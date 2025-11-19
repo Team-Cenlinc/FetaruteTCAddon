@@ -12,10 +12,22 @@ repositories {
         name = "papermc-repo"
         url = "https://repo.papermc.io/repository/maven-public/"
     }
+    maven {
+        name = "bergerkiller-repo"
+        url = "https://ci.mg-dev.eu/repository/maven-releases/"
+    }
+    maven {
+        name = "taboolib-repo"
+        url = "https://repo.tabooproject.org/repository/releases/"
+    }
 }
 
 dependencies {
-    compileOnly("io.papermc.paper:paper-api:1.20.1-R0.1-SNAPSHOT")
+    compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
+    compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
+    compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
+    compileOnly("io.izzel.taboolib:taboolib-platform-bukkit:${tabooLibVersion}")
+    annotationProcessor("io.izzel.taboolib:taboolib-processor:${tabooLibVersion}")
 }
 
 tasks {
@@ -23,7 +35,7 @@ tasks {
         // Configure the Minecraft version for our task.
         // This is the only required configuration besides applying the plugin.
         // Your plugin's jar (or shadowJar if present) will be used automatically.
-        minecraftVersion("1.20")
+        minecraftVersion(project.minecraftVersion)
     }
 }
 
