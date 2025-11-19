@@ -1,0 +1,31 @@
+# Gradle caches and build outputs
+.gradle/
+build/
+out/
+run/
+
+# IDE and workspace metadata
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+
+# Minecraft test server artifacts
+logs/
+crash-reports/
+*.log
+eula.txt
+server.properties
+world/
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+Icon?
+._*
+*.swp
+*.tmp
