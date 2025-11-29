@@ -14,7 +14,7 @@ repositories {
     }
     maven {
         name = "bergerkiller-repo"
-        url = "https://ci.mg-dev.eu/repository/maven-releases/"
+        url = "https://ci.mg-dev.eu/plugin/repository/everything/"
     }
     maven {
         name = "taboolib-repo"
@@ -26,8 +26,7 @@ dependencies {
     compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
-    compileOnly("io.izzel.taboolib:taboolib-platform-bukkit:${tabooLibVersion}")
-    annotationProcessor("io.izzel.taboolib:taboolib-processor:${tabooLibVersion}")
+    compileOnly("io.izzel.taboolib:platform-bukkit:${tabooLibVersion}")
 }
 
 tasks {
