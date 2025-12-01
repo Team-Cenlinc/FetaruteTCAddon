@@ -35,7 +35,7 @@ dependencies {
     testImplementation("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     testImplementation("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testImplementation("org.mockito:mockito-core:5.11.0")
+    testImplementation("org.mockito:mockito-core:5.20.0")
     testImplementation("org.mockito:mockito-inline:5.2.0")
 }
 
