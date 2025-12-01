@@ -4,3 +4,10 @@ main: org.fetarute.fetaruteTCAddon.FetaruteTCAddon
 api-version: '1.20'
 authors: [ Acatine ]
 website: www.fetarute.org
+depend:
+  - BKCommonLib
+  - Train_Carts
+commands:
+  fta:
+    description: FetaruteTCAddon 主命令
+    usage: /fta <info|help|dispatch>

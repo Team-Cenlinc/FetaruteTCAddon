@@ -37,7 +37,15 @@ abstract class AbstractNodeSignAction extends SignAction {
             return false;
         }
         // 仅在建牌阶段写入注册表，后续执行阶段直接复用解析结果
-        parseDefinition(event).ifPresent(definition -> registry.put(event.getBlock(), definition));
+        Optional<SignNodeDefinition> definition = parseDefinition(event);
+        if (definition.isPresent()) {
+            registry.put(event.getBlock(), definition.get());
+            if (event.getPlayer() != null) {
+                event.getPlayer().sendMessage("§b[FTA] 已注册节点: §f" + definition.get().nodeId().value());
+            }
+        } else if (event.getPlayer() != null) {
+            event.getPlayer().sendMessage("§c[FTA] 节点格式无效，使用: §fOperator:From:To:Track:Seq");
+        }
         return true;
     }
 
@@ -69,6 +77,12 @@ abstract class AbstractNodeSignAction extends SignAction {
     }
 
     protected Optional<SignNodeDefinition> parseDefinition(SignActionEvent info) {
-        return SignTextParser.parseWaypointLike(info.getLine(1), nodeType);
+        // TC 牌子格式：第一行 [train]/[cart]，第二行为类型，节点 ID 放在第三行；若第三行为空则尝试第四行。
+        String primary = info.getLine(2);
+        String fallback = info.getLine(3);
+        return SignTextParser.parseWaypointLike(
+                primary != null && !primary.isEmpty() ? primary : fallback,
+                nodeType
+        );
     }
 }

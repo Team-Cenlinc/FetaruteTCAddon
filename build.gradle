@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id("xyz.jpenilla.run-paper") version "2.3.1"
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 group = 'org.fetarute'
@@ -23,10 +24,19 @@ repositories {
 }
 
 dependencies {
+    implementation platform("com.bergerkiller.bukkit:BKCommonLib-bom:${bkCommonLibVersion}")
     compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
     compileOnly("io.izzel.taboolib:platform-bukkit:${tabooLibVersion}")
+    compileOnly("org.incendo:cloud-paper")
+    compileOnly("org.incendo:cloud-minecraft-extras")
+    testImplementation("io.papermc.paper:paper-api:${paperApiVersion}")
+    testImplementation("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
+    testImplementation("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.mockito:mockito-core:5.11.0")
+    testImplementation("org.mockito:mockito-inline:5.2.0")
 }
 
 tasks {
@@ -36,6 +46,10 @@ tasks {
         // Your plugin's jar (or shadowJar if present) will be used automatically.
         minecraftVersion(project.minecraftVersion)
     }
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 def targetJavaVersion = 17
@@ -54,6 +68,24 @@ tasks.withType(JavaCompile).configureEach {
     if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
         options.release.set(targetJavaVersion)
     }
+}
+
+shadowJar {
+    archiveClassifier.set("")
+    def commonPrefix = "com.bergerkiller.bukkit.common.dep"
+    relocate("cloud.commandframework", "${commonPrefix}.cloud.commandframework")
+    relocate("org.incendo.cloud", "${commonPrefix}.cloud")
+    relocate("io.leangen.geantyref", "${commonPrefix}.typetoken")
+    relocate("me.lucko.commodore", "${commonPrefix}.me.lucko.commodore")
+    relocate("net.kyori", "${commonPrefix}.net.kyori")
+}
+
+tasks.named("build") {
+    dependsOn("shadowJar")
+}
+
+tasks.named("jar") {
+    enabled = false
 }
 
 processResources {

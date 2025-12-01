@@ -1,4 +1,4 @@
-name: Gradle Build Check
+name: Junit Test
 
 on:
   push:
@@ -24,3 +24,6 @@ jobs:
 
       - name: Build
         run: ./gradlew build --no-daemon
+
+      - name: Test
+        run: ./gradlew test --no-daemon
