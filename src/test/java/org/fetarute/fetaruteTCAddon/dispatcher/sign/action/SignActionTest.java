@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -20,13 +21,13 @@ import static org.mockito.Mockito.when;
 class SignActionTest {
 
     /**
-     * 验证 Waypoint 牌子建造后被注册，供 TC 路由查询 destination。
+     * 验证 Waypoint 牌子建造后被注册，并向 TC 报告 destination。
      */
     @Test
-    void waypointRegistersDestination() {
+    void waypointReportsDestination() {
         SignNodeRegistry registry = new SignNodeRegistry();
         WaypointSignAction action = new WaypointSignAction(registry, message -> {
-        });
+        }, null);
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
@@ -40,7 +41,7 @@ class SignActionTest {
 
         SignActionEvent queryEvent = mock(SignActionEvent.class);
         when(queryEvent.getBlock()).thenReturn(block);
-        assertTrue(action.getRailDestinationName(queryEvent).equals("SURN:PTK:GPT:1:00"));
+        assertEquals("SURN:PTK:GPT:1:00", action.getRailDestinationName(queryEvent));
     }
 
     /**
@@ -50,7 +51,7 @@ class SignActionTest {
     void destroyRemovesRegistryEntry() {
         SignNodeRegistry registry = new SignNodeRegistry();
         DepotSignAction action = new DepotSignAction(registry, message -> {
-        });
+        }, null);
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
@@ -74,7 +75,7 @@ class SignActionTest {
     void autoStationRejectsInterval() {
         SignNodeRegistry registry = new SignNodeRegistry();
         AutoStationSignAction action = new AutoStationSignAction(registry, message -> {
-        });
+        }, null);
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
@@ -94,7 +95,7 @@ class SignActionTest {
     void debugLogsIncludeLocationOnBuildAndDestroy() {
         List<String> logs = new ArrayList<>();
         SignNodeRegistry registry = new SignNodeRegistry(logs::add);
-        WaypointSignAction action = new WaypointSignAction(registry, logs::add);
+        WaypointSignAction action = new WaypointSignAction(registry, logs::add, null);
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);

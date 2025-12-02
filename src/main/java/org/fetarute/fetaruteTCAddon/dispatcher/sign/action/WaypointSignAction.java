@@ -5,6 +5,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -14,8 +15,8 @@ import java.util.function.Consumer;
  */
 public final class WaypointSignAction extends AbstractNodeSignAction {
 
-    public WaypointSignAction(SignNodeRegistry registry, Consumer<String> debugLogger) {
-        super("waypoint", registry, NodeType.WAYPOINT, debugLogger);
+    public WaypointSignAction(SignNodeRegistry registry, Consumer<String> debugLogger, LocaleManager locale) {
+        super("waypoint", registry, NodeType.WAYPOINT, debugLogger, locale);
     }
 
     @Override

@@ -17,18 +17,15 @@ repositories {
         name = "bergerkiller-repo"
         url = "https://ci.mg-dev.eu/plugin/repository/everything/"
     }
-    maven {
-        name = "taboolib-repo"
-        url = "https://repo.tabooproject.org/repository/releases/"
-    }
 }
 
 dependencies {
     implementation platform("com.bergerkiller.bukkit:BKCommonLib-bom:${bkCommonLibVersion}")
+    implementation("net.kyori:adventure-platform-bukkit:${adventurePlatformVersion}")
+    implementation("dev.triumphteam:triumph-gui:${triumphGuiVersion}")
     compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
-    compileOnly("io.izzel.taboolib:platform-bukkit:${tabooLibVersion}")
     compileOnly("org.incendo:cloud-paper")
     compileOnly("org.incendo:cloud-minecraft-extras")
     testImplementation("io.papermc.paper:paper-api:${paperApiVersion}")
@@ -53,6 +50,13 @@ tasks.test {
 }
 
 def targetJavaVersion = 17
+def gitCommitProvider = providers.exec {
+    commandLine 'git', 'rev-parse', '--short', 'HEAD'
+}.standardOutput.asText.map { it.trim() }
+def gitCommit = gitCommitProvider.getOrElse("unknown")
+def buildTimestamp = new Date().format("yyMMdd")
+def buildId = "build-${gitCommit}-${buildTimestamp}"
+
 java {
     def javaVersion = JavaVersion.toVersion(targetJavaVersion)
     sourceCompatibility = javaVersion
@@ -77,7 +81,6 @@ shadowJar {
     relocate("org.incendo.cloud", "${commonPrefix}.cloud")
     relocate("io.leangen.geantyref", "${commonPrefix}.typetoken")
     relocate("me.lucko.commodore", "${commonPrefix}.me.lucko.commodore")
-    relocate("net.kyori", "${commonPrefix}.net.kyori")
 }
 
 tasks.named("build") {
@@ -89,10 +92,13 @@ tasks.named("jar") {
 }
 
 processResources {
-    def props = [version: version]
+    def props = [version: version, gitCommit: gitCommit, buildId: buildId]
     inputs.properties props
     filteringCharset 'UTF-8'
     filesMatching('plugin.yml') {
+        expand props
+    }
+    filesMatching('build-info.properties') {
         expand props
     }
 }

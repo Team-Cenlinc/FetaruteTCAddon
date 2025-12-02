@@ -11,12 +11,15 @@ import java.util.Optional;
  */
 public final class ConfigManager {
 
-    private final FetaruteTCAddon plugin;
     private static final int EXPECTED_CONFIG_VERSION = 1;
+    private static final String DEFAULT_LOCALE = "zh_CN";
+    private final FetaruteTCAddon plugin;
+    private final java.util.logging.Logger logger;
     private ConfigView current;
 
     public ConfigManager(FetaruteTCAddon plugin) {
         this.plugin = plugin;
+        this.logger = plugin.getLogger();
     }
 
     /**
@@ -25,33 +28,37 @@ public final class ConfigManager {
     public void reload() {
         plugin.reloadConfig();
         FileConfiguration config = plugin.getConfig();
-        current = parse(config);
+        current = parse(config, logger);
     }
 
     public ConfigView current() {
         return current;
     }
 
-    private ConfigView parse(FileConfiguration config) {
+    /**
+     * 解析配置，供生产与测试共用。
+     */
+    public static ConfigView parse(FileConfiguration config, java.util.logging.Logger logger) {
         int version = config.getInt("config-version", 0);
         if (version != EXPECTED_CONFIG_VERSION) {
-            plugin.getLogger().warning("config-version 不匹配，当前: " + version + "，期望: " + EXPECTED_CONFIG_VERSION + "。请备份后更新配置模板。");
+            logger.warning("config-version 不匹配，当前: " + version + "，期望: " + EXPECTED_CONFIG_VERSION + "。请备份后更新配置模板。");
         }
         boolean debugEnabled = config.getBoolean("debug.enabled", false);
+        String localeTag = config.getString("locale", DEFAULT_LOCALE);
         ConfigurationSection storageSection = config.getConfigurationSection("storage");
-        StorageSettings storageSettings = parseStorage(storageSection);
-        return new ConfigView(version, debugEnabled, storageSettings);
+        StorageSettings storageSettings = parseStorage(storageSection, logger);
+        return new ConfigView(version, debugEnabled, localeTag, storageSettings);
     }
 
-    private StorageSettings parseStorage(ConfigurationSection storageSection) {
+    private static StorageSettings parseStorage(ConfigurationSection storageSection, java.util.logging.Logger logger) {
         if (storageSection == null) {
-            plugin.getLogger().warning("缺少 storage 配置段，已回退为 SQLite");
+            logger.warning("缺少 storage 配置段，已回退为 SQLite");
             return new StorageSettings(StorageBackend.SQLITE, defaultSqlite(), Optional.empty());
         }
         String rawBackend = storageSection.getString("backend", "sqlite");
         StorageBackend backend = StorageBackend.from(rawBackend);
         if (!backend.name().equalsIgnoreCase(rawBackend)) {
-            plugin.getLogger().warning("存储后端配置无效: " + rawBackend + "，已回退为 " + backend.name().toLowerCase());
+            logger.warning("存储后端配置无效: " + rawBackend + "，已回退为 " + backend.name().toLowerCase());
         }
 
         ConfigurationSection sqliteSection = storageSection.getConfigurationSection("sqlite");
@@ -63,7 +70,7 @@ public final class ConfigManager {
         return new StorageSettings(backend, sqliteSettings, mySqlSettings);
     }
 
-    private SqliteSettings parseSqlite(ConfigurationSection sqliteSection) {
+    private static SqliteSettings parseSqlite(ConfigurationSection sqliteSection) {
         if (sqliteSection == null) {
             return defaultSqlite();
         }
@@ -71,7 +78,7 @@ public final class ConfigManager {
         return new SqliteSettings(file);
     }
 
-    private Optional<MySqlSettings> parseMySql(ConfigurationSection mysqlSection) {
+    private static Optional<MySqlSettings> parseMySql(ConfigurationSection mysqlSection) {
         if (mysqlSection == null) {
             return Optional.empty();
         }
@@ -85,14 +92,14 @@ public final class ConfigManager {
         return Optional.of(settings);
     }
 
-    private SqliteSettings defaultSqlite() {
+    private static SqliteSettings defaultSqlite() {
         return new SqliteSettings("data/fetarute.sqlite");
     }
 
     /**
      * 调试开关与存储设置的不可变视图。
      */
-    public record ConfigView(int configVersion, boolean debugEnabled, StorageSettings storageSettings) {
+    public record ConfigView(int configVersion, boolean debugEnabled, String locale, StorageSettings storageSettings) {
     }
 
     /**

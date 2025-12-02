@@ -5,6 +5,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -14,8 +15,8 @@ import java.util.function.Consumer;
  */
 public final class AutoStationSignAction extends AbstractNodeSignAction {
 
-    public AutoStationSignAction(SignNodeRegistry registry, Consumer<String> debugLogger) {
-        super("autostation", registry, NodeType.STATION, debugLogger);
+    public AutoStationSignAction(SignNodeRegistry registry, Consumer<String> debugLogger, LocaleManager locale) {
+        super("autostation", registry, NodeType.STATION, debugLogger, locale);
     }
 
     @Override

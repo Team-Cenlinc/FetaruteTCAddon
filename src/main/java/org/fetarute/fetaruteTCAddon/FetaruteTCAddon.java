@@ -1,139 +1,143 @@
 package org.fetarute.fetaruteTCAddon;
 
-import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
-import com.bergerkiller.bukkit.tc.signactions.SignAction;
-import org.incendo.cloud.CommandManager;
-import org.bukkit.command.Command;
+import java.util.Map;
 import org.bukkit.command.CommandSender;
-import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
-import org.jetbrains.annotations.NotNull;
+import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.incendo.cloud.CommandManager;
+import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
+import com.bergerkiller.bukkit.tc.signactions.SignAction;
 
-import java.util.List;
-import java.util.function.Consumer;
-
+/**
+ * 插件入口，负责初始化配置、语言与命令。
+ */
 public final class FetaruteTCAddon extends JavaPlugin {
 
-    private SignNodeRegistry signNodeRegistry;
-    private List<SignAction> registeredSignActions;
-    private CloudSimpleHandler cloudHandler;
-    private FtaInfoCommand infoCommand;
-    private FtaStorageCommand storageCommand;
+    private final CloudSimpleHandler cloudHandler = new CloudSimpleHandler();
     private ConfigManager configManager;
+    private LocaleManager localeManager;
     private StorageManager storageManager;
-    private boolean debugEnabled;
-    private final Consumer<String> debugLogger = this::debug;
+    private CommandManager<CommandSender> commandManager;
+    private LoggerManager loggerManager;
+    private SignNodeRegistry signNodeRegistry;
+    private WaypointSignAction waypointSignAction;
+    private AutoStationSignAction autoStationSignAction;
+    private DepotSignAction depotSignAction;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        configManager = new ConfigManager(this);
-        storageManager = new StorageManager(this);
-        reloadFromConfig();
+        ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), new LoggerManager(getLogger())).update();
+        this.configManager = new ConfigManager(this);
+        this.configManager.reload();
 
-        // 注册自定义牌子以便 TC 与调度层识别节点
-        signNodeRegistry = new SignNodeRegistry(debugLogger);
-        registeredSignActions = List.of(
-                new DepotSignAction(signNodeRegistry, debugLogger),
-                new AutoStationSignAction(signNodeRegistry, debugLogger),
-                new WaypointSignAction(signNodeRegistry, debugLogger)
-        );
-        registeredSignActions.forEach(SignAction::register);
+        this.loggerManager = new LoggerManager(getLogger());
+        this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
 
-        infoCommand = new FtaInfoCommand(this);
-        storageCommand = new FtaStorageCommand(this);
+        this.localeManager = new LocaleManager(this, configManager.current().locale(), loggerManager);
+        this.localeManager.reload();
+
+        this.storageManager = new StorageManager(this, loggerManager);
+        this.storageManager.apply(configManager.current());
+        registerSignActions();
+
         registerCommands();
+        getServer()
+                .getConsoleSender()
+                .sendMessage(localeManager.component("locale.loaded", Map.of("locale", localeManager.getCurrentLocale())));
     }
 
     @Override
     public void onDisable() {
-        if (registeredSignActions != null) {
-            registeredSignActions.forEach(SignAction::unregister);
-        }
-        if (signNodeRegistry != null) {
-            signNodeRegistry.clear();
-        }
-        cloudHandler = null;
+        unregisterSignActions();
         if (storageManager != null) {
             storageManager.shutdown();
         }
     }
 
-    private void registerCommands() {
-        try {
-            cloudHandler = new CloudSimpleHandler();
-            cloudHandler.enable(this);
-            CommandManager<CommandSender> manager = cloudHandler.getManager();
-            infoCommand.register(manager);
-            storageCommand.register(manager);
-        } catch (NoClassDefFoundError e) {
-            getLogger().warning("缺少 cloud-commandframework 依赖（BKCommonLib 内置 Cloud），/fta 命令未注册: " + e.getMessage());
-        } catch (Exception e) {
-            getLogger().warning("初始化命令系统失败，/fta 命令未注册: " + e.getMessage());
-        }
-    }
-
-    @Override
-    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, String[] args) {
-        if (!"fta".equalsIgnoreCase(label)) {
-            return false;
-        }
-        // Cloud 已处理玩家命令；这里兜底控制台或 Cloud 未初始化的场景
-        if (cloudHandler == null || !(sender instanceof Player)) {
-            if (args.length == 0 || "help".equalsIgnoreCase(args[0])) {
-                infoCommand.sendHelp(sender);
-            } else if ("info".equalsIgnoreCase(args[0])) {
-                infoCommand.sendInfo(sender);
-            } else if ("reload".equalsIgnoreCase(args[0])) {
-                if (!sender.hasPermission("fetarute.reload")) {
-                    sender.sendMessage("§c无权限执行重载（需要 fetarute.reload）");
-                    return true;
-                }
-                reloadFromCommand(sender);
-            } else {
-                sender.sendMessage("§c未知子命令，使用 /fta help 查看帮助");
-            }
-            return true;
-        }
-        return false;
-    }
-
     /**
-     * 供命令调用，重新加载配置并应用调试/存储设置。
-     */
-    public void reloadFromCommand(CommandSender sender) {
-        reloadFromConfig();
-        sender.sendMessage("§a[FTA] 配置已重载，debug=" + (debugEnabled ? "开启" : "关闭")
-                + "，存储后端=" + storageManager.backend().name().toLowerCase());
-    }
-
-    private void reloadFromConfig() {
-        configManager.reload();
-        ConfigManager.ConfigView configView = configManager.current();
-        debugEnabled = configView.debugEnabled();
-        if (debugEnabled) {
-            getLogger().info("已启用调试日志输出");
-        }
-        if (configView.configVersion() != 1) {
-            getLogger().warning("config.yml 版本 (" + configView.configVersion() + ") 与插件预期 (1) 不一致，请参考默认模板更新配置。");
-        }
-        storageManager.apply(configView);
-    }
-
-    /**
-     * 统一调试输出，避免散落的 logger 判空。
+     * 提供调试日志输出，受 config.yml 开关控制。
      */
     public void debug(String message) {
-        if (debugEnabled) {
-            getLogger().info("[DEBUG] " + message);
+        if (configManager != null && configManager.current() != null && configManager.current().debugEnabled()) {
+            loggerManager.debug(message);
+        }
+    }
+
+    /**
+     * 供命令调用的重载入口。
+     *
+     * @param sender 触发命令的玩家或控制台
+     */
+    public void reloadFromCommand(CommandSender sender) {
+        ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), loggerManager).update();
+        this.configManager.reload();
+        this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+        this.localeManager.reload(configManager.current().locale());
+        this.storageManager.apply(configManager.current());
+        sender.sendMessage(localeManager.component("command.reload.success"));
+    }
+
+    public LocaleManager getLocaleManager() {
+        return localeManager;
+    }
+
+    public LoggerManager getLoggerManager() {
+        return loggerManager;
+    }
+
+    private void registerCommands() {
+        this.cloudHandler.enable(this);
+        this.commandManager = cloudHandler.getManager();
+        FtaInfoCommand infoCommand = new FtaInfoCommand(this);
+        new FtaStorageCommand(this).register(commandManager);
+        infoCommand.register(commandManager);
+
+        var bukkitCommand = getCommand("fta");
+        if (bukkitCommand != null) {
+            FtaRootCommand rootCommand = new FtaRootCommand(this, infoCommand);
+            bukkitCommand.setExecutor(rootCommand);
+            bukkitCommand.setTabCompleter(rootCommand);
+        } else {
+            loggerManager.warn("未在 plugin.yml 中找到 fta 命令定义");
+        }
+    }
+
+    private void registerSignActions() {
+        this.signNodeRegistry = new SignNodeRegistry(loggerManager::debug);
+        this.waypointSignAction = new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager);
+        this.autoStationSignAction = new AutoStationSignAction(signNodeRegistry, loggerManager::debug, localeManager);
+        this.depotSignAction = new DepotSignAction(signNodeRegistry, loggerManager::debug, localeManager);
+        SignAction.register(waypointSignAction);
+        SignAction.register(autoStationSignAction);
+        SignAction.register(depotSignAction);
+        getServer().getPluginManager().registerEvents(new SignRemoveListener(signNodeRegistry, localeManager), this);
+    }
+
+    private void unregisterSignActions() {
+        if (waypointSignAction != null) {
+            SignAction.unregister(waypointSignAction);
+        }
+        if (autoStationSignAction != null) {
+            SignAction.unregister(autoStationSignAction);
+        }
+        if (depotSignAction != null) {
+            SignAction.unregister(depotSignAction);
+        }
+        if (signNodeRegistry != null) {
+            signNodeRegistry.clear();
         }
     }
 }

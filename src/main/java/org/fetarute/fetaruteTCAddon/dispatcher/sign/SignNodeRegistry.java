@@ -42,12 +42,13 @@ public final class SignNodeRegistry {
         return Optional.ofNullable(definitions.get(key(block)));
     }
 
-    public void remove(Block block) {
+    public Optional<SignNodeDefinition> remove(Block block) {
         Objects.requireNonNull(block, "block");
         SignNodeDefinition removed = definitions.remove(key(block));
         if (removed != null) {
             debugLogger.accept("移除节点注册 " + removed.nodeId().value() + " @ " + formatLocation(block));
         }
+        return Optional.ofNullable(removed);
     }
 
     public Map<String, SignNodeDefinition> snapshot() {

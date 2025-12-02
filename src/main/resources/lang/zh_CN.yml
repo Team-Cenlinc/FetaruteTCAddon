@@ -1,0 +1,29 @@
+prefix: "<gray>[<dark_aqua>FTA</dark_aqua>]</gray>"
+
+locale:
+  loaded: "<prefix> 语言 <dark_aqua><locale></dark_aqua> 已加载"
+  fallback: "<prefix> 未找到语言文件 <red><locale></red>，已回退到 <dark_aqua><fallback></dark_aqua>"
+  reloaded: "<prefix> <dark_aqua>已重新加载语言文件</dark_aqua>"
+
+error:
+  missing-key: "<prefix> 缺少语言键 <red><key></red>"
+  no-permission: "<prefix> <red>你没有权限执行此命令</red>"
+
+sign:
+  created: "<prefix> <dark_aqua>已注册节点</dark_aqua> <white><node></white>"
+  invalid: "<prefix> <red>节点格式无效</red> <gray>使用 Operator:From:To:Track:Seq</gray>"
+  removed: "<prefix> <dark_aqua>已移除节点</dark_aqua> <white><node></white>"
+
+command:
+  help:
+    header: "<prefix> <dark_aqua>可用子命令</dark_aqua>"
+    entry-info: "<gray>/fta info</gray> <white>-</white> <dark_aqua>显示插件版本与构建信息</dark_aqua>"
+    entry-help: "<gray>/fta help</gray> <white>-</white> <dark_aqua>显示此帮助</dark_aqua>"
+    entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
+  info:
+    header: "<prefix> <dark_aqua>插件信息</dark_aqua>"
+    version: "<gray>版本:</gray> <dark_aqua><version></dark_aqua>"
+    build: "<gray>构建:</gray> <dark_aqua><build></dark_aqua>"
+    git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
+  reload:
+    success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"

@@ -8,6 +8,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -21,13 +22,16 @@ abstract class AbstractNodeSignAction extends SignAction {
     protected final SignNodeRegistry registry;
     private final NodeType nodeType;
     private final Consumer<String> debugLogger;
+    private final LocaleManager locale;
 
-    AbstractNodeSignAction(String header, SignNodeRegistry registry, NodeType nodeType, Consumer<String> debugLogger) {
+    AbstractNodeSignAction(String header, SignNodeRegistry registry, NodeType nodeType, Consumer<String> debugLogger,
+                           LocaleManager locale) {
         this.header = header;
         this.registry = registry;
         this.nodeType = nodeType;
         this.debugLogger = debugLogger != null ? debugLogger : message -> {
         };
+        this.locale = locale;
     }
 
     @Override
@@ -46,11 +50,12 @@ abstract class AbstractNodeSignAction extends SignAction {
             registry.put(event.getBlock(), definition.get());
             debugLogger.accept("注册 " + nodeType + " 节点 " + definition.get().nodeId().value()
                     + " @ " + formatLocation(event));
-            if (event.getPlayer() != null) {
-                event.getPlayer().sendMessage("§b[FTA] 已注册节点: §f" + definition.get().nodeId().value());
+            if (event.getPlayer() != null && locale != null) {
+                event.getPlayer().sendMessage(locale.component(
+                        "sign.created", java.util.Map.of("node", definition.get().nodeId().value())));
             }
-        } else if (event.getPlayer() != null) {
-            event.getPlayer().sendMessage("§c[FTA] 节点格式无效，使用: §fOperator:From:To:Track:Seq");
+        } else if (event.getPlayer() != null && locale != null) {
+            event.getPlayer().sendMessage(locale.component("sign.invalid"));
             debugLogger.accept("节点解析失败，原始内容: " + event.getLine(2) + " / " + event.getLine(3)
                     + " @ " + formatLocation(event));
         }
@@ -65,21 +70,17 @@ abstract class AbstractNodeSignAction extends SignAction {
         if (!info.hasGroup()) {
             return;
         }
-        // 列车经过时把节点 ID 写入 TC destination，便于路径规划和 reroute 识别
-        registry.get(info.getBlock()).ifPresent(definition ->
-                definition.trainCartsDestination().ifPresent(destination -> {
-                    info.getGroup().getProperties().setDestination(destination);
-                    debugLogger.accept("触发节点 " + definition.nodeId().value()
-                            + " @ " + formatLocation(info) + "，写入 destination=" + destination);
-                })
-        );
+        // 仅记录触发，不再改写 TrainCarts destination，保持调度层与 TC 路由解耦
+        registry.get(info.getBlock())
+                .ifPresent(definition -> debugLogger.accept("触发节点 " + definition.nodeId().value()
+                        + " @ " + formatLocation(info)));
     }
 
     @Override
     public void destroy(SignActionEvent event) {
         // 删除牌子时清理注册表，避免陈旧目标干扰路由
-        registry.remove(event.getBlock());
-        debugLogger.accept("销毁 " + nodeType + " 节点牌子 @ " + formatLocation(event));
+        registry.remove(event.getBlock())
+                .ifPresent(definition -> debugLogger.accept("销毁 " + nodeType + " 节点牌子 @ " + formatLocation(event)));
     }
 
     @Override

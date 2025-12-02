@@ -8,7 +8,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 记录从 TrainCarts 牌子解析出的节点定义，便于同步调度图与 TC 路由。
+ * 记录从 TrainCarts 牌子解析出的节点定义，供调度图与站点/区间管理使用。
  */
 public record SignNodeDefinition(
         NodeId nodeId,

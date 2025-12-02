@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.storage;
 
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 import java.util.Optional;
 
@@ -11,10 +12,12 @@ import java.util.Optional;
 public final class StorageManager {
 
     private final FetaruteTCAddon plugin;
+    private final LoggerManager logger;
     private ConfigManager.StorageSettings storageSettings;
 
-    public StorageManager(FetaruteTCAddon plugin) {
+    public StorageManager(FetaruteTCAddon plugin, LoggerManager logger) {
         this.plugin = plugin;
+        this.logger = logger;
     }
 
     /**
@@ -47,11 +50,11 @@ public final class StorageManager {
     private void logCurrentBackend() {
         if (storageSettings.backend() == ConfigManager.StorageBackend.MYSQL) {
             storageSettings.mySqlSettings().ifPresent(settings ->
-                    plugin.debug("存储后端: mysql @" + settings.address() + ":" + settings.port()
+                    logger.debug("存储后端: mysql @" + settings.address() + ":" + settings.port()
                             + "/" + settings.database() + " prefix=" + settings.tablePrefix())
             );
         } else {
-            plugin.debug("存储后端: sqlite file=" + storageSettings.sqliteSettings().file());
+            logger.debug("存储后端: sqlite file=" + storageSettings.sqliteSettings().file());
         }
     }
 }
