@@ -7,14 +7,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * Depot throat 牌子，写入 Depot 节点并把 destination 提供给 TC。
  */
 public final class DepotSignAction extends AbstractNodeSignAction {
 
-    public DepotSignAction(SignNodeRegistry registry) {
-        super("depot", registry, NodeType.DEPOT);
+    public DepotSignAction(SignNodeRegistry registry, Consumer<String> debugLogger) {
+        super("depot", registry, NodeType.DEPOT, debugLogger);
     }
 
     @Override

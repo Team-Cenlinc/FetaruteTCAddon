@@ -42,5 +42,6 @@ public final class FtaInfoCommand {
         sender.sendMessage("§b[FetaruteTCAddon] 可用子命令：");
         sender.sendMessage("§7/fta info §f- 显示插件版本与构建信息");
         sender.sendMessage("§7/fta help §f- 显示此帮助");
+        sender.sendMessage("§7/fta reload §f- 重载配置文件（需权限 fetarute.reload）");
     }
 }

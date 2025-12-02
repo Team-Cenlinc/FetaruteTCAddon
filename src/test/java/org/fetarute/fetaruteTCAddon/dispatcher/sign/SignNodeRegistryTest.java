@@ -9,6 +9,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -28,8 +30,14 @@ class SignNodeRegistryTest {
         SignNodeRegistry registry = new SignNodeRegistry();
         World world = mock(World.class);
         when(world.getUID()).thenReturn(UUID.randomUUID());
+        when(world.getName()).thenReturn("world");
+        var location = mock(Location.class);
+        when(location.getWorld()).thenReturn(world);
+        when(location.getBlockX()).thenReturn(1);
+        when(location.getBlockY()).thenReturn(64);
+        when(location.getBlockZ()).thenReturn(2);
         Block block = mock(Block.class);
-        when(block.getLocation()).thenReturn(new Location(world, 1, 64, 2));
+        when(block.getLocation()).thenReturn(location);
 
         SignNodeDefinition definition = new SignNodeDefinition(
                 NodeId.of("SURN:PTK:GPT:1:00"),
@@ -53,8 +61,14 @@ class SignNodeRegistryTest {
         SignNodeRegistry registry = new SignNodeRegistry();
         World world = mock(World.class);
         when(world.getUID()).thenReturn(UUID.randomUUID());
+        when(world.getName()).thenReturn("world");
+        var location = mock(Location.class);
+        when(location.getWorld()).thenReturn(world);
+        when(location.getBlockX()).thenReturn(1);
+        when(location.getBlockY()).thenReturn(64);
+        when(location.getBlockZ()).thenReturn(2);
         Block block = mock(Block.class);
-        when(block.getLocation()).thenReturn(new Location(world, 1, 64, 2));
+        when(block.getLocation()).thenReturn(location);
         SignNodeDefinition definition = new SignNodeDefinition(
                 NodeId.of("SURN:PTK:GPT:1:00"),
                 NodeType.WAYPOINT,
@@ -72,5 +86,36 @@ class SignNodeRegistryTest {
 
     private void assertThrowsUnsupported(Map<String, SignNodeDefinition> snapshot) {
         assertThrows(UnsupportedOperationException.class, snapshot::clear);
+    }
+
+    @Test
+    // 调试日志应包含节点 ID 与方块位置
+    void debugLogsIncludeLocation() {
+        List<String> logs = new ArrayList<>();
+        SignNodeRegistry registry = new SignNodeRegistry(logs::add);
+        World world = mock(World.class);
+        when(world.getUID()).thenReturn(UUID.randomUUID());
+        when(world.getName()).thenReturn("world");
+        var location = mock(Location.class);
+        when(location.getWorld()).thenReturn(world);
+        when(location.getBlockX()).thenReturn(1);
+        when(location.getBlockY()).thenReturn(64);
+        when(location.getBlockZ()).thenReturn(2);
+        Block block = mock(Block.class);
+        when(block.getLocation()).thenReturn(location);
+        SignNodeDefinition definition = new SignNodeDefinition(
+                NodeId.of("SURN:PTK:GPT:1:00"),
+                NodeType.WAYPOINT,
+                Optional.of("SURN:PTK:GPT:1:00"),
+                Optional.of(WaypointMetadata.interval("SURN", "PTK", "GPT", 1, "00"))
+        );
+
+        registry.put(block, definition);
+        registry.remove(block);
+
+        assertEquals(2, logs.size());
+        assertTrue(logs.get(0).contains("SURN:PTK:GPT:1:00"));
+        assertTrue(logs.get(0).contains("world (1,64,2)"));
+        assertTrue(logs.get(1).contains("world (1,64,2)"));
     }
 }

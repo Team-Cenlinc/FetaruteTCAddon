@@ -7,14 +7,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * 普通 waypoint 牌子，解析区间节点并传递 destination。
  */
 public final class WaypointSignAction extends AbstractNodeSignAction {
 
-    public WaypointSignAction(SignNodeRegistry registry) {
-        super("waypoint", registry, NodeType.WAYPOINT);
+    public WaypointSignAction(SignNodeRegistry registry, Consumer<String> debugLogger) {
+        super("waypoint", registry, NodeType.WAYPOINT, debugLogger);
     }
 
     @Override

@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * 统一的节点牌子逻辑：匹配头、解析节点并在列车经过时写入 destination。
@@ -19,11 +20,14 @@ abstract class AbstractNodeSignAction extends SignAction {
     private final String header;
     protected final SignNodeRegistry registry;
     private final NodeType nodeType;
+    private final Consumer<String> debugLogger;
 
-    AbstractNodeSignAction(String header, SignNodeRegistry registry, NodeType nodeType) {
+    AbstractNodeSignAction(String header, SignNodeRegistry registry, NodeType nodeType, Consumer<String> debugLogger) {
         this.header = header;
         this.registry = registry;
         this.nodeType = nodeType;
+        this.debugLogger = debugLogger != null ? debugLogger : message -> {
+        };
     }
 
     @Override
@@ -40,11 +44,15 @@ abstract class AbstractNodeSignAction extends SignAction {
         Optional<SignNodeDefinition> definition = parseDefinition(event);
         if (definition.isPresent()) {
             registry.put(event.getBlock(), definition.get());
+            debugLogger.accept("注册 " + nodeType + " 节点 " + definition.get().nodeId().value()
+                    + " @ " + formatLocation(event));
             if (event.getPlayer() != null) {
                 event.getPlayer().sendMessage("§b[FTA] 已注册节点: §f" + definition.get().nodeId().value());
             }
         } else if (event.getPlayer() != null) {
             event.getPlayer().sendMessage("§c[FTA] 节点格式无效，使用: §fOperator:From:To:Track:Seq");
+            debugLogger.accept("节点解析失败，原始内容: " + event.getLine(2) + " / " + event.getLine(3)
+                    + " @ " + formatLocation(event));
         }
         return true;
     }
@@ -58,15 +66,20 @@ abstract class AbstractNodeSignAction extends SignAction {
             return;
         }
         // 列车经过时把节点 ID 写入 TC destination，便于路径规划和 reroute 识别
-        registry.get(info.getBlock())
-                .flatMap(SignNodeDefinition::trainCartsDestination)
-                .ifPresent(destination -> info.getGroup().getProperties().setDestination(destination));
+        registry.get(info.getBlock()).ifPresent(definition ->
+                definition.trainCartsDestination().ifPresent(destination -> {
+                    info.getGroup().getProperties().setDestination(destination);
+                    debugLogger.accept("触发节点 " + definition.nodeId().value()
+                            + " @ " + formatLocation(info) + "，写入 destination=" + destination);
+                })
+        );
     }
 
     @Override
     public void destroy(SignActionEvent event) {
         // 删除牌子时清理注册表，避免陈旧目标干扰路由
         registry.remove(event.getBlock());
+        debugLogger.accept("销毁 " + nodeType + " 节点牌子 @ " + formatLocation(event));
     }
 
     @Override
@@ -84,5 +97,12 @@ abstract class AbstractNodeSignAction extends SignAction {
                 primary != null && !primary.isEmpty() ? primary : fallback,
                 nodeType
         );
+    }
+
+    private String formatLocation(SignActionEvent info) {
+        var location = info.getBlock().getLocation();
+        var world = location.getWorld();
+        return (world != null ? world.getName() : "unknown")
+                + " (" + location.getBlockX() + "," + location.getBlockY() + "," + location.getBlockZ() + ")";
     }
 }

@@ -8,6 +8,8 @@ import org.bukkit.block.Block;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,7 +25,8 @@ class SignActionTest {
     @Test
     void waypointRegistersDestination() {
         SignNodeRegistry registry = new SignNodeRegistry();
-        WaypointSignAction action = new WaypointSignAction(registry);
+        WaypointSignAction action = new WaypointSignAction(registry, message -> {
+        });
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
@@ -46,7 +49,8 @@ class SignActionTest {
     @Test
     void destroyRemovesRegistryEntry() {
         SignNodeRegistry registry = new SignNodeRegistry();
-        DepotSignAction action = new DepotSignAction(registry);
+        DepotSignAction action = new DepotSignAction(registry, message -> {
+        });
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
@@ -69,7 +73,8 @@ class SignActionTest {
     @Test
     void autoStationRejectsInterval() {
         SignNodeRegistry registry = new SignNodeRegistry();
-        AutoStationSignAction action = new AutoStationSignAction(registry);
+        AutoStationSignAction action = new AutoStationSignAction(registry, message -> {
+        });
         Block block = mockBlock();
 
         SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
@@ -82,11 +87,43 @@ class SignActionTest {
         assertTrue(registry.get(block).isEmpty());
     }
 
+    /**
+     * 调试日志应包含节点坐标，便于排查建牌/销毁。
+     */
+    @Test
+    void debugLogsIncludeLocationOnBuildAndDestroy() {
+        List<String> logs = new ArrayList<>();
+        SignNodeRegistry registry = new SignNodeRegistry(logs::add);
+        WaypointSignAction action = new WaypointSignAction(registry, logs::add);
+        Block block = mockBlock();
+
+        SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
+        when(buildEvent.isTrainSign()).thenReturn(true);
+        when(buildEvent.isCartSign()).thenReturn(true);
+        when(buildEvent.getLine(2)).thenReturn("SURN:PTK:GPT:1:00");
+        when(buildEvent.getBlock()).thenReturn(block);
+        action.build(buildEvent);
+
+        SignActionEvent destroyEvent = mock(SignActionEvent.class);
+        when(destroyEvent.getBlock()).thenReturn(block);
+        action.destroy(destroyEvent);
+
+        assertTrue(logs.stream().anyMatch(msg -> msg.contains("注册 WAYPOINT 节点") && msg.contains("world (1,64,2)")));
+        assertTrue(logs.stream().anyMatch(msg -> msg.contains("销毁 WAYPOINT 节点牌子") && msg.contains("world (1,64,2)")));
+    }
+
     private Block mockBlock() {
         World world = mock(World.class);
         when(world.getUID()).thenReturn(UUID.randomUUID());
+        when(world.getName()).thenReturn("world");
+        var location = mock(Location.class);
+        when(location.getWorld()).thenReturn(world);
+        when(location.getBlockX()).thenReturn(1);
+        when(location.getBlockY()).thenReturn(64);
+        when(location.getBlockZ()).thenReturn(2);
+
         Block block = mock(Block.class);
-        when(block.getLocation()).thenReturn(new Location(world, 1, 64, 2));
+        when(block.getLocation()).thenReturn(location);
         return block;
     }
 }

@@ -10,4 +10,8 @@ depend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|dispatch>
+    usage: /fta <info|help|reload>
+permissions:
+  fetarute.reload:
+    description: 重新加载 FetaruteTCAddon 配置
+    default: op
