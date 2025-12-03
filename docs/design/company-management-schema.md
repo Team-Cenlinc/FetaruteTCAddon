@@ -1,0 +1,157 @@
+# 铁路公司管理数据模型草案
+
+## 设计目标
+- 为 Company → Operator → Line → Route/Station 的组织结构提供稳定主数据来源。
+- 通过 DAO/Repository 抽象解耦业务逻辑与底层数据库，使 SQLite / MySQL / 其他实现可替换。
+- 提供扩展点支撑财务、成员权限、调度图绑定与 route/站点映射。
+- 每个实体同时保留“系统 ID（UUID）+ 人类可读 code/slug”，命令行或 API 可直接使用短 code 锁定目标。
+
+## 核心实体与字段
+> `id` 推荐使用 UUID（文本或 BINARY16），如与外部系统对接可改成雪花或自增，但需在 DAO 层统一。
+
+### PlayerIdentity
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | Identity 主键，供其他表引用 |
+| player_uuid | UUID | Bukkit 报告的 UUID，可为离线/在线模式 |
+| name | VARCHAR | 当前玩家名 |
+| auth_type | ENUM | ONLINE / OFFLINE / MANAGED 等，标记身份来源 |
+| external_ref | VARCHAR | 绑定外部账户（Web/Discord），可空 |
+| metadata | JSON | 附加属性（历史别名等） |
+| created_at / updated_at | TIMESTAMP | 审计 |
+> 离线 / 在线模式切换时只需更新 Identity，引用该 ID 的业务数据无须迁移。
+
+### Company
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | Company 主键 |
+| code | VARCHAR | 人类可读短 ID（命令、API 使用），全局唯一 |
+| name | VARCHAR | 主显示名称（必填） |
+| secondary_name | VARCHAR | 第二语言展示名，可为空 |
+| owner_identity_id | UUID | 归属玩家身份（外键 → `PlayerIdentity`） |
+| status | ENUM | ACTIVE/SUSPENDED/DELETED |
+| balance_minor | BIGINT | 账户余额（以分为单位，便于 Vault 适配） |
+| metadata | JSON | 描述/区域/联系方式等自定义属性 |
+| created_at / updated_at | TIMESTAMP | 审计字段 |
+
+### CompanyMember
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| company_id | UUID | 外键 → Company |
+| player_identity_id | UUID | 外键 → `PlayerIdentity` |
+| roles | JSON | 角色集合，枚举值包括 OWNER/MANAGER/STAFF/VIEWER/DRIVER |
+| joined_at | TIMESTAMP | 加入时间 |
+| permissions | JSON | 细粒度权限开关（可选） |
+> 主键建议 `(company_id, player_identity_id)`，`roles` 字段可存 `['MANAGER','DRIVER']` 以支持多角色。
+
+### Operator
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | Operator 主键 |
+| code | VARCHAR | 人类可读短 ID，Company 维度唯一 |
+| company_id | UUID | 归属公司 |
+| name / secondary_name | VARCHAR | 主/次名称 |
+| color_theme | VARCHAR | MiniMessage 颜色或 HEX |
+| priority | INT | 调度优先级，数字越小越优先 |
+| description | TEXT | 简介 |
+| metadata | JSON | 扩展字段 |
+| created_at / updated_at | TIMESTAMP | 审计 |
+
+### Line
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | Line 主键 |
+| code | VARCHAR | 线路编号（1/NE 等），在同一 Operator 下唯一 |
+| operator_id | UUID | 归属运营商 |
+| name / secondary_name | VARCHAR | 展示名称 |
+| service_type | ENUM | METRO/REGIONAL/COMMUTER/LRT/EXPRESS… |
+| color | VARCHAR | 线路色（HEX/MiniMessage） |
+| status | ENUM | PLANNING/ACTIVE/MAINTENANCE |
+| spawn_freq_baseline_sec | INT | 基准发车间隔，可选 |
+| metadata | JSON | 额外信息（自动广播、首末班等） |
+| created_at / updated_at | TIMESTAMP | 审计 |
+
+### Station
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | Station 主键 |
+| code | VARCHAR | 站代码（拼音/缩写），Operator 范围内唯一 |
+| operator_id | UUID | 归属运营商（或再加 `company_id` 缓存） |
+| primary_line_id | UUID | 主线路（可为 NULL 表示换乘站） |
+| name / secondary_name | VARCHAR | 名称 |
+| world | VARCHAR | 所在世界 |
+| x / y / z / yaw / pitch | DOUBLE | 方块空间位置（供 API/地图用） |
+| graph_node_id | VARCHAR | 对应 `RailNode` ID，便于调度绑定 |
+| amenities | JSON | 设施、售票、换乘说明 |
+| metadata | JSON | 扩展 |
+| created_at / updated_at | TIMESTAMP | 审计 |
+> 若站点通过首个 Track 牌子进行定位，可在同步流程中读取 Sign 坐标更新上述位置字段。
+
+### Route
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | Route 主键 |
+| code | VARCHAR | Route 短 ID（如 `EXP01`），在 Line 下唯一 |
+| line_id | UUID | 归属线路 |
+| name / secondary_name | VARCHAR | 名称 |
+| pattern_type | ENUM | LOCAL/SEMI_EXPRESS/EXPRESS/LIMITED_EXPRESS |
+| tc_route_id | VARCHAR | TrainCarts route 名称（与 TC 系统对接） |
+| distance_m | INT | 预估线路长度（可选） |
+| runtime_secs | INT | 全程运行时间（可选） |
+| metadata | JSON | 调度附加信息（车次号、运营时段） |
+
+#### RouteStop（关联 Route 与 Station / Waypoint）
+| 字段 | 类型 |
+| --- | --- |
+| route_id | UUID |
+| sequence | INT |
+| station_id | UUID | 若为真实站点 |
+| waypoint_node_id | VARCHAR | 对应非站点节点，如库/折返，二选一 |
+| dwell_secs | INT |
+| pass_type | ENUM | STOP/PASS/TERMINATE |
+| notes | VARCHAR |
+> 主键 `(route_id, sequence)`，并在 DAO 层提供顺序重排工具。
+
+### Code 与命令解析
+- 所有含 `code` 的字段需建立唯一索引（Company/Operator/Line/Station/Route），作用域如表格所述（全局或上级实体范围）。
+- 命令解析优先按 `code` 命中，未找到时再接受 UUID；REST / RPC API 返回 `id + code`，方便客户端缓存。
+- 若未来需要多别名，可新增 `<entity>_aliases` 表：`id`, `entity_id`, `alias`, `scope`，命令解析按 alias 回退。
+
+### Financial Records（可选扩展）
+- `company_accounts`：拆分多货币或虚拟/现实账户。
+- `company_transactions`：`id`, `company_id`, `type`, `amount`, `currency`, `source`, `note`, `created_at`。
+
+## DAO / Repository 抽象
+```
+interface CompanyRepository {
+    Optional<Company> findById(UUID id);
+    List<Company> listAll();
+    Company save(Company company);
+    void delete(UUID id);
+}
+```
+- 每个实体有对应 Repository，入参与返回均使用不可变数据模型。
+- `StorageProvider` 工厂根据配置加载具体实现（SQLite/MySQL/Mock）。
+- 事务通过 `StorageTransaction` 抽象暴露，SQLite 初期实现可用单连接 + `BEGIN IMMEDIATE`，未来换数据源仅替换实现。
+- `CompanyService` 等领域服务组合多个 Repository，处理业务校验（余额扣除、成员邀请等）。
+
+## 序列化 / DTO
+- 内部模型：Java 记录或 Lombok-less 数据类，字段均非 null，使用 `Optional` 暴露缺省值。
+- API DTO：由 `RailwayCompanyDtoMapper` 转换，确保对外 JSON 序列化与内部模型解耦。
+- 多语言字段：`name` + `secondaryName` 方案，若未来需要更多语言，可在 metadata 中放 `Map<Locale, String>`。
+
+## 与调度图的衔接
+- Station `graph_node_id` 指向 `RailNode`，RouteStop 通过 station 或 waypoint node 映射到 `RailGraph`。
+- Line 可绑定一组 `EdgeId` 或 `GraphSegmentId`（存于 metadata），便于 API 导出线路路径。
+- Operator/Company 可通过服务接口查询旗下所有节点，用于封锁与安全检查。
+
+## 后续扩展点
+1. **审批流**：新增 `company_invitations` 表，记录邀请/申请状态。
+2. **资产管理**：车辆、车厂、调度权限等实体均可通过 `metadata` 拓展，再拆分独立表。
+3. **审计日志**：统一 `audit_log`，记录谁在何时修改了实体。
+4. **缓存**：在内存中维持只读快照（Guava Cache 或自研）以减少 DB 读；写操作后广播失效事件。
+
+## 迁移策略
+- 采用 Liquibase/Flyway 或自研 `schema_version` 表管理迁移。
+- 单元测试中提供 `InMemoryStorageProvider`（如 H2/SQLite 内存模式）确保 DAO 行为一致。
+- 未来切换 MySQL：实现新的 `SqlDataSourceFactory`，依赖 HikariCP，DAO 层沿用相同 SQL（使用标准 ANSI 语法）。

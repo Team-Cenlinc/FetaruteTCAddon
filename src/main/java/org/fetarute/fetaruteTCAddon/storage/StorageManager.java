@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.storage;
 
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.storage.schema.StorageSchema;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 import java.util.Optional;
@@ -14,6 +15,7 @@ public final class StorageManager {
     private final FetaruteTCAddon plugin;
     private final LoggerManager logger;
     private ConfigManager.StorageSettings storageSettings;
+    private StorageSchema storageSchema = new StorageSchema();
 
     public StorageManager(FetaruteTCAddon plugin, LoggerManager logger) {
         this.plugin = plugin;
@@ -27,6 +29,7 @@ public final class StorageManager {
      */
     public void apply(ConfigManager.ConfigView configView) {
         this.storageSettings = configView.storageSettings();
+        this.storageSchema = resolveSchema(storageSettings);
         logCurrentBackend();
         // TODO: 初始化或切换数据库连接
     }
@@ -43,6 +46,10 @@ public final class StorageManager {
         return storageSettings.mySqlSettings();
     }
 
+    public StorageSchema schema() {
+        return storageSchema;
+    }
+
     public void shutdown() {
         // TODO: 关闭连接池或释放资源
     }
@@ -56,5 +63,13 @@ public final class StorageManager {
         } else {
             logger.debug("存储后端: sqlite file=" + storageSettings.sqliteSettings().file());
         }
+    }
+
+    private StorageSchema resolveSchema(ConfigManager.StorageSettings settings) {
+        Optional<ConfigManager.MySqlSettings> mysql = settings.mySqlSettings();
+        if (mysql.isPresent()) {
+            return new StorageSchema(mysql.get().tablePrefix());
+        }
+        return new StorageSchema();
     }
 }
