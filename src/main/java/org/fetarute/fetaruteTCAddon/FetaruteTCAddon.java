@@ -21,7 +21,8 @@ import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
 
 /**
- * 插件入口，负责初始化配置、语言与命令。
+ * 插件入口，负责初始化配置、语言、存储后端与命令/SignAction 生命周期。
+ * <p>onEnable 按顺序完成：配置更新 → 语言加载 → 存储管理器初始化 → 注册 SignAction 与命令。</p>
  */
 public final class FetaruteTCAddon extends JavaPlugin {
 
@@ -96,6 +97,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
     public LoggerManager getLoggerManager() {
         return loggerManager;
+    }
+
+    public StorageManager getStorageManager() {
+        return storageManager;
     }
 
     private void registerCommands() {

@@ -7,7 +7,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Route 实体，绑定 TrainCarts route 名称。
+ * Route 实体，描述线路运行形态。
  */
 public record Route(
         UUID id,
@@ -16,7 +16,6 @@ public record Route(
         String name,
         Optional<String> secondaryName,
         RoutePatternType patternType,
-        String tcRouteId,
         Optional<Integer> distanceMeters,
         Optional<Integer> runtimeSeconds,
         Map<String, Object> metadata,
@@ -30,7 +29,6 @@ public record Route(
         Objects.requireNonNull(name, "name");
         secondaryName = secondaryName == null ? Optional.empty() : secondaryName;
         Objects.requireNonNull(patternType, "patternType");
-        Objects.requireNonNull(tcRouteId, "tcRouteId");
         distanceMeters = distanceMeters == null ? Optional.empty() : distanceMeters;
         runtimeSeconds = runtimeSeconds == null ? Optional.empty() : runtimeSeconds;
         metadata = metadata == null ? Map.of() : Map.copyOf(metadata);

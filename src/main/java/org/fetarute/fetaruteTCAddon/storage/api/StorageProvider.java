@@ -12,7 +12,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 /**
  * 汇总所有仓库实例，供服务层注入。
  */
-public interface StorageProvider {
+public interface StorageProvider extends AutoCloseable {
 
     PlayerIdentityRepository playerIdentities();
 
@@ -32,5 +32,6 @@ public interface StorageProvider {
 
     StorageTransactionManager transactionManager();
 
+    @Override
     void close();
 }

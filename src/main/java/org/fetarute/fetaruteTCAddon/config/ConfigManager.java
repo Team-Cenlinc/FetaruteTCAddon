@@ -53,7 +53,7 @@ public final class ConfigManager {
     private static StorageSettings parseStorage(ConfigurationSection storageSection, java.util.logging.Logger logger) {
         if (storageSection == null) {
             logger.warning("缺少 storage 配置段，已回退为 SQLite");
-            return new StorageSettings(StorageBackend.SQLITE, defaultSqlite(), Optional.empty());
+            return new StorageSettings(StorageBackend.SQLITE, defaultSqlite(), Optional.empty(), defaultPool());
         }
         String rawBackend = storageSection.getString("backend", "sqlite");
         StorageBackend backend = StorageBackend.from(rawBackend);
@@ -67,7 +67,9 @@ public final class ConfigManager {
         ConfigurationSection mysqlSection = storageSection.getConfigurationSection("mysql");
         Optional<MySqlSettings> mySqlSettings = parseMySql(mysqlSection);
 
-        return new StorageSettings(backend, sqliteSettings, mySqlSettings);
+        PoolSettings poolSettings = parsePool(storageSection.getConfigurationSection("pool"));
+
+        return new StorageSettings(backend, sqliteSettings, mySqlSettings, poolSettings);
     }
 
     private static SqliteSettings parseSqlite(ConfigurationSection sqliteSection) {
@@ -92,8 +94,23 @@ public final class ConfigManager {
         return Optional.of(settings);
     }
 
+    private static PoolSettings parsePool(ConfigurationSection poolSection) {
+        if (poolSection == null) {
+            return defaultPool();
+        }
+        int maxPoolSize = poolSection.getInt("maximum-pool-size", 5);
+        long connectionTimeoutMs = poolSection.getLong("connection-timeout-ms", 30000);
+        long idleTimeoutMs = poolSection.getLong("idle-timeout-ms", 600000);
+        long maxLifetimeMs = poolSection.getLong("max-lifetime-ms", 1800000);
+        return new PoolSettings(maxPoolSize, connectionTimeoutMs, idleTimeoutMs, maxLifetimeMs);
+    }
+
     private static SqliteSettings defaultSqlite() {
         return new SqliteSettings("data/fetarute.sqlite");
+    }
+
+    private static PoolSettings defaultPool() {
+        return new PoolSettings(5, 30000, 600000, 1800000);
     }
 
     /**
@@ -125,7 +142,7 @@ public final class ConfigManager {
      * 存储配置的聚合，便于 StorageManager 统一接收。
      */
     public record StorageSettings(StorageBackend backend, SqliteSettings sqliteSettings,
-                                  Optional<MySqlSettings> mySqlSettings) {
+                                  Optional<MySqlSettings> mySqlSettings, PoolSettings poolSettings) {
     }
 
     /**
@@ -139,5 +156,12 @@ public final class ConfigManager {
      */
     public record MySqlSettings(String address, int port, String database, String username, String password,
                                 String tablePrefix) {
+    }
+
+    /**
+     * 连接池配置。
+     */
+    public record PoolSettings(int maximumPoolSize, long connectionTimeoutMillis, long idleTimeoutMillis,
+                               long maxLifetimeMillis) {
     }
 }

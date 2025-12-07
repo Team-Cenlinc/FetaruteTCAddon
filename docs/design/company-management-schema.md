@@ -134,6 +134,14 @@ interface CompanyRepository {
 - `StorageProvider` 工厂根据配置加载具体实现（SQLite/MySQL/Mock）。
 - 事务通过 `StorageTransaction` 抽象暴露，SQLite 初期实现可用单连接 + `BEGIN IMMEDIATE`，未来换数据源仅替换实现。
 - `CompanyService` 等领域服务组合多个 Repository，处理业务校验（余额扣除、成员邀请等）。
+- 连接池统一使用 HikariCP：SQLite 强制单连接池，MySQL 可按 `storage.pool.*`（最大连接数/超时/生命周期）调整，若驱动或连接失败将回退为占位存储并抛出 StorageException。
+
+### 连接池与配置
+- `storage.pool.maximum-pool-size`：最大连接数，SQLite 会自动收敛为 1，MySQL 可按并发适当调高（默认 5）。
+- `storage.pool.connection-timeout-ms`：获取连接超时（默认 30 秒），避免线程长时间阻塞。
+- `storage.pool.idle-timeout-ms`：空闲连接回收时间（默认 10 分钟）。
+- `storage.pool.max-lifetime-ms`：连接最大生命周期（默认 30 分钟），防止 MySQL 端断开造成僵尸连接。
+- SQLite JDBC URL 形如 `jdbc:sqlite:<dataFolder>/data/fetarute.sqlite`，MySQL JDBC URL 形如 `jdbc:mysql://host:port/db?...`，均由 Hikari 工厂生成。
 
 ## 序列化 / DTO
 - 内部模型：Java 记录或 Lombok-less 数据类，字段均非 null，使用 `Optional` 暴露缺省值。
