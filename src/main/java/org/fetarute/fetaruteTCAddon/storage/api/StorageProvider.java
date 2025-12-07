@@ -9,29 +9,27 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 
-/**
- * 汇总所有仓库实例，供服务层注入。
- */
+/** 汇总所有仓库实例，供服务层注入。 */
 public interface StorageProvider extends AutoCloseable {
 
-    PlayerIdentityRepository playerIdentities();
+  PlayerIdentityRepository playerIdentities();
 
-    CompanyRepository companies();
+  CompanyRepository companies();
 
-    CompanyMemberRepository companyMembers();
+  CompanyMemberRepository companyMembers();
 
-    OperatorRepository operators();
+  OperatorRepository operators();
 
-    LineRepository lines();
+  LineRepository lines();
 
-    StationRepository stations();
+  StationRepository stations();
 
-    RouteRepository routes();
+  RouteRepository routes();
 
-    RouteStopRepository routeStops();
+  RouteStopRepository routeStops();
 
-    StorageTransactionManager transactionManager();
+  StorageTransactionManager transactionManager();
 
-    @Override
-    void close();
+  @Override
+  void close();
 }

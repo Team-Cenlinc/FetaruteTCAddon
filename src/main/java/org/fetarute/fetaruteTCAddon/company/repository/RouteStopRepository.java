@@ -1,20 +1,17 @@
 package org.fetarute.fetaruteTCAddon.company.repository;
 
-import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
-
 import java.util.List;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 
-/**
- * RouteStop 仓库接口。
- */
+/** RouteStop 仓库接口。 */
 public interface RouteStopRepository {
 
-    List<RouteStop> listByRoute(UUID routeId);
+  List<RouteStop> listByRoute(UUID routeId);
 
-    RouteStop save(RouteStop stop);
+  RouteStop save(RouteStop stop);
 
-    void delete(UUID routeId, int sequence);
+  void delete(UUID routeId, int sequence);
 
-    void deleteAll(UUID routeId);
+  void deleteAll(UUID routeId);
 }

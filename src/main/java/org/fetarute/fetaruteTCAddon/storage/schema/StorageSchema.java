@@ -7,60 +7,54 @@ import java.util.Objects;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqliteDialect;
 
-/**
- * 针对 Railway Company 模型的 DDL 生成器，默认生成 SQLite 语句，可按方言调整。
- */
+/** 针对 Railway Company 模型的 DDL 生成器，默认生成 SQLite 语句，可按方言调整。 */
 public final class StorageSchema {
 
-    private static final String DEFAULT_PREFIX = "fta_";
-    private final String tablePrefix;
+  private static final String DEFAULT_PREFIX = "fta_";
+  private final String tablePrefix;
 
-    public StorageSchema() {
-        this(DEFAULT_PREFIX);
-    }
+  public StorageSchema() {
+    this(DEFAULT_PREFIX);
+  }
 
-    public StorageSchema(String tablePrefix) {
-        this.tablePrefix = tablePrefix == null ? "" : tablePrefix;
-    }
+  public StorageSchema(String tablePrefix) {
+    this.tablePrefix = tablePrefix == null ? "" : tablePrefix;
+  }
 
-    public String tablePrefix() {
-        return tablePrefix;
-    }
+  public String tablePrefix() {
+    return tablePrefix;
+  }
 
-    /**
-     * 生成 SQLite 所需的所有建表语句。
-     */
-    public List<String> sqliteStatements() {
-        return statements(new SqliteDialect());
-    }
+  /** 生成 SQLite 所需的所有建表语句。 */
+  public List<String> sqliteStatements() {
+    return statements(new SqliteDialect());
+  }
 
-    /**
-     * 根据指定方言生成建表语句，供启动时迁移。
-     */
-    public List<String> statements(SqlDialect dialect) {
-        Objects.requireNonNull(dialect, "dialect");
-        List<String> ddl = new ArrayList<>();
-        ddl.add(playerIdentities(dialect));
-        ddl.add(uniqueIndex("player_identities_uuid", "player_identities", "player_uuid"));
-        ddl.add(companies(dialect));
-        ddl.add(uniqueIndex("companies_code", "companies", "code"));
-        ddl.add(companyMembers(dialect));
-        ddl.add(index("company_members_player", "company_members", "player_identity_id"));
-        ddl.add(operators(dialect));
-        ddl.add(uniqueIndex("operators_code", "operators", "company_id, code"));
-        ddl.add(lines(dialect));
-        ddl.add(uniqueIndex("lines_code", "lines", "operator_id, code"));
-        ddl.add(stations(dialect));
-        ddl.add(uniqueIndex("stations_code", "stations", "operator_id, code"));
-        ddl.add(routes(dialect));
-        ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
-        ddl.add(routeStops(dialect));
-        ddl.add(index("route_stops_route", "route_stops", "route_id"));
-        return Collections.unmodifiableList(ddl);
-    }
+  /** 根据指定方言生成建表语句，供启动时迁移。 */
+  public List<String> statements(SqlDialect dialect) {
+    Objects.requireNonNull(dialect, "dialect");
+    List<String> ddl = new ArrayList<>();
+    ddl.add(playerIdentities(dialect));
+    ddl.add(uniqueIndex("player_identities_uuid", "player_identities", "player_uuid"));
+    ddl.add(companies(dialect));
+    ddl.add(uniqueIndex("companies_code", "companies", "code"));
+    ddl.add(companyMembers(dialect));
+    ddl.add(index("company_members_player", "company_members", "player_identity_id"));
+    ddl.add(operators(dialect));
+    ddl.add(uniqueIndex("operators_code", "operators", "company_id, code"));
+    ddl.add(lines(dialect));
+    ddl.add(uniqueIndex("lines_code", "lines", "operator_id, code"));
+    ddl.add(stations(dialect));
+    ddl.add(uniqueIndex("stations_code", "stations", "operator_id, code"));
+    ddl.add(routes(dialect));
+    ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
+    ddl.add(routeStops(dialect));
+    ddl.add(index("route_stops_route", "route_stops", "route_id"));
+    return Collections.unmodifiableList(ddl);
+  }
 
-    private String playerIdentities(SqlDialect dialect) {
-        return """
+  private String playerIdentities(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id %s PRIMARY KEY,
                     player_uuid %s NOT NULL,
@@ -71,21 +65,21 @@ public final class StorageSchema {
                     created_at %s NOT NULL,
                     updated_at %s NOT NULL
                 );
-                """.formatted(
-                table("player_identities"),
-                dialect.uuidType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.timestampType()
-        );
-    }
+                """
+        .formatted(
+            table("player_identities"),
+            dialect.uuidType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.timestampType());
+  }
 
-    private String companies(SqlDialect dialect) {
-        return """
+  private String companies(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id %s PRIMARY KEY,
                     code %s NOT NULL,
@@ -99,24 +93,24 @@ public final class StorageSchema {
                     updated_at %s NOT NULL,
                     FOREIGN KEY (owner_identity_id) REFERENCES %s(id) ON DELETE RESTRICT
                 );
-                """.formatted(
-                table("companies"),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.bigIntType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.timestampType(),
-                table("player_identities")
-        );
-    }
+                """
+        .formatted(
+            table("companies"),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.bigIntType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.timestampType(),
+            table("player_identities"));
+  }
 
-    private String companyMembers(SqlDialect dialect) {
-        return """
+  private String companyMembers(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     company_id %s NOT NULL,
                     player_identity_id %s NOT NULL,
@@ -127,20 +121,20 @@ public final class StorageSchema {
                     FOREIGN KEY (company_id) REFERENCES %s(id) ON DELETE CASCADE,
                     FOREIGN KEY (player_identity_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
-                """.formatted(
-                table("company_members"),
-                dialect.uuidType(),
-                dialect.uuidType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.jsonType(),
-                table("companies"),
-                table("player_identities")
-        );
-    }
+                """
+        .formatted(
+            table("company_members"),
+            dialect.uuidType(),
+            dialect.uuidType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.jsonType(),
+            table("companies"),
+            table("player_identities"));
+  }
 
-    private String operators(SqlDialect dialect) {
-        return """
+  private String operators(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id %s PRIMARY KEY,
                     code %s NOT NULL,
@@ -155,25 +149,25 @@ public final class StorageSchema {
                     updated_at %s NOT NULL,
                     FOREIGN KEY (company_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
-                """.formatted(
-                table("operators"),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.intType(),
-                dialect.stringType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.timestampType(),
-                table("companies")
-        );
-    }
+                """
+        .formatted(
+            table("operators"),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.intType(),
+            dialect.stringType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.timestampType(),
+            table("companies"));
+  }
 
-    private String lines(SqlDialect dialect) {
-        return """
+  private String lines(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id %s PRIMARY KEY,
                     code %s NOT NULL,
@@ -189,26 +183,26 @@ public final class StorageSchema {
                     updated_at %s NOT NULL,
                     FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
-                """.formatted(
-                table("lines"),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.intType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.timestampType(),
-                table("operators")
-        );
-    }
+                """
+        .formatted(
+            table("lines"),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.intType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.timestampType(),
+            table("operators"));
+  }
 
-    private String stations(SqlDialect dialect) {
-        return """
+  private String stations(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id %s PRIMARY KEY,
                     code %s NOT NULL,
@@ -230,32 +224,32 @@ public final class StorageSchema {
                     FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE,
                     FOREIGN KEY (primary_line_id) REFERENCES %s(id) ON DELETE SET NULL
                 );
-                """.formatted(
-                table("stations"),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.uuidType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.doubleType(),
-                dialect.doubleType(),
-                dialect.doubleType(),
-                dialect.doubleType(),
-                dialect.doubleType(),
-                dialect.stringType(),
-                dialect.jsonType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.timestampType(),
-                table("operators"),
-                table("lines")
-        );
-    }
+                """
+        .formatted(
+            table("stations"),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.uuidType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.doubleType(),
+            dialect.doubleType(),
+            dialect.doubleType(),
+            dialect.doubleType(),
+            dialect.doubleType(),
+            dialect.stringType(),
+            dialect.jsonType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.timestampType(),
+            table("operators"),
+            table("lines"));
+  }
 
-    private String routes(SqlDialect dialect) {
-        return """
+  private String routes(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     id %s PRIMARY KEY,
                     code %s NOT NULL,
@@ -270,25 +264,25 @@ public final class StorageSchema {
                     updated_at %s NOT NULL,
                     FOREIGN KEY (line_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
-                """.formatted(
-                table("routes"),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                dialect.intType(),
-                dialect.intType(),
-                dialect.jsonType(),
-                dialect.timestampType(),
-                dialect.timestampType(),
-                table("lines")
-        );
-    }
+                """
+        .formatted(
+            table("routes"),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            dialect.intType(),
+            dialect.intType(),
+            dialect.jsonType(),
+            dialect.timestampType(),
+            dialect.timestampType(),
+            table("lines"));
+  }
 
-    private String routeStops(SqlDialect dialect) {
-        return """
+  private String routeStops(SqlDialect dialect) {
+    return """
                 CREATE TABLE IF NOT EXISTS %s (
                     route_id %s NOT NULL,
                     sequence %s NOT NULL,
@@ -301,40 +295,47 @@ public final class StorageSchema {
                     FOREIGN KEY (route_id) REFERENCES %s(id) ON DELETE CASCADE,
                     FOREIGN KEY (station_id) REFERENCES %s(id) ON DELETE SET NULL
                 );
-                """.formatted(
-                table("route_stops"),
-                dialect.uuidType(),
-                dialect.intType(),
-                dialect.uuidType(),
-                dialect.stringType(),
-                dialect.intType(),
-                dialect.stringType(),
-                dialect.stringType(),
-                table("routes"),
-                table("stations")
-        );
-    }
+                """
+        .formatted(
+            table("route_stops"),
+            dialect.uuidType(),
+            dialect.intType(),
+            dialect.uuidType(),
+            dialect.stringType(),
+            dialect.intType(),
+            dialect.stringType(),
+            dialect.stringType(),
+            table("routes"),
+            table("stations"));
+  }
 
-    private String uniqueIndex(String name, String table, String columns) {
-        return indexInternal(name, table, columns, true);
-    }
+  private String uniqueIndex(String name, String table, String columns) {
+    return indexInternal(name, table, columns, true);
+  }
 
-    private String index(String name, String table, String columns) {
-        return indexInternal(name, table, columns, false);
-    }
+  private String index(String name, String table, String columns) {
+    return indexInternal(name, table, columns, false);
+  }
 
-    private String indexInternal(String name, String table, String columns, boolean unique) {
-        Objects.requireNonNull(name, "name");
-        String qualifier = unique ? "UNIQUE " : "";
-        return "CREATE " + qualifier + "INDEX IF NOT EXISTS " + indexName(name)
-                + " ON " + table(table) + " (" + columns + ");";
-    }
+  private String indexInternal(String name, String table, String columns, boolean unique) {
+    Objects.requireNonNull(name, "name");
+    String qualifier = unique ? "UNIQUE " : "";
+    return "CREATE "
+        + qualifier
+        + "INDEX IF NOT EXISTS "
+        + indexName(name)
+        + " ON "
+        + table(table)
+        + " ("
+        + columns
+        + ");";
+  }
 
-    private String table(String raw) {
-        return tablePrefix + raw;
-    }
+  private String table(String raw) {
+    return tablePrefix + raw;
+  }
 
-    private String indexName(String raw) {
-        return tablePrefix + raw;
-    }
+  private String indexName(String raw) {
+    return tablePrefix + raw;
+  }
 }

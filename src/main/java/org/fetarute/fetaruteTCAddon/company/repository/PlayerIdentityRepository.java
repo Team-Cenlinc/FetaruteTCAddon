@@ -1,23 +1,20 @@
 package org.fetarute.fetaruteTCAddon.company.repository;
 
-import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 
-/**
- * 玩家身份仓库接口。
- */
+/** 玩家身份仓库接口。 */
 public interface PlayerIdentityRepository {
 
-    Optional<PlayerIdentity> findById(UUID id);
+  Optional<PlayerIdentity> findById(UUID id);
 
-    Optional<PlayerIdentity> findByPlayerUuid(UUID playerUuid);
+  Optional<PlayerIdentity> findByPlayerUuid(UUID playerUuid);
 
-    List<PlayerIdentity> listAll();
+  List<PlayerIdentity> listAll();
 
-    PlayerIdentity save(PlayerIdentity identity);
+  PlayerIdentity save(PlayerIdentity identity);
 
-    void delete(UUID id);
+  void delete(UUID id);
 }

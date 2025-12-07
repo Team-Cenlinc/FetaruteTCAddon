@@ -1,5 +1,8 @@
 plugins {
     id 'java'
+    id 'checkstyle'
+    id("com.diffplug.spotless") version "6.25.0"
+    id("com.github.spotbugs") version "6.0.14"
     id("xyz.jpenilla.run-paper") version "2.3.1"
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
@@ -24,6 +27,7 @@ dependencies {
     implementation("net.kyori:adventure-platform-bukkit:${adventurePlatformVersion}")
     implementation("dev.triumphteam:triumph-gui:${triumphGuiVersion}")
     implementation("com.zaxxer:HikariCP:5.1.0")
+    compileOnly("com.github.spotbugs:spotbugs-annotations:4.8.6")
     compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
@@ -36,6 +40,39 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.20.0")
     testImplementation("org.mockito:mockito-inline:5.2.0")
     testImplementation("org.xerial:sqlite-jdbc:3.45.3.0")
+}
+
+spotless {
+    format("misc") {
+        target("**/*.md", "**/.gitignore")
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+    java {
+        target("src/*/java/**/*.java")
+        googleJavaFormat("1.17.0")
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+checkstyle {
+    toolVersion = "10.17.0"
+    configFile = rootProject.file("config/checkstyle/checkstyle.xml")
+}
+
+spotbugs {
+    toolVersion = "4.8.6"
+    effort = com.github.spotbugs.snom.Effort.MAX
+    reportLevel = com.github.spotbugs.snom.Confidence.valueOf("LOW")
+}
+
+tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    enabled = false
 }
 
 tasks {
@@ -103,4 +140,8 @@ processResources {
     filesMatching('build-info.properties') {
         expand props
     }
+}
+
+tasks.named("check") {
+    dependsOn("spotlessCheck", "checkstyleMain", "checkstyleTest", "spotbugsMain", "spotbugsTest")
 }

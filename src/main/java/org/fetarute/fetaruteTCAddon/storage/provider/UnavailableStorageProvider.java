@@ -16,79 +16,80 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 
 /**
  * 后端尚未准备就绪时的占位 Provider，所有操作都会抛出 StorageException。
- * <p>用于启动阶段或缺少实现时提示调用方“存储不可用”，防止误写到空实现。</p>
+ *
+ * <p>用于启动阶段或缺少实现时提示调用方“存储不可用”，防止误写到空实现。
  */
 public final class UnavailableStorageProvider implements StorageProvider {
 
-    private final String reason;
+  private final String reason;
 
-    public UnavailableStorageProvider(String reason) {
-        this.reason = reason == null ? "存储后端尚未初始化" : reason;
-    }
+  public UnavailableStorageProvider(String reason) {
+    this.reason = reason == null ? "存储后端尚未初始化" : reason;
+  }
 
-    @SuppressWarnings("unchecked")
-    private <T> T unsupported(Class<T> type) {
-        return (T) Proxy.newProxyInstance(
-                type.getClassLoader(),
-                new Class<?>[]{type},
-                (proxy, method, args) -> {
-                    throw new StorageException(reason);
-                }
-        );
-    }
+  @SuppressWarnings("unchecked")
+  private <T> T unsupported(Class<T> type) {
+    return (T)
+        Proxy.newProxyInstance(
+            type.getClassLoader(),
+            new Class<?>[] {type},
+            (proxy, method, args) -> {
+              throw new StorageException(reason);
+            });
+  }
 
-    @Override
-    public PlayerIdentityRepository playerIdentities() {
-        return unsupported(PlayerIdentityRepository.class);
-    }
+  @Override
+  public PlayerIdentityRepository playerIdentities() {
+    return unsupported(PlayerIdentityRepository.class);
+  }
 
-    @Override
-    public CompanyRepository companies() {
-        return unsupported(CompanyRepository.class);
-    }
+  @Override
+  public CompanyRepository companies() {
+    return unsupported(CompanyRepository.class);
+  }
 
-    @Override
-    public CompanyMemberRepository companyMembers() {
-        return unsupported(CompanyMemberRepository.class);
-    }
+  @Override
+  public CompanyMemberRepository companyMembers() {
+    return unsupported(CompanyMemberRepository.class);
+  }
 
-    @Override
-    public OperatorRepository operators() {
-        return unsupported(OperatorRepository.class);
-    }
+  @Override
+  public OperatorRepository operators() {
+    return unsupported(OperatorRepository.class);
+  }
 
-    @Override
-    public LineRepository lines() {
-        return unsupported(LineRepository.class);
-    }
+  @Override
+  public LineRepository lines() {
+    return unsupported(LineRepository.class);
+  }
 
-    @Override
-    public StationRepository stations() {
-        return unsupported(StationRepository.class);
-    }
+  @Override
+  public StationRepository stations() {
+    return unsupported(StationRepository.class);
+  }
 
-    @Override
-    public RouteRepository routes() {
-        return unsupported(RouteRepository.class);
-    }
+  @Override
+  public RouteRepository routes() {
+    return unsupported(RouteRepository.class);
+  }
 
-    @Override
-    public RouteStopRepository routeStops() {
-        return unsupported(RouteStopRepository.class);
-    }
+  @Override
+  public RouteStopRepository routeStops() {
+    return unsupported(RouteStopRepository.class);
+  }
 
-    @Override
-    public StorageTransactionManager transactionManager() {
-        return new StorageTransactionManager() {
-            @Override
-            public StorageTransaction begin() {
-                throw new StorageException(reason);
-            }
-        };
-    }
+  @Override
+  public StorageTransactionManager transactionManager() {
+    return new StorageTransactionManager() {
+      @Override
+      public StorageTransaction begin() {
+        throw new StorageException(reason);
+      }
+    };
+  }
 
-    @Override
-    public void close() {
-        // 占位实现无需释放资源
-    }
+  @Override
+  public void close() {
+    // 占位实现无需释放资源
+  }
 }

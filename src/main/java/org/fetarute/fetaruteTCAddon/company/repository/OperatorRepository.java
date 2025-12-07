@@ -1,23 +1,20 @@
 package org.fetarute.fetaruteTCAddon.company.repository;
 
-import org.fetarute.fetaruteTCAddon.company.model.Operator;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 
-/**
- * 运营商仓库接口。
- */
+/** 运营商仓库接口。 */
 public interface OperatorRepository {
 
-    Optional<Operator> findById(UUID id);
+  Optional<Operator> findById(UUID id);
 
-    Optional<Operator> findByCompanyAndCode(UUID companyId, String code);
+  Optional<Operator> findByCompanyAndCode(UUID companyId, String code);
 
-    List<Operator> listByCompany(UUID companyId);
+  List<Operator> listByCompany(UUID companyId);
 
-    Operator save(Operator operator);
+  Operator save(Operator operator);
 
-    void delete(UUID id);
+  void delete(UUID id);
 }
