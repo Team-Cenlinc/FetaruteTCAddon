@@ -95,7 +95,7 @@
 | line_id | UUID | 归属线路 |
 | name / secondary_name | VARCHAR | 名称 |
 | pattern_type | ENUM | LOCAL/SEMI_EXPRESS/EXPRESS/LIMITED_EXPRESS |
-| tc_route_id | VARCHAR | TrainCarts route 名称（与 TC 系统对接） |
+| tc_route_id | VARCHAR | （可选）映射到 TrainCarts route / destination，用于兼容旧系统 |
 | distance_m | INT | 预估线路长度（可选） |
 | runtime_secs | INT | 全程运行时间（可选） |
 | metadata | JSON | 调度附加信息（车次号、运营时段） |
@@ -144,6 +144,17 @@ interface CompanyRepository {
 - Station `graph_node_id` 指向 `RailNode`，RouteStop 通过 station 或 waypoint node 映射到 `RailGraph`。
 - Line 可绑定一组 `EdgeId` 或 `GraphSegmentId`（存于 metadata），便于 API 导出线路路径。
 - Operator/Company 可通过服务接口查询旗下所有节点，用于封锁与安全检查。
+
+## 运行时控制策略
+- 调度层每当列车抵达 `RouteStop` 时，解析 RouteStop 元数据（包含特殊标记、动态站台配置），计算下一目标节点，再通过 `TrainProperties.setDestination(nodeId)` 或 PathFinder API 告诉 TrainCarts 要去的 waypoint，TC 负责底层寻路。
+- 由于逐节点更新 destination，`tc_route_id` 字段仅作兼容或导出使用，不再依赖 TrainCarts 的 DestinationRoute 列表；RouteStop 可携带 `CHANGE_LINE`、`DYNAMIC_PLATFORM` 等自定义标记，详见 `docs/design/route-stop-markers.md`。
+- 列车属性（MetaTag）需缓存 `routeId`, `routeCode`, `nextSequence` 等信息，跨服或重载时可恢复调度上下文。
+
+## 跨服/实例同步
+- 多服务器共享 `Route`/`RouteStop` 数据时，以 `code` 作为跨服识别键，`tc_route_id` 作为 TrainCarts 实例的折返名称；无论在哪个服 spawn 列车，只需携带 `routeCode + routeId` 就能查询到完整停靠表与下一目标节点。
+- 列车跨服交接时，序列化 `RouteProgress`（当前 routeId、sequence、下一个 stop 的 nodeId），目标服务器读取后按照相同 Route 数据继续写 destination。
+- 如需要“子服务器自知要把列车引导到哪里”，可传递 `nextStop.graphNodeId` 或 `tc_route_id`，目标服在接管时将该节点设置为 TrainCarts destination，后续停靠再由共享的 RouteStop 列表决定。
+- 所有实例的 DAO/StorageProvider 应指向同一数据库或通过消息总线同步，确保 route 名称与结构保持一致。
 
 ## 后续扩展点
 1. **审批流**：新增 `company_invitations` 表，记录邀请/申请状态。
