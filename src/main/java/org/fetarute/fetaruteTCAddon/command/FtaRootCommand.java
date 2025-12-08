@@ -29,7 +29,6 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
     String sub = args[0].toLowerCase(Locale.ROOT);
     switch (sub) {
       case "info" -> infoCommand.sendInfo(sender);
-      case "help" -> infoCommand.sendHelp(sender);
       case "reload" -> {
         if (!sender.hasPermission("fetarute.reload")) {
           sender.sendMessage(plugin.getLocaleManager().component("error.no-permission"));

@@ -13,6 +13,7 @@ public record RouteDefinition(
     Objects.requireNonNull(id, "id");
     Objects.requireNonNull(waypoints, "waypoints");
     Objects.requireNonNull(metadata, "metadata");
+    waypoints = List.copyOf(waypoints);
     if (waypoints.isEmpty()) {
       throw new IllegalArgumentException("线路至少要包含一个节点");
     }

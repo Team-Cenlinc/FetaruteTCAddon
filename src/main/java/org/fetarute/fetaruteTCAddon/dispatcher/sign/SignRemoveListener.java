@@ -20,7 +20,7 @@ public final class SignRemoveListener implements Listener {
 
   @EventHandler
   public void onBlockBreak(BlockBreakEvent event) {
-    if (!(event.getBlock().getState() instanceof Sign sign)) {
+    if (!(event.getBlock().getState() instanceof Sign)) {
       return;
     }
     registry

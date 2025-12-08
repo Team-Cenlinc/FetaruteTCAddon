@@ -62,19 +62,23 @@ class LocaleManagerTest {
 
   private void copyResourceToDataFolder(String path, File dataFolder, boolean replace)
       throws IOException {
-    InputStream input = LocaleManagerTest.class.getClassLoader().getResourceAsStream(path);
-    if (input == null) {
-      throw new IllegalArgumentException("Resource not found: " + path);
+    try (InputStream input = LocaleManagerTest.class.getClassLoader().getResourceAsStream(path)) {
+      if (input == null) {
+        throw new IllegalArgumentException("Resource not found: " + path);
+      }
+      File target = new File(dataFolder, path);
+      File parent = target.getParentFile();
+      if (parent != null && !parent.exists()) {
+        boolean created = parent.mkdirs();
+        if (!created && !parent.exists()) {
+          throw new IOException("无法创建语言目录：" + parent);
+        }
+      }
+      if (!replace && target.exists()) {
+        return;
+      }
+      Files.copy(input, target.toPath(), StandardCopyOption.REPLACE_EXISTING);
     }
-    File target = new File(dataFolder, path);
-    File parent = target.getParentFile();
-    if (parent != null) {
-      parent.mkdirs();
-    }
-    if (!replace && target.exists()) {
-      return;
-    }
-    Files.copy(input, target.toPath(), StandardCopyOption.REPLACE_EXISTING);
   }
 
   private String plain(net.kyori.adventure.text.Component component) {

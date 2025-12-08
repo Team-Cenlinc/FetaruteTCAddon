@@ -161,6 +161,12 @@ public final class ConfigUpdater {
       int newVersion,
       List<String> addedKeys,
       List<String> extraKeys) {
+
+    public UpdateResult {
+      addedKeys = addedKeys == null ? List.of() : List.copyOf(addedKeys);
+      extraKeys = extraKeys == null ? List.of() : List.copyOf(extraKeys);
+    }
+
     static UpdateResult empty() {
       return new UpdateResult(false, 0, 0, List.of(), List.of());
     }

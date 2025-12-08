@@ -83,6 +83,10 @@ public final class StorageManager {
   }
 
   private void logCurrentBackend() {
+    if (storageSettings == null) {
+      logger.warn("存储后端尚未配置，跳过状态输出");
+      return;
+    }
     if (storageSettings.backend() == ConfigManager.StorageBackend.MYSQL) {
       storageSettings
           .mySqlSettings()

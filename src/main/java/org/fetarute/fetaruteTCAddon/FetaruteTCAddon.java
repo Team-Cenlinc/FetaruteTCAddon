@@ -75,10 +75,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   /** 提供调试日志输出，受 config.yml 开关控制。 */
   public void debug(String message) {
+    LoggerManager logger = this.loggerManager;
+    if (logger == null) {
+      return;
+    }
     if (configManager != null
         && configManager.current() != null
         && configManager.current().debugEnabled()) {
-      loggerManager.debug(message);
+      logger.debug(message);
     }
   }
 
@@ -88,6 +92,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
    * @param sender 触发命令的玩家或控制台
    */
   public void reloadFromCommand(CommandSender sender) {
+    if (configManager == null
+        || loggerManager == null
+        || localeManager == null
+        || storageManager == null) {
+      getLogger().warning("插件尚未完成初始化，无法重载");
+      sender.sendMessage("插件尚未初始化，无法重载");
+      return;
+    }
     ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), loggerManager)
         .update();
     this.configManager.reload();
@@ -110,6 +122,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
   }
 
   private void registerCommands() {
+    if (loggerManager == null) {
+      getLogger().warning("loggerManager 未初始化，跳过命令注册");
+      return;
+    }
     this.cloudHandler.enable(this);
     this.commandManager = cloudHandler.getManager();
     FtaInfoCommand infoCommand = new FtaInfoCommand(this);

@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.config;
 
+import java.util.Locale;
 import java.util.Optional;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -54,7 +55,8 @@ public final class ConfigManager {
     String rawBackend = storageSection.getString("backend", "sqlite");
     StorageBackend backend = StorageBackend.from(rawBackend);
     if (!backend.name().equalsIgnoreCase(rawBackend)) {
-      logger.warning("存储后端配置无效: " + rawBackend + "，已回退为 " + backend.name().toLowerCase());
+      logger.warning(
+          "存储后端配置无效: " + rawBackend + "，已回退为 " + backend.name().toLowerCase(Locale.ROOT));
     }
 
     ConfigurationSection sqliteSection = storageSection.getConfigurationSection("sqlite");
@@ -124,7 +126,7 @@ public final class ConfigManager {
         return SQLITE;
       }
       try {
-        return StorageBackend.valueOf(raw.trim().toUpperCase());
+        return StorageBackend.valueOf(raw.trim().toUpperCase(Locale.ROOT));
       } catch (IllegalArgumentException ex) {
         return SQLITE;
       }

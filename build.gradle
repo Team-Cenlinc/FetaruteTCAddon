@@ -72,7 +72,8 @@ tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
         xml.required = true
         html.required = true
     }
-    enabled = false
+    enabled = true
+    excludeFilter = file("config/spotbugs/exclude.xml")
 }
 
 tasks {

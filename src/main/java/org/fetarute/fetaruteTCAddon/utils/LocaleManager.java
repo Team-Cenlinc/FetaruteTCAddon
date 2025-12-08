@@ -65,10 +65,16 @@ public final class LocaleManager {
     if (messages == null) {
       reload();
     }
+    if (messages == null) {
+      return Component.empty();
+    }
     String raw = messages.getString(key);
     if (raw == null) {
       logMissingKey(key);
       String fallback = messages.getString("error.missing-key", "<prefix> 缺少语言键 <red><key></red>");
+      if (fallback == null) {
+        fallback = "<prefix> 缺少语言键 <red><key></red>";
+      }
       return miniMessage.deserialize(fallback, buildResolvers(Map.of("key", key)));
     }
     TagResolver resolver = buildResolvers(placeholders);
@@ -118,8 +124,11 @@ public final class LocaleManager {
   }
 
   private Component parsePrefix(YamlConfiguration config) {
-    String rawPrefix = config.getString("prefix", "");
-    if (rawPrefix.isEmpty()) {
+    if (config == null) {
+      return Component.empty();
+    }
+    String rawPrefix = config.getString("prefix");
+    if (rawPrefix == null || rawPrefix.isEmpty()) {
       return Component.empty();
     }
     return miniMessage.deserialize(rawPrefix);
