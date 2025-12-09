@@ -14,6 +14,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
  * JDBC 实现的 StorageProvider，占位仓库待后续接入具体 SQL 实现。
@@ -25,11 +28,18 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final DataSource dataSource;
   private final SqlDialect dialect;
   private final StorageTransactionManager transactionManager;
+  private final PlayerIdentityRepository playerIdentityRepository;
+  private final CompanyRepository companyRepository;
 
-  public JdbcStorageProvider(DataSource dataSource, SqlDialect dialect) {
+  public JdbcStorageProvider(
+      DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
     this.dataSource = dataSource;
     this.dialect = dialect;
     this.transactionManager = new JdbcStorageTransactionManager(dataSource);
+    this.playerIdentityRepository =
+        new JdbcPlayerIdentityRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.companyRepository =
+        new JdbcCompanyRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -42,12 +52,12 @@ public final class JdbcStorageProvider implements StorageProvider {
 
   @Override
   public PlayerIdentityRepository playerIdentities() {
-    return unsupported(PlayerIdentityRepository.class);
+    return playerIdentityRepository;
   }
 
   @Override
   public CompanyRepository companies() {
-    return unsupported(CompanyRepository.class);
+    return companyRepository;
   }
 
   @Override

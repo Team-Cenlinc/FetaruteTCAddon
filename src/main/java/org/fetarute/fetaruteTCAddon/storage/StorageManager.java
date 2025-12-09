@@ -41,6 +41,7 @@ public final class StorageManager {
     this.dialect = resolveDialect(storageSettings.backend());
     this.storageSchema = resolveSchema(storageSettings);
     bootstrapProvider();
+    applySchemaIfReady();
     logCurrentBackend();
   }
 
@@ -138,6 +139,26 @@ public final class StorageManager {
             : plugin.getDataFolder();
     this.storageProvider =
         StorageProviderFactory.create(storageSettings, storageSchema, dialect, logger, dataFolder);
+  }
+
+  private void applySchemaIfReady() {
+    if (!(storageProvider
+        instanceof org.fetarute.fetaruteTCAddon.storage.jdbc.JdbcStorageProvider jdbcProvider)) {
+      return;
+    }
+    try (var connection = jdbcProvider.dataSource().getConnection();
+        var statement = connection.createStatement()) {
+      for (String sql : storageSchema.statements(dialect)) {
+        statement.execute(sql);
+      }
+      if (!connection.getAutoCommit()) {
+        connection.commit();
+      }
+    } catch (Exception ex) {
+      logger.warn("初始化数据库表失败: " + ex.getMessage());
+      storageProvider =
+          new UnavailableStorageProvider("Schema initialization failed: " + ex.getMessage());
+    }
   }
 
   private void closeProviderQuietly() {

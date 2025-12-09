@@ -29,11 +29,12 @@ public final class StorageProviderFactory {
     Objects.requireNonNull(settings, "settings");
     Objects.requireNonNull(schema, "schema");
     Objects.requireNonNull(dialect, "dialect");
+    String tablePrefix = schema.tablePrefix();
     return switch (settings.backend()) {
       case SQLITE -> {
         try {
           var ds = HikariDataSourceFactory.create(settings, dataFolder, logger);
-          yield new JdbcStorageProvider(ds, dialect);
+          yield new JdbcStorageProvider(ds, dialect, tablePrefix, logger);
         } catch (Exception ex) {
           logger.error("初始化 SQLite 数据源失败: " + ex.getMessage());
           yield new UnavailableStorageProvider("SQLite 数据源初始化失败: " + ex.getMessage());
@@ -42,7 +43,7 @@ public final class StorageProviderFactory {
       case MYSQL -> {
         try {
           var ds = HikariDataSourceFactory.create(settings, dataFolder, logger);
-          yield new JdbcStorageProvider(ds, dialect);
+          yield new JdbcStorageProvider(ds, dialect, tablePrefix, logger);
         } catch (Exception ex) {
           logger.error("初始化 MySQL 数据源失败: " + ex.getMessage());
           yield new UnavailableStorageProvider("MySQL 数据源初始化失败: " + ex.getMessage());

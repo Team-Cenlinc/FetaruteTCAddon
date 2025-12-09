@@ -47,6 +47,22 @@ class LocaleManagerTest {
     assertTrue(rendered.contains("non.existing.key"));
   }
 
+  @Test
+  void shouldUseBuiltInMissingKeyTemplateWhenTemplateAbsent() throws IOException {
+    LoggerManager loggerManager = new LoggerManager(Logger.getLogger("locale-test"));
+    Path langDir = tempDir.resolve("lang");
+    Files.createDirectories(langDir);
+    Path localeFile = langDir.resolve("test_locale.yml");
+    Files.writeString(localeFile, "prefix: ''\n"); // 不包含 error.missing-key
+    LocaleManager manager =
+        new LocaleManager(localeAccess(tempDir, loggerManager), "test_locale", loggerManager);
+
+    manager.reload();
+
+    String rendered = plain(manager.component("non.existing.key", Map.of()));
+    assertTrue(rendered.contains("缺少语言键"));
+  }
+
   private LocaleManager.LocaleAccess localeAccess(Path dataFolder, LoggerManager loggerManager) {
     return new LocaleManager.LocaleAccess(
         dataFolder.toFile(),

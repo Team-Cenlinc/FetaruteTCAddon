@@ -26,6 +26,7 @@ dependencies {
     implementation platform("com.bergerkiller.bukkit:BKCommonLib-bom:${bkCommonLibVersion}")
     implementation("net.kyori:adventure-platform-bukkit:${adventurePlatformVersion}")
     implementation("dev.triumphteam:triumph-gui:${triumphGuiVersion}")
+    implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.zaxxer:HikariCP:7.0.2")
     compileOnly("com.github.spotbugs:spotbugs-annotations:4.8.6")
     compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
