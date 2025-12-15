@@ -25,6 +25,7 @@ public final class JdbcStorageTransactionManager implements StorageTransactionMa
     try {
       Connection conn = dataSource.getConnection();
       conn.setAutoCommit(false);
+      JdbcConnectionContext.bind(conn);
       return new JdbcStorageTransaction(conn);
     } catch (SQLException ex) {
       throw new StorageException("开启事务失败", ex);

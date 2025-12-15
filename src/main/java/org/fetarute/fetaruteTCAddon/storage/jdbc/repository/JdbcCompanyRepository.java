@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -42,7 +43,7 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
         "SELECT id, code, name, secondary_name, owner_identity_id, status, balance_minor, metadata, created_at, updated_at FROM "
             + table("companies")
             + " WHERE code = ?";
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       statement.setString(1, code);
       try (var rs = statement.executeQuery()) {
@@ -62,7 +63,7 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
         "SELECT id, code, name, secondary_name, owner_identity_id, status, balance_minor, metadata, created_at, updated_at FROM "
             + table("companies");
     List<Company> results = new ArrayList<>();
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql);
         var rs = statement.executeQuery()) {
       while (rs.next()) {
@@ -81,7 +82,7 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
             + table("companies")
             + " WHERE owner_identity_id = ?";
     List<Company> results = new ArrayList<>();
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, ownerIdentityId);
       try (var rs = statement.executeQuery()) {
@@ -116,11 +117,11 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
                 "balance_minor",
                 "metadata",
                 "updated_at"));
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       writeCompany(statement, company);
       statement.executeUpdate();
-      commitIfNecessary(connection);
+      connection.commitIfNecessary();
       return company;
     } catch (SQLException ex) {
       throw new StorageException("保存公司失败", ex);
@@ -130,18 +131,18 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
   @Override
   public void delete(UUID id) {
     String sql = "DELETE FROM " + table("companies") + " WHERE id = ?";
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, id);
       statement.executeUpdate();
-      commitIfNecessary(connection);
+      connection.commitIfNecessary();
     } catch (SQLException ex) {
       throw new StorageException("删除公司失败", ex);
     }
   }
 
   private Optional<Company> querySingle(String sql, UUID id) {
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, id);
       try (var rs = statement.executeQuery()) {
@@ -165,27 +166,27 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
     statement.setString(6, company.status().name());
     statement.setLong(7, company.balanceMinor());
     statement.setString(8, toJson(company.metadata()));
-    statement.setTimestamp(9, toTimestamp(company.createdAt()));
-    statement.setTimestamp(10, toTimestamp(company.updatedAt()));
+    setInstant(statement, 9, company.createdAt());
+    setInstant(statement, 10, company.updatedAt());
   }
 
   private Company mapRow(ResultSet rs) throws SQLException {
-    UUID id = readUuid(rs, "id");
+    UUID id = requireUuid(rs, "id");
     String code = rs.getString("code");
     String name = rs.getString("name");
     String secondaryName = rs.getString("secondary_name");
-    UUID ownerId = readUuid(rs, "owner_identity_id");
+    UUID ownerId = requireUuid(rs, "owner_identity_id");
     CompanyStatus status = CompanyStatus.valueOf(rs.getString("status"));
     long balanceMinor = rs.getLong("balance_minor");
     Map<String, Object> metadata = fromJson(rs.getString("metadata"));
-    Instant createdAt = fromTimestamp(rs.getTimestamp("created_at"));
-    Instant updatedAt = fromTimestamp(rs.getTimestamp("updated_at"));
+    Instant createdAt = readInstant(rs, "created_at");
+    Instant updatedAt = readInstant(rs, "updated_at");
     return new Company(
         id,
         code,
         name,
         Optional.ofNullable(secondaryName),
-        ownerId,
+        Objects.requireNonNull(ownerId, "ownerIdentityId"),
         status,
         balanceMinor,
         metadata,

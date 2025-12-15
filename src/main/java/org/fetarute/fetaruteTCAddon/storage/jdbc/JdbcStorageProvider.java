@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
@@ -30,6 +31,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final StorageTransactionManager transactionManager;
   private final PlayerIdentityRepository playerIdentityRepository;
   private final CompanyRepository companyRepository;
+  private final CompanyMemberRepository companyMemberRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -40,6 +42,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcPlayerIdentityRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.companyRepository =
         new JdbcCompanyRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.companyMemberRepository =
+        new JdbcCompanyMemberRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -62,7 +66,7 @@ public final class JdbcStorageProvider implements StorageProvider {
 
   @Override
   public CompanyMemberRepository companyMembers() {
-    return unsupported(CompanyMemberRepository.class);
+    return companyMemberRepository;
   }
 
   @Override

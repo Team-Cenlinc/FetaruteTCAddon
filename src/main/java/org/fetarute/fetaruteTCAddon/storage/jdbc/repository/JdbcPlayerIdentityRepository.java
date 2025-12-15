@@ -33,7 +33,7 @@ public final class JdbcPlayerIdentityRepository extends JdbcRepositorySupport
         "SELECT id, player_uuid, name, auth_type, external_ref, metadata, created_at, updated_at FROM "
             + table("player_identities")
             + " WHERE id = ?";
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, id);
       try (var rs = statement.executeQuery()) {
@@ -53,7 +53,7 @@ public final class JdbcPlayerIdentityRepository extends JdbcRepositorySupport
         "SELECT id, player_uuid, name, auth_type, external_ref, metadata, created_at, updated_at FROM "
             + table("player_identities")
             + " WHERE player_uuid = ?";
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, playerUuid);
       try (var rs = statement.executeQuery()) {
@@ -73,7 +73,7 @@ public final class JdbcPlayerIdentityRepository extends JdbcRepositorySupport
         "SELECT id, player_uuid, name, auth_type, external_ref, metadata, created_at, updated_at FROM "
             + table("player_identities");
     List<PlayerIdentity> results = new ArrayList<>();
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql);
         var rs = statement.executeQuery()) {
       while (rs.next()) {
@@ -98,11 +98,11 @@ public final class JdbcPlayerIdentityRepository extends JdbcRepositorySupport
             insert,
             List.of("id"),
             List.of("player_uuid", "name", "auth_type", "external_ref", "metadata", "updated_at"));
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       writeIdentity(statement, identity);
       statement.executeUpdate();
-      commitIfNecessary(connection);
+      connection.commitIfNecessary();
       return identity;
     } catch (SQLException ex) {
       throw new StorageException("保存玩家身份失败", ex);
@@ -112,11 +112,11 @@ public final class JdbcPlayerIdentityRepository extends JdbcRepositorySupport
   @Override
   public void delete(UUID id) {
     String sql = "DELETE FROM " + table("player_identities") + " WHERE id = ?";
-    try (var connection = dataSource.getConnection();
+    try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, id);
       statement.executeUpdate();
-      commitIfNecessary(connection);
+      connection.commitIfNecessary();
     } catch (SQLException ex) {
       throw new StorageException("删除玩家身份失败", ex);
     }
@@ -130,19 +130,19 @@ public final class JdbcPlayerIdentityRepository extends JdbcRepositorySupport
     statement.setString(4, identity.authType().name());
     statement.setString(5, identity.externalRef().orElse(null));
     statement.setString(6, toJson(identity.metadata()));
-    statement.setTimestamp(7, toTimestamp(identity.createdAt()));
-    statement.setTimestamp(8, toTimestamp(identity.updatedAt()));
+    setInstant(statement, 7, identity.createdAt());
+    setInstant(statement, 8, identity.updatedAt());
   }
 
   private PlayerIdentity mapRow(ResultSet rs) throws SQLException {
-    UUID id = readUuid(rs, "id");
-    UUID playerUuid = readUuid(rs, "player_uuid");
+    UUID id = requireUuid(rs, "id");
+    UUID playerUuid = requireUuid(rs, "player_uuid");
     String name = rs.getString("name");
     IdentityAuthType authType = IdentityAuthType.valueOf(rs.getString("auth_type"));
     String externalRef = rs.getString("external_ref");
     Map<String, Object> metadata = fromJson(rs.getString("metadata"));
-    Instant createdAt = fromTimestamp(rs.getTimestamp("created_at"));
-    Instant updatedAt = fromTimestamp(rs.getTimestamp("updated_at"));
+    Instant createdAt = readInstant(rs, "created_at");
+    Instant updatedAt = readInstant(rs, "updated_at");
     return new PlayerIdentity(
         id,
         playerUuid,

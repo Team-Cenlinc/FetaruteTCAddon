@@ -4,18 +4,25 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.IdentityAuthType;
+import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
+import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 import org.junit.jupiter.api.AfterEach;
@@ -123,6 +130,114 @@ final class JdbcRepositoryTest {
     assertEquals(ownerId, loaded.ownerIdentityId());
     assertEquals("A", loaded.metadata().get("tier"));
     assertFalse(companyRepo.listByOwner(ownerId).isEmpty());
+  }
+
+  @Test
+  void shouldSupportRepositoriesInsideTransaction() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    PlayerIdentityRepository playerRepo = provider.playerIdentities();
+    CompanyRepository companyRepo = provider.companies();
+
+    UUID ownerId = UUID.randomUUID();
+    UUID ownerPlayerUuid = UUID.randomUUID();
+    Instant now = Instant.now();
+
+    PlayerIdentity identity =
+        new PlayerIdentity(
+            ownerId,
+            ownerPlayerUuid,
+            "Owner",
+            IdentityAuthType.ONLINE,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+
+    Company company =
+        new Company(
+            UUID.randomUUID(),
+            "FTA",
+            "Fetarute Transit",
+            Optional.empty(),
+            ownerId,
+            CompanyStatus.ACTIVE,
+            1_000_000L,
+            Map.of(),
+            now,
+            now);
+
+    assertTimeoutPreemptively(
+        Duration.ofSeconds(3),
+        () ->
+            provider
+                .transactionManager()
+                .execute(
+                    () -> {
+                      playerRepo.save(identity);
+                      companyRepo.save(company);
+                      return null;
+                    }));
+
+    assertTrue(playerRepo.findByPlayerUuid(ownerPlayerUuid).isPresent());
+    assertTrue(companyRepo.findByCode("FTA").isPresent());
+  }
+
+  @Test
+  void shouldPersistCompanyMembersAndEnforceForeignKeys() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    PlayerIdentityRepository playerRepo = provider.playerIdentities();
+    CompanyRepository companyRepo = provider.companies();
+    CompanyMemberRepository memberRepo = provider.companyMembers();
+
+    UUID ownerId = UUID.randomUUID();
+    UUID ownerPlayerUuid = UUID.randomUUID();
+    Instant now = Instant.now();
+    playerRepo.save(
+        new PlayerIdentity(
+            ownerId,
+            ownerPlayerUuid,
+            "Owner",
+            IdentityAuthType.ONLINE,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now));
+
+    UUID companyId = UUID.randomUUID();
+    companyRepo.save(
+        new Company(
+            companyId,
+            "FTA",
+            "Fetarute Transit",
+            Optional.empty(),
+            ownerId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            now,
+            now));
+
+    CompanyMember member =
+        new CompanyMember(
+            companyId,
+            ownerId,
+            EnumSet.of(MemberRole.OWNER),
+            now,
+            Optional.of(Map.of("can_dispatch", true)));
+    memberRepo.save(member);
+
+    CompanyMember loaded = memberRepo.findMembership(companyId, ownerId).orElseThrow();
+    assertEquals(companyId, loaded.companyId());
+    assertEquals(ownerId, loaded.playerIdentityId());
+    assertTrue(loaded.roles().contains(MemberRole.OWNER));
+    assertEquals(true, loaded.permissions().orElseThrow().get("can_dispatch"));
+    assertFalse(memberRepo.listMembers(companyId).isEmpty());
+    assertFalse(memberRepo.listMemberships(ownerId).isEmpty());
+
+    CompanyMember invalid =
+        new CompanyMember(
+            UUID.randomUUID(), UUID.randomUUID(), Set.of(MemberRole.VIEWER), now, Optional.empty());
+    assertThrows(StorageException.class, () -> memberRepo.save(invalid));
   }
 
   private StorageProvider setupProvider(Path dbFile) {

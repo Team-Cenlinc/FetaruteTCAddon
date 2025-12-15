@@ -60,6 +60,7 @@ public final class JdbcStorageTransaction implements StorageTransaction {
     } catch (SQLException ignore) {
       // 忽略关闭异常
     } finally {
+      JdbcConnectionContext.clear(connection);
       closed = true;
     }
   }
