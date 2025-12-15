@@ -1,8 +1,8 @@
 plugins {
     id 'java'
     id 'checkstyle'
-    id("com.diffplug.spotless") version "6.25.0"
-    id("com.github.spotbugs") version "6.0.14"
+    id("com.diffplug.spotless") version "8.1.0"
+    id("com.github.spotbugs") version "6.4.8"
     id("xyz.jpenilla.run-paper") version "2.3.1"
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
@@ -28,7 +28,7 @@ dependencies {
     implementation("dev.triumphteam:triumph-gui:${triumphGuiVersion}")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.zaxxer:HikariCP:7.0.2")
-    compileOnly("com.github.spotbugs:spotbugs-annotations:4.8.6")
+    compileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
     compileOnly("io.papermc.paper:paper-api:${paperApiVersion}")
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
@@ -40,7 +40,7 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.mockito:mockito-core:5.20.0")
     testImplementation("org.mockito:mockito-inline:5.2.0")
-    testImplementation("org.xerial:sqlite-jdbc:3.45.3.0")
+    testImplementation("org.xerial:sqlite-jdbc:3.51.1.0")
 }
 
 spotless {
