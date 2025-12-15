@@ -37,6 +37,7 @@ class SignActionTest {
 
     SignActionEvent queryEvent = mock(SignActionEvent.class);
     when(queryEvent.getBlock()).thenReturn(block);
+    when(queryEvent.getLine(2)).thenReturn("SURN:PTK:GPT:1:00");
     assertEquals("SURN:PTK:GPT:1:00", action.getRailDestinationName(queryEvent));
   }
 

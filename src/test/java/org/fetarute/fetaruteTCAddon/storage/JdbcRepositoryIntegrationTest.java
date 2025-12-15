@@ -88,6 +88,8 @@ final class JdbcRepositoryIntegrationTest {
       assertTrue(playerRepo.findByPlayerUuid(ownerPlayerUuid).isPresent());
       assertTrue(companyRepo.findByCode("INT").isPresent());
       assertTrue(memberRepo.findMembership(companyId, ownerIdentityId).isPresent());
+    } finally {
+      manager.shutdown();
     }
   }
 

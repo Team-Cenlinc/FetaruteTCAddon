@@ -45,12 +45,16 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
   public List<String> onTabComplete(
       CommandSender sender, Command command, String alias, String[] args) {
     List<String> options = new ArrayList<>();
+    options.add("info");
+    options.add("help");
+    if (sender.hasPermission("fetarute.reload")) {
+      options.add("reload");
+    }
+
+    if (args.length == 0) {
+      return options;
+    }
     if (args.length == 1) {
-      options.add("info");
-      options.add("help");
-      if (sender.hasPermission("fetarute.reload")) {
-        options.add("reload");
-      }
       String prefix = args[0].toLowerCase(Locale.ROOT);
       options.removeIf(opt -> !opt.startsWith(prefix));
       return options;

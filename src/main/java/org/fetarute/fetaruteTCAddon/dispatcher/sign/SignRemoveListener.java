@@ -1,8 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 
 import java.util.Map;
-import org.bukkit.block.Sign;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -18,9 +18,9 @@ public final class SignRemoveListener implements Listener {
     this.locale = locale;
   }
 
-  @EventHandler
+  @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
   public void onBlockBreak(BlockBreakEvent event) {
-    if (!(event.getBlock().getState() instanceof Sign)) {
+    if (event.isCancelled()) {
       return;
     }
     registry

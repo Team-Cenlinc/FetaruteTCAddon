@@ -107,6 +107,7 @@ abstract class AbstractNodeSignAction extends SignAction {
     return registry
         .get(event.getBlock())
         .flatMap(SignNodeDefinition::trainCartsDestination)
+        .or(() -> parseDefinition(event).flatMap(SignNodeDefinition::trainCartsDestination))
         .orElse(null);
   }
 
