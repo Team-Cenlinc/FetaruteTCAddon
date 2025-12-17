@@ -10,8 +10,14 @@ depend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload>
+    usage: /fta <info|help|reload|company|operator>
 permissions:
+  fetarute.admin:
+    description: 全局管理员权限
+    default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置
     default: op
+  fetarute.company.create:
+    description: 创建公司
+    default: true

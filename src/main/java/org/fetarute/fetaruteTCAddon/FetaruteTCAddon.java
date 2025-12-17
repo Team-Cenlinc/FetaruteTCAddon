@@ -5,7 +5,9 @@ import com.bergerkiller.bukkit.tc.signactions.SignAction;
 import java.util.Map;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -130,11 +132,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.commandManager = cloudHandler.getManager();
     FtaInfoCommand infoCommand = new FtaInfoCommand(this);
     new FtaStorageCommand(this).register(commandManager);
+    new FtaCompanyCommand(this).register(commandManager);
+    new FtaOperatorCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
     if (bukkitCommand != null) {
-      FtaRootCommand rootCommand = new FtaRootCommand(this, infoCommand);
+      FtaRootCommand rootCommand = new FtaRootCommand(this, commandManager, infoCommand);
       bukkitCommand.setExecutor(rootCommand);
       bukkitCommand.setTabCompleter(rootCommand);
     } else {

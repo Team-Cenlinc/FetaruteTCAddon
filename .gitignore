@@ -30,4 +30,7 @@ Icon?
 *.swp
 *.tmp
 
+# JDBC test artifacts
+test/data/**/*.sqlite
+
 AGENTS.md

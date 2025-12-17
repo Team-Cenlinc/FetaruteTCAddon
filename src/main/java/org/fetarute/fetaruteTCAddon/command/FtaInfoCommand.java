@@ -46,6 +46,8 @@ public final class FtaInfoCommand {
     sender.sendMessage(locale.component("command.help.header"));
     sender.sendMessage(locale.component("command.help.entry-info"));
     sender.sendMessage(locale.component("command.help.entry-help"));
+    sender.sendMessage(locale.component("command.help.entry-company"));
+    sender.sendMessage(locale.component("command.help.entry-operator"));
     sender.sendMessage(locale.component("command.help.entry-reload"));
   }
 

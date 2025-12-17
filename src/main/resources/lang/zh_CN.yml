@@ -8,6 +8,7 @@ locale:
 error:
   missing-key: "<prefix> 缺少语言键 <red><key></red>"
   no-permission: "<prefix> <red>你没有权限执行此命令</red>"
+  storage-unavailable: "<prefix> <red>存储后端尚未就绪，稍后重试或检查控制台日志</red>"
 
 sign:
   created: "<prefix> <dark_aqua>已注册节点</dark_aqua> <white><node></white>"
@@ -15,10 +16,14 @@ sign:
   removed: "<prefix> <dark_aqua>已移除节点</dark_aqua> <white><node></white>"
 
 command:
+  common:
+    confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
   help:
     header: "<prefix> <dark_aqua>可用子命令</dark_aqua>"
     entry-info: "<gray>/fta info</gray> <white>-</white> <dark_aqua>显示插件版本与构建信息</dark_aqua>"
     entry-help: "<gray>/fta help</gray> <white>-</white> <dark_aqua>显示此帮助</dark_aqua>"
+    entry-company: "<gray>/fta company</gray> <white>-</white> <dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
+    entry-operator: "<gray>/fta operator</gray> <white>-</white> <dark_aqua>运营商管理（如 SURN）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
     header: "<prefix> <dark_aqua>插件信息</dark_aqua>"
@@ -27,3 +32,67 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+
+  company:
+    create:
+      success: "<prefix> <dark_aqua>公司已创建：</dark_aqua><white><code></white>"
+      exists: "<prefix> <red>公司 code 已存在：</red><white><code></white>"
+    list:
+      header: "<prefix> <dark_aqua>你的公司列表</dark_aqua>"
+      empty: "<gray>（暂无加入任何公司）</gray>"
+      entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>[<roles>]</gray>"
+    info:
+      header: "<prefix> <dark_aqua>公司</dark_aqua> <white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+      not-found: "<prefix> <red>未找到公司：</red><white><company></white>"
+      status: "<gray>状态:</gray> <dark_aqua><status></dark_aqua>"
+      owner: "<gray>Owner:</gray> <dark_aqua><owner></dark_aqua>"
+      members: "<gray>成员:</gray> <dark_aqua><count></dark_aqua>"
+      operators: "<gray>运营商:</gray> <dark_aqua><count></dark_aqua>"
+    rename:
+      success: "<prefix> <dark_aqua>公司名称已更新：</dark_aqua><white><code></white>"
+    transfer:
+      success: "<prefix> <dark_aqua>公司 Owner 已转移：</dark_aqua><white><code></white> <gray>→</gray> <dark_aqua><player></dark_aqua>"
+      noop: "<prefix> <gray>Owner 未变化：</gray><white><code></white> <gray>→</gray> <dark_aqua><player></dark_aqua>"
+    delete:
+      success: "<prefix> <dark_aqua>公司已标记为已删除：</dark_aqua><white><code></white>"
+    admin:
+      list:
+        header: "<prefix> <dark_aqua>所有公司</dark_aqua>"
+        entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<status>)</gray>"
+      restore:
+        success: "<prefix> <dark_aqua>公司已恢复：</dark_aqua><white><code></white>"
+        not-deleted: "<prefix> <red>公司不在 DELETED 状态：</red><white><code></white> <gray>(<status>)</gray>"
+      purge:
+        success: "<prefix> <red>公司已永久删除：</red><white><code></white>"
+      takeover:
+        success: "<prefix> <dark_aqua>已接管公司 Owner：</dark_aqua><white><code></white>"
+    member:
+      list:
+        header: "<prefix> <dark_aqua>公司成员</dark_aqua> <white><code></white>"
+        empty: "<gray>（暂无成员）</gray>"
+        entry: "<dark_aqua><player></dark_aqua> <gray>[<roles>]</gray>"
+      invite:
+        success: "<prefix> <dark_aqua>已添加成员：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white> <gray>[<roles>]</gray>"
+      setroles:
+        success: "<prefix> <dark_aqua>成员角色已更新：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white> <gray>[<roles>]</gray>"
+      remove:
+        success: "<prefix> <dark_aqua>成员已移除：</dark_aqua><dark_aqua><player></dark_aqua> <gray>←</gray> <white><code></white>"
+        owner: "<prefix> <red>不能移除 Owner；请先 transfer 或使用管理员权限</red>"
+      role-invalid: "<prefix> <red>无效角色：</red><white><role></white>"
+      roles-empty: "<prefix> <red>角色列表不能为空</red>"
+      not-found: "<prefix> <red>未找到成员：</red><dark_aqua><player></dark_aqua>"
+
+  operator:
+    create:
+      success: "<prefix> <dark_aqua>运营商已创建：</dark_aqua><white><company></white><gray>/</gray><white><code></white>"
+      exists: "<prefix> <red>运营商 code 已存在：</red><white><code></white>"
+    list:
+      header: "<prefix> <dark_aqua>运营商列表</dark_aqua> <white><company></white>"
+      empty: "<gray>（暂无运营商）</gray>"
+      entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(priority=<priority>)</gray>"
+    not-found: "<prefix> <red>未找到运营商：</red><white><operator></white>"
+    set:
+      success: "<prefix> <dark_aqua>运营商已更新：</dark_aqua><white><code></white>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--color/--priority/--desc）</gray>"
+    delete:
+      success: "<prefix> <dark_aqua>运营商已删除：</dark_aqua><white><code></white>"

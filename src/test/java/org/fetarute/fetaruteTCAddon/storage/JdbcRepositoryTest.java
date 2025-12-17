@@ -17,9 +17,11 @@ import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.IdentityAuthType;
 import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -238,6 +240,65 @@ final class JdbcRepositoryTest {
         new CompanyMember(
             UUID.randomUUID(), UUID.randomUUID(), Set.of(MemberRole.VIEWER), now, Optional.empty());
     assertThrows(StorageException.class, () -> memberRepo.save(invalid));
+  }
+
+  @Test
+  void shouldPersistOperator() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    PlayerIdentityRepository playerRepo = provider.playerIdentities();
+    CompanyRepository companyRepo = provider.companies();
+    OperatorRepository operatorRepo = provider.operators();
+
+    UUID ownerId = UUID.randomUUID();
+    Instant now = Instant.now();
+    playerRepo.save(
+        new PlayerIdentity(
+            ownerId,
+            UUID.randomUUID(),
+            "Owner",
+            IdentityAuthType.ONLINE,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now));
+
+    UUID companyId = UUID.randomUUID();
+    companyRepo.save(
+        new Company(
+            companyId,
+            "FTA",
+            "Fetarute Transit",
+            Optional.empty(),
+            ownerId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            now,
+            now));
+
+    Operator operator =
+        new Operator(
+            UUID.randomUUID(),
+            "SURN",
+            companyId,
+            "Sunrail",
+            Optional.of("SR"),
+            Optional.of("dark_aqua"),
+            10,
+            Optional.of("desc"),
+            Map.of("tier", "A"),
+            now,
+            now);
+    operatorRepo.save(operator);
+
+    Operator loaded = operatorRepo.findById(operator.id()).orElseThrow();
+    assertEquals(operator.code(), loaded.code());
+    assertEquals(operator.companyId(), loaded.companyId());
+    assertEquals(10, loaded.priority());
+    assertEquals("A", loaded.metadata().get("tier"));
+
+    assertTrue(operatorRepo.findByCompanyAndCode(companyId, "SURN").isPresent());
+    assertFalse(operatorRepo.listByCompany(companyId).isEmpty());
   }
 
   private StorageProvider setupProvider(Path dbFile) {

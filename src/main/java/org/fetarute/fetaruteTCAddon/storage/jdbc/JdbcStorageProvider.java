@@ -16,13 +16,14 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
- * JDBC 实现的 StorageProvider，占位仓库待后续接入具体 SQL 实现。
+ * JDBC 实现的 StorageProvider，负责暴露各类 JDBC 仓库与事务能力。
  *
- * <p>当前仅提供事务能力与数据源关闭，仓库调用会抛出未实现的 StorageException。
+ * <p>若某类仓库尚未实现，将抛出未实现的 StorageException。
  */
 public final class JdbcStorageProvider implements StorageProvider {
 
@@ -32,6 +33,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final PlayerIdentityRepository playerIdentityRepository;
   private final CompanyRepository companyRepository;
   private final CompanyMemberRepository companyMemberRepository;
+  private final OperatorRepository operatorRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -44,6 +46,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcCompanyRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.companyMemberRepository =
         new JdbcCompanyMemberRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.operatorRepository =
+        new JdbcOperatorRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -71,7 +75,7 @@ public final class JdbcStorageProvider implements StorageProvider {
 
   @Override
   public OperatorRepository operators() {
-    return unsupported(OperatorRepository.class);
+    return operatorRepository;
   }
 
   @Override

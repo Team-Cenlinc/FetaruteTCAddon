@@ -12,33 +12,33 @@ class FtaRootCommandTabCompleteTest {
   /** `/fta<TAB>` 应列出可用子命令，并按权限隐藏 reload。 */
   @Test
   void completesSubCommandsWhenNoArgs() {
-    FtaRootCommand root = new FtaRootCommand(null, null);
+    FtaRootCommand root = new FtaRootCommand(null, null, null);
 
     CommandSender sender = Mockito.mock(CommandSender.class);
     Mockito.when(sender.hasPermission("fetarute.reload")).thenReturn(false);
 
     assertEquals(
-        java.util.List.of("info", "help"),
+        java.util.List.of("info", "help", "company", "operator"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {}));
   }
 
   /** `/fta <TAB>` 应同样列出可用子命令。 */
   @Test
   void completesSubCommandsWhenFirstArgEmpty() {
-    FtaRootCommand root = new FtaRootCommand(null, null);
+    FtaRootCommand root = new FtaRootCommand(null, null, null);
 
     CommandSender sender = Mockito.mock(CommandSender.class);
     Mockito.when(sender.hasPermission("fetarute.reload")).thenReturn(true);
 
     assertEquals(
-        java.util.List.of("info", "help", "reload"),
+        java.util.List.of("info", "help", "company", "operator", "reload"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {""}));
   }
 
   /** 子命令应支持前缀过滤。 */
   @Test
   void filtersByPrefix() {
-    FtaRootCommand root = new FtaRootCommand(null, null);
+    FtaRootCommand root = new FtaRootCommand(null, null, null);
 
     CommandSender sender = Mockito.mock(CommandSender.class);
     Mockito.when(sender.hasPermission("fetarute.reload")).thenReturn(true);

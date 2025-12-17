@@ -92,6 +92,10 @@
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
 
     <!-- 测试夹具在 setUp 中清理测试文件，空值路径已由 JUnit 环境保障 -->
     <Match>
