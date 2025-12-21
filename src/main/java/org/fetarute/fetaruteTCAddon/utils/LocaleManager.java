@@ -170,7 +170,7 @@ public final class LocaleManager {
     if (placeholders != null) {
       for (Map.Entry<String, String> entry : placeholders.entrySet()) {
         String value = entry.getValue() == null ? "" : entry.getValue();
-        builder.resolver(Placeholder.parsed(entry.getKey(), value));
+        builder.resolver(Placeholder.unparsed(entry.getKey(), value));
       }
     }
     return builder.build();

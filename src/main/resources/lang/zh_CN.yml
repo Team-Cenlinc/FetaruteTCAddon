@@ -18,6 +18,8 @@ sign:
 command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
+  error:
+    invalid-syntax: "<prefix> <red>命令语法不正确</red> <gray>正确用法：</gray> <white><syntax></white>"
   help:
     header: "<prefix> <dark_aqua>可用子命令</dark_aqua>"
     entry-info: "<gray>/fta info</gray> <white>-</white> <dark_aqua>显示插件版本与构建信息</dark_aqua>"

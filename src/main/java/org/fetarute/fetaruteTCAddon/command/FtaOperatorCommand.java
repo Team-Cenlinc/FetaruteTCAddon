@@ -38,7 +38,7 @@ public final class FtaOperatorCommand {
         CommandFlag.builder("name").withComponent(StringParser.quotedStringParser()).build();
     var secondaryFlag =
         CommandFlag.builder("secondary")
-            .withAliases("secondaryName")
+            .withAliases("s")
             .withComponent(StringParser.quotedStringParser())
             .build();
     var colorFlag = CommandFlag.builder("color").withComponent(StringParser.stringParser()).build();
@@ -46,7 +46,7 @@ public final class FtaOperatorCommand {
         CommandFlag.builder("priority").withComponent(IntegerParser.integerParser()).build();
     var descFlag =
         CommandFlag.builder("desc")
-            .withAliases("description")
+            .withAliases("d")
             .withComponent(StringParser.quotedStringParser())
             .build();
 

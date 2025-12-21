@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.exception.InvalidSyntaxException;
 
 /**
  * 插件入口，负责初始化配置、语言、存储后端与命令/SignAction 生命周期。
@@ -130,6 +131,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     this.cloudHandler.enable(this);
     this.commandManager = cloudHandler.getManager();
+    registerCommandExceptionHandlers();
     FtaInfoCommand infoCommand = new FtaInfoCommand(this);
     new FtaStorageCommand(this).register(commandManager);
     new FtaCompanyCommand(this).register(commandManager);
@@ -144,6 +146,19 @@ public final class FetaruteTCAddon extends JavaPlugin {
     } else {
       loggerManager.warn("未在 plugin.yml 中找到 fta 命令定义");
     }
+  }
+
+  private void registerCommandExceptionHandlers() {
+    LocaleManager locale = this.localeManager;
+    if (locale == null) {
+      return;
+    }
+    cloudHandler.handle(
+        InvalidSyntaxException.class,
+        (sender, ex) ->
+            sender.sendMessage(
+                locale.component(
+                    "command.error.invalid-syntax", Map.of("syntax", ex.correctSyntax()))));
   }
 
   private void registerSignActions() {
