@@ -9,6 +9,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.suggestion.Suggestion;
 
 /** Bukkit 原生命令入口，兼容控制台输出与简单 Tab 补全。 */
 public final class FtaRootCommand implements CommandExecutor, TabCompleter {
@@ -55,6 +56,31 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
   @Override
   public List<String> onTabComplete(
       CommandSender sender, Command command, String alias, String[] args) {
+    if (commandManager != null) {
+      StringBuilder input = new StringBuilder(alias);
+      if (args.length > 0) {
+        input.append(" ").append(String.join(" ", args));
+      }
+      if (args.length == 0 || (args.length > 0 && args[args.length - 1].isEmpty())) {
+        if (input.length() == 0 || input.charAt(input.length() - 1) != ' ') {
+          input.append(' ');
+        }
+      }
+      try {
+        return commandManager
+            .suggestionFactory()
+            .suggest(sender, input.toString())
+            .join()
+            .list()
+            .stream()
+            .map(Suggestion::suggestion)
+            .distinct()
+            .toList();
+      } catch (RuntimeException ignored) {
+        return List.of();
+      }
+    }
+
     List<String> options = new ArrayList<>();
     options.add("info");
     options.add("help");

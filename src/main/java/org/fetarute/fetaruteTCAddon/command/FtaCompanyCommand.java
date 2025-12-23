@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
@@ -9,6 +10,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
+import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.CommandSender;
@@ -24,13 +27,16 @@ import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.context.CommandInput;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.StringParser;
+import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /** 公司管理命令：/fta company ... */
 public final class FtaCompanyCommand {
 
   private final FetaruteTCAddon plugin;
+  private static final int SUGGESTION_LIMIT = 20;
 
   public FtaCompanyCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -38,6 +44,13 @@ public final class FtaCompanyCommand {
 
   public void register(CommandManager<CommandSender> manager) {
     CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
+    SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
+    SuggestionProvider<CommandSender> codeSuggestions = placeholderSuggestion("<code>");
+    SuggestionProvider<CommandSender> nameSuggestions = placeholderSuggestion("\"<name>\"");
+    SuggestionProvider<CommandSender> secondarySuggestions =
+        placeholderSuggestion("\"<secondaryName>\"");
+    SuggestionProvider<CommandSender> playerSuggestions = placeholderSuggestion("<player>");
+    SuggestionProvider<CommandSender> roleSuggestions = roleSuggestions();
 
     manager.command(
         manager
@@ -46,9 +59,9 @@ public final class FtaCompanyCommand {
             .literal("create")
             .permission("fetarute.company.create")
             .senderType(Player.class)
-            .required("code", StringParser.stringParser())
-            .required("name", StringParser.quotedStringParser())
-            .optional("secondaryName", StringParser.quotedStringParser())
+            .required("code", StringParser.stringParser(), codeSuggestions)
+            .required("name", StringParser.quotedStringParser(), nameSuggestions)
+            .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -115,7 +128,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -150,6 +163,8 @@ public final class FtaCompanyCommand {
                     return;
                   }
                   for (CompanyMember member : members) {
+                    String roles =
+                        String.join(",", member.roles().stream().map(Enum::name).toList());
                     String name =
                         provider
                             .playerIdentities()
@@ -157,14 +172,15 @@ public final class FtaCompanyCommand {
                             .map(PlayerIdentity::name)
                             .orElse(member.playerIdentityId().toString());
                     sender.sendMessage(
-                        locale.component(
-                            "command.company.member.list.entry",
-                            Map.of(
-                                "player",
-                                name,
-                                "roles",
-                                String.join(
-                                    ",", member.roles().stream().map(Enum::name).toList()))));
+                        locale
+                            .component(
+                                "command.company.member.list.entry",
+                                Map.of("player", name, "roles", roles))
+                            .hoverEvent(
+                                HoverEvent.showText(
+                                    locale.component(
+                                        "command.company.member.list.hover-entry",
+                                        Map.of("player", name, "roles", roles)))));
                   }
                 }));
 
@@ -175,9 +191,9 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("invite")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
-            .required("player", StringParser.stringParser())
-            .optional("roles", StringParser.greedyStringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("player", StringParser.stringParser(), playerSuggestions)
+            .optional("roles", StringParser.greedyStringParser(), roleSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -269,9 +285,9 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("setroles")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
-            .required("player", StringParser.stringParser())
-            .required("roles", StringParser.greedyStringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("player", StringParser.stringParser(), playerSuggestions)
+            .required("roles", StringParser.greedyStringParser(), roleSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -361,8 +377,8 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("remove")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
-            .required("player", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("player", StringParser.stringParser(), playerSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -459,17 +475,28 @@ public final class FtaCompanyCommand {
                       continue;
                     }
                     Company company = companyOpt.get();
+                    String roles =
+                        String.join(",", membership.roles().stream().map(Enum::name).toList());
+                    String status = company.status().name();
                     sender.sendMessage(
-                        locale.component(
-                            "command.company.list.entry",
-                            Map.of(
-                                "code",
-                                company.code(),
-                                "name",
-                                company.name(),
-                                "roles",
-                                String.join(
-                                    ",", membership.roles().stream().map(Enum::name).toList()))));
+                        locale
+                            .component(
+                                "command.company.list.entry",
+                                Map.of(
+                                    "code", company.code(), "name", company.name(), "roles", roles))
+                            .hoverEvent(
+                                HoverEvent.showText(
+                                    locale.component(
+                                        "command.company.list.hover-entry",
+                                        Map.of(
+                                            "code",
+                                            company.code(),
+                                            "name",
+                                            company.name(),
+                                            "roles",
+                                            roles,
+                                            "status",
+                                            status)))));
                   }
                 }));
 
@@ -478,7 +505,7 @@ public final class FtaCompanyCommand {
             .commandBuilder("fta")
             .literal("company")
             .literal("info")
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -536,9 +563,9 @@ public final class FtaCompanyCommand {
             .commandBuilder("fta")
             .literal("company")
             .literal("rename")
-            .required("company", StringParser.stringParser())
-            .required("name", StringParser.quotedStringParser())
-            .optional("secondaryName", StringParser.quotedStringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("name", StringParser.quotedStringParser(), nameSuggestions)
+            .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -590,8 +617,8 @@ public final class FtaCompanyCommand {
             .commandBuilder("fta")
             .literal("company")
             .literal("transfer")
-            .required("company", StringParser.stringParser())
-            .required("player", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("player", StringParser.stringParser(), playerSuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -668,7 +695,7 @@ public final class FtaCompanyCommand {
             .literal("company")
             .literal("delete")
             .flag(confirmFlag)
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -735,16 +762,29 @@ public final class FtaCompanyCommand {
                   LocaleManager locale = plugin.getLocaleManager();
                   sender.sendMessage(locale.component("command.company.admin.list.header"));
                   for (Company company : provider.companies().listAll()) {
+                    String status = company.status().name();
                     sender.sendMessage(
-                        locale.component(
-                            "command.company.admin.list.entry",
-                            Map.of(
-                                "code",
-                                company.code(),
-                                "name",
-                                company.name(),
-                                "status",
-                                company.status().name())));
+                        locale
+                            .component(
+                                "command.company.admin.list.entry",
+                                Map.of(
+                                    "code",
+                                    company.code(),
+                                    "name",
+                                    company.name(),
+                                    "status",
+                                    status))
+                            .hoverEvent(
+                                HoverEvent.showText(
+                                    locale.component(
+                                        "command.company.admin.list.hover-entry",
+                                        Map.of(
+                                            "code",
+                                            company.code(),
+                                            "name",
+                                            company.name(),
+                                            "status",
+                                            status)))));
                   }
                 }));
 
@@ -755,7 +795,7 @@ public final class FtaCompanyCommand {
             .literal("admin")
             .literal("restore")
             .permission("fetarute.admin")
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -810,7 +850,7 @@ public final class FtaCompanyCommand {
             .literal("purge")
             .permission("fetarute.admin")
             .flag(confirmFlag)
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -850,7 +890,7 @@ public final class FtaCompanyCommand {
             .literal("takeover")
             .permission("fetarute.admin")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -904,9 +944,15 @@ public final class FtaCompanyCommand {
   }
 
   private Optional<StorageProvider> readyProvider(CommandSender sender) {
-    LocaleManager locale = plugin.getLocaleManager();
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
+    }
+    return providerOpt;
+  }
+
+  private Optional<StorageProvider> providerIfReady() {
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      sender.sendMessage(locale.component("error.storage-unavailable"));
       return Optional.empty();
     }
     return plugin.getStorageManager().provider();
@@ -962,6 +1008,88 @@ public final class FtaCompanyCommand {
       }
     }
     return Optional.of(roles);
+  }
+
+  private SuggestionProvider<CommandSender> placeholderSuggestion(String placeholder) {
+    return SuggestionProvider.suggestingStrings(placeholder);
+  }
+
+  private SuggestionProvider<CommandSender> companySuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<company>");
+          }
+          suggestions.addAll(listCompanyCodes(ctx.sender(), prefix));
+          return suggestions;
+        });
+  }
+
+  private static SuggestionProvider<CommandSender> roleSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input).toUpperCase(Locale.ROOT);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<roles...>");
+          }
+          for (MemberRole role : MemberRole.values()) {
+            String name = role.name();
+            if (prefix.isBlank() || name.startsWith(prefix)) {
+              suggestions.add(name);
+            }
+          }
+          return suggestions;
+        });
+  }
+
+  private static String normalizePrefix(CommandInput input) {
+    if (input == null) {
+      return "";
+    }
+    return input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
+  }
+
+  private List<String> listCompanyCodes(CommandSender sender, String prefix) {
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return List.of();
+    }
+    StorageProvider provider = providerOpt.get();
+    Stream<Company> companies;
+    if (sender.hasPermission("fetarute.admin")) {
+      companies = provider.companies().listAll().stream();
+    } else if (sender instanceof Player player) {
+      Optional<PlayerIdentity> identityOpt =
+          provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
+      if (identityOpt.isEmpty()) {
+        return List.of();
+      }
+      List<CompanyMember> memberships =
+          provider.companyMembers().listMemberships(identityOpt.get().id());
+      if (memberships.isEmpty()) {
+        return List.of();
+      }
+      companies =
+          memberships.stream()
+              .map(CompanyMember::companyId)
+              .distinct()
+              .map(provider.companies()::findById)
+              .flatMap(Optional::stream);
+    } else {
+      return List.of();
+    }
+    return companies
+        .map(Company::code)
+        .filter(Objects::nonNull)
+        .map(String::trim)
+        .filter(code -> !code.isBlank())
+        .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+        .distinct()
+        .limit(SUGGESTION_LIMIT)
+        .toList();
   }
 
   private static final class CompanyMemberRepositoryFacade {

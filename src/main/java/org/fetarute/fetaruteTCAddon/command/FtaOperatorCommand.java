@@ -1,11 +1,16 @@
 package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
+import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
@@ -19,14 +24,17 @@ import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.context.CommandInput;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
+import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /** 运营商管理命令：/fta operator ... */
 public final class FtaOperatorCommand {
 
   private final FetaruteTCAddon plugin;
+  private static final int SUGGESTION_LIMIT = 20;
 
   public FtaOperatorCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -34,6 +42,12 @@ public final class FtaOperatorCommand {
 
   public void register(CommandManager<CommandSender> manager) {
     CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
+    SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
+    SuggestionProvider<CommandSender> codeSuggestions = placeholderSuggestion("<code>");
+    SuggestionProvider<CommandSender> nameSuggestions = placeholderSuggestion("\"<name>\"");
+    SuggestionProvider<CommandSender> secondarySuggestions =
+        placeholderSuggestion("\"<secondaryName>\"");
+    SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
     var nameFlag =
         CommandFlag.builder("name").withComponent(StringParser.quotedStringParser()).build();
     var secondaryFlag =
@@ -56,10 +70,10 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("create")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
-            .required("code", StringParser.stringParser())
-            .required("name", StringParser.quotedStringParser())
-            .optional("secondaryName", StringParser.quotedStringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("code", StringParser.stringParser(), codeSuggestions)
+            .required("name", StringParser.quotedStringParser(), nameSuggestions)
+            .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -123,7 +137,7 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -158,16 +172,39 @@ public final class FtaOperatorCommand {
                     return;
                   }
                   for (Operator operator : operators) {
+                    String secondary =
+                        operator.secondaryName().filter(s -> !s.isBlank()).orElse("-");
+                    String color = operator.colorTheme().filter(s -> !s.isBlank()).orElse("-");
+                    String desc = operator.description().filter(s -> !s.isBlank()).orElse("-");
+                    String priority = String.valueOf(operator.priority());
                     sender.sendMessage(
-                        locale.component(
-                            "command.operator.list.entry",
-                            Map.of(
-                                "code",
-                                operator.code(),
-                                "name",
-                                operator.name(),
-                                "priority",
-                                String.valueOf(operator.priority()))));
+                        locale
+                            .component(
+                                "command.operator.list.entry",
+                                Map.of(
+                                    "code",
+                                    operator.code(),
+                                    "name",
+                                    operator.name(),
+                                    "priority",
+                                    priority))
+                            .hoverEvent(
+                                HoverEvent.showText(
+                                    locale.component(
+                                        "command.operator.list.hover-entry",
+                                        Map.of(
+                                            "code",
+                                            operator.code(),
+                                            "name",
+                                            operator.name(),
+                                            "secondary",
+                                            secondary,
+                                            "color",
+                                            color,
+                                            "priority",
+                                            priority,
+                                            "desc",
+                                            desc)))));
                   }
                 }));
 
@@ -177,8 +214,8 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
-            .required("operator", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(colorFlag)
@@ -281,8 +318,8 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("delete")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser())
-            .required("operator", StringParser.stringParser())
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
             .flag(confirmFlag)
             .handler(
                 ctx -> {
@@ -332,9 +369,15 @@ public final class FtaOperatorCommand {
   }
 
   private Optional<StorageProvider> readyProvider(CommandSender sender) {
-    LocaleManager locale = plugin.getLocaleManager();
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
+    }
+    return providerOpt;
+  }
+
+  private Optional<StorageProvider> providerIfReady() {
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      sender.sendMessage(locale.component("error.storage-unavailable"));
       return Optional.empty();
     }
     return plugin.getStorageManager().provider();
@@ -373,5 +416,125 @@ public final class FtaOperatorCommand {
   private Optional<Operator> tryFindOperator(
       StorageProvider provider, UUID companyId, String codeOrId) {
     return new CompanyQueryService(provider).findOperator(companyId, codeOrId);
+  }
+
+  private SuggestionProvider<CommandSender> placeholderSuggestion(String placeholder) {
+    return SuggestionProvider.suggestingStrings(placeholder);
+  }
+
+  private SuggestionProvider<CommandSender> operatorSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<operator>");
+          }
+          Optional<StorageProvider> providerOpt = providerIfReady();
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          if (companyArgOpt.isEmpty()) {
+            return suggestions;
+          }
+          String companyArg = companyArgOpt.get().trim();
+          if (companyArg.isBlank()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!ctx.sender().hasPermission("fetarute.admin")) {
+            if (!(ctx.sender() instanceof Player player)) {
+              return suggestions;
+            }
+            Optional<PlayerIdentity> identityOpt =
+                provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
+            if (identityOpt.isEmpty()) {
+              return suggestions;
+            }
+            if (provider
+                .companyMembers()
+                .findMembership(company.id(), identityOpt.get().id())
+                .isEmpty()) {
+              return suggestions;
+            }
+          }
+          provider.operators().listByCompany(company.id()).stream()
+              .map(Operator::code)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(code -> !code.isBlank())
+              .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  private SuggestionProvider<CommandSender> companySuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<company>");
+          }
+          suggestions.addAll(listCompanyCodes(ctx.sender(), prefix));
+          return suggestions;
+        });
+  }
+
+  private static String normalizePrefix(CommandInput input) {
+    if (input == null) {
+      return "";
+    }
+    return input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
+  }
+
+  private List<String> listCompanyCodes(CommandSender sender, String prefix) {
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return List.of();
+    }
+    StorageProvider provider = providerOpt.get();
+    Stream<Company> companies;
+    if (sender.hasPermission("fetarute.admin")) {
+      companies = provider.companies().listAll().stream();
+    } else if (sender instanceof Player player) {
+      Optional<PlayerIdentity> identityOpt =
+          provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
+      if (identityOpt.isEmpty()) {
+        return List.of();
+      }
+      List<CompanyMember> memberships =
+          provider.companyMembers().listMemberships(identityOpt.get().id());
+      if (memberships.isEmpty()) {
+        return List.of();
+      }
+      companies =
+          memberships.stream()
+              .map(CompanyMember::companyId)
+              .distinct()
+              .map(provider.companies()::findById)
+              .flatMap(Optional::stream);
+    } else {
+      return List.of();
+    }
+    return companies
+        .map(Company::code)
+        .filter(Objects::nonNull)
+        .map(String::trim)
+        .filter(code -> !code.isBlank())
+        .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+        .distinct()
+        .limit(SUGGESTION_LIMIT)
+        .toList();
   }
 }

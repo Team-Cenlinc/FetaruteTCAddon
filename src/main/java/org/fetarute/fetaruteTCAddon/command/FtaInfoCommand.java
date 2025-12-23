@@ -5,6 +5,9 @@ import java.io.InputStream;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.command.CommandSender;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -44,11 +47,36 @@ public final class FtaInfoCommand {
   public void sendHelp(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("command.help.header"));
-    sender.sendMessage(locale.component("command.help.entry-info"));
-    sender.sendMessage(locale.component("command.help.entry-help"));
-    sender.sendMessage(locale.component("command.help.entry-company"));
-    sender.sendMessage(locale.component("command.help.entry-operator"));
-    sender.sendMessage(locale.component("command.help.entry-reload"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-info"),
+        ClickEvent.runCommand("/fta info"),
+        locale.component("command.help.hover-info"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-help"),
+        ClickEvent.runCommand("/fta help"),
+        locale.component("command.help.hover-help"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-company"),
+        ClickEvent.suggestCommand("/fta company "),
+        locale.component("command.help.hover-company"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-operator"),
+        ClickEvent.suggestCommand("/fta operator "),
+        locale.component("command.help.hover-operator"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-reload"),
+        ClickEvent.runCommand("/fta reload"),
+        locale.component("command.help.hover-reload"));
+  }
+
+  private void sendHelpEntry(
+      CommandSender sender, Component text, ClickEvent clickEvent, Component hoverText) {
+    sender.sendMessage(text.clickEvent(clickEvent).hoverEvent(HoverEvent.showText(hoverText)));
   }
 
   private BuildInfo readBuildInfo(LoggerManager logger) {

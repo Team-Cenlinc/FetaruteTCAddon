@@ -23,10 +23,15 @@ command:
   help:
     header: "<prefix> <dark_aqua>可用子命令</dark_aqua>"
     entry-info: "<gray>/fta info</gray> <white>-</white> <dark_aqua>显示插件版本与构建信息</dark_aqua>"
+    hover-info: "<gray>点击执行:</gray> <white>/fta info</white>\n<dark_aqua>显示插件版本与构建信息</dark_aqua>"
     entry-help: "<gray>/fta help</gray> <white>-</white> <dark_aqua>显示此帮助</dark_aqua>"
+    hover-help: "<gray>点击执行:</gray> <white>/fta help</white>\n<dark_aqua>显示此帮助</dark_aqua>"
     entry-company: "<gray>/fta company</gray> <white>-</white> <dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
+    hover-company: "<gray>点击填充:</gray> <white>/fta company </white>\n<dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     entry-operator: "<gray>/fta operator</gray> <white>-</white> <dark_aqua>运营商管理（如 SURN）</dark_aqua>"
+    hover-operator: "<gray>点击填充:</gray> <white>/fta operator </white>\n<dark_aqua>运营商管理（如 SURN）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
+    hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
     header: "<prefix> <dark_aqua>插件信息</dark_aqua>"
     version: "<gray>版本:</gray> <dark_aqua><version></dark_aqua>"
@@ -43,6 +48,7 @@ command:
       header: "<prefix> <dark_aqua>你的公司列表</dark_aqua>"
       empty: "<gray>（暂无加入任何公司）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>[<roles>]</gray>"
+      hover-entry: "<gray>公司:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>状态:</dark_aqua> <white><status></white>\n<dark_aqua>角色:</dark_aqua> <white><roles></white>"
     info:
       header: "<prefix> <dark_aqua>公司</dark_aqua> <white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
       not-found: "<prefix> <red>未找到公司：</red><white><company></white>"
@@ -61,6 +67,7 @@ command:
       list:
         header: "<prefix> <dark_aqua>所有公司</dark_aqua>"
         entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<status>)</gray>"
+        hover-entry: "<gray>公司:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>状态:</dark_aqua> <white><status></white>"
       restore:
         success: "<prefix> <dark_aqua>公司已恢复：</dark_aqua><white><code></white>"
         not-deleted: "<prefix> <red>公司不在 DELETED 状态：</red><white><code></white> <gray>(<status>)</gray>"
@@ -73,6 +80,7 @@ command:
         header: "<prefix> <dark_aqua>公司成员</dark_aqua> <white><code></white>"
         empty: "<gray>（暂无成员）</gray>"
         entry: "<dark_aqua><player></dark_aqua> <gray>[<roles>]</gray>"
+        hover-entry: "<gray>成员:</gray> <white><player></white>\n<dark_aqua>角色:</dark_aqua> <white><roles></white>"
       invite:
         success: "<prefix> <dark_aqua>已添加成员：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white> <gray>[<roles>]</gray>"
       setroles:
@@ -92,6 +100,7 @@ command:
       header: "<prefix> <dark_aqua>运营商列表</dark_aqua> <white><company></white>"
       empty: "<gray>（暂无运营商）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(priority=<priority>)</gray>"
+      hover-entry: "<gray>运营商:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>主题:</dark_aqua> <white><color></white>\n<dark_aqua>优先级:</dark_aqua> <white><priority></white>\n<dark_aqua>描述:</dark_aqua> <white><desc></white>"
     not-found: "<prefix> <red>未找到运营商：</red><white><operator></white>"
     set:
       success: "<prefix> <dark_aqua>运营商已更新：</dark_aqua><white><code></white>"
