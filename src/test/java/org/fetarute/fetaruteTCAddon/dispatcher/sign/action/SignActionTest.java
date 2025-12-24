@@ -62,7 +62,7 @@ class SignActionTest {
     assertFalse(registry.get(block).isPresent());
   }
 
-  /** AutoStation 仅接受站咽喉（第二段 S），否则忽略。 */
+  /** AutoStation 不接受区间点（Waypoint interval），否则会与图节点职责混淆。 */
   @Test
   void autoStationRejectsInterval() {
     SignNodeRegistry registry = new SignNodeRegistry();
@@ -73,6 +73,57 @@ class SignActionTest {
     when(buildEvent.isTrainSign()).thenReturn(true);
     when(buildEvent.isCartSign()).thenReturn(true);
     when(buildEvent.getLine(2)).thenReturn("SURN:PTK:GPT:1:00");
+    when(buildEvent.getBlock()).thenReturn(block);
+
+    action.build(buildEvent);
+    assertTrue(registry.get(block).isEmpty());
+  }
+
+  /** Waypoint 也应接受站咽喉/车库咽喉（它们属于图节点，而非行为节点）。 */
+  @Test
+  void waypointAcceptsThroats() {
+    SignNodeRegistry registry = new SignNodeRegistry();
+    WaypointSignAction action = new WaypointSignAction(registry, message -> {}, null);
+    Block block = mockBlock();
+
+    SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
+    when(buildEvent.isTrainSign()).thenReturn(true);
+    when(buildEvent.isCartSign()).thenReturn(true);
+    when(buildEvent.getLine(2)).thenReturn("SURN:S:PTK:1:01");
+    when(buildEvent.getBlock()).thenReturn(block);
+
+    assertTrue(action.build(buildEvent));
+    assertTrue(registry.get(block).isPresent());
+  }
+
+  /** AutoStation 只接受站点（4 段 S:Station:Track），不接受站咽喉（5 段）。 */
+  @Test
+  void autoStationRejectsStationThroat() {
+    SignNodeRegistry registry = new SignNodeRegistry();
+    AutoStationSignAction action = new AutoStationSignAction(registry, message -> {}, null);
+    Block block = mockBlock();
+
+    SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
+    when(buildEvent.isTrainSign()).thenReturn(true);
+    when(buildEvent.isCartSign()).thenReturn(true);
+    when(buildEvent.getLine(2)).thenReturn("SURN:S:PTK:1:01");
+    when(buildEvent.getBlock()).thenReturn(block);
+
+    action.build(buildEvent);
+    assertTrue(registry.get(block).isEmpty());
+  }
+
+  /** Depot 只接受车库（4 段 D:Depot:Track），不接受车库咽喉（5 段）。 */
+  @Test
+  void depotRejectsDepotThroat() {
+    SignNodeRegistry registry = new SignNodeRegistry();
+    DepotSignAction action = new DepotSignAction(registry, message -> {}, null);
+    Block block = mockBlock();
+
+    SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
+    when(buildEvent.isTrainSign()).thenReturn(true);
+    when(buildEvent.isCartSign()).thenReturn(true);
+    when(buildEvent.getLine(2)).thenReturn("SURN:D:AAA:1:01");
     when(buildEvent.getBlock()).thenReturn(block);
 
     action.build(buildEvent);

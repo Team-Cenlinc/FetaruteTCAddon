@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -9,10 +10,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
@@ -64,6 +67,8 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaRouteCommand {
 
   private static final int SUGGESTION_LIMIT = 20;
+  private static final int STOP_DEBUG_PAGE_SIZE = 10;
+  private static final Duration STOP_DEBUG_SESSION_TTL = Duration.ofMinutes(10);
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
   private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION");
@@ -82,6 +87,8 @@ public final class FtaRouteCommand {
   private final NamespacedKey bookRouteCodeKey;
   private final NamespacedKey bookDefinedAtKey;
   private final NamespacedKey bookEditorMarkerKey;
+  private final ConcurrentHashMap<UUID, StopDebugSession> stopDebugSessions =
+      new ConcurrentHashMap<>();
 
   public FtaRouteCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -178,6 +185,7 @@ public final class FtaRouteCommand {
                                     "<line>",
                                     "route",
                                     "<route>"))));
+                    meta.pages(toComponents(buildRouteEditorEmptyPages(locale)));
                     book.setItemMeta(meta);
                   }
                   var leftovers = sender.getInventory().addItem(book);
@@ -741,6 +749,40 @@ public final class FtaRouteCommand {
                   archiveBookIfHolding(locale, sender, provider, resolved, stops);
                   // define 后回显解析结果，便于玩家检查 PASS/TERM/dwell/nodeId 等是否符合预期。
                   sendStopDebug(locale, sender, provider, resolved.operator().id(), stops);
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("define")
+            .literal("debug")
+            .senderType(Player.class)
+            .optional("page", IntegerParser.integerParser())
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+
+                  int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
+                  StopDebugSession session = stopDebugSessions.get(sender.getUniqueId());
+                  if (session == null) {
+                    sender.sendMessage(
+                        locale.component("command.route.define.debug.session-missing"));
+                    return;
+                  }
+                  if (session.isExpired()) {
+                    stopDebugSessions.remove(sender.getUniqueId());
+                    sender.sendMessage(
+                        locale.component("command.route.define.debug.session-expired"));
+                    return;
+                  }
+                  sendStopDebugPage(locale, sender, provider, session, page);
                 }));
   }
 
@@ -1346,6 +1388,8 @@ public final class FtaRouteCommand {
       rendered.add("# STOP PTK dwell=30");
       rendered.add("# CHANGE:" + operator.code() + ":" + line.code());
       rendered.add("# PASS " + operator.code() + ":A:B:1:00");
+      rendered.add("# STOP " + operator.code() + ":D:DEPOT:1");
+      rendered.add("# STOP " + operator.code() + ":D:DEPOT:1:01");
       rendered.add("");
     } else {
       rendered.add("# 已加载现有停靠表（可直接修改后 define 覆盖）");
@@ -1364,6 +1408,41 @@ public final class FtaRouteCommand {
     rendered.add("# 在编辑完成后执行：");
     rendered.add("# /fta route define <company> <operator> <line> <route>");
 
+    return splitPages(rendered, 11);
+  }
+
+  /**
+   * 构建 Route Editor 的空模板内容。
+   *
+   * <p>空模板不绑定 routeId：用于“先写草稿/拿来当剪贴板”，以及右键牌子快速收集 nodeId。
+   */
+  private List<String> buildRouteEditorEmptyPages(LocaleManager locale) {
+    if (locale != null) {
+      List<String> template = locale.stringList("command.route.editor.book.empty-template");
+      if (!template.isEmpty()) {
+        return splitPages(template, 11);
+      }
+    }
+
+    // 兜底：语言键缺失时仍给出可用帮助。
+    List<String> rendered = new ArrayList<>();
+    rendered.add("# FetaruteTCAddon Route Editor");
+    rendered.add("# 空模板（未绑定 Route）");
+    rendered.add("#");
+    rendered.add("# 用法：每行一个 stop/action");
+    rendered.add("# stop: StationCode 或 NodeId");
+    rendered.add("# action: CHANGE/DYNAMIC/ACTION");
+    rendered.add("# 修饰: PASS/STOP/TERM, dwell=<秒>");
+    rendered.add("#");
+    rendered.add("# 右键 waypoint/autostation/depot");
+    rendered.add("# 牌子可把 nodeId 追加到末尾");
+    rendered.add("#");
+    rendered.add("# 示例：");
+    rendered.add("# PTK");
+    rendered.add("# SURN:D:AAA:1");
+    rendered.add("# SURN:D:AAA:1:01");
+    rendered.add("# SURN:AAA:BBB:1:00");
+    rendered.add("# DYNAMIC:SURN:PTK:[1:3]");
     return splitPages(rendered, 11);
   }
 
@@ -1567,7 +1646,7 @@ public final class FtaRouteCommand {
   }
 
   /**
-   * define 后回显解析结果（最多 20 条）。
+   * define 后回显解析结果（分页，每页 10 条）。
    *
    * <p>输出使用 hover 展示细节（passType/dwell/station/node），并提供建议命令：
    *
@@ -1585,16 +1664,35 @@ public final class FtaRouteCommand {
     if (stops.isEmpty()) {
       return;
     }
+    StopDebugSession session = new StopDebugSession(Instant.now(), operatorId, List.copyOf(stops));
+    stopDebugSessions.put(sender.getUniqueId(), session);
+    sendStopDebugPage(locale, sender, provider, session, 1);
+  }
+
+  private void sendStopDebugPage(
+      LocaleManager locale,
+      Player sender,
+      StorageProvider provider,
+      StopDebugSession session,
+      int page) {
+    int total = session.stops().size();
+    if (total <= 0) {
+      return;
+    }
+
+    int pageCount = (total + STOP_DEBUG_PAGE_SIZE - 1) / STOP_DEBUG_PAGE_SIZE;
+    int safePage = Math.max(1, Math.min(page, pageCount));
+    int start = (safePage - 1) * STOP_DEBUG_PAGE_SIZE;
+    int end = Math.min(start + STOP_DEBUG_PAGE_SIZE, total);
+
     sender.sendMessage(locale.component("command.route.define.debug.header"));
-    int shown = 0;
-    for (RouteStop stop : stops) {
-      if (shown >= 20) {
-        break;
-      }
-      shown++;
+    sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount));
+
+    for (int i = start; i < end; i++) {
+      RouteStop stop = session.stops().get(i);
       String index = String.valueOf(stop.sequence());
-      String pass = stop.passType().name();
-      String dwell = stop.dwellSeconds().map(String::valueOf).orElse("-");
+      String pass = locale.enumText("enum.route-stop-pass-type", stop.passType());
+      String dwellBaseline = stop.dwellSeconds().map(String::valueOf).orElse("-");
       String node = stop.waypointNodeId().orElse("-");
       String stationCode =
           stop.stationId()
@@ -1607,7 +1705,7 @@ public final class FtaRouteCommand {
                           .orElse("-"));
 
       String tpCommand =
-          resolveTeleportCommand(provider, operatorId, stationCode)
+          resolveTeleportCommand(provider, session.operatorId(), stationCode)
               .orElseGet(() -> node.equals("-") ? "" : "/train debug destination " + node);
 
       sender.sendMessage(
@@ -1625,13 +1723,56 @@ public final class FtaRouteCommand {
                               "pass",
                               pass,
                               "dwell",
-                              dwell,
+                              dwellBaseline,
                               "station",
                               stationCode,
                               "node",
                               node,
                               "tp",
                               tpCommand)))));
+    }
+    sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount));
+  }
+
+  private Component buildStopDebugNav(LocaleManager locale, int page, int pageCount) {
+    Component pageText =
+        locale.component(
+            "command.route.define.debug.page",
+            Map.of("page", String.valueOf(page), "pages", String.valueOf(pageCount)));
+
+    Component prev =
+        page > 1
+            ? locale
+                .component("command.route.define.debug.nav.prev")
+                .clickEvent(ClickEvent.runCommand("/fta route define debug " + (page - 1)))
+            : locale.component("command.route.define.debug.nav.prev-disabled");
+    Component next =
+        page < pageCount
+            ? locale
+                .component("command.route.define.debug.nav.next")
+                .clickEvent(ClickEvent.runCommand("/fta route define debug " + (page + 1)))
+            : locale.component("command.route.define.debug.nav.next-disabled");
+    Component hint = locale.component("command.route.define.debug.nav.hint");
+
+    return Component.empty()
+        .append(pageText)
+        .append(Component.space())
+        .append(prev)
+        .append(Component.space())
+        .append(next)
+        .append(Component.space())
+        .append(hint);
+  }
+
+  private record StopDebugSession(Instant createdAt, UUID operatorId, List<RouteStop> stops) {
+    StopDebugSession {
+      Objects.requireNonNull(createdAt, "createdAt");
+      Objects.requireNonNull(operatorId, "operatorId");
+      stops = stops == null ? List.of() : List.copyOf(stops);
+    }
+
+    boolean isExpired() {
+      return createdAt.plus(STOP_DEBUG_SESSION_TTL).isBefore(Instant.now());
     }
   }
 

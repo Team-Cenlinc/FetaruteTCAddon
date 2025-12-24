@@ -141,19 +141,21 @@ public final class RouteEditorAppendListener implements Listener {
     SignSide front = sign.getSide(Side.FRONT);
     String header = PLAIN_TEXT.serialize(front.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
     NodeType nodeType;
-    WaypointKind expectedKind;
+    java.util.EnumSet<WaypointKind> expectedKinds;
     switch (header) {
       case "waypoint" -> {
         nodeType = NodeType.WAYPOINT;
-        expectedKind = WaypointKind.INTERVAL;
+        expectedKinds =
+            java.util.EnumSet.of(
+                WaypointKind.INTERVAL, WaypointKind.STATION_THROAT, WaypointKind.DEPOT_THROAT);
       }
       case "autostation" -> {
         nodeType = NodeType.STATION;
-        expectedKind = WaypointKind.STATION_THROAT;
+        expectedKinds = java.util.EnumSet.of(WaypointKind.STATION);
       }
       case "depot" -> {
         nodeType = NodeType.DEPOT;
-        expectedKind = WaypointKind.DEPOT;
+        expectedKinds = java.util.EnumSet.of(WaypointKind.DEPOT);
       }
       default -> {
         return Optional.empty();
@@ -167,7 +169,7 @@ public final class RouteEditorAppendListener implements Listener {
         .filter(
             def ->
                 def.waypointMetadata()
-                    .map(metadata -> metadata.kind() == expectedKind)
+                    .map(metadata -> expectedKinds.contains(metadata.kind()))
                     .orElse(false));
   }
 
@@ -179,9 +181,14 @@ public final class RouteEditorAppendListener implements Listener {
     String key =
         kind == WaypointKind.STATION_THROAT
             ? "sign.type.station_throat"
-            : kind == WaypointKind.DEPOT
+            : kind == WaypointKind.DEPOT_THROAT
                 ? "sign.type.depot_throat"
-                : "sign.type." + definition.nodeType().name().toLowerCase(java.util.Locale.ROOT);
+                : kind == WaypointKind.STATION
+                    ? "sign.type.station"
+                    : kind == WaypointKind.DEPOT
+                        ? "sign.type.depot"
+                        : "sign.type."
+                            + definition.nodeType().name().toLowerCase(java.util.Locale.ROOT);
     return PLAIN_TEXT.serialize(locale.component(key));
   }
 }

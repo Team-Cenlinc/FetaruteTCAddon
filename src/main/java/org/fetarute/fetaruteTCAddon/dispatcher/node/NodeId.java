@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /**
  * 代表轨道网络中的一个逻辑节点（站台、道岔、车库等）的唯一标识。 推荐遵循 <运营商>:<from>:<to>:<track>:<seq> 的编码方式， 例如
- * SURN:PTK:GPT:1:00、SURN:S:PTK:1（站咽喉）、SURN:D:LVT:1（Depot throat）。
+ * SURN:PTK:GPT:1:00、SURN:S:PTK:1（站点）、SURN:D:LVT:1（车库）、SURN:S:PTK:1:00（站咽喉）、SURN:D:LVT:1:00（车库咽喉）。
  */
 public record NodeId(String value) {
 

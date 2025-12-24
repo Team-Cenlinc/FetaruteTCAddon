@@ -24,7 +24,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             definition ->
                 definition
                     .waypointMetadata()
-                    .map(metadata -> metadata.kind() == WaypointKind.STATION_THROAT)
+                    .map(metadata -> metadata.kind() == WaypointKind.STATION)
                     .orElse(false));
   }
 }

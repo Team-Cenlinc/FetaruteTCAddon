@@ -24,7 +24,11 @@ public final class WaypointSignAction extends AbstractNodeSignAction {
             definition ->
                 definition
                     .waypointMetadata()
-                    .map(metadata -> metadata.kind() == WaypointKind.INTERVAL)
+                    .map(
+                        metadata ->
+                            metadata.kind() == WaypointKind.INTERVAL
+                                || metadata.kind() == WaypointKind.STATION_THROAT
+                                || metadata.kind() == WaypointKind.DEPOT_THROAT)
                     .orElse(false));
   }
 }

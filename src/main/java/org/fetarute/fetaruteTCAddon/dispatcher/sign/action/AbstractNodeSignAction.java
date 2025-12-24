@@ -221,8 +221,12 @@ abstract class AbstractNodeSignAction extends SignAction {
     WaypointKind kind = definition.waypointMetadata().map(metadata -> metadata.kind()).orElse(null);
     if (kind == WaypointKind.STATION_THROAT) {
       key = "sign.type.station_throat";
-    } else if (kind == WaypointKind.DEPOT) {
+    } else if (kind == WaypointKind.DEPOT_THROAT) {
       key = "sign.type.depot_throat";
+    } else if (kind == WaypointKind.STATION) {
+      key = "sign.type.station";
+    } else if (kind == WaypointKind.DEPOT) {
+      key = "sign.type.depot";
     } else {
       key = "sign.type." + definition.nodeType().name().toLowerCase(java.util.Locale.ROOT);
     }

@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -148,6 +149,30 @@ public final class LocaleManager {
     String key = keyPrefix + "." + value.name().toLowerCase(Locale.ROOT);
     String raw = messages.getString(key);
     return raw == null ? value.name() : raw;
+  }
+
+  /**
+   * 获取语言文件中的字符串列表（用于书页模板、帮助文本等非 MiniMessage 场景）。
+   *
+   * <p>注意：此方法不做 MiniMessage 解析，也不做占位符替换；调用方可按需处理。
+   *
+   * @param key 语言键
+   * @return 字符串列表；缺失或非列表时返回空列表
+   */
+  public List<String> stringList(String key) {
+    Objects.requireNonNull(key, "key");
+    if (messages == null) {
+      reload();
+    }
+    if (messages == null) {
+      return List.of();
+    }
+    List<String> list = messages.getStringList(key);
+    if (list.isEmpty()) {
+      return List.of();
+    }
+    // Bukkit 可能返回可变 List；这里返回不可变副本，避免外部改写影响缓存。
+    return List.copyOf(list);
   }
 
   public String getCurrentLocale() {
