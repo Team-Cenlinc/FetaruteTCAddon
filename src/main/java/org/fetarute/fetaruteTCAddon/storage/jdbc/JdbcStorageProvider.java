@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.storage.jdbc;
 
-import java.lang.reflect.Proxy;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
@@ -16,8 +15,12 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRouteRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRouteStopRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationRepository;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
@@ -34,6 +37,10 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final CompanyRepository companyRepository;
   private final CompanyMemberRepository companyMemberRepository;
   private final OperatorRepository operatorRepository;
+  private final LineRepository lineRepository;
+  private final StationRepository stationRepository;
+  private final RouteRepository routeRepository;
+  private final RouteStopRepository routeStopRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -48,6 +55,12 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcCompanyMemberRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.operatorRepository =
         new JdbcOperatorRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.lineRepository = new JdbcLineRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.stationRepository =
+        new JdbcStationRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.routeRepository = new JdbcRouteRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.routeStopRepository =
+        new JdbcRouteStopRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -80,22 +93,22 @@ public final class JdbcStorageProvider implements StorageProvider {
 
   @Override
   public LineRepository lines() {
-    return unsupported(LineRepository.class);
+    return lineRepository;
   }
 
   @Override
   public StationRepository stations() {
-    return unsupported(StationRepository.class);
+    return stationRepository;
   }
 
   @Override
   public RouteRepository routes() {
-    return unsupported(RouteRepository.class);
+    return routeRepository;
   }
 
   @Override
   public RouteStopRepository routeStops() {
-    return unsupported(RouteStopRepository.class);
+    return routeStopRepository;
   }
 
   @Override
@@ -112,16 +125,5 @@ public final class JdbcStorageProvider implements StorageProvider {
         throw new StorageException("关闭数据源失败", ex);
       }
     }
-  }
-
-  @SuppressWarnings("unchecked")
-  private <T> T unsupported(Class<T> type) {
-    return (T)
-        Proxy.newProxyInstance(
-            type.getClassLoader(),
-            new Class<?>[] {type},
-            (proxy, method, args) -> {
-              throw new StorageException("JDBC 仓库尚未实现: " + type.getSimpleName());
-            });
   }
 }

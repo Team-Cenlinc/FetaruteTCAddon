@@ -114,6 +114,11 @@ tasks.withType(JavaCompile).configureEach {
     if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
         options.release.set(targetJavaVersion)
     }
+
+    // 诊断开关：用 -PlintDeprecation 输出具体的弃用 API 位置（默认不刷屏）。
+    if (project.hasProperty("lintDeprecation")) {
+        options.compilerArgs.add("-Xlint:deprecation")
+    }
 }
 
 shadowJar {

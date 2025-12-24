@@ -151,6 +151,7 @@ public final class StorageManager {
       for (String sql : storageSchema.statements(dialect)) {
         statement.execute(sql);
       }
+      applyCompatibilityMigrations(connection);
       if (!connection.getAutoCommit()) {
         connection.commit();
       }
@@ -158,6 +159,42 @@ public final class StorageManager {
       logger.warn("初始化数据库表失败: " + ex.getMessage());
       storageProvider =
           new UnavailableStorageProvider("Schema initialization failed: " + ex.getMessage());
+    }
+  }
+
+  /**
+   * 兼容性迁移：修正历史字符串枚举值，避免升级后旧数据无法被解析。
+   *
+   * <p>当前仅包含 “RoutePatternType” 的历史值迁移：
+   *
+   * <ul>
+   *   <li>SEMI_EXPRESS → RAPID
+   *   <li>LTD_EXPRESS → LIMITED_EXPRESS
+   * </ul>
+   */
+  private void applyCompatibilityMigrations(java.sql.Connection connection) {
+    try (var statement = connection.createStatement()) {
+      String routesTable = storageSchema.tablePrefix() + "routes";
+      int updatedSemi =
+          statement.executeUpdate(
+              "UPDATE "
+                  + routesTable
+                  + " SET pattern_type = 'RAPID' WHERE UPPER(pattern_type) = 'SEMI_EXPRESS'");
+      int updatedLtd =
+          statement.executeUpdate(
+              "UPDATE "
+                  + routesTable
+                  + " SET pattern_type = 'LIMITED_EXPRESS' WHERE UPPER(pattern_type) = 'LTD_EXPRESS'");
+      if (updatedSemi > 0 || updatedLtd > 0) {
+        logger.debug(
+            "已应用兼容性迁移: routes.pattern_type (SEMI_EXPRESS->RAPID="
+                + updatedSemi
+                + ", LTD_EXPRESS->LIMITED_EXPRESS="
+                + updatedLtd
+                + ")");
+      }
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: " + ex.getMessage());
     }
   }
 

@@ -11,9 +11,23 @@ error:
   storage-unavailable: "<prefix> <red>存储后端尚未就绪，稍后重试或检查控制台日志</red>"
 
 sign:
-  created: "<prefix> <dark_aqua>已注册节点</dark_aqua> <white><node></white>"
-  invalid: "<prefix> <red>节点格式无效</red> <gray>使用 Operator:From:To:Track:Seq</gray>"
-  removed: "<prefix> <dark_aqua>已移除节点</dark_aqua> <white><node></white>"
+  created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
+  invalid:
+    generic: "<prefix> <red>节点格式无效</red>"
+    waypoint: "<prefix> <red>区间点格式无效</red> <gray>Waypoint: Operator:From:To:Track:Seq</gray>"
+    autostation: "<prefix> <red>站咽喉格式无效</red> <gray>AutoStation: Operator:S:Station:Track</gray>"
+    depot: "<prefix> <red>车库咽喉格式无效</red> <gray>Depot: Operator:D:Depot:Track</gray>"
+  conflict: "<prefix> <red>节点 ID 冲突：</red><white><node></white> <gray>(已被 <white><type></white> 使用)</gray>\n<gray>位置:</gray> <location>"
+  conflict-hover-teleport: "<gray>点击传送:</gray> <white><cmd></white>"
+  removed: "<prefix> <dark_aqua>已移除</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
+  type:
+    depot: "车库"
+    depot_throat: "车库咽喉"
+    station: "站点"
+    station_throat: "站咽喉"
+    waypoint: "区间点"
+    destination: "目的地"
+    switcher: "道岔"
 
 command:
   common:
@@ -30,6 +44,10 @@ command:
     hover-company: "<gray>点击填充:</gray> <white>/fta company </white>\n<dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     entry-operator: "<gray>/fta operator</gray> <white>-</white> <dark_aqua>运营商管理（如 SURN）</dark_aqua>"
     hover-operator: "<gray>点击填充:</gray> <white>/fta operator </white>\n<dark_aqua>运营商管理（如 SURN）</dark_aqua>"
+    entry-line: "<gray>/fta line</gray> <white>-</white> <dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
+    hover-line: "<gray>点击填充:</gray> <white>/fta line </white>\n<dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
+    entry-route: "<gray>/fta route</gray> <white>-</white> <dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
+    hover-route: "<gray>点击填充:</gray> <white>/fta route </white>\n<dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -107,3 +125,97 @@ command:
       noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--color/--priority/--desc）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运营商已删除：</dark_aqua><white><code></white>"
+
+  line:
+    create:
+      success: "<prefix> <dark_aqua>线路已创建：</dark_aqua><white><operator></white><gray>/</gray><white><code></white>"
+      exists: "<prefix> <red>线路 code 已存在：</red><white><code></white>"
+    list:
+      header: "<prefix> <dark_aqua>线路列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white>"
+      empty: "<gray>（暂无线路）</gray>"
+      entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<status>)</gray>"
+      hover-entry: "<gray>线路:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>类型:</dark_aqua> <white><service></white>\n<dark_aqua>颜色:</dark_aqua> <white><color></white>\n<dark_aqua>状态:</dark_aqua> <white><status></white>\n<dark_aqua>发车基准(秒):</dark_aqua> <white><freq_baseline></white>"
+    info:
+      header: "<prefix> <dark_aqua>线路</dark_aqua> <white><operator></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+      service: "<gray>类型:</gray> <dark_aqua><service></dark_aqua>"
+      status: "<gray>状态:</gray> <dark_aqua><status></dark_aqua>"
+      color: "<gray>颜色:</gray> <dark_aqua><color></dark_aqua>"
+      spawn: "<gray>发车基准(秒):</gray> <dark_aqua><freq_baseline></dark_aqua>"
+    not-found: "<prefix> <red>未找到线路：</red><white><line></white>"
+    enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
+    set:
+      success: "<prefix> <dark_aqua>线路已更新：</dark_aqua><white><code></white>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline）</gray>"
+    delete:
+      success: "<prefix> <dark_aqua>线路已删除：</dark_aqua><white><code></white>"
+
+  route:
+    create:
+      success: "<prefix> <dark_aqua>运行图已创建：</dark_aqua><white><line></white><gray>/</gray><white><code></white>"
+      exists: "<prefix> <red>运行图 code 已存在：</red><white><code></white>"
+    list:
+      header: "<prefix> <dark_aqua>运行图列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white>"
+      empty: "<gray>（暂无运行图）</gray>"
+      entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<pattern>)</gray>"
+      hover-entry: "<gray>运行图:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>模式:</dark_aqua> <white><pattern></white>\n<dark_aqua>运行时间(秒):</dark_aqua> <white><runtime></white>\n<dark_aqua>距离(米):</dark_aqua> <white><distance></white>"
+    info:
+      header: "<prefix> <dark_aqua>运行图</dark_aqua> <white><line></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+      pattern: "<gray>模式:</gray> <dark_aqua><pattern></dark_aqua>"
+      runtime: "<gray>运行时间(秒):</gray> <dark_aqua><runtime></dark_aqua>"
+      distance: "<gray>距离(米):</gray> <dark_aqua><distance></dark_aqua>"
+      stops: "<gray>停靠点:</gray> <dark_aqua><count></dark_aqua>"
+    not-found: "<prefix> <red>未找到运行图：</red><white><route></white>"
+    enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
+    set:
+      success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--runtime/--distance）</gray>"
+    delete:
+      success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
+    define:
+      success: "<prefix> <dark_aqua>停靠表已写入：</dark_aqua><white><code></white> <gray>(<count> stops)</gray>"
+      empty: "<prefix> <red>书中没有可用定义</red> <gray>请至少写入一行站点 code 或 nodeId</gray>"
+      debug:
+        header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua> <gray>(最多显示 20 条)</gray>"
+        entry: "<white>#<seq></white> <dark_aqua><target></dark_aqua>"
+        hover: "<gray>seq:</gray> <white><seq></white>\n<gray>pass:</gray> <white><pass></white>\n<gray>dwell:</gray> <white><dwell></white>\n<gray>station:</gray> <white><station></white>\n<gray>node:</gray> <white><node></white>\n<gray>click:</gray> <white><tp></white>"
+      book:
+        missing: "<prefix> <red>请手持书与笔或成书</red>"
+        invalid: "<prefix> <red>物品不是书与笔/成书</red>"
+      action-first: "<prefix> <red>第 <white><line></white> 行不能是动作：</red><gray><text></gray>"
+      invalid-line: "<prefix> <red>第 <white><line></white> 行无效：</red><gray><text></gray>"
+      station-not-found: "<prefix> <red>第 <white><line></white> 行站点不存在：</red><white><station></white>"
+
+    editor:
+      append:
+        success: "<prefix> <dark_aqua>已添加节点到编辑书末尾：</dark_aqua><white><node></white> <gray>(<type>)</gray>"
+      give:
+        success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>(<line>/<route>)</gray>"
+        empty-success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>(空模板)</gray>"
+        dropped: "<prefix> <red>背包已满，编辑书已掉落在脚下</red>"
+      edit:
+        success: "<prefix> <dark_aqua>已将成书转换为可编辑的书与笔</dark_aqua>"
+        not-editor: "<prefix> <red>请手持由本插件生成的运行图编辑书/成书</red>"
+        not-written: "<prefix> <red>当前不是成书</red> <gray>（书与笔本来就可编辑）</gray>"
+      book:
+        name: "<dark_aqua>运行图编辑器</dark_aqua> <gray>(<line>/<route>)</gray>"
+        name-empty: "<dark_aqua>运行图编辑器</dark_aqua> <gray>(空模板)</gray>"
+        lore-1: "<gray>每行一个 stop 或 action；编辑后用</gray>"
+        lore-2: "<white>/fta route define <company> <operator> <line> <route></white>"
+      archived:
+        success: "<prefix> <dark_aqua>已将编辑书归档为成书</dark_aqua>"
+        lore-1: "<gray>运行图已写入数据库，可用于存档</gray>"
+        lore-2: "<gray>写入时间:</gray> <white><when></white>"
+
+enum:
+  line-service-type:
+    metro: "地铁"
+    regional: "区域"
+    commuter: "通勤"
+    lrt: "轻轨"
+    express: "快线"
+  route-pattern-type:
+    local: "各站停"
+    rapid: "快速"
+    neo_rapid: "新快速"
+    express: "特快"
+    limited_express: "限定特快"

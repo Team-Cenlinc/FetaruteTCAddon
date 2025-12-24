@@ -32,7 +32,11 @@ import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.StringParser;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
-/** 公司管理命令：/fta company ... */
+/**
+ * 公司管理命令入口：/fta company ...
+ *
+ * <p>覆盖 create/list/info/rename/transfer/delete 以及 member/admin 子命令，用于日常公司与成员管理。
+ */
 public final class FtaCompanyCommand {
 
   private final FetaruteTCAddon plugin;
@@ -83,6 +87,7 @@ public final class FtaCompanyCommand {
                       .transactionManager()
                       .execute(
                           () -> {
+                            // 事务内校验 code 唯一并创建公司与默认 Owner 成员记录。
                             if (provider.companies().findByCode(code).isPresent()) {
                               sender.sendMessage(
                                   locale.component(
@@ -157,6 +162,7 @@ public final class FtaCompanyCommand {
                   sender.sendMessage(
                       locale.component(
                           "command.company.member.list.header", Map.of("code", company.code())));
+                  // 读取成员列表并回填玩家显示名用于展示。
                   List<CompanyMember> members = provider.companyMembers().listMembers(company.id());
                   if (members.isEmpty()) {
                     sender.sendMessage(locale.component("command.company.member.list.empty"));
@@ -235,6 +241,7 @@ public final class FtaCompanyCommand {
                       .transactionManager()
                       .execute(
                           () -> {
+                            // 事务内创建/获取身份并合并既有角色，保证成员记录一致性。
                             PlayerIdentity identity = identityService.getOrCreate(target);
                             Optional<CompanyMember> existing =
                                 provider
@@ -333,6 +340,7 @@ public final class FtaCompanyCommand {
                       .transactionManager()
                       .execute(
                           () -> {
+                            // 事务内覆盖角色列表，但保留加入时间与权限字段。
                             PlayerIdentity identity = identityService.getOrCreate(target);
                             Optional<CompanyMember> existing =
                                 provider
@@ -410,6 +418,7 @@ public final class FtaCompanyCommand {
                       .execute(
                           () -> {
                             PlayerIdentity identity = identityService.getOrCreate(target);
+                            // 非本人移除需具备管理权限；本人可自行退出。
                             boolean self = identity.playerUuid().equals(sender.getUniqueId());
                             if (!self && !canManageCompany(sender, provider, company.id())) {
                               sender.sendMessage(locale.component("error.no-permission"));
@@ -429,6 +438,7 @@ public final class FtaCompanyCommand {
                             }
                             if (existing.get().roles().contains(MemberRole.OWNER)
                                 && !sender.hasPermission("fetarute.admin")) {
+                              // 非管理员禁止移除 Owner，避免公司失去所有者。
                               sender.sendMessage(
                                   locale.component("command.company.member.remove.owner"));
                               return null;
@@ -464,6 +474,7 @@ public final class FtaCompanyCommand {
                   List<CompanyMember> memberships =
                       provider.companyMembers().listMemberships(identity.id());
                   sender.sendMessage(locale.component("command.company.list.header"));
+                  // 基于玩家成员关系汇总公司列表。
                   if (memberships.isEmpty()) {
                     sender.sendMessage(locale.component("command.company.list.empty"));
                     return;
@@ -533,6 +544,7 @@ public final class FtaCompanyCommand {
 
                   Optional<PlayerIdentity> owner =
                       provider.playerIdentities().findById(company.ownerIdentityId());
+                  // 统计成员与运营商数量，便于一次性展示公司信息。
                   int memberCount = provider.companyMembers().listMembers(company.id()).size();
                   int operatorCount = provider.operators().listByCompany(company.id()).size();
 
@@ -594,6 +606,7 @@ public final class FtaCompanyCommand {
                   String name = ((String) ctx.get("name")).trim();
                   String secondaryName =
                       ctx.optional("secondaryName").map(String.class::cast).orElse(null);
+                  // 仅更新名称与别名字段，其他字段保持不变。
                   Company updated =
                       new Company(
                           company.id(),
@@ -654,6 +667,7 @@ public final class FtaCompanyCommand {
                       .execute(
                           () -> {
                             PlayerIdentity newOwner = identityService.getOrCreate(target);
+                            // 事务内更新公司 Owner，并同步成员角色（新 Owner 提升、旧 Owner 降级）。
                             if (Objects.equals(company.ownerIdentityId(), newOwner.id())) {
                               sender.sendMessage(
                                   locale.component(
@@ -738,6 +752,7 @@ public final class FtaCompanyCommand {
                           company.metadata(),
                           company.createdAt(),
                           Instant.now());
+                  // 标记为 DELETED 以支持后续恢复。
                   provider.companies().save(updated);
                   sender.sendMessage(
                       locale.component(
@@ -761,6 +776,7 @@ public final class FtaCompanyCommand {
                   StorageProvider provider = providerOpt.get();
                   LocaleManager locale = plugin.getLocaleManager();
                   sender.sendMessage(locale.component("command.company.admin.list.header"));
+                  // 管理员查看所有公司与状态概览。
                   for (Company company : provider.companies().listAll()) {
                     String status = company.status().name();
                     sender.sendMessage(
@@ -824,6 +840,7 @@ public final class FtaCompanyCommand {
                     return;
                   }
 
+                  // 从 DELETED 状态恢复为 ACTIVE。
                   Company updated =
                       new Company(
                           company.id(),
@@ -876,6 +893,7 @@ public final class FtaCompanyCommand {
                     return;
                   }
                   Company company = companyOpt.get();
+                  // 永久删除公司记录，不可恢复。
                   provider.companies().delete(company.id());
                   sender.sendMessage(
                       locale.component(
@@ -919,6 +937,7 @@ public final class FtaCompanyCommand {
                       .execute(
                           () -> {
                             PlayerIdentity identity = identityService.requireIdentity(sender);
+                            // 管理员接管 Owner，并确保成员表中存在 Owner 角色。
                             Company updated =
                                 new Company(
                                     company.id(),

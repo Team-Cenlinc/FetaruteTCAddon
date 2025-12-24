@@ -1,12 +1,13 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
@@ -26,7 +27,7 @@ class SignRemoveListenerTest {
   void doesNotRemoveRegistryWhenBreakCancelled() {
     SignNodeRegistry registry = new SignNodeRegistry();
     LocaleManager locale = mock(LocaleManager.class);
-    SignRemoveListener listener = new SignRemoveListener(registry, locale);
+    SignRemoveListener listener = new SignRemoveListener(registry, locale, message -> {});
     Block block = mockBlock();
 
     registry.put(
@@ -44,14 +45,14 @@ class SignRemoveListenerTest {
     listener.onBlockBreak(event);
 
     assertTrue(registry.get(block).isPresent());
-    verify(locale, never()).component("sign.removed", Map.of("node", "SURN:PTK:GPT:1:00"));
+    verify(locale, never()).component(eq("sign.removed"), anyMap());
   }
 
   @Test
   void removesRegistryAndNotifiesPlayerWhenBreakAllowed() {
     SignNodeRegistry registry = new SignNodeRegistry();
     LocaleManager locale = mock(LocaleManager.class);
-    SignRemoveListener listener = new SignRemoveListener(registry, locale);
+    SignRemoveListener listener = new SignRemoveListener(registry, locale, message -> {});
     Block block = mockBlock();
 
     registry.put(
@@ -67,8 +68,8 @@ class SignRemoveListenerTest {
     when(event.isCancelled()).thenReturn(false);
     when(event.getBlock()).thenReturn(block);
     when(event.getPlayer()).thenReturn(player);
-    when(locale.component("sign.removed", Map.of("node", "SURN:PTK:GPT:1:00")))
-        .thenReturn(Component.text("removed"));
+    when(locale.component(eq("sign.type.waypoint"))).thenReturn(Component.text("区间点"));
+    when(locale.component(eq("sign.removed"), anyMap())).thenReturn(Component.text("removed"));
 
     listener.onBlockBreak(event);
 

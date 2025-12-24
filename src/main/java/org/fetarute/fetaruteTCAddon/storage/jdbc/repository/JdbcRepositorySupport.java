@@ -87,6 +87,38 @@ abstract class JdbcRepositorySupport {
     return uuid;
   }
 
+  /**
+   * 读取可空整数列（兼容 SQLite 的动态类型与旧数据）。
+   *
+   * <p>SQLite 在历史数据/手工修改场景下可能出现 TEXT/空字符串等值；这里做一次“宽松读取”，尽量将数字字符串转换为 int，空字符串视为 null。
+   *
+   * @param rs ResultSet
+   * @param column 列名
+   * @return Integer 或 null
+   * @throws SQLException 驱动层读取失败或值无法解析为整数
+   */
+  protected Integer readNullableInteger(ResultSet rs, String column) throws SQLException {
+    Object raw = rs.getObject(column);
+    if (raw == null) {
+      return null;
+    }
+    if (raw instanceof Number number) {
+      return number.intValue();
+    }
+    if (raw instanceof String value) {
+      String trimmed = value.trim();
+      if (trimmed.isEmpty()) {
+        return null;
+      }
+      try {
+        return Integer.parseInt(trimmed);
+      } catch (NumberFormatException ex) {
+        throw new SQLException("Bad value for type Integer: " + trimmed, ex);
+      }
+    }
+    throw new SQLException("Bad value for type Integer: " + raw);
+  }
+
   protected void setInstant(PreparedStatement statement, int index, Instant instant)
       throws SQLException {
     if (instant == null) {

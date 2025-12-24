@@ -27,15 +27,15 @@ public final class UnavailableStorageProvider implements StorageProvider {
     this.reason = reason == null ? "存储后端尚未初始化" : reason;
   }
 
-  @SuppressWarnings("unchecked")
   private <T> T unsupported(Class<T> type) {
-    return (T)
+    Object proxy =
         Proxy.newProxyInstance(
             type.getClassLoader(),
             new Class<?>[] {type},
-            (proxy, method, args) -> {
+            (ignoredProxy, ignoredMethod, ignoredArgs) -> {
               throw new StorageException(reason);
             });
+    return type.cast(proxy);
   }
 
   @Override

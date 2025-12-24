@@ -51,7 +51,7 @@ class SignActionTest {
     SignChangeActionEvent buildEvent = mock(SignChangeActionEvent.class);
     when(buildEvent.isTrainSign()).thenReturn(true);
     when(buildEvent.isCartSign()).thenReturn(true);
-    when(buildEvent.getLine(2)).thenReturn("SURN:D:LVT:1:00");
+    when(buildEvent.getLine(2)).thenReturn("SURN:D:LVT:1");
     when(buildEvent.getBlock()).thenReturn(block);
     action.build(buildEvent);
     assertTrue(registry.get(block).isPresent());

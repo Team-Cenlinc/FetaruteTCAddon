@@ -7,10 +7,13 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
@@ -136,6 +139,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaStorageCommand(this).register(commandManager);
     new FtaCompanyCommand(this).register(commandManager);
     new FtaOperatorCommand(this).register(commandManager);
+    new FtaLineCommand(this).register(commandManager);
+    new FtaRouteCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
@@ -174,7 +179,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
     SignAction.register(depotSignAction);
     getServer()
         .getPluginManager()
-        .registerEvents(new SignRemoveListener(signNodeRegistry, localeManager), this);
+        .registerEvents(
+            new SignRemoveListener(signNodeRegistry, localeManager, loggerManager::debug), this);
+    getServer()
+        .getPluginManager()
+        .registerEvents(
+            new RouteEditorAppendListener(
+                this, signNodeRegistry, localeManager, loggerManager::debug),
+            this);
   }
 
   private void unregisterSignActions() {

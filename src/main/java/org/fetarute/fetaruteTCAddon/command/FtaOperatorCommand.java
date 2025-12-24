@@ -30,7 +30,11 @@ import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
-/** 运营商管理命令：/fta operator ... */
+/**
+ * 运营商管理命令入口：/fta operator ...
+ *
+ * <p>覆盖 create/list/set/delete 子命令，用于维护运营商编号、名称与显示信息。
+ */
 public final class FtaOperatorCommand {
 
   private final FetaruteTCAddon plugin;
@@ -104,6 +108,7 @@ public final class FtaOperatorCommand {
                   String secondaryName =
                       ctx.optional("secondaryName").map(String.class::cast).orElse(null);
 
+                  // 校验公司内 code 唯一后再创建运营商记录。
                   if (provider.operators().findByCompanyAndCode(company.id(), code).isPresent()) {
                     sender.sendMessage(
                         locale.component("command.operator.create.exists", Map.of("code", code)));
@@ -166,6 +171,7 @@ public final class FtaOperatorCommand {
                   sender.sendMessage(
                       locale.component(
                           "command.operator.list.header", Map.of("company", company.code())));
+                  // 列出运营商基础信息，并用 hover 补充详情。
                   var operators = provider.operators().listByCompany(company.id());
                   if (operators.isEmpty()) {
                     sender.sendMessage(locale.component("command.operator.list.empty"));
@@ -265,6 +271,7 @@ public final class FtaOperatorCommand {
                           || flags.hasFlag(colorFlag)
                           || flags.hasFlag(priorityFlag)
                           || flags.hasFlag(descFlag);
+                  // 未提供任何可更新字段时直接提示，避免无意义写入。
                   if (!any) {
                     sender.sendMessage(locale.component("command.operator.set.noop"));
                     return;
@@ -306,6 +313,7 @@ public final class FtaOperatorCommand {
                           operator.metadata(),
                           operator.createdAt(),
                           Instant.now());
+                  // 仅替换变更字段，其他信息保持不变。
                   provider.operators().save(updated);
                   sender.sendMessage(
                       locale.component(
@@ -361,6 +369,7 @@ public final class FtaOperatorCommand {
                     return;
                   }
                   Operator operator = operatorOpt.get();
+                  // 删除运营商后不再可用于线路与站点配置。
                   provider.operators().delete(operator.id());
                   sender.sendMessage(
                       locale.component(

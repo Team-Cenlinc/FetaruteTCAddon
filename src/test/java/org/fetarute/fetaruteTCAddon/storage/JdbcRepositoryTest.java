@@ -16,16 +16,29 @@ import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.IdentityAuthType;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
+import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.JdbcStorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -299,6 +312,271 @@ final class JdbcRepositoryTest {
 
     assertTrue(operatorRepo.findByCompanyAndCode(companyId, "SURN").isPresent());
     assertFalse(operatorRepo.listByCompany(companyId).isEmpty());
+  }
+
+  /**
+   * 兼容 SQLite “弱类型”导致的历史脏数据：INTEGER 列可能被写入 TEXT/空字符串。
+   *
+   * <p>该测试模拟将若干数值列改写为 {@code ""}，确保仓库读取时不会抛出 driver 的类型异常。
+   */
+  @Test
+  void shouldCoerceNullableIntegerColumnsInSQLite() throws Exception {
+    StorageProvider provider = setupProvider(TEST_DB);
+    assertTrue(provider instanceof JdbcStorageProvider);
+    JdbcStorageProvider jdbcProvider = (JdbcStorageProvider) provider;
+
+    PlayerIdentityRepository playerRepo = provider.playerIdentities();
+    CompanyRepository companyRepo = provider.companies();
+    OperatorRepository operatorRepo = provider.operators();
+    LineRepository lineRepo = provider.lines();
+    StationRepository stationRepo = provider.stations();
+    RouteRepository routeRepo = provider.routes();
+    RouteStopRepository stopRepo = provider.routeStops();
+
+    UUID ownerId = UUID.randomUUID();
+    Instant now = Instant.now();
+    playerRepo.save(
+        new PlayerIdentity(
+            ownerId,
+            UUID.randomUUID(),
+            "Owner",
+            IdentityAuthType.ONLINE,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now));
+
+    UUID companyId = UUID.randomUUID();
+    companyRepo.save(
+        new Company(
+            companyId,
+            "FTA",
+            "Fetarute Transit",
+            Optional.empty(),
+            ownerId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            now,
+            now));
+
+    Operator operator =
+        new Operator(
+            UUID.randomUUID(),
+            "SURN",
+            companyId,
+            "Sunrail",
+            Optional.empty(),
+            Optional.empty(),
+            10,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    operatorRepo.save(operator);
+
+    Line line =
+        new Line(
+            UUID.randomUUID(),
+            "LT",
+            operator.id(),
+            "Line Test",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(60),
+            Map.of(),
+            now,
+            now);
+    lineRepo.save(line);
+
+    Station station =
+        new Station(
+            UUID.randomUUID(),
+            "LVT",
+            operator.id(),
+            Optional.of(line.id()),
+            "Liverpool",
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    stationRepo.save(station);
+
+    Route route =
+        new Route(
+            UUID.randomUUID(),
+            "EXP-01",
+            line.id(),
+            "Express",
+            Optional.empty(),
+            RoutePatternType.EXPRESS,
+            Optional.of(10_000),
+            Optional.of(600),
+            Map.of(),
+            now,
+            now);
+    routeRepo.save(route);
+
+    stopRepo.save(
+        new RouteStop(
+            route.id(),
+            1,
+            Optional.of(station.id()),
+            Optional.empty(),
+            Optional.of(30),
+            RouteStopPassType.STOP,
+            Optional.empty()));
+
+    // 模拟脏数据：把 INTEGER 列写成空字符串（SQLite 会接受但 driver 读取时可能报错）。
+    try (var connection = jdbcProvider.dataSource().getConnection()) {
+      try (var ps =
+          connection.prepareStatement(
+              "UPDATE fta_lines SET spawn_freq_baseline_sec = ? WHERE id = ?")) {
+        ps.setString(1, "");
+        ps.setString(2, line.id().toString());
+        ps.executeUpdate();
+      }
+      try (var ps =
+          connection.prepareStatement("UPDATE fta_routes SET distance_m = ? WHERE id = ?")) {
+        ps.setString(1, "");
+        ps.setString(2, route.id().toString());
+        ps.executeUpdate();
+      }
+      try (var ps =
+          connection.prepareStatement("UPDATE fta_routes SET runtime_secs = ? WHERE id = ?")) {
+        ps.setString(1, "");
+        ps.setString(2, route.id().toString());
+        ps.executeUpdate();
+      }
+      try (var ps =
+          connection.prepareStatement(
+              "UPDATE fta_route_stops SET dwell_secs = ? WHERE route_id = ? AND sequence = ?")) {
+        ps.setString(1, "");
+        ps.setString(2, route.id().toString());
+        ps.setInt(3, 1);
+        ps.executeUpdate();
+      }
+    }
+
+    assertDoesNotThrow(() -> lineRepo.listByOperator(operator.id()));
+    assertTrue(lineRepo.findById(line.id()).orElseThrow().spawnFreqBaselineSec().isEmpty());
+
+    Route loadedRoute = routeRepo.findById(route.id()).orElseThrow();
+    assertTrue(loadedRoute.distanceMeters().isEmpty());
+    assertTrue(loadedRoute.runtimeSeconds().isEmpty());
+
+    RouteStop loadedStop = stopRepo.listByRoute(route.id()).get(0);
+    assertTrue(loadedStop.dwellSeconds().isEmpty());
+  }
+
+  @Test
+  void shouldMigrateLegacyRoutePatternType() throws Exception {
+    // 第一次启动：创建 schema 并写入一条带旧值的 routes 记录
+    Path dbFile = TEST_DB;
+    StorageProvider provider = setupProvider(dbFile);
+    assertTrue(provider instanceof JdbcStorageProvider);
+    JdbcStorageProvider jdbcProvider = (JdbcStorageProvider) provider;
+
+    PlayerIdentityRepository playerRepo = provider.playerIdentities();
+    CompanyRepository companyRepo = provider.companies();
+    OperatorRepository operatorRepo = provider.operators();
+    LineRepository lineRepo = provider.lines();
+    RouteRepository routeRepo = provider.routes();
+
+    UUID ownerId = UUID.randomUUID();
+    Instant now = Instant.now();
+    playerRepo.save(
+        new PlayerIdentity(
+            ownerId,
+            UUID.randomUUID(),
+            "Owner",
+            IdentityAuthType.ONLINE,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now));
+
+    UUID companyId = UUID.randomUUID();
+    companyRepo.save(
+        new Company(
+            companyId,
+            "FTA",
+            "Fetarute Transit",
+            Optional.empty(),
+            ownerId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            now,
+            now));
+
+    Operator operator =
+        new Operator(
+            UUID.randomUUID(),
+            "SURN",
+            companyId,
+            "Sunrail",
+            Optional.empty(),
+            Optional.empty(),
+            10,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    operatorRepo.save(operator);
+
+    Line line =
+        new Line(
+            UUID.randomUUID(),
+            "LT",
+            operator.id(),
+            "Line Test",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    lineRepo.save(line);
+
+    Route route =
+        new Route(
+            UUID.randomUUID(),
+            "EXP-01",
+            line.id(),
+            "Express",
+            Optional.empty(),
+            RoutePatternType.RAPID,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    routeRepo.save(route);
+
+    // 注入旧值（模拟历史库）：SEMI_EXPRESS
+    try (var connection = jdbcProvider.dataSource().getConnection();
+        var ps =
+            connection.prepareStatement("UPDATE fta_routes SET pattern_type = ? WHERE id = ?")) {
+      ps.setString(1, "SEMI_EXPRESS");
+      ps.setString(2, route.id().toString());
+      ps.executeUpdate();
+    }
+
+    // 第二次启动：触发 StorageManager.apply()，执行兼容性迁移
+    manager.shutdown();
+    manager = null;
+    StorageProvider provider2 = setupProvider(dbFile);
+    Route loaded = provider2.routes().findById(route.id()).orElseThrow();
+    assertEquals(RoutePatternType.RAPID, loaded.patternType());
   }
 
   private StorageProvider setupProvider(Path dbFile) {

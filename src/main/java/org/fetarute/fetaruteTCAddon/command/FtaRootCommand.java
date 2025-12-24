@@ -11,7 +11,11 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.suggestion.Suggestion;
 
-/** Bukkit 原生命令入口，兼容控制台输出与简单 Tab 补全。 */
+/**
+ * Bukkit 原生命令入口，负责将 /fta 转发到 Cloud 命令系统并提供基础 Tab 补全。
+ *
+ * <p>当 Cloud 未就绪时回退为帮助输出，保证控制台与玩家侧的最小可用性。
+ */
 public final class FtaRootCommand implements CommandExecutor, TabCompleter {
 
   private final FetaruteTCAddon plugin;
@@ -86,6 +90,8 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
     options.add("help");
     options.add("company");
     options.add("operator");
+    options.add("line");
+    options.add("route");
     if (sender.hasPermission("fetarute.reload")) {
       options.add("reload");
     }

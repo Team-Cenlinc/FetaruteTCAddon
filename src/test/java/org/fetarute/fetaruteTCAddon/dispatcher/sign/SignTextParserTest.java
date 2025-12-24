@@ -25,14 +25,14 @@ class SignTextParserTest {
     assertEquals(
         Optional.of("GPT"), definition.waypointMetadata().orElseThrow().destinationStation());
     assertEquals(1, definition.waypointMetadata().orElseThrow().trackNumber());
-    assertEquals("00", definition.waypointMetadata().orElseThrow().sequence());
+    assertEquals(Optional.of("00"), definition.waypointMetadata().orElseThrow().sequence());
   }
 
   @Test
   // 验证站咽喉编码（第二段 S）解析为 STATION_THROAT
   void parseStationThroat() {
     Optional<SignNodeDefinition> parsed =
-        SignTextParser.parseWaypointLike("SURN:S:PTK:3:10", NodeType.STATION);
+        SignTextParser.parseWaypointLike("SURN:S:PTK:3", NodeType.STATION);
     assertTrue(parsed.isPresent());
     SignNodeDefinition definition = parsed.get();
     assertEquals(NodeType.STATION, definition.nodeType());
@@ -41,14 +41,14 @@ class SignTextParserTest {
     assertEquals(
         Optional.empty(), definition.waypointMetadata().orElseThrow().destinationStation());
     assertEquals(3, definition.waypointMetadata().orElseThrow().trackNumber());
-    assertEquals("10", definition.waypointMetadata().orElseThrow().sequence());
+    assertEquals(Optional.empty(), definition.waypointMetadata().orElseThrow().sequence());
   }
 
   @Test
   // 验证 Depot throat 编码（第二段 D）解析为 DEPOT
   void parseDepotThroat() {
     Optional<SignNodeDefinition> parsed =
-        SignTextParser.parseWaypointLike("SURN:D:LVT:2:05", NodeType.DEPOT);
+        SignTextParser.parseWaypointLike("SURN:D:LVT:2", NodeType.DEPOT);
     assertTrue(parsed.isPresent());
     SignNodeDefinition definition = parsed.get();
     assertEquals(NodeType.DEPOT, definition.nodeType());
@@ -56,12 +56,14 @@ class SignTextParserTest {
     assertEquals("LVT", definition.waypointMetadata().orElseThrow().originStation());
     assertEquals(
         Optional.empty(), definition.waypointMetadata().orElseThrow().destinationStation());
+    assertEquals(Optional.empty(), definition.waypointMetadata().orElseThrow().sequence());
   }
 
   @Test
-  // 段数不为 5 的输入应被拒绝
+  // Waypoint 需要 5 段，Station/Depot 不允许 Seq
   void rejectInvalidSegments() {
     assertTrue(SignTextParser.parseWaypointLike("SURN:PTK:GPT:1", NodeType.WAYPOINT).isEmpty());
+    assertTrue(SignTextParser.parseWaypointLike("SURN:S:PTK:3:10", NodeType.STATION).isEmpty());
     assertTrue(
         SignTextParser.parseWaypointLike("SURN:PTK:GPT:1:00:EXTRA", NodeType.WAYPOINT).isEmpty());
   }

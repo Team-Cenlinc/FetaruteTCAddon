@@ -25,8 +25,8 @@ ACTION:PAYLOAD[:MORE]
 | Sign 类型 | 格式 | 说明 |
 | --- | --- | --- |
 | Waypoint | `Operator:From:To:Track:Seq` | 已在 AGENTS.md 描述，可在 `Track` 字段附加 `#TAG` 说明，如 `LT1#DYNAMIC` 表示该轨可参与动态站台分配 |
-| Station throat | `Operator:S:Station:Track:Seq` | `Track` 可编号 1..n，对应 `DYNAMIC[1:n]` 的站台索引 |
-| Depot throat | `Operator:D:Depot:Track:Seq` | `Track` 字段支持 `IN`/`OUT` 方向标签 |
+| Station throat | `Operator:S:Station:Track` | `Track` 可编号 1..n，对应 `DYNAMIC[1:n]` 的站台索引 |
+| Depot throat | `Operator:D:Depot:Track` | `Track` 字段支持 `IN`/`OUT` 方向标签 |
 
 ## 3. 与 Runtime 的关系
 - RouteStop 标记只影响我们向 TrainCarts 写“下一 destination”时的逻辑。在执行 `CHANGE`/`DYNAMIC` 等动作后，仍通过 `train.getProperties().setDestination(nodeId)` 交给 TC 寻路

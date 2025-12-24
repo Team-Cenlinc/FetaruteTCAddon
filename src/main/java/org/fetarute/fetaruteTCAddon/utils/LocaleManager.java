@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
@@ -81,8 +82,72 @@ public final class LocaleManager {
     return miniMessage.deserialize(raw, resolver);
   }
 
+  /**
+   * 获取指定键的文本组件，并允许传入额外的 TagResolver（用于 clickable/hover 等富交互组件占位符）。
+   *
+   * <p>典型场景：某些提示需要把坐标做成点击传送，但占位符不再是纯字符串。
+   *
+   * @param key 语言键
+   * @param extraResolver 额外的 TagResolver（可为 null）
+   * @return 渲染后的 Adventure 组件
+   */
+  public Component component(String key, TagResolver extraResolver) {
+    if (messages == null) {
+      reload();
+    }
+    if (messages == null) {
+      return Component.empty();
+    }
+    String raw = messages.getString(key);
+    if (raw == null) {
+      logMissingKey(key);
+      String fallback = messages.getString("error.missing-key", "<prefix> 缺少语言键 <red><key></red>");
+      if (fallback == null) {
+        fallback = "<prefix> 缺少语言键 <red><key></red>";
+      }
+      TagResolver resolver =
+          TagResolver.builder()
+              .resolver(Placeholder.component("prefix", prefix))
+              .resolver(Placeholder.unparsed("key", key))
+              .resolver(extraResolver == null ? TagResolver.empty() : extraResolver)
+              .build();
+      return miniMessage.deserialize(fallback, resolver);
+    }
+    TagResolver resolver =
+        TagResolver.builder()
+            .resolver(Placeholder.component("prefix", prefix))
+            .resolver(extraResolver == null ? TagResolver.empty() : extraResolver)
+            .build();
+    return miniMessage.deserialize(raw, resolver);
+  }
+
   public Component component(String key) {
     return component(key, Collections.emptyMap());
+  }
+
+  /**
+   * 获取枚举值的本地化文本（用于命令输出展示）。
+   *
+   * <p>与 {@link #component(String, Map)} 不同：此方法返回的是“纯文本字符串”，适合塞到其他模板的占位符中。 语言文件中对应键建议只写纯文本（不要写
+   * MiniMessage 标签），避免被当作普通字符输出。
+   *
+   * @param keyPrefix 枚举键前缀，如 {@code enum.route-pattern-type}
+   * @param value 枚举值
+   * @return 本地化文本；若缺失则回退到 {@code value.name()}
+   */
+  public String enumText(String keyPrefix, Enum<?> value) {
+    if (value == null) {
+      return "";
+    }
+    if (messages == null) {
+      reload();
+    }
+    if (messages == null) {
+      return value.name();
+    }
+    String key = keyPrefix + "." + value.name().toLowerCase(Locale.ROOT);
+    String raw = messages.getString(key);
+    return raw == null ? value.name() : raw;
   }
 
   public String getCurrentLocale() {
@@ -157,7 +222,8 @@ public final class LocaleManager {
       }
       if (!added.isEmpty()) {
         existing.save(localeFile);
-        access.logger().info("已补全语言键: " + String.join(", ", added));
+        // 补全键属于诊断信息：默认不刷屏，仅在 debug.enabled=true 时输出。
+        access.logger().debug("已补全语言键: " + String.join(", ", added));
       }
     } catch (IOException ex) {
       access.logger().warn("更新语言文件失败: " + ex.getMessage());

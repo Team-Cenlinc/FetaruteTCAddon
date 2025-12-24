@@ -14,7 +14,11 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 import org.incendo.cloud.CommandManager;
 
-/** 注册 /fta info 与 /fta help 子命令，输出版本与帮助信息。 */
+/**
+ * /fta info 与 /fta help 的注册与输出。
+ *
+ * <p>帮助列表带点击与悬浮提示，便于玩家快速执行与查阅说明。
+ */
 public final class FtaInfoCommand {
 
   private final FetaruteTCAddon plugin;
@@ -67,6 +71,16 @@ public final class FtaInfoCommand {
         locale.component("command.help.entry-operator"),
         ClickEvent.suggestCommand("/fta operator "),
         locale.component("command.help.hover-operator"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-line"),
+        ClickEvent.suggestCommand("/fta line "),
+        locale.component("command.help.hover-line"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-route"),
+        ClickEvent.suggestCommand("/fta route "),
+        locale.component("command.help.hover-route"));
     sendHelpEntry(
         sender,
         locale.component("command.help.entry-reload"),

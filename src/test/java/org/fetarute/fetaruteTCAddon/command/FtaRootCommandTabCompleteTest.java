@@ -18,7 +18,7 @@ class FtaRootCommandTabCompleteTest {
     Mockito.when(sender.hasPermission("fetarute.reload")).thenReturn(false);
 
     assertEquals(
-        java.util.List.of("info", "help", "company", "operator"),
+        java.util.List.of("info", "help", "company", "operator", "line", "route"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {}));
   }
 
@@ -31,7 +31,7 @@ class FtaRootCommandTabCompleteTest {
     Mockito.when(sender.hasPermission("fetarute.reload")).thenReturn(true);
 
     assertEquals(
-        java.util.List.of("info", "help", "company", "operator", "reload"),
+        java.util.List.of("info", "help", "company", "operator", "line", "route", "reload"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {""}));
   }
 
