@@ -154,7 +154,8 @@ public final class LocaleManager {
   /**
    * 获取语言文件中的字符串列表（用于书页模板、帮助文本等非 MiniMessage 场景）。
    *
-   * <p>注意：此方法不做 MiniMessage 解析，也不做占位符替换；调用方可按需处理。
+   * <p>注意：此方法不做 MiniMessage 解析，也不做占位符替换；调用方可按需处理（例如把每行当作书本 page 的行）。 Bukkit 的 {@code getStringList}
+   * 对缺失键会返回空列表，因此这里不返回 null。
    *
    * @param key 语言键
    * @return 字符串列表；缺失或非列表时返回空列表

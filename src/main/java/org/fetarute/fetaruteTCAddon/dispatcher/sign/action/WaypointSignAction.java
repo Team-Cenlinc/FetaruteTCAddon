@@ -9,7 +9,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
-/** 普通 waypoint 牌子，解析区间节点并传递 destination。 */
+/**
+ * Waypoint 牌子（图节点）。
+ *
+ * <p>负责注册“区间点 + 咽喉”等纯图节点，供调度层/可达性诊断使用；不承载站台开关门/车库发车等行为语义。
+ */
 public final class WaypointSignAction extends AbstractNodeSignAction {
 
   public WaypointSignAction(

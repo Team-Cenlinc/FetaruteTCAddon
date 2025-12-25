@@ -67,8 +67,13 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaRouteCommand {
 
   private static final int SUGGESTION_LIMIT = 20;
+
+  /** define 后的解析回显分页大小（避免一次输出过长刷屏）。 */
   private static final int STOP_DEBUG_PAGE_SIZE = 10;
+
+  /** define 解析回显缓存的存活时间（超时后需要重新 define）。 */
   private static final Duration STOP_DEBUG_SESSION_TTL = Duration.ofMinutes(10);
+
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
   private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION");
@@ -87,6 +92,8 @@ public final class FtaRouteCommand {
   private final NamespacedKey bookRouteCodeKey;
   private final NamespacedKey bookDefinedAtKey;
   private final NamespacedKey bookEditorMarkerKey;
+
+  /** 最近一次 define 的解析结果缓存（仅用于玩家点击翻页；重启/重载后不保留）。 */
   private final ConcurrentHashMap<UUID, StopDebugSession> stopDebugSessions =
       new ConcurrentHashMap<>();
 
@@ -751,6 +758,7 @@ public final class FtaRouteCommand {
                   sendStopDebug(locale, sender, provider, resolved.operator().id(), stops);
                 }));
 
+    // define debug：对“最近一次 define 的解析结果”进行翻页展示（避免重复解析书本/重复查询）。
     manager.command(
         manager
             .commandBuilder("fta")
@@ -1216,7 +1224,7 @@ public final class FtaRouteCommand {
    * <ul>
    *   <li>空行、#、// 开头的行忽略
    *   <li>动作行（CHANGE/DYNAMIC/ACTION 前缀）附着到上一条 stop 的 notes（用换行拼接）
-   *   <li>stop 行支持 PASS/STOP/TERM 前缀；支持 dwell=&lt;秒&gt; 参数
+   *   <li>stop 行支持 PASS/STOP/TERM 前缀；支持 dwell=&lt;秒&gt; 参数（基准停车时间，运行时可按调度策略增减）
    *   <li>含冒号的行视为 NodeId，写入 waypointNodeId（字符串原样保存）
    *   <li>不含冒号的行视为 StationCode，需在 stations 表中存在，否则报错
    * </ul>
@@ -1764,6 +1772,11 @@ public final class FtaRouteCommand {
         .append(hint);
   }
 
+  /**
+   * define 回显的“会话态”。
+   *
+   * <p>为支持点击翻页，缓存最近一次解析结果；仅用于玩家交互，不写入存储也不跨重启保留。
+   */
   private record StopDebugSession(Instant createdAt, UUID operatorId, List<RouteStop> stops) {
     StopDebugSession {
       Objects.requireNonNull(createdAt, "createdAt");

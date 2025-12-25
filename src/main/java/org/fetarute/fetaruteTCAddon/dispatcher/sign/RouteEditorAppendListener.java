@@ -33,6 +33,8 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * Route Editor 交互增强：手持“运行图编辑书（书与笔）”右键节点牌子时，把 nodeId 追加到书的末尾。
  *
  * <p>这让玩家可以用“世界中的牌子”作为可视化选择器，避免手动输入长 nodeId 或复制粘贴。
+ *
+ * <p>其中 Waypoint 牌子支持追加区间点与咽喉（站咽喉/车库咽喉），AutoStation/Depot 仅追加站点/车库本体。
  */
 public final class RouteEditorAppendListener implements Listener {
 
