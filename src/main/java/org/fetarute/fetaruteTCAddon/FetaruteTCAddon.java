@@ -6,6 +6,7 @@ import java.util.Map;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
@@ -13,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
@@ -40,6 +42,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private CommandManager<CommandSender> commandManager;
   private LoggerManager loggerManager;
   private SignNodeRegistry signNodeRegistry;
+  private RailGraphService railGraphService;
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
   private DepotSignAction depotSignAction;
@@ -62,6 +65,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.storageManager = new StorageManager(this, loggerManager);
     this.storageManager.apply(configManager.current());
     registerSignActions();
+    this.railGraphService = new RailGraphService(signNodeRegistry, loggerManager::debug);
+    preloadRailGraphFromStorage();
 
     registerCommands();
     getServer()
@@ -127,6 +132,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return storageManager;
   }
 
+  public RailGraphService getRailGraphService() {
+    return railGraphService;
+  }
+
+  private void preloadRailGraphFromStorage() {
+    RailGraphService service = railGraphService;
+    if (service == null || storageManager == null || !storageManager.isReady()) {
+      return;
+    }
+    storageManager
+        .provider()
+        .ifPresent(provider -> service.loadFromStorage(provider, getServer().getWorlds()));
+  }
+
   private void registerCommands() {
     if (loggerManager == null) {
       getLogger().warning("loggerManager 未初始化，跳过命令注册");
@@ -141,6 +160,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaOperatorCommand(this).register(commandManager);
     new FtaLineCommand(this).register(commandManager);
     new FtaRouteCommand(this).register(commandManager);
+    new FtaGraphCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");

@@ -1,6 +1,7 @@
 # Gradle caches and build outputs
 .gradle/
-build/
+.gradle-home/
+/build/
 out/
 run/
 

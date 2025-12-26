@@ -7,6 +7,11 @@
         <Method name="getLoggerManager"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getRailGraphService"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
 
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.company.model.CompanyMember"/>
@@ -110,6 +115,18 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailNodeRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailGraphSnapshotRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>

@@ -7,17 +7,40 @@ website: www.fetarute.org
 depend:
   - BKCommonLib
   - Train_Carts
+softdepend:
+  - TCCoasters
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator>
+    usage: /fta <info|help|reload|company|operator|line|route|graph>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
     default: op
+    children:
+      fetarute.graph: true
+      fetarute.graph.build: true
+      fetarute.graph.status: true
+      fetarute.graph.cancel: true
+      fetarute.graph.info: true
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置
     default: op
   fetarute.company.create:
     description: 创建公司
     default: true
+  fetarute.graph:
+    description: 调度图相关命令（/fta graph）
+    default: op
+  fetarute.graph.build:
+    description: 构建并持久化调度图（/fta graph build）
+    default: op
+  fetarute.graph.status:
+    description: 查看调度图构建进度（/fta graph status）
+    default: op
+  fetarute.graph.cancel:
+    description: 取消调度图构建任务（/fta graph cancel）
+    default: op
+  fetarute.graph.info:
+    description: 查看调度图摘要与区间距离（/fta graph info）
+    default: op

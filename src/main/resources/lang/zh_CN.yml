@@ -48,6 +48,8 @@ command:
     hover-line: "<gray>点击填充:</gray> <white>/fta line </white>\n<dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
     entry-route: "<gray>/fta route</gray> <white>-</white> <dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
     hover-route: "<gray>点击填充:</gray> <white>/fta route </white>\n<dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
+    entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
+    hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -57,6 +59,30 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+
+  graph:
+    help: "<prefix> <dark_aqua>用法：</dark_aqua> <white>/fta graph build</white> <gray>[--tickBudgetMs <ms>] [--sync] [--all|--here]</gray> <gray>|</gray> <white>/fta graph status</white> <gray>|</gray> <white>/fta graph cancel</white> <gray>|</gray> <white>/fta graph info</white>"
+    build:
+      started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
+      running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
+      no-nodes: "<prefix> <red>未在已加载区块中扫描到任何节点牌子</red> <gray>请加载线路区域后重试</gray>"
+      no-start-node: "<prefix> <red>未找到附近的节点牌子或轨道</red> <gray>请站在 waypoint/autostation/depot 牌子旁，或站在轨道上重试</gray>"
+      failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
+      success: "<prefix> <dark_aqua>调度图已重建</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
+      missing-switcher:
+        header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
+        entry: "<gray>-</gray> <location>"
+        more: "<gray>… 还有 <white><more></white> 处未显示</gray>"
+    status:
+      idle: "<prefix> <gray>当前世界没有进行中的图构建任务</gray>"
+      running: "<prefix> <dark_aqua>图构建进行中</dark_aqua> <gray>(phase=<white><phase></white>, nodes=<white><nodes></white>, visited=<white><visited></white>, queue=<white><queue></white>, processed=<white><processed></white>)</gray>"
+    cancel:
+      none: "<prefix> <gray>当前世界没有可取消的图构建任务</gray>"
+      success: "<prefix> <dark_aqua>已取消图构建任务</dark_aqua>"
+    info:
+      missing: "<prefix> <gray>该世界尚未构建调度图</gray> <dark_aqua>请先执行</dark_aqua> <white>/fta graph build</white>"
+      header: "<prefix> <dark_aqua>调度图</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>)</gray>"
+      edge: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(len=<white><len></white>)</gray>"
 
   company:
     create:

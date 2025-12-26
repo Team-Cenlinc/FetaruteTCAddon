@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
@@ -47,6 +48,7 @@ public final class SignNodeRegistry {
         key(block),
         new SignNodeInfo(
             definition,
+            world.getUID(),
             world.getName(),
             location.getBlockX(),
             location.getBlockY(),
@@ -99,6 +101,15 @@ public final class SignNodeRegistry {
     return Map.copyOf(snapshot);
   }
 
+  /**
+   * 返回包含坐标信息的注册表快照。
+   *
+   * <p>用于图构建与诊断输出；调用方不得依赖返回值的可变性。
+   */
+  public Map<String, SignNodeInfo> snapshotInfos() {
+    return Map.copyOf(definitions);
+  }
+
   public void clear() {
     definitions.clear();
   }
@@ -138,9 +149,11 @@ public final class SignNodeRegistry {
         + ")";
   }
 
-  public record SignNodeInfo(SignNodeDefinition definition, String worldName, int x, int y, int z) {
+  public record SignNodeInfo(
+      SignNodeDefinition definition, UUID worldId, String worldName, int x, int y, int z) {
     public SignNodeInfo {
       Objects.requireNonNull(definition, "definition");
+      Objects.requireNonNull(worldId, "worldId");
       Objects.requireNonNull(worldName, "worldName");
     }
 

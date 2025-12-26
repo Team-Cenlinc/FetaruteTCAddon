@@ -50,6 +50,11 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
     ddl.add(routeStops(dialect));
     ddl.add(index("route_stops_route", "route_stops", "route_id"));
+    ddl.add(railNodes(dialect));
+    ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
+    ddl.add(railEdges(dialect));
+    ddl.add(index("rail_edges_world", "rail_edges", "world_id"));
+    ddl.add(railGraphSnapshots(dialect));
     return Collections.unmodifiableList(ddl);
   }
 
@@ -307,6 +312,83 @@ public final class StorageSchema {
         dialect.stringType(),
         table("routes"),
         table("stations"));
+  }
+
+  private String railNodes(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    world_id %s NOT NULL,
+                    node_id %s NOT NULL,
+                    node_type %s NOT NULL,
+                    x %s NOT NULL,
+                    y %s NOT NULL,
+                    z %s NOT NULL,
+                    tc_destination %s,
+                    waypoint_operator %s,
+                    waypoint_origin %s,
+                    waypoint_destination %s,
+                    waypoint_track %s,
+                    waypoint_sequence %s,
+                    waypoint_kind %s,
+                    PRIMARY KEY (world_id, node_id)
+                );
+                """,
+        table("rail_nodes"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.stringType());
+  }
+
+  private String railEdges(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    world_id %s NOT NULL,
+                    node_a %s NOT NULL,
+                    node_b %s NOT NULL,
+                    length_blocks %s NOT NULL,
+                    base_speed_limit %s NOT NULL,
+                    bidirectional %s NOT NULL,
+                    PRIMARY KEY (world_id, node_a, node_b)
+                );
+                """,
+        table("rail_edges"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.doubleType(),
+        dialect.intType());
+  }
+
+  private String railGraphSnapshots(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    world_id %s PRIMARY KEY,
+                    built_at %s NOT NULL,
+                    node_count %s NOT NULL,
+                    edge_count %s NOT NULL,
+                    node_signature %s NOT NULL
+                );
+                """,
+        table("rail_graph_snapshots"),
+        dialect.uuidType(),
+        dialect.timestampType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType());
   }
 
   private String formatDdl(String template, Object... args) {
