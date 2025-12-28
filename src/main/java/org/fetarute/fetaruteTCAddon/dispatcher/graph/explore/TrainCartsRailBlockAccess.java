@@ -22,11 +22,15 @@ import org.bukkit.block.BlockFace;
  * <p>目的：复用 TC 的 {@link RailType} 判定逻辑与 junction 逻辑，以兼容自定义轨道实现（例如 TCCoasters 的长距离/曲线连接）。
  *
  * <p>邻接策略：优先使用 {@link RailType#getJunctions(Block)} + {@link RailType#takeJunction(Block,
- * RailJunction)}， 在没有 junction 的轨道类型上回退到 {@link RailType#getPossibleDirections(Block)} 的“相邻方块”遍历。
+ * RailJunction)}；若无法获取 junction，则保守回退为“扫描相邻方块”的轨道遍历（避免依赖已弃用的旧 API）。
  *
  * <p>约束：该实现不会主动加载区块；未加载区块会被视为不可达。
  */
 public final class TrainCartsRailBlockAccess implements RailBlockAccess {
+
+  private static final BlockFace[] FALLBACK_NEIGHBOR_FACES = {
+    BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN
+  };
 
   private final World world;
   private final Map<RailBlockPos, Double> segmentLengthCache = new HashMap<>();
@@ -41,8 +45,12 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       return false;
     }
     Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
-    RailPiece piece = RailType.findRailPiece(block);
+    RailPiece piece = RailPiece.create(block);
     if (piece == null || piece.isNone()) {
+      return false;
+    }
+    RailType railType = piece.type();
+    if (railType == null || railType == RailType.NONE) {
       return false;
     }
     Block railBlock = piece.block();
@@ -58,7 +66,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
     }
 
     Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
-    RailPiece piece = RailType.findRailPiece(block);
+    RailPiece piece = RailPiece.create(block);
     if (piece == null || piece.isNone()) {
       return Set.of();
     }
@@ -72,7 +80,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       return Set.of();
     }
 
-    List<RailJunction> junctions = railType.getJunctions(railBlock);
+    List<RailJunction> junctions = piece.getJunctions();
     if (junctions != null && !junctions.isEmpty()) {
       Set<RailBlockPos> neighbors = new HashSet<>();
       for (RailJunction junction : junctions) {
@@ -92,7 +100,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
         if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
           continue;
         }
-        RailPiece neighborPiece = RailType.findRailPiece(nextBlock);
+        RailPiece neighborPiece = RailPiece.create(nextBlock);
         if (neighborPiece == null || neighborPiece.isNone()) {
           continue;
         }
@@ -108,13 +116,9 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       }
     }
 
-    BlockFace[] directions = railType.getPossibleDirections(railBlock);
-    if (directions == null || directions.length == 0) {
-      return Set.of();
-    }
-
     Set<RailBlockPos> neighbors = new HashSet<>();
-    for (BlockFace face : directions) {
+    // 轨道类型未提供 junctions 时的保守回退：仅扫描相邻方块的轨道。
+    for (BlockFace face : FALLBACK_NEIGHBOR_FACES) {
       if (face == null || face == BlockFace.SELF) {
         continue;
       }
@@ -124,7 +128,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
         continue;
       }
-      RailPiece neighborPiece = RailType.findRailPiece(candidate);
+      RailPiece neighborPiece = RailPiece.create(candidate);
       if (neighborPiece == null || neighborPiece.isNone()) {
         continue;
       }
@@ -174,7 +178,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
     double length = 1.0;
     if (world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4)) {
       Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
-      RailPiece piece = RailType.findRailPiece(block);
+      RailPiece piece = RailPiece.create(block);
       if (piece != null && !piece.isNone()) {
         RailState state = RailState.getSpawnState(piece);
         RailLogic logic = state != null ? state.loadRailLogic() : null;

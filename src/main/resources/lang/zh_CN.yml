@@ -61,18 +61,26 @@ command:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
 
   graph:
-    help: "<prefix> <dark_aqua>用法：</dark_aqua> <white>/fta graph build</white> <gray>[--tickBudgetMs <ms>] [--sync] [--all|--here]</gray> <gray>|</gray> <white>/fta graph status</white> <gray>|</gray> <white>/fta graph cancel</white> <gray>|</gray> <white>/fta graph info</white>"
+    help: "<prefix> <dark_aqua>用法：</dark_aqua> <white>/fta graph build</white> <gray>[--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc]</gray> <gray>|</gray> <white>/fta graph sign waypoint</white> <gray>|</gray> <white>/fta graph status</white> <gray>|</gray> <white>/fta graph cancel</white> <gray>|</gray> <white>/fta graph info</white>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
       running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
       no-nodes: "<prefix> <red>未在已加载区块中扫描到任何节点牌子</red> <gray>请加载线路区域后重试</gray>"
       no-start-node: "<prefix> <red>未找到附近的节点牌子或轨道</red> <gray>请站在 waypoint/autostation/depot 牌子旁，或站在轨道上重试</gray>"
+      tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
+      no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
       success: "<prefix> <dark_aqua>调度图已重建</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       missing-switcher:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"
         more: "<gray>… 还有 <white><more></white> 处未显示</gray>"
+    sign:
+      no-target: "<prefix> <red>请对准一个牌子方块再执行该命令</red>"
+      not-a-sign: "<prefix> <red>目标方块不是牌子</red>"
+      waypoint:
+        invalid-id: "<prefix> <red>无效的 waypoint 节点 ID：</red><white><id></white>"
+        success: "<prefix> <dark_aqua>已设置 waypoint 牌子：</dark_aqua><white><id></white>"
     status:
       idle: "<prefix> <gray>当前世界没有进行中的图构建任务</gray>"
       running: "<prefix> <dark_aqua>图构建进行中</dark_aqua> <gray>(phase=<white><phase></white>, nodes=<white><nodes></white>, visited=<white><visited></white>, queue=<white><queue></white>, processed=<white><processed></white>)</gray>"

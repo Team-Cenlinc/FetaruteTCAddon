@@ -128,13 +128,14 @@ public final class RailGraphBuildJob implements Runnable {
     this.access = new TrainCartsRailBlockAccess(world);
     this.phase = Phase.DISCOVER_NODES;
 
-    if (mode == BuildMode.HERE) {
-      for (RailNodeRecord preseed : preseedNodes) {
-        if (preseed == null) {
-          continue;
-        }
-        nodesById.putIfAbsent(preseed.nodeId().value(), preseed);
+    for (RailNodeRecord preseed : preseedNodes) {
+      if (preseed == null) {
+        continue;
       }
+      nodesById.putIfAbsent(preseed.nodeId().value(), preseed);
+    }
+
+    if (mode == BuildMode.HERE) {
       if (seedNode != null) {
         nodesById.put(seedNode.nodeId().value(), seedNode);
       }
@@ -151,7 +152,7 @@ public final class RailGraphBuildJob implements Runnable {
       this.connectedDiscovery =
           new ConnectedRailNodeDiscoverySession(world, anchors, access, debugLogger);
     } else {
-      this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, debugLogger);
+      this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, access, debugLogger);
     }
 
     this.status =
@@ -333,11 +334,27 @@ public final class RailGraphBuildJob implements Runnable {
     if (discoveredNodes.isEmpty()) {
       throw new IllegalStateException("未扫描到任何节点");
     }
+    if (!containsSignalNodes(discoveredNodes)) {
+      throw new IllegalStateException("未扫描到任何本插件节点牌子");
+    }
     initEdgeSession(discoveredNodes, currentAccess);
     synchronized (this) {
       this.finalNodes = discoveredNodes;
       this.phase = Phase.EXPLORE_EDGES;
     }
+  }
+
+  private static boolean containsSignalNodes(List<RailNodeRecord> nodes) {
+    for (RailNodeRecord node : nodes) {
+      if (node == null) {
+        continue;
+      }
+      NodeType type = node.nodeType();
+      if (type == NodeType.WAYPOINT || type == NodeType.STATION || type == NodeType.DEPOT) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private void initEdgeSession(

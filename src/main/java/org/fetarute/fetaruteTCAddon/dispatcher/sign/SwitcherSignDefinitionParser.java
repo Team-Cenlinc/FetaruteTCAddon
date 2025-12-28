@@ -1,7 +1,12 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 
+import com.bergerkiller.bukkit.tc.SignActionHeader;
+import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import java.util.Optional;
+import java.util.Set;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.block.Block;
 import org.bukkit.block.Sign;
 import org.bukkit.block.sign.Side;
 import org.bukkit.block.sign.SignSide;
@@ -40,8 +45,17 @@ public final class SwitcherSignDefinitionParser {
     if (sign == null) {
       return Optional.empty();
     }
-    SignSide front = sign.getSide(Side.FRONT);
-    String header = PLAIN_TEXT.serialize(front.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
+    return parseFromSide(sign, Side.FRONT).or(() -> parseFromSide(sign, Side.BACK));
+  }
+
+  private static Optional<SignNodeDefinition> parseFromSide(Sign sign, Side side) {
+    SignSide view = sign.getSide(side);
+    String trainHeader = PLAIN_TEXT.serialize(view.line(0)).trim();
+    SignActionHeader parsedHeader = SignActionHeader.parse(trainHeader);
+    if (parsedHeader == null || (!parsedHeader.isTrain() && !parsedHeader.isCart())) {
+      return Optional.empty();
+    }
+    String header = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
     if (!header.equals("switcher") && !header.equals("tag")) {
       return Optional.empty();
     }
@@ -53,14 +67,75 @@ public final class SwitcherSignDefinitionParser {
             sign.getLocation().getBlockX(),
             sign.getLocation().getBlockY(),
             sign.getLocation().getBlockZ());
-    Optional<RailBlockPos> anchor = access.findNearestRailBlocks(center, 2).stream().findFirst();
-    if (anchor.isEmpty()) {
+    Set<RailBlockPos> anchors = access.findNearestRailBlocks(center, 2);
+    if (anchors.isEmpty()) {
       return Optional.empty();
     }
-    NodeId nodeId = nodeIdForRail(worldName, anchor.get());
+    // findNearestRailBlocks 可能返回多个“等距离”的轨道锚点；若直接 findFirst() 会因 Set 的迭代顺序不稳定
+    // 导致 NodeId 漂移，进而引起图签名抖动/快照重复写入等问题。因此这里必须做确定性选择。
+    RailBlockPos anchor = selectDeterministicAnchor(anchors);
+    NodeId nodeId = nodeIdForRail(worldName, anchor);
     return Optional.of(
         new SignNodeDefinition(
             nodeId, NodeType.SWITCHER, Optional.of(SWITCHER_SIGN_MARKER), Optional.empty()));
+  }
+
+  /**
+   * 解析 TrainCarts 的 {@link TrackedSign}（包含 TCCoasters 的 TrackNodeSign 虚拟牌子）。
+   *
+   * <p>Virtual sign 没有 Bukkit {@link Sign} 实例，因此必须读取 {@link TrackedSign#getLine(int)} 与 {@link
+   * TrackedSign#railBlock} 来确定其关联的轨道方块。
+   */
+  public static Optional<SignNodeDefinition> parse(TrackedSign trackedSign) {
+    if (trackedSign == null) {
+      return Optional.empty();
+    }
+    SignActionHeader header = trackedSign.getHeader();
+    if (header == null || (!header.isTrain() && !header.isCart())) {
+      return Optional.empty();
+    }
+
+    String action = safeLine(trackedSign, 1).trim().toLowerCase(java.util.Locale.ROOT);
+    if (!action.equals("switcher") && !action.equals("tag")) {
+      return Optional.empty();
+    }
+
+    Block railBlock = trackedSign.railBlock;
+    if (railBlock == null) {
+      RailPiece piece = trackedSign.getRail();
+      if (piece != null) {
+        railBlock = piece.block();
+      }
+    }
+    if (railBlock == null) {
+      return Optional.empty();
+    }
+
+    String worldName = railBlock.getWorld().getName();
+    RailBlockPos railPos = new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
+    NodeId nodeId = nodeIdForRail(worldName, railPos);
+    return Optional.of(
+        new SignNodeDefinition(
+            nodeId, NodeType.SWITCHER, Optional.of(SWITCHER_SIGN_MARKER), Optional.empty()));
+  }
+
+  private static RailBlockPos selectDeterministicAnchor(Set<RailBlockPos> anchors) {
+    RailBlockPos best = null;
+    for (RailBlockPos candidate : anchors) {
+      if (candidate == null) {
+        continue;
+      }
+      if (best == null) {
+        best = candidate;
+        continue;
+      }
+      if (candidate.x() < best.x()
+          || (candidate.x() == best.x() && candidate.y() < best.y())
+          || (candidate.x() == best.x() && candidate.y() == best.y() && candidate.z() < best.z())) {
+        best = candidate;
+      }
+    }
+    return best != null ? best : anchors.iterator().next();
   }
 
   public static NodeId nodeIdForRail(String worldName, RailBlockPos rail) {
@@ -87,6 +162,15 @@ public final class SwitcherSignDefinitionParser {
       return Optional.of(new RailBlockPos(x, y, z));
     } catch (NumberFormatException ex) {
       return Optional.empty();
+    }
+  }
+
+  private static String safeLine(TrackedSign trackedSign, int index) {
+    try {
+      String value = trackedSign.getLine(index);
+      return value != null ? value : "";
+    } catch (IndexOutOfBoundsException ex) {
+      return "";
     }
   }
 }

@@ -4,7 +4,7 @@
 
 ## 构建命令
 
-- `/fta graph build [--tickBudgetMs <ms>] [--sync] [--all|--here]`
+- `/fta graph build [--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc]`
 - `/fta graph status`
 - `/fta graph cancel`
 - `/fta graph info`
@@ -14,7 +14,7 @@
 **HERE（玩家默认）**
 
 - 起点优先级：
-  1) 若安装了 TCCoasters 且玩家处于编辑状态：优先读取“当前编辑/选中”的 coaster 节点/轨道作为起点
+  1) 若指定 `--tcc`：读取 TCC 编辑器中“当前选中”的轨道方块作为起点
   2) 否则：尝试读取玩家附近的节点牌子（waypoint/autostation/depot）
   3) 再否则：使用玩家脚下附近轨道作为起点
 - 发现节点方式：从起点轨道锚点沿轨道连通性扩展，触达区块后扫描 tile entity 中的牌子。
@@ -45,7 +45,7 @@
      - 本插件节点牌子：`waypoint/autostation/depot`
      - TrainCarts 节点牌子：`switcher/tag`
      - 自动 switcher：轨道访问器返回的邻居数量 ≥ 3 时，会在该轨道方块坐标上生成 `NodeType.SWITCHER`（用于把分叉位置纳入图）
-   - 若 HERE 模式注入了 TCC 预置节点：会先把 coaster 的 TrackNode 列表注入为 Node（NodeId 形如 `TCCNODE:<world>:<x>:<y>:<z>`）
+   - 注意：若线网中没有任何 waypoint/autostation/depot 牌子，则该线网不会被视为“本插件接管的信号线路”，build 可能会提示未扫描到节点。
 
 2) `explore_edges`：计算区间距离
    - 使用“多源 Dijkstra”一次遍历整张轨道网络，计算任意两个节点波前相遇时的最短距离，写入 `Edge.lengthBlocks`
@@ -74,3 +74,11 @@
 - `rail_graph_snapshots`：快照元信息（built_at/node_count/edge_count/node_signature）
 
 插件启动时若存储就绪，会从快照预热到内存，`/fta graph info` 可直接查看。
+
+## 快速写入 Waypoint 牌子
+
+若你已经摆好了牌子方块但不想手动输入长 nodeId，可对准该牌子后执行：
+
+- `/fta graph sign waypoint <nodeId>`
+
+该命令会把牌子前面写成 TrainCarts 格式（`[train]` + `waypoint` + `nodeId`），随后即可用 `/fta graph build` 扫描并建图。

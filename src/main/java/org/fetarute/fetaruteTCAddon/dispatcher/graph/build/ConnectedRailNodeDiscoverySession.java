@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 
+import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.Map;
@@ -34,6 +36,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  */
 public final class ConnectedRailNodeDiscoverySession {
 
+  private static final int NODE_SIGN_ANCHOR_RADIUS = 6;
+
   private final World world;
   private final UUID worldId;
   private final RailBlockAccess access;
@@ -47,6 +51,8 @@ public final class ConnectedRailNodeDiscoverySession {
 
   private BlockState[] currentStates;
   private int stateIndex;
+  private final Set<RailBlockPos> scannedSignBlocks = new HashSet<>();
+  private final Set<Object> scannedVirtualSignKeys = new HashSet<>();
 
   private long processedRailSteps;
   private int scannedTileEntities;
@@ -92,6 +98,14 @@ public final class ConnectedRailNodeDiscoverySession {
         if (!(state instanceof Sign sign)) {
           continue;
         }
+        RailBlockPos signPos =
+            new RailBlockPos(
+                sign.getLocation().getBlockX(),
+                sign.getLocation().getBlockY(),
+                sign.getLocation().getBlockZ());
+        if (!scannedSignBlocks.add(signPos)) {
+          continue;
+        }
         scannedSigns++;
         NodeSignDefinitionParser.parse(sign)
             .or(() -> SwitcherSignDefinitionParser.parse(sign))
@@ -109,6 +123,11 @@ public final class ConnectedRailNodeDiscoverySession {
                       y = pos.y();
                       z = pos.z();
                     }
+                  } else {
+                    RailBlockPos anchor = resolveAnchor(signPos);
+                    x = anchor.x();
+                    y = anchor.y();
+                    z = anchor.z();
                   }
                   RailNodeRecord record =
                       new RailNodeRecord(
@@ -172,6 +191,8 @@ public final class ConnectedRailNodeDiscoverySession {
       }
       processedRailSteps++;
       progressed++;
+
+      scanSignsFromRailPiece(current, byNodeId);
 
       Set<RailBlockPos> neighbors = access.neighbors(current);
       if (neighbors.size() >= 3) {
@@ -247,5 +268,121 @@ public final class ConnectedRailNodeDiscoverySession {
 
   public int scannedChunks() {
     return queuedChunkKeys.size();
+  }
+
+  private void scanSignsFromRailPiece(RailBlockPos railPos, Map<String, RailNodeRecord> byNodeId) {
+    if (railPos == null) {
+      return;
+    }
+    if (!world.isChunkLoaded(railPos.x() >> 4, railPos.z() >> 4)) {
+      return;
+    }
+
+    RailPiece piece = RailPiece.create(world.getBlockAt(railPos.x(), railPos.y(), railPos.z()));
+    if (piece == null || piece.isNone()) {
+      return;
+    }
+
+    TrackedSign[] signs = piece.signs();
+    if (signs == null || signs.length == 0) {
+      return;
+    }
+
+    for (TrackedSign tracked : signs) {
+      if (tracked == null) {
+        continue;
+      }
+
+      // TCCoasters 的 TrackNodeSign 是虚拟牌子（TrackedFakeSign），不会作为 tile entity 被 chunk 扫描发现；
+      // 因此这里只额外处理“非真实牌子”的情况，避免与上面的 tile entity 扫描重复。
+      if (tracked.isRealSign()) {
+        continue;
+      }
+      Object uniqueKey = tracked.getUniqueKey();
+      if (uniqueKey != null && !scannedVirtualSignKeys.add(uniqueKey)) {
+        continue;
+      }
+      scannedSigns++;
+      NodeSignDefinitionParser.parse(tracked)
+          .or(() -> SwitcherSignDefinitionParser.parse(tracked))
+          .ifPresent(
+              def -> {
+                int x = railPos.x();
+                int y = railPos.y();
+                int z = railPos.z();
+                if (def.nodeType() == NodeType.SWITCHER) {
+                  Optional<RailBlockPos> parsed =
+                      SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
+                  if (parsed.isPresent()) {
+                    RailBlockPos pos = parsed.get();
+                    x = pos.x();
+                    y = pos.y();
+                    z = pos.z();
+                  }
+                }
+                RailNodeRecord record =
+                    new RailNodeRecord(
+                        worldId,
+                        def.nodeId(),
+                        def.nodeType(),
+                        x,
+                        y,
+                        z,
+                        def.trainCartsDestination(),
+                        def.waypointMetadata());
+                RailNodeRecord existing = byNodeId.get(def.nodeId().value());
+                if (existing == null) {
+                  byNodeId.put(def.nodeId().value(), record);
+                  return;
+                }
+                if (existing.nodeType() == NodeType.SWITCHER
+                    && def.nodeType() == NodeType.SWITCHER
+                    && existing.trainCartsDestination().isEmpty()
+                    && def.trainCartsDestination().isPresent()) {
+                  byNodeId.put(def.nodeId().value(), record);
+                  return;
+                }
+                if (!existing.equals(record)) {
+                  debugLogger.accept(
+                      "扫描到重复 nodeId，已忽略: node="
+                          + def.nodeId().value()
+                          + " @ "
+                          + world.getName()
+                          + " ("
+                          + x
+                          + ","
+                          + y
+                          + ","
+                          + z
+                          + "), existing=("
+                          + existing.x()
+                          + ","
+                          + existing.y()
+                          + ","
+                          + existing.z()
+                          + ")");
+                }
+              });
+    }
+  }
+
+  private RailBlockPos resolveAnchor(RailBlockPos signPos) {
+    Set<RailBlockPos> anchors = access.findNearestRailBlocks(signPos, NODE_SIGN_ANCHOR_RADIUS);
+    if (anchors.isEmpty()) {
+      return signPos;
+    }
+    RailBlockPos best = null;
+    for (RailBlockPos candidate : anchors) {
+      if (best == null) {
+        best = candidate;
+        continue;
+      }
+      if (candidate.x() < best.x()
+          || (candidate.x() == best.x() && candidate.y() < best.y())
+          || (candidate.x() == best.x() && candidate.y() == best.y() && candidate.z() < best.z())) {
+        best = candidate;
+      }
+    }
+    return best != null ? best : signPos;
   }
 }

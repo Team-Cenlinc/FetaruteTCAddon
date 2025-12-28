@@ -12,9 +12,11 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import net.kyori.adventure.text.Component;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
+import org.bukkit.block.sign.Side;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
@@ -30,9 +32,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlock
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.integration.tcc.TccSelectionResolver;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -41,6 +44,7 @@ import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.component.CommandComponent;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.IntegerParser;
+import org.incendo.cloud.parser.standard.StringParser;
 
 /**
  * 调度图诊断命令：/fta graph build|status|cancel|info。
@@ -54,7 +58,12 @@ import org.incendo.cloud.parser.standard.IntegerParser;
  *
  * <p>重要约束：构建过程不会主动加载区块；未加载区块会被视为不可达，因此线上运维应先预加载线路区域再执行 build。
  *
- * <p>HERE 模式起点优先级：TCC 编辑器选中节点/轨道 → 附近节点牌子 → 玩家脚下附近轨道。
+ * <p>HERE 模式起点优先级：
+ *
+ * <ul>
+ *   <li>若指定 {@code --tcc}：TCC 编辑器选中节点/轨道
+ *   <li>否则：附近节点牌子 → 玩家脚下附近轨道
+ * </ul>
  */
 public final class FtaGraphCommand {
 
@@ -76,6 +85,7 @@ public final class FtaGraphCommand {
             .build();
     CommandFlag<Void> allFlag = CommandFlag.builder("all").build();
     CommandFlag<Void> hereFlag = CommandFlag.builder("here").build();
+    CommandFlag<Void> tccFlag = CommandFlag.builder("tcc").build();
 
     manager.command(
         manager
@@ -93,6 +103,7 @@ public final class FtaGraphCommand {
             .flag(tickBudgetMsFlag)
             .flag(allFlag)
             .flag(hereFlag)
+            .flag(tccFlag)
             .permission("fetarute.graph.build")
             .handler(
                 ctx -> {
@@ -120,6 +131,12 @@ public final class FtaGraphCommand {
                     return;
                   }
 
+                  boolean useTcc = ctx.flags().isPresent(tccFlag);
+                  if (useTcc && !(sender instanceof Player)) {
+                    sender.sendMessage(locale.component("command.graph.build.tcc-player-only"));
+                    return;
+                  }
+
                   BuildMode mode =
                       sender instanceof Player
                           ? (forceAll ? BuildMode.ALL : BuildMode.HERE)
@@ -139,45 +156,35 @@ public final class FtaGraphCommand {
                       return;
                     }
                     TrainCartsRailBlockAccess railAccess = new TrainCartsRailBlockAccess(world);
-                    Optional<TccSelectionResolver.TccCoasterSelection> tccSelectionOpt =
-                        TccSelectionResolver.findSelectedCoaster(player);
-                    if (tccSelectionOpt.isPresent()) {
-                      TccSelectionResolver.TccCoasterSelection tccSelection = tccSelectionOpt.get();
-                      seedRails = railAccess.findNearestRailBlocks(tccSelection.seedRail(), 2);
-                      if (!tccSelection.coasterNodes().isEmpty()) {
-                        UUID wid = world.getUID();
-                        String worldName = world.getName();
-                        preseedNodes =
-                            tccSelection.coasterNodes().stream()
-                                .map(
-                                    pos ->
-                                        new RailNodeRecord(
-                                            wid,
-                                            NodeId.of(
-                                                "TCCNODE:"
-                                                    + worldName
-                                                    + ":"
-                                                    + pos.x()
-                                                    + ":"
-                                                    + pos.y()
-                                                    + ":"
-                                                    + pos.z()),
-                                            NodeType.WAYPOINT,
-                                            pos.x(),
-                                            pos.y(),
-                                            pos.z(),
-                                            Optional.empty(),
-                                            Optional.empty()))
-                                .toList();
+
+                    if (useTcc) {
+                      Optional<RailBlockPos> tccSeedOpt =
+                          TccSelectionResolver.findSelectedRailBlock(player);
+                      if (tccSeedOpt.isEmpty()) {
+                        sender.sendMessage(
+                            locale.component("command.graph.build.no-tcc-selection"));
+                        return;
+                      }
+                      RailBlockPos selected = tccSeedOpt.get();
+                      // TCC 选中位置并不一定等价于“可遍历的轨道方块锚点”（例如某些自定义轨道会把实际 rail piece
+                      // 映射到相邻方块）。因此先尝试精确匹配，失败时再做小半径兜底映射，避免 --tcc 莫名无法起步。
+                      seedRails = railAccess.findNearestRailBlocks(selected, 0);
+                      if (seedRails.isEmpty()) {
+                        seedRails = railAccess.findNearestRailBlocks(selected, 2);
+                      }
+                      if (seedRails.isEmpty()) {
+                        sender.sendMessage(
+                            locale.component("command.graph.build.no-tcc-selection"));
+                        return;
                       }
                     }
                     Optional<RailNodeRecord> seedOpt = findNearbyNodeSign(player, 4);
-                    if (seedRails.isEmpty() && seedOpt.isPresent()) {
+                    if (!useTcc && seedRails.isEmpty() && seedOpt.isPresent()) {
                       seedNode = seedOpt.get();
                       seedRails =
                           railAccess.findNearestRailBlocks(
                               new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()), 2);
-                    } else if (seedRails.isEmpty()) {
+                    } else if (!useTcc && seedRails.isEmpty()) {
                       seedRails =
                           railAccess.findNearestRailBlocks(
                               new RailBlockPos(
@@ -264,15 +271,19 @@ public final class FtaGraphCommand {
                                 .getScheduler()
                                 .runTask(
                                     plugin,
-                                    () ->
+                                    () -> {
+                                      if (ex instanceof IllegalStateException) {
                                         sender.sendMessage(
-                                            locale.component(
-                                                "command.graph.build.failed",
-                                                Map.of(
-                                                    "error",
-                                                    ex.getMessage() != null
-                                                        ? ex.getMessage()
-                                                        : ""))));
+                                            locale.component("command.graph.build.no-nodes"));
+                                        return;
+                                      }
+                                      sender.sendMessage(
+                                          locale.component(
+                                              "command.graph.build.failed",
+                                              Map.of(
+                                                  "error",
+                                                  ex.getMessage() != null ? ex.getMessage() : "")));
+                                    });
                             jobs.remove(worldId);
                           },
                           plugin.getLoggerManager()::debug);
@@ -282,6 +293,83 @@ public final class FtaGraphCommand {
                   }
                   job.start();
                   sender.sendMessage(locale.component("command.graph.build.started"));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("sign")
+            .literal("waypoint")
+            .senderType(Player.class)
+            .permission("fetarute.graph.sign")
+            .required(
+                "id",
+                StringParser.greedyStringParser(),
+                CommandSuggestionProviders.placeholder("<nodeId>"))
+            .handler(
+                ctx -> {
+                  Player player = (Player) ctx.sender();
+                  LocaleManager locale = plugin.getLocaleManager();
+
+                  String rawId = ctx.get("id");
+                  Optional<SignNodeDefinition> defOpt =
+                      SignTextParser.parseWaypointLike(rawId, NodeType.WAYPOINT)
+                          .filter(
+                              definition ->
+                                  definition
+                                      .waypointMetadata()
+                                      .map(
+                                          metadata ->
+                                              metadata.kind()
+                                                      == org.fetarute
+                                                          .fetaruteTCAddon
+                                                          .dispatcher
+                                                          .node
+                                                          .WaypointKind
+                                                          .INTERVAL
+                                                  || metadata.kind()
+                                                      == org.fetarute
+                                                          .fetaruteTCAddon
+                                                          .dispatcher
+                                                          .node
+                                                          .WaypointKind
+                                                          .STATION_THROAT
+                                                  || metadata.kind()
+                                                      == org.fetarute
+                                                          .fetaruteTCAddon
+                                                          .dispatcher
+                                                          .node
+                                                          .WaypointKind
+                                                          .DEPOT_THROAT)
+                                      .orElse(false));
+                  if (defOpt.isEmpty()) {
+                    player.sendMessage(
+                        locale.component(
+                            "command.graph.sign.waypoint.invalid-id", Map.of("id", rawId)));
+                    return;
+                  }
+
+                  org.bukkit.block.Block target = player.getTargetBlockExact(5);
+                  if (target == null) {
+                    player.sendMessage(locale.component("command.graph.sign.no-target"));
+                    return;
+                  }
+                  org.bukkit.block.BlockState state = target.getState();
+                  if (!(state instanceof Sign sign)) {
+                    player.sendMessage(locale.component("command.graph.sign.not-a-sign"));
+                    return;
+                  }
+
+                  var side = sign.getSide(Side.FRONT);
+                  side.line(0, Component.text("[train]"));
+                  side.line(1, Component.text("waypoint"));
+                  side.line(2, Component.text(defOpt.get().nodeId().value()));
+                  side.line(3, Component.empty());
+                  sign.update(true, false);
+
+                  player.sendMessage(
+                      locale.component("command.graph.sign.waypoint.success", Map.of("id", rawId)));
                 }));
 
     manager.command(
@@ -513,6 +601,10 @@ public final class FtaGraphCommand {
       nodes = List.copyOf(byNodeId.values());
     }
 
+    if (nodes.isEmpty() || nodes.stream().noneMatch(FtaGraphCommand::isSignalNode)) {
+      throw new IllegalStateException("未扫描到任何本插件节点牌子");
+    }
+
     Map<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId, java.util.Set<RailBlockPos>>
         anchorsByNode = new HashMap<>();
     Set<RailBlockPos> railsWithSwitchers = new HashSet<>();
@@ -723,6 +815,14 @@ public final class FtaGraphCommand {
       }
     }
     return List.copyOf(filtered);
+  }
+
+  private static boolean isSignalNode(RailNodeRecord node) {
+    if (node == null) {
+      return false;
+    }
+    NodeType type = node.nodeType();
+    return type == NodeType.WAYPOINT || type == NodeType.STATION || type == NodeType.DEPOT;
   }
 
   /**
