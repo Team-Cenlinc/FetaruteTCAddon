@@ -54,6 +54,11 @@ public final class RailGraphService {
     return Optional.ofNullable(snapshots.get(world.getUID()));
   }
 
+  public boolean clearSnapshot(World world) {
+    Objects.requireNonNull(world, "world");
+    return snapshots.remove(world.getUID()) != null;
+  }
+
   public Map<UUID, RailGraphSnapshot> snapshotAll() {
     return Map.copyOf(snapshots);
   }

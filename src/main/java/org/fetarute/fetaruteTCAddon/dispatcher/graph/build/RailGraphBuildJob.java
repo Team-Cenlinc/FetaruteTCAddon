@@ -32,14 +32,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
 /**
  * 分段构建调度图的任务：在主线程按 tick 的“时间预算”增量推进，避免一次性卡服。
  *
- * <p>该任务不会主动加载区块：轨道访问器会把“未加载区块”视为不可达。
+ * <p>默认不会主动加载区块：轨道访问器会把“未加载区块”视为不可达。
+ *
+ * <p>当启用 {@link ChunkLoadOptions} 时，会在 HERE 模式沿轨道按需异步加载相邻区块（不会随便扩张）。
  *
  * <p>节点来源（按优先级合并去重）：
  *
  * <ul>
  *   <li>{@code preseedNodes}：预置节点列表（用于 TCC 无牌子线网，把 coaster 节点注入为 Node）
  *   <li>{@code seedNode}：HERE 模式下玩家附近的节点牌子（可选）
- *   <li>扫描到的节点牌子：waypoint/autostation/depot + TC 的 switcher/tag
+ *   <li>扫描到的节点牌子：waypoint/autostation/depot + TC 的 switcher
  *   <li>轨道分叉：当访问器返回的邻居数量 ≥ 3 时，会生成自动 switcher 节点（坐标即轨道方块坐标）
  * </ul>
  *
@@ -67,8 +69,10 @@ public final class RailGraphBuildJob implements Runnable {
   private final RailNodeRecord seedNode;
   private final Set<RailBlockPos> seedRails;
   private final List<RailNodeRecord> preseedNodes;
+  private final Optional<RailGraphBuildContinuation> continuation;
+  private final ChunkLoadOptions chunkLoadOptions;
   private final long tickBudgetNanos;
-  private final Consumer<RailGraphBuildResult> onSuccess;
+  private final Consumer<RailGraphBuildOutcome> onFinish;
   private final Consumer<Throwable> onFailure;
   private final Consumer<String> debugLogger;
 
@@ -88,6 +92,7 @@ public final class RailGraphBuildJob implements Runnable {
    * @param seedRails HERE 模式的起始轨道锚点集合（优先来自 TCC 编辑器选中位置，其次来自牌子/脚下轨道）
    * @param preseedNodes 预置节点列表（用于把 TCC TrackNode 注入为 Node）
    * @param tickBudgetMs 每 tick 可消耗的时间预算（毫秒）；越小越不易卡服但构建更慢
+   * @param chunkLoadOptions 是否启用沿轨道异步加载区块（用于无需手动预加载的运维模式）
    */
   public RailGraphBuildJob(
       JavaPlugin plugin,
@@ -97,7 +102,8 @@ public final class RailGraphBuildJob implements Runnable {
       Set<RailBlockPos> seedRails,
       List<RailNodeRecord> preseedNodes,
       int tickBudgetMs,
-      Consumer<RailGraphBuildResult> onSuccess,
+      ChunkLoadOptions chunkLoadOptions,
+      Consumer<RailGraphBuildOutcome> onFinish,
       Consumer<Throwable> onFailure,
       Consumer<String> debugLogger) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -106,11 +112,50 @@ public final class RailGraphBuildJob implements Runnable {
     this.seedNode = seedNode;
     this.seedRails = seedRails != null ? Set.copyOf(seedRails) : Set.of();
     this.preseedNodes = preseedNodes != null ? List.copyOf(preseedNodes) : List.of();
+    this.continuation = Optional.empty();
+    this.chunkLoadOptions =
+        chunkLoadOptions != null ? chunkLoadOptions : ChunkLoadOptions.disabled();
     if (tickBudgetMs <= 0) {
       throw new IllegalArgumentException("tickBudgetMs 必须为正数");
     }
     this.tickBudgetNanos = tickBudgetMs * 1_000_000L;
-    this.onSuccess = Objects.requireNonNull(onSuccess, "onSuccess");
+    this.onFinish = Objects.requireNonNull(onFinish, "onFinish");
+    this.onFailure = Objects.requireNonNull(onFailure, "onFailure");
+    this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+  }
+
+  /**
+   * 从续跑状态创建构建任务。
+   *
+   * <p>注意：续跑仅支持 HERE 模式。
+   *
+   * @param continuation 续跑状态快照
+   * @param tickBudgetMs 每 tick 可消耗的时间预算（毫秒）
+   * @param chunkLoadOptions 本次续跑允许加载的 chunk 配额
+   */
+  public RailGraphBuildJob(
+      JavaPlugin plugin,
+      World world,
+      RailGraphBuildContinuation continuation,
+      int tickBudgetMs,
+      ChunkLoadOptions chunkLoadOptions,
+      Consumer<RailGraphBuildOutcome> onFinish,
+      Consumer<Throwable> onFailure,
+      Consumer<String> debugLogger) {
+    this.plugin = Objects.requireNonNull(plugin, "plugin");
+    this.world = Objects.requireNonNull(world, "world");
+    this.mode = BuildMode.HERE;
+    this.seedNode = null;
+    this.seedRails = Set.of();
+    this.preseedNodes = List.of();
+    this.continuation = Optional.ofNullable(continuation);
+    this.chunkLoadOptions =
+        chunkLoadOptions != null ? chunkLoadOptions : ChunkLoadOptions.disabled();
+    if (tickBudgetMs <= 0) {
+      throw new IllegalArgumentException("tickBudgetMs 必须为正数");
+    }
+    this.tickBudgetNanos = tickBudgetMs * 1_000_000L;
+    this.onFinish = Objects.requireNonNull(onFinish, "onFinish");
     this.onFailure = Objects.requireNonNull(onFailure, "onFailure");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
   }
@@ -118,7 +163,7 @@ public final class RailGraphBuildJob implements Runnable {
   /**
    * 启动分段任务。
    *
-   * <p>注意：所有 Bukkit API 访问发生在主线程 tick 回调中；构建阶段不会加载区块。
+   * <p>注意：所有 Bukkit API 访问发生在主线程 tick 回调中；若启用 {@link ChunkLoadOptions}，会通过 Paper 的异步接口按需加载区块。
    */
   public synchronized boolean start() {
     if (task != null) {
@@ -127,32 +172,46 @@ public final class RailGraphBuildJob implements Runnable {
 
     this.access = new TrainCartsRailBlockAccess(world);
     this.phase = Phase.DISCOVER_NODES;
+    this.nodesById.clear();
 
-    for (RailNodeRecord preseed : preseedNodes) {
-      if (preseed == null) {
-        continue;
+    if (continuation.isPresent()) {
+      RailGraphBuildContinuation cached = continuation.get();
+      for (RailNodeRecord node : cached.nodes()) {
+        if (node == null) {
+          continue;
+        }
+        nodesById.putIfAbsent(node.nodeId().value(), node);
       }
-      nodesById.putIfAbsent(preseed.nodeId().value(), preseed);
-    }
-
-    if (mode == BuildMode.HERE) {
-      if (seedNode != null) {
-        nodesById.put(seedNode.nodeId().value(), seedNode);
-      }
-      Set<RailBlockPos> anchors = seedRails;
-      if (anchors.isEmpty() && seedNode != null) {
-        anchors =
-            access.findNearestRailBlocks(
-                new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()),
-                DEFAULT_ANCHOR_SEARCH_RADIUS);
-      }
-      if (anchors.isEmpty()) {
-        throw new IllegalStateException("HERE 模式缺少起始轨道锚点");
-      }
-      this.connectedDiscovery =
-          new ConnectedRailNodeDiscoverySession(world, anchors, access, debugLogger);
+      this.connectedDiscovery = cached.discoverySession();
+      this.connectedDiscovery.beginChunkLoading(chunkLoadOptions);
     } else {
-      this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, access, debugLogger);
+      for (RailNodeRecord preseed : preseedNodes) {
+        if (preseed == null) {
+          continue;
+        }
+        nodesById.putIfAbsent(preseed.nodeId().value(), preseed);
+      }
+
+      if (mode == BuildMode.HERE) {
+        if (seedNode != null) {
+          nodesById.put(seedNode.nodeId().value(), seedNode);
+        }
+        Set<RailBlockPos> anchors = seedRails;
+        if (anchors.isEmpty() && seedNode != null) {
+          anchors =
+              access.findNearestRailBlocks(
+                  new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()),
+                  DEFAULT_ANCHOR_SEARCH_RADIUS);
+        }
+        if (anchors.isEmpty()) {
+          throw new IllegalStateException("HERE 模式缺少起始轨道锚点");
+        }
+        this.connectedDiscovery =
+            new ConnectedRailNodeDiscoverySession(
+                world, anchors, access, debugLogger, chunkLoadOptions);
+      } else {
+        this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, access, debugLogger);
+      }
     }
 
     this.status =
@@ -251,17 +310,38 @@ public final class RailGraphBuildJob implements Runnable {
       Instant builtAt = Instant.now();
       String signature = RailGraphSignature.signatureForNodes(currentFinalNodes);
       cancel();
-      onSuccess.accept(
+      RailGraphBuildResult result =
           new RailGraphBuildResult(
-              graph,
-              builtAt,
-              signature,
-              currentFinalNodes,
-              List.copyOf(junctionsMissingSwitchers)));
+              graph, builtAt, signature, currentFinalNodes, List.copyOf(junctionsMissingSwitchers));
+      RailGraphBuildCompletion completion = computeCompletion();
+      Optional<RailGraphBuildContinuation> nextContinuation = Optional.empty();
+      if (mode == BuildMode.HERE && connectedDiscovery != null && connectedDiscovery.isPaused()) {
+        nextContinuation =
+            Optional.of(
+                new RailGraphBuildContinuation(
+                    Instant.now(), connectedDiscovery, currentFinalNodes));
+      }
+      onFinish.accept(new RailGraphBuildOutcome(result, completion, nextContinuation));
     } catch (Throwable ex) {
       cancel();
       onFailure.accept(ex);
     }
+  }
+
+  private RailGraphBuildCompletion computeCompletion() {
+    if (mode != BuildMode.HERE) {
+      return RailGraphBuildCompletion.PARTIAL_UNLOADED_CHUNKS;
+    }
+    if (!chunkLoadOptions.enabled()) {
+      return RailGraphBuildCompletion.PARTIAL_UNLOADED_CHUNKS;
+    }
+    if (connectedDiscovery != null && connectedDiscovery.isPaused()) {
+      return RailGraphBuildCompletion.PARTIAL_MAX_CHUNKS;
+    }
+    if (connectedDiscovery != null && connectedDiscovery.failedChunks() > 0) {
+      return RailGraphBuildCompletion.PARTIAL_FAILED_CHUNK_LOADS;
+    }
+    return RailGraphBuildCompletion.COMPLETE;
   }
 
   private void runDiscovery(
@@ -290,7 +370,7 @@ public final class RailGraphBuildJob implements Runnable {
                   currentConnectedDiscovery.processedRailSteps());
         }
       }
-      if (!currentConnectedDiscovery.isDone()) {
+      if (!currentConnectedDiscovery.isDone() && !currentConnectedDiscovery.isPaused()) {
         return;
       }
 

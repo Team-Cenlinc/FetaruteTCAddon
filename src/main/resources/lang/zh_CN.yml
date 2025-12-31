@@ -61,20 +61,26 @@ command:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
 
   graph:
-    help: "<prefix> <dark_aqua>用法：</dark_aqua> <white>/fta graph build</white> <gray>[--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc]</gray> <gray>|</gray> <white>/fta graph sign waypoint</white> <gray>|</gray> <white>/fta graph status</white> <gray>|</gray> <white>/fta graph cancel</white> <gray>|</gray> <white>/fta graph info</white>"
+    help: "<prefix> <dark_aqua>用法：</dark_aqua> <white>/fta graph build</white> <gray>[--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc] [--loadChunks [--maxChunks <n>] [--maxConcurrentLoads <n>]]</gray> <gray>|</gray> <white>/fta graph continue</white> <gray>[--tickBudgetMs <ms>] [--maxChunks <n>] [--maxConcurrentLoads <n>]</gray> <gray>|</gray> <white>/fta graph delete</white> <gray>[here]</gray> <gray>|</gray> <white>/fta graph sign waypoint</white> <gray>|</gray> <white>/fta graph status</white> <gray>|</gray> <white>/fta graph cancel</white> <gray>|</gray> <white>/fta graph info</white>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
       running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
       no-nodes: "<prefix> <red>未在已加载区块中扫描到任何节点牌子</red> <gray>请加载线路区域后重试</gray>"
       no-start-node: "<prefix> <red>未找到附近的节点牌子或轨道</red> <gray>请站在 waypoint/autostation/depot 牌子旁，或站在轨道上重试</gray>"
+      load-chunks-here-only: "<prefix> <red>--loadChunks 仅支持 here 模式</red> <gray>请在玩家附近执行 build，或显式指定 --here</gray>"
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
-      success: "<prefix> <dark_aqua>调度图已重建</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
+      success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
+      merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, replaced_components=<white><replaced_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
+      paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
       missing-switcher:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"
         more: "<gray>… 还有 <white><more></white> 处未显示</gray>"
+    continue:
+      none: "<prefix> <gray>当前没有可续跑的图构建状态</gray> <dark_aqua>请先执行 /fta graph build --loadChunks</dark_aqua>"
+      started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
     sign:
       no-target: "<prefix> <red>请对准一个牌子方块再执行该命令</red>"
       not-a-sign: "<prefix> <red>目标方块不是牌子</red>"
@@ -87,9 +93,19 @@ command:
     cancel:
       none: "<prefix> <gray>当前世界没有可取消的图构建任务</gray>"
       success: "<prefix> <dark_aqua>已取消图构建任务</dark_aqua>"
+    delete:
+      none: "<prefix> <gray>该世界没有可删除的调度图</gray>"
+      success: "<prefix> <dark_aqua>已删除调度图</dark_aqua> <gray>(world=<white><world></white>)</gray>"
+      here:
+        no-seed: "<prefix> <gray>附近没有可定位的图节点</gray> <dark_aqua>请靠近 waypoint/station/depot/switcher 再重试</dark_aqua>"
+        success: "<prefix> <dark_aqua>已删除局部调度图</dark_aqua> <gray>(seed=<white><seed></white>, removed_components=<white><removed_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
     info:
       missing: "<prefix> <gray>该世界尚未构建调度图</gray> <dark_aqua>请先执行</dark_aqua> <white>/fta graph build</white>"
       header: "<prefix> <dark_aqua>调度图</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>)</gray>"
+      meta: "<gray>-</gray> <dark_aqua>builtAt</dark_aqua>=<white><built_at></white> <dark_aqua>components</dark_aqua>=<white><components></white> <dark_aqua>blocked</dark_aqua>=<white><blocked_edges></white> <dark_aqua>isolated</dark_aqua>=<white><isolated_nodes></white>"
+      nodes: "<gray>-</gray> <dark_aqua>nodes</dark_aqua> <gray>(waypoint=<white><waypoint></white>, station=<white><station></white>, depot=<white><depot></white>, destination=<white><destination></white>, switcher=<white><switcher></white>)</gray>"
+      switcher: "<gray>-</gray> <dark_aqua>switcher</dark_aqua> <gray>(sign=<white><switcher_sign></white>, auto=<white><switcher_auto></white>)</gray>"
+      edge-top-header: "<gray>-</gray> <dark_aqua>top edges</dark_aqua> <gray>(by length_blocks)</gray>"
       edge: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(len=<white><len></white>)</gray>"
 
   company:

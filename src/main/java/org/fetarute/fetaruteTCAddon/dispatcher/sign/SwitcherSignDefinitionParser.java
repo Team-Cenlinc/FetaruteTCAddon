@@ -16,7 +16,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 
 /**
- * 从 TrainCarts 的 switcher/tag 牌子解析出一个 Switcher 节点定义。
+ * 从 TrainCarts 的 switcher 牌子解析出一个 Switcher 节点定义。
  *
  * <p>注意：Switcher 牌子由 TrainCarts/TCCoasters 提供，并非本插件的自定义 SignAction。 因此这里只做“识别与纳入
  * RailGraph”的最小解析：NodeId 由“被控制的轨道方块”的世界名 + 坐标组成，保证在同一世界内唯一且稳定。
@@ -27,7 +27,7 @@ public final class SwitcherSignDefinitionParser {
       PlainTextComponentSerializer.plainText();
 
   /**
-   * 用于标记“该 Switcher 节点来自 switcher/tag 牌子”。
+   * 用于标记“该 Switcher 节点来自 switcher 牌子”。
    *
    * <p>注意：Switcher 节点本身不用于 TrainCarts destination，因此复用 tcDestination 字段作为内部标记，便于诊断“道岔但缺少 switcher
    * 牌子”的运维提示。
@@ -37,7 +37,7 @@ public final class SwitcherSignDefinitionParser {
   private SwitcherSignDefinitionParser() {}
 
   /**
-   * 解析 TC 的 switcher/tag 牌子。
+   * 解析 TC 的 switcher 牌子。
    *
    * <p>注意：Node 的坐标会写成“被控制的轨道方块坐标”（而不是牌子方块坐标），用于与轨道分叉/junction 检测对齐。
    */
@@ -56,7 +56,7 @@ public final class SwitcherSignDefinitionParser {
       return Optional.empty();
     }
     String header = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
-    if (!header.equals("switcher") && !header.equals("tag")) {
+    if (!header.equals("switcher")) {
       return Optional.empty();
     }
 
@@ -96,7 +96,7 @@ public final class SwitcherSignDefinitionParser {
     }
 
     String action = safeLine(trackedSign, 1).trim().toLowerCase(java.util.Locale.ROOT);
-    if (!action.equals("switcher") && !action.equals("tag")) {
+    if (!action.equals("switcher")) {
       return Optional.empty();
     }
 

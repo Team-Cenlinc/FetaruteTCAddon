@@ -3,15 +3,19 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import org.bukkit.Chunk;
 import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
@@ -28,11 +32,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  *
  * <ul>
  *   <li>本插件节点牌子：waypoint/autostation/depot
- *   <li>TrainCarts 节点牌子：switcher/tag（用于把道岔牌子纳入图）
+ *   <li>TrainCarts 节点牌子：switcher（用于把道岔牌子纳入图）
  *   <li>自动 switcher：当某轨道方块的邻居数量 ≥ 3 时生成 {@link NodeType#SWITCHER} 节点
  * </ul>
  *
- * <p>该会话不会主动加载区块；未加载区块会被视为不可达，因此探索范围等同于“已加载且连通”的轨道区域。
+ * <p>该会话默认不会主动加载区块；未加载区块会被视为不可达，因此探索范围等同于“已加载且连通”的轨道区域。
+ *
+ * <p>当启用 {@link ChunkLoadOptions} 后，会在“沿轨道扩张”的过程中按需异步加载相邻区块（不会随便扩张）。
  */
 public final class ConnectedRailNodeDiscoverySession {
 
@@ -49,6 +55,17 @@ public final class ConnectedRailNodeDiscoverySession {
   private final ArrayDeque<Chunk> chunkQueue = new ArrayDeque<>();
   private final Set<Long> queuedChunkKeys = new HashSet<>();
 
+  private ChunkLoadOptions chunkLoadOptions = ChunkLoadOptions.disabled();
+  private int chunkBudgetRemaining;
+
+  private final ArrayDeque<Long> chunkLoadQueue = new ArrayDeque<>();
+  private final Set<Long> pendingLoadChunkKeys = new HashSet<>();
+  private final Set<Long> processedChunkKeys = new HashSet<>();
+  private final Set<Long> blockedChunkKeys = new HashSet<>();
+  private final Set<Long> failedChunkKeys = new HashSet<>();
+  private final Map<Long, CompletableFuture<Chunk>> inFlightChunkLoads = new HashMap<>();
+  private final Map<Long, Set<RailBlockPos>> pendingRailCandidatesByChunk = new HashMap<>();
+
   private BlockState[] currentStates;
   private int stateIndex;
   private final Set<RailBlockPos> scannedSignBlocks = new HashSet<>();
@@ -62,11 +79,13 @@ public final class ConnectedRailNodeDiscoverySession {
       World world,
       Set<RailBlockPos> seedRails,
       RailBlockAccess access,
-      Consumer<String> debugLogger) {
+      Consumer<String> debugLogger,
+      ChunkLoadOptions chunkLoadOptions) {
     this.world = Objects.requireNonNull(world, "world");
     this.worldId = world.getUID();
     this.access = Objects.requireNonNull(access, "access");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    beginChunkLoading(chunkLoadOptions);
 
     for (RailBlockPos seed : seedRails) {
       if (seed == null) {
@@ -82,10 +101,45 @@ public final class ConnectedRailNodeDiscoverySession {
     }
   }
 
+  public void beginChunkLoading(ChunkLoadOptions options) {
+    this.chunkLoadOptions = options != null ? options : ChunkLoadOptions.disabled();
+    this.chunkBudgetRemaining = this.chunkLoadOptions.maxChunks();
+    if (!this.chunkLoadOptions.enabled()) {
+      return;
+    }
+    scheduleBlockedChunks();
+  }
+
+  private void scheduleBlockedChunks() {
+    if (!chunkLoadOptions.enabled() || chunkBudgetRemaining <= 0 || blockedChunkKeys.isEmpty()) {
+      return;
+    }
+    for (Iterator<Long> iterator = blockedChunkKeys.iterator(); iterator.hasNext(); ) {
+      long key = iterator.next();
+      if (chunkBudgetRemaining <= 0) {
+        return;
+      }
+      if (!pendingRailCandidatesByChunk.containsKey(key)) {
+        iterator.remove();
+        continue;
+      }
+      int chunkX = chunkX(key);
+      int chunkZ = chunkZ(key);
+      if (world.isChunkLoaded(chunkX, chunkZ)) {
+        iterator.remove();
+        processLoadedChunk(key, chunkX, chunkZ);
+        continue;
+      }
+      iterator.remove();
+      scheduleChunkLoad(key);
+    }
+  }
+
   public int step(long deadlineNanos, Map<String, RailNodeRecord> byNodeId) {
     Objects.requireNonNull(byNodeId, "byNodeId");
     int progressed = 0;
     while (System.nanoTime() < deadlineNanos) {
+      progressed += stepChunkLoads();
       if (currentStates != null) {
         if (stateIndex >= currentStates.length) {
           currentStates = null;
@@ -194,8 +248,7 @@ public final class ConnectedRailNodeDiscoverySession {
 
       scanSignsFromRailPiece(current, byNodeId);
 
-      Set<RailBlockPos> neighbors = access.neighbors(current);
-      if (neighbors.size() >= 3) {
+      if (junctionCount(current) >= 3) {
         var nodeId = SwitcherSignDefinitionParser.nodeIdForRail(world.getName(), current);
         byNodeId.putIfAbsent(
             nodeId.value(),
@@ -210,21 +263,189 @@ public final class ConnectedRailNodeDiscoverySession {
                 Optional.empty()));
       }
 
-      for (RailBlockPos neighbor : neighbors) {
-        if (neighbor == null) {
+      if (!chunkLoadOptions.enabled()) {
+        Set<RailBlockPos> neighbors = access.neighbors(current);
+        for (RailBlockPos neighbor : neighbors) {
+          if (neighbor == null) {
+            continue;
+          }
+          if (!access.isRail(neighbor)) {
+            continue;
+          }
+          if (visitedRails.add(neighbor)) {
+            railQueue.add(neighbor);
+            queueChunk(neighbor.x() >> 4, neighbor.z() >> 4);
+          }
+        }
+        continue;
+      }
+
+      Set<RailBlockPos> candidates = access.neighborCandidates(current);
+      for (RailBlockPos candidate : candidates) {
+        if (candidate == null) {
           continue;
         }
-        if (!access.isRail(neighbor)) {
+        int chunkX = candidate.x() >> 4;
+        int chunkZ = candidate.z() >> 4;
+        if (world.isChunkLoaded(chunkX, chunkZ)) {
+          queueRailCandidate(candidate);
           continue;
         }
-        if (visitedRails.add(neighbor)) {
-          railQueue.add(neighbor);
-          queueChunk(neighbor.x() >> 4, neighbor.z() >> 4);
-        }
+        long key = chunkKey(chunkX, chunkZ);
+        pendingRailCandidatesByChunk
+            .computeIfAbsent(key, ignored -> new HashSet<>())
+            .add(candidate);
+        scheduleChunkLoad(key);
       }
     }
 
     return progressed;
+  }
+
+  private int stepChunkLoads() {
+    if (!chunkLoadOptions.enabled()) {
+      return 0;
+    }
+
+    int progressed = 0;
+    progressed += completeChunkLoads();
+    progressed += startChunkLoads();
+    return progressed;
+  }
+
+  private int completeChunkLoads() {
+    if (inFlightChunkLoads.isEmpty()) {
+      return 0;
+    }
+    int completed = 0;
+    for (Iterator<Map.Entry<Long, CompletableFuture<Chunk>>> iterator =
+            inFlightChunkLoads.entrySet().iterator();
+        iterator.hasNext(); ) {
+      Map.Entry<Long, CompletableFuture<Chunk>> entry = iterator.next();
+      CompletableFuture<Chunk> future = entry.getValue();
+      if (future == null || !future.isDone()) {
+        continue;
+      }
+
+      long key = entry.getKey();
+      iterator.remove();
+      pendingLoadChunkKeys.remove(key);
+
+      Chunk chunk;
+      try {
+        chunk = future.join();
+      } catch (Throwable ex) {
+        failedChunkKeys.add(key);
+        pendingRailCandidatesByChunk.remove(key);
+        debugLogger.accept(
+            "区块异步加载失败: world="
+                + world.getName()
+                + " chunk=("
+                + chunkX(key)
+                + ","
+                + chunkZ(key)
+                + ")");
+        continue;
+      }
+
+      if (chunk == null) {
+        failedChunkKeys.add(key);
+        pendingRailCandidatesByChunk.remove(key);
+        continue;
+      }
+
+      processLoadedChunk(key, chunkX(key), chunkZ(key));
+      completed++;
+    }
+    return completed;
+  }
+
+  private void processLoadedChunk(long key, int chunkX, int chunkZ) {
+    processedChunkKeys.add(key);
+    blockedChunkKeys.remove(key);
+    queueChunk(chunkX, chunkZ);
+    Set<RailBlockPos> candidates = pendingRailCandidatesByChunk.remove(key);
+    if (candidates == null || candidates.isEmpty()) {
+      return;
+    }
+    for (RailBlockPos candidate : candidates) {
+      queueRailCandidate(candidate);
+    }
+  }
+
+  private int startChunkLoads() {
+    if (chunkLoadQueue.isEmpty()) {
+      return 0;
+    }
+    if (inFlightChunkLoads.size() >= chunkLoadOptions.maxConcurrentLoads()) {
+      return 0;
+    }
+
+    int started = 0;
+    while (inFlightChunkLoads.size() < chunkLoadOptions.maxConcurrentLoads()) {
+      Long key = chunkLoadQueue.poll();
+      if (key == null) {
+        break;
+      }
+      pendingLoadChunkKeys.remove(key);
+      int chunkX = chunkX(key);
+      int chunkZ = chunkZ(key);
+      if (world.isChunkLoaded(chunkX, chunkZ)) {
+        chunkBudgetRemaining++;
+        processLoadedChunk(key, chunkX, chunkZ);
+        continue;
+      }
+      CompletableFuture<Chunk> future = world.getChunkAtAsync(chunkX, chunkZ, false, false);
+      inFlightChunkLoads.put(key, future);
+      started++;
+    }
+    return started;
+  }
+
+  private void scheduleChunkLoad(long key) {
+    if (!chunkLoadOptions.enabled()) {
+      return;
+    }
+    if (processedChunkKeys.contains(key) || failedChunkKeys.contains(key)) {
+      return;
+    }
+    if (pendingLoadChunkKeys.contains(key) || inFlightChunkLoads.containsKey(key)) {
+      return;
+    }
+    if (chunkBudgetRemaining <= 0) {
+      blockedChunkKeys.add(key);
+      return;
+    }
+    chunkBudgetRemaining--;
+    pendingLoadChunkKeys.add(key);
+    chunkLoadQueue.add(key);
+  }
+
+  private void queueRailCandidate(RailBlockPos candidate) {
+    if (candidate == null) {
+      return;
+    }
+    if (!world.isChunkLoaded(candidate.x() >> 4, candidate.z() >> 4)) {
+      return;
+    }
+    RailPiece piece =
+        RailPiece.create(world.getBlockAt(candidate.x(), candidate.y(), candidate.z()));
+    if (piece == null || piece.isNone()) {
+      return;
+    }
+    Block railBlock = piece.block();
+    RailBlockPos anchor = new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
+    if (visitedRails.add(anchor)) {
+      railQueue.add(anchor);
+      queueChunk(anchor.x() >> 4, anchor.z() >> 4);
+    }
+  }
+
+  private int junctionCount(RailBlockPos railPos) {
+    if (railPos == null) {
+      return 0;
+    }
+    return access.neighbors(railPos).size();
   }
 
   private void queueChunk(int chunkX, int chunkZ) {
@@ -239,7 +460,19 @@ public final class ConnectedRailNodeDiscoverySession {
   }
 
   public boolean isDone() {
-    return railQueue.isEmpty() && chunkQueue.isEmpty() && currentStates == null;
+    return isIdle() && blockedChunkKeys.isEmpty();
+  }
+
+  public boolean isPaused() {
+    return isIdle() && !blockedChunkKeys.isEmpty();
+  }
+
+  private boolean isIdle() {
+    return railQueue.isEmpty()
+        && chunkQueue.isEmpty()
+        && currentStates == null
+        && chunkLoadQueue.isEmpty()
+        && inFlightChunkLoads.isEmpty();
   }
 
   public Set<RailBlockPos> visitedRails() {
@@ -268,6 +501,30 @@ public final class ConnectedRailNodeDiscoverySession {
 
   public int scannedChunks() {
     return queuedChunkKeys.size();
+  }
+
+  public int pendingChunksToLoad() {
+    return blockedChunkKeys.size();
+  }
+
+  public int inFlightChunks() {
+    return inFlightChunkLoads.size();
+  }
+
+  public int failedChunks() {
+    return failedChunkKeys.size();
+  }
+
+  private static long chunkKey(int chunkX, int chunkZ) {
+    return (((long) chunkX) << 32) ^ (chunkZ & 0xffffffffL);
+  }
+
+  private static int chunkX(long key) {
+    return (int) (key >> 32);
+  }
+
+  private static int chunkZ(long key) {
+    return (int) key;
   }
 
   private void scanSignsFromRailPiece(RailBlockPos railPos, Map<String, RailNodeRecord> byNodeId) {

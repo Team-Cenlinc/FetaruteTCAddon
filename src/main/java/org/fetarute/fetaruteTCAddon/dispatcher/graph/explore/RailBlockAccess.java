@@ -18,6 +18,15 @@ public interface RailBlockAccess {
   Set<RailBlockPos> neighbors(RailBlockPos pos);
 
   /**
+   * 返回“可能连通”的邻居候选集合：允许包含位于未加载区块中的候选。
+   *
+   * <p>默认实现等同于 {@link #neighbors(RailBlockPos)}；需要支持“沿轨道异步加载区块”的访问器可覆盖该方法。
+   */
+  default Set<RailBlockPos> neighborCandidates(RailBlockPos pos) {
+    return neighbors(pos);
+  }
+
+  /**
    * 返回从 from 移动到 to 的“距离代价”（同一单位内可视作米/方块）。
    *
    * <p>默认实现为单位权重，等价于“每步 1 格”；若底层轨道具有几何长度（如 TCCoasters）， 实现可返回更精确的代价以改善距离与 ETA 计算。

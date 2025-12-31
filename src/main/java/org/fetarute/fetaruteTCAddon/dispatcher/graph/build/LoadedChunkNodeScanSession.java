@@ -24,7 +24,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  *
  * <ul>
  *   <li>本插件节点牌子：waypoint/autostation/depot
- *   <li>TrainCarts 节点牌子：switcher/tag
+ *   <li>TrainCarts 节点牌子：switcher
  * </ul>
  *
  * <p>注意：该扫描不会主动加载区块，因此“未加载区域”的节点不会被发现。

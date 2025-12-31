@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,20 +21,29 @@ import org.bukkit.block.Sign;
 import org.bukkit.block.sign.Side;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ChunkLoadOptions;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildCompletion;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildContinuation;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob.BuildMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildOutcome;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphMultiSourceExplorerSession;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
@@ -56,7 +67,9 @@ import org.incendo.cloud.parser.standard.StringParser;
  *   <li>explore_edges：在轨道方块图上用多源 Dijkstra 计算节点之间区间距离
  * </ul>
  *
- * <p>重要约束：构建过程不会主动加载区块；未加载区块会被视为不可达，因此线上运维应先预加载线路区域再执行 build。
+ * <p>重要约束：默认不会主动加载区块；未加载区块会被视为不可达，因此线上运维应先预加载线路区域再执行 build。
+ *
+ * <p>如需“沿轨道自动加载区块”，可使用 {@code --loadChunks}（建议配合 {@code --maxChunks} 以免误加载过多区域）。
  *
  * <p>HERE 模式起点优先级：
  *
@@ -69,9 +82,18 @@ public final class FtaGraphCommand {
 
   private final FetaruteTCAddon plugin;
   private final ConcurrentMap<UUID, RailGraphBuildJob> jobs = new ConcurrentHashMap<>();
+  private final ConcurrentMap<GraphBuildCacheKey, RailGraphBuildContinuation> continuations =
+      new ConcurrentHashMap<>();
 
   public FtaGraphCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
+  }
+
+  private record GraphBuildCacheKey(UUID worldId, Optional<UUID> ownerId) {
+    private GraphBuildCacheKey {
+      Objects.requireNonNull(worldId, "worldId");
+      ownerId = ownerId != null ? ownerId : Optional.empty();
+    }
   }
 
   public void register(CommandManager<CommandSender> manager) {
@@ -82,6 +104,21 @@ public final class FtaGraphCommand {
                 CommandComponent.<CommandSender, Integer>builder(
                         "tickBudgetMs", IntegerParser.integerParser())
                     .suggestionProvider(CommandSuggestionProviders.placeholder("<ms>")))
+            .build();
+    CommandFlag<Void> loadChunksFlag = CommandFlag.builder("loadChunks").build();
+    var maxChunksFlag =
+        CommandFlag.<CommandSender>builder("maxChunks")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "maxChunks", IntegerParser.integerParser())
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<n>")))
+            .build();
+    var maxConcurrentLoadsFlag =
+        CommandFlag.<CommandSender>builder("maxConcurrentLoads")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "maxConcurrentLoads", IntegerParser.integerParser())
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<n>")))
             .build();
     CommandFlag<Void> allFlag = CommandFlag.builder("all").build();
     CommandFlag<Void> hereFlag = CommandFlag.builder("here").build();
@@ -101,6 +138,9 @@ public final class FtaGraphCommand {
             .literal("build")
             .flag(syncFlag)
             .flag(tickBudgetMsFlag)
+            .flag(loadChunksFlag)
+            .flag(maxChunksFlag)
+            .flag(maxConcurrentLoadsFlag)
             .flag(allFlag)
             .flag(hereFlag)
             .flag(tccFlag)
@@ -201,13 +241,37 @@ public final class FtaGraphCommand {
 
                   Integer tickBudgetMsValue = ctx.flags().getValue(tickBudgetMsFlag, 1);
                   int tickBudgetMs = tickBudgetMsValue != null ? tickBudgetMsValue : 1;
+
+                  boolean loadChunks = ctx.flags().isPresent(loadChunksFlag);
+                  if (loadChunks && mode != BuildMode.HERE) {
+                    sender.sendMessage(
+                        locale.component("command.graph.build.load-chunks-here-only"));
+                    return;
+                  }
+                  Integer maxChunksValue = ctx.flags().getValue(maxChunksFlag, 256);
+                  int maxChunks = maxChunksValue != null ? maxChunksValue : 256;
+                  Integer maxConcurrentLoadsValue = ctx.flags().getValue(maxConcurrentLoadsFlag, 4);
+                  int maxConcurrentLoads =
+                      maxConcurrentLoadsValue != null ? maxConcurrentLoadsValue : 4;
+                  ChunkLoadOptions chunkLoadOptions =
+                      loadChunks
+                          ? new ChunkLoadOptions(true, maxChunks, maxConcurrentLoads)
+                          : ChunkLoadOptions.disabled();
+                  GraphBuildCacheKey cacheKey = cacheKey(worldId, sender);
+
                   boolean sync = ctx.flags().isPresent(syncFlag);
                   if (sync) {
                     try {
                       long startNanos = System.nanoTime();
                       RailGraphBuildResult result =
                           buildSync(world, mode, seedNode, seedRails, preseedNodes);
-                      onBuildSuccess(world, result);
+                      RailGraphBuildOutcome outcome =
+                          new RailGraphBuildOutcome(
+                              result,
+                              RailGraphBuildCompletion.PARTIAL_UNLOADED_CHUNKS,
+                              Optional.empty());
+                      AppliedGraphBuild applied =
+                          applyBuildSuccess(world, outcome.result(), outcome.completion());
                       long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
                       sender.sendMessage(
                           locale.component(
@@ -216,12 +280,15 @@ public final class FtaGraphCommand {
                                   "world",
                                   world.getName(),
                                   "nodes",
-                                  String.valueOf(result.graph().nodes().size()),
+                                  String.valueOf(applied.result().graph().nodes().size()),
                                   "edges",
-                                  String.valueOf(result.graph().edges().size()),
+                                  String.valueOf(applied.result().graph().edges().size()),
                                   "took_ms",
                                   String.valueOf(tookMs))));
-                      sendMissingSwitcherWarnings(sender, world, result);
+                      applied
+                          .merge()
+                          .ifPresent(merge -> sender.sendMessage(mergeBuildMessage(locale, merge)));
+                      sendMissingSwitcherWarnings(sender, world, applied.result());
                     } catch (IllegalStateException ex) {
                       sender.sendMessage(locale.component("command.graph.build.no-nodes"));
                     }
@@ -238,8 +305,15 @@ public final class FtaGraphCommand {
                           seedRails,
                           preseedNodes,
                           tickBudgetMs,
-                          result -> {
-                            onBuildSuccess(world, result);
+                          chunkLoadOptions,
+                          outcome -> {
+                            AppliedGraphBuild applied =
+                                applyBuildSuccess(world, outcome.result(), outcome.completion());
+                            outcome
+                                .continuation()
+                                .ifPresentOrElse(
+                                    cont -> continuations.put(cacheKey, cont),
+                                    () -> continuations.remove(cacheKey));
                             long tookMs =
                                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
                             plugin
@@ -255,12 +329,32 @@ public final class FtaGraphCommand {
                                                   "world",
                                                   world.getName(),
                                                   "nodes",
-                                                  String.valueOf(result.graph().nodes().size()),
+                                                  String.valueOf(
+                                                      applied.result().graph().nodes().size()),
                                                   "edges",
-                                                  String.valueOf(result.graph().edges().size()),
+                                                  String.valueOf(
+                                                      applied.result().graph().edges().size()),
                                                   "took_ms",
                                                   String.valueOf(tookMs))));
-                                      sendMissingSwitcherWarnings(sender, world, result);
+                                      applied
+                                          .merge()
+                                          .ifPresent(
+                                              merge ->
+                                                  sender.sendMessage(
+                                                      mergeBuildMessage(locale, merge)));
+                                      outcome
+                                          .continuation()
+                                          .ifPresent(
+                                              cont ->
+                                                  sender.sendMessage(
+                                                      locale.component(
+                                                          "command.graph.build.paused",
+                                                          Map.of(
+                                                              "pending_chunks",
+                                                              String.valueOf(
+                                                                  cont.discoverySession()
+                                                                      .pendingChunksToLoad())))));
+                                      sendMissingSwitcherWarnings(sender, world, applied.result());
                                     });
                             jobs.remove(worldId);
                           },
@@ -293,6 +387,139 @@ public final class FtaGraphCommand {
                   }
                   job.start();
                   sender.sendMessage(locale.component("command.graph.build.started"));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("continue")
+            .flag(tickBudgetMsFlag)
+            .flag(maxChunksFlag)
+            .flag(maxConcurrentLoadsFlag)
+            .permission("fetarute.graph.continue")
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  UUID worldId = world.getUID();
+                  if (jobs.containsKey(worldId)) {
+                    sender.sendMessage(locale.component("command.graph.build.running"));
+                    return;
+                  }
+
+                  GraphBuildCacheKey cacheKey = cacheKey(worldId, sender);
+                  RailGraphBuildContinuation continuation = continuations.get(cacheKey);
+                  if (continuation == null) {
+                    sender.sendMessage(locale.component("command.graph.continue.none"));
+                    return;
+                  }
+
+                  Integer tickBudgetMsValue = ctx.flags().getValue(tickBudgetMsFlag, 1);
+                  int tickBudgetMs = tickBudgetMsValue != null ? tickBudgetMsValue : 1;
+                  Integer maxChunksValue = ctx.flags().getValue(maxChunksFlag, 256);
+                  int maxChunks = maxChunksValue != null ? maxChunksValue : 256;
+                  Integer maxConcurrentLoadsValue = ctx.flags().getValue(maxConcurrentLoadsFlag, 4);
+                  int maxConcurrentLoads =
+                      maxConcurrentLoadsValue != null ? maxConcurrentLoadsValue : 4;
+
+                  ChunkLoadOptions chunkLoadOptions =
+                      new ChunkLoadOptions(true, maxChunks, maxConcurrentLoads);
+
+                  long startNanos = System.nanoTime();
+                  RailGraphBuildJob job =
+                      new RailGraphBuildJob(
+                          plugin,
+                          world,
+                          continuation,
+                          tickBudgetMs,
+                          chunkLoadOptions,
+                          outcome -> {
+                            AppliedGraphBuild applied =
+                                applyBuildSuccess(world, outcome.result(), outcome.completion());
+                            outcome
+                                .continuation()
+                                .ifPresentOrElse(
+                                    cont -> continuations.put(cacheKey, cont),
+                                    () -> continuations.remove(cacheKey));
+                            long tookMs =
+                                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+                            plugin
+                                .getServer()
+                                .getScheduler()
+                                .runTask(
+                                    plugin,
+                                    () -> {
+                                      sender.sendMessage(
+                                          locale.component(
+                                              "command.graph.build.success",
+                                              Map.of(
+                                                  "world",
+                                                  world.getName(),
+                                                  "nodes",
+                                                  String.valueOf(
+                                                      applied.result().graph().nodes().size()),
+                                                  "edges",
+                                                  String.valueOf(
+                                                      applied.result().graph().edges().size()),
+                                                  "took_ms",
+                                                  String.valueOf(tookMs))));
+                                      applied
+                                          .merge()
+                                          .ifPresent(
+                                              merge ->
+                                                  sender.sendMessage(
+                                                      mergeBuildMessage(locale, merge)));
+                                      outcome
+                                          .continuation()
+                                          .ifPresent(
+                                              cont ->
+                                                  sender.sendMessage(
+                                                      locale.component(
+                                                          "command.graph.build.paused",
+                                                          Map.of(
+                                                              "pending_chunks",
+                                                              String.valueOf(
+                                                                  cont.discoverySession()
+                                                                      .pendingChunksToLoad())))));
+                                      sendMissingSwitcherWarnings(sender, world, applied.result());
+                                    });
+                            jobs.remove(worldId);
+                          },
+                          ex -> {
+                            plugin.getLogger().warning("调度图构建失败: " + ex.getMessage());
+                            plugin
+                                .getServer()
+                                .getScheduler()
+                                .runTask(
+                                    plugin,
+                                    () -> {
+                                      if (ex instanceof IllegalStateException) {
+                                        sender.sendMessage(
+                                            locale.component("command.graph.build.no-nodes"));
+                                        return;
+                                      }
+                                      sender.sendMessage(
+                                          locale.component(
+                                              "command.graph.build.failed",
+                                              Map.of(
+                                                  "error",
+                                                  ex.getMessage() != null ? ex.getMessage() : "")));
+                                    });
+                            jobs.remove(worldId);
+                          },
+                          plugin.getLoggerManager()::debug);
+                  if (jobs.putIfAbsent(worldId, job) != null) {
+                    sender.sendMessage(locale.component("command.graph.build.running"));
+                    return;
+                  }
+                  job.start();
+                  sender.sendMessage(locale.component("command.graph.continue.started"));
                 }));
 
     manager.command(
@@ -442,6 +669,118 @@ public final class FtaGraphCommand {
         manager
             .commandBuilder("fta")
             .literal("graph")
+            .literal("delete")
+            .permission("fetarute.graph.delete")
+            .handler(
+                ctx -> {
+                  World world = resolveWorld(ctx.sender());
+                  if (world == null) {
+                    ctx.sender().sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  UUID worldId = world.getUID();
+                  if (jobs.containsKey(worldId)) {
+                    ctx.sender().sendMessage(locale.component("command.graph.build.running"));
+                    return;
+                  }
+
+                  boolean hadSnapshot = plugin.getRailGraphService().getSnapshot(world).isPresent();
+                  boolean deletedFromStorage = deleteGraphFromStorage(world);
+                  plugin.getRailGraphService().clearSnapshot(world);
+                  continuations.keySet().removeIf(key -> worldId.equals(key.worldId()));
+
+                  if (!hadSnapshot && !deletedFromStorage) {
+                    ctx.sender().sendMessage(locale.component("command.graph.delete.none"));
+                    return;
+                  }
+                  ctx.sender()
+                      .sendMessage(
+                          locale.component(
+                              "command.graph.delete.success", Map.of("world", world.getName())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("delete")
+            .literal("here")
+            .senderType(Player.class)
+            .permission("fetarute.graph.delete")
+            .handler(
+                ctx -> {
+                  Player player = (Player) ctx.sender();
+                  World world = player.getWorld();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  UUID worldId = world.getUID();
+                  if (jobs.containsKey(worldId)) {
+                    player.sendMessage(locale.component("command.graph.build.running"));
+                    return;
+                  }
+
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      plugin.getRailGraphService().getSnapshot(world);
+                  if (snapshotOpt.isEmpty()) {
+                    player.sendMessage(locale.component("command.graph.info.missing"));
+                    return;
+                  }
+                  RailGraphService.RailGraphSnapshot snapshot = snapshotOpt.get();
+                  RailGraph graph = snapshot.graph();
+
+                  Optional<RailNode> seedOpt =
+                      findNearestGraphNode(
+                          graph,
+                          new Vector(
+                              player.getLocation().getBlockX(),
+                              player.getLocation().getBlockY(),
+                              player.getLocation().getBlockZ()),
+                          32);
+                  if (seedOpt.isEmpty()) {
+                    player.sendMessage(locale.component("command.graph.delete.here.no-seed"));
+                    return;
+                  }
+                  NodeId seed = seedOpt.get().id();
+
+                  RailGraphMerger.RemoveResult removed =
+                      RailGraphMerger.removeComponents(graph, Set.of(seed));
+                  RailGraph nextGraph = removed.graph();
+                  if (removed.totalNodes() <= 0) {
+                    deleteGraphFromStorage(world);
+                    plugin.getRailGraphService().clearSnapshot(world);
+                    continuations.keySet().removeIf(key -> worldId.equals(key.worldId()));
+                  } else {
+                    java.time.Instant now = java.time.Instant.now();
+                    plugin.getRailGraphService().putSnapshot(world, nextGraph, now);
+                    List<RailNodeRecord> nodes = nodeRecordsFromGraph(worldId, nextGraph);
+                    String signature = RailGraphSignature.signatureForNodes(nodes);
+                    persistGraph(
+                        world,
+                        new RailGraphBuildResult(nextGraph, now, signature, nodes, List.of()));
+                  }
+
+                  player.sendMessage(
+                      locale.component(
+                          "command.graph.delete.here.success",
+                          Map.of(
+                              "seed",
+                              seed.value(),
+                              "removed_components",
+                              String.valueOf(removed.removedComponentCount()),
+                              "removed_nodes",
+                              String.valueOf(removed.removedNodes()),
+                              "removed_edges",
+                              String.valueOf(removed.removedEdges()),
+                              "total_nodes",
+                              String.valueOf(removed.totalNodes()),
+                              "total_edges",
+                              String.valueOf(removed.totalEdges()))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
             .literal("info")
             .permission("fetarute.graph.info")
             .handler(
@@ -453,15 +792,89 @@ public final class FtaGraphCommand {
                   }
                   LocaleManager locale = plugin.getLocaleManager();
                   RailGraphService service = plugin.getRailGraphService();
-                  RailGraph graph =
-                      service
-                          .getSnapshot(world)
-                          .map(RailGraphService.RailGraphSnapshot::graph)
-                          .orElse(null);
-                  if (graph == null) {
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      service.getSnapshot(world);
+                  if (snapshotOpt.isEmpty()) {
                     ctx.sender().sendMessage(locale.component("command.graph.info.missing"));
                     return;
                   }
+                  RailGraphService.RailGraphSnapshot snapshot = snapshotOpt.get();
+                  RailGraph graph = snapshot.graph();
+
+                  int blockedEdges = 0;
+                  for (RailEdge edge : graph.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    if (graph.isBlocked(edge.id())) {
+                      blockedEdges++;
+                    }
+                  }
+
+                  int waypointNodes = 0;
+                  int stationNodes = 0;
+                  int depotNodes = 0;
+                  int destinationNodes = 0;
+                  int switcherNodes = 0;
+                  int switcherSignNodes = 0;
+                  int switcherAutoNodes = 0;
+                  int isolatedNodes = 0;
+                  for (RailNode node : graph.nodes()) {
+                    if (node == null) {
+                      continue;
+                    }
+                    NodeType type = node.type();
+                    if (type == null) {
+                      continue;
+                    }
+                    switch (type) {
+                      case WAYPOINT -> waypointNodes++;
+                      case STATION -> stationNodes++;
+                      case DEPOT -> depotNodes++;
+                      case DESTINATION -> destinationNodes++;
+                      case SWITCHER -> {
+                        switcherNodes++;
+                        if (node.trainCartsDestination()
+                            .filter(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER::equals)
+                            .isPresent()) {
+                          switcherSignNodes++;
+                        } else {
+                          switcherAutoNodes++;
+                        }
+                      }
+                    }
+                    if (graph.edgesFrom(node.id()).isEmpty()) {
+                      isolatedNodes++;
+                    }
+                  }
+
+                  int componentCount = 0;
+                  Set<NodeId> visited = new HashSet<>();
+                  ArrayDeque<NodeId> queue = new ArrayDeque<>();
+                  for (RailNode node : graph.nodes()) {
+                    if (node == null) {
+                      continue;
+                    }
+                    NodeId nodeId = node.id();
+                    if (nodeId == null || !visited.add(nodeId)) {
+                      continue;
+                    }
+                    componentCount++;
+                    queue.add(nodeId);
+                    while (!queue.isEmpty()) {
+                      NodeId current = queue.poll();
+                      for (RailEdge edge : graph.edgesFrom(current)) {
+                        if (edge == null) {
+                          continue;
+                        }
+                        NodeId neighbor = current.equals(edge.from()) ? edge.to() : edge.from();
+                        if (neighbor != null && visited.add(neighbor)) {
+                          queue.add(neighbor);
+                        }
+                      }
+                    }
+                  }
+
                   ctx.sender()
                       .sendMessage(
                           locale.component(
@@ -473,12 +886,53 @@ public final class FtaGraphCommand {
                                   String.valueOf(graph.nodes().size()),
                                   "edges",
                                   String.valueOf(graph.edges().size()))));
+                  ctx.sender()
+                      .sendMessage(
+                          locale.component(
+                              "command.graph.info.meta",
+                              Map.of(
+                                  "built_at",
+                                  snapshot.builtAt().toString(),
+                                  "components",
+                                  String.valueOf(componentCount),
+                                  "blocked_edges",
+                                  String.valueOf(blockedEdges),
+                                  "isolated_nodes",
+                                  String.valueOf(isolatedNodes))));
+                  ctx.sender()
+                      .sendMessage(
+                          locale.component(
+                              "command.graph.info.nodes",
+                              Map.of(
+                                  "waypoint",
+                                  String.valueOf(waypointNodes),
+                                  "station",
+                                  String.valueOf(stationNodes),
+                                  "depot",
+                                  String.valueOf(depotNodes),
+                                  "destination",
+                                  String.valueOf(destinationNodes),
+                                  "switcher",
+                                  String.valueOf(switcherNodes))));
+                  ctx.sender()
+                      .sendMessage(
+                          locale.component(
+                              "command.graph.info.switcher",
+                              Map.of(
+                                  "switcher_sign",
+                                  String.valueOf(switcherSignNodes),
+                                  "switcher_auto",
+                                  String.valueOf(switcherAutoNodes))));
 
                   List<RailEdge> top =
                       graph.edges().stream()
                           .sorted(Comparator.comparingInt(RailEdge::lengthBlocks).reversed())
                           .limit(10)
                           .toList();
+                  if (!top.isEmpty()) {
+                    ctx.sender()
+                        .sendMessage(locale.component("command.graph.info.edge-top-header"));
+                  }
                   for (RailEdge edge : top) {
                     ctx.sender()
                         .sendMessage(
@@ -493,6 +947,14 @@ public final class FtaGraphCommand {
                                     String.valueOf(edge.lengthBlocks()))));
                   }
                 }));
+  }
+
+  private GraphBuildCacheKey cacheKey(UUID worldId, CommandSender sender) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(sender, "sender");
+    Optional<UUID> ownerId =
+        sender instanceof Player player ? Optional.of(player.getUniqueId()) : Optional.empty();
+    return new GraphBuildCacheKey(worldId, ownerId);
   }
 
   private void sendHelp(CommandSender sender) {
@@ -544,7 +1006,11 @@ public final class FtaGraphCommand {
       }
       var discovery =
           new org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ConnectedRailNodeDiscoverySession(
-              world, anchors, access, plugin.getLoggerManager()::debug);
+              world,
+              anchors,
+              access,
+              plugin.getLoggerManager()::debug,
+              ChunkLoadOptions.disabled());
       while (!discovery.isDone()) {
         discovery.step(System.nanoTime() + 1_000_000_000L, byNodeId);
       }
@@ -688,10 +1154,89 @@ public final class FtaGraphCommand {
         finalGraph, builtAt, signature, nodes, List.copyOf(missingSwitchers));
   }
 
-  private void onBuildSuccess(World world, RailGraphBuildResult result) {
+  private AppliedGraphBuild applyBuildSuccess(
+      World world, RailGraphBuildResult result, RailGraphBuildCompletion completion) {
     RailGraphService service = plugin.getRailGraphService();
+    Optional<RailGraphService.RailGraphSnapshot> existing = service.getSnapshot(world);
+    if (existing.isPresent()) {
+      RailGraphMerger.MergeResult merge =
+          completion != null && completion.canReplaceComponents()
+              ? RailGraphMerger.appendOrReplaceComponents(existing.get().graph(), result.graph())
+              : RailGraphMerger.upsert(existing.get().graph(), result.graph());
+      List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(world.getUID(), merge.graph());
+      String signature = RailGraphSignature.signatureForNodes(mergedNodes);
+      RailGraphBuildResult merged =
+          new RailGraphBuildResult(
+              merge.graph(),
+              result.builtAt(),
+              signature,
+              mergedNodes,
+              result.missingSwitcherJunctions());
+      service.putSnapshot(world, merged.graph(), merged.builtAt());
+      persistGraph(world, merged);
+      return new AppliedGraphBuild(merged, Optional.of(merge));
+    }
+
     service.putSnapshot(world, result.graph(), result.builtAt());
     persistGraph(world, result);
+    return new AppliedGraphBuild(result, Optional.empty());
+  }
+
+  private static Component mergeBuildMessage(
+      LocaleManager locale, RailGraphMerger.MergeResult merge) {
+    String action =
+        switch (merge.action()) {
+          case APPEND -> "append";
+          case UPSERT -> "upsert";
+          case REPLACE_COMPONENTS -> "replace";
+        };
+    return locale.component(
+        "command.graph.build.merged",
+        Map.of(
+            "action",
+            action,
+            "replaced_components",
+            String.valueOf(merge.replacedComponentCount()),
+            "removed_nodes",
+            String.valueOf(merge.removedNodes()),
+            "removed_edges",
+            String.valueOf(merge.removedEdges()),
+            "total_nodes",
+            String.valueOf(merge.totalNodes()),
+            "total_edges",
+            String.valueOf(merge.totalEdges())));
+  }
+
+  private static List<RailNodeRecord> nodeRecordsFromGraph(UUID worldId, RailGraph graph) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(graph, "graph");
+    List<RailNodeRecord> records = new ArrayList<>();
+    for (RailNode node : graph.nodes()) {
+      if (node == null) {
+        continue;
+      }
+      Vector pos = node.worldPosition();
+      records.add(
+          new RailNodeRecord(
+              worldId,
+              node.id(),
+              node.type(),
+              pos.getBlockX(),
+              pos.getBlockY(),
+              pos.getBlockZ(),
+              node.trainCartsDestination(),
+              node.waypointMetadata()));
+    }
+    records.sort(Comparator.comparing(r -> r.nodeId().value()));
+    return List.copyOf(records);
+  }
+
+  private record AppliedGraphBuild(
+      RailGraphBuildResult result, Optional<RailGraphMerger.MergeResult> merge) {
+    private AppliedGraphBuild {
+      Objects.requireNonNull(result, "result");
+      Objects.requireNonNull(merge, "merge");
+    }
   }
 
   private void persistGraph(World world, RailGraphBuildResult result) {
@@ -735,6 +1280,34 @@ public final class FtaGraphCommand {
               });
     } catch (Exception ex) {
       plugin.getLogger().warning("持久化调度图失败: " + ex.getMessage());
+    }
+  }
+
+  private boolean deleteGraphFromStorage(World world) {
+    Objects.requireNonNull(world, "world");
+    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      return false;
+    }
+    Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
+    if (providerOpt.isEmpty()) {
+      return false;
+    }
+    StorageProvider provider = providerOpt.get();
+    UUID worldId = world.getUID();
+    try {
+      return provider
+          .transactionManager()
+          .execute(
+              () -> {
+                boolean existed = provider.railGraphSnapshots().findByWorld(worldId).isPresent();
+                provider.railNodes().deleteWorld(worldId);
+                provider.railEdges().deleteWorld(worldId);
+                provider.railGraphSnapshots().delete(worldId);
+                return existed;
+              });
+    } catch (Exception ex) {
+      plugin.getLogger().warning("删除调度图失败: " + ex.getMessage());
+      return false;
     }
   }
 
@@ -800,6 +1373,40 @@ public final class FtaGraphCommand {
     return Optional.ofNullable(best);
   }
 
+  private static Optional<RailNode> findNearestGraphNode(
+      RailGraph graph, Vector center, int maxDistanceBlocks) {
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(center, "center");
+    if (maxDistanceBlocks <= 0) {
+      throw new IllegalArgumentException("maxDistanceBlocks 必须为正数");
+    }
+
+    double maxDistanceSquared = maxDistanceBlocks * (double) maxDistanceBlocks;
+    RailNode best = null;
+    double bestDistanceSquared = Double.POSITIVE_INFINITY;
+    for (RailNode node : graph.nodes()) {
+      if (node == null) {
+        continue;
+      }
+      Vector nodePos = node.worldPosition();
+      if (nodePos == null) {
+        continue;
+      }
+      double dx = nodePos.getX() - center.getX();
+      double dy = nodePos.getY() - center.getY();
+      double dz = nodePos.getZ() - center.getZ();
+      double distanceSquared = dx * dx + dy * dy + dz * dz;
+      if (!Double.isFinite(distanceSquared) || distanceSquared > maxDistanceSquared) {
+        continue;
+      }
+      if (distanceSquared < bestDistanceSquared) {
+        bestDistanceSquared = distanceSquared;
+        best = node;
+      }
+    }
+    return Optional.ofNullable(best);
+  }
+
   private static List<RailNodeRecord> filterNodesInComponent(
       List<RailNodeRecord> discovered,
       Set<RailBlockPos> visitedRails,
@@ -831,7 +1438,7 @@ public final class FtaGraphCommand {
    * <p>该提示仅影响诊断与运维流程，不影响图本身的可用性：
    *
    * <ul>
-   *   <li>在 TrainCarts 线网中，建议为关键分叉放置 switcher/tag 牌子，便于运维封锁与行为对齐
+   *   <li>在 TrainCarts 线网中，建议为关键分叉放置 switcher 牌子，便于运维封锁与行为对齐
    *   <li>在 TCC 线网中通常不依赖牌子，本插件会生成自动 switcher 节点；因此若没有牌子也可能出现提示，可按需忽略
    * </ul>
    */

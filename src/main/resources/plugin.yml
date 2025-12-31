@@ -20,8 +20,10 @@ permissions:
     children:
       fetarute.graph: true
       fetarute.graph.build: true
+      fetarute.graph.continue: true
       fetarute.graph.status: true
       fetarute.graph.cancel: true
+      fetarute.graph.delete: true
       fetarute.graph.info: true
       fetarute.graph.sign: true
   fetarute.reload:
@@ -36,11 +38,17 @@ permissions:
   fetarute.graph.build:
     description: 构建并持久化调度图（/fta graph build）
     default: op
+  fetarute.graph.continue:
+    description: 续跑调度图构建任务（/fta graph continue）
+    default: op
   fetarute.graph.status:
     description: 查看调度图构建进度（/fta graph status）
     default: op
   fetarute.graph.cancel:
     description: 取消调度图构建任务（/fta graph cancel）
+    default: op
+  fetarute.graph.delete:
+    description: 删除调度图快照或局部分量（/fta graph delete）
     default: op
   fetarute.graph.info:
     description: 查看调度图摘要与区间距离（/fta graph info）

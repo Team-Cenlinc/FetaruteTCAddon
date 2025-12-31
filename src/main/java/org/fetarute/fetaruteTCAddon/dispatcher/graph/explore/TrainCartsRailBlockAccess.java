@@ -60,7 +60,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
   }
 
   @Override
-  public Set<RailBlockPos> neighbors(RailBlockPos pos) {
+  public Set<RailBlockPos> neighborCandidates(RailBlockPos pos) {
     if (!world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4)) {
       return Set.of();
     }
@@ -95,18 +95,8 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
         if (nextBlock == null) {
           continue;
         }
-        int cx = nextBlock.getX();
-        int cz = nextBlock.getZ();
-        if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
-          continue;
-        }
-        RailPiece neighborPiece = RailPiece.create(nextBlock);
-        if (neighborPiece == null || neighborPiece.isNone()) {
-          continue;
-        }
-        Block neighborBlock = neighborPiece.block();
         RailBlockPos neighborPos =
-            new RailBlockPos(neighborBlock.getX(), neighborBlock.getY(), neighborBlock.getZ());
+            new RailBlockPos(nextBlock.getX(), nextBlock.getY(), nextBlock.getZ());
         if (!pos.equals(neighborPos)) {
           neighbors.add(neighborPos);
         }
@@ -117,7 +107,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
     }
 
     Set<RailBlockPos> neighbors = new HashSet<>();
-    // 轨道类型未提供 junctions 时的保守回退：仅扫描相邻方块的轨道。
+    // 轨道类型未提供 junctions 时的保守回退：仅扫描相邻方块的轨道（不主动跨未加载区块，避免误触发大范围区块加载）。
     for (BlockFace face : FALLBACK_NEIGHBOR_FACES) {
       if (face == null || face == BlockFace.SELF) {
         continue;
@@ -129,6 +119,38 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
         continue;
       }
       RailPiece neighborPiece = RailPiece.create(candidate);
+      if (neighborPiece == null || neighborPiece.isNone()) {
+        continue;
+      }
+      Block neighborBlock = neighborPiece.block();
+      RailBlockPos neighborPos =
+          new RailBlockPos(neighborBlock.getX(), neighborBlock.getY(), neighborBlock.getZ());
+      if (!pos.equals(neighborPos)) {
+        neighbors.add(neighborPos);
+      }
+    }
+    return Set.copyOf(neighbors);
+  }
+
+  @Override
+  public Set<RailBlockPos> neighbors(RailBlockPos pos) {
+    Set<RailBlockPos> candidates = neighborCandidates(pos);
+    if (candidates.isEmpty()) {
+      return Set.of();
+    }
+
+    Set<RailBlockPos> neighbors = new HashSet<>();
+    for (RailBlockPos candidate : candidates) {
+      if (candidate == null) {
+        continue;
+      }
+      int cx = candidate.x();
+      int cz = candidate.z();
+      if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
+        continue;
+      }
+      Block candidateBlock = world.getBlockAt(candidate.x(), candidate.y(), candidate.z());
+      RailPiece neighborPiece = RailPiece.create(candidateBlock);
       if (neighborPiece == null || neighborPiece.isNone()) {
         continue;
       }
