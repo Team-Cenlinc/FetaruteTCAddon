@@ -41,4 +41,3 @@ final class ChunkLoadOptionsTest {
     assertEquals(4, options.maxConcurrentLoads());
   }
 }
-

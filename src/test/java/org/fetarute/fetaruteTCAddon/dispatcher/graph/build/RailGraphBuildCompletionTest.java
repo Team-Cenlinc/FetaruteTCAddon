@@ -15,4 +15,3 @@ final class RailGraphBuildCompletionTest {
     assertFalse(RailGraphBuildCompletion.PARTIAL_FAILED_CHUNK_LOADS.canReplaceComponents());
   }
 }
-

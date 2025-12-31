@@ -54,6 +54,13 @@ public final class RailGraphService {
     return Optional.ofNullable(snapshots.get(world.getUID()));
   }
 
+  /**
+   * 清空指定世界的内存快照。
+   *
+   * <p>注意：该方法只影响内存缓存，不会删除 SQL 中的快照记录；若需同时清理持久化数据，应由命令/运维逻辑另行处理。
+   *
+   * @return 是否存在并成功移除了快照
+   */
   public boolean clearSnapshot(World world) {
     Objects.requireNonNull(world, "world");
     return snapshots.remove(world.getUID()) != null;

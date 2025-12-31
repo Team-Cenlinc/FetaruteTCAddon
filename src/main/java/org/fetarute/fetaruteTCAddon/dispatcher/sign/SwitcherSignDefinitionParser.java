@@ -20,6 +20,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
  *
  * <p>注意：Switcher 牌子由 TrainCarts/TCCoasters 提供，并非本插件的自定义 SignAction。 因此这里只做“识别与纳入
  * RailGraph”的最小解析：NodeId 由“被控制的轨道方块”的世界名 + 坐标组成，保证在同一世界内唯一且稳定。
+ *
+ * <p>重要：这里只识别 {@code [train] switcher}（或 {@code [cart] switcher}），不会把 {@code [train] tag} 等其他 TC
+ * 牌子误认为 switcher。否则在常见线网中会产生大量“莫名其妙的 SWITCHER 节点”（noise nodes），干扰诊断与运维。
  */
 public final class SwitcherSignDefinitionParser {
 
@@ -56,6 +59,7 @@ public final class SwitcherSignDefinitionParser {
       return Optional.empty();
     }
     String header = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
+    // 只接受明确的 switcher 行为牌子：TC 的 tag 牌子通常用于标记/过滤，不代表“道岔节点”，不应纳入 RailGraph。
     if (!header.equals("switcher")) {
       return Optional.empty();
     }

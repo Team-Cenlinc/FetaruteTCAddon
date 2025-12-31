@@ -65,6 +65,14 @@ public final class RailGraphMerger {
         merged, MergeAction.UPSERT, 0, 0, 0, merged.nodes().size(), merged.edges().size());
   }
 
+  /**
+   * 合并一次 build 的结果：若 update 与 base 没有节点交集则追加；若存在交集则替换“重叠节点所在的连通分量”。
+   *
+   * <p>该策略适用于“本次 build 覆盖范围可信”的场景（例如启用了区块加载且未触发配额/失败）：重扫到的分量会被完整替换， 其他不相连的分量会保留。
+   *
+   * <p>若本次 build 可能缺失（未加载区块/达到 maxChunks/区块加载失败），请改用 {@link #upsert(RailGraph, RailGraph)}
+   * 以避免误删旧图中尚未扫描到的节点/边。
+   */
   public static MergeResult appendOrReplaceComponents(RailGraph base, RailGraph update) {
     Objects.requireNonNull(base, "base");
     Objects.requireNonNull(update, "update");
@@ -273,6 +281,7 @@ public final class RailGraphMerger {
     REPLACE_COMPONENTS
   }
 
+  /** 合并结果：包含最终图与统计信息（用于命令回显与诊断）。 */
   public record MergeResult(
       RailGraph graph,
       MergeAction action,
@@ -294,6 +303,7 @@ public final class RailGraphMerger {
     }
   }
 
+  /** 删除连通分量的结果：包含最终图与统计信息（用于命令回显与诊断）。 */
   public record RemoveResult(
       RailGraph graph,
       int removedComponentCount,

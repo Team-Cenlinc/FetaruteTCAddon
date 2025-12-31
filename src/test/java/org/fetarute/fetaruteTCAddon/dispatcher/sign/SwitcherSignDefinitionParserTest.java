@@ -80,7 +80,8 @@ final class SwitcherSignDefinitionParserTest {
     assertEquals(NodeType.SWITCHER, def.nodeType());
     assertEquals(NodeId.of("SWITCHER:world:12:65:-3"), def.nodeId());
     assertEquals(
-        Optional.of(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER), def.trainCartsDestination());
+        Optional.of(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER),
+        def.trainCartsDestination());
     assertTrue(def.waypointMetadata().isEmpty());
   }
 

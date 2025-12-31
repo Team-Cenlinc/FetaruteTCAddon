@@ -101,6 +101,14 @@ public final class ConnectedRailNodeDiscoverySession {
     }
   }
 
+  /**
+   * 启用/刷新“沿轨道扩张时允许加载的区块配额”。
+   *
+   * <p>用途：build continue 会复用同一个 {@link ConnectedRailNodeDiscoverySession}；每次继续时需要注入新的 chunk
+   * 配额与并发上限。
+   *
+   * <p>注意：当 options.disabled 时，本会话不会尝试加载任何区块，未加载区块会被视为不可达，从而导致探索结果天然“可能缺失”。
+   */
   public void beginChunkLoading(ChunkLoadOptions options) {
     this.chunkLoadOptions = options != null ? options : ChunkLoadOptions.disabled();
     this.chunkBudgetRemaining = this.chunkLoadOptions.maxChunks();
@@ -135,6 +143,17 @@ public final class ConnectedRailNodeDiscoverySession {
     }
   }
 
+  /**
+   * 推进一次“沿轨道扩张 + 增量扫描”的探索步骤，直到达到 deadline 或队列耗尽。
+   *
+   * <p>该方法设计为被主线程每 tick 调用：以时间片推进任务避免一次性卡服（time-sliced execution）。
+   *
+   * <p>输出写入到 {@code byNodeId} 以去重：当同一 nodeId 被扫描到多次时，会保留“更可信”的记录（例如 switcher 牌子覆盖自动 switcher）。
+   *
+   * @param deadlineNanos 截止时间（System.nanoTime）
+   * @param byNodeId 输出：nodeId → RailNodeRecord（用于聚合/去重）
+   * @return 本次 step 推进的工作量计数（用于统计与 status 展示）
+   */
   public int step(long deadlineNanos, Map<String, RailNodeRecord> byNodeId) {
     Objects.requireNonNull(byNodeId, "byNodeId");
     int progressed = 0;
@@ -249,6 +268,8 @@ public final class ConnectedRailNodeDiscoverySession {
       scanSignsFromRailPiece(current, byNodeId);
 
       if (junctionCount(current) >= 3) {
+        // 自动 switcher 仅用于把“关键分叉位置”纳入图：这里必须基于“真实连通邻居数”判断。
+        // 不要用 RailPiece#getJunctions() 这类偏“路径段”的概念；否则在 TCCoasters/曲线轨道下会产生大量误判（ghost switcher）。
         var nodeId = SwitcherSignDefinitionParser.nodeIdForRail(world.getName(), current);
         byNodeId.putIfAbsent(
             nodeId.value(),
@@ -459,10 +480,16 @@ public final class ConnectedRailNodeDiscoverySession {
     chunkQueue.add(world.getChunkAt(chunkX, chunkZ));
   }
 
+  /**
+   * @return 是否完全完成：所有可达轨道已处理完毕，且没有“待加载的 blocked chunk”。
+   */
   public boolean isDone() {
     return isIdle() && blockedChunkKeys.isEmpty();
   }
 
+  /**
+   * @return 是否暂停：队列已空但仍有 blocked chunk 等待配额加载（可用 /fta graph continue 续跑）。
+   */
   public boolean isPaused() {
     return isIdle() && !blockedChunkKeys.isEmpty();
   }
@@ -503,6 +530,9 @@ public final class ConnectedRailNodeDiscoverySession {
     return queuedChunkKeys.size();
   }
 
+  /**
+   * @return 仍待加载的 chunk 数量（blocked）。
+   */
   public int pendingChunksToLoad() {
     return blockedChunkKeys.size();
   }

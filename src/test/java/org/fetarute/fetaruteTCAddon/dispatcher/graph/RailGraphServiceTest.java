@@ -37,4 +37,3 @@ final class RailGraphServiceTest {
     assertFalse(service.clearSnapshot(world));
   }
 }
-

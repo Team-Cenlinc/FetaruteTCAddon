@@ -34,7 +34,8 @@ final class ConnectedRailNodeDiscoverySessionTest {
     RailBlockAccess access =
         new FakeRailBlockAccess(
             Set.of(center, a, b, c),
-            Map.of(center, Set.of(a, b, c), a, Set.of(center), b, Set.of(center), c, Set.of(center)));
+            Map.of(
+                center, Set.of(a, b, c), a, Set.of(center), b, Set.of(center), c, Set.of(center)));
 
     ConnectedRailNodeDiscoverySession session =
         new ConnectedRailNodeDiscoverySession(
@@ -66,7 +67,8 @@ final class ConnectedRailNodeDiscoverySessionTest {
 
     RailBlockAccess access =
         new FakeRailBlockAccess(
-            Set.of(center, a, b), Map.of(center, Set.of(a, b), a, Set.of(center), b, Set.of(center)));
+            Set.of(center, a, b),
+            Map.of(center, Set.of(a, b), a, Set.of(center), b, Set.of(center)));
 
     ConnectedRailNodeDiscoverySession session =
         new ConnectedRailNodeDiscoverySession(
@@ -99,4 +101,3 @@ final class ConnectedRailNodeDiscoverySessionTest {
     }
   }
 }
-

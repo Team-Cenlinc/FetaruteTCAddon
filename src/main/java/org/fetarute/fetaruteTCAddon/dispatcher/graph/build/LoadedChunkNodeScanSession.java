@@ -187,6 +187,7 @@ public final class LoadedChunkNodeScanSession {
     if (anchors.isEmpty()) {
       return signPos;
     }
+    // findNearestRailBlocks 可能返回多个“等距离”的轨道锚点；这里做确定性选择，避免因 Set 迭代顺序不稳定导致节点坐标漂移。
     RailBlockPos best = null;
     for (RailBlockPos candidate : anchors) {
       if (best == null) {

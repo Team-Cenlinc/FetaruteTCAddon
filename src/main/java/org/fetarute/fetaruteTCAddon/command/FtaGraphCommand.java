@@ -58,7 +58,7 @@ import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
 
 /**
- * 调度图诊断命令：/fta graph build|status|cancel|info。
+ * 调度图诊断与运维命令：/fta graph build|continue|status|cancel|info|delete。
  *
  * <p>图构建分为两个阶段：
  *
@@ -69,7 +69,13 @@ import org.incendo.cloud.parser.standard.StringParser;
  *
  * <p>重要约束：默认不会主动加载区块；未加载区块会被视为不可达，因此线上运维应先预加载线路区域再执行 build。
  *
- * <p>如需“沿轨道自动加载区块”，可使用 {@code --loadChunks}（建议配合 {@code --maxChunks} 以免误加载过多区域）。
+ * <p>如需“沿轨道自动加载区块”，可使用 {@code --loadChunks}（仅 HERE 支持；建议配合 {@code --maxChunks} 控制加载范围）。
+ *
+ * <p>续跑（continue）：当 HERE + {@code --loadChunks} 达到 {@code maxChunks} 限制时，build 会进入“暂停”并缓存 {@link
+ * RailGraphBuildContinuation}，可用 {@code /fta graph continue} 继续扩张。该缓存仅在内存中保存，服务器重启/插件重载后会失效。
+ *
+ * <p>清理（delete）：{@code /fta graph delete} 会清空内存快照与持久化快照（SQL），并移除该世界的续跑缓存； {@code /fta graph delete
+ * here} 则只删除玩家附近所在的连通分量，便于局部重建。
  *
  * <p>HERE 模式起点优先级：
  *
@@ -81,7 +87,15 @@ import org.incendo.cloud.parser.standard.StringParser;
 public final class FtaGraphCommand {
 
   private final FetaruteTCAddon plugin;
+
+  /** 世界维度的构建任务：同一世界同一时间只允许一个 build/continue 任务运行。 */
   private final ConcurrentMap<UUID, RailGraphBuildJob> jobs = new ConcurrentHashMap<>();
+
+  /**
+   * build 续跑缓存：仅用于 HERE 模式的“按轨道扩张”。
+   *
+   * <p>注意：该缓存只存在内存中，重启/重载后会丢失；因此命令层会在 build 完成/清理时主动移除，避免误用旧状态。
+   */
   private final ConcurrentMap<GraphBuildCacheKey, RailGraphBuildContinuation> continuations =
       new ConcurrentHashMap<>();
 
@@ -89,6 +103,13 @@ public final class FtaGraphCommand {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
   }
 
+  /**
+   * 续跑缓存的 key：按世界 + 发起者隔离。
+   *
+   * <p>原因：HERE 模式依赖玩家位置，且多个玩家可能并行在不同区域进行 build；若只按 world 维度缓存 continuation，会导致玩家之间互相覆盖。
+   *
+   * <p>控制台/非玩家统一视为“匿名发起者”（ownerId 为空）。
+   */
   private record GraphBuildCacheKey(UUID worldId, Optional<UUID> ownerId) {
     private GraphBuildCacheKey {
       Objects.requireNonNull(worldId, "worldId");
@@ -834,6 +855,8 @@ public final class FtaGraphCommand {
                       case DESTINATION -> destinationNodes++;
                       case SWITCHER -> {
                         switcherNodes++;
+                        // Switcher 节点不用于 TC destination，因此复用 trainCartsDestination 字段存放内部 marker，
+                        // 用于区分“来自 switcher 牌子”与“自动分叉生成”（见 SwitcherSignDefinitionParser）。
                         if (node.trainCartsDestination()
                             .filter(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER::equals)
                             .isPresent()) {
@@ -1154,6 +1177,16 @@ public final class FtaGraphCommand {
         finalGraph, builtAt, signature, nodes, List.copyOf(missingSwitchers));
   }
 
+  /**
+   * 将一次 build 的结果写入内存快照，并根据“完整性”选择合并策略后落库。
+   *
+   * <p>当 {@link RailGraphBuildCompletion#canReplaceComponents()} 为 true 时，可认为本次 build 尽可能覆盖了相关连通分量，
+   * 因此允许执行“替换连通分量”（删除旧分量再写入新分量）。
+   *
+   * <p>当 build 结果可能缺失（未加载区块/达到 maxChunks/区块加载失败）时，使用 upsert 以避免误删旧图数据。
+   *
+   * @return 最终写入的图结果，以及可选的 merge 统计（用于命令回显）
+   */
   private AppliedGraphBuild applyBuildSuccess(
       World world, RailGraphBuildResult result, RailGraphBuildCompletion completion) {
     RailGraphService service = plugin.getRailGraphService();
@@ -1207,6 +1240,11 @@ public final class FtaGraphCommand {
             String.valueOf(merge.totalEdges())));
   }
 
+  /**
+   * 将内存图转换为可持久化的节点记录列表。
+   *
+   * <p>注意：这里会按 nodeId 排序，确保签名计算/持久化输出稳定（deterministic），避免因迭代顺序不稳定导致的“重复快照”。
+   */
   private static List<RailNodeRecord> nodeRecordsFromGraph(UUID worldId, RailGraph graph) {
     Objects.requireNonNull(worldId, "worldId");
     Objects.requireNonNull(graph, "graph");
@@ -1239,6 +1277,13 @@ public final class FtaGraphCommand {
     }
   }
 
+  /**
+   * 把调度图快照写入存储（SQL）。
+   *
+   * <p>实现为“按世界 replace”：每次写入会覆盖该世界原有的 rail_nodes/rail_edges/rail_graph_snapshots 记录。
+   *
+   * <p>当存储未就绪（例如启动失败回退为占位存储）时，该方法会直接 no-op。
+   */
   private void persistGraph(World world, RailGraphBuildResult result) {
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
       return;
@@ -1283,6 +1328,11 @@ public final class FtaGraphCommand {
     }
   }
 
+  /**
+   * 从存储后端删除指定世界的调度图快照。
+   *
+   * @return 存储中是否存在该世界的快照记录（用于命令提示“没有可删的快照”）
+   */
   private boolean deleteGraphFromStorage(World world) {
     Objects.requireNonNull(world, "world");
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
@@ -1373,6 +1423,13 @@ public final class FtaGraphCommand {
     return Optional.ofNullable(best);
   }
 
+  /**
+   * 在图中寻找距离指定坐标最近的节点。
+   *
+   * <p>用途：{@code /fta graph delete here} 需要先找到玩家附近的一个“种子节点”，再删除其所在的连通分量。
+   *
+   * <p>注意：这里仅使用节点记录的世界坐标做欧氏距离比较（squared distance）；不做寻路/不访问轨道方块。
+   */
   private static Optional<RailNode> findNearestGraphNode(
       RailGraph graph, Vector center, int maxDistanceBlocks) {
     Objects.requireNonNull(graph, "graph");

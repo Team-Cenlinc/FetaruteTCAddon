@@ -145,4 +145,11 @@
         <Method name="lambda$setUp$0"/>
         <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
     </Match>
+
+    <!-- Mockito static mocking 的 when(...) 使用 void lambda 记录调用，SpotBugs 会误报“忽略返回值”。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParserTest"/>
+        <Method name="lambda$ignoresTagSignsOnBukkitSign$0"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
 </FindBugsFilter>
