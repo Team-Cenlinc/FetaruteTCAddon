@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
@@ -207,6 +208,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             new RouteEditorAppendListener(
                 this, signNodeRegistry, localeManager, loggerManager::debug),
             this);
+    getServer()
+        .getPluginManager()
+        .registerEvents(new TrainSignBypassListener(loggerManager::debug), this);
   }
 
   private void unregisterSignActions() {
