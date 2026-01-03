@@ -743,7 +743,13 @@ public final class FtaGraphCommand {
                   Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
                       plugin.getRailGraphService().getSnapshot(world);
                   if (snapshotOpt.isEmpty()) {
-                    player.sendMessage(locale.component("command.graph.info.missing"));
+                    plugin
+                        .getRailGraphService()
+                        .getStaleState(world)
+                        .ifPresentOrElse(
+                            stale -> player.sendMessage(staleInfoMessage(locale, stale)),
+                            () ->
+                                player.sendMessage(locale.component("command.graph.info.missing")));
                     return;
                   }
                   RailGraphService.RailGraphSnapshot snapshot = snapshotOpt.get();
@@ -816,7 +822,13 @@ public final class FtaGraphCommand {
                   Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
                       service.getSnapshot(world);
                   if (snapshotOpt.isEmpty()) {
-                    ctx.sender().sendMessage(locale.component("command.graph.info.missing"));
+                    service
+                        .getStaleState(world)
+                        .ifPresentOrElse(
+                            stale -> ctx.sender().sendMessage(staleInfoMessage(locale, stale)),
+                            () ->
+                                ctx.sender()
+                                    .sendMessage(locale.component("command.graph.info.missing")));
                     return;
                   }
                   RailGraphService.RailGraphSnapshot snapshot = snapshotOpt.get();
@@ -970,6 +982,37 @@ public final class FtaGraphCommand {
                                     String.valueOf(edge.lengthBlocks()))));
                   }
                 }));
+  }
+
+  private static Component staleInfoMessage(
+      LocaleManager locale, RailGraphService.RailGraphStaleState stale) {
+    Objects.requireNonNull(locale, "locale");
+    Objects.requireNonNull(stale, "stale");
+    return locale.component(
+        "command.graph.info.stale",
+        Map.of(
+            "built_at",
+            stale.builtAt().toString(),
+            "snapshot_sig",
+            shortSignature(stale.snapshotSignature()),
+            "current_sig",
+            shortSignature(stale.currentSignature()),
+            "snapshot_nodes",
+            String.valueOf(stale.snapshotNodeCount()),
+            "snapshot_edges",
+            String.valueOf(stale.snapshotEdgeCount()),
+            "current_nodes",
+            String.valueOf(stale.currentNodeCount())));
+  }
+
+  private static String shortSignature(String signature) {
+    if (signature == null || signature.isEmpty()) {
+      return "";
+    }
+    if (signature.length() <= 12) {
+      return signature;
+    }
+    return signature.substring(0, 12);
   }
 
   private GraphBuildCacheKey cacheKey(UUID worldId, CommandSender sender) {

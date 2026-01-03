@@ -101,6 +101,7 @@ command:
         success: "<prefix> <dark_aqua>已删除局部调度图</dark_aqua> <gray>(seed=<white><seed></white>, removed_components=<white><removed_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
     info:
       missing: "<prefix> <gray>该世界尚未构建调度图</gray> <dark_aqua>请先执行</dark_aqua> <white>/fta graph build</white>"
+      stale: "<prefix> <yellow>调度图快照已失效</yellow> <gray>(builtAt=<white><built_at></white>, nodes=<white><snapshot_nodes></white>→<white><current_nodes></white>, sig=<white><snapshot_sig></white>→<white><current_sig></white>)</gray> <dark_aqua>请执行</dark_aqua> <white>/fta graph build</white>"
       header: "<prefix> <dark_aqua>调度图</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>)</gray>"
       meta: "<gray>-</gray> <dark_aqua>builtAt</dark_aqua>=<white><built_at></white> <dark_aqua>components</dark_aqua>=<white><components></white> <dark_aqua>blocked</dark_aqua>=<white><blocked_edges></white> <dark_aqua>isolated</dark_aqua>=<white><isolated_nodes></white>"
       nodes: "<gray>-</gray> <dark_aqua>nodes</dark_aqua> <gray>(waypoint=<white><waypoint></white>, station=<white><station></white>, depot=<white><depot></white>, destination=<white><destination></white>, switcher=<white><switcher></white>)</gray>"

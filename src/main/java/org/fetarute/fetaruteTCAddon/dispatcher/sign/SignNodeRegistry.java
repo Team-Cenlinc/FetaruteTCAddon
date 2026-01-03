@@ -43,17 +43,24 @@ public final class SignNodeRegistry {
     if (world == null) {
       throw new IllegalArgumentException("牌子所在方块缺少世界信息");
     }
-    // 以世界 UUID + 坐标拼键，避免多世界冲突
-    definitions.put(
-        key(block),
-        new SignNodeInfo(
-            definition,
-            world.getUID(),
-            world.getName(),
-            location.getBlockX(),
-            location.getBlockY(),
-            location.getBlockZ()));
+    put(
+        world.getUID(),
+        world.getName(),
+        location.getBlockX(),
+        location.getBlockY(),
+        location.getBlockZ(),
+        definition);
     debugLogger.accept("注册节点 " + definition.nodeId().value() + " @ " + formatLocation(block));
+  }
+
+  /** 按坐标写入节点定义（用于从存储或扫描结果恢复注册表，不会触发区块加载）。 */
+  public void put(
+      UUID worldId, String worldName, int x, int y, int z, SignNodeDefinition definition) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(definition, "definition");
+    String safeWorldName = worldName == null ? "unknown" : worldName;
+    definitions.put(
+        key(worldId, x, y, z), new SignNodeInfo(definition, worldId, safeWorldName, x, y, z));
   }
 
   public Optional<SignNodeDefinition> get(Block block) {
@@ -125,14 +132,12 @@ public final class SignNodeRegistry {
     if (world == null) {
       throw new IllegalArgumentException("牌子所在方块缺少世界信息");
     }
+    return key(world.getUID(), location.getBlockX(), location.getBlockY(), location.getBlockZ());
+  }
+
+  private String key(UUID worldId, int x, int y, int z) {
     // 直接使用 block 坐标的离散键，不参与浮点运算
-    return world.getUID()
-        + ":"
-        + location.getBlockX()
-        + ":"
-        + location.getBlockY()
-        + ":"
-        + location.getBlockZ();
+    return worldId + ":" + x + ":" + y + ":" + z;
   }
 
   /** 生成用于日志/提示的可读位置字符串（world + x,y,z）。 */

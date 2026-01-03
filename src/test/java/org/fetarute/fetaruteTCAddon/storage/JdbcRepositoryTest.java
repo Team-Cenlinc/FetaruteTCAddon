@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.EnumSet;
@@ -577,6 +578,37 @@ final class JdbcRepositoryTest {
     StorageProvider provider2 = setupProvider(dbFile);
     Route loaded = provider2.routes().findById(route.id()).orElseThrow();
     assertEquals(RoutePatternType.RAPID, loaded.patternType());
+  }
+
+  @Test
+  void shouldMigrateRailGraphSnapshotNodeSignatureColumn() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-graph.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+
+    // 旧版快照表：缺少 node_signature 列
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE IF NOT EXISTS fta_rail_graph_snapshots ("
+              + "world_id TEXT PRIMARY KEY,"
+              + "built_at INTEGER NOT NULL,"
+              + "node_count INTEGER NOT NULL,"
+              + "edge_count INTEGER NOT NULL"
+              + ");");
+      try (var ps =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_graph_snapshots (world_id, built_at, node_count, edge_count) VALUES (?, ?, ?, ?)")) {
+        ps.setString(1, worldId.toString());
+        ps.setLong(2, 0);
+        ps.setInt(3, 0);
+        ps.setInt(4, 0);
+        ps.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+    var snapshot = provider.railGraphSnapshots().findByWorld(worldId).orElseThrow();
+    assertEquals("", snapshot.nodeSignature());
   }
 
   private StorageProvider setupProvider(Path dbFile) {

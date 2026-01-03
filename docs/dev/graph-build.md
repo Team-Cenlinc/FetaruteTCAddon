@@ -97,6 +97,16 @@
 
 插件启动时若存储就绪，会从快照预热到内存，`/fta graph info` 可直接查看。
 
+## 快照失效判断（node_signature）
+
+为了避免“世界内节点牌子已变更，但仍在使用旧图”的问题，图快照引入了基于 `node_signature` 的失效判断：
+
+- `/fta graph build` 时会把节点集合签名写入 `rail_graph_snapshots.node_signature`
+- 建牌/拆牌时插件会对 `rail_nodes` 做增量同步（仅 waypoint/autostation/depot），并据此计算“当前节点签名”
+- 若当前签名与快照签名不一致：旧图会被标记为失效，启动预热会跳过加载，`/fta graph info` 会提示需要重建
+
+注意：该机制只覆盖“节点牌子集合变化”。轨道拓扑变化、未被增量同步的节点来源（例如 switcher/自动分叉/TCC 虚拟牌子）仍需运维自行决定何时重建。
+
 ## 清理与局部清理
 
 - `/fta graph delete`：删除当前世界的内存快照 + SQL 快照，并清空该世界的续跑缓存（不可恢复）

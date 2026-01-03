@@ -15,8 +15,13 @@ import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
@@ -66,7 +71,6 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.storageManager = new StorageManager(this, loggerManager);
     this.storageManager.apply(configManager.current());
     registerSignActions();
-    this.railGraphService = new RailGraphService(signNodeRegistry, loggerManager::debug);
     preloadRailGraphFromStorage();
 
     registerCommands();
@@ -189,19 +193,26 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   private void registerSignActions() {
     this.signNodeRegistry = new SignNodeRegistry(loggerManager::debug);
+    this.railGraphService = new RailGraphService(signNodeRegistry, loggerManager::debug);
+    SignNodeStorageSynchronizer storageSync =
+        new RailNodeIncrementalSync(storageManager, railGraphService, loggerManager::debug);
     this.waypointSignAction =
-        new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager);
+        new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
-        new AutoStationSignAction(signNodeRegistry, loggerManager::debug, localeManager);
+        new AutoStationSignAction(
+            signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.depotSignAction =
-        new DepotSignAction(signNodeRegistry, loggerManager::debug, localeManager);
+        new DepotSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     SignAction.register(waypointSignAction);
     SignAction.register(autoStationSignAction);
     SignAction.register(depotSignAction);
+    preloadSignNodeRegistryFromStorage();
     getServer()
         .getPluginManager()
         .registerEvents(
-            new SignRemoveListener(signNodeRegistry, localeManager, loggerManager::debug), this);
+            new SignRemoveListener(
+                signNodeRegistry, localeManager, loggerManager::debug, storageSync),
+            this);
     getServer()
         .getPluginManager()
         .registerEvents(
@@ -211,6 +222,59 @@ public final class FetaruteTCAddon extends JavaPlugin {
     getServer()
         .getPluginManager()
         .registerEvents(new TrainSignBypassListener(loggerManager::debug), this);
+  }
+
+  /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */
+  private void preloadSignNodeRegistryFromStorage() {
+    SignNodeRegistry registry = signNodeRegistry;
+    StorageManager storage = storageManager;
+    LoggerManager logger = loggerManager;
+    if (registry == null || storage == null || logger == null || !storage.isReady()) {
+      return;
+    }
+    storage
+        .provider()
+        .ifPresent(
+            provider -> {
+              for (org.bukkit.World world : getServer().getWorlds()) {
+                if (world == null) {
+                  continue;
+                }
+                java.util.UUID worldId = world.getUID();
+                java.util.List<RailNodeRecord> nodes;
+                try {
+                  nodes = provider.railNodes().listByWorld(worldId);
+                } catch (Exception ex) {
+                  logger.warn("预热节点注册表失败: world=" + world.getName() + " msg=" + ex.getMessage());
+                  continue;
+                }
+
+                int loaded = 0;
+                for (RailNodeRecord node : nodes) {
+                  if (node == null) {
+                    continue;
+                  }
+                  if (node.nodeType() != NodeType.WAYPOINT
+                      && node.nodeType() != NodeType.STATION
+                      && node.nodeType() != NodeType.DEPOT) {
+                    continue;
+                  }
+                  registry.put(
+                      worldId,
+                      world.getName(),
+                      node.x(),
+                      node.y(),
+                      node.z(),
+                      new SignNodeDefinition(
+                          node.nodeId(),
+                          node.nodeType(),
+                          node.trainCartsDestination(),
+                          node.waypointMetadata()));
+                  loaded++;
+                }
+                logger.debug("从存储预热节点注册表: world=" + world.getName() + " nodes=" + loaded);
+              }
+            });
   }
 
   private void unregisterSignActions() {

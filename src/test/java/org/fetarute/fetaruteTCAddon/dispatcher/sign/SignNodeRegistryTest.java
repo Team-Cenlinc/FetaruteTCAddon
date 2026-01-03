@@ -54,6 +54,45 @@ class SignNodeRegistryTest {
   }
 
   @Test
+  void putByCoordinatesSupportsConflictDetection() {
+    SignNodeRegistry registry = new SignNodeRegistry();
+    UUID worldId = UUID.randomUUID();
+    SignNodeDefinition definition =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:00"),
+            NodeType.WAYPOINT,
+            Optional.of("SURN:PTK:GPT:1:00"),
+            Optional.of(WaypointMetadata.interval("SURN", "PTK", "GPT", 1, "00")));
+    registry.put(worldId, "world", 1, 64, 2, definition);
+
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    when(world.getName()).thenReturn("world");
+    var location = mock(Location.class);
+    when(location.getWorld()).thenReturn(world);
+    when(location.getBlockX()).thenReturn(1);
+    when(location.getBlockY()).thenReturn(64);
+    when(location.getBlockZ()).thenReturn(2);
+    Block block = mock(Block.class);
+    when(block.getLocation()).thenReturn(location);
+
+    assertTrue(registry.get(block).isPresent());
+
+    // 同一坐标应视为“自己”，不报冲突
+    assertTrue(registry.findByNodeId(definition.nodeId(), block).isEmpty());
+
+    // 不同坐标应能查到冲突
+    var otherLocation = mock(Location.class);
+    when(otherLocation.getWorld()).thenReturn(world);
+    when(otherLocation.getBlockX()).thenReturn(9);
+    when(otherLocation.getBlockY()).thenReturn(64);
+    when(otherLocation.getBlockZ()).thenReturn(9);
+    Block otherBlock = mock(Block.class);
+    when(otherBlock.getLocation()).thenReturn(otherLocation);
+    assertTrue(registry.findByNodeId(definition.nodeId(), otherBlock).isPresent());
+  }
+
+  @Test
   // snapshot 返回不可变视图，防止外部篡改内部状态
   void snapshotIsImmutable() {
     SignNodeRegistry registry = new SignNodeRegistry();

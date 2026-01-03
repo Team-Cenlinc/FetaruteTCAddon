@@ -7,6 +7,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -18,8 +19,16 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class DepotSignAction extends AbstractNodeSignAction {
 
   public DepotSignAction(
+      SignNodeRegistry registry,
+      Consumer<String> debugLogger,
+      LocaleManager locale,
+      SignNodeStorageSynchronizer storageSync) {
+    super("depot", registry, NodeType.DEPOT, debugLogger, locale, storageSync);
+  }
+
+  public DepotSignAction(
       SignNodeRegistry registry, Consumer<String> debugLogger, LocaleManager locale) {
-    super("depot", registry, NodeType.DEPOT, debugLogger, locale);
+    this(registry, debugLogger, locale, SignNodeStorageSynchronizer.noop());
   }
 
   @Override

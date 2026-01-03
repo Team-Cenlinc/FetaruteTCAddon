@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
@@ -37,6 +38,22 @@ abstract class AbstractNodeSignAction extends SignAction {
   private final NodeType nodeType;
   private final Consumer<String> debugLogger;
   private final LocaleManager locale;
+  private final SignNodeStorageSynchronizer storageSync;
+
+  AbstractNodeSignAction(
+      String header,
+      SignNodeRegistry registry,
+      NodeType nodeType,
+      Consumer<String> debugLogger,
+      LocaleManager locale,
+      SignNodeStorageSynchronizer storageSync) {
+    this.header = header;
+    this.registry = registry;
+    this.nodeType = nodeType;
+    this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    this.locale = locale;
+    this.storageSync = storageSync != null ? storageSync : SignNodeStorageSynchronizer.noop();
+  }
 
   AbstractNodeSignAction(
       String header,
@@ -44,11 +61,7 @@ abstract class AbstractNodeSignAction extends SignAction {
       NodeType nodeType,
       Consumer<String> debugLogger,
       LocaleManager locale) {
-    this.header = header;
-    this.registry = registry;
-    this.nodeType = nodeType;
-    this.debugLogger = debugLogger != null ? debugLogger : message -> {};
-    this.locale = locale;
+    this(header, registry, nodeType, debugLogger, locale, SignNodeStorageSynchronizer.noop());
   }
 
   @Override
@@ -103,6 +116,7 @@ abstract class AbstractNodeSignAction extends SignAction {
         return true;
       }
       registry.put(event.getBlock(), definition.get());
+      storageSync.upsert(event.getBlock(), definition.get());
       String playerName = event.getPlayer() == null ? "unknown" : event.getPlayer().getName();
       debugLogger.accept(
           "注册 "
@@ -165,11 +179,15 @@ abstract class AbstractNodeSignAction extends SignAction {
   @Override
   public void destroy(SignActionEvent event) {
     // 删除牌子时清理注册表，避免陈旧目标干扰路由。
-    registry
-        .remove(event.getBlock())
-        .ifPresent(
-            definition ->
-                debugLogger.accept("销毁 " + nodeType + " 节点牌子 @ " + formatLocation(event)));
+    var definitionOpt = registry.remove(event.getBlock());
+    if (definitionOpt.isEmpty()) {
+      definitionOpt = parseDefinition(event);
+    }
+    if (definitionOpt.isEmpty()) {
+      return;
+    }
+    storageSync.delete(event.getBlock(), definitionOpt.get());
+    debugLogger.accept("销毁 " + nodeType + " 节点牌子 @ " + formatLocation(event));
   }
 
   @Override

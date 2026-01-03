@@ -55,6 +55,75 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
   }
 
   @Override
+  public void upsert(RailNodeRecord node) {
+    Objects.requireNonNull(node, "node");
+    String insert =
+        "INSERT INTO "
+            + table("rail_nodes")
+            + " (world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    String sql =
+        dialect.applyUpsert(
+            insert,
+            List.of("world_id", "node_id"),
+            List.of(
+                "node_type",
+                "x",
+                "y",
+                "z",
+                "tc_destination",
+                "waypoint_operator",
+                "waypoint_origin",
+                "waypoint_destination",
+                "waypoint_track",
+                "waypoint_sequence",
+                "waypoint_kind"));
+
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      writeRow(statement, node);
+      statement.executeUpdate();
+      connection.commitIfNecessary();
+    } catch (SQLException ex) {
+      throw new StorageException("写入 rail_nodes 失败", ex);
+    }
+  }
+
+  @Override
+  public void delete(UUID worldId, NodeId nodeId) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(nodeId, "nodeId");
+    String sql = "DELETE FROM " + table("rail_nodes") + " WHERE world_id = ? AND node_id = ?";
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, worldId);
+      statement.setString(2, nodeId.value());
+      statement.executeUpdate();
+      connection.commitIfNecessary();
+    } catch (SQLException ex) {
+      throw new StorageException("删除 rail_nodes 失败", ex);
+    }
+  }
+
+  @Override
+  public void deleteByPosition(UUID worldId, int x, int y, int z) {
+    Objects.requireNonNull(worldId, "worldId");
+    String sql =
+        "DELETE FROM " + table("rail_nodes") + " WHERE world_id = ? AND x = ? AND y = ? AND z = ?";
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, worldId);
+      statement.setInt(2, x);
+      statement.setInt(3, y);
+      statement.setInt(4, z);
+      statement.executeUpdate();
+      connection.commitIfNecessary();
+    } catch (SQLException ex) {
+      throw new StorageException("删除 rail_nodes 失败", ex);
+    }
+  }
+
+  @Override
   public void replaceWorld(UUID worldId, Collection<RailNodeRecord> nodes) {
     Objects.requireNonNull(worldId, "worldId");
     Objects.requireNonNull(nodes, "nodes");

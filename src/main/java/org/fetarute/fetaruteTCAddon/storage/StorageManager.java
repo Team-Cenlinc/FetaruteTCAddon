@@ -173,6 +173,35 @@ public final class StorageManager {
    * </ul>
    */
   private void applyCompatibilityMigrations(java.sql.Connection connection) {
+    ensureRailGraphSnapshotSignatureColumn(connection);
+    migrateRoutePatternTypeEnums(connection);
+  }
+
+  /** 兼容性迁移：为旧版 rail_graph_snapshots 补齐 node_signature 列。 */
+  private void ensureRailGraphSnapshotSignatureColumn(java.sql.Connection connection) {
+    String snapshotsTable = storageSchema.tablePrefix() + "rail_graph_snapshots";
+    String sql =
+        "ALTER TABLE "
+            + snapshotsTable
+            + " ADD COLUMN node_signature "
+            + dialect.stringType()
+            + " NOT NULL DEFAULT ''";
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: rail_graph_snapshots.node_signature (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 rail_graph_snapshots.node_signature: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 rail_graph_snapshots.node_signature: " + ex.getMessage());
+    }
+  }
+
+  private void migrateRoutePatternTypeEnums(java.sql.Connection connection) {
     try (var statement = connection.createStatement()) {
       String routesTable = storageSchema.tablePrefix() + "routes";
       int updatedSemi =
@@ -194,7 +223,7 @@ public final class StorageManager {
                 + ")");
       }
     } catch (Exception ex) {
-      logger.warn("应用兼容性迁移失败: " + ex.getMessage());
+      logger.warn("应用兼容性迁移失败: routes.pattern_type: " + ex.getMessage());
     }
   }
 
