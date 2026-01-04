@@ -176,7 +176,12 @@ public final class RailGraphService {
     }
   }
 
-  private RailGraph buildGraphFromRecords(
+  /**
+   * 从存储记录还原一张 {@link RailGraph}。
+   *
+   * <p>注意：该方法不会进行“签名一致性”校验；调用方需自行决定是否信任输入数据。
+   */
+  public static RailGraph buildGraphFromRecords(
       java.util.List<RailNodeRecord> nodeRecords, java.util.List<RailEdgeRecord> edgeRecords) {
     Map<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId, RailNode> nodesById = new HashMap<>();
     for (RailNodeRecord node : nodeRecords) {

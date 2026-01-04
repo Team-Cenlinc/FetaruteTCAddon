@@ -1233,12 +1233,18 @@ public final class FtaGraphCommand {
   private AppliedGraphBuild applyBuildSuccess(
       World world, RailGraphBuildResult result, RailGraphBuildCompletion completion) {
     RailGraphService service = plugin.getRailGraphService();
-    Optional<RailGraphService.RailGraphSnapshot> existing = service.getSnapshot(world);
-    if (existing.isPresent()) {
+
+    Optional<RailGraph> baseGraph =
+        service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph);
+    if (baseGraph.isEmpty()) {
+      baseGraph = loadGraphFromStorage(world);
+    }
+
+    if (baseGraph.isPresent()) {
       RailGraphMerger.MergeResult merge =
           completion != null && completion.canReplaceComponents()
-              ? RailGraphMerger.appendOrReplaceComponents(existing.get().graph(), result.graph())
-              : RailGraphMerger.upsert(existing.get().graph(), result.graph());
+              ? RailGraphMerger.appendOrReplaceComponents(baseGraph.get(), result.graph())
+              : RailGraphMerger.upsert(baseGraph.get(), result.graph());
       List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(world.getUID(), merge.graph());
       String signature = RailGraphSignature.signatureForNodes(mergedNodes);
       RailGraphBuildResult merged =
@@ -1256,6 +1262,38 @@ public final class FtaGraphCommand {
     service.putSnapshot(world, result.graph(), result.builtAt());
     persistGraph(world, result);
     return new AppliedGraphBuild(result, Optional.empty());
+  }
+
+  /**
+   * 尝试从存储加载旧图作为 merge base。
+   *
+   * <p>用途：当图处于 stale 状态时，内存快照会被清空；若此时执行 HERE build 并直接 replace，会把其他连通分量误删。 因此这里在需要时从 SQL
+   * 读取上一版快照（即使签名不一致）用于合并。
+   */
+  private Optional<RailGraph> loadGraphFromStorage(World world) {
+    Objects.requireNonNull(world, "world");
+    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      return Optional.empty();
+    }
+    Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    UUID worldId = world.getUID();
+    try {
+      List<RailNodeRecord> nodes = provider.railNodes().listByWorld(worldId);
+      List<RailEdgeRecord> edges = provider.railEdges().listByWorld(worldId);
+      if (nodes.isEmpty() && edges.isEmpty()) {
+        return Optional.empty();
+      }
+      return Optional.of(RailGraphService.buildGraphFromRecords(nodes, edges));
+    } catch (Exception ex) {
+      plugin
+          .getLogger()
+          .warning("从存储加载调度图失败: world=" + world.getName() + " msg=" + ex.getMessage());
+      return Optional.empty();
+    }
   }
 
   private static Component mergeBuildMessage(

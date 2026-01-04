@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.events.SignChangeActionEvent;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
 import net.kyori.adventure.text.Component;
@@ -14,8 +15,13 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Sign;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
@@ -81,6 +87,12 @@ abstract class AbstractNodeSignAction extends SignAction {
       Optional<SignNodeRegistry.SignNodeInfo> conflict =
           registry.findByNodeId(definition.get().nodeId(), event.getBlock());
       if (conflict.isPresent()) {
+        World currentWorld = event.getBlock().getWorld();
+        if (tryRepairStaleConflict(currentWorld, conflict.get())) {
+          conflict = registry.findByNodeId(definition.get().nodeId(), event.getBlock());
+        }
+      }
+      if (conflict.isPresent()) {
         SignNodeRegistry.SignNodeInfo conflictInfo = conflict.get();
         String playerName = event.getPlayer() == null ? "unknown" : event.getPlayer().getName();
         debugLogger.accept(
@@ -113,6 +125,8 @@ abstract class AbstractNodeSignAction extends SignAction {
                   .build();
           event.getPlayer().sendMessage(locale.component("sign.conflict", resolver));
         }
+        // 冲突牌子必须拒绝写入：否则牌子会留在世界里但不在注册表/存储中，后续“拆旧再放新”会出现幽灵冲突行为。
+        event.setCancelled(true);
         return true;
       }
       registry.put(event.getBlock(), definition.get());
@@ -157,6 +171,84 @@ abstract class AbstractNodeSignAction extends SignAction {
               + ")");
     }
     return true;
+  }
+
+  /**
+   * 尝试在“节点 ID 冲突”时自愈：若注册表中记录的旧位置已不存在节点牌子，则清理陈旧记录并同步到存储。
+   *
+   * <p>常见触发场景：WorldEdit/setblock 移除牌子、插件异常导致 destroy/break 未执行等。
+   *
+   * <p>注意：不会主动加载区块；仅在冲突位置所在 chunk 已加载时进行验证与修复，避免卡服。
+   *
+   * @return 若检测到陈旧记录并完成清理/修复则返回 true
+   */
+  private boolean tryRepairStaleConflict(
+      World currentWorld, SignNodeRegistry.SignNodeInfo conflict) {
+    if (currentWorld == null || conflict == null) {
+      return false;
+    }
+    if (!currentWorld.getUID().equals(conflict.worldId())) {
+      return false;
+    }
+
+    int chunkX = conflict.x() >> 4;
+    int chunkZ = conflict.z() >> 4;
+    if (!currentWorld.isChunkLoaded(chunkX, chunkZ)) {
+      return false;
+    }
+
+    Block conflictBlock = currentWorld.getBlockAt(conflict.x(), conflict.y(), conflict.z());
+    BlockState state = conflictBlock.getState();
+    if (!(state instanceof Sign sign)) {
+      cleanupStaleConflict(conflictBlock, conflict.definition(), "方块已不存在或不再是牌子");
+      return true;
+    }
+
+    Optional<SignNodeDefinition> actualOpt = NodeSignDefinitionParser.parse(sign);
+    if (actualOpt.isEmpty()) {
+      cleanupStaleConflict(conflictBlock, conflict.definition(), "牌子不再是节点牌子");
+      return true;
+    }
+
+    SignNodeDefinition actual = actualOpt.get();
+    if (actual.nodeId().equals(conflict.definition().nodeId())) {
+      // 冲突真实存在（仍占用同一个 NodeId）。顺手修复 definition 的其他差异，避免诊断输出与存储不一致。
+      if (!actual.equals(conflict.definition())) {
+        registry.put(conflictBlock, actual);
+        storageSync.upsert(conflictBlock, actual);
+        debugLogger.accept(
+            "修复节点注册(同 ID 不同定义): node=" + actual.nodeId().value() + " @ " + conflict.locationText());
+      }
+      return false;
+    }
+
+    // 旧位置仍是节点牌子，但 nodeId 已改变：修复 registry + 存储，解除对旧 nodeId 的占用。
+    registry.put(conflictBlock, actual);
+    storageSync.upsert(conflictBlock, actual);
+    debugLogger.accept(
+        "修复节点注册(节点已改名): old="
+            + conflict.definition().nodeId().value()
+            + " new="
+            + actual.nodeId().value()
+            + " @ "
+            + conflict.locationText());
+    return true;
+  }
+
+  private void cleanupStaleConflict(Block conflictBlock, SignNodeDefinition stale, String reason) {
+    Objects.requireNonNull(conflictBlock, "conflictBlock");
+    Objects.requireNonNull(stale, "stale");
+    reason = reason == null ? "" : reason;
+
+    registry.remove(conflictBlock);
+    storageSync.delete(conflictBlock, stale);
+    debugLogger.accept(
+        "清理陈旧节点注册: reason="
+            + reason
+            + " node="
+            + stale.nodeId().value()
+            + " @ "
+            + conflictBlock.getLocation());
   }
 
   @Override

@@ -97,6 +97,8 @@
 
 插件启动时若存储就绪，会从快照预热到内存，`/fta graph info` 可直接查看。
 
+节点牌子的注册表、冲突检测、拆牌清理与 `rail_nodes` 增量同步细节，见：`docs/dev/node-sign-registry.md`。
+
 ## 快照失效判断（node_signature）
 
 为了避免“世界内节点牌子已变更，但仍在使用旧图”的问题，图快照引入了基于 `node_signature` 的失效判断：
@@ -104,6 +106,8 @@
 - `/fta graph build` 时会把节点集合签名写入 `rail_graph_snapshots.node_signature`
 - 建牌/拆牌时插件会对 `rail_nodes` 做增量同步（仅 waypoint/autostation/depot），并据此计算“当前节点签名”
 - 若当前签名与快照签名不一致：旧图会被标记为失效，启动预热会跳过加载，`/fta graph info` 会提示需要重建
+
+当图处于 stale 状态时（内存快照被清空），如果你在 HERE 模式只重建某一个联通分量，命令会在需要时从 SQL 加载旧图作为 merge base，避免误删其他联通分量的数据。
 
 注意：该机制只覆盖“节点牌子集合变化”。轨道拓扑变化、未被增量同步的节点来源（例如 switcher/自动分叉/TCC 虚拟牌子）仍需运维自行决定何时重建。
 
@@ -132,6 +136,16 @@
 
 - 请确认 TrainCarts 的 `[train] tag` 牌子不会被当作 switcher（当前实现只识别 `[train] switcher`）
 - 自动 switcher 的判定基于“真实连通邻居数”（`neighbors >= 3`）；若轨道实现返回的邻居异常，也可能导致噪声节点
+
+## 常见问题：拆牌后仍提示节点 ID 冲突
+
+若你确认原牌子已经不存在，但重放同一个 `nodeId` 仍提示 conflict，通常原因是“非正常移除”导致注册表/存储残留（例如 WorldEdit/setblock、依附方块破坏的时序差异等）。
+
+建议按以下步骤排查：
+
+1) 开启调试：`config.yml` 中 `debug.enabled: true`，然后 `/fta reload`
+2) 使用 conflict 提示中的坐标传送过去，确认该位置是否仍存在节点牌子
+3) 若该位置区块此前未加载：先靠近/传送使其加载，再次尝试建牌触发自愈清理
 
 ## 快速写入 Waypoint 牌子
 
