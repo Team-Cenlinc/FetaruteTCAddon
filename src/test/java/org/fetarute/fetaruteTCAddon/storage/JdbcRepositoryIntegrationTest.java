@@ -100,7 +100,9 @@ final class JdbcRepositoryIntegrationTest {
             new ConfigManager.SqliteSettings(TEST_DB.toString()),
             Optional.empty(),
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
-    ConfigManager.ConfigView view = new ConfigManager.ConfigView(1, false, "zh_CN", settings);
+    ConfigManager.ConfigView view =
+        new ConfigManager.ConfigView(
+            2, false, "zh_CN", settings, new ConfigManager.GraphSettings(8.0));
     manager.apply(view);
     return manager.provider().orElseThrow();
   }

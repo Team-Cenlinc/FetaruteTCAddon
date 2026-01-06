@@ -6,11 +6,16 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 
-/** 负责读取并缓存 config.yml，统一暴露调试开关与存储后端配置。 */
+/**
+ * 负责读取并缓存 config.yml，统一暴露调试开关、调度图相关配置与存储后端配置。
+ *
+ * <p>注意：配置文件由 {@code ConfigUpdater} 负责“补缺失键 + 备份后写回”，因此 {@code config-version} 与新增键会随内置模板升级。
+ */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 1;
+  private static final int EXPECTED_CONFIG_VERSION = 2;
   private static final String DEFAULT_LOCALE = "zh_CN";
+  private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -42,7 +47,9 @@ public final class ConfigManager {
     String localeTag = config.getString("locale", DEFAULT_LOCALE);
     ConfigurationSection storageSection = config.getConfigurationSection("storage");
     StorageSettings storageSettings = parseStorage(storageSection, logger);
-    return new ConfigView(version, debugEnabled, localeTag, storageSettings);
+    ConfigurationSection graphSection = config.getConfigurationSection("graph");
+    GraphSettings graphSettings = parseGraph(graphSection, logger);
+    return new ConfigView(version, debugEnabled, localeTag, storageSettings, graphSettings);
   }
 
   private static StorageSettings parseStorage(
@@ -68,6 +75,22 @@ public final class ConfigManager {
     PoolSettings poolSettings = parsePool(storageSection.getConfigurationSection("pool"));
 
     return new StorageSettings(backend, sqliteSettings, mySqlSettings, poolSettings);
+  }
+
+  private static GraphSettings parseGraph(
+      ConfigurationSection graphSection, java.util.logging.Logger logger) {
+    double defaultSpeedBlocksPerSecond = DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND;
+    if (graphSection == null) {
+      return new GraphSettings(defaultSpeedBlocksPerSecond);
+    }
+    double speed =
+        graphSection.getDouble(
+            "default-speed-blocks-per-second", DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND);
+    if (!Double.isFinite(speed) || speed <= 0.0) {
+      logger.warning("graph.default-speed-blocks-per-second 配置无效: " + speed + "，已回退为默认值");
+      speed = DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND;
+    }
+    return new GraphSettings(speed);
   }
 
   private static SqliteSettings parseSqlite(ConfigurationSection sqliteSection) {
@@ -114,7 +137,29 @@ public final class ConfigManager {
 
   /** 调试开关与存储设置的不可变视图。 */
   public record ConfigView(
-      int configVersion, boolean debugEnabled, String locale, StorageSettings storageSettings) {}
+      int configVersion,
+      boolean debugEnabled,
+      String locale,
+      StorageSettings storageSettings,
+      GraphSettings graphSettings) {}
+
+  /** 调度图相关配置。 */
+  public record GraphSettings(double defaultSpeedBlocksPerSecond) {
+    public GraphSettings {
+      if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
+        throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");
+      }
+    }
+
+    /**
+     * 返回默认配置（与内置模板保持一致）。
+     *
+     * <p>默认速度用于诊断/查询命令中的 ETA 估算：ETA = shortestDistanceBlocks / defaultSpeedBlocksPerSecond。
+     */
+    public static GraphSettings defaults() {
+      return new GraphSettings(DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND);
+    }
+  }
 
   /** 存储后端定义。 */
   public enum StorageBackend {

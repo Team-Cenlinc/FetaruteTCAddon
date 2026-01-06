@@ -61,7 +61,31 @@ command:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
 
   graph:
-    help: "<prefix> <dark_aqua>用法：</dark_aqua> <white>/fta graph build</white> <gray>[--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc] [--loadChunks [--maxChunks <n>] [--maxConcurrentLoads <n>]]</gray> <gray>|</gray> <white>/fta graph continue</white> <gray>[--tickBudgetMs <ms>] [--maxChunks <n>] [--maxConcurrentLoads <n>]</gray> <gray>|</gray> <white>/fta graph delete</white> <gray>[here]</gray> <gray>|</gray> <white>/fta graph sign waypoint</white> <gray>|</gray> <white>/fta graph status</white> <gray>|</gray> <white>/fta graph cancel</white> <gray>|</gray> <white>/fta graph info</white>"
+    help:
+      header: "<prefix> <dark_aqua>调度图命令</dark_aqua>"
+      entry-build: "<gray>/fta graph build</gray> <white>-</white> <dark_aqua>构建并持久化调度图</dark_aqua>"
+      hover-build: "<gray>点击填充:</gray> <white>/fta graph build </white>\n<dark_aqua>构建并持久化调度图</dark_aqua>\n<gray>常用:</gray> <white>--here --loadChunks</white>"
+      entry-continue: "<gray>/fta graph continue</gray> <white>-</white> <dark_aqua>续跑 here 扩张构建</dark_aqua>"
+      hover-continue: "<gray>点击填充:</gray> <white>/fta graph continue </white>\n<dark_aqua>继续 here 扩张构建</dark_aqua>"
+      entry-status: "<gray>/fta graph status</gray> <white>-</white> <dark_aqua>查看构建进度</dark_aqua>"
+      hover-status: "<gray>点击执行:</gray> <white>/fta graph status</white>\n<dark_aqua>查看构建进度</dark_aqua>"
+      entry-cancel: "<gray>/fta graph cancel</gray> <white>-</white> <dark_aqua>取消构建任务</dark_aqua>"
+      hover-cancel: "<gray>点击执行:</gray> <white>/fta graph cancel</white>\n<dark_aqua>取消构建任务</dark_aqua>"
+      entry-info: "<gray>/fta graph info</gray> <white>-</white> <dark_aqua>查看图摘要与 top edges</dark_aqua>"
+      hover-info: "<gray>点击执行:</gray> <white>/fta graph info</white>\n<dark_aqua>查看图摘要与 top edges</dark_aqua>"
+      entry-delete: "<gray>/fta graph delete</gray> <white>-</white> <dark_aqua>删除整张调度图快照</dark_aqua>"
+      hover-delete: "<gray>点击填充:</gray> <white>/fta graph delete </white>\n<red>危险操作</red> <gray>会清空内存与 SQL 快照</gray>"
+      entry-delete-here: "<gray>/fta graph delete here</gray> <white>-</white> <dark_aqua>删除附近连通分量</dark_aqua>"
+      hover-delete-here: "<gray>点击执行:</gray> <white>/fta graph delete here</white>\n<dark_aqua>删除附近连通分量</dark_aqua>"
+      entry-sign-set: "<gray>/fta graph sign set</gray> <white>-</white> <dark_aqua>快速设置节点牌子</dark_aqua>"
+      hover-sign-set: "<gray>点击填充:</gray> <white>/fta graph sign set </white>\n<dark_aqua>支持:</dark_aqua> <white>waypoint/autostation/depot</white>\n<dark_aqua>对准牌子方块后执行</dark_aqua> <gray>(需要 nodeId 参数)</gray>"
+      entry-query: "<gray>/fta graph query</gray> <white>-</white> <dark_aqua>两点可达性/距离/ETA</dark_aqua>"
+      hover-query: "<gray>点击填充:</gray> <white>/fta graph query </white>\n<dark_aqua>输出 hops + distance + ETA(估算)</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>\n<gray>ETA 速度:</gray> <white>graph.default-speed-blocks-per-second</white>"
+      entry-path: "<gray>/fta graph path</gray> <white>-</white> <dark_aqua>最短路径（分页）</dark_aqua>"
+      hover-path: "<gray>点击填充:</gray> <white>/fta graph path </white>\n<dark_aqua>支持 page 参数；节点坐标可点击 /tp</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
+      entry-component: "<gray>/fta graph component</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
+      hover-component: "<gray>点击填充:</gray> <white>/fta graph component </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
+      footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
       running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
@@ -81,12 +105,34 @@ command:
     continue:
       none: "<prefix> <gray>当前没有可续跑的图构建状态</gray> <dark_aqua>请先执行 /fta graph build --loadChunks</dark_aqua>"
       started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
+    query:
+      node-not-found: "<prefix> <red>未找到节点：</red><white><node></white> <gray>(请先 /fta graph build)</gray>"
+      unreachable: "<prefix> <red>两点不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
+      result: "<prefix> <dark_aqua>两点可达</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white> bps, eta=<white><eta></white>)</gray>"
+    path:
+      header: "<prefix> <dark_aqua>最短路径</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, eta=<white><eta></white>)</gray>"
+      page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+      entry: "<gray>#<seq></gray> <white><id></white> <gray>@</gray> <location>"
+      nav:
+        prev: "<dark_aqua>[上一页]</dark_aqua>"
+        prev-disabled: "<gray>[上一页]</gray>"
+        next: "<dark_aqua>[下一页]</dark_aqua>"
+        next-disabled: "<gray>[下一页]</gray>"
+        hint: "<gray>(点击翻页)</gray>"
+    component:
+      result: "<prefix> <dark_aqua>连通分量</dark_aqua> <gray>(seed=<white><seed></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, blocked=<white><blocked_edges></white>)</gray>"
     sign:
       no-target: "<prefix> <red>请对准一个牌子方块再执行该命令</red>"
       not-a-sign: "<prefix> <red>目标方块不是牌子</red>"
       waypoint:
         invalid-id: "<prefix> <red>无效的 waypoint 节点 ID：</red><white><id></white>"
         success: "<prefix> <dark_aqua>已设置 waypoint 牌子：</dark_aqua><white><id></white>"
+      autostation:
+        invalid-id: "<prefix> <red>无效的 autostation 节点 ID：</red><white><id></white>"
+        success: "<prefix> <dark_aqua>已设置 autostation 牌子：</dark_aqua><white><id></white>"
+      depot:
+        invalid-id: "<prefix> <red>无效的 depot 节点 ID：</red><white><id></white>"
+        success: "<prefix> <dark_aqua>已设置 depot 牌子：</dark_aqua><white><id></white>"
     status:
       idle: "<prefix> <gray>当前世界没有进行中的图构建任务</gray>"
       running: "<prefix> <dark_aqua>图构建进行中</dark_aqua> <gray>(phase=<white><phase></white>, nodes=<white><nodes></white>, visited=<white><visited></white>, queue=<white><queue></white>, processed=<white><processed></white>)</gray>"

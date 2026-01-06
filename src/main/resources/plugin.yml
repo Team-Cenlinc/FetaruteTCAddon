@@ -26,6 +26,7 @@ permissions:
       fetarute.graph.delete: true
       fetarute.graph.info: true
       fetarute.graph.sign: true
+      fetarute.graph.query: true
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置
     default: op
@@ -52,6 +53,9 @@ permissions:
     default: op
   fetarute.graph.info:
     description: 查看调度图摘要与区间距离（/fta graph info）
+    default: op
+  fetarute.graph.query:
+    description: 查询调度图可达性与最短路（/fta graph query/path/component）
     default: op
   fetarute.graph.sign:
     description: 快速设置节点牌子内容（/fta graph sign ...）

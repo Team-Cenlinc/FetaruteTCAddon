@@ -133,6 +133,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return loggerManager;
   }
 
+  /** 返回当前已加载的配置视图管理器（用于命令读取调度图/存储等配置）。 */
+  public ConfigManager getConfigManager() {
+    return configManager;
+  }
+
   public StorageManager getStorageManager() {
     return storageManager;
   }

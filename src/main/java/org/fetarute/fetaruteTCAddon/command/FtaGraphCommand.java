@@ -1,11 +1,13 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -15,6 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
@@ -23,6 +27,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
@@ -41,9 +46,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlock
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
@@ -56,9 +66,10 @@ import org.incendo.cloud.component.CommandComponent;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
+import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
- * 调度图诊断与运维命令：/fta graph build|continue|status|cancel|info|delete。
+ * 调度图诊断与运维命令：/fta graph build|continue|status|cancel|info|delete|query|path|component|sign。
  *
  * <p>图构建分为两个阶段：
  *
@@ -76,6 +87,9 @@ import org.incendo.cloud.parser.standard.StringParser;
  *
  * <p>清理（delete）：{@code /fta graph delete} 会清空内存快照与持久化快照（SQL），并移除该世界的续跑缓存； {@code /fta graph delete
  * here} 则只删除玩家附近所在的连通分量，便于局部重建。
+ *
+ * <p>图查询（query/path/component）：基于内存快照做可达性、最短路径与连通分量诊断；ETA 采用“默认速度”估算，速度来源为 {@code config.yml} 的
+ * {@code graph.default-speed-blocks-per-second}（单位 blocks/s）。
  *
  * <p>HERE 模式起点优先级：
  *
@@ -548,6 +562,7 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("sign")
+            .literal("set")
             .literal("waypoint")
             .senderType(Player.class)
             .permission("fetarute.graph.sign")
@@ -560,64 +575,68 @@ public final class FtaGraphCommand {
                   Player player = (Player) ctx.sender();
                   LocaleManager locale = plugin.getLocaleManager();
 
-                  String rawId = ctx.get("id");
-                  Optional<SignNodeDefinition> defOpt =
-                      SignTextParser.parseWaypointLike(rawId, NodeType.WAYPOINT)
-                          .filter(
-                              definition ->
-                                  definition
-                                      .waypointMetadata()
-                                      .map(
-                                          metadata ->
-                                              metadata.kind()
-                                                      == org.fetarute
-                                                          .fetaruteTCAddon
-                                                          .dispatcher
-                                                          .node
-                                                          .WaypointKind
-                                                          .INTERVAL
-                                                  || metadata.kind()
-                                                      == org.fetarute
-                                                          .fetaruteTCAddon
-                                                          .dispatcher
-                                                          .node
-                                                          .WaypointKind
-                                                          .STATION_THROAT
-                                                  || metadata.kind()
-                                                      == org.fetarute
-                                                          .fetaruteTCAddon
-                                                          .dispatcher
-                                                          .node
-                                                          .WaypointKind
-                                                          .DEPOT_THROAT)
-                                      .orElse(false));
-                  if (defOpt.isEmpty()) {
-                    player.sendMessage(
-                        locale.component(
-                            "command.graph.sign.waypoint.invalid-id", Map.of("id", rawId)));
-                    return;
-                  }
+                  handleSignSet(
+                      player,
+                      locale,
+                      "waypoint",
+                      NodeType.WAYPOINT,
+                      ctx.get("id"),
+                      "command.graph.sign.waypoint.invalid-id",
+                      "command.graph.sign.waypoint.success");
+                }));
 
-                  org.bukkit.block.Block target = player.getTargetBlockExact(5);
-                  if (target == null) {
-                    player.sendMessage(locale.component("command.graph.sign.no-target"));
-                    return;
-                  }
-                  org.bukkit.block.BlockState state = target.getState();
-                  if (!(state instanceof Sign sign)) {
-                    player.sendMessage(locale.component("command.graph.sign.not-a-sign"));
-                    return;
-                  }
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("sign")
+            .literal("set")
+            .literal("autostation")
+            .senderType(Player.class)
+            .permission("fetarute.graph.sign")
+            .required(
+                "id",
+                StringParser.greedyStringParser(),
+                CommandSuggestionProviders.placeholder("<nodeId>"))
+            .handler(
+                ctx -> {
+                  Player player = (Player) ctx.sender();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  handleSignSet(
+                      player,
+                      locale,
+                      "autostation",
+                      NodeType.STATION,
+                      ctx.get("id"),
+                      "command.graph.sign.autostation.invalid-id",
+                      "command.graph.sign.autostation.success");
+                }));
 
-                  var side = sign.getSide(Side.FRONT);
-                  side.line(0, Component.text("[train]"));
-                  side.line(1, Component.text("waypoint"));
-                  side.line(2, Component.text(defOpt.get().nodeId().value()));
-                  side.line(3, Component.empty());
-                  sign.update(true, false);
-
-                  player.sendMessage(
-                      locale.component("command.graph.sign.waypoint.success", Map.of("id", rawId)));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("sign")
+            .literal("set")
+            .literal("depot")
+            .senderType(Player.class)
+            .permission("fetarute.graph.sign")
+            .required(
+                "id",
+                StringParser.greedyStringParser(),
+                CommandSuggestionProviders.placeholder("<nodeId>"))
+            .handler(
+                ctx -> {
+                  Player player = (Player) ctx.sender();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  handleSignSet(
+                      player,
+                      locale,
+                      "depot",
+                      NodeType.DEPOT,
+                      ctx.get("id"),
+                      "command.graph.sign.depot.invalid-id",
+                      "command.graph.sign.depot.success");
                 }));
 
     manager.command(
@@ -982,6 +1001,185 @@ public final class FtaGraphCommand {
                                     String.valueOf(edge.lengthBlocks()))));
                   }
                 }));
+
+    SuggestionProvider<CommandSender> nodeIdSuggestions = graphNodeIdSuggestions("\"<nodeId>\"");
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("query")
+            .permission("fetarute.graph.query")
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  RailGraph graph = snapshotOpt.get().graph();
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(
+                          graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+                  RailGraphPath path = pathOpt.get();
+                  double defaultSpeed = defaultSpeedBlocksPerSecond();
+                  RailTravelTimeModel timeModel = RailTravelTimeModels.constantSpeed(defaultSpeed);
+                  Optional<Duration> etaOpt =
+                      timeModel.pathTravelTime(graph, path.nodes(), path.edges());
+                  String etaText = etaOpt.map(this::formatDuration).orElse("-");
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.query.result",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "hops",
+                              String.valueOf(path.edges().size()),
+                              "distance_blocks",
+                              String.valueOf(path.totalLengthBlocks()),
+                              "speed",
+                              String.format(Locale.ROOT, "%.2f", defaultSpeed),
+                              "eta",
+                              etaText)));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("path")
+            .permission("fetarute.graph.query")
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .optional("page", IntegerParser.integerParser())
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  RailGraph graph = snapshotOpt.get().graph();
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(
+                          graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
+                  sendPathPage(locale, sender, graph, pathOpt.get(), page);
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("component")
+            .permission("fetarute.graph.query")
+            .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  RailGraph graph = snapshotOpt.get().graph();
+
+                  NodeId seed = NodeId.of(normalizeNodeIdArg(ctx.get("node")));
+                  if (graph.findNode(seed).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", seed.value())));
+                    return;
+                  }
+
+                  ComponentStats stats = componentStats(graph, seed);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.component.result",
+                          Map.of(
+                              "seed",
+                              seed.value(),
+                              "nodes",
+                              String.valueOf(stats.nodeCount()),
+                              "edges",
+                              String.valueOf(stats.edgeCount()),
+                              "blocked_edges",
+                              String.valueOf(stats.blockedEdgeCount()))));
+                }));
   }
 
   private static Component staleInfoMessage(
@@ -1023,9 +1221,521 @@ public final class FtaGraphCommand {
     return new GraphBuildCacheKey(worldId, ownerId);
   }
 
+  /**
+   * 输出 {@code /fta graph} 二级帮助。
+   *
+   * <p>帮助条目为可点击/可悬浮文本：
+   *
+   * <ul>
+   *   <li>按权限过滤：仅展示调用者可用的子命令
+   *   <li>按 sender 类型过滤：控制台不展示 player-only 子命令
+   * </ul>
+   */
   private void sendHelp(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
-    sender.sendMessage(locale.component("command.graph.help"));
+    sender.sendMessage(locale.component("command.graph.help.header"));
+
+    if (sender.hasPermission("fetarute.graph.build")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-build"),
+          ClickEvent.suggestCommand("/fta graph build "),
+          locale.component("command.graph.help.hover-build"));
+    }
+    if (sender.hasPermission("fetarute.graph.continue")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-continue"),
+          ClickEvent.suggestCommand("/fta graph continue "),
+          locale.component("command.graph.help.hover-continue"));
+    }
+    if (sender.hasPermission("fetarute.graph.status")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-status"),
+          ClickEvent.runCommand("/fta graph status"),
+          locale.component("command.graph.help.hover-status"));
+    }
+    if (sender.hasPermission("fetarute.graph.cancel")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-cancel"),
+          ClickEvent.runCommand("/fta graph cancel"),
+          locale.component("command.graph.help.hover-cancel"));
+    }
+    if (sender.hasPermission("fetarute.graph.info")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-info"),
+          ClickEvent.runCommand("/fta graph info"),
+          locale.component("command.graph.help.hover-info"));
+    }
+    if (sender.hasPermission("fetarute.graph.delete")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-delete"),
+          ClickEvent.suggestCommand("/fta graph delete "),
+          locale.component("command.graph.help.hover-delete"));
+      if (sender instanceof Player) {
+        sendHelpEntry(
+            sender,
+            locale.component("command.graph.help.entry-delete-here"),
+            ClickEvent.runCommand("/fta graph delete here"),
+            locale.component("command.graph.help.hover-delete-here"));
+      }
+    }
+    if (sender.hasPermission("fetarute.graph.sign") && sender instanceof Player) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-sign-set"),
+          ClickEvent.suggestCommand("/fta graph sign set "),
+          locale.component("command.graph.help.hover-sign-set"));
+    }
+    if (sender.hasPermission("fetarute.graph.query")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-query"),
+          ClickEvent.suggestCommand("/fta graph query "),
+          locale.component("command.graph.help.hover-query"));
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-path"),
+          ClickEvent.suggestCommand("/fta graph path "),
+          locale.component("command.graph.help.hover-path"));
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-component"),
+          ClickEvent.suggestCommand("/fta graph component "),
+          locale.component("command.graph.help.hover-component"));
+    }
+
+    sender.sendMessage(locale.component("command.graph.help.footer"));
+  }
+
+  /** 输出一条可点击/可悬浮的帮助条目。 */
+  private void sendHelpEntry(
+      CommandSender sender, Component text, ClickEvent clickEvent, Component hoverText) {
+    Objects.requireNonNull(sender, "sender");
+    Objects.requireNonNull(text, "text");
+    Objects.requireNonNull(clickEvent, "clickEvent");
+    Objects.requireNonNull(hoverText, "hoverText");
+    sender.sendMessage(text.clickEvent(clickEvent).hoverEvent(HoverEvent.showText(hoverText)));
+  }
+
+  /**
+   * 获取指定世界的调度图内存快照；若不存在则输出缺失/失效提示并返回 empty。
+   *
+   * <p>用于 query/path/component 等只读诊断命令，避免调用方重复处理 stale/missing 分支。
+   */
+  private Optional<RailGraphService.RailGraphSnapshot> requireGraphSnapshot(
+      CommandSender sender, World world, LocaleManager locale) {
+    Objects.requireNonNull(sender, "sender");
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(locale, "locale");
+    RailGraphService service = plugin.getRailGraphService();
+    if (service == null) {
+      sender.sendMessage(locale.component("command.graph.info.missing"));
+      return Optional.empty();
+    }
+    Optional<RailGraphService.RailGraphSnapshot> snapshotOpt = service.getSnapshot(world);
+    if (snapshotOpt.isPresent()) {
+      return snapshotOpt;
+    }
+    service
+        .getStaleState(world)
+        .ifPresentOrElse(
+            stale -> sender.sendMessage(staleInfoMessage(locale, stale)),
+            () -> sender.sendMessage(locale.component("command.graph.info.missing")));
+    return Optional.empty();
+  }
+
+  /**
+   * NodeId 参数补全：从“当前世界内存快照”枚举节点并做前缀过滤。
+   *
+   * <p>约束与策略：
+   *
+   * <ul>
+   *   <li>不访问存储后端：仅依赖内存快照，避免 tab 补全阻塞主线程/刷 SQL
+   *   <li>候选数量最多 20 条：避免刷屏
+   *   <li>快照不存在则仅返回占位符
+   * </ul>
+   */
+  private SuggestionProvider<CommandSender> graphNodeIdSuggestions(String placeholder) {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = input != null ? input.lastRemainingToken() : "";
+          prefix = prefix.trim();
+          if (!prefix.isEmpty() && (prefix.charAt(0) == '"' || prefix.charAt(0) == '\'')) {
+            prefix = prefix.substring(1);
+          }
+          if (!prefix.isEmpty()
+              && (prefix.charAt(prefix.length() - 1) == '"'
+                  || prefix.charAt(prefix.length() - 1) == '\'')) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+          }
+          prefix = prefix.trim().toLowerCase(Locale.ROOT);
+
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank() && placeholder != null && !placeholder.isBlank()) {
+            suggestions.add(placeholder);
+          }
+
+          World world = resolveWorld(ctx.sender());
+          if (world == null) {
+            return suggestions;
+          }
+          RailGraphService service = plugin.getRailGraphService();
+          if (service == null) {
+            return suggestions;
+          }
+          Optional<RailGraphService.RailGraphSnapshot> snapshotOpt = service.getSnapshot(world);
+          if (snapshotOpt.isEmpty()) {
+            return suggestions;
+          }
+
+          List<String> nodeIds = new ArrayList<>();
+          for (RailNode node : snapshotOpt.get().graph().nodes()) {
+            if (node == null || node.id() == null) {
+              continue;
+            }
+            String raw = node.id().value();
+            if (raw == null) {
+              continue;
+            }
+            String lower = raw.toLowerCase(Locale.ROOT);
+            if (prefix.isBlank() || lower.startsWith(prefix)) {
+              nodeIds.add('"' + raw + '"');
+            }
+          }
+          nodeIds.stream().distinct().sorted().limit(20).forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /**
+   * 读取图查询的默认速度（blocks/s）。
+   *
+   * <p>用于 {@code /fta graph query/path} 的 ETA 估算：ETA = shortestDistanceBlocks / speed。
+   */
+  private double defaultSpeedBlocksPerSecond() {
+    ConfigManager.GraphSettings defaults = ConfigManager.GraphSettings.defaults();
+    ConfigManager configManager = plugin.getConfigManager();
+    if (configManager == null) {
+      return defaults.defaultSpeedBlocksPerSecond();
+    }
+    ConfigManager.ConfigView view = configManager.current();
+    if (view == null || view.graphSettings() == null) {
+      return defaults.defaultSpeedBlocksPerSecond();
+    }
+    double speed = view.graphSettings().defaultSpeedBlocksPerSecond();
+    if (!Double.isFinite(speed) || speed <= 0.0) {
+      return defaults.defaultSpeedBlocksPerSecond();
+    }
+    return speed;
+  }
+
+  /**
+   * 将 Duration 格式化为简短中文文本。
+   *
+   * <p>输出示例：{@code 59秒}、{@code 2分10秒}、{@code 1小时5分}。
+   */
+  private String formatDuration(Duration duration) {
+    if (duration == null || duration.isNegative()) {
+      return "-";
+    }
+    long seconds = duration.toSeconds();
+    if (seconds < 60) {
+      return seconds + "秒";
+    }
+    long minutes = seconds / 60;
+    long remainSeconds = seconds % 60;
+    if (minutes < 60) {
+      return remainSeconds == 0 ? minutes + "分" : minutes + "分" + remainSeconds + "秒";
+    }
+    long hours = minutes / 60;
+    long remainMinutes = minutes % 60;
+    return remainMinutes == 0 ? hours + "小时" : hours + "小时" + remainMinutes + "分";
+  }
+
+  /**
+   * 分页输出最短路径，并为玩家提供“点击传送”与“点击翻页”交互。
+   *
+   * <p>注意：路径中节点坐标来自图快照记录的 sign 坐标，不保证在轨道上；仅用于诊断定位。
+   */
+  private void sendPathPage(
+      LocaleManager locale, CommandSender sender, RailGraph graph, RailGraphPath path, int page) {
+    Objects.requireNonNull(locale, "locale");
+    Objects.requireNonNull(sender, "sender");
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(path, "path");
+
+    int pageSize = 10;
+    int totalEntries = path.nodes().size();
+    int totalPages = Math.max(1, (totalEntries + pageSize - 1) / pageSize);
+    int effectivePage = Math.max(1, Math.min(page, totalPages));
+    int startIndex = (effectivePage - 1) * pageSize;
+    int endIndex = Math.min(totalEntries, startIndex + pageSize);
+
+    double defaultSpeed = defaultSpeedBlocksPerSecond();
+    RailTravelTimeModel timeModel = RailTravelTimeModels.constantSpeed(defaultSpeed);
+    Optional<Duration> etaOpt = timeModel.pathTravelTime(graph, path.nodes(), path.edges());
+    String etaText = etaOpt.map(this::formatDuration).orElse("-");
+
+    sender.sendMessage(
+        locale.component(
+            "command.graph.path.header",
+            Map.of(
+                "from",
+                path.from().value(),
+                "to",
+                path.to().value(),
+                "hops",
+                String.valueOf(path.edges().size()),
+                "distance_blocks",
+                String.valueOf(path.totalLengthBlocks()),
+                "eta",
+                etaText)));
+    sender.sendMessage(
+        locale.component(
+            "command.graph.path.page",
+            Map.of("page", String.valueOf(effectivePage), "pages", String.valueOf(totalPages))));
+
+    for (int i = startIndex; i < endIndex; i++) {
+      NodeId nodeId = path.nodes().get(i);
+      String idText = nodeId != null ? nodeId.value() : "-";
+
+      String locationText = "-";
+      net.kyori.adventure.text.Component locationComponent =
+          net.kyori.adventure.text.Component.text(locationText);
+      Optional<RailNode> nodeOpt = nodeId != null ? graph.findNode(nodeId) : Optional.empty();
+      if (nodeOpt.isPresent()) {
+        Vector pos = nodeOpt.get().worldPosition();
+        if (pos != null) {
+          int x = pos.getBlockX();
+          int y = pos.getBlockY();
+          int z = pos.getBlockZ();
+          locationText = x + " " + y + " " + z;
+          locationComponent = net.kyori.adventure.text.Component.text(locationText);
+          if (sender instanceof Player) {
+            String tp = "/tp " + x + " " + y + " " + z;
+            locationComponent =
+                locationComponent
+                    .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(tp))
+                    .hoverEvent(
+                        net.kyori.adventure.text.event.HoverEvent.showText(
+                            net.kyori.adventure.text.Component.text(tp)));
+          }
+        }
+      }
+
+      sender.sendMessage(
+          locale.component(
+              "command.graph.path.entry",
+              net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                          "seq", String.valueOf(i + 1)))
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                          "id", idText))
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                          "location", locationComponent))
+                  .build()));
+    }
+
+    sender.sendMessage(buildPathNav(locale, path, effectivePage, totalPages));
+  }
+
+  /** 构建 {@code /fta graph path} 的分页导航（上一页/下一页）。 */
+  private Component buildPathNav(
+      LocaleManager locale, RailGraphPath path, int page, int totalPages) {
+    net.kyori.adventure.text.Component pageText =
+        net.kyori.adventure.text.Component.text("")
+            .append(locale.component("command.graph.path.nav.hint"));
+
+    net.kyori.adventure.text.Component prev =
+        page > 1
+            ? locale
+                .component("command.graph.path.nav.prev")
+                .clickEvent(
+                    net.kyori.adventure.text.event.ClickEvent.runCommand(
+                        "/fta graph path "
+                            + path.from().value()
+                            + " "
+                            + path.to().value()
+                            + " "
+                            + (page - 1)))
+            : locale.component("command.graph.path.nav.prev-disabled");
+    net.kyori.adventure.text.Component next =
+        page < totalPages
+            ? locale
+                .component("command.graph.path.nav.next")
+                .clickEvent(
+                    net.kyori.adventure.text.event.ClickEvent.runCommand(
+                        "/fta graph path "
+                            + path.from().value()
+                            + " "
+                            + path.to().value()
+                            + " "
+                            + (page + 1)))
+            : locale.component("command.graph.path.nav.next-disabled");
+
+    return net.kyori.adventure.text.Component.empty()
+        .append(prev)
+        .append(net.kyori.adventure.text.Component.space())
+        .append(next)
+        .append(net.kyori.adventure.text.Component.space())
+        .append(pageText);
+  }
+
+  /**
+   * 计算以 seed 为起点的连通分量统计信息。
+   *
+   * <p>实现为基于图邻接表的 BFS：
+   *
+   * <ul>
+   *   <li>nodeCount：分量内节点数
+   *   <li>edgeCount：分量内边数（按 EdgeId 去重）
+   *   <li>blockedEdgeCount：其中被标记为 blocked 的边数
+   * </ul>
+   */
+  private static ComponentStats componentStats(RailGraph graph, NodeId seed) {
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(seed, "seed");
+
+    Set<NodeId> visited = new HashSet<>();
+    ArrayDeque<NodeId> queue = new ArrayDeque<>();
+    visited.add(seed);
+    queue.add(seed);
+
+    Set<org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId> edges = new HashSet<>();
+    while (!queue.isEmpty()) {
+      NodeId current = queue.poll();
+      for (RailEdge edge : graph.edgesFrom(current)) {
+        if (edge == null) {
+          continue;
+        }
+        edges.add(edge.id());
+        NodeId neighbor = current.equals(edge.from()) ? edge.to() : edge.from();
+        if (neighbor != null && visited.add(neighbor)) {
+          queue.add(neighbor);
+        }
+      }
+    }
+
+    int blockedEdges = 0;
+    for (org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId edgeId : edges) {
+      if (edgeId != null && graph.isBlocked(edgeId)) {
+        blockedEdges++;
+      }
+    }
+    return new ComponentStats(visited.size(), edges.size(), blockedEdges);
+  }
+
+  /** 连通分量统计结果（nodes/edges/blockedEdges）。 */
+  private record ComponentStats(int nodeCount, int edgeCount, int blockedEdgeCount) {}
+
+  /**
+   * 写入节点牌子内容：统一填充 {@code [train]} 头 + action + nodeId。
+   *
+   * <p>校验规则：
+   *
+   * <ul>
+   *   <li>{@code waypoint}：只接受区间点/咽喉（5 段 interval 或 5 段 S/D throat）
+   *   <li>{@code autostation}：只接受站点本体（4 段 S）
+   *   <li>{@code depot}：只接受车库本体（4 段 D）
+   * </ul>
+   *
+   * @param actionName SignAction 名称（写入牌子第 2 行）
+   * @param nodeType 注册用的节点类型（用于复用解析器）
+   */
+  private void handleSignSet(
+      Player player,
+      LocaleManager locale,
+      String actionName,
+      NodeType nodeType,
+      String rawId,
+      String invalidLocaleKey,
+      String successLocaleKey) {
+    Objects.requireNonNull(player, "player");
+    Objects.requireNonNull(locale, "locale");
+    Objects.requireNonNull(actionName, "actionName");
+    Objects.requireNonNull(nodeType, "nodeType");
+    Objects.requireNonNull(invalidLocaleKey, "invalidLocaleKey");
+    Objects.requireNonNull(successLocaleKey, "successLocaleKey");
+
+    String normalizedId = normalizeNodeIdArg(rawId);
+    Optional<SignNodeDefinition> defOpt =
+        SignTextParser.parseWaypointLike(normalizedId, nodeType)
+            .filter(
+                definition ->
+                    definition
+                        .waypointMetadata()
+                        .map(
+                            metadata -> {
+                              WaypointKind kind = metadata.kind();
+                              if (kind == null) {
+                                return false;
+                              }
+                              if (nodeType == NodeType.WAYPOINT) {
+                                return kind == WaypointKind.INTERVAL
+                                    || kind == WaypointKind.STATION_THROAT
+                                    || kind == WaypointKind.DEPOT_THROAT;
+                              }
+                              if (nodeType == NodeType.STATION) {
+                                return kind == WaypointKind.STATION;
+                              }
+                              if (nodeType == NodeType.DEPOT) {
+                                return kind == WaypointKind.DEPOT;
+                              }
+                              return false;
+                            })
+                        .orElse(false));
+    if (defOpt.isEmpty()) {
+      player.sendMessage(locale.component(invalidLocaleKey, Map.of("id", normalizedId)));
+      return;
+    }
+
+    org.bukkit.block.Block target = player.getTargetBlockExact(5);
+    if (target == null) {
+      player.sendMessage(locale.component("command.graph.sign.no-target"));
+      return;
+    }
+    org.bukkit.block.BlockState state = target.getState();
+    if (!(state instanceof Sign sign)) {
+      player.sendMessage(locale.component("command.graph.sign.not-a-sign"));
+      return;
+    }
+
+    var side = sign.getSide(Side.FRONT);
+    side.line(0, Component.text("[train]"));
+    side.line(1, Component.text(actionName));
+    side.line(2, Component.text(defOpt.get().nodeId().value()));
+    side.line(3, Component.empty());
+    sign.update(true, false);
+
+    player.sendMessage(locale.component(successLocaleKey, Map.of("id", normalizedId)));
+  }
+
+  /**
+   * 规范化 NodeId 命令参数：去掉首尾空白，并容忍一对包裹引号。
+   *
+   * <p>原因：玩家侧命令输入有时会尝试用引号包裹含 {@code :} 的节点 ID；这里在不改变实际 NodeId 语义的前提下做一次兼容处理。
+   */
+  private static String normalizeNodeIdArg(String raw) {
+    if (raw == null) {
+      return "";
+    }
+    String trimmed = raw.trim();
+    if (trimmed.length() >= 2) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+        return trimmed.substring(1, trimmed.length() - 1).trim();
+      }
+    }
+    return trimmed;
   }
 
   /**

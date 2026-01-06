@@ -22,7 +22,9 @@ final class StorageManagerTest {
             new ConfigManager.SqliteSettings("data/test.sqlite"),
             Optional.empty(),
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
-    ConfigManager.ConfigView view = new ConfigManager.ConfigView(1, true, "zh_CN", settings);
+    ConfigManager.ConfigView view =
+        new ConfigManager.ConfigView(
+            2, true, "zh_CN", settings, new ConfigManager.GraphSettings(8.0));
     StorageManager manager =
         new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
 
@@ -43,7 +45,9 @@ final class StorageManagerTest {
             Optional.of(
                 new ConfigManager.MySqlSettings("127.0.0.1", 3306, "db", "user", "pwd", "fta_")),
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
-    ConfigManager.ConfigView view = new ConfigManager.ConfigView(1, false, "zh_CN", settings);
+    ConfigManager.ConfigView view =
+        new ConfigManager.ConfigView(
+            2, false, "zh_CN", settings, new ConfigManager.GraphSettings(8.0));
     StorageManager manager =
         new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
 

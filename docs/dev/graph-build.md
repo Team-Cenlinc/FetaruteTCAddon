@@ -9,6 +9,9 @@
 - `/fta graph status`
 - `/fta graph cancel`
 - `/fta graph info`
+- `/fta graph query "<from>" "<to>"`
+- `/fta graph path "<from>" "<to>" [page]`
+- `/fta graph component "<nodeId>"`
 - `/fta graph delete`
 - `/fta graph delete here`
 
@@ -130,6 +133,49 @@
 - switcher 来源拆分（来自 switcher 牌子 vs 自动分叉）
 - 最长的 10 条边（按 lengthBlocks 降序）
 
+## 图查询（/fta graph query/path/component）
+
+图查询命令用于“运维排障/线路验证”，依赖内存快照，因此请先完成一次 `/fta graph build`（若图处于 stale 状态，`/fta graph info` 会提示重建）。
+
+补充：命令侧已适配交互与补全，便于运维快速定位问题。
+
+- `/fta graph` 二级帮助为可点击条目（run/suggest），并按权限与 sender 类型过滤可用命令。
+- `query/path/component` 的 nodeId 参数支持 Tab 补全（仅基于内存快照，最多返回 20 条候选；无快照时仅返回占位符）。
+- 玩家端由于 Minecraft 命令解析限制，nodeId（含 `:`）建议使用引号包裹（Tab 补全也会返回带引号的候选）。
+
+### 两点可达性（query）
+
+- `/fta graph query "<from>" "<to>"`
+  - 输出：hops（跳数）、distance_blocks（最短距离，blocks）、eta（估算）
+  - ETA 计算：`eta = distance_blocks / graph.default-speed-blocks-per-second`
+
+默认速度来自 `config.yml`：
+
+```yml
+graph:
+  default-speed-blocks-per-second: 8.0
+```
+
+该值用于“诊断估算”，建议按服务器实际列车运行速度调参。
+
+### 最短路径（path）
+
+- `/fta graph path "<from>" "<to>" [page]`
+  - 分页输出节点序列（每页 10 条）
+  - 玩家端会把节点坐标做成可点击 `/tp x y z`，便于定位牌子/咽喉/道岔附近的轨道区域
+
+注意：这里的坐标来自图快照记录的节点坐标（通常是牌子方块坐标），不保证一定落在轨道方块上，仅用于诊断定位。
+
+### 连通分量统计（component）
+
+- `/fta graph component "<nodeId>"`
+  - 输出：seed 所在连通分量的 nodes/edges 数量，以及其中 blocked_edges 数量
+  - 常用于排查“为什么两点不可达”：先确认是否在同一连通分量，再回到 build 的区块加载/漏扫问题
+
+### 权限
+
+- `fetarute.graph.query`：访问 query/path/component
+
 ## 常见问题：SWITCHER 节点异常增多
 
 若你在旧版本中发现大量“莫名其妙的 SWITCHER”：
@@ -147,10 +193,12 @@
 2) 使用 conflict 提示中的坐标传送过去，确认该位置是否仍存在节点牌子
 3) 若该位置区块此前未加载：先靠近/传送使其加载，再次尝试建牌触发自愈清理
 
-## 快速写入 Waypoint 牌子
+## 快速写入节点牌子
 
 若你已经摆好了牌子方块但不想手动输入长 nodeId，可对准该牌子后执行：
 
-- `/fta graph sign waypoint <nodeId>`
+- `/fta graph sign set waypoint <nodeId>`
+- `/fta graph sign set autostation <nodeId>`
+- `/fta graph sign set depot <nodeId>`
 
-该命令会把牌子前面写成 TrainCarts 格式（`[train]` + `waypoint` + `nodeId`），随后即可用 `/fta graph build` 扫描并建图。
+该命令会把牌子前面写成 TrainCarts 格式（`[train]` + `action` + `nodeId`），随后即可用 `/fta graph build` 扫描并建图。
