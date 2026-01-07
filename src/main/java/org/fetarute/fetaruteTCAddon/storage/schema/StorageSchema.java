@@ -54,6 +54,8 @@ public final class StorageSchema {
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     ddl.add(railEdges(dialect));
     ddl.add(index("rail_edges_world", "rail_edges", "world_id"));
+    ddl.add(railEdgeOverrides(dialect));
+    ddl.add(index("rail_edge_overrides_world", "rail_edge_overrides", "world_id"));
     ddl.add(railGraphSnapshots(dialect));
     return Collections.unmodifiableList(ddl);
   }
@@ -370,6 +372,34 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.doubleType(),
         dialect.intType());
+  }
+
+  private String railEdgeOverrides(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    world_id %s NOT NULL,
+                    node_a %s NOT NULL,
+                    node_b %s NOT NULL,
+                    speed_limit_bps %s,
+                    temp_speed_limit_bps %s,
+                    temp_speed_limit_until %s,
+                    blocked_manual %s NOT NULL,
+                    blocked_until %s,
+                    updated_at %s NOT NULL,
+                    PRIMARY KEY (world_id, node_a, node_b)
+                );
+                """,
+        table("rail_edge_overrides"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.doubleType(),
+        dialect.doubleType(),
+        dialect.timestampType(),
+        dialect.intType(),
+        dialect.timestampType(),
+        dialect.timestampType());
   }
 
   private String railGraphSnapshots(SqlDialect dialect) {

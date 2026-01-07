@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -11,11 +12,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -28,6 +32,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
@@ -40,16 +45,18 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob.Bui
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildOutcome;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailSpeed;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphMultiSourceExplorerSession;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -101,6 +108,11 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaGraphCommand {
 
   private final FetaruteTCAddon plugin;
+  private static final Pattern SPEED_PATTERN =
+      Pattern.compile(
+          "^\\s*(?<value>[+-]?(?:\\d+(?:\\.\\d+)?|\\.\\d+))\\s*(?<unit>kmh|km/h|kph|bps|bpt)?\\s*$",
+          Pattern.CASE_INSENSITIVE);
+  private static final Pattern TTL_PATTERN = Pattern.compile("(?i)(\\d+)([smhd])");
 
   /** 世界维度的构建任务：同一世界同一时间只允许一个 build/continue 任务运行。 */
   private final ConcurrentMap<UUID, RailGraphBuildJob> jobs = new ConcurrentHashMap<>();
@@ -158,6 +170,7 @@ public final class FtaGraphCommand {
     CommandFlag<Void> allFlag = CommandFlag.builder("all").build();
     CommandFlag<Void> hereFlag = CommandFlag.builder("here").build();
     CommandFlag<Void> tccFlag = CommandFlag.builder("tcc").build();
+    CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
 
     manager.command(
         manager
@@ -851,7 +864,8 @@ public final class FtaGraphCommand {
                     return;
                   }
                   RailGraphService.RailGraphSnapshot snapshot = snapshotOpt.get();
-                  RailGraph graph = snapshot.graph();
+                  Instant now = Instant.now();
+                  RailGraph graph = graphWithEdgeOverrides(world.getUID(), snapshot.graph(), now);
 
                   int blockedEdges = 0;
                   for (RailEdge edge : graph.edges()) {
@@ -1003,6 +1017,1853 @@ public final class FtaGraphCommand {
                 }));
 
     SuggestionProvider<CommandSender> nodeIdSuggestions = graphNodeIdSuggestions("\"<nodeId>\"");
+    SuggestionProvider<CommandSender> speedSuggestions = speedSuggestions("<speed>");
+    SuggestionProvider<CommandSender> ttlSuggestions = ttlSuggestions("<ttl>");
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("speed")
+            .literal("set")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  if (graph.findNode(a).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", a.value())));
+                    return;
+                  }
+                  if (graph.findNode(b).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", b.value())));
+                    return;
+                  }
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+                  if (!graphHasEdge(graph, edgeId)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.not-adjacent",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(((String) ctx.get("speed")).trim());
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-speed",
+                            Map.of("raw", String.valueOf(ctx.get("speed")))));
+                    return;
+                  }
+                  RailSpeed speed = speedOpt.get();
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          OptionalDouble.of(speed.blocksPerSecond()),
+                          current != null
+                              ? current.tempSpeedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          current != null ? current.tempSpeedLimitUntil() : Optional.empty(),
+                          current != null && current.blockedManual(),
+                          current != null ? current.blockedUntil() : Optional.empty(),
+                          Instant.now());
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              provider.railEdgeOverrides().upsert(next);
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    service.putEdgeOverride(next);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.set.success",
+                          Map.of(
+                              "a",
+                              a.value(),
+                              "b",
+                              b.value(),
+                              "speed",
+                              speed.formatWithAllUnits())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("speed")
+            .literal("clear")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  if (current == null || current.speedLimitBlocksPerSecond().isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.clear.none",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          OptionalDouble.empty(),
+                          current.tempSpeedLimitBlocksPerSecond(),
+                          current.tempSpeedLimitUntil(),
+                          current.blockedManual(),
+                          current.blockedUntil(),
+                          Instant.now());
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              if (next.isEmpty()) {
+                                provider.railEdgeOverrides().delete(world.getUID(), edgeId);
+                              } else {
+                                provider.railEdgeOverrides().upsert(next);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    if (next.isEmpty()) {
+                      service.deleteEdgeOverride(world.getUID(), edgeId);
+                    } else {
+                      service.putEdgeOverride(next);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.clear.success",
+                          Map.of("a", a.value(), "b", b.value())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("speed")
+            .literal("temp")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .required("ttl", StringParser.stringParser(), ttlSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  if (graph.findNode(a).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", a.value())));
+                    return;
+                  }
+                  if (graph.findNode(b).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", b.value())));
+                    return;
+                  }
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+                  if (!graphHasEdge(graph, edgeId)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.not-adjacent",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(((String) ctx.get("speed")).trim());
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-speed",
+                            Map.of("raw", String.valueOf(ctx.get("speed")))));
+                    return;
+                  }
+                  Optional<Duration> ttlOpt = parseTtlArg(((String) ctx.get("ttl")).trim());
+                  if (ttlOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-ttl",
+                            Map.of("raw", String.valueOf(ctx.get("ttl")))));
+                    return;
+                  }
+                  RailSpeed speed = speedOpt.get();
+                  Duration ttl = ttlOpt.get();
+                  Instant until = now.plus(ttl);
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current != null
+                              ? current.speedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          OptionalDouble.of(speed.blocksPerSecond()),
+                          Optional.of(until),
+                          current != null && current.blockedManual(),
+                          current != null ? current.blockedUntil() : Optional.empty(),
+                          now);
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              provider.railEdgeOverrides().upsert(next);
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    service.putEdgeOverride(next);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.temp.success",
+                          Map.of(
+                              "a",
+                              a.value(),
+                              "b",
+                              b.value(),
+                              "speed",
+                              speed.formatWithAllUnits(),
+                              "ttl",
+                              formatDuration(ttl))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("speed")
+            .literal("temp-clear")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  if (current == null || current.tempSpeedLimitBlocksPerSecond().isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.temp-clear.none",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current.speedLimitBlocksPerSecond(),
+                          OptionalDouble.empty(),
+                          Optional.empty(),
+                          current.blockedManual(),
+                          current.blockedUntil(),
+                          Instant.now());
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              if (next.isEmpty()) {
+                                provider.railEdgeOverrides().delete(world.getUID(), edgeId);
+                              } else {
+                                provider.railEdgeOverrides().upsert(next);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    if (next.isEmpty()) {
+                      service.deleteEdgeOverride(world.getUID(), edgeId);
+                    } else {
+                      service.putEdgeOverride(next);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.temp-clear.success",
+                          Map.of("a", a.value(), "b", b.value())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("speed")
+            .literal("path")
+            .permission("fetarute.graph.edge")
+            .flag(confirmFlag)
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(((String) ctx.get("speed")).trim());
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-speed",
+                            Map.of("raw", String.valueOf(ctx.get("speed")))));
+                    return;
+                  }
+                  RailSpeed speed = speedOpt.get();
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  RailGraphPathFinder.Options options =
+                      new RailGraphPathFinder.Options(
+                          RailGraphPathFinder.Options.shortestDistance().costModel(), true);
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(graph, from, to, options);
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  RailGraphPath path = pathOpt.get();
+                  if (!ctx.flags().isPresent(confirmFlag)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.path.preview",
+                            Map.of(
+                                "from",
+                                from.value(),
+                                "to",
+                                to.value(),
+                                "edges",
+                                String.valueOf(path.edges().size()),
+                                "speed",
+                                speed.formatWithAllUnits())));
+                    sender.sendMessage(locale.component("command.common.confirm-required"));
+                    return;
+                  }
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  RailGraphService service = plugin.getRailGraphService();
+
+                  List<RailEdgeOverrideRecord> updates = new ArrayList<>();
+                  for (RailEdge edge : path.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    EdgeId edgeId = EdgeId.undirected(edge.id().a(), edge.id().b());
+                    RailEdgeOverrideRecord current =
+                        service != null
+                            ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                            : null;
+                    RailEdgeOverrideRecord next =
+                        new RailEdgeOverrideRecord(
+                            world.getUID(),
+                            edgeId,
+                            OptionalDouble.of(speed.blocksPerSecond()),
+                            current != null
+                                ? current.tempSpeedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            current != null ? current.tempSpeedLimitUntil() : Optional.empty(),
+                            current != null && current.blockedManual(),
+                            current != null ? current.blockedUntil() : Optional.empty(),
+                            now);
+                    updates.add(next);
+                  }
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              for (RailEdgeOverrideRecord update : updates) {
+                                provider.railEdgeOverrides().upsert(update);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    for (RailEdgeOverrideRecord update : updates) {
+                      service.putEdgeOverride(update);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.path.success",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "edges",
+                              String.valueOf(updates.size()),
+                              "speed",
+                              speed.formatWithAllUnits())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("speed")
+            .literal("path")
+            .literal("temp")
+            .permission("fetarute.graph.edge")
+            .flag(confirmFlag)
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .required("ttl", StringParser.stringParser(), ttlSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(((String) ctx.get("speed")).trim());
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-speed",
+                            Map.of("raw", String.valueOf(ctx.get("speed")))));
+                    return;
+                  }
+                  Optional<Duration> ttlOpt = parseTtlArg(((String) ctx.get("ttl")).trim());
+                  if (ttlOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-ttl",
+                            Map.of("raw", String.valueOf(ctx.get("ttl")))));
+                    return;
+                  }
+                  RailSpeed speed = speedOpt.get();
+                  Duration ttl = ttlOpt.get();
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  RailGraphPathFinder.Options options =
+                      new RailGraphPathFinder.Options(
+                          RailGraphPathFinder.Options.shortestDistance().costModel(), true);
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(graph, from, to, options);
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  RailGraphPath path = pathOpt.get();
+                  if (!ctx.flags().isPresent(confirmFlag)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.path.temp.preview",
+                            Map.of(
+                                "from",
+                                from.value(),
+                                "to",
+                                to.value(),
+                                "edges",
+                                String.valueOf(path.edges().size()),
+                                "speed",
+                                speed.formatWithAllUnits(),
+                                "ttl",
+                                formatDuration(ttl))));
+                    sender.sendMessage(locale.component("command.common.confirm-required"));
+                    return;
+                  }
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  RailGraphService service = plugin.getRailGraphService();
+
+                  Instant until = now.plus(ttl);
+                  List<RailEdgeOverrideRecord> updates = new ArrayList<>();
+                  for (RailEdge edge : path.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    EdgeId edgeId = EdgeId.undirected(edge.id().a(), edge.id().b());
+                    RailEdgeOverrideRecord current =
+                        service != null
+                            ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                            : null;
+                    RailEdgeOverrideRecord next =
+                        new RailEdgeOverrideRecord(
+                            world.getUID(),
+                            edgeId,
+                            current != null
+                                ? current.speedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            OptionalDouble.of(speed.blocksPerSecond()),
+                            Optional.of(until),
+                            current != null && current.blockedManual(),
+                            current != null ? current.blockedUntil() : Optional.empty(),
+                            now);
+                    updates.add(next);
+                  }
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              for (RailEdgeOverrideRecord update : updates) {
+                                provider.railEdgeOverrides().upsert(update);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    for (RailEdgeOverrideRecord update : updates) {
+                      service.putEdgeOverride(update);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.path.temp.success",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "edges",
+                              String.valueOf(updates.size()),
+                              "speed",
+                              speed.formatWithAllUnits(),
+                              "ttl",
+                              formatDuration(ttl))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("restrict")
+            .literal("set")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .required("ttl", StringParser.stringParser(), ttlSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  if (graph.findNode(a).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", a.value())));
+                    return;
+                  }
+                  if (graph.findNode(b).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", b.value())));
+                    return;
+                  }
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+                  if (!graphHasEdge(graph, edgeId)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.not-adjacent",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(((String) ctx.get("speed")).trim());
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-speed",
+                            Map.of("raw", String.valueOf(ctx.get("speed")))));
+                    return;
+                  }
+                  Optional<Duration> ttlOpt = parseTtlArg(((String) ctx.get("ttl")).trim());
+                  if (ttlOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-ttl",
+                            Map.of("raw", String.valueOf(ctx.get("ttl")))));
+                    return;
+                  }
+                  RailSpeed speed = speedOpt.get();
+                  Duration ttl = ttlOpt.get();
+                  Instant until = now.plus(ttl);
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current != null
+                              ? current.speedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          OptionalDouble.of(speed.blocksPerSecond()),
+                          Optional.of(until),
+                          current != null && current.blockedManual(),
+                          current != null ? current.blockedUntil() : Optional.empty(),
+                          now);
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              provider.railEdgeOverrides().upsert(next);
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    service.putEdgeOverride(next);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.temp.success",
+                          Map.of(
+                              "a",
+                              a.value(),
+                              "b",
+                              b.value(),
+                              "speed",
+                              speed.formatWithAllUnits(),
+                              "ttl",
+                              formatDuration(ttl))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("restrict")
+            .literal("clear")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  if (current == null || current.tempSpeedLimitBlocksPerSecond().isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.temp-clear.none",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current.speedLimitBlocksPerSecond(),
+                          OptionalDouble.empty(),
+                          Optional.empty(),
+                          current.blockedManual(),
+                          current.blockedUntil(),
+                          Instant.now());
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              if (next.isEmpty()) {
+                                provider.railEdgeOverrides().delete(world.getUID(), edgeId);
+                              } else {
+                                provider.railEdgeOverrides().upsert(next);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    if (next.isEmpty()) {
+                      service.deleteEdgeOverride(world.getUID(), edgeId);
+                    } else {
+                      service.putEdgeOverride(next);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.temp-clear.success",
+                          Map.of("a", a.value(), "b", b.value())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("restrict")
+            .literal("path")
+            .permission("fetarute.graph.edge")
+            .flag(confirmFlag)
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .required("ttl", StringParser.stringParser(), ttlSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(((String) ctx.get("speed")).trim());
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-speed",
+                            Map.of("raw", String.valueOf(ctx.get("speed")))));
+                    return;
+                  }
+                  Optional<Duration> ttlOpt = parseTtlArg(((String) ctx.get("ttl")).trim());
+                  if (ttlOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.invalid-ttl",
+                            Map.of("raw", String.valueOf(ctx.get("ttl")))));
+                    return;
+                  }
+                  RailSpeed speed = speedOpt.get();
+                  Duration ttl = ttlOpt.get();
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  RailGraphPathFinder.Options options =
+                      new RailGraphPathFinder.Options(
+                          RailGraphPathFinder.Options.shortestDistance().costModel(), true);
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(graph, from, to, options);
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  RailGraphPath path = pathOpt.get();
+                  if (!ctx.flags().isPresent(confirmFlag)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.path.temp.preview",
+                            Map.of(
+                                "from",
+                                from.value(),
+                                "to",
+                                to.value(),
+                                "edges",
+                                String.valueOf(path.edges().size()),
+                                "speed",
+                                speed.formatWithAllUnits(),
+                                "ttl",
+                                formatDuration(ttl))));
+                    sender.sendMessage(locale.component("command.common.confirm-required"));
+                    return;
+                  }
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  RailGraphService service = plugin.getRailGraphService();
+
+                  Instant until = now.plus(ttl);
+                  List<RailEdgeOverrideRecord> updates = new ArrayList<>();
+                  for (RailEdge edge : path.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    EdgeId edgeId = EdgeId.undirected(edge.id().a(), edge.id().b());
+                    RailEdgeOverrideRecord current =
+                        service != null
+                            ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                            : null;
+                    RailEdgeOverrideRecord next =
+                        new RailEdgeOverrideRecord(
+                            world.getUID(),
+                            edgeId,
+                            current != null
+                                ? current.speedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            OptionalDouble.of(speed.blocksPerSecond()),
+                            Optional.of(until),
+                            current != null && current.blockedManual(),
+                            current != null ? current.blockedUntil() : Optional.empty(),
+                            now);
+                    updates.add(next);
+                  }
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              for (RailEdgeOverrideRecord update : updates) {
+                                provider.railEdgeOverrides().upsert(update);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.speed.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    for (RailEdgeOverrideRecord update : updates) {
+                      service.putEdgeOverride(update);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.speed.path.temp.success",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "edges",
+                              String.valueOf(updates.size()),
+                              "speed",
+                              speed.formatWithAllUnits(),
+                              "ttl",
+                              formatDuration(ttl))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("block")
+            .literal("set")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  if (graph.findNode(a).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", a.value())));
+                    return;
+                  }
+                  if (graph.findNode(b).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", b.value())));
+                    return;
+                  }
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+                  if (!graphHasEdge(graph, edgeId)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.not-adjacent",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  Instant now = Instant.now();
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current != null
+                              ? current.speedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          current != null
+                              ? current.tempSpeedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          current != null ? current.tempSpeedLimitUntil() : Optional.empty(),
+                          true,
+                          current != null ? current.blockedUntil() : Optional.empty(),
+                          now);
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              provider.railEdgeOverrides().upsert(next);
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    service.putEdgeOverride(next);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.block.set.success",
+                          Map.of("a", a.value(), "b", b.value())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("block")
+            .literal("clear")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  if (current == null
+                      || (!current.blockedManual() && current.blockedUntil().isEmpty())) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.clear.none",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  Instant now = Instant.now();
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current.speedLimitBlocksPerSecond(),
+                          current.tempSpeedLimitBlocksPerSecond(),
+                          current.tempSpeedLimitUntil(),
+                          false,
+                          Optional.empty(),
+                          now);
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              if (next.isEmpty()) {
+                                provider.railEdgeOverrides().delete(world.getUID(), edgeId);
+                              } else {
+                                provider.railEdgeOverrides().upsert(next);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    if (next.isEmpty()) {
+                      service.deleteEdgeOverride(world.getUID(), edgeId);
+                    } else {
+                      service.putEdgeOverride(next);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.block.clear.success",
+                          Map.of("a", a.value(), "b", b.value())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("block")
+            .literal("temp")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("ttl", StringParser.stringParser(), ttlSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  if (graph.findNode(a).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", a.value())));
+                    return;
+                  }
+                  if (graph.findNode(b).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", b.value())));
+                    return;
+                  }
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+                  if (!graphHasEdge(graph, edgeId)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.not-adjacent",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  Optional<Duration> ttlOpt = parseTtlArg(((String) ctx.get("ttl")).trim());
+                  if (ttlOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.invalid-ttl",
+                            Map.of("raw", String.valueOf(ctx.get("ttl")))));
+                    return;
+                  }
+                  Duration ttl = ttlOpt.get();
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  Instant now = Instant.now();
+                  Instant until = now.plus(ttl);
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current != null
+                              ? current.speedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          current != null
+                              ? current.tempSpeedLimitBlocksPerSecond()
+                              : OptionalDouble.empty(),
+                          current != null ? current.tempSpeedLimitUntil() : Optional.empty(),
+                          current != null && current.blockedManual(),
+                          Optional.of(until),
+                          now);
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              provider.railEdgeOverrides().upsert(next);
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    service.putEdgeOverride(next);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.block.temp.success",
+                          Map.of("a", a.value(), "b", b.value(), "ttl", formatDuration(ttl))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("block")
+            .literal("temp-clear")
+            .permission("fetarute.graph.edge")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+
+                  RailGraphService service = plugin.getRailGraphService();
+                  RailEdgeOverrideRecord current =
+                      service != null
+                          ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                          : null;
+                  if (current == null || current.blockedUntil().isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.temp-clear.none",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+
+                  Instant now = Instant.now();
+                  RailEdgeOverrideRecord next =
+                      new RailEdgeOverrideRecord(
+                          world.getUID(),
+                          edgeId,
+                          current.speedLimitBlocksPerSecond(),
+                          current.tempSpeedLimitBlocksPerSecond(),
+                          current.tempSpeedLimitUntil(),
+                          current.blockedManual(),
+                          Optional.empty(),
+                          now);
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              if (next.isEmpty()) {
+                                provider.railEdgeOverrides().delete(world.getUID(), edgeId);
+                              } else {
+                                provider.railEdgeOverrides().upsert(next);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    if (next.isEmpty()) {
+                      service.deleteEdgeOverride(world.getUID(), edgeId);
+                    } else {
+                      service.putEdgeOverride(next);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.block.temp-clear.success",
+                          Map.of("a", a.value(), "b", b.value())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("block")
+            .literal("path")
+            .permission("fetarute.graph.edge")
+            .flag(confirmFlag)
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  RailGraphPathFinder.Options options =
+                      new RailGraphPathFinder.Options(
+                          RailGraphPathFinder.Options.shortestDistance().costModel(), true);
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(graph, from, to, options);
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  RailGraphPath path = pathOpt.get();
+                  if (!ctx.flags().isPresent(confirmFlag)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.path.preview",
+                            Map.of(
+                                "from",
+                                from.value(),
+                                "to",
+                                to.value(),
+                                "edges",
+                                String.valueOf(path.edges().size()))));
+                    sender.sendMessage(locale.component("command.common.confirm-required"));
+                    return;
+                  }
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  RailGraphService service = plugin.getRailGraphService();
+
+                  Instant now = Instant.now();
+                  List<RailEdgeOverrideRecord> updates = new ArrayList<>();
+                  for (RailEdge edge : path.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    EdgeId edgeId = EdgeId.undirected(edge.id().a(), edge.id().b());
+                    RailEdgeOverrideRecord current =
+                        service != null
+                            ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                            : null;
+                    RailEdgeOverrideRecord next =
+                        new RailEdgeOverrideRecord(
+                            world.getUID(),
+                            edgeId,
+                            current != null
+                                ? current.speedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            current != null
+                                ? current.tempSpeedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            current != null ? current.tempSpeedLimitUntil() : Optional.empty(),
+                            true,
+                            current != null ? current.blockedUntil() : Optional.empty(),
+                            now);
+                    updates.add(next);
+                  }
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              for (RailEdgeOverrideRecord update : updates) {
+                                provider.railEdgeOverrides().upsert(update);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    for (RailEdgeOverrideRecord update : updates) {
+                      service.putEdgeOverride(update);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.block.path.success",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "edges",
+                              String.valueOf(updates.size()))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("edge")
+            .literal("block")
+            .literal("path")
+            .literal("temp")
+            .permission("fetarute.graph.edge")
+            .flag(confirmFlag)
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("ttl", StringParser.stringParser(), ttlSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+
+                  Optional<Duration> ttlOpt = parseTtlArg(((String) ctx.get("ttl")).trim());
+                  if (ttlOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.invalid-ttl",
+                            Map.of("raw", String.valueOf(ctx.get("ttl")))));
+                    return;
+                  }
+                  Duration ttl = ttlOpt.get();
+
+                  RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+                  RailGraphPathFinder.Options options =
+                      new RailGraphPathFinder.Options(
+                          RailGraphPathFinder.Options.shortestDistance().costModel(), true);
+                  Optional<RailGraphPath> pathOpt =
+                      pathFinder.shortestPath(graph, from, to, options);
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  RailGraphPath path = pathOpt.get();
+                  if (!ctx.flags().isPresent(confirmFlag)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.path.temp.preview",
+                            Map.of(
+                                "from",
+                                from.value(),
+                                "to",
+                                to.value(),
+                                "edges",
+                                String.valueOf(path.edges().size()),
+                                "ttl",
+                                formatDuration(ttl))));
+                    sender.sendMessage(locale.component("command.common.confirm-required"));
+                    return;
+                  }
+
+                  Optional<StorageProvider> providerOpt = requireStorageProvider(sender, locale);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  RailGraphService service = plugin.getRailGraphService();
+
+                  Instant now = Instant.now();
+                  Instant until = now.plus(ttl);
+                  List<RailEdgeOverrideRecord> updates = new ArrayList<>();
+                  for (RailEdge edge : path.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    EdgeId edgeId = EdgeId.undirected(edge.id().a(), edge.id().b());
+                    RailEdgeOverrideRecord current =
+                        service != null
+                            ? service.getEdgeOverride(world.getUID(), edgeId).orElse(null)
+                            : null;
+                    RailEdgeOverrideRecord next =
+                        new RailEdgeOverrideRecord(
+                            world.getUID(),
+                            edgeId,
+                            current != null
+                                ? current.speedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            current != null
+                                ? current.tempSpeedLimitBlocksPerSecond()
+                                : OptionalDouble.empty(),
+                            current != null ? current.tempSpeedLimitUntil() : Optional.empty(),
+                            current != null && current.blockedManual(),
+                            Optional.of(until),
+                            now);
+                    updates.add(next);
+                  }
+
+                  try {
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              for (RailEdgeOverrideRecord update : updates) {
+                                provider.railEdgeOverrides().upsert(update);
+                              }
+                              return null;
+                            });
+                  } catch (Exception ex) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.edge.block.storage-failed",
+                            Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                    return;
+                  }
+
+                  if (service != null) {
+                    for (RailEdgeOverrideRecord update : updates) {
+                      service.putEdgeOverride(update);
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.edge.block.path.temp.success",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "edges",
+                              String.valueOf(updates.size()),
+                              "ttl",
+                              formatDuration(ttl))));
+                }));
 
     manager.command(
         manager
@@ -1026,7 +2887,9 @@ public final class FtaGraphCommand {
                   if (snapshotOpt.isEmpty()) {
                     return;
                   }
-                  RailGraph graph = snapshotOpt.get().graph();
+                  Instant now = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(world.getUID(), snapshotOpt.get().graph(), now);
 
                   NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
                   NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
@@ -1056,10 +2919,23 @@ public final class FtaGraphCommand {
                   }
                   RailGraphPath path = pathOpt.get();
                   double defaultSpeed = defaultSpeedBlocksPerSecond();
-                  RailTravelTimeModel timeModel = RailTravelTimeModels.constantSpeed(defaultSpeed);
+                  RailTravelTimeModel timeModel =
+                      edgeSpeedTimeModel(world.getUID(), now, defaultSpeed);
                   Optional<Duration> etaOpt =
                       timeModel.pathTravelTime(graph, path.nodes(), path.edges());
                   String etaText = etaOpt.map(this::formatDuration).orElse("-");
+
+                  String speedText = RailSpeed.ofBlocksPerSecond(defaultSpeed).formatWithAllUnits();
+                  if (etaOpt.isPresent()
+                      && path.totalLengthBlocks() > 0
+                      && !etaOpt.get().isZero()
+                      && etaOpt.get().toMillis() > 0) {
+                    double seconds = etaOpt.get().toMillis() / 1000.0;
+                    double avgSpeed = path.totalLengthBlocks() / seconds;
+                    if (Double.isFinite(avgSpeed) && avgSpeed > 0.0) {
+                      speedText = RailSpeed.ofBlocksPerSecond(avgSpeed).formatWithAllUnits();
+                    }
+                  }
 
                   sender.sendMessage(
                       locale.component(
@@ -1074,7 +2950,7 @@ public final class FtaGraphCommand {
                               "distance_blocks",
                               String.valueOf(path.totalLengthBlocks()),
                               "speed",
-                              String.format(Locale.ROOT, "%.2f", defaultSpeed),
+                              speedText,
                               "eta",
                               etaText)));
                 }));
@@ -1102,7 +2978,10 @@ public final class FtaGraphCommand {
                   if (snapshotOpt.isEmpty()) {
                     return;
                   }
-                  RailGraph graph = snapshotOpt.get().graph();
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
 
                   NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
                   NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
@@ -1132,7 +3011,8 @@ public final class FtaGraphCommand {
                   }
 
                   int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
-                  sendPathPage(locale, sender, graph, pathOpt.get(), page);
+                  sendPathPage(
+                      locale, sender, world.getUID(), nowForGraph, graph, pathOpt.get(), page);
                 }));
 
     manager.command(
@@ -1156,7 +3036,10 @@ public final class FtaGraphCommand {
                   if (snapshotOpt.isEmpty()) {
                     return;
                   }
-                  RailGraph graph = snapshotOpt.get().graph();
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
 
                   NodeId seed = NodeId.of(normalizeNodeIdArg(ctx.get("node")));
                   if (graph.findNode(seed).isEmpty()) {
@@ -1291,6 +3174,23 @@ public final class FtaGraphCommand {
           ClickEvent.suggestCommand("/fta graph sign set "),
           locale.component("command.graph.help.hover-sign-set"));
     }
+    if (sender.hasPermission("fetarute.graph.edge")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-edge-speed"),
+          ClickEvent.suggestCommand("/fta graph edge speed "),
+          locale.component("command.graph.help.hover-edge-speed"));
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-edge-restrict"),
+          ClickEvent.suggestCommand("/fta graph edge restrict "),
+          locale.component("command.graph.help.hover-edge-restrict"));
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-edge-block"),
+          ClickEvent.suggestCommand("/fta graph edge block "),
+          locale.component("command.graph.help.hover-edge-block"));
+    }
     if (sender.hasPermission("fetarute.graph.query")) {
       sendHelpEntry(
           sender,
@@ -1347,6 +3247,19 @@ public final class FtaGraphCommand {
             stale -> sender.sendMessage(staleInfoMessage(locale, stale)),
             () -> sender.sendMessage(locale.component("command.graph.info.missing")));
     return Optional.empty();
+  }
+
+  /** 获取存储后端 provider（不可用则输出提示并返回 empty）。 */
+  private Optional<StorageProvider> requireStorageProvider(
+      CommandSender sender, LocaleManager locale) {
+    Objects.requireNonNull(sender, "sender");
+    Objects.requireNonNull(locale, "locale");
+    var storageManager = plugin.getStorageManager();
+    if (storageManager == null || !storageManager.isReady()) {
+      sender.sendMessage(locale.component("error.storage-unavailable"));
+      return Optional.empty();
+    }
+    return storageManager.provider();
   }
 
   /**
@@ -1412,6 +3325,144 @@ public final class FtaGraphCommand {
         });
   }
 
+  /** 速度参数补全：输出占位符与常用单位示例（kmh/bps/bpt）。 */
+  private static SuggestionProvider<CommandSender> speedSuggestions(String placeholder) {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = input != null ? input.lastRemainingToken() : "";
+          prefix = prefix.trim().toLowerCase(Locale.ROOT);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add(placeholder);
+          }
+          List<String> candidates = List.of("80kmh", "40kmh", "8bps", "0.4bpt");
+          for (String candidate : candidates) {
+            if (prefix.isBlank() || candidate.startsWith(prefix)) {
+              suggestions.add(candidate);
+            }
+          }
+          return suggestions;
+        });
+  }
+
+  /** TTL 参数补全：输出占位符与常用时长示例（支持 s/m/h/d）。 */
+  private static SuggestionProvider<CommandSender> ttlSuggestions(String placeholder) {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = input != null ? input.lastRemainingToken() : "";
+          prefix = prefix.trim().toLowerCase(Locale.ROOT);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add(placeholder);
+          }
+          List<String> candidates = List.of("90s", "5m", "15m", "1h");
+          for (String candidate : candidates) {
+            if (prefix.isBlank() || candidate.startsWith(prefix)) {
+              suggestions.add(candidate);
+            }
+          }
+          return suggestions;
+        });
+  }
+
+  /**
+   * 解析速度参数并统一为 blocks/s。
+   *
+   * <p>支持：{@code 80kmh} / {@code 8bps} / {@code 0.4bpt}；省略单位时默认视为 {@code kmh}。
+   */
+  private static Optional<RailSpeed> parseSpeedArg(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return Optional.empty();
+    }
+    Matcher matcher = SPEED_PATTERN.matcher(raw);
+    if (!matcher.matches()) {
+      return Optional.empty();
+    }
+    String valueText = matcher.group("value");
+    String unit = matcher.group("unit");
+    if (valueText == null || valueText.isBlank()) {
+      return Optional.empty();
+    }
+    double value;
+    try {
+      value = Double.parseDouble(valueText);
+    } catch (NumberFormatException ex) {
+      return Optional.empty();
+    }
+    if (!Double.isFinite(value) || value <= 0.0) {
+      return Optional.empty();
+    }
+
+    String normalizedUnit = unit != null ? unit.trim().toLowerCase(Locale.ROOT) : "kmh";
+    try {
+      return switch (normalizedUnit) {
+        case "kmh", "km/h", "kph" -> Optional.of(RailSpeed.ofKilometersPerHour(value));
+        case "bps" -> Optional.of(RailSpeed.ofBlocksPerSecond(value));
+        case "bpt" -> Optional.of(RailSpeed.ofBlocksPerTick(value));
+        default -> Optional.empty();
+      };
+    } catch (IllegalArgumentException ex) {
+      return Optional.empty();
+    }
+  }
+
+  /** 解析 TTL 参数：支持 {@code 90s}、{@code 1m}、{@code 2h}、{@code 1d}，以及组合形式（如 {@code 1h30m}）。 */
+  private static Optional<Duration> parseTtlArg(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return Optional.empty();
+    }
+    String trimmed = raw.trim();
+    Matcher matcher = TTL_PATTERN.matcher(trimmed);
+    int index = 0;
+    Duration total = Duration.ZERO;
+    boolean matchedAny = false;
+    while (matcher.find()) {
+      if (matcher.start() != index) {
+        return Optional.empty();
+      }
+      matchedAny = true;
+      long value;
+      try {
+        value = Long.parseLong(matcher.group(1));
+      } catch (NumberFormatException ex) {
+        return Optional.empty();
+      }
+      if (value <= 0) {
+        return Optional.empty();
+      }
+      char unit = matcher.group(2).toLowerCase(Locale.ROOT).charAt(0);
+      try {
+        total =
+            switch (unit) {
+              case 's' -> total.plusSeconds(value);
+              case 'm' -> total.plusMinutes(value);
+              case 'h' -> total.plusHours(value);
+              case 'd' -> total.plusDays(value);
+              default -> total;
+            };
+      } catch (ArithmeticException ex) {
+        return Optional.empty();
+      }
+      index = matcher.end();
+    }
+    if (!matchedAny || index != trimmed.length()) {
+      return Optional.empty();
+    }
+    return total.isZero() ? Optional.empty() : Optional.of(total);
+  }
+
+  /** 判断图中是否存在某条“直接区间边”。 */
+  private static boolean graphHasEdge(RailGraph graph, EdgeId edgeId) {
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(edgeId, "edgeId");
+    for (RailEdge edge : graph.edgesFrom(edgeId.a())) {
+      if (edge != null && edge.id() != null && edge.id().equals(edgeId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * 读取图查询的默认速度（blocks/s）。
    *
@@ -1463,9 +3514,17 @@ public final class FtaGraphCommand {
    * <p>注意：路径中节点坐标来自图快照记录的 sign 坐标，不保证在轨道上；仅用于诊断定位。
    */
   private void sendPathPage(
-      LocaleManager locale, CommandSender sender, RailGraph graph, RailGraphPath path, int page) {
+      LocaleManager locale,
+      CommandSender sender,
+      UUID worldId,
+      Instant now,
+      RailGraph graph,
+      RailGraphPath path,
+      int page) {
     Objects.requireNonNull(locale, "locale");
     Objects.requireNonNull(sender, "sender");
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(now, "now");
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(path, "path");
 
@@ -1477,7 +3536,7 @@ public final class FtaGraphCommand {
     int endIndex = Math.min(totalEntries, startIndex + pageSize);
 
     double defaultSpeed = defaultSpeedBlocksPerSecond();
-    RailTravelTimeModel timeModel = RailTravelTimeModels.constantSpeed(defaultSpeed);
+    RailTravelTimeModel timeModel = edgeSpeedTimeModel(worldId, now, defaultSpeed);
     Optional<Duration> etaOpt = timeModel.pathTravelTime(graph, path.nodes(), path.edges());
     String etaText = etaOpt.map(this::formatDuration).orElse("-");
 
@@ -1587,6 +3646,74 @@ public final class FtaGraphCommand {
         .append(next)
         .append(net.kyori.adventure.text.Component.space())
         .append(pageText);
+  }
+
+  /**
+   * 以“按边限速优先、否则默认速度”的规则构建 ETA 模型。
+   *
+   * <p>速度来源：edge.baseSpeedLimit（未来可由建图阶段填充）→ rail_edge_overrides.speed_limit_bps →
+   * rail_edge_overrides.temp_speed_limit_bps（若 TTL 仍有效）→ graph.default-speed-blocks-per-second。
+   */
+  private RailTravelTimeModel edgeSpeedTimeModel(
+      UUID worldId, Instant now, double defaultSpeedBlocksPerSecond) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(now, "now");
+    if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
+      throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");
+    }
+
+    RailGraphService service = plugin.getRailGraphService();
+    return (graph, edge, from, to) -> {
+      if (edge == null) {
+        return Optional.empty();
+      }
+      int lengthBlocks = edge.lengthBlocks();
+      if (lengthBlocks <= 0) {
+        return Optional.empty();
+      }
+
+      double speedBlocksPerSecond;
+      if (service != null) {
+        speedBlocksPerSecond =
+            service.effectiveSpeedLimitBlocksPerSecond(
+                worldId, edge, now, defaultSpeedBlocksPerSecond);
+      } else {
+        double baseFromEdge = edge.baseSpeedLimit();
+        speedBlocksPerSecond =
+            Double.isFinite(baseFromEdge) && baseFromEdge > 0.0
+                ? baseFromEdge
+                : defaultSpeedBlocksPerSecond;
+      }
+      if (!Double.isFinite(speedBlocksPerSecond) || speedBlocksPerSecond <= 0.0) {
+        return Optional.empty();
+      }
+
+      double seconds = lengthBlocks / speedBlocksPerSecond;
+      if (!Double.isFinite(seconds) || seconds < 0.0) {
+        return Optional.empty();
+      }
+      long millis = (long) Math.round(seconds * 1000.0);
+      if (millis < 0) {
+        return Optional.empty();
+      }
+      return Optional.of(Duration.ofMillis(millis));
+    };
+  }
+
+  private RailGraph graphWithEdgeOverrides(UUID worldId, RailGraph graph, Instant now) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(now, "now");
+
+    RailGraphService service = plugin.getRailGraphService();
+    if (service == null) {
+      return graph;
+    }
+    Map<EdgeId, RailEdgeOverrideRecord> overrides = service.edgeOverrides(worldId);
+    if (overrides.isEmpty()) {
+      return graph;
+    }
+    return new EdgeOverrideRailGraph(graph, overrides, now);
   }
 
   /**
@@ -2143,6 +4270,7 @@ public final class FtaGraphCommand {
                 boolean existed = provider.railGraphSnapshots().findByWorld(worldId).isPresent();
                 provider.railNodes().deleteWorld(worldId);
                 provider.railEdges().deleteWorld(worldId);
+                provider.railEdgeOverrides().deleteWorld(worldId);
                 provider.railGraphSnapshots().delete(worldId);
                 return existed;
               });

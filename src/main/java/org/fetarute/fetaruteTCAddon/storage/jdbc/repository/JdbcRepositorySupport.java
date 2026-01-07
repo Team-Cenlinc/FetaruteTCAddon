@@ -119,6 +119,38 @@ abstract class JdbcRepositorySupport {
     throw new SQLException("Bad value for type Integer: " + raw);
   }
 
+  /**
+   * 读取可空 double 列（兼容 SQLite 的动态类型与旧数据）。
+   *
+   * <p>SQLite 在历史数据/手工修改场景下可能出现 TEXT/空字符串等值；这里做一次“宽松读取”，尽量将数字字符串转换为 double，空字符串视为 null。
+   *
+   * @param rs ResultSet
+   * @param column 列名
+   * @return Double 或 null
+   * @throws SQLException 驱动层读取失败或值无法解析为 double
+   */
+  protected Double readNullableDouble(ResultSet rs, String column) throws SQLException {
+    Object raw = rs.getObject(column);
+    if (raw == null) {
+      return null;
+    }
+    if (raw instanceof Number number) {
+      return number.doubleValue();
+    }
+    if (raw instanceof String value) {
+      String trimmed = value.trim();
+      if (trimmed.isEmpty()) {
+        return null;
+      }
+      try {
+        return Double.parseDouble(trimmed);
+      } catch (NumberFormatException ex) {
+        throw new SQLException("Bad value for type Double: " + trimmed, ex);
+      }
+    }
+    throw new SQLException("Bad value for type Double: " + raw);
+  }
+
   protected void setInstant(PreparedStatement statement, int index, Instant instant)
       throws SQLException {
     if (instant == null) {
@@ -145,6 +177,39 @@ abstract class JdbcRepositorySupport {
       throw new StorageException("时间戳列缺失: " + column);
     }
     return timestamp.toInstant();
+  }
+
+  /**
+   * 读取可空时间戳列。
+   *
+   * <p>SQLite 使用 epoch millis 存储，因此需要兼容 Number/String 等值；MySQL 则直接读取 Timestamp。
+   *
+   * @return Instant 或 null
+   */
+  protected Instant readNullableInstant(ResultSet rs, String column) throws SQLException {
+    if (epochMillisTimestamp) {
+      Object raw = rs.getObject(column);
+      if (raw == null) {
+        return null;
+      }
+      if (raw instanceof Number number) {
+        return Instant.ofEpochMilli(number.longValue());
+      }
+      if (raw instanceof String value) {
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+          return null;
+        }
+        try {
+          return Instant.ofEpochMilli(Long.parseLong(trimmed));
+        } catch (NumberFormatException ex) {
+          throw new SQLException("Bad value for type Instant: " + trimmed, ex);
+        }
+      }
+      throw new SQLException("Bad value for type Instant: " + raw);
+    }
+    Timestamp timestamp = rs.getTimestamp(column);
+    return timestamp == null ? null : timestamp.toInstant();
   }
 
   protected String toJson(Map<String, Object> map) {

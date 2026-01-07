@@ -9,6 +9,21 @@
 - `/fta graph status`
 - `/fta graph cancel`
 - `/fta graph info`
+- `/fta graph edge speed set "<a>" "<b>" <speed>`
+- `/fta graph edge speed clear "<a>" "<b>"`
+- `/fta graph edge speed temp "<a>" "<b>" <speed> <ttl>`
+- `/fta graph edge speed temp-clear "<a>" "<b>"`
+- `/fta graph edge speed path "<from>" "<to>" <speed> [--confirm]`
+- `/fta graph edge speed path temp "<from>" "<to>" <speed> <ttl> [--confirm]`
+- `/fta graph edge restrict set "<a>" "<b>" <speed> <ttl>`
+- `/fta graph edge restrict clear "<a>" "<b>"`
+- `/fta graph edge restrict path "<from>" "<to>" <speed> <ttl> [--confirm]`
+- `/fta graph edge block set "<a>" "<b>"`
+- `/fta graph edge block clear "<a>" "<b>"`
+- `/fta graph edge block temp "<a>" "<b>" <ttl>`
+- `/fta graph edge block temp-clear "<a>" "<b>"`
+- `/fta graph edge block path "<from>" "<to>" [--confirm]`
+- `/fta graph edge block path temp "<from>" "<to>" <ttl> [--confirm]`
 - `/fta graph query "<from>" "<to>"`
 - `/fta graph path "<from>" "<to>" [page]`
 - `/fta graph component "<nodeId>"`
@@ -96,6 +111,7 @@
 
 - `rail_nodes`：节点列表（含 nodeType/坐标/元数据）
 - `rail_edges`：区间边与距离
+- `rail_edge_overrides`：区间运维覆盖（限速/临时限速/封锁等），不会被 build 覆盖
 - `rail_graph_snapshots`：快照元信息（built_at/node_count/edge_count/node_signature）
 
 插件启动时若存储就绪，会从快照预热到内存，`/fta graph info` 可直接查看。
@@ -147,7 +163,8 @@
 
 - `/fta graph query "<from>" "<to>"`
   - 输出：hops（跳数）、distance_blocks（最短距离，blocks）、eta（估算）
-  - ETA 计算：`eta = distance_blocks / graph.default-speed-blocks-per-second`
+  - ETA 计算：沿最短路逐段累计（按边限速优先，否则回退默认速度）
+  - 默认寻径会绕开被封锁的区间（见下文 edge block）
 
 默认速度来自 `config.yml`：
 
@@ -157,6 +174,77 @@ graph:
 ```
 
 该值用于“诊断估算”，建议按服务器实际列车运行速度调参。
+
+### 区间限速/临时限速（edge speed）
+
+区间限速属于“运维覆盖层”（`rail_edge_overrides`），不会被 `/fta graph build` 覆盖；命令支持直接边与“最短路批量”两种形态：
+
+- 直接边（两节点必须相邻）：
+  - `/fta graph edge speed set "<a>" "<b>" <speed>`
+  - `/fta graph edge speed clear "<a>" "<b>"`
+  - `/fta graph edge speed temp "<a>" "<b>" <speed> <ttl>`
+  - `/fta graph edge speed temp-clear "<a>" "<b>"`
+- 最短路批量：
+  - `/fta graph edge speed path "<from>" "<to>" <speed> [--confirm]`
+  - `/fta graph edge speed path temp "<from>" "<to>" <speed> <ttl> [--confirm]`
+
+#### 速度单位（命令输入/展示）
+
+约定 `1 block≈1m`，`20 tick = 1s`。内部与存储统一使用 blocks/s（bps），命令支持多单位输入：
+
+- `bps`（blocks/s）：调度层内部单位
+- `bpt`（blocks/tick）：TrainCarts 常用语境
+- `kmh`/`km/h`/`kph`：人类直观单位
+
+换算：
+
+- `1 bps = 3.6 km/h`
+- `1 bpt = 20 bps = 72 km/h`
+- `km/h → bps = kmh / 3.6`
+- `km/h → bpt = kmh / 72`
+- `bps → km/h = bps * 3.6`
+- `bpt → km/h = bpt * 72`
+
+输入示例：`80kmh`、`80km/h`、`0.4bpt`、`8bps`（省略单位时默认视为 `kmh`）。
+
+#### TTL 格式
+
+TTL 支持 `s/m/h/d`，并支持组合（例如 `1h30m`）：`90s`、`1m`、`2h`、`1h30m`、`1d`。
+
+#### ETA 与限速的关系
+
+每条边的有效速度（blocks/s）按以下规则计算：
+
+- `base = edge.baseSpeedLimit > 0 ? edge.baseSpeedLimit : graph.default-speed-blocks-per-second`
+- `normal = override.speed_limit_bps ? override.speed_limit_bps : base`
+- `effective = min(normal, override.temp_speed_limit_bps (若 TTL 仍有效))`
+
+随后按边累计：`edgeSeconds = edge.lengthBlocks / effective`，整段 ETA 为各边之和。
+
+### 临时限速别名（edge restrict）
+
+`restrict` 是 `speed temp` 的语义化别名：用于表达“可通行但临时降速”的限制（TTL 到期自动失效）。
+
+- 直接边：
+  - `/fta graph edge restrict set "<a>" "<b>" <speed> <ttl>`
+  - `/fta graph edge restrict clear "<a>" "<b>"`
+- 最短路批量：
+  - `/fta graph edge restrict path "<from>" "<to>" <speed> <ttl> [--confirm]`
+
+### 区间封锁（edge block）
+
+封锁属于“不可通行”的运维控制（maintenance/事故/临时管制等）：被封锁的 edge 默认不允许寻径穿越。
+
+- 直接边：
+  - `/fta graph edge block set "<a>" "<b>"`（手动封锁，必须 clear）
+  - `/fta graph edge block clear "<a>" "<b>"`（清除 manual + TTL）
+  - `/fta graph edge block temp "<a>" "<b>" <ttl>`（TTL 封锁，到期自动失效）
+  - `/fta graph edge block temp-clear "<a>" "<b>"`（仅清除 TTL）
+- 最短路批量：
+  - `/fta graph edge block path "<from>" "<to>" [--confirm]`
+  - `/fta graph edge block path temp "<from>" "<to>" <ttl> [--confirm]`
+
+封锁生效规则：`effectiveBlocked = blocked_manual || (blocked_until != null && now < blocked_until)`。
 
 ### 最短路径（path）
 
@@ -175,6 +263,7 @@ graph:
 ### 权限
 
 - `fetarute.graph.query`：访问 query/path/component
+- `fetarute.graph.edge`：访问 edge speed/restrict/block
 
 ## 常见问题：SWITCHER 节点异常增多
 

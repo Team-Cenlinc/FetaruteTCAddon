@@ -32,4 +32,19 @@ final class StorageSchemaDialectTest {
         routes.lines().anyMatch(line -> line.stripLeading().startsWith("tc_route_id"));
     assertTrue(!hasTcRouteColumn, "schema 中不应再包含 tc_route_id");
   }
+
+  @Test
+  void schemaIncludesRailEdgeOverridesTable() {
+    StorageSchema schema = new StorageSchema("fta_");
+    String table =
+        schema.sqliteStatements().stream()
+            .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS fta_rail_edge_overrides"))
+            .findFirst()
+            .orElseThrow();
+    assertTrue(table.contains("speed_limit_bps"));
+    assertTrue(table.contains("temp_speed_limit_bps"));
+    assertTrue(table.contains("blocked_manual"));
+    assertTrue(table.contains("blocked_until"));
+    assertTrue(table.contains("updated_at"));
+  }
 }

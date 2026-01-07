@@ -11,10 +11,12 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
@@ -29,6 +31,8 @@ public final class RailGraphService {
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<UUID, RailGraphSnapshot> snapshots = new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailGraphStaleState> staleStates = new ConcurrentHashMap<>();
+  private final ConcurrentMap<UUID, ConcurrentMap<EdgeId, RailEdgeOverrideRecord>> edgeOverrides =
+      new ConcurrentHashMap<>();
 
   public RailGraphService(SignNodeRegistry registry, Consumer<String> debugLogger) {
     this(new SignRegistryRailGraphBuilder(registry, debugLogger), debugLogger);
@@ -90,6 +94,91 @@ public final class RailGraphService {
     return snapshots.remove(world.getUID()) != null;
   }
 
+  /** 返回指定世界的边运维覆盖快照（只读）。 */
+  public Map<EdgeId, RailEdgeOverrideRecord> edgeOverrides(UUID worldId) {
+    Objects.requireNonNull(worldId, "worldId");
+    return Map.copyOf(edgeOverrides.getOrDefault(worldId, new ConcurrentHashMap<>()));
+  }
+
+  /** 查询某条边的运维覆盖。 */
+  public Optional<RailEdgeOverrideRecord> getEdgeOverride(UUID worldId, EdgeId edgeId) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(edgeId, "edgeId");
+    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
+    return Optional.ofNullable(
+        edgeOverrides.getOrDefault(worldId, new ConcurrentHashMap<>()).get(normalized));
+  }
+
+  /** 写入或更新某条边的运维覆盖（仅更新内存）。 */
+  public void putEdgeOverride(RailEdgeOverrideRecord override) {
+    Objects.requireNonNull(override, "override");
+    EdgeId normalized = EdgeId.undirected(override.edgeId().a(), override.edgeId().b());
+    edgeOverrides
+        .computeIfAbsent(override.worldId(), ignored -> new ConcurrentHashMap<>())
+        .put(normalized, override);
+  }
+
+  /** 删除某条边的运维覆盖（仅更新内存）。 */
+  public void deleteEdgeOverride(UUID worldId, EdgeId edgeId) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(edgeId, "edgeId");
+    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
+    ConcurrentMap<EdgeId, RailEdgeOverrideRecord> byWorld = edgeOverrides.get(worldId);
+    if (byWorld == null) {
+      return;
+    }
+    byWorld.remove(normalized);
+    if (byWorld.isEmpty()) {
+      edgeOverrides.remove(worldId, byWorld);
+    }
+  }
+
+  /**
+   * 计算某条边的“当前有效限速”（blocks/s）。
+   *
+   * <p>规则：
+   *
+   * <ul>
+   *   <li>base = edge.baseSpeedLimit &gt; 0 ? edge.baseSpeedLimit : default
+   *   <li>normal = override.speedLimit ? override.speedLimit : base
+   *   <li>effective = min(normal, override.tempSpeedLimit(if active))
+   * </ul>
+   */
+  public double effectiveSpeedLimitBlocksPerSecond(
+      UUID worldId, RailEdge edge, Instant now, double defaultSpeedBlocksPerSecond) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(edge, "edge");
+    Objects.requireNonNull(now, "now");
+    if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
+      throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");
+    }
+
+    double baseFromEdge = edge.baseSpeedLimit();
+    double base =
+        Double.isFinite(baseFromEdge) && baseFromEdge > 0.0
+            ? baseFromEdge
+            : defaultSpeedBlocksPerSecond;
+
+    EdgeId edgeId = edge.id();
+    if (edgeId == null) {
+      return base;
+    }
+    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
+    RailEdgeOverrideRecord override =
+        edgeOverrides.getOrDefault(worldId, new ConcurrentHashMap<>()).get(normalized);
+    double effective = base;
+    if (override != null && override.speedLimitBlocksPerSecond().isPresent()) {
+      effective = override.speedLimitBlocksPerSecond().getAsDouble();
+    }
+    if (override != null && override.isTempSpeedActive(now)) {
+      effective = Math.min(effective, override.tempSpeedLimitBlocksPerSecond().getAsDouble());
+    }
+    if (!Double.isFinite(effective) || effective <= 0.0) {
+      return base;
+    }
+    return effective;
+  }
+
   public Map<UUID, RailGraphSnapshot> snapshotAll() {
     return Map.copyOf(snapshots);
   }
@@ -104,6 +193,7 @@ public final class RailGraphService {
     Objects.requireNonNull(worlds, "worlds");
     RailNodeRepository nodeRepo = provider.railNodes();
     RailEdgeRepository edgeRepo = provider.railEdges();
+    RailEdgeOverrideRepository overrideRepo = provider.railEdgeOverrides();
     RailGraphSnapshotRepository snapshotRepo = provider.railGraphSnapshots();
 
     for (World world : worlds) {
@@ -111,6 +201,25 @@ public final class RailGraphService {
         continue;
       }
       UUID worldId = world.getUID();
+      try {
+        ConcurrentMap<EdgeId, RailEdgeOverrideRecord> overridesById = new ConcurrentHashMap<>();
+        for (RailEdgeOverrideRecord override : overrideRepo.listByWorld(worldId)) {
+          if (override == null || override.edgeId() == null) {
+            continue;
+          }
+          EdgeId normalized = EdgeId.undirected(override.edgeId().a(), override.edgeId().b());
+          overridesById.put(normalized, override);
+        }
+        if (!overridesById.isEmpty()) {
+          edgeOverrides.put(worldId, overridesById);
+        } else {
+          edgeOverrides.remove(worldId);
+        }
+      } catch (Exception ex) {
+        debugLogger.accept(
+            "读取 rail_edge_overrides 失败: world=" + worldId + " msg=" + ex.getMessage());
+      }
+
       Optional<RailGraphSnapshotRecord> snapshotOpt = snapshotRepo.findByWorld(worldId);
       if (snapshotOpt.isEmpty()) {
         continue;

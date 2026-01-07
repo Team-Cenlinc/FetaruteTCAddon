@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
@@ -33,10 +34,14 @@ import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.JdbcStorageProvider;
@@ -609,6 +614,73 @@ final class JdbcRepositoryTest {
     StorageProvider provider = setupProvider(dbFile);
     var snapshot = provider.railGraphSnapshots().findByWorld(worldId).orElseThrow();
     assertEquals("", snapshot.nodeSignature());
+  }
+
+  @Test
+  void shouldPersistRailEdgeOverrides() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    RailEdgeOverrideRepository repository = provider.railEdgeOverrides();
+
+    UUID worldId = UUID.randomUUID();
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    RailEdgeOverrideRecord record =
+        new RailEdgeOverrideRecord(
+            worldId,
+            edgeId,
+            OptionalDouble.of(8.0),
+            OptionalDouble.of(4.0),
+            Optional.of(now.plusSeconds(60)),
+            false,
+            Optional.empty(),
+            now);
+
+    repository.upsert(record);
+
+    RailEdgeOverrideRecord loaded = repository.findByEdge(worldId, edgeId).orElseThrow();
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(edgeId, loaded.edgeId());
+    assertEquals(8.0, loaded.speedLimitBlocksPerSecond().getAsDouble(), 1e-9);
+    assertEquals(4.0, loaded.tempSpeedLimitBlocksPerSecond().getAsDouble(), 1e-9);
+    assertEquals(record.tempSpeedLimitUntil(), loaded.tempSpeedLimitUntil());
+    assertFalse(loaded.blockedManual());
+
+    assertEquals(1, repository.listByWorld(worldId).size());
+
+    repository.delete(worldId, edgeId);
+    assertTrue(repository.findByEdge(worldId, edgeId).isEmpty());
+  }
+
+  @Test
+  void shouldNormalizeEdgeIdAndPersistBlockedFields() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    RailEdgeOverrideRepository repository = provider.railEdgeOverrides();
+
+    UUID worldId = UUID.randomUUID();
+    EdgeId raw = new EdgeId(NodeId.of("B"), NodeId.of("A"));
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    RailEdgeOverrideRecord record =
+        new RailEdgeOverrideRecord(
+            worldId,
+            raw,
+            OptionalDouble.empty(),
+            OptionalDouble.empty(),
+            Optional.empty(),
+            true,
+            Optional.of(now.plusSeconds(120)),
+            now);
+
+    repository.upsert(record);
+
+    EdgeId canonical = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+    RailEdgeOverrideRecord loaded = repository.findByEdge(worldId, canonical).orElseThrow();
+    assertEquals("A", loaded.edgeId().a().value());
+    assertEquals("B", loaded.edgeId().b().value());
+    assertTrue(loaded.blockedManual());
+    assertEquals(record.blockedUntil(), loaded.blockedUntil());
+
+    repository.deleteWorld(worldId);
+    assertTrue(repository.listByWorld(worldId).isEmpty());
   }
 
   private StorageProvider setupProvider(Path dbFile) {

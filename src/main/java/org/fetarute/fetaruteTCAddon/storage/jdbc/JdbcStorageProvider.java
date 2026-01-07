@@ -6,6 +6,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailNodeRepository;
@@ -21,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepositor
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailNodeRepository;
@@ -49,6 +51,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RouteStopRepository routeStopRepository;
   private final RailNodeRepository railNodeRepository;
   private final RailEdgeRepository railEdgeRepository;
+  private final RailEdgeOverrideRepository railEdgeOverrideRepository;
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
 
   public JdbcStorageProvider(
@@ -74,6 +77,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcRailNodeRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railEdgeRepository =
         new JdbcRailEdgeRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.railEdgeOverrideRepository =
+        new JdbcRailEdgeOverrideRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railGraphSnapshotRepository =
         new JdbcRailGraphSnapshotRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
@@ -134,6 +139,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public RailEdgeRepository railEdges() {
     return railEdgeRepository;
+  }
+
+  @Override
+  public RailEdgeOverrideRepository railEdgeOverrides() {
+    return railEdgeOverrideRepository;
   }
 
   @Override
