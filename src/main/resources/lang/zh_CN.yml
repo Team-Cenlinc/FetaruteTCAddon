@@ -32,6 +32,8 @@ sign:
 command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
+    yes: "是"
+    no: "否"
   error:
     invalid-syntax: "<prefix> <red>命令语法不正确</red> <gray>正确用法：</gray> <white><syntax></white>"
   help:
@@ -80,11 +82,13 @@ command:
       entry-sign-set: "<gray>/fta graph sign set</gray> <white>-</white> <dark_aqua>快速设置节点牌子</dark_aqua>"
       hover-sign-set: "<gray>点击填充:</gray> <white>/fta graph sign set </white>\n<dark_aqua>支持:</dark_aqua> <white>waypoint/autostation/depot</white>\n<dark_aqua>对准牌子方块后执行</dark_aqua> <gray>(需要 nodeId 参数)</gray>"
       entry-edge-speed: "<gray>/fta graph edge speed</gray> <white>-</white> <dark_aqua>区间限速/临时限速</dark_aqua>"
-      hover-edge-speed: "<gray>点击填充:</gray> <white>/fta graph edge speed </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp</white>\n<dark_aqua>速度单位:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      hover-edge-speed: "<gray>点击填充:</gray> <white>/fta graph edge speed </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp/list</white>\n<dark_aqua>速度单位:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
       entry-edge-restrict: "<gray>/fta graph edge restrict</gray> <white>-</white> <dark_aqua>临时限速（restriction）</dark_aqua>"
-      hover-edge-restrict: "<gray>点击填充:</gray> <white>/fta graph edge restrict </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/path</white>\n<dark_aqua>说明:</dark_aqua> <gray>等价于</gray> <white>/fta graph edge speed temp</white> <gray>与</gray> <white>/fta graph edge speed path temp</white>\n<dark_aqua>速度单位:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      hover-edge-restrict: "<gray>点击填充:</gray> <white>/fta graph edge restrict </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/path/list</white>\n<dark_aqua>说明:</dark_aqua> <gray>等价于</gray> <white>/fta graph edge speed temp</white> <gray>与</gray> <white>/fta graph edge speed path temp</white>\n<dark_aqua>速度单位:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
       entry-edge-block: "<gray>/fta graph edge block</gray> <white>-</white> <dark_aqua>区间封锁/解封</dark_aqua>"
-      hover-edge-block: "<gray>点击填充:</gray> <white>/fta graph edge block </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      hover-edge-block: "<gray>点击填充:</gray> <white>/fta graph edge block </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp/list</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      entry-edge-overrides: "<gray>/fta graph edge overrides</gray> <white>-</white> <dark_aqua>overrides 管理（孤儿清理）</dark_aqua>"
+      hover-edge-overrides: "<gray>点击填充:</gray> <white>/fta graph edge overrides orphan </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/cleanup</white>\n<dark_aqua>说明:</dark_aqua> <gray>用于清理“库里有 override 但当前图不存在该边”的历史记录</gray>"
       entry-query: "<gray>/fta graph query</gray> <white>-</white> <dark_aqua>两点可达性/距离/ETA</dark_aqua>"
       hover-query: "<gray>点击填充:</gray> <white>/fta graph query </white>\n<dark_aqua>输出 hops + distance + ETA(估算)</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>\n<gray>ETA:</gray> <white>按边限速(override/base)</white> <gray>缺失时回退</gray> <white>graph.default-speed-blocks-per-second</white>\n<gray>限速命令:</gray> <white>/fta graph edge speed ...</white>"
       entry-path: "<gray>/fta graph path</gray> <white>-</white> <dark_aqua>最短路径（分页）</dark_aqua>"
@@ -117,6 +121,9 @@ command:
       result: "<prefix> <dark_aqua>两点可达</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>, eta=<white><eta></white>)</gray>"
 
     edge:
+      list:
+        status:
+          active: "生效"
       speed:
         not-adjacent: "<prefix> <red>两节点不是直接相邻区间</red> <gray>(a=<white><a></white>, b=<white><b></white>)</gray>"
         invalid-speed: "<prefix> <red>速度参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
@@ -138,6 +145,17 @@ command:
           temp:
             preview: "<prefix> <yellow>预览：将对最短路批量设置临时限速</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
             success: "<prefix> <yellow>已批量设置临时限速</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
+        list:
+          header: "<prefix> <dark_aqua>区间长期限速</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+          page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+          empty: "<prefix> <gray>当前没有已设置的区间长期限速</gray>"
+          entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(speed=<white><speed></white>, updatedAt=<white><updated_at></white>)</gray>"
+      restrict:
+        list:
+          header: "<prefix> <dark_aqua>区间临时限速（restriction）</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+          page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+          empty: "<prefix> <gray>当前没有生效中的区间临时限速</gray>"
+          entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(speed=<white><speed></white>, status=<white><status></white>, until=<white><until></white>, remaining=<white><remaining></white>, updatedAt=<white><updated_at></white>)</gray>"
       block:
         not-adjacent: "<prefix> <red>两节点不是直接相邻区间</red> <gray>(a=<white><a></white>, b=<white><b></white>)</gray>"
         invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持:</dark_aqua> <white>90s/1m/2h/1h30m</white>"
@@ -158,6 +176,38 @@ command:
           temp:
             preview: "<prefix> <yellow>预览：将对最短路批量设置临时封锁</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, ttl=<white><ttl></white>)</gray>"
             success: "<prefix> <yellow>已批量设置临时封锁</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, ttl=<white><ttl></white>)</gray>"
+        list:
+          header: "<prefix> <dark_aqua>区间封锁</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+          page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+          empty: "<prefix> <gray>当前没有生效中的区间封锁</gray>"
+          mode:
+            manual: "手动"
+            ttl: "TTL"
+            both: "手动+TTL"
+          entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(mode=<white><mode></white>, status=<white><status></white>, until=<white><until></white>, remaining=<white><remaining></white>, updatedAt=<white><updated_at></white>)</gray>"
+      overrides:
+        orphan:
+          header: "<prefix> <yellow>孤儿 overrides</yellow> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+          page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+          empty: "<prefix> <gray>没有检测到孤儿 overrides</gray>"
+          entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(updatedAt=<white><updated_at></white>)</gray>"
+          cleanup:
+            preview: "<prefix> <yellow>预览：将清理孤儿 overrides</yellow> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+            success: "<prefix> <dark_aqua>已清理孤儿 overrides</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+      get:
+        edge:
+          header: "<prefix> <dark_aqua>区间信息</dark_aqua> <gray>(<white><a></white> ↔ <white><b></white>, len=<white><len_blocks></white> blocks, blocked=<white><blocked></white>, effective=<white><effective_speed></white>)</gray>"
+          speed: "<gray>-</gray> <dark_aqua>speed</dark_aqua> <gray>(base=<white><base_speed></white>, speed_limit=<white><speed_limit></white>, restrict=<white><restrict_speed></white>, until=<white><restrict_until></white>, remaining=<white><restrict_remaining></white>, effective=<white><effective_speed></white>)</gray>"
+          block: "<gray>-</gray> <dark_aqua>block</dark_aqua> <gray>(manual=<white><blocked_manual></white>, until=<white><blocked_until></white>, remaining=<white><blocked_remaining></white>)</gray>"
+        adjacent:
+          header: "<prefix> <dark_aqua>相邻区间</dark_aqua> <gray>(node=<white><node></white>, edges=<white><count></white>)</gray>"
+          page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+          empty: "<prefix> <gray>该节点没有相邻区间</gray>"
+          entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(len=<white><len_blocks></white>, speed=<white><speed></white>, blocked=<white><blocked></white>, flags=<white><flags></white>, other=<white><other></white>)</gray>"
+        path:
+          header: "<prefix> <dark_aqua>最短路区间详情</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, eta=<white><eta></white>)</gray>"
+          page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+          entry: "<gray>#<seq></gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(len=<white><len_blocks></white>, speed=<white><speed></white>, blocked=<white><blocked></white>, flags=<white><flags></white>)</gray>"
     path:
       header: "<prefix> <dark_aqua>最短路径</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, eta=<white><eta></white>)</gray>"
       page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"

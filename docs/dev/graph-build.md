@@ -15,15 +15,23 @@
 - `/fta graph edge speed temp-clear "<a>" "<b>"`
 - `/fta graph edge speed path "<from>" "<to>" <speed> [--confirm]`
 - `/fta graph edge speed path temp "<from>" "<to>" <speed> <ttl> [--confirm]`
+- `/fta graph edge speed list [--node "<nodeId>"] [page]`
 - `/fta graph edge restrict set "<a>" "<b>" <speed> <ttl>`
 - `/fta graph edge restrict clear "<a>" "<b>"`
 - `/fta graph edge restrict path "<from>" "<to>" <speed> <ttl> [--confirm]`
+- `/fta graph edge restrict list [--node "<nodeId>"] [page]`
 - `/fta graph edge block set "<a>" "<b>"`
 - `/fta graph edge block clear "<a>" "<b>"`
 - `/fta graph edge block temp "<a>" "<b>" <ttl>`
 - `/fta graph edge block temp-clear "<a>" "<b>"`
 - `/fta graph edge block path "<from>" "<to>" [--confirm]`
 - `/fta graph edge block path temp "<from>" "<to>" <ttl> [--confirm]`
+- `/fta graph edge block list [--node "<nodeId>"] [page]`
+- `/fta graph edge get "<a>" "<b>"`
+- `/fta graph edge get adjacent "<nodeId>" [page]`
+- `/fta graph edge get path "<from>" "<to>" [page]`
+- `/fta graph edge overrides orphan list [--node "<nodeId>"] [page]`
+- `/fta graph edge overrides orphan cleanup [--node "<nodeId>"] [--confirm]`
 - `/fta graph query "<from>" "<to>"`
 - `/fta graph path "<from>" "<to>" [page]`
 - `/fta graph component "<nodeId>"`
@@ -187,6 +195,8 @@ graph:
 - 最短路批量：
   - `/fta graph edge speed path "<from>" "<to>" <speed> [--confirm]`
   - `/fta graph edge speed path temp "<from>" "<to>" <speed> <ttl> [--confirm]`
+- 查看列表（管理）：
+  - `/fta graph edge speed list [--node "<nodeId>"] [page]`
 
 #### 速度单位（命令输入/展示）
 
@@ -230,6 +240,8 @@ TTL 支持 `s/m/h/d`，并支持组合（例如 `1h30m`）：`90s`、`1m`、`2h`
   - `/fta graph edge restrict clear "<a>" "<b>"`
 - 最短路批量：
   - `/fta graph edge restrict path "<from>" "<to>" <speed> <ttl> [--confirm]`
+- 查看列表（管理）：
+  - `/fta graph edge restrict list [--node "<nodeId>"] [page]`
 
 ### 区间封锁（edge block）
 
@@ -243,8 +255,27 @@ TTL 支持 `s/m/h/d`，并支持组合（例如 `1h30m`）：`90s`、`1m`、`2h`
 - 最短路批量：
   - `/fta graph edge block path "<from>" "<to>" [--confirm]`
   - `/fta graph edge block path temp "<from>" "<to>" <ttl> [--confirm]`
+- 查看列表（管理）：
+  - `/fta graph edge block list [--node "<nodeId>"] [page]`
 
 封锁生效规则：`effectiveBlocked = blocked_manual || (blocked_until != null && now < blocked_until)`。
+
+### 快速查看区间状态（edge get）
+
+用于运维快速查看某条区间或一条最短路上的“当前生效速度/限速/临时限速/封锁”等信息：
+
+- 直接区间：`/fta graph edge get "<a>" "<b>"`（两节点必须相邻）
+- 相邻区间：`/fta graph edge get adjacent "<nodeId>" [page]`
+- 最短路区间详情：`/fta graph edge get path "<from>" "<to>" [page]`
+
+输出中的 flags：`S`=存在长期限速（speed set），`R`=存在生效的临时限速（restrict/temp），`B`=区间被封锁（block）。
+
+### 孤儿 overrides（orphan overrides）
+
+当线路改造/节点改名后，可能出现“库里有 rail_edge_overrides，但当前图快照已不存在该边”的孤儿记录，可用以下命令排查与清理：
+
+- `/fta graph edge overrides orphan list [--node "<nodeId>"] [page]`
+- `/fta graph edge overrides orphan cleanup [--node "<nodeId>"] [--confirm]`
 
 ### 最短路径（path）
 

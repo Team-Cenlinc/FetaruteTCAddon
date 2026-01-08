@@ -152,6 +152,32 @@ public final class LocaleManager {
   }
 
   /**
+   * 获取语言文件中的纯文本字符串（不做 MiniMessage 解析）。
+   *
+   * <p>适用于需要把短文本作为占位符塞进其他模板的场景（例如 list/status/mode 等）。
+   *
+   * <p>注意：语言文件中的对应键建议只写纯文本（不要写 MiniMessage 标签），避免被当作普通字符输出。
+   *
+   * @param key 语言键
+   * @return 纯文本；缺失时回退为 key 本身
+   */
+  public String text(String key) {
+    Objects.requireNonNull(key, "key");
+    if (messages == null) {
+      reload();
+    }
+    if (messages == null) {
+      return key;
+    }
+    String raw = messages.getString(key);
+    if (raw == null) {
+      logMissingKey(key);
+      return key;
+    }
+    return raw;
+  }
+
+  /**
    * 获取语言文件中的字符串列表（用于书页模板、帮助文本等非 MiniMessage 场景）。
    *
    * <p>注意：此方法不做 MiniMessage 解析，也不做占位符替换；调用方可按需处理（例如把每行当作书本 page 的行）。 Bukkit 的 {@code getStringList}

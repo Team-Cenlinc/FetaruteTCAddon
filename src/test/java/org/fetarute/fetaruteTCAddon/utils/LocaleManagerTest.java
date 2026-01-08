@@ -35,5 +35,8 @@ public final class LocaleManagerTest {
 
     // 未知前缀应回退到枚举 name()
     assertEquals("RAPID", locale.enumText("enum.unknown", RoutePatternType.RAPID));
+
+    // 纯文本键读取（用于 list/status 等占位符）
+    assertEquals("生效", locale.text("command.graph.edge.list.status.active"));
   }
 }
