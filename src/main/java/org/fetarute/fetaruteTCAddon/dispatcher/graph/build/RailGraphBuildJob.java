@@ -60,6 +60,7 @@ public final class RailGraphBuildJob implements Runnable {
   }
 
   private static final int DEFAULT_ANCHOR_SEARCH_RADIUS = 2;
+  private static final int SIGN_ANCHOR_SEARCH_RADIUS = 6;
   private static final int DEFAULT_MAX_DISTANCE_BLOCKS = 4096;
   private static final int DEFAULT_STEP_BATCH = 256;
 
@@ -85,6 +86,7 @@ public final class RailGraphBuildJob implements Runnable {
   private LoadedChunkNodeScanSession loadedChunkDiscovery;
   private RailGraphMultiSourceExplorerSession edgeSession;
   private List<RailNodeRecord> finalNodes = List.of();
+  private List<DuplicateNodeId> duplicateNodeIds = List.of();
   private RailGraphBuildStatus status;
   private final Set<RailBlockPos> junctionsMissingSwitchers = new HashSet<>();
 
@@ -210,7 +212,7 @@ public final class RailGraphBuildJob implements Runnable {
             new ConnectedRailNodeDiscoverySession(
                 world, anchors, access, debugLogger, chunkLoadOptions);
       } else {
-        this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, access, debugLogger);
+        this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, debugLogger);
       }
     }
 
@@ -259,6 +261,7 @@ public final class RailGraphBuildJob implements Runnable {
       LoadedChunkNodeScanSession currentLoadedDiscovery;
       RailGraphMultiSourceExplorerSession currentEdgeSession;
       List<RailNodeRecord> currentFinalNodes;
+      List<DuplicateNodeId> currentDuplicateNodeIds;
       synchronized (this) {
         currentPhase = this.phase;
         currentAccess = this.access;
@@ -266,6 +269,7 @@ public final class RailGraphBuildJob implements Runnable {
         currentLoadedDiscovery = this.loadedChunkDiscovery;
         currentEdgeSession = this.edgeSession;
         currentFinalNodes = this.finalNodes;
+        currentDuplicateNodeIds = this.duplicateNodeIds;
       }
       if (currentPhase == null || currentAccess == null) {
         cancel();
@@ -312,7 +316,12 @@ public final class RailGraphBuildJob implements Runnable {
       cancel();
       RailGraphBuildResult result =
           new RailGraphBuildResult(
-              graph, builtAt, signature, currentFinalNodes, List.copyOf(junctionsMissingSwitchers));
+              graph,
+              builtAt,
+              signature,
+              currentFinalNodes,
+              List.copyOf(junctionsMissingSwitchers),
+              currentDuplicateNodeIds);
       RailGraphBuildCompletion completion = computeCompletion();
       Optional<RailGraphBuildContinuation> nextContinuation = Optional.empty();
       if (mode == BuildMode.HERE && connectedDiscovery != null && connectedDiscovery.isPaused()) {
@@ -420,6 +429,12 @@ public final class RailGraphBuildJob implements Runnable {
     initEdgeSession(discoveredNodes, currentAccess);
     synchronized (this) {
       this.finalNodes = discoveredNodes;
+      this.duplicateNodeIds =
+          mode == BuildMode.HERE && connectedDiscovery != null
+              ? connectedDiscovery.duplicateNodeIds()
+              : (loadedChunkDiscovery != null
+                  ? loadedChunkDiscovery.duplicateNodeIds()
+                  : List.of());
       this.phase = Phase.EXPLORE_EDGES;
     }
   }
@@ -450,8 +465,11 @@ public final class RailGraphBuildJob implements Runnable {
               .isPresent()) {
         addRailsAround(railsWithSwitchers, currentAccess, center, DEFAULT_ANCHOR_SEARCH_RADIUS);
       }
-      Set<RailBlockPos> anchors =
-          currentAccess.findNearestRailBlocks(center, DEFAULT_ANCHOR_SEARCH_RADIUS);
+      int anchorRadius =
+          node.nodeType() == NodeType.SWITCHER
+              ? DEFAULT_ANCHOR_SEARCH_RADIUS
+              : SIGN_ANCHOR_SEARCH_RADIUS;
+      Set<RailBlockPos> anchors = currentAccess.findNearestRailBlocks(center, anchorRadius);
       if (anchors.isEmpty()) {
         missingAnchors++;
         continue;
@@ -509,7 +527,11 @@ public final class RailGraphBuildJob implements Runnable {
     for (RailNodeRecord node : discovered) {
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
       Set<RailBlockPos> anchors =
-          access.findNearestRailBlocks(center, DEFAULT_ANCHOR_SEARCH_RADIUS);
+          access.findNearestRailBlocks(
+              center,
+              node.nodeType() == NodeType.SWITCHER
+                  ? DEFAULT_ANCHOR_SEARCH_RADIUS
+                  : SIGN_ANCHOR_SEARCH_RADIUS);
       if (anchors.isEmpty()) {
         continue;
       }

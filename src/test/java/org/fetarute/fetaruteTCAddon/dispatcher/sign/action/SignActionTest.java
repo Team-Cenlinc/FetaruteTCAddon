@@ -209,6 +209,9 @@ class SignActionTest {
     when(world.getUID()).thenReturn(UUID.randomUUID());
     when(world.getName()).thenReturn("world");
     when(world.isChunkLoaded(anyInt(), anyInt())).thenReturn(true);
+    Block defaultBlock = mockBlock(world, 0, 64, 0);
+    when(defaultBlock.getState()).thenReturn(mock(BlockState.class));
+    when(world.getBlockAt(anyInt(), anyInt(), anyInt())).thenReturn(defaultBlock);
 
     Block oldBlock = mockBlock(world, 1, 64, 2);
     SignNodeDefinition oldDef =

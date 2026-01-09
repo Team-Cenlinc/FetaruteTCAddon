@@ -17,7 +17,8 @@ public record RailGraphBuildResult(
     Instant builtAt,
     String nodeSignature,
     List<RailNodeRecord> nodes,
-    List<RailBlockPos> missingSwitcherJunctions) {
+    List<RailBlockPos> missingSwitcherJunctions,
+    List<DuplicateNodeId> duplicateNodeIds) {
 
   public RailGraphBuildResult {
     Objects.requireNonNull(graph, "graph");
@@ -26,5 +27,6 @@ public record RailGraphBuildResult(
     nodes = nodes != null ? List.copyOf(nodes) : List.of();
     missingSwitcherJunctions =
         missingSwitcherJunctions != null ? List.copyOf(missingSwitcherJunctions) : List.of();
+    duplicateNodeIds = duplicateNodeIds != null ? List.copyOf(duplicateNodeIds) : List.of();
   }
 }

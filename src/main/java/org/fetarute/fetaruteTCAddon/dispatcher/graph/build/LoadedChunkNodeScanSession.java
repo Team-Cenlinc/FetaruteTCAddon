@@ -3,14 +3,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import org.bukkit.Chunk;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -31,13 +29,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  */
 public final class LoadedChunkNodeScanSession {
 
-  private static final int NODE_SIGN_ANCHOR_RADIUS = 6;
-
   private final World world;
   private final UUID worldId;
-  private final RailBlockAccess access;
   private final Chunk[] chunks;
   private final Consumer<String> debugLogger;
+  private final DuplicateNodeIdCollector duplicateCollector = new DuplicateNodeIdCollector();
 
   private int chunkIndex;
   private BlockState[] currentStates;
@@ -45,11 +41,9 @@ public final class LoadedChunkNodeScanSession {
   private int scannedTileEntities;
   private int scannedSigns;
 
-  public LoadedChunkNodeScanSession(
-      World world, RailBlockAccess access, Consumer<String> debugLogger) {
+  public LoadedChunkNodeScanSession(World world, Consumer<String> debugLogger) {
     this.world = Objects.requireNonNull(world, "world");
     this.worldId = world.getUID();
-    this.access = Objects.requireNonNull(access, "access");
     this.chunks = world.getLoadedChunks();
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
   }
@@ -107,12 +101,6 @@ public final class LoadedChunkNodeScanSession {
                     y = pos.y();
                     z = pos.z();
                   }
-                } else {
-                  RailBlockPos signPos = new RailBlockPos(x, y, z);
-                  RailBlockPos anchor = resolveAnchor(signPos);
-                  x = anchor.x();
-                  y = anchor.y();
-                  z = anchor.z();
                 }
                 RailNodeRecord record =
                     new RailNodeRecord(
@@ -124,6 +112,10 @@ public final class LoadedChunkNodeScanSession {
                         z,
                         def.trainCartsDestination(),
                         def.waypointMetadata());
+                duplicateCollector.record(
+                    def.nodeId(),
+                    new DuplicateNodeId.Occurrence(
+                        def.nodeType(), x, y, z, /* virtualSign= */ false));
                 RailNodeRecord existing = byNodeId.get(def.nodeId().value());
                 if (existing == null) {
                   byNodeId.put(def.nodeId().value(), record);
@@ -182,24 +174,8 @@ public final class LoadedChunkNodeScanSession {
     return chunkIndex;
   }
 
-  private RailBlockPos resolveAnchor(RailBlockPos signPos) {
-    Set<RailBlockPos> anchors = access.findNearestRailBlocks(signPos, NODE_SIGN_ANCHOR_RADIUS);
-    if (anchors.isEmpty()) {
-      return signPos;
-    }
-    // findNearestRailBlocks 可能返回多个“等距离”的轨道锚点；这里做确定性选择，避免因 Set 迭代顺序不稳定导致节点坐标漂移。
-    RailBlockPos best = null;
-    for (RailBlockPos candidate : anchors) {
-      if (best == null) {
-        best = candidate;
-        continue;
-      }
-      if (candidate.x() < best.x()
-          || (candidate.x() == best.x() && candidate.y() < best.y())
-          || (candidate.x() == best.x() && candidate.y() == best.y() && candidate.z() < best.z())) {
-        best = candidate;
-      }
-    }
-    return best != null ? best : signPos;
+  /** 返回本次会话扫描到的重复 nodeId 列表（仅诊断用途）。 */
+  public java.util.List<DuplicateNodeId> duplicateNodeIds() {
+    return duplicateCollector.duplicates();
   }
 }

@@ -42,12 +42,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  */
 public final class ConnectedRailNodeDiscoverySession {
 
-  private static final int NODE_SIGN_ANCHOR_RADIUS = 6;
-
   private final World world;
   private final UUID worldId;
   private final RailBlockAccess access;
   private final Consumer<String> debugLogger;
+  private final DuplicateNodeIdCollector duplicateCollector = new DuplicateNodeIdCollector();
 
   private final ArrayDeque<RailBlockPos> railQueue = new ArrayDeque<>();
   private final Set<RailBlockPos> visitedRails = new HashSet<>();
@@ -196,11 +195,6 @@ public final class ConnectedRailNodeDiscoverySession {
                       y = pos.y();
                       z = pos.z();
                     }
-                  } else {
-                    RailBlockPos anchor = resolveAnchor(signPos);
-                    x = anchor.x();
-                    y = anchor.y();
-                    z = anchor.z();
                   }
                   RailNodeRecord record =
                       new RailNodeRecord(
@@ -212,6 +206,10 @@ public final class ConnectedRailNodeDiscoverySession {
                           z,
                           def.trainCartsDestination(),
                           def.waypointMetadata());
+                  duplicateCollector.record(
+                      def.nodeId(),
+                      new DuplicateNodeId.Occurrence(
+                          def.nodeType(), x, y, z, /* virtualSign= */ false));
                   RailNodeRecord existing = byNodeId.get(def.nodeId().value());
                   if (existing == null) {
                     byNodeId.put(def.nodeId().value(), record);
@@ -545,6 +543,11 @@ public final class ConnectedRailNodeDiscoverySession {
     return failedChunkKeys.size();
   }
 
+  /** 返回本次会话扫描到的重复 nodeId 列表（仅诊断用途）。 */
+  public java.util.List<DuplicateNodeId> duplicateNodeIds() {
+    return duplicateCollector.duplicates();
+  }
+
   private static long chunkKey(int chunkX, int chunkZ) {
     return (((long) chunkX) << 32) ^ (chunkZ & 0xffffffffL);
   }
@@ -617,6 +620,10 @@ public final class ConnectedRailNodeDiscoverySession {
                         z,
                         def.trainCartsDestination(),
                         def.waypointMetadata());
+                duplicateCollector.record(
+                    def.nodeId(),
+                    new DuplicateNodeId.Occurrence(
+                        def.nodeType(), x, y, z, /* virtualSign= */ true));
                 RailNodeRecord existing = byNodeId.get(def.nodeId().value());
                 if (existing == null) {
                   byNodeId.put(def.nodeId().value(), record);
@@ -651,25 +658,5 @@ public final class ConnectedRailNodeDiscoverySession {
                 }
               });
     }
-  }
-
-  private RailBlockPos resolveAnchor(RailBlockPos signPos) {
-    Set<RailBlockPos> anchors = access.findNearestRailBlocks(signPos, NODE_SIGN_ANCHOR_RADIUS);
-    if (anchors.isEmpty()) {
-      return signPos;
-    }
-    RailBlockPos best = null;
-    for (RailBlockPos candidate : anchors) {
-      if (best == null) {
-        best = candidate;
-        continue;
-      }
-      if (candidate.x() < best.x()
-          || (candidate.x() == best.x() && candidate.y() < best.y())
-          || (candidate.x() == best.x() && candidate.y() == best.y() && candidate.z() < best.z())) {
-        best = candidate;
-      }
-    }
-    return best != null ? best : signPos;
   }
 }

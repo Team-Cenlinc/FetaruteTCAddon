@@ -112,6 +112,10 @@ command:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"
         more: "<gray>… 还有 <white><more></white> 处未显示</gray>"
+      duplicate-node-id:
+        header: "<prefix> <red>发现 <white><count></white> 个重复 nodeId</red> <gray>(world=<white><world></white>)</gray>"
+        entry: "<gray>-</gray> <white><node></white> <gray>→</gray> <locations>"
+        more: "<gray>… 还有 <white><more></white> 个未显示</gray>"
     continue:
       none: "<prefix> <gray>当前没有可续跑的图构建状态</gray> <dark_aqua>请先执行 /fta graph build --loadChunks</dark_aqua>"
       started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
@@ -241,6 +245,8 @@ command:
     delete:
       none: "<prefix> <gray>该世界没有可删除的调度图</gray>"
       success: "<prefix> <dark_aqua>已删除调度图</dark_aqua> <gray>(world=<white><world></white>)</gray>"
+      hard:
+        confirm: "<prefix> <red>危险操作：</red><gray>将删除该世界的</gray> <white>rail_nodes</white> <gray>与</gray> <white>rail_edge_overrides</white> <gray>数据</gray> <dark_aqua>请加</dark_aqua> <white>--confirm</white> <dark_aqua>继续</dark_aqua>"
       here:
         no-seed: "<prefix> <gray>附近没有可定位的图节点</gray> <dark_aqua>请靠近 waypoint/station/depot/switcher 再重试</dark_aqua>"
         success: "<prefix> <dark_aqua>已删除局部调度图</dark_aqua> <gray>(seed=<white><seed></white>, removed_components=<white><removed_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"

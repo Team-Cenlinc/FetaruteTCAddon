@@ -146,6 +146,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** 返回节点牌子注册表（用于 NodeId 冲突检测与路线编辑器）。 */
+  public SignNodeRegistry getSignNodeRegistry() {
+    return signNodeRegistry;
+  }
+
   private void preloadRailGraphFromStorage() {
     RailGraphService service = railGraphService;
     if (service == null || storageManager == null || !storageManager.isReady()) {

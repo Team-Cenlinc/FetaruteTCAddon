@@ -121,6 +121,14 @@ public final class SignNodeRegistry {
     definitions.clear();
   }
 
+  /** 删除指定世界的所有注册项（不会触发区块加载）。 */
+  public void removeWorld(UUID worldId) {
+    Objects.requireNonNull(worldId, "worldId");
+    definitions
+        .entrySet()
+        .removeIf(entry -> entry != null && worldId.equals(entry.getValue().worldId()));
+  }
+
   /**
    * 将方块位置编码为稳定键。
    *

@@ -38,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ChunkLoadOptions;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.DuplicateNodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildCompletion;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildContinuation;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob;
@@ -64,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.integration.tcc.TccSelectionResolver;
@@ -172,6 +174,7 @@ public final class FtaGraphCommand {
     CommandFlag<Void> hereFlag = CommandFlag.builder("here").build();
     CommandFlag<Void> tccFlag = CommandFlag.builder("tcc").build();
     CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
+    CommandFlag<Void> hardFlag = CommandFlag.builder("hard").build();
 
     manager.command(
         manager
@@ -338,6 +341,7 @@ public final class FtaGraphCommand {
                           .merge()
                           .ifPresent(merge -> sender.sendMessage(mergeBuildMessage(locale, merge)));
                       sendMissingSwitcherWarnings(sender, world, applied.result());
+                      sendDuplicateNodeIdWarnings(sender, world, applied.result());
                     } catch (IllegalStateException ex) {
                       sender.sendMessage(locale.component("command.graph.build.no-nodes"));
                     }
@@ -404,6 +408,7 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendMissingSwitcherWarnings(sender, world, applied.result());
+                                      sendDuplicateNodeIdWarnings(sender, world, applied.result());
                                     });
                             jobs.remove(worldId);
                           },
@@ -537,6 +542,7 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendMissingSwitcherWarnings(sender, world, applied.result());
+                                      sendDuplicateNodeIdWarnings(sender, world, applied.result());
                                     });
                             jobs.remove(worldId);
                           },
@@ -724,6 +730,8 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("delete")
+            .flag(hardFlag)
+            .flag(confirmFlag)
             .permission("fetarute.graph.delete")
             .handler(
                 ctx -> {
@@ -739,8 +747,14 @@ public final class FtaGraphCommand {
                     return;
                   }
 
+                  boolean hard = ctx.flags().isPresent(hardFlag);
+                  if (hard && !ctx.flags().isPresent(confirmFlag)) {
+                    ctx.sender().sendMessage(locale.component("command.graph.delete.hard.confirm"));
+                    return;
+                  }
+
                   boolean hadSnapshot = plugin.getRailGraphService().getSnapshot(world).isPresent();
-                  boolean deletedFromStorage = deleteGraphFromStorage(world);
+                  boolean deletedFromStorage = deleteGraphFromStorage(world, hard);
                   plugin.getRailGraphService().clearSnapshot(world);
                   continuations.keySet().removeIf(key -> worldId.equals(key.worldId()));
 
@@ -806,7 +820,7 @@ public final class FtaGraphCommand {
                       RailGraphMerger.removeComponents(graph, Set.of(seed));
                   RailGraph nextGraph = removed.graph();
                   if (removed.totalNodes() <= 0) {
-                    deleteGraphFromStorage(world);
+                    deleteGraphFromStorage(world, false);
                     plugin.getRailGraphService().clearSnapshot(world);
                     continuations.keySet().removeIf(key -> worldId.equals(key.worldId()));
                   } else {
@@ -816,7 +830,8 @@ public final class FtaGraphCommand {
                     String signature = RailGraphSignature.signatureForNodes(nodes);
                     persistGraph(
                         world,
-                        new RailGraphBuildResult(nextGraph, now, signature, nodes, List.of()));
+                        new RailGraphBuildResult(
+                            nextGraph, now, signature, nodes, List.of(), List.of()));
                   }
 
                   player.sendMessage(
@@ -5085,6 +5100,9 @@ public final class FtaGraphCommand {
     TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
 
     Map<String, RailNodeRecord> byNodeId = new HashMap<>();
+    Map<String, DuplicateNodeId.Occurrence> firstSeen = new HashMap<>();
+    Map<String, java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence>> duplicates =
+        new HashMap<>();
     if (preseedNodes != null) {
       for (RailNodeRecord node : preseedNodes) {
         if (node == null) {
@@ -5094,6 +5112,7 @@ public final class FtaGraphCommand {
       }
     }
     List<RailNodeRecord> nodes;
+    List<DuplicateNodeId> duplicateNodeIds = List.of();
     if (mode == BuildMode.HERE) {
       if (seedNode != null) {
         byNodeId.put(seedNode.nodeId().value(), seedNode);
@@ -5117,6 +5136,7 @@ public final class FtaGraphCommand {
       while (!discovery.isDone()) {
         discovery.step(System.nanoTime() + 1_000_000_000L, byNodeId);
       }
+      duplicateNodeIds = discovery.duplicateNodeIds();
       var visitedRails = discovery.visitedRails();
       nodes = filterNodesInComponent(List.copyOf(byNodeId.values()), visitedRails, access);
     } else {
@@ -5153,6 +5173,11 @@ public final class FtaGraphCommand {
                             z,
                             def.trainCartsDestination(),
                             def.waypointMetadata());
+                    recordDuplicateOccurrence(
+                        def.nodeId(),
+                        new DuplicateNodeId.Occurrence(def.nodeType(), x, y, z, false),
+                        firstSeen,
+                        duplicates);
                     RailNodeRecord existing = byNodeId.get(def.nodeId().value());
                     if (existing == null) {
                       byNodeId.put(def.nodeId().value(), record);
@@ -5168,6 +5193,7 @@ public final class FtaGraphCommand {
         }
       }
       nodes = List.copyOf(byNodeId.values());
+      duplicateNodeIds = duplicateNodeIdsFromMaps(firstSeen, duplicates);
     }
 
     if (nodes.isEmpty() || nodes.stream().noneMatch(FtaGraphCommand::isSignalNode)) {
@@ -5178,7 +5204,10 @@ public final class FtaGraphCommand {
         anchorsByNode = new HashMap<>();
     Set<RailBlockPos> railsWithSwitchers = new HashSet<>();
     for (RailNodeRecord node : nodes) {
-      var anchors = access.findNearestRailBlocks(new RailBlockPos(node.x(), node.y(), node.z()), 2);
+      int anchorRadius = node.nodeType() == NodeType.SWITCHER ? 2 : 6;
+      var anchors =
+          access.findNearestRailBlocks(
+              new RailBlockPos(node.x(), node.y(), node.z()), anchorRadius);
       if (!anchors.isEmpty()) {
         anchorsByNode.put(node.nodeId(), anchors);
       }
@@ -5254,7 +5283,66 @@ public final class FtaGraphCommand {
         org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature.signatureForNodes(
             nodes);
     return new RailGraphBuildResult(
-        finalGraph, builtAt, signature, nodes, List.copyOf(missingSwitchers));
+        finalGraph, builtAt, signature, nodes, List.copyOf(missingSwitchers), duplicateNodeIds);
+  }
+
+  private static void recordDuplicateOccurrence(
+      NodeId nodeId,
+      DuplicateNodeId.Occurrence occurrence,
+      Map<String, DuplicateNodeId.Occurrence> firstSeen,
+      Map<String, java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence>> duplicates) {
+    if (nodeId == null || occurrence == null) {
+      return;
+    }
+    String key = nodeId.value();
+    DuplicateNodeId.Occurrence first = firstSeen.get(key);
+    if (first == null) {
+      firstSeen.put(key, occurrence);
+      return;
+    }
+    if (sameOccurrence(first, occurrence)) {
+      return;
+    }
+    java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence> list =
+        duplicates.computeIfAbsent(key, ignored -> new java.util.LinkedHashMap<>());
+    list.putIfAbsent(occKey(first), first);
+    list.putIfAbsent(occKey(occurrence), occurrence);
+  }
+
+  private static boolean sameOccurrence(
+      DuplicateNodeId.Occurrence a, DuplicateNodeId.Occurrence b) {
+    return a.x() == b.x()
+        && a.y() == b.y()
+        && a.z() == b.z()
+        && a.virtualSign() == b.virtualSign()
+        && a.nodeType() == b.nodeType();
+  }
+
+  private static String occKey(DuplicateNodeId.Occurrence occurrence) {
+    return occurrence.nodeType().name()
+        + "@"
+        + occurrence.x()
+        + ":"
+        + occurrence.y()
+        + ":"
+        + occurrence.z()
+        + ":"
+        + (occurrence.virtualSign() ? "v" : "r");
+  }
+
+  private static List<DuplicateNodeId> duplicateNodeIdsFromMaps(
+      Map<String, DuplicateNodeId.Occurrence> firstSeen,
+      Map<String, java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence>> duplicates) {
+    if (duplicates == null || duplicates.isEmpty()) {
+      return List.of();
+    }
+    List<DuplicateNodeId> out = new ArrayList<>();
+    for (var entry : duplicates.entrySet()) {
+      NodeId nodeId = NodeId.of(entry.getKey());
+      out.add(new DuplicateNodeId(nodeId, List.copyOf(entry.getValue().values())));
+    }
+    out.sort(Comparator.comparing(d -> d.nodeId().value()));
+    return List.copyOf(out);
   }
 
   /**
@@ -5290,15 +5378,55 @@ public final class FtaGraphCommand {
               result.builtAt(),
               signature,
               mergedNodes,
-              result.missingSwitcherJunctions());
+              result.missingSwitcherJunctions(),
+              result.duplicateNodeIds());
       service.putSnapshot(world, merged.graph(), merged.builtAt());
+      syncSignNodeRegistry(world, mergedNodes);
       persistGraph(world, merged);
       return new AppliedGraphBuild(merged, Optional.of(merge));
     }
 
     service.putSnapshot(world, result.graph(), result.builtAt());
+    syncSignNodeRegistry(world, result.nodes());
     persistGraph(world, result);
     return new AppliedGraphBuild(result, Optional.empty());
+  }
+
+  /**
+   * 将 build 结果中的节点列表写回节点注册表，确保重建图后仍能进行 NodeId 冲突检测。
+   *
+   * <p>注册表仅用于 waypoint/autostation/depot 牌子的冲突检测，因此这里只同步 WAYPOINT/STATION/DEPOT 三类节点。
+   */
+  private void syncSignNodeRegistry(World world, List<RailNodeRecord> nodes) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(nodes, "nodes");
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    if (registry == null) {
+      return;
+    }
+
+    UUID worldId = world.getUID();
+    for (RailNodeRecord node : nodes) {
+      if (node == null) {
+        continue;
+      }
+      if (node.nodeType() != NodeType.WAYPOINT
+          && node.nodeType() != NodeType.STATION
+          && node.nodeType() != NodeType.DEPOT) {
+        continue;
+      }
+      registry.put(
+          worldId,
+          world.getName(),
+          node.x(),
+          node.y(),
+          node.z(),
+          new SignNodeDefinition(
+              node.nodeId(),
+              node.nodeType(),
+              node.trainCartsDestination(),
+              node.waypointMetadata()));
+    }
   }
 
   /**
@@ -5451,7 +5579,7 @@ public final class FtaGraphCommand {
    *
    * @return 存储中是否存在该世界的快照记录（用于命令提示“没有可删的快照”）
    */
-  private boolean deleteGraphFromStorage(World world) {
+  private boolean deleteGraphFromStorage(World world, boolean hard) {
     Objects.requireNonNull(world, "world");
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
       return false;
@@ -5468,10 +5596,12 @@ public final class FtaGraphCommand {
           .execute(
               () -> {
                 boolean existed = provider.railGraphSnapshots().findByWorld(worldId).isPresent();
-                provider.railNodes().deleteWorld(worldId);
                 provider.railEdges().deleteWorld(worldId);
-                provider.railEdgeOverrides().deleteWorld(worldId);
                 provider.railGraphSnapshots().delete(worldId);
+                if (hard) {
+                  provider.railNodes().deleteWorld(worldId);
+                  provider.railEdgeOverrides().deleteWorld(worldId);
+                }
                 return existed;
               });
     } catch (Exception ex) {
@@ -5661,6 +5791,84 @@ public final class FtaGraphCommand {
       sender.sendMessage(
           locale.component(
               "command.graph.build.missing-switcher.more",
+              Map.of("more", String.valueOf(count - limit))));
+    }
+  }
+
+  private void sendDuplicateNodeIdWarnings(
+      CommandSender sender, World world, RailGraphBuildResult result) {
+    if (result == null || result.duplicateNodeIds().isEmpty()) {
+      return;
+    }
+
+    LocaleManager locale = plugin.getLocaleManager();
+    int count = result.duplicateNodeIds().size();
+    sender.sendMessage(
+        locale.component(
+            "command.graph.build.duplicate-node-id.header",
+            Map.of("count", String.valueOf(count), "world", world.getName())));
+
+    int limit = Math.min(10, count);
+    for (int i = 0; i < limit; i++) {
+      DuplicateNodeId dup = result.duplicateNodeIds().get(i);
+      if (dup == null) {
+        continue;
+      }
+      int showLocations = Math.min(3, dup.occurrences().size());
+      net.kyori.adventure.text.Component locations = net.kyori.adventure.text.Component.empty();
+      for (int j = 0; j < showLocations; j++) {
+        DuplicateNodeId.Occurrence occ = dup.occurrences().get(j);
+        if (occ == null) {
+          continue;
+        }
+        String tp = "/tp " + occ.x() + " " + occ.y() + " " + occ.z();
+        net.kyori.adventure.text.Component entry =
+            net.kyori.adventure.text.Component.text(
+                occ.nodeType().name()
+                    + " "
+                    + occ.x()
+                    + " "
+                    + occ.y()
+                    + " "
+                    + occ.z()
+                    + (occ.virtualSign() ? " (virtual)" : ""));
+        if (sender instanceof Player) {
+          entry =
+              entry
+                  .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(tp))
+                  .hoverEvent(
+                      net.kyori.adventure.text.event.HoverEvent.showText(
+                          net.kyori.adventure.text.Component.text(tp)));
+        }
+        if (!locations.equals(net.kyori.adventure.text.Component.empty())) {
+          locations = locations.append(net.kyori.adventure.text.Component.text(" | "));
+        }
+        locations = locations.append(entry);
+      }
+      if (dup.occurrences().size() > showLocations) {
+        locations =
+            locations.append(
+                net.kyori.adventure.text.Component.text(
+                    " | +" + (dup.occurrences().size() - showLocations)));
+      }
+
+      sender.sendMessage(
+          locale.component(
+              "command.graph.build.duplicate-node-id.entry",
+              net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                          "node", dup.nodeId().value()))
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                          "locations", locations))
+                  .build()));
+    }
+
+    if (count > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.graph.build.duplicate-node-id.more",
               Map.of("more", String.valueOf(count - limit))));
     }
   }

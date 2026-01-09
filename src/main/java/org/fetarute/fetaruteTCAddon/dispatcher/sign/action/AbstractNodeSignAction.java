@@ -19,6 +19,7 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
@@ -200,6 +201,37 @@ abstract class AbstractNodeSignAction extends SignAction {
     Block conflictBlock = currentWorld.getBlockAt(conflict.x(), conflict.y(), conflict.z());
     BlockState state = conflictBlock.getState();
     if (!(state instanceof Sign sign)) {
+      // 兼容“图构建/快照”写入的节点坐标并非牌子方块坐标的历史数据：尝试在邻域内找到真实的节点牌子并修复坐标。
+      java.util.Optional<Block> repaired =
+          findNearbyNodeSignByNodeId(
+              currentWorld,
+              conflict.definition().nodeId(),
+              conflict.x(),
+              conflict.y(),
+              conflict.z(),
+              6,
+              4);
+      if (repaired.isPresent()) {
+        Block signBlock = repaired.get();
+        BlockState repairedState = signBlock.getState();
+        if (repairedState instanceof Sign repairedSign) {
+          Optional<SignNodeDefinition> actualOpt = NodeSignDefinitionParser.parse(repairedSign);
+          if (actualOpt.isPresent()
+              && actualOpt.get().nodeId().equals(conflict.definition().nodeId())) {
+            registry.remove(conflictBlock);
+            registry.put(signBlock, actualOpt.get());
+            storageSync.upsert(signBlock, actualOpt.get());
+            debugLogger.accept(
+                "修复节点注册(纠正坐标): node="
+                    + conflict.definition().nodeId().value()
+                    + " from="
+                    + conflict.locationText()
+                    + " to="
+                    + signBlock.getLocation());
+            return false;
+          }
+        }
+      }
       cleanupStaleConflict(conflictBlock, conflict.definition(), "方块已不存在或不再是牌子");
       return true;
     }
@@ -233,6 +265,38 @@ abstract class AbstractNodeSignAction extends SignAction {
             + " @ "
             + conflict.locationText());
     return true;
+  }
+
+  private static java.util.Optional<Block> findNearbyNodeSignByNodeId(
+      World world, NodeId nodeId, int baseX, int baseY, int baseZ, int radiusXZ, int radiusY) {
+    if (world == null || nodeId == null) {
+      return java.util.Optional.empty();
+    }
+    if (radiusXZ <= 0 || radiusY < 0) {
+      return java.util.Optional.empty();
+    }
+
+    for (int dy = -radiusY; dy <= radiusY; dy++) {
+      int y = baseY + dy;
+      for (int dx = -radiusXZ; dx <= radiusXZ; dx++) {
+        int x = baseX + dx;
+        for (int dz = -radiusXZ; dz <= radiusXZ; dz++) {
+          int z = baseZ + dz;
+          if (!world.isChunkLoaded(x >> 4, z >> 4)) {
+            continue;
+          }
+          BlockState state = world.getBlockAt(x, y, z).getState();
+          if (!(state instanceof Sign sign)) {
+            continue;
+          }
+          Optional<SignNodeDefinition> parsed = NodeSignDefinitionParser.parse(sign);
+          if (parsed.isPresent() && nodeId.equals(parsed.get().nodeId())) {
+            return java.util.Optional.of(sign.getBlock());
+          }
+        }
+      }
+    }
+    return java.util.Optional.empty();
   }
 
   private void cleanupStaleConflict(Block conflictBlock, SignNodeDefinition stale, String reason) {

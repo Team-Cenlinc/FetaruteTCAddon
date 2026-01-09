@@ -140,7 +140,8 @@
 
 ## 清理与局部清理
 
-- `/fta graph delete`：删除当前世界的内存快照 + SQL 快照，并清空该世界的续跑缓存（不可恢复）
+- `/fta graph delete`：删除当前世界的内存快照 + SQL 快照（`rail_edges/rail_graph_snapshots`），并清空该世界的续跑缓存（不可恢复）
+- `/fta graph delete --hard --confirm`：额外清空 `rail_nodes` 与 `rail_edge_overrides`（危险：会导致重启后 NodeId 冲突检测失效，除非你也清理/重建世界内牌子）
 - `/fta graph delete here`：仅删除玩家附近所在的连通分量（通过“最近节点”定位），适合局部重建/排查
 
 注意：清理前请确保没有正在运行的 build/continue 任务（命令会在检测到运行中时拒绝执行）。
