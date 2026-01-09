@@ -92,6 +92,9 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
     options.add("operator");
     options.add("line");
     options.add("route");
+    if (sender.hasPermission("fetarute.depot.spawn") || sender.hasPermission("fetarute.admin")) {
+      options.add("depot");
+    }
     if (sender.hasPermission("fetarute.graph") || sender.hasPermission("fetarute.admin")) {
       options.add("graph");
     }

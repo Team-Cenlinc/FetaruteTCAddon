@@ -5,9 +5,11 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -33,12 +35,18 @@ public final class DepotSignAction extends AbstractNodeSignAction {
 
   @Override
   protected Optional<SignNodeDefinition> parseDefinition(SignActionEvent info) {
-    return super.parseDefinition(info)
-        .filter(
-            definition ->
-                definition
-                    .waypointMetadata()
-                    .map(metadata -> metadata.kind() == WaypointKind.DEPOT)
-                    .orElse(false));
+    Optional<SignNodeDefinition> parsed = NodeSignDefinitionParser.parse(info.getSign());
+    if (parsed.isEmpty()) {
+      String raw = info.getLine(2);
+      if (raw != null && !raw.isBlank()) {
+        parsed = SignTextParser.parseWaypointLike(raw.trim(), NodeType.DEPOT);
+      }
+    }
+    return parsed.filter(
+        definition ->
+            definition
+                .waypointMetadata()
+                .map(metadata -> metadata.kind() == WaypointKind.DEPOT)
+                .orElse(false));
   }
 }

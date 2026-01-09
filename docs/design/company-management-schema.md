@@ -100,6 +100,9 @@
 | runtime_secs | INT | 全程运行时间（可选） |
 | metadata | JSON | 调度附加信息（车次号、运营时段） |
 
+> Route metadata 常用键：
+> - `spawn_train_pattern`：TrainCarts SpawnableGroup 字符串，用于 `/fta depot spawn` 的默认车型/编组。
+
 #### RouteStop（关联 Route 与 Station / Waypoint）
 | 字段 | 类型 |
 | --- | --- |

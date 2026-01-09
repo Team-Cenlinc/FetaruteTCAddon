@@ -52,13 +52,12 @@ public final class SwitcherSignDefinitionParser {
   }
 
   private static Optional<SignNodeDefinition> parseFromSide(Sign sign, Side side) {
-    SignSide view = sign.getSide(side);
-    String trainHeader = PLAIN_TEXT.serialize(view.line(0)).trim();
+    String trainHeader = safeLine(sign, side, 0).trim();
     SignActionHeader parsedHeader = SignActionHeader.parse(trainHeader);
     if (parsedHeader == null || (!parsedHeader.isTrain() && !parsedHeader.isCart())) {
       return Optional.empty();
     }
-    String header = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
+    String header = safeLine(sign, side, 1).trim().toLowerCase(java.util.Locale.ROOT);
     // 只接受明确的 switcher 行为牌子：TC 的 tag 牌子通常用于标记/过滤，不代表“道岔节点”，不应纳入 RailGraph。
     if (!header.equals("switcher")) {
       return Optional.empty();
@@ -173,6 +172,38 @@ public final class SwitcherSignDefinitionParser {
     try {
       String value = trackedSign.getLine(index);
       return value != null ? value : "";
+    } catch (IndexOutOfBoundsException ex) {
+      return "";
+    }
+  }
+
+  /**
+   * 安全读取牌子文本行，兼容 TrainCarts FakeSign 的旧 API。
+   *
+   * <p>若 SignSide#line 不可用则回退到旧的 Sign#getLine（仅正面）。
+   */
+  private static String safeLine(Sign sign, Side side, int index) {
+    if (sign == null) {
+      return "";
+    }
+    try {
+      SignSide view = sign.getSide(side);
+      return PLAIN_TEXT.serialize(view.line(index));
+    } catch (AbstractMethodError | NoSuchMethodError ex) {
+      // 兼容 TrainCarts 的 FakeSign 仍使用旧 Sign API。
+      if (side != Side.FRONT) {
+        return "";
+      }
+      return safeLegacyLine(sign, index);
+    } catch (IndexOutOfBoundsException ex) {
+      return "";
+    }
+  }
+
+  /** 旧版 Sign API 的安全读取。 */
+  private static String safeLegacyLine(Sign sign, int index) {
+    try {
+      return sign.getLine(index);
     } catch (IndexOutOfBoundsException ex) {
       return "";
     }

@@ -159,6 +159,14 @@ public final class FtaRouteCommand {
         CommandFlag.builder("runtime").withComponent(IntegerParser.integerParser()).build();
     var distanceFlag =
         CommandFlag.builder("distance").withComponent(IntegerParser.integerParser()).build();
+    var spawnFlag =
+        CommandFlag.<CommandSender>builder("spawn")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "spawn", StringParser.greedyStringParser())
+                    .suggestionProvider(placeholderSuggestion("\"<pattern>\"")))
+            .build();
+    var spawnClearFlag = CommandFlag.builder("spawn-clear").build();
 
     // editor give：允许“空模板”与“绑定到指定 route”两种模式；要么四参齐全要么不填。
     manager.command(
@@ -542,6 +550,14 @@ public final class FtaRouteCommand {
                           Map.of(
                               "distance",
                               route.distanceMeters().map(String::valueOf).orElse("-"))));
+                  String spawnPattern = "-";
+                  Object rawSpawn = route.metadata().get("spawn_train_pattern");
+                  if (rawSpawn instanceof String raw && !raw.isBlank()) {
+                    spawnPattern = raw.trim();
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.info.spawn-pattern", Map.of("pattern", spawnPattern)));
 
                   List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
                   sender.sendMessage(
@@ -565,6 +581,8 @@ public final class FtaRouteCommand {
             .flag(patternFlag)
             .flag(runtimeFlag)
             .flag(distanceFlag)
+            .flag(spawnFlag)
+            .flag(spawnClearFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -588,7 +606,9 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(secondaryFlag)
                           || flags.hasFlag(patternFlag)
                           || flags.hasFlag(runtimeFlag)
-                          || flags.hasFlag(distanceFlag);
+                          || flags.hasFlag(distanceFlag)
+                          || flags.hasFlag(spawnFlag)
+                          || flags.hasFlag(spawnClearFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.route.set.noop"));
                     return;
@@ -620,6 +640,18 @@ public final class FtaRouteCommand {
                       flags.getValue(runtimeFlag, route.runtimeSeconds().orElse(null));
                   Integer distance =
                       flags.getValue(distanceFlag, route.distanceMeters().orElse(null));
+                  Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
+                  if (flags.hasFlag(spawnClearFlag)) {
+                    metadata.remove("spawn_train_pattern");
+                  }
+                  if (flags.hasFlag(spawnFlag)) {
+                    String spawnPattern = normalizeSpawnPattern(flags.getValue(spawnFlag, null));
+                    if (spawnPattern == null) {
+                      metadata.remove("spawn_train_pattern");
+                    } else {
+                      metadata.put("spawn_train_pattern", spawnPattern);
+                    }
+                  }
 
                   Route updated =
                       new Route(
@@ -631,7 +663,7 @@ public final class FtaRouteCommand {
                           patternOpt.get(),
                           Optional.ofNullable(distance),
                           Optional.ofNullable(runtime),
-                          route.metadata(),
+                          metadata,
                           route.createdAt(),
                           Instant.now());
                   provider.routes().save(updated);
@@ -1856,6 +1888,21 @@ public final class FtaRouteCommand {
     } catch (IllegalArgumentException ex) {
       return Optional.empty();
     }
+  }
+
+  private static String normalizeSpawnPattern(String raw) {
+    if (raw == null) {
+      return null;
+    }
+    String trimmed = raw.trim();
+    if (trimmed.length() >= 2) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+        trimmed = trimmed.substring(1, trimmed.length() - 1).trim();
+      }
+    }
+    return trimmed.isBlank() ? null : trimmed;
   }
 
   /**

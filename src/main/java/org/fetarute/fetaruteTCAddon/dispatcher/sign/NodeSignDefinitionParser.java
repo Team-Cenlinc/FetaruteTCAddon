@@ -28,13 +28,12 @@ public final class NodeSignDefinitionParser {
   }
 
   private static Optional<SignNodeDefinition> parseFromSide(Sign sign, Side side) {
-    SignSide view = sign.getSide(side);
-    String trainHeader = PLAIN_TEXT.serialize(view.line(0)).trim();
+    String trainHeader = safeLine(sign, side, 0).trim();
     SignActionHeader parsedHeader = SignActionHeader.parse(trainHeader);
     if (parsedHeader == null || (!parsedHeader.isTrain() && !parsedHeader.isCart())) {
       return Optional.empty();
     }
-    String header = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(java.util.Locale.ROOT);
+    String header = safeLine(sign, side, 1).trim().toLowerCase(java.util.Locale.ROOT);
     NodeType nodeType;
     EnumSet<WaypointKind> expectedKinds;
     switch (header) {
@@ -57,8 +56,8 @@ public final class NodeSignDefinitionParser {
       }
     }
 
-    String line2 = PLAIN_TEXT.serialize(view.line(2));
-    String line3 = PLAIN_TEXT.serialize(view.line(3));
+    String line2 = safeLine(sign, side, 2);
+    String line3 = safeLine(sign, side, 3);
     return parseNodeIdFromLines(line2, line3, nodeType)
         .filter(
             def ->
@@ -190,6 +189,38 @@ public final class NodeSignDefinitionParser {
     try {
       String value = trackedSign.getLine(index);
       return value != null ? value : "";
+    } catch (IndexOutOfBoundsException ex) {
+      return "";
+    }
+  }
+
+  /**
+   * 安全读取牌子文本行，兼容 TrainCarts FakeSign 的旧 API。
+   *
+   * <p>若 SignSide#line 不可用则回退到旧的 Sign#getLine（仅正面）。
+   */
+  private static String safeLine(Sign sign, Side side, int index) {
+    if (sign == null) {
+      return "";
+    }
+    try {
+      SignSide view = sign.getSide(side);
+      return PLAIN_TEXT.serialize(view.line(index));
+    } catch (AbstractMethodError | NoSuchMethodError ex) {
+      // 兼容 TrainCarts 的 FakeSign 仍使用旧 Sign API。
+      if (side != Side.FRONT) {
+        return "";
+      }
+      return safeLegacyLine(sign, index);
+    } catch (IndexOutOfBoundsException ex) {
+      return "";
+    }
+  }
+
+  /** 旧版 Sign API 的安全读取。 */
+  private static String safeLegacyLine(Sign sign, int index) {
+    try {
+      return sign.getLine(index);
     } catch (IndexOutOfBoundsException ex) {
       return "";
     }

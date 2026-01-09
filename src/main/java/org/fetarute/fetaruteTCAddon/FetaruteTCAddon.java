@@ -6,6 +6,7 @@ import java.util.Map;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
@@ -175,6 +176,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaOperatorCommand(this).register(commandManager);
     new FtaLineCommand(this).register(commandManager);
     new FtaRouteCommand(this).register(commandManager);
+    new FtaDepotCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 

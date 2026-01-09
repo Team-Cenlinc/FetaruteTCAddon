@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|graph>
+    usage: /fta <info|help|reload|company|operator|line|route|depot|graph>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
@@ -28,6 +28,7 @@ permissions:
       fetarute.graph.sign: true
       fetarute.graph.query: true
       fetarute.graph.edge: true
+      fetarute.depot.spawn: true
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置
     default: op
@@ -63,4 +64,7 @@ permissions:
     default: op
   fetarute.graph.sign:
     description: 快速设置节点牌子内容（/fta graph sign ...）
+    default: op
+  fetarute.depot.spawn:
+    description: 手动触发车库生成列车（/fta depot spawn）
     default: op

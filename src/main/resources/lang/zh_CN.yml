@@ -50,6 +50,8 @@ command:
     hover-line: "<gray>点击填充:</gray> <white>/fta line </white>\n<dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
     entry-route: "<gray>/fta route</gray> <white>-</white> <dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
     hover-route: "<gray>点击填充:</gray> <white>/fta route </white>\n<dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
+    entry-depot: "<gray>/fta depot</gray> <white>-</white> <dark_aqua>车库指令（手动生成列车）</dark_aqua>"
+    hover-depot: "<gray>点击填充:</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
     entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
@@ -365,12 +367,13 @@ command:
       pattern: "<gray>模式:</gray> <dark_aqua><pattern></dark_aqua>"
       runtime: "<gray>运行时间(秒):</gray> <dark_aqua><runtime></dark_aqua>"
       distance: "<gray>距离(米):</gray> <dark_aqua><distance></dark_aqua>"
+      spawn-pattern: "<gray>车型/编组:</gray> <dark_aqua><pattern></dark_aqua>"
       stops: "<gray>停靠点:</gray> <dark_aqua><count></dark_aqua>"
     not-found: "<prefix> <red>未找到运行图：</red><white><route></white>"
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--runtime/--distance）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--runtime/--distance/--spawn/--spawn-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
@@ -434,6 +437,18 @@ command:
         success: "<prefix> <dark_aqua>已将编辑书归档为成书</dark_aqua>"
         lore-1: "<gray>运行图已写入数据库，可用于存档</gray>"
         lore-2: "<gray>写入时间:</gray> <white><when></white>"
+
+  depot:
+    spawn:
+      not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"
+      not-depot: "<prefix> <red>节点不是车库</red> <gray>(node=<white><node></white>)</gray>"
+      world-missing: "<prefix> <red>车库所在世界未加载</red> <gray>(world=<white><world></white>)</gray>"
+      sign-missing: "<prefix> <red>车库牌子不存在或未加载</red> <gray>(node=<white><node></white>)</gray>"
+      pattern-missing: "<prefix> <red>缺少车型/编组</red> <gray>请在 route metadata 或牌子第 4 行设置</gray>"
+      pattern-invalid: "<prefix> <red>车型/编组无效</red> <gray>(pattern=<white><pattern></white>)</gray>"
+      rail-missing: "<prefix> <red>车库附近未找到可生成轨道</red> <gray>(node=<white><node></white>)</gray>"
+      spawn-failed: "<prefix> <red>生成列车失败</red> <gray>(node=<white><node></white>)</gray>"
+      success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
 
 enum:
   line-service-type:

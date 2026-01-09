@@ -58,11 +58,16 @@
 | 命令 | 说明 | 角色 | DAO |
 | --- | --- | --- | --- |
 | `/fta route create <line> <code> <name> --tc <tcRoute>` | 新建 Route 并绑定 TC route ID | DISPATCHER/MANAGER | `RouteRepository.save` |
-| `/fta route set <route> [--name --pattern --tc --dist --runtime]` | 更新 Route 属性 | DISPATCHER/MANAGER | `RouteRepository.save` |
+| `/fta route set <route> [--name --pattern --tc --dist --runtime --spawn --spawn-clear]` | 更新 Route 属性 | DISPATCHER/MANAGER | `RouteRepository.save` |
 | `/fta route list <line>` | 列出线路下 Route | 成员 | `RouteRepository.listByLine` |
 | `/fta route stop add <route> <sequence> (--station <station> | --waypoint <node>) [--dwell <sec> --pass <type>]` | 插入停靠点 | DISPATCHER/MANAGER | `RouteStopRepository.save` |
 | `/fta route stop remove <route> <sequence>` | 移除停靠 | DISPATCHER/MANAGER | `RouteStopRepository.delete` |
 | `/fta route stop list <route>` | 查看停靠表 | 成员 | `RouteStopRepository.listByRoute` |
+
+## Depot 命令
+| 命令 | 说明 | 角色 | DAO |
+| --- | --- | --- | --- |
+| `/fta depot spawn <company> <operator> <line> <route> "<nodeId>" [--pattern "<pattern>"]` | 手动触发车库生成列车（pattern 优先级：flag &gt; route metadata &gt; 牌子第 4 行） | OWNER/MANAGER + `fetarute.depot.spawn` | `RouteRepository`, `RouteStopRepository`, `StationRepository` |
 
 ## Player Identity / 管理命令
 | 命令 | 说明 | 权限 | DAO |
