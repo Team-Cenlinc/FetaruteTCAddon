@@ -62,6 +62,14 @@ abstract class AbstractNodeSignAction extends SignAction {
     this.storageSync = storageSync != null ? storageSync : SignNodeStorageSynchronizer.noop();
   }
 
+  /** 输出调试日志（由调用方决定是否启用）。 */
+  protected void debug(String message) {
+    if (message == null || message.isBlank()) {
+      return;
+    }
+    debugLogger.accept(message);
+  }
+
   AbstractNodeSignAction(
       String header,
       SignNodeRegistry registry,

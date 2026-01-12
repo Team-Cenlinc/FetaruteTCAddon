@@ -14,10 +14,13 @@ class ConfigManagerTest {
   // 应解析 debug 开关与 MySQL 配置
   void parseDebugAndMySqlSettings() {
     YamlConfiguration config = new YamlConfiguration();
-    config.set("config-version", 2);
+    config.set("config-version", 3);
     config.set("debug.enabled", true);
     config.set("storage.backend", "mysql");
     config.set("graph.default-speed-blocks-per-second", 12.5);
+    config.set("autostation.door-close-sound", "BLOCK_NOTE_BLOCK_BELL");
+    config.set("autostation.door-close-sound-volume", 0.9);
+    config.set("autostation.door-close-sound-pitch", 1.1);
     config.set("storage.mysql.db_address", "db.example.com");
     config.set("storage.mysql.db_port", 3307);
     config.set("storage.mysql.db_table", "fta_data");
@@ -26,9 +29,12 @@ class ConfigManagerTest {
     config.set("storage.mysql.table_prefix", "t_");
     ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
 
-    assertEquals(2, view.configVersion());
+    assertEquals(3, view.configVersion());
     assertTrue(view.debugEnabled());
     assertEquals(12.5, view.graphSettings().defaultSpeedBlocksPerSecond());
+    assertEquals("BLOCK_NOTE_BLOCK_BELL", view.autoStationSettings().doorCloseSound());
+    assertEquals(0.9f, view.autoStationSettings().doorCloseSoundVolume());
+    assertEquals(1.1f, view.autoStationSettings().doorCloseSoundPitch());
     assertEquals(ConfigManager.StorageBackend.MYSQL, view.storageSettings().backend());
     ConfigManager.MySqlSettings mysql = view.storageSettings().mySqlSettings().orElseThrow();
     assertEquals("db.example.com", mysql.address());
@@ -49,6 +55,7 @@ class ConfigManagerTest {
     assertEquals(0, view.configVersion());
     assertFalse(view.debugEnabled());
     assertEquals(8.0, view.graphSettings().defaultSpeedBlocksPerSecond());
+    assertEquals("BLOCK_NOTE_BLOCK_BELL", view.autoStationSettings().doorCloseSound());
     assertEquals(ConfigManager.StorageBackend.SQLITE, view.storageSettings().backend());
     assertEquals("data/fetarute.sqlite", view.storageSettings().sqliteSettings().file());
   }

@@ -13,6 +13,8 @@
 
 1) 解析：从牌子第 3/4 行解析 `nodeId`
    - Depot 牌子第 4 行可填写 TrainCarts 的 spawn pattern（例如 `4m`），仅供 `/fta depot spawn` 默认读取，不参与 `nodeId` 解析。
+   - AutoStation 牌子第 4 行可填写开门方向（`N/E/S/W/BOTH/NONE`），仅供停站开门逻辑使用，不参与 `nodeId` 解析。
+   - AutoStation 行为细节见：`docs/dev/autostation.md`
 2) 冲突检测：同一个 `nodeId` 不允许被多个方块位置占用
    - 冲突时会显示已占用的位置，并取消本次写入（牌子内容不会被改成“看起来有效但未注册”的状态）
 3) 写入：

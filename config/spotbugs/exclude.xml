@@ -72,6 +72,10 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.config.ConfigManager"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
@@ -164,5 +168,12 @@
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParserTest"/>
         <Method name="lambda$ignoresTagSignsOnBukkitSign$0"/>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+
+    <!-- BKCommonLib CommonEntity 返回类型的误报：member.getEntity().getEntity() -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController"/>
+        <Method name="chooseDoorSideByWorld"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
 </FindBugsFilter>

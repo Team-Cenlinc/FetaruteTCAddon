@@ -13,9 +13,12 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 2;
+  private static final int EXPECTED_CONFIG_VERSION = 3;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
+  private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
+  private static final float DEFAULT_AUTOSTATION_DOOR_CLOSE_VOLUME = 1.0f;
+  private static final float DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH = 1.2f;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -49,7 +52,10 @@ public final class ConfigManager {
     StorageSettings storageSettings = parseStorage(storageSection, logger);
     ConfigurationSection graphSection = config.getConfigurationSection("graph");
     GraphSettings graphSettings = parseGraph(graphSection, logger);
-    return new ConfigView(version, debugEnabled, localeTag, storageSettings, graphSettings);
+    ConfigurationSection autoStationSection = config.getConfigurationSection("autostation");
+    AutoStationSettings autoStationSettings = parseAutoStation(autoStationSection, logger);
+    return new ConfigView(
+        version, debugEnabled, localeTag, storageSettings, graphSettings, autoStationSettings);
   }
 
   private static StorageSettings parseStorage(
@@ -91,6 +97,33 @@ public final class ConfigManager {
       speed = DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND;
     }
     return new GraphSettings(speed);
+  }
+
+  private static AutoStationSettings parseAutoStation(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    String sound = DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND;
+    float volume = DEFAULT_AUTOSTATION_DOOR_CLOSE_VOLUME;
+    float pitch = DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH;
+    if (section != null) {
+      String configured = section.getString("door-close-sound", sound);
+      if (configured != null && !configured.trim().isEmpty()) {
+        sound = configured.trim();
+      }
+      double configuredVolume = section.getDouble("door-close-sound-volume", volume);
+      if (Double.isFinite(configuredVolume) && configuredVolume > 0.0) {
+        volume = (float) configuredVolume;
+      } else {
+        logger.warning(
+            "autostation.door-close-sound-volume 配置无效: " + configuredVolume + "，已回退为默认值");
+      }
+      double configuredPitch = section.getDouble("door-close-sound-pitch", pitch);
+      if (Double.isFinite(configuredPitch) && configuredPitch > 0.0) {
+        pitch = (float) configuredPitch;
+      } else {
+        logger.warning("autostation.door-close-sound-pitch 配置无效: " + configuredPitch + "，已回退为默认值");
+      }
+    }
+    return new AutoStationSettings(sound, volume, pitch);
   }
 
   private static SqliteSettings parseSqlite(ConfigurationSection sqliteSection) {
@@ -141,7 +174,8 @@ public final class ConfigManager {
       boolean debugEnabled,
       String locale,
       StorageSettings storageSettings,
-      GraphSettings graphSettings) {}
+      GraphSettings graphSettings,
+      AutoStationSettings autoStationSettings) {}
 
   /** 调度图相关配置。 */
   public record GraphSettings(double defaultSpeedBlocksPerSecond) {
@@ -160,6 +194,10 @@ public final class ConfigManager {
       return new GraphSettings(DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND);
     }
   }
+
+  /** AutoStation 相关配置（默认关门提示音与音量/音高）。 */
+  public record AutoStationSettings(
+      String doorCloseSound, float doorCloseSoundVolume, float doorCloseSoundPitch) {}
 
   /** 存储后端定义。 */
   public enum StorageBackend {

@@ -3,6 +3,9 @@ package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.Optional;
 import java.util.Set;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -86,8 +89,8 @@ public final class SwitcherSignDefinitionParser {
   /**
    * 解析 TrainCarts 的 {@link TrackedSign}（包含 TCCoasters 的 TrackNodeSign 虚拟牌子）。
    *
-   * <p>Virtual sign 没有 Bukkit {@link Sign} 实例，因此必须读取 {@link TrackedSign#getLine(int)} 与 {@link
-   * TrackedSign#railBlock} 来确定其关联的轨道方块。
+   * <p>Virtual sign 没有 Bukkit {@link Sign} 实例，因此必须读取 {@link TrackedSign#getLine(int)} 与轨道方块
+   * 关联信息来确定其坐标。
    */
   public static Optional<SignNodeDefinition> parse(TrackedSign trackedSign) {
     if (trackedSign == null) {
@@ -103,13 +106,7 @@ public final class SwitcherSignDefinitionParser {
       return Optional.empty();
     }
 
-    Block railBlock = trackedSign.railBlock;
-    if (railBlock == null) {
-      RailPiece piece = trackedSign.getRail();
-      if (piece != null) {
-        railBlock = piece.block();
-      }
-    }
+    Block railBlock = resolveRailBlock(trackedSign);
     if (railBlock == null) {
       return Optional.empty();
     }
@@ -202,10 +199,46 @@ public final class SwitcherSignDefinitionParser {
 
   /** 旧版 Sign API 的安全读取。 */
   private static String safeLegacyLine(Sign sign, int index) {
-    try {
-      return sign.getLine(index);
-    } catch (IndexOutOfBoundsException ex) {
+    return readLegacyLine(sign, index);
+  }
+
+  private static String readLegacyLine(Sign sign, int index) {
+    if (sign == null) {
       return "";
     }
+    try {
+      Method method = sign.getClass().getMethod("getLine", int.class);
+      Object value = method.invoke(sign, index);
+      return value == null ? "" : value.toString();
+    } catch (NoSuchMethodException | IllegalAccessException ex) {
+      return "";
+    } catch (InvocationTargetException ex) {
+      Throwable cause = ex.getCause();
+      if (cause instanceof IndexOutOfBoundsException) {
+        return "";
+      }
+      return "";
+    }
+  }
+
+  private static Block resolveRailBlock(TrackedSign trackedSign) {
+    if (trackedSign == null) {
+      return null;
+    }
+    RailPiece piece = trackedSign.getRail();
+    if (piece != null) {
+      return piece.block();
+    }
+    try {
+      Field field = TrackedSign.class.getDeclaredField("railBlock");
+      field.setAccessible(true);
+      Object value = field.get(trackedSign);
+      if (value instanceof Block block) {
+        return block;
+      }
+    } catch (NoSuchFieldException | IllegalAccessException ex) {
+      return null;
+    }
+    return null;
   }
 }

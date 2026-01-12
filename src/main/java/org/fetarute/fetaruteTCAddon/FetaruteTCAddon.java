@@ -212,7 +212,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
         new AutoStationSignAction(
-            signNodeRegistry, loggerManager::debug, localeManager, storageSync);
+            this, signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.depotSignAction =
         new DepotSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     SignAction.register(waypointSignAction);

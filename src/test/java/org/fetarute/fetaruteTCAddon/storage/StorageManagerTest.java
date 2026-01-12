@@ -24,7 +24,12 @@ final class StorageManagerTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
     ConfigManager.ConfigView view =
         new ConfigManager.ConfigView(
-            2, true, "zh_CN", settings, new ConfigManager.GraphSettings(8.0));
+            3,
+            true,
+            "zh_CN",
+            settings,
+            new ConfigManager.GraphSettings(8.0),
+            new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f));
     StorageManager manager =
         new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
 
@@ -47,7 +52,12 @@ final class StorageManagerTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
     ConfigManager.ConfigView view =
         new ConfigManager.ConfigView(
-            2, false, "zh_CN", settings, new ConfigManager.GraphSettings(8.0));
+            3,
+            false,
+            "zh_CN",
+            settings,
+            new ConfigManager.GraphSettings(8.0),
+            new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f));
     StorageManager manager =
         new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
 

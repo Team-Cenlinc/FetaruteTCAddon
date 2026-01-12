@@ -2,6 +2,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 
 import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.EnumSet;
 import java.util.Optional;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -219,9 +221,24 @@ public final class NodeSignDefinitionParser {
 
   /** 旧版 Sign API 的安全读取。 */
   private static String safeLegacyLine(Sign sign, int index) {
+    return readLegacyLine(sign, index);
+  }
+
+  private static String readLegacyLine(Sign sign, int index) {
+    if (sign == null) {
+      return "";
+    }
     try {
-      return sign.getLine(index);
-    } catch (IndexOutOfBoundsException ex) {
+      Method method = sign.getClass().getMethod("getLine", int.class);
+      Object value = method.invoke(sign, index);
+      return value == null ? "" : value.toString();
+    } catch (NoSuchMethodException | IllegalAccessException ex) {
+      return "";
+    } catch (InvocationTargetException ex) {
+      Throwable cause = ex.getCause();
+      if (cause instanceof IndexOutOfBoundsException) {
+        return "";
+      }
       return "";
     }
   }
