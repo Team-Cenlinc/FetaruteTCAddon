@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 
@@ -12,4 +13,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 public interface HeadwayRule {
 
   Duration headwayFor(Optional<RouteId> routeId, OccupancyResource resource);
+
+  /** 返回固定 headway 的简单规则，便于 MVP 与测试使用。 */
+  static HeadwayRule fixed(Duration duration) {
+    Objects.requireNonNull(duration, "duration");
+    if (duration.isNegative()) {
+      throw new IllegalArgumentException("duration 不能为负");
+    }
+    return (routeId, resource) -> duration;
+  }
 }

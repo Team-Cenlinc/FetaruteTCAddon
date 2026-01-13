@@ -54,6 +54,8 @@ command:
     hover-depot: "<gray>点击填充:</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
     entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
+    entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
+    hover-occupancy: "<gray>点击填充:</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -63,6 +65,42 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+
+  occupancy:
+    not-ready: "<prefix> <red>占用管理器未就绪</red>"
+    invalid-kind: "<prefix> <red>未知资源类型:</red> <white><kind></white>"
+    release:
+      success: "<prefix> <dark_aqua>已释放列车占用</dark_aqua> <gray>(train=<white><train></white>, count=<white><count></white>)</gray>"
+    release-resource:
+      success: "<prefix> <dark_aqua>已释放资源占用</dark_aqua> <gray>(kind=<white><kind></white>, key=<white><key></white>)</gray>"
+      none: "<prefix> <gray>未找到资源占用</gray> <gray>(kind=<white><kind></white>, key=<white><key></white>)</gray>"
+    cleanup:
+      success: "<prefix> <dark_aqua>已清理过期占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
+    dump:
+      header: "<prefix> <dark_aqua>当前占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
+      entry: "<gray>-</gray> <white><resource></white> <gray>train=<white><train></white> releaseAt=<white><release_at></white> headway=<white><headway></white></gray>"
+      truncated: "<gray>… 已截断，使用 /fta occupancy dump <limit> 调整数量</gray>"
+    debug:
+      player-only: "<prefix> <red>该调试命令仅限玩家执行</red>"
+      graph-not-ready: "<prefix> <red>调度图未就绪</red> <gray>请先 /fta graph build</gray>"
+      edge-not-found: "<prefix> <red>未找到区间边</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
+      path-not-found: "<prefix> <red>两点不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
+      no-resources: "<prefix> <red>无法生成占用资源</red>"
+      decision: "<prefix> <dark_aqua>占用判定</dark_aqua> <gray>(scope=<white><scope></white>, edges=<white><edges></white>, allowed=<white><allowed></white>, earliest=<white><earliest></white>, signal=<white><signal></white>, blockers=<white><blockers></white>)</gray>"
+    help:
+      header: "<prefix> <dark_aqua>调度占用命令</dark_aqua>"
+      entry-dump: "<gray>/fta occupancy dump</gray> <white>-</white> <dark_aqua>查看占用快照</dark_aqua>"
+      hover-dump: "<gray>点击填充:</gray> <white>/fta occupancy dump </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-release: "<gray>/fta occupancy release</gray> <white>-</white> <dark_aqua>按列车释放占用</dark_aqua>"
+      hover-release: "<gray>点击填充:</gray> <white>/fta occupancy release </white>\n<dark_aqua>按列车名称清理占用</dark_aqua>"
+      entry-release-resource: "<gray>/fta occupancy release-resource</gray> <white>-</white> <dark_aqua>按资源释放占用</dark_aqua>"
+      hover-release-resource: "<gray>点击填充:</gray> <white>/fta occupancy release-resource </white>\n<dark_aqua>参数: EDGE/NODE/CONFLICT + key</dark_aqua>"
+      entry-cleanup: "<gray>/fta occupancy cleanup</gray> <white>-</white> <dark_aqua>清理过期占用</dark_aqua>"
+      hover-cleanup: "<gray>点击执行:</gray> <white>/fta occupancy cleanup</white>\n<dark_aqua>清理超时释放记录</dark_aqua>"
+      entry-debug-edge: "<gray>/fta occupancy debug edge</gray> <white>-</white> <dark_aqua>调试区间占用</dark_aqua>"
+      hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\" [seconds]</dark_aqua>"
+      entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
+      hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\" [seconds]</dark_aqua>"
 
   graph:
     help:

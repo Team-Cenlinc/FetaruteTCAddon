@@ -91,6 +91,19 @@ public final class SimpleOccupancyManager implements OccupancyManager {
   }
 
   @Override
+  public synchronized Optional<OccupancyClaim> getClaim(OccupancyResource resource) {
+    if (resource == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(claims.get(resource));
+  }
+
+  @Override
+  public synchronized List<OccupancyClaim> snapshotClaims() {
+    return List.copyOf(claims.values());
+  }
+
+  @Override
   public synchronized int releaseByTrain(String trainName) {
     if (trainName == null || trainName.isBlank()) {
       return 0;
@@ -126,6 +139,69 @@ public final class SimpleOccupancyManager implements OccupancyManager {
     }
     claims.remove(resource);
     return true;
+  }
+
+  @Override
+  public synchronized boolean updateReleaseAt(
+      OccupancyResource resource, Instant releaseAt, Optional<String> trainName) {
+    if (resource == null || releaseAt == null) {
+      return false;
+    }
+    OccupancyClaim claim = claims.get(resource);
+    if (claim == null) {
+      return false;
+    }
+    if (trainName != null && trainName.isPresent()) {
+      String expected = trainName.get();
+      if (!claim.trainName().equalsIgnoreCase(expected)) {
+        return false;
+      }
+    }
+    Instant nextRelease = releaseAt;
+    if (releaseAt.isBefore(claim.acquiredAt())) {
+      nextRelease = claim.acquiredAt();
+    }
+    claims.put(
+        resource,
+        new OccupancyClaim(
+            resource,
+            claim.trainName(),
+            claim.routeId(),
+            claim.acquiredAt(),
+            nextRelease,
+            claim.headway()));
+    return true;
+  }
+
+  @Override
+  public synchronized int updateReleaseAtByTrain(String trainName, Instant releaseAt) {
+    if (trainName == null || trainName.isBlank() || releaseAt == null) {
+      return 0;
+    }
+    int updated = 0;
+    for (Map.Entry<OccupancyResource, OccupancyClaim> entry : claims.entrySet()) {
+      OccupancyClaim claim = entry.getValue();
+      if (claim == null) {
+        continue;
+      }
+      if (!claim.trainName().equalsIgnoreCase(trainName)) {
+        continue;
+      }
+      Instant nextRelease = releaseAt;
+      if (releaseAt.isBefore(claim.acquiredAt())) {
+        nextRelease = claim.acquiredAt();
+      }
+      entry.setValue(
+          new OccupancyClaim(
+              entry.getKey(),
+              claim.trainName(),
+              claim.routeId(),
+              claim.acquiredAt(),
+              nextRelease,
+              claim.headway()));
+      updated++;
+    }
+    return updated;
   }
 
   @Override

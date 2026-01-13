@@ -54,4 +54,25 @@ class SimpleOccupancyManagerTest {
     assertEquals(0, manager.cleanupExpired(now.plusSeconds(6)));
     assertEquals(1, manager.cleanupExpired(now.plusSeconds(8)));
   }
+
+  @Test
+  void updateReleaseAtByTrainAdjustsBlockTime() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("NODE-1"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-A", Optional.empty(), now, Duration.ofSeconds(5), List.of(resource));
+    manager.acquire(request);
+
+    manager.updateReleaseAtByTrain("train-A", now.plusSeconds(2));
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "train-B", Optional.empty(), now, Duration.ofSeconds(5), List.of(resource)));
+    assertEquals(now.plusSeconds(2), decision.earliestTime());
+  }
 }

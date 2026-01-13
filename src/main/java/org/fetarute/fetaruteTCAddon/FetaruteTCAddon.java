@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon;
 
 import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
+import java.time.Duration;
 import java.util.Map;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -10,6 +11,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
@@ -19,6 +21,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -53,6 +59,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
   private DepotSignAction depotSignAction;
+  private OccupancyManager occupancyManager;
 
   @Override
   public void onEnable() {
@@ -73,6 +80,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.storageManager.apply(configManager.current());
     registerSignActions();
     preloadRailGraphFromStorage();
+    initOccupancyManager();
 
     registerCommands();
     getServer()
@@ -147,6 +155,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** 返回当前占用管理器（调度闭塞骨架）。 */
+  public OccupancyManager getOccupancyManager() {
+    return occupancyManager;
+  }
+
   /** 返回节点牌子注册表（用于 NodeId 冲突检测与路线编辑器）。 */
   public SignNodeRegistry getSignNodeRegistry() {
     return signNodeRegistry;
@@ -177,6 +190,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaLineCommand(this).register(commandManager);
     new FtaRouteCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
+    new FtaOccupancyCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
@@ -234,6 +248,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
     getServer()
         .getPluginManager()
         .registerEvents(new TrainSignBypassListener(loggerManager::debug), this);
+  }
+
+  private void initOccupancyManager() {
+    this.occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
   }
 
   /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */
