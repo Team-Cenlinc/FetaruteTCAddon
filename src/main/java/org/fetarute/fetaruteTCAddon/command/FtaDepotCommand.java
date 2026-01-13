@@ -48,6 +48,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.context.CommandInput;
@@ -228,6 +229,12 @@ public final class FtaDepotCommand {
                     properties.setTrainName(trainName);
                     addTags(properties, runId, resolved, depotId, pattern, destInfo);
                   }
+                  Bukkit.getScheduler()
+                      .runTaskLater(
+                          plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 2L);
+                  Bukkit.getScheduler()
+                      .runTaskLater(
+                          plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 10L);
 
                   sender.sendMessage(
                       locale.component(

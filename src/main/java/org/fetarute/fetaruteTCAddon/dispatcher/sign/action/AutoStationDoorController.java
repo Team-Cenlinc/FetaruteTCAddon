@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
 import com.bergerkiller.bukkit.common.config.ConfigurationNode;
+import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.attachments.animation.Animation;
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationNode;
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationOptions;
@@ -29,7 +30,7 @@ import org.bukkit.util.Vector;
  *
  * <p>约定：标准动画名称为 {@code doorL/doorR}；旧车使用 {@code doorL10/doorR10}。
  */
-final class AutoStationDoorController {
+public final class AutoStationDoorController {
 
   private static final String DOOR_LEFT = "doorL";
   private static final String DOOR_RIGHT = "doorR";
@@ -42,6 +43,7 @@ final class AutoStationDoorController {
   private static final double LEGACY_SPLIT_SECONDS = 5.0;
   private static final int CHIME_REPEAT_COUNT = 3;
   private static final long CHIME_REPEAT_INTERVAL_TICKS = 10L;
+  private static final long LEGACY_CLOSE_SOUND_DELAY_TICKS = 80L;
   private static final int MAX_WORLD_SELECT_ANCHOR_DEPTH = 6;
   private static final double WORLD_SELECT_PROBE_OFFSET_BLOCKS = 0.75;
   private static final Set<String> LEFT_ANIMATIONS =
@@ -219,12 +221,13 @@ final class AutoStationDoorController {
             WorldSelectProbe.PIVOT,
             eps);
     String retry = "";
-    if (isModernDoorPair(leftName, rightName)) {
+    int maxAnchorDepth = maxAnchorDepth(leftName, rightName, leftTargets, rightTargets);
+    if (maxAnchorDepth > 0) {
       StringBuilder trials = new StringBuilder();
       appendAnchorTrial(trials, 0, attempt);
       WorldSelectAttempt best = attempt;
       int chosenDepth = 0;
-      for (int depth = 1; depth <= MAX_WORLD_SELECT_ANCHOR_DEPTH; depth++) {
+      for (int depth = 1; depth <= maxAnchorDepth; depth++) {
         WorldSelectAttempt candidate =
             computeWorldSelectAttempt(
                 world,
@@ -261,7 +264,7 @@ final class AutoStationDoorController {
             && Double.isFinite(attempt.delta())
             && Math.abs(attempt.delta()) <= eps;
     if (attempt.selection() == null || tieLike) {
-      int maxDepth = isModernDoorPair(leftName, rightName) ? MAX_WORLD_SELECT_ANCHOR_DEPTH : 0;
+      int maxDepth = maxAnchorDepth;
       StringBuilder trials = new StringBuilder();
       WorldSelectAttempt best = attempt;
       for (int depth = 0; depth <= maxDepth; depth++) {
@@ -304,6 +307,21 @@ final class AutoStationDoorController {
     double scoreL = attempt.scoreL();
     double scoreR = attempt.scoreR();
     double delta = attempt.delta();
+    if (selection == null) {
+      DoorSideSelection fallback =
+          maxSeparationSelection(
+              world,
+              desired,
+              candidates.leftTargets(),
+              candidates.rightTargets(),
+              attempt.anchorDepth(),
+              attempt.probe(),
+              eps);
+      if (fallback != null) {
+        selection = fallback;
+        reason = reason + "+maxSeparation";
+      }
+    }
 
     if (leftRep == null && rightRep == null) {
       return new DoorSideDecision(
@@ -600,6 +618,12 @@ final class AutoStationDoorController {
     if (Double.isFinite(candidateAbs) && !Double.isFinite(baselineAbs)) {
       return true;
     }
+    boolean candidateNonPivot =
+        candidate.probe() != null && candidate.probe() != WorldSelectProbe.PIVOT;
+    boolean baselinePivot = baseline.probe() == null || baseline.probe() == WorldSelectProbe.PIVOT;
+    if (candidateNonPivot && baselinePivot && candidateAbs >= baselineAbs - 1.0e-6) {
+      return true;
+    }
     if (candidateAbs > baselineAbs + 0.01) {
       return true;
     }
@@ -671,6 +695,32 @@ final class AutoStationDoorController {
     List<Attachment> leftCandidates = leftExclusive.isEmpty() ? leftTargets : leftExclusive;
     List<Attachment> rightCandidates = rightExclusive.isEmpty() ? rightTargets : rightExclusive;
     return new TargetCandidates(leftCandidates, rightCandidates);
+  }
+
+  private static int maxAnchorDepth(
+      String leftName,
+      String rightName,
+      List<Attachment> leftTargets,
+      List<Attachment> rightTargets) {
+    if (isModernDoorPair(leftName, rightName)) {
+      return MAX_WORLD_SELECT_ANCHOR_DEPTH;
+    }
+    return hasAnyParent(leftTargets) || hasAnyParent(rightTargets) ? 1 : 0;
+  }
+
+  private static boolean hasAnyParent(List<Attachment> targets) {
+    if (targets == null || targets.isEmpty()) {
+      return false;
+    }
+    for (Attachment target : targets) {
+      if (target == null) {
+        continue;
+      }
+      if (target.getParent() != null) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static List<Attachment> filterExclusiveTargets(
@@ -945,6 +995,7 @@ final class AutoStationDoorController {
     private final DoorAction rightAction;
     private final DoorChimeSettings chimeSettings;
     private final String selectionSummary;
+    private boolean openSucceeded;
 
     private DoorSession(
         MinecartGroup group,
@@ -998,6 +1049,7 @@ final class AutoStationDoorController {
         opened |= rightAction.open(group);
       }
       if (opened) {
+        openSucceeded = true;
         playOpenChime(group, openLeft, openRight, chimeSettings);
       }
       return opened;
@@ -1015,36 +1067,24 @@ final class AutoStationDoorController {
     /**
      * 执行关门动作，可选择是否播放提示音。
      *
-     * <p>用于 legacy 场景：先提前播放关门提示音，再在合适的时刻触发关门动画，避免提示音与门叶运动重叠。
+     * <p>用于 legacy 场景：可先触发关门动画，再在合适时机播放提示音。
      */
     boolean close(boolean playSound) {
-      if (group == null) {
-        return false;
+      boolean started = startCloseAnimation();
+      if (started && playSound) {
+        playCloseSound();
       }
-      boolean closed = false;
-      if (openLeft) {
-        closed |= leftAction.close(group);
-      }
-      if (openRight) {
-        closed |= rightAction.close(group);
-      }
-      if (closed && playSound) {
-        playCloseSound(group, openLeft, openRight, chimeSettings);
-      }
-      return closed;
+      return started;
     }
 
     /** 提前触发关门动画（不播放提示音）。 */
     boolean prepareClose() {
-      return close(false);
+      return startCloseAnimation();
     }
 
     /** 单独播放关门提示音（不触发关门动画）。 */
     void playCloseChime() {
-      if (group == null) {
-        return;
-      }
-      playCloseSound(group, openLeft, openRight, chimeSettings);
+      playCloseSound();
     }
 
     /** 是否使用 legacy 门动画（doorL10/doorR10 或其他 legacy 片段）。 */
@@ -1054,11 +1094,139 @@ final class AutoStationDoorController {
       }
       return openRight && rightAction instanceof DoorAction.Legacy;
     }
+
+    /** 是否曾成功触发开门动画。 */
+    boolean openSucceeded() {
+      return openSucceeded;
+    }
+
+    /** 估算关门动画时长（tick），仅 legacy 可用。 */
+    long estimatedCloseDurationTicks() {
+      long left = leftAction.closeDurationTicks();
+      long right = rightAction.closeDurationTicks();
+      long max = Math.max(left, right);
+      return max > 0L ? max : -1L;
+    }
+
+    /** 触发关门动画（不播放提示音）。 */
+    boolean startCloseAnimation() {
+      if (group == null || !openSucceeded) {
+        return false;
+      }
+      boolean closed = false;
+      if (openLeft) {
+        closed |= leftAction.close(group);
+      }
+      if (openRight) {
+        closed |= rightAction.close(group);
+      }
+      return closed;
+    }
+
+    /** 播放关门提示音（不触发关门动画）。 */
+    void playCloseSound() {
+      if (group == null || !openSucceeded) {
+        return;
+      }
+      AutoStationDoorController.playCloseSound(group, openLeft, openRight, chimeSettings);
+    }
   }
 
-  /** legacy 关门提示音提前量（tick）。 */
-  static long closeChimeLeadTicks() {
-    return Math.max(0L, (long) (CHIME_REPEAT_COUNT - 1) * CHIME_REPEAT_INTERVAL_TICKS);
+  /** legacy 关门提示音延迟量（tick）。 */
+  static long legacyCloseSoundDelayTicks() {
+    return Math.max(0L, LEGACY_CLOSE_SOUND_DELAY_TICKS);
+  }
+
+  /**
+   * 尝试预热门动画与附件树。
+   *
+   * <p>用于列车刚生成时确保附件变换就绪并重置门动画到起点。
+   */
+  public static void warmUpDoorAnimations(MinecartGroup group) {
+    warmUpDoorAnimations(group, false);
+  }
+
+  public static void warmUpDoorAnimations(MinecartGroup group, boolean probePlay) {
+    if (group == null) {
+      return;
+    }
+    for (MinecartMember<?> member : group) {
+      if (member == null || member.getAttachments() == null) {
+        continue;
+      }
+      if (!member.getAttachments().isAttached()) {
+        continue;
+      }
+      Attachment root = member.getAttachments().getRootAttachment();
+      if (root != null) {
+        root.getTransform();
+        root.getChildren();
+      }
+    }
+
+    Collection<String> animationNames = group.getAnimationNames();
+    if (animationNames == null || animationNames.isEmpty()) {
+      return;
+    }
+    warmUpAnimation(group, animationNames, DOOR_LEFT, probePlay);
+    warmUpAnimation(group, animationNames, DOOR_RIGHT, probePlay);
+    warmUpAnimation(group, animationNames, DOOR_LEFT_LEGACY, probePlay);
+    warmUpAnimation(group, animationNames, DOOR_RIGHT_LEGACY, probePlay);
+  }
+
+  private static void warmUpAnimation(
+      MinecartGroup group, Collection<String> animationNames, String key, boolean probePlay) {
+    if (group == null || animationNames == null || key == null) {
+      return;
+    }
+    String name = findAnimationName(animationNames, key);
+    if (name == null) {
+      return;
+    }
+    List<Attachment> targets = findAnimationTargets(group, name);
+    if (!hasAttachedTargets(targets)) {
+      return;
+    }
+    warmUpAnchors(targets);
+    AnimationOptions options = new AnimationOptions(name);
+    options.setReset(true);
+    options.setSpeed(0.0);
+    group.playNamedAnimation(options);
+    if (probePlay) {
+      AnimationOptions playOptions = new AnimationOptions(name);
+      playOptions.setReset(true);
+      playOptions.setSpeed(-1.0);
+      group.playNamedAnimation(playOptions);
+      TrainCarts trainCarts = TrainCarts.plugin;
+      if (trainCarts != null) {
+        Bukkit.getScheduler()
+            .runTaskLater(
+                trainCarts,
+                () -> {
+                  AnimationOptions reset = new AnimationOptions(name);
+                  reset.setReset(true);
+                  reset.setSpeed(0.0);
+                  group.playNamedAnimation(reset);
+                },
+                2L);
+      }
+    }
+  }
+
+  private static void warmUpAnchors(List<Attachment> targets) {
+    if (targets == null || targets.isEmpty()) {
+      return;
+    }
+    for (Attachment target : targets) {
+      if (target == null) {
+        continue;
+      }
+      Attachment anchor = resolveAnchorAttachment(target, 1);
+      if (anchor == null || !anchor.isAttached()) {
+        continue;
+      }
+      anchor.getTransform();
+    }
   }
 
   /**
@@ -1187,15 +1355,19 @@ final class AutoStationDoorController {
       return Optional.empty();
     }
     AnimationNode[] openNodes = cloneNodes(nodes, 0, openIndex);
+    double openDuration = totalDuration(openNodes);
     Animation open = new Animation(legacyName + "_open", openNodes);
     Animation close;
+    double closeDuration;
     if (splitByDuration && openIndex < nodes.length - 1) {
       AnimationNode[] closeNodes = cloneNodes(nodes, openIndex, nodes.length - 1);
       close = new Animation(legacyName + "_close", closeNodes);
+      closeDuration = totalDuration(closeNodes);
     } else {
       close = new Animation(legacyName + "_close", reverseNodes(openNodes));
+      closeDuration = totalDuration(openNodes);
     }
-    return Optional.of(new AnimationPair(open, close));
+    return Optional.of(new AnimationPair(open, close, openDuration, closeDuration));
   }
 
   private static DoorAction buildLegacyAction(
@@ -1431,6 +1603,8 @@ final class AutoStationDoorController {
 
     boolean close(MinecartGroup group);
 
+    long closeDurationTicks();
+
     static DoorAction named(String name, List<Attachment> targets) {
       return new DoorAction.Named(name, targets);
     }
@@ -1484,6 +1658,11 @@ final class AutoStationDoorController {
         options.setSpeed(-1.0);
         return group.playNamedAnimation(options);
       }
+
+      @Override
+      public long closeDurationTicks() {
+        return -1L;
+      }
     }
 
     final class Custom implements DoorAction {
@@ -1510,6 +1689,11 @@ final class AutoStationDoorController {
         }
         return startAnimation(targets, pair.close());
       }
+
+      @Override
+      public long closeDurationTicks() {
+        return -1L;
+      }
     }
 
     final class Legacy implements DoorAction {
@@ -1520,6 +1704,7 @@ final class AutoStationDoorController {
       private final int splitFail;
       private final boolean fallbackAllowed;
       private boolean fallbackUsed;
+      private final long closeDurationTicks;
 
       private Legacy(
           String name,
@@ -1534,6 +1719,7 @@ final class AutoStationDoorController {
         this.splitOk = splitOk;
         this.splitFail = splitFail;
         this.fallbackAllowed = fallbackAllowed;
+        this.closeDurationTicks = estimateCloseDurationTicks(this.targets);
       }
 
       @Override
@@ -1570,6 +1756,11 @@ final class AutoStationDoorController {
         options.setSpeed(-1.0);
         return group.playNamedAnimation(options);
       }
+
+      @Override
+      public long closeDurationTicks() {
+        return closeDurationTicks;
+      }
     }
 
     enum None implements DoorAction {
@@ -1584,10 +1775,16 @@ final class AutoStationDoorController {
       public boolean close(MinecartGroup group) {
         return false;
       }
+
+      @Override
+      public long closeDurationTicks() {
+        return -1L;
+      }
     }
   }
 
-  private record AnimationPair(Animation open, Animation close) {}
+  private record AnimationPair(
+      Animation open, Animation close, double openDurationSeconds, double closeDurationSeconds) {}
 
   private record LegacyTarget(Attachment target, AnimationPair pair) {}
 
@@ -1695,6 +1892,26 @@ final class AutoStationDoorController {
       }
     }
     return count;
+  }
+
+  private static long estimateCloseDurationTicks(List<LegacyTarget> targets) {
+    if (targets == null || targets.isEmpty()) {
+      return -1L;
+    }
+    double maxSeconds = -1.0;
+    for (LegacyTarget target : targets) {
+      if (target == null || target.pair() == null) {
+        continue;
+      }
+      double seconds = target.pair().closeDurationSeconds();
+      if (Double.isFinite(seconds) && seconds > maxSeconds) {
+        maxSeconds = seconds;
+      }
+    }
+    if (!Double.isFinite(maxSeconds) || maxSeconds <= 0.0) {
+      return -1L;
+    }
+    return Math.max(1L, Math.round(maxSeconds * 20.0));
   }
 
   private static String describeAction(DoorAction action, boolean enabled) {
@@ -2119,6 +2336,56 @@ final class AutoStationDoorController {
     return false;
   }
 
+  private static DoorSideSelection maxSeparationSelection(
+      World world,
+      BlockFace desired,
+      List<Attachment> leftTargets,
+      List<Attachment> rightTargets,
+      int anchorDepth,
+      WorldSelectProbe probe,
+      double eps) {
+    if (world == null || desired == null) {
+      return null;
+    }
+    List<Location> leftLocations = collectAttachedLocations(world, leftTargets, anchorDepth, probe);
+    List<Location> rightLocations =
+        collectAttachedLocations(world, rightTargets, anchorDepth, probe);
+    if (leftLocations.isEmpty() || rightLocations.isEmpty()) {
+      return null;
+    }
+    double bestAbs = -1.0;
+    DoorSideSelection best = null;
+    for (Location left : leftLocations) {
+      if (left == null) {
+        continue;
+      }
+      double scoreL = desiredScore(desired, left);
+      if (!Double.isFinite(scoreL)) {
+        continue;
+      }
+      for (Location right : rightLocations) {
+        if (right == null) {
+          continue;
+        }
+        double scoreR = desiredScore(desired, right);
+        if (!Double.isFinite(scoreR)) {
+          continue;
+        }
+        double delta = scoreL - scoreR;
+        double abs = Math.abs(delta);
+        if (abs > bestAbs + 1.0e-9) {
+          bestAbs = abs;
+          best =
+              delta > 0.0 ? new DoorSideSelection(true, false) : new DoorSideSelection(false, true);
+        }
+      }
+    }
+    if (bestAbs <= eps) {
+      return null;
+    }
+    return best;
+  }
+
   /** 判断门附近是否存在观察者，避免无人时播放提示音。 */
   private static boolean hasNearbyViewer(Collection<Player> viewers, Location location) {
     if (viewers == null || location == null) {
@@ -2134,6 +2401,63 @@ final class AutoStationDoorController {
       }
     }
     return false;
+  }
+
+  static String sampleDoorTransformSummary(MinecartGroup group) {
+    if (group == null) {
+      return "none";
+    }
+    Collection<String> animationNames = group.getAnimationNames();
+    if (animationNames == null || animationNames.isEmpty()) {
+      return "none";
+    }
+    String leftName = findAnimationName(animationNames, DOOR_LEFT);
+    leftName = leftName != null ? leftName : findAnimationName(animationNames, DOOR_LEFT_LEGACY);
+    String rightName = findAnimationName(animationNames, DOOR_RIGHT);
+    rightName =
+        rightName != null ? rightName : findAnimationName(animationNames, DOOR_RIGHT_LEGACY);
+    String leftSummary = sampleTransform(group, leftName);
+    String rightSummary = sampleTransform(group, rightName);
+    if ("none".equals(leftSummary) && "none".equals(rightSummary)) {
+      return "none";
+    }
+    return "L=" + leftSummary + ",R=" + rightSummary;
+  }
+
+  private static String sampleTransform(MinecartGroup group, String animationName) {
+    if (group == null || animationName == null) {
+      return "none";
+    }
+    List<Attachment> targets = findAnimationTargets(group, animationName);
+    for (Attachment target : targets) {
+      if (target == null || !target.isAttached()) {
+        continue;
+      }
+      Attachment parent = target.getParent();
+      String child = formatTransform(target);
+      String parentSummary = parent != null ? formatTransform(parent) : "none";
+      return "child=" + child + ",parent=" + parentSummary;
+    }
+    return "none";
+  }
+
+  private static String formatTransform(Attachment attachment) {
+    if (attachment == null || attachment.getManager() == null) {
+      return "none";
+    }
+    World world = attachment.getManager().getWorld();
+    if (world == null) {
+      return "none";
+    }
+    com.bergerkiller.bukkit.common.math.Matrix4x4 transform = attachment.getTransform();
+    if (transform == null) {
+      return "none";
+    }
+    Location location = transform.toLocation(world);
+    if (location == null) {
+      return "none";
+    }
+    return String.format(Locale.ROOT, "(%.2f,%.2f)", location.getX(), location.getZ());
   }
 
   /** 提示音触发类型：开门/关门。 */

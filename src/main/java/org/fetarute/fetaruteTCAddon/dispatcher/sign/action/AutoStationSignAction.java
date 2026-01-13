@@ -16,6 +16,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import org.bukkit.Bukkit;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -47,11 +48,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   private static final int DEFAULT_DWELL_SECONDS = 20;
   private static final String TAG_ROUTE_ID = "FTA_ROUTE_ID";
+  private static final String TAG_DOOR_FIRST_STOP_DONE = "FTA_DOOR_FIRST_STOP_DONE";
+  private static final String TAG_RUN_AT = "FTA_RUN_AT";
   private static final long DOOR_OPEN_DELAY_TICKS = 20L;
+  private static final long DOOR_OPEN_FIRST_DELAY_TICKS = 60L;
   private static final long TICK_MILLIS = 50L;
   private static final int STOP_WAIT_TIMEOUT_TICKS = 200;
   private static final int STOP_STABLE_TICKS = 1;
-  private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 10;
+  private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
   private static final int DOOR_OPEN_MAX_ATTEMPTS = 12;
   private static final long DOOR_OPEN_MAX_RETRY_WINDOW_TICKS = 160L;
@@ -88,7 +92,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /**
    * AutoStation 执行入口：仅在列车进入牌子触发一次。
    *
-   * <p>无 RouteId 或无匹配 RouteStop 时视为 waypoint 直接通过。停站时先居中停稳，再延迟 10 tick 开门；dwell 从开门后开始计时。
+   * <p>无 RouteId 或无匹配 RouteStop 时视为 waypoint 直接通过。停站时先居中停稳，再延迟一定 tick 开门；dwell 从开门后开始计时。
    */
   @Override
   public void execute(SignActionEvent info) {
@@ -142,6 +146,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     AutoStationDoorController.DoorSession session =
         AutoStationDoorController.plan(group, facingDirection, doorDirection, chimeSettings);
     String planSummary = session.debugSummary();
+    boolean firstStop = isFirstStop(properties);
     if (session.hasActions()) {
       String animationSummary = summarizeDoorAnimations(group);
       debug(
@@ -201,7 +206,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         facingDirection,
         facingSource,
         chimeSettings,
-        session);
+        session,
+        firstStop);
   }
 
   private void scheduleDoorSequence(
@@ -215,13 +221,23 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       BlockFace facingDirection,
       String facingSource,
       AutoStationDoorController.DoorChimeSettings chimeSettings,
-      AutoStationDoorController.DoorSession session) {
+      AutoStationDoorController.DoorSession session,
+      boolean firstStop) {
     if (plugin == null || info == null || !info.hasGroup()) {
       return;
     }
     MinecartGroup group = info.getGroup();
     if (group == null) {
       return;
+    }
+    if (firstStop) {
+      Bukkit.getScheduler()
+          .runTaskLater(plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 2L);
+      Bukkit.getScheduler()
+          .runTaskLater(plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 10L);
+      Bukkit.getScheduler()
+          .runTaskLater(
+              plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group, true), 20L);
     }
     new org.bukkit.scheduler.BukkitRunnable() {
       private int waitedTicks = 0;
@@ -250,7 +266,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 facingSource,
                 chimeSettings,
                 session,
-                false);
+                false,
+                firstStop);
             return;
           }
         } else {
@@ -271,7 +288,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               facingSource,
               chimeSettings,
               session,
-              true);
+              true,
+              firstStop);
         }
       }
     }.runTaskTimer(plugin, 1L, 1L);
@@ -289,7 +307,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       String facingSource,
       AutoStationDoorController.DoorChimeSettings chimeSettings,
       AutoStationDoorController.DoorSession session,
-      boolean timedOut) {
+      boolean timedOut,
+      boolean firstStop) {
     MinecartGroup group = info == null ? null : info.getGroup();
     if (group == null || !group.isValid()) {
       return;
@@ -325,10 +344,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       private boolean gaveUpLogged = false;
       private boolean opened = false;
       private boolean closeStarted = false;
-      private boolean closeChimeStarted = false;
-      private boolean openFailedLogged = false;
+      private boolean closeAnimationTriggered = false;
+      private boolean closeSoundPlayed = false;
       private BlockFace cachedFacing = null;
-      private String cachedFacingSource = null;
       private String cachedAnimations = null;
       private String cachedPlanSummary = null;
       private AutoStationDoorController.DoorSession cachedSession = null;
@@ -343,25 +361,29 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         ticksSinceStop++;
         if (opened) {
           ticksSinceOpen++;
-          long closeTrigger =
-              dwellTicks > DOOR_CLOSE_EARLY_TICKS
-                  ? dwellTicks - DOOR_CLOSE_EARLY_TICKS
-                  : dwellTicks;
-          long closeChimeLead =
-              cachedSession != null && cachedSession.usesLegacyDoorAnimation()
-                  ? AutoStationDoorController.closeChimeLeadTicks()
-                  : 0L;
-          long closeChimeTrigger = closeTrigger - closeChimeLead;
-          if (closeChimeTrigger < 0L) {
-            closeChimeTrigger = 0L;
-          }
-          if (!closeChimeStarted && closeChimeLead > 0L && ticksSinceOpen >= closeChimeTrigger) {
-            closeChimeStarted = true;
-            if (cachedSession != null) {
-              cachedSession.playCloseChime();
+          boolean legacy = cachedSession != null && cachedSession.usesLegacyDoorAnimation();
+          long closeStartTick;
+          long closeSoundTick;
+          if (legacy) {
+            long closeDuration =
+                cachedSession == null ? -1L : cachedSession.estimatedCloseDurationTicks();
+            if (closeDuration <= 0L) {
+              closeDuration = DOOR_CLOSE_EARLY_TICKS;
             }
+            closeStartTick = Math.max(0L, dwellTicks - closeDuration);
+            closeSoundTick =
+                closeStartTick + AutoStationDoorController.legacyCloseSoundDelayTicks();
+            if (closeSoundTick > dwellTicks) {
+              closeSoundTick = dwellTicks;
+            }
+          } else {
+            closeStartTick =
+                dwellTicks > DOOR_CLOSE_EARLY_TICKS
+                    ? dwellTicks - DOOR_CLOSE_EARLY_TICKS
+                    : dwellTicks;
+            closeSoundTick = closeStartTick;
           }
-          if (!closeStarted && ticksSinceOpen >= closeTrigger) {
+          if (!closeStarted && ticksSinceOpen >= closeStartTick) {
             debug(
                 "AutoStation 关门: nodeId="
                     + definition.nodeId().value()
@@ -377,6 +399,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + ticksSinceOpen
                     + "/"
                     + dwellTicks
+                    + (legacy
+                        ? ", closeStart=" + closeStartTick + ", closeSound=" + closeSoundTick
+                        : "")
                     + ", plan="
                     + (cachedPlanSummary == null ? "-" : cachedPlanSummary)
                     + ", attachments="
@@ -384,18 +409,19 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + " @ "
                     + location);
             if (cachedSession != null) {
-              boolean legacy = closeChimeLead > 0L;
-              if (legacy) {
-                if (!closeChimeStarted) {
-                  closeChimeStarted = true;
-                  cachedSession.playCloseChime();
-                }
-                cachedSession.prepareClose();
-              } else {
-                cachedSession.close(true);
-              }
+              closeAnimationTriggered =
+                  legacy ? cachedSession.startCloseAnimation() : cachedSession.close(true);
             }
             closeStarted = true;
+          }
+          if (legacy
+              && closeAnimationTriggered
+              && !closeSoundPlayed
+              && ticksSinceOpen >= closeSoundTick) {
+            closeSoundPlayed = true;
+            if (cachedSession != null) {
+              cachedSession.playCloseSound();
+            }
           }
           if (ticksSinceOpen >= dwellTicks) {
             waitState.stop();
@@ -404,44 +430,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           return;
         }
 
-        if (ticksSinceStop >= dwellTicks) {
-          if (!openFailedLogged && doorDirection != AutoStationDoorDirection.NONE) {
-            String planSummary = cachedPlanSummary;
-            if (planSummary == null) {
-              planSummary = session == null ? "none" : session.debugSummary();
-            }
-            BlockFace facing = cachedFacing == null ? facingDirection : cachedFacing;
-            String source = cachedFacingSource == null ? facingSource : cachedFacingSource;
-            String animations =
-                cachedAnimations == null ? summarizeDoorAnimations(group) : cachedAnimations;
-            debug(
-                "AutoStation 开门失败: 超过 dwell 未能成功触发动画 (door="
-                    + doorDirection
-                    + ", train="
-                    + trainName
-                    + ", route="
-                    + shortUuid(routeId)
-                    + ", sid="
-                    + stopSessionId
-                    + ", facing="
-                    + facing
-                    + ", source="
-                    + source
-                    + ", plan="
-                    + planSummary
-                    + ", animations="
-                    + animations
-                    + ", attachments="
-                    + summarizeAttachments(group)
-                    + ") @ "
-                    + location);
-            openFailedLogged = true;
-          }
-          waitState.stop();
-          cancel();
-          return;
-        }
-        if (ticksSinceStop < DOOR_OPEN_DELAY_TICKS) {
+        long openDelayTicks = firstStop ? DOOR_OPEN_FIRST_DELAY_TICKS : DOOR_OPEN_DELAY_TICKS;
+        if (ticksSinceStop < openDelayTicks) {
           return;
         }
         if (gaveUpOpen) {
@@ -461,7 +451,6 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             cachedSession == null
                 || cachedFacing != resolvedFacing
                 || !java.util.Objects.equals(cachedAnimations, animations);
-        cachedFacingSource = resolvedSource;
         if (shouldRebuild) {
           cachedFacing = resolvedFacing;
           cachedAnimations = animations;
@@ -536,9 +525,36 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + location);
           }
           gaveUpOpen = true;
+          waitState.stop();
+          cancel();
           return;
         }
         openAttempts++;
+        debug(
+            "AutoStation 开门尝试: nodeId="
+                + definition.nodeId().value()
+                + ", train="
+                + trainName
+                + ", route="
+                + shortUuid(routeId)
+                + ", sid="
+                + stopSessionId
+                + ", attempt="
+                + openAttempts
+                + ", tickSinceStop="
+                + ticksSinceStop
+                + ", spawnAgeMs="
+                + readRunAgeMillis(group.getProperties())
+                + ", plan="
+                + (cachedPlanSummary == null ? "-" : cachedPlanSummary)
+                + ", animations="
+                + (cachedAnimations == null ? summarizeDoorAnimations(group) : cachedAnimations)
+                + ", attachments="
+                + summarizeAttachments(group)
+                + ", transforms="
+                + AutoStationDoorController.sampleDoorTransformSummary(group)
+                + " @ "
+                + location);
         boolean didOpen = cachedSession.open();
         if (!didOpen) {
           if (openAttempts == 1 && doorDirection != AutoStationDoorDirection.NONE) {
@@ -573,8 +589,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         opened = true;
         ticksSinceOpen = 0L;
         closeStarted = false;
+        closeAnimationTriggered = false;
+        closeSoundPlayed = false;
         String planSummary = cachedSession.debugSummary();
         cachedPlanSummary = planSummary;
+        if (firstStop) {
+          markFirstStopDone(group.getProperties());
+        }
         debug(
             "AutoStation 开门: nodeId="
                 + definition.nodeId().value()
@@ -749,6 +770,83 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         return Optional.of(UUID.fromString(value));
       } catch (IllegalArgumentException ex) {
         return Optional.empty();
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static boolean isFirstStop(TrainProperties properties) {
+    return !hasTagKey(properties, TAG_DOOR_FIRST_STOP_DONE);
+  }
+
+  private static void markFirstStopDone(TrainProperties properties) {
+    if (properties == null) {
+      return;
+    }
+    if (hasTagKey(properties, TAG_DOOR_FIRST_STOP_DONE)) {
+      return;
+    }
+    properties.addTags(TAG_DOOR_FIRST_STOP_DONE + "=1");
+  }
+
+  private static boolean hasTagKey(TrainProperties properties, String key) {
+    if (properties == null || key == null || key.isBlank() || !properties.hasTags()) {
+      return false;
+    }
+    for (String tag : properties.getTags()) {
+      if (tag == null) {
+        continue;
+      }
+      String trimmed = tag.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int idx = trimmed.indexOf('=');
+      String current = idx > 0 ? trimmed.substring(0, idx).trim() : trimmed;
+      if (key.equalsIgnoreCase(current)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static long readRunAgeMillis(TrainProperties properties) {
+    Optional<String> valueOpt = readTagValue(properties, TAG_RUN_AT);
+    if (valueOpt.isEmpty()) {
+      return -1L;
+    }
+    try {
+      long runAt = Long.parseLong(valueOpt.get());
+      long now = System.currentTimeMillis();
+      return now >= runAt ? now - runAt : -1L;
+    } catch (NumberFormatException ex) {
+      return -1L;
+    }
+  }
+
+  private static Optional<String> readTagValue(TrainProperties properties, String key) {
+    if (properties == null || key == null || key.isBlank() || !properties.hasTags()) {
+      return Optional.empty();
+    }
+    for (String tag : properties.getTags()) {
+      if (tag == null) {
+        continue;
+      }
+      String trimmed = tag.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int idx = trimmed.indexOf('=');
+      if (idx <= 0) {
+        continue;
+      }
+      String current = trimmed.substring(0, idx).trim();
+      if (!key.equalsIgnoreCase(current)) {
+        continue;
+      }
+      String value = trimmed.substring(idx + 1).trim();
+      if (!value.isEmpty()) {
+        return Optional.of(value);
       }
     }
     return Optional.empty();
