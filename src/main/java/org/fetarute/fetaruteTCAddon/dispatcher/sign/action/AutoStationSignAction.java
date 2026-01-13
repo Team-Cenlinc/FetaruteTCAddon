@@ -42,7 +42,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * 站咽喉属于图节点（Waypoint）职责，不应使用 AutoStation 牌子注册。
  *
  * <p>行为触发依赖列车 {@code FTA_ROUTE_ID} tag 与 RouteStop：仅在 STOP/TERMINATE 时停站， {@code dwellSeconds}
- * 缺失时默认 20 秒。
+ * 缺失时默认 20 秒。开门失败将跳过关门动作，避免“未开门先关门”的误触发。
  */
 public final class AutoStationSignAction extends AbstractNodeSignAction {
 
