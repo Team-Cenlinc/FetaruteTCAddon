@@ -308,6 +308,15 @@ public final class AutoStationDoorController {
     double scoreR = attempt.scoreR();
     double delta = attempt.delta();
     if (selection == null) {
+      DoorSideSelection axisSelection =
+          axisSideSelection(
+              world, desired, candidates.leftTargets(), candidates.rightTargets(), eps);
+      if (axisSelection != null) {
+        selection = axisSelection;
+        reason = reason + "+axis";
+      }
+    }
+    if (selection == null) {
       DoorSideSelection fallback =
           maxSeparationSelection(
               world,
@@ -2334,6 +2343,126 @@ public final class AutoStationDoorController {
       }
     }
     return false;
+  }
+
+  private static DoorSideSelection axisSideSelection(
+      World world,
+      BlockFace desired,
+      List<Attachment> leftTargets,
+      List<Attachment> rightTargets,
+      double eps) {
+    if (world == null || desired == null) {
+      return null;
+    }
+    List<Double> leftScores = collectAxisScores(world, desired, leftTargets);
+    List<Double> rightScores = collectAxisScores(world, desired, rightTargets);
+    if (leftScores.isEmpty() && rightScores.isEmpty()) {
+      return null;
+    }
+    Double leftMedian = medianScore(leftScores);
+    Double rightMedian = medianScore(rightScores);
+    boolean hasLeft = leftMedian != null && Double.isFinite(leftMedian);
+    boolean hasRight = rightMedian != null && Double.isFinite(rightMedian);
+    if (hasLeft && hasRight) {
+      double delta = leftMedian - rightMedian;
+      if (Math.abs(delta) > eps) {
+        return delta > 0.0
+            ? new DoorSideSelection(true, false)
+            : new DoorSideSelection(false, true);
+      }
+      return null;
+    }
+    if (hasLeft) {
+      return Math.abs(leftMedian) > eps ? new DoorSideSelection(true, false) : null;
+    }
+    if (hasRight) {
+      return Math.abs(rightMedian) > eps ? new DoorSideSelection(false, true) : null;
+    }
+    return null;
+  }
+
+  private static List<Double> collectAxisScores(
+      World world, BlockFace desired, List<Attachment> targets) {
+    if (world == null || desired == null || targets == null || targets.isEmpty()) {
+      return List.of();
+    }
+    List<Double> scores = new ArrayList<>();
+    for (Attachment target : targets) {
+      if (target == null || !target.isAttached()) {
+        continue;
+      }
+      Attachment anchor = resolveDoorAnchor(target);
+      if (anchor == null || !anchor.isAttached()) {
+        continue;
+      }
+      Vector direction = resolveWorldDirection(world, anchor, new Vector(1.0, 0.0, 0.0));
+      if (direction == null) {
+        continue;
+      }
+      double score = desiredAxisScore(desired, direction);
+      if (Double.isFinite(score)) {
+        scores.add(score);
+      }
+    }
+    return scores;
+  }
+
+  private static Attachment resolveDoorAnchor(Attachment attachment) {
+    if (attachment == null) {
+      return null;
+    }
+    Attachment parent = attachment.getParent();
+    return parent != null ? parent : attachment;
+  }
+
+  private static Vector resolveWorldDirection(World world, Attachment anchor, Vector localAxis) {
+    if (world == null || anchor == null || localAxis == null) {
+      return null;
+    }
+    com.bergerkiller.bukkit.common.math.Matrix4x4 transform = anchor.getTransform();
+    if (transform == null) {
+      return null;
+    }
+    Location origin = transform.toLocation(world);
+    if (origin == null) {
+      return null;
+    }
+    Vector point = localAxis.clone();
+    transform.transformPoint(point);
+    Vector direction = point.subtract(origin.toVector());
+    double length = direction.length();
+    if (!Double.isFinite(length) || length <= 1.0e-6) {
+      return null;
+    }
+    return direction.multiply(1.0 / length);
+  }
+
+  private static double desiredAxisScore(BlockFace desired, Vector direction) {
+    if (direction == null || desired == null) {
+      return Double.NaN;
+    }
+    double sign = desiredSign(desired);
+    if (desired == BlockFace.NORTH || desired == BlockFace.SOUTH) {
+      return sign * direction.getZ();
+    }
+    if (desired == BlockFace.EAST || desired == BlockFace.WEST) {
+      return sign * direction.getX();
+    }
+    return Double.NaN;
+  }
+
+  private static Double medianScore(List<Double> scores) {
+    if (scores == null || scores.isEmpty()) {
+      return null;
+    }
+    List<Double> sorted = new ArrayList<>(scores);
+    sorted.sort(Double::compare);
+    int size = sorted.size();
+    int midIndex = size / 2;
+    if (size % 2 == 1) {
+      return sorted.get(midIndex);
+    }
+    return (sorted.get(midIndex - 1) + sorted.get(midIndex)) / 2.0;
   }
 
   private static DoorSideSelection maxSeparationSelection(
