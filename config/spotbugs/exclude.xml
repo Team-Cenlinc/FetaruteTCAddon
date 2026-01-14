@@ -76,6 +76,10 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTrainCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>

@@ -92,6 +92,12 @@ public final class OccupancyRequestBuilder {
       return Optional.empty();
     }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
+    for (NodeId node : pathNodes) {
+      if (node == null) {
+        continue;
+      }
+      resources.add(OccupancyResource.forNode(node));
+    }
     for (RailEdge edge : edges) {
       resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
     }

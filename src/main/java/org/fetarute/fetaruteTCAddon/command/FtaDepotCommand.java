@@ -873,6 +873,7 @@ public final class FtaDepotCommand {
     tags.put("FTA_DEST_CODE", destInfo.code());
     tags.put("FTA_DEST_NAME", destInfo.name());
     tags.put("FTA_RUN_AT", String.valueOf(now.toEpochMilli()));
+    tags.put("FTA_ROUTE_INDEX", "0");
     List<String> out = new ArrayList<>();
     for (Map.Entry<String, String> entry : tags.entrySet()) {
       String value = sanitizeTagValue(entry.getValue());

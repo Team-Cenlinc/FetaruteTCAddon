@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|depot|graph|occupancy>
+    usage: /fta <info|help|reload|company|operator|line|route|depot|graph|occupancy|train>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
@@ -31,6 +31,7 @@ permissions:
       fetarute.depot.spawn: true
       fetarute.occupancy: true
       fetarute.occupancy.debug: true
+      fetarute.train.config: true
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置
     default: op
@@ -75,4 +76,7 @@ permissions:
     default: op
   fetarute.occupancy.debug:
     description: 调度占用调试命令（/fta occupancy debug）
+    default: op
+  fetarute.train.config:
+    description: 列车加减速/速度配置（/fta train config）
     default: op

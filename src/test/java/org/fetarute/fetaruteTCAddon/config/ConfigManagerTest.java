@@ -14,7 +14,7 @@ class ConfigManagerTest {
   // 应解析 debug 开关与 MySQL 配置
   void parseDebugAndMySqlSettings() {
     YamlConfiguration config = new YamlConfiguration();
-    config.set("config-version", 3);
+    config.set("config-version", 4);
     config.set("debug.enabled", true);
     config.set("storage.backend", "mysql");
     config.set("graph.default-speed-blocks-per-second", 12.5);
@@ -29,7 +29,7 @@ class ConfigManagerTest {
     config.set("storage.mysql.table_prefix", "t_");
     ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
 
-    assertEquals(3, view.configVersion());
+    assertEquals(4, view.configVersion());
     assertTrue(view.debugEnabled());
     assertEquals(12.5, view.graphSettings().defaultSpeedBlocksPerSecond());
     assertEquals("BLOCK_NOTE_BLOCK_BELL", view.autoStationSettings().doorCloseSound());

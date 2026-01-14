@@ -3,9 +3,9 @@
 AutoStation 牌子是“站点行为节点”，用于执行停站/开关门/发车，不负责调度寻路。
 
 ## 触发条件
-- 仅在列车具备 `FTA_ROUTE_ID` tag 且 RouteStop 标记为 `STOP/TERMINATE` 时停站。
+- 仅在列车具备 `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`（或 `FTA_ROUTE_ID`）tag 且 RouteStop 标记为 `STOP/TERMINATE` 时停站。
 - 若 RouteStop 未填写 `dwellSeconds`，默认停站 20 秒；若填写 `<= 0` 则视为不停车。
-- 未匹配到 RouteStop 或无 `FTA_ROUTE_ID` 的列车视为 waypoint，直接通过。
+- 未匹配到 RouteStop 或无 route tag 的列车视为 waypoint，直接通过。
 - RouteStop 匹配顺序：先按站点 ID（同运营商 + 站点 code）匹配，失败后再用 waypoint nodeId 匹配。
 
 ## 牌子格式

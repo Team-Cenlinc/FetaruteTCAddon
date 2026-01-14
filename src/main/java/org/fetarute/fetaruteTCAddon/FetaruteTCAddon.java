@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
@@ -16,11 +17,22 @@ import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
@@ -35,6 +47,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
@@ -60,6 +73,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private AutoStationSignAction autoStationSignAction;
   private DepotSignAction depotSignAction;
   private OccupancyManager occupancyManager;
+  private RouteDefinitionCache routeDefinitionCache;
+  private RouteProgressRegistry routeProgressRegistry;
+  private RuntimeDispatchService runtimeDispatchService;
+  private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
 
   @Override
   public void onEnable() {
@@ -81,6 +98,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     registerSignActions();
     preloadRailGraphFromStorage();
     initOccupancyManager();
+    initRouteDefinitionCache();
+    initRuntimeDispatch();
 
     registerCommands();
     getServer()
@@ -131,6 +150,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
     this.localeManager.reload(configManager.current().locale());
     this.storageManager.apply(configManager.current());
+    initRouteDefinitionCache();
+    restartRuntimeMonitor();
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
 
@@ -149,6 +170,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public StorageManager getStorageManager() {
     return storageManager;
+  }
+
+  /** 返回运行时调度服务（若未初始化则为空）。 */
+  public Optional<RuntimeDispatchService> getRuntimeDispatchService() {
+    return Optional.ofNullable(runtimeDispatchService);
   }
 
   public RailGraphService getRailGraphService() {
@@ -191,6 +217,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaRouteCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
+    new FtaTrainCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
@@ -254,6 +281,95 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.occupancyManager =
         new SimpleOccupancyManager(
             HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+  }
+
+  private void initRouteDefinitionCache() {
+    if (this.routeDefinitionCache == null) {
+      this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
+    }
+    if (storageManager != null && storageManager.isReady()) {
+      storageManager.provider().ifPresent(provider -> routeDefinitionCache.reload(provider));
+    }
+  }
+
+  /**
+   * 仅刷新 RouteDefinition 缓存，避免重建实例导致运行时引用失效。
+   *
+   * @param provider 已就绪的 StorageProvider
+   */
+  public void reloadRouteDefinitions(StorageProvider provider) {
+    if (provider == null || routeDefinitionCache == null) {
+      return;
+    }
+    routeDefinitionCache.reload(provider);
+  }
+
+  /**
+   * 增量刷新单条 RouteDefinition，避免全量遍历带来的卡顿。
+   *
+   * @param provider 已就绪的 StorageProvider
+   * @param operator 线路所属运营商
+   * @param line 线路
+   * @param route 线路班次
+   * @return 刷新后的定义（若节点不足则返回 empty）
+   */
+  public Optional<RouteDefinition> refreshRouteDefinition(
+      StorageProvider provider, Operator operator, Line line, Route route) {
+    if (provider == null || routeDefinitionCache == null) {
+      return Optional.empty();
+    }
+    return routeDefinitionCache.refresh(provider, operator, line, route);
+  }
+
+  /**
+   * 从缓存中移除单条 RouteDefinition。
+   *
+   * @param operator 线路所属运营商
+   * @param line 线路
+   * @param route 线路班次
+   */
+  public void removeRouteDefinition(Operator operator, Line line, Route route) {
+    if (routeDefinitionCache == null) {
+      return;
+    }
+    routeDefinitionCache.remove(operator, line, route);
+  }
+
+  private void initRuntimeDispatch() {
+    if (occupancyManager == null || railGraphService == null || configManager == null) {
+      return;
+    }
+    this.routeProgressRegistry = new RouteProgressRegistry();
+    this.runtimeDispatchService =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitionCache,
+            routeProgressRegistry,
+            signNodeRegistry,
+            configManager,
+            new TrainConfigResolver(),
+            loggerManager::debug);
+    getServer()
+        .getPluginManager()
+        .registerEvents(new RuntimeDispatchListener(runtimeDispatchService), this);
+    restartRuntimeMonitor();
+  }
+
+  private void restartRuntimeMonitor() {
+    if (runtimeMonitorTask != null) {
+      runtimeMonitorTask.cancel();
+      runtimeMonitorTask = null;
+    }
+    if (runtimeDispatchService == null || configManager == null) {
+      return;
+    }
+    int interval = configManager.current().runtimeSettings().dispatchTickIntervalTicks();
+    runtimeMonitorTask =
+        getServer()
+            .getScheduler()
+            .runTaskTimer(
+                this, new RuntimeSignalMonitor(runtimeDispatchService), interval, interval);
   }
 
   /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */
@@ -321,6 +437,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (signNodeRegistry != null) {
       signNodeRegistry.clear();
+    }
+    if (runtimeMonitorTask != null) {
+      runtimeMonitorTask.cancel();
+      runtimeMonitorTask = null;
     }
   }
 }

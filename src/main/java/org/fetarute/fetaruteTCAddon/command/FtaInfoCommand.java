@@ -98,6 +98,11 @@ public final class FtaInfoCommand {
         locale.component("command.help.hover-occupancy"));
     sendHelpEntry(
         sender,
+        locale.component("command.help.entry-train"),
+        ClickEvent.suggestCommand("/fta train "),
+        locale.component("command.help.hover-train"));
+    sendHelpEntry(
+        sender,
         locale.component("command.help.entry-reload"),
         ClickEvent.runCommand("/fta reload"),
         locale.component("command.help.hover-reload"));

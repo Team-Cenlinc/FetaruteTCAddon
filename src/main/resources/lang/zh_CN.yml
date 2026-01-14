@@ -56,6 +56,8 @@ command:
     hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
     hover-occupancy: "<gray>点击填充:</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
+    entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置（速度/加减速）</dark_aqua>"
+    hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置（速度/加减速）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -101,6 +103,12 @@ command:
       hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\" [seconds]</dark_aqua>"
       entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
       hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\" [seconds]</dark_aqua>"
+
+  train:
+    config:
+      not-found: "<prefix> <red>未找到列车</red> <gray>(train=<white><train></white>)</gray>"
+      set: "<prefix> <dark_aqua>已更新列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, cruise=<white><cruise></white>, caution=<white><caution></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
+      list: "<prefix> <dark_aqua>列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, cruise=<white><cruise></white>, caution=<white><caution></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
 
   graph:
     help:

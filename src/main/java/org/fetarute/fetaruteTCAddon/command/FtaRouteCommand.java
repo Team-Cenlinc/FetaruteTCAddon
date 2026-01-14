@@ -712,6 +712,7 @@ public final class FtaRouteCommand {
                             provider.routes().delete(route.id());
                             return null;
                           });
+                  plugin.removeRouteDefinition(resolved.operator(), resolved.line(), route);
                   sender.sendMessage(
                       locale.component(
                           "command.route.delete.success", Map.of("code", route.code())));
@@ -779,6 +780,8 @@ public final class FtaRouteCommand {
                             }
                             return null;
                           });
+                  plugin.refreshRouteDefinition(
+                      provider, resolved.operator(), resolved.line(), route);
                   sender.sendMessage(
                       locale.component(
                           "command.route.define.success",

@@ -73,7 +73,10 @@ class OccupancyRequestBuilderTest {
     assertTrue(requestOpt.isPresent());
     OccupancyRequest request = requestOpt.get();
     assertEquals(Duration.ofSeconds(10), request.travelTime());
-    assertEquals(2, request.resourceList().size());
+    assertEquals(5, request.resourceList().size());
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeA)));
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeB)));
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeC)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeAB)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeBC)));
   }

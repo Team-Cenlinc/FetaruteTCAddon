@@ -1,0 +1,106 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.junit.jupiter.api.Test;
+
+class RouteProgressRegistryTest {
+
+  @Test
+  void initFromTagsRestoresIndex() {
+    UUID routeId = UUID.randomUUID();
+    TagStore store =
+        new TagStore("FTA_ROUTE_ID=" + routeId, "FTA_ROUTE_INDEX=1", "FTA_ROUTE_UPDATED_AT=123");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C")),
+            Optional.empty());
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RouteProgressRegistry.RouteProgressEntry entry =
+        registry.initFromTags("train-1", store.properties(), route);
+
+    assertEquals(1, entry.currentIndex());
+    assertEquals(Optional.of(NodeId.of("C")), entry.nextTarget());
+  }
+
+  @Test
+  void advanceWritesBackTags() {
+    UUID routeId = UUID.randomUUID();
+    TagStore store = new TagStore("FTA_ROUTE_ID=" + routeId);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C")),
+            Optional.empty());
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.advance("train-1", routeId, route, 1, store.properties(), Instant.ofEpochMilli(1000));
+
+    assertEquals(
+        Optional.of(1),
+        TrainTagHelper.readIntTag(store.properties(), RouteProgressRegistry.TAG_ROUTE_INDEX));
+    assertTrue(
+        TrainTagHelper.readTagValue(store.properties(), RouteProgressRegistry.TAG_ROUTE_UPDATED_AT)
+            .isPresent());
+  }
+
+  private static final class TagStore {
+    private final TrainProperties properties;
+    private final List<String> tags;
+
+    private TagStore(String... initial) {
+      this.tags = new ArrayList<>(Arrays.asList(initial));
+      this.properties = mock(TrainProperties.class);
+      when(properties.hasTags()).thenAnswer(inv -> !tags.isEmpty());
+      when(properties.getTags()).thenAnswer(inv -> List.copyOf(tags));
+      doAnswer(
+              inv -> {
+                tags.addAll(extractTags(inv.getArgument(0)));
+                return null;
+              })
+          .when(properties)
+          .addTags(any(String[].class));
+      doAnswer(
+              inv -> {
+                tags.removeAll(extractTags(inv.getArgument(0)));
+                return null;
+              })
+          .when(properties)
+          .removeTags(any(String[].class));
+    }
+
+    private TrainProperties properties() {
+      return properties;
+    }
+
+    private static List<String> extractTags(Object arg) {
+      if (arg == null) {
+        return List.of();
+      }
+      if (arg instanceof String[] values) {
+        return Arrays.asList(values);
+      }
+      if (arg instanceof String value) {
+        return List.of(value);
+      }
+      return List.of();
+    }
+  }
+}

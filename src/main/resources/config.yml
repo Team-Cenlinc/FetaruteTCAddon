@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 3
+config-version: 4
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -19,6 +19,39 @@ autostation:
   door-close-sound-volume: 1.0
   # 关门提示音音高
   door-close-sound-pitch: 1.2
+
+runtime:
+  # 运行时信号/闭塞监测 tick 间隔
+  dispatch-tick-interval-ticks: 10
+  # 占用请求 lookahead 边数
+  lookahead-edges: 2
+  # 进站前的限速（blocks per second）
+  approach-speed-bps: 4.0
+
+train:
+  # 默认车种（emu/dmu/diesel_push_pull/electric_loco）
+  default-type: emu
+  types:
+    emu:
+      cruise-bps: 12.0
+      caution-bps: 6.0
+      accel-bps2: 0.8
+      decel-bps2: 1.0
+    dmu:
+      cruise-bps: 11.0
+      caution-bps: 5.5
+      accel-bps2: 0.7
+      decel-bps2: 0.9
+    diesel_push_pull:
+      cruise-bps: 10.0
+      caution-bps: 5.0
+      accel-bps2: 0.6
+      decel-bps2: 0.8
+    electric_loco:
+      cruise-bps: 13.0
+      caution-bps: 6.5
+      accel-bps2: 0.9
+      decel-bps2: 1.1
 
 storage:
   # 可选值：sqlite / mysql
