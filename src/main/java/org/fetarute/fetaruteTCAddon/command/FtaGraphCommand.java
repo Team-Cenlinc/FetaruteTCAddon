@@ -69,6 +69,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.integration.tcc.TccSelectionResolver;
+import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -4008,6 +4009,184 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("component")
+            .literal("caution")
+            .permission("fetarute.graph.build")
+            .literal("get")
+            .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+
+                  NodeId seed = NodeId.of(normalizeNodeIdArg(ctx.get("node")));
+                  UUID worldId = world.getUID();
+                  RailGraphService service = plugin.getRailGraphService();
+                  Optional<String> componentKeyOpt =
+                      service != null ? service.componentKey(worldId, seed) : Optional.empty();
+                  String componentKey = componentKeyOpt.orElse(seed.value());
+                  double defaultBps =
+                      plugin.getConfigManager().current().runtimeSettings().cautionSpeedBps();
+                  OptionalDouble override =
+                      service != null
+                          ? service.componentCautionSpeedBlocksPerSecond(worldId, componentKey)
+                          : OptionalDouble.empty();
+                  double effective = override.orElse(defaultBps);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.component.caution.get",
+                          Map.of(
+                              "seed",
+                              seed.value(),
+                              "component_key",
+                              componentKey,
+                              "default_bps",
+                              String.valueOf(defaultBps),
+                              "override_bps",
+                              override.isPresent() ? String.valueOf(override.getAsDouble()) : "-",
+                              "effective_bps",
+                              String.valueOf(effective))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("component")
+            .literal("caution")
+            .permission("fetarute.graph.build")
+            .literal("set")
+            .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("speed", StringParser.stringParser(), speedSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  String rawSpeed = ((String) ctx.get("speed")).trim();
+                  Optional<RailSpeed> speedOpt = parseSpeedArg(rawSpeed);
+                  if (speedOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.component.caution.invalid-speed",
+                            Map.of("raw", rawSpeed)));
+                    return;
+                  }
+                  double bps = speedOpt.get().blocksPerSecond();
+                  StorageManager storage = plugin.getStorageManager();
+                  if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
+                    sender.sendMessage(locale.component("storage-unavailable"));
+                    return;
+                  }
+                  RailGraphService service = plugin.getRailGraphService();
+                  NodeId seed = NodeId.of(normalizeNodeIdArg(ctx.get("node")));
+                  UUID worldId = world.getUID();
+                  Optional<String> componentKeyOpt =
+                      service != null ? service.componentKey(worldId, seed) : Optional.empty();
+                  String componentKey = componentKeyOpt.orElse(seed.value());
+                  Instant now = Instant.now();
+                  var record =
+                      new org.fetarute
+                          .fetaruteTCAddon
+                          .dispatcher
+                          .graph
+                          .persist
+                          .RailComponentCautionRecord(worldId, componentKey, bps, now);
+                  storage
+                      .provider()
+                      .ifPresent(
+                          provider ->
+                              provider
+                                  .transactionManager()
+                                  .execute(
+                                      () -> {
+                                        provider.railComponentCautions().upsert(record);
+                                        return null;
+                                      }));
+                  if (service != null) {
+                    service.putComponentCaution(record);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.component.caution.set",
+                          Map.of(
+                              "component_key",
+                              componentKey,
+                              "bps",
+                              String.valueOf(bps),
+                              "speed",
+                              speedOpt.get().formatWithAllUnits())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("component")
+            .literal("caution")
+            .permission("fetarute.graph.build")
+            .literal("clear")
+            .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  StorageManager storage = plugin.getStorageManager();
+                  if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
+                    sender.sendMessage(locale.component("storage-unavailable"));
+                    return;
+                  }
+                  RailGraphService service = plugin.getRailGraphService();
+                  NodeId seed = NodeId.of(normalizeNodeIdArg(ctx.get("node")));
+                  UUID worldId = world.getUID();
+                  Optional<String> componentKeyOpt =
+                      service != null ? service.componentKey(worldId, seed) : Optional.empty();
+                  String componentKey = componentKeyOpt.orElse(seed.value());
+                  storage
+                      .provider()
+                      .ifPresent(
+                          provider ->
+                              provider
+                                  .transactionManager()
+                                  .execute(
+                                      () -> {
+                                        provider
+                                            .railComponentCautions()
+                                            .delete(worldId, componentKey);
+                                        return null;
+                                      }));
+                  if (service != null) {
+                    service.deleteComponentCaution(worldId, componentKey);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.component.caution.clear",
+                          Map.of("component_key", componentKey)));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("component")
             .permission("fetarute.graph.query")
             .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
             .handler(
@@ -4038,12 +4217,19 @@ public final class FtaGraphCommand {
                   }
 
                   ComponentStats stats = componentStats(graph, seed);
+                  RailGraphService service = plugin.getRailGraphService();
+                  Optional<String> componentKeyOpt =
+                      service != null
+                          ? service.componentKey(world.getUID(), seed)
+                          : Optional.empty();
                   sender.sendMessage(
                       locale.component(
                           "command.graph.component.result",
                           Map.of(
                               "seed",
                               seed.value(),
+                              "component_key",
+                              componentKeyOpt.orElse(seed.value()),
                               "nodes",
                               String.valueOf(stats.nodeCount()),
                               "edges",

@@ -698,13 +698,13 @@ final class JdbcRepositoryTest {
             settings,
             new ConfigManager.GraphSettings(8.0),
             new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
-            new ConfigManager.RuntimeSettings(10, 2, 4.0),
+            new ConfigManager.RuntimeSettings(10, 2, 4.0, 6.0),
             new ConfigManager.TrainConfigSettings(
                 "emu",
-                new ConfigManager.TrainTypeSettings(12.0, 6.0, 0.8, 1.0),
-                new ConfigManager.TrainTypeSettings(11.0, 5.5, 0.7, 0.9),
-                new ConfigManager.TrainTypeSettings(10.0, 5.0, 0.6, 0.8),
-                new ConfigManager.TrainTypeSettings(13.0, 6.5, 0.9, 1.1)));
+                new ConfigManager.TrainTypeSettings(0.8, 1.0),
+                new ConfigManager.TrainTypeSettings(0.7, 0.9),
+                new ConfigManager.TrainTypeSettings(0.6, 0.8),
+                new ConfigManager.TrainTypeSettings(0.9, 1.1)));
     manager = new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
     manager.apply(view);
     return manager.provider().orElseThrow();

@@ -27,29 +27,23 @@ runtime:
   lookahead-edges: 2
   # 进站前的限速（blocks per second）
   approach-speed-bps: 4.0
+  # CAUTION 信号速度上限（blocks per second），可被连通分量覆盖
+  caution-speed-bps: 6.0
 
 train:
   # 默认车种（emu/dmu/diesel_push_pull/electric_loco）
   default-type: emu
   types:
     emu:
-      cruise-bps: 12.0
-      caution-bps: 6.0
       accel-bps2: 0.8
       decel-bps2: 1.0
     dmu:
-      cruise-bps: 11.0
-      caution-bps: 5.5
       accel-bps2: 0.7
       decel-bps2: 0.9
     diesel_push_pull:
-      cruise-bps: 10.0
-      caution-bps: 5.0
       accel-bps2: 0.6
       decel-bps2: 0.8
     electric_loco:
-      cruise-bps: 13.0
-      caution-bps: 6.5
       accel-bps2: 0.9
       decel-bps2: 1.1
 

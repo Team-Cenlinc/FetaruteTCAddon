@@ -5,21 +5,25 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailComponentCautionRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -31,8 +35,12 @@ public final class RailGraphService {
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<UUID, RailGraphSnapshot> snapshots = new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailGraphStaleState> staleStates = new ConcurrentHashMap<>();
+  private final ConcurrentMap<UUID, RailGraphComponentIndex> componentIndexes =
+      new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, ConcurrentMap<EdgeId, RailEdgeOverrideRecord>> edgeOverrides =
       new ConcurrentHashMap<>();
+  private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
+      componentCautions = new ConcurrentHashMap<>();
 
   public RailGraphService(SignNodeRegistry registry, Consumer<String> debugLogger) {
     this(new SignRegistryRailGraphBuilder(registry, debugLogger), debugLogger);
@@ -50,8 +58,10 @@ public final class RailGraphService {
   public RailGraph rebuild(World world) {
     Objects.requireNonNull(world, "world");
     RailGraph graph = builder.build(world);
-    snapshots.put(world.getUID(), new RailGraphSnapshot(graph, Instant.now()));
-    staleStates.remove(world.getUID());
+    UUID worldId = world.getUID();
+    snapshots.put(worldId, new RailGraphSnapshot(graph, Instant.now()));
+    componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
+    staleStates.remove(worldId);
     return graph;
   }
 
@@ -59,13 +69,21 @@ public final class RailGraphService {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(builtAt, "builtAt");
-    snapshots.put(world.getUID(), new RailGraphSnapshot(graph, builtAt));
-    staleStates.remove(world.getUID());
+    UUID worldId = world.getUID();
+    snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
+    componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
+    staleStates.remove(worldId);
   }
 
   public Optional<RailGraphSnapshot> getSnapshot(World world) {
     Objects.requireNonNull(world, "world");
     return Optional.ofNullable(snapshots.get(world.getUID()));
+  }
+
+  /** 运行时便捷入口：按 worldId 查询内存快照，避免依赖 Bukkit World 实例。 */
+  public Optional<RailGraphSnapshot> getSnapshot(UUID worldId) {
+    Objects.requireNonNull(worldId, "worldId");
+    return Optional.ofNullable(snapshots.get(worldId));
   }
 
   public Optional<RailGraphStaleState> getStaleState(World world) {
@@ -78,6 +96,7 @@ public final class RailGraphService {
     Objects.requireNonNull(state, "state");
     UUID worldId = world.getUID();
     snapshots.remove(worldId);
+    componentIndexes.remove(worldId);
     staleStates.put(worldId, state);
   }
 
@@ -90,8 +109,61 @@ public final class RailGraphService {
    */
   public boolean clearSnapshot(World world) {
     Objects.requireNonNull(world, "world");
-    staleStates.remove(world.getUID());
-    return snapshots.remove(world.getUID()) != null;
+    UUID worldId = world.getUID();
+    staleStates.remove(worldId);
+    componentIndexes.remove(worldId);
+    return snapshots.remove(worldId) != null;
+  }
+
+  /** 返回节点所属连通分量的 key（不存在则 empty）。 */
+  public Optional<String> componentKey(UUID worldId, NodeId nodeId) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(nodeId, "nodeId");
+    RailGraphComponentIndex index = componentIndexes.get(worldId);
+    if (index == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(index.componentKey(nodeId));
+  }
+
+  /** 查询某连通分量的 caution 速度覆盖（blocks/s）。 */
+  public OptionalDouble componentCautionSpeedBlocksPerSecond(UUID worldId, String componentKey) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(componentKey, "componentKey");
+    RailComponentCautionRecord record =
+        componentCautions.getOrDefault(worldId, new ConcurrentHashMap<>()).get(componentKey);
+    if (record == null) {
+      return OptionalDouble.empty();
+    }
+    return OptionalDouble.of(record.cautionSpeedBlocksPerSecond());
+  }
+
+  /** 写入或更新某连通分量的 caution 速度覆盖（仅更新内存）。 */
+  public void putComponentCaution(RailComponentCautionRecord record) {
+    Objects.requireNonNull(record, "record");
+    componentCautions
+        .computeIfAbsent(record.worldId(), ignored -> new ConcurrentHashMap<>())
+        .put(record.componentKey(), record);
+  }
+
+  /** 删除某连通分量的 caution 速度覆盖（仅更新内存）。 */
+  public void deleteComponentCaution(UUID worldId, String componentKey) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(componentKey, "componentKey");
+    ConcurrentMap<String, RailComponentCautionRecord> byWorld = componentCautions.get(worldId);
+    if (byWorld == null) {
+      return;
+    }
+    byWorld.remove(componentKey);
+    if (byWorld.isEmpty()) {
+      componentCautions.remove(worldId, byWorld);
+    }
+  }
+
+  /** 返回指定世界的连通分量 caution 覆盖快照（只读）。 */
+  public Map<String, RailComponentCautionRecord> componentCautions(UUID worldId) {
+    Objects.requireNonNull(worldId, "worldId");
+    return Map.copyOf(componentCautions.getOrDefault(worldId, new ConcurrentHashMap<>()));
   }
 
   /** 返回指定世界的边运维覆盖快照（只读）。 */
@@ -194,6 +266,7 @@ public final class RailGraphService {
     RailNodeRepository nodeRepo = provider.railNodes();
     RailEdgeRepository edgeRepo = provider.railEdges();
     RailEdgeOverrideRepository overrideRepo = provider.railEdgeOverrides();
+    RailComponentCautionRepository cautionRepo = provider.railComponentCautions();
     RailGraphSnapshotRepository snapshotRepo = provider.railGraphSnapshots();
 
     for (World world : worlds) {
@@ -218,6 +291,24 @@ public final class RailGraphService {
       } catch (Exception ex) {
         debugLogger.accept(
             "读取 rail_edge_overrides 失败: world=" + worldId + " msg=" + ex.getMessage());
+      }
+
+      try {
+        ConcurrentMap<String, RailComponentCautionRecord> byKey = new ConcurrentHashMap<>();
+        for (RailComponentCautionRecord record : cautionRepo.listByWorld(worldId)) {
+          if (record == null || record.componentKey() == null || record.componentKey().isBlank()) {
+            continue;
+          }
+          byKey.put(record.componentKey(), record);
+        }
+        if (!byKey.isEmpty()) {
+          componentCautions.put(worldId, byKey);
+        } else {
+          componentCautions.remove(worldId);
+        }
+      } catch (Exception ex) {
+        debugLogger.accept(
+            "读取 rail_component_cautions 失败: world=" + worldId + " msg=" + ex.getMessage());
       }
 
       Optional<RailGraphSnapshotRecord> snapshotOpt = snapshotRepo.findByWorld(worldId);
@@ -281,6 +372,7 @@ public final class RailGraphService {
       }
       RailGraph graph = buildGraphFromRecords(nodeRecords, edgeRecords);
       snapshots.put(worldId, new RailGraphSnapshot(graph, snapshot.builtAt()));
+      componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
       staleStates.remove(worldId);
     }
   }

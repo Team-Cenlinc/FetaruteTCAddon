@@ -80,7 +80,7 @@ command:
       success: "<prefix> <dark_aqua>已清理过期占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
     dump:
       header: "<prefix> <dark_aqua>当前占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
-      entry: "<gray>-</gray> <white><resource></white> <gray>train=<white><train></white> releaseAt=<white><release_at></white> headway=<white><headway></white></gray>"
+      entry: "<gray>-</gray> <white><resource></white> <gray>train=<white><train></white> state=<white><state></white> availableAt=<white><available_at></white> headway=<white><headway></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta occupancy dump <limit> 调整数量</gray>"
     debug:
       player-only: "<prefix> <red>该调试命令仅限玩家执行</red>"
@@ -105,10 +105,26 @@ command:
       hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\" [seconds]</dark_aqua>"
 
   train:
+    help:
+      header: "<prefix> <dark_aqua>列车配置命令</dark_aqua>"
+      entry-config-list: "<gray>/fta train config list</gray> <white>-</white> <dark_aqua>查看列车配置</dark_aqua>"
+      hover-config-list: "<gray>点击填充:</gray> <white>/fta train config list </white>\n<dark_aqua>参数:</dark_aqua> <white>[train]</white>\n<gray>可用:</gray> <white>列车名</white> / <white>@train[...]</white>"
+      entry-config-set: "<gray>/fta train config set</gray> <white>-</white> <dark_aqua>设置列车配置</dark_aqua>"
+      hover-config-set: "<gray>点击填充:</gray> <white>/fta train config set </white>\n<dark_aqua>可选:</dark_aqua> <white>[train]</white>\n<dark_aqua>flags:</dark_aqua> <white>--type</white> <white>--accel</white> <white>--decel</white>"
+      entry-train-edit: "<gray>/train edit</gray> <white>-</white> <dark_aqua>选中 TrainCarts 编辑列车</dark_aqua>"
+      hover-train-edit: "<gray>点击填充:</gray> <white>/train edit </white>\n<dark_aqua>提示:</dark_aqua> <gray>TrainCarts 的命令默认作用于“正在编辑”的列车</gray>"
+      entry-selector: "<gray>@train[...]</gray> <white>-</white> <dark_aqua>TrainCarts 选择器</dark_aqua>"
+      hover-selector: "<gray>点击填充:</gray> <white>/fta train config list @train[</white>\n<dark_aqua>示例:</dark_aqua> <white>@train[name=EXP]</white> <white>@train[tag=FTA]</white> <white>@train[world=world]</white>"
     config:
       not-found: "<prefix> <red>未找到列车</red> <gray>(train=<white><train></white>)</gray>"
-      set: "<prefix> <dark_aqua>已更新列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, cruise=<white><cruise></white>, caution=<white><caution></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
-      list: "<prefix> <dark_aqua>列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, cruise=<white><cruise></white>, caution=<white><caution></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
+      invalid-selector: "<prefix> <red>列车选择器参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>@train[]</white>/<white>@train[name=EXP]</white>/<white>@train[tag=FTA]</white>"
+      no-selection: "<prefix> <red>未选择列车</red> <gray>(请先用 <white>/train edit</white> 选中列车，或指定列车名 / <white>@train[...]</white>)</gray>"
+      no-selection-entry-train-edit: "<gray>-</gray> <dark_aqua>点击填充:</dark_aqua> <white>/train edit</white>"
+      no-selection-hover-train-edit: "<gray>TrainCarts 选中列车后，可不在车内执行</gray> <white>/fta train config ...</white>"
+      no-selection-entry-selector: "<gray>-</gray> <dark_aqua>点击填充:</dark_aqua> <white>/fta train config list @train[</white>"
+      no-selection-hover-selector: "<gray>使用 @train[...] 选择 0..N 个列车，并对每个命中列车执行</gray>"
+      set: "<prefix> <dark_aqua>已更新列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
+      list: "<prefix> <dark_aqua>列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
 
   graph:
     help:
@@ -271,7 +287,12 @@ command:
         next-disabled: "<gray>[下一页]</gray>"
         hint: "<gray>(点击翻页)</gray>"
     component:
-      result: "<prefix> <dark_aqua>连通分量</dark_aqua> <gray>(seed=<white><seed></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, blocked=<white><blocked_edges></white>)</gray>"
+      result: "<prefix> <dark_aqua>连通分量</dark_aqua> <gray>(seed=<white><seed></white>, key=<white><component_key></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, blocked=<white><blocked_edges></white>)</gray>"
+      caution:
+        invalid-speed: "<prefix> <red>无效的 caution 速度</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
+        get: "<prefix> <dark_aqua>分量 caution</dark_aqua> <gray>(seed=<white><seed></white>, key=<white><component_key></white>, default=<white><default_bps></white>, override=<white><override_bps></white>, effective=<white><effective_bps></white>)</gray>"
+        set: "<prefix> <dark_aqua>已设置分量 caution</dark_aqua> <gray>(key=<white><component_key></white>, speed=<white><speed></white>, bps=<white><bps></white>)</gray>"
+        clear: "<prefix> <dark_aqua>已清除分量 caution</dark_aqua> <gray>(key=<white><component_key></white>)</gray>"
     sign:
       no-target: "<prefix> <red>请对准一个牌子方块再执行该命令</red>"
       not-a-sign: "<prefix> <red>目标方块不是牌子</red>"

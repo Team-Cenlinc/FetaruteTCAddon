@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon;
 
 import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
 import java.time.Duration;
 import java.util.Map;
@@ -335,6 +337,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     routeDefinitionCache.remove(operator, line, route);
   }
 
+  /**
+   * 初始化运行时调度：注册推进点监听 + 启动信号 tick。
+   *
+   * <p>启动后会延迟 1 tick 扫描现存列车，触发一次信号评估用于重建占用状态。
+   */
   private void initRuntimeDispatch() {
     if (occupancyManager == null || railGraphService == null || configManager == null) {
       return;
@@ -354,6 +361,23 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(new RuntimeDispatchListener(runtimeDispatchService), this);
     restartRuntimeMonitor();
+    getServer()
+        .getScheduler()
+        .runTaskLater(
+            this,
+            () -> {
+              try {
+                for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+                  if (group == null || !group.isValid()) {
+                    continue;
+                  }
+                  runtimeDispatchService.handleSignalTick(group);
+                }
+              } catch (Exception ex) {
+                debug("运行时占用重建失败: " + ex.getMessage());
+              }
+            },
+            1L);
   }
 
   private void restartRuntimeMonitor() {

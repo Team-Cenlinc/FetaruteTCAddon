@@ -14,7 +14,8 @@
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
-- 当列车仍在占用区间时，信号 tick 会续租占用，避免超时释放导致后车误判可进入。
+- 占用采用事件反射式：推进点会释放窗口外资源；信号 tick 会对“已不存在列车”的遗留占用做被动清理。
+- 运行时使用“长租约”占用窗口（避免依赖短续租），实际释放由事件反射触发。
 
 ## tags 与恢复
 推进点依赖 TrainProperties tags：
@@ -30,14 +31,16 @@
 2) `FTA_ROUTE_ID`（兼容旧标签）
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
+若运行时内存中缺少该列车的 RouteProgressEntry，将在首次信号 tick 基于 tags 自动初始化，避免“每 tick 反复发车动作”的异常。
+插件启动后会延迟 1 tick 扫描现存列车并触发一次信号评估，用于重建占用快照。
 
 ## 列车速度配置
 通过 `/fta train config set|list` 写入列车配置：
 - `FTA_TRAIN_TYPE`：车种（EMU/DMU/DIESEL_PUSH_PULL/ELECTRIC_LOCO）
-- `FTA_TRAIN_CRUISE_BPS`：巡航速度（blocks/second）
-- `FTA_TRAIN_CAUTION_BPS`：警示速度（blocks/second）
 - `FTA_TRAIN_ACCEL_BPS2`：加速度（blocks/second^2）
 - `FTA_TRAIN_DECEL_BPS2`：减速度（blocks/second^2）
+
+详见 `docs/dev/train-config.md`。
 
 运行时会把速度换算成 blocks/tick：
 - `bps -> bpt`：除以 20
@@ -45,12 +48,17 @@
 
 ## 进站限速
 - `runtime.approach-speed-bps` 控制进站限速上限。
-- 当下一节点为站点（AutoStation）时，限速会取 `min(cruise, approach)`。
+- 当下一节点为站点（AutoStation）时，限速会取 `min(默认速度, approach)`，再与边限速取最小值。
+
+## CAUTION 速度来源
+- 优先使用“连通分量 caution 覆盖”（`rail_component_cautions`）。
+- 未设置覆盖时回退为 `runtime.caution-speed-bps`。
+- 详见 `docs/dev/graph-component-caution.md`。
 
 ## lookahead 占用
 - `runtime.lookahead-edges` 控制每次申请占用的边数量。
 - 值越大越保守，能降低咽喉/道岔前卡死风险。
 
 ## 已知限制
-- 释放策略仍为超时释放（releaseAt + headway）；事件驱动释放待接入。
+- 占用释放采用事件反射式：列车推进后释放窗口外资源；并在列车消失时被动清理遗留占用。headway 冷却仍以 releaseAt + headway 计算。
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。

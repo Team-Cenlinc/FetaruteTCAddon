@@ -5,6 +5,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RailGraphSnapshotRepository;
@@ -37,6 +38,8 @@ public interface StorageProvider extends AutoCloseable {
   RailEdgeRepository railEdges();
 
   RailEdgeOverrideRepository railEdgeOverrides();
+
+  RailComponentCautionRepository railComponentCautions();
 
   RailGraphSnapshotRepository railGraphSnapshots();
 

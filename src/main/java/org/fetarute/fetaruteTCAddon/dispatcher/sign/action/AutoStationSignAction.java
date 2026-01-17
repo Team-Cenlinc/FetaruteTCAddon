@@ -426,6 +426,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           if (ticksSinceOpen >= dwellTicks) {
             waitState.stop();
             cancel();
+            if (plugin != null) {
+              Bukkit.getScheduler()
+                  .runTask(
+                      plugin,
+                      () ->
+                          plugin
+                              .getRuntimeDispatchService()
+                              .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+            }
           }
           return;
         }

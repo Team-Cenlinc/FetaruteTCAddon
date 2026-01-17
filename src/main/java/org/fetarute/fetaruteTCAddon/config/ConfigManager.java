@@ -22,20 +22,13 @@ public final class ConfigManager {
   private static final int DEFAULT_DISPATCH_TICK_INTERVAL = 10;
   private static final int DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES = 2;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
-  private static final double DEFAULT_EMU_CRUISE_BPS = 12.0;
-  private static final double DEFAULT_EMU_CAUTION_BPS = 6.0;
+  private static final double DEFAULT_CAUTION_SPEED_BPS = 6.0;
   private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
   private static final double DEFAULT_EMU_DECEL_BPS2 = 1.0;
-  private static final double DEFAULT_DMU_CRUISE_BPS = 11.0;
-  private static final double DEFAULT_DMU_CAUTION_BPS = 5.5;
   private static final double DEFAULT_DMU_ACCEL_BPS2 = 0.7;
   private static final double DEFAULT_DMU_DECEL_BPS2 = 0.9;
-  private static final double DEFAULT_DIESEL_PP_CRUISE_BPS = 10.0;
-  private static final double DEFAULT_DIESEL_PP_CAUTION_BPS = 5.0;
   private static final double DEFAULT_DIESEL_PP_ACCEL_BPS2 = 0.6;
   private static final double DEFAULT_DIESEL_PP_DECEL_BPS2 = 0.8;
-  private static final double DEFAULT_ELECTRIC_LOCO_CRUISE_BPS = 13.0;
-  private static final double DEFAULT_ELECTRIC_LOCO_CAUTION_BPS = 6.5;
   private static final double DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2 = 0.9;
   private static final double DEFAULT_ELECTRIC_LOCO_DECEL_BPS2 = 1.1;
   private final FetaruteTCAddon plugin;
@@ -161,6 +154,7 @@ public final class ConfigManager {
     int tickInterval = DEFAULT_DISPATCH_TICK_INTERVAL;
     int lookaheadEdges = DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
+    double cautionSpeed = DEFAULT_CAUTION_SPEED_BPS;
     if (section != null) {
       int configuredInterval = section.getInt("dispatch-tick-interval-ticks", tickInterval);
       if (configuredInterval > 0) {
@@ -180,8 +174,14 @@ public final class ConfigManager {
       } else {
         logger.warning("runtime.approach-speed-bps 配置无效: " + configuredApproach);
       }
+      double configuredCaution = section.getDouble("caution-speed-bps", cautionSpeed);
+      if (Double.isFinite(configuredCaution) && configuredCaution > 0.0) {
+        cautionSpeed = configuredCaution;
+      } else {
+        logger.warning("runtime.caution-speed-bps 配置无效: " + configuredCaution);
+      }
     }
-    return new RuntimeSettings(tickInterval, lookaheadEdges, approachSpeed);
+    return new RuntimeSettings(tickInterval, lookaheadEdges, approachSpeed, cautionSpeed);
   }
 
   private static TrainConfigSettings parseTrain(
@@ -209,18 +209,8 @@ public final class ConfigManager {
     if (section == null) {
       return defaults;
     }
-    double cruise = section.getDouble("cruise-bps", defaults.cruiseSpeedBps());
-    double caution = section.getDouble("caution-bps", defaults.cautionSpeedBps());
     double accel = section.getDouble("accel-bps2", defaults.accelBps2());
     double decel = section.getDouble("decel-bps2", defaults.decelBps2());
-    if (!Double.isFinite(cruise) || cruise <= 0.0) {
-      logger.warning("train.types." + key + ".cruise-bps 无效，使用默认值");
-      cruise = defaults.cruiseSpeedBps();
-    }
-    if (!Double.isFinite(caution) || caution < 0.0) {
-      logger.warning("train.types." + key + ".caution-bps 无效，使用默认值");
-      caution = defaults.cautionSpeedBps();
-    }
     if (!Double.isFinite(accel) || accel <= 0.0) {
       logger.warning("train.types." + key + ".accel-bps2 无效，使用默认值");
       accel = defaults.accelBps2();
@@ -229,7 +219,7 @@ public final class ConfigManager {
       logger.warning("train.types." + key + ".decel-bps2 无效，使用默认值");
       decel = defaults.decelBps2();
     }
-    return new TrainTypeSettings(cruise, caution, accel, decel);
+    return new TrainTypeSettings(accel, decel);
   }
 
   private static SqliteSettings parseSqlite(ConfigurationSection sqliteSection) {
@@ -309,7 +299,10 @@ public final class ConfigManager {
 
   /** 运行时调度配置。 */
   public record RuntimeSettings(
-      int dispatchTickIntervalTicks, int lookaheadEdges, double approachSpeedBps) {
+      int dispatchTickIntervalTicks,
+      int lookaheadEdges,
+      double approachSpeedBps,
+      double cautionSpeedBps) {
     public RuntimeSettings {
       if (dispatchTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("dispatchTickIntervalTicks 必须为正数");
@@ -320,10 +313,13 @@ public final class ConfigManager {
       if (!Double.isFinite(approachSpeedBps) || approachSpeedBps < 0.0) {
         throw new IllegalArgumentException("approachSpeedBps 必须为非负数");
       }
+      if (!Double.isFinite(cautionSpeedBps) || cautionSpeedBps <= 0.0) {
+        throw new IllegalArgumentException("cautionSpeedBps 必须为正数");
+      }
     }
   }
 
-  /** 列车类型默认配置。 */
+  /** 列车类型默认配置（车种映射 + 默认类型）。 */
   public record TrainConfigSettings(
       String defaultType,
       TrainTypeSettings emu,
@@ -362,16 +358,9 @@ public final class ConfigManager {
     }
   }
 
-  /** 单个列车类型的默认速度/加减速配置。 */
-  public record TrainTypeSettings(
-      double cruiseSpeedBps, double cautionSpeedBps, double accelBps2, double decelBps2) {
+  /** 单个列车类型的加减速配置（不包含巡航/警示速度）。 */
+  public record TrainTypeSettings(double accelBps2, double decelBps2) {
     public TrainTypeSettings {
-      if (!Double.isFinite(cruiseSpeedBps) || cruiseSpeedBps <= 0.0) {
-        throw new IllegalArgumentException("cruiseSpeedBps 必须为正数");
-      }
-      if (!Double.isFinite(cautionSpeedBps) || cautionSpeedBps < 0.0) {
-        throw new IllegalArgumentException("cautionSpeedBps 必须为非负数");
-      }
       if (!Double.isFinite(accelBps2) || accelBps2 <= 0.0) {
         throw new IllegalArgumentException("accelBps2 必须为正数");
       }
@@ -382,35 +371,20 @@ public final class ConfigManager {
   }
 
   private static TrainTypeSettings defaultsEmu() {
-    return new TrainTypeSettings(
-        DEFAULT_EMU_CRUISE_BPS,
-        DEFAULT_EMU_CAUTION_BPS,
-        DEFAULT_EMU_ACCEL_BPS2,
-        DEFAULT_EMU_DECEL_BPS2);
+    return new TrainTypeSettings(DEFAULT_EMU_ACCEL_BPS2, DEFAULT_EMU_DECEL_BPS2);
   }
 
   private static TrainTypeSettings defaultsDmu() {
-    return new TrainTypeSettings(
-        DEFAULT_DMU_CRUISE_BPS,
-        DEFAULT_DMU_CAUTION_BPS,
-        DEFAULT_DMU_ACCEL_BPS2,
-        DEFAULT_DMU_DECEL_BPS2);
+    return new TrainTypeSettings(DEFAULT_DMU_ACCEL_BPS2, DEFAULT_DMU_DECEL_BPS2);
   }
 
   private static TrainTypeSettings defaultsDieselPushPull() {
-    return new TrainTypeSettings(
-        DEFAULT_DIESEL_PP_CRUISE_BPS,
-        DEFAULT_DIESEL_PP_CAUTION_BPS,
-        DEFAULT_DIESEL_PP_ACCEL_BPS2,
-        DEFAULT_DIESEL_PP_DECEL_BPS2);
+    return new TrainTypeSettings(DEFAULT_DIESEL_PP_ACCEL_BPS2, DEFAULT_DIESEL_PP_DECEL_BPS2);
   }
 
   private static TrainTypeSettings defaultsElectricLoco() {
     return new TrainTypeSettings(
-        DEFAULT_ELECTRIC_LOCO_CRUISE_BPS,
-        DEFAULT_ELECTRIC_LOCO_CAUTION_BPS,
-        DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2,
-        DEFAULT_ELECTRIC_LOCO_DECEL_BPS2);
+        DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2, DEFAULT_ELECTRIC_LOCO_DECEL_BPS2);
   }
 
   /** 存储后端定义。 */

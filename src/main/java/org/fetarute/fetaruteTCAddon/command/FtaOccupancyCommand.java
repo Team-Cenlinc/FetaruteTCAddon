@@ -221,6 +221,7 @@ public final class FtaOccupancyCommand {
       return;
     }
     LocaleManager locale = plugin.getLocaleManager();
+    Instant now = Instant.now();
     List<OccupancyClaim> claims =
         occupancy.snapshotClaims().stream()
             .sorted(Comparator.comparing(claim -> claim.resource().toString()))
@@ -244,12 +245,36 @@ public final class FtaOccupancyCommand {
                   claim.resource().toString(),
                   "train",
                   claim.trainName(),
-                  "release_at",
-                  claim.releaseAt().toString(),
+                  "state",
+                  claimState(claim, now),
+                  "available_at",
+                  claimAvailableAt(claim, now),
                   "headway",
                   claim.headway().toString())));
       count++;
     }
+  }
+
+  private static String claimState(OccupancyClaim claim, Instant now) {
+    if (claim == null || now == null) {
+      return "UNKNOWN";
+    }
+    // 运行时占用采用“长租约 + 事件反射释放”模式：占用中时 releaseAt 会被设置为很远的未来。
+    if (claim.releaseAt().isAfter(now.plusSeconds(86400L * 365L))) {
+      return "HELD";
+    }
+    Instant availableAt = claim.releaseAt().plus(claim.headway());
+    return availableAt.isAfter(now) ? "HEADWAY" : "EXPIRED";
+  }
+
+  private static String claimAvailableAt(OccupancyClaim claim, Instant now) {
+    if (claim == null || now == null) {
+      return "-";
+    }
+    if (claim.releaseAt().isAfter(now.plusSeconds(86400L * 365L))) {
+      return "-";
+    }
+    return claim.releaseAt().plus(claim.headway()).toString();
   }
 
   /** 注册 /fta occupancy debug 子命令。 */

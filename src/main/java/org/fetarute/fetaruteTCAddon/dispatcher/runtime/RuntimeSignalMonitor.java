@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Objects;
 
@@ -21,14 +22,20 @@ public final class RuntimeSignalMonitor implements Runnable {
   @Override
   public void run() {
     Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
-    if (groups == null || groups.isEmpty()) {
+    if (groups == null) {
       return;
     }
+    Instant now = Instant.now();
+    java.util.Set<String> activeTrainNames = new java.util.HashSet<>();
     for (MinecartGroup group : groups) {
       if (group == null || !group.isValid()) {
         continue;
       }
+      if (group.getProperties() != null && group.getProperties().getTrainName() != null) {
+        activeTrainNames.add(group.getProperties().getTrainName());
+      }
       dispatchService.handleSignalTick(group);
     }
+    dispatchService.cleanupOrphanOccupancyClaims(activeTrainNames, now);
   }
 }

@@ -22,17 +22,11 @@ class TrainConfigResolverTest {
   void resolvesFromTagsWhenPresent() {
     TagStore store =
         new TagStore(
-            "FTA_TRAIN_TYPE=DMU",
-            "FTA_TRAIN_CRUISE_BPS=9.5",
-            "FTA_TRAIN_CAUTION_BPS=4.0",
-            "FTA_TRAIN_ACCEL_BPS2=0.55",
-            "FTA_TRAIN_DECEL_BPS2=0.75");
+            "FTA_TRAIN_TYPE=DMU", "FTA_TRAIN_ACCEL_BPS2=0.55", "FTA_TRAIN_DECEL_BPS2=0.75");
     TrainConfigResolver resolver = new TrainConfigResolver();
     TrainConfig config = resolver.resolve(store.properties(), defaultConfig());
 
     assertEquals(TrainType.DMU, config.type());
-    assertEquals(9.5, config.cruiseSpeedBps());
-    assertEquals(4.0, config.cautionSpeedBps());
     assertEquals(0.55, config.accelBps2());
     assertEquals(0.75, config.decelBps2());
   }
@@ -41,25 +35,13 @@ class TrainConfigResolverTest {
   void writeConfigUpdatesTags() {
     TagStore store = new TagStore();
     TrainConfigResolver resolver = new TrainConfigResolver();
-    TrainConfig config = new TrainConfig(TrainType.EMU, 12.0, 6.0, 0.8, 1.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
 
-    resolver.writeConfig(
-        store.properties(),
-        config,
-        Optional.of(10.0),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.of(1.2));
+    resolver.writeConfig(store.properties(), config, Optional.empty(), Optional.of(1.2));
 
     assertEquals(
         Optional.of("EMU"),
         TrainTagHelper.readTagValue(store.properties(), TrainConfigResolver.TAG_TRAIN_TYPE));
-    assertEquals(
-        Optional.of("10.0"),
-        TrainTagHelper.readTagValue(store.properties(), TrainConfigResolver.TAG_TRAIN_CRUISE_BPS));
-    assertEquals(
-        Optional.of("6.0"),
-        TrainTagHelper.readTagValue(store.properties(), TrainConfigResolver.TAG_TRAIN_CAUTION_BPS));
     assertEquals(
         Optional.of("0.8"),
         TrainTagHelper.readTagValue(store.properties(), TrainConfigResolver.TAG_TRAIN_ACCEL_BPS2));
@@ -83,13 +65,13 @@ class TrainConfigResolverTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000)),
         new ConfigManager.GraphSettings(8.0),
         new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
-        new ConfigManager.RuntimeSettings(10, 2, 4.0),
+        new ConfigManager.RuntimeSettings(10, 2, 4.0, 6.0),
         new ConfigManager.TrainConfigSettings(
             "emu",
-            new ConfigManager.TrainTypeSettings(12.0, 6.0, 0.8, 1.0),
-            new ConfigManager.TrainTypeSettings(11.0, 5.5, 0.7, 0.9),
-            new ConfigManager.TrainTypeSettings(10.0, 5.0, 0.6, 0.8),
-            new ConfigManager.TrainTypeSettings(13.0, 6.5, 0.9, 1.1)));
+            new ConfigManager.TrainTypeSettings(0.8, 1.0),
+            new ConfigManager.TrainTypeSettings(0.7, 0.9),
+            new ConfigManager.TrainTypeSettings(0.6, 0.8),
+            new ConfigManager.TrainTypeSettings(0.9, 1.1)));
   }
 
   private static final class TagStore {
