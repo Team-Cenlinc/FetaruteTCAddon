@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 class SimpleOccupancyManagerTest {
 
   @Test
-  void acquireBlocksOtherTrainsUntilReleasePlusHeadway() {
+  void acquireBlocksOtherTrainsUntilRelease() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ofSeconds(10);
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -24,39 +24,20 @@ class SimpleOccupancyManagerTest {
     OccupancyResource resource =
         OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
     OccupancyRequest request =
-        new OccupancyRequest(
-            "train-A", Optional.empty(), now, Duration.ofSeconds(5), List.of(resource));
+        new OccupancyRequest("train-A", Optional.empty(), now, List.of(resource));
     OccupancyDecision decision = manager.acquire(request);
     assertTrue(decision.allowed());
 
     OccupancyRequest otherRequest =
-        new OccupancyRequest(
-            "train-B", Optional.empty(), now, Duration.ofSeconds(5), List.of(resource));
+        new OccupancyRequest("train-B", Optional.empty(), now, List.of(resource));
     OccupancyDecision otherDecision = manager.canEnter(otherRequest);
     assertFalse(otherDecision.allowed());
-    assertEquals(now.plusSeconds(15), otherDecision.earliestTime());
-    assertEquals(SignalAspect.CAUTION, otherDecision.signal());
+    assertEquals(now, otherDecision.earliestTime());
+    assertEquals(SignalAspect.STOP, otherDecision.signal());
   }
 
   @Test
-  void cleanupExpiredRemovesClaimsAfterReleaseAndHeadway() {
-    HeadwayRule headwayRule = (routeId, resource) -> Duration.ofSeconds(3);
-    SimpleOccupancyManager manager =
-        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
-
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("NODE-1"));
-    OccupancyRequest request =
-        new OccupancyRequest(
-            "train-A", Optional.empty(), now, Duration.ofSeconds(4), List.of(resource));
-    manager.acquire(request);
-
-    assertEquals(0, manager.cleanupExpired(now.plusSeconds(6)));
-    assertEquals(1, manager.cleanupExpired(now.plusSeconds(8)));
-  }
-
-  @Test
-  void updateReleaseAtByTrainAdjustsBlockTime() {
+  void releaseByTrainClearsClaims() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -64,15 +45,12 @@ class SimpleOccupancyManagerTest {
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("NODE-1"));
     OccupancyRequest request =
-        new OccupancyRequest(
-            "train-A", Optional.empty(), now, Duration.ofSeconds(5), List.of(resource));
+        new OccupancyRequest("train-A", Optional.empty(), now, List.of(resource));
     manager.acquire(request);
 
-    manager.updateReleaseAtByTrain("train-A", now.plusSeconds(2));
+    manager.releaseByTrain("train-A");
     OccupancyDecision decision =
-        manager.canEnter(
-            new OccupancyRequest(
-                "train-B", Optional.empty(), now, Duration.ofSeconds(5), List.of(resource)));
-    assertEquals(now.plusSeconds(2), decision.earliestTime());
+        manager.canEnter(new OccupancyRequest("train-B", Optional.empty(), now, List.of(resource)));
+    assertTrue(decision.allowed());
   }
 }

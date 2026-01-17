@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -10,7 +9,6 @@ import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
@@ -19,18 +17,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
 /**
  * 运行时占用请求构建器：把“列车状态 + 线路定义 + 图”转换成 OccupancyRequest。
  *
- * <p>默认行为只做 lookahead 的边占用，travelTime 由 RailTravelTimeModel 提供。
+ * <p>默认行为只做 lookahead 的边占用。
  */
 public final class OccupancyRequestBuilder {
 
   private final RailGraph graph;
-  private final RailTravelTimeModel travelTimeModel;
   private final int lookaheadEdges;
 
-  public OccupancyRequestBuilder(
-      RailGraph graph, RailTravelTimeModel travelTimeModel, int lookaheadEdges) {
+  public OccupancyRequestBuilder(RailGraph graph, int lookaheadEdges) {
     this.graph = Objects.requireNonNull(graph, "graph");
-    this.travelTimeModel = Objects.requireNonNull(travelTimeModel, "travelTimeModel");
     if (lookaheadEdges <= 0) {
       throw new IllegalArgumentException("lookaheadEdges 必须大于 0");
     }
@@ -87,10 +82,6 @@ public final class OccupancyRequestBuilder {
     if (edges.isEmpty()) {
       return Optional.empty();
     }
-    Optional<Duration> travelTimeOpt = travelTimeModel.pathTravelTime(graph, pathNodes, edges);
-    if (travelTimeOpt.isEmpty()) {
-      return Optional.empty();
-    }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
     for (NodeId node : pathNodes) {
       if (node == null) {
@@ -102,8 +93,7 @@ public final class OccupancyRequestBuilder {
       resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
     }
     return Optional.of(
-        new OccupancyRequest(
-            trainName, routeId, requestTime, travelTimeOpt.get(), List.copyOf(resources)));
+        new OccupancyRequest(trainName, routeId, requestTime, List.copyOf(resources)));
   }
 
   private List<RailEdge> resolveEdges(List<NodeId> pathNodes) {

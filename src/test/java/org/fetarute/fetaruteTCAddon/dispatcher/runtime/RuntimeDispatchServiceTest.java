@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -8,7 +9,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -194,8 +194,7 @@ class RuntimeDispatchServiceTest {
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
     verify(occupancyManager).acquire(requestCaptor.capture());
-    Duration travelTime = requestCaptor.getValue().travelTime();
-    assertTrue(travelTime.compareTo(Duration.ofHours(1)) >= 0);
+    assertFalse(requestCaptor.getValue().resourceList().isEmpty());
   }
 
   private static Answer<OccupancyDecision> allowProceed() {

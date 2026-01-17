@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,8 +14,6 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
@@ -45,9 +42,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 public final class RuntimeDispatchService {
 
   private static final double TICKS_PER_SECOND = 20.0;
-
-  /** 事件反射式占用的“长租约”窗口：用于避免依赖短续租带来的抖动。 */
-  private static final Duration OCCUPANCY_HOLD_LEASE = Duration.ofDays(3650);
 
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
@@ -142,12 +136,9 @@ public final class RuntimeDispatchService {
       return;
     }
     RailGraph graph = graphOpt.get();
-    RailTravelTimeModel travelTimeModel =
-        RailTravelTimeModels.constantSpeed(
-            configManager.current().graphSettings().defaultSpeedBlocksPerSecond());
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph, travelTimeModel, configManager.current().runtimeSettings().lookaheadEdges());
+            graph, configManager.current().runtimeSettings().lookaheadEdges());
     Optional<OccupancyRequest> requestOpt =
         builder.buildFromNodes(
             trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now);
@@ -164,12 +155,11 @@ public final class RuntimeDispatchService {
                   graph,
                   route,
                   currentIndex,
-                  configManager.current().runtimeSettings().lookaheadEdges(),
-                  travelTimeModel));
+                  configManager.current().runtimeSettings().lookaheadEdges()));
       return;
     }
-    OccupancyRequest request = withHoldLease(requestOpt.get());
-    releaseResourcesNotInRequest(trainName, request.resourceList(), now);
+    OccupancyRequest request = requestOpt.get();
+    releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
     if (!decision.allowed()) {
       debugLogger.accept(
@@ -222,8 +212,8 @@ public final class RuntimeDispatchService {
    *
    * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。
    */
-  public void cleanupOrphanOccupancyClaims(java.util.Set<String> activeTrainNames, Instant now) {
-    if (occupancyManager == null || activeTrainNames == null || now == null) {
+  public void cleanupOrphanOccupancyClaims(java.util.Set<String> activeTrainNames) {
+    if (occupancyManager == null || activeTrainNames == null) {
       return;
     }
     java.util.Set<String> activeLower = new java.util.HashSet<>();
@@ -246,7 +236,7 @@ public final class RuntimeDispatchService {
       if (!released.add(key)) {
         continue;
       }
-      occupancyManager.updateReleaseAtByTrain(trainName, now);
+      occupancyManager.releaseByTrain(trainName);
     }
   }
 
@@ -283,12 +273,9 @@ public final class RuntimeDispatchService {
       return;
     }
     RailGraph graph = graphOpt.get();
-    RailTravelTimeModel travelTimeModel =
-        RailTravelTimeModels.constantSpeed(
-            configManager.current().graphSettings().defaultSpeedBlocksPerSecond());
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph, travelTimeModel, configManager.current().runtimeSettings().lookaheadEdges());
+            graph, configManager.current().runtimeSettings().lookaheadEdges());
     Optional<OccupancyRequest> requestOpt =
         builder.buildFromNodes(
             trainName,
@@ -299,9 +286,8 @@ public final class RuntimeDispatchService {
     if (requestOpt.isEmpty()) {
       return;
     }
-    Instant now = Instant.now();
-    OccupancyRequest request = withHoldLease(requestOpt.get());
-    releaseResourcesNotInRequest(trainName, request.resourceList(), now);
+    OccupancyRequest request = requestOpt.get();
+    releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
     if (decision.allowed()) {
       occupancyManager.acquire(request);
@@ -379,30 +365,13 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 将占用请求改写为“长租约”，避免依赖短续约产生抖动。
-   *
-   * <p>真正释放仍由推进点/信号 tick 触发的事件反射逻辑完成。
-   */
-  private static OccupancyRequest withHoldLease(OccupancyRequest request) {
-    if (request == null) {
-      return null;
-    }
-    return new OccupancyRequest(
-        request.trainName(),
-        request.routeId(),
-        request.now(),
-        OCCUPANCY_HOLD_LEASE,
-        request.resourceList());
-  }
-
-  /**
    * 释放“超出当前占用窗口”的资源。
    *
    * <p>用于事件反射式占用：列车推进后即时释放窗口外资源，不再等待 time-based 过期。
    */
   private void releaseResourcesNotInRequest(
-      String trainName, List<OccupancyResource> keepResources, Instant now) {
-    if (trainName == null || trainName.isBlank() || occupancyManager == null || now == null) {
+      String trainName, List<OccupancyResource> keepResources) {
+    if (trainName == null || trainName.isBlank() || occupancyManager == null) {
       return;
     }
     java.util.Set<OccupancyResource> keep =
@@ -417,7 +386,7 @@ public final class RuntimeDispatchService {
       if (keep.contains(claim.resource())) {
         continue;
       }
-      occupancyManager.updateReleaseAt(claim.resource(), now, Optional.of(trainName));
+      occupancyManager.releaseResource(claim.resource(), Optional.of(trainName));
     }
   }
 
@@ -604,11 +573,7 @@ public final class RuntimeDispatchService {
   }
 
   private String diagnoseBuildFailure(
-      RailGraph graph,
-      RouteDefinition route,
-      int currentIndex,
-      int lookaheadEdges,
-      RailTravelTimeModel travelTimeModel) {
+      RailGraph graph, RouteDefinition route, int currentIndex, int lookaheadEdges) {
     if (graph == null || route == null) {
       return "missing_graph_or_route";
     }
@@ -637,10 +602,6 @@ public final class RuntimeDispatchService {
     }
     if (edges.isEmpty()) {
       return "edges_empty";
-    }
-    Optional<Duration> travelTime = travelTimeModel.pathTravelTime(graph, pathNodes, edges);
-    if (travelTime.isEmpty()) {
-      return "travel_time_empty";
     }
     return "unknown";
   }

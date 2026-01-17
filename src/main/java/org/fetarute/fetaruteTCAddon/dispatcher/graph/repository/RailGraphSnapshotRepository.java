@@ -1,4 +1,4 @@
-package org.fetarute.fetaruteTCAddon.company.repository;
+package org.fetarute.fetaruteTCAddon.dispatcher.graph.repository;
 
 import java.util.Optional;
 import java.util.UUID;

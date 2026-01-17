@@ -76,11 +76,9 @@ command:
     release-resource:
       success: "<prefix> <dark_aqua>已释放资源占用</dark_aqua> <gray>(kind=<white><kind></white>, key=<white><key></white>)</gray>"
       none: "<prefix> <gray>未找到资源占用</gray> <gray>(kind=<white><kind></white>, key=<white><key></white>)</gray>"
-    cleanup:
-      success: "<prefix> <dark_aqua>已清理过期占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
     dump:
       header: "<prefix> <dark_aqua>当前占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
-      entry: "<gray>-</gray> <white><resource></white> <gray>train=<white><train></white> state=<white><state></white> availableAt=<white><available_at></white> headway=<white><headway></white></gray>"
+      entry: "<gray>-</gray> <white><resource></white> <gray>train=<white><train></white> since=<white><since></white> headway=<white><headway></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta occupancy dump <limit> 调整数量</gray>"
     debug:
       player-only: "<prefix> <red>该调试命令仅限玩家执行</red>"
@@ -97,12 +95,10 @@ command:
       hover-release: "<gray>点击填充:</gray> <white>/fta occupancy release </white>\n<dark_aqua>按列车名称清理占用</dark_aqua>"
       entry-release-resource: "<gray>/fta occupancy release-resource</gray> <white>-</white> <dark_aqua>按资源释放占用</dark_aqua>"
       hover-release-resource: "<gray>点击填充:</gray> <white>/fta occupancy release-resource </white>\n<dark_aqua>参数: EDGE/NODE/CONFLICT + key</dark_aqua>"
-      entry-cleanup: "<gray>/fta occupancy cleanup</gray> <white>-</white> <dark_aqua>清理过期占用</dark_aqua>"
-      hover-cleanup: "<gray>点击执行:</gray> <white>/fta occupancy cleanup</white>\n<dark_aqua>清理超时释放记录</dark_aqua>"
       entry-debug-edge: "<gray>/fta occupancy debug edge</gray> <white>-</white> <dark_aqua>调试区间占用</dark_aqua>"
-      hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\" [seconds]</dark_aqua>"
+      hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\"</dark_aqua>"
       entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
-      hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\" [seconds]</dark_aqua>"
+      hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\"</dark_aqua>"
 
   train:
     help:
@@ -157,8 +153,8 @@ command:
       hover-query: "<gray>点击填充:</gray> <white>/fta graph query </white>\n<dark_aqua>输出 hops + distance + ETA(估算)</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>\n<gray>ETA:</gray> <white>按边限速(override/base)</white> <gray>缺失时回退</gray> <white>graph.default-speed-blocks-per-second</white>\n<gray>限速命令:</gray> <white>/fta graph edge speed ...</white>"
       entry-path: "<gray>/fta graph path</gray> <white>-</white> <dark_aqua>最短路径（分页）</dark_aqua>"
       hover-path: "<gray>点击填充:</gray> <white>/fta graph path </white>\n<dark_aqua>支持 page 参数；节点坐标可点击 /tp</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
-      entry-component: "<gray>/fta graph component</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
-      hover-component: "<gray>点击填充:</gray> <white>/fta graph component </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
+      entry-component: "<gray>/fta graph component list</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
+      hover-component: "<gray>点击填充:</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"

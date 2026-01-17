@@ -18,13 +18,13 @@
 
 ## 命令
 设置：
-- `/fta graph component caution set "<nodeId>" <speed>`
+- `/fta graph component set caution "<nodeId>" <speed>`
 
 查询：
-- `/fta graph component caution get "<nodeId>"`
+- `/fta graph component get caution "<nodeId>"`
 
 清除：
-- `/fta graph component caution clear "<nodeId>"`
+- `/fta graph component clear caution "<nodeId>"`
 
 ## 速度格式
 与 edge speedlimit 一致：

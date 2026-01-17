@@ -4009,9 +4009,9 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("component")
-            .literal("caution")
-            .permission("fetarute.graph.build")
             .literal("get")
+            .permission("fetarute.graph.build")
+            .literal("caution")
             .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
             .handler(
                 ctx -> {
@@ -4062,9 +4062,9 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("component")
-            .literal("caution")
-            .permission("fetarute.graph.build")
             .literal("set")
+            .permission("fetarute.graph.build")
+            .literal("caution")
             .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
             .required("speed", StringParser.stringParser(), speedSuggestions)
             .handler(
@@ -4136,9 +4136,9 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("component")
-            .literal("caution")
-            .permission("fetarute.graph.build")
             .literal("clear")
+            .permission("fetarute.graph.build")
+            .literal("caution")
             .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
             .handler(
                 ctx -> {
@@ -4187,6 +4187,7 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("component")
+            .literal("list")
             .permission("fetarute.graph.query")
             .required("node", StringParser.quotedStringParser(), nodeIdSuggestions)
             .handler(
@@ -4384,7 +4385,7 @@ public final class FtaGraphCommand {
       sendHelpEntry(
           sender,
           locale.component("command.graph.help.entry-component"),
-          ClickEvent.suggestCommand("/fta graph component "),
+          ClickEvent.suggestCommand("/fta graph component list "),
           locale.component("command.graph.help.hover-component"));
     }
 

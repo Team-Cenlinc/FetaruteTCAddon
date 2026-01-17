@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.command;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
@@ -52,7 +51,6 @@ public final class FtaOccupancyCommand {
     var nodeIdSuggestions = graphNodeIdSuggestions("\"<nodeId>\"");
     var kindSuggestions = CommandSuggestionProviders.enumValues(ResourceKind.class, "<kind>");
     var limitSuggestions = CommandSuggestionProviders.<CommandSender>placeholder("<limit>");
-    var secondsSuggestions = CommandSuggestionProviders.<CommandSender>placeholder("<seconds>");
 
     manager.command(
         manager
@@ -74,7 +72,7 @@ public final class FtaOccupancyCommand {
                   dumpClaims(ctx.sender(), limit);
                 }));
 
-    registerDebugCommands(manager, nodeIdSuggestions, secondsSuggestions);
+    registerDebugCommands(manager, nodeIdSuggestions);
 
     manager.command(
         manager
@@ -145,28 +143,6 @@ public final class FtaOccupancyCommand {
                       .sendMessage(
                           locale.component(messageKey, Map.of("kind", kind.name(), "key", key)));
                 }));
-
-    manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("occupancy")
-            .literal("cleanup")
-            .permission("fetarute.occupancy")
-            .handler(
-                ctx -> {
-                  OccupancyManager occupancy = plugin.getOccupancyManager();
-                  if (occupancy == null) {
-                    sendNotReady(ctx.sender());
-                    return;
-                  }
-                  int removed = occupancy.cleanupExpired(Instant.now());
-                  LocaleManager locale = plugin.getLocaleManager();
-                  ctx.sender()
-                      .sendMessage(
-                          locale.component(
-                              "command.occupancy.cleanup.success",
-                              Map.of("count", String.valueOf(removed))));
-                }));
   }
 
   private void sendHelp(CommandSender sender) {
@@ -187,11 +163,6 @@ public final class FtaOccupancyCommand {
         locale.component("command.occupancy.help.entry-release-resource"),
         ClickEvent.suggestCommand("/fta occupancy release-resource "),
         locale.component("command.occupancy.help.hover-release-resource"));
-    sendHelpEntry(
-        sender,
-        locale.component("command.occupancy.help.entry-cleanup"),
-        ClickEvent.runCommand("/fta occupancy cleanup"),
-        locale.component("command.occupancy.help.hover-cleanup"));
     sendHelpEntry(
         sender,
         locale.component("command.occupancy.help.entry-debug-edge"),
@@ -221,7 +192,6 @@ public final class FtaOccupancyCommand {
       return;
     }
     LocaleManager locale = plugin.getLocaleManager();
-    Instant now = Instant.now();
     List<OccupancyClaim> claims =
         occupancy.snapshotClaims().stream()
             .sorted(Comparator.comparing(claim -> claim.resource().toString()))
@@ -245,43 +215,17 @@ public final class FtaOccupancyCommand {
                   claim.resource().toString(),
                   "train",
                   claim.trainName(),
-                  "state",
-                  claimState(claim, now),
-                  "available_at",
-                  claimAvailableAt(claim, now),
+                  "since",
+                  claim.acquiredAt().toString(),
                   "headway",
                   claim.headway().toString())));
       count++;
     }
   }
 
-  private static String claimState(OccupancyClaim claim, Instant now) {
-    if (claim == null || now == null) {
-      return "UNKNOWN";
-    }
-    // 运行时占用采用“长租约 + 事件反射释放”模式：占用中时 releaseAt 会被设置为很远的未来。
-    if (claim.releaseAt().isAfter(now.plusSeconds(86400L * 365L))) {
-      return "HELD";
-    }
-    Instant availableAt = claim.releaseAt().plus(claim.headway());
-    return availableAt.isAfter(now) ? "HEADWAY" : "EXPIRED";
-  }
-
-  private static String claimAvailableAt(OccupancyClaim claim, Instant now) {
-    if (claim == null || now == null) {
-      return "-";
-    }
-    if (claim.releaseAt().isAfter(now.plusSeconds(86400L * 365L))) {
-      return "-";
-    }
-    return claim.releaseAt().plus(claim.headway()).toString();
-  }
-
   /** 注册 /fta occupancy debug 子命令。 */
   private void registerDebugCommands(
-      CommandManager<CommandSender> manager,
-      SuggestionProvider<CommandSender> nodeIdSuggestions,
-      SuggestionProvider<CommandSender> secondsSuggestions) {
+      CommandManager<CommandSender> manager, SuggestionProvider<CommandSender> nodeIdSuggestions) {
     manager.command(
         manager
             .commandBuilder("fta")
@@ -292,13 +236,11 @@ public final class FtaOccupancyCommand {
             .permission("fetarute.occupancy.debug")
             .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
             .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
-            .optional("seconds", IntegerParser.integerParser(1, 3600), secondsSuggestions)
             .handler(
                 ctx -> {
                   String fromRaw = ctx.get("from");
                   String toRaw = ctx.get("to");
-                  int seconds = ctx.<Integer>optional("seconds").orElse(10);
-                  handleEdgeDecision(ctx.sender(), fromRaw, toRaw, seconds, true);
+                  handleEdgeDecision(ctx.sender(), fromRaw, toRaw, true);
                 }));
 
     manager.command(
@@ -311,13 +253,11 @@ public final class FtaOccupancyCommand {
             .permission("fetarute.occupancy.debug")
             .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
             .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
-            .optional("seconds", IntegerParser.integerParser(1, 3600), secondsSuggestions)
             .handler(
                 ctx -> {
                   String fromRaw = ctx.get("from");
                   String toRaw = ctx.get("to");
-                  int seconds = ctx.<Integer>optional("seconds").orElse(10);
-                  handleEdgeDecision(ctx.sender(), fromRaw, toRaw, seconds, false);
+                  handleEdgeDecision(ctx.sender(), fromRaw, toRaw, false);
                 }));
 
     manager.command(
@@ -330,13 +270,11 @@ public final class FtaOccupancyCommand {
             .permission("fetarute.occupancy.debug")
             .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
             .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
-            .optional("seconds", IntegerParser.integerParser(1, 7200), secondsSuggestions)
             .handler(
                 ctx -> {
                   String fromRaw = ctx.get("from");
                   String toRaw = ctx.get("to");
-                  int seconds = ctx.<Integer>optional("seconds").orElse(30);
-                  handlePathDecision(ctx.sender(), fromRaw, toRaw, seconds, true);
+                  handlePathDecision(ctx.sender(), fromRaw, toRaw, true);
                 }));
 
     manager.command(
@@ -349,19 +287,17 @@ public final class FtaOccupancyCommand {
             .permission("fetarute.occupancy.debug")
             .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
             .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
-            .optional("seconds", IntegerParser.integerParser(1, 7200), secondsSuggestions)
             .handler(
                 ctx -> {
                   String fromRaw = ctx.get("from");
                   String toRaw = ctx.get("to");
-                  int seconds = ctx.<Integer>optional("seconds").orElse(30);
-                  handlePathDecision(ctx.sender(), fromRaw, toRaw, seconds, false);
+                  handlePathDecision(ctx.sender(), fromRaw, toRaw, false);
                 }));
   }
 
   /** 调试：对单条边执行 can/acquire 判定。 */
   private void handleEdgeDecision(
-      CommandSender sender, String fromRaw, String toRaw, int seconds, boolean acquire) {
+      CommandSender sender, String fromRaw, String toRaw, boolean acquire) {
     LocaleManager locale = plugin.getLocaleManager();
     Optional<RailGraph> graphOpt = resolveGraph(sender);
     if (graphOpt.isEmpty()) {
@@ -380,13 +316,13 @@ public final class FtaOccupancyCommand {
     List<OccupancyResource> resources =
         OccupancyResourceResolver.resourcesForEdge(graphOpt.get(), edgeOpt.get());
     String trainName = resolveTrainName(sender, acquire);
-    OccupancyRequest request = buildRequest(trainName, resources, seconds);
+    OccupancyRequest request = buildRequest(trainName, resources);
     handleDecision(sender, request, acquire, "edge", resources.size());
   }
 
   /** 调试：对最短路路径执行 can/acquire 判定。 */
   private void handlePathDecision(
-      CommandSender sender, String fromRaw, String toRaw, int seconds, boolean acquire) {
+      CommandSender sender, String fromRaw, String toRaw, boolean acquire) {
     LocaleManager locale = plugin.getLocaleManager();
     Optional<RailGraph> graphOpt = resolveGraph(sender);
     if (graphOpt.isEmpty()) {
@@ -417,7 +353,7 @@ public final class FtaOccupancyCommand {
       return;
     }
     String trainName = resolveTrainName(sender, acquire);
-    OccupancyRequest request = buildRequest(trainName, resources, seconds);
+    OccupancyRequest request = buildRequest(trainName, resources);
     handleDecision(sender, request, acquire, "path", path.edges().size());
   }
 
@@ -454,12 +390,10 @@ public final class FtaOccupancyCommand {
                 String.valueOf(decision.blockers().size()))));
   }
 
-  /** 构造调试占用请求（秒数表示 travelTime）。 */
-  private OccupancyRequest buildRequest(
-      String trainName, List<OccupancyResource> resources, int seconds) {
+  /** 构造调试占用请求。 */
+  private OccupancyRequest buildRequest(String trainName, List<OccupancyResource> resources) {
     Instant now = Instant.now();
-    return new OccupancyRequest(
-        trainName, Optional.empty(), now, Duration.ofSeconds(seconds), resources);
+    return new OccupancyRequest(trainName, Optional.empty(), now, resources);
   }
 
   /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */

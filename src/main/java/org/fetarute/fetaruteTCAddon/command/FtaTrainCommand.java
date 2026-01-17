@@ -28,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfigResolver
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainType;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.component.CommandComponent;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.DoubleParser;
 import org.incendo.cloud.parser.standard.StringParser;
@@ -66,9 +67,28 @@ public final class FtaTrainCommand {
   public void register(CommandManager<CommandSender> manager) {
     SuggestionProvider<CommandSender> trainSuggestions = trainSuggestions();
 
-    var typeFlag = CommandFlag.builder("type").withComponent(StringParser.stringParser()).build();
-    var accelFlag = CommandFlag.builder("accel").withComponent(DoubleParser.doubleParser()).build();
-    var decelFlag = CommandFlag.builder("decel").withComponent(DoubleParser.doubleParser()).build();
+    var typeFlag =
+        CommandFlag.builder("type")
+            .withComponent(
+                CommandComponent.builder("type", StringParser.stringParser())
+                    .suggestionProvider(
+                        CommandSuggestionProviders.enumValues(TrainType.class, "<type>"))
+                    .build())
+            .build();
+    var accelFlag =
+        CommandFlag.builder("accel")
+            .withComponent(
+                CommandComponent.builder("accel", DoubleParser.doubleParser())
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<bps2>"))
+                    .build())
+            .build();
+    var decelFlag =
+        CommandFlag.builder("decel")
+            .withComponent(
+                CommandComponent.builder("decel", DoubleParser.doubleParser())
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<bps2>"))
+                    .build())
+            .build();
 
     manager.command(
         manager

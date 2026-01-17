@@ -13,7 +13,7 @@ import java.util.Optional;
 /**
  * 基于内存 Map 的占用管理器，适合作为 MVP 版本。
  *
- * <p>占用释放以“预计 releaseAt + headway”超时为准，后续可接入事件驱动释放。
+ * <p>占用释放由事件驱动触发：释放后即认为可重新判定，不依赖 releaseAt；headway 仅作为配置保留。
  */
 public final class SimpleOccupancyManager implements OccupancyManager {
 
@@ -30,9 +30,8 @@ public final class SimpleOccupancyManager implements OccupancyManager {
   public synchronized OccupancyDecision canEnter(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
     Instant now = request.now();
-    cleanupExpired(now);
-    Instant earliest = now;
     List<OccupancyClaim> blockers = new ArrayList<>();
+    boolean allowed = true;
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
@@ -44,16 +43,11 @@ public final class SimpleOccupancyManager implements OccupancyManager {
       if (claim.trainName().equalsIgnoreCase(request.trainName())) {
         continue;
       }
-      Instant availableAt = claim.releaseAt().plus(claim.headway());
-      if (availableAt.isAfter(earliest)) {
-        earliest = availableAt;
-      }
       blockers.add(claim);
+      allowed = false;
     }
-    boolean allowed = !earliest.isAfter(now);
-    Duration delay = allowed ? Duration.ZERO : Duration.between(now, earliest);
-    SignalAspect signal = signalPolicy.aspectForDelay(delay);
-    return new OccupancyDecision(allowed, earliest, signal, List.copyOf(blockers));
+    SignalAspect signal = allowed ? signalPolicy.aspectForDelay(Duration.ZERO) : SignalAspect.STOP;
+    return new OccupancyDecision(allowed, now, signal, List.copyOf(blockers));
   }
 
   @Override
@@ -64,7 +58,6 @@ public final class SimpleOccupancyManager implements OccupancyManager {
       return decision;
     }
     Instant now = request.now();
-    Instant releaseAt = now.plus(request.travelTime());
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
@@ -72,20 +65,21 @@ public final class SimpleOccupancyManager implements OccupancyManager {
       Duration headway = headwayRule.headwayFor(request.routeId(), resource);
       OccupancyClaim existing = claims.get(resource);
       if (existing != null && existing.trainName().equalsIgnoreCase(request.trainName())) {
-        Instant nextRelease =
-            existing.releaseAt().isAfter(releaseAt) ? existing.releaseAt() : releaseAt;
         Duration nextHeadway =
             existing.headway().compareTo(headway) >= 0 ? existing.headway() : headway;
         claims.put(
             resource,
             new OccupancyClaim(
-                resource, existing.trainName(), request.routeId(), now, nextRelease, nextHeadway));
+                resource,
+                existing.trainName(),
+                request.routeId(),
+                existing.acquiredAt(),
+                nextHeadway));
         continue;
       }
       claims.put(
           resource,
-          new OccupancyClaim(
-              resource, request.trainName(), request.routeId(), now, releaseAt, headway));
+          new OccupancyClaim(resource, request.trainName(), request.routeId(), now, headway));
     }
     return decision;
   }
@@ -141,90 +135,5 @@ public final class SimpleOccupancyManager implements OccupancyManager {
     return true;
   }
 
-  @Override
-  public synchronized boolean updateReleaseAt(
-      OccupancyResource resource, Instant releaseAt, Optional<String> trainName) {
-    if (resource == null || releaseAt == null) {
-      return false;
-    }
-    OccupancyClaim claim = claims.get(resource);
-    if (claim == null) {
-      return false;
-    }
-    if (trainName != null && trainName.isPresent()) {
-      String expected = trainName.get();
-      if (!claim.trainName().equalsIgnoreCase(expected)) {
-        return false;
-      }
-    }
-    Instant nextRelease = releaseAt;
-    if (releaseAt.isBefore(claim.acquiredAt())) {
-      nextRelease = claim.acquiredAt();
-    }
-    claims.put(
-        resource,
-        new OccupancyClaim(
-            resource,
-            claim.trainName(),
-            claim.routeId(),
-            claim.acquiredAt(),
-            nextRelease,
-            claim.headway()));
-    return true;
-  }
-
-  @Override
-  public synchronized int updateReleaseAtByTrain(String trainName, Instant releaseAt) {
-    if (trainName == null || trainName.isBlank() || releaseAt == null) {
-      return 0;
-    }
-    int updated = 0;
-    for (Map.Entry<OccupancyResource, OccupancyClaim> entry : claims.entrySet()) {
-      OccupancyClaim claim = entry.getValue();
-      if (claim == null) {
-        continue;
-      }
-      if (!claim.trainName().equalsIgnoreCase(trainName)) {
-        continue;
-      }
-      Instant nextRelease = releaseAt;
-      if (releaseAt.isBefore(claim.acquiredAt())) {
-        nextRelease = claim.acquiredAt();
-      }
-      entry.setValue(
-          new OccupancyClaim(
-              entry.getKey(),
-              claim.trainName(),
-              claim.routeId(),
-              claim.acquiredAt(),
-              nextRelease,
-              claim.headway()));
-      updated++;
-    }
-    return updated;
-  }
-
-  @Override
-  public synchronized int cleanupExpired(Instant now) {
-    if (now == null) {
-      return 0;
-    }
-    int removed = 0;
-    Iterator<Map.Entry<OccupancyResource, OccupancyClaim>> iterator = claims.entrySet().iterator();
-    while (iterator.hasNext()) {
-      Map.Entry<OccupancyResource, OccupancyClaim> entry = iterator.next();
-      OccupancyClaim claim = entry.getValue();
-      if (claim == null) {
-        iterator.remove();
-        removed++;
-        continue;
-      }
-      Instant availableAt = claim.releaseAt().plus(claim.headway());
-      if (!availableAt.isAfter(now)) {
-        iterator.remove();
-        removed++;
-      }
-    }
-    return removed;
-  }
+  // 事件反射式释放不需要 time-based 清理。
 }

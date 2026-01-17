@@ -6,9 +6,9 @@
 
 ## 核心概念
 - Resource：占用对象（EDGE/NODE/CONFLICT）。
-- Claim：占用记录，包含 `releaseAt` 与 `headway`。
-- Request：列车申请占用的上下文（含 travelTime）。
-- Decision：是否可进入、最早进入时间与信号许可。
+- Claim：占用记录，仅描述当前占用者与 headway 配置（无 releaseAt）。
+- Request：列车申请占用的上下文（不再包含 travelTime）。
+- Decision：是否可进入、信号许可与阻塞信息（earliest 仅作提示）。
 
 ## 信号许可（SignalAspect）
 - `PROCEED`：可进入。
@@ -22,13 +22,12 @@
 - node 占用使用 `NODE:<nodeId>`（switcher 同样补冲突资源）。
 
 ## Headway 规则
-- headway = 释放后仍需等待的时间。
-- 可按 route/资源类型动态返回。
-- 若 releaseAt + headway 未到，则判定阻塞。
+- headway 用于刻画“线路安全冗余”，当前以配置形式保留。
+- 事件驱动释放后立即重新判定，不再依赖 releaseAt 计算。
 
 ## 释放策略
-- MVP 使用“超时释放”：`releaseAt + headway` 到期后清理。
-- 后续可接入事件驱动（到达 waypoint/站台/区间端点）做精确释放。
+- 当前采用事件驱动：列车推进/离开资源时立即释放。
+- 不再依赖超时清理。
 
 ## Lookahead 占用
 - 运行时可按“当前节点 + N 段边”申请占用，降低咽喉/道岔前的卡死。
@@ -44,15 +43,10 @@
 - `/fta occupancy dump [limit]`：查看占用快照。
 - `/fta occupancy release <train>`：按列车清理占用。
 - `/fta occupancy release-resource <EDGE|NODE|CONFLICT> <key>`：按资源清理占用。
-- `/fta occupancy cleanup`：清理超时占用。
-- `/fta occupancy debug acquire edge "<from>" "<to>" [seconds]`：对单条边执行占用。
-- `/fta occupancy debug can edge "<from>" "<to>" [seconds]`：对单条边执行判定（不占用）。
-- `/fta occupancy debug acquire path "<from>" "<to>" [seconds]`：对最短路路径执行占用。
-- `/fta occupancy debug can path "<from>" "<to>" [seconds]`：对最短路路径执行判定（不占用）。
-
-### 调试参数说明
-- `seconds` 表示 travelTime，用于计算 releaseAt；不等同 headway。
+- `/fta occupancy debug acquire edge "<from>" "<to>"`：对单条边执行占用。
+- `/fta occupancy debug can edge "<from>" "<to>"`：对单条边执行判定（不占用）。
+- `/fta occupancy debug acquire path "<from>" "<to>"`：对最短路路径执行占用。
+- `/fta occupancy debug can path "<from>" "<to>"`：对最短路路径执行判定（不占用）。
 
 ## 预留 API
 - `OccupancyManager#getClaim/snapshotClaims` 提供只读查询。
-- `updateReleaseAt/updateReleaseAtByTrain` 用于接入事件驱动的精确释放。

@@ -9,8 +9,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import javax.sql.DataSource;
-import org.fetarute.fetaruteTCAddon.company.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailComponentCautionRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 

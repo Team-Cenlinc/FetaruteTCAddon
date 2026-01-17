@@ -3,7 +3,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -14,7 +13,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -61,8 +59,7 @@ class OccupancyRequestBuilderTest {
             Map.of(nodeA, stationA, nodeB, stationB, nodeC, stationC),
             Map.of(edgeAB, ab, edgeBC, bc),
             Set.of());
-    RailTravelTimeModel timeModel = (g, edge, from, to) -> Optional.of(Duration.ofSeconds(5));
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, timeModel, 2);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2);
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB, nodeC), Optional.empty());
@@ -72,7 +69,6 @@ class OccupancyRequestBuilderTest {
         builder.build(state, route, Instant.parse("2026-01-01T00:00:00Z"));
     assertTrue(requestOpt.isPresent());
     OccupancyRequest request = requestOpt.get();
-    assertEquals(Duration.ofSeconds(10), request.travelTime());
     assertEquals(5, request.resourceList().size());
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeA)));
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeB)));
@@ -103,8 +99,7 @@ class OccupancyRequestBuilderTest {
     RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 20, 8.0, true, Optional.empty());
     SimpleRailGraph graph =
         new SimpleRailGraph(Map.of(nodeA, stationA, nodeB, stationB), Map.of(edgeAB, ab), Set.of());
-    RailTravelTimeModel timeModel = (g, edge, from, to) -> Optional.of(Duration.ofSeconds(5));
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, timeModel, 1);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1);
     RouteDefinition route =
         new RouteDefinition(RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB), Optional.empty());
     TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 1));
