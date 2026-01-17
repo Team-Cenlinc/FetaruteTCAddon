@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -24,10 +25,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
@@ -195,6 +199,193 @@ class RuntimeDispatchServiceTest {
         ArgumentCaptor.forClass(OccupancyRequest.class);
     verify(occupancyManager).acquire(requestCaptor.capture());
     assertFalse(requestCaptor.getValue().resourceList().isEmpty());
+  }
+
+  @Test
+  void handleTrainRemovedReleasesOccupancyAndClearsProgress() {
+    String trainName = "train-1";
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags = new TagStore(trainName, "FTA_ROUTE_INDEX=0");
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(trainName, tags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            signNodeRegistry,
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleTrainRemoved(trainName);
+
+    verify(occupancyManager).releaseByTrain(trainName);
+    assertTrue(registry.get(trainName).isEmpty());
+  }
+
+  @Test
+  void rebuildOccupancySnapshotReleasesOrphanClaims() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    new OccupancyResource(ResourceKind.EDGE, "A~B"),
+                    "ghost",
+                    Optional.empty(),
+                    Instant.now(),
+                    Duration.ZERO)));
+
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            signNodeRegistry,
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.rebuildOccupancySnapshot(List.of(train));
+
+    verify(occupancyManager).releaseByTrain("ghost");
+  }
+
+  @Test
+  void cleanupOrphanOccupancyClaimsRemovesProgressEntries() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags = new TagStore("old-train", "FTA_ROUTE_INDEX=0");
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("old-train", tags.properties(), route);
+
+    RuntimeDispatchService serviceWithRegistry =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            mock(SignNodeRegistry.class),
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    serviceWithRegistry.cleanupOrphanOccupancyClaims(java.util.Set.of("new-train"));
+
+    assertTrue(registry.get("old-train").isEmpty());
+  }
+
+  @Test
+  void handleSignalTickMigratesProgressOnRename() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "new-train",
+            "FTA_TRAIN_NAME=old-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("old-train", tags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            signNodeRegistry,
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+
+    verify(occupancyManager).releaseByTrain("old-train");
+    assertTrue(registry.get("old-train").isEmpty());
+    assertTrue(registry.get("new-train").isPresent());
   }
 
   private static Answer<OccupancyDecision> allowProceed() {

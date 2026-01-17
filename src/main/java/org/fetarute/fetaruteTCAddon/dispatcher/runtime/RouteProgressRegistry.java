@@ -27,6 +27,7 @@ public final class RouteProgressRegistry {
   public static final String TAG_ROUTE_CODE = "FTA_ROUTE_CODE";
   public static final String TAG_ROUTE_INDEX = "FTA_ROUTE_INDEX";
   public static final String TAG_ROUTE_UPDATED_AT = "FTA_ROUTE_UPDATED_AT";
+  public static final String TAG_TRAIN_NAME = "FTA_TRAIN_NAME";
 
   private final ConcurrentMap<String, RouteProgressEntry> entries = new ConcurrentHashMap<>();
 
@@ -46,7 +47,10 @@ public final class RouteProgressRegistry {
       String trainName, TrainProperties properties, RouteDefinition route) {
     Objects.requireNonNull(route, "route");
     int index = TrainTagHelper.readIntTag(properties, TAG_ROUTE_INDEX).orElse(0);
-    return upsert(trainName, parseRouteId(properties).orElse(null), route, index, Instant.now());
+    RouteProgressEntry entry =
+        upsert(trainName, parseRouteId(properties).orElse(null), route, index, Instant.now());
+    TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, trainName);
+    return entry;
   }
 
   /**
@@ -62,9 +66,40 @@ public final class RouteProgressRegistry {
       TrainProperties properties,
       Instant now) {
     RouteProgressEntry entry = upsert(trainName, routeUuid, route, currentIndex, now);
+    TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, trainName);
     TrainTagHelper.writeTag(properties, TAG_ROUTE_INDEX, String.valueOf(currentIndex));
     TrainTagHelper.writeTag(properties, TAG_ROUTE_UPDATED_AT, String.valueOf(now.toEpochMilli()));
     return entry;
+  }
+
+  /**
+   * 迁移列车名：保持进度与信号状态，但更新 key 与记录中的 trainName。
+   *
+   * @return 是否发生了迁移
+   */
+  public boolean rename(String oldName, String newName) {
+    if (oldName == null
+        || oldName.isBlank()
+        || newName == null
+        || newName.isBlank()
+        || oldName.equalsIgnoreCase(newName)) {
+      return false;
+    }
+    RouteProgressEntry existing = entries.remove(oldName);
+    if (existing == null) {
+      return false;
+    }
+    RouteProgressEntry migrated =
+        new RouteProgressEntry(
+            newName,
+            existing.routeUuid(),
+            existing.routeId(),
+            existing.currentIndex(),
+            existing.nextTarget(),
+            existing.lastSignal(),
+            existing.lastUpdatedAt());
+    entries.put(newName, migrated);
+    return true;
   }
 
   /** 更新当前信号许可状态，用于运行时控车与 UI 反馈。 */

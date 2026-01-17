@@ -5,6 +5,7 @@ import java.util.Optional;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 
 /**
  * 负责读取并缓存 config.yml，统一暴露调试开关、调度图相关配置与存储后端配置。
@@ -333,19 +334,11 @@ public final class ConfigManager {
       }
     }
 
-    public org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainType defaultTrainType() {
-      return org.fetarute
-          .fetaruteTCAddon
-          .dispatcher
-          .runtime
-          .train
-          .TrainType
-          .parse(defaultType)
-          .orElse(org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainType.EMU);
+    public TrainType defaultTrainType() {
+      return TrainType.parse(defaultType).orElse(TrainType.EMU);
     }
 
-    public TrainTypeSettings forType(
-        org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainType type) {
+    public TrainTypeSettings forType(TrainType type) {
       if (type == null) {
         return emu;
       }

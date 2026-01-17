@@ -1,4 +1,4 @@
-package org.fetarute.fetaruteTCAddon.dispatcher.runtime.train;
+package org.fetarute.fetaruteTCAddon.dispatcher.runtime.config;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;

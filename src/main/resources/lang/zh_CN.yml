@@ -106,11 +106,11 @@ command:
       entry-config-list: "<gray>/fta train config list</gray> <white>-</white> <dark_aqua>查看列车配置</dark_aqua>"
       hover-config-list: "<gray>点击填充:</gray> <white>/fta train config list </white>\n<dark_aqua>参数:</dark_aqua> <white>[train]</white>\n<gray>可用:</gray> <white>列车名</white> / <white>@train[...]</white>"
       entry-config-set: "<gray>/fta train config set</gray> <white>-</white> <dark_aqua>设置列车配置</dark_aqua>"
-      hover-config-set: "<gray>点击填充:</gray> <white>/fta train config set </white>\n<dark_aqua>可选:</dark_aqua> <white>[train]</white>\n<dark_aqua>flags:</dark_aqua> <white>--type</white> <white>--accel</white> <white>--decel</white>"
+      hover-config-set: "<gray>点击填充:</gray> <white>/fta train config set </white>\n<dark_aqua>可选:</dark_aqua> <white>[train]</white>\n<dark_aqua>flags:</dark_aqua> <white>--type &lt;type&gt;</white> <white>--accel &lt;bps2&gt;</white> <white>--decel &lt;bps2&gt;</white>"
       entry-train-edit: "<gray>/train edit</gray> <white>-</white> <dark_aqua>选中 TrainCarts 编辑列车</dark_aqua>"
       hover-train-edit: "<gray>点击填充:</gray> <white>/train edit </white>\n<dark_aqua>提示:</dark_aqua> <gray>TrainCarts 的命令默认作用于“正在编辑”的列车</gray>"
       entry-selector: "<gray>@train[...]</gray> <white>-</white> <dark_aqua>TrainCarts 选择器</dark_aqua>"
-      hover-selector: "<gray>点击填充:</gray> <white>/fta train config list @train[</white>\n<dark_aqua>示例:</dark_aqua> <white>@train[name=EXP]</white> <white>@train[tag=FTA]</white> <white>@train[world=world]</white>"
+      hover-selector: "<gray>点击填充:</gray> <white>/fta train config list @train[</white>\n<dark_aqua>示例:</dark_aqua> <white>@train[name=EXP]</white> <white>@train[tag=FTA]</white> <white>@train[world=world]</white>\n<dark_aqua>常用键:</dark_aqua> <white>name/tag/world/distance/sort/limit/destination/ticket</white>"
     config:
       not-found: "<prefix> <red>未找到列车</red> <gray>(train=<white><train></white>)</gray>"
       invalid-selector: "<prefix> <red>列车选择器参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>@train[]</white>/<white>@train[name=EXP]</white>/<white>@train[tag=FTA]</white>"

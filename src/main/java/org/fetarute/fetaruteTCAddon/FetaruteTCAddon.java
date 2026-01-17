@@ -34,7 +34,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeTrainHandle;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
@@ -367,12 +368,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
             this,
             () -> {
               try {
+                java.util.List<org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle>
+                    handles = new java.util.ArrayList<>();
                 for (MinecartGroup group : MinecartGroupStore.getGroups()) {
                   if (group == null || !group.isValid()) {
                     continue;
                   }
-                  runtimeDispatchService.handleSignalTick(group);
+                  handles.add(new TrainCartsRuntimeTrainHandle(group));
                 }
+                runtimeDispatchService.rebuildOccupancySnapshot(handles);
               } catch (Exception ex) {
                 debug("运行时占用重建失败: " + ex.getMessage());
               }

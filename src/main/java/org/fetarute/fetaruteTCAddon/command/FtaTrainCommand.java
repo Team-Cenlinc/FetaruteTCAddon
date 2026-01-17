@@ -23,9 +23,9 @@ import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfig;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfigResolver;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.component.CommandComponent;
@@ -41,13 +41,28 @@ public final class FtaTrainCommand {
   private static final String TRAIN_SELECTOR_PREFIX = "@train[";
   private static final List<String> TRAIN_SELECTOR_KEYS =
       List.of(
-          "name=",
-          "tag=",
-          "world=",
+          "x=",
+          "y=",
+          "z=",
+          "dx=",
+          "dy=",
+          "dz=",
           "distance=",
+          "world=",
           "sort=",
           "limit=",
+          "name=",
+          "tag=",
+          "passengers=",
+          "playerpassengers=",
           "destination=",
+          "ticket=",
+          "speed=",
+          "velocity=",
+          "speedlimit=",
+          "friction=",
+          "gravity=",
+          "keepchunksloaded=",
           "unloaded=",
           "derailed=");
   private static final List<String> TRAIN_SELECTOR_SORT_VALUES =
@@ -55,6 +70,8 @@ public final class FtaTrainCommand {
   private static final List<String> TRAIN_SELECTOR_BOOLEAN_VALUES = List.of("true", "false");
   private static final List<String> TRAIN_SELECTOR_LIMIT_VALUES =
       List.of("1", "2", "5", "10", "20");
+  private static final List<String> TRAIN_SELECTOR_NUMBER_VALUES =
+      List.of("0", "1", "2", "5", "10", "20", "50", "100");
 
   private final FetaruteTCAddon plugin;
   private final TrainConfigResolver resolver = new TrainConfigResolver();
@@ -308,7 +325,52 @@ public final class FtaTrainCommand {
         }
         return suggestions;
       }
-      if (key.equals("unloaded=") || key.equals("derailed=")) {
+      if (key.equals("destination=")) {
+        for (String destination : trainDestinationSuggestions(valuePrefix)) {
+          suggestions.add(prefix + "destination=" + destination);
+          if (suggestions.size() >= SUGGESTION_LIMIT) {
+            break;
+          }
+        }
+        return suggestions;
+      }
+      if (key.equals("ticket=")) {
+        for (String ticket : trainTicketSuggestions(valuePrefix)) {
+          suggestions.add(prefix + "ticket=" + ticket);
+          if (suggestions.size() >= SUGGESTION_LIMIT) {
+            break;
+          }
+        }
+        return suggestions;
+      }
+      if (key.equals("passengers=") || key.equals("playerpassengers=")) {
+        for (String value : TRAIN_SELECTOR_LIMIT_VALUES) {
+          if (value.startsWith(valuePrefix)) {
+            suggestions.add(prefix + key + value);
+          }
+        }
+        return suggestions;
+      }
+      if (key.equals("x=")
+          || key.equals("y=")
+          || key.equals("z=")
+          || key.equals("dx=")
+          || key.equals("dy=")
+          || key.equals("dz=")
+          || key.equals("distance=")
+          || key.equals("speed=")
+          || key.equals("velocity=")
+          || key.equals("speedlimit=")
+          || key.equals("friction=")
+          || key.equals("gravity=")) {
+        for (String value : TRAIN_SELECTOR_NUMBER_VALUES) {
+          if (value.startsWith(valuePrefix)) {
+            suggestions.add(prefix + key + value);
+          }
+        }
+        return suggestions;
+      }
+      if (key.equals("unloaded=") || key.equals("derailed=") || key.equals("keepchunksloaded=")) {
         for (String value : TRAIN_SELECTOR_BOOLEAN_VALUES) {
           if (value.startsWith(valuePrefix)) {
             suggestions.add(prefix + key + value);
@@ -369,6 +431,59 @@ public final class FtaTrainCommand {
           continue;
         }
         String normalized = tag.trim();
+        if (!normalized.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+          continue;
+        }
+        suggestions.add(normalized);
+      }
+    }
+    suggestions.sort(String.CASE_INSENSITIVE_ORDER);
+    if (suggestions.size() > SUGGESTION_LIMIT) {
+      return suggestions.subList(0, SUGGESTION_LIMIT);
+    }
+    return suggestions;
+  }
+
+  private static List<String> trainDestinationSuggestions(String token) {
+    String prefix = token == null ? "" : token.trim().toLowerCase(Locale.ROOT);
+    List<String> suggestions = new ArrayList<>();
+    for (TrainProperties props : TrainPropertiesStore.getAll()) {
+      if (props == null || !props.hasDestination()) {
+        continue;
+      }
+      String destination = props.getDestination();
+      if (destination == null || destination.isBlank()) {
+        continue;
+      }
+      String normalized = destination.trim();
+      if (!normalized.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+        continue;
+      }
+      suggestions.add(normalized);
+    }
+    suggestions.sort(String.CASE_INSENSITIVE_ORDER);
+    if (suggestions.size() > SUGGESTION_LIMIT) {
+      return suggestions.subList(0, SUGGESTION_LIMIT);
+    }
+    return suggestions;
+  }
+
+  private static List<String> trainTicketSuggestions(String token) {
+    String prefix = token == null ? "" : token.trim().toLowerCase(Locale.ROOT);
+    List<String> suggestions = new ArrayList<>();
+    for (TrainProperties props : TrainPropertiesStore.getAll()) {
+      if (props == null) {
+        continue;
+      }
+      Collection<String> tickets = props.getTickets();
+      if (tickets == null || tickets.isEmpty()) {
+        continue;
+      }
+      for (String ticket : tickets) {
+        if (ticket == null || ticket.isBlank()) {
+          continue;
+        }
+        String normalized = ticket.trim();
         if (!normalized.toLowerCase(Locale.ROOT).startsWith(prefix)) {
           continue;
         }

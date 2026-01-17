@@ -14,7 +14,8 @@
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
-- 占用采用事件反射式：推进点会释放窗口外资源；信号 tick 会对“已不存在列车”的遗留占用做被动清理。
+- 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
+- TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 
 ## tags 与恢复
 推进点依赖 TrainProperties tags：
@@ -24,6 +25,7 @@
 - `FTA_ROUTE_CODE`：班次 code（由 `/fta depot spawn` 写入）
 - `FTA_ROUTE_INDEX`：已抵达节点索引（运行时写回）
 - `FTA_ROUTE_UPDATED_AT`：可选，调度更新时间（毫秒）
+- `FTA_TRAIN_NAME`：上次记录的列车名（用于改名迁移）
 
 线路定义查找顺序：
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
@@ -31,7 +33,7 @@
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
 若运行时内存中缺少该列车的 RouteProgressEntry，将在首次信号 tick 基于 tags 自动初始化，避免“每 tick 反复发车动作”的异常。
-插件启动后会延迟 1 tick 扫描现存列车并触发一次信号评估，用于重建占用快照。
+插件启动后会延迟 1 tick 扫描现存列车并重建占用快照（基于 tags 初始化进度并重新评估信号）。
 
 ## 列车速度配置
 通过 `/fta train config set|list` 写入列车配置：
@@ -59,5 +61,5 @@
 - 值越大越保守，能降低咽喉/道岔前卡死风险。
 
 ## 已知限制
-- 占用释放采用事件反射式：列车推进后释放窗口外资源；并在列车消失时被动清理遗留占用。
+- 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。

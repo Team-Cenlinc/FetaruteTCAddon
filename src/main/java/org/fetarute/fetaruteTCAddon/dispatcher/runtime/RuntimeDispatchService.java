@@ -19,8 +19,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfig;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.train.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -84,6 +84,7 @@ public final class RuntimeDispatchService {
     RuntimeTrainHandle train = new TrainCartsRuntimeTrainHandle(group);
     TrainProperties properties = train.properties();
     String trainName = properties != null ? properties.getTrainName() : "unknown";
+    handleRenameIfNeeded(properties, trainName);
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
     if (routeOpt.isEmpty()) {
@@ -208,7 +209,7 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 清理“已不存在列车”的占用记录（事件反射式占用的兜底）。
+   * 清理“已不存在列车”的占用记录与进度缓存（事件反射式占用的兜底）。
    *
    * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。
    */
@@ -222,6 +223,14 @@ public final class RuntimeDispatchService {
         continue;
       }
       activeLower.add(name.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+    for (String name : progressRegistry.snapshot().keySet()) {
+      if (name == null || name.isBlank()) {
+        continue;
+      }
+      if (!activeLower.contains(name.trim().toLowerCase(java.util.Locale.ROOT))) {
+        progressRegistry.remove(name);
+      }
     }
     java.util.Set<String> released = new java.util.HashSet<>();
     for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
@@ -241,6 +250,44 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 启动/重载后扫描现存列车，重建占用快照并修复孤儿占用。
+   *
+   * <p>会对每列车执行一次信号评估，用 tags 初始化进度，确保占用与信号状态同步。
+   */
+  public void rebuildOccupancySnapshot(java.util.Collection<? extends RuntimeTrainHandle> trains) {
+    if (trains == null || trains.isEmpty()) {
+      return;
+    }
+    java.util.Set<String> activeTrainNames = new java.util.HashSet<>();
+    for (RuntimeTrainHandle train : trains) {
+      if (train == null || !train.isValid()) {
+        continue;
+      }
+      TrainProperties properties = train.properties();
+      if (properties != null && properties.getTrainName() != null) {
+        activeTrainNames.add(properties.getTrainName());
+      }
+      handleSignalTick(train, false);
+    }
+    cleanupOrphanOccupancyClaims(activeTrainNames);
+  }
+
+  /**
+   * 列车卸载/移除时释放占用并清理进度缓存。
+   *
+   * <p>用于事件反射式占用的主动清理，避免列车消失后资源长期占用。
+   */
+  public void handleTrainRemoved(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    if (occupancyManager != null) {
+      occupancyManager.releaseByTrain(trainName);
+    }
+    progressRegistry.remove(trainName);
+  }
+
+  /**
    * 信号 tick 入口：重算占用并根据许可变化调整控车。
    *
    * <p>forceApply 用于强制刷新（例如停站结束），即便信号等级未变化也会重新下发速度/发车动作。
@@ -254,6 +301,7 @@ public final class RuntimeDispatchService {
       return;
     }
     String trainName = properties.getTrainName();
+    handleRenameIfNeeded(properties, trainName);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
     if (routeOpt.isEmpty()) {
       return;
@@ -362,6 +410,25 @@ public final class RuntimeDispatchService {
     if (aspect == SignalAspect.PROCEED && allowLaunch && train != null && !train.isMoving()) {
       train.launch(targetBpt, accelBpt2);
     }
+  }
+
+  /** 处理列车改名：迁移进度缓存并释放旧名占用，随后写回当前名称 tag。 */
+  void handleRenameIfNeeded(TrainProperties properties, String trainName) {
+    if (properties == null || trainName == null || trainName.isBlank()) {
+      return;
+    }
+    Optional<String> previousOpt =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME);
+    if (previousOpt.isPresent()) {
+      String previous = previousOpt.get();
+      if (!previous.equalsIgnoreCase(trainName)) {
+        progressRegistry.rename(previous, trainName);
+        if (occupancyManager != null) {
+          occupancyManager.releaseByTrain(previous);
+        }
+      }
+    }
+    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_TRAIN_NAME, trainName);
   }
 
   /**

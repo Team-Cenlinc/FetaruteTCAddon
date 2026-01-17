@@ -1,4 +1,4 @@
-package org.fetarute.fetaruteTCAddon.dispatcher.runtime.train;
+package org.fetarute.fetaruteTCAddon.dispatcher.runtime.config;
 
 import java.util.Locale;
 import java.util.Optional;
