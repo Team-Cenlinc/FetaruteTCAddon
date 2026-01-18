@@ -25,6 +25,8 @@ runtime:
   dispatch-tick-interval-ticks: 10
   # 占用请求 lookahead 边数
   lookahead-edges: 2
+  # 道岔区联合锁闭范围（向前 N 段边）
+  switcher-zone-edges: 3
   # 进站前的限速（blocks per second）
   approach-speed-bps: 4.0
   # CAUTION 信号速度上限（blocks per second），可被连通分量覆盖

@@ -10,6 +10,7 @@ import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
@@ -17,19 +18,25 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
 /**
  * 运行时占用请求构建器：把“列车状态 + 线路定义 + 图”转换成 OccupancyRequest。
  *
- * <p>默认行为只做 lookahead 的边占用。
+ * <p>默认会占用 lookahead 边与对应节点资源，并附加走廊/道岔冲突资源；道岔冲突可按 {@code switcherZoneEdges} 限制为“前 N 段边内的道岔”。
  */
 public final class OccupancyRequestBuilder {
 
   private final RailGraph graph;
   private final int lookaheadEdges;
+  private final int switcherZoneEdges;
+  private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
 
-  public OccupancyRequestBuilder(RailGraph graph, int lookaheadEdges) {
+  public OccupancyRequestBuilder(RailGraph graph, int lookaheadEdges, int switcherZoneEdges) {
     this.graph = Objects.requireNonNull(graph, "graph");
     if (lookaheadEdges <= 0) {
       throw new IllegalArgumentException("lookaheadEdges 必须大于 0");
     }
+    if (switcherZoneEdges < 0) {
+      throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");
+    }
     this.lookaheadEdges = lookaheadEdges;
+    this.switcherZoneEdges = switcherZoneEdges;
   }
 
   /**
@@ -53,7 +60,7 @@ public final class OccupancyRequestBuilder {
   /**
    * 从给定的节点列表与 currentIndex 构建占用请求。
    *
-   * <p>该方法用于未来从其他来源（非 RouteDefinition）构建 lookahead 请求。
+   * <p>该方法用于未来从其他来源（非 RouteDefinition）构建 lookahead 请求；会同时生成节点与冲突资源。
    *
    * <p>currentIndex 指向“已抵达节点”的索引，资源从 currentIndex -> currentIndex+1 开始。
    */
@@ -92,8 +99,41 @@ public final class OccupancyRequestBuilder {
     for (RailEdge edge : edges) {
       resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
     }
+    applySwitcherZoneConflicts(resources, pathNodes);
     return Optional.of(
         new OccupancyRequest(trainName, routeId, requestTime, List.copyOf(resources)));
+  }
+
+  private void applySwitcherZoneConflicts(
+      Set<OccupancyResource> resources, List<NodeId> pathNodes) {
+    if (resources == null || pathNodes == null || switcherZoneEdges < 0) {
+      return;
+    }
+    Set<String> allowed = new LinkedHashSet<>();
+    if (!pathNodes.isEmpty()) {
+      int maxIndex = Math.min(pathNodes.size() - 1, switcherZoneEdges);
+      for (int i = 0; i <= maxIndex; i++) {
+        NodeId nodeId = pathNodes.get(i);
+        if (nodeId == null) {
+          continue;
+        }
+        // 仅保留“前 N 段边内”的道岔冲突资源，避免过度锁闭。
+        graph
+            .findNode(nodeId)
+            .filter(node -> node.type() == NodeType.SWITCHER)
+            .ifPresent(node -> allowed.add(OccupancyResourceResolver.switcherConflictId(node)));
+      }
+    }
+    // 移除超出道岔联合锁闭范围的冲突资源。
+    resources.removeIf(
+        resource ->
+            resource.kind() == ResourceKind.CONFLICT
+                && resource.key().startsWith(SWITCHER_CONFLICT_PREFIX)
+                && !allowed.contains(resource.key()));
+    // 补回前 N 段边内的道岔冲突资源。
+    for (String key : allowed) {
+      resources.add(OccupancyResource.forConflict(key));
+    }
   }
 
   private List<RailEdge> resolveEdges(List<NodeId> pathNodes) {
@@ -103,6 +143,7 @@ public final class OccupancyRequestBuilder {
       NodeId to = pathNodes.get(i + 1);
       Optional<RailEdge> edgeOpt = findEdge(from, to);
       if (edgeOpt.isEmpty()) {
+        // 任一相邻节点不可达时，直接失败并返回空列表。
         return List.of();
       }
       edges.add(edgeOpt.get());
@@ -119,6 +160,7 @@ public final class OccupancyRequestBuilder {
         return Optional.of(edge);
       }
     }
+    // 无向图：只要两端点相连即可视为可达。
     return Optional.empty();
   }
 }

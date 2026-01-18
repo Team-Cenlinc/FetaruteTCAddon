@@ -13,9 +13,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
 /**
- * 单线区间冲突组索引：把“度数=2 连续链路”压缩成走廊，并为区间生成 conflict key。
+ * 单线区间冲突组索引：把“度数=2 连续链路”压缩成走廊，并为区间生成冲突资源 key。
  *
- * <p>边界判定：度数≠2 或节点类型为 {@link NodeType#SWITCHER}。
+ * <p>边界判定：度数≠2 或节点类型为 {@link NodeType#SWITCHER}。无边界闭环会被归并为 {@code
+ * CONFLICT:single:<componentKey>:cycle:<minNode>} 形式的冲突组。
  */
 public final class RailGraphConflictIndex {
 
@@ -105,6 +106,7 @@ public final class RailGraphConflictIndex {
     NodeId current = start;
     RailEdge edge = startEdge;
     while (true) {
+      // 以“边”为访问单元，防止回到同一段轨道时死循环。
       EdgeId edgeId = EdgeId.undirected(edge.from(), edge.to());
       if (!visited.add(edgeId)) {
         break;
@@ -117,6 +119,7 @@ public final class RailGraphConflictIndex {
       if (boundaries.contains(next)) {
         return new Corridor(start, next, edges);
       }
+      // 在度数=2 的中间节点上继续前进，只要排除“回头边”即可确定下一段。
       RailEdge nextEdge = nextEdge(graph, next, current);
       if (nextEdge == null) {
         return new Corridor(start, next, edges);
@@ -136,6 +139,7 @@ public final class RailGraphConflictIndex {
     RailEdge edge = startEdge;
     NodeId minNode = minNode(start, startEdge.from(), startEdge.to());
     while (true) {
+      // 在无边界闭环里遍历，遇到已访问边即可结束，避免无穷循环。
       EdgeId edgeId = EdgeId.undirected(edge.from(), edge.to());
       if (!visited.add(edgeId)) {
         break;
@@ -148,6 +152,7 @@ public final class RailGraphConflictIndex {
       }
       previous = current;
       current = next;
+      // 闭环上的节点度数=2，只需避开回头边即可继续。
       RailEdge nextEdge = nextEdge(graph, current, previous);
       if (nextEdge == null || current.equals(start)) {
         break;
@@ -169,6 +174,7 @@ public final class RailGraphConflictIndex {
       if (other == null) {
         continue;
       }
+      // 只排除回头边，其它边视为“前进方向”。
       if (previous == null || !other.equals(previous)) {
         return edge;
       }
@@ -181,6 +187,7 @@ public final class RailGraphConflictIndex {
     String componentKey = resolveComponentKey(componentIndex, start, end);
     String left = start != null ? start.value() : "unknown";
     String right = end != null ? end.value() : "unknown";
+    // 按字典序排序，避免 A~B 与 B~A 生成不同 key。
     if (left.compareTo(right) > 0) {
       String swap = left;
       left = right;
@@ -192,6 +199,7 @@ public final class RailGraphConflictIndex {
   private static String buildCycleKey(RailGraphComponentIndex componentIndex, NodeId minNode) {
     String componentKey = resolveComponentKey(componentIndex, minNode, minNode);
     String nodeValue = minNode != null ? minNode.value() : "unknown";
+    // 闭环以最小节点名归一化，确保不同遍历路径生成同一 key。
     return SINGLE_PREFIX + componentKey + ":" + CYCLE_SEGMENT + nodeValue;
   }
 
@@ -211,6 +219,7 @@ public final class RailGraphConflictIndex {
         }
       }
     }
+    // 兜底：未知连通分量时退回 "unknown"。
     return "unknown";
   }
 
@@ -222,6 +231,7 @@ public final class RailGraphConflictIndex {
     if (b != null && compareNode(b, current) < 0) {
       current = b;
     }
+    // 统一用字典序最小节点做闭环标识，确保 key 稳定。
     return current;
   }
 

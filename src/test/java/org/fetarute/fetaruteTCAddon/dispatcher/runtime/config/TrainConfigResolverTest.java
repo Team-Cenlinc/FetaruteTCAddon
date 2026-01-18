@@ -65,7 +65,7 @@ class TrainConfigResolverTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000)),
         new ConfigManager.GraphSettings(8.0),
         new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
-        new ConfigManager.RuntimeSettings(10, 2, 4.0, 6.0),
+        new ConfigManager.RuntimeSettings(10, 2, 3, 4.0, 6.0),
         new ConfigManager.TrainConfigSettings(
             "emu",
             new ConfigManager.TrainTypeSettings(0.8, 1.0),

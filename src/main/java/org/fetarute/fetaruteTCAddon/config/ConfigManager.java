@@ -22,6 +22,7 @@ public final class ConfigManager {
   private static final float DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH = 1.2f;
   private static final int DEFAULT_DISPATCH_TICK_INTERVAL = 10;
   private static final int DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES = 2;
+  private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
   private static final double DEFAULT_CAUTION_SPEED_BPS = 6.0;
   private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
@@ -154,6 +155,7 @@ public final class ConfigManager {
       ConfigurationSection section, java.util.logging.Logger logger) {
     int tickInterval = DEFAULT_DISPATCH_TICK_INTERVAL;
     int lookaheadEdges = DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES;
+    int switcherZoneEdges = DEFAULT_SWITCHER_ZONE_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
     double cautionSpeed = DEFAULT_CAUTION_SPEED_BPS;
     if (section != null) {
@@ -169,6 +171,12 @@ public final class ConfigManager {
       } else {
         logger.warning("runtime.lookahead-edges 配置无效: " + configuredLookahead);
       }
+      int configuredSwitcherZone = section.getInt("switcher-zone-edges", switcherZoneEdges);
+      if (configuredSwitcherZone >= 0) {
+        switcherZoneEdges = configuredSwitcherZone;
+      } else {
+        logger.warning("runtime.switcher-zone-edges 配置无效: " + configuredSwitcherZone);
+      }
       double configuredApproach = section.getDouble("approach-speed-bps", approachSpeed);
       if (Double.isFinite(configuredApproach) && configuredApproach >= 0.0) {
         approachSpeed = configuredApproach;
@@ -182,7 +190,8 @@ public final class ConfigManager {
         logger.warning("runtime.caution-speed-bps 配置无效: " + configuredCaution);
       }
     }
-    return new RuntimeSettings(tickInterval, lookaheadEdges, approachSpeed, cautionSpeed);
+    return new RuntimeSettings(
+        tickInterval, lookaheadEdges, switcherZoneEdges, approachSpeed, cautionSpeed);
   }
 
   private static TrainConfigSettings parseTrain(
@@ -302,6 +311,7 @@ public final class ConfigManager {
   public record RuntimeSettings(
       int dispatchTickIntervalTicks,
       int lookaheadEdges,
+      int switcherZoneEdges,
       double approachSpeedBps,
       double cautionSpeedBps) {
     public RuntimeSettings {
@@ -310,6 +320,9 @@ public final class ConfigManager {
       }
       if (lookaheadEdges <= 0) {
         throw new IllegalArgumentException("lookaheadEdges 必须为正数");
+      }
+      if (switcherZoneEdges < 0) {
+        throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");
       }
       if (!Double.isFinite(approachSpeedBps) || approachSpeedBps < 0.0) {
         throw new IllegalArgumentException("approachSpeedBps 必须为非负数");

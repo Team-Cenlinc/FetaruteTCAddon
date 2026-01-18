@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -39,6 +40,35 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
 
 class RuntimeDispatchServiceTest {
+
+  @Test
+  void handleSignalTickSkipsWhenRouteIndexMissing() {
+    TagStore tags =
+        new TagStore("train-1", "FTA_OPERATOR_CODE=op", "FTA_LINE_CODE=l1", "FTA_ROUTE_CODE=r1");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+
+    verifyNoInteractions(occupancyManager);
+  }
 
   @Test
   void handleSignalTickInitializesProgressRegistryAndAvoidsRepeatedLaunch() {
@@ -441,7 +471,7 @@ class RuntimeDispatchServiceTest {
     ConfigManager.AutoStationSettings autoStation =
         new ConfigManager.AutoStationSettings("", 1.0f, 1.0f);
     ConfigManager.RuntimeSettings runtime =
-        new ConfigManager.RuntimeSettings(intervalTicks, 1, 0.0, 6.0);
+        new ConfigManager.RuntimeSettings(intervalTicks, 1, 3, 0.0, 6.0);
     ConfigManager.TrainTypeSettings typeDefaults = new ConfigManager.TrainTypeSettings(1.0, 1.0);
     ConfigManager.TrainConfigSettings train =
         new ConfigManager.TrainConfigSettings(

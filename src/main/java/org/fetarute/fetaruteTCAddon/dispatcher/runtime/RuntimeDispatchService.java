@@ -139,7 +139,9 @@ public final class RuntimeDispatchService {
     RailGraph graph = graphOpt.get();
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph, configManager.current().runtimeSettings().lookaheadEdges());
+            graph,
+            configManager.current().runtimeSettings().lookaheadEdges(),
+            configManager.current().runtimeSettings().switcherZoneEdges());
     Optional<OccupancyRequest> requestOpt =
         builder.buildFromNodes(
             trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now);
@@ -302,6 +304,15 @@ public final class RuntimeDispatchService {
     }
     String trainName = properties.getTrainName();
     handleRenameIfNeeded(properties, trainName);
+    if (TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isEmpty()) {
+      if (progressRegistry.get(trainName).isPresent()) {
+        if (occupancyManager != null) {
+          occupancyManager.releaseByTrain(trainName);
+        }
+        progressRegistry.remove(trainName);
+      }
+      return;
+    }
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
     if (routeOpt.isEmpty()) {
       return;
@@ -323,7 +334,9 @@ public final class RuntimeDispatchService {
     RailGraph graph = graphOpt.get();
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph, configManager.current().runtimeSettings().lookaheadEdges());
+            graph,
+            configManager.current().runtimeSettings().lookaheadEdges(),
+            configManager.current().runtimeSettings().switcherZoneEdges());
     Optional<OccupancyRequest> requestOpt =
         builder.buildFromNodes(
             trainName,
