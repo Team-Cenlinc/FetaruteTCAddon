@@ -43,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.JdbcStorageProvider;
@@ -695,13 +696,14 @@ final class JdbcRepositoryTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
     ConfigManager.ConfigView view =
         new ConfigManager.ConfigView(
-            4,
+            5,
             false,
             "zh_CN",
             settings,
             new ConfigManager.GraphSettings(8.0),
             new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
-            new ConfigManager.RuntimeSettings(10, 2, 3, 4.0, 6.0),
+            new ConfigManager.RuntimeSettings(
+                10, 2, 3, 4.0, 6.0, 3.5, true, SpeedCurveType.PHYSICS, 1.0, 0.0, 0.2, 60, true),
             new ConfigManager.TrainConfigSettings(
                 "emu",
                 new ConfigManager.TrainTypeSettings(0.8, 1.0),

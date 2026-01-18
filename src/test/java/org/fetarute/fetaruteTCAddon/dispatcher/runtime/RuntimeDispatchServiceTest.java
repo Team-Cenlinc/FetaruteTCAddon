@@ -26,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -471,7 +472,20 @@ class RuntimeDispatchServiceTest {
     ConfigManager.AutoStationSettings autoStation =
         new ConfigManager.AutoStationSettings("", 1.0f, 1.0f);
     ConfigManager.RuntimeSettings runtime =
-        new ConfigManager.RuntimeSettings(intervalTicks, 1, 3, 0.0, 6.0);
+        new ConfigManager.RuntimeSettings(
+            intervalTicks,
+            1,
+            3,
+            0.0,
+            6.0,
+            3.5,
+            true,
+            SpeedCurveType.PHYSICS,
+            1.0,
+            0.0,
+            0.2,
+            60,
+            true);
     ConfigManager.TrainTypeSettings typeDefaults = new ConfigManager.TrainTypeSettings(1.0, 1.0);
     ConfigManager.TrainConfigSettings train =
         new ConfigManager.TrainConfigSettings(
@@ -518,6 +532,11 @@ class RuntimeDispatchServiceTest {
     @Override
     public boolean isMoving() {
       return moving;
+    }
+
+    @Override
+    public double currentSpeedBlocksPerTick() {
+      return 0.0;
     }
 
     @Override

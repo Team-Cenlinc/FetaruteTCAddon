@@ -12,6 +12,9 @@ public interface RuntimeTrainHandle {
   /** 当前是否处于移动状态。 */
   boolean isMoving();
 
+  /** 当前速度（blocks per tick），用于低速 failover 判定。 */
+  double currentSpeedBlocksPerTick();
+
   /** 运行时所在世界 ID（用于查询调度图快照）。 */
   UUID worldId();
 

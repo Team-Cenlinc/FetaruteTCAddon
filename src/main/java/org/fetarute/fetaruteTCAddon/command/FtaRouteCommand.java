@@ -1480,8 +1480,7 @@ public final class FtaRouteCommand {
       }
 
       // 动作行：附着到上一条 stop 的 notes（用换行拼接，便于后续解释器读取）。
-      String firstSegment = firstSegment(trimmed);
-      if (isActionLine(firstSegment)) {
+      if (isActionLine(trimmed)) {
         if (stops.isEmpty()) {
           sender.sendMessage(
               locale.component(
@@ -1489,11 +1488,16 @@ public final class FtaRouteCommand {
                   Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
           return Optional.empty();
         }
+        String normalizedAction = normalizeActionLine(trimmed);
         RouteStop last = stops.get(stops.size() - 1);
         String mergedNotes =
             last.notes()
-                .map(existing -> existing.isBlank() ? trimmed : (existing + "\n" + trimmed))
-                .orElse(trimmed);
+                .map(
+                    existing ->
+                        existing.isBlank()
+                            ? normalizedAction
+                            : (existing + "\n" + normalizedAction))
+                .orElse(normalizedAction);
         stops.set(
             stops.size() - 1,
             new RouteStop(
@@ -1585,11 +1589,41 @@ public final class FtaRouteCommand {
     return idx < 0 ? line : line.substring(0, idx);
   }
 
-  private static boolean isActionLine(String firstSegment) {
-    if (firstSegment == null) {
+  private static boolean isActionLine(String line) {
+    if (line == null) {
       return false;
     }
-    return ACTION_PREFIXES.contains(firstSegment.trim().toUpperCase(Locale.ROOT));
+    String trimmed = line.trim();
+    if (trimmed.isEmpty()) {
+      return false;
+    }
+    for (String prefix : ACTION_PREFIXES) {
+      if (startsWithWord(trimmed, prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static String normalizeActionLine(String line) {
+    if (line == null) {
+      return "";
+    }
+    String trimmed = line.trim();
+    for (String prefix : ACTION_PREFIXES) {
+      if (!startsWithWord(trimmed, prefix)) {
+        continue;
+      }
+      String rest = trimmed.substring(prefix.length()).trim();
+      if (rest.isEmpty()) {
+        return prefix;
+      }
+      if (rest.startsWith(":")) {
+        return prefix + rest;
+      }
+      return prefix + ":" + rest;
+    }
+    return trimmed;
   }
 
   private RouteValidationResult validateRouteStops(
@@ -1729,9 +1763,8 @@ public final class FtaRouteCommand {
       if (trimmed.isEmpty()) {
         continue;
       }
-      String prefix = firstSegment(trimmed);
-      if (isActionLine(prefix)) {
-        lines.add(trimmed);
+      if (isActionLine(trimmed)) {
+        lines.add(normalizeActionLine(trimmed));
       }
     }
     return lines;

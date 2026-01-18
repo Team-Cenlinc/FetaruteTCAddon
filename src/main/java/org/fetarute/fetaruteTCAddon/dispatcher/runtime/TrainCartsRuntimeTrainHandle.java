@@ -31,6 +31,16 @@ public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
   }
 
   @Override
+  public double currentSpeedBlocksPerTick() {
+    MinecartMember<?> head = group.head();
+    if (head == null) {
+      return 0.0;
+    }
+    double speed = head.getRealSpeed();
+    return Double.isFinite(speed) ? Math.abs(speed) : 0.0;
+  }
+
+  @Override
   public UUID worldId() {
     if (group.getWorld() == null) {
       return new UUID(0L, 0L);

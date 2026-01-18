@@ -5,6 +5,7 @@ import java.util.Optional;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 
 /**
@@ -14,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 4;
+  private static final int EXPECTED_CONFIG_VERSION = 5;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
@@ -25,6 +26,14 @@ public final class ConfigManager {
   private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
   private static final double DEFAULT_CAUTION_SPEED_BPS = 6.0;
+  private static final double DEFAULT_APPROACH_DEPOT_SPEED_BPS = 3.5;
+  private static final boolean DEFAULT_SPEED_CURVE_ENABLED = true;
+  private static final SpeedCurveType DEFAULT_SPEED_CURVE_TYPE = SpeedCurveType.PHYSICS;
+  private static final double DEFAULT_SPEED_CURVE_FACTOR = 1.0;
+  private static final double DEFAULT_SPEED_CURVE_EARLY_BRAKE_BLOCKS = 0.0;
+  private static final double DEFAULT_FAILOVER_STALL_SPEED_BPS = 0.2;
+  private static final int DEFAULT_FAILOVER_STALL_TICKS = 60;
+  private static final boolean DEFAULT_FAILOVER_UNREACHABLE_STOP = true;
   private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
   private static final double DEFAULT_EMU_DECEL_BPS2 = 1.0;
   private static final double DEFAULT_DMU_ACCEL_BPS2 = 0.7;
@@ -158,6 +167,14 @@ public final class ConfigManager {
     int switcherZoneEdges = DEFAULT_SWITCHER_ZONE_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
     double cautionSpeed = DEFAULT_CAUTION_SPEED_BPS;
+    double approachDepotSpeed = DEFAULT_APPROACH_DEPOT_SPEED_BPS;
+    boolean speedCurveEnabled = DEFAULT_SPEED_CURVE_ENABLED;
+    SpeedCurveType speedCurveType = DEFAULT_SPEED_CURVE_TYPE;
+    double speedCurveFactor = DEFAULT_SPEED_CURVE_FACTOR;
+    double speedCurveEarlyBrakeBlocks = DEFAULT_SPEED_CURVE_EARLY_BRAKE_BLOCKS;
+    double failoverStallSpeed = DEFAULT_FAILOVER_STALL_SPEED_BPS;
+    int failoverStallTicks = DEFAULT_FAILOVER_STALL_TICKS;
+    boolean failoverUnreachableStop = DEFAULT_FAILOVER_UNREACHABLE_STOP;
     if (section != null) {
       int configuredInterval = section.getInt("dispatch-tick-interval-ticks", tickInterval);
       if (configuredInterval > 0) {
@@ -189,9 +206,69 @@ public final class ConfigManager {
       } else {
         logger.warning("runtime.caution-speed-bps 配置无效: " + configuredCaution);
       }
+      double configuredDepotApproach =
+          section.getDouble("approach-depot-speed-bps", approachDepotSpeed);
+      if (Double.isFinite(configuredDepotApproach) && configuredDepotApproach >= 0.0) {
+        approachDepotSpeed = configuredDepotApproach;
+      } else {
+        logger.warning("runtime.approach-depot-speed-bps 配置无效: " + configuredDepotApproach);
+      }
+      boolean configuredSpeedCurve = section.getBoolean("speed-curve-enabled", speedCurveEnabled);
+      speedCurveEnabled = configuredSpeedCurve;
+      String rawCurveType = section.getString("speed-curve-type", speedCurveType.name());
+      speedCurveType =
+          SpeedCurveType.parse(rawCurveType)
+              .orElseGet(
+                  () -> {
+                    logger.warning("runtime.speed-curve-type 配置无效: " + rawCurveType + "，已回退为默认值");
+                    return DEFAULT_SPEED_CURVE_TYPE;
+                  });
+      double configuredSpeedCurveFactor = section.getDouble("speed-curve-factor", speedCurveFactor);
+      if (Double.isFinite(configuredSpeedCurveFactor) && configuredSpeedCurveFactor > 0.0) {
+        speedCurveFactor = configuredSpeedCurveFactor;
+      } else {
+        logger.warning("runtime.speed-curve-factor 配置无效: " + configuredSpeedCurveFactor);
+      }
+      double configuredSpeedCurveEarlyBrake =
+          section.getDouble("speed-curve-early-brake-blocks", speedCurveEarlyBrakeBlocks);
+      if (Double.isFinite(configuredSpeedCurveEarlyBrake)
+          && configuredSpeedCurveEarlyBrake >= 0.0) {
+        speedCurveEarlyBrakeBlocks = configuredSpeedCurveEarlyBrake;
+      } else {
+        logger.warning(
+            "runtime.speed-curve-early-brake-blocks 配置无效: " + configuredSpeedCurveEarlyBrake);
+      }
+      double configuredStallSpeed =
+          section.getDouble("failover-stall-speed-bps", failoverStallSpeed);
+      if (Double.isFinite(configuredStallSpeed) && configuredStallSpeed >= 0.0) {
+        failoverStallSpeed = configuredStallSpeed;
+      } else {
+        logger.warning("runtime.failover-stall-speed-bps 配置无效: " + configuredStallSpeed);
+      }
+      int configuredStallTicks = section.getInt("failover-stall-ticks", failoverStallTicks);
+      if (configuredStallTicks > 0) {
+        failoverStallTicks = configuredStallTicks;
+      } else {
+        logger.warning("runtime.failover-stall-ticks 配置无效: " + configuredStallTicks);
+      }
+      boolean configuredUnreachableStop =
+          section.getBoolean("failover-unreachable-stop", failoverUnreachableStop);
+      failoverUnreachableStop = configuredUnreachableStop;
     }
     return new RuntimeSettings(
-        tickInterval, lookaheadEdges, switcherZoneEdges, approachSpeed, cautionSpeed);
+        tickInterval,
+        lookaheadEdges,
+        switcherZoneEdges,
+        approachSpeed,
+        cautionSpeed,
+        approachDepotSpeed,
+        speedCurveEnabled,
+        speedCurveType,
+        speedCurveFactor,
+        speedCurveEarlyBrakeBlocks,
+        failoverStallSpeed,
+        failoverStallTicks,
+        failoverUnreachableStop);
   }
 
   private static TrainConfigSettings parseTrain(
@@ -313,7 +390,15 @@ public final class ConfigManager {
       int lookaheadEdges,
       int switcherZoneEdges,
       double approachSpeedBps,
-      double cautionSpeedBps) {
+      double cautionSpeedBps,
+      double approachDepotSpeedBps,
+      boolean speedCurveEnabled,
+      SpeedCurveType speedCurveType,
+      double speedCurveFactor,
+      double speedCurveEarlyBrakeBlocks,
+      double failoverStallSpeedBps,
+      int failoverStallTicks,
+      boolean failoverUnreachableStop) {
     public RuntimeSettings {
       if (dispatchTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("dispatchTickIntervalTicks 必须为正数");
@@ -329,6 +414,24 @@ public final class ConfigManager {
       }
       if (!Double.isFinite(cautionSpeedBps) || cautionSpeedBps <= 0.0) {
         throw new IllegalArgumentException("cautionSpeedBps 必须为正数");
+      }
+      if (!Double.isFinite(approachDepotSpeedBps) || approachDepotSpeedBps < 0.0) {
+        throw new IllegalArgumentException("approachDepotSpeedBps 必须为非负数");
+      }
+      if (speedCurveType == null) {
+        throw new IllegalArgumentException("speedCurveType 不能为空");
+      }
+      if (!Double.isFinite(speedCurveFactor) || speedCurveFactor <= 0.0) {
+        throw new IllegalArgumentException("speedCurveFactor 必须为正数");
+      }
+      if (!Double.isFinite(speedCurveEarlyBrakeBlocks) || speedCurveEarlyBrakeBlocks < 0.0) {
+        throw new IllegalArgumentException("speedCurveEarlyBrakeBlocks 必须为非负数");
+      }
+      if (!Double.isFinite(failoverStallSpeedBps) || failoverStallSpeedBps < 0.0) {
+        throw new IllegalArgumentException("failoverStallSpeedBps 必须为非负数");
+      }
+      if (failoverStallTicks <= 0) {
+        throw new IllegalArgumentException("failoverStallTicks 必须为正数");
       }
     }
   }

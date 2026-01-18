@@ -550,6 +550,7 @@ command:
           - "# action: CHANGE/DYNAMIC/CRET/DSTY/ACTION"
           - "# 修饰: PASS/STOP/TERM, dwell=<秒>（基准停车时间）"
           - "# 限制: CRET 仅允许首个 stop；DSTY 必须为最后 stop"
+          - "# 规则较长，请翻页查看后续"
           - "#"
           - "# 右键 waypoint/autostation/depot"
           - "# /switcher 牌子或其轨道可把 nodeId 追加到末尾"
@@ -576,6 +577,8 @@ command:
       pattern-invalid: "<prefix> <red>车型/编组无效</red> <gray>(pattern=<white><pattern></white>)</gray>"
       rail-missing: "<prefix> <red>车库附近未找到可生成轨道</red> <gray>(node=<white><node></white>)</gray>"
       spawn-failed: "<prefix> <red>生成列车失败</red> <gray>(node=<white><node></white>)</gray>"
+      route-empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
+      route-mismatch: "<prefix> <red>首个 stop 与车库不匹配</red> <gray>(route=<white><route></white>, node=<white><node></white>)</gray>"
       success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
 
 enum:

@@ -9,6 +9,8 @@ import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -25,6 +27,7 @@ public final class OccupancyRequestBuilder {
   private final RailGraph graph;
   private final int lookaheadEdges;
   private final int switcherZoneEdges;
+  private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
 
   public OccupancyRequestBuilder(RailGraph graph, int lookaheadEdges, int switcherZoneEdges) {
@@ -70,6 +73,21 @@ public final class OccupancyRequestBuilder {
       List<NodeId> nodes,
       int currentIndex,
       Instant now) {
+    return buildContextFromNodes(trainName, routeId, nodes, currentIndex, now)
+        .map(OccupancyRequestContext::request);
+  }
+
+  /**
+   * 构建占用请求并返回路径上下文。
+   *
+   * <p>用于运行时做 lookahead 距离估算与诊断输出。
+   */
+  public Optional<OccupancyRequestContext> buildContextFromNodes(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(nodes, "nodes");
@@ -85,12 +103,16 @@ public final class OccupancyRequestBuilder {
     for (int i = currentIndex; i <= maxIndex; i++) {
       pathNodes.add(nodes.get(i));
     }
-    List<RailEdge> edges = resolveEdges(pathNodes);
+    List<NodeId> expandedNodes = expandPathNodes(pathNodes);
+    if (expandedNodes.isEmpty()) {
+      return Optional.empty();
+    }
+    List<RailEdge> edges = resolveEdges(expandedNodes);
     if (edges.isEmpty()) {
       return Optional.empty();
     }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
-    for (NodeId node : pathNodes) {
+    for (NodeId node : expandedNodes) {
       if (node == null) {
         continue;
       }
@@ -99,9 +121,10 @@ public final class OccupancyRequestBuilder {
     for (RailEdge edge : edges) {
       resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
     }
-    applySwitcherZoneConflicts(resources, pathNodes);
-    return Optional.of(
-        new OccupancyRequest(trainName, routeId, requestTime, List.copyOf(resources)));
+    applySwitcherZoneConflicts(resources, expandedNodes);
+    OccupancyRequest request =
+        new OccupancyRequest(trainName, routeId, requestTime, List.copyOf(resources));
+    return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
   }
 
   private void applySwitcherZoneConflicts(
@@ -149,6 +172,39 @@ public final class OccupancyRequestBuilder {
       edges.add(edgeOpt.get());
     }
     return edges;
+  }
+
+  private List<NodeId> expandPathNodes(List<NodeId> nodes) {
+    if (nodes == null || nodes.size() < 2) {
+      return List.of();
+    }
+    List<NodeId> expanded = new ArrayList<>();
+    expanded.add(nodes.get(0));
+    for (int i = 0; i < nodes.size() - 1; i++) {
+      NodeId from = nodes.get(i);
+      NodeId to = nodes.get(i + 1);
+      if (from == null || to == null) {
+        return List.of();
+      }
+      Optional<RailEdge> directEdge = findEdge(from, to);
+      if (directEdge.isPresent()) {
+        expanded.add(to);
+        continue;
+      }
+      Optional<RailGraphPath> pathOpt =
+          pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+      if (pathOpt.isEmpty()) {
+        return List.of();
+      }
+      List<NodeId> segment = pathOpt.get().nodes();
+      if (segment.size() < 2) {
+        return List.of();
+      }
+      for (int j = 1; j < segment.size(); j++) {
+        expanded.add(segment.get(j));
+      }
+    }
+    return List.copyOf(expanded);
   }
 
   private Optional<RailEdge> findEdge(NodeId from, NodeId to) {

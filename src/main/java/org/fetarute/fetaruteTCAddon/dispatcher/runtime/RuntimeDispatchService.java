@@ -8,12 +8,14 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
@@ -23,9 +25,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyLookaheadResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -41,7 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
  */
 public final class RuntimeDispatchService {
 
-  private static final double TICKS_PER_SECOND = 20.0;
+  private static final double SPEED_TICKS_PER_SECOND = 20.0;
 
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
@@ -50,7 +54,10 @@ public final class RuntimeDispatchService {
   private final SignNodeRegistry signNodeRegistry;
   private final ConfigManager configManager;
   private final TrainConfigResolver trainConfigResolver;
+  private final TrainLaunchManager trainLaunchManager = new TrainLaunchManager();
   private final Consumer<String> debugLogger;
+  private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+  private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
 
   public RuntimeDispatchService(
       OccupancyManager occupancyManager,
@@ -142,10 +149,10 @@ public final class RuntimeDispatchService {
             graph,
             configManager.current().runtimeSettings().lookaheadEdges(),
             configManager.current().runtimeSettings().switcherZoneEdges());
-    Optional<OccupancyRequest> requestOpt =
-        builder.buildFromNodes(
+    Optional<OccupancyRequestContext> contextOpt =
+        builder.buildContextFromNodes(
             trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now);
-    if (requestOpt.isEmpty()) {
+    if (contextOpt.isEmpty()) {
       debugLogger.accept(
           "调度推进失败: 构建占用请求失败 train="
               + trainName
@@ -161,10 +168,13 @@ public final class RuntimeDispatchService {
                   configManager.current().runtimeSettings().lookaheadEdges()));
       return;
     }
-    OccupancyRequest request = requestOpt.get();
+    OccupancyRequestContext context = contextOpt.get();
+    OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
     if (!decision.allowed()) {
+      OptionalLong lookaheadDistance =
+          OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
       debugLogger.accept(
           "调度推进阻塞: train="
               + trainName
@@ -177,8 +187,16 @@ public final class RuntimeDispatchService {
               + " blockers="
               + summarizeBlockers(decision));
       progressRegistry.updateSignal(trainName, decision.signal(), now);
-      applySignalToTrain(
-          train, properties, decision.signal(), route, currentNode, nextTarget.get(), graph, false);
+      applyControl(
+          train,
+          properties,
+          decision.signal(),
+          route,
+          currentNode,
+          nextTarget.get(),
+          graph,
+          false,
+          lookaheadDistance);
       return;
     }
     occupancyManager.acquire(request);
@@ -192,8 +210,16 @@ public final class RuntimeDispatchService {
     }
     properties.clearDestinationRoute();
     properties.setDestination(destinationName);
-    applySignalToTrain(
-        train, properties, SignalAspect.PROCEED, route, currentNode, nextTarget.get(), graph, true);
+    applyControl(
+        train,
+        properties,
+        SignalAspect.PROCEED,
+        route,
+        currentNode,
+        nextTarget.get(),
+        graph,
+        true,
+        OptionalLong.empty());
   }
 
   /** 周期性信号检查：信号等级变化时调整速度/刹车。 */
@@ -287,6 +313,7 @@ public final class RuntimeDispatchService {
       occupancyManager.releaseByTrain(trainName);
     }
     progressRegistry.remove(trainName);
+    stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
   }
 
   /**
@@ -311,6 +338,7 @@ public final class RuntimeDispatchService {
         }
         progressRegistry.remove(trainName);
       }
+      stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
       return;
     }
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
@@ -337,17 +365,18 @@ public final class RuntimeDispatchService {
             graph,
             configManager.current().runtimeSettings().lookaheadEdges(),
             configManager.current().runtimeSettings().switcherZoneEdges());
-    Optional<OccupancyRequest> requestOpt =
-        builder.buildFromNodes(
+    Optional<OccupancyRequestContext> contextOpt =
+        builder.buildContextFromNodes(
             trainName,
             Optional.ofNullable(route.id()),
             route.waypoints(),
             currentIndex,
             Instant.now());
-    if (requestOpt.isEmpty()) {
+    if (contextOpt.isEmpty()) {
       return;
     }
-    OccupancyRequest request = requestOpt.get();
+    OccupancyRequestContext context = contextOpt.get();
+    OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
     if (decision.allowed()) {
@@ -370,7 +399,52 @@ public final class RuntimeDispatchService {
     if (currentNode.isEmpty() || nextNode.isEmpty()) {
       return;
     }
-    applySignalToTrain(
+    OptionalLong distanceOpt = OptionalLong.empty();
+    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
+    boolean needsDistance =
+        runtimeSettings.speedCurveEnabled() || runtimeSettings.failoverUnreachableStop();
+    if (needsDistance) {
+      distanceOpt = resolveShortestDistance(graph, currentNode.get(), nextNode.get());
+      if (runtimeSettings.failoverUnreachableStop() && distanceOpt.isEmpty()) {
+        progressRegistry.updateSignal(trainName, SignalAspect.STOP, Instant.now());
+        applyControl(
+            train,
+            properties,
+            SignalAspect.STOP,
+            route,
+            currentNode.get(),
+            nextNode.get(),
+            graph,
+            false,
+            OptionalLong.empty());
+        debugLogger.accept(
+            "调度 failover: 目标不可达 train="
+                + trainName
+                + " from="
+                + currentNode.get().value()
+                + " to="
+                + nextNode.get().value());
+        return;
+      }
+    }
+    // 信号非放行时，按 lookahead 阻塞距离提前下压速度，避免过点再减速。
+    if (runtimeSettings.speedCurveEnabled() && decision.signal() != SignalAspect.PROCEED) {
+      OptionalLong lookaheadDistance =
+          OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
+      if (lookaheadDistance.isPresent()) {
+        if (distanceOpt.isPresent()) {
+          distanceOpt =
+              OptionalLong.of(Math.min(distanceOpt.getAsLong(), lookaheadDistance.getAsLong()));
+        } else {
+          distanceOpt = lookaheadDistance;
+        }
+      }
+    }
+    StallDecision stallDecision = updateStallState(trainName, train, currentIndex, nextAspect);
+    if (stallDecision.forceLaunch()) {
+      allowLaunch = true;
+    }
+    applyControl(
         train,
         properties,
         nextAspect,
@@ -378,7 +452,19 @@ public final class RuntimeDispatchService {
         currentNode.get(),
         nextNode.get(),
         graph,
-        allowLaunch);
+        allowLaunch,
+        distanceOpt);
+    if (stallDecision.triggerFailover()) {
+      triggerStallFailover(
+          train,
+          properties,
+          trainName,
+          route,
+          currentNode.get(),
+          nextNode.get(),
+          graph,
+          distanceOpt);
+    }
   }
 
   /**
@@ -386,7 +472,7 @@ public final class RuntimeDispatchService {
    *
    * <p>PROCEED 发车并恢复巡航速度；CAUTION 限速；STOP 停车并清空限速。
    */
-  private void applySignalToTrain(
+  private void applyControl(
       RuntimeTrainHandle train,
       TrainProperties properties,
       SignalAspect aspect,
@@ -394,8 +480,9 @@ public final class RuntimeDispatchService {
       NodeId currentNode,
       NodeId nextNode,
       RailGraph graph,
-      boolean allowLaunch) {
-    if (properties == null) {
+      boolean allowLaunch,
+      OptionalLong distanceOpt) {
+    if (properties == null || aspect == null || route == null) {
       return;
     }
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
@@ -406,22 +493,100 @@ public final class RuntimeDispatchService {
     if (edgeLimit > 0.0) {
       targetBps = Math.min(targetBps, edgeLimit);
     }
-    double targetBpt = toBlocksPerTick(targetBps);
-    double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
-    double decelBpt2 = toBlocksPerTickSquared(config.decelBps2());
-    if (accelBpt2 > 0.0 && decelBpt2 > 0.0) {
-      properties.setWaitAcceleration(accelBpt2, decelBpt2);
+    trainLaunchManager.applyControl(
+        train,
+        properties,
+        aspect,
+        targetBps,
+        config,
+        allowLaunch,
+        distanceOpt,
+        configManager.current().runtimeSettings());
+  }
+
+  private OptionalLong resolveShortestDistance(RailGraph graph, NodeId from, NodeId to) {
+    if (graph == null || from == null || to == null) {
+      return OptionalLong.empty();
     }
-    if (aspect == SignalAspect.STOP) {
-      properties.setSpeedLimit(0.0);
-      if (train != null) {
-        train.stop();
-      }
+    return pathFinder
+        .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+        .map(path -> OptionalLong.of(path.totalLengthBlocks()))
+        .orElse(OptionalLong.empty());
+  }
+
+  private void triggerStallFailover(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      NodeId currentNode,
+      NodeId nextNode,
+      RailGraph graph,
+      OptionalLong distanceOpt) {
+    if (train == null || properties == null || trainName == null || trainName.isBlank()) {
       return;
     }
-    properties.setSpeedLimit(targetBpt);
-    if (aspect == SignalAspect.PROCEED && allowLaunch && train != null && !train.isMoving()) {
-      train.launch(targetBpt, accelBpt2);
+    String destination = resolveDestinationName(nextNode);
+    if (destination == null || destination.isBlank()) {
+      return;
+    }
+    properties.clearDestinationRoute();
+    properties.setDestination(destination);
+    applyControl(
+        train,
+        properties,
+        SignalAspect.PROCEED,
+        route,
+        currentNode,
+        nextNode,
+        graph,
+        true,
+        distanceOpt);
+    debugLogger.accept(
+        "调度 failover: 低速重下发 destination train=" + trainName + " dest=" + destination);
+  }
+
+  private StallDecision updateStallState(
+      String trainName, RuntimeTrainHandle train, int currentIndex, SignalAspect aspect) {
+    if (train == null || trainName == null || trainName.isBlank()) {
+      return StallDecision.none();
+    }
+    ConfigManager.RuntimeSettings settings = configManager.current().runtimeSettings();
+    if (settings.failoverStallSpeedBps() <= 0.0 || settings.failoverStallTicks() <= 0) {
+      return StallDecision.none();
+    }
+    if (aspect != SignalAspect.PROCEED) {
+      stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+      return StallDecision.none();
+    }
+    double currentBps = train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND;
+    String key = trainName.toLowerCase(java.util.Locale.ROOT);
+    StallState state = stallStates.computeIfAbsent(key, k -> new StallState());
+    if (state.lastIndex != currentIndex) {
+      state.lastIndex = currentIndex;
+      state.ticks = 0;
+      return StallDecision.none();
+    }
+    if (currentBps > settings.failoverStallSpeedBps()) {
+      state.ticks = 0;
+      return StallDecision.none();
+    }
+    state.ticks++;
+    if (state.ticks < settings.failoverStallTicks()) {
+      return StallDecision.none();
+    }
+    state.ticks = 0;
+    return new StallDecision(true, true);
+  }
+
+  private static final class StallState {
+    private int lastIndex = -1;
+    private int ticks = 0;
+  }
+
+  private record StallDecision(boolean forceLaunch, boolean triggerFailover) {
+    private static StallDecision none() {
+      return new StallDecision(false, false);
     }
   }
 
@@ -488,6 +653,10 @@ public final class RuntimeDispatchService {
     if (aspect == SignalAspect.PROCEED && approachLimit > 0.0 && isStationNode(nextNode)) {
       return Math.min(base, approachLimit);
     }
+    double depotLimit = configManager.current().runtimeSettings().approachDepotSpeedBps();
+    if (aspect == SignalAspect.PROCEED && depotLimit > 0.0 && isDepotNode(nextNode)) {
+      return Math.min(base, depotLimit);
+    }
     return base;
   }
 
@@ -520,6 +689,24 @@ public final class RuntimeDispatchService {
     return def.get()
         .waypointMetadata()
         .map(meta -> meta.kind() == WaypointKind.STATION)
+        .orElse(false);
+  }
+
+  private boolean isDepotNode(NodeId nodeId) {
+    if (nodeId == null) {
+      return false;
+    }
+    Optional<SignNodeDefinition> def =
+        signNodeRegistry.findByNodeId(nodeId, null).map(SignNodeRegistry.SignNodeInfo::definition);
+    if (def.isEmpty()) {
+      return false;
+    }
+    if (def.get().nodeType() == NodeType.DEPOT) {
+      return true;
+    }
+    return def.get()
+        .waypointMetadata()
+        .map(meta -> meta.kind() == WaypointKind.DEPOT)
         .orElse(false);
   }
 
@@ -695,19 +882,5 @@ public final class RuntimeDispatchService {
     } catch (IllegalArgumentException ex) {
       return Optional.empty();
     }
-  }
-
-  private static double toBlocksPerTick(double blocksPerSecond) {
-    if (!Double.isFinite(blocksPerSecond) || blocksPerSecond <= 0.0) {
-      return 0.0;
-    }
-    return blocksPerSecond / TICKS_PER_SECOND;
-  }
-
-  private static double toBlocksPerTickSquared(double blocksPerSecondSquared) {
-    if (!Double.isFinite(blocksPerSecondSquared) || blocksPerSecondSquared <= 0.0) {
-      return 0.0;
-    }
-    return blocksPerSecondSquared / (TICKS_PER_SECOND * TICKS_PER_SECOND);
   }
 }

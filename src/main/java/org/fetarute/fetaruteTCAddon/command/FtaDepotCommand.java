@@ -46,6 +46,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController;
@@ -228,6 +231,8 @@ public final class FtaDepotCommand {
                     properties.clearDestination();
                     properties.setTrainName(trainName);
                     addTags(properties, runId, resolved, depotId, pattern, destInfo);
+                    initializeRouteIndex(
+                        properties, provider, resolved.route(), depotId, sender, locale);
                   }
                   Bukkit.getScheduler()
                       .runTaskLater(
@@ -884,6 +889,90 @@ public final class FtaDepotCommand {
     if (!out.isEmpty()) {
       properties.addTags(out.toArray(new String[0]));
     }
+  }
+
+  private void initializeRouteIndex(
+      TrainProperties properties,
+      org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
+      Route route,
+      NodeId depotId,
+      CommandSender sender,
+      LocaleManager locale) {
+    if (properties == null || provider == null || route == null || depotId == null) {
+      return;
+    }
+    List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+    if (stops.isEmpty()) {
+      sender.sendMessage(
+          locale.component("command.depot.spawn.route-empty", Map.of("route", route.code())));
+      return;
+    }
+    RouteStop first = stops.get(0);
+    if (first == null) {
+      sender.sendMessage(
+          locale.component("command.depot.spawn.route-empty", Map.of("route", route.code())));
+      return;
+    }
+    boolean matches =
+        RouteStopResolver.resolveNodeId(provider, first)
+            .map(node -> node.value().equalsIgnoreCase(depotId.value()))
+            .orElse(false);
+    if (!matches) {
+      Optional<String> cretTarget = resolveCretTarget(first);
+      matches = cretTarget.map(target -> target.equalsIgnoreCase(depotId.value())).orElse(false);
+    }
+    if (!matches) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.route-mismatch",
+              Map.of("route", route.code(), "node", depotId.value())));
+      return;
+    }
+    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX, String.valueOf(0));
+    TrainTagHelper.writeTag(
+        properties,
+        RouteProgressRegistry.TAG_ROUTE_UPDATED_AT,
+        String.valueOf(Instant.now().toEpochMilli()));
+  }
+
+  private Optional<String> resolveCretTarget(RouteStop stop) {
+    if (stop == null || stop.notes().isEmpty()) {
+      return Optional.empty();
+    }
+    String raw = stop.notes().orElse("");
+    if (raw.isBlank()) {
+      return Optional.empty();
+    }
+    String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
+    for (String line : normalized.split("\n", -1)) {
+      if (line == null) {
+        continue;
+      }
+      String trimmed = line.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      if (!startsWithWord(trimmed, "CRET")) {
+        continue;
+      }
+      String rest = trimmed.substring(4).trim();
+      if (rest.startsWith(":")) {
+        rest = rest.substring(1).trim();
+      }
+      if (!rest.isEmpty()) {
+        return Optional.of(rest);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static boolean startsWithWord(String text, String word) {
+    return text != null
+        && word != null
+        && text.regionMatches(true, 0, word, 0, word.length())
+        && (text.length() == word.length()
+            || Character.isWhitespace(text.charAt(word.length()))
+            || text.charAt(word.length()) == ':');
   }
 
   private static String sanitizeTagValue(String raw) {

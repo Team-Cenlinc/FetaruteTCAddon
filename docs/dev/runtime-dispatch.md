@@ -33,6 +33,21 @@
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
 2) `FTA_ROUTE_ID`（兼容旧标签）
 
+## 控车重算与 failover
+运行时控车每隔 `runtime.dispatch-tick-interval-ticks` 重新评估占用与信号，并重新下发速度控制。
+
+新增 failover 判定：
+- 低速判定：速度低于 `runtime.failover-stall-speed-bps` 持续 `runtime.failover-stall-ticks` 时，会重下发 destination。
+- 不可达判定：若当前节点到下一节点在调度图中不可达，则执行强制停车（`runtime.failover-unreachable-stop`）。
+
+速度曲线：
+- 若启用 `runtime.speed-curve-enabled`，将根据“剩余距离 + 制动能力”自动计算限速，提前减速而不是过点再减速。
+- 当信号处于 CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度。
+- `runtime.speed-curve-type` 控制曲线形态（`physics/linear/quadratic/cubic`）。
+- `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
+- `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
+- `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
+
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
 若运行时内存中缺少该列车的 RouteProgressEntry，将在首次信号 tick 基于 tags 自动初始化，避免“每 tick 反复发车动作”的异常。
 插件启动后会延迟 1 tick 扫描现存列车并重建占用快照（基于 tags 初始化进度并重新评估信号）。
