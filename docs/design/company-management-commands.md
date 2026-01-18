@@ -25,7 +25,10 @@
 ## Company 成员管理
 | 命令 | 说明 | 角色 | DAO |
 | --- | --- | --- | --- |
-| `/fta company member invite <company> <player> [role...]` | 邀请玩家加入，默认 STAFF | OWNER/MANAGER | `CompanyMemberRepository.save` |
+| `/fta company member invite <company> <player> [role...]` | 发送成员邀请（需对方确认），默认 STAFF | OWNER/MANAGER | `CompanyMemberInviteRepository.save` |
+| `/fta company member accept <company>` | 接受邀请并加入公司 | PLAYER | `CompanyMemberInviteRepository.find/delete`, `CompanyMemberRepository.save` |
+| `/fta company member decline <company>` | 拒绝邀请 | PLAYER | `CompanyMemberInviteRepository.find/delete` |
+| `/fta company member invites` | 列出待处理邀请 | PLAYER | `CompanyMemberInviteRepository.listInvites` |
 | `/fta company member setroles <company> <player> <role...>` | 设置玩家多角色列表 | OWNER/MANAGER | `CompanyMemberRepository.save` |
 | `/fta company member remove <company> <player>` | 移除成员 | OWNER/MANAGER 或 SELF | `CompanyMemberRepository.delete` |
 | `/fta company member list <company>` | 列出成员与角色 | 成员 | `CompanyMemberRepository.listMembers` |

@@ -23,12 +23,17 @@ import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
+import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
 import org.bukkit.block.sign.Side;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -342,7 +347,6 @@ public final class FtaGraphCommand {
                       applied
                           .merge()
                           .ifPresent(merge -> sender.sendMessage(mergeBuildMessage(locale, merge)));
-                      sendMissingSwitcherWarnings(sender, world, applied.result());
                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
                     } catch (IllegalStateException ex) {
                       sender.sendMessage(locale.component("command.graph.build.no-nodes"));
@@ -409,7 +413,6 @@ public final class FtaGraphCommand {
                                                               String.valueOf(
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
-                                      sendMissingSwitcherWarnings(sender, world, applied.result());
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
                                     });
                             jobs.remove(worldId);
@@ -543,7 +546,6 @@ public final class FtaGraphCommand {
                                                               String.valueOf(
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
-                                      sendMissingSwitcherWarnings(sender, world, applied.result());
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
                                     });
                             jobs.remove(worldId);
@@ -577,6 +579,26 @@ public final class FtaGraphCommand {
                   }
                   job.start();
                   sender.sendMessage(locale.component("command.graph.continue.started"));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("debugstick")
+            .literal("give")
+            .senderType(Player.class)
+            .permission("fetarute.graph.query")
+            .handler(
+                ctx -> {
+                  Player player = (Player) ctx.sender();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  ItemStack stick = createDebugStick(locale);
+                  var leftovers = player.getInventory().addItem(stick);
+                  if (!leftovers.isEmpty()) {
+                    player.getWorld().dropItemNaturally(player.getLocation(), stick);
+                  }
+                  player.sendMessage(locale.component("command.graph.debugstick.give.success"));
                 }));
 
     manager.command(
@@ -6213,63 +6235,6 @@ public final class FtaGraphCommand {
     return type == NodeType.WAYPOINT || type == NodeType.STATION || type == NodeType.DEPOT;
   }
 
-  /**
-   * 在构建完成后输出“道岔附近缺少 switcher 牌子”的运维提示。
-   *
-   * <p>该提示仅影响诊断与运维流程，不影响图本身的可用性：
-   *
-   * <ul>
-   *   <li>在 TrainCarts 线网中，建议为关键分叉放置 switcher 牌子，便于运维封锁与行为对齐
-   *   <li>在 TCC 线网中通常不依赖牌子，本插件会生成自动 switcher 节点；因此若没有牌子也可能出现提示，可按需忽略
-   * </ul>
-   */
-  private void sendMissingSwitcherWarnings(
-      CommandSender sender, World world, RailGraphBuildResult result) {
-    if (result == null || result.missingSwitcherJunctions().isEmpty()) {
-      return;
-    }
-
-    LocaleManager locale = plugin.getLocaleManager();
-    int count = result.missingSwitcherJunctions().size();
-    sender.sendMessage(
-        locale.component(
-            "command.graph.build.missing-switcher.header",
-            Map.of("count", String.valueOf(count), "world", world.getName())));
-
-    int limit = Math.min(10, count);
-    for (int i = 0; i < limit; i++) {
-      RailBlockPos pos = result.missingSwitcherJunctions().get(i);
-      String tp = "/tp " + pos.x() + " " + pos.y() + " " + pos.z();
-
-      net.kyori.adventure.text.Component location =
-          net.kyori.adventure.text.Component.text(pos.x() + " " + pos.y() + " " + pos.z());
-      if (sender instanceof Player) {
-        location =
-            location
-                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(tp))
-                .hoverEvent(
-                    net.kyori.adventure.text.event.HoverEvent.showText(
-                        net.kyori.adventure.text.Component.text(tp)));
-      }
-
-      sender.sendMessage(
-          locale.component(
-              "command.graph.build.missing-switcher.entry",
-              net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
-                  .resolver(
-                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
-                          "location", location))
-                  .build()));
-    }
-
-    if (count > limit) {
-      sender.sendMessage(
-          locale.component(
-              "command.graph.build.missing-switcher.more",
-              Map.of("more", String.valueOf(count - limit))));
-    }
-  }
-
   private void sendDuplicateNodeIdWarnings(
       CommandSender sender, World world, RailGraphBuildResult result) {
     if (result == null || result.duplicateNodeIds().isEmpty()) {
@@ -6346,6 +6311,27 @@ public final class FtaGraphCommand {
               "command.graph.build.duplicate-node-id.more",
               Map.of("more", String.valueOf(count - limit))));
     }
+  }
+
+  private ItemStack createDebugStick(LocaleManager locale) {
+    ItemStack stick = new ItemStack(Material.STICK, 1);
+    if (locale == null) {
+      return stick;
+    }
+    ItemMeta meta = stick.getItemMeta();
+    if (meta == null) {
+      return stick;
+    }
+    meta.displayName(locale.component("command.graph.debugstick.name"));
+    meta.lore(
+        List.of(
+            locale.component("command.graph.debugstick.lore-1"),
+            locale.component("command.graph.debugstick.lore-2"),
+            locale.component("command.graph.debugstick.lore-3")));
+    meta.getPersistentDataContainer()
+        .set(new NamespacedKey(plugin, "graph_debug_stick"), PersistentDataType.BYTE, (byte) 1);
+    stick.setItemMeta(meta);
+    return stick;
   }
 
   private static void addRailsAround(

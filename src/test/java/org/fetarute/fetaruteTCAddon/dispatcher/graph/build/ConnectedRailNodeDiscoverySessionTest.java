@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -13,15 +12,12 @@ import org.bukkit.World;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 import org.junit.jupiter.api.Test;
 
 final class ConnectedRailNodeDiscoverySessionTest {
 
   @Test
-  void createsAutoSwitcherWhenNeighborCountAtLeast3() {
+  void doesNotCreateAutoSwitcherWhenNeighborCountAtLeast3() {
     World world = mock(World.class);
     when(world.getUID()).thenReturn(UUID.randomUUID());
     when(world.getName()).thenReturn("world");
@@ -44,15 +40,7 @@ final class ConnectedRailNodeDiscoverySessionTest {
     Map<String, RailNodeRecord> nodes = new HashMap<>();
     session.step(System.nanoTime() + 1_000_000_000L, nodes);
 
-    NodeId expectedId = SwitcherSignDefinitionParser.nodeIdForRail("world", center);
-    assertTrue(nodes.containsKey(expectedId.value()));
-    RailNodeRecord record = nodes.get(expectedId.value());
-    assertEquals(NodeType.SWITCHER, record.nodeType());
-    assertEquals(center.x(), record.x());
-    assertEquals(center.y(), record.y());
-    assertEquals(center.z(), record.z());
-    assertTrue(record.trainCartsDestination().isEmpty());
-    assertTrue(record.waypointMetadata().isEmpty());
+    assertTrue(nodes.isEmpty());
   }
 
   @Test

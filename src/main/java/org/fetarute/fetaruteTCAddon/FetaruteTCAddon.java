@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -274,6 +275,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .registerEvents(
             new RouteEditorAppendListener(
                 this, signNodeRegistry, localeManager, loggerManager::debug),
+            this);
+    getServer()
+        .getPluginManager()
+        .registerEvents(
+            new GraphDebugStickListener(
+                this, signNodeRegistry, railGraphService, localeManager, loggerManager::debug),
             this);
     getServer()
         .getPluginManager()

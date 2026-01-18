@@ -33,7 +33,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  * <ul>
  *   <li>本插件节点牌子：waypoint/autostation/depot
  *   <li>TrainCarts 节点牌子：switcher（用于把道岔牌子纳入图）
- *   <li>自动 switcher：当某轨道方块的邻居数量 ≥ 3 时生成 {@link NodeType#SWITCHER} 节点
  * </ul>
  *
  * <p>该会话默认不会主动加载区块；未加载区块会被视为不可达，因此探索范围等同于“已加载且连通”的轨道区域。
@@ -147,7 +146,7 @@ public final class ConnectedRailNodeDiscoverySession {
    *
    * <p>该方法设计为被主线程每 tick 调用：以时间片推进任务避免一次性卡服（time-sliced execution）。
    *
-   * <p>输出写入到 {@code byNodeId} 以去重：当同一 nodeId 被扫描到多次时，会保留“更可信”的记录（例如 switcher 牌子覆盖自动 switcher）。
+   * <p>输出写入到 {@code byNodeId} 以去重：当同一 nodeId 被扫描到多次时，会保留“更可信”的记录（例如后续扫描到的牌子覆盖旧记录）。
    *
    * @param deadlineNanos 截止时间（System.nanoTime）
    * @param byNodeId 输出：nodeId → RailNodeRecord（用于聚合/去重）
@@ -264,23 +263,6 @@ public final class ConnectedRailNodeDiscoverySession {
       progressed++;
 
       scanSignsFromRailPiece(current, byNodeId);
-
-      if (junctionCount(current) >= 3) {
-        // 自动 switcher 仅用于把“关键分叉位置”纳入图：这里必须基于“真实连通邻居数”判断。
-        // 不要用 RailPiece#getJunctions() 这类偏“路径段”的概念；否则在 TCCoasters/曲线轨道下会产生大量误判（ghost switcher）。
-        var nodeId = SwitcherSignDefinitionParser.nodeIdForRail(world.getName(), current);
-        byNodeId.putIfAbsent(
-            nodeId.value(),
-            new RailNodeRecord(
-                worldId,
-                nodeId,
-                NodeType.SWITCHER,
-                current.x(),
-                current.y(),
-                current.z(),
-                Optional.empty(),
-                Optional.empty()));
-      }
 
       if (!chunkLoadOptions.enabled()) {
         Set<RailBlockPos> neighbors = access.neighbors(current);
@@ -458,13 +440,6 @@ public final class ConnectedRailNodeDiscoverySession {
       railQueue.add(anchor);
       queueChunk(anchor.x() >> 4, anchor.z() >> 4);
     }
-  }
-
-  private int junctionCount(RailBlockPos railPos) {
-    if (railPos == null) {
-      return 0;
-    }
-    return access.neighbors(railPos).size();
   }
 
   private void queueChunk(int chunkX, int chunkZ) {

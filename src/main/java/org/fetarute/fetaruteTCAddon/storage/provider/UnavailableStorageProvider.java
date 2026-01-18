@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage.provider;
 
 import java.lang.reflect.Proxy;
+import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
@@ -56,6 +57,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public CompanyMemberRepository companyMembers() {
     return unsupported(CompanyMemberRepository.class);
+  }
+
+  @Override
+  public CompanyMemberInviteRepository companyMemberInvites() {
+    return unsupported(CompanyMemberInviteRepository.class);
   }
 
   @Override

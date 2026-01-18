@@ -164,6 +164,65 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
     return Set.copyOf(neighbors);
   }
 
+  /**
+   * 返回 rail 方块的“真实分叉度”（按可达的连通邻居去重计数）。
+   *
+   * <p>用于更保守地判定“真实分叉”，避免出现以下误判：
+   *
+   * <ul>
+   *   <li>轨道实现返回多个 junction 名称，但它们实际指向同一个下一段轨道（若直接数 junction 名称会虚高）
+   *   <li>相邻但不连通的平行轨道（不应被视为分叉）
+   * </ul>
+   */
+  public int junctionCount(RailBlockPos pos) {
+    if (pos == null) {
+      return 0;
+    }
+    if (!world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4)) {
+      return 0;
+    }
+    Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
+    RailPiece piece = RailPiece.create(block);
+    if (piece == null || piece.isNone()) {
+      return 0;
+    }
+    Block railBlock = piece.block();
+    if (railBlock.getX() != pos.x() || railBlock.getY() != pos.y() || railBlock.getZ() != pos.z()) {
+      return 0;
+    }
+    List<RailJunction> junctions = piece.getJunctions();
+    if (junctions == null || junctions.isEmpty()) {
+      return 0;
+    }
+    Set<RailBlockPos> targets = new HashSet<>();
+    RailType railType = piece.type();
+    if (railType == null || railType == RailType.NONE) {
+      return 0;
+    }
+    for (RailJunction junction : junctions) {
+      if (junction == null) {
+        continue;
+      }
+      RailState nextState = railType.takeJunction(railBlock, junction);
+      if (nextState == null) {
+        continue;
+      }
+      Block nextBlock = nextState.railBlock();
+      if (nextBlock == null) {
+        continue;
+      }
+      RailBlockPos next = new RailBlockPos(nextBlock.getX(), nextBlock.getY(), nextBlock.getZ());
+      if (pos.equals(next)) {
+        continue;
+      }
+      if (!isRail(next)) {
+        continue;
+      }
+      targets.add(next);
+    }
+    return targets.size();
+  }
+
   @Override
   public double stepCost(RailBlockPos from, RailBlockPos to) {
     Objects.requireNonNull(from, "from");

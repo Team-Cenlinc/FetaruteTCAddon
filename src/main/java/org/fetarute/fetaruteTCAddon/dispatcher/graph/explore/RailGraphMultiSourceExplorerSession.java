@@ -38,8 +38,9 @@ public final class RailGraphMultiSourceExplorerSession {
   }
 
   /**
-   * @param onJunction 可选回调：当某个轨道方块的邻居数量 ≥ 3 时触发，用于标记“分叉/道岔候选位置”。
-   *     <p>注意：该判断依赖 {@link RailBlockAccess#neighbors(RailBlockPos)} 的实现；例如对 TCC 的长距离连接，邻居可能不是相邻方块。
+   * @param onJunction 可选回调：用于标记“分叉/道岔候选位置”。
+   *     <p>默认依赖 {@link RailBlockAccess#neighbors(RailBlockPos)} 的邻居数量；若访问器是 {@link
+   *     TrainCartsRailBlockAccess}，则改用其 {@code junctionCount} 做更保守的判定，避免相邻但不连通的轨道误报。
    */
   public RailGraphMultiSourceExplorerSession(
       Map<NodeId, Set<RailBlockPos>> anchorsByNode,
@@ -104,7 +105,7 @@ public final class RailGraphMultiSourceExplorerSession {
       }
 
       Set<RailBlockPos> neighbors = access.neighbors(current);
-      if (onJunction != null && neighbors.size() >= 3) {
+      if (onJunction != null && isJunction(access, current, neighbors)) {
         onJunction.accept(current);
       }
 
@@ -173,6 +174,15 @@ public final class RailGraphMultiSourceExplorerSession {
     }
     bestLengths.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= 0);
     return Map.copyOf(bestLengths);
+  }
+
+  private boolean isJunction(
+      RailBlockAccess access, RailBlockPos current, Set<RailBlockPos> neighbors) {
+    if (access instanceof TrainCartsRailBlockAccess tcAccess) {
+      int junctions = tcAccess.junctionCount(current);
+      return junctions >= 3;
+    }
+    return neighbors.size() >= 3;
   }
 
   private record Visit(NodeId owner, double distance) {

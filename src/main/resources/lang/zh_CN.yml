@@ -319,6 +319,18 @@ command:
       depot:
         invalid-id: "<prefix> <red>无效的 depot 节点 ID：</red><white><id></white>"
         success: "<prefix> <dark_aqua>已设置 depot 牌子：</dark_aqua><white><id></white>"
+    debugstick:
+      give:
+        success: "<prefix> <dark_aqua>已获得 debug 棍</dark_aqua>"
+      name: "<dark_aqua>FTA Debug 棍</dark_aqua>"
+      lore-1: "<gray>左键牌子/牌子对应轨道：两次选点，输出 edge/path</gray>"
+      lore-2: "<gray>潜行左键：查看该节点信息</gray>"
+      lore-3: "<gray>提示：若点击轨道但无牌子，会提示“无牌子”</gray>"
+      no-sign: "<prefix> <gray>无牌子</gray> <gray>(x=<white><x></white>, y=<white><y></white>, z=<white><z></white>)</gray>"
+      select:
+        first: "<prefix> <dark_aqua>已选择节点 A：</dark_aqua><white><node></white> <gray>(请再点一次选择 B)</gray>"
+      node:
+        header: "<prefix> <dark_aqua>节点信息</dark_aqua> <gray>(id=<white><node></white>, type=<white><type></white>, at=<white><x></white> <white><y></white> <white><z></white>, edges=<white><edges></white>, component=<white><component></white>)</gray>"
     status:
       idle: "<prefix> <gray>当前世界没有进行中的图构建任务</gray>"
       running: "<prefix> <dark_aqua>图构建进行中</dark_aqua> <gray>(phase=<white><phase></white>, nodes=<white><nodes></white>, visited=<white><visited></white>, queue=<white><queue></white>, processed=<white><processed></white>)</gray>"
@@ -385,7 +397,21 @@ command:
         entry: "<dark_aqua><player></dark_aqua> <gray>[<roles>]</gray>"
         hover-entry: "<gray>成员:</gray> <white><player></white>\n<dark_aqua>角色:</dark_aqua> <white><roles></white>"
       invite:
-        success: "<prefix> <dark_aqua>已添加成员：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white> <gray>[<roles>]</gray>"
+        sent: "<prefix> <dark_aqua>已发送邀请：</dark_aqua><dark_aqua><player></dark_aqua> <gray>←</gray> <white><code></white> <gray>[<roles>]</gray>"
+        already-member: "<prefix> <red>玩家已是成员：</red><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white>"
+        not-found: "<prefix> <red>未找到该公司邀请：</red><white><code></white>"
+        accept-success: "<prefix> <dark_aqua>已加入公司：</dark_aqua><white><code></white> <gray>[<roles>]</gray>"
+        decline-success: "<prefix> <gray>已拒绝公司邀请：</gray><white><code></white>"
+        notify: "<prefix> <dark_aqua>收到公司邀请：</dark_aqua><white><code></white> <gray>[<roles>]</gray> <gray>by</gray> <white><inviter></white> <accept> <gray>|</gray> <decline>"
+        notify-accept: "<prefix> <dark_aqua>玩家已接受邀请：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white>"
+        notify-decline: "<prefix> <gray>玩家已拒绝邀请：</gray><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white>"
+        action:
+          accept: "<green>[接受]</green>"
+          decline: "<red>[拒绝]</red>"
+        list:
+          header: "<prefix> <dark_aqua>待处理公司邀请</dark_aqua>"
+          empty: "<gray>（暂无邀请）</gray>"
+          entry: "<dark_aqua><code></dark_aqua> <gray>[<roles>]</gray> <gray>inviter:</gray> <white><inviter></white>"
       setroles:
         success: "<prefix> <dark_aqua>成员角色已更新：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white> <gray>[<roles>]</gray>"
       remove:
@@ -483,6 +509,7 @@ command:
     editor:
       append:
         success: "<prefix> <dark_aqua>已添加节点到编辑书末尾：</dark_aqua><white><node></white> <gray>(<type>)</gray>"
+        no-sign: "<prefix> <gray>该位置附近未找到可解析的节点牌子</gray> <gray>(<x> <y> <z>)</gray>"
       give:
         success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>(<line>/<route>)</gray>"
         empty-success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>(空模板)</gray>"
@@ -506,7 +533,7 @@ command:
           - "# 修饰: PASS/STOP/TERM, dwell=<秒>（基准停车时间）"
           - "#"
           - "# 右键 waypoint/autostation/depot"
-          - "# 牌子可把 nodeId 追加到末尾"
+          - "# /switcher 牌子或其轨道可把 nodeId 追加到末尾"
           - "#"
           - "# 示例："
           - "# PTK"

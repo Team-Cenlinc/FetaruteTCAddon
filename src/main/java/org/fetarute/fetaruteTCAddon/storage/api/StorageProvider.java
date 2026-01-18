@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.storage.api;
 
+import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
@@ -22,6 +23,8 @@ public interface StorageProvider extends AutoCloseable {
   CompanyRepository companies();
 
   CompanyMemberRepository companyMembers();
+
+  CompanyMemberInviteRepository companyMemberInvites();
 
   OperatorRepository operators();
 

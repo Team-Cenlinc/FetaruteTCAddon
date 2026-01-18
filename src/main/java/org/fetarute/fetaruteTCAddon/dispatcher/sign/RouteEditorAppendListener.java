@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -24,7 +25,10 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BookMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.util.RayTraceResult;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -42,6 +46,7 @@ public final class RouteEditorAppendListener implements Listener {
       PlainTextComponentSerializer.plainText();
   private static final int MAX_PAGE_CHARS = 240;
 
+  private final FetaruteTCAddon plugin;
   private final SignNodeRegistry registry;
   private final LocaleManager locale;
   private final Consumer<String> debugLogger;
@@ -53,7 +58,7 @@ public final class RouteEditorAppendListener implements Listener {
       SignNodeRegistry registry,
       LocaleManager locale,
       Consumer<String> debugLogger) {
-    Objects.requireNonNull(plugin, "plugin");
+    this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.registry = Objects.requireNonNull(registry, "registry");
     this.locale = Objects.requireNonNull(locale, "locale");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
@@ -61,16 +66,13 @@ public final class RouteEditorAppendListener implements Listener {
     this.bookRouteIdKey = new NamespacedKey(plugin, "route_editor_route_id");
   }
 
-  @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
-  public void onRightClickSign(PlayerInteractEvent event) {
-    if (event.getAction() != Action.RIGHT_CLICK_BLOCK) {
+  @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+  public void onRightClickSignOrRail(PlayerInteractEvent event) {
+    if (event.getAction() != Action.RIGHT_CLICK_BLOCK
+        && event.getAction() != Action.RIGHT_CLICK_AIR) {
       return;
     }
     if (event.getHand() != org.bukkit.inventory.EquipmentSlot.HAND) {
-      return;
-    }
-    Block clicked = event.getClickedBlock();
-    if (clicked == null) {
       return;
     }
 
@@ -80,12 +82,57 @@ public final class RouteEditorAppendListener implements Listener {
       return;
     }
 
-    Optional<SignNodeDefinition> defOpt = registry.get(clicked).or(() -> parseNodeSign(clicked));
+    Block clicked = event.getClickedBlock();
+    if (clicked == null) {
+      RayTraceResult ray = player.rayTraceBlocks(6.0);
+      if (ray != null) {
+        clicked = ray.getHitBlock();
+      }
+    }
+    if (clicked == null) {
+      return;
+    }
+
+    List<Block> targets = List.of(clicked, clicked.getRelative(org.bukkit.block.BlockFace.UP));
+    boolean shouldHandle = targets.stream().anyMatch(this::isSignOrRailLike);
+    if (shouldHandle) {
+      denyUse(event);
+      closeBookLater(player);
+    }
+
+    Optional<SignNodeDefinition> defOpt = Optional.empty();
+    for (Block target : targets) {
+      if (target == null) {
+        continue;
+      }
+      defOpt =
+          registry
+              .get(target)
+              .or(() -> parseNodeSign(target))
+              .or(() -> parseSwitcherSign(target))
+              .or(() -> resolveNodeFromRail(target));
+      if (defOpt.isPresent()) {
+        break;
+      }
+    }
     if (defOpt.isEmpty()) {
+      if (shouldHandle) {
+        player.sendMessage(
+            locale.component(
+                "command.route.editor.append.no-sign",
+                java.util.Map.of(
+                    "x",
+                    String.valueOf(clicked.getX()),
+                    "y",
+                    String.valueOf(clicked.getY()),
+                    "z",
+                    String.valueOf(clicked.getZ()))));
+        event.setCancelled(true);
+      }
       return;
     }
     SignNodeDefinition definition = defOpt.get();
-    String node = definition.trainCartsDestination().orElse(definition.nodeId().value());
+    String node = nodeValueForEditor(definition);
     if (node.isBlank()) {
       return;
     }
@@ -173,6 +220,120 @@ public final class RouteEditorAppendListener implements Listener {
                 def.waypointMetadata()
                     .map(metadata -> expectedKinds.contains(metadata.kind()))
                     .orElse(false));
+  }
+
+  private Optional<SignNodeDefinition> parseSwitcherSign(Block block) {
+    if (block == null) {
+      return Optional.empty();
+    }
+    BlockState state = block.getState();
+    if (!(state instanceof Sign sign)) {
+      return Optional.empty();
+    }
+    return SwitcherSignDefinitionParser.parse(sign);
+  }
+
+  /** 判定方块是否为 TrainCarts 可识别的轨道方块（含 TCC 轨道）。 */
+  private boolean isRailLike(Block clicked) {
+    if (clicked == null) {
+      return false;
+    }
+    com.bergerkiller.bukkit.tc.controller.components.RailPiece piece =
+        com.bergerkiller.bukkit.tc.controller.components.RailPiece.create(clicked);
+    return piece != null && !piece.isNone();
+  }
+
+  /** 用于快速判断“是否需要拦截右键行为”。 */
+  private boolean isSignOrRailLike(Block block) {
+    if (block == null) {
+      return false;
+    }
+    return block.getState() instanceof Sign || isRailLike(block);
+  }
+
+  /** 关闭与物品/方块交互相关的默认行为（避免书本打开编辑界面）。 */
+  private void denyUse(PlayerInteractEvent event) {
+    event.setUseInteractedBlock(org.bukkit.event.Event.Result.DENY);
+    event.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
+    event.setCancelled(true);
+  }
+
+  /** 在下一 tick 强制关闭书本界面，用于兜底客户端已弹窗的情况。 */
+  private void closeBookLater(Player player) {
+    if (player == null) {
+      return;
+    }
+    plugin.getServer().getScheduler().runTask(plugin, (Runnable) player::closeInventory);
+  }
+
+  /** 为 route editor 选择“可写入的 nodeId 文本”。 */
+  private String nodeValueForEditor(SignNodeDefinition definition) {
+    if (definition == null) {
+      return "";
+    }
+    if (definition.nodeType() == NodeType.SWITCHER
+        || definition
+            .trainCartsDestination()
+            .filter(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER::equals)
+            .isPresent()) {
+      return definition.nodeId().value();
+    }
+    return definition.trainCartsDestination().orElse(definition.nodeId().value());
+  }
+
+  /**
+   * 从轨道方块反推其对应的节点牌子。
+   *
+   * <p>策略：以轨道为中心在小范围内扫描牌子，并校验该牌子的“轨道锚点”是否包含该轨道。
+   */
+  private Optional<SignNodeDefinition> resolveNodeFromRail(Block clicked) {
+    if (clicked == null) {
+      return Optional.empty();
+    }
+
+    com.bergerkiller.bukkit.tc.controller.components.RailPiece piece =
+        com.bergerkiller.bukkit.tc.controller.components.RailPiece.create(clicked);
+    if (piece == null || piece.isNone()) {
+      return Optional.empty();
+    }
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(clicked.getWorld());
+    org.bukkit.block.Block railBlock = piece.block();
+    RailBlockPos railPos = new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
+    if (!access.isRail(railPos)) {
+      return Optional.empty();
+    }
+
+    int radius = 2;
+    SignNodeDefinition best = null;
+    int bestDistance = Integer.MAX_VALUE;
+    for (int dx = -radius; dx <= radius; dx++) {
+      for (int dy = -radius; dy <= radius; dy++) {
+        for (int dz = -radius; dz <= radius; dz++) {
+          Block candidate = clicked.getRelative(dx, dy, dz);
+          Optional<SignNodeDefinition> defOpt =
+              registry
+                  .get(candidate)
+                  .or(() -> parseNodeSign(candidate))
+                  .or(() -> parseSwitcherSign(candidate));
+          if (defOpt.isEmpty()) {
+            continue;
+          }
+          SignNodeDefinition def = defOpt.get();
+          Set<RailBlockPos> anchors =
+              access.findNearestRailBlocks(
+                  new RailBlockPos(candidate.getX(), candidate.getY(), candidate.getZ()), 2);
+          if (!anchors.contains(railPos)) {
+            continue;
+          }
+          int distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+          if (best == null || distance < bestDistance) {
+            best = def;
+            bestDistance = distance;
+          }
+        }
+      }
+    }
+    return Optional.ofNullable(best);
   }
 
   private String localizedType(SignNodeDefinition definition) {

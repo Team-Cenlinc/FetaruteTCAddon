@@ -10,7 +10,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 /**
  * 一次图构建的结果，用于回调通知与持久化。
  *
- * <p>{@code missingSwitcherJunctions} 用于构建完成后的运维提示（道岔附近缺少 switcher 牌子），不参与持久化，也不影响图的可用性。
+ * <p>{@code missingSwitcherJunctions} 预留字段：历史上用于输出“道岔附近缺少 switcher 牌子”的运维提示。
+ * 当前版本不再生成该提示，因此该列表通常为空；保留字段仅用于兼容与未来扩展。
  */
 public record RailGraphBuildResult(
     RailGraph graph,

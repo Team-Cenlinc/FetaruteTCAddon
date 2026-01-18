@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
 import org.fetarute.fetaruteTCAddon.company.api.PlayerIdentityService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
+import org.fetarute.fetaruteTCAddon.company.model.CompanyMemberInvite;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
@@ -53,7 +54,8 @@ public final class FtaCompanyCommand {
     SuggestionProvider<CommandSender> nameSuggestions = placeholderSuggestion("\"<name>\"");
     SuggestionProvider<CommandSender> secondarySuggestions =
         placeholderSuggestion("\"<secondaryName>\"");
-    SuggestionProvider<CommandSender> playerSuggestions = placeholderSuggestion("<player>");
+    SuggestionProvider<CommandSender> playerSuggestions = onlinePlayerSuggestions();
+    SuggestionProvider<CommandSender> inviteCompanySuggestions = inviteCompanySuggestions();
     SuggestionProvider<CommandSender> roleSuggestions = roleSuggestions();
 
     manager.command(
@@ -241,46 +243,264 @@ public final class FtaCompanyCommand {
                       .transactionManager()
                       .execute(
                           () -> {
-                            // 事务内创建/获取身份并合并既有角色，保证成员记录一致性。
-                            PlayerIdentity identity = identityService.getOrCreate(target);
+                            PlayerIdentity inviterIdentity =
+                                identityService.requireIdentity(sender);
+                            PlayerIdentity targetIdentity = identityService.getOrCreate(target);
+                            Optional<CompanyMember> existing =
+                                provider
+                                    .companyMembers()
+                                    .findMembership(company.id(), targetIdentity.id());
+                            Instant now = Instant.now();
+                            if (existing.isPresent()) {
+                              sender.sendMessage(
+                                  locale.component(
+                                      "command.company.member.invite.already-member",
+                                      Map.of(
+                                          "code",
+                                          company.code(),
+                                          "player",
+                                          targetIdentity.name())));
+                              return null;
+                            }
+                            provider
+                                .companyMemberInvites()
+                                .save(
+                                    new CompanyMemberInvite(
+                                        company.id(),
+                                        targetIdentity.id(),
+                                        roles,
+                                        inviterIdentity.id(),
+                                        now));
+                            sender.sendMessage(
+                                locale.component(
+                                    "command.company.member.invite.sent",
+                                    Map.of(
+                                        "code", company.code(),
+                                        "player", targetIdentity.name(),
+                                        "roles",
+                                            String.join(
+                                                ",", roles.stream().map(Enum::name).toList()))));
+                            Player targetOnline = Bukkit.getPlayer(targetIdentity.playerUuid());
+                            if (targetOnline != null && targetOnline.isOnline()) {
+                              sendInviteNotification(
+                                  locale,
+                                  targetOnline,
+                                  company.code(),
+                                  inviterIdentity.name(),
+                                  roles);
+                            }
+                            return null;
+                          });
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("company")
+            .literal("member")
+            .literal("invites")
+            .senderType(Player.class)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  PlayerIdentity identity =
+                      new PlayerIdentityService(provider.playerIdentities())
+                          .requireIdentity(sender);
+
+                  List<CompanyMemberInvite> invites =
+                      provider.companyMemberInvites().listInvites(identity.id());
+                  sender.sendMessage(locale.component("command.company.member.invite.list.header"));
+                  if (invites.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.company.member.invite.list.empty"));
+                    return;
+                  }
+                  for (CompanyMemberInvite invite : invites) {
+                    if (invite == null) {
+                      continue;
+                    }
+                    Optional<Company> companyOpt =
+                        provider.companies().findById(invite.companyId());
+                    if (companyOpt.isEmpty()) {
+                      continue;
+                    }
+                    String inviter =
+                        provider
+                            .playerIdentities()
+                            .findById(invite.invitedByIdentityId())
+                            .map(PlayerIdentity::name)
+                            .orElse(invite.invitedByIdentityId().toString());
+                    String roles =
+                        String.join(",", invite.roles().stream().map(Enum::name).toList());
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.member.invite.list.entry",
+                            Map.of(
+                                "code",
+                                companyOpt.get().code(),
+                                "inviter",
+                                inviter,
+                                "roles",
+                                roles)));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("company")
+            .literal("member")
+            .literal("accept")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), inviteCompanySuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+                  PlayerIdentityService identityService =
+                      new PlayerIdentityService(provider.playerIdentities());
+
+                  String companyArg = ((String) ctx.get("company")).trim();
+                  Optional<Company> companyOpt = query.findCompany(companyArg);
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found", Map.of("company", companyArg)));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+
+                  provider
+                      .transactionManager()
+                      .execute(
+                          () -> {
+                            PlayerIdentity identity = identityService.requireIdentity(sender);
+                            Optional<CompanyMemberInvite> inviteOpt =
+                                provider
+                                    .companyMemberInvites()
+                                    .findInvite(company.id(), identity.id());
+                            if (inviteOpt.isEmpty()) {
+                              sender.sendMessage(
+                                  locale.component(
+                                      "command.company.member.invite.not-found",
+                                      Map.of("code", company.code())));
+                              return null;
+                            }
                             Optional<CompanyMember> existing =
                                 provider
                                     .companyMembers()
                                     .findMembership(company.id(), identity.id());
-                            Instant now = Instant.now();
                             if (existing.isPresent()) {
-                              CompanyMember member = existing.get();
-                              EnumSet<MemberRole> merged = EnumSet.copyOf(member.roles());
-                              merged.addAll(roles);
-                              provider
-                                  .companyMembers()
-                                  .save(
-                                      new CompanyMember(
-                                          company.id(),
-                                          identity.id(),
-                                          merged,
-                                          member.joinedAt(),
-                                          member.permissions()));
-                            } else {
-                              provider
-                                  .companyMembers()
-                                  .save(
-                                      new CompanyMember(
-                                          company.id(),
-                                          identity.id(),
-                                          roles,
-                                          now,
-                                          Optional.empty()));
+                              provider.companyMemberInvites().delete(company.id(), identity.id());
+                              sender.sendMessage(
+                                  locale.component(
+                                      "command.company.member.invite.already-member",
+                                      Map.of("code", company.code(), "player", identity.name())));
+                              return null;
                             }
+
+                            CompanyMemberInvite invite = inviteOpt.get();
+                            EnumSet<MemberRole> roles = EnumSet.copyOf(invite.roles());
+                            provider
+                                .companyMembers()
+                                .save(
+                                    new CompanyMember(
+                                        company.id(),
+                                        identity.id(),
+                                        roles,
+                                        Instant.now(),
+                                        Optional.empty()));
+                            provider.companyMemberInvites().delete(company.id(), identity.id());
                             sender.sendMessage(
                                 locale.component(
-                                    "command.company.member.invite.success",
+                                    "command.company.member.invite.accept-success",
                                     Map.of(
-                                        "code", company.code(),
-                                        "player", identity.name(),
+                                        "code",
+                                        company.code(),
                                         "roles",
-                                            String.join(
-                                                ",", roles.stream().map(Enum::name).toList()))));
+                                        String.join(
+                                            ",", roles.stream().map(Enum::name).toList()))));
+                            notifyInviteDecision(
+                                provider,
+                                locale,
+                                invite.invitedByIdentityId(),
+                                "command.company.member.invite.notify-accept",
+                                Map.of("code", company.code(), "player", identity.name()));
+                            return null;
+                          });
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("company")
+            .literal("member")
+            .literal("decline")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), inviteCompanySuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+                  PlayerIdentityService identityService =
+                      new PlayerIdentityService(provider.playerIdentities());
+
+                  String companyArg = ((String) ctx.get("company")).trim();
+                  Optional<Company> companyOpt = query.findCompany(companyArg);
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found", Map.of("company", companyArg)));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+
+                  provider
+                      .transactionManager()
+                      .execute(
+                          () -> {
+                            PlayerIdentity identity = identityService.requireIdentity(sender);
+                            Optional<CompanyMemberInvite> inviteOpt =
+                                provider
+                                    .companyMemberInvites()
+                                    .findInvite(company.id(), identity.id());
+                            if (inviteOpt.isEmpty()) {
+                              sender.sendMessage(
+                                  locale.component(
+                                      "command.company.member.invite.not-found",
+                                      Map.of("code", company.code())));
+                              return null;
+                            }
+                            CompanyMemberInvite invite = inviteOpt.get();
+                            provider.companyMemberInvites().delete(company.id(), identity.id());
+                            sender.sendMessage(
+                                locale.component(
+                                    "command.company.member.invite.decline-success",
+                                    Map.of("code", company.code())));
+                            notifyInviteDecision(
+                                provider,
+                                locale,
+                                invite.invitedByIdentityId(),
+                                "command.company.member.invite.notify-decline",
+                                Map.of("code", company.code(), "player", identity.name()));
                             return null;
                           });
                 }));
@@ -1033,6 +1253,27 @@ public final class FtaCompanyCommand {
     return SuggestionProvider.suggestingStrings(placeholder);
   }
 
+  private SuggestionProvider<CommandSender> onlinePlayerSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<player>");
+          }
+          Bukkit.getOnlinePlayers().stream()
+              .map(Player::getName)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(name -> !name.isBlank())
+              .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
   private SuggestionProvider<CommandSender> companySuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
@@ -1061,6 +1302,54 @@ public final class FtaCompanyCommand {
             }
           }
           return suggestions;
+        });
+  }
+
+  /** 针对“accept/decline”子命令，仅提示当前玩家收到的邀请公司 code。 */
+  private SuggestionProvider<CommandSender> inviteCompanySuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<company>");
+          }
+          if (!(ctx.sender() instanceof Player player)) {
+            return suggestions;
+          }
+          Optional<StorageProvider> providerOpt = providerIfReady();
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          Optional<PlayerIdentity> identityOpt =
+              provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
+          if (identityOpt.isEmpty()) {
+            return suggestions;
+          }
+          List<CompanyMemberInvite> invites =
+              provider.companyMemberInvites().listInvites(identityOpt.get().id());
+          for (CompanyMemberInvite invite : invites) {
+            if (invite == null) {
+              continue;
+            }
+            Optional<Company> companyOpt = provider.companies().findById(invite.companyId());
+            if (companyOpt.isEmpty()) {
+              continue;
+            }
+            String code = companyOpt.get().code();
+            if (code == null) {
+              continue;
+            }
+            String trimmed = code.trim();
+            if (trimmed.isBlank()) {
+              continue;
+            }
+            if (trimmed.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+              suggestions.add(trimmed);
+            }
+          }
+          return suggestions.stream().distinct().limit(SUGGESTION_LIMIT).toList();
         });
   }
 
@@ -1109,6 +1398,78 @@ public final class FtaCompanyCommand {
         .distinct()
         .limit(SUGGESTION_LIMIT)
         .toList();
+  }
+
+  /** 向被邀请人发送可点击的接受/拒绝通知。 */
+  private void sendInviteNotification(
+      LocaleManager locale,
+      Player target,
+      String companyCode,
+      String inviter,
+      Set<MemberRole> roles) {
+    if (target == null || locale == null) {
+      return;
+    }
+    String rolesText = String.join(",", roles.stream().map(Enum::name).toList());
+    String acceptCommand = "/fta company member accept " + companyCode;
+    String declineCommand = "/fta company member decline " + companyCode;
+
+    net.kyori.adventure.text.Component accept =
+        locale
+            .component("command.company.member.invite.action.accept")
+            .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(acceptCommand))
+            .hoverEvent(
+                net.kyori.adventure.text.event.HoverEvent.showText(
+                    net.kyori.adventure.text.Component.text(acceptCommand)));
+    net.kyori.adventure.text.Component decline =
+        locale
+            .component("command.company.member.invite.action.decline")
+            .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(declineCommand))
+            .hoverEvent(
+                net.kyori.adventure.text.event.HoverEvent.showText(
+                    net.kyori.adventure.text.Component.text(declineCommand)));
+
+    net.kyori.adventure.text.minimessage.tag.resolver.TagResolver resolver =
+        net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
+            .resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                    "accept", accept))
+            .resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                    "decline", decline))
+            .resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                    "code", companyCode))
+            .resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                    "roles", rolesText))
+            .resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                    "inviter", inviter))
+            .build();
+    target.sendMessage(locale.component("command.company.member.invite.notify", resolver));
+  }
+
+  /** 通知邀请发起人对方已接受或拒绝（仅在线时通知）。 */
+  private void notifyInviteDecision(
+      StorageProvider provider,
+      LocaleManager locale,
+      UUID invitedById,
+      String messageKey,
+      Map<String, String> placeholders) {
+    if (provider == null || locale == null || invitedById == null || messageKey == null) {
+      return;
+    }
+    Optional<PlayerIdentity> inviterOpt = provider.playerIdentities().findById(invitedById);
+    if (inviterOpt.isEmpty()) {
+      return;
+    }
+    PlayerIdentity inviter = inviterOpt.get();
+    Player online = Bukkit.getPlayer(inviter.playerUuid());
+    if (online == null || !online.isOnline()) {
+      return;
+    }
+    online.sendMessage(locale.component(messageKey, placeholders));
   }
 
   private static final class CompanyMemberRepositoryFacade {

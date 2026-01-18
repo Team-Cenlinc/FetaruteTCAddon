@@ -44,6 +44,16 @@
 | permissions | JSON | 细粒度权限开关（可选） |
 > 主键建议 `(company_id, player_identity_id)`，`roles` 字段可存 `['MANAGER','DRIVER']` 以支持多角色。
 
+### CompanyMemberInvite
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| company_id | UUID | 外键 → Company |
+| player_identity_id | UUID | 外键 → `PlayerIdentity` |
+| roles | JSON | 邀请时附带的角色集合 |
+| invited_by_identity_id | UUID | 邀请发起人身份 |
+| invited_at | TIMESTAMP | 邀请时间 |
+> 用于实现“邀请需确认”流程；接受后写入 CompanyMember 并删除邀请记录。
+
 ### Operator
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -168,7 +178,7 @@ interface CompanyRepository {
 - 所有实例的 DAO/StorageProvider 应指向同一数据库或通过消息总线同步，确保 route 名称与结构保持一致。
 
 ## 后续扩展点
-1. **审批流**：新增 `company_invitations` 表，记录邀请/申请状态。
+1. **审批流**：当前使用 `company_member_invites` 记录邀请；若需审批状态可在此表扩展 status 字段或新增申请表。
 2. **资产管理**：车辆、车厂、调度权限等实体均可通过 `metadata` 拓展，再拆分独立表。
 3. **审计日志**：统一 `audit_log`，记录谁在何时修改了实体。
 4. **缓存**：在内存中维持只读快照（Guava Cache 或自研）以减少 DB 读；写操作后广播失效事件。

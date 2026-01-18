@@ -40,6 +40,8 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("companies_code", "companies", "code"));
     ddl.add(companyMembers(dialect));
     ddl.add(index("company_members_player", "company_members", "player_identity_id"));
+    ddl.add(companyMemberInvites(dialect));
+    ddl.add(index("company_member_invites_player", "company_member_invites", "player_identity_id"));
     ddl.add(operators(dialect));
     ddl.add(uniqueIndex("operators_code", "operators", "company_id, code"));
     ddl.add(lines(dialect));
@@ -139,6 +141,32 @@ public final class StorageSchema {
         dialect.timestampType(),
         dialect.jsonType(),
         table("companies"),
+        table("player_identities"));
+  }
+
+  private String companyMemberInvites(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    company_id %s NOT NULL,
+                    player_identity_id %s NOT NULL,
+                    roles %s NOT NULL,
+                    invited_by_identity_id %s NOT NULL,
+                    invited_at %s NOT NULL,
+                    PRIMARY KEY (company_id, player_identity_id),
+                    FOREIGN KEY (company_id) REFERENCES %s(id) ON DELETE CASCADE,
+                    FOREIGN KEY (player_identity_id) REFERENCES %s(id) ON DELETE CASCADE,
+                    FOREIGN KEY (invited_by_identity_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("company_member_invites"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.jsonType(),
+        dialect.uuidType(),
+        dialect.timestampType(),
+        table("companies"),
+        table("player_identities"),
         table("player_identities"));
   }
 

@@ -3,7 +3,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -27,7 +26,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 
 /**
  * 分段构建调度图的任务：在主线程按 tick 的“时间预算”增量推进，避免一次性卡服。
@@ -42,10 +40,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  *   <li>{@code preseedNodes}：预置节点列表（用于 TCC 无牌子线网，把 coaster 节点注入为 Node）
  *   <li>{@code seedNode}：HERE 模式下玩家附近的节点牌子（可选）
  *   <li>扫描到的节点牌子：waypoint/autostation/depot + TC 的 switcher
- *   <li>轨道分叉：当访问器返回的邻居数量 ≥ 3 时，会生成自动 switcher 节点（坐标即轨道方块坐标）
  * </ul>
- *
- * <p>注意：自动 switcher 节点仅用于把“关键分叉位置”纳入图；并不替代 TrainCarts 的 switcher 牌子行为。
  */
 public final class RailGraphBuildJob implements Runnable {
 
@@ -88,7 +83,6 @@ public final class RailGraphBuildJob implements Runnable {
   private List<RailNodeRecord> finalNodes = List.of();
   private List<DuplicateNodeId> duplicateNodeIds = List.of();
   private RailGraphBuildStatus status;
-  private final Set<RailBlockPos> junctionsMissingSwitchers = new HashSet<>();
 
   /**
    * @param seedRails HERE 模式的起始轨道锚点集合（优先来自 TCC 编辑器选中位置，其次来自牌子/脚下轨道）
@@ -316,12 +310,7 @@ public final class RailGraphBuildJob implements Runnable {
       cancel();
       RailGraphBuildResult result =
           new RailGraphBuildResult(
-              graph,
-              builtAt,
-              signature,
-              currentFinalNodes,
-              List.copyOf(junctionsMissingSwitchers),
-              currentDuplicateNodeIds);
+              graph, builtAt, signature, currentFinalNodes, List.of(), currentDuplicateNodeIds);
       RailGraphBuildCompletion completion = computeCompletion();
       Optional<RailGraphBuildContinuation> nextContinuation = Optional.empty();
       if (mode == BuildMode.HERE && connectedDiscovery != null && connectedDiscovery.isPaused()) {
@@ -456,15 +445,8 @@ public final class RailGraphBuildJob implements Runnable {
       List<RailNodeRecord> nodes, TrainCartsRailBlockAccess currentAccess) {
     Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
     int missingAnchors = 0;
-    Set<RailBlockPos> railsWithSwitchers = new HashSet<>();
     for (RailNodeRecord node : nodes) {
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
-      if (node.nodeType() == NodeType.SWITCHER
-          && node.trainCartsDestination()
-              .filter(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER::equals)
-              .isPresent()) {
-        addRailsAround(railsWithSwitchers, currentAccess, center, DEFAULT_ANCHOR_SEARCH_RADIUS);
-      }
       int anchorRadius =
           node.nodeType() == NodeType.SWITCHER
               ? DEFAULT_ANCHOR_SEARCH_RADIUS
@@ -478,14 +460,7 @@ public final class RailGraphBuildJob implements Runnable {
     }
     RailGraphMultiSourceExplorerSession newSession =
         new RailGraphMultiSourceExplorerSession(
-            anchorsByNode,
-            currentAccess,
-            DEFAULT_MAX_DISTANCE_BLOCKS,
-            junction -> {
-              if (!railsWithSwitchers.contains(junction)) {
-                junctionsMissingSwitchers.add(junction);
-              }
-            });
+            anchorsByNode, currentAccess, DEFAULT_MAX_DISTANCE_BLOCKS);
     synchronized (this) {
       this.edgeSession = newSession;
       if (status != null) {
@@ -501,20 +476,6 @@ public final class RailGraphBuildJob implements Runnable {
                 newSession.visitedRailBlocks(),
                 newSession.queueSize(),
                 newSession.processedSteps());
-      }
-    }
-  }
-
-  private static void addRailsAround(
-      Set<RailBlockPos> out, TrainCartsRailBlockAccess access, RailBlockPos center, int radius) {
-    for (int dx = -radius; dx <= radius; dx++) {
-      for (int dy = -radius; dy <= radius; dy++) {
-        for (int dz = -radius; dz <= radius; dz++) {
-          RailBlockPos candidate = center.offset(dx, dy, dz);
-          if (access.isRail(candidate)) {
-            out.add(candidate);
-          }
-        }
       }
     }
   }

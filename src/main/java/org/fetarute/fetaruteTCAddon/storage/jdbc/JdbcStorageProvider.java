@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage.jdbc;
 
 import javax.sql.DataSource;
+import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
@@ -18,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
@@ -46,6 +48,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final PlayerIdentityRepository playerIdentityRepository;
   private final CompanyRepository companyRepository;
   private final CompanyMemberRepository companyMemberRepository;
+  private final CompanyMemberInviteRepository companyMemberInviteRepository;
   private final OperatorRepository operatorRepository;
   private final LineRepository lineRepository;
   private final StationRepository stationRepository;
@@ -68,6 +71,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcCompanyRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.companyMemberRepository =
         new JdbcCompanyMemberRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.companyMemberInviteRepository =
+        new JdbcCompanyMemberInviteRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.operatorRepository =
         new JdbcOperatorRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.lineRepository = new JdbcLineRepository(dataSource, dialect, tablePrefix, logger::debug);
@@ -109,6 +114,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public CompanyMemberRepository companyMembers() {
     return companyMemberRepository;
+  }
+
+  @Override
+  public CompanyMemberInviteRepository companyMemberInvites() {
+    return companyMemberInviteRepository;
   }
 
   @Override
