@@ -10,6 +10,7 @@ import java.util.Set;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -44,11 +45,14 @@ class OccupancyResourceResolverTest {
             Map.of(switcherId, switcher, nodeId, node), Map.of(edgeId, edge), Set.of());
 
     List<OccupancyResource> resources = OccupancyResourceResolver.resourcesForEdge(graph, edge);
-    assertEquals(2, resources.size());
+    assertEquals(3, resources.size());
     assertTrue(resources.contains(OccupancyResource.forEdge(edgeId)));
     assertTrue(
         resources.contains(
             OccupancyResource.forConflict(OccupancyResourceResolver.switcherConflictId(switcher))));
+    String conflictKey =
+        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeId).orElseThrow();
+    assertTrue(resources.contains(OccupancyResource.forConflict(conflictKey)));
   }
 
   @Test

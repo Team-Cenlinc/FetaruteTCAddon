@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Objects;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
@@ -28,6 +29,11 @@ public final class OccupancyResourceResolver {
     if (graph != null) {
       graph.findNode(edge.from()).ifPresent(node -> addSwitcherConflict(node, resources));
       graph.findNode(edge.to()).ifPresent(node -> addSwitcherConflict(node, resources));
+      if (graph instanceof RailGraphConflictSupport conflictSupport) {
+        conflictSupport
+            .conflictKeyForEdge(edge.id())
+            .ifPresent(key -> resources.add(OccupancyResource.forConflict(key)));
+      }
     }
     return List.copyOf(resources);
   }

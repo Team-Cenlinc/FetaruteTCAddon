@@ -19,6 +19,7 @@
 ## MVP 资源解析规则
 - edge 必占用自身资源：`EDGE:<from~to>`。
 - edge 若连接 `SWITCHER` 节点，额外占用冲突资源：`CONFLICT:switcher:<nodeId>`。
+- edge 若处于单线走廊，额外占用冲突资源：`CONFLICT:single:<component>:<endA>~<endB>`。
 - node 占用使用 `NODE:<nodeId>`（switcher 同样补冲突资源）。
 
 ## Headway 规则

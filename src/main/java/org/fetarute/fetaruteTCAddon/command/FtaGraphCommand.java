@@ -35,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ChunkLoadOptions;
@@ -4238,6 +4239,266 @@ public final class FtaGraphCommand {
                               "blocked_edges",
                               String.valueOf(stats.blockedEdgeCount()))));
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("conflict")
+            .literal("list")
+            .permission("fetarute.graph.query")
+            .flag(nodeFilterFlag)
+            .optional("page", IntegerParser.integerParser())
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+                  if (!(graph instanceof RailGraphConflictSupport support)) {
+                    sender.sendMessage(locale.component("command.graph.conflict.not-supported"));
+                    return;
+                  }
+
+                  String nodeRaw = ctx.flags().getValue(nodeFilterFlag, null);
+                  Optional<NodeId> nodeFilter =
+                      nodeRaw == null || nodeRaw.isBlank()
+                          ? Optional.empty()
+                          : Optional.of(NodeId.of(normalizeNodeIdArg(nodeRaw)));
+
+                  Map<String, ConflictGroup> groups = new HashMap<>();
+                  for (RailEdge edge : graph.edges()) {
+                    if (edge == null) {
+                      continue;
+                    }
+                    EdgeId edgeId = EdgeId.undirected(edge.from(), edge.to());
+                    if (nodeFilter.isPresent()
+                        && !edgeId.a().equals(nodeFilter.get())
+                        && !edgeId.b().equals(nodeFilter.get())) {
+                      continue;
+                    }
+                    Optional<String> keyOpt = support.conflictKeyForEdge(edgeId);
+                    if (keyOpt.isEmpty()) {
+                      continue;
+                    }
+                    String key = keyOpt.get();
+                    ConflictGroup group = groups.computeIfAbsent(key, ConflictGroup::new);
+                    group.edges().add(edgeId);
+                    group.nodes().add(edgeId.a());
+                    group.nodes().add(edgeId.b());
+                  }
+
+                  if (groups.isEmpty()) {
+                    sender.sendMessage(locale.component("command.graph.conflict.list.empty"));
+                    return;
+                  }
+
+                  List<ConflictGroup> sorted = new ArrayList<>(groups.values());
+                  sorted.sort(Comparator.comparing(ConflictGroup::key));
+                  int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
+                  ListPage<ConflictGroup> pageResult = paginate(sorted, page, 10);
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.list.header",
+                          Map.of(
+                              "world", world.getName(), "count", String.valueOf(sorted.size()))));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.list.page",
+                          Map.of(
+                              "page",
+                              String.valueOf(pageResult.page()),
+                              "pages",
+                              String.valueOf(pageResult.totalPages()))));
+
+                  for (ConflictGroup group : pageResult.items()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.conflict.list.entry",
+                            Map.of(
+                                "key",
+                                group.key(),
+                                "edges",
+                                String.valueOf(group.edges().size()),
+                                "nodes",
+                                String.valueOf(group.nodes().size()))));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("conflict")
+            .literal("edge")
+            .permission("fetarute.graph.query")
+            .required("a", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("b", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+                  if (!(graph instanceof RailGraphConflictSupport support)) {
+                    sender.sendMessage(locale.component("command.graph.conflict.not-supported"));
+                    return;
+                  }
+                  NodeId a = NodeId.of(normalizeNodeIdArg(ctx.get("a")));
+                  NodeId b = NodeId.of(normalizeNodeIdArg(ctx.get("b")));
+                  if (graph.findNode(a).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", a.value())));
+                    return;
+                  }
+                  if (graph.findNode(b).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", b.value())));
+                    return;
+                  }
+                  EdgeId edgeId = EdgeId.undirected(a, b);
+                  if (!graphHasEdge(graph, edgeId)) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.conflict.edge.not-adjacent",
+                            Map.of("a", a.value(), "b", b.value())));
+                    return;
+                  }
+                  String key = support.conflictKeyForEdge(edgeId).orElse("-");
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.edge.result",
+                          Map.of("a", a.value(), "b", b.value(), "key", key)));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("conflict")
+            .literal("path")
+            .permission("fetarute.graph.query")
+            .required("from", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .required("to", StringParser.quotedStringParser(), nodeIdSuggestions)
+            .optional("page", IntegerParser.integerParser())
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  Instant nowForGraph = Instant.now();
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), nowForGraph);
+                  if (!(graph instanceof RailGraphConflictSupport support)) {
+                    sender.sendMessage(locale.component("command.graph.conflict.not-supported"));
+                    return;
+                  }
+                  NodeId from = NodeId.of(normalizeNodeIdArg(ctx.get("from")));
+                  NodeId to = NodeId.of(normalizeNodeIdArg(ctx.get("to")));
+                  if (graph.findNode(from).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", from.value())));
+                    return;
+                  }
+                  if (graph.findNode(to).isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.node-not-found", Map.of("node", to.value())));
+                    return;
+                  }
+                  RailGraphPathFinder finder = new RailGraphPathFinder();
+                  Optional<RailGraphPath> pathOpt =
+                      finder.shortestPath(
+                          graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+                  if (pathOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.query.unreachable",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  RailGraphPath path = pathOpt.get();
+                  Set<String> keys = new HashSet<>();
+                  for (RailEdge edge : path.edges()) {
+                    support.conflictKeyForEdge(edge.id()).ifPresent(keys::add);
+                  }
+                  if (keys.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.conflict.path.empty",
+                            Map.of("from", from.value(), "to", to.value())));
+                    return;
+                  }
+
+                  List<String> sorted = new ArrayList<>(keys);
+                  sorted.sort(String.CASE_INSENSITIVE_ORDER);
+                  int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
+                  ListPage<String> pageResult = paginate(sorted, page, 10);
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.path.header",
+                          Map.of(
+                              "from",
+                              from.value(),
+                              "to",
+                              to.value(),
+                              "edges",
+                              String.valueOf(path.edges().size()),
+                              "conflicts",
+                              String.valueOf(sorted.size()))));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.path.page",
+                          Map.of(
+                              "page",
+                              String.valueOf(pageResult.page()),
+                              "pages",
+                              String.valueOf(pageResult.totalPages()))));
+                  for (String key : pageResult.items()) {
+                    sender.sendMessage(
+                        locale.component("command.graph.conflict.path.entry", Map.of("key", key)));
+                  }
+                }));
   }
 
   private static Component staleInfoMessage(
@@ -4387,6 +4648,11 @@ public final class FtaGraphCommand {
           locale.component("command.graph.help.entry-component"),
           ClickEvent.suggestCommand("/fta graph component list "),
           locale.component("command.graph.help.hover-component"));
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-conflict"),
+          ClickEvent.suggestCommand("/fta graph conflict list "),
+          locale.component("command.graph.help.hover-conflict"));
     }
 
     sender.sendMessage(locale.component("command.graph.help.footer"));
@@ -4898,6 +5164,28 @@ public final class FtaGraphCommand {
 
   /** 简单分页结果。 */
   private record ListPage<T>(int page, int totalPages, List<T> items) {}
+
+  private static final class ConflictGroup {
+    private final String key;
+    private final java.util.Set<EdgeId> edges = new java.util.HashSet<>();
+    private final java.util.Set<NodeId> nodes = new java.util.HashSet<>();
+
+    private ConflictGroup(String key) {
+      this.key = key == null ? "" : key;
+    }
+
+    public String key() {
+      return key;
+    }
+
+    public java.util.Set<EdgeId> edges() {
+      return edges;
+    }
+
+    public java.util.Set<NodeId> nodes() {
+      return nodes;
+    }
+  }
 
   private static <T> ListPage<T> paginate(List<T> items, int page, int pageSize) {
     Objects.requireNonNull(items, "items");

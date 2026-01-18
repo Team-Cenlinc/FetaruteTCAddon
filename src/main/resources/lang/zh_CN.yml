@@ -155,6 +155,8 @@ command:
       hover-path: "<gray>点击填充:</gray> <white>/fta graph path </white>\n<dark_aqua>支持 page 参数；节点坐标可点击 /tp</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
       entry-component: "<gray>/fta graph component list</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
       hover-component: "<gray>点击填充:</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
+      entry-conflict: "<gray>/fta graph conflict</gray> <white>-</white> <dark_aqua>联合闭锁冲突组</dark_aqua>"
+      hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
@@ -183,6 +185,22 @@ command:
       node-not-found: "<prefix> <red>未找到节点：</red><white><node></white> <gray>(请先 /fta graph build)</gray>"
       unreachable: "<prefix> <red>两点不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       result: "<prefix> <dark_aqua>两点可达</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>, eta=<white><eta></white>)</gray>"
+
+    conflict:
+      not-supported: "<prefix> <gray>当前调度图未启用冲突组</gray>"
+      list:
+        header: "<prefix> <dark_aqua>联合闭锁冲突组</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+        page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+        empty: "<prefix> <gray>未找到冲突组</gray>"
+        entry: "<gray>-</gray> <white><key></white> <gray>(edges=<white><edges></white>, nodes=<white><nodes></white>)</gray>"
+      edge:
+        not-adjacent: "<prefix> <red>两节点不是直接相邻区间</red> <gray>(a=<white><a></white>, b=<white><b></white>)</gray>"
+        result: "<prefix> <dark_aqua>冲突组</dark_aqua> <gray>(<white><a></white> ↔ <white><b></white>, key=<white><key></white>)</gray>"
+      path:
+        header: "<prefix> <dark_aqua>路径冲突组</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, conflicts=<white><conflicts></white>)</gray>"
+        page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+        empty: "<prefix> <gray>路径未涉及冲突组</gray> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
+        entry: "<gray>-</gray> <white><key></white>"
 
     edge:
       list:

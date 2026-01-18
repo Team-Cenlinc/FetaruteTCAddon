@@ -11,6 +11,7 @@ import java.util.Set;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -69,12 +70,15 @@ class OccupancyRequestBuilderTest {
         builder.build(state, route, Instant.parse("2026-01-01T00:00:00Z"));
     assertTrue(requestOpt.isPresent());
     OccupancyRequest request = requestOpt.get();
-    assertEquals(5, request.resourceList().size());
+    assertEquals(6, request.resourceList().size());
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeA)));
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeB)));
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeC)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeAB)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeBC)));
+    String conflictKey =
+        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeAB).orElseThrow();
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflictKey)));
   }
 
   @Test

@@ -9,6 +9,7 @@ import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -18,7 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  *
  * <p>当前仅覆盖 {@link #isBlocked(EdgeId)}，其余方法均委托给底层图。
  */
-public final class EdgeOverrideRailGraph implements RailGraph {
+public final class EdgeOverrideRailGraph implements RailGraph, RailGraphConflictSupport {
 
   private final RailGraph delegate;
   private final Map<EdgeId, RailEdgeOverrideRecord> overrides;
@@ -68,5 +69,13 @@ public final class EdgeOverrideRailGraph implements RailGraph {
       return false;
     }
     return override.isBlockedEffective(now);
+  }
+
+  @Override
+  public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+    if (delegate instanceof RailGraphConflictSupport support) {
+      return support.conflictKeyForEdge(edgeId);
+    }
+    return Optional.empty();
   }
 }
