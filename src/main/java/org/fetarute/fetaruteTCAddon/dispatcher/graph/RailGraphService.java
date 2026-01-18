@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -86,9 +87,118 @@ public final class RailGraphService {
     return Optional.ofNullable(snapshots.get(worldId));
   }
 
+  /** 返回已加载的图快照数量，用于命令校验/诊断。 */
+  public int snapshotCount() {
+    return snapshots.size();
+  }
+
+  /**
+   * 在已加载的快照中查找包含指定路径的世界。
+   *
+   * <p>路径按相邻节点“可连通”判定：只要两点处于同一连通分量即可；若任一节点缺失则返回 empty。
+   */
+  public Optional<UUID> findWorldIdForPath(List<NodeId> nodes) {
+    if (nodes == null || nodes.size() < 2) {
+      return Optional.empty();
+    }
+    for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
+      UUID worldId = entry.getKey();
+      RailGraphSnapshot snapshot = entry.getValue();
+      RailGraphComponentIndex index = componentIndexes.get(worldId);
+      if (snapshot == null || snapshot.graph() == null || index == null) {
+        continue;
+      }
+      if (pathConnected(index, nodes)) {
+        return Optional.of(worldId);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 在已加载的快照中查找包含指定区间的世界（按连通分量判定）。
+   *
+   * <p>用于命令侧校验路线是否可达（不触发区块加载）。
+   */
+  public Optional<UUID> findWorldIdForConnectedPair(NodeId from, NodeId to) {
+    Objects.requireNonNull(from, "from");
+    Objects.requireNonNull(to, "to");
+    for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
+      UUID worldId = entry.getKey();
+      RailGraphSnapshot snapshot = entry.getValue();
+      RailGraphComponentIndex index = componentIndexes.get(worldId);
+      if (snapshot == null || snapshot.graph() == null || index == null) {
+        continue;
+      }
+      if (pairConnected(index, from, to)) {
+        return Optional.of(worldId);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 在已加载的快照中查找包含指定边的世界。
+   *
+   * <p>用于命令侧校验路线是否可达（不触发区块加载）。
+   */
+  public Optional<UUID> findWorldIdForEdge(NodeId from, NodeId to) {
+    Objects.requireNonNull(from, "from");
+    Objects.requireNonNull(to, "to");
+    for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
+      RailGraphSnapshot snapshot = entry.getValue();
+      if (snapshot == null || snapshot.graph() == null) {
+        continue;
+      }
+      if (edgeExists(snapshot.graph(), from, to)) {
+        return Optional.of(entry.getKey());
+      }
+    }
+    return Optional.empty();
+  }
+
   public Optional<RailGraphStaleState> getStaleState(World world) {
     Objects.requireNonNull(world, "world");
     return Optional.ofNullable(staleStates.get(world.getUID()));
+  }
+
+  private boolean edgeExists(RailGraph graph, NodeId from, NodeId to) {
+    // 只检查内存快照，不触发区块加载。
+    for (RailEdge edge : graph.edgesFrom(from)) {
+      if (edgeConnects(edge, from, to)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean pathConnected(RailGraphComponentIndex index, List<NodeId> nodes) {
+    for (int i = 0; i < nodes.size() - 1; i++) {
+      NodeId from = nodes.get(i);
+      NodeId to = nodes.get(i + 1);
+      if (from == null || to == null) {
+        return false;
+      }
+      if (!pairConnected(index, from, to)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean pairConnected(RailGraphComponentIndex index, NodeId from, NodeId to) {
+    String fromKey = index.componentKey(from);
+    String toKey = index.componentKey(to);
+    return fromKey != null && fromKey.equals(toKey);
+  }
+
+  private boolean edgeConnects(RailEdge edge, NodeId a, NodeId b) {
+    // 无向边匹配。
+    if (edge == null) {
+      return false;
+    }
+    return (edge.from().equals(a) && edge.to().equals(b))
+        || (edge.from().equals(b) && edge.to().equals(a));
   }
 
   public void markStale(World world, RailGraphStaleState state) {

@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.UUID;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -34,7 +35,7 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
   @Override
   public Optional<Route> findById(UUID id) {
     String sql =
-        "SELECT id, code, line_id, name, secondary_name, pattern_type, distance_m, runtime_secs, metadata, created_at, updated_at FROM "
+        "SELECT id, code, line_id, name, secondary_name, pattern_type, operation_type, distance_m, runtime_secs, metadata, created_at, updated_at FROM "
             + table("routes")
             + " WHERE id = ?";
     try (var connection = openConnection();
@@ -54,7 +55,7 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
   @Override
   public Optional<Route> findByLineAndCode(UUID lineId, String code) {
     String sql =
-        "SELECT id, code, line_id, name, secondary_name, pattern_type, distance_m, runtime_secs, metadata, created_at, updated_at FROM "
+        "SELECT id, code, line_id, name, secondary_name, pattern_type, operation_type, distance_m, runtime_secs, metadata, created_at, updated_at FROM "
             + table("routes")
             + " WHERE line_id = ? AND code = ?";
     try (var connection = openConnection();
@@ -75,7 +76,7 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
   @Override
   public List<Route> listByLine(UUID lineId) {
     String sql =
-        "SELECT id, code, line_id, name, secondary_name, pattern_type, distance_m, runtime_secs, metadata, created_at, updated_at FROM "
+        "SELECT id, code, line_id, name, secondary_name, pattern_type, operation_type, distance_m, runtime_secs, metadata, created_at, updated_at FROM "
             + table("routes")
             + " WHERE line_id = ?"
             + " ORDER BY code ASC";
@@ -100,8 +101,8 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
     String insert =
         "INSERT INTO "
             + table("routes")
-            + " (id, code, line_id, name, secondary_name, pattern_type, distance_m, runtime_secs, metadata, created_at, updated_at)"
-            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            + " (id, code, line_id, name, secondary_name, pattern_type, operation_type, distance_m, runtime_secs, metadata, created_at, updated_at)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     String sql =
         dialect.applyUpsert(
             insert,
@@ -112,6 +113,7 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
                 "name",
                 "secondary_name",
                 "pattern_type",
+                "operation_type",
                 "distance_m",
                 "runtime_secs",
                 "metadata",
@@ -147,19 +149,20 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
     statement.setString(4, route.name());
     statement.setString(5, route.secondaryName().orElse(null));
     statement.setString(6, route.patternType().name());
+    statement.setString(7, route.operationType().name());
     if (route.distanceMeters().isPresent()) {
-      statement.setInt(7, route.distanceMeters().get());
-    } else {
-      statement.setObject(7, null);
-    }
-    if (route.runtimeSeconds().isPresent()) {
-      statement.setInt(8, route.runtimeSeconds().get());
+      statement.setInt(8, route.distanceMeters().get());
     } else {
       statement.setObject(8, null);
     }
-    statement.setString(9, toJson(route.metadata()));
-    setInstant(statement, 10, route.createdAt());
-    setInstant(statement, 11, route.updatedAt());
+    if (route.runtimeSeconds().isPresent()) {
+      statement.setInt(9, route.runtimeSeconds().get());
+    } else {
+      statement.setObject(9, null);
+    }
+    statement.setString(10, toJson(route.metadata()));
+    setInstant(statement, 11, route.createdAt());
+    setInstant(statement, 12, route.updatedAt());
   }
 
   private Route mapRow(ResultSet rs) throws SQLException {
@@ -169,6 +172,7 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
     String name = rs.getString("name");
     String secondaryName = rs.getString("secondary_name");
     String patternType = rs.getString("pattern_type");
+    String operationType = rs.getString("operation_type");
     Integer distanceMeters = readNullableInteger(rs, "distance_m");
     Integer runtimeSeconds = readNullableInteger(rs, "runtime_secs");
     Map<String, Object> metadata = fromJson(rs.getString("metadata"));
@@ -178,6 +182,10 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
     if (parsedPattern.isEmpty()) {
       throw new StorageException("无效的 RoutePatternType: " + patternType);
     }
+    Optional<RouteOperationType> parsedOperation = RouteOperationType.fromToken(operationType);
+    if (parsedOperation.isEmpty()) {
+      throw new StorageException("无效的 RouteOperationType: " + operationType);
+    }
     return new Route(
         id,
         code,
@@ -185,6 +193,7 @@ public final class JdbcRouteRepository extends JdbcRepositorySupport implements 
         name,
         Optional.ofNullable(secondaryName),
         parsedPattern.get(),
+        parsedOperation.get(),
         Optional.ofNullable(distanceMeters),
         Optional.ofNullable(runtimeSeconds),
         metadata,

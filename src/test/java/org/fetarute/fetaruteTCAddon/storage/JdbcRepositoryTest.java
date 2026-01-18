@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -422,6 +423,7 @@ final class JdbcRepositoryTest {
             "Express",
             Optional.empty(),
             RoutePatternType.EXPRESS,
+            RouteOperationType.OPERATION,
             Optional.of(10_000),
             Optional.of(600),
             Map.of(),
@@ -561,6 +563,7 @@ final class JdbcRepositoryTest {
             "Express",
             Optional.empty(),
             RoutePatternType.RAPID,
+            RouteOperationType.OPERATION,
             Optional.empty(),
             Optional.empty(),
             Map.of(),

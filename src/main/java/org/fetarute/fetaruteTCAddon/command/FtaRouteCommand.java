@@ -17,6 +17,8 @@ import java.util.stream.Stream;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
+import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -36,10 +38,13 @@ import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -67,6 +72,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaRouteCommand {
 
   private static final int SUGGESTION_LIMIT = 20;
+  private static final int VALIDATION_ISSUE_LIMIT = 20;
 
   /** define 后的解析回显分页大小（避免一次输出过长刷屏）。 */
   private static final int STOP_DEBUG_PAGE_SIZE = 10;
@@ -76,9 +82,12 @@ public final class FtaRouteCommand {
 
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
-  private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION");
+  private static final Set<String> ACTION_PREFIXES =
+      Set.of("CHANGE", "DYNAMIC", "ACTION", "CRET", "DSTY");
   private static final List<String> ROUTE_PATTERN_ALIASES =
       List.of("LOCAL", "RAPID", "NEO_RAPID", "EXPRESS", "LTD_EXPRESS", "LIMITED_EXPRESS");
+  private static final List<String> ROUTE_OPERATION_ALIASES =
+      List.of("OPERATION", "RETURN", "OP", "RET");
   private static final PlainTextComponentSerializer PLAIN_TEXT =
       PlainTextComponentSerializer.plainText();
 
@@ -132,6 +141,7 @@ public final class FtaRouteCommand {
     SuggestionProvider<CommandSender> secondarySuggestions =
         placeholderSuggestion("\"<secondaryName>\"");
     SuggestionProvider<CommandSender> patternValueSuggestions = routePatternSuggestions();
+    SuggestionProvider<CommandSender> operationValueSuggestions = routeOperationSuggestions();
 
     var nameFlag =
         CommandFlag.<CommandSender>builder("name")
@@ -154,6 +164,13 @@ public final class FtaRouteCommand {
                 CommandComponent.<CommandSender, String>builder(
                         "pattern", StringParser.stringParser())
                     .suggestionProvider(patternValueSuggestions))
+            .build();
+    var operationFlag =
+        CommandFlag.<CommandSender>builder("operation")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "operation", StringParser.stringParser())
+                    .suggestionProvider(operationValueSuggestions))
             .build();
     var runtimeFlag =
         CommandFlag.builder("runtime").withComponent(IntegerParser.integerParser()).build();
@@ -361,6 +378,7 @@ public final class FtaRouteCommand {
             .required("name", StringParser.quotedStringParser(), nameSuggestions)
             .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
             .flag(patternFlag)
+            .flag(operationFlag)
             .flag(runtimeFlag)
             .flag(distanceFlag)
             .handler(
@@ -400,6 +418,17 @@ public final class FtaRouteCommand {
                             Map.of("field", "pattern", "value", String.valueOf(patternRaw))));
                     return;
                   }
+                  String operationRaw =
+                      flags.getValue(operationFlag, RouteOperationType.OPERATION.name());
+                  Optional<RouteOperationType> operationOpt =
+                      RouteOperationType.fromToken(operationRaw);
+                  if (operationOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.enum-invalid",
+                            Map.of("field", "operation", "value", String.valueOf(operationRaw))));
+                    return;
+                  }
                   Integer runtime = flags.getValue(runtimeFlag, null);
                   Integer distance = flags.getValue(distanceFlag, null);
 
@@ -412,6 +441,7 @@ public final class FtaRouteCommand {
                           name,
                           Optional.ofNullable(secondaryName),
                           patternOpt.get(),
+                          operationOpt.get(),
                           Optional.ofNullable(distance),
                           Optional.ofNullable(runtime),
                           Map.of(),
@@ -470,12 +500,21 @@ public final class FtaRouteCommand {
                     String distance = route.distanceMeters().map(String::valueOf).orElse("-");
                     String pattern =
                         locale.enumText("enum.route-pattern-type", route.patternType());
+                    String operation =
+                        locale.enumText("enum.route-operation-type", route.operationType());
                     sender.sendMessage(
                         locale
                             .component(
                                 "command.route.list.entry",
                                 Map.of(
-                                    "code", route.code(), "name", route.name(), "pattern", pattern))
+                                    "code",
+                                    route.code(),
+                                    "name",
+                                    route.name(),
+                                    "pattern",
+                                    pattern,
+                                    "operation",
+                                    operation))
                             .hoverEvent(
                                 HoverEvent.showText(
                                     locale.component(
@@ -489,6 +528,8 @@ public final class FtaRouteCommand {
                                             secondary,
                                             "pattern",
                                             pattern,
+                                            "operation",
+                                            operation,
                                             "runtime",
                                             runtime,
                                             "distance",
@@ -541,6 +582,13 @@ public final class FtaRouteCommand {
                               locale.enumText("enum.route-pattern-type", route.patternType()))));
                   sender.sendMessage(
                       locale.component(
+                          "command.route.info.operation",
+                          Map.of(
+                              "operation",
+                              locale.enumText(
+                                  "enum.route-operation-type", route.operationType()))));
+                  sender.sendMessage(
+                      locale.component(
                           "command.route.info.runtime",
                           Map.of(
                               "runtime", route.runtimeSeconds().map(String::valueOf).orElse("-"))));
@@ -570,6 +618,112 @@ public final class FtaRouteCommand {
         manager
             .commandBuilder("fta")
             .literal("route")
+            .literal("validate")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .optional("route", StringParser.stringParser(), routeSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, false);
+                  if (resolved == null) {
+                    return;
+                  }
+
+                  List<Route> routes = new ArrayList<>();
+                  Optional<String> routeArgOpt = ctx.optional("route").map(String.class::cast);
+                  if (routeArgOpt.isPresent()) {
+                    String routeCode = routeArgOpt.get().trim();
+                    Optional<Route> routeOpt =
+                        provider.routes().findByLineAndCode(resolved.line().id(), routeCode);
+                    if (routeOpt.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component("command.route.not-found", Map.of("route", routeCode)));
+                      return;
+                    }
+                    routes.add(routeOpt.get());
+                  } else {
+                    routes.addAll(provider.routes().listByLine(resolved.line().id()));
+                  }
+                  if (routes.isEmpty()) {
+                    sender.sendMessage(locale.component("command.route.list.empty"));
+                    return;
+                  }
+
+                  List<RouteValidationEntry> entries = new ArrayList<>();
+                  int routeIssueCount = 0;
+                  boolean reachabilitySkipped = false;
+                  for (Route route : routes) {
+                    List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+                    RouteValidationResult result = validateRouteStops(provider, stops, true);
+                    if (result.reachabilitySkipped()) {
+                      reachabilitySkipped = true;
+                    }
+                    if (result.issues().isEmpty()) {
+                      continue;
+                    }
+                    routeIssueCount++;
+                    for (RouteValidationIssue issue : result.issues()) {
+                      entries.add(new RouteValidationEntry(route.code(), issue));
+                    }
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.validate.header",
+                          Map.of("count", String.valueOf(routes.size()))));
+                  if (reachabilitySkipped) {
+                    sender.sendMessage(locale.component("command.route.define.graph-missing"));
+                  }
+                  if (entries.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.validate.ok",
+                            Map.of("count", String.valueOf(routes.size()))));
+                    return;
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.validate.summary",
+                          Map.of(
+                              "routes",
+                              String.valueOf(routeIssueCount),
+                              "issues",
+                              String.valueOf(entries.size()))));
+                  int limit = Math.min(entries.size(), VALIDATION_ISSUE_LIMIT);
+                  for (int i = 0; i < limit; i++) {
+                    RouteValidationEntry entry = entries.get(i);
+                    Component error = locale.component(entry.issue().key(), entry.issue().params());
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.validate.entry",
+                            TagResolver.builder()
+                                .resolver(Placeholder.unparsed("route", entry.routeCode()))
+                                .resolver(Placeholder.component("error", error))
+                                .build()));
+                  }
+                  if (entries.size() > limit) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.validate.more",
+                            Map.of("count", String.valueOf(entries.size() - limit))));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
             .literal("set")
             .senderType(Player.class)
             .required("company", StringParser.stringParser(), companySuggestions)
@@ -579,6 +733,7 @@ public final class FtaRouteCommand {
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(patternFlag)
+            .flag(operationFlag)
             .flag(runtimeFlag)
             .flag(distanceFlag)
             .flag(spawnFlag)
@@ -605,6 +760,7 @@ public final class FtaRouteCommand {
                       flags.hasFlag(nameFlag)
                           || flags.hasFlag(secondaryFlag)
                           || flags.hasFlag(patternFlag)
+                          || flags.hasFlag(operationFlag)
                           || flags.hasFlag(runtimeFlag)
                           || flags.hasFlag(distanceFlag)
                           || flags.hasFlag(spawnFlag)
@@ -636,6 +792,16 @@ public final class FtaRouteCommand {
                             Map.of("field", "pattern", "value", String.valueOf(patternRaw))));
                     return;
                   }
+                  String operationRaw = flags.getValue(operationFlag, route.operationType().name());
+                  Optional<RouteOperationType> operationOpt =
+                      RouteOperationType.fromToken(operationRaw);
+                  if (operationOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.enum-invalid",
+                            Map.of("field", "operation", "value", String.valueOf(operationRaw))));
+                    return;
+                  }
                   Integer runtime =
                       flags.getValue(runtimeFlag, route.runtimeSeconds().orElse(null));
                   Integer distance =
@@ -661,6 +827,7 @@ public final class FtaRouteCommand {
                           name,
                           Optional.ofNullable(secondary),
                           patternOpt.get(),
+                          operationOpt.get(),
                           Optional.ofNullable(distance),
                           Optional.ofNullable(runtime),
                           metadata,
@@ -768,6 +935,16 @@ public final class FtaRouteCommand {
                     return;
                   }
                   List<RouteStop> stops = stopsOpt.get();
+                  RouteValidationResult validation = validateRouteStops(provider, stops, true);
+                  if (validation.reachabilitySkipped()) {
+                    sender.sendMessage(locale.component("command.route.define.graph-missing"));
+                  }
+                  if (!validation.issues().isEmpty()) {
+                    for (RouteValidationIssue issue : validation.issues()) {
+                      sender.sendMessage(locale.component(issue.key(), issue.params()));
+                    }
+                    return;
+                  }
 
                   provider
                       .transactionManager()
@@ -917,6 +1094,24 @@ public final class FtaRouteCommand {
             suggestions.add("<pattern>");
           }
           for (String value : ROUTE_PATTERN_ALIASES) {
+            if (prefix.isBlank() || value.startsWith(prefix)) {
+              suggestions.add(value);
+            }
+          }
+          return suggestions;
+        });
+  }
+
+  /** operation flag value 补全：提供占位符与常用别名（支持前缀过滤）。 */
+  private static SuggestionProvider<CommandSender> routeOperationSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = input.lastRemainingToken().trim().toUpperCase(Locale.ROOT);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<operation>");
+          }
+          for (String value : ROUTE_OPERATION_ALIASES) {
             if (prefix.isBlank() || value.startsWith(prefix)) {
               suggestions.add(value);
             }
@@ -1258,7 +1453,7 @@ public final class FtaRouteCommand {
    *
    * <ul>
    *   <li>空行、#、// 开头的行忽略
-   *   <li>动作行（CHANGE/DYNAMIC/ACTION 前缀）附着到上一条 stop 的 notes（用换行拼接）
+   *   <li>动作行（CHANGE/DYNAMIC/CRET/DSTY/ACTION 前缀）附着到上一条 stop 的 notes（用换行拼接）
    *   <li>stop 行支持 PASS/STOP/TERM 前缀；支持 dwell=&lt;秒&gt; 参数（基准停车时间，运行时可按调度策略增减）
    *   <li>含冒号的行视为 NodeId，写入 waypointNodeId（字符串原样保存）
    *   <li>不含冒号的行视为 StationCode，需在 stations 表中存在，否则报错
@@ -1397,6 +1592,158 @@ public final class FtaRouteCommand {
     return ACTION_PREFIXES.contains(firstSegment.trim().toUpperCase(Locale.ROOT));
   }
 
+  private RouteValidationResult validateRouteStops(
+      StorageProvider provider, List<RouteStop> stops, boolean checkReachability) {
+    // 结构校验 + 可选的图可达性检查（依赖已加载的图快照）。
+    if (stops == null || stops.isEmpty()) {
+      return new RouteValidationResult(List.of(), false);
+    }
+    List<RouteValidationIssue> issues = new ArrayList<>();
+
+    int cretCount = 0;
+    int dstyCount = 0;
+    int cretSeq = -1;
+    int dstySeq = -1;
+    for (RouteStop stop : stops) {
+      if (stop == null) {
+        continue;
+      }
+      for (String line : extractActionLines(stop)) {
+        String prefix = firstSegment(line).trim().toUpperCase(Locale.ROOT);
+        if ("CRET".equals(prefix)) {
+          cretCount++;
+          cretSeq = stop.sequence();
+        } else if ("DSTY".equals(prefix)) {
+          dstyCount++;
+          dstySeq = stop.sequence();
+        }
+      }
+    }
+    if (cretCount > 1) {
+      issues.add(new RouteValidationIssue("command.route.define.cret-multi", Map.of()));
+    }
+    if (cretCount == 1 && cretSeq != 0) {
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.define.cret-not-first", Map.of("seq", String.valueOf(cretSeq))));
+    }
+    if (dstyCount > 1) {
+      issues.add(new RouteValidationIssue("command.route.define.dsty-multi", Map.of()));
+    }
+    if (dstyCount == 1 && dstySeq != stops.size() - 1) {
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.define.dsty-not-last", Map.of("seq", String.valueOf(dstySeq))));
+    }
+
+    boolean missingNode = false;
+    List<NodeId> nodes = new ArrayList<>();
+    for (RouteStop stop : stops) {
+      if (stop == null) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
+      if (nodeIdOpt.isEmpty()) {
+        missingNode = true;
+        addMissingNodeIssue(provider, stop, issues);
+        continue;
+      }
+      nodes.add(nodeIdOpt.get());
+    }
+
+    boolean reachabilitySkipped = false;
+    if (checkReachability) {
+      if (plugin.getRailGraphService() == null
+          || plugin.getRailGraphService().snapshotCount() <= 0) {
+        reachabilitySkipped = true;
+      } else if (!missingNode && nodes.size() >= 2) {
+        if (plugin.getRailGraphService().findWorldIdForPath(nodes).isEmpty()) {
+          boolean pairMissing = false;
+          for (int i = 0; i < nodes.size() - 1; i++) {
+            NodeId from = nodes.get(i);
+            NodeId to = nodes.get(i + 1);
+            if (plugin.getRailGraphService().findWorldIdForConnectedPair(from, to).isEmpty()) {
+              issues.add(
+                  new RouteValidationIssue(
+                      "command.route.define.edge-unreachable",
+                      Map.of("from", from.value(), "to", to.value())));
+              pairMissing = true;
+            }
+          }
+          if (!pairMissing) {
+            issues.add(new RouteValidationIssue("command.route.define.path-cross-world", Map.of()));
+          }
+        }
+      }
+    }
+    return new RouteValidationResult(List.copyOf(issues), reachabilitySkipped);
+  }
+
+  /**
+   * 将“无法解析节点”的 stop 转换为具体的校验问题输出。
+   *
+   * <p>若 stop 绑定站点则报告站点缺失/站点未绑定图节点，否则报告 nodeId 缺失。
+   */
+  private void addMissingNodeIssue(
+      StorageProvider provider, RouteStop stop, List<RouteValidationIssue> issues) {
+    if (stop == null) {
+      return;
+    }
+    if (stop.stationId().isPresent()) {
+      Optional<Station> stationOpt = RouteStopResolver.resolveStation(provider, stop);
+      if (stationOpt.isEmpty()) {
+        issues.add(
+            new RouteValidationIssue(
+                "command.route.define.station-missing",
+                Map.of("seq", String.valueOf(stop.sequence()))));
+        return;
+      }
+      Station station = stationOpt.get();
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.define.station-graph-missing",
+              Map.of("seq", String.valueOf(stop.sequence()), "station", station.code())));
+      return;
+    }
+    issues.add(
+        new RouteValidationIssue(
+            "command.route.define.node-missing", Map.of("seq", String.valueOf(stop.sequence()))));
+  }
+
+  /** 从 RouteStop 的 notes 中提取 action 行（仅保留支持的前缀）。 */
+  private List<String> extractActionLines(RouteStop stop) {
+    if (stop == null || stop.notes().isEmpty()) {
+      return List.of();
+    }
+    String raw = stop.notes().orElse("");
+    if (raw.isBlank()) {
+      return List.of();
+    }
+    String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
+    List<String> lines = new ArrayList<>();
+    for (String line : normalized.split("\n", -1)) {
+      if (line == null) {
+        continue;
+      }
+      String trimmed = line.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      String prefix = firstSegment(trimmed);
+      if (isActionLine(prefix)) {
+        lines.add(trimmed);
+      }
+    }
+    return lines;
+  }
+
+  private record RouteValidationIssue(String key, Map<String, String> params) {}
+
+  private record RouteValidationResult(
+      List<RouteValidationIssue> issues, boolean reachabilitySkipped) {}
+
+  private record RouteValidationEntry(String routeCode, RouteValidationIssue issue) {}
+
   private record ResolvedLine(Company company, Operator operator, Line line) {}
 
   private record ResolvedRoute(Company company, Operator operator, Line line, Route route) {}
@@ -1422,17 +1769,19 @@ public final class FtaRouteCommand {
     rendered.add("# stop: StationCode 或 NodeId");
     rendered.add("#   NodeId 例: " + operator.code() + ":S:PTK:1");
     rendered.add("#           或: " + operator.code() + ":A:B:1:00");
-    rendered.add("# action: CHANGE/DYNAMIC/ACTION");
+    rendered.add("# action: CHANGE/DYNAMIC/CRET/DSTY/ACTION");
     rendered.add("# 修饰: PASS/STOP/TERM, dwell=<秒>");
+    rendered.add("# 限制: CRET 仅允许首个 stop；DSTY 必须为最后 stop");
     rendered.add("#");
 
     if (stops.isEmpty()) {
       rendered.add("# 示例：");
+      rendered.add("# STOP " + operator.code() + ":D:DEPOT:1");
+      rendered.add("# CRET:" + operator.code() + ":D:DEPOT:1");
       rendered.add("# STOP PTK dwell=30");
       rendered.add("# CHANGE:" + operator.code() + ":" + line.code());
       rendered.add("# PASS " + operator.code() + ":A:B:1:00");
-      rendered.add("# STOP " + operator.code() + ":D:DEPOT:1");
-      rendered.add("# STOP " + operator.code() + ":D:DEPOT:1:01");
+      rendered.add("# DSTY:" + operator.code() + ":D:DEPOT:1:01");
       rendered.add("");
     } else {
       rendered.add("# 已加载现有停靠表（可直接修改后 define 覆盖）");

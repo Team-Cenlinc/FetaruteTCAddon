@@ -27,6 +27,8 @@
 - `FTA_ROUTE_UPDATED_AT`：可选，调度更新时间（毫秒）
 - `FTA_TRAIN_NAME`：上次记录的列车名（用于改名迁移）
 
+未写入 `FTA_ROUTE_INDEX` 时视为“未激活”，信号 tick 不会构建占用；首次触发推进点后才会写入并进入占用/控车流程。
+
 线路定义查找顺序：
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
 2) `FTA_ROUTE_ID`（兼容旧标签）

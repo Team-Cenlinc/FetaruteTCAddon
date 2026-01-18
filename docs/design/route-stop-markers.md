@@ -7,7 +7,7 @@
 ```
 ACTION:PAYLOAD[:MORE]
 ```
-例如 `CHANGE:SURN:LT`、`DYNAMIC:SURN:PTK:[1:3]`。若参数较多，可继续拼接冒号片段，或用 `ACTION[参数]` 的数组式写法。运行时解析逻辑由 `RouteStopInterpreter` 统一处理。
+例如 `CHANGE:SURN:LT`、`DYNAMIC:SURN:PTK:[1:3]`、`CRET:SURN:D:DEPOT:1`。若参数较多，可继续拼接冒号片段，或用 `ACTION[参数]` 的数组式写法。运行时解析逻辑由 `RouteStopInterpreter` 统一处理。
 
 ### 1.1 换线标记（CHANGE）
 - 语法：`CHANGE:<OperatorCode>:<LineCode>`（例如 `CHANGE:SURN:LT`）。
@@ -15,9 +15,19 @@ ACTION:PAYLOAD[:MORE]
 - 典型场景：直通车在枢纽站由 FTL 线切换到 SURN-LT 线继续行驶。
 
 ### 1.2 动态站台标记（DYNAMIC）
-- 语法：`DYNAMIC:<OperatorCode>:<StationCode>`，可附带区间，如 `DYNAMIC:SURN:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。
-- 行为：调度层根据实时占用情况在指定站台集合中挑选一个空闲 nodeId，将其写入下一目的地，并把选择结果写回列车 MetaTag，供 PIDS/日志使用。
+- 语法：`DYNAMIC:<OperatorCode>:<StationCode>` 或 `DYNAMIC:<OperatorCode>:<DepotCode>`，可附带区间，如 `DYNAMIC:SURN:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。
+- 行为：调度层根据实时占用情况在指定站台/车库集合中挑选一个空闲 nodeId，将其写入下一目的地，并把选择结果写回列车 MetaTag，供 PIDS/日志使用。
 - 扩展：若只写 `DYNAMIC` 而不带范围，默认使用该站所有站台；如需特殊策略，可在 `[]` 内写 JSON 片段，例如 `[prefer=2,3]`。
+
+### 1.3 生成标记（CRET）
+- 语法：`CRET:<NodeId>` 或 `CRET:DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`。
+- 含义：明确列车在何处生成；调度层会在该 stop 触发生成/出库逻辑。
+- 约束：整条路线仅允许一个 `CRET`，且必须绑定在首个 stop 上。
+
+### 1.4 销毁标记（DSTY）
+- 语法：`DSTY:<NodeId>` 或 `DSTY:DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`。
+- 含义：列车抵达该 stop 后执行销毁/回收（例如进库后销毁实体）。
+- 约束：整条路线仅允许一个 `DSTY`，且必须绑定在最后一个 stop 上。
 
 ## 2. Sign 牌子命名扩展
 在 `dispatcher/sign` 体系内，保留以下扩展规则，方便与 RouteStop 标记联动：

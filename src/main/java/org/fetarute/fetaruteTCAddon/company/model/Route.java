@@ -14,6 +14,7 @@ public record Route(
     String name,
     Optional<String> secondaryName,
     RoutePatternType patternType,
+    RouteOperationType operationType,
     Optional<Integer> distanceMeters,
     Optional<Integer> runtimeSeconds,
     Map<String, Object> metadata,
@@ -26,6 +27,7 @@ public record Route(
     Objects.requireNonNull(name, "name");
     secondaryName = secondaryName == null ? Optional.empty() : secondaryName;
     Objects.requireNonNull(patternType, "patternType");
+    Objects.requireNonNull(operationType, "operationType");
     distanceMeters = distanceMeters == null ? Optional.empty() : distanceMeters;
     runtimeSeconds = runtimeSeconds == null ? Optional.empty() : runtimeSeconds;
     metadata = metadata == null ? Map.of() : Map.copyOf(metadata);

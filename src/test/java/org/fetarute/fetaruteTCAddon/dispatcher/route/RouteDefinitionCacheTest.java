@@ -17,6 +17,7 @@ import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -89,6 +90,7 @@ class RouteDefinitionCacheTest {
             "Route 1",
             Optional.empty(),
             RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
             Optional.empty(),
             Optional.empty(),
             Map.of(),
@@ -208,6 +210,7 @@ class RouteDefinitionCacheTest {
             "Route 1",
             Optional.empty(),
             RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
             Optional.empty(),
             Optional.empty(),
             Map.of(),

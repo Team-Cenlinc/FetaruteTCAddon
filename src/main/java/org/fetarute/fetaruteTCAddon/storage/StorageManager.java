@@ -165,7 +165,12 @@ public final class StorageManager {
   /**
    * 兼容性迁移：修正历史字符串枚举值，避免升级后旧数据无法被解析。
    *
-   * <p>当前仅包含 “RoutePatternType” 的历史值迁移：
+   * <p>当前包含：
+   *
+   * <ul>
+   *   <li>routes.operation_type 列补齐（默认 OPERATION）
+   *   <li>RoutePatternType 历史值迁移
+   * </ul>
    *
    * <ul>
    *   <li>SEMI_EXPRESS → RAPID
@@ -174,6 +179,7 @@ public final class StorageManager {
    */
   private void applyCompatibilityMigrations(java.sql.Connection connection) {
     ensureRailGraphSnapshotSignatureColumn(connection);
+    ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);
   }
 
@@ -198,6 +204,30 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 rail_graph_snapshots.node_signature: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 rail_graph_snapshots.node_signature: " + ex.getMessage());
+    }
+  }
+
+  /** 兼容性迁移：为旧版 routes 表补齐 operation_type 列。 */
+  private void ensureRouteOperationTypeColumn(java.sql.Connection connection) {
+    String routesTable = storageSchema.tablePrefix() + "routes";
+    String sql =
+        "ALTER TABLE "
+            + routesTable
+            + " ADD COLUMN operation_type "
+            + dialect.stringType()
+            + " NOT NULL DEFAULT 'OPERATION'";
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: routes.operation_type (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 routes.operation_type: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 routes.operation_type: " + ex.getMessage());
     }
   }
 

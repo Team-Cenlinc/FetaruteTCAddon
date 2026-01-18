@@ -23,6 +23,8 @@ import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
+import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
@@ -36,6 +38,12 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -69,6 +77,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -123,6 +132,7 @@ public final class FtaGraphCommand {
           "^\\s*(?<value>[+-]?(?:\\d+(?:\\.\\d+)?|\\.\\d+))\\s*(?<unit>kmh|km/h|kph|bps|bpt)?\\s*$",
           Pattern.CASE_INSENSITIVE);
   private static final Pattern TTL_PATTERN = Pattern.compile("(?i)(\\d+)([smhd])");
+  private static final int VALIDATION_ISSUE_LIMIT = 20;
 
   /** 世界维度的构建任务：同一世界同一时间只允许一个 build/continue 任务运行。 */
   private final ConcurrentMap<UUID, RailGraphBuildJob> jobs = new ConcurrentHashMap<>();
@@ -348,6 +358,7 @@ public final class FtaGraphCommand {
                           .merge()
                           .ifPresent(merge -> sender.sendMessage(mergeBuildMessage(locale, merge)));
                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                      validateRoutesAfterBuild(sender, world, applied.result().graph());
                     } catch (IllegalStateException ex) {
                       sender.sendMessage(locale.component("command.graph.build.no-nodes"));
                     }
@@ -414,6 +425,8 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                                      validateRoutesAfterBuild(
+                                          sender, world, applied.result().graph());
                                     });
                             jobs.remove(worldId);
                           },
@@ -547,6 +560,8 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                                      validateRoutesAfterBuild(
+                                          sender, world, applied.result().graph());
                                     });
                             jobs.remove(worldId);
                           },
@@ -5889,6 +5904,215 @@ public final class FtaGraphCommand {
     return new AppliedGraphBuild(result, Optional.empty());
   }
 
+  private void validateRoutesAfterBuild(CommandSender sender, World world, RailGraph graph) {
+    // 构建完成后做一次“路由可达性扫描”，仅针对当前世界涉及的路线。
+    if (sender == null || world == null || graph == null) {
+      return;
+    }
+    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      return;
+    }
+    Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
+    if (providerOpt.isEmpty()) {
+      return;
+    }
+    StorageProvider provider = providerOpt.get();
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              RouteValidationSummary summary = buildValidationSummary(provider, graph);
+              if (summary.routesChecked() <= 0) {
+                return;
+              }
+              plugin
+                  .getServer()
+                  .getScheduler()
+                  .runTask(
+                      plugin,
+                      () -> {
+                        if (sender instanceof Player player && !player.isOnline()) {
+                          return;
+                        }
+                        sendValidationSummary(sender, summary);
+                      });
+            });
+  }
+
+  private RouteValidationSummary buildValidationSummary(StorageProvider provider, RailGraph graph) {
+    List<RouteValidationEntry> entries = new ArrayList<>();
+    int routesChecked = 0;
+    int routeIssueCount = 0;
+
+    for (Company company : provider.companies().listAll()) {
+      if (company == null) {
+        continue;
+      }
+      for (Operator operator : provider.operators().listByCompany(company.id())) {
+        if (operator == null) {
+          continue;
+        }
+        for (Line line : provider.lines().listByOperator(operator.id())) {
+          if (line == null) {
+            continue;
+          }
+          for (Route route : provider.routes().listByLine(line.id())) {
+            if (route == null) {
+              continue;
+            }
+            List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+            if (stops.isEmpty()) {
+              continue;
+            }
+            if (!routeTouchesWorld(provider, graph, stops)) {
+              continue;
+            }
+            routesChecked++;
+            List<RouteValidationIssue> issues = validateStopsInGraph(provider, graph, stops);
+            if (issues.isEmpty()) {
+              continue;
+            }
+            routeIssueCount++;
+            for (RouteValidationIssue issue : issues) {
+              entries.add(new RouteValidationEntry(route.code(), issue));
+            }
+          }
+        }
+      }
+    }
+    return new RouteValidationSummary(routesChecked, routeIssueCount, List.copyOf(entries));
+  }
+
+  private void sendValidationSummary(CommandSender sender, RouteValidationSummary summary) {
+    LocaleManager locale = plugin.getLocaleManager();
+    sender.sendMessage(
+        locale.component(
+            "command.route.validate.header",
+            Map.of("count", String.valueOf(summary.routesChecked()))));
+    if (summary.entries().isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.route.validate.ok",
+              Map.of("count", String.valueOf(summary.routesChecked()))));
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            "command.route.validate.summary",
+            Map.of(
+                "routes",
+                String.valueOf(summary.routeIssueCount()),
+                "issues",
+                String.valueOf(summary.entries().size()))));
+    int limit = Math.min(summary.entries().size(), VALIDATION_ISSUE_LIMIT);
+    for (int i = 0; i < limit; i++) {
+      RouteValidationEntry entry = summary.entries().get(i);
+      Component error = locale.component(entry.issue().key(), entry.issue().params());
+      sender.sendMessage(
+          locale.component(
+              "command.route.validate.entry",
+              TagResolver.builder()
+                  .resolver(Placeholder.unparsed("route", entry.routeCode()))
+                  .resolver(Placeholder.component("error", error))
+                  .build()));
+    }
+    if (summary.entries().size() > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.route.validate.more",
+              Map.of("count", String.valueOf(summary.entries().size() - limit))));
+    }
+  }
+
+  private boolean routeTouchesWorld(
+      StorageProvider provider, RailGraph graph, List<RouteStop> stops) {
+    // 只要 stop 节点存在于当前图快照，就视为该路线“涉及该世界”。
+    if (graph == null || stops == null || stops.isEmpty()) {
+      return false;
+    }
+    for (RouteStop stop : stops) {
+      if (stop == null) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
+      if (nodeIdOpt.isPresent() && graph.findNode(nodeIdOpt.get()).isPresent()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private List<RouteValidationIssue> validateStopsInGraph(
+      StorageProvider provider, RailGraph graph, List<RouteStop> stops) {
+    // 仅检查“节点存在 + 相邻 stop 边可达性”。
+    if (graph == null || stops == null || stops.isEmpty()) {
+      return List.of();
+    }
+    List<RouteValidationIssue> issues = new ArrayList<>();
+    List<NodeId> nodes = new ArrayList<>();
+    boolean missingNode = false;
+    for (RouteStop stop : stops) {
+      if (stop == null) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
+      if (nodeIdOpt.isEmpty()) {
+        missingNode = true;
+        addMissingNodeIssue(provider, stop, issues);
+        continue;
+      }
+      nodes.add(nodeIdOpt.get());
+    }
+    if (missingNode || nodes.size() < 2) {
+      return List.copyOf(issues);
+    }
+    RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+    for (int i = 0; i < nodes.size() - 1; i++) {
+      NodeId from = nodes.get(i);
+      NodeId to = nodes.get(i + 1);
+      boolean reachable =
+          pathFinder
+              .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+              .isPresent();
+      if (!reachable) {
+        issues.add(
+            new RouteValidationIssue(
+                "command.route.define.edge-unreachable",
+                Map.of("from", from.value(), "to", to.value())));
+      }
+    }
+    return List.copyOf(issues);
+  }
+
+  private void addMissingNodeIssue(
+      StorageProvider provider, RouteStop stop, List<RouteValidationIssue> issues) {
+    // 站点缺失与节点缺失分别输出不同提示。
+    if (stop == null) {
+      return;
+    }
+    if (stop.stationId().isPresent()) {
+      Optional<Station> stationOpt = RouteStopResolver.resolveStation(provider, stop);
+      if (stationOpt.isEmpty()) {
+        issues.add(
+            new RouteValidationIssue(
+                "command.route.define.station-missing",
+                Map.of("seq", String.valueOf(stop.sequence()))));
+        return;
+      }
+      Station station = stationOpt.get();
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.define.station-graph-missing",
+              Map.of("seq", String.valueOf(stop.sequence()), "station", station.code())));
+      return;
+    }
+    issues.add(
+        new RouteValidationIssue(
+            "command.route.define.node-missing", Map.of("seq", String.valueOf(stop.sequence()))));
+  }
+
   /**
    * 将 build 结果中的节点列表写回节点注册表，确保重建图后仍能进行 NodeId 冲突检测。
    *
@@ -6019,6 +6243,13 @@ public final class FtaGraphCommand {
       Objects.requireNonNull(merge, "merge");
     }
   }
+
+  private record RouteValidationIssue(String key, Map<String, String> params) {}
+
+  private record RouteValidationEntry(String routeCode, RouteValidationIssue issue) {}
+
+  private record RouteValidationSummary(
+      int routesChecked, int routeIssueCount, List<RouteValidationEntry> entries) {}
 
   /**
    * 把调度图快照写入存储（SQL）。

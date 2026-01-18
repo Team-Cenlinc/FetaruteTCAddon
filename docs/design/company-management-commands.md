@@ -66,6 +66,7 @@
 | `/fta route stop add <route> <sequence> (--station <station> | --waypoint <node>) [--dwell <sec> --pass <type>]` | 插入停靠点 | DISPATCHER/MANAGER | `RouteStopRepository.save` |
 | `/fta route stop remove <route> <sequence>` | 移除停靠 | DISPATCHER/MANAGER | `RouteStopRepository.delete` |
 | `/fta route stop list <route>` | 查看停靠表 | 成员 | `RouteStopRepository.listByRoute` |
+| `/fta route validate <company> <operator> <line> [route]` | 校验停靠表结构与图可达性 | 成员 | `RouteStopRepository.listByRoute` |
 
 ## Depot 命令
 | 命令 | 说明 | 角色 | DAO |

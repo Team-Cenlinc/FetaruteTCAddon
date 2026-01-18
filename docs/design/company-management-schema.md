@@ -105,6 +105,7 @@
 | line_id | UUID | 归属线路 |
 | name / secondary_name | VARCHAR | 名称 |
 | pattern_type | ENUM | LOCAL/SEMI_EXPRESS/EXPRESS/LIMITED_EXPRESS |
+| operation_type | ENUM | OPERATION/RETURN |
 | tc_route_id | VARCHAR | （可选）映射到 TrainCarts route / destination，用于兼容旧系统 |
 | distance_m | INT | 预估线路长度（可选） |
 | runtime_secs | INT | 全程运行时间（可选） |
