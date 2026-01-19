@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|depot|graph|occupancy|train>
+    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|train>
 permissions:
   fetarute.admin:
     description: 全局管理员权限

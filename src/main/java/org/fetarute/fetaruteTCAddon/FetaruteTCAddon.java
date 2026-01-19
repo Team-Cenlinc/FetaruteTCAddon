@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -238,6 +239,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaOperatorCommand(this).register(commandManager);
     new FtaLineCommand(this).register(commandManager);
     new FtaRouteCommand(this).register(commandManager);
+    new FtaStationCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);

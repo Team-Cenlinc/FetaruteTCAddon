@@ -51,6 +51,8 @@ command:
     hover-line: "<gray>点击填充:</gray> <white>/fta line </white>\n<dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
     entry-route: "<gray>/fta route</gray> <white>-</white> <dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
     hover-route: "<gray>点击填充:</gray> <white>/fta route </white>\n<dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
+    entry-station: "<gray>/fta station</gray> <white>-</white> <dark_aqua>站点主数据管理（名称/位置/PIDS）</dark_aqua>"
+    hover-station: "<gray>点击填充:</gray> <white>/fta station </white>\n<dark_aqua>站点主数据管理（名称/位置/PIDS）</dark_aqua>"
     entry-depot: "<gray>/fta depot</gray> <white>-</white> <dark_aqua>车库指令（手动生成列车）</dark_aqua>"
     hover-depot: "<gray>点击填充:</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
     entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
@@ -567,15 +569,37 @@ command:
           - "#"
           - "# 示例："
           - "# SURN:D:AAA:1"
-          - "# CRET:SURN:D:AAA:1"
+          - "# CRET SURN:D:AAA:1"
           - "# PTK"
           - "# DYNAMIC:SURN:PTK:[1:3]"
           - "# SURN:AAA:BBB:1:00"
-          - "# DSTY:SURN:D:AAA:1:01"
+          - "# DSTY SURN:D:AAA:1:01"
       archived:
         success: "<prefix> <dark_aqua>已将编辑书归档为成书</dark_aqua>"
         lore-1: "<gray>运行图已写入数据库，可用于存档</gray>"
         lore-2: "<gray>写入时间:</gray> <white><when></white>"
+
+  station:
+    not-found: "<prefix> <red>未找到站点：</red><white><operator></white><gray>/</gray><white><station></white>"
+    list:
+      header: "<prefix> <dark_aqua>站点列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white>"
+      empty: "<gray>（暂无站点）</gray>"
+      entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+    info:
+      header: "<prefix> <dark_aqua>站点</dark_aqua> <white><operator></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+      secondary: "<gray>第二语言名称:</gray> <dark_aqua><secondary></dark_aqua>"
+      node: "<gray>图节点:</gray> <dark_aqua><node></dark_aqua>"
+      world: "<gray>世界:</gray> <dark_aqua><world></dark_aqua>"
+      location: "<gray>位置:</gray> <dark_aqua><location></dark_aqua>"
+    set:
+      success: "<prefix> <dark_aqua>站点已更新：</dark_aqua><white><code></white>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--secondary-clear/--node/--node-clear/--here/--location-clear）</gray>"
+    dump:
+      header: "<prefix> <dark_aqua>站点清理预览</dark_aqua> <gray>(operator=<white><operator></white>, count=<white><count></white>)</gray>"
+      empty: "<gray>（没有可清理的站点）</gray>"
+      entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+      more: "<gray>… 还有 <white><count></white> 个未显示</gray>"
+      success: "<prefix> <dark_aqua>已清理站点</dark_aqua> <gray>(count=<white><count></white>)</gray>"
 
   depot:
     spawn:

@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.command;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -13,7 +14,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
+import org.bukkit.Server;
 import org.bukkit.World;
+import org.bukkit.scheduler.BukkitScheduler;
+import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -89,6 +93,12 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     when(plugin.getSignNodeRegistry()).thenReturn(registry);
     when(plugin.getStorageManager()).thenReturn(storageManager);
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+    Server server = mock(Server.class);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    when(plugin.getServer()).thenReturn(server);
+    when(server.getScheduler()).thenReturn(scheduler);
+    when(scheduler.runTaskAsynchronously(any(), any(Runnable.class)))
+        .thenReturn(mock(BukkitTask.class));
 
     FtaGraphCommand command = new FtaGraphCommand(plugin);
 

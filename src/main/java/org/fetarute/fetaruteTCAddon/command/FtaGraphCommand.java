@@ -38,6 +38,7 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.StationAutoSyncService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -5895,13 +5896,46 @@ public final class FtaGraphCommand {
       service.putSnapshot(world, merged.graph(), merged.builtAt());
       syncSignNodeRegistry(world, mergedNodes);
       persistGraph(world, merged);
+      scheduleStationAutoSync(world, merged.nodes());
       return new AppliedGraphBuild(merged, Optional.of(merge));
     }
 
     service.putSnapshot(world, result.graph(), result.builtAt());
     syncSignNodeRegistry(world, result.nodes());
     persistGraph(world, result);
+    scheduleStationAutoSync(world, result.nodes());
     return new AppliedGraphBuild(result, Optional.empty());
+  }
+
+  /** build 完成后异步自愈 Station 主数据（用于 PIDS/站点显示）。 */
+  private void scheduleStationAutoSync(World world, List<RailNodeRecord> nodes) {
+    if (world == null || nodes == null || nodes.isEmpty()) {
+      return;
+    }
+    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      return;
+    }
+    Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
+    if (providerOpt.isEmpty()) {
+      return;
+    }
+    StorageProvider provider = providerOpt.get();
+    String worldName = world.getName();
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              try {
+                java.util.function.Consumer<String> debug =
+                    plugin.getLoggerManager() != null ? plugin.getLoggerManager()::debug : m -> {};
+                StationAutoSyncService sync = new StationAutoSyncService(debug);
+                sync.syncFromRailNodes(provider, worldName, nodes);
+              } catch (Exception ex) {
+                plugin.getLogger().warning("站点自愈失败: " + ex.getMessage());
+              }
+            });
   }
 
   private void validateRoutesAfterBuild(CommandSender sender, World world, RailGraph graph) {
