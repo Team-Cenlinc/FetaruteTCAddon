@@ -55,7 +55,7 @@ class TrainConfigResolverTest {
 
   private static ConfigManager.ConfigView defaultConfig() {
     return new ConfigManager.ConfigView(
-        6,
+        7,
         false,
         "zh_CN",
         new ConfigManager.StorageSettings(
@@ -67,6 +67,7 @@ class TrainConfigResolverTest {
         new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
         new ConfigManager.RuntimeSettings(
             10, 2, 1, 3, 4.0, 6.0, 3.5, true, SpeedCurveType.PHYSICS, 1.0, 0.0, 0.2, 60, true),
+        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
         new ConfigManager.TrainConfigSettings(
             "emu",
             new ConfigManager.TrainTypeSettings(0.8, 1.0),

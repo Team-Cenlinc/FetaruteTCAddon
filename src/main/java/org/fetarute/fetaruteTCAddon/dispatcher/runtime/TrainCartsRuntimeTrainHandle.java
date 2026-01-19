@@ -23,16 +23,25 @@ public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
     this.group = Objects.requireNonNull(group, "group");
   }
 
+  /**
+   * @return TrainCarts MinecartGroup 是否仍有效。
+   */
   @Override
   public boolean isValid() {
     return group.isValid();
   }
 
+  /**
+   * @return 列车是否处于移动状态。
+   */
   @Override
   public boolean isMoving() {
     return group.isMoving();
   }
 
+  /**
+   * @return head cart 的实时速度（blocks/tick），若异常返回 0。
+   */
   @Override
   public double currentSpeedBlocksPerTick() {
     MinecartMember<?> head = group.head();
@@ -51,16 +60,25 @@ public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
     return group.getWorld().getUID();
   }
 
+  /**
+   * @return TrainProperties，用于读写 tags/destination 等。
+   */
   @Override
   public TrainProperties properties() {
     return group.getProperties();
   }
 
+  /** 执行紧急停车（不触发目的地逻辑）。 */
   @Override
   public void stop() {
     group.stop(false);
   }
 
+  /**
+   * 发车至目标速度。
+   *
+   * <p>若列车仍在移动则跳过。
+   */
   @Override
   public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
     if (group.isMoving()) {

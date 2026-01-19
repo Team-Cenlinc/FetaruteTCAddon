@@ -51,6 +51,7 @@ public final class FtaOccupancyCommand {
     this.plugin = plugin;
   }
 
+  /** 注册 /fta occupancy 相关命令与补全。 */
   public void register(CommandManager<CommandSender> manager) {
     var nodeIdSuggestions = graphNodeIdSuggestions("\"<nodeId>\"");
     var kindSuggestions = CommandSuggestionProviders.enumValues(ResourceKind.class, "<kind>");
@@ -162,6 +163,7 @@ public final class FtaOccupancyCommand {
                 }));
   }
 
+  /** 输出 occupancy 帮助，并附带可点击建议命令。 */
   private void sendHelp(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("command.occupancy.help.header"));
@@ -197,16 +199,19 @@ public final class FtaOccupancyCommand {
         locale.component("command.occupancy.help.hover-debug-path"));
   }
 
+  /** 输出单行帮助条目（带 click/hover）。 */
   private void sendHelpEntry(
       CommandSender sender, Component text, ClickEvent clickEvent, Component hoverText) {
     sender.sendMessage(text.clickEvent(clickEvent).hoverEvent(HoverEvent.showText(hoverText)));
   }
 
+  /** 提示占用系统未就绪（存储或运行时未初始化）。 */
   private void sendNotReady(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("command.occupancy.not-ready"));
   }
 
+  /** 输出当前占用快照（按资源排序）。 */
   private void dumpClaims(CommandSender sender, int limit) {
     OccupancyManager occupancy = plugin.getOccupancyManager();
     if (occupancy == null) {
@@ -245,6 +250,7 @@ public final class FtaOccupancyCommand {
     }
   }
 
+  /** 输出 Gate Queue 排队快照（含方向锁信息）。 */
   private void dumpQueues(CommandSender sender, int limit) {
     OccupancyManager occupancy = plugin.getOccupancyManager();
     if (occupancy == null) {
@@ -311,6 +317,11 @@ public final class FtaOccupancyCommand {
   }
 
   /** 注册 /fta occupancy debug 子命令。 */
+  /**
+   * 注册 /fta occupancy debug 子命令。
+   *
+   * <p>用于运维手动验证“可进入/占用”的判定逻辑。
+   */
   private void registerDebugCommands(
       CommandManager<CommandSender> manager, SuggestionProvider<CommandSender> nodeIdSuggestions) {
     manager.command(
@@ -383,6 +394,11 @@ public final class FtaOccupancyCommand {
   }
 
   /** 调试：对单条边执行 can/acquire 判定。 */
+  /**
+   * 调试：对单条边执行 can/acquire 判定。
+   *
+   * <p>用于验证资源解析、冲突组与信号判定输出。
+   */
   private void handleEdgeDecision(
       CommandSender sender, String fromRaw, String toRaw, boolean acquire) {
     LocaleManager locale = plugin.getLocaleManager();
@@ -408,6 +424,11 @@ public final class FtaOccupancyCommand {
   }
 
   /** 调试：对最短路路径执行 can/acquire 判定。 */
+  /**
+   * 调试：对最短路路径执行 can/acquire 判定。
+   *
+   * <p>用于验证整段路径的资源展开与冲突组处理。
+   */
   private void handlePathDecision(
       CommandSender sender, String fromRaw, String toRaw, boolean acquire) {
     LocaleManager locale = plugin.getLocaleManager();
@@ -445,6 +466,11 @@ public final class FtaOccupancyCommand {
   }
 
   /** 输出占用判定结果（允许/最早时间/信号/阻塞数）。 */
+  /**
+   * 输出占用判定结果（允许/最早时间/信号/阻塞数）。
+   *
+   * <p>若选择 acquire，则会真实写入占用。
+   */
   private void handleDecision(
       CommandSender sender,
       OccupancyRequest request,
@@ -478,11 +504,13 @@ public final class FtaOccupancyCommand {
   }
 
   /** 构造调试占用请求。 */
+  /** 构造调试占用请求（不含线路信息与走廊方向）。 */
   private OccupancyRequest buildRequest(String trainName, List<OccupancyResource> resources) {
     Instant now = Instant.now();
     return new OccupancyRequest(trainName, Optional.empty(), now, resources, Map.of());
   }
 
+  /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */
   /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */
   private String resolveTrainName(CommandSender sender, boolean acquire) {
     String name = sender.getName();
@@ -492,6 +520,11 @@ public final class FtaOccupancyCommand {
     return "probe:" + name;
   }
 
+  /**
+   * 解析玩家所在世界的调度图快照。
+   *
+   * <p>调试命令仅允许玩家使用（确保有明确 world 上下文）。
+   */
   private Optional<RailGraph> resolveGraph(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     if (!(sender instanceof Player player)) {
@@ -512,6 +545,7 @@ public final class FtaOccupancyCommand {
     return Optional.of(snapshotOpt.get().graph());
   }
 
+  /** 查找无向边（from/to 顺序可互换）。 */
   private Optional<RailEdge> findEdge(RailGraph graph, NodeId from, NodeId to) {
     for (RailEdge edge : graph.edgesFrom(from)) {
       if (edge.from().equals(from) && edge.to().equals(to)) {

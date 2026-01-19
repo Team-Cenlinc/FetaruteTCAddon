@@ -1036,10 +1036,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     double x = 0.0;
     double z = 0.0;
     switch (face) {
-      case EAST -> z = -distance;
-      case WEST -> z = +distance;
-      case SOUTH -> x = -distance;
-      case NORTH -> x = +distance;
+      case EAST -> z = +distance;
+      case WEST -> z = -distance;
+      case SOUTH -> x = +distance;
+      case NORTH -> x = -distance;
       default -> {
         return Optional.empty();
       }

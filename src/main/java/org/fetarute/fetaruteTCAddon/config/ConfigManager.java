@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 6;
+  private static final int EXPECTED_CONFIG_VERSION = 7;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
@@ -59,6 +59,9 @@ public final class ConfigManager {
     current = parse(config, logger);
   }
 
+  /**
+   * @return 当前配置快照（不可变视图）。
+   */
   public ConfigView current() {
     return current;
   }
@@ -80,6 +83,8 @@ public final class ConfigManager {
     AutoStationSettings autoStationSettings = parseAutoStation(autoStationSection, logger);
     ConfigurationSection runtimeSection = config.getConfigurationSection("runtime");
     RuntimeSettings runtimeSettings = parseRuntime(runtimeSection, logger);
+    ConfigurationSection spawnSection = config.getConfigurationSection("spawn");
+    SpawnSettings spawnSettings = parseSpawn(spawnSection, logger);
     ConfigurationSection trainSection = config.getConfigurationSection("train");
     TrainConfigSettings trainConfigSettings = parseTrain(trainSection, logger);
     return new ConfigView(
@@ -90,9 +95,64 @@ public final class ConfigManager {
         graphSettings,
         autoStationSettings,
         runtimeSettings,
+        spawnSettings,
         trainConfigSettings);
   }
 
+  /** 解析 spawn 配置段。 */
+  private static SpawnSettings parseSpawn(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    boolean enabled = false;
+    int tickIntervalTicks = 20;
+    int planRefreshTicks = 200;
+    int maxSpawnPerTick = 1;
+    int maxGeneratePerTick = 5;
+    int maxBacklogPerService = 5;
+    int retryDelayTicks = 40;
+    if (section != null) {
+      enabled = section.getBoolean("enabled", enabled);
+      tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
+      if (tickIntervalTicks <= 0) {
+        logger.warning("spawn.tick-interval-ticks 配置无效: " + tickIntervalTicks);
+        tickIntervalTicks = 20;
+      }
+      planRefreshTicks = section.getInt("plan-refresh-ticks", planRefreshTicks);
+      if (planRefreshTicks <= 0) {
+        logger.warning("spawn.plan-refresh-ticks 配置无效: " + planRefreshTicks);
+        planRefreshTicks = 200;
+      }
+      maxSpawnPerTick = section.getInt("max-spawn-per-tick", maxSpawnPerTick);
+      if (maxSpawnPerTick <= 0) {
+        logger.warning("spawn.max-spawn-per-tick 配置无效: " + maxSpawnPerTick);
+        maxSpawnPerTick = 1;
+      }
+      maxGeneratePerTick = section.getInt("max-generate-per-tick", maxGeneratePerTick);
+      if (maxGeneratePerTick <= 0) {
+        logger.warning("spawn.max-generate-per-tick 配置无效: " + maxGeneratePerTick);
+        maxGeneratePerTick = 5;
+      }
+      maxBacklogPerService = section.getInt("max-backlog-per-service", maxBacklogPerService);
+      if (maxBacklogPerService <= 0) {
+        logger.warning("spawn.max-backlog-per-service 配置无效: " + maxBacklogPerService);
+        maxBacklogPerService = 5;
+      }
+      retryDelayTicks = section.getInt("retry-delay-ticks", retryDelayTicks);
+      if (retryDelayTicks < 0) {
+        logger.warning("spawn.retry-delay-ticks 配置无效: " + retryDelayTicks);
+        retryDelayTicks = 40;
+      }
+    }
+    return new SpawnSettings(
+        enabled,
+        tickIntervalTicks,
+        planRefreshTicks,
+        maxSpawnPerTick,
+        maxGeneratePerTick,
+        maxBacklogPerService,
+        retryDelayTicks);
+  }
+
+  /** 解析 storage 配置段。 */
   private static StorageSettings parseStorage(
       ConfigurationSection storageSection, java.util.logging.Logger logger) {
     if (storageSection == null) {
@@ -118,6 +178,7 @@ public final class ConfigManager {
     return new StorageSettings(backend, sqliteSettings, mySqlSettings, poolSettings);
   }
 
+  /** 解析 graph 配置段。 */
   private static GraphSettings parseGraph(
       ConfigurationSection graphSection, java.util.logging.Logger logger) {
     double defaultSpeedBlocksPerSecond = DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND;
@@ -134,6 +195,7 @@ public final class ConfigManager {
     return new GraphSettings(speed);
   }
 
+  /** 解析 autostation 配置段。 */
   private static AutoStationSettings parseAutoStation(
       ConfigurationSection section, java.util.logging.Logger logger) {
     String sound = DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND;
@@ -161,6 +223,7 @@ public final class ConfigManager {
     return new AutoStationSettings(sound, volume, pitch);
   }
 
+  /** 解析 runtime 配置段。 */
   private static RuntimeSettings parseRuntime(
       ConfigurationSection section, java.util.logging.Logger logger) {
     int tickInterval = DEFAULT_DISPATCH_TICK_INTERVAL;
@@ -369,7 +432,39 @@ public final class ConfigManager {
       GraphSettings graphSettings,
       AutoStationSettings autoStationSettings,
       RuntimeSettings runtimeSettings,
+      SpawnSettings spawnSettings,
       TrainConfigSettings trainConfigSettings) {}
+
+  /** 自动发车配置（SpawnManager / TicketAssigner）。 */
+  public record SpawnSettings(
+      boolean enabled,
+      int tickIntervalTicks,
+      int planRefreshTicks,
+      int maxSpawnPerTick,
+      int maxGeneratePerTick,
+      int maxBacklogPerService,
+      int retryDelayTicks) {
+    public SpawnSettings {
+      if (tickIntervalTicks <= 0) {
+        throw new IllegalArgumentException("tickIntervalTicks 必须为正数");
+      }
+      if (planRefreshTicks <= 0) {
+        throw new IllegalArgumentException("planRefreshTicks 必须为正数");
+      }
+      if (maxSpawnPerTick <= 0) {
+        throw new IllegalArgumentException("maxSpawnPerTick 必须为正数");
+      }
+      if (maxGeneratePerTick <= 0) {
+        throw new IllegalArgumentException("maxGeneratePerTick 必须为正数");
+      }
+      if (maxBacklogPerService <= 0) {
+        throw new IllegalArgumentException("maxBacklogPerService 必须为正数");
+      }
+      if (retryDelayTicks < 0) {
+        throw new IllegalArgumentException("retryDelayTicks 必须为非负数");
+      }
+    }
+  }
 
   /** 调度图相关配置。 */
   public record GraphSettings(double defaultSpeedBlocksPerSecond) {

@@ -9,6 +9,7 @@
 - Claim：占用记录，仅描述当前占用者与 headway 配置（无 releaseAt）。
 - Request：列车申请占用的上下文（不再包含 travelTime，包含单线走廊方向信息）。
 - Decision：是否可进入、信号许可与阻塞信息（earliest 仅作提示）。
+- Queue：冲突资源的 FIFO 排队快照，用于运维诊断与顺序控制。
 
 ## 信号许可（SignalAspect）
 - `PROCEED`：可进入。
@@ -47,6 +48,7 @@
 - 走廊为空时会比较两侧队列头部的首见时间，优先放行更早等待的一侧。
 - 同向跟驰仍可并行进入走廊，但进入顺序受队列约束。
 - 队列条目若超过 30 秒未刷新会自动清理（避免遗留阻塞）。
+- `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向与首见时间）。
 
 ## 观测与运维
 - `/fta occupancy dump [limit]`：查看占用快照。

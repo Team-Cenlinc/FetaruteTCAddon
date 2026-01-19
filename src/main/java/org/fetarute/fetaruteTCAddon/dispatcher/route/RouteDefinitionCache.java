@@ -40,11 +40,13 @@ public final class RouteDefinitionCache {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
   }
 
+  /** 根据 routeId 获取缓存定义。 */
   public Optional<RouteDefinition> findById(UUID routeId) {
     Objects.requireNonNull(routeId, "routeId");
     return Optional.ofNullable(cache.get(routeId));
   }
 
+  /** 根据 operator/line/route code 获取缓存定义。 */
   public Optional<RouteDefinition> findByCodes(
       String operatorCode, String lineCode, String routeCode) {
     RouteCodeKey key = RouteCodeKey.of(operatorCode, lineCode, routeCode);
@@ -54,6 +56,7 @@ public final class RouteDefinitionCache {
     return Optional.ofNullable(codeCache.get(key));
   }
 
+  /** 返回 RouteDefinition 全量快照（只读）。 */
   public Map<UUID, RouteDefinition> snapshot() {
     return Map.copyOf(cache);
   }
@@ -78,12 +81,18 @@ public final class RouteDefinitionCache {
     return Optional.ofNullable(stops.get(sequence));
   }
 
+  /** 清空所有缓存。 */
   public void clear() {
     cache.clear();
     codeCache.clear();
     stopCache.clear();
   }
 
+  /**
+   * 从数据库加载所有 Route 与 RouteStop，构建节点序列缓存。
+   *
+   * <p>仅保留节点数量不少于 2 的线路。
+   */
   /**
    * 从数据库加载所有 Route 与 RouteStop，构建节点序列缓存。
    *
@@ -146,6 +155,11 @@ public final class RouteDefinitionCache {
    *
    * <p>若节点数量不足，会移除已有缓存。
    */
+  /**
+   * 按指定 Route 增量刷新缓存。
+   *
+   * <p>若节点数量不足，会移除已有缓存。
+   */
   public Optional<RouteDefinition> refresh(
       StorageProvider provider, Operator operator, Line line, Route route) {
     Objects.requireNonNull(provider, "provider");
@@ -176,6 +190,7 @@ public final class RouteDefinitionCache {
   }
 
   /** 从缓存中移除指定 Route 定义。 */
+  /** 从缓存中移除指定 Route 定义。 */
   public void remove(Operator operator, Line line, Route route) {
     if (operator == null || line == null || route == null) {
       return;
@@ -190,6 +205,11 @@ public final class RouteDefinitionCache {
             RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id())));
   }
 
+  /**
+   * 构建单条 RouteDefinition，并统计解析过程中的异常情况用于日志输出。
+   *
+   * <p>优先使用 waypoint nodeId；若为站点，则读取 Station.graphNodeId。
+   */
   private Optional<RouteDefinition> buildDefinition(
       Operator operator,
       Line line,

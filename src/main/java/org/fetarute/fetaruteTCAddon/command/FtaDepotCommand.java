@@ -36,7 +36,6 @@ import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
-import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
@@ -48,6 +47,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
@@ -220,7 +220,7 @@ public final class FtaDepotCommand {
                       destInfoOpt.orElse(
                           new DestinationInfo(resolved.route().name(), resolved.route().code()));
                   String trainName =
-                      buildTrainName(
+                      TrainNameFormatter.buildTrainName(
                           resolved.operator().code(),
                           resolved.line().code(),
                           resolved.route().patternType(),
@@ -798,56 +798,6 @@ public final class FtaDepotCommand {
       return Optional.of(new DestinationInfo(node, node));
     }
     return Optional.of(new DestinationInfo(route.name(), route.code()));
-  }
-
-  /**
-   * 生成列车名称：OP-LINE-<patternInit><destInit>-####。
-   *
-   * <p>#### 来自 runId 哈希；destInit 使用目标名称的首字符（Unicode）。
-   */
-  private static String buildTrainName(
-      String operator, String line, RoutePatternType pattern, String destName, UUID runId) {
-    String op = safeNameToken(operator, "OP");
-    String ln = safeNameToken(line, "LINE");
-    String patternInit = patternInitial(pattern);
-    String destInit = firstGlyph(destName);
-    int raw = runId.hashCode();
-    int normalized = raw == Integer.MIN_VALUE ? 0 : Math.abs(raw);
-    String seq = String.format(Locale.ROOT, "%04d", normalized % 10000);
-    return op + "-" + ln + "-" + patternInit + destInit + "-" + seq;
-  }
-
-  private static String patternInitial(RoutePatternType pattern) {
-    if (pattern == null) {
-      return "X";
-    }
-    return switch (pattern) {
-      case LOCAL -> "L";
-      case RAPID -> "R";
-      case NEO_RAPID -> "N";
-      case EXPRESS -> "E";
-      case LIMITED_EXPRESS -> "X";
-    };
-  }
-
-  private static String safeNameToken(String value, String fallback) {
-    if (value == null) {
-      return fallback;
-    }
-    String trimmed = value.trim();
-    return trimmed.isEmpty() ? fallback : trimmed;
-  }
-
-  private static String firstGlyph(String value) {
-    if (value == null) {
-      return "?";
-    }
-    String trimmed = value.trim();
-    if (trimmed.isEmpty()) {
-      return "?";
-    }
-    int cp = trimmed.codePointAt(0);
-    return new String(Character.toChars(cp));
   }
 
   /**

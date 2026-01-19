@@ -32,6 +32,7 @@ sign:
 command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
+    invalid-boolean: "<prefix> <red>无效布尔值：</red><white><value></white> <gray>(仅支持 true/false)</gray>"
     yes: "是"
     no: "否"
   error:
@@ -490,7 +491,7 @@ command:
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:

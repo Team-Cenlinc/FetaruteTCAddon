@@ -33,26 +33,39 @@ public final class EdgeOverrideRailGraph implements RailGraph, RailGraphCorridor
     this.now = Objects.requireNonNull(now, "now");
   }
 
+  /**
+   * @return 底层图的节点快照。
+   */
   @Override
   public Collection<RailNode> nodes() {
     return delegate.nodes();
   }
 
+  /**
+   * @return 底层图的边快照。
+   */
   @Override
   public Collection<RailEdge> edges() {
     return delegate.edges();
   }
 
+  /** 查询节点（不应用覆盖）。 */
   @Override
   public Optional<RailNode> findNode(NodeId id) {
     return delegate.findNode(id);
   }
 
+  /** 查询邻接边（不应用覆盖）。 */
   @Override
   public Set<RailEdge> edgesFrom(NodeId id) {
     return delegate.edgesFrom(id);
   }
 
+  /**
+   * 判断边是否封锁（叠加 overrides）。
+   *
+   * <p>若底层图已封锁则直接返回 true。
+   */
   @Override
   public boolean isBlocked(EdgeId id) {
     if (delegate.isBlocked(id)) {
@@ -72,6 +85,7 @@ public final class EdgeOverrideRailGraph implements RailGraph, RailGraphCorridor
     return override.isBlockedEffective(now);
   }
 
+  /** 透传冲突组查询（若底层支持）。 */
   @Override
   public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
     if (delegate instanceof RailGraphCorridorSupport support) {
@@ -80,6 +94,7 @@ public final class EdgeOverrideRailGraph implements RailGraph, RailGraphCorridor
     return Optional.empty();
   }
 
+  /** 透传走廊信息查询（若底层支持）。 */
   @Override
   public Optional<RailGraphCorridorInfo> corridorInfoForEdge(EdgeId edgeId) {
     if (delegate instanceof RailGraphCorridorSupport support) {

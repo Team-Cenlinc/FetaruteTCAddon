@@ -495,7 +495,15 @@ class RuntimeDispatchServiceTest {
         new ConfigManager.TrainConfigSettings(
             "emu", typeDefaults, typeDefaults, typeDefaults, typeDefaults);
     return new ConfigManager.ConfigView(
-        6, false, "zh_CN", storage, graph, autoStation, runtime, train);
+        7,
+        false,
+        "zh_CN",
+        storage,
+        graph,
+        autoStation,
+        runtime,
+        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
+        train);
   }
 
   private static final class TagStore {

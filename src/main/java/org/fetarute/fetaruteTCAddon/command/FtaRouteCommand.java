@@ -184,6 +184,20 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("\"<pattern>\"")))
             .build();
     var spawnClearFlag = CommandFlag.builder("spawn-clear").build();
+    var spawnEnabledFlag =
+        CommandFlag.<CommandSender>builder("spawn-enabled")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "spawn-enabled", StringParser.stringParser())
+                    .suggestionProvider(placeholderSuggestion("<true|false>")))
+            .build();
+    var spawnWeightFlag =
+        CommandFlag.<CommandSender>builder("spawn-weight")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "spawn-weight", IntegerParser.integerParser())
+                    .suggestionProvider(placeholderSuggestion("<weight>")))
+            .build();
 
     // editor give：允许“空模板”与“绑定到指定 route”两种模式；要么四参齐全要么不填。
     manager.command(
@@ -738,6 +752,8 @@ public final class FtaRouteCommand {
             .flag(distanceFlag)
             .flag(spawnFlag)
             .flag(spawnClearFlag)
+            .flag(spawnEnabledFlag)
+            .flag(spawnWeightFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -764,7 +780,9 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(runtimeFlag)
                           || flags.hasFlag(distanceFlag)
                           || flags.hasFlag(spawnFlag)
-                          || flags.hasFlag(spawnClearFlag);
+                          || flags.hasFlag(spawnClearFlag)
+                          || flags.hasFlag(spawnEnabledFlag)
+                          || flags.hasFlag(spawnWeightFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.route.set.noop"));
                     return;
@@ -816,6 +834,29 @@ public final class FtaRouteCommand {
                       metadata.remove("spawn_train_pattern");
                     } else {
                       metadata.put("spawn_train_pattern", spawnPattern);
+                    }
+                  }
+                  if (flags.hasFlag(spawnEnabledFlag)) {
+                    Optional<Boolean> enabled =
+                        parseBooleanToken(flags.getValue(spawnEnabledFlag, null));
+                    if (enabled.isPresent()) {
+                      metadata.put("spawn_enabled", enabled.get());
+                    } else {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.common.invalid-boolean",
+                              Map.of(
+                                  "value",
+                                  String.valueOf(flags.getValue(spawnEnabledFlag, null)))));
+                      return;
+                    }
+                  }
+                  if (flags.hasFlag(spawnWeightFlag)) {
+                    Integer weight = flags.getValue(spawnWeightFlag, null);
+                    if (weight == null || weight <= 0) {
+                      metadata.remove("spawn_weight");
+                    } else {
+                      metadata.put("spawn_weight", weight);
                     }
                   }
 
@@ -2234,7 +2275,7 @@ public final class FtaRouteCommand {
     for (int i = start; i < end; i++) {
       RouteStop stop = session.stops().get(i);
       String index = String.valueOf(stop.sequence());
-      String pass = locale.enumText("enum.route-stop-pass-type", stop.passType());
+      String pass = resolveStopPassLabel(locale, stop);
       String dwellBaseline = stop.dwellSeconds().map(String::valueOf).orElse("-");
       String node = stop.waypointNodeId().orElse("-");
       String stationCode =
@@ -2275,6 +2316,32 @@ public final class FtaRouteCommand {
                               tpCommand)))));
     }
     sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount));
+  }
+
+  /**
+   * debug 输出中的 passType 展示。
+   *
+   * <p>CRET/DSTY 是“动作指令”，语义上等同 PASS（不停车），但为了避免把它们显示成 PASS 造成误解，这里优先显示为 {@code CRET}/{@code DSTY}。
+   */
+  private static String resolveStopPassLabel(LocaleManager locale, RouteStop stop) {
+    if (stop == null) {
+      return "-";
+    }
+    Optional<String> notes = stop.notes();
+    if (notes.isPresent()) {
+      String raw = notes.get();
+      if (raw != null) {
+        String trimmed = raw.trim();
+        String upper = trimmed.toUpperCase(java.util.Locale.ROOT);
+        if (upper.startsWith("CRET ") || "CRET".equals(upper)) {
+          return "CRET";
+        }
+        if (upper.startsWith("DSTY ") || "DSTY".equals(upper)) {
+          return "DSTY";
+        }
+      }
+    }
+    return locale.enumText("enum.route-stop-pass-type", stop.passType());
   }
 
   private Component buildStopDebugNav(LocaleManager locale, int page, int pageCount) {
@@ -2391,6 +2458,22 @@ public final class FtaRouteCommand {
     } catch (IllegalArgumentException ex) {
       return Optional.empty();
     }
+  }
+
+  /** 解析 {@code true/false/yes/no/1/0}，用于命令行布尔参数。 */
+  private static Optional<Boolean> parseBooleanToken(String raw) {
+    if (raw == null) {
+      return Optional.empty();
+    }
+    String t = raw.trim().toLowerCase(java.util.Locale.ROOT);
+    if (t.isEmpty()) {
+      return Optional.empty();
+    }
+    return switch (t) {
+      case "true", "yes", "y", "1" -> Optional.of(true);
+      case "false", "no", "n", "0" -> Optional.of(false);
+      default -> Optional.empty();
+    };
   }
 
   private static String normalizeSpawnPattern(String raw) {

@@ -30,6 +30,9 @@ public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSuppor
     this.edgesFrom = buildAdjacency(this.nodesById, this.edgesById);
   }
 
+  /**
+   * @return 空图快照。
+   */
   public static SimpleRailGraph empty() {
     return new SimpleRailGraph(Map.of(), Map.of(), Set.of());
   }
@@ -62,6 +65,11 @@ public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSuppor
     return blockedEdges.contains(id);
   }
 
+  /**
+   * 查询指定边的冲突组 key。
+   *
+   * <p>索引懒加载并缓存，避免每次查询重算。
+   */
   @Override
   public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
     if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
@@ -80,6 +88,11 @@ public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSuppor
     return index.conflictKeyForEdge(edgeId);
   }
 
+  /**
+   * 查询指定边所属的走廊信息。
+   *
+   * <p>索引懒加载并缓存，避免重复构建。
+   */
   @Override
   public Optional<RailGraphCorridorInfo> corridorInfoForEdge(EdgeId edgeId) {
     if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
@@ -98,6 +111,7 @@ public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSuppor
     return index.corridorInfoForEdge(edgeId);
   }
 
+  /** 构建邻接表（无向图）。 */
   private static Map<NodeId, Set<RailEdge>> buildAdjacency(
       Map<NodeId, RailNode> nodes, Map<EdgeId, RailEdge> edges) {
     Map<NodeId, Set<RailEdge>> adjacency = new HashMap<>();

@@ -16,6 +16,7 @@
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
+- 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
 
 ## tags 与恢复
 推进点依赖 TrainProperties tags：

@@ -41,6 +41,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnMonitor;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.StorageSpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TrainCartsDepotSpawner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -81,6 +87,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private RouteProgressRegistry routeProgressRegistry;
   private RuntimeDispatchService runtimeDispatchService;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
+  private SpawnManager spawnManager;
+  private TicketAssigner spawnTicketAssigner;
+  private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
 
   @Override
   public void onEnable() {
@@ -104,6 +113,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initOccupancyManager();
     initRouteDefinitionCache();
     initRuntimeDispatch();
+    initSpawnScheduler();
 
     registerCommands();
     getServer()
@@ -116,6 +126,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
   @Override
   public void onDisable() {
     unregisterSignActions();
+    if (runtimeMonitorTask != null) {
+      runtimeMonitorTask.cancel();
+      runtimeMonitorTask = null;
+    }
+    if (spawnMonitorTask != null) {
+      spawnMonitorTask.cancel();
+      spawnMonitorTask = null;
+    }
     if (storageManager != null) {
       storageManager.shutdown();
     }
@@ -156,6 +174,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.storageManager.apply(configManager.current());
     initRouteDefinitionCache();
     restartRuntimeMonitor();
+    initSpawnScheduler();
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
 
@@ -405,6 +424,66 @@ public final class FetaruteTCAddon extends JavaPlugin {
             .getScheduler()
             .runTaskTimer(
                 this, new RuntimeSignalMonitor(runtimeDispatchService), interval, interval);
+  }
+
+  private void initSpawnScheduler() {
+    if (configManager == null
+        || storageManager == null
+        || occupancyManager == null
+        || railGraphService == null
+        || routeDefinitionCache == null
+        || runtimeDispatchService == null
+        || signNodeRegistry == null) {
+      return;
+    }
+    ConfigManager.SpawnSettings spawnSettings = configManager.current().spawnSettings();
+    StorageSpawnManager.SpawnManagerSettings managerSettings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            java.time.Duration.ofMillis(spawnSettings.planRefreshTicks() * 50L),
+            java.time.Duration.ZERO,
+            spawnSettings.maxBacklogPerService(),
+            spawnSettings.maxGeneratePerTick(),
+            Math.max(1, spawnSettings.maxSpawnPerTick()));
+    this.spawnManager = new StorageSpawnManager(managerSettings, loggerManager::debug);
+    TrainCartsDepotSpawner depotSpawner =
+        new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
+    this.spawnTicketAssigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            routeDefinitionCache,
+            runtimeDispatchService,
+            configManager,
+            signNodeRegistry,
+            loggerManager::debug,
+            java.time.Duration.ofMillis(spawnSettings.retryDelayTicks() * 50L),
+            spawnSettings.maxSpawnPerTick());
+    restartSpawnMonitor();
+  }
+
+  private void restartSpawnMonitor() {
+    if (spawnMonitorTask != null) {
+      spawnMonitorTask.cancel();
+      spawnMonitorTask = null;
+    }
+    if (spawnTicketAssigner == null || configManager == null || storageManager == null) {
+      return;
+    }
+    ConfigManager.SpawnSettings settings = configManager.current().spawnSettings();
+    if (settings == null || !settings.enabled()) {
+      return;
+    }
+    int interval = settings.tickIntervalTicks();
+    spawnMonitorTask =
+        getServer()
+            .getScheduler()
+            .runTaskTimer(
+                this,
+                new SpawnMonitor(storageManager, configManager, spawnTicketAssigner),
+                interval,
+                interval);
   }
 
   /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */

@@ -15,6 +15,7 @@
 - 不把 Station/AutoStation 作为边界，因此“单线区间上有多个站点”会被同一走廊锁住。
 - 道岔联合锁闭范围由 `runtime.switcher-zone-edges` 控制（向前 N 段边）。
 - 占用层会对 `CONFLICT:switcher` 与 `CONFLICT:single` 资源启用 Gate Queue。
+- `RailGraphCorridorInfo` 提供走廊端点与路径节点列表，方向以端点排序为准。
 
 ## 运维命令
 - `/fta graph conflict list [--node "<nodeId>"] [page]`：列出冲突组与覆盖区间数量。
