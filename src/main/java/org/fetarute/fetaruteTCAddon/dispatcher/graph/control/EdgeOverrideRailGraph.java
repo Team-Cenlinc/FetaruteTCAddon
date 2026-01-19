@@ -9,7 +9,8 @@ import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -19,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  *
  * <p>当前仅覆盖 {@link #isBlocked(EdgeId)}，其余方法均委托给底层图。
  */
-public final class EdgeOverrideRailGraph implements RailGraph, RailGraphConflictSupport {
+public final class EdgeOverrideRailGraph implements RailGraph, RailGraphCorridorSupport {
 
   private final RailGraph delegate;
   private final Map<EdgeId, RailEdgeOverrideRecord> overrides;
@@ -73,8 +74,16 @@ public final class EdgeOverrideRailGraph implements RailGraph, RailGraphConflict
 
   @Override
   public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
-    if (delegate instanceof RailGraphConflictSupport support) {
+    if (delegate instanceof RailGraphCorridorSupport support) {
       return support.conflictKeyForEdge(edgeId);
+    }
+    return Optional.empty();
+  }
+
+  @Override
+  public Optional<RailGraphCorridorInfo> corridorInfoForEdge(EdgeId edgeId) {
+    if (delegate instanceof RailGraphCorridorSupport support) {
+      return support.corridorInfoForEdge(edgeId);
     }
     return Optional.empty();
   }

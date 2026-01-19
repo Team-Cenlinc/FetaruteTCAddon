@@ -80,6 +80,13 @@ command:
       header: "<prefix> <dark_aqua>当前占用</dark_aqua> <gray>(count=<white><count></white>)</gray>"
       entry: "<gray>-</gray> <white><resource></white> <gray>train=<white><train></white> since=<white><since></white> headway=<white><headway></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta occupancy dump <limit> 调整数量</gray>"
+    queue:
+      not-supported: "<prefix> <gray>占用管理器暂不支持队列快照</gray>"
+      empty: "<prefix> <gray>当前没有排队中的资源</gray>"
+      header: "<prefix> <dark_aqua>占用队列</dark_aqua> <gray>(resources=<white><count></white>, entries=<white><entries></white>)</gray>"
+      entry: "<gray>-</gray> <white><resource></white> <gray>active=<white><active></white> dir=<white><direction></white> queued=<white><count></white></gray>"
+      item: "<gray>  •</gray> <white><train></white> <gray>dir=<white><direction></white> since=<white><since></white> seen=<white><seen></white></gray>"
+      truncated: "<gray>  … 已截断，使用 /fta occupancy queue <limit> 调整数量</gray>"
     debug:
       player-only: "<prefix> <red>该调试命令仅限玩家执行</red>"
       graph-not-ready: "<prefix> <red>调度图未就绪</red> <gray>请先 /fta graph build</gray>"
@@ -91,6 +98,8 @@ command:
       header: "<prefix> <dark_aqua>调度占用命令</dark_aqua>"
       entry-dump: "<gray>/fta occupancy dump</gray> <white>-</white> <dark_aqua>查看占用快照</dark_aqua>"
       hover-dump: "<gray>点击填充:</gray> <white>/fta occupancy dump </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-queue: "<gray>/fta occupancy queue</gray> <white>-</white> <dark_aqua>查看排队快照</dark_aqua>"
+      hover-queue: "<gray>点击填充:</gray> <white>/fta occupancy queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-release: "<gray>/fta occupancy release</gray> <white>-</white> <dark_aqua>按列车释放占用</dark_aqua>"
       hover-release: "<gray>点击填充:</gray> <white>/fta occupancy release </white>\n<dark_aqua>按列车名称清理占用</dark_aqua>"
       entry-release-resource: "<gray>/fta occupancy release-resource</gray> <white>-</white> <dark_aqua>按资源释放占用</dark_aqua>"

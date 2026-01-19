@@ -16,16 +16,16 @@
 RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 
 ### CRET（生成）
-- 语法：`CRET:<NodeId>` 或 `CRET:DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`
-- 约束：整条路线仅允许一个 `CRET`，且必须绑定在首个 stop 上。
+- 语法：`CRET <NodeId>` 或 `CRET DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`
+- 约束：整条路线仅允许一个 `CRET`，且必须为首个 stop（CRET 自身占一行 stop）。
 
 ### TERM（终到）
 - 使用 stop 前缀 `TERM`/`TERMINATE`（即 RouteStopPassType.TERMINATE）。
 - 语义：标记“运营终到站”，后续调度可在此等待下一班次或回库。
 
 ### DSTY（销毁）
-- 语法：`DSTY:<NodeId>` 或 `DSTY:DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`
-- 约束：整条路线仅允许一个 `DSTY`，且必须绑定在最后一个 stop 上。
+- 语法：`DSTY <NodeId>` 或 `DSTY DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`
+- 约束：整条路线仅允许一个 `DSTY`，且必须为最后 stop（DSTY 自身占一行 stop）。
 
 ### DYNAMIC（动态站台/车库）
 - 语法：`DYNAMIC:<OperatorCode>:<StationCode>` 或 `DYNAMIC:<OperatorCode>:<DepotCode>`

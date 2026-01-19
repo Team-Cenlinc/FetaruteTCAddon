@@ -17,6 +17,11 @@
         <Method name="getSignNodeRegistry"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getOccupancyManager"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
 
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.company.model.CompanyMember"/>

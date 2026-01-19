@@ -24,14 +24,18 @@ public final class RailGraphConflictIndex {
   private static final String CYCLE_SEGMENT = "cycle:";
 
   private final Map<EdgeId, String> conflictByEdge;
+  private final Map<EdgeId, RailGraphCorridorInfo> corridorByEdge;
 
-  private RailGraphConflictIndex(Map<EdgeId, String> conflictByEdge) {
+  private RailGraphConflictIndex(
+      Map<EdgeId, String> conflictByEdge, Map<EdgeId, RailGraphCorridorInfo> corridorByEdge) {
     this.conflictByEdge = Map.copyOf(conflictByEdge);
+    this.corridorByEdge = Map.copyOf(corridorByEdge);
   }
 
   public static RailGraphConflictIndex fromGraph(RailGraph graph) {
     Objects.requireNonNull(graph, "graph");
     Map<EdgeId, String> conflictByEdge = new HashMap<>();
+    Map<EdgeId, RailGraphCorridorInfo> corridorByEdge = new HashMap<>();
     Set<EdgeId> assigned = new HashSet<>();
     Map<NodeId, RailNode> nodesById = new HashMap<>();
     Map<NodeId, Integer> degrees = new HashMap<>();
@@ -64,8 +68,10 @@ public final class RailGraphConflictIndex {
         }
         Corridor corridor = walkCorridor(graph, boundary, edge, boundaries);
         String key = buildCorridorKey(componentIndex, corridor.start(), corridor.end());
+        RailGraphCorridorInfo info = buildCorridorInfo(key, corridor);
         for (EdgeId id : corridor.edges()) {
           conflictByEdge.put(id, key);
+          corridorByEdge.put(id, info);
           assigned.add(id);
         }
       }
@@ -78,13 +84,15 @@ public final class RailGraphConflictIndex {
       }
       Cycle cycle = walkCycle(graph, edge);
       String key = buildCycleKey(componentIndex, cycle.minNode());
+      RailGraphCorridorInfo info = buildCycleInfo(key);
       for (EdgeId id : cycle.edges()) {
         conflictByEdge.put(id, key);
+        corridorByEdge.put(id, info);
         assigned.add(id);
       }
     }
 
-    return new RailGraphConflictIndex(conflictByEdge);
+    return new RailGraphConflictIndex(conflictByEdge, corridorByEdge);
   }
 
   public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
@@ -99,10 +107,20 @@ public final class RailGraphConflictIndex {
     return Map.copyOf(conflictByEdge);
   }
 
+  public Optional<RailGraphCorridorInfo> corridorInfoForEdge(EdgeId edgeId) {
+    if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
+      return Optional.empty();
+    }
+    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
+    return Optional.ofNullable(corridorByEdge.get(normalized));
+  }
+
   private static Corridor walkCorridor(
       RailGraph graph, NodeId start, RailEdge startEdge, Set<NodeId> boundaries) {
     List<EdgeId> edges = new ArrayList<>();
     Set<EdgeId> visited = new HashSet<>();
+    List<NodeId> nodes = new ArrayList<>();
+    nodes.add(start);
     NodeId current = start;
     RailEdge edge = startEdge;
     while (true) {
@@ -116,18 +134,19 @@ public final class RailGraphConflictIndex {
       if (next == null) {
         break;
       }
+      nodes.add(next);
       if (boundaries.contains(next)) {
-        return new Corridor(start, next, edges);
+        return new Corridor(start, next, edges, nodes);
       }
       // 在度数=2 的中间节点上继续前进，只要排除“回头边”即可确定下一段。
       RailEdge nextEdge = nextEdge(graph, next, current);
       if (nextEdge == null) {
-        return new Corridor(start, next, edges);
+        return new Corridor(start, next, edges, nodes);
       }
       current = next;
       edge = nextEdge;
     }
-    return new Corridor(start, current, edges);
+    return new Corridor(start, current, edges, nodes);
   }
 
   private static Cycle walkCycle(RailGraph graph, RailEdge startEdge) {
@@ -245,7 +264,24 @@ public final class RailGraphConflictIndex {
     return left.value().compareTo(right.value());
   }
 
-  private record Corridor(NodeId start, NodeId end, List<EdgeId> edges) {}
+  private record Corridor(NodeId start, NodeId end, List<EdgeId> edges, List<NodeId> nodes) {}
 
   private record Cycle(NodeId minNode, List<EdgeId> edges) {}
+
+  private static RailGraphCorridorInfo buildCorridorInfo(String key, Corridor corridor) {
+    NodeId left = corridor.start();
+    NodeId right = corridor.end();
+    List<NodeId> nodes = new ArrayList<>(corridor.nodes());
+    if (left != null && right != null && left.value().compareTo(right.value()) > 0) {
+      NodeId swap = left;
+      left = right;
+      right = swap;
+      java.util.Collections.reverse(nodes);
+    }
+    return new RailGraphCorridorInfo(key, left, right, nodes, false);
+  }
+
+  private static RailGraphCorridorInfo buildCycleInfo(String key) {
+    return new RailGraphCorridorInfo(key, null, null, List.of(), true);
+  }
 }

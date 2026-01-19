@@ -19,8 +19,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
@@ -70,6 +74,19 @@ public final class FtaOccupancyCommand {
                 ctx -> {
                   int limit = ctx.<Integer>optional("limit").orElse(DEFAULT_LIMIT);
                   dumpClaims(ctx.sender(), limit);
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("occupancy")
+            .literal("queue")
+            .permission("fetarute.occupancy")
+            .optional("limit", IntegerParser.integerParser(1, 200), limitSuggestions)
+            .handler(
+                ctx -> {
+                  int limit = ctx.<Integer>optional("limit").orElse(DEFAULT_LIMIT);
+                  dumpQueues(ctx.sender(), limit);
                 }));
 
     registerDebugCommands(manager, nodeIdSuggestions);
@@ -155,6 +172,11 @@ public final class FtaOccupancyCommand {
         locale.component("command.occupancy.help.hover-dump"));
     sendHelpEntry(
         sender,
+        locale.component("command.occupancy.help.entry-queue"),
+        ClickEvent.suggestCommand("/fta occupancy queue "),
+        locale.component("command.occupancy.help.hover-queue"));
+    sendHelpEntry(
+        sender,
         locale.component("command.occupancy.help.entry-release"),
         ClickEvent.suggestCommand("/fta occupancy release "),
         locale.component("command.occupancy.help.hover-release"));
@@ -220,6 +242,71 @@ public final class FtaOccupancyCommand {
                   "headway",
                   claim.headway().toString())));
       count++;
+    }
+  }
+
+  private void dumpQueues(CommandSender sender, int limit) {
+    OccupancyManager occupancy = plugin.getOccupancyManager();
+    if (occupancy == null) {
+      sendNotReady(sender);
+      return;
+    }
+    if (!(occupancy instanceof OccupancyQueueSupport queueSupport)) {
+      LocaleManager locale = plugin.getLocaleManager();
+      sender.sendMessage(locale.component("command.occupancy.queue.not-supported"));
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    List<OccupancyQueueSnapshot> snapshots =
+        queueSupport.snapshotQueues().stream()
+            .sorted(Comparator.comparing(snapshot -> snapshot.resource().toString()))
+            .toList();
+    if (snapshots.isEmpty()) {
+      sender.sendMessage(locale.component("command.occupancy.queue.empty"));
+      return;
+    }
+    int totalEntries = snapshots.stream().mapToInt(snapshot -> snapshot.entries().size()).sum();
+    sender.sendMessage(
+        locale.component(
+            "command.occupancy.queue.header",
+            Map.of(
+                "count",
+                String.valueOf(snapshots.size()),
+                "entries",
+                String.valueOf(totalEntries))));
+    for (OccupancyQueueSnapshot snapshot : snapshots) {
+      sender.sendMessage(
+          locale.component(
+              "command.occupancy.queue.entry",
+              Map.of(
+                  "resource",
+                  snapshot.resource().toString(),
+                  "active",
+                  String.valueOf(snapshot.activeClaims()),
+                  "direction",
+                  formatDirection(snapshot.activeDirection().orElse(null)),
+                  "count",
+                  String.valueOf(snapshot.entries().size()))));
+      int printed = 0;
+      for (OccupancyQueueEntry entry : snapshot.entries()) {
+        if (printed >= limit) {
+          sender.sendMessage(locale.component("command.occupancy.queue.truncated"));
+          break;
+        }
+        sender.sendMessage(
+            locale.component(
+                "command.occupancy.queue.item",
+                Map.of(
+                    "train",
+                    entry.trainName(),
+                    "direction",
+                    formatDirection(entry.direction()),
+                    "since",
+                    entry.firstSeen().toString(),
+                    "seen",
+                    entry.lastSeen().toString())));
+        printed++;
+      }
     }
   }
 
@@ -393,7 +480,7 @@ public final class FtaOccupancyCommand {
   /** 构造调试占用请求。 */
   private OccupancyRequest buildRequest(String trainName, List<OccupancyResource> resources) {
     Instant now = Instant.now();
-    return new OccupancyRequest(trainName, Optional.empty(), now, resources);
+    return new OccupancyRequest(trainName, Optional.empty(), now, resources, Map.of());
   }
 
   /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */
@@ -435,6 +522,17 @@ public final class FtaOccupancyCommand {
       }
     }
     return Optional.empty();
+  }
+
+  private String formatDirection(CorridorDirection direction) {
+    if (direction == null) {
+      return "-";
+    }
+    return switch (direction) {
+      case A_TO_B -> "A->B";
+      case B_TO_A -> "B->A";
+      case UNKNOWN -> "-";
+    };
   }
 
   private SuggestionProvider<CommandSender> graphNodeIdSuggestions(String placeholder) {

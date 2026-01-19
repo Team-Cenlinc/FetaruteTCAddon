@@ -10,13 +10,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
  * 单条占用记录，仅描述“当前占用者”与 headway 配置。
  *
  * <p>释放由事件驱动触发，headway 不再依赖 releaseAt 计算。
+ *
+ * <p>corridorDirection 仅用于单线走廊方向锁判定。
  */
 public record OccupancyClaim(
     OccupancyResource resource,
     String trainName,
     Optional<RouteId> routeId,
     Instant acquiredAt,
-    Duration headway) {
+    Duration headway,
+    Optional<CorridorDirection> corridorDirection) {
 
   public OccupancyClaim {
     Objects.requireNonNull(resource, "resource");
@@ -24,6 +27,7 @@ public record OccupancyClaim(
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(acquiredAt, "acquiredAt");
     Objects.requireNonNull(headway, "headway");
+    Objects.requireNonNull(corridorDirection, "corridorDirection");
     if (trainName.isBlank()) {
       throw new IllegalArgumentException("trainName 不能为空");
     }

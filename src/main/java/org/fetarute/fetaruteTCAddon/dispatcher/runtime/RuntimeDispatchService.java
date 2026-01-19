@@ -11,6 +11,8 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -58,6 +60,8 @@ public final class RuntimeDispatchService {
   private final Consumer<String> debugLogger;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
+  private static final Pattern ACTION_PREFIX_PATTERN =
+      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
   public RuntimeDispatchService(
       OccupancyManager occupancyManager,
@@ -116,6 +120,11 @@ public final class RuntimeDispatchService {
       return;
     }
     NodeId currentNode = definition.nodeId();
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
+    if (stopOpt.isPresent() && shouldDestroyAt(stopOpt.get(), currentNode)) {
+      handleDestroy(train, properties, trainName, "DSTY");
+      return;
+    }
     Optional<NodeId> nextTarget =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(route.waypoints().get(currentIndex + 1))
@@ -144,11 +153,12 @@ public final class RuntimeDispatchService {
       return;
     }
     RailGraph graph = graphOpt.get();
+    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
+    int lookaheadEdges = runtimeSettings.lookaheadEdges();
+    int minClearEdges = runtimeSettings.minClearEdges();
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph,
-            configManager.current().runtimeSettings().lookaheadEdges(),
-            configManager.current().runtimeSettings().switcherZoneEdges());
+            graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges());
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
             trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now);
@@ -162,10 +172,7 @@ public final class RuntimeDispatchService {
               + route.id().value()
               + " reason="
               + diagnoseBuildFailure(
-                  graph,
-                  route,
-                  currentIndex,
-                  configManager.current().runtimeSettings().lookaheadEdges()));
+                  graph, route, currentIndex, Math.max(lookaheadEdges, minClearEdges)));
       return;
     }
     OccupancyRequestContext context = contextOpt.get();
@@ -354,17 +361,25 @@ public final class RuntimeDispatchService {
     if (currentIndex < 0 || currentIndex >= route.waypoints().size() - 1) {
       return;
     }
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
+    if (stopOpt.isPresent()
+        && shouldDestroyAt(stopOpt.get(), route.waypoints().get(currentIndex))) {
+      handleDestroy(train, properties, trainName, "DSTY");
+      return;
+    }
     Optional<RailGraph> graphOpt =
         railGraphService.getSnapshot(train.worldId()).map(snapshot -> snapshot.graph());
     if (graphOpt.isEmpty()) {
       return;
     }
     RailGraph graph = graphOpt.get();
+    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graph,
-            configManager.current().runtimeSettings().lookaheadEdges(),
-            configManager.current().runtimeSettings().switcherZoneEdges());
+            runtimeSettings.lookaheadEdges(),
+            runtimeSettings.minClearEdges(),
+            runtimeSettings.switcherZoneEdges());
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
             trainName,
@@ -400,7 +415,6 @@ public final class RuntimeDispatchService {
       return;
     }
     OptionalLong distanceOpt = OptionalLong.empty();
-    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     boolean needsDistance =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.failoverUnreachableStop();
     if (needsDistance) {
@@ -546,6 +560,24 @@ public final class RuntimeDispatchService {
         "调度 failover: 低速重下发 destination train=" + trainName + " dest=" + destination);
   }
 
+  private void handleDestroy(
+      RuntimeTrainHandle train, TrainProperties properties, String trainName, String reason) {
+    if (properties == null || trainName == null || trainName.isBlank()) {
+      return;
+    }
+    if (train != null) {
+      train.destroy();
+    }
+    if (occupancyManager != null) {
+      occupancyManager.releaseByTrain(trainName);
+    }
+    progressRegistry.remove(trainName);
+    stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
+    TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
+    debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);
+  }
+
   private StallDecision updateStallState(
       String trainName, RuntimeTrainHandle train, int currentIndex, SignalAspect aspect) {
     if (train == null || trainName == null || trainName.isBlank()) {
@@ -577,6 +609,103 @@ public final class RuntimeDispatchService {
     }
     state.ticks = 0;
     return new StallDecision(true, true);
+  }
+
+  /**
+   * 判定当前节点是否应执行 DSTY 销毁。
+   *
+   * <p>DSTY 在 DSL 中带目标 NodeId（如 {@code DSTY <NodeId>}），且历史版本可能把 DSTY 写在其他 stop 的 notes
+   * 上。为避免在错误节点提前销毁，只有当“目标 NodeId == 当前节点”时才触发。
+   */
+  private boolean shouldDestroyAt(RouteStop stop, NodeId currentNode) {
+    if (stop == null || currentNode == null) {
+      return false;
+    }
+    Optional<String> targetOpt = findDirectiveTarget(stop, "DSTY");
+    if (targetOpt.isEmpty()) {
+      return false;
+    }
+    String target = targetOpt.get();
+    if (target.isBlank()) {
+      return false;
+    }
+    return currentNode.value().equalsIgnoreCase(target);
+  }
+
+  private Optional<String> findDirectiveTarget(RouteStop stop, String prefix) {
+    if (stop == null || prefix == null || prefix.isBlank() || stop.notes().isEmpty()) {
+      return Optional.empty();
+    }
+    String raw = stop.notes().orElse("");
+    if (raw.isBlank()) {
+      return Optional.empty();
+    }
+    String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
+    for (String line : normalized.split("\n", -1)) {
+      if (line == null) {
+        continue;
+      }
+      String trimmed = line.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      if (!ACTION_PREFIX_PATTERN.matcher(trimmed).find()) {
+        continue;
+      }
+      String normalizedAction = normalizeActionLine(trimmed);
+      String actualPrefix = firstSegment(normalizedAction).trim();
+      if (!actualPrefix.equalsIgnoreCase(prefix)) {
+        continue;
+      }
+      String rest = normalizedAction.substring(actualPrefix.length()).trim();
+      if (rest.isBlank()) {
+        continue;
+      }
+      // DSTY/CRET 语法使用空格分隔；这里取整段 remainder 作为目标 NodeId（不支持带空格的 NodeId）。
+      int ws = rest.indexOf(' ');
+      if (ws >= 0) {
+        rest = rest.substring(0, ws).trim();
+      }
+      if (!rest.isBlank()) {
+        return Optional.of(rest);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static String firstSegment(String line) {
+    if (line == null || line.isEmpty()) {
+      return "";
+    }
+    int idx = 0;
+    while (idx < line.length()) {
+      char ch = line.charAt(idx);
+      if (Character.isWhitespace(ch) || ch == ':') {
+        break;
+      }
+      idx++;
+    }
+    return line.substring(0, idx);
+  }
+
+  private static String normalizeActionLine(String line) {
+    String trimmed = line.trim();
+    java.util.regex.Matcher matcher = ACTION_PREFIX_PATTERN.matcher(trimmed);
+    if (!matcher.find()) {
+      return trimmed;
+    }
+    String prefix = matcher.group(1).toUpperCase(java.util.Locale.ROOT);
+    String rest = trimmed.substring(prefix.length()).trim();
+    if (rest.isEmpty()) {
+      return prefix;
+    }
+    if (rest.startsWith(":")) {
+      rest = rest.substring(1).trim();
+    }
+    if ("CRET".equals(prefix) || "DSTY".equals(prefix)) {
+      return rest.isEmpty() ? prefix : prefix + " " + rest;
+    }
+    return prefix + ":" + rest;
   }
 
   private static final class StallState {

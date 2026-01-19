@@ -17,6 +17,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -307,7 +309,8 @@ class RuntimeDispatchServiceTest {
                     "ghost",
                     Optional.empty(),
                     Instant.now(),
-                    Duration.ZERO)));
+                    Duration.ZERO,
+                    Optional.empty())));
 
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
 
@@ -475,6 +478,7 @@ class RuntimeDispatchServiceTest {
         new ConfigManager.RuntimeSettings(
             intervalTicks,
             1,
+            1,
             3,
             0.0,
             6.0,
@@ -491,7 +495,7 @@ class RuntimeDispatchServiceTest {
         new ConfigManager.TrainConfigSettings(
             "emu", typeDefaults, typeDefaults, typeDefaults, typeDefaults);
     return new ConfigManager.ConfigView(
-        1, false, "zh_CN", storage, graph, autoStation, runtime, train);
+        6, false, "zh_CN", storage, graph, autoStation, runtime, train);
   }
 
   private static final class TagStore {
@@ -512,11 +516,120 @@ class RuntimeDispatchServiceTest {
     }
   }
 
+  @Test
+  void handleSignalTickDoesNotDestroyWhenDstyTargetDoesNotMatchCurrentNode() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("TERM"), NodeId.of("NEXT")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(NodeId.of("TERM"), NodeId.of("NEXT"), 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of("TERM"),
+            Optional.empty(),
+            RouteStopPassType.TERMINATE,
+            Optional.of("DSTY SURN:D:DEPOT:2"));
+    when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+    assertTrue(train.destroyCalls == 0);
+  }
+
+  @Test
+  void handleSignalTickDestroysWhenDstyTargetMatchesCurrentNode() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("DEPOT"), NodeId.of("NEXT")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of("DEPOT"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("DSTY DEPOT"));
+    when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+    assertTrue(train.destroyCalls == 1);
+    verify(occupancyManager).releaseByTrain("train-1");
+  }
+
   private static final class FakeTrain implements RuntimeTrainHandle {
     private final UUID worldId;
     private final TrainProperties properties;
     private final boolean moving;
     private int launchCalls = 0;
+    private int destroyCalls = 0;
 
     private FakeTrain(UUID worldId, TrainProperties properties, boolean moving) {
       this.worldId = worldId;
@@ -555,6 +668,11 @@ class RuntimeDispatchServiceTest {
     @Override
     public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
       launchCalls++;
+    }
+
+    @Override
+    public void destroy() {
+      destroyCalls++;
     }
   }
 }

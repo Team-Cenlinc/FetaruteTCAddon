@@ -28,6 +28,7 @@
 - `FTA_TRAIN_NAME`：上次记录的列车名（用于改名迁移）
 
 未写入 `FTA_ROUTE_INDEX` 时视为“未激活”，信号 tick 不会构建占用；首次触发推进点后才会写入并进入占用/控车流程。
+`TERMINATE` 表示结束载客：若线路在 TERM 后仍有节点（例如回库段/DSTY），继续按线路推进；若已无后续节点，则等待调度分配新 ticket/线路。
 
 线路定义查找顺序：
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
@@ -75,9 +76,15 @@
 
 ## lookahead 占用
 - `runtime.lookahead-edges` 控制每次申请占用的边数量。
+- `runtime.min-clear-edges` 用于限制同向跟驰的最小空闲边数（与 lookahead 取最大值）。
 - 值越大越保守，能降低咽喉/道岔前卡死风险。
 - `runtime.switcher-zone-edges` 控制道岔联合锁闭范围（向前 N 段边）。
+- 单线走廊冲突采用方向锁：同向可跟驰，对向需等待走廊清空。
+- 道岔/单线冲突会进入 FIFO Gate Queue，避免抢占导致的顺序漂移。
 
 ## 已知限制
 - 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。
+
+## 后续预留
+- 计划把 SignalAspectPolicy 与速度曲线联动，形成更接近 CBTC 的移动闭塞（远期）。

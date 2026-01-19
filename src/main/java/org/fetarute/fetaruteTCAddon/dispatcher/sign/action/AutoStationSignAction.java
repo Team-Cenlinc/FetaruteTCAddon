@@ -5,6 +5,8 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.standard.StandardProperties;
+import com.bergerkiller.bukkit.tc.properties.standard.type.ExitOffset;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.util.Collection;
 import java.util.HashSet;
@@ -59,6 +61,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
   private static final int DOOR_OPEN_MAX_ATTEMPTS = 12;
   private static final long DOOR_OPEN_MAX_RETRY_WINDOW_TICKS = 160L;
+  private static final double EXIT_OFFSET_DISTANCE_BLOCKS = 3.0;
 
   private final FetaruteTCAddon plugin;
 
@@ -313,6 +316,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (group == null || !group.isValid()) {
       return;
     }
+    TrainProperties properties = group.getProperties();
+    ExitOffsetState exitOffsetState = new ExitOffsetState(properties);
     com.bergerkiller.bukkit.tc.actions.GroupActionWaitState waitState =
         group.getActions().addActionWaitState();
     if (timedOut) {
@@ -354,6 +359,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       @Override
       public void run() {
         if (!group.isValid()) {
+          exitOffsetState.restore();
           waitState.stop();
           cancel();
           return;
@@ -424,6 +430,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             }
           }
           if (ticksSinceOpen >= dwellTicks) {
+            exitOffsetState.restore();
             waitState.stop();
             cancel();
             if (plugin != null) {
@@ -494,6 +501,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + location);
           }
           cachedPlanSummary = nextPlan;
+        }
+        if (!exitOffsetState.applied()) {
+          resolveExitFace(doorDirection)
+              .flatMap(face -> buildExitOffset(face, EXIT_OFFSET_DISTANCE_BLOCKS))
+              .ifPresent(exitOffsetState::apply);
         }
         if (cachedSession == null) {
           return;
@@ -1005,6 +1017,66 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return new FacingResult(face, "direction");
     }
     return FacingResult.empty();
+  }
+
+  private static Optional<BlockFace> resolveExitFace(AutoStationDoorDirection doorDirection) {
+    if (doorDirection != null) {
+      Optional<BlockFace> face = doorDirection.toBlockFace();
+      if (face.isPresent()) {
+        return face;
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static Optional<ExitOffset> buildExitOffset(BlockFace face, double distance) {
+    if (face == null || !Double.isFinite(distance) || distance <= 0.0) {
+      return Optional.empty();
+    }
+    double x = 0.0;
+    double z = 0.0;
+    switch (face) {
+      case EAST -> z = -distance;
+      case WEST -> z = +distance;
+      case SOUTH -> x = -distance;
+      case NORTH -> x = +distance;
+      default -> {
+        return Optional.empty();
+      }
+    }
+    return Optional.of(ExitOffset.create(x, 0.0, z, Float.NaN, Float.NaN));
+  }
+
+  private static final class ExitOffsetState {
+    private final TrainProperties properties;
+    private final ExitOffset original;
+    private boolean applied;
+
+    private ExitOffsetState(TrainProperties properties) {
+      this.properties = properties;
+      this.original = properties == null ? null : properties.get(StandardProperties.EXIT_OFFSET);
+    }
+
+    boolean applied() {
+      return applied;
+    }
+
+    void apply(ExitOffset offset) {
+      if (properties == null || offset == null) {
+        return;
+      }
+      properties.set(StandardProperties.EXIT_OFFSET, offset);
+      applied = true;
+    }
+
+    void restore() {
+      if (!applied || properties == null) {
+        return;
+      }
+      ExitOffset target = original != null ? original : StandardProperties.EXIT_OFFSET.getDefault();
+      properties.set(StandardProperties.EXIT_OFFSET, target);
+      applied = false;
+    }
   }
 
   private record FacingResult(BlockFace face, String source) {

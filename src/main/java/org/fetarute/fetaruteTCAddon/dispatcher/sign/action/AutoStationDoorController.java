@@ -1033,6 +1033,14 @@ public final class AutoStationDoorController {
       return openLeft || openRight;
     }
 
+    boolean openLeft() {
+      return openLeft;
+    }
+
+    boolean openRight() {
+      return openRight;
+    }
+
     String debugSummary() {
       String leftSummary = describeAction(leftAction, openLeft);
       String rightSummary = describeAction(rightAction, openRight);

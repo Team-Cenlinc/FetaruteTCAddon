@@ -34,6 +34,7 @@ public final class RouteDefinitionCache {
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<UUID, RouteDefinition> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<RouteCodeKey, RouteDefinition> codeCache = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, List<RouteStop>> stopCache = new ConcurrentHashMap<>();
 
   public RouteDefinitionCache(Consumer<String> debugLogger) {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
@@ -57,9 +58,30 @@ public final class RouteDefinitionCache {
     return Map.copyOf(cache);
   }
 
+  /** 获取指定线路的 RouteStop 列表（按 sequence 排序）。 */
+  public List<RouteStop> listStops(RouteId routeId) {
+    if (routeId == null || routeId.value() == null) {
+      return List.of();
+    }
+    return stopCache.getOrDefault(normalizeRouteId(routeId.value()), List.of());
+  }
+
+  /** 按索引获取 RouteStop；找不到时返回 empty。 */
+  public Optional<RouteStop> findStop(RouteId routeId, int sequence) {
+    if (routeId == null || sequence < 0) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = listStops(routeId);
+    if (sequence >= stops.size()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(stops.get(sequence));
+  }
+
   public void clear() {
     cache.clear();
     codeCache.clear();
+    stopCache.clear();
   }
 
   /**
@@ -109,6 +131,8 @@ public final class RouteDefinitionCache {
             if (codeKey != null) {
               codeCache.put(codeKey, definition);
             }
+            stopCache.put(
+                normalizeRouteId(definition.id().value()), List.copyOf(sortedStops(stops)));
             loaded++;
           }
         }
@@ -138,11 +162,15 @@ public final class RouteDefinitionCache {
       if (codeKey != null) {
         codeCache.put(codeKey, definition);
       }
+      stopCache.put(normalizeRouteId(definition.id().value()), List.copyOf(sortedStops(stops)));
     } else {
       cache.remove(route.id());
       if (codeKey != null) {
         codeCache.remove(codeKey);
       }
+      stopCache.remove(
+          normalizeRouteId(
+              RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id())));
     }
     return definitionOpt;
   }
@@ -157,6 +185,9 @@ public final class RouteDefinitionCache {
     if (codeKey != null) {
       codeCache.remove(codeKey);
     }
+    stopCache.remove(
+        normalizeRouteId(
+            RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id())));
   }
 
   private Optional<RouteDefinition> buildDefinition(
@@ -180,8 +211,7 @@ public final class RouteDefinitionCache {
               + line.code());
       return Optional.empty();
     }
-    List<RouteStop> sorted = new ArrayList<>(stops);
-    sorted.sort(Comparator.comparingInt(RouteStop::sequence));
+    List<RouteStop> sorted = sortedStops(stops);
     List<NodeId> nodes = new ArrayList<>();
     int totalStops = sorted.size();
     int waypointStops = 0;
@@ -236,6 +266,15 @@ public final class RouteDefinitionCache {
         RouteId.of(
             RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id()));
     return Optional.of(new RouteDefinition(routeKey, nodes, Optional.empty()));
+  }
+
+  private List<RouteStop> sortedStops(List<RouteStop> stops) {
+    if (stops == null || stops.isEmpty()) {
+      return List.of();
+    }
+    List<RouteStop> sorted = new ArrayList<>(stops);
+    sorted.sort(Comparator.comparingInt(RouteStop::sequence));
+    return sorted;
   }
 
   private Optional<NodeId> resolveNodeId(RouteStop stop, StationRepository stations) {
@@ -300,5 +339,17 @@ public final class RouteDefinitionCache {
       }
       return trimmed;
     }
+
+    @Override
+    public String toString() {
+      return operatorCode + ":" + lineCode + ":" + routeCode;
+    }
+  }
+
+  private static String normalizeRouteId(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return "";
+    }
+    return raw.trim().toLowerCase(java.util.Locale.ROOT);
   }
 }

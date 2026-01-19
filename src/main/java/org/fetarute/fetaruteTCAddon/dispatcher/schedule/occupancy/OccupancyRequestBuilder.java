@@ -2,13 +2,19 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -21,25 +27,30 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
  * 运行时占用请求构建器：把“列车状态 + 线路定义 + 图”转换成 OccupancyRequest。
  *
  * <p>默认会占用 lookahead 边与对应节点资源，并附加走廊/道岔冲突资源；道岔冲突可按 {@code switcherZoneEdges} 限制为“前 N 段边内的道岔”。
+ * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。
  */
 public final class OccupancyRequestBuilder {
 
   private final RailGraph graph;
-  private final int lookaheadEdges;
   private final int switcherZoneEdges;
+  private final int effectiveLookaheadEdges;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
 
-  public OccupancyRequestBuilder(RailGraph graph, int lookaheadEdges, int switcherZoneEdges) {
+  public OccupancyRequestBuilder(
+      RailGraph graph, int lookaheadEdges, int minClearEdges, int switcherZoneEdges) {
     this.graph = Objects.requireNonNull(graph, "graph");
     if (lookaheadEdges <= 0) {
       throw new IllegalArgumentException("lookaheadEdges 必须大于 0");
     }
+    if (minClearEdges < 0) {
+      throw new IllegalArgumentException("minClearEdges 必须为非负数");
+    }
     if (switcherZoneEdges < 0) {
       throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");
     }
-    this.lookaheadEdges = lookaheadEdges;
     this.switcherZoneEdges = switcherZoneEdges;
+    this.effectiveLookaheadEdges = Math.max(lookaheadEdges, minClearEdges);
   }
 
   /**
@@ -98,7 +109,7 @@ public final class OccupancyRequestBuilder {
     if (currentIndex < 0 || currentIndex >= nodes.size() - 1) {
       return Optional.empty();
     }
-    int maxIndex = Math.min(nodes.size() - 1, currentIndex + lookaheadEdges);
+    int maxIndex = Math.min(nodes.size() - 1, currentIndex + effectiveLookaheadEdges);
     List<NodeId> pathNodes = new ArrayList<>();
     for (int i = currentIndex; i <= maxIndex; i++) {
       pathNodes.add(nodes.get(i));
@@ -122,8 +133,10 @@ public final class OccupancyRequestBuilder {
       resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
     }
     applySwitcherZoneConflicts(resources, expandedNodes);
+    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(expandedNodes);
     OccupancyRequest request =
-        new OccupancyRequest(trainName, routeId, requestTime, List.copyOf(resources));
+        new OccupancyRequest(
+            trainName, routeId, requestTime, List.copyOf(resources), corridorDirections);
     return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
   }
 
@@ -218,5 +231,107 @@ public final class OccupancyRequestBuilder {
     }
     // 无向图：只要两端点相连即可视为可达。
     return Optional.empty();
+  }
+
+  private Map<String, CorridorDirection> resolveCorridorDirections(List<NodeId> pathNodes) {
+    if (!(graph instanceof RailGraphCorridorSupport support)) {
+      return Map.of();
+    }
+    if (pathNodes == null || pathNodes.size() < 2) {
+      return Map.of();
+    }
+    Map<String, CorridorDirection> directions = new LinkedHashMap<>();
+    for (int i = 0; i < pathNodes.size() - 1; i++) {
+      NodeId from = pathNodes.get(i);
+      NodeId to = pathNodes.get(i + 1);
+      if (from == null || to == null) {
+        continue;
+      }
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      support
+          .corridorInfoForEdge(edgeId)
+          .filter(RailGraphCorridorInfo::directional)
+          .ifPresent(
+              info -> {
+                if (directions.containsKey(info.key())) {
+                  return;
+                }
+                resolveCorridorDirection(info, pathNodes, from, to)
+                    .ifPresent(direction -> directions.put(info.key(), direction));
+              });
+    }
+    return Map.copyOf(directions);
+  }
+
+  private Optional<CorridorDirection> resolveCorridorDirection(
+      RailGraphCorridorInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
+    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(info, from, to);
+    if (byCorridor != CorridorDirection.UNKNOWN) {
+      return Optional.of(byCorridor);
+    }
+    int leftIndex = indexOfNode(pathNodes, info.left());
+    int rightIndex = indexOfNode(pathNodes, info.right());
+    if (leftIndex >= 0 && rightIndex >= 0 && leftIndex != rightIndex) {
+      return Optional.of(
+          leftIndex < rightIndex ? CorridorDirection.A_TO_B : CorridorDirection.B_TO_A);
+    }
+    CorridorDirection byDistance = resolveDirectionByDistance(from, to, info.left(), info.right());
+    return byDistance == CorridorDirection.UNKNOWN ? Optional.empty() : Optional.of(byDistance);
+  }
+
+  private CorridorDirection resolveDirectionByCorridorNodes(
+      RailGraphCorridorInfo info, NodeId from, NodeId to) {
+    if (info == null || from == null || to == null) {
+      return CorridorDirection.UNKNOWN;
+    }
+    List<NodeId> corridorNodes = info.nodes();
+    int fromIndex = indexOfNode(corridorNodes, from);
+    int toIndex = indexOfNode(corridorNodes, to);
+    if (fromIndex < 0 || toIndex < 0 || fromIndex == toIndex) {
+      return CorridorDirection.UNKNOWN;
+    }
+    return fromIndex < toIndex ? CorridorDirection.A_TO_B : CorridorDirection.B_TO_A;
+  }
+
+  private CorridorDirection resolveDirectionByDistance(
+      NodeId from, NodeId to, NodeId left, NodeId right) {
+    OptionalLong fromLeft = shortestDistance(from, left);
+    OptionalLong toLeft = shortestDistance(to, left);
+    OptionalLong fromRight = shortestDistance(from, right);
+    OptionalLong toRight = shortestDistance(to, right);
+    if (fromLeft.isEmpty() || toLeft.isEmpty() || fromRight.isEmpty() || toRight.isEmpty()) {
+      return CorridorDirection.UNKNOWN;
+    }
+    boolean towardLeft = toLeft.getAsLong() < fromLeft.getAsLong();
+    boolean towardRight = toRight.getAsLong() < fromRight.getAsLong();
+    if (towardRight && !towardLeft) {
+      return CorridorDirection.A_TO_B;
+    }
+    if (towardLeft && !towardRight) {
+      return CorridorDirection.B_TO_A;
+    }
+    return CorridorDirection.UNKNOWN;
+  }
+
+  private OptionalLong shortestDistance(NodeId from, NodeId to) {
+    if (from == null || to == null) {
+      return OptionalLong.empty();
+    }
+    return pathFinder
+        .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+        .map(path -> OptionalLong.of(path.totalLengthBlocks()))
+        .orElse(OptionalLong.empty());
+  }
+
+  private int indexOfNode(List<NodeId> nodes, NodeId target) {
+    if (nodes == null || target == null) {
+      return -1;
+    }
+    for (int i = 0; i < nodes.size(); i++) {
+      if (target.equals(nodes.get(i))) {
+        return i;
+      }
+    }
+    return -1;
   }
 }

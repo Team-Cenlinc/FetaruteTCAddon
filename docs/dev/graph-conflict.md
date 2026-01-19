@@ -7,12 +7,14 @@
 ## 冲突组规则（当前实现）
 - Switcher 冲突：每条连接 `SWITCHER` 的区间附加 `CONFLICT:switcher:<nodeId>`。
 - 单线走廊冲突：将度数=2 的连续链路压缩为一个走廊，所有区间共享
-  `CONFLICT:single:<componentKey>:<endA>~<endB>`。
+  `CONFLICT:single:<componentKey>:<endA>~<endB>`；用于“对向互斥”，同向跟驰不再互斥。
 - 闭环冲突：若连通分量内无边界节点，则归并为
   `CONFLICT:single:<componentKey>:cycle:<minNode>`。
+  闭环仍为严格互斥，不区分方向。
 - 边界判定：度数≠2 或节点类型为 `SWITCHER`。
 - 不把 Station/AutoStation 作为边界，因此“单线区间上有多个站点”会被同一走廊锁住。
 - 道岔联合锁闭范围由 `runtime.switcher-zone-edges` 控制（向前 N 段边）。
+- 占用层会对 `CONFLICT:switcher` 与 `CONFLICT:single` 资源启用 Gate Queue。
 
 ## 运维命令
 - `/fta graph conflict list [--node "<nodeId>"] [page]`：列出冲突组与覆盖区间数量。

@@ -82,8 +82,8 @@ public final class FtaRouteCommand {
 
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
-  private static final Set<String> ACTION_PREFIXES =
-      Set.of("CHANGE", "DYNAMIC", "ACTION", "CRET", "DSTY");
+  private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION");
+  private static final Set<String> DIRECTIVE_PREFIXES = Set.of("CRET", "DSTY");
   private static final List<String> ROUTE_PATTERN_ALIASES =
       List.of("LOCAL", "RAPID", "NEO_RAPID", "EXPRESS", "LTD_EXPRESS", "LIMITED_EXPRESS");
   private static final List<String> ROUTE_OPERATION_ALIASES =
@@ -1453,7 +1453,8 @@ public final class FtaRouteCommand {
    *
    * <ul>
    *   <li>空行、#、// 开头的行忽略
-   *   <li>动作行（CHANGE/DYNAMIC/CRET/DSTY/ACTION 前缀）附着到上一条 stop 的 notes（用换行拼接）
+   *   <li>动作行（CHANGE/DYNAMIC/ACTION 前缀）附着到上一条 stop 的 notes（用换行拼接）
+   *   <li>CRET/DSTY 作为指令行：直接生成对应的节点 stop（默认 PASS），并写入 notes 便于后续识别
    *   <li>stop 行支持 PASS/STOP/TERM 前缀；支持 dwell=&lt;秒&gt; 参数（基准停车时间，运行时可按调度策略增减）
    *   <li>含冒号的行视为 NodeId，写入 waypointNodeId（字符串原样保存）
    *   <li>不含冒号的行视为 StationCode，需在 stations 表中存在，否则报错
@@ -1461,7 +1462,7 @@ public final class FtaRouteCommand {
    *
    * <p>这里不对 NodeId 做强校验：因为节点可能来自轨道牌子注册或后续扩展（如 Switcher）。
    */
-  private Optional<List<RouteStop>> parseStopsFromBook(
+  Optional<List<RouteStop>> parseStopsFromBook(
       LocaleManager locale,
       StorageProvider provider,
       UUID operatorId,
@@ -1469,6 +1470,7 @@ public final class FtaRouteCommand {
       Player sender,
       List<BookLine> lines) {
     List<RouteStop> stops = new ArrayList<>();
+    boolean dstySeen = false;
     for (BookLine line : lines) {
       String raw = line.text();
       if (raw == null) {
@@ -1477,6 +1479,53 @@ public final class FtaRouteCommand {
       String trimmed = raw.trim();
       if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("//")) {
         continue;
+      }
+
+      Optional<DirectiveLine> directiveOpt = parseDirectiveLine(trimmed);
+      if (directiveOpt.isPresent()) {
+        DirectiveLine directive = directiveOpt.get();
+        if (directive.argument().isBlank()) {
+          sender.sendMessage(
+              locale.component(
+                  "command.route.define.invalid-line",
+                  Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
+          return Optional.empty();
+        }
+        String normalizedDirective = normalizeActionLine(trimmed);
+        if ("CRET".equals(directive.prefix())) {
+          if (!stops.isEmpty()) {
+            sender.sendMessage(
+                locale.component(
+                    "command.route.define.cret-not-first",
+                    Map.of("seq", String.valueOf(stops.size()))));
+            return Optional.empty();
+          }
+          RouteStop stop =
+              new RouteStop(
+                  routeId,
+                  0,
+                  Optional.empty(),
+                  Optional.of(directive.argument()),
+                  Optional.empty(),
+                  RouteStopPassType.PASS,
+                  Optional.of(normalizedDirective));
+          stops.add(stop);
+          continue;
+        }
+        if ("DSTY".equals(directive.prefix())) {
+          RouteStop stop =
+              new RouteStop(
+                  routeId,
+                  stops.size(),
+                  Optional.empty(),
+                  Optional.of(directive.argument()),
+                  Optional.empty(),
+                  RouteStopPassType.PASS,
+                  Optional.of(normalizedDirective));
+          stops.add(stop);
+          dstySeen = true;
+          continue;
+        }
       }
 
       // 动作行：附着到上一条 stop 的 notes（用换行拼接，便于后续解释器读取）。
@@ -1509,6 +1558,14 @@ public final class FtaRouteCommand {
                 last.passType(),
                 Optional.of(mergedNotes)));
         continue;
+      }
+
+      if (dstySeen) {
+        sender.sendMessage(
+            locale.component(
+                "command.route.define.dsty-not-last",
+                Map.of("seq", String.valueOf(stops.size() - 1))));
+        return Optional.empty();
       }
 
       // 允许 PASS/STOP/TERM 前缀控制 passType（默认 STOP）。
@@ -1581,12 +1638,24 @@ public final class FtaRouteCommand {
 
   private static boolean startsWithWord(String text, String word) {
     return text.regionMatches(true, 0, word, 0, word.length())
-        && (text.length() == word.length() || Character.isWhitespace(text.charAt(word.length())));
+        && (text.length() == word.length()
+            || Character.isWhitespace(text.charAt(word.length()))
+            || text.charAt(word.length()) == ':');
   }
 
   private static String firstSegment(String line) {
-    int idx = line.indexOf(':');
-    return idx < 0 ? line : line.substring(0, idx);
+    if (line == null || line.isEmpty()) {
+      return "";
+    }
+    int idx = 0;
+    while (idx < line.length()) {
+      char ch = line.charAt(idx);
+      if (Character.isWhitespace(ch) || ch == ':') {
+        break;
+      }
+      idx++;
+    }
+    return line.substring(0, idx);
   }
 
   private static boolean isActionLine(String line) {
@@ -1605,11 +1674,35 @@ public final class FtaRouteCommand {
     return false;
   }
 
+  private static boolean isDirectiveLine(String line) {
+    if (line == null) {
+      return false;
+    }
+    String trimmed = line.trim();
+    if (trimmed.isEmpty()) {
+      return false;
+    }
+    for (String prefix : DIRECTIVE_PREFIXES) {
+      if (startsWithWord(trimmed, prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static String normalizeActionLine(String line) {
     if (line == null) {
       return "";
     }
     String trimmed = line.trim();
+    Optional<DirectiveLine> directiveOpt = parseDirectiveLine(trimmed);
+    if (directiveOpt.isPresent()) {
+      DirectiveLine directive = directiveOpt.get();
+      if (directive.argument().isBlank()) {
+        return directive.prefix();
+      }
+      return directive.prefix() + " " + directive.argument();
+    }
     for (String prefix : ACTION_PREFIXES) {
       if (!startsWithWord(trimmed, prefix)) {
         continue;
@@ -1624,6 +1717,27 @@ public final class FtaRouteCommand {
       return prefix + ":" + rest;
     }
     return trimmed;
+  }
+
+  private static Optional<DirectiveLine> parseDirectiveLine(String line) {
+    if (line == null) {
+      return Optional.empty();
+    }
+    String trimmed = line.trim();
+    if (trimmed.isEmpty()) {
+      return Optional.empty();
+    }
+    for (String prefix : DIRECTIVE_PREFIXES) {
+      if (!startsWithWord(trimmed, prefix)) {
+        continue;
+      }
+      String rest = trimmed.substring(prefix.length()).trim();
+      if (rest.startsWith(":")) {
+        rest = rest.substring(1).trim();
+      }
+      return Optional.of(new DirectiveLine(prefix, rest));
+    }
+    return Optional.empty();
   }
 
   private RouteValidationResult validateRouteStops(
@@ -1763,7 +1877,7 @@ public final class FtaRouteCommand {
       if (trimmed.isEmpty()) {
         continue;
       }
-      if (isActionLine(trimmed)) {
+      if (isActionLine(trimmed) || isDirectiveLine(trimmed)) {
         lines.add(normalizeActionLine(trimmed));
       }
     }
@@ -1782,7 +1896,9 @@ public final class FtaRouteCommand {
   private record ResolvedRoute(Company company, Operator operator, Line line, Route route) {}
 
   /** 书本的“原始行”，用于在报错时定位行号。 */
-  private record BookLine(int lineNo, String text) {}
+  record BookLine(int lineNo, String text) {}
+
+  private record DirectiveLine(String prefix, String argument) {}
 
   /**
    * 构建 Route Editor 的书页内容。
@@ -1802,7 +1918,8 @@ public final class FtaRouteCommand {
     rendered.add("# stop: StationCode 或 NodeId");
     rendered.add("#   NodeId 例: " + operator.code() + ":S:PTK:1");
     rendered.add("#           或: " + operator.code() + ":A:B:1:00");
-    rendered.add("# action: CHANGE/DYNAMIC/CRET/DSTY/ACTION");
+    rendered.add("# action: CHANGE/DYNAMIC/ACTION");
+    rendered.add("# directive: CRET/DSTY <NodeId>");
     rendered.add("# 修饰: PASS/STOP/TERM, dwell=<秒>");
     rendered.add("# 限制: CRET 仅允许首个 stop；DSTY 必须为最后 stop");
     rendered.add("#");
@@ -1810,11 +1927,11 @@ public final class FtaRouteCommand {
     if (stops.isEmpty()) {
       rendered.add("# 示例：");
       rendered.add("# STOP " + operator.code() + ":D:DEPOT:1");
-      rendered.add("# CRET:" + operator.code() + ":D:DEPOT:1");
+      rendered.add("# CRET " + operator.code() + ":D:DEPOT:1");
       rendered.add("# STOP PTK dwell=30");
       rendered.add("# CHANGE:" + operator.code() + ":" + line.code());
       rendered.add("# PASS " + operator.code() + ":A:B:1:00");
-      rendered.add("# DSTY:" + operator.code() + ":D:DEPOT:1:01");
+      rendered.add("# DSTY " + operator.code() + ":D:DEPOT:1:01");
       rendered.add("");
     } else {
       rendered.add("# 已加载现有停靠表（可直接修改后 define 覆盖）");
@@ -1857,6 +1974,7 @@ public final class FtaRouteCommand {
     rendered.add("# 用法：每行一个 stop/action");
     rendered.add("# stop: StationCode 或 NodeId");
     rendered.add("# action: CHANGE/DYNAMIC/ACTION");
+    rendered.add("# directive: CRET/DSTY <NodeId>");
     rendered.add("# 修饰: PASS/STOP/TERM, dwell=<秒>");
     rendered.add("#");
     rendered.add("# 右键 waypoint/autostation/depot");

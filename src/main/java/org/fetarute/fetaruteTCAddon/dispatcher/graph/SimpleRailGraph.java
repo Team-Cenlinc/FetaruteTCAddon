@@ -11,13 +11,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
 /** 线程安全的不可变调度图快照实现。 */
-public final class SimpleRailGraph implements RailGraph, RailGraphConflictSupport {
+public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSupport {
 
   private final Map<NodeId, RailNode> nodesById;
   private final Map<EdgeId, RailEdge> edgesById;
   private final Map<NodeId, Set<RailEdge>> edgesFrom;
   private final Set<EdgeId> blockedEdges;
-  private volatile Map<EdgeId, String> conflictByEdge;
+  private volatile RailGraphConflictIndex conflictIndex;
 
   public SimpleRailGraph(
       Map<NodeId, RailNode> nodesById, Map<EdgeId, RailEdge> edgesById, Set<EdgeId> blockedEdges) {
@@ -67,18 +67,35 @@ public final class SimpleRailGraph implements RailGraph, RailGraphConflictSuppor
     if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
       return Optional.empty();
     }
-    Map<EdgeId, String> mapping = conflictByEdge;
-    if (mapping == null) {
+    RailGraphConflictIndex index = conflictIndex;
+    if (index == null) {
       synchronized (this) {
-        mapping = conflictByEdge;
-        if (mapping == null) {
-          mapping = RailGraphConflictIndex.fromGraph(this).snapshot();
-          conflictByEdge = mapping;
+        index = conflictIndex;
+        if (index == null) {
+          index = RailGraphConflictIndex.fromGraph(this);
+          conflictIndex = index;
         }
       }
     }
-    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
-    return Optional.ofNullable(mapping.get(normalized));
+    return index.conflictKeyForEdge(edgeId);
+  }
+
+  @Override
+  public Optional<RailGraphCorridorInfo> corridorInfoForEdge(EdgeId edgeId) {
+    if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
+      return Optional.empty();
+    }
+    RailGraphConflictIndex index = conflictIndex;
+    if (index == null) {
+      synchronized (this) {
+        index = conflictIndex;
+        if (index == null) {
+          index = RailGraphConflictIndex.fromGraph(this);
+          conflictIndex = index;
+        }
+      }
+    }
+    return index.corridorInfoForEdge(edgeId);
   }
 
   private static Map<NodeId, Set<RailEdge>> buildAdjacency(

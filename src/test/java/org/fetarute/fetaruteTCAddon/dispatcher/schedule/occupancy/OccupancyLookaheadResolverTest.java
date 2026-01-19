@@ -29,7 +29,8 @@ class OccupancyLookaheadResolverTest {
                     "t1",
                     Optional.of(new RouteId("R1")),
                     Instant.EPOCH,
-                    Duration.ZERO)));
+                    Duration.ZERO,
+                    Optional.empty())));
     OccupancyRequestContext context = contextForTwoEdges(10, 20);
 
     OptionalLong distance = OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
@@ -52,7 +53,8 @@ class OccupancyLookaheadResolverTest {
                     "t1",
                     Optional.empty(),
                     Instant.EPOCH,
-                    Duration.ZERO)));
+                    Duration.ZERO,
+                    Optional.empty())));
 
     OptionalLong distance = OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
 
@@ -74,7 +76,8 @@ class OccupancyLookaheadResolverTest {
                     "t1",
                     Optional.empty(),
                     Instant.EPOCH,
-                    Duration.ZERO)));
+                    Duration.ZERO,
+                    Optional.empty())));
 
     OptionalLong distance = OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
 
@@ -97,13 +100,15 @@ class OccupancyLookaheadResolverTest {
                     "t1",
                     Optional.empty(),
                     Instant.EPOCH,
-                    Duration.ZERO),
+                    Duration.ZERO,
+                    Optional.empty()),
                 new OccupancyClaim(
                     OccupancyResource.forNode(node),
                     "t2",
                     Optional.empty(),
                     Instant.EPOCH,
-                    Duration.ZERO)));
+                    Duration.ZERO,
+                    Optional.empty())));
 
     OptionalLong distance = OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
 
@@ -119,7 +124,7 @@ class OccupancyLookaheadResolverTest {
     RailEdge edge2 =
         new RailEdge(EdgeId.undirected(b, c), b, c, secondLength, -1.0, true, Optional.empty());
     OccupancyRequest request =
-        new OccupancyRequest("t1", Optional.empty(), Instant.EPOCH, List.of());
+        new OccupancyRequest("t1", Optional.empty(), Instant.EPOCH, List.of(), java.util.Map.of());
     return new OccupancyRequestContext(request, List.of(a, b, c), List.of(edge1, edge2));
   }
 }

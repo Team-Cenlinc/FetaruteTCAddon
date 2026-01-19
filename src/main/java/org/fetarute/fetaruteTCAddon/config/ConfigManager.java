@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 5;
+  private static final int EXPECTED_CONFIG_VERSION = 6;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
@@ -23,6 +23,7 @@ public final class ConfigManager {
   private static final float DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH = 1.2f;
   private static final int DEFAULT_DISPATCH_TICK_INTERVAL = 10;
   private static final int DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES = 2;
+  private static final int DEFAULT_MIN_CLEAR_EDGES = 1;
   private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
   private static final double DEFAULT_CAUTION_SPEED_BPS = 6.0;
@@ -164,6 +165,7 @@ public final class ConfigManager {
       ConfigurationSection section, java.util.logging.Logger logger) {
     int tickInterval = DEFAULT_DISPATCH_TICK_INTERVAL;
     int lookaheadEdges = DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES;
+    int minClearEdges = DEFAULT_MIN_CLEAR_EDGES;
     int switcherZoneEdges = DEFAULT_SWITCHER_ZONE_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
     double cautionSpeed = DEFAULT_CAUTION_SPEED_BPS;
@@ -187,6 +189,12 @@ public final class ConfigManager {
         lookaheadEdges = configuredLookahead;
       } else {
         logger.warning("runtime.lookahead-edges 配置无效: " + configuredLookahead);
+      }
+      int configuredMinClear = section.getInt("min-clear-edges", minClearEdges);
+      if (configuredMinClear >= 0) {
+        minClearEdges = configuredMinClear;
+      } else {
+        logger.warning("runtime.min-clear-edges 配置无效: " + configuredMinClear);
       }
       int configuredSwitcherZone = section.getInt("switcher-zone-edges", switcherZoneEdges);
       if (configuredSwitcherZone >= 0) {
@@ -258,6 +266,7 @@ public final class ConfigManager {
     return new RuntimeSettings(
         tickInterval,
         lookaheadEdges,
+        minClearEdges,
         switcherZoneEdges,
         approachSpeed,
         cautionSpeed,
@@ -388,6 +397,7 @@ public final class ConfigManager {
   public record RuntimeSettings(
       int dispatchTickIntervalTicks,
       int lookaheadEdges,
+      int minClearEdges,
       int switcherZoneEdges,
       double approachSpeedBps,
       double cautionSpeedBps,
@@ -405,6 +415,9 @@ public final class ConfigManager {
       }
       if (lookaheadEdges <= 0) {
         throw new IllegalArgumentException("lookaheadEdges 必须为正数");
+      }
+      if (minClearEdges < 0) {
+        throw new IllegalArgumentException("minClearEdges 必须为非负数");
       }
       if (switcherZoneEdges < 0) {
         throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -24,12 +25,14 @@ class SimpleOccupancyManagerTest {
     OccupancyResource resource =
         OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
     OccupancyRequest request =
-        new OccupancyRequest("train-A", Optional.empty(), now, List.of(resource));
+        new OccupancyRequest(
+            "train-A", Optional.empty(), now, List.of(resource), java.util.Map.of());
     OccupancyDecision decision = manager.acquire(request);
     assertTrue(decision.allowed());
 
     OccupancyRequest otherRequest =
-        new OccupancyRequest("train-B", Optional.empty(), now, List.of(resource));
+        new OccupancyRequest(
+            "train-B", Optional.empty(), now, List.of(resource), java.util.Map.of());
     OccupancyDecision otherDecision = manager.canEnter(otherRequest);
     assertFalse(otherDecision.allowed());
     assertEquals(now, otherDecision.earliestTime());
@@ -45,12 +48,101 @@ class SimpleOccupancyManagerTest {
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("NODE-1"));
     OccupancyRequest request =
-        new OccupancyRequest("train-A", Optional.empty(), now, List.of(resource));
+        new OccupancyRequest(
+            "train-A", Optional.empty(), now, List.of(resource), java.util.Map.of());
     manager.acquire(request);
 
     manager.releaseByTrain("train-A");
     OccupancyDecision decision =
-        manager.canEnter(new OccupancyRequest("train-B", Optional.empty(), now, List.of(resource)));
+        manager.canEnter(
+            new OccupancyRequest(
+                "train-B", Optional.empty(), now, List.of(resource), java.util.Map.of()));
     assertTrue(decision.allowed());
+  }
+
+  @Test
+  void singleCorridorAllowsSameDirection() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+
+    OccupancyDecision first =
+        manager.acquire(
+            new OccupancyRequest("t1", Optional.empty(), now, List.of(resource), forward));
+    assertTrue(first.allowed());
+
+    OccupancyDecision second =
+        manager.canEnter(
+            new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), forward));
+    assertTrue(second.allowed());
+  }
+
+  @Test
+  void singleCorridorBlocksOppositeDirection() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(resource.key(), CorridorDirection.B_TO_A);
+
+    OccupancyDecision first =
+        manager.acquire(
+            new OccupancyRequest("t1", Optional.empty(), now, List.of(resource), forward));
+    assertTrue(first.allowed());
+
+    OccupancyDecision second =
+        manager.canEnter(
+            new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), reverse));
+    assertFalse(second.allowed());
+    assertEquals(SignalAspect.STOP, second.signal());
+  }
+
+  @Test
+  void queueBlocksSwitcherByOrder() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:SW-1");
+
+    OccupancyDecision first =
+        manager.canEnter(
+            new OccupancyRequest("t1", Optional.empty(), now, List.of(resource), Map.of()));
+    assertTrue(first.allowed());
+
+    OccupancyDecision second =
+        manager.canEnter(
+            new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), Map.of()));
+    assertFalse(second.allowed());
+  }
+
+  @Test
+  void queuePrefersEarliestSingleCorridorEntry() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(resource.key(), CorridorDirection.B_TO_A);
+
+    OccupancyDecision first =
+        manager.canEnter(
+            new OccupancyRequest("t1", Optional.empty(), now, List.of(resource), forward));
+    assertTrue(first.allowed());
+
+    OccupancyDecision second =
+        manager.canEnter(
+            new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), reverse));
+    assertFalse(second.allowed());
   }
 }

@@ -61,7 +61,7 @@ class OccupancyRequestBuilderTest {
             Map.of(nodeA, stationA, nodeB, stationB, nodeC, stationC),
             Map.of(edgeAB, ab, edgeBC, bc),
             Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0);
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB, nodeC), Optional.empty());
@@ -80,6 +80,7 @@ class OccupancyRequestBuilderTest {
     String conflictKey =
         ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeAB).orElseThrow();
     assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflictKey)));
+    assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflictKey));
   }
 
   @Test
@@ -104,7 +105,7 @@ class OccupancyRequestBuilderTest {
     RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 20, 8.0, true, Optional.empty());
     SimpleRailGraph graph =
         new SimpleRailGraph(Map.of(nodeA, stationA, nodeB, stationB), Map.of(edgeAB, ab), Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 0);
     RouteDefinition route =
         new RouteDefinition(RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB), Optional.empty());
     TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 1));
@@ -159,7 +160,7 @@ class OccupancyRequestBuilderTest {
             Map.of(nodeA, a, nodeB, b, nodeS, s, nodeC, c),
             Map.of(edgeAB, ab, edgeBS, bs, edgeSC, sc),
             Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 3, 1);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 3, 0, 1);
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB, nodeS, nodeC), Optional.empty());
@@ -206,7 +207,7 @@ class OccupancyRequestBuilderTest {
     SimpleRailGraph graph =
         new SimpleRailGraph(
             Map.of(nodeA, a, nodeS, s, nodeB, b), Map.of(edgeAS, as, edgeSB, sb), Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 1);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 1);
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeS, nodeB), Optional.empty());

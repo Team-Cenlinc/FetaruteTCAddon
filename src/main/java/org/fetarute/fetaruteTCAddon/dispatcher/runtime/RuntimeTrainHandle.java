@@ -26,4 +26,7 @@ public interface RuntimeTrainHandle {
 
   /** 在列车静止时发车；实现应自行处理“正在移动时跳过”的保护。 */
   void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared);
+
+  /** 销毁列车实体（用于 DSTY 终点回收）。 */
+  void destroy();
 }

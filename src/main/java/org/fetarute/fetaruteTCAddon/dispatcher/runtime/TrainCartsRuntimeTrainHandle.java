@@ -6,6 +6,9 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import java.util.Objects;
 import java.util.UUID;
+import org.bukkit.Bukkit;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.plugin.java.JavaPlugin;
 
 /**
  * TrainCarts 运行时列车句柄实现。
@@ -73,5 +76,33 @@ public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
       launchConfig.setAcceleration(accelBlocksPerTickSquared);
     }
     head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
+  }
+
+  @Override
+  public void destroy() {
+    if (!group.isValid()) {
+      return;
+    }
+    // 避免在 TrainCarts doPhysics / SignTracker 刷新过程中直接 destroy() 导致 members array 出现 dead entity。
+    // DSTY 往往在推进点（SignActionEvent）内触发，延迟 1 tick 执行更安全。
+    Plugin plugin = null;
+    try {
+      plugin = JavaPlugin.getProvidingPlugin(TrainCartsRuntimeTrainHandle.class);
+    } catch (Throwable ignored) {
+      plugin = null;
+    }
+    if (plugin == null || !plugin.isEnabled()) {
+      group.destroy();
+      return;
+    }
+    Bukkit.getScheduler()
+        .runTaskLater(
+            plugin,
+            () -> {
+              if (group.isValid()) {
+                group.destroy();
+              }
+            },
+            1L);
   }
 }
