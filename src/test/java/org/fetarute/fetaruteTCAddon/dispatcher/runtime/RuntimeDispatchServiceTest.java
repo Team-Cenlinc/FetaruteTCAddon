@@ -180,6 +180,104 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleSignalTickGradesBlockedAspectByLookaheadPosition() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, c), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView base = testConfigView(20, 20.0);
+    ConfigManager.RuntimeSettings runtime =
+        new ConfigManager.RuntimeSettings(
+            base.runtimeSettings().dispatchTickIntervalTicks(),
+            2,
+            base.runtimeSettings().minClearEdges(),
+            base.runtimeSettings().switcherZoneEdges(),
+            base.runtimeSettings().approachSpeedBps(),
+            base.runtimeSettings().cautionSpeedBps(),
+            base.runtimeSettings().approachDepotSpeedBps(),
+            base.runtimeSettings().speedCurveEnabled(),
+            base.runtimeSettings().speedCurveType(),
+            base.runtimeSettings().speedCurveFactor(),
+            base.runtimeSettings().speedCurveEarlyBrakeBlocks(),
+            base.runtimeSettings().failoverStallSpeedBps(),
+            base.runtimeSettings().failoverStallTicks(),
+            base.runtimeSettings().failoverUnreachableStop());
+    when(configManager.current())
+        .thenReturn(
+            new ConfigManager.ConfigView(
+                base.configVersion(),
+                base.debugEnabled(),
+                base.locale(),
+                base.storageSettings(),
+                base.graphSettings(),
+                base.autoStationSettings(),
+                runtime,
+                base.spawnSettings(),
+                base.trainConfigSettings()));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            inv -> {
+              OccupancyRequest request = inv.getArgument(0);
+              OccupancyResource blocker = OccupancyResource.forEdge(EdgeId.undirected(b, c));
+              return new OccupancyDecision(
+                  false,
+                  request.now(),
+                  SignalAspect.STOP,
+                  List.of(
+                      new OccupancyClaim(
+                          blocker,
+                          "other",
+                          Optional.empty(),
+                          request.now(),
+                          Duration.ZERO,
+                          Optional.empty())));
+            });
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            configManager,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
+    assertTrue(aspect == SignalAspect.PROCEED_WITH_CAUTION);
+  }
+
+  @Test
   void handleSignalTickUsesHoldLease() {
     RouteDefinition route =
         new RouteDefinition(
@@ -435,7 +533,7 @@ class RuntimeDispatchServiceTest {
     return new RailGraph() {
       @Override
       public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
-        return List.of();
+        return List.of(new RailNodeTest(a), new RailNodeTest(b));
       }
 
       @Override
@@ -445,6 +543,15 @@ class RuntimeDispatchServiceTest {
 
       @Override
       public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+        if (id == null) {
+          return Optional.empty();
+        }
+        if (id.equals(a)) {
+          return Optional.of(new RailNodeTest(a));
+        }
+        if (id.equals(b)) {
+          return Optional.of(new RailNodeTest(b));
+        }
         return Optional.empty();
       }
 
@@ -452,6 +559,61 @@ class RuntimeDispatchServiceTest {
       public java.util.Set<RailEdge> edgesFrom(NodeId id) {
         if (id.equals(a) || id.equals(b)) {
           return java.util.Set.of(edge);
+        }
+        return java.util.Set.of();
+      }
+
+      @Override
+      public boolean isBlocked(EdgeId id) {
+        return false;
+      }
+    };
+  }
+
+  private static RailGraph graphWithTwoEdges(
+      NodeId a, NodeId b, NodeId c, int length1, int length2) {
+    RailEdge edge1 =
+        new RailEdge(EdgeId.undirected(a, b), a, b, length1, -1.0, true, Optional.empty());
+    RailEdge edge2 =
+        new RailEdge(EdgeId.undirected(b, c), b, c, length2, -1.0, true, Optional.empty());
+    return new RailGraph() {
+      @Override
+      public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
+        return List.of(new RailNodeTest(a), new RailNodeTest(b), new RailNodeTest(c));
+      }
+
+      @Override
+      public java.util.Collection<RailEdge> edges() {
+        return List.of(edge1, edge2);
+      }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+        if (id == null) {
+          return Optional.empty();
+        }
+        if (id.equals(a)) {
+          return Optional.of(new RailNodeTest(a));
+        }
+        if (id.equals(b)) {
+          return Optional.of(new RailNodeTest(b));
+        }
+        if (id.equals(c)) {
+          return Optional.of(new RailNodeTest(c));
+        }
+        return Optional.empty();
+      }
+
+      @Override
+      public java.util.Set<RailEdge> edgesFrom(NodeId id) {
+        if (id.equals(a)) {
+          return java.util.Set.of(edge1);
+        }
+        if (id.equals(b)) {
+          return java.util.Set.of(edge1, edge2);
+        }
+        if (id.equals(c)) {
+          return java.util.Set.of(edge2);
         }
         return java.util.Set.of();
       }

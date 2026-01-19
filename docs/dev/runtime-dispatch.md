@@ -8,7 +8,7 @@
 ## 运行时流程
 1) 推进点触发：解析当前节点 → 构建 OccupancyRequest → canEnter
 2) 允许进入：acquire → 写入下一跳 destination → 发车/限速
-3) 不允许进入：更新信号为 CAUTION/STOP → 限速或停车
+3) 不允许进入：基于 lookahead 阻塞位置细分信号（PROCEED_WITH_CAUTION/CAUTION/STOP）→ 限速或停车
 
 ## 信号变化监测
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
@@ -44,7 +44,7 @@
 
 速度曲线：
 - 若启用 `runtime.speed-curve-enabled`，将根据“剩余距离 + 制动能力”自动计算限速，提前减速而不是过点再减速。
-- 当信号处于 CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度。
+- 当信号处于 PROCEED_WITH_CAUTION/CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度。
 - `runtime.speed-curve-type` 控制曲线形态（`physics/linear/quadratic/cubic`）。
 - `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。

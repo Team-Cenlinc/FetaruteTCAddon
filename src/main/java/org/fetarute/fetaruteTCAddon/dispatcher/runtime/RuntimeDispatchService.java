@@ -17,6 +17,8 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -33,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -182,22 +185,23 @@ public final class RuntimeDispatchService {
     if (!decision.allowed()) {
       OptionalLong lookaheadDistance =
           OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
+      SignalAspect aspect = deriveBlockedAspect(decision, context);
       debugLogger.accept(
           "调度推进阻塞: train="
               + trainName
               + " node="
               + definition.nodeId().value()
               + " signal="
-              + decision.signal()
+              + aspect
               + " earliest="
               + decision.earliestTime()
               + " blockers="
               + summarizeBlockers(decision));
-      progressRegistry.updateSignal(trainName, decision.signal(), now);
+      progressRegistry.updateSignal(trainName, aspect, now);
       applyControl(
           train,
           properties,
-          decision.signal(),
+          aspect,
           route,
           currentNode,
           nextTarget.get(),
@@ -367,8 +371,7 @@ public final class RuntimeDispatchService {
       handleDestroy(train, properties, trainName, "DSTY");
       return;
     }
-    Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(train.worldId()).map(snapshot -> snapshot.graph());
+    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());
     if (graphOpt.isEmpty()) {
       return;
     }
@@ -397,7 +400,8 @@ public final class RuntimeDispatchService {
     if (decision.allowed()) {
       occupancyManager.acquire(request);
     }
-    SignalAspect nextAspect = decision.signal();
+    SignalAspect nextAspect =
+        decision.allowed() ? decision.signal() : deriveBlockedAspect(decision, context);
     SignalAspect lastAspect = progressEntry.lastSignal();
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
     if (allowLaunch) {
@@ -442,7 +446,7 @@ public final class RuntimeDispatchService {
       }
     }
     // 信号非放行时，按 lookahead 阻塞距离提前下压速度，避免过点再减速。
-    if (runtimeSettings.speedCurveEnabled() && decision.signal() != SignalAspect.PROCEED) {
+    if (runtimeSettings.speedCurveEnabled() && nextAspect != SignalAspect.PROCEED) {
       OptionalLong lookaheadDistance =
           OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
       if (lookaheadDistance.isPresent()) {
@@ -479,6 +483,62 @@ public final class RuntimeDispatchService {
           graph,
           distanceOpt);
     }
+  }
+
+  /**
+   * 当 canEnter 阻塞时，基于 blocker 在 lookahead 路径中的位置细分信号等级。
+   *
+   * <p>语义：
+   *
+   * <ul>
+   *   <li>CAUTION：下一个区间（第 1 段边或下一节点）会遇到 stop，应更早准备停车。
+   *   <li>PROCEED_WITH_CAUTION：前两个区间内存在 stop，用于提前减速提示。
+   *   <li>STOP：无法定位 blocker 位置（例如仅 CONFLICT 阻塞）时的保守回退。
+   * </ul>
+   */
+  private SignalAspect deriveBlockedAspect(
+      OccupancyDecision decision, OccupancyRequestContext context) {
+    if (decision == null || context == null || decision.blockers().isEmpty()) {
+      return SignalAspect.STOP;
+    }
+    List<NodeId> nodes = context.pathNodes();
+    List<RailEdge> edges = context.edges();
+    int bestPosition = Integer.MAX_VALUE;
+    for (OccupancyClaim claim : decision.blockers()) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      OccupancyResource resource = claim.resource();
+      if (resource.kind() == ResourceKind.EDGE && edges != null) {
+        for (int i = 0; i < edges.size(); i++) {
+          RailEdge edge = edges.get(i);
+          if (edge == null) {
+            continue;
+          }
+          if (OccupancyResource.forEdge(edge.id()).key().equals(resource.key())) {
+            bestPosition = Math.min(bestPosition, i + 1);
+            break;
+          }
+        }
+        continue;
+      }
+      if (resource.kind() == ResourceKind.NODE && nodes != null) {
+        for (int i = 0; i < nodes.size(); i++) {
+          NodeId node = nodes.get(i);
+          if (node == null) {
+            continue;
+          }
+          if (node.value().equals(resource.key()) && i > 0) {
+            bestPosition = Math.min(bestPosition, i);
+            break;
+          }
+        }
+      }
+    }
+    if (bestPosition == Integer.MAX_VALUE) {
+      return SignalAspect.STOP;
+    }
+    return bestPosition <= 1 ? SignalAspect.CAUTION : SignalAspect.PROCEED_WITH_CAUTION;
   }
 
   /**
@@ -885,9 +945,27 @@ public final class RuntimeDispatchService {
     if (event == null || event.getWorld() == null) {
       return Optional.empty();
     }
+    return resolveGraph(event.getWorld().getUID(), Instant.now());
+  }
+
+  private Optional<RailGraph> resolveGraph(UUID worldId, Instant now) {
+    if (worldId == null) {
+      return Optional.empty();
+    }
+    Instant snapshotTime = now != null ? now : Instant.now();
     return railGraphService
-        .getSnapshot(event.getWorld().getUID())
-        .map(snapshot -> snapshot.graph());
+        .getSnapshot(worldId)
+        .map(
+            snapshot -> {
+              RailGraph graph = snapshot.graph();
+              java.util.Map<
+                      org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId, RailEdgeOverrideRecord>
+                  overrides = railGraphService.edgeOverrides(worldId);
+              if (overrides.isEmpty()) {
+                return graph;
+              }
+              return new EdgeOverrideRailGraph(graph, overrides, snapshotTime);
+            });
   }
 
   private Optional<RouteDefinition> resolveRouteDefinition(TrainProperties properties) {

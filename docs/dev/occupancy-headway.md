@@ -13,9 +13,9 @@
 
 ## 信号许可（SignalAspect）
 - `PROCEED`：可进入。
-- `PROCEED_WITH_CAUTION`：短暂等待后可进入。
-- `CAUTION`：需等待，建议限速/提示。
-- `STOP`：禁止进入。
+- `PROCEED_WITH_CAUTION`：前方两段区间内存在 stop，用于提前减速提示。
+- `CAUTION`：下一个区间会遇到 stop，准备停车。
+- `STOP`：禁止进入或无法定位阻塞位置（例如仅 CONFLICT 阻塞）。
 
 ## MVP 资源解析规则
 - edge 必占用自身资源：`EDGE:<from~to>`。

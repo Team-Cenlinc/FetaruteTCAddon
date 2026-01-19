@@ -21,7 +21,9 @@ public record OccupancyResource(ResourceKind kind, String key) {
 
   public static OccupancyResource forEdge(EdgeId edgeId) {
     Objects.requireNonNull(edgeId, "edgeId");
-    return new OccupancyResource(ResourceKind.EDGE, edgeId.a().value() + "~" + edgeId.b().value());
+    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
+    return new OccupancyResource(
+        ResourceKind.EDGE, normalized.a().value() + "~" + normalized.b().value());
   }
 
   public static OccupancyResource forNode(NodeId nodeId) {
