@@ -37,6 +37,11 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 - DSTY 只能出现一次，且必须是最后 stop。
 - 若调度图快照已加载，会校验相邻 stop 的 NodeId 是否存在可达边；图未加载时仅提示并跳过校验。
 
+`/fta route debug <company> <operator> <line> <route> [page]` 可直接查看已保存线路的 stop 回显（无需先 define）。
+`/fta route debug <company> <operator> <line> <route> [page]` 会进行调试展示：
+- CRET/DSTY 会以指令行形式展示（不显示 PASS 前缀）。
+- 若相邻 stop 不直接相连，会展开最短路径中的中间节点并标记为 PASS（仅回显，不写入路线）。
+
 ## 手动校验命令
 `/fta route validate <company> <operator> <line> [route]`
 - 触发与 define 相同的基础校验逻辑，并汇总输出问题路线。

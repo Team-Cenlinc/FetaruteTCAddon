@@ -504,14 +504,14 @@ command:
         page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
         entry: "<white>#<seq></white> <dark_aqua><target></dark_aqua>"
         hover: "<gray>序号:</gray> <white><seq></white>\n<gray>类型:</gray> <white><pass></white>\n<gray>基准停车(秒):</gray> <white><dwell></white>\n<gray>站点:</gray> <white><station></white>\n<gray>节点:</gray> <white><node></white>\n<gray>调试:</gray> <white><tp></white>"
-        session-missing: "<prefix> <red>没有可分页的解析结果</red> <gray>请先执行一次 /fta route define ...</gray>"
-        session-expired: "<prefix> <red>解析结果已过期</red> <gray>请重新执行 /fta route define ...</gray>"
         nav:
           prev: "<dark_aqua>[上一页]</dark_aqua>"
           prev-disabled: "<gray>[上一页]</gray>"
           next: "<dark_aqua>[下一页]</dark_aqua>"
           next-disabled: "<gray>[下一页]</gray>"
           hint: "<gray>(点击翻页)</gray>"
+    debug:
+      empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
       book:
         missing: "<prefix> <red>请手持书与笔或成书</red>"
         invalid: "<prefix> <red>物品不是书与笔/成书</red>"

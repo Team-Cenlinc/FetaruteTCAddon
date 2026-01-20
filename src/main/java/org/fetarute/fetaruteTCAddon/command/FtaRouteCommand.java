@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.command;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,7 +9,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -43,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -77,9 +76,6 @@ public final class FtaRouteCommand {
   /** define 后的解析回显分页大小（避免一次输出过长刷屏）。 */
   private static final int STOP_DEBUG_PAGE_SIZE = 10;
 
-  /** define 解析回显缓存的存活时间（超时后需要重新 define）。 */
-  private static final Duration STOP_DEBUG_SESSION_TTL = Duration.ofMinutes(10);
-
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
   private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION");
@@ -101,10 +97,6 @@ public final class FtaRouteCommand {
   private final NamespacedKey bookRouteCodeKey;
   private final NamespacedKey bookDefinedAtKey;
   private final NamespacedKey bookEditorMarkerKey;
-
-  /** 最近一次 define 的解析结果缓存（仅用于玩家点击翻页；重启/重载后不保留）。 */
-  private final ConcurrentHashMap<UUID, StopDebugSession> stopDebugSessions =
-      new ConcurrentHashMap<>();
 
   public FtaRouteCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -1008,17 +1000,30 @@ public final class FtaRouteCommand {
                   // 若玩家手持的是该 route 的编辑书/成书，则在 define 后将其归档为“成书”，便于存档与回溯。
                   archiveBookIfHolding(locale, sender, provider, resolved, stops);
                   // define 后回显解析结果，便于玩家检查 PASS/TERM/dwell/nodeId 等是否符合预期。
-                  sendStopDebug(locale, sender, provider, resolved.operator().id(), stops);
+                  String navCommand =
+                      "/fta route debug "
+                          + resolved.company().code()
+                          + " "
+                          + resolved.operator().code()
+                          + " "
+                          + resolved.line().code()
+                          + " "
+                          + route.code()
+                          + " ";
+                  sendStopDebug(
+                      locale, sender, provider, resolved.operator().id(), stops, navCommand);
                 }));
 
-    // define debug：对“最近一次 define 的解析结果”进行翻页展示（避免重复解析书本/重复查询）。
     manager.command(
         manager
             .commandBuilder("fta")
             .literal("route")
-            .literal("define")
             .literal("debug")
             .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("route", StringParser.stringParser(), routeSuggestions)
             .optional("page", IntegerParser.integerParser())
             .handler(
                 ctx -> {
@@ -1030,20 +1035,39 @@ public final class FtaRouteCommand {
                   StorageProvider provider = providerOpt.get();
                   LocaleManager locale = plugin.getLocaleManager();
 
+                  ResolvedRoute resolved =
+                      resolveRoute(ctx, provider, locale, new CompanyQueryService(provider), false);
+                  if (resolved == null) {
+                    return;
+                  }
+                  List<RouteStop> stops = provider.routeStops().listByRoute(resolved.route().id());
+                  if (stops.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.debug.empty", Map.of("route", resolved.route().code())));
+                    return;
+                  }
                   int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
-                  StopDebugSession session = stopDebugSessions.get(sender.getUniqueId());
-                  if (session == null) {
-                    sender.sendMessage(
-                        locale.component("command.route.define.debug.session-missing"));
-                    return;
-                  }
-                  if (session.isExpired()) {
-                    stopDebugSessions.remove(sender.getUniqueId());
-                    sender.sendMessage(
-                        locale.component("command.route.define.debug.session-expired"));
-                    return;
-                  }
-                  sendStopDebugPage(locale, sender, provider, session, page);
+                  StopDebugSession session = new StopDebugSession(resolved.operator().id(), stops);
+                  List<DebugStopEntry> entries = buildDebugEntries(locale, provider, session);
+                  String navCommand =
+                      "/fta route debug "
+                          + resolved.company().code()
+                          + " "
+                          + resolved.operator().code()
+                          + " "
+                          + resolved.line().code()
+                          + " "
+                          + resolved.route().code()
+                          + " ";
+                  sendStopDebugPage(
+                      locale,
+                      sender,
+                      provider,
+                      resolved.operator().id(),
+                      entries,
+                      page,
+                      navCommand);
                 }));
   }
 
@@ -1495,7 +1519,7 @@ public final class FtaRouteCommand {
    * <ul>
    *   <li>空行、#、// 开头的行忽略
    *   <li>动作行（CHANGE/DYNAMIC/ACTION 前缀）附着到上一条 stop 的 notes（用换行拼接）
-   *   <li>CRET/DSTY 作为指令行：直接生成对应的节点 stop（默认 PASS），并写入 notes 便于后续识别
+   *   <li>CRET/DSTY 作为指令行：直接生成对应的节点 stop，并写入 notes 便于后续识别（运行时视为不停车）
    *   <li>stop 行支持 PASS/STOP/TERM 前缀；支持 dwell=&lt;秒&gt; 参数（基准停车时间，运行时可按调度策略增减）
    *   <li>含冒号的行视为 NodeId，写入 waypointNodeId（字符串原样保存）
    *   <li>不含冒号的行视为 StationCode，需在 stations 表中存在，否则报错
@@ -2037,11 +2061,15 @@ public final class FtaRouteCommand {
    */
   private String renderStopLine(StorageProvider provider, UUID operatorId, RouteStop stop) {
     String prefix =
-        switch (stop.passType()) {
-          case PASS -> "PASS ";
-          case TERMINATE -> "TERM ";
-          case STOP -> "STOP ";
-        };
+        resolveDirectivePrefix(stop)
+            .map(value -> value + " ")
+            .orElseGet(
+                () ->
+                    switch (stop.passType()) {
+                      case PASS -> "PASS ";
+                      case TERMINATE -> "TERM ";
+                      case STOP -> "STOP ";
+                    });
     String dwell = stop.dwellSeconds().map(value -> " dwell=" + value).orElse("");
     String target =
         stop.waypointNodeId()
@@ -2244,22 +2272,25 @@ public final class FtaRouteCommand {
       Player sender,
       StorageProvider provider,
       UUID operatorId,
-      List<RouteStop> stops) {
+      List<RouteStop> stops,
+      String navCommand) {
     if (stops.isEmpty()) {
       return;
     }
-    StopDebugSession session = new StopDebugSession(Instant.now(), operatorId, List.copyOf(stops));
-    stopDebugSessions.put(sender.getUniqueId(), session);
-    sendStopDebugPage(locale, sender, provider, session, 1);
+    StopDebugSession session = new StopDebugSession(operatorId, List.copyOf(stops));
+    List<DebugStopEntry> entries = buildDebugEntries(locale, provider, session);
+    sendStopDebugPage(locale, sender, provider, operatorId, entries, 1, navCommand);
   }
 
   private void sendStopDebugPage(
       LocaleManager locale,
       Player sender,
       StorageProvider provider,
-      StopDebugSession session,
-      int page) {
-    int total = session.stops().size();
+      UUID operatorId,
+      List<DebugStopEntry> entries,
+      int page,
+      String navCommand) {
+    int total = entries.size();
     if (total <= 0) {
       return;
     }
@@ -2270,26 +2301,18 @@ public final class FtaRouteCommand {
     int end = Math.min(start + STOP_DEBUG_PAGE_SIZE, total);
 
     sender.sendMessage(locale.component("command.route.define.debug.header"));
-    sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount));
+    sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount, navCommand));
 
     for (int i = start; i < end; i++) {
-      RouteStop stop = session.stops().get(i);
-      String index = String.valueOf(stop.sequence());
-      String pass = resolveStopPassLabel(locale, stop);
-      String dwellBaseline = stop.dwellSeconds().map(String::valueOf).orElse("-");
-      String node = stop.waypointNodeId().orElse("-");
-      String stationCode =
-          stop.stationId()
-              .flatMap(provider.stations()::findById)
-              .map(Station::code)
-              .orElseGet(
-                  () ->
-                      stop.waypointNodeId()
-                          .flatMap(id -> tryExtractStationCodeFromNodeId(id, true))
-                          .orElse("-"));
+      DebugStopEntry entry = entries.get(i);
+      String index = entry.seq();
+      String pass = entry.passLabel();
+      String dwellBaseline = entry.dwellBaseline();
+      String node = entry.node();
+      String stationCode = entry.stationCode();
 
       String tpCommand =
-          resolveTeleportCommand(provider, session.operatorId(), stationCode)
+          resolveTeleportCommand(provider, operatorId, stationCode)
               .orElseGet(() -> node.equals("-") ? "" : "/train debug destination " + node);
 
       sender.sendMessage(
@@ -2315,7 +2338,7 @@ public final class FtaRouteCommand {
                               "tp",
                               tpCommand)))));
     }
-    sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount));
+    sender.sendMessage(buildStopDebugNav(locale, safePage, pageCount, navCommand));
   }
 
   /**
@@ -2344,7 +2367,21 @@ public final class FtaRouteCommand {
     return locale.enumText("enum.route-stop-pass-type", stop.passType());
   }
 
-  private Component buildStopDebugNav(LocaleManager locale, int page, int pageCount) {
+  private Optional<String> resolveDirectivePrefix(RouteStop stop) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    for (String line : extractActionLines(stop)) {
+      String prefix = firstSegment(line).trim().toUpperCase(Locale.ROOT);
+      if (DIRECTIVE_PREFIXES.contains(prefix)) {
+        return Optional.of(prefix);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private Component buildStopDebugNav(
+      LocaleManager locale, int page, int pageCount, String navCommand) {
     Component pageText =
         locale.component(
             "command.route.define.debug.page",
@@ -2354,13 +2391,13 @@ public final class FtaRouteCommand {
         page > 1
             ? locale
                 .component("command.route.define.debug.nav.prev")
-                .clickEvent(ClickEvent.runCommand("/fta route define debug " + (page - 1)))
+                .clickEvent(ClickEvent.runCommand(navCommand + (page - 1)))
             : locale.component("command.route.define.debug.nav.prev-disabled");
     Component next =
         page < pageCount
             ? locale
                 .component("command.route.define.debug.nav.next")
-                .clickEvent(ClickEvent.runCommand("/fta route define debug " + (page + 1)))
+                .clickEvent(ClickEvent.runCommand(navCommand + (page + 1)))
             : locale.component("command.route.define.debug.nav.next-disabled");
     Component hint = locale.component("command.route.define.debug.nav.hint");
 
@@ -2374,22 +2411,109 @@ public final class FtaRouteCommand {
         .append(hint);
   }
 
+  private List<DebugStopEntry> buildDebugEntries(
+      LocaleManager locale, StorageProvider provider, StopDebugSession session) {
+    List<RouteStop> stops = session.stops();
+    if (stops.isEmpty()) {
+      return List.of();
+    }
+    List<DebugStopEntry> entries = new ArrayList<>();
+    RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+    for (int i = 0; i < stops.size(); i++) {
+      RouteStop stop = stops.get(i);
+      entries.add(toDebugEntry(locale, provider, stop, String.valueOf(stop.sequence()), false));
+      if (i >= stops.size() - 1) {
+        continue;
+      }
+      Optional<NodeId> fromOpt = RouteStopResolver.resolveNodeId(provider, stop);
+      Optional<NodeId> toOpt = RouteStopResolver.resolveNodeId(provider, stops.get(i + 1));
+      if (fromOpt.isEmpty() || toOpt.isEmpty()) {
+        continue;
+      }
+      Optional<List<NodeId>> pathOpt =
+          findShortestPathNodes(pathFinder, fromOpt.get(), toOpt.get());
+      if (pathOpt.isEmpty()) {
+        continue;
+      }
+      List<NodeId> nodes = pathOpt.get();
+      if (nodes.size() <= 2) {
+        continue;
+      }
+      for (int idx = 1; idx < nodes.size() - 1; idx++) {
+        String seq = stop.sequence() + "." + idx;
+        entries.add(toPathDebugEntry(nodes.get(idx), seq));
+      }
+    }
+    return entries;
+  }
+
+  private DebugStopEntry toDebugEntry(
+      LocaleManager locale,
+      StorageProvider provider,
+      RouteStop stop,
+      String seq,
+      boolean expanded) {
+    String passLabel = expanded ? "PASS (path)" : resolveStopPassLabel(locale, stop);
+    String dwellBaseline = stop.dwellSeconds().map(String::valueOf).orElse("-");
+    String node = stop.waypointNodeId().orElse("-");
+    String stationCode =
+        stop.stationId()
+            .flatMap(provider.stations()::findById)
+            .map(Station::code)
+            .orElseGet(
+                () ->
+                    stop.waypointNodeId()
+                        .flatMap(id -> tryExtractStationCodeFromNodeId(id, true))
+                        .orElse("-"));
+    return new DebugStopEntry(seq, passLabel, dwellBaseline, node, stationCode, expanded);
+  }
+
+  private DebugStopEntry toPathDebugEntry(NodeId node, String seq) {
+    String nodeValue = node == null ? "-" : node.value();
+    String stationCode =
+        node == null ? "-" : tryExtractStationCodeFromNodeId(node.value(), true).orElse("-");
+    return new DebugStopEntry(seq, "PASS (path)", "-", nodeValue, stationCode, true);
+  }
+
+  private Optional<List<NodeId>> findShortestPathNodes(
+      RailGraphPathFinder pathFinder, NodeId from, NodeId to) {
+    if (plugin.getRailGraphService() == null || pathFinder == null) {
+      return Optional.empty();
+    }
+    Optional<UUID> worldOpt = plugin.getRailGraphService().findWorldIdForConnectedPair(from, to);
+    if (worldOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService.RailGraphSnapshot>
+        snapshotOpt = plugin.getRailGraphService().getSnapshot(worldOpt.get());
+    if (snapshotOpt.isEmpty() || snapshotOpt.get().graph() == null) {
+      return Optional.empty();
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph graph = snapshotOpt.get().graph();
+    return pathFinder
+        .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+        .map(path -> path.nodes());
+  }
+
   /**
-   * define 回显的“会话态”。
+   * define/debug 回显的“上下文态”。
    *
-   * <p>为支持点击翻页，缓存最近一次解析结果；仅用于玩家交互，不写入存储也不跨重启保留。
+   * <p>仅用于生成调试回显，不写入存储。
    */
-  private record StopDebugSession(Instant createdAt, UUID operatorId, List<RouteStop> stops) {
+  private record StopDebugSession(UUID operatorId, List<RouteStop> stops) {
     StopDebugSession {
-      Objects.requireNonNull(createdAt, "createdAt");
       Objects.requireNonNull(operatorId, "operatorId");
       stops = stops == null ? List.of() : List.copyOf(stops);
     }
-
-    boolean isExpired() {
-      return createdAt.plus(STOP_DEBUG_SESSION_TTL).isBefore(Instant.now());
-    }
   }
+
+  private record DebugStopEntry(
+      String seq,
+      String passLabel,
+      String dwellBaseline,
+      String node,
+      String stationCode,
+      boolean expanded) {}
 
   /**
    * 根据 stationCode 解析可用的传送命令。
