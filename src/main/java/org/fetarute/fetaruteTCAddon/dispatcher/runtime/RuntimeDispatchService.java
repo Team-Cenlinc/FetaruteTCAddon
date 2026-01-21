@@ -212,6 +212,10 @@ public final class RuntimeDispatchService {
             .orElse(OptionalInt.empty());
     int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
     if (currentIndex < 0) {
+      if (matchesDstyTarget(route, definition.nodeId())) {
+        handleDestroy(train, properties, trainName, "DSTY");
+        return;
+      }
       Optional<BlockFace> pathFace =
           resolveLaunchDirectionByTrainCarts(
               train, properties != null ? properties.getDestination() : null);
@@ -773,7 +777,12 @@ public final class RuntimeDispatchService {
     progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
 
     NodeId nextNode = route.waypoints().get(startIndex + 1);
-    trainHandle.setDestination(nextNode.value());
+    String destinationName = resolveDestinationName(nextNode);
+    if (destinationName == null || destinationName.isBlank()) {
+      destinationName = nextNode.value();
+    }
+    properties.clearDestinationRoute();
+    trainHandle.setDestination(destinationName);
     refreshSignal(properties.getHolder());
 
     debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
@@ -1152,6 +1161,27 @@ public final class RuntimeDispatchService {
       return false;
     }
     return currentNode.value().equalsIgnoreCase(target);
+  }
+
+  private boolean matchesDstyTarget(RouteDefinition route, NodeId currentNode) {
+    if (route == null || currentNode == null) {
+      return false;
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return false;
+    }
+    for (RouteStop stop : stops) {
+      Optional<String> targetOpt = findDirectiveTarget(stop, "DSTY");
+      if (targetOpt.isEmpty()) {
+        continue;
+      }
+      String target = targetOpt.get();
+      if (!target.isBlank() && currentNode.value().equalsIgnoreCase(target)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private Optional<String> findDirectiveTarget(RouteStop stop, String prefix) {
