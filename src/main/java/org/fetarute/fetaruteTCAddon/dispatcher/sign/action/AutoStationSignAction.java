@@ -430,17 +430,44 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             }
           }
           if (ticksSinceOpen >= dwellTicks) {
-            exitOffsetState.restore();
-            waitState.stop();
-            cancel();
-            if (plugin != null) {
-              Bukkit.getScheduler()
-                  .runTask(
-                      plugin,
-                      () ->
-                          plugin
-                              .getRuntimeDispatchService()
-                              .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+            // 每 20 tick (1秒) 检查一次发车门控，避免刷屏与性能浪费。
+            if ((ticksSinceOpen - dwellTicks) % 20 != 0) {
+              return;
+            }
+
+            boolean canDepart = true;
+            if (plugin != null && plugin.getRuntimeDispatchService().isPresent()) {
+              // 检查出站门控（闭塞/占用）
+              canDepart =
+                  plugin.getRuntimeDispatchService().get().checkDeparture(group, definition);
+            }
+
+            if (canDepart) {
+              exitOffsetState.restore();
+              waitState.stop();
+              cancel();
+              if (properties != null) {
+                try {
+                  com.bergerkiller.bukkit.tc.Station station =
+                      new com.bergerkiller.bukkit.tc.Station(info);
+                  BlockFace launchFace = station.getNextDirectionFace();
+                  if (launchFace != null && AutoStationDoorController.isCardinal(launchFace)) {
+                    org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper.writeTag(
+                        properties, "FTA_LAUNCH_DIR", launchFace.name());
+                  }
+                } catch (Throwable ignored) {
+                  // 回退到调度控车逻辑
+                }
+              }
+              if (plugin != null) {
+                Bukkit.getScheduler()
+                    .runTask(
+                        plugin,
+                        () ->
+                            plugin
+                                .getRuntimeDispatchService()
+                                .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+              }
             }
           }
           return;
@@ -985,7 +1012,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         }
       }
     } catch (Throwable ignored) {
-      // ignored
+      // 忽略
     }
     return "unknown";
   }

@@ -30,8 +30,8 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <ul>
  *   <li>仅对 {@link LineStatus#ACTIVE} 且配置了 spawnFreqBaselineSec 的线路生成票据
  *   <li>同一条线路可配置多条可发车 OPERATION route：通过 route.metadata 的 {@code spawn_weight} 控制长期比例
- *   <li>若存在多条可发车 route，则要求这些 route 的 CRET depotNodeId 一致（不允许跨 depot 混发）
- *   <li>出库点从 route 的 CRET 指令推导（等价于首行 depot nodeId）
+ *   <li>若存在多条 CRET route，则要求这些 route 的 depotNodeId 一致（不允许跨 depot 混发）
+ *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
  * </ul>
  */
 public final class StorageSpawnManager implements SpawnManager {
@@ -109,6 +109,16 @@ public final class StorageSpawnManager implements SpawnManager {
       }
     }
     states.keySet().removeIf(key -> !live.contains(key));
+    if (!queue.isEmpty()) {
+      int before = queue.size();
+      queue.removeIf(
+          ticket ->
+              ticket == null || ticket.service() == null || !live.contains(ticket.service().key()));
+      int removed = before - queue.size();
+      if (removed > 0) {
+        debugLogger.accept("SpawnPlan 清理过期票据: removed=" + removed);
+      }
+    }
   }
 
   private void generateTickets(Instant now) {
@@ -235,33 +245,46 @@ public final class StorageSpawnManager implements SpawnManager {
       if (stops.isEmpty()) {
         continue;
       }
-      String depot = resolveCretNodeId(stops).orElse("");
-      if (depot.isBlank()) {
+      RouteStop first = stops.get(0);
+      Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
+      boolean depotSpawn = cret.isPresent();
+      String startNode =
+          cret.orElseGet(
+              () ->
+                  first != null && first.waypointNodeId().isPresent()
+                      ? first.waypointNodeId().get()
+                      : "");
+      if (startNode == null || startNode.isBlank()) {
         continue;
       }
       Optional<Boolean> enabledFlag = readBoolean(route.metadata(), "spawn_enabled");
       Optional<Integer> weight = readInt(route.metadata(), "spawn_weight");
-      candidates.add(new RouteSelection(route, depot, enabledFlag, weight));
+      candidates.add(new RouteSelection(route, startNode.trim(), depotSpawn, enabledFlag, weight));
     }
     if (candidates.isEmpty()) {
       return List.of();
     }
 
     boolean multi = candidates.size() > 1;
+    boolean hasExplicitDisable = false;
+    boolean hasExplicitWeightZero = false;
     List<RouteSelection> enabled = new ArrayList<>();
     for (RouteSelection selection : candidates) {
       if (selection == null) {
         continue;
       }
       if (selection.spawnEnabledFlag().isPresent() && !selection.spawnEnabledFlag().get()) {
+        hasExplicitDisable = true;
         continue;
       }
       Optional<Integer> weight = selection.spawnWeightRaw();
       if (weight.isPresent()) {
         int w = weight.get() == null ? 0 : weight.get();
-        if (w > 0) {
-          enabled.add(selection.withResolvedWeight(w));
+        if (w <= 0) {
+          hasExplicitWeightZero = true;
+          continue;
         }
+        enabled.add(selection.withResolvedWeight(w));
         continue;
       }
       if (!multi) {
@@ -274,7 +297,21 @@ public final class StorageSpawnManager implements SpawnManager {
     if (enabled.isEmpty()) {
       if (candidates.size() == 1) {
         RouteSelection only = candidates.get(0);
+        if (only.spawnEnabledFlag().isPresent() && !only.spawnEnabledFlag().get()) {
+          return List.of();
+        }
+        if (only.spawnWeightRaw().isPresent()) {
+          return List.of();
+        }
         return List.of(only.withResolvedWeight(1));
+      }
+      if (hasExplicitDisable || hasExplicitWeightZero) {
+        debugLogger.accept(
+            "SpawnPlan 跳过线路(候选 route 已禁用或权重为 0): line="
+                + line.code()
+                + " routes="
+                + String.join(", ", candidates.stream().map(sel -> sel.route().code()).toList()));
+        return List.of();
       }
       candidates.sort(
           Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
@@ -287,39 +324,29 @@ public final class StorageSpawnManager implements SpawnManager {
     }
 
     enabled.sort(Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
-    String depot = enabled.get(0).depotNodeId();
-    boolean depotMismatch =
-        enabled.stream()
-            .map(RouteSelection::depotNodeId)
-            .anyMatch(d -> d == null || !d.equalsIgnoreCase(depot));
-    if (depotMismatch) {
-      debugLogger.accept(
-          "SpawnPlan 跳过线路(不允许跨 depot 混发): line="
-              + line.code()
-              + " routes="
-              + String.join(
-                  ", ",
-                  enabled.stream()
-                      .map(sel -> sel.route().code() + "@" + sel.depotNodeId())
-                      .toList()));
-      return List.of();
+    List<RouteSelection> depotSelections =
+        enabled.stream().filter(RouteSelection::depotSpawn).toList();
+    if (depotSelections.size() > 1) {
+      String depot = depotSelections.get(0).depotNodeId();
+      boolean depotMismatch =
+          depotSelections.stream()
+              .map(RouteSelection::depotNodeId)
+              .anyMatch(d -> d == null || !d.equalsIgnoreCase(depot));
+      if (depotMismatch) {
+        debugLogger.accept(
+            "SpawnPlan 跳过线路(不允许跨 depot 混发): line="
+                + line.code()
+                + " routes="
+                + String.join(
+                    ", ",
+                    depotSelections.stream()
+                        .map(sel -> sel.route().code() + "@" + sel.depotNodeId())
+                        .toList()));
+        return List.of();
+      }
     }
 
     return enabled;
-  }
-
-  private Optional<String> resolveCretNodeId(List<RouteStop> stops) {
-    if (stops == null || stops.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteStop first = stops.get(0);
-    if (first != null && first.waypointNodeId().isPresent()) {
-      String node = first.waypointNodeId().get();
-      if (node != null && !node.isBlank()) {
-        return Optional.of(node.trim());
-      }
-    }
-    return SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
   }
 
   private Optional<Boolean> readBoolean(Map<String, Object> meta, String key) {
@@ -396,6 +423,7 @@ public final class StorageSpawnManager implements SpawnManager {
   private record RouteSelection(
       Route route,
       String depotNodeId,
+      boolean depotSpawn,
       Optional<Boolean> spawnEnabledFlag,
       Optional<Integer> spawnWeightRaw,
       int spawnWeight) {
@@ -406,13 +434,18 @@ public final class StorageSpawnManager implements SpawnManager {
     }
 
     private RouteSelection(
-        Route route, String depotNodeId, Optional<Boolean> enabled, Optional<Integer> weight) {
-      this(route, depotNodeId, enabled, weight, 0);
+        Route route,
+        String depotNodeId,
+        boolean depotSpawn,
+        Optional<Boolean> enabled,
+        Optional<Integer> weight) {
+      this(route, depotNodeId, depotSpawn, enabled, weight, 0);
     }
 
     private RouteSelection withResolvedWeight(int weight) {
       int w = Math.max(1, Math.min(1000, weight));
-      return new RouteSelection(route, depotNodeId, spawnEnabledFlag, spawnWeightRaw, w);
+      return new RouteSelection(
+          route, depotNodeId, depotSpawn, spawnEnabledFlag, spawnWeightRaw, w);
     }
   }
 

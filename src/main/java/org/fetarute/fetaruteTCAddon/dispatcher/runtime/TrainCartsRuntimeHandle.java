@@ -2,11 +2,14 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import org.bukkit.Bukkit;
+import org.bukkit.block.BlockFace;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -15,11 +18,11 @@ import org.bukkit.plugin.java.JavaPlugin;
  *
  * <p>仅封装“是否移动/发车/停车”等控车动作，避免运行时逻辑直接依赖 TrainCarts API。
  */
-public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
+public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
   private final MinecartGroup group;
 
-  public TrainCartsRuntimeTrainHandle(MinecartGroup group) {
+  public TrainCartsRuntimeHandle(MinecartGroup group) {
     this.group = Objects.requireNonNull(group, "group");
   }
 
@@ -105,7 +108,7 @@ public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
     // DSTY 往往在推进点（SignActionEvent）内触发，延迟 1 tick 执行更安全。
     Plugin plugin = null;
     try {
-      plugin = JavaPlugin.getProvidingPlugin(TrainCartsRuntimeTrainHandle.class);
+      plugin = JavaPlugin.getProvidingPlugin(TrainCartsRuntimeHandle.class);
     } catch (Throwable ignored) {
       plugin = null;
     }
@@ -122,5 +125,73 @@ public final class TrainCartsRuntimeTrainHandle implements RuntimeTrainHandle {
               }
             },
             1L);
+  }
+
+  @Override
+  public void setRouteIndex(int index) {
+    if (group.getProperties() != null) {
+      TrainTagHelper.writeTag(group.getProperties(), "FTA_ROUTE_INDEX", String.valueOf(index));
+    }
+  }
+
+  @Override
+  public void setRouteId(String routeId) {
+    if (group.getProperties() != null) {
+      TrainTagHelper.writeTag(group.getProperties(), "FTA_ROUTE_CODE", routeId);
+    }
+  }
+
+  @Override
+  public void setDestination(String destination) {
+    if (group.getProperties() != null) {
+      group.getProperties().setDestination(destination);
+    }
+  }
+
+  @Override
+  public Optional<BlockFace> forwardDirection() {
+    MinecartMember<?> head = group.head();
+    if (head == null) {
+      return Optional.empty();
+    }
+    // 用轨道方向字段作为“发车/折返”判定依据；模型朝向（orientationForward）可能与轨道前进方向相反，
+    // 会导致错误 reverse（例如站台/车库端头直接掉轨）。
+    BlockFace face = head.getDirectionTo();
+    if (isCardinal(face)) {
+      return Optional.of(face);
+    }
+    face = head.getDirection();
+    if (isCardinal(face)) {
+      return Optional.of(face);
+    }
+    face = head.getDirectionFrom();
+    return isCardinal(face) ? Optional.of(face) : Optional.empty();
+  }
+
+  @Override
+  public Optional<RailState> railState() {
+    MinecartMember<?> head = group.head();
+    if (head == null) {
+      return Optional.empty();
+    }
+    if (head.getRailTracker() == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(head.getRailTracker().getState());
+  }
+
+  private static boolean isCardinal(BlockFace face) {
+    return face == BlockFace.NORTH
+        || face == BlockFace.SOUTH
+        || face == BlockFace.EAST
+        || face == BlockFace.WEST;
+  }
+
+  @Override
+  public void reverse() {
+    if (!group.isValid() || group.isMoving()) {
+      return;
+    }
+    group.reverse();
   }
 }

@@ -14,7 +14,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 基于内存 Map 的占用管理器，适合作为 MVP 版本。
+ * 基于内存 Map 的占用管理器，适合作为“最小可用版本”。
  *
  * <p>占用释放由事件驱动触发：释放后即认为可重新判定，不依赖 releaseAt；headway 仅作为配置保留。
  *
@@ -98,7 +98,7 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(request.trainName(), direction, now);
+      queue.touch(request.trainName(), direction, now, request.priority());
       if (!isQueueAllowed(request.trainName(), resource, direction, queue)) {
         queueBlocked = true;
         queue
@@ -279,7 +279,7 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
     return true;
   }
 
-  // 事件反射式释放不需要 time-based 清理。
+  // 事件反射式释放不需要“基于时间”的清理。
 
   private boolean isSameCorridorDirection(
       OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
@@ -392,7 +392,7 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(request.trainName(), direction, now);
+      queue.touch(request.trainName(), direction, now, request.priority());
     }
   }
 
@@ -480,12 +480,14 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
     private final LinkedHashMap<String, OccupancyQueueEntry> forward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> backward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> neutral = new LinkedHashMap<>();
+    private final Map<String, Integer> priorities = new java.util.HashMap<>();
 
-    void touch(String trainName, CorridorDirection direction, Instant now) {
+    void touch(String trainName, CorridorDirection direction, Instant now, int priority) {
       if (trainName == null || trainName.isBlank() || now == null) {
         return;
       }
       String key = normalize(trainName);
+      priorities.put(key, priority);
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       OccupancyQueueEntry existing = target.get(key);
       if (existing == null) {
@@ -504,6 +506,7 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       forward.remove(key);
       backward.remove(key);
       neutral.remove(key);
+      priorities.remove(key);
     }
 
     boolean isHeadForDirection(String trainName, CorridorDirection direction) {
@@ -527,7 +530,17 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       if (target.isEmpty()) {
         return Optional.empty();
       }
-      return Optional.of(target.values().iterator().next());
+      // 排序规则：priority 倒序，其次 firstSeen 正序
+      return target.values().stream().sorted(this::compareEntries).findFirst();
+    }
+
+    private int compareEntries(OccupancyQueueEntry a, OccupancyQueueEntry b) {
+      int pA = priorities.getOrDefault(normalize(a.trainName()), 0);
+      int pB = priorities.getOrDefault(normalize(b.trainName()), 0);
+      if (pA != pB) {
+        return Integer.compare(pB, pA); // 优先级更高者优先
+      }
+      return a.firstSeen().compareTo(b.firstSeen()); // 首见更早者优先（FIFO）
     }
 
     Optional<OccupancyQueueEntry> blockingEntry(CorridorDirection direction) {

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.company.model;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -18,6 +19,7 @@ public record Station(
     Optional<StationLocation> location,
     Optional<String> graphNodeId,
     Optional<Map<String, Object>> amenities,
+    List<StationSidingPool> sidingPools,
     Map<String, Object> metadata,
     Instant createdAt,
     Instant updatedAt) {
@@ -32,6 +34,7 @@ public record Station(
     location = location == null ? Optional.empty() : location;
     graphNodeId = graphNodeId == null ? Optional.empty() : graphNodeId;
     amenities = amenities == null ? Optional.empty() : amenities.map(Map::copyOf);
+    sidingPools = sidingPools == null ? List.of() : List.copyOf(sidingPools);
     metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
     Objects.requireNonNull(createdAt, "createdAt");
     Objects.requireNonNull(updatedAt, "updatedAt");

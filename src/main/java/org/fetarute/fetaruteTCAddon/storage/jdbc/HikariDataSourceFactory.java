@@ -63,7 +63,7 @@ public final class HikariDataSourceFactory {
     config.setDriverClassName("org.sqlite.JDBC");
     config.setMaximumPoolSize(1);
     // 注意：SQLite 的 PRAGMA foreign_keys 需要在没有事务时开启；若连接默认 autoCommit=false，
-    // driver 可能在初始化阶段进入事务导致 PRAGMA 不生效，因此这里保持默认 autoCommit=true。
+    // JDBC driver 可能在初始化阶段进入事务导致 PRAGMA 不生效，因此这里保持默认 autoCommit=true。
     config.setAutoCommit(true);
     config.setConnectionInitSql("PRAGMA foreign_keys=ON");
     logger.debug("SQLite 数据库文件: " + dbPath.toAbsolutePath());

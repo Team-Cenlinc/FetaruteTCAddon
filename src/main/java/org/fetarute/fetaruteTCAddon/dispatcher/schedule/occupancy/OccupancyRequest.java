@@ -19,7 +19,8 @@ public record OccupancyRequest(
     Optional<RouteId> routeId,
     Instant now,
     List<OccupancyResource> resources,
-    Map<String, CorridorDirection> corridorDirections) {
+    Map<String, CorridorDirection> corridorDirections,
+    int priority) {
 
   public OccupancyRequest {
     Objects.requireNonNull(trainName, "trainName");
@@ -32,6 +33,15 @@ public record OccupancyRequest(
     }
     resources = List.copyOf(resources);
     corridorDirections = Map.copyOf(corridorDirections);
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections) {
+    this(trainName, routeId, now, resources, corridorDirections, 0);
   }
 
   public List<OccupancyResource> resourceList() {

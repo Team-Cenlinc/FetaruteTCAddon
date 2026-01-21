@@ -36,10 +36,21 @@ public final class OccupancyRequestBuilder {
   private final int effectiveLookaheadEdges;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
+  private final java.util.function.Consumer<String> debugLogger;
 
   public OccupancyRequestBuilder(
       RailGraph graph, int lookaheadEdges, int minClearEdges, int switcherZoneEdges) {
+    this(graph, lookaheadEdges, minClearEdges, switcherZoneEdges, msg -> {});
+  }
+
+  public OccupancyRequestBuilder(
+      RailGraph graph,
+      int lookaheadEdges,
+      int minClearEdges,
+      int switcherZoneEdges,
+      java.util.function.Consumer<String> debugLogger) {
     this.graph = Objects.requireNonNull(graph, "graph");
+    this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     if (lookaheadEdges <= 0) {
       throw new IllegalArgumentException("lookaheadEdges 必须大于 0");
     }
@@ -67,8 +78,9 @@ public final class OccupancyRequestBuilder {
     Instant requestTime = now != null ? now : Instant.now();
     List<NodeId> nodes = route.waypoints();
     int currentIndex = state.routeProgress().currentIndex();
+    // 默认优先级 0 (普通)
     return buildFromNodes(
-        state.trainName(), Optional.of(route.id()), nodes, currentIndex, requestTime);
+        state.trainName(), Optional.of(route.id()), nodes, currentIndex, requestTime, 0);
   }
 
   /**
@@ -83,8 +95,9 @@ public final class OccupancyRequestBuilder {
       Optional<RouteId> routeId,
       List<NodeId> nodes,
       int currentIndex,
-      Instant now) {
-    return buildContextFromNodes(trainName, routeId, nodes, currentIndex, now)
+      Instant now,
+      int priority) {
+    return buildContextFromNodes(trainName, routeId, nodes, currentIndex, now, priority)
         .map(OccupancyRequestContext::request);
   }
 
@@ -98,15 +111,19 @@ public final class OccupancyRequestBuilder {
       Optional<RouteId> routeId,
       List<NodeId> nodes,
       int currentIndex,
-      Instant now) {
+      Instant now,
+      int priority) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(nodes, "nodes");
     Instant requestTime = now != null ? now : Instant.now();
     if (nodes.isEmpty()) {
+      debugLogger.accept("构建请求失败: nodes 列表为空");
       return Optional.empty();
     }
     if (currentIndex < 0 || currentIndex >= nodes.size() - 1) {
+      debugLogger.accept(
+          "构建请求失败: currentIndex 超出范围 index=" + currentIndex + " size=" + nodes.size());
       return Optional.empty();
     }
     int maxIndex = Math.min(nodes.size() - 1, currentIndex + effectiveLookaheadEdges);
@@ -116,10 +133,12 @@ public final class OccupancyRequestBuilder {
     }
     List<NodeId> expandedNodes = expandPathNodes(pathNodes);
     if (expandedNodes.isEmpty()) {
+      debugLogger.accept("构建请求失败: expandPathNodes 返回空 (路径不连通?) nodes=" + pathNodes);
       return Optional.empty();
     }
     List<RailEdge> edges = resolveEdges(expandedNodes);
     if (edges.isEmpty()) {
+      debugLogger.accept("构建请求失败: resolveEdges 返回空 (边未找到?) nodes=" + expandedNodes);
       return Optional.empty();
     }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
@@ -136,7 +155,7 @@ public final class OccupancyRequestBuilder {
     Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(expandedNodes);
     OccupancyRequest request =
         new OccupancyRequest(
-            trainName, routeId, requestTime, List.copyOf(resources), corridorDirections);
+            trainName, routeId, requestTime, List.copyOf(resources), corridorDirections, priority);
     return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
   }
 
@@ -180,6 +199,7 @@ public final class OccupancyRequestBuilder {
       Optional<RailEdge> edgeOpt = findEdge(from, to);
       if (edgeOpt.isEmpty()) {
         // 任一相邻节点不可达时，直接失败并返回空列表。
+        debugLogger.accept("resolveEdges 失败: 边不可达 from=" + from.value() + " to=" + to.value());
         return List.of();
       }
       edges.add(edgeOpt.get());
@@ -207,6 +227,7 @@ public final class OccupancyRequestBuilder {
       Optional<RailGraphPath> pathOpt =
           pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
       if (pathOpt.isEmpty()) {
+        debugLogger.accept("expandPathNodes 失败: 最短路未找到 from=" + from.value() + " to=" + to.value());
         return List.of();
       }
       List<NodeId> segment = pathOpt.get().nodes();

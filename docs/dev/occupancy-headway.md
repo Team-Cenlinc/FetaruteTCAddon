@@ -17,7 +17,7 @@
 - `CAUTION`：下一个区间会遇到 stop，准备停车。
 - `STOP`：禁止进入或无法定位阻塞位置（例如仅 CONFLICT 阻塞）。
 
-## MVP 资源解析规则
+## 最小可用版本资源解析规则
 - edge 必占用自身资源：`EDGE:<from~to>`。
 - edge 若连接 `SWITCHER` 节点，额外占用冲突资源：`CONFLICT:switcher:<nodeId>`。
 - edge 若处于单线走廊，会关联冲突资源：`CONFLICT:single:<component>:<endA>~<endB>`（对向互斥，同向可跟驰）。
@@ -44,11 +44,15 @@
 - 相关说明见 `docs/dev/runtime-dispatch.md`。
 
 ## Gate Queue（排队控制）
-- `CONFLICT:switcher:*` 与 `CONFLICT:single:*` 使用 FIFO 队列控制放行顺序。
-- 走廊为空时会比较两侧队列头部的首见时间，优先放行更早等待的一侧。
+- `CONFLICT:switcher:*` 与 `CONFLICT:single:*` 使用优先级队列控制放行顺序。
+- **优先级 (Priority)**：
+  - 高优先级列车优先放行（例如客运 > 回收）。
+  - 优先级相同时，按“首见时间”先到先得（FIFO）。
+  - 当前默认优先级：客运=0，回收（Reclaim）=-10。
+- 走廊为空时会比较两侧队列头部的优先级与首见时间，优先放行更优的一侧。
 - 同向跟驰仍可并行进入走廊，但进入顺序受队列约束。
 - 队列条目若超过 30 秒未刷新会自动清理（避免遗留阻塞）。
-- `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向与首见时间）。
+- `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向、优先级与首见时间）。
 
 ## 观测与运维
 - `/fta occupancy dump [limit]`：查看占用快照。

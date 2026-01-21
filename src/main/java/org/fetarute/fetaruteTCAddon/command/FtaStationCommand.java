@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
+import org.fetarute.fetaruteTCAddon.company.model.StationSidingPool;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
@@ -32,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.context.CommandInput;
 import org.incendo.cloud.parser.flag.CommandFlag;
+import org.incendo.cloud.parser.standard.StringArrayParser;
 import org.incendo.cloud.parser.standard.StringParser;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
@@ -444,6 +446,7 @@ public final class FtaStationCommand {
                           location,
                           node,
                           station.amenities(),
+                          station.sidingPools(),
                           station.metadata(),
                           station.createdAt(),
                           Instant.now());
@@ -453,7 +456,153 @@ public final class FtaStationCommand {
                           "command.station.set.success", Map.of("code", station.code())));
                 }));
 
-    // dump: 清理不再引用且未出现在 rail_nodes 中的站点记录
+    var capacityFlag =
+        CommandFlag.<CommandSender>builder("capacity")
+            .withComponent(
+                org.incendo.cloud.component.CommandComponent.<CommandSender, Integer>builder(
+                        "capacity",
+                        org.incendo.cloud.parser.standard.IntegerParser.integerParser(1))
+                    .suggestionProvider(placeholder("<N>")))
+            .build();
+
+    // 关联存车线池
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("station")
+            .literal("link")
+            .literal("siding")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("station", StringParser.stringParser(), stationSuggestions)
+            .required("poolId", StringParser.stringParser())
+            .required("nodes", StringArrayParser.stringArrayParser())
+            .flag(capacityFlag)
+            .handler(
+                ctx -> {
+                  Player sender = ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedStation resolved = resolveStation(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  Station station = resolved.station();
+                  String poolId = ctx.get("poolId");
+                  String[] rawNodes = ctx.get("nodes");
+                  List<String> nodes = rawNodes == null ? List.of() : List.of(rawNodes);
+                  Optional<Integer> capacityOpt = ctx.flags().getValue(capacityFlag);
+                  int capacity = capacityOpt.orElse(nodes.size());
+
+                  if (nodes.isEmpty()) {
+                    sender.sendMessage(locale.component("command.station.link.siding.empty-nodes"));
+                    return;
+                  }
+
+                  // 更新逻辑：移除同 poolId 的旧记录，再追加新记录
+                  List<StationSidingPool> pools = new ArrayList<>(station.sidingPools());
+                  pools.removeIf(p -> p.poolId().equalsIgnoreCase(poolId));
+
+                  // 创建新存车线池（当前使用默认策略）
+                  StationSidingPool pool =
+                      new StationSidingPool(
+                          poolId,
+                          nodes,
+                          StationSidingPool.SelectionPolicy.FIRST_AVAILABLE,
+                          capacity,
+                          StationSidingPool.FallbackPolicy.STAY_AT_PLATFORM);
+                  pools.add(pool);
+
+                  Station updated =
+                      new Station(
+                          station.id(),
+                          station.code(),
+                          station.operatorId(),
+                          station.primaryLineId(),
+                          station.name(),
+                          station.secondaryName(),
+                          station.world(),
+                          station.location(),
+                          station.graphNodeId(),
+                          station.amenities(),
+                          pools,
+                          station.metadata(),
+                          station.createdAt(),
+                          Instant.now());
+                  provider.stations().save(updated);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.station.link.siding.success",
+                          Map.of(
+                              "station",
+                              station.code(),
+                              "pool",
+                              poolId,
+                              "count",
+                              String.valueOf(nodes.size()),
+                              "capacity",
+                              String.valueOf(capacity))));
+                }));
+
+    // 列出存车线池
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("station")
+            .literal("siding")
+            .literal("list")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("station", StringParser.stringParser(), stationSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedStation resolved = resolveStation(ctx, provider, locale, query, false);
+                  if (resolved == null) {
+                    return;
+                  }
+                  Station station = resolved.station();
+
+                  if (station.sidingPools().isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.station.siding.list.empty",
+                            Map.of("station", station.code())));
+                    return;
+                  }
+
+                  sender.sendMessage(
+                      locale.component(
+                          "command.station.siding.list.header", Map.of("station", station.code())));
+                  for (StationSidingPool pool : station.sidingPools()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.station.siding.list.entry",
+                            Map.of(
+                                "pool",
+                                pool.poolId(),
+                                "nodes",
+                                String.join(", ", pool.candidateNodes()))));
+                  }
+                }));
+
+    // 清理不再引用且未出现在 rail_nodes 中的站点记录
     manager.command(
         manager
             .commandBuilder("fta")
@@ -617,7 +766,7 @@ public final class FtaStationCommand {
       return null;
     }
     if (companyArg == null) {
-      return null; // Should not happen if required
+      return null; // 按 required 声明理论上不会发生
     }
     companyArg = companyArg.trim();
 

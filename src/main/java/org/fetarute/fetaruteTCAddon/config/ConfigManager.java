@@ -87,6 +87,8 @@ public final class ConfigManager {
     SpawnSettings spawnSettings = parseSpawn(spawnSection, logger);
     ConfigurationSection trainSection = config.getConfigurationSection("train");
     TrainConfigSettings trainConfigSettings = parseTrain(trainSection, logger);
+    ConfigurationSection reclaimSection = config.getConfigurationSection("reclaim");
+    ReclaimSettings reclaimSettings = parseReclaim(reclaimSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -96,7 +98,37 @@ public final class ConfigManager {
         autoStationSettings,
         runtimeSettings,
         spawnSettings,
-        trainConfigSettings);
+        trainConfigSettings,
+        reclaimSettings);
+  }
+
+  /** 解析 reclaim 配置段。 */
+  private static ReclaimSettings parseReclaim(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    boolean enabled = false;
+    long maxIdleSeconds = 300;
+    int maxActiveTrains = 50;
+    long checkIntervalSeconds = 60;
+
+    if (section != null) {
+      enabled = section.getBoolean("enabled", enabled);
+      maxIdleSeconds = section.getLong("max-idle-seconds", maxIdleSeconds);
+      if (maxIdleSeconds <= 0) {
+        logger.warning("reclaim.max-idle-seconds 配置无效: " + maxIdleSeconds);
+        maxIdleSeconds = 300;
+      }
+      maxActiveTrains = section.getInt("max-active-trains", maxActiveTrains);
+      if (maxActiveTrains <= 0) {
+        logger.warning("reclaim.max-active-trains 配置无效: " + maxActiveTrains);
+        maxActiveTrains = 50;
+      }
+      checkIntervalSeconds = section.getLong("check-interval-seconds", checkIntervalSeconds);
+      if (checkIntervalSeconds <= 0) {
+        logger.warning("reclaim.check-interval-seconds 配置无效: " + checkIntervalSeconds);
+        checkIntervalSeconds = 60;
+      }
+    }
+    return new ReclaimSettings(enabled, maxIdleSeconds, maxActiveTrains, checkIntervalSeconds);
   }
 
   /** 解析 spawn 配置段。 */
@@ -433,7 +465,24 @@ public final class ConfigManager {
       AutoStationSettings autoStationSettings,
       RuntimeSettings runtimeSettings,
       SpawnSettings spawnSettings,
-      TrainConfigSettings trainConfigSettings) {}
+      TrainConfigSettings trainConfigSettings,
+      ReclaimSettings reclaimSettings) {}
+
+  /** 车辆回收配置（ReclaimPolicy）。 */
+  public record ReclaimSettings(
+      boolean enabled, long maxIdleSeconds, int maxActiveTrains, long checkIntervalSeconds) {
+    public ReclaimSettings {
+      if (maxIdleSeconds <= 0) {
+        throw new IllegalArgumentException("maxIdleSeconds 必须为正数");
+      }
+      if (maxActiveTrains <= 0) {
+        throw new IllegalArgumentException("maxActiveTrains 必须为正数");
+      }
+      if (checkIntervalSeconds <= 0) {
+        throw new IllegalArgumentException("checkIntervalSeconds 必须为正数");
+      }
+    }
+  }
 
   /** 自动发车配置（SpawnManager / TicketAssigner）。 */
   public record SpawnSettings(

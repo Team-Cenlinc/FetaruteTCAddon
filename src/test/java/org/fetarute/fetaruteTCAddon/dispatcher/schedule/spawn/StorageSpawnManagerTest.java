@@ -78,6 +78,36 @@ class StorageSpawnManagerTest {
   }
 
   @Test
+  void pollDueTicketsSkipsLineWhenBaselineZero() {
+    StorageProvider provider = mockProvider(baselineZeroRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 5, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now);
+
+    assertTrue(due.isEmpty());
+    assertEquals(0, manager.snapshotPlan().size());
+  }
+
+  @Test
+  void pollDueTicketsSkipsRouteWhenWeightZero() {
+    StorageProvider provider = mockProvider(weightZeroRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 5, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now);
+
+    assertTrue(due.isEmpty());
+    assertEquals(0, manager.snapshotPlan().size());
+  }
+
+  @Test
   void pollDueTicketsSupportsMultiRouteWeightsWithSameDepot() {
     StorageProvider provider = mockProvider(twoEnabledRoutesSameDepotWithWeights());
     StorageSpawnManager.SpawnManagerSettings settings =
@@ -99,6 +129,21 @@ class StorageSpawnManagerTest {
     assertEquals(Duration.ofSeconds(450), servicesByRoute.get("R2").baseHeadway());
     assertEquals("SURN:D:DEPOT:1", servicesByRoute.get("R1").depotNodeId());
     assertEquals("SURN:D:DEPOT:1", servicesByRoute.get("R2").depotNodeId());
+  }
+
+  @Test
+  void pollDueTicketsAllowsLayoverRouteAlongsideDepotRoute() {
+    StorageProvider provider = mockProvider(depotAndLayoverRoutesSameLine());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 10, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now);
+
+    assertEquals(2, due.size());
+    assertEquals(2, manager.snapshotPlan().size());
   }
 
   @Test
@@ -248,6 +293,84 @@ class StorageSpawnManagerTest {
         Map.of(route1.id(), List.of(cret1), route2.id(), List.of(cret2)));
   }
 
+  private static Fixture baselineZeroRoute() {
+    Fixture base = enabledRoute();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+    Line line =
+        new Line(
+            base.line().id(),
+            "L1",
+            base.operator().id(),
+            "Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(0),
+            Map.of(),
+            ts,
+            ts);
+    Route route =
+        new Route(
+            base.routes().get(0).id(),
+            "R1",
+            line.id(),
+            "Route",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_enabled", true),
+            ts,
+            ts);
+    RouteStop cret =
+        new RouteStop(
+            route.id(),
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+    return new Fixture(
+        base.company(), base.operator(), line, List.of(route), Map.of(route.id(), List.of(cret)));
+  }
+
+  private static Fixture weightZeroRoute() {
+    Fixture base = enabledRoute();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+    Route route =
+        new Route(
+            base.routes().get(0).id(),
+            "R1",
+            base.line().id(),
+            "Route",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_weight", 0),
+            ts,
+            ts);
+    RouteStop cret =
+        new RouteStop(
+            route.id(),
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+    return new Fixture(
+        base.company(),
+        base.operator(),
+        base.line(),
+        List.of(route),
+        Map.of(route.id(), List.of(cret)));
+  }
+
   private static Fixture twoEnabledRoutesSameDepotWithWeights() {
     Fixture base = enabledRoute();
     UUID route2Id = UUID.randomUUID();
@@ -304,6 +427,64 @@ class StorageSpawnManagerTest {
         base.line(),
         List.of(route1, route2),
         Map.of(route1.id(), List.of(cret1), route2.id(), List.of(cret2)));
+  }
+
+  private static Fixture depotAndLayoverRoutesSameLine() {
+    Fixture base = enabledRoute();
+    UUID route2Id = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+    Route route1 =
+        new Route(
+            base.routes().get(0).id(),
+            "R1",
+            base.line().id(),
+            "Route",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_weight", 1),
+            ts,
+            ts);
+    Route route2 =
+        new Route(
+            route2Id,
+            "R2",
+            base.line().id(),
+            "Route2",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_weight", 1),
+            ts,
+            ts);
+    RouteStop cret =
+        new RouteStop(
+            route1.id(),
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+    RouteStop stop =
+        new RouteStop(
+            route2.id(),
+            0,
+            Optional.empty(),
+            Optional.of("SURN:S:PEK:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("STOP SURN:S:PEK:1"));
+    return new Fixture(
+        base.company(),
+        base.operator(),
+        base.line(),
+        List.of(route1, route2),
+        Map.of(route1.id(), List.of(cret), route2.id(), List.of(stop)));
   }
 
   private static Fixture twoEnabledRoutesDifferentDepotWithWeights() {

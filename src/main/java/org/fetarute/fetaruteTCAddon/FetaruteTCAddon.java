@@ -32,11 +32,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSyn
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeTrainHandle;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -86,7 +88,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private OccupancyManager occupancyManager;
   private RouteDefinitionCache routeDefinitionCache;
   private RouteProgressRegistry routeProgressRegistry;
+  private LayoverRegistry layoverRegistry;
   private RuntimeDispatchService runtimeDispatchService;
+  private ReclaimManager reclaimManager;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
@@ -115,6 +119,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initRouteDefinitionCache();
     initRuntimeDispatch();
     initSpawnScheduler();
+    initReclaimManager();
 
     registerCommands();
     getServer()
@@ -376,6 +381,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       return;
     }
     this.routeProgressRegistry = new RouteProgressRegistry();
+    this.layoverRegistry = new LayoverRegistry();
     this.runtimeDispatchService =
         new RuntimeDispatchService(
             occupancyManager,
@@ -383,6 +389,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             routeDefinitionCache,
             routeProgressRegistry,
             signNodeRegistry,
+            layoverRegistry,
             configManager,
             new TrainConfigResolver(),
             loggerManager::debug);
@@ -402,7 +409,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
                   if (group == null || !group.isValid()) {
                     continue;
                   }
-                  handles.add(new TrainCartsRuntimeTrainHandle(group));
+                  handles.add(new TrainCartsRuntimeHandle(group));
                 }
                 runtimeDispatchService.rebuildOccupancySnapshot(handles);
               } catch (Exception ex) {
@@ -459,9 +466,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
             runtimeDispatchService,
             configManager,
             signNodeRegistry,
+            layoverRegistry,
             loggerManager::debug,
-            java.time.Duration.ofMillis(spawnSettings.retryDelayTicks() * 50L),
+            java.time.Duration.ofMillis(spawnSettings.planRefreshTicks() * 50L),
             spawnSettings.maxSpawnPerTick());
+    runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     restartSpawnMonitor();
   }
 
@@ -486,6 +495,19 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 new SpawnMonitor(storageManager, configManager, spawnTicketAssigner),
                 interval,
                 interval);
+  }
+
+  private void initReclaimManager() {
+    if (layoverRegistry == null
+        || spawnTicketAssigner == null
+        || configManager == null
+        || loggerManager == null) {
+      return;
+    }
+    this.reclaimManager =
+        new ReclaimManager(
+            this, layoverRegistry, spawnTicketAssigner, configManager, loggerManager::debug);
+    this.reclaimManager.start();
   }
 
   /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */

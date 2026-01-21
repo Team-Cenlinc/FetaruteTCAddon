@@ -35,6 +35,15 @@
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
 2) `FTA_ROUTE_ID`（兼容旧标签）
 
+## 待命与回收 (Layover & Reclaim)
+- 列车抵达 `TERM` 站点且线路生命周期为 `REUSE_AT_TERM` 时，将进入待命（Layover）状态，注册到 `LayoverRegistry`。
+- `TERM` 站点会阻止继续发车（防止驶入未定义后续路径），直到调度分配新票据。
+- Layover 注册时会触发一次即时复用尝试（不必等待下一轮 spawn tick）。
+- `ReclaimManager` 定期检查待命列车：
+  - 若闲置超时或服务器车辆超限，会为其分配 `RETURN` 票据。
+  - `RETURN` 票据优先级较低（-10），礼让正常客运列车。
+- 详见 `docs/dev/reclaim-policy.md`。
+
 ## 控车重算与 failover
 运行时控车每隔 `runtime.dispatch-tick-interval-ticks` 重新评估占用与信号，并重新下发速度控制。
 

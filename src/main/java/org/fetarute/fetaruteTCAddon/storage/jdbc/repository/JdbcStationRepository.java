@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage.jdbc.repository;
 
+import com.google.gson.reflect.TypeToken;
+import java.lang.reflect.Type;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -12,6 +14,7 @@ import java.util.UUID;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
+import org.fetarute.fetaruteTCAddon.company.model.StationSidingPool;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
@@ -24,6 +27,9 @@ import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
  */
 public final class JdbcStationRepository extends JdbcRepositorySupport
     implements StationRepository {
+
+  private static final Type SIDING_POOL_LIST_TYPE =
+      new TypeToken<List<StationSidingPool>>() {}.getType();
 
   public JdbcStationRepository(
       DataSource dataSource,
@@ -197,7 +203,14 @@ public final class JdbcStationRepository extends JdbcRepositorySupport
 
     statement.setString(13, station.graphNodeId().orElse(null));
     statement.setString(14, station.amenities().map(this::toJson).orElse(null));
-    statement.setString(15, toJson(station.metadata()));
+
+    // 将 siding pools 注入 metadata，便于持久化（表结构不变）
+    Map<String, Object> metadata = new java.util.HashMap<>(station.metadata());
+    if (!station.sidingPools().isEmpty()) {
+      metadata.put("_siding_pools", station.sidingPools());
+    }
+    statement.setString(15, toJson(metadata));
+
     setInstant(statement, 16, station.createdAt());
     setInstant(statement, 17, station.updatedAt());
   }
@@ -229,6 +242,20 @@ public final class JdbcStationRepository extends JdbcRepositorySupport
     Optional<Map<String, Object>> amenities =
         amenitiesJson == null ? Optional.empty() : Optional.of(fromJson(amenitiesJson));
 
+    List<StationSidingPool> sidingPools = List.of();
+    if (metadata.containsKey("_siding_pools")) {
+      try {
+        Object raw = metadata.get("_siding_pools");
+        String json = gson.toJson(raw);
+        sidingPools = gson.fromJson(json, SIDING_POOL_LIST_TYPE);
+        // 从 metadata 视图移除该字段，避免上层误以为它是普通 metadata（可选）
+        metadata = new java.util.HashMap<>(metadata);
+        metadata.remove("_siding_pools");
+      } catch (Exception ex) {
+        debug("解析 Station Siding Pools 失败: " + ex.getMessage());
+      }
+    }
+
     return new Station(
         id,
         code,
@@ -240,6 +267,7 @@ public final class JdbcStationRepository extends JdbcRepositorySupport
         location,
         Optional.ofNullable(graphNodeId),
         amenities,
+        sidingPools,
         metadata,
         createdAt,
         updatedAt);

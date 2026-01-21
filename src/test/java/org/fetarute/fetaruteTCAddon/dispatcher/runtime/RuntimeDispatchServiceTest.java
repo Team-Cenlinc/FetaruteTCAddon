@@ -62,6 +62,7 @@ class RuntimeDispatchServiceTest {
             mock(RouteDefinitionCache.class),
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -114,6 +115,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             new RouteProgressRegistry(),
             signNodeRegistry,
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -169,6 +171,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             registry,
             signNodeRegistry,
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -224,7 +227,8 @@ class RuntimeDispatchServiceTest {
                 base.autoStationSettings(),
                 runtime,
                 base.spawnSettings(),
-                base.trainConfigSettings()));
+                base.trainConfigSettings(),
+                base.reclaimSettings()));
 
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
@@ -266,6 +270,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             registry,
             mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -318,6 +323,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             new RouteProgressRegistry(),
             signNodeRegistry,
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -358,6 +364,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             registry,
             signNodeRegistry,
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -419,6 +426,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             new RouteProgressRegistry(),
             signNodeRegistry,
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -453,6 +461,7 @@ class RuntimeDispatchServiceTest {
             mock(RouteDefinitionCache.class),
             registry,
             mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -507,6 +516,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             registry,
             signNodeRegistry,
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -665,7 +675,8 @@ class RuntimeDispatchServiceTest {
         autoStation,
         runtime,
         new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
-        train);
+        train,
+        new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L));
   }
 
   private static final class TagStore {
@@ -735,6 +746,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -784,6 +796,7 @@ class RuntimeDispatchServiceTest {
             routeDefinitions,
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
             configManager,
             new TrainConfigResolver(),
             null);
@@ -844,5 +857,22 @@ class RuntimeDispatchServiceTest {
     public void destroy() {
       destroyCalls++;
     }
+
+    @Override
+    public void setRouteIndex(int index) {}
+
+    @Override
+    public void setRouteId(String routeId) {}
+
+    @Override
+    public void setDestination(String destination) {}
+
+    @Override
+    public java.util.Optional<org.bukkit.block.BlockFace> forwardDirection() {
+      return java.util.Optional.empty();
+    }
+
+    @Override
+    public void reverse() {}
   }
 }

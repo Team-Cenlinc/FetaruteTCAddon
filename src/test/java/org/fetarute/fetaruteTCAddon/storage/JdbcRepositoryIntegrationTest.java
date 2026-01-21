@@ -117,7 +117,8 @@ final class JdbcRepositoryIntegrationTest {
                 new ConfigManager.TrainTypeSettings(0.8, 1.0),
                 new ConfigManager.TrainTypeSettings(0.7, 0.9),
                 new ConfigManager.TrainTypeSettings(0.6, 0.8),
-                new ConfigManager.TrainTypeSettings(0.9, 1.1)));
+                new ConfigManager.TrainTypeSettings(0.9, 1.1)),
+            new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L));
     manager.apply(view);
     return manager.provider().orElseThrow();
   }

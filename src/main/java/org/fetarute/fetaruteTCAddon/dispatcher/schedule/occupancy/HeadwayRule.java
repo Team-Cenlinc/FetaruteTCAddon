@@ -14,7 +14,7 @@ public interface HeadwayRule {
 
   Duration headwayFor(Optional<RouteId> routeId, OccupancyResource resource);
 
-  /** 返回固定 headway 的简单规则，便于 MVP 与测试使用。 */
+  /** 返回固定 headway 的简单规则，便于“最小可用版本”与测试使用。 */
   static HeadwayRule fixed(Duration duration) {
     Objects.requireNonNull(duration, "duration");
     if (duration.isNegative()) {

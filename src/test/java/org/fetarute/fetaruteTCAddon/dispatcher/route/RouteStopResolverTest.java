@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -52,6 +53,7 @@ class RouteStopResolverTest {
             Optional.empty(),
             Optional.of("SURN:S:PTK:1"),
             Optional.empty(),
+            List.of(),
             Map.of(),
             Instant.now(),
             Instant.now());

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.Optional;
 import java.util.UUID;
 
 /** 运行时控车抽象：隔离 TrainCarts 具体实现，便于单测与后续扩展。 */
@@ -42,4 +43,24 @@ public interface RuntimeTrainHandle {
    * <p>实现应避免在 TrainCarts 内部 tick 过程中直接销毁导致异常。
    */
   void destroy();
+
+  /** 设置列车当前的 route index。 */
+  void setRouteIndex(int index);
+
+  /** 设置列车当前的 route ID。 */
+  void setRouteId(String routeId);
+
+  /** 设置列车目的地（destination）。 */
+  void setDestination(String destination);
+
+  /** 获取列车当前朝向（用于判定发车方向）。 */
+  java.util.Optional<org.bukkit.block.BlockFace> forwardDirection();
+
+  /** 获取列车的轨道状态（用于 TrainCarts 寻路方向判断）。 */
+  default Optional<com.bergerkiller.bukkit.tc.controller.components.RailState> railState() {
+    return Optional.empty();
+  }
+
+  /** 反向列车朝向（用于终到折返）。 */
+  void reverse();
 }

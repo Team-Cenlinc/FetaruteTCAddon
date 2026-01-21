@@ -1,7 +1,13 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
+import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
+import com.bergerkiller.bukkit.tc.pathfinding.PathConnection;
+import com.bergerkiller.bukkit.tc.pathfinding.PathNode;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,6 +18,8 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -22,9 +30,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRec
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -57,10 +67,12 @@ public final class RuntimeDispatchService {
   private final RouteDefinitionCache routeDefinitions;
   private final RouteProgressRegistry progressRegistry;
   private final SignNodeRegistry signNodeRegistry;
+  private final LayoverRegistry layoverRegistry;
   private final ConfigManager configManager;
   private final TrainConfigResolver trainConfigResolver;
   private final TrainLaunchManager trainLaunchManager = new TrainLaunchManager();
   private final Consumer<String> debugLogger;
+  private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
   private static final Pattern ACTION_PREFIX_PATTERN =
@@ -72,6 +84,7 @@ public final class RuntimeDispatchService {
       RouteDefinitionCache routeDefinitions,
       RouteProgressRegistry progressRegistry,
       SignNodeRegistry signNodeRegistry,
+      LayoverRegistry layoverRegistry,
       ConfigManager configManager,
       TrainConfigResolver trainConfigResolver,
       Consumer<String> debugLogger) {
@@ -80,9 +93,95 @@ public final class RuntimeDispatchService {
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.progressRegistry = Objects.requireNonNull(progressRegistry, "progressRegistry");
     this.signNodeRegistry = Objects.requireNonNull(signNodeRegistry, "signNodeRegistry");
+    this.layoverRegistry = Objects.requireNonNull(layoverRegistry, "layoverRegistry");
     this.configManager = Objects.requireNonNull(configManager, "configManager");
     this.trainConfigResolver = Objects.requireNonNull(trainConfigResolver, "trainConfigResolver");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+  }
+
+  /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
+  public void setLayoverListener(Consumer<LayoverRegistry.LayoverCandidate> listener) {
+    this.layoverListener = listener != null ? listener : candidate -> {};
+  }
+
+  /**
+   * 检查列车是否允许从当前站点发车（出站门控）。
+   *
+   * <p>如果允许，会申请占用并返回 true；如果阻塞，返回 false。
+   */
+  public boolean checkDeparture(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group, SignNodeDefinition definition) {
+    if (group == null || definition == null) {
+      return true;
+    }
+    RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
+    TrainProperties properties = train.properties();
+    String trainName = properties != null ? properties.getTrainName() : "unknown";
+    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
+    if (routeOpt.isEmpty()) {
+      return true;
+    }
+    RouteDefinition route = routeOpt.get();
+    OptionalInt tagIndex =
+        TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
+            .map(OptionalInt::of)
+            .orElse(OptionalInt.empty());
+    int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
+    if (currentIndex < 0) {
+      return true;
+    }
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
+    if (stopOpt.isPresent()) {
+      RouteStop stop = stopOpt.get();
+      if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
+          && route.lifecycleMode()
+              == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+        handleLayoverRegistrationIfNeeded(trainName, route, definition.nodeId(), properties);
+        return false;
+      }
+    }
+    if (currentIndex >= route.waypoints().size() - 1) {
+      // 已到终点/无下一跳时不做发车门控。
+      return true;
+    }
+
+    Instant now = Instant.now();
+    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
+    if (graphOpt.isEmpty()) {
+      return true;
+    }
+    RailGraph graph = graphOpt.get();
+    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
+    int lookaheadEdges = runtimeSettings.lookaheadEdges();
+    int minClearEdges = runtimeSettings.minClearEdges();
+    int priority = 0;
+
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(
+            graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges(), debugLogger);
+
+    Optional<OccupancyRequestContext> contextOpt =
+        builder.buildContextFromNodes(
+            trainName,
+            Optional.ofNullable(route.id()),
+            route.waypoints(),
+            currentIndex,
+            now,
+            priority);
+
+    if (contextOpt.isEmpty()) {
+      debugLogger.accept("发车门控失败: 构建占用请求失败 train=" + trainName);
+      return false;
+    }
+
+    OccupancyRequest request = contextOpt.get().request();
+    releaseResourcesNotInRequest(trainName, request.resourceList());
+    OccupancyDecision decision = occupancyManager.acquire(request);
+    if (!decision.allowed()) {
+      debugLogger.accept("发车门控阻塞: train=" + trainName + " aspect=" + decision.signal());
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -95,7 +194,7 @@ public final class RuntimeDispatchService {
       return;
     }
     com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
-    RuntimeTrainHandle train = new TrainCartsRuntimeTrainHandle(group);
+    RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
     TrainProperties properties = train.properties();
     String trainName = properties != null ? properties.getTrainName() : "unknown";
     handleRenameIfNeeded(properties, trainName);
@@ -113,26 +212,56 @@ public final class RuntimeDispatchService {
             .orElse(OptionalInt.empty());
     int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
     if (currentIndex < 0) {
+      Optional<BlockFace> pathFace =
+          resolveLaunchDirectionByTrainCarts(
+              train, properties != null ? properties.getDestination() : null);
+      String directionHint = pathFace.map(face -> " pathDirection=" + face.name()).orElse("");
       debugLogger.accept(
           "调度推进跳过: 当前节点不在线路定义内 train="
               + trainName
               + " node="
               + definition.nodeId().value()
               + " route="
-              + route.id().value());
+              + route.id().value()
+              + directionHint);
       return;
     }
     NodeId currentNode = definition.nodeId();
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
-    if (stopOpt.isPresent() && shouldDestroyAt(stopOpt.get(), currentNode)) {
-      handleDestroy(train, properties, trainName, "DSTY");
-      return;
+    if (stopOpt.isPresent()) {
+      RouteStop stop = stopOpt.get();
+      if (shouldDestroyAt(stop, currentNode)) {
+        handleDestroy(train, properties, trainName, "DSTY");
+        return;
+      }
+      if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
+          && route.lifecycleMode()
+              == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+        Instant now = Instant.now();
+        progressRegistry.advance(
+            trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+        if (occupancyManager != null) {
+          occupancyManager.releaseByTrain(trainName);
+        }
+        handleLayoverRegistrationIfNeeded(trainName, route, currentNode, properties);
+        debugLogger.accept(
+            "调度终到: 进入 Layover train="
+                + trainName
+                + " node="
+                + currentNode.value()
+                + " route="
+                + route.id().value());
+        return;
+      }
     }
     Optional<NodeId> nextTarget =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(route.waypoints().get(currentIndex + 1))
             : Optional.empty();
     if (nextTarget.isEmpty()) {
+      Instant now = Instant.now();
+      progressRegistry.advance(
+          trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       debugLogger.accept(
           "调度推进结束: 已到终点 train="
               + trainName
@@ -159,12 +288,18 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
+    int priority = 0; // TODO: 后续从列车属性或线路类型读取优先级
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges());
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
-            trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now);
+            trainName,
+            Optional.ofNullable(route.id()),
+            route.waypoints(),
+            currentIndex,
+            now,
+            priority);
     if (contextOpt.isEmpty()) {
       debugLogger.accept(
           "调度推进失败: 构建占用请求失败 train="
@@ -235,7 +370,7 @@ public final class RuntimeDispatchService {
 
   /** 周期性信号检查：信号等级变化时调整速度/刹车。 */
   public void handleSignalTick(com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
-    handleSignalTick(new TrainCartsRuntimeTrainHandle(group), false);
+    handleSignalTick(new TrainCartsRuntimeHandle(group), false);
   }
 
   /**
@@ -244,7 +379,7 @@ public final class RuntimeDispatchService {
    * <p>会重新评估占用与信号，并根据结果重下发速度/发车指令。
    */
   public void refreshSignal(com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
-    handleSignalTick(new TrainCartsRuntimeTrainHandle(group), true);
+    handleSignalTick(new TrainCartsRuntimeHandle(group), true);
   }
 
   /**
@@ -320,6 +455,7 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank()) {
       return;
     }
+    layoverRegistry.unregister(trainName);
     if (occupancyManager != null) {
       occupancyManager.releaseByTrain(trainName);
     }
@@ -362,7 +498,24 @@ public final class RuntimeDispatchService {
             .get(trainName)
             .orElseGet(() -> progressRegistry.initFromTags(trainName, properties, route));
     int currentIndex = progressEntry.currentIndex();
-    if (currentIndex < 0 || currentIndex >= route.waypoints().size() - 1) {
+    if (currentIndex < 0) {
+      return;
+    }
+    if (currentIndex >= route.waypoints().size() - 1) {
+      // 到达终点后：无论是否进入 layover，都应保持停车，避免“停站结束后继续滑行/穿站”。
+      if (forceApply) {
+        properties.setSpeedLimit(0.0);
+        train.stop();
+      }
+      if (forceApply
+          && route.lifecycleMode()
+              == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+        int lastIndex = Math.max(0, route.waypoints().size() - 1);
+        NodeId terminalNode = route.waypoints().get(lastIndex);
+        if (layoverRegistry.get(trainName).isEmpty()) {
+          handleLayoverRegistrationIfNeeded(trainName, route, terminalNode, properties);
+        }
+      }
       return;
     }
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
@@ -389,7 +542,8 @@ public final class RuntimeDispatchService {
             Optional.ofNullable(route.id()),
             route.waypoints(),
             currentIndex,
-            Instant.now());
+            Instant.now(),
+            0);
     if (contextOpt.isEmpty()) {
       return;
     }
@@ -416,6 +570,10 @@ public final class RuntimeDispatchService {
             ? Optional.of(route.waypoints().get(currentIndex))
             : Optional.empty();
     if (currentNode.isEmpty() || nextNode.isEmpty()) {
+      // 若已到终点且无下一目标，检查是否需要注册 Layover
+      if (nextNode.isEmpty() && forceApply && currentNode.isPresent()) {
+        handleLayoverRegistrationIfNeeded(trainName, route, currentNode.get(), properties);
+      }
       return;
     }
     OptionalLong distanceOpt = OptionalLong.empty();
@@ -483,6 +641,143 @@ public final class RuntimeDispatchService {
           graph,
           distanceOpt);
     }
+  }
+
+  private void handleLayoverRegistrationIfNeeded(
+      String trainName, RouteDefinition route, NodeId location, TrainProperties properties) {
+    if (route.lifecycleMode()
+        != org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+      return;
+    }
+    if (layoverRegistry.get(trainName).isPresent()) {
+      return;
+    }
+    String terminalKey = location.value();
+
+    java.util.Map<String, String> tags = new java.util.HashMap<>();
+    if (properties.hasTags()) {
+      for (String tag : properties.getTags()) {
+        int idx = tag.indexOf('=');
+        if (idx > 0) {
+          tags.put(tag.substring(0, idx).trim(), tag.substring(idx + 1).trim());
+        } else {
+          tags.put(tag.trim(), "");
+        }
+      }
+    }
+    layoverRegistry.register(trainName, terminalKey, location, Instant.now(), tags);
+    debugLogger.accept(
+        "Layover 注册: train=" + trainName + " term=" + terminalKey + " node=" + location.value());
+    layoverRegistry.get(trainName).ifPresent(layoverListener);
+  }
+
+  /**
+   * 将待命列车投入下一趟运营（复用出车）。
+   *
+   * @param candidate 待命列车候选对象
+   * @param ticket 分配的任务票据
+   * @return 是否成功发车（若占用失败或列车无效则返回 false）
+   */
+  public boolean dispatchLayover(LayoverCandidate candidate, ServiceTicket ticket) {
+    if (candidate == null || ticket == null) {
+      return false;
+    }
+    String trainName = candidate.trainName();
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null || properties.getHolder() == null) {
+      debugLogger.accept("Layover 发车失败: 列车未找到 " + trainName);
+      layoverRegistry.unregister(trainName);
+      return false;
+    }
+    RuntimeTrainHandle trainHandle = new TrainCartsRuntimeHandle(properties.getHolder());
+    if (!trainHandle.isValid()) {
+      debugLogger.accept("Layover 发车失败: 列车无效 " + trainName);
+      layoverRegistry.unregister(trainName);
+      return false;
+    }
+
+    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
+    if (routeOpt.isEmpty()) {
+      debugLogger.accept("Layover 发车失败: Route 未找到 " + ticket.routeId());
+      return false;
+    }
+    RouteDefinition route = routeOpt.get();
+    NodeId startNode = candidate.locationNodeId();
+    int startIndex = RouteIndexResolver.resolveCurrentIndex(route, OptionalInt.empty(), startNode);
+    if (startIndex != 0) {
+      debugLogger.accept("Layover 发车失败: 未处于线路首站 train=" + trainName + " node=" + startNode.value());
+      return false;
+    }
+    if (startIndex + 1 >= route.waypoints().size()) {
+      debugLogger.accept("Layover 发车失败: 线路无下一站 train=" + trainName);
+      return false;
+    }
+
+    Instant now = Instant.now();
+    Optional<RailGraph> graphOpt = resolveGraph(trainHandle.worldId(), now);
+    if (graphOpt.isEmpty()) {
+      debugLogger.accept("Layover 发车失败: 图快照缺失 train=" + trainName);
+      return false;
+    }
+    RailGraph graph = graphOpt.get();
+    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(
+            graph,
+            runtime.lookaheadEdges(),
+            runtime.minClearEdges(),
+            runtime.switcherZoneEdges(),
+            debugLogger);
+    Optional<OccupancyRequestContext> ctxOpt =
+        builder.buildContextFromNodes(
+            trainName,
+            Optional.ofNullable(route.id()),
+            route.waypoints(),
+            startIndex,
+            now,
+            ticket.priority());
+    if (ctxOpt.isEmpty()) {
+      debugLogger.accept("Layover 发车失败: 无法构建占用请求 train=" + trainName);
+      return false;
+    }
+    OccupancyRequest request = ctxOpt.get().request();
+    OccupancyDecision decision = occupancyManager.canEnter(request);
+    if (!decision.allowed()) {
+      debugLogger.accept("Layover 发车受阻: train=" + trainName + " signal=" + decision.signal());
+      return false;
+    }
+
+    releaseResourcesNotInRequest(trainName, request.resourceList());
+    occupancyManager.acquire(request);
+    layoverRegistry.unregister(trainName);
+
+    TrainTagHelper.writeTag(
+        properties, RouteProgressRegistry.TAG_ROUTE_ID, ticket.routeId().toString());
+    route
+        .metadata()
+        .ifPresent(
+            meta -> {
+              TrainTagHelper.writeTag(
+                  properties, RouteProgressRegistry.TAG_OPERATOR_CODE, meta.operator());
+              TrainTagHelper.writeTag(
+                  properties, RouteProgressRegistry.TAG_LINE_CODE, meta.lineId());
+              TrainTagHelper.writeTag(
+                  properties, RouteProgressRegistry.TAG_ROUTE_CODE, meta.serviceId());
+            });
+    if (route.metadata().isEmpty()) {
+      TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_OPERATOR_CODE);
+      TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_LINE_CODE);
+      TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_CODE);
+    }
+    TrainTagHelper.writeTag(properties, "FTA_TICKET_ID", ticket.ticketId());
+    progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
+
+    NodeId nextNode = route.waypoints().get(startIndex + 1);
+    trainHandle.setDestination(nextNode.value());
+    refreshSignal(properties.getHolder());
+
+    debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
+    return true;
   }
 
   /**
@@ -567,6 +862,9 @@ public final class RuntimeDispatchService {
     if (edgeLimit > 0.0) {
       targetBps = Math.min(targetBps, edgeLimit);
     }
+    if (allowLaunch && train != null && !train.isMoving()) {
+      maybeReverseForLaunch(train, currentNode, nextNode, graph);
+    }
     trainLaunchManager.applyControl(
         train,
         properties,
@@ -586,6 +884,169 @@ public final class RuntimeDispatchService {
         .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
         .map(path -> OptionalLong.of(path.totalLengthBlocks()))
         .orElse(OptionalLong.empty());
+  }
+
+  private void maybeReverseForLaunch(
+      RuntimeTrainHandle train, NodeId currentNode, NodeId nextNode, RailGraph graph) {
+    if (train == null || currentNode == null || nextNode == null) {
+      return;
+    }
+    TrainProperties properties = train.properties();
+    Optional<BlockFace> desiredOpt =
+        resolveLaunchDirection(train, properties, graph, currentNode, nextNode);
+    if (desiredOpt.isEmpty()) {
+      return;
+    }
+    BlockFace desired = desiredOpt.get();
+    Optional<BlockFace> facingOpt = train.forwardDirection();
+    if (facingOpt.isEmpty()) {
+      return;
+    }
+    BlockFace facing = facingOpt.get();
+    if (!isCardinal(facing)) {
+      return;
+    }
+    if (facing == desired) {
+      return;
+    }
+    if (facing == desired.getOppositeFace()) {
+      train.reverse();
+      TrainProperties props = train.properties();
+      String trainName = props != null ? props.getTrainName() : "unknown";
+      debugLogger.accept(
+          "发车方向调整: reverse train="
+              + trainName
+              + " from="
+              + currentNode.value()
+              + " to="
+              + nextNode.value());
+    }
+  }
+
+  private Optional<BlockFace> resolveLaunchDirection(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      RailGraph graph,
+      NodeId currentNode,
+      NodeId nextNode) {
+    Optional<BlockFace> tagOpt = readLaunchDirectionTag(properties);
+    String destination = resolveDestinationName(nextNode);
+    Optional<BlockFace> pathOpt = resolveLaunchDirectionByTrainCarts(train, destination);
+    if (pathOpt.isPresent() && tagOpt.isPresent() && pathOpt.get() != tagOpt.get()) {
+      debugLogger.accept(
+          "发车方向标记与线路方向不一致，使用寻路方向 from="
+              + currentNode.value()
+              + " to="
+              + nextNode.value()
+              + " tag="
+              + tagOpt.get().name()
+              + " path="
+              + pathOpt.get().name());
+    }
+    if (pathOpt.isPresent()) {
+      return pathOpt;
+    }
+    Optional<BlockFace> graphOpt = resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
+    return tagOpt.isPresent() ? tagOpt : graphOpt;
+  }
+
+  private Optional<BlockFace> readLaunchDirectionTag(TrainProperties properties) {
+    if (properties == null) {
+      return Optional.empty();
+    }
+    Optional<String> valueOpt = TrainTagHelper.readTagValue(properties, "FTA_LAUNCH_DIR");
+    if (valueOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    TrainTagHelper.removeTagKey(properties, "FTA_LAUNCH_DIR");
+    try {
+      BlockFace face = BlockFace.valueOf(valueOpt.get().trim().toUpperCase(java.util.Locale.ROOT));
+      return isCardinal(face) ? Optional.of(face) : Optional.empty();
+    } catch (IllegalArgumentException ex) {
+      return Optional.empty();
+    }
+  }
+
+  private Optional<BlockFace> resolveLaunchDirectionByTrainCarts(
+      RuntimeTrainHandle train, String destination) {
+    if (train == null || destination == null || destination.isBlank()) {
+      return Optional.empty();
+    }
+    Optional<RailState> stateOpt = train.railState();
+    if (stateOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    RailState state = stateOpt.get();
+    Block railBlock = state.railBlock();
+    if (railBlock == null) {
+      return Optional.empty();
+    }
+    PathNode node = PathNode.getOrCreate(railBlock);
+    if (node == null || node.containsName(destination)) {
+      return Optional.empty();
+    }
+    PathConnection connection = node.findConnection(destination);
+    if (connection == null || connection.junctionName == null) {
+      return Optional.empty();
+    }
+    RailPiece piece = state.railPiece();
+    if (piece == null || piece.isNone()) {
+      piece = RailPiece.create(railBlock);
+    }
+    if (piece == null || piece.isNone()) {
+      return Optional.empty();
+    }
+    List<RailJunction> junctions = piece.getJunctions();
+    if (junctions == null || junctions.isEmpty()) {
+      return Optional.empty();
+    }
+    for (RailJunction junction : junctions) {
+      if (junction == null || !connection.junctionName.equals(junction.name())) {
+        continue;
+      }
+      BlockFace face = junction.position().getMotionFace();
+      if (isCardinal(face)) {
+        return Optional.of(face);
+      }
+      break;
+    }
+    return Optional.empty();
+  }
+
+  private Optional<BlockFace> resolveLaunchDirectionByGraph(
+      RailGraph graph, NodeId currentNode, NodeId nextNode) {
+    if (graph == null || currentNode == null || nextNode == null) {
+      return Optional.empty();
+    }
+    Optional<RailNode> fromOpt = graph.findNode(currentNode);
+    Optional<RailNode> toOpt = graph.findNode(nextNode);
+    if (fromOpt.isEmpty() || toOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    org.bukkit.util.Vector from = fromOpt.get().worldPosition();
+    org.bukkit.util.Vector to = toOpt.get().worldPosition();
+    if (from == null || to == null) {
+      return Optional.empty();
+    }
+    double dx = to.getX() - from.getX();
+    double dz = to.getZ() - from.getZ();
+    if (!Double.isFinite(dx) || !Double.isFinite(dz)) {
+      return Optional.empty();
+    }
+    if (Math.abs(dx) < 1.0e-6 && Math.abs(dz) < 1.0e-6) {
+      return Optional.empty();
+    }
+    if (Math.abs(dx) >= Math.abs(dz)) {
+      return Optional.of(dx >= 0.0 ? BlockFace.EAST : BlockFace.WEST);
+    }
+    return Optional.of(dz >= 0.0 ? BlockFace.SOUTH : BlockFace.NORTH);
+  }
+
+  private static boolean isCardinal(BlockFace face) {
+    return face == BlockFace.NORTH
+        || face == BlockFace.SOUTH
+        || face == BlockFace.EAST
+        || face == BlockFace.WEST;
   }
 
   private void triggerStallFailover(
@@ -625,6 +1086,7 @@ public final class RuntimeDispatchService {
     if (properties == null || trainName == null || trainName.isBlank()) {
       return;
     }
+    layoverRegistry.unregister(trainName);
     if (train != null) {
       train.destroy();
     }
@@ -801,7 +1263,7 @@ public final class RuntimeDispatchService {
   /**
    * 释放“超出当前占用窗口”的资源。
    *
-   * <p>用于事件反射式占用：列车推进后即时释放窗口外资源，不再等待 time-based 过期。
+   * <p>用于事件反射式占用：列车推进后即时释放窗口外资源，不再等待“基于时间”的过期。
    */
   private void releaseResourcesNotInRequest(
       String trainName, List<OccupancyResource> keepResources) {

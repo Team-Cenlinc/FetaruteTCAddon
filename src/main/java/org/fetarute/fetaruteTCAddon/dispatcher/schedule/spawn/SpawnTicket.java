@@ -28,6 +28,10 @@ public record SpawnTicket(
     lastError = lastError == null ? Optional.empty() : lastError;
   }
 
+  public Instant scheduledTime() {
+    return dueAt;
+  }
+
   public SpawnTicket withRetry(Instant nextNotBefore, String error) {
     return new SpawnTicket(
         id,

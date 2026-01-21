@@ -60,7 +60,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  * <p>Route 描述一条线路下的“运行图/停靠表”，由若干 {@link RouteStop} 组成。由于 RouteStop 的编辑更像脚本，
  * 本插件提供“用书与笔承载定义”的方式：每一行代表一个站点/节点或一个动作标记（如 CHANGE/DYNAMIC）。
  *
- * <p>Route Editor 的核心目标：
+ * <p>运行图编辑器的核心目标：
  *
  * <ul>
  *   <li>把 RouteStop 的编辑从“长命令参数”变成“可复制/可存档的文本”
@@ -88,7 +88,7 @@ public final class FtaRouteCommand {
       PlainTextComponentSerializer.plainText();
 
   private final FetaruteTCAddon plugin;
-  // Route Editor 书本上下文存储在 PersistentDataContainer 中：这是“机器可读”的唯一可信来源。
+  // 运行图编辑器书本上下文存储在 PersistentDataContainer 中：这是“机器可读”的唯一可信来源。
   // 之所以不用 lore/title 做识别：它们受语言/格式化影响，且用户可手动改名导致误判。
   private final NamespacedKey bookRouteIdKey;
   private final NamespacedKey bookCompanyKey;
@@ -1966,7 +1966,7 @@ public final class FtaRouteCommand {
   private record DirectiveLine(String prefix, String argument) {}
 
   /**
-   * 构建 Route Editor 的书页内容。
+   * 构建运行图编辑器的书页内容。
    *
    * <p>当 stops 非空时，会把现有停靠表渲染进书中，便于“二次编辑”；同时会把 notes 逐行展开为 action 行。
    *
@@ -1975,16 +1975,16 @@ public final class FtaRouteCommand {
   private List<String> buildRouteEditorPages(
       StorageProvider provider, Operator operator, Line line, Route route, List<RouteStop> stops) {
     List<String> rendered = new ArrayList<>();
-    rendered.add("# FetaruteTCAddon Route Editor");
-    rendered.add("# Line: " + operator.code() + "/" + line.code());
-    rendered.add("# Route: " + route.code());
+    rendered.add("# FetaruteTCAddon 运行图编辑器");
+    rendered.add("# 线路: " + operator.code() + "/" + line.code());
+    rendered.add("# 班次: " + route.code());
     rendered.add("#");
-    rendered.add("# 规则：每行=stop/action；空行/注释忽略");
-    rendered.add("# stop: StationCode 或 NodeId");
+    rendered.add("# 规则：每行=stop/action（停靠/动作）；空行/注释忽略");
+    rendered.add("# stop: 站点 code 或 NodeId");
     rendered.add("#   NodeId 例: " + operator.code() + ":S:PTK:1");
     rendered.add("#           或: " + operator.code() + ":A:B:1:00");
-    rendered.add("# action: CHANGE/DYNAMIC/ACTION");
-    rendered.add("# directive: CRET/DSTY <NodeId>");
+    rendered.add("# action: CHANGE/DYNAMIC/ACTION（动作标记）");
+    rendered.add("# directive: CRET/DSTY <NodeId>（指令）");
     rendered.add("# 修饰: PASS/STOP/TERM, dwell=<秒>");
     rendered.add("# 限制: CRET 仅允许首个 stop；DSTY 必须为最后 stop");
     rendered.add("#");
@@ -2003,10 +2003,22 @@ public final class FtaRouteCommand {
       rendered.add("");
       for (RouteStop stop : stops) {
         rendered.add(renderStopLine(provider, operator.id(), stop));
+        Optional<String> directivePrefix = resolveDirectivePrefix(stop);
         stop.notes().stream()
             .flatMap(s -> Stream.of(s.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1)))
             .map(String::trim)
             .filter(s -> !s.isBlank())
+            .filter(
+                s -> {
+                  if (directivePrefix.isPresent()) {
+                    Optional<DirectiveLine> parsed = parseDirectiveLine(s);
+                    if (parsed.isPresent()
+                        && parsed.get().prefix().equalsIgnoreCase(directivePrefix.get())) {
+                      return false;
+                    }
+                  }
+                  return true;
+                })
             .forEach(rendered::add);
       }
       rendered.add("");
@@ -2019,7 +2031,7 @@ public final class FtaRouteCommand {
   }
 
   /**
-   * 构建 Route Editor 的空模板内容。
+   * 构建运行图编辑器的空模板内容。
    *
    * <p>空模板不绑定 routeId：用于“先写草稿/拿来当剪贴板”，以及右键牌子快速收集 nodeId。
    */
@@ -2033,17 +2045,17 @@ public final class FtaRouteCommand {
 
     // 兜底：语言键缺失时仍给出可用帮助。
     List<String> rendered = new ArrayList<>();
-    rendered.add("# FetaruteTCAddon Route Editor");
-    rendered.add("# 空模板（未绑定 Route）");
+    rendered.add("# FetaruteTCAddon 运行图编辑器");
+    rendered.add("# 空模板（未绑定班次）");
     rendered.add("#");
-    rendered.add("# 用法：每行一个 stop/action");
-    rendered.add("# stop: StationCode 或 NodeId");
-    rendered.add("# action: CHANGE/DYNAMIC/ACTION");
-    rendered.add("# directive: CRET/DSTY <NodeId>");
+    rendered.add("# 用法：每行一个 stop/action（停靠/动作）");
+    rendered.add("# stop: 站点 code 或 NodeId");
+    rendered.add("# action: CHANGE/DYNAMIC/ACTION（动作标记）");
+    rendered.add("# directive: CRET/DSTY <NodeId>（指令）");
     rendered.add("# 修饰: PASS/STOP/TERM, dwell=<秒>");
     rendered.add("#");
     rendered.add("# 右键 waypoint/autostation/depot");
-    rendered.add("# 牌子可把 nodeId 追加到末尾");
+    rendered.add("# 牌子可把 nodeId 追加到末尾（用于快速取点）");
     rendered.add("#");
     rendered.add("# 示例：");
     rendered.add("# PTK");
@@ -2133,7 +2145,7 @@ public final class FtaRouteCommand {
   }
 
   /**
-   * 从物品的 PDC（NBT）读取 Route Editor 上下文。
+   * 从物品的 PDC（NBT）读取运行图编辑器上下文。
    *
    * <p>仅当 {@code route_editor_route_id} 存在且可解析为 UUID 时，才认为这是“插件生成的编辑书/成书”。
    */
@@ -2616,7 +2628,7 @@ public final class FtaRouteCommand {
   }
 
   /**
-   * Route Editor 的书本上下文。
+   * 运行图编辑器的书本上下文。
    *
    * <p>其中 routeId 是唯一可信的绑定键；company/operator/line/routeCode 用于展示与归档。
    */

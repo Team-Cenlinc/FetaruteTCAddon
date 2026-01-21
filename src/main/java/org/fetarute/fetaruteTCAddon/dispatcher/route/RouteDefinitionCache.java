@@ -285,7 +285,8 @@ public final class RouteDefinitionCache {
     RouteId routeKey =
         RouteId.of(
             RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id()));
-    return Optional.of(new RouteDefinition(routeKey, nodes, Optional.empty()));
+    RouteLifecycleMode lifecycleMode = RouteDefinition.resolveMode(sorted);
+    return Optional.of(new RouteDefinition(routeKey, nodes, Optional.empty(), lifecycleMode));
   }
 
   private List<RouteStop> sortedStops(List<RouteStop> stops) {

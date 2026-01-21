@@ -8,6 +8,7 @@ import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -411,6 +412,7 @@ final class JdbcRepositoryTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
+            List.of(),
             Map.of(),
             now,
             now);
@@ -710,7 +712,8 @@ final class JdbcRepositoryTest {
                 new ConfigManager.TrainTypeSettings(0.8, 1.0),
                 new ConfigManager.TrainTypeSettings(0.7, 0.9),
                 new ConfigManager.TrainTypeSettings(0.6, 0.8),
-                new ConfigManager.TrainTypeSettings(0.9, 1.1)));
+                new ConfigManager.TrainTypeSettings(0.9, 1.1)),
+            new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L));
     manager = new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
     manager.apply(view);
     return manager.provider().orElseThrow();

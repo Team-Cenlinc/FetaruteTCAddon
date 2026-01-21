@@ -34,7 +34,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * Route Editor 交互增强：手持“运行图编辑书（书与笔）”右键节点牌子时，把 nodeId 追加到书的末尾。
+ * 运行图编辑器交互增强：手持“运行图编辑书（书与笔）”右键节点牌子时，把 nodeId 追加到书的末尾。
  *
  * <p>这让玩家可以用“世界中的牌子”作为可视化选择器，避免手动输入长 nodeId 或复制粘贴。
  *

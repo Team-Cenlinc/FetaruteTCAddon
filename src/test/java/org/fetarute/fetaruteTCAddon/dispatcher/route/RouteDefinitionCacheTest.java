@@ -108,6 +108,7 @@ class RouteDefinitionCacheTest {
             Optional.empty(),
             Optional.of("SURN:S:STA:1"),
             Optional.empty(),
+            List.of(),
             Map.of(),
             now,
             now);
@@ -128,7 +129,7 @@ class RouteDefinitionCacheTest {
             Optional.empty(),
             Optional.of("SURN:A:B:1:01"),
             Optional.empty(),
-            RouteStopPassType.STOP,
+            RouteStopPassType.TERMINATE,
             Optional.empty());
 
     StorageProvider provider = mock(StorageProvider.class);
@@ -162,6 +163,7 @@ class RouteDefinitionCacheTest {
     RouteDefinition def = defOpt.get();
     assertEquals("INT:L1:R1", def.id().value());
     assertEquals(List.of(NodeId.of("SURN:S:STA:1"), NodeId.of("SURN:A:B:1:01")), def.waypoints());
+    assertEquals(RouteLifecycleMode.REUSE_AT_TERM, def.lifecycleMode());
 
     Optional<RouteDefinition> byCodes = cache.findByCodes("int", "L1", "r1");
     assertTrue(byCodes.isPresent());

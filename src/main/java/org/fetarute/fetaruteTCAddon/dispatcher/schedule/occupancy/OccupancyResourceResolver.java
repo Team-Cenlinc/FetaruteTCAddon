@@ -12,7 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 /**
  * 负责将轨道图元素映射为占用资源集合。
  *
- * <p>MVP 规则：edge 必占用自身资源，若端点为 switcher，则额外占用冲突资源。
+ * <p>最小可用版本规则：区间边（edge）必占用自身资源；若端点为 switcher，则额外占用冲突资源。
  */
 public final class OccupancyResourceResolver {
 

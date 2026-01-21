@@ -101,6 +101,7 @@ public final class StationAutoSyncService {
                 candidate.location(),
                 candidate.graphNodeId(),
                 Optional.empty(),
+                List.of(),
                 Map.of(),
                 now,
                 now);
@@ -134,6 +135,7 @@ public final class StationAutoSyncService {
               location,
               graphNodeId,
               existing.amenities(),
+              existing.sidingPools(),
               existing.metadata(),
               existing.createdAt(),
               now);
