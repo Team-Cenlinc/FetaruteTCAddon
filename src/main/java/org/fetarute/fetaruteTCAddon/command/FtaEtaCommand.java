@@ -5,6 +5,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -18,6 +19,9 @@ import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaConfidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaReason;
@@ -30,6 +34,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.parser.standard.IntegerParser;
@@ -211,11 +217,29 @@ public final class FtaEtaCommand {
     String world = snap.worldId().toString();
     String signal = snap.signalAspect().map(Enum::name).orElse("-");
     String dwell = snap.dwellRemainingSec().map(sec -> formatSeconds(sec)).orElse("-");
+    String current = snap.currentNodeId().map(node -> node.value()).orElse("-");
+    String lastPassed = snap.lastPassedNodeId().map(node -> node.value()).orElse("-");
+    String ticket = snap.ticketId().orElse("-");
     sender.sendMessage(
         locale.component(
             "command.eta.train.snapshot",
             Map.of(
-                "route", route, "index", index, "world", world, "signal", signal, "dwell", dwell)));
+                "route",
+                route,
+                "index",
+                index,
+                "world",
+                world,
+                "signal",
+                signal,
+                "dwell",
+                dwell,
+                "current",
+                current,
+                "last",
+                lastPassed,
+                "ticket",
+                ticket)));
   }
 
   private void showTicketEta(CommandSender sender, String ticketId) {
@@ -238,6 +262,7 @@ public final class FtaEtaCommand {
       return;
     }
     LocaleManager locale = plugin.getLocaleManager();
+    StationNameResolver resolver = buildStationNameResolver();
     BoardResult board = service.getBoard(operator, stationCode, lineId, horizon);
     String lineText = lineId == null || lineId.isBlank() ? "-" : lineId;
     String stationText = operator + ":" + stationCode;
@@ -261,14 +286,17 @@ public final class FtaEtaCommand {
         sender.sendMessage(locale.component("command.eta.board.truncated"));
         break;
       }
+      String destText = formatBoardDestination(row, resolver);
       sender.sendMessage(
           locale.component(
               "command.eta.board.row",
               Map.of(
                   "line",
                   row.lineName(),
+                  "route",
+                  row.routeId(),
                   "dest",
-                  row.destination(),
+                  destText,
                   "platform",
                   row.platform(),
                   "status",
@@ -386,10 +414,131 @@ public final class FtaEtaCommand {
     return "unknown";
   }
 
+  private StationNameResolver buildStationNameResolver() {
+    StorageManager storage = plugin.getStorageManager();
+    if (storage == null || !storage.isReady()) {
+      return new StationNameResolver(null, new HashMap<>());
+    }
+    StorageProvider provider = storage.provider().orElse(null);
+    return new StationNameResolver(provider, new HashMap<>());
+  }
+
+  private String formatBoardDestination(BoardResult.BoardRow row, StationNameResolver resolver) {
+    String base = row.destination();
+    Optional<String> destIdOpt = row.destinationId();
+    if (destIdOpt.isEmpty()) {
+      return base;
+    }
+    String destId = destIdOpt.get();
+    Optional<StationKey> keyOpt = parseStationKey(destId);
+    Optional<String> nameOpt =
+        keyOpt.isPresent() ? resolveStationName(resolver, keyOpt.get()) : Optional.empty();
+    String label = nameOpt.orElse(base);
+    if (label == null || label.isBlank()) {
+      label = destId;
+    }
+    if (containsIgnoreCase(label, destId)) {
+      return label;
+    }
+    return label + " (" + destId + ")";
+  }
+
+  private Optional<String> resolveStationName(StationNameResolver resolver, StationKey key) {
+    if (resolver == null || resolver.provider() == null || key == null) {
+      return Optional.empty();
+    }
+    String cacheKey =
+        key.operator().toLowerCase(Locale.ROOT) + ":" + key.station().toLowerCase(Locale.ROOT);
+    if (resolver.cache().containsKey(cacheKey)) {
+      return resolver.cache().get(cacheKey);
+    }
+    Optional<String> result = Optional.empty();
+    StorageProvider provider = resolver.provider();
+    for (Company company : provider.companies().listAll()) {
+      if (company == null) {
+        continue;
+      }
+      for (Operator operator : provider.operators().listByCompany(company.id())) {
+        if (operator == null || operator.code() == null) {
+          continue;
+        }
+        if (!operator.code().equalsIgnoreCase(key.operator())) {
+          continue;
+        }
+        Optional<Station> stationOpt =
+            provider.stations().findByOperatorAndCode(operator.id(), key.station());
+        if (stationOpt.isPresent()) {
+          Station station = stationOpt.get();
+          if (station.name() != null && !station.name().isBlank()) {
+            result = Optional.of(station.name());
+          }
+        }
+        break;
+      }
+      if (result.isPresent()) {
+        break;
+      }
+    }
+    resolver.cache().put(cacheKey, result);
+    return result;
+  }
+
+  private Optional<StationKey> parseStationKey(String stationId) {
+    if (stationId == null || stationId.isBlank()) {
+      return Optional.empty();
+    }
+    int idx = stationId.indexOf(':');
+    if (idx <= 0 || idx >= stationId.length() - 1) {
+      return Optional.empty();
+    }
+    String operator = stationId.substring(0, idx).trim();
+    String station = stationId.substring(idx + 1).trim();
+    if (operator.isEmpty() || station.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(new StationKey(operator, station));
+  }
+
+  private boolean containsIgnoreCase(String raw, String needle) {
+    if (raw == null || needle == null) {
+      return false;
+    }
+    return raw.toLowerCase(Locale.ROOT).contains(needle.toLowerCase(Locale.ROOT));
+  }
+
   private void sendNotReady(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("command.eta.not-ready"));
   }
+
+  private Optional<StorageProvider> providerIfReady() {
+    StorageManager storage = plugin.getStorageManager();
+    if (storage == null || !storage.isReady()) {
+      return Optional.empty();
+    }
+    return storage.provider();
+  }
+
+  private boolean canReadCompanyNoCreateIdentity(
+      CommandSender sender, StorageProvider provider, java.util.UUID companyId) {
+    if (sender.hasPermission("fetarute.admin")) {
+      return true;
+    }
+    if (!(sender instanceof Player player)) {
+      return false;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity> identityOpt =
+        provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
+    if (identityOpt.isEmpty()) {
+      return false;
+    }
+    return provider.companyMembers().findMembership(companyId, identityOpt.get().id()).isPresent();
+  }
+
+  private record StationNameResolver(
+      StorageProvider provider, Map<String, Optional<String>> cache) {}
+
+  private record StationKey(String operator, String station) {}
 
   private SuggestionProvider<CommandSender> trainSuggestions(String placeholder) {
     return SuggestionProvider.blockingStrings(
@@ -671,16 +820,61 @@ public final class FtaEtaCommand {
             suggestions.add(placeholder);
           }
           EtaService service = plugin.getEtaService();
-          if (service == null) {
-            return suggestions;
+          java.util.Set<String> candidates = new java.util.LinkedHashSet<>();
+          if (service != null) {
+            candidates.addAll(service.suggestLineIds());
           }
-          service.suggestLineIds().stream()
+          candidates.addAll(listLineCodesFromStorage(ctx, prefix));
+          candidates.stream()
               .filter(s -> prefix.isBlank() || s.toLowerCase(Locale.ROOT).startsWith(prefix))
               .sorted(String.CASE_INSENSITIVE_ORDER)
               .limit(SUGGESTION_LIMIT)
               .forEach(suggestions::add);
           return suggestions;
         });
+  }
+
+  private java.util.Set<String> listLineCodesFromStorage(
+      org.incendo.cloud.context.CommandContext<CommandSender> ctx, String prefix) {
+    java.util.Set<String> candidates = new java.util.LinkedHashSet<>();
+    if (ctx == null) {
+      return candidates;
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return candidates;
+    }
+    Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
+    if (operatorArgOpt.isEmpty()) {
+      return candidates;
+    }
+    String operatorArg = operatorArgOpt.get().trim();
+    if (operatorArg.isBlank()) {
+      return candidates;
+    }
+    StorageProvider provider = providerOpt.get();
+    for (Company company : provider.companies().listAll()) {
+      if (company == null) {
+        continue;
+      }
+      if (!canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id())) {
+        continue;
+      }
+      Optional<Operator> operatorOpt =
+          provider.operators().findByCompanyAndCode(company.id(), operatorArg);
+      if (operatorOpt.isEmpty()) {
+        continue;
+      }
+      provider.lines().listByOperator(operatorOpt.get().id()).stream()
+          .map(org.fetarute.fetaruteTCAddon.company.model.Line::code)
+          .filter(java.util.Objects::nonNull)
+          .map(String::trim)
+          .filter(code -> !code.isBlank())
+          .filter(code -> prefix.isBlank() || code.toLowerCase(Locale.ROOT).startsWith(prefix))
+          .forEach(candidates::add);
+      break;
+    }
+    return candidates;
   }
 
   private static SuggestionProvider<CommandSender> horizonSuggestions(String placeholder) {

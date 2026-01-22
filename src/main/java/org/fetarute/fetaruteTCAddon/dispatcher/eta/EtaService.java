@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteProgress;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -61,7 +62,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
  *
  * <p>约束：EtaService 不做运行时采样；只读 Snapshot + Graph/Route/Occupancy 快照 + Cache。
  *
- * <p>注意：站牌会合并未出票服务预测（见 {@link SpawnForecastSupport}）；若 SpawnMonitor 未运行或计划为空， 站牌仍可能为空。
+ * <p>注意：站牌会合并未出票服务预测（见 {@link SpawnForecastSupport}）；若 SpawnMonitor 未运行或计划为空，站牌仍可能为空。
+ *
+ * <p>Layover：若起点存在待命列车，未发车 ETA 会使用候选的 readyAt 修正最早发车时间。
  */
 public final class EtaService {
 
@@ -86,6 +89,7 @@ public final class EtaService {
 
   private volatile SpawnManager spawnManager;
   private volatile TicketAssigner ticketAssigner;
+  private volatile LayoverRegistry layoverRegistry;
 
   private final java.util.function.IntSupplier lookaheadEdges;
   private final java.util.function.IntSupplier minClearEdges;
@@ -114,6 +118,11 @@ public final class EtaService {
   public void attachTicketSources(SpawnManager spawnManager, TicketAssigner ticketAssigner) {
     this.spawnManager = spawnManager;
     this.ticketAssigner = ticketAssigner;
+  }
+
+  /** 绑定 LayoverRegistry，用于未发车 ETA 的待命时间修正。 */
+  public void attachLayoverRegistry(LayoverRegistry layoverRegistry) {
+    this.layoverRegistry = layoverRegistry;
   }
 
   /**
@@ -420,19 +429,27 @@ public final class EtaService {
       }
       TargetSelection target = targetOpt.get();
       String lineName = resolveLineName(route);
-      String dest = resolveDestination(route);
+      String routeId = route.id().value();
+      DestinationInfo destInfo = resolveDestinationInfo(route);
       String platform = resolvePlatform(target.nodeId());
       rows.add(
           new BoardRowEntry(
               result.etaEpochMillis(),
               new BoardResult.BoardRow(
-                  lineName, dest, platform, result.statusText(), result.reasons())));
+                  lineName,
+                  routeId,
+                  destInfo.label(),
+                  destInfo.destinationId(),
+                  platform,
+                  result.statusText(),
+                  result.reasons())));
     }
 
     List<SpawnTicket> pendingTickets = collectPendingTickets();
     Set<String> reservedSlots = new HashSet<>();
     for (SpawnTicket ticket : pendingTickets) {
-      buildTicketSlotKey(ticket).ifPresent(reservedSlots::add);
+      RouteDefinition route = resolveRouteDefinition(ticket).orElse(null);
+      buildTicketSlotKey(ticket, route).ifPresent(reservedSlots::add);
     }
 
     for (SpawnTicket ticket : pendingTickets) {
@@ -445,7 +462,8 @@ public final class EtaService {
       List<SpawnTicket> forecastTickets =
           forecastSupport.snapshotForecast(now, window, FORECAST_LIMIT_PER_SERVICE);
       for (SpawnTicket ticket : forecastTickets) {
-        Optional<String> slotKeyOpt = buildTicketSlotKey(ticket);
+        RouteDefinition route = resolveRouteDefinition(ticket).orElse(null);
+        Optional<String> slotKeyOpt = buildTicketSlotKey(ticket, route);
         if (slotKeyOpt.isPresent() && !seenSlots.add(slotKeyOpt.get())) {
           continue;
         }
@@ -471,7 +489,7 @@ public final class EtaService {
         && !ticket.service().lineCode().equalsIgnoreCase(lineId)) {
       return Optional.empty();
     }
-    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.service().routeId());
+    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(ticket);
     if (routeOpt.isEmpty()) {
       return Optional.empty();
     }
@@ -487,24 +505,39 @@ public final class EtaService {
     }
     TargetSelection target = targetOpt.get();
     String lineName = ticket.service().lineCode();
-    String dest = resolveDestination(route);
+    String routeId = route.id().value();
+    DestinationInfo destInfo = resolveDestinationInfo(route);
     String platform = resolvePlatform(target.nodeId());
     return Optional.of(
         new BoardRowEntry(
             result.etaEpochMillis(),
             new BoardResult.BoardRow(
-                lineName, dest, platform, result.statusText(), result.reasons())));
+                lineName,
+                routeId,
+                destInfo.label(),
+                destInfo.destinationId(),
+                platform,
+                result.statusText(),
+                result.reasons())));
   }
 
-  private Optional<String> buildTicketSlotKey(SpawnTicket ticket) {
+  private Optional<String> buildTicketSlotKey(SpawnTicket ticket, RouteDefinition route) {
     if (ticket == null || ticket.service() == null || ticket.service().key() == null) {
       return Optional.empty();
     }
-    Instant departAt = resolveTicketDepartTime(ticket);
+    Instant departAt =
+        route != null ? resolveTicketDepartTime(ticket, route) : resolveTicketDepartTime(ticket);
     if (departAt == null) {
       return Optional.empty();
     }
     return Optional.of(ticket.service().key().routeId() + "|" + departAt.toEpochMilli());
+  }
+
+  private Optional<RouteDefinition> resolveRouteDefinition(SpawnTicket ticket) {
+    if (ticket == null || ticket.service() == null) {
+      return Optional.empty();
+    }
+    return routeDefinitions.findById(ticket.service().routeId());
   }
 
   private Optional<String> findTrainByTicketId(String ticketId) {
@@ -610,7 +643,7 @@ public final class EtaService {
       remainingEdgeCount = progress.remainingEdgeCount();
     }
 
-    Instant departAt = resolveTicketDepartTime(ticket);
+    Instant departAt = resolveTicketDepartTime(ticket, route);
     long waitSecLong = Math.max(0L, Duration.between(now, departAt).getSeconds());
     int waitSec = waitSecLong > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) waitSecLong;
     List<EtaReason> reasons = new ArrayList<>();
@@ -675,6 +708,35 @@ public final class EtaService {
       return notBefore;
     }
     return due != null ? due : Instant.EPOCH;
+  }
+
+  private Instant resolveTicketDepartTime(SpawnTicket ticket, RouteDefinition route) {
+    Instant base = resolveTicketDepartTime(ticket);
+    Optional<Instant> readyAt = resolveLayoverReadyAt(route);
+    if (readyAt.isPresent() && readyAt.get().isAfter(base)) {
+      return readyAt.get();
+    }
+    return base;
+  }
+
+  private Optional<Instant> resolveLayoverReadyAt(RouteDefinition route) {
+    if (route == null || route.waypoints().isEmpty()) {
+      return Optional.empty();
+    }
+    LayoverRegistry registry = this.layoverRegistry;
+    if (registry == null) {
+      return Optional.empty();
+    }
+    NodeId startNode = route.waypoints().get(0);
+    if (startNode == null) {
+      return Optional.empty();
+    }
+    List<LayoverRegistry.LayoverCandidate> candidates = registry.findCandidates(startNode.value());
+    if (candidates.isEmpty()) {
+      return Optional.empty();
+    }
+    Instant readyAt = candidates.get(0).readyAt();
+    return readyAt == null ? Optional.empty() : Optional.of(readyAt);
   }
 
   private record TargetSelection(NodeId nodeId, int index) {
@@ -892,6 +954,38 @@ public final class EtaService {
     return last.value();
   }
 
+  private DestinationInfo resolveDestinationInfo(RouteDefinition route) {
+    String label = resolveDestination(route);
+    Optional<String> destinationId = resolveDestinationId(route);
+    return new DestinationInfo(label, destinationId);
+  }
+
+  private Optional<String> resolveDestinationId(RouteDefinition route) {
+    if (route == null || route.waypoints().isEmpty()) {
+      return Optional.empty();
+    }
+    NodeId last = route.waypoints().get(route.waypoints().size() - 1);
+    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(last);
+    if (metaOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    WaypointMetadata meta = metaOpt.get();
+    String operator = meta.operator();
+    if (operator == null || operator.isBlank()) {
+      return Optional.empty();
+    }
+    String stationCode;
+    if (meta.kind() == WaypointKind.INTERVAL && meta.destinationStation().isPresent()) {
+      stationCode = meta.destinationStation().get();
+    } else {
+      stationCode = meta.originStation();
+    }
+    if (stationCode == null || stationCode.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(operator + ":" + stationCode);
+  }
+
   private String resolvePlatform(NodeId nodeId) {
     if (nodeId == null) {
       return "-";
@@ -917,6 +1011,13 @@ public final class EtaService {
   private record RouteCodeParts(String operator, String line, String route) {}
 
   private record BoardRowEntry(long etaMillis, BoardResult.BoardRow row) {}
+
+  private record DestinationInfo(String label, Optional<String> destinationId) {
+    private DestinationInfo {
+      label = label == null || label.isBlank() ? "-" : label;
+      destinationId = destinationId == null ? Optional.empty() : destinationId;
+    }
+  }
 
   private OccupancyDecision buildAndCanEnter(
       RailGraph graph, RouteDefinition route, String trainName, int routeIndex, Instant now) {

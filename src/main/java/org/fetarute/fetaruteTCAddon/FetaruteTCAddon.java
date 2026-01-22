@@ -466,6 +466,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 configManager != null
                     ? configManager.current().runtimeSettings().switcherZoneEdges()
                     : 2);
+    if (layoverRegistry != null) {
+      etaService.attachLayoverRegistry(layoverRegistry);
+    }
   }
 
   private void restartRuntimeMonitor() {

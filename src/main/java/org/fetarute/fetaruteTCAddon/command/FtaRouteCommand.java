@@ -867,6 +867,8 @@ public final class FtaRouteCommand {
                           route.createdAt(),
                           Instant.now());
                   provider.routes().save(updated);
+                  plugin.refreshRouteDefinition(
+                      provider, resolved.operator(), resolved.line(), updated);
                   sender.sendMessage(
                       locale.component("command.route.set.success", Map.of("code", route.code())));
                 }));

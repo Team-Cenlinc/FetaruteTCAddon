@@ -133,7 +133,7 @@ command:
       summary: "<gray>-</gray> status=<white><status></white> arriving=<white><arriving></white> eta=<white><eta></white> at=<white><at></white> conf=<white><conf></white>"
       breakdown: "<gray>-</gray> travel=<white><travel></white> dwell=<white><dwell></white> wait=<white><wait></white> minutes=<white><minutes></white>"
       reasons: "<gray>-</gray> reasons=<white><reasons></white>"
-      snapshot: "<gray>-</gray> route=<white><route></white> index=<white><index></white> world=<white><world></white> signal=<white><signal></white> dwellRemaining=<white><dwell></white>"
+      snapshot: "<gray>-</gray> route=<white><route></white> index=<white><index></white> world=<white><world></white> signal=<white><signal></white> dwellRemaining=<white><dwell></white> current=<white><current></white> last=<white><last></white> ticket=<white><ticket></white>"
       snapshot-missing: "<gray>-</gray> <red>未找到运行时快照</red>"
     ticket:
       header: "<prefix> <dark_aqua>ETA 诊断</dark_aqua> <gray>(ticket=<white><ticket></white>)</gray>"
@@ -144,7 +144,7 @@ command:
       header: "<prefix> <dark_aqua>ETA 站牌</dark_aqua> <gray>(station=<white><station></white>, line=<white><line></white>, rows=<white><rows></white>)</gray>"
       empty: "<prefix> <gray>暂无站牌输出</gray>"
       truncated: "<gray>… 已截断，缩小站牌范围或降低 horizon</gray>"
-      row: "<gray>-</gray> <white><line></white> <gray>-></gray> <white><dest></white> <gray>plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
+      row: "<gray>-</gray> <white><line></white> <gray>(route=<white><route></white>)</gray> <gray>-></gray> <white><dest></white> <gray>plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
 
   train:
     help:

@@ -8,7 +8,10 @@
 - **安全性**：ETA 使用占用“只读预览”接口，避免触发排队与运行时状态变化
 - **Arriving 语义**：Approaching = Arriving
 - **未发车 ETA**：`getForTicket(ticketId)` 仅读取“已生成但未发车”的票据队列快照（不读 SpawnPlan）
+- **Layover 修正**：若起点存在待命列车，未发车 ETA 会使用 `readyAt` 修正最早发车时间
 - **站牌预测**：站牌会合并未出票服务的预测结果（基于 SpawnManager 的计划与状态）
+- **站牌目的地展示**：优先解析站点名称并显示为 `name (operator:station)`，缺失时回退到原始 destination 文本
+- **站牌调试字段**：每行会输出 RouteId，便于核对线路解析结果
 - **站牌查询输入**：`/fta eta board` 使用 `<operator> <stationCode>`（stationCode 允许跨 operator 重名，默认 horizon=10 分钟）
 
 ## 核心类
