@@ -20,6 +20,10 @@ public record BoardResult(List<BoardRow> rows) {
       String routeId,
       String destination,
       Optional<String> destinationId,
+      String endRoute,
+      Optional<String> endRouteId,
+      String endOperation,
+      Optional<String> endOperationId,
       String platform,
       String statusText,
       List<EtaReason> reasons) {
@@ -29,6 +33,12 @@ public record BoardResult(List<BoardRow> rows) {
       Objects.requireNonNull(destination, "destination");
       destinationId = destinationId == null ? Optional.empty() : destinationId;
       Objects.requireNonNull(destinationId, "destinationId");
+      Objects.requireNonNull(endRoute, "endRoute");
+      endRouteId = endRouteId == null ? Optional.empty() : endRouteId;
+      Objects.requireNonNull(endRouteId, "endRouteId");
+      Objects.requireNonNull(endOperation, "endOperation");
+      endOperationId = endOperationId == null ? Optional.empty() : endOperationId;
+      Objects.requireNonNull(endOperationId, "endOperationId");
       Objects.requireNonNull(platform, "platform");
       Objects.requireNonNull(statusText, "statusText");
       reasons = reasons == null ? List.of() : List.copyOf(reasons);

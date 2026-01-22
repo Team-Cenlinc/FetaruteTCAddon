@@ -287,6 +287,9 @@ public final class FtaEtaCommand {
         break;
       }
       String destText = formatBoardDestination(row, resolver);
+      String endRouteText = formatBoardStation(row.endRoute(), row.endRouteId(), resolver);
+      String endOperationText =
+          formatBoardStation(row.endOperation(), row.endOperationId(), resolver);
       sender.sendMessage(
           locale.component(
               "command.eta.board.row",
@@ -297,6 +300,10 @@ public final class FtaEtaCommand {
                   row.routeId(),
                   "dest",
                   destText,
+                  "end_route",
+                  endRouteText,
+                  "end_operation",
+                  endOperationText,
                   "platform",
                   row.platform(),
                   "status",
@@ -424,23 +431,30 @@ public final class FtaEtaCommand {
   }
 
   private String formatBoardDestination(BoardResult.BoardRow row, StationNameResolver resolver) {
-    String base = row.destination();
-    Optional<String> destIdOpt = row.destinationId();
-    if (destIdOpt.isEmpty()) {
-      return base;
+    return formatBoardStation(row.destination(), row.destinationId(), resolver);
+  }
+
+  private String formatBoardStation(
+      String base, Optional<String> destIdOpt, StationNameResolver resolver) {
+    String label = base;
+    if (destIdOpt.isPresent()) {
+      String destId = destIdOpt.get();
+      if ("OUT_OF_SERVICE".equalsIgnoreCase(destId)) {
+        String primary = (label == null || label.isBlank()) ? "回库" : label;
+        return primary + " / Not in Service (" + destId + ")";
+      }
+      Optional<StationKey> keyOpt = parseStationKey(destId);
+      Optional<String> nameOpt =
+          keyOpt.isPresent() ? resolveStationName(resolver, keyOpt.get()) : Optional.empty();
+      label = nameOpt.orElse(base);
+      if (label == null || label.isBlank()) {
+        label = destId;
+      }
+      if (!containsIgnoreCase(label, destId)) {
+        label = label + " (" + destId + ")";
+      }
     }
-    String destId = destIdOpt.get();
-    Optional<StationKey> keyOpt = parseStationKey(destId);
-    Optional<String> nameOpt =
-        keyOpt.isPresent() ? resolveStationName(resolver, keyOpt.get()) : Optional.empty();
-    String label = nameOpt.orElse(base);
-    if (label == null || label.isBlank()) {
-      label = destId;
-    }
-    if (containsIgnoreCase(label, destId)) {
-      return label;
-    }
-    return label + " (" + destId + ")";
+    return label == null || label.isBlank() ? "-" : label;
   }
 
   private Optional<String> resolveStationName(StationNameResolver resolver, StationKey key) {

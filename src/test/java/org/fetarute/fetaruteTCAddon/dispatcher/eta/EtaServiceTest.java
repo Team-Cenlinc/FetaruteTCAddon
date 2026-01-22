@@ -11,10 +11,17 @@ import static org.mockito.Mockito.when;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -38,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnServiceKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 
 class EtaServiceTest {
@@ -167,6 +175,189 @@ class EtaServiceTest {
     assertFalse(board.rows().isEmpty());
     EtaResult result = service.getForTicket(ticket.id().toString());
     assertTrue(result.eta().isAfter(readyAt.minusSeconds(1)));
+  }
+
+  @Test
+  void boardIncludesEndRouteAndEndOperation() {
+    UUID routeUuid = UUID.randomUUID();
+    UUID worldId = UUID.randomUUID();
+    NodeId start = NodeId.of("SURN:S:AAA:1");
+    NodeId passStation = NodeId.of("SURN:S:CCC:1");
+    NodeId depot = NodeId.of("SURN:D:DEPOT:1");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("SURN:L1:R1"), List.of(start, passStation, depot), Optional.empty());
+    RailGraph graph = buildGraph(start, passStation, 60);
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    List<RouteStop> stops =
+        List.of(
+            new RouteStop(
+                routeUuid,
+                0,
+                Optional.empty(),
+                Optional.of(start.value()),
+                Optional.empty(),
+                RouteStopPassType.STOP,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                1,
+                Optional.empty(),
+                Optional.of(passStation.value()),
+                Optional.empty(),
+                RouteStopPassType.PASS,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                2,
+                Optional.empty(),
+                Optional.of(depot.value()),
+                Optional.empty(),
+                RouteStopPassType.PASS,
+                Optional.empty()));
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(any())).thenReturn(stops);
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any()))
+        .thenReturn(new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()));
+
+    TrainSnapshotStore snapshotStore = new TrainSnapshotStore();
+    snapshotStore.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            Instant.now(),
+            worldId,
+            routeUuid,
+            route.id(),
+            0,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+
+    EtaService service =
+        new EtaService(
+            snapshotStore,
+            railGraphService,
+            routeDefinitions,
+            occupancyManager,
+            HeadwayRule.fixed(Duration.ZERO),
+            () -> 2,
+            () -> 0,
+            () -> 2);
+
+    BoardResult board = service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10));
+
+    assertFalse(board.rows().isEmpty());
+    BoardResult.BoardRow row = board.rows().get(0);
+    assertEquals("SURN:CCC", row.endRouteId().orElse(""));
+    assertEquals("SURN:AAA", row.endOperationId().orElse(""));
+  }
+
+  @Test
+  void boardReturnRouteUsesNotInServiceForEndOperation() {
+    UUID routeUuid = UUID.randomUUID();
+    UUID worldId = UUID.randomUUID();
+    NodeId start = NodeId.of("SURN:S:AAA:1");
+    NodeId end = NodeId.of("SURN:S:BBB:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("SURN:L1:R1"), List.of(start, end), Optional.empty());
+    RailGraph graph = buildGraph(start, end, 60);
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    List<RouteStop> stops =
+        List.of(
+            new RouteStop(
+                routeUuid,
+                0,
+                Optional.empty(),
+                Optional.of(start.value()),
+                Optional.empty(),
+                RouteStopPassType.STOP,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                1,
+                Optional.empty(),
+                Optional.of(end.value()),
+                Optional.empty(),
+                RouteStopPassType.TERMINATE,
+                Optional.empty()));
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(any())).thenReturn(stops);
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any()))
+        .thenReturn(new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()));
+
+    TrainSnapshotStore snapshotStore = new TrainSnapshotStore();
+    snapshotStore.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            Instant.now(),
+            worldId,
+            routeUuid,
+            route.id(),
+            0,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+
+    StorageProvider provider = mock(StorageProvider.class);
+    RouteRepository routeRepo = mock(RouteRepository.class);
+    when(provider.routes()).thenReturn(routeRepo);
+    when(routeRepo.findById(routeUuid))
+        .thenReturn(
+            Optional.of(
+                new Route(
+                    routeUuid,
+                    "R1",
+                    UUID.randomUUID(),
+                    "Return",
+                    Optional.empty(),
+                    RoutePatternType.LOCAL,
+                    RouteOperationType.RETURN,
+                    Optional.empty(),
+                    Optional.empty(),
+                    Map.of(),
+                    Instant.now(),
+                    Instant.now())));
+
+    EtaService service =
+        new EtaService(
+            snapshotStore,
+            railGraphService,
+            routeDefinitions,
+            occupancyManager,
+            HeadwayRule.fixed(Duration.ZERO),
+            () -> 2,
+            () -> 0,
+            () -> 2);
+    service.attachStorageProvider(provider);
+
+    BoardResult board = service.getBoard("SURN", "BBB", null, Duration.ofMinutes(10));
+
+    assertFalse(board.rows().isEmpty());
+    BoardResult.BoardRow row = board.rows().get(0);
+    assertEquals("回库", row.endOperation());
+    assertEquals("OUT_OF_SERVICE", row.endOperationId().orElse(""));
   }
 
   private RailGraph buildGraph(NodeId start, NodeId end, int lengthBlocks) {

@@ -186,6 +186,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
     this.localeManager.reload(configManager.current().locale());
     this.storageManager.apply(configManager.current());
+    if (etaService != null) {
+      etaService.attachStorageProvider(storageManager.provider().orElse(null));
+    }
     initRouteDefinitionCache();
     restartRuntimeMonitor();
     initSpawnScheduler();
@@ -468,6 +471,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     : 2);
     if (layoverRegistry != null) {
       etaService.attachLayoverRegistry(layoverRegistry);
+    }
+    if (storageManager != null && storageManager.isReady()) {
+      etaService.attachStorageProvider(storageManager.provider().orElse(null));
     }
   }
 

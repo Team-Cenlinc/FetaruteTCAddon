@@ -4,12 +4,19 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.cache.EtaCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ArrivingClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ClearanceModel;
@@ -47,6 +54,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
  * ETA 服务（唯一入口）。
@@ -90,6 +98,7 @@ public final class EtaService {
   private volatile SpawnManager spawnManager;
   private volatile TicketAssigner ticketAssigner;
   private volatile LayoverRegistry layoverRegistry;
+  private volatile StorageProvider storageProvider;
 
   private final java.util.function.IntSupplier lookaheadEdges;
   private final java.util.function.IntSupplier minClearEdges;
@@ -123,6 +132,11 @@ public final class EtaService {
   /** 绑定 LayoverRegistry，用于未发车 ETA 的待命时间修正。 */
   public void attachLayoverRegistry(LayoverRegistry layoverRegistry) {
     this.layoverRegistry = layoverRegistry;
+  }
+
+  /** 绑定 StorageProvider，用于站牌终点站解析与名称辅助。 */
+  public void attachStorageProvider(StorageProvider storageProvider) {
+    this.storageProvider = storageProvider;
   }
 
   /**
@@ -402,6 +416,11 @@ public final class EtaService {
     Duration window = horizon == null ? Duration.ofMinutes(10) : horizon;
     Instant cutoff = now.plus(window);
     List<BoardRowEntry> rows = new ArrayList<>();
+    Map<UUID, TerminalInfo> terminalCache = new HashMap<>();
+    TerminalResolveContext terminalContext =
+        new TerminalResolveContext(
+            storageProvider, new HashMap<>(), new HashMap<>(), new HashMap<>());
+    Set<UUID> returnTicketSeen = new HashSet<>();
 
     for (var entry : snapshotStore.snapshot().entrySet()) {
       String trainName = entry.getKey();
@@ -430,7 +449,11 @@ public final class EtaService {
       TargetSelection target = targetOpt.get();
       String lineName = resolveLineName(route);
       String routeId = route.id().value();
-      DestinationInfo destInfo = resolveDestinationInfo(route);
+      TerminalInfo terminal =
+          resolveTerminalInfo(route, snap.routeUuid(), terminalCache, terminalContext);
+      DestinationInfo destInfo = resolveBoardDestination(route, terminal);
+      DestinationInfo endRoute = terminal.endRoute();
+      DestinationInfo endOperation = terminal.endOperation();
       String platform = resolvePlatform(target.nodeId());
       rows.add(
           new BoardRowEntry(
@@ -440,6 +463,10 @@ public final class EtaService {
                   routeId,
                   destInfo.label(),
                   destInfo.destinationId(),
+                  endRoute.label(),
+                  endRoute.destinationId(),
+                  endOperation.label(),
+                  endOperation.destinationId(),
                   platform,
                   result.statusText(),
                   result.reasons())));
@@ -453,7 +480,15 @@ public final class EtaService {
     }
 
     for (SpawnTicket ticket : pendingTickets) {
-      buildBoardRowForTicket(ticket, stationId, lineId, now, cutoff).ifPresent(rows::add);
+      UUID routeUuid =
+          ticket != null && ticket.service() != null ? ticket.service().routeId() : null;
+      if (routeUuid != null && isReturnRoute(routeUuid, terminalContext)) {
+        if (!returnTicketSeen.add(routeUuid)) {
+          continue;
+        }
+      }
+      buildBoardRowForTicket(ticket, stationId, lineId, now, cutoff, terminalCache, terminalContext)
+          .ifPresent(rows::add);
     }
 
     SpawnManager manager = this.spawnManager;
@@ -467,7 +502,16 @@ public final class EtaService {
         if (slotKeyOpt.isPresent() && !seenSlots.add(slotKeyOpt.get())) {
           continue;
         }
-        buildBoardRowForTicket(ticket, stationId, lineId, now, cutoff).ifPresent(rows::add);
+        UUID routeUuid =
+            ticket != null && ticket.service() != null ? ticket.service().routeId() : null;
+        if (routeUuid != null && isReturnRoute(routeUuid, terminalContext)) {
+          if (!returnTicketSeen.add(routeUuid)) {
+            continue;
+          }
+        }
+        buildBoardRowForTicket(
+                ticket, stationId, lineId, now, cutoff, terminalCache, terminalContext)
+            .ifPresent(rows::add);
       }
     }
 
@@ -480,7 +524,13 @@ public final class EtaService {
   }
 
   private Optional<BoardRowEntry> buildBoardRowForTicket(
-      SpawnTicket ticket, String stationId, String lineId, Instant now, Instant cutoff) {
+      SpawnTicket ticket,
+      String stationId,
+      String lineId,
+      Instant now,
+      Instant cutoff,
+      Map<UUID, TerminalInfo> terminalCache,
+      TerminalResolveContext terminalContext) {
     if (ticket == null || ticket.service() == null) {
       return Optional.empty();
     }
@@ -506,7 +556,11 @@ public final class EtaService {
     TargetSelection target = targetOpt.get();
     String lineName = ticket.service().lineCode();
     String routeId = route.id().value();
-    DestinationInfo destInfo = resolveDestinationInfo(route);
+    TerminalInfo terminal =
+        resolveTerminalInfo(route, ticket.service().routeId(), terminalCache, terminalContext);
+    DestinationInfo destInfo = resolveBoardDestination(route, terminal);
+    DestinationInfo endRoute = terminal.endRoute();
+    DestinationInfo endOperation = terminal.endOperation();
     String platform = resolvePlatform(target.nodeId());
     return Optional.of(
         new BoardRowEntry(
@@ -516,6 +570,10 @@ public final class EtaService {
                 routeId,
                 destInfo.label(),
                 destInfo.destinationId(),
+                endRoute.label(),
+                endRoute.destinationId(),
+                endOperation.label(),
+                endOperation.destinationId(),
                 platform,
                 result.statusText(),
                 result.reasons())));
@@ -934,6 +992,24 @@ public final class EtaService {
     return parseRouteId(route.id()).map(RouteCodeParts::line).orElse(route.id().value());
   }
 
+  private DestinationInfo resolveBoardDestination(RouteDefinition route, TerminalInfo terminal) {
+    DestinationInfo base = terminal != null ? terminal.endRoute() : DestinationInfo.empty();
+    if (route == null) {
+      return base;
+    }
+    Optional<RouteMetadata> metaOpt = route.metadata();
+    if (metaOpt.isPresent()) {
+      Optional<String> displayNameOpt = metaOpt.get().displayName();
+      if (displayNameOpt.isPresent() && !displayNameOpt.get().isBlank()) {
+        return new DestinationInfo(displayNameOpt.get(), base.destinationId());
+      }
+    }
+    if (!base.isBlank()) {
+      return base;
+    }
+    return resolveDestinationInfo(route);
+  }
+
   private String resolveDestination(RouteDefinition route) {
     if (route == null || route.waypoints().isEmpty()) {
       return "-";
@@ -958,6 +1034,214 @@ public final class EtaService {
     String label = resolveDestination(route);
     Optional<String> destinationId = resolveDestinationId(route);
     return new DestinationInfo(label, destinationId);
+  }
+
+  private TerminalInfo resolveTerminalInfo(
+      RouteDefinition route,
+      UUID routeUuid,
+      Map<UUID, TerminalInfo> terminalCache,
+      TerminalResolveContext terminalContext) {
+    if (route == null || route.id() == null || route.id().value() == null) {
+      return TerminalInfo.empty();
+    }
+    if (terminalCache != null && routeUuid != null) {
+      TerminalInfo cached = terminalCache.get(routeUuid);
+      if (cached != null) {
+        return cached;
+      }
+    }
+    DestinationInfo endRoute = resolveEndRoute(route, terminalContext);
+    DestinationInfo endOperation = resolveEndOperation(route, terminalContext, endRoute);
+    if (isReturnRoute(routeUuid, terminalContext)) {
+      endOperation = new DestinationInfo("回库", Optional.of("OUT_OF_SERVICE"));
+    }
+    TerminalInfo terminal = new TerminalInfo(endRoute, endOperation);
+    if (terminalCache != null && routeUuid != null) {
+      terminalCache.put(routeUuid, terminal);
+    }
+    return terminal;
+  }
+
+  private DestinationInfo resolveEndRoute(RouteDefinition route, TerminalResolveContext context) {
+    Optional<DestinationInfo> endRouteOpt = findLastStationDestination(route, true, context);
+    if (endRouteOpt.isPresent()) {
+      return endRouteOpt.get();
+    }
+    Optional<DestinationInfo> fallback = findLastStationDestination(route);
+    return fallback.orElse(DestinationInfo.empty());
+  }
+
+  private DestinationInfo resolveEndOperation(
+      RouteDefinition route, TerminalResolveContext context, DestinationInfo endRoute) {
+    Optional<DestinationInfo> endOperationOpt = findLastStationDestination(route, false, context);
+    return endOperationOpt.orElse(endRoute);
+  }
+
+  private Optional<DestinationInfo> findLastStationDestination(RouteDefinition route) {
+    if (route == null || route.waypoints().isEmpty()) {
+      return Optional.empty();
+    }
+    List<NodeId> waypoints = route.waypoints();
+    for (int i = waypoints.size() - 1; i >= 0; i--) {
+      NodeId nodeId = waypoints.get(i);
+      Optional<DestinationInfo> infoOpt = resolveStationDestination(nodeId);
+      if (infoOpt.isPresent()) {
+        return infoOpt;
+      }
+    }
+    return Optional.empty();
+  }
+
+  private Optional<DestinationInfo> findLastStationDestination(
+      RouteDefinition route, boolean includePass, TerminalResolveContext context) {
+    if (route == null || route.id() == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return Optional.empty();
+    }
+    for (int i = stops.size() - 1; i >= 0; i--) {
+      RouteStop stop = stops.get(i);
+      if (stop == null) {
+        continue;
+      }
+      if (!includePass && stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      Optional<DestinationInfo> infoOpt = resolveStationDestination(stop, context);
+      if (infoOpt.isPresent()) {
+        return infoOpt;
+      }
+    }
+    return Optional.empty();
+  }
+
+  private Optional<DestinationInfo> resolveStationDestination(
+      RouteStop stop, TerminalResolveContext context) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    if (stop.stationId().isPresent()) {
+      return resolveStationDestination(stop.stationId().get(), context);
+    }
+    if (stop.waypointNodeId().isPresent()) {
+      return resolveStationDestination(NodeId.of(stop.waypointNodeId().get()));
+    }
+    return Optional.empty();
+  }
+
+  private Optional<DestinationInfo> resolveStationDestination(NodeId nodeId) {
+    if (nodeId == null) {
+      return Optional.empty();
+    }
+    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeId);
+    if (metaOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    WaypointMetadata meta = metaOpt.get();
+    if (meta.kind() != WaypointKind.STATION) {
+      return Optional.empty();
+    }
+    String operator = meta.operator();
+    String station = meta.originStation();
+    if (operator == null || operator.isBlank() || station == null || station.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(new DestinationInfo(station, Optional.of(operator + ":" + station)));
+  }
+
+  private Optional<DestinationInfo> resolveStationDestination(
+      UUID stationId, TerminalResolveContext context) {
+    if (stationId == null || context == null) {
+      return Optional.empty();
+    }
+    Map<UUID, Optional<DestinationInfo>> stationCache = context.stationCache();
+    if (stationCache.containsKey(stationId)) {
+      return stationCache.get(stationId);
+    }
+    StorageProvider provider = context.provider();
+    Optional<DestinationInfo> result = Optional.empty();
+    if (provider != null) {
+      Optional<Station> stationOpt = provider.stations().findById(stationId);
+      if (stationOpt.isPresent()) {
+        result = resolveStationDestination(stationOpt.get(), context);
+      }
+    }
+    stationCache.put(stationId, result);
+    return result;
+  }
+
+  private Optional<DestinationInfo> resolveStationDestination(
+      Station station, TerminalResolveContext context) {
+    if (station == null) {
+      return Optional.empty();
+    }
+    if (station.graphNodeId().isPresent()) {
+      Optional<DestinationInfo> infoOpt =
+          resolveStationDestination(NodeId.of(station.graphNodeId().get()));
+      if (infoOpt.isPresent()) {
+        return infoOpt;
+      }
+    }
+    String stationCode = station.code();
+    if (stationCode == null || stationCode.isBlank() || context == null) {
+      return Optional.empty();
+    }
+    Optional<String> operatorOpt = resolveOperatorCode(station.operatorId(), context);
+    if (operatorOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    String operator = operatorOpt.get();
+    if (operator.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(new DestinationInfo(stationCode, Optional.of(operator + ":" + stationCode)));
+  }
+
+  private Optional<String> resolveOperatorCode(UUID operatorId, TerminalResolveContext context) {
+    if (operatorId == null || context == null) {
+      return Optional.empty();
+    }
+    Map<UUID, Optional<String>> operatorCache = context.operatorCache();
+    if (operatorCache.containsKey(operatorId)) {
+      return operatorCache.get(operatorId);
+    }
+    StorageProvider provider = context.provider();
+    Optional<String> result = Optional.empty();
+    if (provider != null) {
+      result = provider.operators().findById(operatorId).map(Operator::code);
+      if (result.isPresent() && result.get() != null) {
+        String trimmed = result.get().trim();
+        result = trimmed.isBlank() ? Optional.empty() : Optional.of(trimmed);
+      }
+    }
+    operatorCache.put(operatorId, result);
+    return result;
+  }
+
+  private boolean isReturnRoute(UUID routeUuid, TerminalResolveContext context) {
+    return resolveOperationType(routeUuid, context)
+        .map(type -> type == RouteOperationType.RETURN)
+        .orElse(false);
+  }
+
+  private Optional<RouteOperationType> resolveOperationType(
+      UUID routeUuid, TerminalResolveContext context) {
+    if (routeUuid == null || context == null) {
+      return Optional.empty();
+    }
+    Map<UUID, Optional<RouteOperationType>> cache = context.routeOperationCache();
+    if (cache.containsKey(routeUuid)) {
+      return cache.get(routeUuid);
+    }
+    StorageProvider provider = context.provider();
+    Optional<RouteOperationType> result = Optional.empty();
+    if (provider != null) {
+      result = provider.routes().findById(routeUuid).map(r -> r.operationType());
+    }
+    cache.put(routeUuid, result);
+    return result;
   }
 
   private Optional<String> resolveDestinationId(RouteDefinition route) {
@@ -1012,10 +1296,42 @@ public final class EtaService {
 
   private record BoardRowEntry(long etaMillis, BoardResult.BoardRow row) {}
 
+  private record TerminalInfo(DestinationInfo endRoute, DestinationInfo endOperation) {
+    private TerminalInfo {
+      endRoute = endRoute == null ? DestinationInfo.empty() : endRoute;
+      endOperation = endOperation == null ? endRoute : endOperation;
+    }
+
+    private static TerminalInfo empty() {
+      DestinationInfo empty = DestinationInfo.empty();
+      return new TerminalInfo(empty, empty);
+    }
+  }
+
+  private record TerminalResolveContext(
+      StorageProvider provider,
+      Map<UUID, Optional<DestinationInfo>> stationCache,
+      Map<UUID, Optional<String>> operatorCache,
+      Map<UUID, Optional<RouteOperationType>> routeOperationCache) {
+    private TerminalResolveContext {
+      stationCache = stationCache == null ? new HashMap<>() : stationCache;
+      operatorCache = operatorCache == null ? new HashMap<>() : operatorCache;
+      routeOperationCache = routeOperationCache == null ? new HashMap<>() : routeOperationCache;
+    }
+  }
+
   private record DestinationInfo(String label, Optional<String> destinationId) {
     private DestinationInfo {
       label = label == null || label.isBlank() ? "-" : label;
       destinationId = destinationId == null ? Optional.empty() : destinationId;
+    }
+
+    private static DestinationInfo empty() {
+      return new DestinationInfo("-", Optional.empty());
+    }
+
+    private boolean isBlank() {
+      return "-".equals(label) && destinationId.isEmpty();
     }
   }
 

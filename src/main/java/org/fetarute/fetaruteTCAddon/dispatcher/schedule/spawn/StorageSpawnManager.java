@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -30,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <ul>
  *   <li>仅对 {@link LineStatus#ACTIVE} 且配置了 spawnFreqBaselineSec 的线路生成票据
  *   <li>同一条线路可配置多条可发车 OPERATION route：通过 route.metadata 的 {@code spawn_weight} 控制长期比例
+ *   <li>RETURN route 也会进入 SpawnPlan（用于 Layover 复用与站牌预测）
  *   <li>若存在多条 CRET route，则要求这些 route 的 depotNodeId 一致（不允许跨 depot 混发）
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
  * </ul>
@@ -40,6 +42,7 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
   private final Consumer<String> debugLogger;
 
   private SpawnPlan plan = SpawnPlan.empty();
+  private SpawnPlan forecastPlan = SpawnPlan.empty();
   private Instant lastPlanRefresh = Instant.EPOCH;
 
   private final Map<SpawnServiceKey, ServiceState> states = new HashMap<>();
@@ -119,9 +122,12 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
     if (now == null || horizon == null || horizon.isZero() || horizon.isNegative()) {
       return List.of();
     }
-    SpawnPlan planSnapshot = this.plan;
+    SpawnPlan planSnapshot = this.forecastPlan;
     if (planSnapshot == null || planSnapshot.services().isEmpty()) {
-      return List.of();
+      planSnapshot = this.plan;
+      if (planSnapshot == null || planSnapshot.services().isEmpty()) {
+        return List.of();
+      }
     }
     int limitPerService = Math.max(1, Math.min(20, maxPerService));
     Instant cutoff = now.plus(horizon);
@@ -153,6 +159,7 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
     }
     SpawnPlan refreshed = buildPlan(provider, now);
     plan = refreshed;
+    forecastPlan = buildForecastPlan(provider, now, refreshed);
     lastPlanRefresh = now;
     // 清理已不存在的 service 状态
     java.util.Set<SpawnServiceKey> live = new java.util.HashSet<>();
@@ -265,7 +272,42 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
     return out;
   }
 
-  private SpawnPlan buildPlan(StorageProvider provider, Instant now) {
+  private SpawnPlan buildForecastPlan(StorageProvider provider, Instant now, SpawnPlan basePlan) {
+    if (provider == null) {
+      return basePlan == null ? SpawnPlan.empty() : basePlan;
+    }
+    List<SpawnService> services = new ArrayList<>();
+    HashSet<SpawnServiceKey> known = new HashSet<>();
+    if (basePlan != null) {
+      for (SpawnService service : basePlan.services()) {
+        if (service == null || service.key() == null) {
+          continue;
+        }
+        if (known.add(service.key())) {
+          services.add(service);
+        }
+      }
+    }
+
+    List<SpawnService> returnServices = buildReturnServices(provider);
+    for (SpawnService service : returnServices) {
+      if (service == null || service.key() == null) {
+        continue;
+      }
+      if (known.add(service.key())) {
+        services.add(service);
+      }
+    }
+
+    services.sort(
+        Comparator.comparing((SpawnService s) -> s.operatorCode().toLowerCase(Locale.ROOT))
+            .thenComparing(s -> s.lineCode().toLowerCase(Locale.ROOT))
+            .thenComparing(s -> s.routeCode().toLowerCase(Locale.ROOT)));
+    debugLogger.accept("SpawnForecast 刷新: services=" + services.size() + " at " + now);
+    return new SpawnPlan(now, services);
+  }
+
+  private List<SpawnService> buildReturnServices(StorageProvider provider) {
     List<SpawnService> services = new ArrayList<>();
     List<Company> companies = provider.companies().listAll();
     for (Company company : companies) {
@@ -288,7 +330,7 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
             continue;
           }
           Duration headway = Duration.ofSeconds(baseline.get());
-          List<RouteSelection> selections = selectSpawnRoutes(provider, line);
+          List<RouteSelection> selections = selectForecastRoutes(provider, line);
           if (selections.isEmpty()) {
             continue;
           }
@@ -316,12 +358,79 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
         }
       }
     }
+    return services;
+  }
+
+  private SpawnPlan buildPlan(StorageProvider provider, Instant now) {
+    List<SpawnService> services = new ArrayList<>();
+    List<Company> companies = provider.companies().listAll();
+    for (Company company : companies) {
+      if (company == null) {
+        continue;
+      }
+      for (Operator operator : provider.operators().listByCompany(company.id())) {
+        if (operator == null) {
+          continue;
+        }
+        for (Line line : provider.lines().listByOperator(operator.id())) {
+          if (line == null) {
+            continue;
+          }
+          if (line.status() != LineStatus.ACTIVE) {
+            continue;
+          }
+          Optional<Integer> baseline = line.spawnFreqBaselineSec();
+          if (baseline.isEmpty() || baseline.get() == null || baseline.get() <= 0) {
+            continue;
+          }
+          Duration headway = Duration.ofSeconds(baseline.get());
+          List<RouteSelection> selections = selectSpawnRoutes(provider, line);
+          appendServices(services, company, operator, line, headway, selections);
+
+          List<RouteSelection> returnSelections = selectForecastRoutes(provider, line);
+          appendServices(services, company, operator, line, headway, returnSelections);
+        }
+      }
+    }
     services.sort(
         Comparator.comparing((SpawnService s) -> s.operatorCode().toLowerCase(Locale.ROOT))
             .thenComparing(s -> s.lineCode().toLowerCase(Locale.ROOT))
             .thenComparing(s -> s.routeCode().toLowerCase(Locale.ROOT)));
     debugLogger.accept("SpawnPlan 刷新: services=" + services.size() + " at " + now);
     return new SpawnPlan(now, services);
+  }
+
+  private void appendServices(
+      List<SpawnService> services,
+      Company company,
+      Operator operator,
+      Line line,
+      Duration headway,
+      List<RouteSelection> selections) {
+    if (services == null || selections == null || selections.isEmpty()) {
+      return;
+    }
+    long sumWeight = selections.stream().mapToLong(RouteSelection::spawnWeight).sum();
+    if (sumWeight <= 0L) {
+      return;
+    }
+    for (RouteSelection selection : selections) {
+      Duration routeHeadway = scaleHeadway(headway, sumWeight, selection.spawnWeight());
+      SpawnService service =
+          new SpawnService(
+              new SpawnServiceKey(selection.route().id()),
+              company.id(),
+              company.code(),
+              operator.id(),
+              operator.code(),
+              line.id(),
+              line.code(),
+              selection.route().id(),
+              selection.route().code(),
+              routeHeadway,
+              selection.depotNodeId());
+      services.add(service);
+    }
   }
 
   private List<RouteSelection> selectSpawnRoutes(StorageProvider provider, Line line) {
@@ -444,6 +553,52 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
     }
 
     return enabled;
+  }
+
+  private List<RouteSelection> selectForecastRoutes(StorageProvider provider, Line line) {
+    Objects.requireNonNull(provider, "provider");
+    if (line == null) {
+      return List.of();
+    }
+    List<Route> routes = provider.routes().listByLine(line.id());
+    if (routes.isEmpty()) {
+      return List.of();
+    }
+    List<RouteSelection> candidates = new ArrayList<>();
+    for (Route route : routes) {
+      if (route == null || route.operationType() != RouteOperationType.RETURN) {
+        continue;
+      }
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      if (stops.isEmpty()) {
+        continue;
+      }
+      RouteStop first = stops.get(0);
+      Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
+      boolean depotSpawn = cret.isPresent();
+      String startNode =
+          cret.orElseGet(
+              () ->
+                  first != null && first.waypointNodeId().isPresent()
+                      ? first.waypointNodeId().get()
+                      : "");
+      if (startNode == null || startNode.isBlank()) {
+        continue;
+      }
+      Optional<Boolean> enabledFlag = readBoolean(route.metadata(), "spawn_enabled");
+      if (enabledFlag.isPresent() && !enabledFlag.get()) {
+        continue;
+      }
+      Optional<Integer> weightOpt = readInt(route.metadata(), "spawn_weight");
+      int weight = weightOpt.orElse(1);
+      if (weight <= 0) {
+        continue;
+      }
+      candidates.add(
+          new RouteSelection(route, startNode.trim(), depotSpawn, enabledFlag, weightOpt)
+              .withResolvedWeight(weight));
+    }
+    return candidates;
   }
 
   private Optional<Boolean> readBoolean(Map<String, Object> meta, String key) {

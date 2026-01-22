@@ -144,7 +144,7 @@ command:
       header: "<prefix> <dark_aqua>ETA 站牌</dark_aqua> <gray>(station=<white><station></white>, line=<white><line></white>, rows=<white><rows></white>)</gray>"
       empty: "<prefix> <gray>暂无站牌输出</gray>"
       truncated: "<gray>… 已截断，缩小站牌范围或降低 horizon</gray>"
-      row: "<gray>-</gray> <white><line></white> <gray>(route=<white><route></white>)</gray> <gray>-></gray> <white><dest></white> <gray>plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
+      row: "<gray>-</gray> <white><line></white> <gray>(route=<white><route></white>)</gray> <gray>-></gray> <white><dest></white> <gray>(end=<white><end_route></white> op=<white><end_operation></white>) plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
 
   train:
     help:

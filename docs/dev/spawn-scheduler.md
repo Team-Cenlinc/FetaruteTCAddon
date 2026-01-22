@@ -27,6 +27,7 @@
   - `spawn_weight: <int>`：权重（`>0` 才视为可发车）。例如 `1` 与 `2` 表示长期约 1:2 的发车比例。
   - `spawn_enabled: true|false`：可选开关；若显式为 `false`，即使有 `spawn_weight` 也不会参与发车。
 - 若同一线路存在多条候选 route，但没有任何 route 配置 `spawn_weight`（也没有显式 `spawn_enabled=true`），为避免误发车将跳过该线路。
+- `RETURN` route 默认参与 SpawnPlan（用于 Layover 复用与站牌预测），但不会从 Depot 生成列车。
 
 ### headway 分摊
 

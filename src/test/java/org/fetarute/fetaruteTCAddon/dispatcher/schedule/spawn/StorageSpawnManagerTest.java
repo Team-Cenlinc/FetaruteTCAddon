@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -161,6 +162,32 @@ class StorageSpawnManagerTest {
     assertEquals(0, manager.snapshotPlan().size());
   }
 
+  @Test
+  void snapshotForecastIncludesReturnRoutes() {
+    StorageProvider provider = mockProvider(operationAndReturnRoutes());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 1, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    manager.pollDueTickets(provider, now);
+
+    List<SpawnTicket> forecast = manager.snapshotForecast(now, Duration.ofMinutes(10), 1);
+    Set<String> routes =
+        forecast.stream().map(t -> t.service().routeCode()).collect(Collectors.toSet());
+    Set<String> plannedRoutes =
+        manager.snapshotPlan().services().stream()
+            .map(SpawnService::routeCode)
+            .collect(Collectors.toSet());
+
+    assertEquals(2, manager.snapshotPlan().size());
+    assertTrue(routes.contains("R1"));
+    assertTrue(routes.contains("RET"));
+    assertTrue(plannedRoutes.contains("R1"));
+    assertTrue(plannedRoutes.contains("RET"));
+  }
+
   private static Fixture enabledRoute() {
     UUID companyId = UUID.randomUUID();
     UUID ownerIdentityId = UUID.randomUUID();
@@ -233,6 +260,47 @@ class StorageSpawnManagerTest {
             Optional.of("CRET SURN:D:DEPOT:1"));
 
     return new Fixture(company, operator, line, List.of(route), Map.of(routeId, List.of(cret)));
+  }
+
+  private static Fixture operationAndReturnRoutes() {
+    Fixture base = enabledRoute();
+    UUID route2Id = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+
+    Route returnRoute =
+        new Route(
+            route2Id,
+            "RET",
+            base.line().id(),
+            "Return",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.RETURN,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    RouteStop start =
+        new RouteStop(
+            route2Id,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:S:RET:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.empty());
+
+    return new Fixture(
+        base.company(),
+        base.operator(),
+        base.line(),
+        List.of(base.routes().get(0), returnRoute),
+        Map.of(
+            base.routes().get(0).id(),
+            base.stopsByRouteId().get(base.routes().get(0).id()),
+            returnRoute.id(),
+            List.of(start)));
   }
 
   private static Fixture twoCandidatesNoneEnabled() {

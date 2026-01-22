@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -155,6 +156,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     RouteDefinition route = routeOpt.get();
+
+    if (routeEntity.operationType() == RouteOperationType.RETURN) {
+      return tryReuseLayover(ticket, service, route, now, false);
+    }
 
     List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
         provider.routeStops().listByRoute(routeEntity.id());
