@@ -23,4 +23,9 @@ public interface SpawnManager {
 
   /** 返回当前计划快照（用于诊断输出）。 */
   SpawnPlan snapshotPlan();
+
+  /** 返回当前队列快照（用于 ETA/诊断）。 */
+  default List<SpawnTicket> snapshotQueue() {
+    return List.of();
+  }
 }

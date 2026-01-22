@@ -11,6 +11,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -20,6 +21,8 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -49,6 +52,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
  * 运行时调度控制：推进点触发下发目的地 + 信号等级变化时控车。
@@ -69,12 +74,15 @@ public final class RuntimeDispatchService {
   private final SignNodeRegistry signNodeRegistry;
   private final LayoverRegistry layoverRegistry;
   private final ConfigManager configManager;
+  private final StorageManager storageManager;
   private final TrainConfigResolver trainConfigResolver;
   private final TrainLaunchManager trainLaunchManager = new TrainLaunchManager();
   private final Consumer<String> debugLogger;
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Integer> operatorPriorityCache =
+      new java.util.concurrent.ConcurrentHashMap<>();
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
@@ -86,6 +94,7 @@ public final class RuntimeDispatchService {
       SignNodeRegistry signNodeRegistry,
       LayoverRegistry layoverRegistry,
       ConfigManager configManager,
+      StorageManager storageManager,
       TrainConfigResolver trainConfigResolver,
       Consumer<String> debugLogger) {
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
@@ -95,6 +104,7 @@ public final class RuntimeDispatchService {
     this.signNodeRegistry = Objects.requireNonNull(signNodeRegistry, "signNodeRegistry");
     this.layoverRegistry = Objects.requireNonNull(layoverRegistry, "layoverRegistry");
     this.configManager = Objects.requireNonNull(configManager, "configManager");
+    this.storageManager = storageManager;
     this.trainConfigResolver = Objects.requireNonNull(trainConfigResolver, "trainConfigResolver");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
   }
@@ -154,7 +164,7 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
-    int priority = 0;
+    int priority = resolvePriority(properties, route);
 
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
@@ -292,7 +302,7 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
-    int priority = 0; // TODO: 后续从列车属性或线路类型读取优先级
+    int priority = resolvePriority(properties, route);
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges());
@@ -1399,6 +1409,73 @@ public final class RuntimeDispatchService {
         .findByNodeId(nodeId, null)
         .map(info -> info.definition().trainCartsDestination().orElse(nodeId.value()))
         .orElse(nodeId.value());
+  }
+
+  private int resolvePriority(TrainProperties properties, RouteDefinition route) {
+    Optional<Integer> tagPriority = TrainTagHelper.readIntTag(properties, "FTA_PRIORITY");
+    if (tagPriority.isPresent()) {
+      return tagPriority.get();
+    }
+    Optional<String> operatorOpt = resolveOperatorCode(properties, route);
+    if (operatorOpt.isEmpty()) {
+      return 0;
+    }
+    String operatorCode = operatorOpt.get();
+    String key = operatorCode.trim().toLowerCase(Locale.ROOT);
+    Integer cached = operatorPriorityCache.get(key);
+    if (cached != null) {
+      return cached;
+    }
+    Optional<Integer> loaded = loadOperatorPriority(operatorCode);
+    if (loaded.isPresent()) {
+      operatorPriorityCache.putIfAbsent(key, loaded.get());
+      return loaded.get();
+    }
+    return 0;
+  }
+
+  private Optional<String> resolveOperatorCode(TrainProperties properties, RouteDefinition route) {
+    Optional<String> tagOpt =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_OPERATOR_CODE);
+    if (tagOpt.isPresent()) {
+      return tagOpt;
+    }
+    if (route == null || route.id() == null || route.id().value() == null) {
+      return Optional.empty();
+    }
+    String raw = route.id().value();
+    String[] parts = raw.split(":");
+    if (parts.length < 3) {
+      return Optional.empty();
+    }
+    String op = parts[0].trim();
+    return op.isEmpty() ? Optional.empty() : Optional.of(op);
+  }
+
+  private Optional<Integer> loadOperatorPriority(String operatorCode) {
+    if (operatorCode == null || operatorCode.isBlank()) {
+      return Optional.empty();
+    }
+    StorageManager storage = storageManager;
+    if (storage == null || !storage.isReady()) {
+      return Optional.empty();
+    }
+    Optional<StorageProvider> providerOpt = storage.provider();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    for (Company company : provider.companies().listAll()) {
+      if (company == null) {
+        continue;
+      }
+      Optional<Operator> operatorOpt =
+          provider.operators().findByCompanyAndCode(company.id(), operatorCode);
+      if (operatorOpt.isPresent()) {
+        return Optional.of(operatorOpt.get().priority());
+      }
+    }
+    return Optional.empty();
   }
 
   private double resolveEdgeSpeedLimit(

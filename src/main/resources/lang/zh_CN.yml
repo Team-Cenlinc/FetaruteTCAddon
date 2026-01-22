@@ -59,6 +59,8 @@ command:
     hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
     hover-occupancy: "<gray>点击填充:</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
+    entry-eta: "<gray>/fta eta</gray> <white>-</white> <dark_aqua>ETA 诊断输出</dark_aqua>"
+    hover-eta: "<gray>点击填充:</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
     entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置（速度/加减速）</dark_aqua>"
     hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置（速度/加减速）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
@@ -111,6 +113,38 @@ command:
       hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\"</dark_aqua>"
       entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
       hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\"</dark_aqua>"
+
+  eta:
+    not-ready: "<prefix> <red>ETA 模块未就绪</red>"
+    help:
+      header: "<prefix> <dark_aqua>ETA 诊断命令</dark_aqua>"
+      entry-train: "<gray>/fta eta train</gray> <white>-</white> <dark_aqua>查看列车 ETA</dark_aqua>"
+      hover-train: "<gray>点击填充:</gray> <white>/fta eta train </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;train&gt;</white>"
+      entry-train-station: "<gray>/fta eta train station</gray> <white>-</white> <dark_aqua>按站点估算 ETA</dark_aqua>"
+      hover-train-station: "<gray>点击填充:</gray> <white>/fta eta train station </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;train&gt; &lt;stationId&gt;</white>"
+      entry-train-platform: "<gray>/fta eta train platform</gray> <white>-</white> <dark_aqua>按站台节点估算 ETA</dark_aqua>"
+      hover-train-platform: "<gray>点击填充:</gray> <white>/fta eta train platform </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;train&gt; &lt;nodeId&gt;</white>"
+      entry-ticket: "<gray>/fta eta ticket</gray> <white>-</white> <dark_aqua>查看票据 ETA</dark_aqua>"
+      hover-ticket: "<gray>点击填充:</gray> <white>/fta eta ticket </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;ticketId&gt;</white>"
+      entry-board: "<gray>/fta eta board</gray> <white>-</white> <dark_aqua>查看站牌 ETA</dark_aqua>"
+      hover-board: "<gray>点击填充:</gray> <white>/fta eta board </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;operator&gt; &lt;stationCode&gt; [lineId] [sec]</white>"
+    train:
+      header: "<prefix> <dark_aqua>ETA 诊断</dark_aqua> <gray>(train=<white><train></white>, target=<white><target></white>)</gray>"
+      summary: "<gray>-</gray> status=<white><status></white> arriving=<white><arriving></white> eta=<white><eta></white> at=<white><at></white> conf=<white><conf></white>"
+      breakdown: "<gray>-</gray> travel=<white><travel></white> dwell=<white><dwell></white> wait=<white><wait></white> minutes=<white><minutes></white>"
+      reasons: "<gray>-</gray> reasons=<white><reasons></white>"
+      snapshot: "<gray>-</gray> route=<white><route></white> index=<white><index></white> world=<white><world></white> signal=<white><signal></white> dwellRemaining=<white><dwell></white>"
+      snapshot-missing: "<gray>-</gray> <red>未找到运行时快照</red>"
+    ticket:
+      header: "<prefix> <dark_aqua>ETA 诊断</dark_aqua> <gray>(ticket=<white><ticket></white>)</gray>"
+      summary: "<gray>-</gray> status=<white><status></white> eta=<white><eta></white> at=<white><at></white> conf=<white><conf></white>"
+      breakdown: "<gray>-</gray> travel=<white><travel></white> dwell=<white><dwell></white> wait=<white><wait></white> minutes=<white><minutes></white>"
+      reasons: "<gray>-</gray> reasons=<white><reasons></white>"
+    board:
+      header: "<prefix> <dark_aqua>ETA 站牌</dark_aqua> <gray>(station=<white><station></white>, line=<white><line></white>, rows=<white><rows></white>)</gray>"
+      empty: "<prefix> <gray>暂无站牌输出</gray>"
+      truncated: "<gray>… 已截断，缩小站牌范围或降低 horizon</gray>"
+      row: "<gray>-</gray> <white><line></white> <gray>-></gray> <white><dest></white> <gray>plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
 
   train:
     help:

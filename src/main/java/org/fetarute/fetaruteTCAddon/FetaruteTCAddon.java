@@ -11,6 +11,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
@@ -25,6 +26,9 @@ import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
@@ -86,6 +90,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private AutoStationSignAction autoStationSignAction;
   private DepotSignAction depotSignAction;
   private OccupancyManager occupancyManager;
+  private HeadwayRule headwayRule;
   private RouteDefinitionCache routeDefinitionCache;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
@@ -95,6 +100,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
   private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
+  private TrainSnapshotStore trainSnapshotStore;
+  private EtaRuntimeSampler etaRuntimeSampler;
+  private EtaService etaService;
 
   @Override
   public void onEnable() {
@@ -215,6 +223,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return occupancyManager;
   }
 
+  /** 返回 ETA 服务（若未初始化则为空）。 */
+  public EtaService getEtaService() {
+    return etaService;
+  }
+
   /** 返回节点牌子注册表（用于 NodeId 冲突检测与路线编辑器）。 */
   public SignNodeRegistry getSignNodeRegistry() {
     return signNodeRegistry;
@@ -246,6 +259,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaRouteCommand(this).register(commandManager);
     new FtaStationCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
+    new FtaEtaCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
@@ -314,9 +328,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   }
 
   private void initOccupancyManager() {
+    this.headwayRule = HeadwayRule.fixed(Duration.ZERO);
     this.occupancyManager =
-        new SimpleOccupancyManager(
-            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
   }
 
   private void initRouteDefinitionCache() {
@@ -391,11 +405,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
             signNodeRegistry,
             layoverRegistry,
             configManager,
+            storageManager,
             new TrainConfigResolver(),
             loggerManager::debug);
     getServer()
         .getPluginManager()
         .registerEvents(new RuntimeDispatchListener(runtimeDispatchService), this);
+    initEtaService();
     restartRuntimeMonitor();
     getServer()
         .getScheduler()
@@ -419,6 +435,39 @@ public final class FetaruteTCAddon extends JavaPlugin {
             1L);
   }
 
+  private void initEtaService() {
+    if (railGraphService == null
+        || routeDefinitionCache == null
+        || occupancyManager == null
+        || headwayRule == null
+        || routeProgressRegistry == null) {
+      return;
+    }
+    if (trainSnapshotStore == null) {
+      trainSnapshotStore = new TrainSnapshotStore();
+    }
+    etaRuntimeSampler = new EtaRuntimeSampler(routeProgressRegistry, trainSnapshotStore);
+    etaService =
+        new EtaService(
+            trainSnapshotStore,
+            railGraphService,
+            routeDefinitionCache,
+            occupancyManager,
+            headwayRule,
+            () ->
+                configManager != null
+                    ? configManager.current().runtimeSettings().lookaheadEdges()
+                    : 2,
+            () ->
+                configManager != null
+                    ? configManager.current().runtimeSettings().minClearEdges()
+                    : 0,
+            () ->
+                configManager != null
+                    ? configManager.current().runtimeSettings().switcherZoneEdges()
+                    : 2);
+  }
+
   private void restartRuntimeMonitor() {
     if (runtimeMonitorTask != null) {
       runtimeMonitorTask.cancel();
@@ -432,7 +481,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
         getServer()
             .getScheduler()
             .runTaskTimer(
-                this, new RuntimeSignalMonitor(runtimeDispatchService), interval, interval);
+                this,
+                new RuntimeSignalMonitor(
+                    runtimeDispatchService, etaRuntimeSampler, trainSnapshotStore),
+                interval,
+                interval);
   }
 
   private void initSpawnScheduler() {
@@ -471,6 +524,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofMillis(spawnSettings.planRefreshTicks() * 50L),
             spawnSettings.maxSpawnPerTick());
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
+    if (etaService != null) {
+      etaService.attachTicketSources(spawnManager, spawnTicketAssigner);
+    }
     restartSpawnMonitor();
   }
 

@@ -51,6 +51,42 @@ public final class CommandSuggestionProviders {
         });
   }
 
+  /**
+   * 枚举值补全（逗号分隔列表）：仅对最后一段做前缀匹配，并保留已输入的前缀。
+   *
+   * <p>例如：{@code OWNER,MAN} 会提示 {@code OWNER,MANAGER}。
+   */
+  public static <C, E extends Enum<E>> SuggestionProvider<C> enumValuesList(
+      Class<E> enumClass, String placeholder) {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String rawPrefix = input == null ? "" : input.lastRemainingToken();
+          String base = "";
+          int idx = rawPrefix.lastIndexOf(',');
+          if (idx >= 0) {
+            base = rawPrefix.substring(0, idx + 1);
+            rawPrefix = rawPrefix.substring(idx + 1);
+          }
+          String prefix = rawPrefix.trim().toUpperCase(Locale.ROOT);
+          String spacer = rawPrefix.startsWith(" ") ? " " : "";
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add(placeholder);
+          }
+          E[] values = enumClass.getEnumConstants();
+          if (values == null) {
+            return suggestions;
+          }
+          for (E value : values) {
+            String name = value.name();
+            if (prefix.isBlank() || name.startsWith(prefix)) {
+              suggestions.add(base + spacer + name);
+            }
+          }
+          return suggestions;
+        });
+  }
+
   /** 将 Cloud 的输入 token 规范化为大写前缀，用于枚举类前缀过滤。 */
   private static String normalizeUpperPrefix(CommandInput input) {
     if (input == null) {

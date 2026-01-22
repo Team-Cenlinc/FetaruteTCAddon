@@ -34,7 +34,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
  * </ul>
  */
-public final class StorageSpawnManager implements SpawnManager {
+public final class StorageSpawnManager implements SpawnManager, SpawnForecastSupport {
 
   private final SpawnManagerSettings settings;
   private final Consumer<String> debugLogger;
@@ -93,6 +93,59 @@ public final class StorageSpawnManager implements SpawnManager {
     return plan;
   }
 
+  @Override
+  public List<SpawnTicket> snapshotQueue() {
+    if (queue.isEmpty()) {
+      return List.of();
+    }
+    List<SpawnTicket> snapshot = new ArrayList<>(queue);
+    snapshot.sort(
+        Comparator.<SpawnTicket, Instant>comparing(SpawnTicket::notBefore)
+            .thenComparing(SpawnTicket::dueAt)
+            .thenComparing(ticket -> ticket.service().operatorCode(), String.CASE_INSENSITIVE_ORDER)
+            .thenComparing(ticket -> ticket.service().lineCode(), String.CASE_INSENSITIVE_ORDER)
+            .thenComparing(ticket -> ticket.service().routeCode(), String.CASE_INSENSITIVE_ORDER)
+            .thenComparing(ticket -> ticket.id().toString()));
+    return List.copyOf(snapshot);
+  }
+
+  /**
+   * 基于当前计划与内部状态生成“未出票”的预测票据列表（用于站牌展示）。
+   *
+   * <p>注意：该列表不进入真实队列，不会影响实际出车与 backlog。
+   */
+  @Override
+  public List<SpawnTicket> snapshotForecast(Instant now, Duration horizon, int maxPerService) {
+    if (now == null || horizon == null || horizon.isZero() || horizon.isNegative()) {
+      return List.of();
+    }
+    SpawnPlan planSnapshot = this.plan;
+    if (planSnapshot == null || planSnapshot.services().isEmpty()) {
+      return List.of();
+    }
+    int limitPerService = Math.max(1, Math.min(20, maxPerService));
+    Instant cutoff = now.plus(horizon);
+    List<SpawnTicket> out = new ArrayList<>();
+    for (SpawnService service : planSnapshot.services()) {
+      if (service == null) {
+        continue;
+      }
+      Instant nextDueAt = resolveForecastStart(service, now);
+      if (nextDueAt.isAfter(cutoff)) {
+        continue;
+      }
+      Duration headway = service.baseHeadway();
+      Instant due = nextDueAt;
+      int count = 0;
+      while (count < limitPerService && !due.isAfter(cutoff)) {
+        out.add(new SpawnTicket(UUID.randomUUID(), service, due, due, 0, Optional.empty()));
+        count++;
+        due = due.plus(headway);
+      }
+    }
+    return List.copyOf(out);
+  }
+
   private void refreshPlanIfNeeded(StorageProvider provider, Instant now) {
     Duration ttl = settings.planRefreshInterval();
     if (!ttl.isZero() && !ttl.isNegative() && now.isBefore(lastPlanRefresh.plus(ttl))) {
@@ -118,6 +171,50 @@ public final class StorageSpawnManager implements SpawnManager {
       if (removed > 0) {
         debugLogger.accept("SpawnPlan 清理过期票据: removed=" + removed);
       }
+    }
+  }
+
+  private Instant resolveForecastStart(SpawnService service, Instant now) {
+    if (service == null || now == null) {
+      return Instant.EPOCH;
+    }
+    ServiceState state = states.get(service.key());
+    Instant nextDueAt = state != null ? state.nextDueAt : null;
+    if (nextDueAt == null) {
+      nextDueAt = now.plus(settings.initialJitter());
+    }
+    if (nextDueAt.isBefore(now)) {
+      nextDueAt = alignToNextSlot(nextDueAt, now, service.baseHeadway());
+    }
+    return nextDueAt;
+  }
+
+  private Instant alignToNextSlot(Instant base, Instant now, Duration headway) {
+    if (base == null || now == null) {
+      return Instant.EPOCH;
+    }
+    if (headway == null || headway.isZero() || headway.isNegative()) {
+      return now;
+    }
+    long headwayNanos;
+    long deltaNanos;
+    try {
+      headwayNanos = headway.toNanos();
+      deltaNanos = Duration.between(base, now).toNanos();
+    } catch (ArithmeticException ex) {
+      return now;
+    }
+    if (headwayNanos <= 0L) {
+      return now;
+    }
+    if (deltaNanos <= 0L) {
+      return base;
+    }
+    long steps = Math.floorDiv(deltaNanos, headwayNanos) + 1L;
+    try {
+      return base.plusNanos(Math.multiplyExact(headwayNanos, steps));
+    } catch (ArithmeticException ex) {
+      return now;
     }
   }
 

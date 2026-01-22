@@ -22,7 +22,8 @@ import java.util.Set;
  *
  * <p>道岔/单线冲突使用 FIFO Gate Queue 保障进入顺序。
  */
-public final class SimpleOccupancyManager implements OccupancyManager, OccupancyQueueSupport {
+public final class SimpleOccupancyManager
+    implements OccupancyManager, OccupancyQueueSupport, OccupancyPreviewSupport {
 
   private static final Duration QUEUE_ENTRY_TTL = Duration.ofSeconds(30);
 
@@ -100,6 +101,71 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
       queue.touch(request.trainName(), direction, now, request.priority());
       if (!isQueueAllowed(request.trainName(), resource, direction, queue)) {
+        queueBlocked = true;
+        queue
+            .blockingEntry(direction)
+            .map(entry -> createQueueBlocker(resource, entry))
+            .ifPresent(blockers::add);
+      }
+    }
+    if (queueBlocked) {
+      return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
+    }
+    SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+  }
+
+  @Override
+  /**
+   * 预览占用判定（不写入状态、不入队）。
+   *
+   * <p>用于 ETA 估算，避免对运行时队列造成副作用。
+   */
+  public synchronized OccupancyDecision canEnterPreview(OccupancyRequest request) {
+    Objects.requireNonNull(request, "request");
+    Instant now = request.now();
+    List<OccupancyClaim> blockers = new ArrayList<>();
+    for (OccupancyResource resource : request.resourceList()) {
+      if (resource == null) {
+        continue;
+      }
+      List<OccupancyClaim> existing = claims.get(resource);
+      if (existing == null || existing.isEmpty()) {
+        continue;
+      }
+      for (OccupancyClaim claim : existing) {
+        if (claim == null) {
+          continue;
+        }
+        if (claim.trainName().equalsIgnoreCase(request.trainName())) {
+          continue;
+        }
+        if (isSingleCorridorConflict(resource)
+            && isSameCorridorDirection(request, resource, claim)) {
+          continue;
+        }
+        blockers.add(claim);
+      }
+    }
+    if (!blockers.isEmpty()) {
+      return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
+    }
+
+    boolean queueBlocked = false;
+    for (OccupancyResource resource : request.resourceList()) {
+      if (!isQueueableConflict(resource)) {
+        continue;
+      }
+      if (findClaim(claims.get(resource), request.trainName()) != null) {
+        continue;
+      }
+      CorridorDirection direction = queueDirectionFor(request, resource);
+      ConflictQueue queue = queues.get(resource);
+      if (queue == null || queue.isEmpty()) {
+        continue;
+      }
+      if (!isQueueAllowedPreview(
+          request.trainName(), resource, direction, queue, request.priority(), now)) {
         queueBlocked = true;
         queue
             .blockingEntry(direction)
@@ -341,6 +407,33 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
     return queue.isHeadForDirection(trainName, direction);
   }
 
+  private boolean isQueueAllowedPreview(
+      String trainName,
+      OccupancyResource resource,
+      CorridorDirection direction,
+      ConflictQueue queue,
+      int priority,
+      Instant now) {
+    if (queue == null || queue.isEmpty()) {
+      return true;
+    }
+    if (queue.contains(trainName)) {
+      return isQueueAllowed(trainName, resource, direction, queue);
+    }
+    if (!resource.key().startsWith("single:") || resource.key().contains(":cycle:")) {
+      return queue.wouldBeHeadAny(trainName, direction, priority, now);
+    }
+    Optional<CorridorDirection> activeDirection = activeDirectionFor(resource);
+    if (activeDirection.isEmpty()) {
+      return queue.wouldBeHeadAny(trainName, direction, priority, now);
+    }
+    CorridorDirection active = activeDirection.get();
+    if (direction == CorridorDirection.UNKNOWN || direction != active) {
+      return false;
+    }
+    return queue.wouldBeHeadForDirection(trainName, direction, priority, now);
+  }
+
   private Optional<CorridorDirection> activeDirectionFor(OccupancyResource resource) {
     if (!resource.key().startsWith("single:") || resource.key().contains(":cycle:")) {
       return Optional.empty();
@@ -509,6 +602,14 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       priorities.remove(key);
     }
 
+    boolean contains(String trainName) {
+      if (trainName == null || trainName.isBlank()) {
+        return false;
+      }
+      String key = normalize(trainName);
+      return forward.containsKey(key) || backward.containsKey(key) || neutral.containsKey(key);
+    }
+
     boolean isHeadForDirection(String trainName, CorridorDirection direction) {
       if (trainName == null || trainName.isBlank()) {
         return false;
@@ -534,6 +635,65 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
       return target.values().stream().sorted(this::compareEntries).findFirst();
     }
 
+    Optional<OccupancyQueueEntry> headEntryWithCandidate(
+        CorridorDirection direction, OccupancyQueueEntry candidate, int candidatePriority) {
+      LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
+      OccupancyQueueEntry best = null;
+      int bestPriority = 0;
+      for (OccupancyQueueEntry entry : target.values()) {
+        int priority = priorities.getOrDefault(normalize(entry.trainName()), 0);
+        if (best == null || compareEntries(entry, priority, best, bestPriority) < 0) {
+          best = entry;
+          bestPriority = priority;
+        }
+      }
+      if (candidate != null) {
+        if (best == null || compareEntries(candidate, candidatePriority, best, bestPriority) < 0) {
+          best = candidate;
+        }
+      }
+      return Optional.ofNullable(best);
+    }
+
+    boolean wouldBeHeadForDirection(
+        String trainName, CorridorDirection direction, int priority, Instant now) {
+      if (trainName == null || trainName.isBlank()) {
+        return false;
+      }
+      Instant time = now != null ? now : Instant.now();
+      OccupancyQueueEntry candidate = new OccupancyQueueEntry(trainName, direction, time, time);
+      return headEntryWithCandidate(direction, candidate, priority)
+          .map(entry -> entry.trainName().equalsIgnoreCase(trainName))
+          .orElse(false);
+    }
+
+    boolean wouldBeHeadAny(
+        String trainName, CorridorDirection direction, int priority, Instant now) {
+      if (trainName == null || trainName.isBlank()) {
+        return false;
+      }
+      Instant time = now != null ? now : Instant.now();
+      OccupancyQueueEntry candidate = new OccupancyQueueEntry(trainName, direction, time, time);
+      Optional<OccupancyQueueEntry> head =
+          pickEarlier(
+              headEntryWithCandidate(
+                  CorridorDirection.A_TO_B,
+                  direction == CorridorDirection.A_TO_B ? candidate : null,
+                  priority),
+              headEntryWithCandidate(
+                  CorridorDirection.B_TO_A,
+                  direction == CorridorDirection.B_TO_A ? candidate : null,
+                  priority));
+      head =
+          pickEarlier(
+              head,
+              headEntryWithCandidate(
+                  CorridorDirection.UNKNOWN,
+                  direction == CorridorDirection.UNKNOWN ? candidate : null,
+                  priority));
+      return head.map(entry -> entry.trainName().equalsIgnoreCase(trainName)).orElse(false);
+    }
+
     private int compareEntries(OccupancyQueueEntry a, OccupancyQueueEntry b) {
       int pA = priorities.getOrDefault(normalize(a.trainName()), 0);
       int pB = priorities.getOrDefault(normalize(b.trainName()), 0);
@@ -541,6 +701,14 @@ public final class SimpleOccupancyManager implements OccupancyManager, Occupancy
         return Integer.compare(pB, pA); // 优先级更高者优先
       }
       return a.firstSeen().compareTo(b.firstSeen()); // 首见更早者优先（FIFO）
+    }
+
+    private int compareEntries(
+        OccupancyQueueEntry a, int priorityA, OccupancyQueueEntry b, int priorityB) {
+      if (priorityA != priorityB) {
+        return Integer.compare(priorityB, priorityA);
+      }
+      return a.firstSeen().compareTo(b.firstSeen());
     }
 
     Optional<OccupancyQueueEntry> blockingEntry(CorridorDirection direction) {

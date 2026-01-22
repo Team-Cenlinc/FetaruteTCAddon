@@ -77,6 +77,10 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaEtaCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
@@ -101,7 +105,15 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>

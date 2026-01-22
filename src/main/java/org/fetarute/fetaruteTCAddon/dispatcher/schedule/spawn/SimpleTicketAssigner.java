@@ -110,6 +110,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   @Override
+  public List<SpawnTicket> snapshotPendingTickets() {
+    if (pendingLayoverTickets.isEmpty()) {
+      return List.of();
+    }
+    return List.copyOf(pendingLayoverTickets.values());
+  }
+
+  @Override
   public void tick(StorageProvider provider, Instant now) {
     if (provider == null || now == null) {
       return;

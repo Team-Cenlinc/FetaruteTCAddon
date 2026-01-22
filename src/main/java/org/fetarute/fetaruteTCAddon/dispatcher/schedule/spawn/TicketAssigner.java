@@ -28,4 +28,9 @@ public interface TicketAssigner {
    * <p>默认不处理，具体行为由实现类决定。
    */
   default void onLayoverRegistered(LayoverRegistry.LayoverCandidate candidate) {}
+
+  /** 返回待分配/等待 Layover 的票据快照（用于 ETA/诊断）。 */
+  default java.util.List<SpawnTicket> snapshotPendingTickets() {
+    return java.util.List.of();
+  }
 }

@@ -1288,21 +1288,7 @@ public final class FtaCompanyCommand {
   }
 
   private static SuggestionProvider<CommandSender> roleSuggestions() {
-    return SuggestionProvider.blockingStrings(
-        (ctx, input) -> {
-          String prefix = normalizePrefix(input).toUpperCase(Locale.ROOT);
-          List<String> suggestions = new ArrayList<>();
-          if (prefix.isBlank()) {
-            suggestions.add("<roles...>");
-          }
-          for (MemberRole role : MemberRole.values()) {
-            String name = role.name();
-            if (prefix.isBlank() || name.startsWith(prefix)) {
-              suggestions.add(name);
-            }
-          }
-          return suggestions;
-        });
+    return CommandSuggestionProviders.enumValuesList(MemberRole.class, "<roles...>");
   }
 
   /** 针对“accept/decline”子命令，仅提示当前玩家收到的邀请公司 code。 */

@@ -64,6 +64,7 @@ class RuntimeDispatchServiceTest {
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -117,6 +118,7 @@ class RuntimeDispatchServiceTest {
             signNodeRegistry,
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -173,6 +175,7 @@ class RuntimeDispatchServiceTest {
             signNodeRegistry,
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -272,6 +275,7 @@ class RuntimeDispatchServiceTest {
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -325,6 +329,7 @@ class RuntimeDispatchServiceTest {
             signNodeRegistry,
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -366,6 +371,7 @@ class RuntimeDispatchServiceTest {
             signNodeRegistry,
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -428,6 +434,7 @@ class RuntimeDispatchServiceTest {
             signNodeRegistry,
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -463,6 +470,7 @@ class RuntimeDispatchServiceTest {
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -518,6 +526,7 @@ class RuntimeDispatchServiceTest {
             signNodeRegistry,
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -748,6 +757,7 @@ class RuntimeDispatchServiceTest {
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 
@@ -798,6 +808,7 @@ class RuntimeDispatchServiceTest {
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
             configManager,
+            null,
             new TrainConfigResolver(),
             null);
 

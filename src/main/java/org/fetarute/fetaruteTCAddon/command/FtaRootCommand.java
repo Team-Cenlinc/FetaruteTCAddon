@@ -43,7 +43,8 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
       }
       return true;
     }
-    String input = args.length == 0 ? label : (label + " " + String.join(" ", args));
+    String root = command != null ? command.getName() : label;
+    String input = args.length == 0 ? root : (root + " " + String.join(" ", args));
     commandManager
         .commandExecutor()
         .executeCommand(sender, input)
@@ -61,7 +62,8 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
   public List<String> onTabComplete(
       CommandSender sender, Command command, String alias, String[] args) {
     if (commandManager != null) {
-      StringBuilder input = new StringBuilder(alias);
+      String root = command != null ? command.getName() : alias;
+      StringBuilder input = new StringBuilder(root);
       if (args.length > 0) {
         input.append(" ").append(String.join(" ", args));
       }
@@ -101,6 +103,9 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
     }
     if (sender.hasPermission("fetarute.occupancy") || sender.hasPermission("fetarute.admin")) {
       options.add("occupancy");
+    }
+    if (sender.hasPermission("fetarute.eta") || sender.hasPermission("fetarute.admin")) {
+      options.add("eta");
     }
     if (sender.hasPermission("fetarute.train.config") || sender.hasPermission("fetarute.admin")) {
       options.add("train");
