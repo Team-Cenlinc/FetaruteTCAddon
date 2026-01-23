@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
@@ -82,14 +83,39 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   @Override
   protected Optional<SignNodeDefinition> parseDefinition(SignActionEvent info) {
-    String raw = info.getLine(2);
-    return SignTextParser.parseWaypointLike(raw, NodeType.STATION)
-        .filter(
-            definition ->
-                definition
-                    .waypointMetadata()
-                    .map(metadata -> metadata.kind() == WaypointKind.STATION)
-                    .orElse(false));
+    Optional<SignNodeDefinition> parsed = Optional.empty();
+    if (info != null && info.getTrackedSign() != null) {
+      parsed = NodeSignDefinitionParser.parse(info.getTrackedSign());
+    }
+    if (parsed.isEmpty() && info != null) {
+      parsed = NodeSignDefinitionParser.parse(info.getSign());
+    }
+    if (parsed.isEmpty() && info != null) {
+      String line2 = info.getLine(2);
+      String line3 = info.getLine(3);
+      parsed = parseFromLines(line2, line3);
+    }
+    return parsed.filter(
+        definition ->
+            definition
+                .waypointMetadata()
+                .map(metadata -> metadata.kind() == WaypointKind.STATION)
+                .orElse(false));
+  }
+
+  private Optional<SignNodeDefinition> parseFromLines(String line2, String line3) {
+    Optional<SignNodeDefinition> parsed = SignTextParser.parseWaypointLike(line2, NodeType.STATION);
+    if (parsed.isPresent()) {
+      return parsed;
+    }
+    parsed = SignTextParser.parseWaypointLike(line3, NodeType.STATION);
+    if (parsed.isPresent()) {
+      return parsed;
+    }
+    if (line2 != null && line3 != null) {
+      return SignTextParser.parseWaypointLike(line2.trim() + line3.trim(), NodeType.STATION);
+    }
+    return Optional.empty();
   }
 
   /**

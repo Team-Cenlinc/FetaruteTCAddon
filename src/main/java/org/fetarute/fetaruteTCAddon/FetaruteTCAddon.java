@@ -264,6 +264,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return etaService;
   }
 
+  /** 返回 SpawnManager（若未初始化则为空）。 */
+  public Optional<SpawnManager> getSpawnManager() {
+    return Optional.ofNullable(spawnManager);
+  }
+
+  /** 返回 TicketAssigner（若未初始化则为空）。 */
+  public Optional<TicketAssigner> getSpawnTicketAssigner() {
+    return Optional.ofNullable(spawnTicketAssigner);
+  }
+
   /** 返回节点牌子注册表（用于 NodeId 冲突检测与路线编辑器）。 */
   public SignNodeRegistry getSignNodeRegistry() {
     return signNodeRegistry;

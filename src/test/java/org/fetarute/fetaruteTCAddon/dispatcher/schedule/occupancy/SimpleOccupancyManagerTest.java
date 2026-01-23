@@ -145,4 +145,61 @@ class SimpleOccupancyManagerTest {
             new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), reverse));
     assertFalse(second.allowed());
   }
+
+  @Test
+  void shouldYieldForHigherPriorityOppositeCorridor() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(resource.key(), CorridorDirection.B_TO_A);
+
+    OccupancyRequest high =
+        new OccupancyRequest("fast", Optional.empty(), now, List.of(resource), reverse, 10);
+    manager.canEnter(high);
+
+    OccupancyRequest low =
+        new OccupancyRequest("slow", Optional.empty(), now, List.of(resource), forward, 1);
+    assertTrue(manager.shouldYield(low));
+  }
+
+  @Test
+  void shouldNotYieldForHigherPrioritySameDirection() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+
+    OccupancyRequest high =
+        new OccupancyRequest("fast", Optional.empty(), now, List.of(resource), forward, 10);
+    manager.canEnter(high);
+
+    OccupancyRequest low =
+        new OccupancyRequest("slow", Optional.empty(), now, List.of(resource), forward, 1);
+    assertFalse(manager.shouldYield(low));
+  }
+
+  @Test
+  void shouldYieldForHigherPrioritySwitcher() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:SW-1");
+
+    OccupancyRequest high =
+        new OccupancyRequest("fast", Optional.empty(), now, List.of(resource), Map.of(), 5);
+    manager.canEnter(high);
+
+    OccupancyRequest low =
+        new OccupancyRequest("slow", Optional.empty(), now, List.of(resource), Map.of(), 1);
+    assertTrue(manager.shouldYield(low));
+  }
 }

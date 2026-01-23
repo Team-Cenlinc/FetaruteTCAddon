@@ -345,6 +345,45 @@ public final class SimpleOccupancyManager
     return true;
   }
 
+  @Override
+  /**
+   * 优先级让行判定：当冲突队列中存在更高优先级列车时返回 true。
+   *
+   * <p>仅针对单线走廊与道岔冲突资源；同向单线不触发让行。
+   */
+  public synchronized boolean shouldYield(OccupancyRequest request) {
+    if (request == null || request.trainName() == null || request.trainName().isBlank()) {
+      return false;
+    }
+    Instant now = request.now();
+    purgeExpiredQueueEntries(now);
+    int priority = request.priority();
+    for (OccupancyResource resource : request.resourceList()) {
+      if (!isQueueableConflict(resource)) {
+        continue;
+      }
+      ConflictQueue queue = queues.get(resource);
+      if (queue == null || queue.isEmpty()) {
+        continue;
+      }
+      if (isSingleCorridorConflict(resource)) {
+        Optional<CorridorDirection> direction = resolveCorridorDirection(request, resource);
+        if (direction.isPresent()) {
+          if (queue.hasHigherPriorityOutside(request.trainName(), direction.get(), priority, now)) {
+            return true;
+          }
+        } else if (queue.hasHigherPriorityAny(request.trainName(), priority, now)) {
+          return true;
+        }
+        continue;
+      }
+      if (queue.hasHigherPriorityAny(request.trainName(), priority, now)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // 事件反射式释放不需要“基于时间”的清理。
 
   private boolean isSameCorridorDirection(
@@ -711,6 +750,53 @@ public final class SimpleOccupancyManager
       return a.firstSeen().compareTo(b.firstSeen());
     }
 
+    boolean hasHigherPriorityAny(String trainName, int priority, Instant now) {
+      if (trainName == null || trainName.isBlank()) {
+        return false;
+      }
+      String key = normalize(trainName);
+      java.util.Set<String> keys = new java.util.HashSet<>();
+      keys.addAll(forward.keySet());
+      keys.addAll(backward.keySet());
+      keys.addAll(neutral.keySet());
+      for (String otherKey : keys) {
+        if (otherKey == null || otherKey.equals(key)) {
+          continue;
+        }
+        int otherPriority = priorities.getOrDefault(otherKey, 0);
+        if (otherPriority > priority) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    boolean hasHigherPriorityOutside(
+        String trainName, CorridorDirection direction, int priority, Instant now) {
+      if (trainName == null || trainName.isBlank()) {
+        return false;
+      }
+      String key = normalize(trainName);
+      List<LinkedHashMap<String, OccupancyQueueEntry>> targets =
+          List.of(forward, backward, neutral);
+      LinkedHashMap<String, OccupancyQueueEntry> same = mapFor(direction);
+      for (LinkedHashMap<String, OccupancyQueueEntry> target : targets) {
+        if (target == same) {
+          continue;
+        }
+        for (String otherKey : target.keySet()) {
+          if (otherKey == null || otherKey.equals(key)) {
+            continue;
+          }
+          int otherPriority = priorities.getOrDefault(otherKey, 0);
+          if (otherPriority > priority) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
     Optional<OccupancyQueueEntry> blockingEntry(CorridorDirection direction) {
       if (direction == CorridorDirection.UNKNOWN) {
         return headAny();
@@ -796,7 +882,8 @@ public final class SimpleOccupancyManager
       if (current == null || current.isEmpty()) {
         return candidate;
       }
-      if (candidate.get().firstSeen().isBefore(current.get().firstSeen())) {
+      // 跨方向比较也要遵循 priority 优先，其次 FIFO（与 headEntry 的规则一致）。
+      if (compareEntries(candidate.get(), current.get()) < 0) {
         return candidate;
       }
       return current;

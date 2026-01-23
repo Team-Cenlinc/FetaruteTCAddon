@@ -45,11 +45,15 @@
 
 ## 运行时门控
 
-`TicketAssigner` 在实际 spawn 前会构建一次“gate 占用请求”，并调用 `OccupancyManager.canEnter(...)` 判定是否允许出车：
+`TicketAssigner` 在实际 spawn 前会构建一次“gate 占用请求”，并调用 `OccupancyManager.acquire(...)` 预占用资源：
 
 - 允许：生成列车，写入 `FTA_*` tags 与 `FTA_ROUTE_INDEX=0`，下发下一跳 destination，并触发一次 `RuntimeDispatchService.refreshSignal(...)`。
-- 不允许/失败：票据按 `spawn.retry-delay-ticks` 延迟后重试。
+- 不允许/失败：若 spawn 失败会释放已占用资源，票据按 `spawn.retry-delay-ticks` 延迟后重试。
   - 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
+
+### Depot lookover
+- Depot 出车会对起步段的道岔执行“lookover”：把道岔分支边一并占用，避免刚出库即被其他列车抢占分支。
+- lookover 优先追加“走廊冲突 + 方向”资源以允许同向放行；方向无法判定时回退为 EDGE 资源。
 
 > 当前版本已实现两条执行路径：
 > - 停靠表首行为 `CRET`：从 Depot 生成列车。

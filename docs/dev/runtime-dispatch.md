@@ -9,6 +9,7 @@
 1) 推进点触发：解析当前节点 → 构建 OccupancyRequest → canEnter
 2) 允许进入：acquire → 写入下一跳 destination → 发车/限速
 3) 不允许进入：基于 lookahead 阻塞位置细分信号（PROCEED_WITH_CAUTION/CAUTION/STOP）→ 限速或停车
+4) 出站门控（站台/TERM）会额外检查优先级让行：若单线/道岔冲突队列存在更高优先级列车，则保持停站等待。
 
 ## 信号变化监测
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
@@ -17,6 +18,7 @@
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
+- 可用 `/fta occupancy stats` 观察自愈与出车重试统计，`/fta occupancy heal` 可手动触发清理。
 
 ## tags 与恢复
 推进点依赖 TrainProperties tags：

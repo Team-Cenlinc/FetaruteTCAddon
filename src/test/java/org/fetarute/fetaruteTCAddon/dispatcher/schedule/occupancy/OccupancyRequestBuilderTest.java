@@ -221,6 +221,71 @@ class OccupancyRequestBuilderTest {
     assertTrue(request.resourceList().contains(OccupancyResource.forConflict(switcherKey)));
   }
 
+  @Test
+  void depotLookoverAddsDirectionalConflictForBranch() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    NodeId nodeC = NodeId.of("C");
+    NodeId nodeS = NodeId.of("S");
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode s =
+        new SignRailNode(
+            nodeS,
+            NodeType.SWITCHER,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode c =
+        new SignRailNode(
+            nodeC,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 10.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeAS = EdgeId.undirected(nodeA, nodeS);
+    EdgeId edgeSB = EdgeId.undirected(nodeS, nodeB);
+    EdgeId edgeSC = EdgeId.undirected(nodeS, nodeC);
+    RailEdge as = new RailEdge(edgeAS, nodeA, nodeS, 10, 8.0, true, Optional.empty());
+    RailEdge sb = new RailEdge(edgeSB, nodeS, nodeB, 10, 8.0, true, Optional.empty());
+    RailEdge sc = new RailEdge(edgeSC, nodeS, nodeC, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(nodeA, a, nodeS, s, nodeB, b, nodeC, c),
+            Map.of(edgeAS, as, edgeSB, sb, edgeSC, sc),
+            Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 1);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeS, nodeB), Optional.empty());
+    TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 0));
+
+    Optional<OccupancyRequestContext> ctxOpt =
+        builder.buildContextFromNodes(
+            state.trainName(), Optional.of(route.id()), route.waypoints(), 0, Instant.now(), 0);
+    assertTrue(ctxOpt.isPresent());
+    OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get());
+
+    OccupancyResource branchEdge = OccupancyResource.forEdge(edgeSC);
+    assertFalse(request.resourceList().contains(branchEdge));
+    String branchConflict =
+        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeSC).orElseThrow();
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(branchConflict)));
+    assertTrue(request.corridorDirections().containsKey(branchConflict));
+  }
+
   private record StubProgress(RouteId routeId, int currentIndex) implements RouteProgress {
 
     @Override

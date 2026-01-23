@@ -51,6 +51,7 @@
   - 当前默认优先级：客运=0，回收（Reclaim）=-10。
 - 走廊为空时会比较两侧队列头部的优先级与首见时间，优先放行更优的一侧。
 - 同向跟驰仍可并行进入走廊，但进入顺序受队列约束。
+- 出站门控会查询单线/道岔冲突队列的更高优先级列车，必要时让行并保持停站等待（仅站台/TERM）。
 - 队列条目若超过 30 秒未刷新会自动清理（避免遗留阻塞）。
 - `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向、优先级与首见时间）。
 
@@ -59,6 +60,8 @@
 - `/fta occupancy queue [limit]`：查看排队快照。
 - `/fta occupancy release <train>`：按列车清理占用。
 - `/fta occupancy release-resource <EDGE|NODE|CONFLICT> <key>`：按资源清理占用。
+- `/fta occupancy stats`：查看自愈/出车重试等运行统计。
+- `/fta occupancy heal`：手动触发“孤儿占用/进度/待命”自愈清理。
 - `/fta occupancy debug acquire edge "<from>" "<to>"`：对单条边执行占用。
 - `/fta occupancy debug can edge "<from>" "<to>"`：对单条边执行判定（不占用）。
 - `/fta occupancy debug acquire path "<from>" "<to>"`：对最短路路径执行占用。

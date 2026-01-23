@@ -66,6 +66,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public final class RuntimeDispatchService {
 
+  private static final java.util.logging.Logger HEALTH_LOGGER =
+      java.util.logging.Logger.getLogger("FetaruteTCAddon");
+
   private static final double SPEED_TICKS_PER_SECOND = 20.0;
 
   private final OccupancyManager occupancyManager;
@@ -82,6 +85,19 @@ public final class RuntimeDispatchService {
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
+
+  private final java.util.concurrent.atomic.LongAdder orphanCleanupRuns =
+      new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.atomic.LongAdder orphanProgressRemoved =
+      new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.atomic.LongAdder orphanTrainsReleased =
+      new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.atomic.LongAdder orphanLayoverRemoved =
+      new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.ConcurrentMap<String, Long> healLastWarnAtMs =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private volatile CleanupResult lastCleanupResult =
+      new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
   private final java.util.concurrent.ConcurrentMap<String, Integer> operatorPriorityCache =
       new java.util.concurrent.ConcurrentHashMap<>();
   private static final Pattern ACTION_PREFIX_PATTERN =
@@ -187,6 +203,10 @@ public final class RuntimeDispatchService {
 
     OccupancyRequest request = contextOpt.get().request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
+    if (occupancyManager.shouldYield(request)) {
+      debugLogger.accept("发车门控让行: train=" + trainName + " priority=" + priority);
+      return false;
+    }
     OccupancyDecision decision = occupancyManager.acquire(request);
     if (!decision.allowed()) {
       debugLogger.accept("发车门控阻塞: train=" + trainName + " aspect=" + decision.signal());
@@ -403,10 +423,24 @@ public final class RuntimeDispatchService {
    *
    * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。
    */
+  /** 清理“已不存在列车”的占用记录与进度缓存。 */
   public void cleanupOrphanOccupancyClaims(java.util.Set<String> activeTrainNames) {
+    cleanupOrphanOccupancyClaimsWithReport(activeTrainNames);
+  }
+
+  /**
+   * 清理“已不存在列车”的占用记录与进度缓存，并返回本次自愈的统计结果。
+   *
+   * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。
+   */
+  public CleanupResult cleanupOrphanOccupancyClaimsWithReport(
+      java.util.Set<String> activeTrainNames) {
     if (occupancyManager == null || activeTrainNames == null) {
-      return;
+      return lastCleanupResult;
     }
+
+    orphanCleanupRuns.increment();
+
     java.util.Set<String> activeLower = new java.util.HashSet<>();
     for (String name : activeTrainNames) {
       if (name == null || name.isBlank()) {
@@ -414,15 +448,20 @@ public final class RuntimeDispatchService {
       }
       activeLower.add(name.trim().toLowerCase(java.util.Locale.ROOT));
     }
+
+    int removedProgress = 0;
     for (String name : progressRegistry.snapshot().keySet()) {
       if (name == null || name.isBlank()) {
         continue;
       }
       if (!activeLower.contains(name.trim().toLowerCase(java.util.Locale.ROOT))) {
         progressRegistry.remove(name);
+        removedProgress++;
       }
     }
+
     java.util.Set<String> released = new java.util.HashSet<>();
+    int releasedTrains = 0;
     for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
       if (claim == null || claim.trainName() == null || claim.trainName().isBlank()) {
         continue;
@@ -436,8 +475,103 @@ public final class RuntimeDispatchService {
         continue;
       }
       occupancyManager.releaseByTrain(trainName);
+      releasedTrains++;
     }
+
+    int removedLayovers = 0;
+    for (LayoverCandidate candidate : layoverRegistry.snapshot()) {
+      if (candidate == null || candidate.trainName() == null || candidate.trainName().isBlank()) {
+        continue;
+      }
+      String key = candidate.trainName().trim().toLowerCase(java.util.Locale.ROOT);
+      if (activeLower.contains(key)) {
+        continue;
+      }
+      layoverRegistry.unregister(candidate.trainName());
+      removedLayovers++;
+    }
+
+    if (removedProgress > 0) {
+      orphanProgressRemoved.add(removedProgress);
+    }
+    if (releasedTrains > 0) {
+      orphanTrainsReleased.add(releasedTrains);
+    }
+    if (removedLayovers > 0) {
+      orphanLayoverRemoved.add(removedLayovers);
+    }
+
+    CleanupResult result =
+        new CleanupResult(
+            java.time.Instant.now(), removedProgress, releasedTrains, removedLayovers);
+    lastCleanupResult = result;
+
+    if (removedProgress > 0 || releasedTrains > 0 || removedLayovers > 0) {
+      warnHealThrottled(
+          "orphan-cleanup",
+          "调度自愈: cleaned progress="
+              + removedProgress
+              + " releasedTrains="
+              + releasedTrains
+              + " removedLayovers="
+              + removedLayovers);
+    }
+
+    return result;
   }
+
+  /** 返回上一次自愈统计结果。 */
+  public CleanupResult lastCleanupResult() {
+    return lastCleanupResult;
+  }
+
+  /** 返回自愈运行次数。 */
+  public long orphanCleanupRuns() {
+    return orphanCleanupRuns.sum();
+  }
+
+  /** 返回累计移除的进度条目数量。 */
+  public long orphanProgressRemoved() {
+    return orphanProgressRemoved.sum();
+  }
+
+  /** 返回累计释放的列车占用数量。 */
+  public long orphanTrainsReleased() {
+    return orphanTrainsReleased.sum();
+  }
+
+  /** 返回累计移除的 Layover 条目数量。 */
+  public long orphanLayoverRemoved() {
+    return orphanLayoverRemoved.sum();
+  }
+
+  /** 返回当前进度缓存条目数。 */
+  public int progressEntryCount() {
+    return progressRegistry.snapshot().size();
+  }
+
+  /** 返回 Layover 候选列车数量。 */
+  public int layoverCandidateCount() {
+    return layoverRegistry.snapshot().size();
+  }
+
+  private void warnHealThrottled(String key, String message) {
+    long now = System.currentTimeMillis();
+    long intervalMs = 60_000L;
+    healLastWarnAtMs.compute(
+        key,
+        (k, prev) -> {
+          if (prev == null || now - prev > intervalMs) {
+            HEALTH_LOGGER.warning(message);
+            return now;
+          }
+          return prev;
+        });
+  }
+
+  /** 调度自愈统计结果。 */
+  public record CleanupResult(
+      java.time.Instant at, int removedProgress, int releasedTrains, int removedLayovers) {}
 
   /**
    * 启动/重载后扫描现存列车，重建占用快照并修复孤儿占用。

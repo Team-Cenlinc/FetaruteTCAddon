@@ -32,6 +32,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public final class SimpleTicketAssigner implements TicketAssigner {
 
+  private static final java.util.logging.Logger HEALTH_LOGGER =
+      java.util.logging.Logger.getLogger("FetaruteTCAddon");
+
   private final SpawnManager spawnManager;
   private final DepotSpawner depotSpawner;
   private final OccupancyManager occupancyManager;
@@ -45,6 +48,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final LayoverRegistry layoverRegistry;
   private final Duration retryDelay;
   private final int maxSpawnPerTick;
+
+  /** 出车成功次数（含 Layover 复用）。 */
+  private final java.util.concurrent.atomic.LongAdder spawnSuccess =
+      new java.util.concurrent.atomic.LongAdder();
+
+  /** 出车重试次数（requeue 计数）。 */
+  private final java.util.concurrent.atomic.LongAdder spawnRetries =
+      new java.util.concurrent.atomic.LongAdder();
+
+  private final java.util.concurrent.ConcurrentMap<String, java.util.concurrent.atomic.LongAdder>
+      requeueByError = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Long> lastWarnAtMs =
+      new java.util.concurrent.ConcurrentHashMap<>();
   // key 为 ticketId：避免同一 route 在 backlog>1 时覆盖导致“丢票据/永久卡 backlog”。
   private final java.util.Map<java.util.UUID, SpawnTicket> pendingLayoverTickets =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -208,15 +224,26 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       requeue(ticket, now, "occupancy-context-failed");
       return false;
     }
-    OccupancyRequest request = ctxOpt.get().request();
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext ctx =
+        ctxOpt.get();
+    OccupancyRequest request = builder.applyDepotLookover(ctx);
+    OccupancyDecision decision = occupancyManager.acquire(request);
     if (!decision.allowed()) {
       requeue(ticket, now, "gate-blocked:" + decision.signal());
       return false;
     }
 
-    Optional<MinecartGroup> groupOpt = depotSpawner.spawn(provider, ticket, trainName, now);
+    Optional<MinecartGroup> groupOpt;
+    try {
+      groupOpt = depotSpawner.spawn(provider, ticket, trainName, now);
+    } catch (Exception e) {
+      occupancyManager.releaseByTrain(trainName);
+      debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
+      requeue(ticket, now, "spawn-failed");
+      return false;
+    }
     if (groupOpt.isEmpty()) {
+      occupancyManager.releaseByTrain(trainName);
       requeue(ticket, now, "spawn-failed");
       return false;
     }
@@ -226,9 +253,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       group.getProperties().clearDestination();
       group.getProperties().setDestination(route.waypoints().get(1).value());
     }
-    occupancyManager.acquire(request);
     runtimeDispatchService.refreshSignal(group);
     spawnManager.complete(ticket);
+    spawnSuccess.increment();
     debugLogger.accept(
         "自动发车成功: train="
             + trainName
@@ -299,6 +326,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             ServiceTicket.TicketMode.OPERATION);
     if (runtimeDispatchService.dispatchLayover(candidate, serviceTicket)) {
       spawnManager.complete(ticket);
+      spawnSuccess.increment();
       pendingLayoverTickets.remove(ticket.id());
       debugLogger.accept("Layover 复用成功: " + candidate.trainName() + " -> " + service.routeCode());
       return true;
@@ -309,10 +337,29 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return false;
   }
 
+  /** 返回出车诊断快照（成功/重试/错误分布）。 */
+  public SpawnDiagnostics snapshotDiagnostics() {
+    java.util.Map<String, Long> byError = new java.util.HashMap<>();
+    for (var entry : requeueByError.entrySet()) {
+      if (entry.getKey() == null || entry.getValue() == null) {
+        continue;
+      }
+      byError.put(entry.getKey(), entry.getValue().sum());
+    }
+    return new SpawnDiagnostics(
+        spawnSuccess.sum(), spawnRetries.sum(), java.util.Map.copyOf(byError));
+  }
+
   private void requeue(SpawnTicket ticket, Instant now, String error) {
     if (ticket == null) {
       return;
     }
+    spawnRetries.increment();
+    String key = error == null ? "unknown" : error;
+    requeueByError
+        .computeIfAbsent(key, k -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+
     Instant next = now.plus(retryDelay);
     SpawnTicket retry = ticket.withRetry(next, error);
     spawnManager.requeue(retry);
@@ -328,6 +375,37 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + retry.notBefore()
             + " error="
             + error);
+
+    if (key.startsWith("spawn-failed")
+        || key.startsWith("graph-missing")
+        || key.startsWith("depot-world-missing")) {
+      warnThrottled(
+          "spawn:" + key + ":" + routeCode,
+          "自动发车异常: route=" + routeCode + " error=" + key + " attempts=" + retry.attempts());
+    }
+  }
+
+  private void warnThrottled(String key, String message) {
+    long now = System.currentTimeMillis();
+    long intervalMs = 60_000L;
+    lastWarnAtMs.compute(
+        key,
+        (k, prev) -> {
+          if (prev == null || now - prev > intervalMs) {
+            HEALTH_LOGGER.warning(message);
+            return now;
+          }
+          return prev;
+        });
+  }
+
+  /** 出车诊断快照。 */
+  public record SpawnDiagnostics(
+      long success, long retries, java.util.Map<String, Long> requeueByError) {
+    public SpawnDiagnostics {
+      requeueByError =
+          requeueByError == null ? java.util.Map.of() : java.util.Map.copyOf(requeueByError);
+    }
   }
 
   private Optional<java.util.UUID> resolveDepotWorldId(SpawnService service) {

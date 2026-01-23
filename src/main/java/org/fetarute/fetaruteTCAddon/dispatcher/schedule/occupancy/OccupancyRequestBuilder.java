@@ -1,7 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -157,6 +161,158 @@ public final class OccupancyRequestBuilder {
         new OccupancyRequest(
             trainName, routeId, requestTime, List.copyOf(resources), corridorDirections, priority);
     return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
+  }
+
+  /**
+   * Depot 出车专用：在起步段遇到道岔时，额外把该道岔周边的多分支 edge 也纳入请求，用于 spawn 前的“多方向 lookover”。
+   *
+   * <p>实现策略：仅追加 EDGE 资源（不追加走廊冲突 key），避免因缺少方向信息导致过度对向锁闭。
+   */
+  public OccupancyRequest applyDepotLookover(OccupancyRequestContext context) {
+    Objects.requireNonNull(context, "context");
+    OccupancyRequest base = context.request();
+    if (switcherZoneEdges <= 0) {
+      return base;
+    }
+
+    List<NodeId> pathNodes = context.pathNodes();
+    if (pathNodes.size() < 2) {
+      return base;
+    }
+
+    int maxIndex = Math.min(pathNodes.size() - 1, switcherZoneEdges);
+    Set<NodeId> switchers = new LinkedHashSet<>();
+    for (int i = 0; i <= maxIndex; i++) {
+      NodeId nodeId = pathNodes.get(i);
+      if (nodeId == null) {
+        continue;
+      }
+      graph
+          .findNode(nodeId)
+          .filter(node -> node.type() == NodeType.SWITCHER)
+          .ifPresent(node -> switchers.add(node.id()));
+    }
+    if (switchers.isEmpty()) {
+      return base;
+    }
+
+    Set<OccupancyResource> merged = new LinkedHashSet<>(base.resourceList());
+    Map<String, CorridorDirection> directions = new LinkedHashMap<>(base.corridorDirections());
+    boolean updated = false;
+    for (NodeId switcher : switchers) {
+      for (RailEdge edge : collectEdgesWithin(switcher, switcherZoneEdges)) {
+        OccupancyResource edgeResource = OccupancyResource.forEdge(edge.id());
+        if (merged.contains(edgeResource)) {
+          continue;
+        }
+        if (tryAddDirectionalLookoverConflict(
+            merged, directions, context.pathNodes(), switcher, edge)) {
+          updated = true;
+          continue;
+        }
+        updated |= merged.add(edgeResource);
+      }
+    }
+
+    if (!updated) {
+      return base;
+    }
+    return new OccupancyRequest(
+        base.trainName(),
+        base.routeId(),
+        base.now(),
+        List.copyOf(merged),
+        Map.copyOf(directions),
+        base.priority());
+  }
+
+  private boolean tryAddDirectionalLookoverConflict(
+      Set<OccupancyResource> resources,
+      Map<String, CorridorDirection> directions,
+      List<NodeId> pathNodes,
+      NodeId switcher,
+      RailEdge edge) {
+    if (resources == null || directions == null || switcher == null || edge == null) {
+      return false;
+    }
+    if (!(graph instanceof RailGraphCorridorSupport support)) {
+      return false;
+    }
+    NodeId from;
+    NodeId to;
+    if (switcher.equals(edge.from())) {
+      from = edge.from();
+      to = edge.to();
+    } else if (switcher.equals(edge.to())) {
+      from = edge.to();
+      to = edge.from();
+    } else {
+      return false;
+    }
+    Optional<String> conflictKeyOpt = support.conflictKeyForEdge(edge.id());
+    if (conflictKeyOpt.isEmpty()) {
+      return false;
+    }
+    Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(edge.id());
+    if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
+      return false;
+    }
+    String key = conflictKeyOpt.get();
+    Optional<CorridorDirection> directionOpt =
+        resolveCorridorDirection(infoOpt.get(), pathNodes, from, to);
+    if (directionOpt.isEmpty()) {
+      return false;
+    }
+    if (!directions.containsKey(key)) {
+      directions.put(key, directionOpt.get());
+    }
+    resources.add(OccupancyResource.forConflict(key));
+    return true;
+  }
+
+  private Set<RailEdge> collectEdgesWithin(NodeId start, int maxEdges) {
+    if (start == null || maxEdges <= 0) {
+      return Set.of();
+    }
+
+    record NodeDepth(NodeId node, int depth) {}
+
+    Set<RailEdge> collected = new LinkedHashSet<>();
+    Set<EdgeId> visitedEdges = new HashSet<>();
+    Map<NodeId, Integer> bestDepth = new HashMap<>();
+    Deque<NodeDepth> queue = new ArrayDeque<>();
+    queue.addLast(new NodeDepth(start, 0));
+    bestDepth.put(start, 0);
+
+    while (!queue.isEmpty()) {
+      NodeDepth current = queue.removeFirst();
+      if (current.depth() >= maxEdges) {
+        continue;
+      }
+      for (RailEdge edge : graph.edgesFrom(current.node())) {
+        if (edge == null) {
+          continue;
+        }
+        EdgeId edgeId = EdgeId.undirected(edge.from(), edge.to());
+        if (!visitedEdges.add(edgeId)) {
+          continue;
+        }
+        collected.add(edge);
+        NodeId next = current.node().equals(edge.from()) ? edge.to() : edge.from();
+        if (next == null) {
+          continue;
+        }
+        int nextDepth = current.depth() + 1;
+        Integer known = bestDepth.get(next);
+        if (known != null && known <= nextDepth) {
+          continue;
+        }
+        bestDepth.put(next, nextDepth);
+        queue.addLast(new NodeDepth(next, nextDepth));
+      }
+    }
+
+    return Set.copyOf(collected);
   }
 
   private void applySwitcherZoneConflicts(

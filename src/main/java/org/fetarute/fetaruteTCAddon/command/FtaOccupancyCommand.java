@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
@@ -19,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -89,6 +92,22 @@ public final class FtaOccupancyCommand {
                   int limit = ctx.<Integer>optional("limit").orElse(DEFAULT_LIMIT);
                   dumpQueues(ctx.sender(), limit);
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("occupancy")
+            .literal("stats")
+            .permission("fetarute.occupancy")
+            .handler(ctx -> dumpStats(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("occupancy")
+            .literal("heal")
+            .permission("fetarute.occupancy")
+            .handler(ctx -> healOrphans(ctx.sender())));
 
     registerDebugCommands(manager, nodeIdSuggestions);
 
@@ -189,6 +208,16 @@ public final class FtaOccupancyCommand {
         locale.component("command.occupancy.help.hover-release-resource"));
     sendHelpEntry(
         sender,
+        locale.component("command.occupancy.help.entry-stats"),
+        ClickEvent.runCommand("/fta occupancy stats"),
+        locale.component("command.occupancy.help.hover-stats"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.occupancy.help.entry-heal"),
+        ClickEvent.runCommand("/fta occupancy heal"),
+        locale.component("command.occupancy.help.hover-heal"));
+    sendHelpEntry(
+        sender,
         locale.component("command.occupancy.help.entry-debug-edge"),
         ClickEvent.suggestCommand("/fta occupancy debug acquire edge "),
         locale.component("command.occupancy.help.hover-debug-edge"));
@@ -209,6 +238,142 @@ public final class FtaOccupancyCommand {
   private void sendNotReady(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("command.occupancy.not-ready"));
+  }
+
+  private void dumpStats(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+
+    OccupancyManager occupancy = plugin.getOccupancyManager();
+    if (occupancy == null) {
+      sendNotReady(sender);
+      return;
+    }
+
+    int claims = occupancy.snapshotClaims().size();
+
+    int queueResources = 0;
+    int queueEntries = 0;
+    if (occupancy instanceof OccupancyQueueSupport support) {
+      for (OccupancyQueueSnapshot snap : support.snapshotQueues()) {
+        if (snap == null || snap.entries() == null) {
+          continue;
+        }
+        queueResources++;
+        queueEntries += snap.entries().size();
+      }
+    }
+
+    RuntimeDispatchService dispatch = plugin.getRuntimeDispatchService().orElse(null);
+    int progress = dispatch != null ? dispatch.progressEntryCount() : 0;
+    int layover = dispatch != null ? dispatch.layoverCandidateCount() : 0;
+    RuntimeDispatchService.CleanupResult lastHeal =
+        dispatch != null
+            ? dispatch.lastCleanupResult()
+            : new RuntimeDispatchService.CleanupResult(Instant.EPOCH, 0, 0, 0);
+
+    int spawnQueue = plugin.getSpawnManager().map(m -> m.snapshotQueue().size()).orElse(0);
+    int pending =
+        plugin.getSpawnTicketAssigner().map(a -> a.snapshotPendingTickets().size()).orElse(0);
+
+    long spawnSuccess = 0;
+    long spawnRetries = 0;
+    java.util.List<java.util.Map.Entry<String, Long>> topSpawnErrors = java.util.List.of();
+    var assignerOpt = plugin.getSpawnTicketAssigner();
+    if (assignerOpt.isPresent()
+        && assignerOpt.get()
+            instanceof
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner
+            assigner) {
+      var diag = assigner.snapshotDiagnostics();
+      spawnSuccess = diag.success();
+      spawnRetries = diag.retries();
+      topSpawnErrors =
+          diag.requeueByError().entrySet().stream()
+              .sorted(java.util.Map.Entry.<String, Long>comparingByValue().reversed())
+              .limit(5)
+              .toList();
+    }
+
+    sender.sendMessage(locale.component("command.occupancy.stats.header"));
+    sender.sendMessage(
+        locale.component(
+            "command.occupancy.stats.occupancy",
+            Map.of(
+                "claims",
+                String.valueOf(claims),
+                "queues",
+                String.valueOf(queueResources),
+                "entries",
+                String.valueOf(queueEntries))));
+    sender.sendMessage(
+        locale.component(
+            "command.occupancy.stats.runtime",
+            Map.of(
+                "progress",
+                String.valueOf(progress),
+                "layover",
+                String.valueOf(layover),
+                "heal_at",
+                lastHeal.at().toString(),
+                "heal_released",
+                String.valueOf(lastHeal.releasedTrains()),
+                "heal_progress",
+                String.valueOf(lastHeal.removedProgress()),
+                "heal_layover",
+                String.valueOf(lastHeal.removedLayovers()))));
+    sender.sendMessage(
+        locale.component(
+            "command.occupancy.stats.spawn",
+            Map.of(
+                "queue",
+                String.valueOf(spawnQueue),
+                "pending",
+                String.valueOf(pending),
+                "success",
+                String.valueOf(spawnSuccess),
+                "retry",
+                String.valueOf(spawnRetries))));
+
+    for (var entry : topSpawnErrors) {
+      sender.sendMessage(
+          locale.component(
+              "command.occupancy.stats.spawn-error",
+              Map.of("error", entry.getKey(), "count", String.valueOf(entry.getValue()))));
+    }
+  }
+
+  private void healOrphans(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    RuntimeDispatchService dispatch = plugin.getRuntimeDispatchService().orElse(null);
+    if (dispatch == null) {
+      sender.sendMessage(locale.component("command.occupancy.heal.not-ready"));
+      return;
+    }
+
+    java.util.Set<String> active = new java.util.HashSet<>();
+    for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+      if (group == null || !group.isValid()) {
+        continue;
+      }
+      if (group.getProperties() != null && group.getProperties().getTrainName() != null) {
+        active.add(group.getProperties().getTrainName());
+      }
+    }
+
+    RuntimeDispatchService.CleanupResult result =
+        dispatch.cleanupOrphanOccupancyClaimsWithReport(active);
+    sender.sendMessage(
+        locale.component(
+            "command.occupancy.heal.success",
+            Map.of(
+                "released",
+                String.valueOf(result.releasedTrains()),
+                "removed_progress",
+                String.valueOf(result.removedProgress()),
+                "removed_layover",
+                String.valueOf(result.removedLayovers()),
+                "at",
+                result.at().toString())));
   }
 
   /** 输出当前占用快照（按资源排序）。 */

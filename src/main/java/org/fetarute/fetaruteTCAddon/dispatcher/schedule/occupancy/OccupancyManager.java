@@ -26,4 +26,13 @@ public interface OccupancyManager {
 
   /** 释放单个资源占用（可选校验列车名称）。 */
   boolean releaseResource(OccupancyResource resource, Optional<String> trainName);
+
+  /**
+   * 是否需要让行（优先级让行）。
+   *
+   * <p>默认实现不启用让行，由具体占用实现决定是否支持。
+   */
+  default boolean shouldYield(OccupancyRequest request) {
+    return false;
+  }
 }

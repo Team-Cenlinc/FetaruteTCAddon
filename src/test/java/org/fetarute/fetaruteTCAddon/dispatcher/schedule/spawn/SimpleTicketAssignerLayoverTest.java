@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -105,6 +106,42 @@ class SimpleTicketAssignerLayoverTest {
 
     verify(spawnManager).complete(ticket);
     verify(spawnManager, never()).requeue(any());
+    assertEquals(1L, assigner.snapshotDiagnostics().success());
+    assertEquals(0L, assigner.snapshotDiagnostics().retries());
+  }
+
+  @Test
+  void tickRequeueIncrementsDiagnostics() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeId)).thenReturn(Optional.empty());
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            routeDefinitions,
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1);
+
+    assigner.tick(provider, Instant.now());
+
+    assertEquals(0L, assigner.snapshotDiagnostics().success());
+    assertEquals(1L, assigner.snapshotDiagnostics().retries());
+    assertEquals(
+        1L, assigner.snapshotDiagnostics().requeueByError().getOrDefault("route-not-found", 0L));
   }
 
   private static SpawnTicket buildTicket(UUID routeId) {

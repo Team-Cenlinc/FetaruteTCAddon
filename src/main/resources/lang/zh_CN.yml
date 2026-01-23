@@ -149,6 +149,15 @@ command:
       entry: "<gray>-</gray> <white><resource></white> <gray>active=<white><active></white> dir=<white><direction></white> queued=<white><count></white></gray>"
       item: "<gray>  •</gray> <white><train></white> <gray>dir=<white><direction></white> since=<white><since></white> seen=<white><seen></white></gray>"
       truncated: "<gray>  … 已截断，使用 /fta occupancy queue <limit> 调整数量</gray>"
+    stats:
+      header: "<prefix> <dark_aqua>调度健康</dark_aqua>"
+      occupancy: "<gray>-</gray> claims=<white><claims></white> queues=<white><queues></white> entries=<white><entries></white>"
+      runtime: "<gray>-</gray> progress=<white><progress></white> layover=<white><layover></white> lastHeal=<white><heal_at></white> released=<white><heal_released></white> removedProgress=<white><heal_progress></white> removedLayover=<white><heal_layover></white>"
+      spawn: "<gray>-</gray> spawnQueue=<white><queue></white> pending=<white><pending></white> success=<white><success></white> retry=<white><retry></white>"
+      spawn-error: "<gray>  •</gray> <white><error></white> <gray>x</gray><white><count></white>"
+    heal:
+      not-ready: "<prefix> <red>运行时调度未就绪，无法自愈</red>"
+      success: "<prefix> <dark_aqua>自愈完成</dark_aqua> <gray>(released=<white><released></white>, removedProgress=<white><removed_progress></white>, removedLayover=<white><removed_layover></white>, at=<white><at></white>)</gray>"
     debug:
       player-only: "<prefix> <red>该调试命令仅限玩家执行</red>"
       graph-not-ready: "<prefix> <red>调度图未就绪</red> <gray>请先 /fta graph build</gray>"
@@ -166,6 +175,10 @@ command:
       hover-release: "<gray>点击填充:</gray> <white>/fta occupancy release </white>\n<dark_aqua>按列车名称清理占用</dark_aqua>"
       entry-release-resource: "<gray>/fta occupancy release-resource</gray> <white>-</white> <dark_aqua>按资源释放占用</dark_aqua>"
       hover-release-resource: "<gray>点击填充:</gray> <white>/fta occupancy release-resource </white>\n<dark_aqua>参数: EDGE/NODE/CONFLICT + key</dark_aqua>"
+      entry-stats: "<gray>/fta occupancy stats</gray> <white>-</white> <dark_aqua>查看自愈/异常统计</dark_aqua>"
+      hover-stats: "<gray>点击执行:</gray> <white>/fta occupancy stats</white>\n<dark_aqua>汇总占用/队列/出车异常等指标</dark_aqua>"
+      entry-heal: "<gray>/fta occupancy heal</gray> <white>-</white> <dark_aqua>手动触发自愈清理</dark_aqua>"
+      hover-heal: "<gray>点击执行:</gray> <white>/fta occupancy heal</white>\n<dark_aqua>清理孤儿占用/进度缓存并回显结果</dark_aqua>"
       entry-debug-edge: "<gray>/fta occupancy debug edge</gray> <white>-</white> <dark_aqua>调试区间占用</dark_aqua>"
       hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\"</dark_aqua>"
       entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
