@@ -10,6 +10,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.bukkit.Bukkit;
+import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -33,6 +34,7 @@ public class ReclaimManager {
   private final ConfigManager configManager;
   private final Consumer<String> debugLogger;
   private final java.util.function.IntSupplier activeTrainCountSupplier;
+  private BukkitTask task;
 
   public ReclaimManager(
       FetaruteTCAddon plugin,
@@ -66,8 +68,18 @@ public class ReclaimManager {
   }
 
   public void start() {
+    stop();
     long interval = configManager.current().reclaimSettings().checkIntervalSeconds() * 20L;
-    Bukkit.getScheduler().runTaskTimer(plugin, this::performReclaimCheck, interval, interval);
+    task =
+        Bukkit.getScheduler().runTaskTimer(plugin, this::performReclaimCheck, interval, interval);
+  }
+
+  public void stop() {
+    if (task == null) {
+      return;
+    }
+    task.cancel();
+    task = null;
   }
 
   void performReclaimCheck() {

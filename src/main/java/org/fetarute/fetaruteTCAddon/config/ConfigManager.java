@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 7;
+  private static final int EXPECTED_CONFIG_VERSION = 9;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
@@ -26,6 +26,9 @@ public final class ConfigManager {
   private static final int DEFAULT_MIN_CLEAR_EDGES = 1;
   private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
+  private static final boolean DEFAULT_HUD_BOSSBAR_ENABLED = true;
+  private static final int DEFAULT_HUD_BOSSBAR_TICK_INTERVAL = 10;
+  private static final Optional<String> DEFAULT_HUD_BOSSBAR_TEMPLATE = Optional.empty();
   private static final double DEFAULT_CAUTION_SPEED_BPS = 6.0;
   private static final double DEFAULT_APPROACH_DEPOT_SPEED_BPS = 3.5;
   private static final boolean DEFAULT_SPEED_CURVE_ENABLED = true;
@@ -260,6 +263,9 @@ public final class ConfigManager {
       ConfigurationSection section, java.util.logging.Logger logger) {
     int tickInterval = DEFAULT_DISPATCH_TICK_INTERVAL;
     int lookaheadEdges = DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES;
+    boolean hudBossBarEnabled = DEFAULT_HUD_BOSSBAR_ENABLED;
+    int hudBossBarTickInterval = DEFAULT_HUD_BOSSBAR_TICK_INTERVAL;
+    Optional<String> hudBossBarTemplate = DEFAULT_HUD_BOSSBAR_TEMPLATE;
     int minClearEdges = DEFAULT_MIN_CLEAR_EDGES;
     int switcherZoneEdges = DEFAULT_SWITCHER_ZONE_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
@@ -273,6 +279,25 @@ public final class ConfigManager {
     int failoverStallTicks = DEFAULT_FAILOVER_STALL_TICKS;
     boolean failoverUnreachableStop = DEFAULT_FAILOVER_UNREACHABLE_STOP;
     if (section != null) {
+      ConfigurationSection hud = section.getConfigurationSection("hud");
+      if (hud != null) {
+        ConfigurationSection bossbar = hud.getConfigurationSection("bossbar");
+        if (bossbar != null) {
+          hudBossBarEnabled = bossbar.getBoolean("enabled", hudBossBarEnabled);
+          int configuredHudInterval = bossbar.getInt("tick-interval-ticks", hudBossBarTickInterval);
+          if (configuredHudInterval > 0) {
+            hudBossBarTickInterval = configuredHudInterval;
+          } else {
+            logger.warning(
+                "runtime.hud.bossbar.tick-interval-ticks 配置无效: " + configuredHudInterval);
+          }
+          String configuredTemplate = bossbar.getString("template");
+          if (configuredTemplate != null && !configuredTemplate.isBlank()) {
+            hudBossBarTemplate = Optional.of(configuredTemplate);
+          }
+        }
+      }
+
       int configuredInterval = section.getInt("dispatch-tick-interval-ticks", tickInterval);
       if (configuredInterval > 0) {
         tickInterval = configuredInterval;
@@ -372,7 +397,10 @@ public final class ConfigManager {
         speedCurveEarlyBrakeBlocks,
         failoverStallSpeed,
         failoverStallTicks,
-        failoverUnreachableStop);
+        failoverUnreachableStop,
+        hudBossBarEnabled,
+        hudBossBarTickInterval,
+        hudBossBarTemplate);
   }
 
   private static TrainConfigSettings parseTrain(
@@ -552,7 +580,10 @@ public final class ConfigManager {
       double speedCurveEarlyBrakeBlocks,
       double failoverStallSpeedBps,
       int failoverStallTicks,
-      boolean failoverUnreachableStop) {
+      boolean failoverUnreachableStop,
+      boolean hudBossBarEnabled,
+      int hudBossBarTickIntervalTicks,
+      Optional<String> hudBossBarTemplate) {
     public RuntimeSettings {
       if (dispatchTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("dispatchTickIntervalTicks 必须为正数");
@@ -590,6 +621,11 @@ public final class ConfigManager {
       if (failoverStallTicks <= 0) {
         throw new IllegalArgumentException("failoverStallTicks 必须为正数");
       }
+      if (hudBossBarTickIntervalTicks <= 0) {
+        throw new IllegalArgumentException("hudBossBarTickIntervalTicks 必须为正数");
+      }
+      hudBossBarTemplate =
+          hudBossBarTemplate == null ? Optional.empty() : hudBossBarTemplate.map(String::trim);
     }
   }
 

@@ -10,6 +10,25 @@ error:
   no-permission: "<prefix> <red>你没有权限执行此命令</red>"
   storage-unavailable: "<prefix> <red>存储后端尚未就绪，稍后重试或检查控制台日志</red>"
 
+display:
+  hud:
+    bossbar:
+      template: "<dark_aqua>{label_line}</dark_aqua> <white>{line}</white> <dark_gray>|</dark_gray> <dark_aqua>{label_next}</dark_aqua> <white>{next_station}</white> <dark_gray>|</dark_gray> <gold>{eta_status}</gold> <dark_gray>|</dark_gray> <aqua>{speed_kmh} {speed_unit}</aqua>"
+      label:
+        line: "线路"
+        next: "下一站"
+      unit:
+        kmh: "km/h"
+      signal:
+        proceed: "通行"
+        proceed_with_caution: "注意"
+        caution: "注意"
+        stop: "停车"
+        unknown: "-"
+      service:
+        in_service: "营运中"
+        layover: "待命"
+
 sign:
   created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
   invalid:
@@ -63,6 +82,8 @@ command:
     hover-eta: "<gray>点击填充:</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
     entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置（速度/加减速）</dark_aqua>"
     hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置（速度/加减速）</dark_aqua>"
+    entry-template: "<gray>/fta template</gray> <white>-</white> <dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
+    hover-template: "<gray>点击填充:</gray> <white>/fta template </white>\n<dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -72,6 +93,42 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+
+  template:
+    invalid-type: "<prefix> <red>未知模板类型:</red> <white><type></white>"
+    invalid-name: "<prefix> <red>模板名称不能为空</red>"
+    not-found: "<prefix> <red>未找到模板</red> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
+    create:
+      exists: "<prefix> <red>模板已存在</red> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
+      success: "<prefix> <dark_aqua>已创建模板</dark_aqua> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
+    editor:
+      give:
+        success: "<prefix> <dark_aqua>已发放模板编辑书</dark_aqua>"
+        dropped: "<prefix> <gray>背包已满，模板编辑书已掉落</gray>"
+      book:
+        name: "<dark_aqua>模板编辑器</dark_aqua> <gray>(<type>/<name>)</gray>"
+        lore-1: "<gray>编辑模板内容并执行 /fta template define</gray>"
+        lore-2: "<gray>绑定:</gray> <white><company></white>/<white><name></white>"
+        empty-template:
+          - "# FetaruteTCAddon HUD Template"
+          - "# 每行一段文本或配置"
+          - "# 使用 {placeholder} 占位符"
+          - "# 完成后运行 /fta template define"
+    define:
+      success: "<prefix> <dark_aqua>已更新模板</dark_aqua> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
+      book:
+        missing: "<prefix> <red>请手持模板编辑书</red>"
+        invalid: "<prefix> <red>不是有效的模板编辑书</red>"
+        empty: "<prefix> <red>模板内容为空</red>"
+    list:
+      header: "<prefix> <dark_aqua>模板列表</dark_aqua> <gray>(company=<white><company></white>, count=<white><count></white>)</gray>"
+      empty: "<prefix> <gray>暂无模板</gray>"
+      entry: "<gray>-</gray> <white><type></white> <dark_aqua><name></dark_aqua>"
+    info:
+      header: "<prefix> <dark_aqua>模板信息</dark_aqua> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
+      entry: "<gray>company=<white><company></white> updated=<white><updated></white></gray>"
+    delete:
+      success: "<prefix> <dark_aqua>已删除模板</dark_aqua> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
 
   occupancy:
     not-ready: "<prefix> <red>占用管理器未就绪</red>"
@@ -505,6 +562,17 @@ command:
       noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline）</gray>"
     delete:
       success: "<prefix> <dark_aqua>线路已删除：</dark_aqua><white><code></white>"
+    hud:
+      invalid-type: "<prefix> <red>无效模板类型:</red> <white><type></white>"
+      template-not-found: "<prefix> <red>未找到模板</red> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
+      set:
+        success: "<prefix> <dark_aqua>已绑定线路模板</dark_aqua> <gray>(line=<white><line></white>, type=<white><type></white>, name=<white><name></white>)</gray>"
+      clear:
+        success: "<prefix> <dark_aqua>已清除线路模板</dark_aqua> <gray>(line=<white><line></white>, type=<white><type></white>)</gray>"
+      show:
+        header: "<prefix> <dark_aqua>线路 HUD 绑定</dark_aqua> <gray>(line=<white><line></white>, count=<white><count></white>)</gray>"
+        empty: "<prefix> <gray>该线路尚未绑定模板</gray>"
+        entry: "<gray>-</gray> <white><type></white> <dark_aqua><name></dark_aqua>"
 
   route:
     create:

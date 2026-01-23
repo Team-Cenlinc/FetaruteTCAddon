@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -63,6 +64,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
+import org.fetarute.fetaruteTCAddon.display.DisplayService;
+import org.fetarute.fetaruteTCAddon.display.SimpleDisplayService;
+import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
@@ -103,6 +107,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private TrainSnapshotStore trainSnapshotStore;
   private EtaRuntimeSampler etaRuntimeSampler;
   private EtaService etaService;
+  private DisplayService displayService;
+  private HudTemplateService hudTemplateService;
 
   @Override
   public void onEnable() {
@@ -128,6 +134,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initRuntimeDispatch();
     initSpawnScheduler();
     initReclaimManager();
+    initHudTemplateService();
+    initDisplayService();
 
     registerCommands();
     getServer()
@@ -147,6 +155,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (spawnMonitorTask != null) {
       spawnMonitorTask.cancel();
       spawnMonitorTask = null;
+    }
+    if (displayService != null) {
+      displayService.stop();
+      displayService = null;
+    }
+    if (reclaimManager != null) {
+      reclaimManager.stop();
+      reclaimManager = null;
     }
     if (storageManager != null) {
       storageManager.shutdown();
@@ -180,6 +196,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
       sender.sendMessage("插件尚未初始化，无法重载");
       return;
     }
+    if (displayService != null) {
+      displayService.stop();
+      displayService = null;
+    }
+    if (reclaimManager != null) {
+      reclaimManager.stop();
+      reclaimManager = null;
+    }
     ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), loggerManager)
         .update();
     this.configManager.reload();
@@ -189,9 +213,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (etaService != null) {
       etaService.attachStorageProvider(storageManager.provider().orElse(null));
     }
+    if (hudTemplateService != null) {
+      hudTemplateService.reload();
+    }
     initRouteDefinitionCache();
     restartRuntimeMonitor();
     initSpawnScheduler();
+    initReclaimManager();
+    initDisplayService();
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
 
@@ -210,6 +239,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public StorageManager getStorageManager() {
     return storageManager;
+  }
+
+  public HudTemplateService getHudTemplateService() {
+    return hudTemplateService;
   }
 
   /** 返回运行时调度服务（若未初始化则为空）。 */
@@ -266,6 +299,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaOccupancyCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
+    new FtaTemplateCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
@@ -573,6 +607,36 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new ReclaimManager(
             this, layoverRegistry, spawnTicketAssigner, configManager, loggerManager::debug);
     this.reclaimManager.start();
+  }
+
+  /**
+   * 初始化展示层（HUD/站牌等）。
+   *
+   * <p>该层只消费调度/ETA 的快照与缓存，不参与控车与调度决策。
+   */
+  private void initDisplayService() {
+    if (configManager == null || etaService == null || routeDefinitionCache == null) {
+      return;
+    }
+    if (displayService != null) {
+      displayService.stop();
+    }
+    displayService =
+        new SimpleDisplayService(
+            this,
+            configManager,
+            etaService,
+            routeDefinitionCache,
+            routeProgressRegistry,
+            layoverRegistry,
+            hudTemplateService);
+    displayService.start();
+  }
+
+  /** 初始化 HUD 模板服务（加载模板与线路绑定缓存）。 */
+  private void initHudTemplateService() {
+    this.hudTemplateService = new HudTemplateService(storageManager, loggerManager::debug);
+    this.hudTemplateService.reload();
   }
 
   /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */

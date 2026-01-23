@@ -52,6 +52,9 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
     ddl.add(routeStops(dialect));
     ddl.add(index("route_stops_route", "route_stops", "route_id"));
+    ddl.add(hudTemplates(dialect));
+    ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
+    ddl.add(hudLineBindings(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     ddl.add(railEdges(dialect));
@@ -346,6 +349,53 @@ public final class StorageSchema {
         dialect.stringType(),
         table("routes"),
         table("stations"));
+  }
+
+  private String hudTemplates(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    type %s NOT NULL,
+                    name %s NOT NULL,
+                    content %s NOT NULL,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    FOREIGN KEY (company_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("hud_templates"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("companies"));
+  }
+
+  private String hudLineBindings(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    line_id %s NOT NULL,
+                    template_type %s NOT NULL,
+                    template_id %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    PRIMARY KEY (line_id, template_type),
+                    FOREIGN KEY (line_id) REFERENCES %s(id) ON DELETE CASCADE,
+                    FOREIGN KEY (template_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("hud_line_bindings"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.timestampType(),
+        table("lines"),
+        table("hud_templates"));
   }
 
   private String railNodes(SqlDialect dialect) {

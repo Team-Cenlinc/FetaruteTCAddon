@@ -45,6 +45,11 @@ public final class SqliteDialect implements SqlDialect {
   }
 
   @Override
+  public String textType() {
+    return "TEXT";
+  }
+
+  @Override
   public String timestampType() {
     return "INTEGER";
   }

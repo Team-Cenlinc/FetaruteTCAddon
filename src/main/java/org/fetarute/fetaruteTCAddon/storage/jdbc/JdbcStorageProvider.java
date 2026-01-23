@@ -15,6 +15,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverride
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
+import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
@@ -22,6 +24,8 @@ import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
@@ -59,6 +63,8 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RailEdgeOverrideRepository railEdgeOverrideRepository;
   private final RailComponentCautionRepository railComponentCautionRepository;
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
+  private final HudTemplateRepository hudTemplateRepository;
+  private final HudLineBindingRepository hudLineBindingRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -91,6 +97,10 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcRailComponentCautionRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railGraphSnapshotRepository =
         new JdbcRailGraphSnapshotRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.hudTemplateRepository =
+        new JdbcHudTemplateRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.hudLineBindingRepository =
+        new JdbcHudLineBindingRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -169,6 +179,16 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public RailGraphSnapshotRepository railGraphSnapshots() {
     return railGraphSnapshotRepository;
+  }
+
+  @Override
+  public HudTemplateRepository hudTemplates() {
+    return hudTemplateRepository;
+  }
+
+  @Override
+  public HudLineBindingRepository hudLineBindings() {
+    return hudLineBindingRepository;
   }
 
   @Override

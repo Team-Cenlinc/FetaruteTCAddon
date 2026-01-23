@@ -8,7 +8,6 @@ import com.bergerkiller.bukkit.tc.events.GroupRemoveEvent;
 import com.bergerkiller.bukkit.tc.events.GroupUnloadEvent;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
-import java.util.Locale;
 import java.util.Optional;
 import org.bukkit.block.Sign;
 import org.bukkit.event.EventHandler;
@@ -48,11 +47,7 @@ public final class RuntimeDispatchListener implements Listener {
     if (!event.hasGroup()) {
       return;
     }
-    String type = safeType(event);
-    if (type.isEmpty()) {
-      return;
-    }
-    Optional<SignNodeDefinition> definitionOpt = resolveDefinition(event, type);
+    Optional<SignNodeDefinition> definitionOpt = resolveDefinition(event);
     definitionOpt.ifPresent(def -> dispatchService.handleProgressTrigger(event, def));
   }
 
@@ -98,18 +93,24 @@ public final class RuntimeDispatchListener implements Listener {
     dispatchService.handleSignalTick(group);
   }
 
-  private Optional<SignNodeDefinition> resolveDefinition(SignActionEvent event, String type) {
-    if (type.equals("switcher")) {
-      if (event.getTrackedSign() != null) {
-        return SwitcherSignDefinitionParser.parse(event.getTrackedSign());
-      }
-      Sign sign = event.getSign();
-      return SwitcherSignDefinitionParser.parse(sign);
+  private Optional<SignNodeDefinition> resolveDefinition(SignActionEvent event) {
+    if (event == null) {
+      return Optional.empty();
     }
     if (event.getTrackedSign() != null) {
+      Optional<SignNodeDefinition> switcher =
+          SwitcherSignDefinitionParser.parse(event.getTrackedSign());
+      if (switcher.isPresent()) {
+        return switcher;
+      }
       return NodeSignDefinitionParser.parse(event.getTrackedSign());
     }
-    return NodeSignDefinitionParser.parse(event.getSign());
+    Sign sign = event.getSign();
+    Optional<SignNodeDefinition> switcher = SwitcherSignDefinitionParser.parse(sign);
+    if (switcher.isPresent()) {
+      return switcher;
+    }
+    return NodeSignDefinitionParser.parse(sign);
   }
 
   private boolean isHeadMember(SignActionEvent event) {
@@ -125,13 +126,5 @@ public final class RuntimeDispatchListener implements Listener {
       return false;
     }
     return group.head() == member;
-  }
-
-  private String safeType(SignActionEvent event) {
-    String line = event.getLine(1);
-    if (line == null) {
-      return "";
-    }
-    return line.trim().toLowerCase(Locale.ROOT);
   }
 }

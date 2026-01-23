@@ -32,6 +32,9 @@ public interface SqlDialect {
 
   String jsonType();
 
+  /** 长文本类型（用于模板、文档等大字段）。 */
+  String textType();
+
   String timestampType();
 
   String intType();

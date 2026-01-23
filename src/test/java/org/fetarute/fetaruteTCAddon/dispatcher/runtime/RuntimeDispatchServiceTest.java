@@ -218,7 +218,10 @@ class RuntimeDispatchServiceTest {
             base.runtimeSettings().speedCurveEarlyBrakeBlocks(),
             base.runtimeSettings().failoverStallSpeedBps(),
             base.runtimeSettings().failoverStallTicks(),
-            base.runtimeSettings().failoverUnreachableStop());
+            base.runtimeSettings().failoverUnreachableStop(),
+            base.runtimeSettings().hudBossBarEnabled(),
+            base.runtimeSettings().hudBossBarTickIntervalTicks(),
+            Optional.empty());
     when(configManager.current())
         .thenReturn(
             new ConfigManager.ConfigView(
@@ -670,13 +673,16 @@ class RuntimeDispatchServiceTest {
             0.0,
             0.2,
             60,
-            true);
+            true,
+            true,
+            10,
+            Optional.empty());
     ConfigManager.TrainTypeSettings typeDefaults = new ConfigManager.TrainTypeSettings(1.0, 1.0);
     ConfigManager.TrainConfigSettings train =
         new ConfigManager.TrainConfigSettings(
             "emu", typeDefaults, typeDefaults, typeDefaults, typeDefaults);
     return new ConfigManager.ConfigView(
-        7,
+        9,
         false,
         "zh_CN",
         storage,

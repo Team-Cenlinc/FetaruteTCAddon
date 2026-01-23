@@ -22,6 +22,11 @@
         <Method name="getOccupancyManager"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getHudTemplateService"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
 
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.company.model.CompanyMember"/>
@@ -121,6 +126,10 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManager"/>
         <Method name="applySchemaIfReady"/>
         <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
@@ -185,6 +194,14 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailComponentCautionRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>

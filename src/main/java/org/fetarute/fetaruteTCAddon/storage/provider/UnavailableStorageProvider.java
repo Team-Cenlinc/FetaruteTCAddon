@@ -15,6 +15,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverride
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
+import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransaction;
@@ -112,6 +114,16 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public RailGraphSnapshotRepository railGraphSnapshots() {
     return unsupported(RailGraphSnapshotRepository.class);
+  }
+
+  @Override
+  public HudTemplateRepository hudTemplates() {
+    return unsupported(HudTemplateRepository.class);
+  }
+
+  @Override
+  public HudLineBindingRepository hudLineBindings() {
+    return unsupported(HudLineBindingRepository.class);
   }
 
   @Override

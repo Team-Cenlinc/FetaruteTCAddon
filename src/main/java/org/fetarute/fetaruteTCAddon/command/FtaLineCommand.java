@@ -24,6 +24,9 @@ import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
+import org.fetarute.fetaruteTCAddon.display.template.HudTemplate;
+import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
+import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -74,6 +77,9 @@ public final class FtaLineCommand {
     SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
     SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
     SuggestionProvider<CommandSender> lineSuggestions = lineSuggestions();
+    SuggestionProvider<CommandSender> templateTypeSuggestions =
+        CommandSuggestionProviders.enumValues(HudTemplateType.class, "<type>");
+    SuggestionProvider<CommandSender> templateNameSuggestions = templateNameSuggestions();
 
     SuggestionProvider<CommandSender> codeSuggestions = placeholderSuggestion("<code>");
     SuggestionProvider<CommandSender> nameSuggestions = placeholderSuggestion("\"<name>\"");
@@ -617,6 +623,247 @@ public final class FtaLineCommand {
                   sender.sendMessage(
                       locale.component("command.line.delete.success", Map.of("code", line.code())));
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("line")
+            .literal("hud")
+            .literal("set")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("type", StringParser.stringParser(), templateTypeSuggestions)
+            .required("template", StringParser.stringParser(), templateNameSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  Optional<Company> companyOpt =
+                      query.findCompany(((String) ctx.get("company")).trim());
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found",
+                            Map.of("company", ((String) ctx.get("company")).trim())));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+                  if (!canManageCompany(sender, provider, company.id())) {
+                    sender.sendMessage(locale.component("error.no-permission"));
+                    return;
+                  }
+                  Optional<Operator> operatorOpt =
+                      query.findOperator(company.id(), ((String) ctx.get("operator")).trim());
+                  if (operatorOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.operator.not-found",
+                            Map.of("operator", ((String) ctx.get("operator")).trim())));
+                    return;
+                  }
+                  Operator operator = operatorOpt.get();
+
+                  String lineArg = ((String) ctx.get("line")).trim();
+                  Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+                  if (lineOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.not-found", Map.of("line", lineArg)));
+                    return;
+                  }
+                  Line line = lineOpt.get();
+
+                  String typeRaw = ((String) ctx.get("type")).trim();
+                  Optional<HudTemplateType> typeOpt = HudTemplateType.parse(typeRaw);
+                  if (typeOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.hud.invalid-type", Map.of("type", typeRaw)));
+                    return;
+                  }
+                  HudTemplateType type = typeOpt.get();
+                  String templateName = ((String) ctx.get("template")).trim();
+                  Optional<HudTemplate> templateOpt =
+                      provider
+                          .hudTemplates()
+                          .findByCompanyAndName(company.id(), type, templateName);
+                  if (templateOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.line.hud.template-not-found",
+                            Map.of("type", type.name(), "name", templateName)));
+                    return;
+                  }
+                  HudTemplate template = templateOpt.get();
+                  provider
+                      .hudLineBindings()
+                      .save(
+                          new HudLineBindingRepository.LineBinding(
+                              line.id(), type, template.id(), java.time.Instant.now()));
+                  reloadTemplateCache();
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.hud.set.success",
+                          Map.of(
+                              "line", line.code(), "type", type.name(), "name", template.name())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("line")
+            .literal("hud")
+            .literal("clear")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("type", StringParser.stringParser(), templateTypeSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  Optional<Company> companyOpt =
+                      query.findCompany(((String) ctx.get("company")).trim());
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found",
+                            Map.of("company", ((String) ctx.get("company")).trim())));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+                  if (!canManageCompany(sender, provider, company.id())) {
+                    sender.sendMessage(locale.component("error.no-permission"));
+                    return;
+                  }
+                  Optional<Operator> operatorOpt =
+                      query.findOperator(company.id(), ((String) ctx.get("operator")).trim());
+                  if (operatorOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.operator.not-found",
+                            Map.of("operator", ((String) ctx.get("operator")).trim())));
+                    return;
+                  }
+                  Operator operator = operatorOpt.get();
+
+                  String lineArg = ((String) ctx.get("line")).trim();
+                  Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+                  if (lineOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.not-found", Map.of("line", lineArg)));
+                    return;
+                  }
+                  Line line = lineOpt.get();
+
+                  String typeRaw = ((String) ctx.get("type")).trim();
+                  Optional<HudTemplateType> typeOpt = HudTemplateType.parse(typeRaw);
+                  if (typeOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.hud.invalid-type", Map.of("type", typeRaw)));
+                    return;
+                  }
+                  HudTemplateType type = typeOpt.get();
+                  provider.hudLineBindings().delete(line.id(), type);
+                  reloadTemplateCache();
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.hud.clear.success",
+                          Map.of("line", line.code(), "type", type.name())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("line")
+            .literal("hud")
+            .literal("show")
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  Optional<Company> companyOpt =
+                      query.findCompany(((String) ctx.get("company")).trim());
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found",
+                            Map.of("company", ((String) ctx.get("company")).trim())));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+                  if (!canReadCompany(sender, provider, company.id())) {
+                    sender.sendMessage(locale.component("error.no-permission"));
+                    return;
+                  }
+                  Optional<Operator> operatorOpt =
+                      query.findOperator(company.id(), ((String) ctx.get("operator")).trim());
+                  if (operatorOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.operator.not-found",
+                            Map.of("operator", ((String) ctx.get("operator")).trim())));
+                    return;
+                  }
+                  Operator operator = operatorOpt.get();
+
+                  String lineArg = ((String) ctx.get("line")).trim();
+                  Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+                  if (lineOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.not-found", Map.of("line", lineArg)));
+                    return;
+                  }
+                  Line line = lineOpt.get();
+
+                  List<HudLineBindingRepository.LineBinding> bindings =
+                      provider.hudLineBindings().listByLine(line.id());
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.hud.show.header",
+                          Map.of("line", line.code(), "count", String.valueOf(bindings.size()))));
+                  if (bindings.isEmpty()) {
+                    sender.sendMessage(locale.component("command.line.hud.show.empty"));
+                    return;
+                  }
+                  for (HudLineBindingRepository.LineBinding binding : bindings) {
+                    String name =
+                        provider
+                            .hudTemplates()
+                            .findById(binding.templateId())
+                            .map(HudTemplate::name)
+                            .orElse("-");
+                    sender.sendMessage(
+                        locale.component(
+                            "command.line.hud.show.entry",
+                            Map.of("type", binding.type().name(), "name", name)));
+                  }
+                }));
   }
 
   /** 获取已就绪的 StorageProvider；未就绪时向用户输出统一错误文案。 */
@@ -790,6 +1037,66 @@ public final class FtaLineCommand {
               .forEach(suggestions::add);
           return suggestions;
         });
+  }
+
+  /**
+   * template 名称补全：依赖 company/type 参数，并按权限过滤。
+   *
+   * <p>仅返回与输入前缀匹配的模板名称。
+   */
+  private SuggestionProvider<CommandSender> templateNameSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<template>");
+          }
+          Optional<StorageProvider> providerOpt = providerIfReady();
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          Optional<String> typeArgOpt = ctx.optional("type").map(String.class::cast);
+          if (companyArgOpt.isEmpty() || typeArgOpt.isEmpty()) {
+            return suggestions;
+          }
+          String companyArg = companyArgOpt.get().trim();
+          String typeRaw = typeArgOpt.get().trim();
+          if (companyArg.isBlank() || typeRaw.isBlank()) {
+            return suggestions;
+          }
+          Optional<HudTemplateType> typeOpt = HudTemplateType.parse(typeRaw);
+          if (typeOpt.isEmpty()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id())) {
+            return suggestions;
+          }
+          provider.hudTemplates().listByCompanyAndType(company.id(), typeOpt.get()).stream()
+              .map(HudTemplate::name)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(name -> !name.isBlank())
+              .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  private void reloadTemplateCache() {
+    if (plugin.getHudTemplateService() != null) {
+      plugin.getHudTemplateService().reload();
+    }
   }
 
   /** 将 Cloud 的输入 token 规范化为小写前缀，用于前缀过滤。 */

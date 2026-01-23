@@ -233,13 +233,12 @@ public final class ConfigUpdater {
       List<String> block = templateBlocks.get(addedKey);
       String parent = parentPath(addedKey);
       if (!parent.isEmpty() && !sectionEnd.containsKey(parent)) {
-        if (insertedSections.add(parent)) {
-          List<String> sectionBlock = sectionBlocks.get(parent);
-          if (sectionBlock != null && !sectionBlock.isEmpty()) {
-            int insertIndex = resolveSectionInsertIndex(parent, sectionEnd, merged.size());
-            inserts.add(new InsertBlock(insertIndex, order++, sectionBlock));
-            continue;
-          }
+        SectionCandidate candidate = resolveMissingSection(parent, sectionEnd, sectionBlocks);
+        if (candidate != null && insertedSections.add(candidate.sectionPath())) {
+          int insertIndex =
+              resolveSectionInsertIndex(candidate.sectionPath(), sectionEnd, merged.size());
+          inserts.add(new InsertBlock(insertIndex, order++, candidate.blockLines()));
+          continue;
         }
       }
       if (block == null || block.isEmpty()) {
@@ -469,6 +468,27 @@ public final class ConfigUpdater {
     return false;
   }
 
+  /**
+   * 当父级段缺失时，寻找“最靠近已存在父段”的模板 section 块。
+   *
+   * <p>避免直接插入深层子段导致缩进失效。
+   */
+  private SectionCandidate resolveMissingSection(
+      String parent, Map<String, Integer> sectionEnd, Map<String, List<String>> sectionBlocks) {
+    String candidate = parent;
+    while (!candidate.isEmpty()) {
+      List<String> block = sectionBlocks.get(candidate);
+      String candidateParent = parentPath(candidate);
+      boolean parentExists = candidateParent.isEmpty() || sectionEnd.containsKey(candidateParent);
+      if (block != null && !block.isEmpty() && parentExists) {
+        return new SectionCandidate(candidate, block);
+      }
+      candidate = parentPath(candidate);
+    }
+    logger.warn("配置合并未找到可插入的父级段: " + parent + "，请手动合并配置");
+    return null;
+  }
+
   private int resolveSectionInsertIndex(
       String sectionPath, Map<String, Integer> sectionEnd, int fallback) {
     String parent = parentPath(sectionPath);
@@ -625,6 +645,8 @@ public final class ConfigUpdater {
   }
 
   private record InsertBlock(int index, int order, List<String> lines) {}
+
+  private record SectionCandidate(String sectionPath, List<String> blockLines) {}
 
   private record SectionFrame(String key, int indent) {}
 

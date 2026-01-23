@@ -103,14 +103,30 @@ final class JdbcRepositoryIntegrationTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
     ConfigManager.ConfigView view =
         new ConfigManager.ConfigView(
-            7,
+            9,
             false,
             "zh_CN",
             settings,
             new ConfigManager.GraphSettings(8.0),
             new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
             new ConfigManager.RuntimeSettings(
-                10, 2, 1, 3, 4.0, 6.0, 3.5, true, SpeedCurveType.PHYSICS, 1.0, 0.0, 0.2, 60, true),
+                10,
+                2,
+                1,
+                3,
+                4.0,
+                6.0,
+                3.5,
+                true,
+                SpeedCurveType.PHYSICS,
+                1.0,
+                0.0,
+                0.2,
+                60,
+                true,
+                true,
+                10,
+                Optional.empty()),
             new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
             new ConfigManager.TrainConfigSettings(
                 "emu",

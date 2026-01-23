@@ -44,6 +44,11 @@ public final class MySqlDialect implements SqlDialect {
   }
 
   @Override
+  public String textType() {
+    return "LONGTEXT";
+  }
+
+  @Override
   public String timestampType() {
     return "TIMESTAMP";
   }

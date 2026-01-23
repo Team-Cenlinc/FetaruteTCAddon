@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 7
+config-version: 9
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -23,6 +23,20 @@ autostation:
 runtime:
   # 运行时信号/闭塞监测 tick 间隔
   dispatch-tick-interval-ticks: 10
+
+  hud:
+    bossbar:
+      # 是否启用“车上 BossBar HUD”
+      enabled: true
+      # BossBar 刷新间隔（ticks）
+      tick-interval-ticks: 10
+      # BossBar 标题模板（MiniMessage）
+      # 占位符: {label_line} {line} {line_code} {line_name} {line_color} {operator}
+      #        {route_code} {route_id} {route_name} {dest_eor} {dest_eop} {label_next} {next_station}
+      #        {eta_status} {eta_minutes} {speed} {speed_kmh} {speed_bps} {speed_unit}
+      #        {signal_status} {signal_aspect} {service_status} {progress_percent}
+      #        {train_name} {layover_wait}
+      template: "<dark_aqua>{label_line}</dark_aqua> <white>{line}</white> <dark_gray>|</dark_gray> <dark_aqua>{label_next}</dark_aqua> <white>{next_station}</white> <dark_gray>|</dark_gray> <gold>{eta_status}</gold> <dark_gray>|</dark_gray> <aqua>{speed_kmh} {speed_unit}</aqua>"
   # 占用请求 lookahead 边数
   lookahead-edges: 2
   # 同向跟驰最小空闲边数

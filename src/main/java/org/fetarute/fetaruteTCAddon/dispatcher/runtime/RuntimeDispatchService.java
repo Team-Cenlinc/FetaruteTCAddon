@@ -24,6 +24,7 @@ import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -244,7 +245,8 @@ public final class RuntimeDispatchService {
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     if (stopOpt.isPresent()) {
       RouteStop stop = stopOpt.get();
-      if (shouldDestroyAt(stop, currentNode)) {
+      if (shouldDestroyAt(stop, currentNode)
+          || shouldDestroyAtFallback(stop, currentIndex, route, definition)) {
         handleDestroy(train, properties, trainName, "DSTY");
         return;
       }
@@ -1171,6 +1173,29 @@ public final class RuntimeDispatchService {
       return false;
     }
     return currentNode.value().equalsIgnoreCase(target);
+  }
+
+  /**
+   * DSTY 兜底判定：当 stop 未携带指令 notes 时，允许“最后一站 + depot + PASS”触发销毁。
+   *
+   * <p>用于兼容历史数据中 DSTY notes 缺失的情况，避免 RETURN 线路无法回收。
+   */
+  private boolean shouldDestroyAtFallback(
+      RouteStop stop, int currentIndex, RouteDefinition route, SignNodeDefinition definition) {
+    if (stop == null || route == null || definition == null) {
+      return false;
+    }
+    if (definition.nodeType() != NodeType.DEPOT) {
+      return false;
+    }
+    if (stop.notes().isPresent() && !stop.notes().get().isBlank()) {
+      return false;
+    }
+    if (stop.passType() != RouteStopPassType.PASS) {
+      return false;
+    }
+    int lastIndex = Math.max(0, route.waypoints().size() - 1);
+    return currentIndex == lastIndex;
   }
 
   private boolean matchesDstyTarget(RouteDefinition route, NodeId currentNode) {
