@@ -9,8 +9,10 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -25,11 +27,20 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaTarget;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
@@ -37,7 +48,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
+import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -50,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class BossBarTrainHudManager implements Listener {
 
   private static final long VEHICLE_HOPS = 3;
+  private static final long DEPARTING_WINDOW_TICKS = 60L;
   private static final String DEFAULT_TEMPLATE =
       "Line {line} | Next {next_station} | {eta_status} | {speed}";
 
@@ -61,10 +77,19 @@ public final class BossBarTrainHudManager implements Listener {
   private final Optional<RouteProgressRegistry> routeProgressRegistry;
   private final Optional<LayoverRegistry> layoverRegistry;
   private final HudTemplateService templateService;
+  private final HudDefaultTemplateService defaultTemplateService;
   private final Consumer<String> debugLogger;
 
   private final BossBarProgressTracker progressTracker = new BossBarProgressTracker();
+  private final BossBarHudStateTracker stateTracker =
+      new BossBarHudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
+  private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
+  private final Map<String, StationDisplay> stationByKey = new HashMap<>();
+  private final Map<UUID, StationDisplay> stationById = new HashMap<>();
+  private final Map<UUID, Optional<NodeId>> stationNodeById = new HashMap<>();
+  private boolean stationCacheLoaded = false;
   private final Map<UUID, BossBar> bars = new HashMap<>();
+  private long tickCounter = 0L;
 
   public BossBarTrainHudManager(
       FetaruteTCAddon plugin,
@@ -75,6 +100,7 @@ public final class BossBarTrainHudManager implements Listener {
       RouteProgressRegistry routeProgressRegistry,
       LayoverRegistry layoverRegistry,
       HudTemplateService templateService,
+      HudDefaultTemplateService defaultTemplateService,
       Consumer<String> debugLogger) {
     this.plugin = plugin;
     this.locale = locale;
@@ -84,6 +110,7 @@ public final class BossBarTrainHudManager implements Listener {
     this.routeProgressRegistry = Optional.ofNullable(routeProgressRegistry);
     this.layoverRegistry = Optional.ofNullable(layoverRegistry);
     this.templateService = templateService;
+    this.defaultTemplateService = defaultTemplateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
 
@@ -98,6 +125,8 @@ public final class BossBarTrainHudManager implements Listener {
   }
 
   public void tick() {
+    int intervalTicks = resolveIntervalTicks();
+    tickCounter += intervalTicks;
     Set<String> activeTrains = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
       Optional<MinecartGroup> groupOpt = resolveGroup(player);
@@ -108,6 +137,7 @@ public final class BossBarTrainHudManager implements Listener {
       showOrUpdate(player, groupOpt.get()).ifPresent(activeTrains::add);
     }
     progressTracker.retain(activeTrains);
+    stateTracker.retain(activeTrains);
   }
 
   public void shutdown() {
@@ -115,6 +145,12 @@ public final class BossBarTrainHudManager implements Listener {
       hide(player);
     }
     progressTracker.clear();
+    stateTracker.clear();
+    templateCache.clear();
+    stationByKey.clear();
+    stationById.clear();
+    stationNodeById.clear();
+    stationCacheLoaded = false;
     bars.clear();
     debugLogger.accept("BossBarTrainHudManager shutdown");
   }
@@ -144,6 +180,10 @@ public final class BossBarTrainHudManager implements Listener {
 
     Optional<RouteProgressRegistry.RouteProgressEntry> progressEntry =
         resolveProgressEntry(trainName);
+    if (!isFtaManaged(properties, progressEntry)) {
+      showDestinationOnly(player, properties);
+      return Optional.of(trainName);
+    }
     int routeIndex =
         progressEntry
             .map(RouteProgressRegistry.RouteProgressEntry::currentIndex)
@@ -161,43 +201,50 @@ public final class BossBarTrainHudManager implements Listener {
         templateService != null
             ? templateService.resolveLineInfo(routeOpt.flatMap(RouteDefinition::metadata))
             : Optional.empty();
-    Optional<NodeId> nextNode =
-        progressEntry.flatMap(RouteProgressRegistry.RouteProgressEntry::nextTarget);
-    if (nextNode.isEmpty()) {
-      nextNode = routeOpt.flatMap(route -> resolveNextNode(route, routeIndex));
-    }
-    String nextStation = nextNode.map(HudWaypointLabel::stationLabel).orElse("-");
+    StationDisplay nextStation =
+        resolveNextStopStationDisplay(routeOpt, routeIndex).orElse(StationDisplay.empty());
     Destinations destinations = resolveDestinations(routeOpt);
 
     EtaResult eta = etaService.getForTrain(trainName, EtaTarget.nextStop());
+    Optional<TrainRuntimeSnapshot> snapshotOpt = etaService.getRuntimeSnapshot(trainName);
+    Optional<NodeId> currentNode = snapshotOpt.flatMap(TrainRuntimeSnapshot::currentNodeId);
+    StationDisplay currentStation =
+        currentNode.map(this::resolveStationDisplay).orElse(StationDisplay.empty());
+    boolean stop =
+        snapshotOpt
+            .flatMap(TrainRuntimeSnapshot::dwellRemainingSec)
+            .map(sec -> sec > 0)
+            .orElse(false);
     SignalAspect signalAspect =
         progressEntry.map(RouteProgressRegistry.RouteProgressEntry::lastSignal).orElse(null);
     Optional<LayoverRegistry.LayoverCandidate> layover = resolveLayover(trainName);
 
     double speedBps = resolveSpeedBlocksPerSecond(group);
-    float progress =
+    long nowMillis = System.currentTimeMillis();
+    float baseProgress =
         progressTracker.progress(
-            trainName,
-            routeIndex,
-            eta.etaEpochMillis(),
-            System.currentTimeMillis(),
-            group.isMoving());
+            trainName, routeIndex, eta.etaEpochMillis(), nowMillis, group.isMoving());
 
-    Component title =
-        BossBarHudTemplateRenderer.render(
-            resolveTemplate(templateOpt),
-            buildPlaceholders(
-                trainName,
-                lineInfo,
-                routeOpt,
-                nextStation,
-                destinations,
-                eta,
-                speedBps,
-                progress,
-                signalAspect,
-                layover),
-            debugLogger);
+    Map<String, String> placeholders =
+        buildPlaceholders(
+            trainName,
+            lineInfo,
+            routeOpt,
+            currentStation,
+            nextStation,
+            destinations,
+            eta,
+            speedBps,
+            baseProgress,
+            signalAspect,
+            layover);
+    BossBarHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
+    float progress = resolveProgress(template, placeholders, baseProgress);
+    BossBarHudState state =
+        stateTracker.resolve(
+            trainName, group.isMoving(), eta.arriving(), layover.isPresent(), stop, nowMillis);
+    String templateLine = template.resolveLine(state, tickCounter).orElse("");
+    Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
 
     BossBar bar =
         bars.computeIfAbsent(
@@ -212,6 +259,37 @@ public final class BossBarTrainHudManager implements Listener {
 
     player.showBossBar(bar);
     return Optional.of(trainName);
+  }
+
+  private boolean isFtaManaged(
+      TrainProperties properties,
+      Optional<RouteProgressRegistry.RouteProgressEntry> progressEntry) {
+    if (progressEntry != null && progressEntry.isPresent()) {
+      return true;
+    }
+    if (properties == null) {
+      return false;
+    }
+    return TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID).isPresent();
+  }
+
+  private void showDestinationOnly(Player player, TrainProperties properties) {
+    String destination = properties == null ? null : properties.getDestination();
+    if (destination == null || destination.isBlank()) {
+      destination = localeTextOrDefault("display.hud.bossbar.tc_destination.empty", "暂无目的地");
+    } else {
+      destination = destination.trim();
+    }
+    BossBar bar =
+        bars.computeIfAbsent(
+            player.getUniqueId(),
+            id ->
+                BossBar.bossBar(
+                    Component.empty(), 0.0f, BossBar.Color.BLUE, BossBar.Overlay.PROGRESS));
+    bar.name(Component.text(destination));
+    bar.progress(1.0f);
+    bar.color(BossBar.Color.BLUE);
+    player.showBossBar(bar);
   }
 
   private void hide(Player player) {
@@ -260,15 +338,114 @@ public final class BossBarTrainHudManager implements Listener {
     return routeDefinitions.findById(routeUuid.get());
   }
 
-  private Optional<NodeId> resolveNextNode(RouteDefinition route, int routeIndex) {
-    if (route == null || route.waypoints() == null) {
+  private Optional<StationDisplay> resolveNextStopStationDisplay(
+      Optional<RouteDefinition> routeOpt, int routeIndex) {
+    if (routeOpt == null || routeOpt.isEmpty() || routeDefinitions == null) {
       return Optional.empty();
     }
-    int nextIndex = routeIndex + 1;
-    if (nextIndex < 0 || nextIndex >= route.waypoints().size()) {
+    RouteDefinition route = routeOpt.get();
+    if (route.waypoints() == null || route.waypoints().isEmpty()) {
       return Optional.empty();
     }
-    return Optional.ofNullable(route.waypoints().get(nextIndex));
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return Optional.empty();
+    }
+    Map<NodeId, Integer> nodeIndexMap = buildNodeIndexMap(route.waypoints());
+    StationDisplay best = StationDisplay.empty();
+    int bestIndex = Integer.MAX_VALUE;
+    for (RouteStop stop : stops) {
+      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
+      StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
+      if (display.isEmpty()) {
+        continue;
+      }
+      Optional<Integer> nodeIndexOpt =
+          nodeIdOpt.map(nodeIndexMap::get).filter(index -> index != null);
+      if (nodeIndexOpt.isPresent()) {
+        int index = nodeIndexOpt.get();
+        if (index > routeIndex && index < bestIndex) {
+          bestIndex = index;
+          best = display;
+        }
+      }
+    }
+    if (bestIndex != Integer.MAX_VALUE) {
+      return Optional.of(best);
+    }
+    StationDisplay fallback = resolveLastStopDisplay(stops);
+    return fallback.isEmpty() ? Optional.empty() : Optional.of(fallback);
+  }
+
+  private Map<NodeId, Integer> buildNodeIndexMap(List<NodeId> waypoints) {
+    Map<NodeId, Integer> indexMap = new HashMap<>();
+    if (waypoints == null) {
+      return indexMap;
+    }
+    for (int i = 0; i < waypoints.size(); i++) {
+      NodeId nodeId = waypoints.get(i);
+      if (nodeId != null) {
+        indexMap.put(nodeId, i);
+      }
+    }
+    return indexMap;
+  }
+
+  private Optional<NodeId> resolveStopNodeId(RouteStop stop) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    if (stop.waypointNodeId().isPresent()) {
+      return Optional.of(NodeId.of(stop.waypointNodeId().get()));
+    }
+    if (stop.stationId().isPresent()) {
+      return resolveStationNodeId(stop.stationId().get());
+    }
+    return Optional.empty();
+  }
+
+  private StationDisplay resolveStopDisplay(RouteStop stop, Optional<NodeId> nodeIdOpt) {
+    if (stop == null) {
+      return StationDisplay.empty();
+    }
+    if (stop.stationId().isPresent()) {
+      StationDisplay display = resolveStationDisplay(stop.stationId().get());
+      if (!display.isEmpty()) {
+        return display;
+      }
+    }
+    if (nodeIdOpt.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeIdOpt.get());
+    if (metaOpt.isPresent()) {
+      WaypointMetadata meta = metaOpt.get();
+      if (meta.kind() != WaypointKind.STATION && meta.kind() != WaypointKind.STATION_THROAT) {
+        return StationDisplay.empty();
+      }
+    }
+    return resolveStationDisplay(nodeIdOpt.get());
+  }
+
+  private StationDisplay resolveLastStopDisplay(List<RouteStop> stops) {
+    if (stops == null || stops.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    for (int i = stops.size() - 1; i >= 0; i--) {
+      RouteStop stop = stops.get(i);
+      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
+      StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
+      if (!display.isEmpty()) {
+        return display;
+      }
+    }
+    return StationDisplay.empty();
   }
 
   private double resolveSpeedBlocksPerSecond(MinecartGroup group) {
@@ -329,7 +506,7 @@ public final class BossBarTrainHudManager implements Listener {
     if (signalAspect == SignalAspect.CAUTION || signalAspect == SignalAspect.PROCEED_WITH_CAUTION) {
       return BossBar.Color.YELLOW;
     }
-    if (eta != null && eta.arriving()) {
+    if (eta.arriving()) {
       return BossBar.Color.YELLOW;
     }
     return BossBar.Color.BLUE;
@@ -360,15 +537,56 @@ public final class BossBarTrainHudManager implements Listener {
         return configured.get();
       }
     }
+    if (defaultTemplateService != null) {
+      Optional<String> defaultTemplate = defaultTemplateService.resolveBossBarTemplate();
+      if (defaultTemplate.isPresent() && !defaultTemplate.get().isBlank()) {
+        return defaultTemplate.get();
+      }
+    }
     String fallback = localeTextOrDefault("display.hud.bossbar.template", DEFAULT_TEMPLATE);
     return fallback.isBlank() ? DEFAULT_TEMPLATE : fallback;
+  }
+
+  private BossBarHudTemplate resolveParsedTemplate(String rawTemplate) {
+    String key = rawTemplate == null ? "" : rawTemplate;
+    return templateCache.computeIfAbsent(
+        key, value -> BossBarHudTemplate.parse(value, debugLogger));
+  }
+
+  private int resolveIntervalTicks() {
+    if (configManager != null && configManager.current() != null) {
+      int interval = configManager.current().runtimeSettings().hudBossBarTickIntervalTicks();
+      return Math.max(1, interval);
+    }
+    return 1;
+  }
+
+  private float resolveProgress(
+      BossBarHudTemplate template, Map<String, String> placeholders, float baseProgress) {
+    if (template == null) {
+      return baseProgress;
+    }
+    Optional<String> expressionOpt = template.progressExpression();
+    if (expressionOpt.isEmpty()) {
+      return baseProgress;
+    }
+    OptionalDouble parsed =
+        BossBarProgressExpression.evaluate(expressionOpt.get(), placeholders, debugLogger);
+    if (parsed.isEmpty()) {
+      return baseProgress;
+    }
+    float value = (float) parsed.getAsDouble();
+    float clamped = clampProgress(value);
+    applyProgressPlaceholders(placeholders, clamped);
+    return clamped;
   }
 
   private Map<String, String> buildPlaceholders(
       String trainName,
       Optional<HudTemplateService.LineInfo> lineInfo,
       Optional<RouteDefinition> routeOpt,
-      String nextStation,
+      StationDisplay currentStation,
+      StationDisplay nextStation,
       Destinations destinations,
       EtaResult eta,
       double speedBps,
@@ -376,10 +594,15 @@ public final class BossBarTrainHudManager implements Listener {
       SignalAspect signalAspect,
       Optional<LayoverRegistry.LayoverCandidate> layover) {
     Map<String, String> placeholders = new HashMap<>();
-    String safeNext = nextStation == null || nextStation.isBlank() ? "-" : nextStation;
-    String etaStatus = eta != null ? eta.statusText() : "-";
+    StationDisplay safeCurrent =
+        currentStation == null ? StationDisplay.empty() : currentStation.sanitized();
+    StationDisplay safeNext =
+        nextStation == null ? StationDisplay.empty() : nextStation.sanitized();
+    StationDisplay safeEor = destinations.eor().sanitized();
+    StationDisplay safeEop = destinations.eop().sanitized();
+    String etaStatus = eta.statusText();
     String etaMinutes =
-        eta != null && eta.etaMinutesRounded() >= 0 ? String.valueOf(eta.etaMinutesRounded()) : "-";
+        eta.etaMinutesRounded() >= 0 ? String.valueOf(eta.etaMinutesRounded()) : "-";
     String unit = localeTextOrDefault("display.hud.bossbar.unit.kmh", "km/h");
     String labelLine = localeTextOrDefault("display.hud.bossbar.label.line", "Line");
     String labelNext = localeTextOrDefault("display.hud.bossbar.label.next", "Next");
@@ -388,6 +611,7 @@ public final class BossBarTrainHudManager implements Listener {
     String lineCode = "-";
     String lineName = "-";
     String lineColor = "";
+    String lineColorTag = "white";
     String operatorCode = "-";
     String routeCode = "-";
     String routeId = "-";
@@ -410,6 +634,9 @@ public final class BossBarTrainHudManager implements Listener {
       lineName = info.name();
       lineColor = info.color();
     }
+    if (lineColor != null && !lineColor.isBlank()) {
+      lineColorTag = lineColor;
+    }
     String lineLabel = resolveLineLabel(lineName, lineCode);
     String safeLine = lineLabel.isBlank() ? "-" : lineLabel;
 
@@ -417,13 +644,23 @@ public final class BossBarTrainHudManager implements Listener {
     placeholders.put("line_code", safeOrDash(lineCode));
     placeholders.put("line_name", safeOrDash(lineName));
     placeholders.put("line_color", lineColor == null ? "" : lineColor);
+    placeholders.put("line_color_tag", lineColorTag);
     placeholders.put("operator", safeOrDash(operatorCode));
     placeholders.put("route_code", safeOrDash(routeCode));
     placeholders.put("route_id", safeOrDash(routeId));
     placeholders.put("route_name", safeOrDash(routeName));
-    placeholders.put("next_station", safeNext);
-    placeholders.put("dest_eor", destinations.eor());
-    placeholders.put("dest_eop", destinations.eop());
+    placeholders.put("current_station", safeCurrent.label());
+    placeholders.put("current_station_code", safeCurrent.code());
+    placeholders.put("current_station_lang2", safeCurrent.lang2());
+    placeholders.put("next_station", safeNext.label());
+    placeholders.put("next_station_code", safeNext.code());
+    placeholders.put("next_station_lang2", safeNext.lang2());
+    placeholders.put("dest_eor", safeEor.label());
+    placeholders.put("dest_eor_code", safeEor.code());
+    placeholders.put("dest_eor_lang2", safeEor.lang2());
+    placeholders.put("dest_eop", safeEop.label());
+    placeholders.put("dest_eop_code", safeEop.code());
+    placeholders.put("dest_eop_lang2", safeEop.lang2());
     placeholders.put("eta_status", etaStatus);
     placeholders.put("eta_minutes", etaMinutes);
     placeholders.put("speed_kmh", formatSpeedValue(speedBps));
@@ -434,7 +671,7 @@ public final class BossBarTrainHudManager implements Listener {
     placeholders.put("signal_status", signalStatus);
     placeholders.put("service_status", serviceStatus);
     placeholders.put("train_name", trainName);
-    placeholders.put("progress_percent", formatPercent(progress));
+    applyProgressPlaceholders(placeholders, progress);
     placeholders.put("label_line", labelLine);
     placeholders.put("label_next", labelNext);
     placeholders.put("layover_wait", "-");
@@ -446,6 +683,11 @@ public final class BossBarTrainHudManager implements Listener {
                 formatDuration(Duration.between(candidate.readyAt(), Instant.now()))));
 
     return placeholders;
+  }
+
+  private void applyProgressPlaceholders(Map<String, String> placeholders, float progress) {
+    placeholders.put("progress", formatProgressValue(progress));
+    placeholders.put("progress_percent", formatPercent(progress));
   }
 
   private String resolveLineLabel(String lineName, String lineCode) {
@@ -486,25 +728,218 @@ public final class BossBarTrainHudManager implements Listener {
     return minutes + "m";
   }
 
+  private StationDisplay resolveStationDisplay(NodeId nodeId) {
+    if (nodeId == null || nodeId.value() == null || nodeId.value().isBlank()) {
+      return StationDisplay.empty();
+    }
+    Optional<StationKey> keyOpt = resolveStationKey(nodeId);
+    if (keyOpt.isPresent()) {
+      StationKey key = keyOpt.get();
+      StationDisplay resolved = resolveStationDisplay(key);
+      if (!resolved.isEmpty()) {
+        return resolved;
+      }
+      return StationDisplay.of(key.station(), key.station(), "-");
+    }
+    String label = HudWaypointLabel.stationLabel(nodeId);
+    return StationDisplay.of(label, "-", "-");
+  }
+
+  private StationDisplay resolveStationDisplay(UUID stationId) {
+    if (stationId == null) {
+      return StationDisplay.empty();
+    }
+    ensureStationCache();
+    StationDisplay cached = stationById.get(stationId);
+    if (cached != null) {
+      return cached;
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    Optional<Station> stationOpt = provider.stations().findById(stationId);
+    if (stationOpt.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    StationDisplay display = StationDisplay.fromStation(stationOpt.get());
+    Optional<NodeId> nodeId =
+        stationOpt.get().graphNodeId().filter(id -> !id.isBlank()).map(NodeId::of);
+    stationById.put(stationId, display);
+    stationNodeById.put(stationId, nodeId);
+    String key =
+        stationKey(resolveOperatorCode(stationOpt.get().operatorId()).orElse(""), display.code());
+    if (!key.isBlank()) {
+      stationByKey.putIfAbsent(key, display);
+    }
+    return display;
+  }
+
+  private StationDisplay resolveStationDisplay(StationKey key) {
+    if (key == null) {
+      return StationDisplay.empty();
+    }
+    ensureStationCache();
+    StationDisplay cached = stationByKey.get(stationKey(key.operator(), key.station()));
+    if (cached != null) {
+      return cached;
+    }
+    return StationDisplay.empty();
+  }
+
+  private Optional<StationKey> resolveStationKey(NodeId nodeId) {
+    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeId);
+    if (metaOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    WaypointMetadata meta = metaOpt.get();
+    String operator = meta.operator();
+    if (operator == null || operator.isBlank()) {
+      return Optional.empty();
+    }
+    String station =
+        meta.kind() == WaypointKind.INTERVAL
+            ? meta.destinationStation().orElse(meta.originStation())
+            : meta.originStation();
+    if (station == null || station.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(new StationKey(operator, station));
+  }
+
+  private Optional<WaypointMetadata> parseWaypointMetadata(NodeId nodeId) {
+    if (nodeId == null || nodeId.value() == null || nodeId.value().isBlank()) {
+      return Optional.empty();
+    }
+    return SignTextParser.parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
+        .flatMap(SignNodeDefinition::waypointMetadata);
+  }
+
+  private Optional<NodeId> resolveStationNodeId(UUID stationId) {
+    if (stationId == null) {
+      return Optional.empty();
+    }
+    ensureStationCache();
+    Optional<NodeId> cached = stationNodeById.get(stationId);
+    if (cached != null) {
+      return cached;
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    Optional<Station> stationOpt = provider.stations().findById(stationId);
+    if (stationOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<NodeId> nodeId =
+        stationOpt.get().graphNodeId().filter(id -> !id.isBlank()).map(NodeId::of);
+    stationNodeById.put(stationId, nodeId);
+    return nodeId;
+  }
+
+  private void ensureStationCache() {
+    if (stationCacheLoaded) {
+      return;
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return;
+    }
+    StorageProvider provider = providerOpt.get();
+    try {
+      for (Company company : provider.companies().listAll()) {
+        if (company == null) {
+          continue;
+        }
+        for (Operator operator : provider.operators().listByCompany(company.id())) {
+          if (operator == null) {
+            continue;
+          }
+          for (Station station : provider.stations().listByOperator(operator.id())) {
+            if (station == null) {
+              continue;
+            }
+            StationDisplay display = StationDisplay.fromStation(station);
+            Optional<NodeId> nodeId =
+                station.graphNodeId().filter(id -> !id.isBlank()).map(NodeId::of);
+            stationById.put(station.id(), display);
+            stationNodeById.put(station.id(), nodeId);
+            String key = stationKey(operator.code(), station.code());
+            if (!key.isBlank()) {
+              stationByKey.put(key, display);
+            }
+          }
+        }
+      }
+      stationCacheLoaded = true;
+    } catch (Exception ex) {
+      debugLogger.accept("BossBar station cache load failed: " + ex.getMessage());
+    }
+  }
+
+  private Optional<String> resolveOperatorCode(UUID operatorId) {
+    if (operatorId == null) {
+      return Optional.empty();
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    return provider.operators().findById(operatorId).map(Operator::code);
+  }
+
+  private Optional<StorageProvider> providerIfReady() {
+    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      return Optional.empty();
+    }
+    return plugin.getStorageManager().provider();
+  }
+
+  private String stationKey(String operator, String station) {
+    if (operator == null || operator.isBlank() || station == null || station.isBlank()) {
+      return "";
+    }
+    return operator.trim().toLowerCase(Locale.ROOT) + ":" + station.trim().toLowerCase(Locale.ROOT);
+  }
+
+  private float clampProgress(float progress) {
+    if (progress < 0.0f) {
+      return 0.0f;
+    }
+    if (progress > 1.0f) {
+      return 1.0f;
+    }
+    return progress;
+  }
+
+  private String formatProgressValue(float progress) {
+    float clamped = clampProgress(progress);
+    return String.format(java.util.Locale.ROOT, "%.3f", clamped);
+  }
+
   private Destinations resolveDestinations(Optional<RouteDefinition> routeOpt) {
     if (routeOpt == null || routeOpt.isEmpty()) {
       return Destinations.empty();
     }
     RouteDefinition route = routeOpt.get();
-    String eor = resolveEndOfRoute(route);
-    String eop = resolveEndOfOperation(route, eor);
+    StationDisplay eor = resolveEndOfRoute(route);
+    StationDisplay eop = resolveEndOfOperation(route, eor);
     return new Destinations(eor, eop);
   }
 
-  private String resolveEndOfRoute(RouteDefinition route) {
+  private StationDisplay resolveEndOfRoute(RouteDefinition route) {
     if (route == null || route.waypoints().isEmpty()) {
-      return "-";
+      return StationDisplay.empty();
     }
     NodeId last = route.waypoints().get(route.waypoints().size() - 1);
-    return HudWaypointLabel.stationLabel(last);
+    return resolveStationDisplay(last);
   }
 
-  private String resolveEndOfOperation(RouteDefinition route, String fallback) {
+  private StationDisplay resolveEndOfOperation(RouteDefinition route, StationDisplay fallback) {
     if (route == null || routeDefinitions == null) {
       return fallback;
     }
@@ -519,9 +954,19 @@ public final class BossBarTrainHudManager implements Listener {
       if (passType == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.PASS) {
         continue;
       }
+      Optional<UUID> stationId = stop.stationId();
+      if (stationId.isPresent()) {
+        StationDisplay resolved = resolveStationDisplay(stationId.get());
+        if (!resolved.isEmpty()) {
+          return resolved;
+        }
+      }
       Optional<String> nodeId = stop.waypointNodeId().filter(id -> !id.isBlank());
       if (nodeId.isPresent()) {
-        return HudWaypointLabel.stationLabel(NodeId.of(nodeId.get()));
+        StationDisplay resolved = resolveStationDisplay(NodeId.of(nodeId.get()));
+        if (!resolved.isEmpty()) {
+          return resolved;
+        }
       }
       break;
     }
@@ -535,9 +980,51 @@ public final class BossBarTrainHudManager implements Listener {
     return value;
   }
 
-  private record Destinations(String eor, String eop) {
+  private record Destinations(StationDisplay eor, StationDisplay eop) {
     private static Destinations empty() {
-      return new Destinations("-", "-");
+      return new Destinations(StationDisplay.empty(), StationDisplay.empty());
     }
   }
+
+  private record StationDisplay(String label, String code, String lang2) {
+    private StationDisplay {
+      label = sanitize(label);
+      code = sanitize(code);
+      lang2 = sanitize(lang2);
+    }
+
+    private static StationDisplay empty() {
+      return new StationDisplay("-", "-", "-");
+    }
+
+    private static StationDisplay of(String label, String code, String lang2) {
+      return new StationDisplay(label, code, lang2);
+    }
+
+    private static StationDisplay fromStation(Station station) {
+      String code = station == null ? "-" : station.code();
+      String name = station == null ? "-" : station.name();
+      String label = name == null || name.isBlank() ? code : name;
+      String secondary =
+          station == null ? "-" : station.secondaryName().filter(s -> !s.isBlank()).orElse("-");
+      return new StationDisplay(label, code, secondary);
+    }
+
+    private boolean isEmpty() {
+      return "-".equals(label) && "-".equals(code) && "-".equals(lang2);
+    }
+
+    private StationDisplay sanitized() {
+      return new StationDisplay(label, code, lang2);
+    }
+
+    private static String sanitize(String value) {
+      if (value == null || value.isBlank()) {
+        return "-";
+      }
+      return value;
+    }
+  }
+
+  private record StationKey(String operator, String station) {}
 }

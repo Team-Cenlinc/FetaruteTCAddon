@@ -9,6 +9,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager;
+import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 
 /** 展示层实现：目前只包含车上 BossBar HUD。 */
@@ -30,6 +31,7 @@ public final class SimpleDisplayService implements DisplayService {
       HudTemplateService templateService) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.configManager = Objects.requireNonNull(configManager, "configManager");
+    HudDefaultTemplateService defaultTemplateService = plugin.getHudDefaultTemplateService();
     this.bossBarHud =
         new BossBarTrainHudManager(
             plugin,
@@ -40,6 +42,7 @@ public final class SimpleDisplayService implements DisplayService {
             routeProgressRegistry,
             layoverRegistry,
             templateService,
+            defaultTemplateService,
             plugin::debug);
   }
 

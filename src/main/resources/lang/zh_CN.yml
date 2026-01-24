@@ -13,7 +13,17 @@ error:
 display:
   hud:
     bossbar:
-      template: "<dark_aqua>{label_line}</dark_aqua> <white>{line}</white> <dark_gray>|</dark_gray> <dark_aqua>{label_next}</dark_aqua> <white>{next_station}</white> <dark_gray>|</dark_gray> <gold>{eta_status}</gold> <dark_gray>|</dark_gray> <aqua>{speed_kmh} {speed_unit}</aqua>"
+      template: |-
+        rotate_ticks: 60
+        AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>本站 {current_station}，开往 {dest_eor}</white>
+        AT_STATION_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}，开往 {dest_eor}</white>
+        DEPARTING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将离站，前往 {next_station}</white>
+        ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将到达 {next_station}</white>
+        IN_TRIP: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}</white><gray> | </gray><white>{eta_status}</white>
+        ON_LAYOVER_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>折返待命中</white>
+        ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将换向，等待调度</white>
+        IDLE_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>临时停车</white>
+        IDLE_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>等待信号中</white>
       label:
         line: "线路"
         next: "下一站"
@@ -28,6 +38,8 @@ display:
       service:
         in_service: "营运中"
         layover: "待命"
+      tc_destination:
+        empty: "暂无目的地"
 
 sign:
   created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"

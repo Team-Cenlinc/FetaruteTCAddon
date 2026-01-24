@@ -30,13 +30,15 @@ runtime:
       enabled: true
       # BossBar 刷新间隔（ticks）
       tick-interval-ticks: 10
-      # BossBar 标题模板（MiniMessage）
-      # 占位符: {label_line} {line} {line_code} {line_name} {line_color} {operator}
-      #        {route_code} {route_id} {route_name} {dest_eor} {dest_eop} {label_next} {next_station}
+      # BossBar 标题模板（MiniMessage），留空则使用 default_hud_template.yml
+      # 占位符: {label_line} {line} {line_code} {line_name} {line_color} {line_color_tag} {operator}
+      #        {route_code} {route_id} {route_name} {dest_eor} {dest_eor_code} {dest_eor_lang2}
+      #        {dest_eop} {dest_eop_code} {dest_eop_lang2} {current_station} {current_station_code} {current_station_lang2}
+      #        {label_next} {next_station} {next_station_code} {next_station_lang2}
       #        {eta_status} {eta_minutes} {speed} {speed_kmh} {speed_bps} {speed_unit}
-      #        {signal_status} {signal_aspect} {service_status} {progress_percent}
+      #        {signal_status} {signal_aspect} {service_status} {progress} {progress_percent}
       #        {train_name} {layover_wait}
-      template: "<dark_aqua>{label_line}</dark_aqua> <white>{line}</white> <dark_gray>|</dark_gray> <dark_aqua>{label_next}</dark_aqua> <white>{next_station}</white> <dark_gray>|</dark_gray> <gold>{eta_status}</gold> <dark_gray>|</dark_gray> <aqua>{speed_kmh} {speed_unit}</aqua>"
+      template: ""
   # 占用请求 lookahead 边数
   lookahead-edges: 2
   # 同向跟驰最小空闲边数

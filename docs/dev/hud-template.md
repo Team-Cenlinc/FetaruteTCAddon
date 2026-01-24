@@ -14,10 +14,45 @@
 3) Adventure Component 输出
 
 ## BossBar 模板默认值
-语言文件中可提供默认模板：
-- `display.hud.bossbar.template`
+默认模板优先从 `plugins/FetaruteTCAddon/default_hud_template.yml` 读取：
+- `bossbar.template`
 
-当线路未绑定模板时，BossBar 会回退到该默认值（或 config 中的 `runtime.hud.bossbar.template`）。
+当线路未绑定模板且 config 未配置时，BossBar 会回退到该默认值；最后才会回退到语言文件中的 `display.hud.bossbar.template`。
+
+## BossBar 状态模板（可选）
+BossBar 支持按状态选择模板行，格式为：
+
+```text
+IDLE_1: <template line>
+DEPARTING: <template line>
+ARRIVING_1: <template line>
+ARRIVING_2: <template line>
+IN_TRIP: <template line>
+```
+
+- 状态：`IDLE` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `IN_TRIP`
+- 可选后缀 `_n` 表示轮播顺序（按数字升序轮播）
+- 若模板内没有任何状态行，则保持“整段文本作为单行标题”的兼容行为
+- 若需要未匹配状态的默认内容，可额外写一行“无前缀模板行”作为 fallback
+- AT_STATION 以运行时 `dwellRemainingSec > 0` 判定，IDLE 为非停站静止（临时停车）
+- ON_LAYOVER 表示终到后折返/待命，优先级高于 AT_STATION
+- 兼容旧模板的 `STOP`/`LAYOVER` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`
+
+轮播间隔可通过模板行配置：
+```text
+rotate_ticks: 40
+```
+
+## BossBar 进度表达式（可选）
+BossBar 进度条支持由模板表达式驱动：
+
+```text
+progress: {progress}
+progress: {eta_minutes} / 10
+```
+
+- 表达式会先做 `{placeholder}` 替换，再进行基础运算（`+ - * /` 与括号）
+- 结果会被 clamp 到 0.0 ~ 1.0，解析失败则回退到默认进度算法
 
 ## 线路绑定
 绑定记录存储在 `hud_line_bindings`：
@@ -51,6 +86,8 @@ BossBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{line_name}` → `东湾快线`
 - `line_color`：线路颜色（Line.color，形如 `#RRGGBB`；缺失为 `""`）
   - 例：`<# {line_color}>` → `<#2BC4FF>`（模板内自行包裹）
+- `line_color_tag`：线路颜色标签（`#RRGGBB` 或默认 `dark_aqua`）
+  - 例：`<{line_color_tag}>{line}` → `<#2BC4FF>LINE`
 - `operator`：运营商 code（RouteMetadata.operator）
   - 例：`{operator}` → `SURN`
 - `route_code`：班次/route code（RouteMetadata.serviceId）
@@ -59,12 +96,30 @@ BossBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{route_name}` → `机场直达`
 - `route_id`：RouteId 原始值（如 `OP:LINE:ROUTE`）
   - 例：`{route_id}` → `SURN:NE:EXP-01`
-- `next_station`：下一站（由 NodeId 推断站名）；缺失为 `-`
+- `next_station`：下一停靠站（RouteStop 中非 PASS 的下一站）；缺失为 `-`
   - 例：`Next: {next_station}` → `Next: Central`
+- `next_station_code`：下一站 code（用于精简显示）
+  - 例：`{next_station_code}` → `CEN`
+- `next_station_lang2`：下一站第二语言名（缺失为 `-`）
+  - 例：`{next_station_lang2}` → `Central`
+- `current_station`：当前站（由运行时快照推断站名）；缺失为 `-`
+  - 例：`本站 {current_station}` → `本站 Central`
+- `current_station_code`：当前站 code
+  - 例：`{current_station_code}` → `CEN`
+- `current_station_lang2`：当前站第二语言名（缺失为 `-`）
+  - 例：`{current_station_lang2}` → `Central`
 - `dest_eor`：End of Route（最后一个站点，PASS 也算；缺失回退 `-`）
   - 例：`To {dest_eor}` → `To Central`
+- `dest_eor_code`：End of Route code
+  - 例：`{dest_eor_code}` → `CEN`
+- `dest_eor_lang2`：End of Route 第二语言名（缺失为 `-`）
+  - 例：`{dest_eor_lang2}` → `Central`
 - `dest_eop`：End of Operation（最后一个 STOP/TERM；无则回退到 `dest_eor`）
   - 例：`To {dest_eop}` → `To Depot`
+- `dest_eop_code`：End of Operation code
+  - 例：`{dest_eop_code}` → `DEP`
+- `dest_eop_lang2`：End of Operation 第二语言名（缺失为 `-`）
+  - 例：`{dest_eop_lang2}` → `Depot`
 - `label_line`：语言文件里的“线路”标签
   - 例：`<dark_aqua>{label_line}</dark_aqua>` → `线路`
 - `label_next`：语言文件里的“下一站”标签
@@ -95,6 +150,8 @@ BossBar 支持以下占位符（模板中使用 `{xxx}`）：
 ### 运行状态字段
 - `service_status`：营运状态（营运中/待命）
   - 例：`{service_status}` → `待命`
+- `progress`：进度值（0.0 ~ 1.0）
+  - 例：`{progress}` → `0.65`
 - `progress_percent`：进度百分比（0-100）
   - 例：`{progress_percent}%` → `65%`
 - `train_name`：列车名

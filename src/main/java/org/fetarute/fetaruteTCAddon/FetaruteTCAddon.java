@@ -37,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSyn
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
@@ -66,6 +67,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
 import org.fetarute.fetaruteTCAddon.display.SimpleDisplayService;
+import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -98,6 +100,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private RouteDefinitionCache routeDefinitionCache;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
+  private DwellRegistry dwellRegistry;
   private RuntimeDispatchService runtimeDispatchService;
   private ReclaimManager reclaimManager;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
@@ -109,6 +112,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private EtaService etaService;
   private DisplayService displayService;
   private HudTemplateService hudTemplateService;
+  private HudDefaultTemplateService hudDefaultTemplateService;
 
   @Override
   public void onEnable() {
@@ -135,6 +139,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initSpawnScheduler();
     initReclaimManager();
     initHudTemplateService();
+    initHudDefaultTemplateService();
     initDisplayService();
 
     registerCommands();
@@ -216,6 +221,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (hudTemplateService != null) {
       hudTemplateService.reload();
     }
+    if (hudDefaultTemplateService != null) {
+      hudDefaultTemplateService.reload();
+    }
     initRouteDefinitionCache();
     restartRuntimeMonitor();
     initSpawnScheduler();
@@ -243,6 +251,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public HudTemplateService getHudTemplateService() {
     return hudTemplateService;
+  }
+
+  public HudDefaultTemplateService getHudDefaultTemplateService() {
+    return hudDefaultTemplateService;
   }
 
   /** 返回运行时调度服务（若未初始化则为空）。 */
@@ -443,6 +455,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     this.routeProgressRegistry = new RouteProgressRegistry();
     this.layoverRegistry = new LayoverRegistry();
+    this.dwellRegistry = new DwellRegistry();
     this.runtimeDispatchService =
         new RuntimeDispatchService(
             occupancyManager,
@@ -536,9 +549,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
             .runTaskTimer(
                 this,
                 new RuntimeSignalMonitor(
-                    runtimeDispatchService, etaRuntimeSampler, trainSnapshotStore),
+                    runtimeDispatchService, etaRuntimeSampler, trainSnapshotStore, dwellRegistry),
                 interval,
                 interval);
+  }
+
+  public Optional<DwellRegistry> getDwellRegistry() {
+    return Optional.ofNullable(dwellRegistry);
   }
 
   private void initSpawnScheduler() {
@@ -647,6 +664,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private void initHudTemplateService() {
     this.hudTemplateService = new HudTemplateService(storageManager, loggerManager::debug);
     this.hudTemplateService.reload();
+  }
+
+  /** 初始化 HUD 默认模板服务（读取 default_hud_template.yml）。 */
+  private void initHudDefaultTemplateService() {
+    this.hudDefaultTemplateService = new HudDefaultTemplateService(this, loggerManager);
+    this.hudDefaultTemplateService.reload();
   }
 
   /** 从 rail_nodes 预热节点注册表，确保重启后仍可进行 NodeId 冲突检测。 */

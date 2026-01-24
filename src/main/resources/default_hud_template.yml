@@ -1,0 +1,12 @@
+bossbar:
+  template: |-
+    rotate_ticks: 60
+    AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>本站 {current_station}，开往 {dest_eor}</white>
+    AT_STATION_2: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>下一站 {next_station}，开往 {dest_eor}</white>
+    DEPARTING: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>即将离站，前往 {next_station}</white>
+    ARRIVING: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>即将到达 {next_station}</white>
+    IN_TRIP: <{line_color_tag}>▋<white> {line}</white> <{line_color_tag}>▋<gray> | </gray><white>下一站 {next_station}</white><gray> | </gray><white>{eta_status}</white>
+    ON_LAYOVER_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>折返待命中</white>
+    ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>即将换向，等待调度</white>
+    IDLE_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>临时停车</white>
+    IDLE_2: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>等待信号中</white>

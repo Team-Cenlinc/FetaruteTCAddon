@@ -21,14 +21,17 @@ public final class RuntimeSignalMonitor implements Runnable {
   private final RuntimeDispatchService dispatchService;
   private final EtaRuntimeSampler etaSampler;
   private final TrainSnapshotStore snapshotStore;
+  private final DwellRegistry dwellRegistry;
 
   public RuntimeSignalMonitor(
       RuntimeDispatchService dispatchService,
       EtaRuntimeSampler etaSampler,
-      TrainSnapshotStore snapshotStore) {
+      TrainSnapshotStore snapshotStore,
+      DwellRegistry dwellRegistry) {
     this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
     this.etaSampler = etaSampler;
     this.snapshotStore = snapshotStore;
+    this.dwellRegistry = dwellRegistry;
   }
 
   @Override
@@ -44,23 +47,32 @@ public final class RuntimeSignalMonitor implements Runnable {
       if (group == null || !group.isValid()) {
         continue;
       }
-      if (group.getProperties() != null && group.getProperties().getTrainName() != null) {
-        activeTrainNames.add(group.getProperties().getTrainName());
+      String trainName =
+          group.getProperties() != null ? group.getProperties().getTrainName() : null;
+      if (trainName != null && !trainName.isBlank()) {
+        activeTrainNames.add(trainName);
       }
       dispatchService.handleSignalTick(group);
       if (etaSampler != null) {
+        Optional<Integer> dwellRemainingSec =
+            dwellRegistry != null && trainName != null && !trainName.isBlank()
+                ? dwellRegistry.remainingSeconds(trainName)
+                : Optional.empty();
         etaSampler.sample(
             group,
             tick,
             now,
             Optional.empty(),
             Optional.empty(),
-            Optional.empty(),
+            dwellRemainingSec,
             Optional.empty());
       }
     }
     dispatchService.cleanupOrphanOccupancyClaims(activeTrainNames);
     cleanupSnapshotStore(activeTrainNames);
+    if (dwellRegistry != null) {
+      dwellRegistry.retain(activeTrainNames);
+    }
   }
 
   private void cleanupSnapshotStore(Set<String> activeTrainNames) {

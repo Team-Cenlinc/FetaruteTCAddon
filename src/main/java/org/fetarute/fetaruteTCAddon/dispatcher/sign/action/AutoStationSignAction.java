@@ -342,6 +342,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (group == null || !group.isValid()) {
       return;
     }
+    FetaruteTCAddon plugin = this.plugin;
+    if (plugin == null) {
+      return;
+    }
+    if (dwellSeconds > 0 && !group.isMoving()) {
+      plugin.getDwellRegistry().ifPresent(registry -> registry.start(trainName, dwellSeconds));
+    }
     TrainProperties properties = group.getProperties();
     ExitOffsetState exitOffsetState = new ExitOffsetState(properties);
     com.bergerkiller.bukkit.tc.actions.GroupActionWaitState waitState =
@@ -462,7 +469,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             }
 
             boolean canDepart = true;
-            if (plugin != null && plugin.getRuntimeDispatchService().isPresent()) {
+            if (plugin.getRuntimeDispatchService().isPresent()) {
               // 检查出站门控（闭塞/占用）
               canDepart =
                   plugin.getRuntimeDispatchService().get().checkDeparture(group, definition);
@@ -472,6 +479,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               exitOffsetState.restore();
               waitState.stop();
               cancel();
+              plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               if (properties != null) {
                 try {
                   com.bergerkiller.bukkit.tc.Station station =
@@ -485,15 +493,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                   // 回退到调度控车逻辑
                 }
               }
-              if (plugin != null) {
-                Bukkit.getScheduler()
-                    .runTask(
-                        plugin,
-                        () ->
-                            plugin
-                                .getRuntimeDispatchService()
-                                .ifPresent(dispatch -> dispatch.refreshSignal(group)));
-              }
+              Bukkit.getScheduler()
+                  .runTask(
+                      plugin,
+                      () ->
+                          plugin
+                              .getRuntimeDispatchService()
+                              .ifPresent(dispatch -> dispatch.refreshSignal(group)));
             }
           }
           return;
