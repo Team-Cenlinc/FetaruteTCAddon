@@ -8,18 +8,24 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 
+/**
+ * HUD 模板解析器：支持状态分支、轮播与进度表达式。
+ *
+ * <p>BossBar/ActionBar 共用该解析结果，区别仅在渲染通道与进度条使用方式。
+ */
 public final class BossBarHudTemplate {
 
   private static final int DEFAULT_ROTATE_TICKS = 40;
 
-  private final Map<BossBarHudState, List<TemplateLine>> linesByState;
+  private final Map<HudState, List<TemplateLine>> linesByState;
   private final List<TemplateLine> fallbackLines;
   private final Optional<String> progressExpression;
   private final int rotateTicks;
 
   private BossBarHudTemplate(
-      Map<BossBarHudState, List<TemplateLine>> linesByState,
+      Map<HudState, List<TemplateLine>> linesByState,
       List<TemplateLine> fallbackLines,
       Optional<String> progressExpression,
       int rotateTicks) {
@@ -29,7 +35,8 @@ public final class BossBarHudTemplate {
     this.rotateTicks = rotateTicks;
   }
 
-  public Optional<String> resolveLine(BossBarHudState state, long tick) {
+  /** 按状态与 tick 解析当前展示行（支持轮播）。 */
+  public Optional<String> resolveLine(HudState state, long tick) {
     List<TemplateLine> candidates = linesByState.get(state);
     if (candidates == null || candidates.isEmpty()) {
       candidates = fallbackLines;
@@ -46,16 +53,28 @@ public final class BossBarHudTemplate {
     return Optional.ofNullable(candidates.get(index).content());
   }
 
+  /** 进度表达式（BossBar 专用）。 */
   public Optional<String> progressExpression() {
     return progressExpression;
   }
 
+  /**
+   * 解析模板文本。
+   *
+   * <p>支持：
+   *
+   * <ul>
+   *   <li>{@code STATE[_n]}：状态分支与轮播顺序
+   *   <li>{@code rotate_ticks}: 轮播间隔
+   *   <li>{@code progress}: 进度表达式
+   * </ul>
+   */
   public static BossBarHudTemplate parse(String raw, Consumer<String> debugLogger) {
     if (raw == null) {
       return new BossBarHudTemplate(Map.of(), List.of(), Optional.empty(), DEFAULT_ROTATE_TICKS);
     }
     String[] lines = raw.split("\n", -1);
-    Map<BossBarHudState, List<TemplateLine>> stateLines = new EnumMap<>(BossBarHudState.class);
+    Map<HudState, List<TemplateLine>> stateLines = new EnumMap<>(HudState.class);
     List<TemplateLine> fallback = new ArrayList<>();
     Optional<String> progress = Optional.empty();
     int rotateTicks = DEFAULT_ROTATE_TICKS;
@@ -102,8 +121,8 @@ public final class BossBarHudTemplate {
       return new BossBarHudTemplate(Map.of(), single, Optional.empty(), DEFAULT_ROTATE_TICKS);
     }
 
-    Map<BossBarHudState, List<TemplateLine>> normalized = new EnumMap<>(BossBarHudState.class);
-    for (Map.Entry<BossBarHudState, List<TemplateLine>> entry : stateLines.entrySet()) {
+    Map<HudState, List<TemplateLine>> normalized = new EnumMap<>(HudState.class);
+    for (Map.Entry<HudState, List<TemplateLine>> entry : stateLines.entrySet()) {
       List<TemplateLine> sorted = sortLines(entry.getValue());
       if (!sorted.isEmpty()) {
         normalized.put(entry.getKey(), sorted);
@@ -114,7 +133,7 @@ public final class BossBarHudTemplate {
   }
 
   private static boolean tryParseDirective(
-      Map<BossBarHudState, List<TemplateLine>> stateLines, String key, String value) {
+      Map<HudState, List<TemplateLine>> stateLines, String key, String value) {
     if (key == null || key.isBlank()) {
       return false;
     }
@@ -147,7 +166,7 @@ public final class BossBarHudTemplate {
         }
       }
     }
-    Optional<BossBarHudState> stateOpt = BossBarHudState.parse(base);
+    Optional<HudState> stateOpt = HudState.parse(base);
     int finalOrder = Math.max(1, order);
     return stateOpt.map(state -> new ParsedState(state, finalOrder)).orElse(null);
   }
@@ -206,7 +225,7 @@ public final class BossBarHudTemplate {
     }
   }
 
-  private record ParsedState(BossBarHudState state, int order) {
+  private record ParsedState(HudState state, int order) {
     private ParsedState {
       Objects.requireNonNull(state, "state");
     }

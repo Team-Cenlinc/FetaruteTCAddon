@@ -1,12 +1,27 @@
 bossbar:
   template: |-
     rotate_ticks: 60
-    AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>本站 {current_station}，开往 {dest_eor}</white>
-    AT_STATION_2: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>下一站 {next_station}，开往 {dest_eor}</white>
-    DEPARTING: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>即将离站，前往 {next_station}</white>
-    ARRIVING: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>即将到达 {next_station}</white>
-    IN_TRIP: <{line_color_tag}>▋<white> {line}</white> <{line_color_tag}>▋<gray> | </gray><white>下一站 {next_station}</white><gray> | </gray><white>{eta_status}</white>
-    ON_LAYOVER_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>折返待命中</white>
-    ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>即将换向，等待调度</white>
-    IDLE_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>临时停车</white>
-    IDLE_2: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>等待信号中</white>
+    AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>开往 {dest_eor}</white>
+    AT_STATION_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>To {dest_eop}</white>
+    TERM_ARRIVING_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>终点 {next_station} 到了</white>
+    TERM_ARRIVING_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>We are now at the terminal station {next_station_lang2}</white>
+    IN_TRIP_1: <{line_color_tag}>▋<white> {line}</white> <{line_color_tag}>▋<gray> | </gray><white>车厢 {player_carriage_no}/{player_carriage_total}</white><gray> | </gray><white>速度 {speed}</white>
+    IN_TRIP_2: <{line_color_tag}>▋<white> {line_lang2}</white> <{line_color_tag}>▋<gray> | </gray><white>Carriage {player_carriage_no}/{player_carriage_total}</white><gray> | </gray><white>Speed {speed}</white>
+actionbar:
+  template: |-
+    rotate_ticks: 60
+    AT_STATION_1: <white>本站 {current_station} ｜ 下一站 {next_station}</white>
+    AT_STATION_2: <white>Currently at: {current_station_lang2} ｜ Next station: {next_station_lang2}</white>
+    DEPARTING_1: <white>欢迎乘坐 {operator} </white>
+    DEPARTING_2: <white>本次列车为 {line} 前往 {dest_eop}</white>
+    DEPARTING_3: <white>Welcome aboard {operator} | Line {line} to {dest_eop_lang2}</white>
+    IN_TRIP_1: <white>下一站 {next_station} ，预计 {eta_minutes} 分钟后到达</white>
+    IN_TRIP_2: <white>Next station: {next_station_lang2}</white>
+    ARRIVING_1: <yellow>{next_station} 到了，下车请注意安全</yellow>
+    ARRIVING_2: <yellow>We are now arriving at {next_station}, please mind the gap before exiting</yellow>
+    TERM_ARRIVING_1: <yellow>终点站 {next_station} 到了，请全体乘客下车, 感谢您搭乘 {operator}</yellow>
+    TERM_ARRIVING_2: <yellow>This is the final stop. Thank you for travelling with us today</yellow>
+    ON_LAYOVER_1: <white>等待新行程</white>
+    ON_LAYOVER_2: <white>Preparing for new trip</white>
+    IDLE_1: <white>临时停车，等待信号中...</white>
+    IDLE_2: <white>Waiting for signal...</white>

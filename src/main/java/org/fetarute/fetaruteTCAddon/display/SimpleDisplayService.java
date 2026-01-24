@@ -8,18 +8,25 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.hud.actionbar.ActionBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 
-/** 展示层实现：目前只包含车上 BossBar HUD。 */
+/**
+ * 展示层实现：目前包含车上 BossBar 与 ActionBar HUD。
+ *
+ * <p>根据配置分别启动定时任务，互不影响，可独立启停。
+ */
 public final class SimpleDisplayService implements DisplayService {
 
   private final FetaruteTCAddon plugin;
   private final ConfigManager configManager;
   private final BossBarTrainHudManager bossBarHud;
+  private final ActionBarTrainHudManager actionBarHud;
 
   private BukkitTask bossBarTask;
+  private BukkitTask actionBarTask;
 
   public SimpleDisplayService(
       FetaruteTCAddon plugin,
@@ -44,12 +51,24 @@ public final class SimpleDisplayService implements DisplayService {
             templateService,
             defaultTemplateService,
             plugin::debug);
+    this.actionBarHud =
+        new ActionBarTrainHudManager(
+            plugin,
+            plugin.getLocaleManager(),
+            configManager,
+            etaService,
+            routeDefinitions,
+            routeProgressRegistry,
+            layoverRegistry,
+            templateService,
+            defaultTemplateService,
+            plugin::debug);
   }
 
   @Override
-  /** 根据配置启动 BossBar HUD 定时刷新。 */
+  /** 根据配置启动 HUD 定时刷新。 */
   public void start() {
-    if (bossBarTask != null) {
+    if (bossBarTask != null || actionBarTask != null) {
       return;
     }
 
@@ -59,26 +78,42 @@ public final class SimpleDisplayService implements DisplayService {
     }
 
     if (!view.runtimeSettings().hudBossBarEnabled()) {
-      return;
+      // skip
+    } else {
+      int interval = view.runtimeSettings().hudBossBarTickIntervalTicks();
+      bossBarHud.register();
+      bossBarTask =
+          plugin
+              .getServer()
+              .getScheduler()
+              .runTaskTimer(plugin, bossBarHud::tick, (long) interval, (long) interval);
     }
 
-    int interval = view.runtimeSettings().hudBossBarTickIntervalTicks();
-    bossBarHud.register();
-    bossBarTask =
-        plugin
-            .getServer()
-            .getScheduler()
-            .runTaskTimer(plugin, bossBarHud::tick, (long) interval, (long) interval);
+    if (view.runtimeSettings().hudActionBarEnabled()) {
+      int interval = view.runtimeSettings().hudActionBarTickIntervalTicks();
+      actionBarHud.register();
+      actionBarTask =
+          plugin
+              .getServer()
+              .getScheduler()
+              .runTaskTimer(plugin, actionBarHud::tick, (long) interval, (long) interval);
+    }
   }
 
   @Override
-  /** 停止 BossBar HUD 并清理已展示的 BossBar。 */
+  /** 停止 HUD 并清理展示。 */
   public void stop() {
     if (bossBarTask != null) {
       bossBarTask.cancel();
       bossBarTask = null;
     }
+    if (actionBarTask != null) {
+      actionBarTask.cancel();
+      actionBarTask = null;
+    }
     bossBarHud.shutdown();
     bossBarHud.unregister();
+    actionBarHud.shutdown();
+    actionBarHud.unregister();
   }
 }

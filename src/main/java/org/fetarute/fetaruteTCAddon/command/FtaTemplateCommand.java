@@ -611,6 +611,12 @@ public final class FtaTemplateCommand {
         return value;
       }
     }
+    if (type == HudTemplateType.ACTIONBAR && locale != null) {
+      String value = locale.text("display.hud.actionbar.template");
+      if (!value.isBlank()) {
+        return value;
+      }
+    }
     return "";
   }
 

@@ -19,7 +19,9 @@ display:
         AT_STATION_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}，开往 {dest_eor}</white>
         DEPARTING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将离站，前往 {next_station}</white>
         ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将到达 {next_station}</white>
-        IN_TRIP: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}</white><gray> | </gray><white>{eta_status}</white>
+        TERM_ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>终点 {next_station} 到达</white>
+        IN_TRIP_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}</white><gray> | </gray><white>{eta_status}</white>
+        IN_TRIP_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>车厢 {player_carriage_no}/{player_carriage_total}</white><gray> | </gray><white>速度 {speed}</white>
         ON_LAYOVER_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>折返待命中</white>
         ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将换向，等待调度</white>
         IDLE_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>临时停车</white>
@@ -38,6 +40,25 @@ display:
       service:
         in_service: "营运中"
         layover: "待命"
+      tc_destination:
+        empty: "暂无目的地"
+    actionbar:
+      template: |-
+        rotate_ticks: 80
+        AT_STATION_1: <white>欢迎乘坐 {operator} 列车，本站 {current_station}</white>
+        AT_STATION_2: <white>本线路 {line} 前往 {dest_eop}</white>
+        AT_STATION_3: <white>Welcome aboard {operator} | Line {line} to {dest_eop_lang2}</white>
+        DEPARTING: <white>前往 {next_station}</white>
+        ARRIVING: <yellow>即将到达 {next_station}</yellow>
+        TERM_ARRIVING: <yellow>终点 {next_station} 到达</yellow>
+        ON_LAYOVER: <white>折返待命中</white>
+        IDLE: <white>临时停车</white>
+        <white>欢迎乘坐 {company}/{operator} 列车</white>
+        <white>本次列车为 {line} 列车，前往 {dest_eop}</white>
+        <white>下一站 {next_station}</white>
+        <white>Welcome aboard {operator} train</white>
+        <white>Line {line} to {dest_eop_lang2}</white>
+        <white>Next stop {next_station_lang2}</white>
       tc_destination:
         empty: "暂无目的地"
 

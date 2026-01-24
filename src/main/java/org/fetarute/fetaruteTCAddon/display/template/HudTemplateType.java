@@ -6,6 +6,7 @@ import java.util.Optional;
 /** HUD 模板类型：用于区分不同展示通道的模板。 */
 public enum HudTemplateType {
   BOSSBAR,
+  ACTIONBAR,
   ANNOUNCEMENT,
   PLAYER_DISPLAY,
   STATION_DISPLAY;

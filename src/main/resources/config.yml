@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 9
+config-version: 10
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -32,12 +32,21 @@ runtime:
       tick-interval-ticks: 10
       # BossBar 标题模板（MiniMessage），留空则使用 default_hud_template.yml
       # 占位符: {label_line} {line} {line_code} {line_name} {line_color} {line_color_tag} {operator}
+      #        {company} {company_code} {company_name}
       #        {route_code} {route_id} {route_name} {dest_eor} {dest_eor_code} {dest_eor_lang2}
       #        {dest_eop} {dest_eop_code} {dest_eop_lang2} {current_station} {current_station_code} {current_station_lang2}
       #        {label_next} {next_station} {next_station_code} {next_station_lang2}
       #        {eta_status} {eta_minutes} {speed} {speed_kmh} {speed_bps} {speed_unit}
       #        {signal_status} {signal_aspect} {service_status} {progress} {progress_percent}
-      #        {train_name} {layover_wait}
+      #        {train_name} {layover_wait} {player_carriage_no} {player_carriage_total}
+      template: ""
+    actionbar:
+      # 是否启用“车上 ActionBar HUD”
+      enabled: true
+      # ActionBar 刷新间隔（ticks）
+      tick-interval-ticks: 10
+      # ActionBar 模板（MiniMessage），留空则使用 default_hud_template.yml
+      # 占位符同 BossBar（见上方），支持 HUD State 分支（如 ARRIVING/TERM_ARRIVING）
       template: ""
   # 占用请求 lookahead 边数
   lookahead-edges: 2

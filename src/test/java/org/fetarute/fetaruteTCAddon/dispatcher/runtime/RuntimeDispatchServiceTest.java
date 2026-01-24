@@ -42,6 +42,18 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
 
+/**
+ * RuntimeDispatchService 终点停车与 Layover 注册逻辑回归测试。
+ *
+ * <p>覆盖场景：
+ *
+ * <ul>
+ *   <li>终点停车不依赖 forceApply，确保不会穿站
+ *   <li>终点 Layover 注册仅在 REUSE_AT_TERM 且未被 DSTY 销毁时触发
+ *   <li>DSTY 销毁优先于终点停车，避免 deadlock
+ *   <li>信号/占用/速度控制分支正常推进
+ * </ul>
+ */
 class RuntimeDispatchServiceTest {
 
   @Test
@@ -221,6 +233,9 @@ class RuntimeDispatchServiceTest {
             base.runtimeSettings().failoverUnreachableStop(),
             base.runtimeSettings().hudBossBarEnabled(),
             base.runtimeSettings().hudBossBarTickIntervalTicks(),
+            Optional.empty(),
+            base.runtimeSettings().hudActionBarEnabled(),
+            base.runtimeSettings().hudActionBarTickIntervalTicks(),
             Optional.empty());
     when(configManager.current())
         .thenReturn(
@@ -676,13 +691,16 @@ class RuntimeDispatchServiceTest {
             true,
             true,
             10,
+            Optional.empty(),
+            false,
+            10,
             Optional.empty());
     ConfigManager.TrainTypeSettings typeDefaults = new ConfigManager.TrainTypeSettings(1.0, 1.0);
     ConfigManager.TrainConfigSettings train =
         new ConfigManager.TrainConfigSettings(
             "emu", typeDefaults, typeDefaults, typeDefaults, typeDefaults);
     return new ConfigManager.ConfigView(
-        9,
+        10,
         false,
         "zh_CN",
         storage,
@@ -770,6 +788,57 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     service.handleSignalTick(train, false);
     assertTrue(train.destroyCalls == 0);
+    assertTrue(train.stopCalls == 0);
+  }
+
+  @Test
+  void handleSignalTickStopsAtTerminalEvenWithoutForceApply() {
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(NodeId.of("TERM")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of("TERM"),
+            Optional.empty(),
+            RouteStopPassType.TERMINATE,
+            Optional.empty());
+    when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+    assertTrue(train.stopCalls == 1);
   }
 
   @Test
@@ -830,6 +899,7 @@ class RuntimeDispatchServiceTest {
     private final boolean moving;
     private int launchCalls = 0;
     private int destroyCalls = 0;
+    private int stopCalls = 0;
 
     private FakeTrain(UUID worldId, TrainProperties properties, boolean moving) {
       this.worldId = worldId;
@@ -863,7 +933,9 @@ class RuntimeDispatchServiceTest {
     }
 
     @Override
-    public void stop() {}
+    public void stop() {
+      stopCalls++;
+    }
 
     @Override
     public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {

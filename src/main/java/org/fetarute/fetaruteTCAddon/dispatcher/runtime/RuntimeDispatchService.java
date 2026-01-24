@@ -618,6 +618,23 @@ public final class RuntimeDispatchService {
    *
    * <p>forceApply 用于强制刷新（例如停站结束），即便信号等级未变化也会重新下发速度/发车动作。
    */
+  /**
+   * 信号周期性 tick：推进列车运行状态，处理终点停车、DSTY 销毁与 Layover 注册。
+   *
+   * <p>主要职责：
+   *
+   * <ul>
+   *   <li>优先判定当前节点是否为 DSTY（销毁目标），如是则立即销毁列车。
+   *   <li>若已到达终点（currentIndex >= last），无论 forceApply 均强制 setSpeedLimit(0)+stop()，避免滑行穿站。
+   *   <li>终点为 REUSE_AT_TERM 时补注册 Layover，确保待命池可用。
+   *   <li>其余分支推进常规信号/占用/速度控制。
+   * </ul>
+   *
+   * <p>注意：此处终点停车不再依赖 forceApply，防止未触发信号刷新时列车穿站。
+   *
+   * @param train 控制的列车句柄
+   * @param forceApply 是否强制刷新信号/状态（如停站结束/信号变化）
+   */
   void handleSignalTick(RuntimeTrainHandle train, boolean forceApply) {
     if (train == null || !train.isValid()) {
       return;
@@ -651,27 +668,36 @@ public final class RuntimeDispatchService {
     if (currentIndex < 0) {
       return;
     }
+
+    NodeId currentNode =
+        currentIndex < route.waypoints().size()
+            ? route.waypoints().get(currentIndex)
+            : route.waypoints().get(Math.max(0, route.waypoints().size() - 1));
+
+    // DSTY 销毁必须优先于“终点停车”，否则当线路最后一个节点就是 DSTY 目标时会卡死不销毁。
+    // 若当前节点为 DSTY（销毁目标），立即销毁列车并返回，避免后续逻辑干扰。
+    // 详见：终点停车与 DSTY 互斥处理说明。
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
+    if (stopOpt.isPresent() && shouldDestroyAt(stopOpt.get(), currentNode)) {
+      handleDestroy(train, properties, trainName, "DSTY");
+      return;
+    }
+
     if (currentIndex >= route.waypoints().size() - 1) {
-      // 到达终点后：无论是否进入 layover，都应保持停车，避免“停站结束后继续滑行/穿站”。
-      if (forceApply) {
-        properties.setSpeedLimit(0.0);
-        train.stop();
-      }
-      if (forceApply
-          && route.lifecycleMode()
-              == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+      // 终点停车逻辑：
+      // 1. 无论 forceApply 均强制 setSpeedLimit(0)+stop()，防止滑行穿站。
+      // 2. 若为 REUSE_AT_TERM，补注册 Layover，确保列车进入待命池。
+      // 3. 终点停车与 DSTY 互斥，优先销毁。
+      properties.setSpeedLimit(0.0);
+      train.stop();
+      if (route.lifecycleMode()
+          == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
         int lastIndex = Math.max(0, route.waypoints().size() - 1);
         NodeId terminalNode = route.waypoints().get(lastIndex);
         if (layoverRegistry.get(trainName).isEmpty()) {
           handleLayoverRegistrationIfNeeded(trainName, route, terminalNode, properties);
         }
       }
-      return;
-    }
-    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
-    if (stopOpt.isPresent()
-        && shouldDestroyAt(stopOpt.get(), route.waypoints().get(currentIndex))) {
-      handleDestroy(train, properties, trainName, "DSTY");
       return;
     }
     Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());
@@ -715,14 +741,14 @@ public final class RuntimeDispatchService {
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(route.waypoints().get(currentIndex + 1))
             : Optional.empty();
-    Optional<NodeId> currentNode =
+    Optional<NodeId> currentNodeOpt =
         currentIndex < route.waypoints().size()
             ? Optional.of(route.waypoints().get(currentIndex))
             : Optional.empty();
-    if (currentNode.isEmpty() || nextNode.isEmpty()) {
+    if (currentNodeOpt.isEmpty() || nextNode.isEmpty()) {
       // 若已到终点且无下一目标，检查是否需要注册 Layover
-      if (nextNode.isEmpty() && forceApply && currentNode.isPresent()) {
-        handleLayoverRegistrationIfNeeded(trainName, route, currentNode.get(), properties);
+      if (nextNode.isEmpty() && forceApply && currentNodeOpt.isPresent()) {
+        handleLayoverRegistrationIfNeeded(trainName, route, currentNodeOpt.get(), properties);
       }
       return;
     }
@@ -730,7 +756,7 @@ public final class RuntimeDispatchService {
     boolean needsDistance =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.failoverUnreachableStop();
     if (needsDistance) {
-      distanceOpt = resolveShortestDistance(graph, currentNode.get(), nextNode.get());
+      distanceOpt = resolveShortestDistance(graph, currentNodeOpt.get(), nextNode.get());
       if (runtimeSettings.failoverUnreachableStop() && distanceOpt.isEmpty()) {
         progressRegistry.updateSignal(trainName, SignalAspect.STOP, Instant.now());
         applyControl(
@@ -738,7 +764,7 @@ public final class RuntimeDispatchService {
             properties,
             SignalAspect.STOP,
             route,
-            currentNode.get(),
+            currentNodeOpt.get(),
             nextNode.get(),
             graph,
             false,
@@ -747,7 +773,7 @@ public final class RuntimeDispatchService {
             "调度 failover: 目标不可达 train="
                 + trainName
                 + " from="
-                + currentNode.get().value()
+                + currentNodeOpt.get().value()
                 + " to="
                 + nextNode.get().value());
         return;
@@ -775,7 +801,7 @@ public final class RuntimeDispatchService {
         properties,
         nextAspect,
         route,
-        currentNode.get(),
+        currentNodeOpt.get(),
         nextNode.get(),
         graph,
         allowLaunch,
@@ -786,13 +812,23 @@ public final class RuntimeDispatchService {
           properties,
           trainName,
           route,
-          currentNode.get(),
+          currentNodeOpt.get(),
           nextNode.get(),
           graph,
           distanceOpt);
     }
   }
 
+  /**
+   * 终点 Layover 注册：在 REUSE_AT_TERM 模式下，将列车注册到 Layover 待命池。
+   *
+   * <p>仅在列车到达终点且未被 DSTY 销毁时调用，避免重复注册。
+   *
+   * @param trainName 列车名
+   * @param route 当前线路定义
+   * @param terminalNode 终点节点
+   * @param properties 列车属性
+   */
   private void handleLayoverRegistrationIfNeeded(
       String trainName, RouteDefinition route, NodeId location, TrainProperties properties) {
     if (route.lifecycleMode()
@@ -1236,6 +1272,16 @@ public final class RuntimeDispatchService {
         "调度 failover: 低速重下发 destination train=" + trainName + " dest=" + destination);
   }
 
+  /**
+   * 列车销毁处理：在 DSTY 节点或命令触发下销毁列车。
+   *
+   * <p>优先于终点停车逻辑，避免 DSTY 节点被终点停车拦截。
+   *
+   * @param train 控制的列车句柄
+   * @param properties 列车属性
+   * @param trainName 列车名
+   * @param reason 销毁原因（如 DSTY/命令）
+   */
   private void handleDestroy(
       RuntimeTrainHandle train, TrainProperties properties, String trainName, String reason) {
     if (properties == null || trainName == null || trainName.isBlank()) {
@@ -1293,6 +1339,13 @@ public final class RuntimeDispatchService {
    *
    * <p>DSTY 在 DSL 中带目标 NodeId（如 {@code DSTY <NodeId>}），且历史版本可能把 DSTY 写在其他 stop 的 notes
    * 上。为避免在错误节点提前销毁，只有当“目标 NodeId == 当前节点”时才触发。
+   */
+  /**
+   * 判断当前节点是否为 DSTY（销毁目标）。
+   *
+   * @param stop 当前 RouteStop
+   * @param currentNode 当前节点
+   * @return 是否应销毁
    */
   private boolean shouldDestroyAt(RouteStop stop, NodeId currentNode) {
     if (stop == null || currentNode == null) {
@@ -1441,6 +1494,12 @@ public final class RuntimeDispatchService {
   }
 
   /** 处理列车改名：迁移进度缓存并释放旧名占用，随后写回当前名称 tag。 */
+  /**
+   * 列车重命名处理：如有必要，自动同步列车名与属性。
+   *
+   * @param properties 列车属性
+   * @param trainName 当前列车名
+   */
   void handleRenameIfNeeded(TrainProperties properties, String trainName) {
     if (properties == null || trainName == null || trainName.isBlank()) {
       return;

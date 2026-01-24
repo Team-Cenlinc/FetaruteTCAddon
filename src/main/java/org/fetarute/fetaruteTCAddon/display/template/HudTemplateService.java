@@ -58,7 +58,16 @@ public final class HudTemplateService {
    * <p>当线路未绑定模板时返回 empty，由调用方决定回退到配置/语言默认模板。
    */
   public Optional<String> resolveBossBarTemplate(Optional<RouteMetadata> metaOpt) {
-    if (metaOpt == null || metaOpt.isEmpty()) {
+    return resolveTemplate(HudTemplateType.BOSSBAR, metaOpt);
+  }
+
+  /**
+   * 解析指定类型的 HUD 模板文本：根据线路绑定查询对应模板内容。
+   *
+   * <p>当线路未绑定模板时返回 empty，由调用方决定回退到配置/语言默认模板。
+   */
+  public Optional<String> resolveTemplate(HudTemplateType type, Optional<RouteMetadata> metaOpt) {
+    if (type == null || metaOpt == null || metaOpt.isEmpty()) {
       return Optional.empty();
     }
     RouteMetadata meta = metaOpt.get();
@@ -71,7 +80,7 @@ public final class HudTemplateService {
     if (lineId == null) {
       return Optional.empty();
     }
-    UUID templateId = lineBindings.get(new LineBindingKey(lineId, HudTemplateType.BOSSBAR));
+    UUID templateId = lineBindings.get(new LineBindingKey(lineId, type));
     if (templateId == null) {
       return Optional.empty();
     }
@@ -124,7 +133,12 @@ public final class HudTemplateService {
             LineKey key = new LineKey(operator.code(), line.code());
             lineByCode.put(key, line.id());
             lineInfoByCode.put(
-                key, new LineInfo(line.code(), line.name(), line.color().orElse("")));
+                key,
+                new LineInfo(
+                    line.code(),
+                    line.name(),
+                    line.secondaryName().orElse(""),
+                    line.color().orElse("")));
           }
         }
       }
@@ -209,11 +223,16 @@ public final class HudTemplateService {
     }
   }
 
-  /** 线路元信息，用于模板占位符。 */
-  public record LineInfo(String code, String name, String color) {
+  /**
+   * 线路元信息，用于模板占位符。
+   *
+   * <p>{@code secondaryName} 用于 `line_lang2` 双语展示，缺省时回退到主名称。
+   */
+  public record LineInfo(String code, String name, String secondaryName, String color) {
     public LineInfo {
       Objects.requireNonNull(code, "code");
       Objects.requireNonNull(name, "name");
+      secondaryName = secondaryName == null ? "" : secondaryName;
       color = color == null ? "" : color;
     }
   }

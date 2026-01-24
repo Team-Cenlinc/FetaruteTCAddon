@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 9;
+  private static final int EXPECTED_CONFIG_VERSION = 10;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
@@ -29,6 +29,9 @@ public final class ConfigManager {
   private static final boolean DEFAULT_HUD_BOSSBAR_ENABLED = true;
   private static final int DEFAULT_HUD_BOSSBAR_TICK_INTERVAL = 10;
   private static final Optional<String> DEFAULT_HUD_BOSSBAR_TEMPLATE = Optional.empty();
+  private static final boolean DEFAULT_HUD_ACTIONBAR_ENABLED = false;
+  private static final int DEFAULT_HUD_ACTIONBAR_TICK_INTERVAL = 10;
+  private static final Optional<String> DEFAULT_HUD_ACTIONBAR_TEMPLATE = Optional.empty();
   private static final double DEFAULT_CAUTION_SPEED_BPS = 6.0;
   private static final double DEFAULT_APPROACH_DEPOT_SPEED_BPS = 3.5;
   private static final boolean DEFAULT_SPEED_CURVE_ENABLED = true;
@@ -266,6 +269,9 @@ public final class ConfigManager {
     boolean hudBossBarEnabled = DEFAULT_HUD_BOSSBAR_ENABLED;
     int hudBossBarTickInterval = DEFAULT_HUD_BOSSBAR_TICK_INTERVAL;
     Optional<String> hudBossBarTemplate = DEFAULT_HUD_BOSSBAR_TEMPLATE;
+    boolean hudActionBarEnabled = DEFAULT_HUD_ACTIONBAR_ENABLED;
+    int hudActionBarTickInterval = DEFAULT_HUD_ACTIONBAR_TICK_INTERVAL;
+    Optional<String> hudActionBarTemplate = DEFAULT_HUD_ACTIONBAR_TEMPLATE;
     int minClearEdges = DEFAULT_MIN_CLEAR_EDGES;
     int switcherZoneEdges = DEFAULT_SWITCHER_ZONE_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
@@ -294,6 +300,22 @@ public final class ConfigManager {
           String configuredTemplate = bossbar.getString("template");
           if (configuredTemplate != null && !configuredTemplate.isBlank()) {
             hudBossBarTemplate = Optional.of(configuredTemplate);
+          }
+        }
+        ConfigurationSection actionbar = hud.getConfigurationSection("actionbar");
+        if (actionbar != null) {
+          hudActionBarEnabled = actionbar.getBoolean("enabled", hudActionBarEnabled);
+          int configuredHudInterval =
+              actionbar.getInt("tick-interval-ticks", hudActionBarTickInterval);
+          if (configuredHudInterval > 0) {
+            hudActionBarTickInterval = configuredHudInterval;
+          } else {
+            logger.warning(
+                "runtime.hud.actionbar.tick-interval-ticks 配置无效: " + configuredHudInterval);
+          }
+          String configuredTemplate = actionbar.getString("template");
+          if (configuredTemplate != null && !configuredTemplate.isBlank()) {
+            hudActionBarTemplate = Optional.of(configuredTemplate);
           }
         }
       }
@@ -400,7 +422,10 @@ public final class ConfigManager {
         failoverUnreachableStop,
         hudBossBarEnabled,
         hudBossBarTickInterval,
-        hudBossBarTemplate);
+        hudBossBarTemplate,
+        hudActionBarEnabled,
+        hudActionBarTickInterval,
+        hudActionBarTemplate);
   }
 
   private static TrainConfigSettings parseTrain(
@@ -583,7 +608,10 @@ public final class ConfigManager {
       boolean failoverUnreachableStop,
       boolean hudBossBarEnabled,
       int hudBossBarTickIntervalTicks,
-      Optional<String> hudBossBarTemplate) {
+      Optional<String> hudBossBarTemplate,
+      boolean hudActionBarEnabled,
+      int hudActionBarTickIntervalTicks,
+      Optional<String> hudActionBarTemplate) {
     public RuntimeSettings {
       if (dispatchTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("dispatchTickIntervalTicks 必须为正数");
@@ -624,8 +652,13 @@ public final class ConfigManager {
       if (hudBossBarTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("hudBossBarTickIntervalTicks 必须为正数");
       }
+      if (hudActionBarTickIntervalTicks <= 0) {
+        throw new IllegalArgumentException("hudActionBarTickIntervalTicks 必须为正数");
+      }
       hudBossBarTemplate =
           hudBossBarTemplate == null ? Optional.empty() : hudBossBarTemplate.map(String::trim);
+      hudActionBarTemplate =
+          hudActionBarTemplate == null ? Optional.empty() : hudActionBarTemplate.map(String::trim);
     }
   }
 

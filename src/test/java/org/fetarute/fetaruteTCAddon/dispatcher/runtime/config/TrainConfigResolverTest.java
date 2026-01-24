@@ -55,7 +55,7 @@ class TrainConfigResolverTest {
 
   private static ConfigManager.ConfigView defaultConfig() {
     return new ConfigManager.ConfigView(
-        9,
+        10,
         false,
         "zh_CN",
         new ConfigManager.StorageSettings(
@@ -81,6 +81,9 @@ class TrainConfigResolverTest {
             60,
             true,
             true,
+            10,
+            Optional.empty(),
+            false,
             10,
             Optional.empty()),
         new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),

@@ -1,4 +1,4 @@
-package org.fetarute.fetaruteTCAddon.display.hud.bossbar;
+package org.fetarute.fetaruteTCAddon.display.hud.actionbar;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -10,7 +10,6 @@ import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
-import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -21,35 +20,35 @@ import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
+import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplate;
+import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplateRenderer;
+import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressExpression;
+import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressTracker;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
+import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 车上 BossBar HUD（MVP）：展示线路/下一站/ETA/速度，并用 BossBar 进度条做“下一站到达进度”近似。
+ * 车上 ActionBar HUD：以纯文本输出线路/下一站等状态。
  *
- * <p>BossBar 的结构与计算逻辑保持固定（progress/ETA/speed 等），标题模板可通过 HUD 模板服务覆写。 占位符统一由 {@link
- * org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver} 填充， 并额外注入玩家侧车厢号信息（{@code
- * player_carriage_no}/{@code player_carriage_total}）。
- *
- * <p>玩家是否在列车上：从 player.getVehicle() 反查 TrainCarts member/group。
+ * <p>模板解析与状态分支逻辑与 BossBar 共用（HudState + BossBarHudTemplate）。 ActionBar 仅负责按 tick 推送文本，不持久化 UI 状态。
  */
-public final class BossBarTrainHudManager implements Listener {
+public final class ActionBarTrainHudManager implements Listener {
 
   private static final long DEPARTING_WINDOW_TICKS = 60L;
   private static final String DEFAULT_TEMPLATE =
-      "线路 {line} | 下一站 {next_station} | {eta_status} | {speed}";
+      "<white>欢迎乘坐 {company}/{operator} 列车</white> <gray>|</gray> <white>{line}</white>"
+          + " <gray>|</gray> <white>前往 {dest_eop}</white>";
 
   private final FetaruteTCAddon plugin;
   private final LocaleManager locale;
@@ -62,10 +61,10 @@ public final class BossBarTrainHudManager implements Listener {
   private final BossBarProgressTracker progressTracker = new BossBarProgressTracker();
   private final HudStateTracker stateTracker = new HudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
   private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
-  private final Map<UUID, BossBar> bars = new HashMap<>();
+  private final Set<UUID> showingPlayers = new HashSet<>();
   private long tickCounter = 0L;
 
-  public BossBarTrainHudManager(
+  public ActionBarTrainHudManager(
       FetaruteTCAddon plugin,
       LocaleManager locale,
       ConfigManager configManager,
@@ -96,62 +95,68 @@ public final class BossBarTrainHudManager implements Listener {
 
   public void register() {
     Bukkit.getPluginManager().registerEvents(this, plugin);
-    debugLogger.accept("BossBarTrainHudManager registered");
+    debugLogger.accept("ActionBarTrainHudManager registered");
   }
 
   public void unregister() {
     HandlerList.unregisterAll(this);
-    debugLogger.accept("BossBarTrainHudManager unregistered");
+    debugLogger.accept("ActionBarTrainHudManager unregistered");
   }
 
   public void tick() {
     int intervalTicks = resolveIntervalTicks();
     tickCounter += intervalTicks;
     Set<String> activeTrains = new HashSet<>();
+    Set<UUID> currentPlayers = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
       Optional<MinecartGroup> groupOpt = contextResolver.resolveGroup(player);
       if (groupOpt.isEmpty()) {
-        hide(player);
+        clear(player);
         continue;
       }
-      showOrUpdate(player, groupOpt.get()).ifPresent(activeTrains::add);
+      Optional<String> trainName = showOrUpdate(player, groupOpt.get());
+      if (trainName.isPresent()) {
+        activeTrains.add(trainName.get());
+        currentPlayers.add(player.getUniqueId());
+      }
     }
     progressTracker.retain(activeTrains);
     stateTracker.retain(activeTrains);
+    clearInactivePlayers(currentPlayers);
   }
 
   public void shutdown() {
     for (Player player : Bukkit.getOnlinePlayers()) {
-      hide(player);
+      clear(player);
     }
     progressTracker.clear();
     stateTracker.clear();
     templateCache.clear();
     contextResolver.clearCaches();
-    bars.clear();
-    debugLogger.accept("BossBarTrainHudManager shutdown");
+    showingPlayers.clear();
+    debugLogger.accept("ActionBarTrainHudManager shutdown");
   }
 
   @EventHandler
   public void onQuit(PlayerQuitEvent event) {
-    hide(event.getPlayer());
+    clear(event.getPlayer());
   }
 
   @EventHandler
   public void onKick(PlayerKickEvent event) {
-    hide(event.getPlayer());
+    clear(event.getPlayer());
   }
 
   private Optional<String> showOrUpdate(Player player, MinecartGroup group) {
     TrainProperties properties = group.getProperties();
     if (properties == null) {
-      hide(player);
+      clear(player);
       return Optional.empty();
     }
 
     String trainName = properties.getTrainName();
     if (trainName == null || trainName.isBlank()) {
-      hide(player);
+      clear(player);
       return Optional.empty();
     }
 
@@ -164,7 +169,8 @@ public final class BossBarTrainHudManager implements Listener {
 
     Optional<String> templateOpt =
         templateService != null
-            ? templateService.resolveBossBarTemplate(
+            ? templateService.resolveTemplate(
+                HudTemplateType.ACTIONBAR,
                 context.routeDefinition().flatMap(RouteDefinition::metadata))
             : Optional.empty();
     BossBarHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
@@ -178,7 +184,7 @@ public final class BossBarTrainHudManager implements Listener {
             context.moving());
     Map<String, String> placeholders = contextResolver.buildPlaceholders(context, baseProgress);
     contextResolver.applyPlayerPlaceholders(placeholders, player, group);
-    float progress = resolveProgress(template, placeholders, baseProgress);
+    resolveProgress(template, placeholders, baseProgress);
     boolean terminalArriving = context.terminalNextStop() && context.eta().arriving();
     HudState state =
         stateTracker.resolve(
@@ -191,67 +197,51 @@ public final class BossBarTrainHudManager implements Listener {
             nowMillis);
     String templateLine = template.resolveLine(state, tickCounter).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
-
-    BossBar bar =
-        bars.computeIfAbsent(
-            player.getUniqueId(),
-            id ->
-                BossBar.bossBar(
-                    Component.empty(), 0.0f, BossBar.Color.BLUE, BossBar.Overlay.PROGRESS));
-
-    bar.name(title);
-    bar.progress(progress);
-    bar.color(resolveColor(context.eta(), context.signalAspect()));
-
-    player.showBossBar(bar);
+    player.sendActionBar(title);
+    showingPlayers.add(player.getUniqueId());
     return Optional.of(trainName);
   }
 
   private void showDestinationOnly(Player player, TrainProperties properties) {
     String destination = properties == null ? null : properties.getDestination();
     if (destination == null || destination.isBlank()) {
-      destination = localeTextOrDefault("display.hud.bossbar.tc_destination.empty", "暂无目的地");
+      destination = localeTextOrDefault("display.hud.actionbar.tc_destination.empty", "暂无目的地");
     } else {
       destination = destination.trim();
     }
-    BossBar bar =
-        bars.computeIfAbsent(
-            player.getUniqueId(),
-            id ->
-                BossBar.bossBar(
-                    Component.empty(), 0.0f, BossBar.Color.BLUE, BossBar.Overlay.PROGRESS));
-    bar.name(Component.text(destination));
-    bar.progress(1.0f);
-    bar.color(BossBar.Color.BLUE);
-    player.showBossBar(bar);
+    player.sendActionBar(Component.text(destination));
+    showingPlayers.add(player.getUniqueId());
   }
 
-  private void hide(Player player) {
-    BossBar bar = bars.remove(player.getUniqueId());
-    if (bar != null) {
-      player.hideBossBar(bar);
+  private void clear(Player player) {
+    if (player == null) {
+      return;
+    }
+    if (showingPlayers.remove(player.getUniqueId())) {
+      player.sendActionBar(Component.empty());
     }
   }
 
-  private String localeTextOrDefault(String key, String fallback) {
-    if (locale == null) {
-      return fallback;
+  private void clearInactivePlayers(Set<UUID> currentPlayers) {
+    if (currentPlayers == null || currentPlayers.isEmpty()) {
+      for (UUID uuid : new HashSet<>(showingPlayers)) {
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null) {
+          player.sendActionBar(Component.empty());
+        }
+      }
+      showingPlayers.clear();
+      return;
     }
-    String value = locale.text(key);
-    return value.equals(key) ? fallback : value;
-  }
-
-  private BossBar.Color resolveColor(EtaResult eta, SignalAspect signalAspect) {
-    if (signalAspect == SignalAspect.STOP) {
-      return BossBar.Color.RED;
+    for (UUID uuid : new HashSet<>(showingPlayers)) {
+      if (!currentPlayers.contains(uuid)) {
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null) {
+          player.sendActionBar(Component.empty());
+        }
+        showingPlayers.remove(uuid);
+      }
     }
-    if (signalAspect == SignalAspect.CAUTION || signalAspect == SignalAspect.PROCEED_WITH_CAUTION) {
-      return BossBar.Color.YELLOW;
-    }
-    if (eta.arriving()) {
-      return BossBar.Color.YELLOW;
-    }
-    return BossBar.Color.BLUE;
   }
 
   private String resolveTemplate(Optional<String> templateOpt) {
@@ -259,18 +249,20 @@ public final class BossBarTrainHudManager implements Listener {
       return templateOpt.get();
     }
     if (configManager != null && configManager.current() != null) {
-      Optional<String> configured = configManager.current().runtimeSettings().hudBossBarTemplate();
+      Optional<String> configured =
+          configManager.current().runtimeSettings().hudActionBarTemplate();
       if (configured.isPresent() && !configured.get().isBlank()) {
         return configured.get();
       }
     }
     if (defaultTemplateService != null) {
-      Optional<String> defaultTemplate = defaultTemplateService.resolveBossBarTemplate();
+      Optional<String> defaultTemplate =
+          defaultTemplateService.resolveTemplate(HudTemplateType.ACTIONBAR);
       if (defaultTemplate.isPresent() && !defaultTemplate.get().isBlank()) {
         return defaultTemplate.get();
       }
     }
-    String fallback = localeTextOrDefault("display.hud.bossbar.template", DEFAULT_TEMPLATE);
+    String fallback = localeTextOrDefault("display.hud.actionbar.template", DEFAULT_TEMPLATE);
     return fallback.isBlank() ? DEFAULT_TEMPLATE : fallback;
   }
 
@@ -280,32 +272,39 @@ public final class BossBarTrainHudManager implements Listener {
         key, value -> BossBarHudTemplate.parse(value, debugLogger));
   }
 
-  private float resolveProgress(
+  private void resolveProgress(
       BossBarHudTemplate template, Map<String, String> placeholders, float baseProgress) {
     if (template == null) {
-      return baseProgress;
+      return;
     }
     Optional<String> expressionOpt = template.progressExpression();
     if (expressionOpt.isEmpty()) {
-      return baseProgress;
+      return;
     }
     OptionalDouble parsed =
         BossBarProgressExpression.evaluate(expressionOpt.get(), placeholders, debugLogger);
     if (parsed.isEmpty()) {
-      return baseProgress;
+      return;
     }
     float value = (float) parsed.getAsDouble();
     float clamped = clampProgress(value);
     contextResolver.applyProgressPlaceholders(placeholders, clamped);
-    return clamped;
   }
 
   private int resolveIntervalTicks() {
     if (configManager != null && configManager.current() != null) {
-      int interval = configManager.current().runtimeSettings().hudBossBarTickIntervalTicks();
+      int interval = configManager.current().runtimeSettings().hudActionBarTickIntervalTicks();
       return Math.max(1, interval);
     }
     return 1;
+  }
+
+  private String localeTextOrDefault(String key, String fallback) {
+    if (locale == null) {
+      return fallback;
+    }
+    String value = locale.text(key);
+    return value.equals(key) ? fallback : value;
   }
 
   private float clampProgress(float progress) {

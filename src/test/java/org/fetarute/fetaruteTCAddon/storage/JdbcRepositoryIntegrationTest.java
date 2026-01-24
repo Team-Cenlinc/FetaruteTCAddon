@@ -103,7 +103,7 @@ final class JdbcRepositoryIntegrationTest {
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
     ConfigManager.ConfigView view =
         new ConfigManager.ConfigView(
-            9,
+            10,
             false,
             "zh_CN",
             settings,
@@ -125,6 +125,9 @@ final class JdbcRepositoryIntegrationTest {
                 60,
                 true,
                 true,
+                10,
+                Optional.empty(),
+                false,
                 10,
                 Optional.empty()),
             new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
