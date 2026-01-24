@@ -4,6 +4,7 @@
 
 ## 模板类型
 - `BOSSBAR`：车上 BossBar 标题（单行，支持 MiniMessage）。
+- `ACTIONBAR`：车上 ActionBar 文本（单行，支持 MiniMessage）。
 - `ANNOUNCEMENT`：ActionBar 广播（预留）。
 - `PLAYER_DISPLAY`：Scoreboard LCD（预留）。
 - `STATION_DISPLAY`：站牌显示（预留）。
@@ -13,14 +14,15 @@
 2) MiniMessage 解析
 3) Adventure Component 输出
 
-## BossBar 模板默认值
+## 默认模板回退顺序
 默认模板优先从 `plugins/FetaruteTCAddon/default_hud_template.yml` 读取：
 - `bossbar.template`
+- `actionbar.template`
 
-当线路未绑定模板且 config 未配置时，BossBar 会回退到该默认值；最后才会回退到语言文件中的 `display.hud.bossbar.template`。
+当线路未绑定模板且 config 未配置时，BossBar/ActionBar 会回退到对应默认模板；最后才会回退到语言文件中的 `display.hud.bossbar.template` / `display.hud.actionbar.template`。
 
-## BossBar 状态模板（可选）
-BossBar 支持按状态选择模板行，格式为：
+## 状态模板（可选）
+BossBar/ActionBar 支持按状态选择模板行，格式为：
 
 ```text
 IDLE_1: <template line>
@@ -28,15 +30,18 @@ DEPARTING: <template line>
 ARRIVING_1: <template line>
 ARRIVING_2: <template line>
 IN_TRIP: <template line>
+TERM_ARRIVING: <template line>
+AT_LAST_STATION: <template line>
 ```
 
-- 状态：`IDLE` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `IN_TRIP`
+- 状态：`IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP`
 - 可选后缀 `_n` 表示轮播顺序（按数字升序轮播）
 - 若模板内没有任何状态行，则保持“整段文本作为单行标题”的兼容行为
 - 若需要未匹配状态的默认内容，可额外写一行“无前缀模板行”作为 fallback
 - AT_STATION 以运行时 `dwellRemainingSec > 0` 判定，IDLE 为非停站静止（临时停车）
-- ON_LAYOVER 表示终到后折返/待命，优先级高于 AT_STATION
-- 兼容旧模板的 `STOP`/`LAYOVER` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`
+- ON_LAYOVER 表示终到后折返/待命，优先级高于 AT_LAST_STATION/AT_STATION
+- AT_LAST_STATION 表示停在终点站（EOP），优先级高于 AT_STATION
+- 兼容旧模板的 `STOP`/`LAYOVER`/`TERMINAL_ARRIVING` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`/`TERM_ARRIVING`
 
 轮播间隔可通过模板行配置：
 ```text
@@ -44,7 +49,7 @@ rotate_ticks: 40
 ```
 
 ## BossBar 进度表达式（可选）
-BossBar 进度条支持由模板表达式驱动：
+BossBar 进度条支持由模板表达式驱动（ActionBar 不使用进度）：
 
 ```text
 progress: {progress}
@@ -74,12 +79,14 @@ progress: {eta_minutes} / 10
 - `/fta line hud clear <company> <operator> <line> <type>`
 - `/fta line hud show <company> <operator> <line>`
 
-## BossBar 占位符
-BossBar 支持以下占位符（模板中使用 `{xxx}`）：
+## 占位符
+BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 
 ### 基础字段（线路/站点）
 - `line`：线路显示名（优先 Line.name，其次 line code）；缺失为 `-`
   - 例：`{line}` → `S2`
+- `line_lang2`：线路第二语言名（Line.secondaryName，缺失回退到 `line`）
+  - 例：`{line_lang2}` → `东湾 Line`
 - `line_code`：线路 code（优先 Line.code，其次 RouteMetadata.lineId）
   - 例：`{line_code}` → `S2`
 - `line_name`：线路名称（Line.name）
@@ -90,6 +97,12 @@ BossBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`<{line_color_tag}>{line}` → `<#2BC4FF>LINE`
 - `operator`：运营商 code（RouteMetadata.operator）
   - 例：`{operator}` → `SURN`
+- `company`：公司显示名（优先 Company.name，其次 company code）
+  - 例：`{company}` → `FetaRail`
+- `company_code`：公司 code
+  - 例：`{company_code}` → `FETA`
+- `company_name`：公司名称
+  - 例：`{company_name}` → `FetaRail Co.`
 - `route_code`：班次/route code（RouteMetadata.serviceId）
   - 例：`{route_code}` → `EXP-01`
 - `route_name`：班次/route 展示名（Route.name，来自 RouteMetadata.displayName）
@@ -140,6 +153,12 @@ BossBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{speed_bps}` → `11.76`
 - `speed_unit`：速度单位文本（来自语言文件）
   - 例：`{speed_unit}` → `km/h`
+
+### 乘客侧字段
+- `player_carriage_no`：玩家所在车厢序号（从 1 开始，无法解析为 `-`）
+  - 例：`{player_carriage_no}` → `2`
+- `player_carriage_total`：列车编组总车厢数（无法解析为 `-`）
+  - 例：`{player_carriage_total}` → `8`
 
 ### 信号/占用字段
 - `signal_status`：中文信号提示（通行/注意/停车）

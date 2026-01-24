@@ -10,6 +10,7 @@ import java.util.Optional;
  */
 public enum HudState {
   IDLE,
+  AT_LAST_STATION,
   AT_STATION,
   ON_LAYOVER,
   DEPARTING,
@@ -25,6 +26,9 @@ public enum HudState {
     String normalized = raw.trim().toUpperCase(Locale.ROOT);
     if ("STOP".equals(normalized)) {
       return Optional.of(HudState.AT_STATION);
+    }
+    if ("LAST_STATION".equals(normalized)) {
+      return Optional.of(HudState.AT_LAST_STATION);
     }
     if ("LAYOVER".equals(normalized)) {
       return Optional.of(HudState.ON_LAYOVER);

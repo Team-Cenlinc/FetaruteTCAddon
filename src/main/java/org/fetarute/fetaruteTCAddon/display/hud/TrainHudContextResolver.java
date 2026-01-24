@@ -168,6 +168,12 @@ public final class TrainHudContextResolver {
     SignalAspect signalAspect =
         progressEntry.map(RouteProgressRegistry.RouteProgressEntry::lastSignal).orElse(null);
     Optional<LayoverRegistry.LayoverCandidate> layover = resolveLayover(trainName);
+    Optional<NodeId> eopNodeId = routeOpt.flatMap(this::resolveEndOfOperationNodeId);
+    boolean atLastStation =
+        stop
+            && currentNode.isPresent()
+            && eopNodeId.isPresent()
+            && currentNode.get().equals(eopNodeId.get());
 
     double speedBps = resolveSpeedBlocksPerSecond(group);
     boolean moving = group.isMoving();
@@ -186,6 +192,7 @@ public final class TrainHudContextResolver {
             layover,
             stop,
             moving,
+            atLastStation,
             terminalNextStop,
             speedBps);
     return Optional.of(context);
@@ -878,6 +885,33 @@ public final class TrainHudContextResolver {
     }
     NodeId last = route.waypoints().get(route.waypoints().size() - 1);
     return resolveStationDisplay(last);
+  }
+
+  private Optional<NodeId> resolveEndOfOperationNodeId(RouteDefinition route) {
+    if (route == null || routeDefinitions == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    for (int i = stops.size() - 1; i >= 0; i--) {
+      RouteStop stop = stops.get(i);
+      if (stop == null) {
+        continue;
+      }
+      RouteStopPassType passType = stop.passType();
+      if (passType == RouteStopPassType.PASS) {
+        continue;
+      }
+      Optional<String> nodeId = stop.waypointNodeId().filter(id -> !id.isBlank());
+      if (nodeId.isPresent()) {
+        return Optional.of(NodeId.of(nodeId.get()));
+      }
+      Optional<UUID> stationId = stop.stationId();
+      if (stationId.isPresent()) {
+        return resolveStationNodeId(stationId.get());
+      }
+      break;
+    }
+    return Optional.empty();
   }
 
   private StationDisplay resolveEndOfOperation(RouteDefinition route, StationDisplay fallback) {

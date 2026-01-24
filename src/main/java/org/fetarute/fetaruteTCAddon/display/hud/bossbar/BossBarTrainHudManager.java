@@ -187,6 +187,7 @@ public final class BossBarTrainHudManager implements Listener {
             context.eta().arriving(),
             context.layover().isPresent(),
             context.stop(),
+            context.atLastStation(),
             terminalArriving,
             nowMillis);
     String templateLine = template.resolveLine(state, tickCounter).orElse("");

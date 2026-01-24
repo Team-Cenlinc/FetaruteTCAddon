@@ -17,6 +17,7 @@ display:
         rotate_ticks: 60
         AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>本站 {current_station}，开往 {dest_eor}</white>
         AT_STATION_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}，开往 {dest_eor}</white>
+        AT_LAST_STATION: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>终点站 {current_station} 到达</white>
         DEPARTING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将离站，前往 {next_station}</white>
         ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将到达 {next_station}</white>
         TERM_ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>终点 {next_station} 到达</white>
@@ -48,6 +49,7 @@ display:
         AT_STATION_1: <white>欢迎乘坐 {operator} 列车，本站 {current_station}</white>
         AT_STATION_2: <white>本线路 {line} 前往 {dest_eop}</white>
         AT_STATION_3: <white>Welcome aboard {operator} | Line {line} to {dest_eop_lang2}</white>
+        AT_LAST_STATION: <yellow>终点站 {current_station} 到达</yellow>
         DEPARTING: <white>前往 {next_station}</white>
         ARRIVING: <yellow>即将到达 {next_station}</yellow>
         TERM_ARRIVING: <yellow>终点 {next_station} 到达</yellow>

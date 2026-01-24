@@ -27,6 +27,7 @@ public record TrainHudContext(
     Optional<LayoverRegistry.LayoverCandidate> layover,
     boolean stop,
     boolean moving,
+    boolean atLastStation,
     boolean terminalNextStop,
     double speedBps) {
   public TrainHudContext {

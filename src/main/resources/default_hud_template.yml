@@ -3,6 +3,8 @@ bossbar:
     rotate_ticks: 60
     AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>开往 {dest_eor}</white>
     AT_STATION_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>To {dest_eop}</white>
+    AT_LAST_STATION_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>终点站 {current_station} 到了</white>
+    AT_LAST_STATION_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>Final stop {current_station_lang2}</white>
     TERM_ARRIVING_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>终点 {next_station} 到了</white>
     TERM_ARRIVING_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>We are now at the terminal station {next_station_lang2}</white>
     IN_TRIP_1: <{line_color_tag}>▋<white> {line}</white> <{line_color_tag}>▋<gray> | </gray><white>车厢 {player_carriage_no}/{player_carriage_total}</white><gray> | </gray><white>速度 {speed}</white>
@@ -12,6 +14,8 @@ actionbar:
     rotate_ticks: 60
     AT_STATION_1: <white>本站 {current_station} ｜ 下一站 {next_station}</white>
     AT_STATION_2: <white>Currently at: {current_station_lang2} ｜ Next station: {next_station_lang2}</white>
+    AT_LAST_STATION_1: <yellow>终点站 {current_station} 到了，请全体乘客下车</yellow>
+    AT_LAST_STATION_2: <yellow>Final stop {current_station_lang2}</yellow>
     DEPARTING_1: <white>欢迎乘坐 {operator} </white>
     DEPARTING_2: <white>本次列车为 {line} 前往 {dest_eop}</white>
     DEPARTING_3: <white>Welcome aboard {operator} | Line {line} to {dest_eop_lang2}</white>

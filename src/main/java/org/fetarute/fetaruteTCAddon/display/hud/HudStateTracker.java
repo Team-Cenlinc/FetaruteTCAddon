@@ -26,6 +26,7 @@ public final class HudStateTracker {
    * @param arriving 是否即将到站（ETA）
    * @param layover 是否处于待命
    * @param stop 是否停站（dwellRemainingSec > 0）
+   * @param atLastStation 是否停在终点站（EOP）
    * @param terminalArriving 是否终点到站
    * @param nowMillis 当前时间戳（毫秒）
    * @return HUD 状态
@@ -36,11 +37,16 @@ public final class HudStateTracker {
       boolean arriving,
       boolean layover,
       boolean stop,
+      boolean atLastStation,
       boolean terminalArriving,
       long nowMillis) {
     if (layover) {
       updateMotion(trainName, moving, nowMillis);
       return HudState.ON_LAYOVER;
+    }
+    if (stop && atLastStation) {
+      updateMotion(trainName, moving, nowMillis);
+      return HudState.AT_LAST_STATION;
     }
     if (stop) {
       updateMotion(trainName, moving, nowMillis);
