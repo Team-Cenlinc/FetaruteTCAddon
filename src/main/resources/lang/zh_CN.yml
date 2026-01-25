@@ -12,6 +12,13 @@ error:
 
 display:
   hud:
+    eta:
+      status:
+        arriving: "即将到达"
+        delayed: "延误 {minutes}分"
+        scheduled: "预计 {minutes}分"
+        minutes: "{minutes}分"
+        unavailable: "-"
     bossbar:
       template: |-
         rotate_ticks: 60

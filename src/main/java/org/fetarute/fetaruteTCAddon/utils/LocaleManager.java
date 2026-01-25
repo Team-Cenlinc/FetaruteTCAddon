@@ -4,13 +4,20 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.URISyntaxException;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -29,6 +36,7 @@ public final class LocaleManager {
   private String currentLocale;
   private YamlConfiguration messages;
   private Component prefix = Component.empty();
+  private List<String> availableLocales = List.of();
 
   public LocaleManager(JavaPlugin plugin, String localeTag, LoggerManager loggerManager) {
     this(
@@ -206,11 +214,24 @@ public final class LocaleManager {
     return currentLocale;
   }
 
+  /** 获取当前已发现的语言列表（来自 lang 目录）。 */
+  public List<String> availableLocales() {
+    if (availableLocales == null || availableLocales.isEmpty()) {
+      if (currentLocale != null && !currentLocale.isBlank()) {
+        return List.of(currentLocale);
+      }
+      return List.of(DEFAULT_LOCALE);
+    }
+    return List.copyOf(availableLocales);
+  }
+
   private void loadLocale(String localeTag) {
+    ensureBundledLocales();
     LocaleFile localeFile = prepareLocaleFile(localeTag);
     messages = YamlConfiguration.loadConfiguration(localeFile.file());
     currentLocale = localeFile.locale();
     prefix = parsePrefix(messages);
+    refreshAvailableLocales();
   }
 
   private LocaleFile prepareLocaleFile(String localeTag) {
@@ -280,6 +301,118 @@ public final class LocaleManager {
     } catch (IOException ex) {
       access.logger().warn("更新语言文件失败: " + ex.getMessage());
     }
+  }
+
+  /** 确保内置语言文件已落地到 lang 目录（仅补缺失键）。 */
+  private void ensureBundledLocales() {
+    File langDir = new File(access.dataFolder(), "lang");
+    if (!langDir.exists() && !langDir.mkdirs()) {
+      access.logger().warn("无法创建语言目录 " + langDir.getAbsolutePath());
+      return;
+    }
+    for (String localeTag : listBundledLocales()) {
+      if (localeTag == null || localeTag.isBlank()) {
+        continue;
+      }
+      File localeFile = new File(langDir, localeTag + ".yml");
+      mergeLocaleDefaults(localeTag, localeFile);
+    }
+  }
+
+  /** 刷新当前可用语言列表（来自 lang 目录 + 当前 locale）。 */
+  private void refreshAvailableLocales() {
+    Set<String> locales = new HashSet<>(listLocalesInDir(new File(access.dataFolder(), "lang")));
+    if (currentLocale != null && !currentLocale.isBlank()) {
+      locales.add(currentLocale);
+    }
+    if (locales.isEmpty()) {
+      locales.add(DEFAULT_LOCALE);
+    }
+    List<String> sorted = new ArrayList<>(locales);
+    Collections.sort(sorted);
+    availableLocales = List.copyOf(sorted);
+  }
+
+  /** 扫描目录下的 <locale>.yml 文件名。 */
+  private List<String> listLocalesInDir(File langDir) {
+    if (langDir == null || !langDir.exists() || !langDir.isDirectory()) {
+      return List.of();
+    }
+    File[] files = langDir.listFiles((dir, name) -> name.endsWith(".yml"));
+    if (files == null || files.length == 0) {
+      return List.of();
+    }
+    List<String> locales = new ArrayList<>();
+    for (File file : files) {
+      String name = file.getName();
+      if (!name.endsWith(".yml")) {
+        continue;
+      }
+      String locale = name.substring(0, name.length() - ".yml".length());
+      if (!locale.isBlank()) {
+        locales.add(locale);
+      }
+    }
+    Collections.sort(locales);
+    return locales;
+  }
+
+  /** 从内置资源/插件包中枚举可用语言文件。 */
+  private List<String> listBundledLocales() {
+    Set<String> locales = new HashSet<>();
+    try {
+      URL resource = LocaleManager.class.getClassLoader().getResource("lang");
+      if (resource != null && "file".equalsIgnoreCase(resource.getProtocol())) {
+        File dir = new File(resource.toURI());
+        locales.addAll(listLocalesInDir(dir));
+      }
+    } catch (URISyntaxException ex) {
+      access.logger().debug("解析 lang 资源目录失败: " + ex.getMessage());
+    }
+    try {
+      URL location = LocaleManager.class.getProtectionDomain().getCodeSource().getLocation();
+      if (location != null) {
+        File source = new File(location.toURI());
+        if (source.isFile()) {
+          locales.addAll(listLocalesInJar(source));
+        } else if (source.isDirectory()) {
+          locales.addAll(listLocalesInDir(new File(source, "lang")));
+        }
+      }
+    } catch (URISyntaxException | IOException ex) {
+      access.logger().debug("扫描内置语言失败: " + ex.getMessage());
+    }
+    List<String> sorted = new ArrayList<>(locales);
+    Collections.sort(sorted);
+    return sorted;
+  }
+
+  /** 从插件 jar 内枚举 lang/*.yml。 */
+  private List<String> listLocalesInJar(File jarFile) throws IOException {
+    if (jarFile == null || !jarFile.isFile()) {
+      return List.of();
+    }
+    Set<String> locales = new HashSet<>();
+    try (JarFile jar = new JarFile(jarFile)) {
+      Enumeration<JarEntry> entries = jar.entries();
+      while (entries.hasMoreElements()) {
+        JarEntry entry = entries.nextElement();
+        if (entry.isDirectory()) {
+          continue;
+        }
+        String name = entry.getName();
+        if (name == null || !name.startsWith("lang/") || !name.endsWith(".yml")) {
+          continue;
+        }
+        String locale = name.substring("lang/".length(), name.length() - ".yml".length());
+        if (!locale.isBlank()) {
+          locales.add(locale);
+        }
+      }
+    }
+    List<String> sorted = new ArrayList<>(locales);
+    Collections.sort(sorted);
+    return sorted;
   }
 
   private TagResolver buildResolvers(Map<String, String> placeholders) {

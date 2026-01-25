@@ -14,8 +14,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.HandlerList;
@@ -75,24 +76,27 @@ public final class ScoreboardTrainHudManager implements Listener {
 
   private static final String OBJECTIVE_NAME = "fta_hud";
   private static final String OBJECTIVE_TITLE = " ";
-  private static final String[] LINE_ENTRIES =
-      new String[] {
-        ChatColor.BLACK.toString(),
-        ChatColor.DARK_BLUE.toString(),
-        ChatColor.DARK_GREEN.toString(),
-        ChatColor.DARK_AQUA.toString(),
-        ChatColor.DARK_RED.toString(),
-        ChatColor.DARK_PURPLE.toString(),
-        ChatColor.GOLD.toString(),
-        ChatColor.GRAY.toString(),
-        ChatColor.DARK_GRAY.toString(),
-        ChatColor.BLUE.toString(),
-        ChatColor.GREEN.toString(),
-        ChatColor.AQUA.toString(),
-        ChatColor.RED.toString(),
-        ChatColor.LIGHT_PURPLE.toString(),
-        ChatColor.YELLOW.toString()
+  private static final LegacyComponentSerializer LEGACY_SERIALIZER =
+      LegacyComponentSerializer.legacySection();
+  private static final NamedTextColor[] LINE_ENTRY_COLORS =
+      new NamedTextColor[] {
+        NamedTextColor.BLACK,
+        NamedTextColor.DARK_BLUE,
+        NamedTextColor.DARK_GREEN,
+        NamedTextColor.DARK_AQUA,
+        NamedTextColor.DARK_RED,
+        NamedTextColor.DARK_PURPLE,
+        NamedTextColor.GOLD,
+        NamedTextColor.GRAY,
+        NamedTextColor.DARK_GRAY,
+        NamedTextColor.BLUE,
+        NamedTextColor.GREEN,
+        NamedTextColor.AQUA,
+        NamedTextColor.RED,
+        NamedTextColor.LIGHT_PURPLE,
+        NamedTextColor.YELLOW
       };
+  private static final String[] LINE_ENTRIES = buildLineEntries();
 
   private final FetaruteTCAddon plugin;
   private final ConfigManager configManager;
@@ -492,7 +496,7 @@ public final class ScoreboardTrainHudManager implements Listener {
         itemPlaceholders.put("station_lang2", stop.display().lang2());
         itemPlaceholders.put("eta", formatEta(stop.eta()));
         itemPlaceholders.put("eta_minutes", formatEtaMinutes(stop.eta()));
-        itemPlaceholders.put("eta_status", stop.eta().statusText());
+        contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, stop.eta());
       } else {
         itemPlaceholders.put("idx", "");
         itemPlaceholders.put("index", "");
@@ -501,7 +505,7 @@ public final class ScoreboardTrainHudManager implements Listener {
         itemPlaceholders.put("station_lang2", "-");
         itemPlaceholders.put("eta", "");
         itemPlaceholders.put("eta_minutes", "-");
-        itemPlaceholders.put("eta_status", "-");
+        contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, null);
       }
       for (String rowFormat : rowLines) {
         output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(rowFormat, itemPlaceholders));
@@ -644,15 +648,8 @@ public final class ScoreboardTrainHudManager implements Listener {
     if (eta == null) {
       return "-";
     }
-    String status = eta.statusText();
-    if (status == null || status.isBlank()) {
-      int minutes = eta.etaMinutesRounded();
-      return minutes >= 0 ? minutes + "m" : "-";
-    }
-    if ("N/A".equalsIgnoreCase(status.trim())) {
-      return "-";
-    }
-    return status;
+    String status = contextResolver.formatEtaStatus(eta);
+    return status == null || status.isBlank() ? "-" : status;
   }
 
   private String formatEtaMinutes(org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult eta) {
@@ -720,9 +717,17 @@ public final class ScoreboardTrainHudManager implements Listener {
 
   private String lineEntry(int index) {
     if (index < 0 || index >= LINE_ENTRIES.length) {
-      return ChatColor.RESET.toString() + index;
+      return LEGACY_SERIALIZER.serialize(Component.text(" ", NamedTextColor.WHITE)) + index;
     }
     return LINE_ENTRIES[index];
+  }
+
+  private static String[] buildLineEntries() {
+    String[] entries = new String[LINE_ENTRY_COLORS.length];
+    for (int i = 0; i < LINE_ENTRY_COLORS.length; i++) {
+      entries[i] = LEGACY_SERIALIZER.serialize(Component.text(" ", LINE_ENTRY_COLORS[i]));
+    }
+    return entries;
   }
 
   private static final class PlayerHudState {

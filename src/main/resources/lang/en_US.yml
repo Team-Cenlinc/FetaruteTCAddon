@@ -1,0 +1,32 @@
+prefix: "<gray>[<dark_aqua>FTA</dark_aqua>]</gray>"
+
+display:
+  hud:
+    eta:
+      status:
+        arriving: "Arriving"
+        delayed: "Delayed {minutes}min"
+        scheduled: "Scheduled {minutes}min"
+        minutes: "{minutes}min"
+        unavailable: "-"
+
+enum:
+  line-service-type:
+    metro: "Metro"
+    regional: "Regional"
+    commuter: "Commuter"
+    lrt: "Light Rail"
+    express: "Express"
+  route-pattern-type:
+    local: "Local"
+    rapid: "Rapid"
+    neo_rapid: "Neo Rapid"
+    express: "Express"
+    limited_express: "Ltd. Express"
+  route-operation-type:
+    operation: "Operation"
+    return: "Not in Service"
+  route-stop-pass-type:
+    stop: "Stop"
+    pass: "Pass"
+    terminate: "Terminate"

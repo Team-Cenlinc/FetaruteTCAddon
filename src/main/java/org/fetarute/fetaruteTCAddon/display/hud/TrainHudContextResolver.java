@@ -75,6 +75,7 @@ public final class TrainHudContextResolver {
 
   private static final long VEHICLE_HOPS = 3;
   private static final String TAG_ROUTE_PATTERN = "FTA_PATTERN";
+  private static final List<String> DEFAULT_LOCALE_TAGS = List.of("zh_CN", "en_US");
 
   private final FetaruteTCAddon plugin;
   private final LocaleManager locale;
@@ -93,6 +94,12 @@ public final class TrainHudContextResolver {
   private boolean companyCacheLoaded = false;
   private final Map<UUID, Optional<RoutePatternType>> routePatternById = new HashMap<>();
   private final Map<String, Map<RoutePatternType, String>> patternTextByLocale = new HashMap<>();
+  private final Map<String, EtaStatusTemplates> etaStatusByLocale = new HashMap<>();
+
+  private static final String ETA_STATUS_PREFIX = "display.hud.eta.status.";
+  private static final EtaStatusTemplates DEFAULT_ETA_STATUS =
+      new EtaStatusTemplates(
+          "Arriving", "Delayed {minutes}m", "Scheduled {minutes}m", "{minutes}m", "-");
 
   public TrainHudContextResolver(
       FetaruteTCAddon plugin,
@@ -278,6 +285,7 @@ public final class TrainHudContextResolver {
     companyCacheLoaded = false;
     routePatternById.clear();
     patternTextByLocale.clear();
+    etaStatusByLocale.clear();
   }
 
   /** 根据上下文生成模板占位符键值。 */
@@ -294,7 +302,6 @@ public final class TrainHudContextResolver {
         context.nextStation() == null ? StationDisplay.empty() : context.nextStation().sanitized();
     StationDisplay safeEor = context.destinations().eor().sanitized();
     StationDisplay safeEop = context.destinations().eop().sanitized();
-    String etaStatus = context.eta().statusText();
     String etaMinutes =
         context.eta().etaMinutesRounded() >= 0
             ? String.valueOf(context.eta().etaMinutesRounded())
@@ -373,7 +380,7 @@ public final class TrainHudContextResolver {
     placeholders.put("dest_eop", safeEop.label());
     placeholders.put("dest_eop_code", safeEop.code());
     placeholders.put("dest_eop_lang2", safeEop.lang2());
-    placeholders.put("eta_status", etaStatus);
+    applyEtaStatusPlaceholders(placeholders, context.eta());
     placeholders.put("eta_minutes", etaMinutes);
     placeholders.put("speed_kmh", formatSpeedValue(context.speedBps()));
     placeholders.put("speed_bps", formatSpeedBps(context.speedBps()));
@@ -422,6 +429,42 @@ public final class TrainHudContextResolver {
         "player_carriage_total", carriageTotal > 0 ? String.valueOf(carriageTotal) : "-");
   }
 
+  /** 注入 ETA 状态占位符（含当前语言与指定语言版本）。 */
+  public void applyEtaStatusPlaceholders(Map<String, String> placeholders, EtaResult eta) {
+    if (placeholders == null) {
+      return;
+    }
+    String localeTag = locale == null ? null : locale.getCurrentLocale();
+    placeholders.put("eta_status", formatEtaStatus(eta, localeTag));
+    placeholders.putAll(resolveEtaStatusLocalePlaceholders(eta));
+  }
+
+  /** 使用当前语言渲染 ETA 状态文本。 */
+  public String formatEtaStatus(EtaResult eta) {
+    String localeTag = locale == null ? null : locale.getCurrentLocale();
+    return formatEtaStatus(eta, localeTag);
+  }
+
+  /** 使用指定语言渲染 ETA 状态文本。 */
+  public String formatEtaStatus(EtaResult eta, String localeTag) {
+    EtaStatusView view = resolveEtaStatusView(eta);
+    if (view.kind() == EtaStatusKind.RAW) {
+      return view.raw();
+    }
+    EtaStatusTemplates templates = resolveEtaStatusTemplates(localeTag);
+    String rendered = renderEtaStatus(view, templates);
+    if (rendered != null && !rendered.isBlank()) {
+      return rendered;
+    }
+    if (view.raw() != null && !view.raw().isBlank()) {
+      return view.raw();
+    }
+    if (view.minutes() >= 0) {
+      return view.minutes() + "m";
+    }
+    return "-";
+  }
+
   public void applyProgressPlaceholders(Map<String, String> placeholders, float progress) {
     placeholders.put("progress", formatProgressValue(progress));
     placeholders.put("progress_percent", formatPercent(progress));
@@ -433,6 +476,189 @@ public final class TrainHudContextResolver {
     }
     String value = locale.text(key);
     return value.equals(key) ? fallback : value;
+  }
+
+  private Set<String> resolveLocaleCandidates() {
+    Set<String> locales = new LinkedHashSet<>();
+    if (locale != null) {
+      String current = locale.getCurrentLocale();
+      if (current != null && !current.isBlank()) {
+        locales.add(current);
+      }
+      locales.addAll(locale.availableLocales());
+    }
+    locales.addAll(DEFAULT_LOCALE_TAGS);
+    return locales;
+  }
+
+  private Map<String, String> resolveEtaStatusLocalePlaceholders(EtaResult eta) {
+    Set<String> locales = resolveLocaleCandidates();
+    for (String candidate : locales) {
+      ensureEtaLocale(candidate);
+    }
+    Map<String, String> placeholders = new HashMap<>();
+    for (String localeKey : locales) {
+      if (localeKey == null || localeKey.isBlank()) {
+        continue;
+      }
+      placeholders.put("eta_status_" + localeKey, formatEtaStatus(eta, localeKey));
+    }
+    return placeholders;
+  }
+
+  private EtaStatusTemplates resolveEtaStatusTemplates(String localeTag) {
+    if (localeTag == null || localeTag.isBlank()) {
+      return DEFAULT_ETA_STATUS;
+    }
+    ensureEtaLocale(localeTag);
+    return etaStatusByLocale.getOrDefault(localeTag, DEFAULT_ETA_STATUS);
+  }
+
+  private void ensureEtaLocale(String localeTag) {
+    if (localeTag == null || localeTag.isBlank() || etaStatusByLocale.containsKey(localeTag)) {
+      return;
+    }
+    EtaStatusTemplates templates = DEFAULT_ETA_STATUS;
+    try {
+      File langDir = new File(plugin.getDataFolder(), "lang");
+      File file = new File(langDir, localeTag + ".yml");
+      if (!file.exists()) {
+        try (InputStream stream =
+            LocaleManager.class
+                .getClassLoader()
+                .getResourceAsStream("lang/" + localeTag + ".yml")) {
+          if (stream == null) {
+            etaStatusByLocale.put(localeTag, templates);
+            return;
+          }
+          YamlConfiguration config =
+              YamlConfiguration.loadConfiguration(
+                  new InputStreamReader(stream, StandardCharsets.UTF_8));
+          templates = loadEtaStatusTemplates(config);
+          etaStatusByLocale.put(localeTag, templates);
+          return;
+        }
+      }
+      YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
+      templates = loadEtaStatusTemplates(config);
+    } catch (IOException | RuntimeException ex) {
+      debugLogger.accept("HUD eta_status locale 加载失败: " + ex.getMessage());
+    }
+    etaStatusByLocale.put(localeTag, templates);
+  }
+
+  private EtaStatusTemplates loadEtaStatusTemplates(YamlConfiguration config) {
+    if (config == null) {
+      return DEFAULT_ETA_STATUS;
+    }
+    String arriving =
+        readEtaTemplate(config, ETA_STATUS_PREFIX + "arriving", DEFAULT_ETA_STATUS.arriving());
+    String delayed =
+        readEtaTemplate(config, ETA_STATUS_PREFIX + "delayed", DEFAULT_ETA_STATUS.delayed());
+    String scheduled =
+        readEtaTemplate(config, ETA_STATUS_PREFIX + "scheduled", DEFAULT_ETA_STATUS.scheduled());
+    String minutes =
+        readEtaTemplate(config, ETA_STATUS_PREFIX + "minutes", DEFAULT_ETA_STATUS.minutes());
+    String unavailable =
+        readEtaTemplate(
+            config, ETA_STATUS_PREFIX + "unavailable", DEFAULT_ETA_STATUS.unavailable());
+    return new EtaStatusTemplates(arriving, delayed, scheduled, minutes, unavailable);
+  }
+
+  private String readEtaTemplate(YamlConfiguration config, String key, String fallback) {
+    String value = config.getString(key);
+    if (value == null || value.isBlank()) {
+      return fallback;
+    }
+    return value;
+  }
+
+  private String renderEtaStatus(EtaStatusView view, EtaStatusTemplates templates) {
+    if (view == null) {
+      return "-";
+    }
+    if (view.kind() == EtaStatusKind.UNAVAILABLE) {
+      return templates.unavailable();
+    }
+    if (view.kind() == EtaStatusKind.ARRIVING) {
+      return templates.arriving();
+    }
+    if (view.kind() == EtaStatusKind.DELAYED) {
+      return view.minutes() >= 0 ? replaceMinutes(templates.delayed(), view.minutes()) : view.raw();
+    }
+    if (view.kind() == EtaStatusKind.SCHEDULED) {
+      return view.minutes() >= 0
+          ? replaceMinutes(templates.scheduled(), view.minutes())
+          : view.raw();
+    }
+    if (view.kind() == EtaStatusKind.MINUTES) {
+      return view.minutes() >= 0 ? replaceMinutes(templates.minutes(), view.minutes()) : view.raw();
+    }
+    return view.raw();
+  }
+
+  private String replaceMinutes(String template, int minutes) {
+    if (template == null || template.isBlank()) {
+      return "";
+    }
+    return template.replace("{minutes}", String.valueOf(minutes));
+  }
+
+  private EtaStatusView resolveEtaStatusView(EtaResult eta) {
+    if (eta == null) {
+      return new EtaStatusView(EtaStatusKind.UNAVAILABLE, -1, "-");
+    }
+    String raw = eta.statusText();
+    raw = raw == null ? "" : raw.trim();
+    if (raw.isEmpty()) {
+      return eta.etaMinutesRounded() >= 0
+          ? new EtaStatusView(EtaStatusKind.MINUTES, eta.etaMinutesRounded(), raw)
+          : new EtaStatusView(EtaStatusKind.UNAVAILABLE, -1, "-");
+    }
+    if ("-".equals(raw) || "N/A".equalsIgnoreCase(raw)) {
+      return new EtaStatusView(EtaStatusKind.UNAVAILABLE, -1, raw);
+    }
+    String lower = raw.toLowerCase(Locale.ROOT);
+    if ("arriving".equals(lower)) {
+      return new EtaStatusView(EtaStatusKind.ARRIVING, -1, raw);
+    }
+    if (lower.startsWith("delayed")) {
+      return new EtaStatusView(EtaStatusKind.DELAYED, parseMinutes(raw, eta), raw);
+    }
+    if (lower.startsWith("scheduled")) {
+      return new EtaStatusView(EtaStatusKind.SCHEDULED, parseMinutes(raw, eta), raw);
+    }
+    if (lower.endsWith("m")) {
+      int minutes = parseMinutes(raw, eta);
+      if (minutes >= 0) {
+        return new EtaStatusView(EtaStatusKind.MINUTES, minutes, raw);
+      }
+    }
+    if (eta.etaMinutesRounded() >= 0) {
+      return new EtaStatusView(EtaStatusKind.MINUTES, eta.etaMinutesRounded(), raw);
+    }
+    return new EtaStatusView(EtaStatusKind.RAW, -1, raw);
+  }
+
+  private int parseMinutes(String raw, EtaResult eta) {
+    if (raw == null) {
+      return eta == null ? -1 : eta.etaMinutesRounded();
+    }
+    StringBuilder digits = new StringBuilder();
+    for (int i = 0; i < raw.length(); i++) {
+      char ch = raw.charAt(i);
+      if (ch >= '0' && ch <= '9') {
+        digits.append(ch);
+      }
+    }
+    if (digits.length() == 0) {
+      return eta == null ? -1 : eta.etaMinutesRounded();
+    }
+    try {
+      return Integer.parseInt(digits.toString());
+    } catch (NumberFormatException ex) {
+      return eta == null ? -1 : eta.etaMinutesRounded();
+    }
   }
 
   private boolean isFtaManaged(
@@ -520,13 +746,7 @@ public final class TrainHudContextResolver {
       return Map.of();
     }
     RoutePatternType pattern = patternOpt.get();
-    Set<String> locales = new LinkedHashSet<>();
-    if (locale != null
-        && locale.getCurrentLocale() != null
-        && !locale.getCurrentLocale().isBlank()) {
-      locales.add(locale.getCurrentLocale());
-    }
-    locales.addAll(patternTextByLocale.keySet());
+    Set<String> locales = resolveLocaleCandidates();
     for (String candidate : locales) {
       ensurePatternLocale(candidate);
     }
@@ -589,6 +809,25 @@ public final class TrainHudContextResolver {
       mapping.put(type, value);
     }
   }
+
+  private enum EtaStatusKind {
+    ARRIVING,
+    DELAYED,
+    SCHEDULED,
+    MINUTES,
+    UNAVAILABLE,
+    RAW
+  }
+
+  private record EtaStatusView(EtaStatusKind kind, int minutes, String raw) {
+    private EtaStatusView {
+      kind = kind == null ? EtaStatusKind.UNAVAILABLE : kind;
+      raw = raw == null ? "" : raw;
+    }
+  }
+
+  private record EtaStatusTemplates(
+      String arriving, String delayed, String scheduled, String minutes, String unavailable) {}
 
   private Optional<NextStop> resolveNextStop(Optional<RouteDefinition> routeOpt, int routeIndex) {
     if (routeOpt == null || routeOpt.isEmpty() || routeDefinitions == null) {
