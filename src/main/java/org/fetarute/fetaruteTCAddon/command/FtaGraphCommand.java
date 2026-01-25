@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Material;
@@ -57,11 +58,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ChunkLoadOptions;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.DuplicateNodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.EdgeExploreMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildCompletion;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildContinuation;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob.BuildMode;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildOutcome;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideLister;
@@ -69,7 +70,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGra
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailSpeed;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphExplorer;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphMultiSourceExplorerSession;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
@@ -170,7 +170,6 @@ public final class FtaGraphCommand {
   }
 
   public void register(CommandManager<CommandSender> manager) {
-    CommandFlag<Void> syncFlag = CommandFlag.builder("sync").build();
     var tickBudgetMsFlag =
         CommandFlag.<CommandSender>builder("tickBudgetMs")
             .withComponent(
@@ -179,6 +178,9 @@ public final class FtaGraphCommand {
                     .suggestionProvider(CommandSuggestionProviders.placeholder("<ms>")))
             .build();
     CommandFlag<Void> loadChunksFlag = CommandFlag.builder("loadChunks").build();
+    CommandFlag<Void> bfsFlag = CommandFlag.builder("bfs").build(); // 使用旧版 BFS 多源探索
+    CommandFlag<Void> isolatedFlag = CommandFlag.builder("isolated").build(); // 显示孤立节点
+    CommandFlag<Void> refreshFlag = CommandFlag.builder("refresh").build(); // 快速刷新边（跳过节点发现）
     var maxChunksFlag =
         CommandFlag.<CommandSender>builder("maxChunks")
             .withComponent(
@@ -224,9 +226,10 @@ public final class FtaGraphCommand {
             .commandBuilder("fta")
             .literal("graph")
             .literal("build")
-            .flag(syncFlag)
             .flag(tickBudgetMsFlag)
             .flag(loadChunksFlag)
+            .flag(bfsFlag)
+            .flag(refreshFlag)
             .flag(maxChunksFlag)
             .flag(maxConcurrentLoadsFlag)
             .flag(allFlag)
@@ -327,8 +330,8 @@ public final class FtaGraphCommand {
                     }
                   }
 
-                  Integer tickBudgetMsValue = ctx.flags().getValue(tickBudgetMsFlag, 1);
-                  int tickBudgetMs = tickBudgetMsValue != null ? tickBudgetMsValue : 1;
+                  Integer tickBudgetMsValue = ctx.flags().getValue(tickBudgetMsFlag, 10);
+                  int tickBudgetMs = tickBudgetMsValue != null ? tickBudgetMsValue : 10;
 
                   boolean loadChunks = ctx.flags().isPresent(loadChunksFlag);
                   if (loadChunks && mode != BuildMode.HERE) {
@@ -347,40 +350,15 @@ public final class FtaGraphCommand {
                           : ChunkLoadOptions.disabled();
                   GraphBuildCacheKey cacheKey = cacheKey(worldId, sender);
 
-                  boolean sync = ctx.flags().isPresent(syncFlag);
-                  if (sync) {
-                    try {
-                      long startNanos = System.nanoTime();
-                      RailGraphBuildResult result =
-                          buildSync(world, mode, seedNode, seedRails, preseedNodes);
-                      RailGraphBuildOutcome outcome =
-                          new RailGraphBuildOutcome(
-                              result,
-                              RailGraphBuildCompletion.PARTIAL_UNLOADED_CHUNKS,
-                              Optional.empty());
-                      AppliedGraphBuild applied =
-                          applyBuildSuccess(world, outcome.result(), outcome.completion());
-                      long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-                      sender.sendMessage(
-                          locale.component(
-                              "command.graph.build.success",
-                              Map.of(
-                                  "world",
-                                  world.getName(),
-                                  "nodes",
-                                  String.valueOf(applied.result().graph().nodes().size()),
-                                  "edges",
-                                  String.valueOf(applied.result().graph().edges().size()),
-                                  "took_ms",
-                                  String.valueOf(tookMs))));
-                      applied
-                          .merge()
-                          .ifPresent(merge -> sender.sendMessage(mergeBuildMessage(locale, merge)));
-                      sendDuplicateNodeIdWarnings(sender, world, applied.result());
-                      validateRoutesAfterBuild(sender, world, applied.result().graph());
-                    } catch (IllegalStateException ex) {
-                      sender.sendMessage(locale.component("command.graph.build.no-nodes"));
-                    }
+                  // 边探索模式：默认使用节点到节点探索（更快），--bfs 使用旧版 BFS 多源
+                  boolean useBfs = ctx.flags().isPresent(bfsFlag);
+                  EdgeExploreMode exploreMode =
+                      useBfs ? EdgeExploreMode.bfsMultiSource() : EdgeExploreMode.nodeToNode();
+
+                  // --refresh 模式：跳过节点发现，从 SQL 加载现有节点，只重新探索边
+                  boolean refresh = ctx.flags().isPresent(refreshFlag);
+                  if (refresh) {
+                    handleRefreshBuild(sender, world, worldId, tickBudgetMs, exploreMode, locale);
                     return;
                   }
 
@@ -395,6 +373,7 @@ public final class FtaGraphCommand {
                           preseedNodes,
                           tickBudgetMs,
                           chunkLoadOptions,
+                          exploreMode,
                           outcome -> {
                             AppliedGraphBuild applied =
                                 applyBuildSuccess(world, outcome.result(), outcome.completion());
@@ -446,6 +425,8 @@ public final class FtaGraphCommand {
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
                                       validateRoutesAfterBuild(
                                           sender, world, applied.result().graph());
+                                      sender.sendMessage(
+                                          locale.component("command.graph.build.reroute-hint"));
                                     });
                             jobs.remove(worldId);
                           },
@@ -511,8 +492,8 @@ public final class FtaGraphCommand {
                     return;
                   }
 
-                  Integer tickBudgetMsValue = ctx.flags().getValue(tickBudgetMsFlag, 1);
-                  int tickBudgetMs = tickBudgetMsValue != null ? tickBudgetMsValue : 1;
+                  Integer tickBudgetMsValue = ctx.flags().getValue(tickBudgetMsFlag, 10);
+                  int tickBudgetMs = tickBudgetMsValue != null ? tickBudgetMsValue : 10;
                   Integer maxChunksValue = ctx.flags().getValue(maxChunksFlag, 256);
                   int maxChunks = maxChunksValue != null ? maxChunksValue : 256;
                   Integer maxConcurrentLoadsValue = ctx.flags().getValue(maxConcurrentLoadsFlag, 4);
@@ -530,6 +511,7 @@ public final class FtaGraphCommand {
                           continuation,
                           tickBudgetMs,
                           chunkLoadOptions,
+                          EdgeExploreMode.bfsMultiSource(), // 默认使用 BFS
                           outcome -> {
                             AppliedGraphBuild applied =
                                 applyBuildSuccess(world, outcome.result(), outcome.completion());
@@ -581,6 +563,8 @@ public final class FtaGraphCommand {
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
                                       validateRoutesAfterBuild(
                                           sender, world, applied.result().graph());
+                                      sender.sendMessage(
+                                          locale.component("command.graph.build.reroute-hint"));
                                     });
                             jobs.remove(worldId);
                           },
@@ -917,6 +901,7 @@ public final class FtaGraphCommand {
             .literal("info")
             .permission("fetarute.graph.info")
             .flag(worldFlag)
+            .flag(isolatedFlag)
             .handler(
                 ctx -> {
                   World world =
@@ -928,6 +913,7 @@ public final class FtaGraphCommand {
                     ctx.sender().sendMessage("未找到可用世界");
                     return;
                   }
+                  boolean showIsolated = ctx.flags().isPresent(isolatedFlag);
                   LocaleManager locale = plugin.getLocaleManager();
                   RailGraphService service = plugin.getRailGraphService();
                   Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
@@ -964,6 +950,7 @@ public final class FtaGraphCommand {
                   int switcherSignNodes = 0;
                   int switcherAutoNodes = 0;
                   int isolatedNodes = 0;
+                  List<RailNode> isolatedNodeList = new ArrayList<>();
                   for (RailNode node : graph.nodes()) {
                     if (node == null) {
                       continue;
@@ -992,6 +979,7 @@ public final class FtaGraphCommand {
                     }
                     if (graph.edgesFrom(node.id()).isEmpty()) {
                       isolatedNodes++;
+                      isolatedNodeList.add(node);
                     }
                   }
 
@@ -1092,6 +1080,46 @@ public final class FtaGraphCommand {
                                     edge.to().value(),
                                     "len",
                                     String.valueOf(edge.lengthBlocks()))));
+                  }
+
+                  // 显示孤立节点（仅当 --isolated 且有孤立节点）
+                  if (showIsolated && !isolatedNodeList.isEmpty()) {
+                    ctx.sender()
+                        .sendMessage(
+                            Component.text("- isolated nodes (no edges):")
+                                .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW));
+                    int limit = Math.min(20, isolatedNodeList.size());
+                    for (int i = 0; i < limit; i++) {
+                      RailNode isolated = isolatedNodeList.get(i);
+                      Vector pos = isolated.worldPosition();
+                      String posStr =
+                          pos != null
+                              ? String.format(
+                                  "(%d,%d,%d)", pos.getBlockX(), pos.getBlockY(), pos.getBlockZ())
+                              : "(?)";
+                      Component line =
+                          Component.text("  - " + isolated.id().value() + " " + posStr)
+                              .color(net.kyori.adventure.text.format.NamedTextColor.GRAY);
+                      if (pos != null) {
+                        line =
+                            line.clickEvent(
+                                    ClickEvent.runCommand(
+                                        "/tp "
+                                            + pos.getBlockX()
+                                            + " "
+                                            + pos.getBlockY()
+                                            + " "
+                                            + pos.getBlockZ()))
+                                .hoverEvent(HoverEvent.showText(Component.text("点击传送")));
+                      }
+                      ctx.sender().sendMessage(line);
+                    }
+                    if (isolatedNodeList.size() > limit) {
+                      ctx.sender()
+                          .sendMessage(
+                              Component.text("  ... 还有 " + (isolatedNodeList.size() - limit) + " 个")
+                                  .color(net.kyori.adventure.text.format.NamedTextColor.GRAY));
+                    }
                   }
                 }));
 
@@ -5617,272 +5645,6 @@ public final class FtaGraphCommand {
   }
 
   /**
-   * 同步构建调度图（仅用于调试/维护）。
-   *
-   * <p>注意：该方法会在主线程一次性跑完整个 discovery + explore，可能导致卡服；生产环境建议使用分段任务 {@link RailGraphBuildJob}。
-   *
-   * @param mode 构建模式
-   * @param seedNode HERE 模式下的“节点牌子 seed”（可为 null）
-   * @param seedRails HERE 模式下的“轨道锚点 seed”（不可为 null）
-   * @param preseedNodes HERE 模式下可注入的预置节点列表（用于 TCC 无牌子线网）
-   */
-  private RailGraphBuildResult buildSync(
-      World world,
-      BuildMode mode,
-      RailNodeRecord seedNode,
-      Set<RailBlockPos> seedRails,
-      List<RailNodeRecord> preseedNodes) {
-    // 同步模式：主线程一次性跑完整个 BFS（可能卡服，仅用于维护/调试）。
-    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
-
-    Map<String, RailNodeRecord> byNodeId = new HashMap<>();
-    Map<String, DuplicateNodeId.Occurrence> firstSeen = new HashMap<>();
-    Map<String, java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence>> duplicates =
-        new HashMap<>();
-    if (preseedNodes != null) {
-      for (RailNodeRecord node : preseedNodes) {
-        if (node == null) {
-          continue;
-        }
-        byNodeId.putIfAbsent(node.nodeId().value(), node);
-      }
-    }
-    List<RailNodeRecord> nodes;
-    List<DuplicateNodeId> duplicateNodeIds = List.of();
-    if (mode == BuildMode.HERE) {
-      if (seedNode != null) {
-        byNodeId.put(seedNode.nodeId().value(), seedNode);
-      }
-      Set<RailBlockPos> anchors = seedRails != null ? seedRails : Set.of();
-      if (anchors.isEmpty() && seedNode != null) {
-        anchors =
-            access.findNearestRailBlocks(
-                new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()), 2);
-      }
-      if (anchors.isEmpty()) {
-        throw new IllegalStateException("HERE 模式缺少起始轨道锚点");
-      }
-      var discovery =
-          new org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ConnectedRailNodeDiscoverySession(
-              world,
-              anchors,
-              access,
-              plugin.getLoggerManager()::debug,
-              ChunkLoadOptions.disabled(),
-              null);
-      while (!discovery.isDone()) {
-        discovery.step(System.nanoTime() + 1_000_000_000L, byNodeId);
-      }
-      duplicateNodeIds = discovery.duplicateNodeIds();
-      var visitedRails = discovery.visitedRails();
-      nodes = filterNodesInComponent(List.copyOf(byNodeId.values()), visitedRails, access);
-    } else {
-      for (org.bukkit.Chunk chunk : world.getLoadedChunks()) {
-        if (chunk == null) {
-          continue;
-        }
-        for (BlockState state : chunk.getTileEntities()) {
-          if (!(state instanceof Sign sign)) {
-            continue;
-          }
-          NodeSignDefinitionParser.parse(sign)
-              .or(() -> SwitcherSignDefinitionParser.parse(sign))
-              .ifPresent(
-                  def -> {
-                    int x = sign.getLocation().getBlockX();
-                    int y = sign.getLocation().getBlockY();
-                    int z = sign.getLocation().getBlockZ();
-                    if (def.nodeType() == NodeType.SWITCHER) {
-                      RailBlockPos railPos =
-                          SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId())
-                              .orElse(new RailBlockPos(x, y, z));
-                      x = railPos.x();
-                      y = railPos.y();
-                      z = railPos.z();
-                    }
-                    RailNodeRecord record =
-                        new RailNodeRecord(
-                            world.getUID(),
-                            def.nodeId(),
-                            def.nodeType(),
-                            x,
-                            y,
-                            z,
-                            def.trainCartsDestination(),
-                            def.waypointMetadata());
-                    recordDuplicateOccurrence(
-                        def.nodeId(),
-                        new DuplicateNodeId.Occurrence(def.nodeType(), x, y, z, false),
-                        firstSeen,
-                        duplicates);
-                    RailNodeRecord existing = byNodeId.get(def.nodeId().value());
-                    if (existing == null) {
-                      byNodeId.put(def.nodeId().value(), record);
-                      return;
-                    }
-                    if (existing.nodeType() == NodeType.SWITCHER
-                        && def.nodeType() == NodeType.SWITCHER
-                        && existing.trainCartsDestination().isEmpty()
-                        && def.trainCartsDestination().isPresent()) {
-                      byNodeId.put(def.nodeId().value(), record);
-                    }
-                  });
-        }
-      }
-      nodes = List.copyOf(byNodeId.values());
-      duplicateNodeIds = duplicateNodeIdsFromMaps(firstSeen, duplicates);
-    }
-
-    if (nodes.isEmpty() || nodes.stream().noneMatch(FtaGraphCommand::isSignalNode)) {
-      throw new IllegalStateException("未扫描到任何本插件节点牌子");
-    }
-
-    Map<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId, java.util.Set<RailBlockPos>>
-        anchorsByNode = new HashMap<>();
-    Set<RailBlockPos> railsWithSwitchers = new HashSet<>();
-    for (RailNodeRecord node : nodes) {
-      int anchorRadius = node.nodeType() == NodeType.SWITCHER ? 2 : 6;
-      var anchors =
-          access.findNearestRailBlocks(
-              new RailBlockPos(node.x(), node.y(), node.z()), anchorRadius);
-      if (!anchors.isEmpty()) {
-        anchorsByNode.put(node.nodeId(), anchors);
-      }
-      if (node.nodeType() == NodeType.SWITCHER
-          && node.trainCartsDestination()
-              .filter(SwitcherSignDefinitionParser.SWITCHER_SIGN_MARKER::equals)
-              .isPresent()) {
-        addRailsAround(
-            railsWithSwitchers, access, new RailBlockPos(node.x(), node.y(), node.z()), 2);
-      }
-    }
-
-    Set<RailBlockPos> missingSwitchers = new HashSet<>();
-    RailGraphMultiSourceExplorerSession session =
-        new RailGraphMultiSourceExplorerSession(
-            anchorsByNode,
-            access,
-            512,
-            junction -> {
-              if (!railsWithSwitchers.contains(junction)) {
-                missingSwitchers.add(junction);
-              }
-            });
-    while (!session.isDone()) {
-      session.step(50_000);
-    }
-    var edgeLengths = session.edgeLengths();
-
-    Map<
-            org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId,
-            org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode>
-        nodesById = new HashMap<>();
-    for (RailNodeRecord node : nodes) {
-      var railNode =
-          new org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode(
-              node.nodeId(),
-              node.nodeType(),
-              new org.bukkit.util.Vector(node.x(), node.y(), node.z()),
-              node.trainCartsDestination(),
-              node.waypointMetadata());
-      nodesById.put(railNode.id(), railNode);
-    }
-    Map<
-            org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId,
-            org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge>
-        edgesById = new HashMap<>();
-    for (var entry : edgeLengths.entrySet()) {
-      var edgeId = entry.getKey();
-      int lengthBlocks = entry.getValue();
-      var a = nodesById.get(edgeId.a());
-      var b = nodesById.get(edgeId.b());
-      if (a == null || b == null) {
-        continue;
-      }
-      edgesById.put(
-          edgeId,
-          new org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge(
-              edgeId,
-              edgeId.a(),
-              edgeId.b(),
-              lengthBlocks,
-              0.0,
-              true,
-              java.util.Optional.of(
-                  new org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeMetadata(
-                      a.waypointMetadata(), b.waypointMetadata()))));
-    }
-    var finalGraph =
-        new org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph(
-            nodesById, edgesById, java.util.Set.of());
-    var builtAt = java.time.Instant.now();
-    String signature =
-        org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature.signatureForNodes(
-            nodes);
-    return new RailGraphBuildResult(
-        finalGraph, builtAt, signature, nodes, List.copyOf(missingSwitchers), duplicateNodeIds);
-  }
-
-  private static void recordDuplicateOccurrence(
-      NodeId nodeId,
-      DuplicateNodeId.Occurrence occurrence,
-      Map<String, DuplicateNodeId.Occurrence> firstSeen,
-      Map<String, java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence>> duplicates) {
-    if (nodeId == null || occurrence == null) {
-      return;
-    }
-    String key = nodeId.value();
-    DuplicateNodeId.Occurrence first = firstSeen.get(key);
-    if (first == null) {
-      firstSeen.put(key, occurrence);
-      return;
-    }
-    if (sameOccurrence(first, occurrence)) {
-      return;
-    }
-    java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence> list =
-        duplicates.computeIfAbsent(key, ignored -> new java.util.LinkedHashMap<>());
-    list.putIfAbsent(occKey(first), first);
-    list.putIfAbsent(occKey(occurrence), occurrence);
-  }
-
-  private static boolean sameOccurrence(
-      DuplicateNodeId.Occurrence a, DuplicateNodeId.Occurrence b) {
-    return a.x() == b.x()
-        && a.y() == b.y()
-        && a.z() == b.z()
-        && a.virtualSign() == b.virtualSign()
-        && a.nodeType() == b.nodeType();
-  }
-
-  private static String occKey(DuplicateNodeId.Occurrence occurrence) {
-    return occurrence.nodeType().name()
-        + "@"
-        + occurrence.x()
-        + ":"
-        + occurrence.y()
-        + ":"
-        + occurrence.z()
-        + ":"
-        + (occurrence.virtualSign() ? "v" : "r");
-  }
-
-  private static List<DuplicateNodeId> duplicateNodeIdsFromMaps(
-      Map<String, DuplicateNodeId.Occurrence> firstSeen,
-      Map<String, java.util.LinkedHashMap<String, DuplicateNodeId.Occurrence>> duplicates) {
-    if (duplicates == null || duplicates.isEmpty()) {
-      return List.of();
-    }
-    List<DuplicateNodeId> out = new ArrayList<>();
-    for (var entry : duplicates.entrySet()) {
-      NodeId nodeId = NodeId.of(entry.getKey());
-      out.add(new DuplicateNodeId(nodeId, List.copyOf(entry.getValue().values())));
-    }
-    out.sort(Comparator.comparing(d -> d.nodeId().value()));
-    return List.copyOf(out);
-  }
-
-  /**
    * 将一次 build 的结果写入内存快照，并根据“完整性”选择合并策略后落库。
    *
    * <p>当 {@link RailGraphBuildCompletion#canReplaceComponents()} 为 true 时，可认为本次 build 尽可能覆盖了相关连通分量，
@@ -6365,6 +6127,232 @@ public final class FtaGraphCommand {
   }
 
   /**
+   * 快速刷新模式：跳过节点发现，从 SQL 加载现有节点，只重新探索边。
+   *
+   * <p>适用场景：
+   *
+   * <ul>
+   *   <li>节点牌子未变，但轨道布局变化（如新增渡线）
+   *   <li>TrainCarts reroute 后想同步边距离
+   *   <li>快速修复边数据
+   * </ul>
+   */
+  private void handleRefreshBuild(
+      CommandSender sender,
+      World world,
+      UUID worldId,
+      int tickBudgetMs,
+      EdgeExploreMode exploreMode,
+      LocaleManager locale) {
+    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      sender.sendMessage(locale.component("command.graph.build.storage-not-ready"));
+      return;
+    }
+    Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
+    if (providerOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.graph.build.storage-not-ready"));
+      return;
+    }
+    StorageProvider provider = providerOpt.get();
+
+    // 从 SQL 加载现有节点
+    List<RailNodeRecord> nodes;
+    try {
+      nodes = provider.railNodes().listByWorld(worldId);
+    } catch (Exception ex) {
+      sender.sendMessage(Component.text("从存储加载节点失败: " + ex.getMessage(), NamedTextColor.RED));
+      return;
+    }
+
+    if (nodes.isEmpty()) {
+      sender.sendMessage(locale.component("command.graph.build.no-nodes"));
+      return;
+    }
+
+    sender.sendMessage(
+        Component.text("快速刷新模式: 从存储加载 " + nodes.size() + " 个节点，开始边探索...", NamedTextColor.YELLOW));
+
+    // 构建锚点索引
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
+    Map<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId, Set<RailBlockPos>> anchorsByNode =
+        new HashMap<>();
+    Map<RailBlockPos, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId> anchorIndex =
+        new HashMap<>();
+    int missingAnchors = 0;
+
+    for (RailNodeRecord node : nodes) {
+      int anchorRadius = node.nodeType() == NodeType.SWITCHER ? 2 : 6;
+      Set<RailBlockPos> anchors =
+          access.findNearestRailBlocks(
+              new RailBlockPos(node.x(), node.y(), node.z()), anchorRadius);
+      if (anchors.isEmpty()) {
+        missingAnchors++;
+        continue;
+      }
+      anchorsByNode.put(node.nodeId(), anchors);
+      for (RailBlockPos anchor : anchors) {
+        anchorIndex.put(anchor, node.nodeId());
+      }
+    }
+
+    if (anchorsByNode.isEmpty()) {
+      sender.sendMessage(Component.text("未找到任何有效锚点，请检查节点位置是否在已加载区块内", NamedTextColor.RED));
+      return;
+    }
+
+    plugin
+        .getLoggerManager()
+        .debug(
+            "快速刷新: nodes="
+                + nodes.size()
+                + " anchors="
+                + anchorsByNode.size()
+                + " missing="
+                + missingAnchors);
+
+    // 使用 NodeToNodeEdgeExplorer 探索边
+    long startNanos = System.nanoTime();
+    var nodeToNodeExplorer =
+        new org.fetarute.fetaruteTCAddon.dispatcher.graph.build.NodeToNodeEdgeExplorer(
+            world, anchorIndex, plugin.getLoggerManager()::debug);
+    for (var entry : anchorsByNode.entrySet()) {
+      nodeToNodeExplorer.addNode(entry.getKey(), entry.getValue());
+    }
+
+    // 分段执行边探索
+    long tickBudgetNanos = tickBudgetMs * 1_000_000L;
+    final int finalMissingAnchors = missingAnchors;
+    final List<RailNodeRecord> finalNodes = nodes;
+
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskTimer(
+            plugin,
+            new java.util.function.Consumer<org.bukkit.scheduler.BukkitTask>() {
+              @Override
+              public void accept(org.bukkit.scheduler.BukkitTask task) {
+                long deadline = System.nanoTime() + tickBudgetNanos;
+                nodeToNodeExplorer.step(deadline);
+
+                if (!nodeToNodeExplorer.isDone()) {
+                  return;
+                }
+
+                // 完成
+                task.cancel();
+                long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+                Map<EdgeId, Integer> edgeLengths = nodeToNodeExplorer.getDiscoveredEdges();
+
+                // 构建图
+                Map<
+                        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId,
+                        org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode>
+                    nodesById = new HashMap<>();
+                for (RailNodeRecord node : finalNodes) {
+                  var railNode =
+                      new org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode(
+                          node.nodeId(),
+                          node.nodeType(),
+                          new org.bukkit.util.Vector(node.x(), node.y(), node.z()),
+                          node.trainCartsDestination(),
+                          node.waypointMetadata());
+                  nodesById.put(railNode.id(), railNode);
+                }
+
+                Map<EdgeId, org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge> edgesById =
+                    new HashMap<>();
+                for (var entry : edgeLengths.entrySet()) {
+                  EdgeId edgeId = entry.getKey();
+                  int lengthBlocks = entry.getValue();
+                  var a = nodesById.get(edgeId.a());
+                  var b = nodesById.get(edgeId.b());
+                  if (a == null || b == null) {
+                    continue;
+                  }
+                  edgesById.put(
+                      edgeId,
+                      new org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge(
+                          edgeId,
+                          edgeId.a(),
+                          edgeId.b(),
+                          lengthBlocks,
+                          0.0,
+                          true,
+                          Optional.empty()));
+                }
+
+                // 新探索的边 graph（只包含本次能探索到的边）
+                RailGraph freshEdgesGraph =
+                    new org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph(
+                        nodesById, edgesById, Set.of());
+
+                // 与现有图合并（保留未探索区域的边）
+                RailGraphService service = plugin.getRailGraphService();
+                Optional<RailGraph> existingGraph =
+                    service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph);
+                if (existingGraph.isEmpty()) {
+                  existingGraph = loadGraphFromStorage(world);
+                }
+
+                RailGraph finalGraph;
+                int preservedEdges = 0;
+                if (existingGraph.isPresent()) {
+                  // 合并：新边覆盖旧边（upsert），保留未探索区域的旧边
+                  RailGraphMerger.MergeResult merge =
+                      RailGraphMerger.upsert(existingGraph.get(), freshEdgesGraph);
+                  finalGraph = merge.graph();
+                  preservedEdges = merge.totalEdges() - edgesById.size();
+                } else {
+                  finalGraph = freshEdgesGraph;
+                }
+
+                Instant builtAt = Instant.now();
+                String signature =
+                    org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature
+                        .signatureForNodes(finalNodes);
+
+                // 保存到服务和存储
+                service.putSnapshot(world, finalGraph, builtAt);
+
+                List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(world.getUID(), finalGraph);
+                RailGraphBuildResult result =
+                    new RailGraphBuildResult(
+                        finalGraph, builtAt, signature, mergedNodes, List.of(), List.of());
+                persistGraph(world, result);
+
+                sender.sendMessage(
+                    locale.component(
+                        "command.graph.build.success",
+                        Map.of(
+                            "world",
+                            world.getName(),
+                            "nodes",
+                            String.valueOf(finalGraph.nodes().size()),
+                            "edges",
+                            String.valueOf(finalGraph.edges().size()),
+                            "took_ms",
+                            String.valueOf(tookMs))));
+
+                if (finalMissingAnchors > 0) {
+                  sender.sendMessage(
+                      Component.text(
+                          "提示: "
+                              + finalMissingAnchors
+                              + " 个节点未找到锚点（可能在未加载区块），保留了 "
+                              + preservedEdges
+                              + " 条现有边",
+                          NamedTextColor.YELLOW));
+                }
+
+                sender.sendMessage(locale.component("command.graph.build.reroute-hint"));
+              }
+            },
+            1L,
+            1L);
+  }
+
+  /**
    * 尝试从存储加载旧图作为 merge base。
    *
    * <p>用途：当图处于 stale 状态时，内存快照会被清空；若此时执行 HERE build 并直接 replace，会把其他连通分量误删。 因此这里在需要时从 SQL
@@ -6372,6 +6360,7 @@ public final class FtaGraphCommand {
    */
   private Optional<RailGraph> loadGraphFromStorage(World world) {
     Objects.requireNonNull(world, "world");
+    ;
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
       return Optional.empty();
     }
@@ -6655,31 +6644,6 @@ public final class FtaGraphCommand {
     return Optional.ofNullable(best);
   }
 
-  private static List<RailNodeRecord> filterNodesInComponent(
-      List<RailNodeRecord> discovered,
-      Set<RailBlockPos> visitedRails,
-      TrainCartsRailBlockAccess access) {
-    List<RailNodeRecord> filtered = new java.util.ArrayList<>();
-    for (RailNodeRecord node : discovered) {
-      var anchors = access.findNearestRailBlocks(new RailBlockPos(node.x(), node.y(), node.z()), 2);
-      if (anchors.isEmpty()) {
-        continue;
-      }
-      if (anchors.stream().anyMatch(visitedRails::contains)) {
-        filtered.add(node);
-      }
-    }
-    return List.copyOf(filtered);
-  }
-
-  private static boolean isSignalNode(RailNodeRecord node) {
-    if (node == null) {
-      return false;
-    }
-    NodeType type = node.nodeType();
-    return type == NodeType.WAYPOINT || type == NodeType.STATION || type == NodeType.DEPOT;
-  }
-
   private void sendDuplicateNodeIdWarnings(
       CommandSender sender, World world, RailGraphBuildResult result) {
     if (result == null || result.duplicateNodeIds().isEmpty()) {
@@ -6777,19 +6741,5 @@ public final class FtaGraphCommand {
         .set(new NamespacedKey(plugin, "graph_debug_stick"), PersistentDataType.BYTE, (byte) 1);
     stick.setItemMeta(meta);
     return stick;
-  }
-
-  private static void addRailsAround(
-      Set<RailBlockPos> out, TrainCartsRailBlockAccess access, RailBlockPos center, int radius) {
-    for (int dx = -radius; dx <= radius; dx++) {
-      for (int dy = -radius; dy <= radius; dy++) {
-        for (int dz = -radius; dz <= radius; dz++) {
-          RailBlockPos candidate = center.offset(dx, dy, dz);
-          if (access.isRail(candidate)) {
-            out.add(candidate);
-          }
-        }
-      }
-    }
   }
 }

@@ -257,29 +257,6 @@ command:
       empty: "<prefix> <gray>暂无站牌输出</gray>"
       truncated: "<gray>… 已截断，缩小站牌范围或降低 horizon</gray>"
       row: "<gray>-</gray> <white><line></white> <gray>(route=<white><route></white>)</gray> <gray>-></gray> <white><dest></white> <gray>(end=<white><end_route></white> op=<white><end_operation></white>) plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
-
-  train:
-    help:
-      header: "<prefix> <dark_aqua>列车配置命令</dark_aqua>"
-      entry-config-list: "<gray>/fta train config list</gray> <white>-</white> <dark_aqua>查看列车配置</dark_aqua>"
-      hover-config-list: "<gray>点击填充:</gray> <white>/fta train config list </white>\n<dark_aqua>参数:</dark_aqua> <white>[train]</white>\n<gray>可用:</gray> <white>列车名</white> / <white>@train[...]</white>"
-      entry-config-set: "<gray>/fta train config set</gray> <white>-</white> <dark_aqua>设置列车配置</dark_aqua>"
-      hover-config-set: "<gray>点击填充:</gray> <white>/fta train config set </white>\n<dark_aqua>可选:</dark_aqua> <white>[train]</white>\n<dark_aqua>flags:</dark_aqua> <white>--type &lt;type&gt;</white> <white>--accel &lt;bps2&gt;</white> <white>--decel &lt;bps2&gt;</white>"
-      entry-train-edit: "<gray>/train edit</gray> <white>-</white> <dark_aqua>选中 TrainCarts 编辑列车</dark_aqua>"
-      hover-train-edit: "<gray>点击填充:</gray> <white>/train edit </white>\n<dark_aqua>提示:</dark_aqua> <gray>TrainCarts 的命令默认作用于“正在编辑”的列车</gray>"
-      entry-selector: "<gray>@train[...]</gray> <white>-</white> <dark_aqua>TrainCarts 选择器</dark_aqua>"
-      hover-selector: "<gray>点击填充:</gray> <white>/fta train config list @train[</white>\n<dark_aqua>示例:</dark_aqua> <white>@train[name=EXP]</white> <white>@train[tag=FTA]</white> <white>@train[world=world]</white>\n<dark_aqua>常用键:</dark_aqua> <white>name/tag/world/distance/sort/limit/destination/ticket</white>"
-    config:
-      not-found: "<prefix> <red>未找到列车</red> <gray>(train=<white><train></white>)</gray>"
-      invalid-selector: "<prefix> <red>列车选择器参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>@train[]</white>/<white>@train[name=EXP]</white>/<white>@train[tag=FTA]</white>"
-      no-selection: "<prefix> <red>未选择列车</red> <gray>(请先用 <white>/train edit</white> 选中列车，或指定列车名 / <white>@train[...]</white>)</gray>"
-      no-selection-entry-train-edit: "<gray>-</gray> <dark_aqua>点击填充:</dark_aqua> <white>/train edit</white>"
-      no-selection-hover-train-edit: "<gray>TrainCarts 选中列车后，可不在车内执行</gray> <white>/fta train config ...</white>"
-      no-selection-entry-selector: "<gray>-</gray> <dark_aqua>点击填充:</dark_aqua> <white>/fta train config list @train[</white>"
-      no-selection-hover-selector: "<gray>使用 @train[...] 选择 0..N 个列车，并对每个命中列车执行</gray>"
-      set: "<prefix> <dark_aqua>已更新列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
-      list: "<prefix> <dark_aqua>列车配置</dark_aqua> <gray>(train=<white><train></white>, type=<white><type></white>, accel=<white><accel></white>, decel=<white><decel></white>)</gray>"
-
   graph:
     help:
       header: "<prefix> <dark_aqua>调度图命令</dark_aqua>"
@@ -322,12 +299,14 @@ command:
       no-nodes: "<prefix> <red>未在已加载区块中扫描到任何节点牌子</red> <gray>请加载线路区域后重试</gray>"
       no-start-node: "<prefix> <red>未找到附近的节点牌子或轨道</red> <gray>请站在 waypoint/autostation/depot 牌子旁，或站在轨道上重试</gray>"
       load-chunks-here-only: "<prefix> <red>--loadChunks 仅支持 here 模式</red> <gray>请在玩家附近执行 build，或显式指定 --here</gray>"
+      storage-not-ready: "<prefix> <red>存储未就绪</red> <gray>--refresh 需要从数据库加载节点</gray>"
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, replaced_components=<white><replaced_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
+      reroute-hint: "<prefix> <gray>建议执行 TrainCarts reroute 以同步寻路缓存:</gray> <click:run_command:'/train reroute'><hover:show_text:'<gray>点击执行:</gray> <white>/train reroute</white>'><dark_aqua>[/train reroute]</dark_aqua></hover></click>"
       missing-switcher:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"

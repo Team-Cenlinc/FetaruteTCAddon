@@ -736,10 +736,9 @@ public final class RuntimeDispatchService {
     if (currentIndex >= route.waypoints().size() - 1) {
       // 终点：检查列车是否已停止
       // 若已停止，清理 destination 并注册 Layover
-      // 若仍在运动，设置 speedLimit=0 让 TrainCarts 自然减速
+      // 不设置 speedLimit=0，让 speed curve 逐渐减速
       double currentSpeed = train.currentSpeedBlocksPerTick();
       boolean isStopped = Math.abs(currentSpeed) < 0.001;
-      properties.setSpeedLimit(0.0);
       if (isStopped) {
         train.stop(); // 确保完全停止
         properties.clearDestinationRoute();
@@ -753,7 +752,7 @@ public final class RuntimeDispatchService {
           }
         }
       }
-      // 未停止时：speedLimit=0 已设置，让 TrainCarts 自然减速
+      // 未停止时：由 applyControl 的 speed curve 逐渐减速
       return;
     }
     Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());

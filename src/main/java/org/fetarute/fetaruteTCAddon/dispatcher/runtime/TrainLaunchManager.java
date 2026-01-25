@@ -41,20 +41,27 @@ public final class TrainLaunchManager {
     if (properties == null || aspect == null || config == null || runtimeSettings == null) {
       return;
     }
-    double adjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
-    double targetBpt = toBlocksPerTick(adjustedBps);
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
     double decelBpt2 = toBlocksPerTickSquared(config.decelBps2());
     if (accelBpt2 > 0.0 && decelBpt2 > 0.0) {
       properties.setWaitAcceleration(accelBpt2, decelBpt2);
     }
+
     if (aspect == SignalAspect.STOP) {
-      properties.setSpeedLimit(0.0);
-      if (train != null) {
+      // STOP 信号：使用 speed curve 计算减速目标，而不是直接设置 0
+      // 这样可以让列车平滑减速而不是急刹
+      double curveSpeed = applySpeedCurve(0.0, config, distanceOpt, runtimeSettings);
+      double curveSpeedBpt = toBlocksPerTick(curveSpeed);
+      // 不设置 TrainCarts 的 speedLimit，让我们的控制逻辑接管
+      // 只在列车真正停下来后调用 stop() 确保完全停止
+      if (train != null && curveSpeedBpt < 0.001 && !train.isMoving()) {
         train.stop();
       }
       return;
     }
+
+    double adjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+    double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     // 非 STOP 信号都允许发车（CAUTION/PROCEED_WITH_CAUTION 以较慢速度）
     boolean canLaunch = allowLaunch && train != null && !train.isMoving();

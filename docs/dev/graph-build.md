@@ -4,7 +4,7 @@
 
 ## 构建命令
 
-- `/fta graph build [--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc] [--loadChunks] [--maxChunks <n>] [--maxConcurrentLoads <n>]`
+- `/fta graph build [--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc] [--loadChunks] [--bfs] [--maxChunks <n>] [--maxConcurrentLoads <n>]`
 - `/fta graph continue [--tickBudgetMs <ms>] [--maxChunks <n>] [--maxConcurrentLoads <n>]`
 - `/fta graph status`
 - `/fta graph cancel`
@@ -88,9 +88,20 @@
      - TrainCarts 节点牌子：`switcher`（只识别 `[train] switcher`，不会把 `[train] tag` 误认为 switcher）
    - 注意：若线网中没有任何 waypoint/autostation/depot 牌子，则该线网不会被视为“本插件接管的信号线路”，build 可能会提示未扫描到节点。
 
+
 2) `explore_edges`：计算区间距离
-   - 使用“多源 Dijkstra”一次遍历整张轨道网络，计算任意两个节点波前相遇时的最短距离，写入 `Edge.lengthBlocks`
-   - 最大探索距离默认为 `4096`，用于防止误扫整图或无限环路
+   - **默认（BFS 多源）**：使用"多源 Dijkstra"一次遍历整张轨道网络，计算任意两个节点波前相遇时的最短距离，写入 `Edge.lengthBlocks`
+   - **`--nodeToNode`（节点到节点探索）**：使用 TrainCarts 的 `TrackWalkingPoint` 从每个节点出发，沿轨道走到下一个节点就停止并记录边长
+   - 最大探索距离默认为 `512` blocks，用于防止误扫或无限环路
+
+### 边探索模式对比
+
+| 模式 | 命令参数 | 优势 | 劣势 |
+|------|---------|------|------|
+| 节点到节点 | （默认） | 只探索节点之间的轨道段，更快 | 需要节点牌子先被扫描到 |
+| BFS 多源 | `--bfs` | 一次遍历计算所有边 | 可能扫描到大量无关轨道（如废弃矿井） |
+
+**说明**：默认使用节点到节点探索模式（使用 TrainCarts 的 `TrackWalkingPoint`），这样不会扫描到无关轨道。如果需要使用旧版 BFS 多源探索，可以加 `--bfs` 参数。
 
 ## 区块加载约束（重要）
 
