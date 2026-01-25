@@ -777,7 +777,7 @@ enum:
     rapid: "快速"
     neo_rapid: "新快速"
     express: "特快"
-    limited_express: "限定特快"
+    limited_express: "特急"
   route-operation-type:
     operation: "运营"
     return: "回送"

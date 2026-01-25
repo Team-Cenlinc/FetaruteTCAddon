@@ -39,6 +39,9 @@ public final class BossBarHudTemplate {
   public Optional<String> resolveLine(HudState state, long tick) {
     List<TemplateLine> candidates = linesByState.get(state);
     if (candidates == null || candidates.isEmpty()) {
+      candidates = linesByState.get(HudState.DEFAULT);
+    }
+    if (candidates == null || candidates.isEmpty()) {
       candidates = fallbackLines;
     }
     if (candidates == null || candidates.isEmpty()) {

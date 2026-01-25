@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.actionbar.ActionBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager;
+import org.fetarute.fetaruteTCAddon.display.hud.scoreboard.ScoreboardTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 
@@ -24,9 +25,11 @@ public final class SimpleDisplayService implements DisplayService {
   private final ConfigManager configManager;
   private final BossBarTrainHudManager bossBarHud;
   private final ActionBarTrainHudManager actionBarHud;
+  private final ScoreboardTrainHudManager scoreboardHud;
 
   private BukkitTask bossBarTask;
   private BukkitTask actionBarTask;
+  private BukkitTask scoreboardTask;
 
   public SimpleDisplayService(
       FetaruteTCAddon plugin,
@@ -63,12 +66,24 @@ public final class SimpleDisplayService implements DisplayService {
             templateService,
             defaultTemplateService,
             plugin::debug);
+    this.scoreboardHud =
+        new ScoreboardTrainHudManager(
+            plugin,
+            plugin.getLocaleManager(),
+            configManager,
+            etaService,
+            routeDefinitions,
+            routeProgressRegistry,
+            layoverRegistry,
+            templateService,
+            defaultTemplateService,
+            plugin::debug);
   }
 
   @Override
   /** 根据配置启动 HUD 定时刷新。 */
   public void start() {
-    if (bossBarTask != null || actionBarTask != null) {
+    if (bossBarTask != null || actionBarTask != null || scoreboardTask != null) {
       return;
     }
 
@@ -98,6 +113,16 @@ public final class SimpleDisplayService implements DisplayService {
               .getScheduler()
               .runTaskTimer(plugin, actionBarHud::tick, (long) interval, (long) interval);
     }
+
+    if (view.runtimeSettings().hudPlayerDisplayEnabled()) {
+      int interval = view.runtimeSettings().hudPlayerDisplayTickIntervalTicks();
+      scoreboardHud.register();
+      scoreboardTask =
+          plugin
+              .getServer()
+              .getScheduler()
+              .runTaskTimer(plugin, scoreboardHud::tick, (long) interval, (long) interval);
+    }
   }
 
   @Override
@@ -111,9 +136,15 @@ public final class SimpleDisplayService implements DisplayService {
       actionBarTask.cancel();
       actionBarTask = null;
     }
+    if (scoreboardTask != null) {
+      scoreboardTask.cancel();
+      scoreboardTask = null;
+    }
     bossBarHud.shutdown();
     bossBarHud.unregister();
     actionBarHud.shutdown();
     actionBarHud.unregister();
+    scoreboardHud.shutdown();
+    scoreboardHud.unregister();
   }
 }

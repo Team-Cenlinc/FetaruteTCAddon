@@ -617,6 +617,14 @@ public final class FtaTemplateCommand {
         return value;
       }
     }
+    if (type == HudTemplateType.PLAYER_DISPLAY) {
+      if (plugin.getHudDefaultTemplateService() != null) {
+        Optional<String> template = plugin.getHudDefaultTemplateService().resolveTemplate(type);
+        if (template.isPresent() && !template.get().isBlank()) {
+          return template.get();
+        }
+      }
+    }
     return "";
   }
 

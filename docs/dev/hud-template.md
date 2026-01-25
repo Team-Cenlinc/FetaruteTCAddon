@@ -6,7 +6,7 @@
 - `BOSSBAR`：车上 BossBar 标题（单行，支持 MiniMessage）。
 - `ACTIONBAR`：车上 ActionBar 文本（单行，支持 MiniMessage）。
 - `ANNOUNCEMENT`：ActionBar 广播（预留）。
-- `PLAYER_DISPLAY`：Scoreboard LCD（预留）。
+- `PLAYER_DISPLAY`：Scoreboard LCD（车内 PIDS）。
 - `STATION_DISPLAY`：站牌显示（预留）。
 
 ## 渲染顺序
@@ -34,10 +34,10 @@ TERM_ARRIVING: <template line>
 AT_LAST_STATION: <template line>
 ```
 
-- 状态：`IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP`
+- 状态：`DEFAULT` / `IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP`
 - 可选后缀 `_n` 表示轮播顺序（按数字升序轮播）
 - 若模板内没有任何状态行，则保持“整段文本作为单行标题”的兼容行为
-- 若需要未匹配状态的默认内容，可额外写一行“无前缀模板行”作为 fallback
+- 若某状态未定义，会优先回退到 `DEFAULT`，再回退到“无前缀模板行”
 - AT_STATION 以运行时 `dwellRemainingSec > 0` 判定，IDLE 为非停站静止（临时停车）
 - ON_LAYOVER 表示终到后折返/待命，优先级高于 AT_LAST_STATION/AT_STATION
 - AT_LAST_STATION 表示停在终点站（EOP），优先级高于 AT_STATION
@@ -133,6 +133,10 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{dest_eop_code}` → `DEP`
 - `dest_eop_lang2`：End of Operation 第二语言名（缺失为 `-`）
   - 例：`{dest_eop_lang2}` → `Depot`
+- `route_pattern`：线路运行模式（i18n: enum.route-pattern-type.*，缺失为 `-`）
+  - 例：`{route_pattern}` → `特快`
+- `route_pattern_<locale>`：指定语言标签的运行模式（从 lang/<locale>.yml 读取）
+  - 例：`{route_pattern_zh_CN}` → `特快`
 - `label_line`：语言文件里的“线路”标签
   - 例：`<dark_aqua>{label_line}</dark_aqua>` → `线路`
 - `label_next`：语言文件里的“下一站”标签
@@ -177,6 +181,10 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`Train {train_name}` → `Train S2-01`
 - `layover_wait`：待命持续时间（分钟，例 `3m`；非待命为 `-`）
   - 例：`Layover {layover_wait}` → `Layover 5m`
+- `time_hhmm` / `time_HHmm`：当前时间（24h，HH:mm）
+  - 例：`{time_hhmm}` → `20:10`
+- `time_hhmmss` / `time_HHmmSS`：当前时间（24h，HH:mm:ss）
+  - 例：`{time_hhmmss}` → `20:10:32`
 
 ### 综合示例
 ```text
@@ -188,3 +196,89 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 ## 存储表
 - `hud_templates`：模板主表（company + type + name 唯一）
 - `hud_line_bindings`：线路绑定（line + type 唯一）
+
+## Scoreboard（PLAYER_DISPLAY）模板规范
+Scoreboard 使用 YAML 模板，支持“静态页 + list_page 生成器”。示例：
+
+```yaml
+lines: 10
+page_duration_ticks: 60
+pages:
+  IN_TRIP_1:
+    title: "<{line_color_tag}>▋</{line_color_tag}><white> {line}</white><gray> | </gray><white>{dest_eop}</white>"
+    kind: list_page
+    source: next_stops
+    limit: 12
+    header:
+      - "<gray>Upcoming</gray>"
+    row: "<white>{index}. {station}</white> <gray>{eta}</gray>"
+    window:
+      size: 3
+      step: 3
+      fixed: 3
+      mode: chunk
+      periodTicks: 120
+      resetOnStop: true
+    footer:
+      - ""
+      - "<gray>{time_hhmm}</gray>"
+  ARRIVING_1:
+    lines:
+      - "<yellow>Arriving</yellow> <white>{next_station}</white>"
+      - "<gray>Please prepare to exit.</gray>"
+```
+
+### 顶层字段说明
+- `lines`：每页固定行数（最大 15）。
+- `page_duration_ticks`：分页轮播间隔（ticks）。
+- `title`：Scoreboard 标题（MiniMessage，占位符同 BossBar/ActionBar；建议在 page 内单独配置）。
+- `pages`：按 HUD 状态分组的页面。
+
+### HUD State Key
+Scoreboard 使用 HUD 状态名分组，`_n` 为页序号（排序轮播）：
+- `DEFAULT_*`
+- `IDLE_*`
+- `AT_STATION_*`
+- `AT_LAST_STATION_*`
+- `ON_LAYOVER_*`
+- `DEPARTING_*`
+- `ARRIVING_*`
+- `TERM_ARRIVING_*`
+- `IN_TRIP_*`
+
+### 静态页
+- `kind` 可省略或设为 `static`。
+- `lines`：字符串列表（MiniMessage + `{placeholder}`）。
+- `title`：可选，覆盖顶层标题（随页轮播）。
+
+### list_page（页面生成器）
+字段说明：
+- `kind`: `list_page`
+- `source`: 列表数据源（当前仅 `next_stops`）
+- `limit`: 最大条目数（用于截断列表总长度）
+- `row`: 每行模板（MiniMessage + item 占位符，可写为字符串或列表）
+- `header` / `footer`: 可选，列表前后附加行
+- `empty`: 可选，无数据时填充内容（默认 `-`）
+- `window`: 窗口滚动配置
+
+`window` 字段：
+- `size`: 展示行数
+- `step`: 每次滚动跨几站（chunk 通常等于 `size`，slide 通常为 `1`）
+- `fixed`: 固定显示的前 N 条（不参与窗口滚动）
+- `mode`: `chunk` 或 `slide`
+- `periodTicks`: 滚动周期（ticks）
+- `resetOnStop`: 到站推进或状态切换时重置窗口
+- `windowOffset`: 运行时窗口偏移（从第几个 stop 开始展示），由系统按 `size/step` 自动计算
+
+`row` 支持多行（列表形式）：会为每个 stop 输出多行，常用于“符号行 + 文本行”组合。
+
+windowOffset 规则（用于“固定前三站 + 滚动后续”）：
+- 窗口滚动只作用于“fixed 之后的列表”，固定行不参与滚动
+- 当前展示区间：`stops[fixed + windowOffset .. fixed + windowOffset + size - 1]`
+- `chunk` 模式：`windowOffset = pageIndex * step`（默认 step=size），超过最大 offset 回到 0
+- `slide` 模式：`windowOffset = windowOffset + step`，超过最大 offset 回到 0
+
+list-item 占位符（`next_stops`）：
+- `index` / `idx`：序号（从 1 开始）
+- `station` / `station_code` / `station_lang2`
+- `eta` / `eta_minutes` / `eta_status`

@@ -29,3 +29,49 @@ actionbar:
     ON_LAYOVER_2: <white>Preparing for new trip</white>
     IDLE_1: <white>临时停车，等待信号中...</white>
     IDLE_2: <white>Waiting for signal...</white>
+player_display:
+  template: |-
+    lines: 15
+    page_duration_ticks: 60
+    pages:
+      DEFAULT_1:
+        title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <{line_color_tag}>█</{line_color_tag}>"
+        kind: list_page
+        source: next_stops
+        limit: 15
+        header:
+          - "<gray>█</gray> <white>开往 {dest_eop}</white>"
+          - "<gray>█</gray> <white>车次 {train_name} - {route_pattern_zh_CN}</white>"
+        row:
+          - "<{line_color_tag}>█</{line_color_tag}>"
+        window:
+          size: 2
+          step: 2
+          fixed: 3
+          mode: chunk
+          periodTicks: 120
+          resetOnStop: true
+        footer:
+          - "<gray>█</gray> <white>时间：{time_hhmm}</white>"
+    
+      DEFAULT_2:
+        title: "<{line_color_tag}>█</{line_color_tag}> <white>{line_lang2}</white> <{line_color_tag}>█</{line_color_tag}>"
+        kind: list_page
+        source: next_stops
+        limit: 15
+        header:
+          - "<gray>█</gray> <white>To {dest_eop_lang2}</white>"
+          - "<gray>█</gray> <white>Train {train_name} - {route_pattern_en_US}</white>"
+        row:
+          - "<{line_color_tag}>◘</{line_color_tag}> <white>{index} - {station_lang2}</white> <gray>{eta_status}</gray>"
+          - "<{line_color_tag}>█</{line_color_tag}>"
+        window:
+          size: 2
+          step: 2
+          fixed: 3
+          mode: chunk
+          periodTicks: 120
+          resetOnStop: true
+        footer:
+          - "<gray>-------------</gray>"
+          - "<white>Time: {time_hhmm}</white>"

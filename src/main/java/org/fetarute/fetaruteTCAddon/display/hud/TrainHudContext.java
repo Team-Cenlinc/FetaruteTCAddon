@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.display.hud;
 
 import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -19,6 +20,7 @@ public record TrainHudContext(
     int routeIndex,
     Optional<RouteDefinition> routeDefinition,
     Optional<HudTemplateService.LineInfo> lineInfo,
+    Optional<RoutePatternType> routePatternType,
     StationDisplay currentStation,
     StationDisplay nextStation,
     Destinations destinations,
@@ -34,6 +36,7 @@ public record TrainHudContext(
     Objects.requireNonNull(trainName, "trainName");
     routeDefinition = routeDefinition == null ? Optional.empty() : routeDefinition;
     lineInfo = lineInfo == null ? Optional.empty() : lineInfo;
+    routePatternType = routePatternType == null ? Optional.empty() : routePatternType;
     Objects.requireNonNull(currentStation, "currentStation");
     Objects.requireNonNull(nextStation, "nextStation");
     Objects.requireNonNull(destinations, "destinations");

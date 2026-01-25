@@ -236,6 +236,9 @@ class RuntimeDispatchServiceTest {
             Optional.empty(),
             base.runtimeSettings().hudActionBarEnabled(),
             base.runtimeSettings().hudActionBarTickIntervalTicks(),
+            Optional.empty(),
+            false,
+            10,
             Optional.empty());
     when(configManager.current())
         .thenReturn(
@@ -690,6 +693,9 @@ class RuntimeDispatchServiceTest {
             60,
             true,
             true,
+            10,
+            Optional.empty(),
+            false,
             10,
             Optional.empty(),
             false,

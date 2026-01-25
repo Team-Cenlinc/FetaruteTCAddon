@@ -129,6 +129,9 @@ final class JdbcRepositoryIntegrationTest {
                 Optional.empty(),
                 false,
                 10,
+                Optional.empty(),
+                false,
+                10,
                 Optional.empty()),
             new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
             new ConfigManager.TrainConfigSettings(

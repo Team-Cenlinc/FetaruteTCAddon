@@ -4,21 +4,35 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
@@ -60,6 +74,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class TrainHudContextResolver {
 
   private static final long VEHICLE_HOPS = 3;
+  private static final String TAG_ROUTE_PATTERN = "FTA_PATTERN";
 
   private final FetaruteTCAddon plugin;
   private final LocaleManager locale;
@@ -76,6 +91,8 @@ public final class TrainHudContextResolver {
   private boolean stationCacheLoaded = false;
   private final Map<String, CompanyDisplay> companyByOperatorCode = new HashMap<>();
   private boolean companyCacheLoaded = false;
+  private final Map<UUID, Optional<RoutePatternType>> routePatternById = new HashMap<>();
+  private final Map<String, Map<RoutePatternType, String>> patternTextByLocale = new HashMap<>();
 
   public TrainHudContextResolver(
       FetaruteTCAddon plugin,
@@ -149,6 +166,8 @@ public final class TrainHudContextResolver {
         templateService != null
             ? templateService.resolveLineInfo(routeOpt.flatMap(RouteDefinition::metadata))
             : Optional.empty();
+    Optional<RoutePatternType> routePatternType =
+        resolveRoutePatternType(properties, progressEntry, routeOpt);
     Optional<NextStop> nextStopOpt = resolveNextStop(routeOpt, routeIndex);
     StationDisplay nextStation = nextStopOpt.map(NextStop::display).orElse(StationDisplay.empty());
     boolean terminalNextStop =
@@ -184,6 +203,7 @@ public final class TrainHudContextResolver {
             routeIndex,
             routeOpt,
             lineInfo,
+            routePatternType,
             currentStation,
             nextStation,
             destinations,
@@ -198,6 +218,57 @@ public final class TrainHudContextResolver {
     return Optional.of(context);
   }
 
+  /**
+   * 解析“未来几站”列表，用于 Scoreboard/LCD 渲染。
+   *
+   * <p>limit=0 仅返回 total 计数，不计算 ETA。
+   */
+  public UpcomingStops resolveUpcomingStops(TrainHudContext context, int limit) {
+    if (context == null || context.routeDefinition().isEmpty()) {
+      return UpcomingStops.empty();
+    }
+    if (routeDefinitions == null) {
+      return UpcomingStops.empty();
+    }
+    RouteDefinition route = context.routeDefinition().get();
+    if (route.waypoints() == null || route.waypoints().isEmpty()) {
+      return UpcomingStops.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return UpcomingStops.empty();
+    }
+    Map<NodeId, Integer> nodeIndexMap = buildNodeIndexMap(route.waypoints());
+    int safeLimit = Math.max(0, limit);
+    List<UpcomingStop> upcoming = new ArrayList<>();
+    int total = 0;
+    for (RouteStop stop : stops) {
+      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
+      StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
+      if (display.isEmpty()) {
+        continue;
+      }
+      Integer nodeIndex = nodeIdOpt.map(nodeIndexMap::get).orElse(null);
+      if (nodeIndex == null || nodeIndex <= context.routeIndex()) {
+        continue;
+      }
+      total++;
+      if (safeLimit > 0 && upcoming.size() >= safeLimit) {
+        continue;
+      }
+      EtaTarget target = resolveStopTarget(stop, nodeIdOpt, display);
+      EtaResult eta =
+          target == null
+              ? EtaResult.unavailable("-", List.of())
+              : etaService.getForTrain(context.trainName(), target);
+      upcoming.add(new UpcomingStop(total, display, eta));
+    }
+    return new UpcomingStops(List.copyOf(upcoming), total);
+  }
+
   public void clearCaches() {
     stationByKey.clear();
     stationById.clear();
@@ -205,11 +276,16 @@ public final class TrainHudContextResolver {
     stationCacheLoaded = false;
     companyByOperatorCode.clear();
     companyCacheLoaded = false;
+    routePatternById.clear();
+    patternTextByLocale.clear();
   }
 
   /** 根据上下文生成模板占位符键值。 */
   public Map<String, String> buildPlaceholders(TrainHudContext context, float progress) {
     Map<String, String> placeholders = new HashMap<>();
+    LocalTime now = LocalTime.now();
+    String timeHhmm = now.format(DateTimeFormatter.ofPattern("HH:mm"));
+    String timeHhmmss = now.format(DateTimeFormatter.ofPattern("HH:mm:ss"));
     StationDisplay safeCurrent =
         context.currentStation() == null
             ? StationDisplay.empty()
@@ -237,6 +313,7 @@ public final class TrainHudContextResolver {
     String routeCode = "-";
     String routeId = "-";
     String routeName = "-";
+    String routePattern = "-";
     if (context.routeDefinition() != null && context.routeDefinition().isPresent()) {
       RouteDefinition route = context.routeDefinition().get();
       routeId = route.id().toString();
@@ -248,6 +325,10 @@ public final class TrainHudContextResolver {
         routeCode = meta.serviceId();
         routeName = meta.displayName().filter(name -> !name.isBlank()).orElse(routeName);
       }
+    }
+    if (context.routePatternType() != null && context.routePatternType().isPresent()) {
+      RoutePatternType patternType = context.routePatternType().get();
+      routePattern = locale.enumText("enum.route-pattern-type", patternType);
     }
     if (context.lineInfo() != null && context.lineInfo().isPresent()) {
       HudTemplateService.LineInfo info = context.lineInfo().get();
@@ -278,6 +359,8 @@ public final class TrainHudContextResolver {
     placeholders.put("route_code", safeOrDash(routeCode));
     placeholders.put("route_id", safeOrDash(routeId));
     placeholders.put("route_name", safeOrDash(routeName));
+    placeholders.put("route_pattern", safeOrDash(routePattern));
+    placeholders.putAll(resolvePatternLocalePlaceholders(context.routePatternType()));
     placeholders.put("current_station", safeCurrent.label());
     placeholders.put("current_station_code", safeCurrent.code());
     placeholders.put("current_station_lang2", safeCurrent.lang2());
@@ -302,6 +385,10 @@ public final class TrainHudContextResolver {
     placeholders.put("signal_status", signalStatus);
     placeholders.put("service_status", serviceStatus);
     placeholders.put("train_name", context.trainName());
+    placeholders.put("time_hhmm", timeHhmm);
+    placeholders.put("time_hhmmss", timeHhmmss);
+    placeholders.put("time_HHmm", timeHhmm);
+    placeholders.put("time_HHmmSS", timeHhmmss);
     applyProgressPlaceholders(placeholders, progress);
     placeholders.put("label_line", labelLine);
     placeholders.put("label_next", labelNext);
@@ -382,6 +469,127 @@ public final class TrainHudContextResolver {
     return routeDefinitions.findById(routeUuid.get());
   }
 
+  private Optional<RoutePatternType> resolveRoutePatternType(
+      TrainProperties properties,
+      Optional<RouteProgressRegistry.RouteProgressEntry> progressEntry,
+      Optional<RouteDefinition> routeOpt) {
+    if (routeOpt == null || routeOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RoutePatternType> tagPattern = resolvePatternFromTag(properties);
+    if (tagPattern.isPresent()) {
+      return tagPattern;
+    }
+    Optional<UUID> routeId =
+        progressEntry != null
+            ? progressEntry.map(RouteProgressRegistry.RouteProgressEntry::routeUuid)
+            : Optional.empty();
+    if (routeId.isEmpty() && properties != null) {
+      routeId =
+          TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
+              .flatMap(TrainHudContextResolver::parseUuid);
+    }
+    if (routeId.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RoutePatternType> cached = routePatternById.get(routeId.get());
+    if (cached != null) {
+      return cached;
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RoutePatternType> resolved =
+        providerOpt.get().routes().findById(routeId.get()).map(Route::patternType);
+    routePatternById.put(routeId.get(), resolved);
+    return resolved;
+  }
+
+  private Optional<RoutePatternType> resolvePatternFromTag(TrainProperties properties) {
+    if (properties == null) {
+      return Optional.empty();
+    }
+    return TrainTagHelper.readTagValue(properties, TAG_ROUTE_PATTERN)
+        .flatMap(RoutePatternType::fromToken);
+  }
+
+  private Map<String, String> resolvePatternLocalePlaceholders(
+      Optional<RoutePatternType> patternOpt) {
+    if (patternOpt == null || patternOpt.isEmpty()) {
+      return Map.of();
+    }
+    RoutePatternType pattern = patternOpt.get();
+    Set<String> locales = new LinkedHashSet<>();
+    if (locale != null
+        && locale.getCurrentLocale() != null
+        && !locale.getCurrentLocale().isBlank()) {
+      locales.add(locale.getCurrentLocale());
+    }
+    locales.addAll(patternTextByLocale.keySet());
+    for (String candidate : locales) {
+      ensurePatternLocale(candidate);
+    }
+    Map<String, String> placeholders = new HashMap<>();
+    for (Map.Entry<String, Map<RoutePatternType, String>> entry : patternTextByLocale.entrySet()) {
+      String localeKey = entry.getKey();
+      if (localeKey == null || localeKey.isBlank()) {
+        continue;
+      }
+      String text = entry.getValue().getOrDefault(pattern, pattern.name());
+      placeholders.put("route_pattern_" + localeKey, text);
+    }
+    return placeholders;
+  }
+
+  private void ensurePatternLocale(String localeTag) {
+    if (localeTag == null || localeTag.isBlank() || patternTextByLocale.containsKey(localeTag)) {
+      return;
+    }
+    Map<RoutePatternType, String> mapping = new EnumMap<>(RoutePatternType.class);
+    try {
+      File langDir = new File(plugin.getDataFolder(), "lang");
+      File file = new File(langDir, localeTag + ".yml");
+      if (!file.exists()) {
+        try (InputStream stream =
+            LocaleManager.class
+                .getClassLoader()
+                .getResourceAsStream("lang/" + localeTag + ".yml")) {
+          if (stream == null) {
+            patternTextByLocale.put(localeTag, mapping);
+            return;
+          }
+          YamlConfiguration config =
+              YamlConfiguration.loadConfiguration(
+                  new InputStreamReader(stream, StandardCharsets.UTF_8));
+          loadPatternMapping(config, mapping);
+          patternTextByLocale.put(localeTag, mapping);
+          return;
+        }
+      }
+      YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
+      loadPatternMapping(config, mapping);
+    } catch (IOException | RuntimeException ex) {
+      debugLogger.accept("HUD route_pattern locale 加载失败: " + ex.getMessage());
+    }
+    patternTextByLocale.put(localeTag, mapping);
+  }
+
+  private void loadPatternMapping(YamlConfiguration config, Map<RoutePatternType, String> mapping) {
+    if (config == null || mapping == null) {
+      return;
+    }
+    String prefix = "enum.route-pattern-type.";
+    for (RoutePatternType type : RoutePatternType.values()) {
+      String key = prefix + type.name().toLowerCase(Locale.ROOT);
+      String value = config.getString(key);
+      if (value == null || value.isBlank()) {
+        value = type.name();
+      }
+      mapping.put(type, value);
+    }
+  }
+
   private Optional<NextStop> resolveNextStop(Optional<RouteDefinition> routeOpt, int routeIndex) {
     if (routeOpt == null || routeOpt.isEmpty() || routeDefinitions == null) {
       return Optional.empty();
@@ -430,6 +638,26 @@ public final class TrainHudContextResolver {
       }
     }
     return Optional.empty();
+  }
+
+  private EtaTarget resolveStopTarget(
+      RouteStop stop, Optional<NodeId> nodeIdOpt, StationDisplay display) {
+    if (nodeIdOpt != null && nodeIdOpt.isPresent()) {
+      return new EtaTarget.PlatformNode(nodeIdOpt.get());
+    }
+    String stationCode = display == null ? "-" : display.code();
+    if (stationCode != null && !stationCode.isBlank() && !"-".equals(stationCode)) {
+      return new EtaTarget.Station(stationCode);
+    }
+    Optional<UUID> stationId = stop == null ? Optional.empty() : stop.stationId();
+    if (stationId.isPresent()) {
+      StationDisplay resolved = resolveStationDisplay(stationId.get());
+      String code = resolved.code();
+      if (code != null && !code.isBlank() && !"-".equals(code)) {
+        return new EtaTarget.Station(code);
+      }
+    }
+    return null;
   }
 
   private int resolveLastStopIndex(List<RouteStop> stops) {
@@ -986,6 +1214,31 @@ public final class TrainHudContextResolver {
         return "-";
       }
       return value;
+    }
+  }
+
+  /** 未来停靠预览项（用于 LCD/Scoreboard）。 */
+  public record UpcomingStop(int sequence, StationDisplay display, EtaResult eta) {
+    public UpcomingStop {
+      Objects.requireNonNull(display, "display");
+      Objects.requireNonNull(eta, "eta");
+      if (sequence <= 0) {
+        throw new IllegalArgumentException("sequence 必须为正数");
+      }
+    }
+  }
+
+  /** 未来停靠列表及总数。 */
+  public record UpcomingStops(List<UpcomingStop> stops, int total) {
+    public UpcomingStops {
+      stops = stops == null ? List.of() : List.copyOf(stops);
+      if (total < 0) {
+        throw new IllegalArgumentException("total 必须为非负数");
+      }
+    }
+
+    public static UpcomingStops empty() {
+      return new UpcomingStops(List.of(), 0);
     }
   }
 }

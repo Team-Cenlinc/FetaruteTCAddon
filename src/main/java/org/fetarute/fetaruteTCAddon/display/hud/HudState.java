@@ -9,6 +9,7 @@ import java.util.Optional;
  * <p>解析时兼容旧前缀（STOP/LAYOVER/TERMINAL_ARRIVING）。
  */
 public enum HudState {
+  DEFAULT,
   IDLE,
   AT_LAST_STATION,
   AT_STATION,
