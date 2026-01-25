@@ -16,10 +16,21 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * <p>核心职责：
  *
  * <ul>
- *   <li>登记已完成终到流程的列车（标识其位置与终到站）。
- *   <li>为调度器提供候选列车查询（按等待时间/优先级排序）。
- *   <li>提供快照供调试与 UI 展示。
+ *   <li>登记已完成终到流程的列车（标识其位置与终到站）
+ *   <li>为调度器提供候选列车查询（按等待时间/优先级排序）
+ *   <li>提供快照供调试与 UI 展示
  * </ul>
+ *
+ * <h3>terminalKey 匹配规则</h3>
+ *
+ * <p>查找候选列车时使用 {@link TerminalKeyResolver#matches(String, String)} 进行匹配，支持：
+ *
+ * <ul>
+ *   <li><b>精确匹配</b>：完整 NodeId 相同
+ *   <li><b>站点匹配</b>：同一站点不同站台可复用
+ * </ul>
+ *
+ * @see TerminalKeyResolver
  */
 public final class LayoverRegistry {
 
@@ -29,7 +40,7 @@ public final class LayoverRegistry {
    * 注册一列可复用的待命列车。
    *
    * @param trainName 列车名
-   * @param terminalKey 终到站标识（用于分组匹配）
+   * @param terminalKey 终到站标识（用于分组匹配，建议使用 {@link TerminalKeyResolver#toTerminalKey(NodeId)} 生成）
    * @param locationNodeId 当前所在节点 ID（站台或 Siding）
    * @param readyAt 就绪时间（关门完成时间）
    * @param tags 列车当前的 tag 快照（用于后续恢复/属性判断）
@@ -51,7 +62,11 @@ public final class LayoverRegistry {
         new LayoverCandidate(trainName, terminalKey, locationNodeId, readyAt, Map.copyOf(tags)));
   }
 
-  /** 注销列车（通常在分配任务或销毁时调用）。 */
+  /**
+   * 注销列车（通常在分配任务或销毁时调用）。
+   *
+   * @param trainName 列车名
+   */
   public void unregister(String trainName) {
     if (trainName != null) {
       candidates.remove(trainName);
@@ -61,18 +76,29 @@ public final class LayoverRegistry {
   /**
    * 查找指定终到站的可用候选列车。
    *
+   * <p>使用 {@link TerminalKeyResolver#matches(String, String)} 进行匹配，支持同站不同站台复用。
+   *
    * <p>按等待时间从长到短排序（FIFO，防饿死）。
+   *
+   * @param terminalKey 目标终到站标识（通常为目标线路的首站 NodeId）
+   * @return 匹配的候选列车列表，按 readyAt 升序排列
    */
   public List<LayoverCandidate> findCandidates(String terminalKey) {
     if (terminalKey == null) {
       return List.of();
     }
     return candidates.values().stream()
-        .filter(c -> c.terminalKey().equals(terminalKey))
+        .filter(c -> TerminalKeyResolver.matches(c.terminalKey(), terminalKey))
         .sorted(Comparator.comparing(LayoverCandidate::readyAt))
         .toList();
   }
 
+  /**
+   * 根据列车名获取候选记录。
+   *
+   * @param trainName 列车名
+   * @return 候选记录，若不存在则返回 empty
+   */
   public Optional<LayoverCandidate> get(String trainName) {
     if (trainName == null) {
       return Optional.empty();
@@ -80,12 +106,24 @@ public final class LayoverRegistry {
     return Optional.ofNullable(candidates.get(trainName));
   }
 
-  /** 返回全量快照（调试用）。 */
+  /**
+   * 返回全量快照（调试用）。
+   *
+   * @return 所有候选列车的不可变列表
+   */
   public List<LayoverCandidate> snapshot() {
     return List.copyOf(candidates.values());
   }
 
-  /** 待命候选列车记录。 */
+  /**
+   * 待命候选列车记录。
+   *
+   * @param trainName 列车名
+   * @param terminalKey 终到站标识
+   * @param locationNodeId 当前所在节点 ID
+   * @param readyAt 就绪时间
+   * @param tags 列车 tag 快照
+   */
   public record LayoverCandidate(
       String trainName,
       String terminalKey,

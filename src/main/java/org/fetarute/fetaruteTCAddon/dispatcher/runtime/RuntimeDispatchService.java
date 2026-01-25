@@ -829,6 +829,26 @@ public final class RuntimeDispatchService {
    * @param terminalNode 终点节点
    * @param properties 列车属性
    */
+  /**
+   * 终点 Layover 注册：在 REUSE_AT_TERM 模式下，将列车注册到 Layover 待命池。
+   *
+   * <p>仅在列车到达终点且未被 DSTY 销毁时调用。使用 {@link TerminalKeyResolver#toTerminalKey(NodeId)} 生成标准化的
+   * terminalKey，确保后续匹配一致性。
+   *
+   * <h4>terminalKey 用途</h4>
+   *
+   * <ul>
+   *   <li>作为 Layover 候选列车的分组依据
+   *   <li>与新线路首站进行匹配，支持同站不同站台复用
+   * </ul>
+   *
+   * @param trainName 列车名
+   * @param route 当前线路定义
+   * @param location 终点节点（列车当前位置）
+   * @param properties 列车属性
+   * @see TerminalKeyResolver
+   * @see LayoverRegistry#register(String, String, NodeId, Instant, java.util.Map)
+   */
   private void handleLayoverRegistrationIfNeeded(
       String trainName, RouteDefinition route, NodeId location, TrainProperties properties) {
     if (route.lifecycleMode()
@@ -838,7 +858,8 @@ public final class RuntimeDispatchService {
     if (layoverRegistry.get(trainName).isPresent()) {
       return;
     }
-    String terminalKey = location.value();
+    // 使用 TerminalKeyResolver 生成标准化 terminalKey，确保匹配一致性
+    String terminalKey = TerminalKeyResolver.toTerminalKey(location);
 
     java.util.Map<String, String> tags = new java.util.HashMap<>();
     if (properties.hasTags()) {
@@ -853,12 +874,36 @@ public final class RuntimeDispatchService {
     }
     layoverRegistry.register(trainName, terminalKey, location, Instant.now(), tags);
     debugLogger.accept(
-        "Layover 注册: train=" + trainName + " term=" + terminalKey + " node=" + location.value());
+        "Layover 注册: train="
+            + trainName
+            + " terminalKey="
+            + terminalKey
+            + " station="
+            + TerminalKeyResolver.extractStationName(location));
     layoverRegistry.get(trainName).ifPresent(layoverListener);
   }
 
   /**
    * 将待命列车投入下一趟运营（复用出车）。
+   *
+   * <p>验证流程：
+   *
+   * <ol>
+   *   <li>检查列车存在且有效
+   *   <li>检查列车位置与线路首站匹配（支持同站不同站台，使用 {@link TerminalKeyResolver}）
+   *   <li>构建占用请求并获取许可
+   *   <li>成功后写入 Route tags、推进进度、设置 destination
+   * </ol>
+   *
+   * <h4>首站匹配规则</h4>
+   *
+   * <p>传统检查要求 {@code startIndex == 0}，即列车必须精确位于线路首站节点。 新规则使用 {@link
+   * TerminalKeyResolver#matches(String, String)}，允许：
+   *
+   * <ul>
+   *   <li>精确匹配：列车位置与首站 NodeId 相同
+   *   <li>站点匹配：列车位于首站的不同站台（同 Station/Depot）
+   * </ul>
    *
    * @param candidate 待命列车候选对象
    * @param ticket 分配的任务票据
@@ -889,11 +934,37 @@ public final class RuntimeDispatchService {
     }
     RouteDefinition route = routeOpt.get();
     NodeId startNode = candidate.locationNodeId();
-    int startIndex = RouteIndexResolver.resolveCurrentIndex(route, OptionalInt.empty(), startNode);
-    if (startIndex != 0) {
-      debugLogger.accept("Layover 发车失败: 未处于线路首站 train=" + trainName + " node=" + startNode.value());
+
+    // 使用 TerminalKeyResolver 进行首站匹配，支持同站不同站台复用
+    NodeId routeFirstNode = route.waypoints().get(0);
+    String startTerminalKey = TerminalKeyResolver.toTerminalKey(startNode);
+    String routeFirstTerminalKey = TerminalKeyResolver.toTerminalKey(routeFirstNode);
+
+    if (!TerminalKeyResolver.matches(startTerminalKey, routeFirstTerminalKey)) {
+      debugLogger.accept(
+          "Layover 发车失败: 位置与首站不匹配 train="
+              + trainName
+              + " location="
+              + startNode.value()
+              + " routeFirst="
+              + routeFirstNode.value());
       return false;
     }
+
+    // 使用精确匹配确定 startIndex，若不匹配则回退为 0（同站不同站台场景）
+    int startIndex = RouteIndexResolver.resolveCurrentIndex(route, OptionalInt.empty(), startNode);
+    if (startIndex < 0) {
+      // 同站不同站台：从索引 0 开始
+      startIndex = 0;
+      debugLogger.accept(
+          "Layover 发车: 同站不同站台复用 train="
+              + trainName
+              + " location="
+              + startNode.value()
+              + " routeFirst="
+              + routeFirstNode.value());
+    }
+
     if (startIndex + 1 >= route.waypoints().size()) {
       debugLogger.accept("Layover 发车失败: 线路无下一站 train=" + trainName);
       return false;

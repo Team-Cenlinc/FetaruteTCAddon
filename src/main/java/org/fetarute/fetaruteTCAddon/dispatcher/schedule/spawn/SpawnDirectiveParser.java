@@ -6,11 +6,11 @@ import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 
 /** 从 RouteStop 的 notes 中解析 CRET/DSTY 等指令的目标。 */
-final class SpawnDirectiveParser {
+public final class SpawnDirectiveParser {
 
   private SpawnDirectiveParser() {}
 
-  static Optional<String> findDirectiveTarget(List<RouteStop> stops, String directive) {
+  public static Optional<String> findDirectiveTarget(List<RouteStop> stops, String directive) {
     if (stops == null || stops.isEmpty() || directive == null || directive.isBlank()) {
       return Optional.empty();
     }
@@ -23,7 +23,7 @@ final class SpawnDirectiveParser {
     return Optional.empty();
   }
 
-  static Optional<String> findDirectiveTarget(RouteStop stop, String directive) {
+  public static Optional<String> findDirectiveTarget(RouteStop stop, String directive) {
     if (stop == null || stop.notes().isEmpty() || directive == null || directive.isBlank()) {
       return Optional.empty();
     }

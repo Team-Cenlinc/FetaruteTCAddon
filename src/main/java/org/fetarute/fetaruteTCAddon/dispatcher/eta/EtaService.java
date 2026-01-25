@@ -13,22 +13,25 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.cache.EtaCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ArrivingClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ClearanceModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DwellModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.PathProgressModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpawnTrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.TravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.WaitEstimator;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
@@ -40,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteProgress;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -53,6 +57,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -73,10 +78,26 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <p>注意：站牌会合并未出票服务预测（见 {@link SpawnForecastSupport}）；若 SpawnMonitor 未运行或计划为空，站牌仍可能为空。
  *
  * <p>Layover：若起点存在待命列车，未发车 ETA 会使用候选的 readyAt 修正最早发车时间。
+ *
+ * <h2>动态速度模型</h2>
+ *
+ * <p>ETA 计算使用动态速度模型，综合考虑：
+ *
+ * <ul>
+ *   <li>边限速（{@code RailEdge.baseSpeedLimit}）
+ *   <li>列车加减速参数（运行中列车从快照获取，未发车从 depot 配置推断）
+ *   <li>当前速度（若快照有采样）
+ * </ul>
+ *
+ * @see DynamicTravelTimeModel
+ * @see SpawnTrainConfigResolver
  */
 public final class EtaService {
 
   private static final int FORECAST_LIMIT_PER_SERVICE = 5;
+
+  /** 默认速度（blocks/s），当边无限速配置时使用。 */
+  private static final double DEFAULT_FALLBACK_SPEED_BPS = 6.0;
 
   private final TrainSnapshotStore snapshotStore;
   private final RailGraphService railGraphService;
@@ -84,12 +105,16 @@ public final class EtaService {
   private final OccupancyManager occupancyManager;
 
   private final PathProgressModel pathProgressModel = new PathProgressModel();
-  private final TravelTimeModel travelTimeModel =
-      new TravelTimeModel(RailTravelTimeModels.constantSpeed(6.0));
   private final DwellModel dwellModel = new DwellModel();
   private final ClearanceModel clearanceModel = new ClearanceModel();
   private final ArrivingClassifier arrivingClassifier = new ArrivingClassifier();
   private final WaitEstimator waitEstimator;
+
+  /** 动态旅行时间模型（考虑边限速与加减速）。 */
+  private final DynamicTravelTimeModel dynamicTravelTimeModel;
+
+  /** 适配层，将 DynamicTravelTimeModel 包装为 TravelTimeModel 供现有逻辑使用。 */
+  private final TravelTimeModel travelTimeModel;
 
   private final EtaCache<String, EtaResult> trainCache = new EtaCache<>(Duration.ofMillis(800));
   private final EtaCache<String, EtaResult> ticketCache = new EtaCache<>(Duration.ofMillis(1200));
@@ -99,6 +124,8 @@ public final class EtaService {
   private volatile TicketAssigner ticketAssigner;
   private volatile LayoverRegistry layoverRegistry;
   private volatile StorageProvider storageProvider;
+  private volatile SignNodeRegistry signNodeRegistry;
+  private volatile ConfigManager.ConfigView configView;
 
   private final java.util.function.IntSupplier lookaheadEdges;
   private final java.util.function.IntSupplier minClearEdges;
@@ -121,6 +148,12 @@ public final class EtaService {
     this.lookaheadEdges = lookaheadEdges != null ? lookaheadEdges : () -> 2;
     this.minClearEdges = minClearEdges != null ? minClearEdges : () -> 0;
     this.switcherZoneEdges = switcherZoneEdges != null ? switcherZoneEdges : () -> 2;
+
+    // 初始化动态旅行时间模型（使用默认加减速参数）
+    this.dynamicTravelTimeModel =
+        new DynamicTravelTimeModel(
+            DynamicTravelTimeModel.TrainMotionParams.defaults(), DEFAULT_FALLBACK_SPEED_BPS);
+    this.travelTimeModel = new TravelTimeModel(dynamicTravelTimeModel);
   }
 
   /** 绑定票据来源（SpawnManager/TicketAssigner），用于未发车 ETA。 */
@@ -137,6 +170,18 @@ public final class EtaService {
   /** 绑定 StorageProvider，用于站牌终点站解析与名称辅助。 */
   public void attachStorageProvider(StorageProvider storageProvider) {
     this.storageProvider = storageProvider;
+  }
+
+  /**
+   * 绑定 SignNodeRegistry 与配置，用于未发车列车的配置推断。
+   *
+   * @param signNodeRegistry 牌子注册表
+   * @param configView 配置视图
+   */
+  public void attachConfigSources(
+      SignNodeRegistry signNodeRegistry, ConfigManager.ConfigView configView) {
+    this.signNodeRegistry = signNodeRegistry;
+    this.configView = configView;
   }
 
   /**
@@ -679,6 +724,10 @@ public final class EtaService {
     int travelSec = 0;
     int dwellSec = 0;
 
+    // 使用 Route 对应的动态模型（考虑 CRET depot 的列车配置）
+    TravelTimeModel routeTravelTimeModel =
+        resolveTravelTimeModelForRoute(ticket.service().routeId());
+
     if (targetSel.index() > 0) {
       Optional<RailGraph> graphOpt = resolveGraphForRouteSegment(route, 0, targetSel.index());
       if (graphOpt.isEmpty()) {
@@ -692,7 +741,7 @@ public final class EtaService {
       }
       PathProgressModel.PathProgress progress = progressOpt.get();
       Optional<Integer> travelSecOpt =
-          travelTimeModel.estimateTravelSec(
+          routeTravelTimeModel.estimateTravelSec(
               graph, progress.remainingNodes(), progress.remainingEdges());
       if (travelSecOpt.isEmpty()) {
         return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
@@ -1417,5 +1466,56 @@ public final class EtaService {
     public Instant lastUpdatedAt() {
       return updatedAt;
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 动态旅行时间模型辅助
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * 根据 Route 的 CRET depot 配置创建动态旅行时间模型（用于未发车 ETA）。
+   *
+   * <p>解析优先级：
+   *
+   * <ol>
+   *   <li>从 CRET depot spawn pattern 推断列车类型
+   *   <li>根据列车类型获取加减速配置
+   *   <li>fallback 到默认配置
+   * </ol>
+   *
+   * @param routeUuid Route UUID
+   * @return 适用于该 Route 的 TravelTimeModel
+   */
+  TravelTimeModel resolveTravelTimeModelForRoute(UUID routeUuid) {
+    if (routeUuid == null || signNodeRegistry == null || configView == null) {
+      return travelTimeModel;
+    }
+    StorageProvider provider = this.storageProvider;
+    if (provider == null) {
+      return travelTimeModel;
+    }
+
+    Optional<Route> routeOpt = provider.routes().findById(routeUuid);
+    if (routeOpt.isEmpty()) {
+      return travelTimeModel;
+    }
+    Route route = routeOpt.get();
+    List<RouteStop> stops = provider.routeStops().listByRoute(routeUuid);
+
+    SpawnTrainConfigResolver configResolver =
+        new SpawnTrainConfigResolver(signNodeRegistry, configView);
+    TrainConfig trainConfig = configResolver.resolveForRoute(route, stops);
+
+    DynamicTravelTimeModel.TrainMotionParams params =
+        new DynamicTravelTimeModel.TrainMotionParams(
+            trainConfig.accelBps2(), trainConfig.decelBps2());
+    DynamicTravelTimeModel dynamicModel =
+        new DynamicTravelTimeModel(params, DEFAULT_FALLBACK_SPEED_BPS);
+    return new TravelTimeModel(dynamicModel);
+  }
+
+  /** 获取动态旅行时间模型（用于诊断/测试）。 */
+  public DynamicTravelTimeModel getDynamicTravelTimeModel() {
+    return dynamicTravelTimeModel;
   }
 }

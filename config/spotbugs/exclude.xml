@@ -246,4 +246,18 @@
         <Method name="chooseDoorSideByWorld"/>
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
+
+    <!-- EtaService attach 方法存储外部引用，调用方负责生命周期管理 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService"/>
+        <Method name="attachConfigSources"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- BKCommonLib CommonEntity 返回类型的误报：head.getEntity().getVelocity() -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler"/>
+        <Method name="sampleSpeed"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
 </FindBugsFilter>
