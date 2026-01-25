@@ -3,6 +3,8 @@ package org.fetarute.fetaruteTCAddon.storage.jdbc;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Path;
 import java.util.Locale;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -59,6 +61,13 @@ public final class HikariDataSourceFactory {
         }
       }
     }
+
+    // 如果文件存在，检查是否是有效的 SQLite 数据库
+    File dbFile = dbPath.toFile();
+    if (dbFile.exists() && dbFile.length() > 0) {
+      verifySqliteHeader(dbFile, logger);
+    }
+
     config.setJdbcUrl("jdbc:sqlite:" + dbPath.toAbsolutePath());
     config.setDriverClassName("org.sqlite.JDBC");
     config.setMaximumPoolSize(1);
@@ -67,6 +76,37 @@ public final class HikariDataSourceFactory {
     config.setAutoCommit(true);
     config.setConnectionInitSql("PRAGMA foreign_keys=ON");
     logger.debug("SQLite 数据库文件: " + dbPath.toAbsolutePath());
+  }
+
+  /** SQLite 文件的魔数头（前 16 字节）。 */
+  private static final byte[] SQLITE_HEADER =
+      "SQLite format 3\0".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+
+  /**
+   * 验证 SQLite 文件头是否有效。
+   *
+   * @param dbFile 数据库文件
+   * @param logger 日志工具
+   * @throws IllegalStateException 如果文件头无效或损坏
+   */
+  private static void verifySqliteHeader(File dbFile, LoggerManager logger) {
+    byte[] header = new byte[16];
+    try (RandomAccessFile raf = new RandomAccessFile(dbFile, "r")) {
+      int read = raf.read(header);
+      if (read < 16) {
+        throw new IllegalStateException("SQLite 数据库文件损坏或截断（文件大小不足）: " + dbFile.getAbsolutePath());
+      }
+      for (int i = 0; i < SQLITE_HEADER.length; i++) {
+        if (header[i] != SQLITE_HEADER[i]) {
+          throw new IllegalStateException(
+              "SQLite 数据库文件损坏（无效文件头）: " + dbFile.getAbsolutePath() + "。请删除该文件或从备份恢复后重试。");
+        }
+      }
+    } catch (IOException e) {
+      throw new IllegalStateException(
+          "无法读取 SQLite 数据库文件: " + dbFile.getAbsolutePath() + " - " + e.getMessage(), e);
+    }
+    logger.debug("SQLite 文件头验证通过: " + dbFile.getAbsolutePath());
   }
 
   private static void configureMySql(

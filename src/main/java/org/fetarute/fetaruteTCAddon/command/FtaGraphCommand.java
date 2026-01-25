@@ -49,6 +49,7 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeValidator;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
@@ -96,6 +97,7 @@ import org.incendo.cloud.component.CommandComponent;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
+import org.incendo.cloud.suggestion.Suggestion;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
@@ -190,6 +192,19 @@ public final class FtaGraphCommand {
                 CommandComponent.<CommandSender, Integer>builder(
                         "maxConcurrentLoads", IntegerParser.integerParser())
                     .suggestionProvider(CommandSuggestionProviders.placeholder("<n>")))
+            .build();
+    var worldFlag =
+        CommandFlag.<CommandSender>builder("world")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "world", StringParser.stringParser())
+                    .suggestionProvider(
+                        (ctx, input) ->
+                            java.util.concurrent.CompletableFuture.completedFuture(
+                                plugin.getServer().getWorlds().stream()
+                                    .map(World::getName)
+                                    .map(Suggestion::suggestion)
+                                    .toList())))
             .build();
     CommandFlag<Void> allFlag = CommandFlag.builder("all").build();
     CommandFlag<Void> hereFlag = CommandFlag.builder("here").build();
@@ -901,9 +916,14 @@ public final class FtaGraphCommand {
             .literal("graph")
             .literal("info")
             .permission("fetarute.graph.info")
+            .flag(worldFlag)
             .handler(
                 ctx -> {
-                  World world = resolveWorld(ctx.sender());
+                  World world =
+                      ctx.flags()
+                          .<String>getValue("world")
+                          .map(name -> plugin.getServer().getWorld(name))
+                          .orElseGet(() -> resolveWorld(ctx.sender()));
                   if (world == null) {
                     ctx.sender().sendMessage("未找到可用世界");
                     return;
@@ -5648,7 +5668,8 @@ public final class FtaGraphCommand {
               anchors,
               access,
               plugin.getLoggerManager()::debug,
-              ChunkLoadOptions.disabled());
+              ChunkLoadOptions.disabled(),
+              null);
       while (!discovery.isDone()) {
         discovery.step(System.nanoTime() + 1_000_000_000L, byNodeId);
       }
@@ -5741,7 +5762,7 @@ public final class FtaGraphCommand {
         new RailGraphMultiSourceExplorerSession(
             anchorsByNode,
             access,
-            4096,
+            512,
             junction -> {
               if (!railsWithSwitchers.contains(junction)) {
                 missingSwitchers.add(junction);
@@ -5958,12 +5979,38 @@ public final class FtaGraphCommand {
       }
     }
 
-    // 使用合并后的所有节点，重新探索边
-    // 这里采用同步探索，因为只需要探索已加载区块内的轨道，耗时较短
+    // 如果有交集（重扫到已有分量），不应该重新探索边，因为这可能引入"绕道边"
+    // 只在两个完全独立的组件合并时才探索桥接边
+    if (hasOverlap) {
+      return merged;
+    }
+
+    // 只使用边界节点（base 独有 + update 独有）进行桥接边探索，
+    // 避免对整个图重新探索导致的"绕道边"问题
+    Set<NodeId> boundaryNodeIds = new HashSet<>();
+    for (NodeId id : baseNodeIds) {
+      if (!updateNodeIds.contains(id)) {
+        boundaryNodeIds.add(id);
+      }
+    }
+    for (NodeId id : updateNodeIds) {
+      if (!baseNodeIds.contains(id)) {
+        boundaryNodeIds.add(id);
+      }
+    }
+
+    if (boundaryNodeIds.size() < 2) {
+      return merged;
+    }
+
+    // 使用边界节点探索桥接边
     TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
 
     for (RailNode node : merged.nodes()) {
+      if (!boundaryNodeIds.contains(node.id())) {
+        continue;
+      }
       Vector pos = node.worldPosition();
       RailBlockPos center = new RailBlockPos(pos.getBlockX(), pos.getBlockY(), pos.getBlockZ());
       int radius = node.type() == NodeType.SWITCHER ? 2 : 6;
@@ -5978,8 +6025,18 @@ public final class FtaGraphCommand {
     }
 
     // 执行边探索
+    Map<EdgeId, Integer> rawEdgeLengths =
+        RailGraphExplorer.exploreEdgeLengths(anchorsByNode, access, 512);
+
+    // 构建节点映射用于跨轨道过滤
+    Map<NodeId, RailNode> nodesById = new HashMap<>();
+    for (RailNode node : merged.nodes()) {
+      nodesById.put(node.id(), node);
+    }
+
+    // 过滤跨轨道直连边
     Map<EdgeId, Integer> newEdgeLengths =
-        RailGraphExplorer.exploreEdgeLengths(anchorsByNode, access, 4096);
+        RailEdgeValidator.filterCrossTrackEdges(rawEdgeLengths, nodesById);
 
     // 检查是否有新边
     Map<EdgeId, RailEdge> edgesById = new HashMap<>();
@@ -5988,10 +6045,6 @@ public final class FtaGraphCommand {
     }
 
     int newEdgeCount = 0;
-    Map<NodeId, RailNode> nodesById = new HashMap<>();
-    for (RailNode node : merged.nodes()) {
-      nodesById.put(node.id(), node);
-    }
 
     for (Map.Entry<EdgeId, Integer> entry : newEdgeLengths.entrySet()) {
       EdgeId edgeId = entry.getKey();

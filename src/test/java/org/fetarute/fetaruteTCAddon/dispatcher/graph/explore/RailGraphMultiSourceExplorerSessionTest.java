@@ -227,6 +227,108 @@ final class RailGraphMultiSourceExplorerSessionTest {
     assertTrue(lengths.containsKey(EdgeId.undirected(sw2, sw4)), "SW2-SW4 边应存在");
   }
 
+  @Test
+  void doesNotConnectParallelTracksViaIntermediateCrossover() {
+    // 模拟平行轨道通过渡线连接的场景（渡线处有 switcher 节点）：
+    //
+    // Track 1:  A1 ---- SW1 ---- C1
+    //                    |
+    //           (渡线)   X
+    //                    |
+    // Track 2:  A2 ---- SW2 ---- C2
+    //
+    // Waypoint 节点：A1、C1、A2、C2
+    // Switcher 节点：SW1、SW2（渡线口）
+    //
+    // 期望的边：A1-SW1, SW1-C1, A2-SW2, SW2-C2, SW1-SW2
+    // 不应该存在：A1-A2, A1-C2, C1-A2, C1-C2 等跨轨道"绕道"边
+
+    InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
+
+    // Track 1 positions
+    RailBlockPos a1 = new RailBlockPos(0, 0, 0);
+    RailBlockPos sw1 = new RailBlockPos(10, 0, 0);
+    RailBlockPos c1 = new RailBlockPos(20, 0, 0);
+
+    // Track 2 positions (Z offset = 4)
+    RailBlockPos a2 = new RailBlockPos(0, 0, 4);
+    RailBlockPos sw2 = new RailBlockPos(10, 0, 4);
+    RailBlockPos c2 = new RailBlockPos(20, 0, 4);
+
+    // Build track 1 (A1 -> SW1 -> C1)
+    connectStraightLine(access, a1, sw1);
+    connectStraightLine(access, sw1, c1);
+
+    // Build track 2 (A2 -> SW2 -> C2)
+    connectStraightLine(access, a2, sw2);
+    connectStraightLine(access, sw2, c2);
+
+    // Crossover between SW1 and SW2
+    connectStraightLine(access, sw1, sw2);
+
+    NodeId nodeA1 = NodeId.of("A1");
+    NodeId nodeC1 = NodeId.of("C1");
+    NodeId nodeA2 = NodeId.of("A2");
+    NodeId nodeC2 = NodeId.of("C2");
+    NodeId nodeSW1 = NodeId.of("SW1");
+    NodeId nodeSW2 = NodeId.of("SW2");
+
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(
+                nodeA1, Set.of(a1),
+                nodeC1, Set.of(c1),
+                nodeA2, Set.of(a2),
+                nodeC2, Set.of(c2),
+                nodeSW1, Set.of(sw1),
+                nodeSW2, Set.of(sw2)),
+            access,
+            1000);
+
+    while (!session.isDone()) {
+      session.step(100);
+    }
+
+    Map<EdgeId, Integer> lengths = session.edgeLengths();
+
+    // 应该存在的边：同轨道直接相邻的节点
+    assertTrue(lengths.containsKey(EdgeId.undirected(nodeA1, nodeSW1)), "A1-SW1 边应存在");
+    assertTrue(lengths.containsKey(EdgeId.undirected(nodeSW1, nodeC1)), "SW1-C1 边应存在");
+    assertTrue(lengths.containsKey(EdgeId.undirected(nodeA2, nodeSW2)), "A2-SW2 边应存在");
+    assertTrue(lengths.containsKey(EdgeId.undirected(nodeSW2, nodeC2)), "SW2-C2 边应存在");
+    // 渡线边
+    assertTrue(lengths.containsKey(EdgeId.undirected(nodeSW1, nodeSW2)), "SW1-SW2 边应存在");
+
+    // 不应该存在的边：跨轨道的"绕道"边（中间有其他节点）
+    assertFalse(lengths.containsKey(EdgeId.undirected(nodeA1, nodeA2)), "A1-A2 边不应存在");
+    assertFalse(lengths.containsKey(EdgeId.undirected(nodeA1, nodeC2)), "A1-C2 边不应存在");
+    assertFalse(lengths.containsKey(EdgeId.undirected(nodeC1, nodeA2)), "C1-A2 边不应存在");
+    assertFalse(lengths.containsKey(EdgeId.undirected(nodeC1, nodeC2)), "C1-C2 边不应存在");
+    // A1-C1, A2-C2 也不应存在（中间有 switcher）
+    assertFalse(lengths.containsKey(EdgeId.undirected(nodeA1, nodeC1)), "A1-C1 边不应存在（有 SW1）");
+    assertFalse(lengths.containsKey(EdgeId.undirected(nodeA2, nodeC2)), "A2-C2 边不应存在（有 SW2）");
+
+    // 验证边长度正确
+    assertEquals(10, lengths.get(EdgeId.undirected(nodeA1, nodeSW1)));
+    assertEquals(10, lengths.get(EdgeId.undirected(nodeSW1, nodeC1)));
+    assertEquals(4, lengths.get(EdgeId.undirected(nodeSW1, nodeSW2)));
+  }
+
+  /** 辅助方法：在两点之间创建直线轨道连接（每格 cost=1）。 */
+  private void connectStraightLine(
+      InMemoryRailBlockAccess access, RailBlockPos from, RailBlockPos to) {
+    int dx = Integer.signum(to.x() - from.x());
+    int dy = Integer.signum(to.y() - from.y());
+    int dz = Integer.signum(to.z() - from.z());
+
+    RailBlockPos current = from;
+    while (!current.equals(to)) {
+      RailBlockPos next = new RailBlockPos(current.x() + dx, current.y() + dy, current.z() + dz);
+      access.connect(current, next, 1.0);
+      current = next;
+    }
+  }
+
   /** 用于单元测试的内存轨道图：直接用邻接表描述 railNeighbors。 */
   private static final class InMemoryRailBlockAccess implements RailBlockAccess {
 

@@ -260,4 +260,10 @@
         <Method name="sampleSpeed"/>
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
+
+    <!-- 存储 Plugin 引用用于 addPluginChunkTicket，生命周期由调用方保证 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ConnectedRailNodeDiscoverySession"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
 </FindBugsFilter>

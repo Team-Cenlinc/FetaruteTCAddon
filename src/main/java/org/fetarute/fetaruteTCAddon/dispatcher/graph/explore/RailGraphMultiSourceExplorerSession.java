@@ -30,6 +30,9 @@ public final class RailGraphMultiSourceExplorerSession {
   private final Map<RailBlockPos, Visit> visits = new HashMap<>();
   private final Map<EdgeId, Integer> bestLengths = new HashMap<>();
 
+  /** 记录每个锚点位置所属的节点，用于判断波前是否到达了另一个节点的锚点。 */
+  private final Map<RailBlockPos, NodeId> anchorOwners = new HashMap<>();
+
   private long processed;
 
   public RailGraphMultiSourceExplorerSession(
@@ -67,6 +70,8 @@ public final class RailGraphMultiSourceExplorerSession {
         if (!access.isRail(anchor)) {
           continue;
         }
+        // 记录锚点归属，用于后续判断"波前是否到达了另一个节点的锚点"
+        anchorOwners.putIfAbsent(anchor, owner);
         Visit existing = visits.get(anchor);
         if (existing == null || existing.distance > 0.0) {
           visits.put(anchor, new Visit(owner, 0.0));
@@ -104,6 +109,17 @@ public final class RailGraphMultiSourceExplorerSession {
         continue;
       }
 
+      // 如果当前位置是另一个节点的锚点（不是自己的锚点），则停止扩展
+      // 这确保波前不会"穿越"其他节点，从而只连接轨道上直接相邻的节点
+      NodeId currentAnchorOwner = anchorOwners.get(current);
+      if (currentAnchorOwner != null
+          && !currentAnchorOwner.value().equals(currentVisit.owner.value())
+          && currentVisit.distance > 0.0) {
+        // 当前位置是另一个节点的锚点，且我们是从远处走过来的（distance > 0）
+        // 说明我们刚好"到达"了另一个节点，应该停止继续扩展
+        continue;
+      }
+
       Set<RailBlockPos> neighbors = access.neighbors(current);
       if (onJunction != null && isJunction(access, current, neighbors)) {
         onJunction.accept(current);
@@ -124,6 +140,28 @@ public final class RailGraphMultiSourceExplorerSession {
           continue;
         }
 
+        // 检查邻居是否是另一个节点的锚点
+        NodeId neighborAnchorOwner = anchorOwners.get(neighbor);
+        boolean neighborIsOtherNodeAnchor =
+            neighborAnchorOwner != null
+                && !neighborAnchorOwner.value().equals(currentVisit.owner.value());
+
+        if (neighborIsOtherNodeAnchor) {
+          // 邻居是另一个节点的锚点：记录边，但不继续扩展
+          if (!currentVisit.owner.value().equals(neighborAnchorOwner.value())) {
+            int candidateInt = (int) Math.round(nextDistance);
+            if (candidateInt > 0) {
+              EdgeId edgeId = EdgeId.undirected(currentVisit.owner, neighborAnchorOwner);
+              Integer existingBest = bestLengths.get(edgeId);
+              if (existingBest == null || candidateInt < existingBest) {
+                bestLengths.put(edgeId, candidateInt);
+              }
+            }
+          }
+          // 不将邻居加入队列，因为它是另一个节点的锚点，该节点会自己从那里开始扩展
+          continue;
+        }
+
         Visit neighborVisit = visits.get(neighbor);
         if (neighborVisit == null || nextDistance + 1e-9 < neighborVisit.distance) {
           visits.put(neighbor, new Visit(currentVisit.owner, nextDistance));
@@ -132,7 +170,7 @@ public final class RailGraphMultiSourceExplorerSession {
         }
 
         if (!neighborVisit.owner.equals(currentVisit.owner)) {
-          // 两个不同源的波前在边 (current-neighbor) 上相遇：最短距离候选为 dist(a)+w+dist(b)
+          // 两个不同源的波前在非锚点的轨道上相遇：说明它们之间没有其他节点
           // 注意：如果两个 owner 的 NodeId 值相同（同一节点的多个 anchor），会形成自环，需要跳过
           if (currentVisit.owner.value().equals(neighborVisit.owner.value())) {
             // 同一节点的不同 anchor 之间存在轨道路径，不应创建自环边

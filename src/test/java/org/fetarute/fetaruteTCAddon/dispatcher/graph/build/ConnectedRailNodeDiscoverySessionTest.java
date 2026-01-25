@@ -35,7 +35,7 @@ final class ConnectedRailNodeDiscoverySessionTest {
 
     ConnectedRailNodeDiscoverySession session =
         new ConnectedRailNodeDiscoverySession(
-            world, Set.of(center), access, message -> {}, ChunkLoadOptions.disabled());
+            world, Set.of(center), access, message -> {}, ChunkLoadOptions.disabled(), null);
 
     Map<String, RailNodeRecord> nodes = new HashMap<>();
     session.step(System.nanoTime() + 1_000_000_000L, nodes);
@@ -60,7 +60,7 @@ final class ConnectedRailNodeDiscoverySessionTest {
 
     ConnectedRailNodeDiscoverySession session =
         new ConnectedRailNodeDiscoverySession(
-            world, Set.of(center), access, message -> {}, ChunkLoadOptions.disabled());
+            world, Set.of(center), access, message -> {}, ChunkLoadOptions.disabled(), null);
 
     Map<String, RailNodeRecord> nodes = new HashMap<>();
     session.step(System.nanoTime() + 1_000_000_000L, nodes);

@@ -25,7 +25,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
 
   private static final int DEFAULT_ANCHOR_SEARCH_RADIUS = 2;
-  private static final int DEFAULT_MAX_EDGE_DISTANCE_BLOCKS = 4096;
+  private static final int DEFAULT_MAX_EDGE_DISTANCE_BLOCKS = 512;
 
   private final SignNodeRegistry registry;
   private final Consumer<String> debugLogger;

@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 
+import com.bergerkiller.bukkit.common.utils.ChunkUtil;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import java.util.ArrayDeque;
@@ -18,6 +19,7 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
+import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
@@ -55,6 +57,7 @@ public final class ConnectedRailNodeDiscoverySession {
 
   private ChunkLoadOptions chunkLoadOptions = ChunkLoadOptions.disabled();
   private int chunkBudgetRemaining;
+  private Plugin ticketPlugin;
 
   private final ArrayDeque<Long> chunkLoadQueue = new ArrayDeque<>();
   private final Set<Long> pendingLoadChunkKeys = new HashSet<>();
@@ -63,6 +66,9 @@ public final class ConnectedRailNodeDiscoverySession {
   private final Set<Long> failedChunkKeys = new HashSet<>();
   private final Map<Long, CompletableFuture<Chunk>> inFlightChunkLoads = new HashMap<>();
   private final Map<Long, Set<RailBlockPos>> pendingRailCandidatesByChunk = new HashMap<>();
+
+  /** 持有 chunk ticket 的区块（chunkKey），用于在 build 完成后释放 */
+  private final Set<Long> ticketedChunkKeys = new HashSet<>();
 
   private BlockState[] currentStates;
   private int stateIndex;
@@ -78,11 +84,13 @@ public final class ConnectedRailNodeDiscoverySession {
       Set<RailBlockPos> seedRails,
       RailBlockAccess access,
       Consumer<String> debugLogger,
-      ChunkLoadOptions chunkLoadOptions) {
+      ChunkLoadOptions chunkLoadOptions,
+      Plugin plugin) {
     this.world = Objects.requireNonNull(world, "world");
     this.worldId = world.getUID();
     this.access = Objects.requireNonNull(access, "access");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    this.ticketPlugin = plugin;
     beginChunkLoading(chunkLoadOptions);
 
     for (RailBlockPos seed : seedRails) {
@@ -155,9 +163,26 @@ public final class ConnectedRailNodeDiscoverySession {
   public int step(long deadlineNanos, Map<String, RailNodeRecord> byNodeId) {
     Objects.requireNonNull(byNodeId, "byNodeId");
     int progressed = 0;
+    // 更激进地限制每 tick 处理量，避免 TrainCarts 轨道查询成为瓶颈
+    int maxRailStepsPerTick = 32;
+    int maxTileEntitiesPerTick = 128;
+    int railStepsThisTick = 0;
+    int tileEntitiesThisTick = 0;
+
     while (System.nanoTime() < deadlineNanos) {
       progressed += stepChunkLoads();
+
+      // 如果有大量异步加载排队，优先等待它们完成，减少主线程压力
+      if (inFlightChunkLoads.size() >= chunkLoadOptions.maxConcurrentLoads()) {
+        // 有足够多的异步加载正在进行，本 tick 暂停主线程工作
+        return progressed;
+      }
+
       if (currentStates != null) {
+        // 限制每 tick 处理的 tile entity 数量
+        if (tileEntitiesThisTick >= maxTileEntitiesPerTick) {
+          return progressed;
+        }
         if (stateIndex >= currentStates.length) {
           currentStates = null;
           stateIndex = 0;
@@ -165,6 +190,7 @@ public final class ConnectedRailNodeDiscoverySession {
         }
         BlockState state = currentStates[stateIndex++];
         scannedTileEntities++;
+        tileEntitiesThisTick++;
         progressed++;
         if (!(state instanceof Sign sign)) {
           continue;
@@ -255,12 +281,18 @@ public final class ConnectedRailNodeDiscoverySession {
         continue;
       }
 
+      // 限制每 tick 的轨道探索步数，避免 TrainCarts 轨道查询成为瓶颈
+      if (railStepsThisTick >= maxRailStepsPerTick) {
+        return progressed;
+      }
+
       RailBlockPos current = railQueue.poll();
       if (current == null) {
         return progressed;
       }
       processedRailSteps++;
       progressed++;
+      railStepsThisTick++;
 
       scanSignsFromRailPiece(current, byNodeId);
 
@@ -364,6 +396,12 @@ public final class ConnectedRailNodeDiscoverySession {
   private void processLoadedChunk(long key, int chunkX, int chunkZ) {
     processedChunkKeys.add(key);
     blockedChunkKeys.remove(key);
+    // 添加 chunk ticket 防止区块被卸载
+    if (ticketPlugin != null && !ticketedChunkKeys.contains(key)) {
+      if (world.addPluginChunkTicket(chunkX, chunkZ, ticketPlugin)) {
+        ticketedChunkKeys.add(key);
+      }
+    }
     queueChunk(chunkX, chunkZ);
     Set<RailBlockPos> candidates = pendingRailCandidatesByChunk.remove(key);
     if (candidates == null || candidates.isEmpty()) {
@@ -396,7 +434,8 @@ public final class ConnectedRailNodeDiscoverySession {
         processLoadedChunk(key, chunkX, chunkZ);
         continue;
       }
-      CompletableFuture<Chunk> future = world.getChunkAtAsync(chunkX, chunkZ, false, false);
+      // 使用 BKCommonLib 的异步加载，性能比 Paper 的 getChunkAtAsync 更好
+      CompletableFuture<Chunk> future = ChunkUtil.getChunkAsync(world, chunkX, chunkZ);
       inFlightChunkLoads.put(key, future);
       started++;
     }
@@ -450,6 +489,12 @@ public final class ConnectedRailNodeDiscoverySession {
     if (!queuedChunkKeys.add(key)) {
       return;
     }
+    // 为已加载的区块添加 ticket，防止在 discovery 和 edge 阶段之间被卸载
+    if (ticketPlugin != null && !ticketedChunkKeys.contains(key)) {
+      if (world.addPluginChunkTicket(chunkX, chunkZ, ticketPlugin)) {
+        ticketedChunkKeys.add(key);
+      }
+    }
     chunkQueue.add(world.getChunkAt(chunkX, chunkZ));
   }
 
@@ -465,6 +510,31 @@ public final class ConnectedRailNodeDiscoverySession {
    */
   public boolean isPaused() {
     return isIdle() && !blockedChunkKeys.isEmpty();
+  }
+
+  /**
+   * 释放所有持有的 chunk tickets。
+   *
+   * <p>在 build 完成或取消后调用，允许之前为了探索而加载的区块被正常卸载。
+   */
+  public void releaseChunkTickets() {
+    if (ticketPlugin == null || ticketedChunkKeys.isEmpty()) {
+      return;
+    }
+    for (long key : ticketedChunkKeys) {
+      int chunkX = chunkX(key);
+      int chunkZ = chunkZ(key);
+      world.removePluginChunkTicket(chunkX, chunkZ, ticketPlugin);
+    }
+    debugLogger.accept("释放 chunk tickets: " + ticketedChunkKeys.size() + " 个");
+    ticketedChunkKeys.clear();
+  }
+
+  /**
+   * @return 当前持有的 chunk ticket 数量。
+   */
+  public int ticketedChunks() {
+    return ticketedChunkKeys.size();
   }
 
   private boolean isIdle() {

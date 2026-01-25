@@ -16,6 +16,7 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeValidator;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
@@ -56,8 +57,10 @@ public final class RailGraphBuildJob implements Runnable {
 
   private static final int DEFAULT_ANCHOR_SEARCH_RADIUS = 2;
   private static final int SIGN_ANCHOR_SEARCH_RADIUS = 6;
-  private static final int DEFAULT_MAX_DISTANCE_BLOCKS = 4096;
-  private static final int DEFAULT_STEP_BATCH = 256;
+  private static final int DEFAULT_MAX_DISTANCE_BLOCKS = 512;
+
+  /** 边探索阶段每次调用的批量大小。减小该值可降低单帧卡顿但会延长总构建时间。 */
+  private static final int DEFAULT_STEP_BATCH = 64;
 
   private final JavaPlugin plugin;
   private final World world;
@@ -204,7 +207,7 @@ public final class RailGraphBuildJob implements Runnable {
         }
         this.connectedDiscovery =
             new ConnectedRailNodeDiscoverySession(
-                world, anchors, access, debugLogger, chunkLoadOptions);
+                world, anchors, access, debugLogger, chunkLoadOptions, plugin);
       } else {
         this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, debugLogger);
       }
@@ -243,6 +246,10 @@ public final class RailGraphBuildJob implements Runnable {
     }
     task.cancel();
     task = null;
+    // 取消时也释放 chunk tickets
+    if (connectedDiscovery != null) {
+      connectedDiscovery.releaseChunkTickets();
+    }
     return true;
   }
 
@@ -280,8 +287,19 @@ public final class RailGraphBuildJob implements Runnable {
         return;
       }
 
-      while (System.nanoTime() < deadline && !currentEdgeSession.isDone()) {
-        currentEdgeSession.step(DEFAULT_STEP_BATCH);
+      // 限制每 tick 最大步数，确保即使单步操作慢也不会卡住太久
+      int maxStepsPerTick = 128;
+      int stepsThisTick = 0;
+      while (System.nanoTime() < deadline
+          && !currentEdgeSession.isDone()
+          && stepsThisTick < maxStepsPerTick) {
+        // 每次只处理一小批，然后检查时间预算
+        int stepped = currentEdgeSession.step(DEFAULT_STEP_BATCH);
+        stepsThisTick += stepped;
+        // 如果时间紧张就提前退出，避免超出预算
+        if (System.nanoTime() >= deadline) {
+          break;
+        }
       }
       synchronized (this) {
         if (status != null) {
@@ -318,6 +336,9 @@ public final class RailGraphBuildJob implements Runnable {
             Optional.of(
                 new RailGraphBuildContinuation(
                     Instant.now(), connectedDiscovery, currentFinalNodes));
+      } else if (connectedDiscovery != null) {
+        // 非续跑状态，释放 chunk tickets
+        connectedDiscovery.releaseChunkTickets();
       }
       onFinish.accept(new RailGraphBuildOutcome(result, completion, nextContinuation));
     } catch (Throwable ex) {
@@ -376,6 +397,13 @@ public final class RailGraphBuildJob implements Runnable {
       List<RailNodeRecord> discovered = new ArrayList<>(nodesById.values());
       List<RailNodeRecord> filtered =
           filterNodesInComponent(discovered, visitedRails, currentAccess);
+      debugLogger.accept(
+          "HERE 节点过滤: discovered="
+              + discovered.size()
+              + " filtered="
+              + filtered.size()
+              + " visitedRails="
+              + visitedRails.size());
       finishDiscoveryAndStartEdgePhase(filtered, currentAccess);
       return;
     }
@@ -516,8 +544,12 @@ public final class RailGraphBuildJob implements Runnable {
       nodesById.put(railNode.id(), railNode);
     }
 
+    // 过滤跨轨道直连边（同一区间的不同轨道应通过 switcher 连接）
+    Map<EdgeId, Integer> filteredEdgeLengths =
+        RailEdgeValidator.filterCrossTrackEdges(edgeLengths, nodesById);
+
     Map<EdgeId, RailEdge> edgesById = new HashMap<>();
-    for (Map.Entry<EdgeId, Integer> entry : edgeLengths.entrySet()) {
+    for (Map.Entry<EdgeId, Integer> entry : filteredEdgeLengths.entrySet()) {
       EdgeId edgeId = entry.getKey();
       int lengthBlocks = entry.getValue();
       RailNode a = nodesById.get(edgeId.a());
