@@ -133,6 +133,11 @@ public final class RailGraphMultiSourceExplorerSession {
 
         if (!neighborVisit.owner.equals(currentVisit.owner)) {
           // 两个不同源的波前在边 (current-neighbor) 上相遇：最短距离候选为 dist(a)+w+dist(b)
+          // 注意：如果两个 owner 的 NodeId 值相同（同一节点的多个 anchor），会形成自环，需要跳过
+          if (currentVisit.owner.value().equals(neighborVisit.owner.value())) {
+            // 同一节点的不同 anchor 之间存在轨道路径，不应创建自环边
+            continue;
+          }
           double candidate = nextDistance + neighborVisit.distance;
           if (!Double.isFinite(candidate) || candidate <= 0.0) {
             continue;

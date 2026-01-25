@@ -88,17 +88,23 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
           continue;
         }
         RailState nextState = railType.takeJunction(railBlock, junction);
-        if (nextState == null) {
-          continue;
+        if (nextState != null) {
+          Block nextBlock = nextState.railBlock();
+          if (nextBlock != null) {
+            RailBlockPos neighborPos =
+                new RailBlockPos(nextBlock.getX(), nextBlock.getY(), nextBlock.getZ());
+            if (!pos.equals(neighborPos)) {
+              neighbors.add(neighborPos);
+            }
+            continue;
+          }
         }
-        Block nextBlock = nextState.railBlock();
-        if (nextBlock == null) {
-          continue;
-        }
-        RailBlockPos neighborPos =
-            new RailBlockPos(nextBlock.getX(), nextBlock.getY(), nextBlock.getZ());
-        if (!pos.equals(neighborPos)) {
-          neighbors.add(neighborPos);
+
+        // takeJunction 失败（可能是目标区块未加载），尝试从 junction 的方向信息预测目标位置
+        // 这对于 loadChunks 模式很重要：我们需要知道要加载哪个区块
+        RailBlockPos predicted = predictNeighborFromJunction(pos, junction);
+        if (predicted != null && !pos.equals(predicted)) {
+          neighbors.add(predicted);
         }
       }
       if (!neighbors.isEmpty()) {
@@ -116,6 +122,8 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       int cx = candidate.getX();
       int cz = candidate.getZ();
       if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
+        // 在 loadChunks 模式下，我们也返回未加载区块中的候选位置
+        neighbors.add(new RailBlockPos(candidate.getX(), candidate.getY(), candidate.getZ()));
         continue;
       }
       RailPiece neighborPiece = RailPiece.create(candidate);
@@ -130,6 +138,77 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       }
     }
     return Set.copyOf(neighbors);
+  }
+
+  /**
+   * 从 RailJunction 的位置/方向信息预测邻居位置。
+   *
+   * <p>当 takeJunction 因目标区块未加载而失败时，我们可以尝试从 junction 的运动方向预测目标位置。 这对于 TCCoasters
+   * 的长距离轨道段特别有用：即使目标区块未加载，我们仍能知道大致方向。
+   *
+   * @param currentPos 当前轨道位置
+   * @param junction 要预测的 junction
+   * @return 预测的邻居位置，如果无法预测则返回 null
+   */
+  private RailBlockPos predictNeighborFromJunction(RailBlockPos currentPos, RailJunction junction) {
+    if (junction == null) {
+      return null;
+    }
+
+    // 尝试从 junction.position() 获取方向信息
+    RailPath.Position junctionPos = junction.position();
+    if (junctionPos == null) {
+      return null;
+    }
+
+    // 获取运动方向向量
+    double motionX = junctionPos.motX;
+    double motionY = junctionPos.motY;
+    double motionZ = junctionPos.motZ;
+
+    // 如果方向向量为零，尝试使用 BlockFace
+    if (Math.abs(motionX) < 0.01 && Math.abs(motionY) < 0.01 && Math.abs(motionZ) < 0.01) {
+      BlockFace face = junctionPos.getMotionFace();
+      if (face != null && face != BlockFace.SELF) {
+        motionX = face.getModX();
+        motionY = face.getModY();
+        motionZ = face.getModZ();
+      }
+    }
+
+    // 归一化并扩展预测距离
+    // 对于普通轨道，预测 1-2 格；对于 TCC 长距离轨道，可能需要更大的预测距离
+    double length = Math.sqrt(motionX * motionX + motionY * motionY + motionZ * motionZ);
+    if (length < 0.01) {
+      return null;
+    }
+
+    // 预测几个可能的位置（1格、2格、4格、8格、16格）
+    // 返回第一个在不同区块的位置，便于触发区块加载
+    int[] distances = {1, 2, 4, 8, 16, 32};
+    int currentChunkX = currentPos.x() >> 4;
+    int currentChunkZ = currentPos.z() >> 4;
+
+    for (int dist : distances) {
+      int predictedX = currentPos.x() + (int) Math.round((motionX / length) * dist);
+      int predictedY = currentPos.y() + (int) Math.round((motionY / length) * dist);
+      int predictedZ = currentPos.z() + (int) Math.round((motionZ / length) * dist);
+
+      int predictedChunkX = predictedX >> 4;
+      int predictedChunkZ = predictedZ >> 4;
+
+      // 如果预测位置在不同区块，返回它（这样可以触发区块加载）
+      if (predictedChunkX != currentChunkX || predictedChunkZ != currentChunkZ) {
+        return new RailBlockPos(predictedX, predictedY, predictedZ);
+      }
+    }
+
+    // 如果所有预测都在当前区块内，返回最远的那个
+    int dist = distances[distances.length - 1];
+    return new RailBlockPos(
+        currentPos.x() + (int) Math.round((motionX / length) * dist),
+        currentPos.y() + (int) Math.round((motionY / length) * dist),
+        currentPos.z() + (int) Math.round((motionZ / length) * dist));
   }
 
   @Override

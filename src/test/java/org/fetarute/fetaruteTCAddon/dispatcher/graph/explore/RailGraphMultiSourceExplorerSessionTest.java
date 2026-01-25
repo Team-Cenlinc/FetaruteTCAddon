@@ -145,6 +145,88 @@ final class RailGraphMultiSourceExplorerSessionTest {
     assertTrue(junctions.contains(center));
   }
 
+  @Test
+  void doesNotCreateSelfLoopWhenSameNodeHasMultipleAnchors() {
+    // 模拟场景：同一节点（A）有两个 anchor，它们之间存在轨道路径
+    // 这不应该创建自环边 A->A
+    InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
+    RailBlockPos anchor1 = new RailBlockPos(0, 0, 0);
+    RailBlockPos anchor2 = new RailBlockPos(2, 0, 0);
+    RailBlockPos middle = new RailBlockPos(1, 0, 0);
+    access.connect(anchor1, middle, 1.0);
+    access.connect(middle, anchor2, 1.0);
+
+    NodeId a = NodeId.of("A");
+    // 同一节点有两个 anchor
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(Map.of(a, Set.of(anchor1, anchor2)), access, 64);
+
+    while (!session.isDone()) {
+      session.step(10);
+    }
+
+    Map<EdgeId, Integer> lengths = session.edgeLengths();
+    // 不应该有任何边，因为只有一个节点
+    assertTrue(lengths.isEmpty(), "不应创建自环边");
+  }
+
+  @Test
+  void handlesXCrossingWithMultipleSwitchers() {
+    // 模拟 X 字渡线场景：>-< 形状，6 个 switcher
+    // 这种情况下不应产生自环
+    InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
+
+    // 创建 X 形轨道：
+    //     S1 --- S3
+    //       \   /
+    //         X (center)
+    //       /   \
+    //     S2 --- S4
+    RailBlockPos s1 = new RailBlockPos(0, 0, 0);
+    RailBlockPos s2 = new RailBlockPos(0, 0, 2);
+    RailBlockPos s3 = new RailBlockPos(4, 0, 0);
+    RailBlockPos s4 = new RailBlockPos(4, 0, 2);
+    RailBlockPos center1 = new RailBlockPos(2, 0, 0);
+    RailBlockPos center2 = new RailBlockPos(2, 0, 2);
+
+    access.connect(s1, center1, 2.0);
+    access.connect(center1, s3, 2.0);
+    access.connect(s2, center2, 2.0);
+    access.connect(center2, s4, 2.0);
+    access.connect(center1, center2, 2.0); // 渡线连接
+
+    NodeId sw1 = NodeId.of("SW1");
+    NodeId sw2 = NodeId.of("SW2");
+    NodeId sw3 = NodeId.of("SW3");
+    NodeId sw4 = NodeId.of("SW4");
+
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(
+                sw1, Set.of(s1),
+                sw2, Set.of(s2),
+                sw3, Set.of(s3),
+                sw4, Set.of(s4)),
+            access,
+            64);
+
+    while (!session.isDone()) {
+      session.step(10);
+    }
+
+    Map<EdgeId, Integer> lengths = session.edgeLengths();
+
+    // 应该有边：SW1-SW3, SW2-SW4, SW1-SW2, SW1-SW4, SW2-SW3, SW3-SW4
+    // 但不应有任何自环
+    for (EdgeId edgeId : lengths.keySet()) {
+      assertFalse(edgeId.a().equals(edgeId.b()), "不应存在自环边: " + edgeId);
+    }
+
+    // 验证关键边存在
+    assertTrue(lengths.containsKey(EdgeId.undirected(sw1, sw3)), "SW1-SW3 边应存在");
+    assertTrue(lengths.containsKey(EdgeId.undirected(sw2, sw4)), "SW2-SW4 边应存在");
+  }
+
   /** 用于单元测试的内存轨道图：直接用邻接表描述 railNeighbors。 */
   private static final class InMemoryRailBlockAccess implements RailBlockAccess {
 

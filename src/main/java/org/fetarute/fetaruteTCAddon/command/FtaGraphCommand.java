@@ -48,10 +48,12 @@ import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ChunkLoadOptions;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.DuplicateNodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildCompletion;
@@ -65,6 +67,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideLister;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailSpeed;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphExplorer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphMultiSourceExplorerSession;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
@@ -5883,11 +5886,18 @@ public final class FtaGraphCommand {
           completion != null && completion.canReplaceComponents()
               ? RailGraphMerger.appendOrReplaceComponents(baseGraph.get(), result.graph())
               : RailGraphMerger.upsert(baseGraph.get(), result.graph());
-      List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(world.getUID(), merge.graph());
+
+      // 合并后重新探索边，以发现"跨分区"的桥接边
+      // 这确保了多次 build 的结果能正确连通
+      RailGraph graphWithBridgingEdges =
+          exploreBridgingEdges(world, merge.graph(), baseGraph.get(), result.graph());
+
+      List<RailNodeRecord> mergedNodes =
+          nodeRecordsFromGraph(world.getUID(), graphWithBridgingEdges);
       String signature = RailGraphSignature.signatureForNodes(mergedNodes);
       RailGraphBuildResult merged =
           new RailGraphBuildResult(
-              merge.graph(),
+              graphWithBridgingEdges,
               result.builtAt(),
               signature,
               mergedNodes,
@@ -5905,6 +5915,123 @@ public final class FtaGraphCommand {
     persistGraph(world, result);
     scheduleStationAutoSync(world, result.nodes());
     return new AppliedGraphBuild(result, Optional.empty());
+  }
+
+  /**
+   * 在合并后探索"桥接边"：发现 base 和 update 之间可能存在的边。
+   *
+   * <p>背景：当从多个位置分别 build 同一 component 的不同部分时，每次 build 只会发现当前可达区域内的边。 合并后，不同 build
+   * 结果之间可能存在轨道连通但未被发现的边。
+   *
+   * <p>该方法会找出"边界节点"（来自 base 但与 update 有邻接可能的节点），使用这些节点重新探索边。
+   *
+   * <p>实现策略：使用合并图中所有节点重新运行一次同步的边探索（耗时较短，因为只探索已加载区块内的轨道）。 新发现的边会追加到合并结果中。
+   */
+  private RailGraph exploreBridgingEdges(
+      World world, RailGraph merged, RailGraph base, RailGraph update) {
+    if (merged == null || merged.nodes().isEmpty()) {
+      return merged;
+    }
+
+    // 找出"边界节点"：base 中有但 update 中没有的节点，以及 update 中有但 base 中没有的节点
+    // 这些节点之间可能存在未被发现的桥接边
+    Set<NodeId> baseNodeIds = new HashSet<>();
+    for (RailNode node : base.nodes()) {
+      baseNodeIds.add(node.id());
+    }
+    Set<NodeId> updateNodeIds = new HashSet<>();
+    for (RailNode node : update.nodes()) {
+      updateNodeIds.add(node.id());
+    }
+
+    // 只有当 base 和 update 都有节点时才需要探索桥接边
+    if (baseNodeIds.isEmpty() || updateNodeIds.isEmpty()) {
+      return merged;
+    }
+
+    // 检查是否有交集（如果完全不相交，探索桥接边可能更有意义）
+    boolean hasOverlap = false;
+    for (NodeId id : updateNodeIds) {
+      if (baseNodeIds.contains(id)) {
+        hasOverlap = true;
+        break;
+      }
+    }
+
+    // 使用合并后的所有节点，重新探索边
+    // 这里采用同步探索，因为只需要探索已加载区块内的轨道，耗时较短
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
+    Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
+
+    for (RailNode node : merged.nodes()) {
+      Vector pos = node.worldPosition();
+      RailBlockPos center = new RailBlockPos(pos.getBlockX(), pos.getBlockY(), pos.getBlockZ());
+      int radius = node.type() == NodeType.SWITCHER ? 2 : 6;
+      Set<RailBlockPos> anchors = access.findNearestRailBlocks(center, radius);
+      if (!anchors.isEmpty()) {
+        anchorsByNode.put(node.id(), anchors);
+      }
+    }
+
+    if (anchorsByNode.size() < 2) {
+      return merged;
+    }
+
+    // 执行边探索
+    Map<EdgeId, Integer> newEdgeLengths =
+        RailGraphExplorer.exploreEdgeLengths(anchorsByNode, access, 4096);
+
+    // 检查是否有新边
+    Map<EdgeId, RailEdge> edgesById = new HashMap<>();
+    for (RailEdge edge : merged.edges()) {
+      edgesById.put(edge.id(), edge);
+    }
+
+    int newEdgeCount = 0;
+    Map<NodeId, RailNode> nodesById = new HashMap<>();
+    for (RailNode node : merged.nodes()) {
+      nodesById.put(node.id(), node);
+    }
+
+    for (Map.Entry<EdgeId, Integer> entry : newEdgeLengths.entrySet()) {
+      EdgeId edgeId = entry.getKey();
+      if (edgesById.containsKey(edgeId)) {
+        continue; // 边已存在
+      }
+      int lengthBlocks = entry.getValue();
+      RailNode a = nodesById.get(edgeId.a());
+      RailNode b = nodesById.get(edgeId.b());
+      if (a == null || b == null) {
+        continue;
+      }
+      edgesById.put(
+          edgeId,
+          new RailEdge(
+              edgeId,
+              edgeId.a(),
+              edgeId.b(),
+              lengthBlocks,
+              0.0,
+              true,
+              Optional.of(new RailEdgeMetadata(a.waypointMetadata(), b.waypointMetadata()))));
+      newEdgeCount++;
+    }
+
+    if (newEdgeCount == 0) {
+      return merged;
+    }
+
+    plugin.getLoggerManager().debug("合并后发现 " + newEdgeCount + " 条桥接边");
+
+    // 保留原有的 blocked edges
+    Set<EdgeId> blockedEdges = new HashSet<>();
+    for (RailEdge edge : edgesById.values()) {
+      if (merged.isBlocked(edge.id())) {
+        blockedEdges.add(edge.id());
+      }
+    }
+
+    return new SimpleRailGraph(nodesById, edgesById, blockedEdges);
   }
 
   /** build 完成后异步自愈 Station 主数据（用于 PIDS/站点显示）。 */
