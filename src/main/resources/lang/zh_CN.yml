@@ -772,6 +772,38 @@ command:
       route-mismatch: "<prefix> <red>首个 stop 与车库不匹配</red> <gray>(route=<white><route></white>, node=<white><node></white>)</gray>"
       success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
 
+  train:
+    help:
+      header: "<prefix> <dark_aqua>列车配置命令</dark_aqua>"
+      entry-config-list: "  <gray>•</gray> <white>/fta train config list [列车]</white> <gray>- 查看配置</gray>"
+      entry-config-set: "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel</white> <gray>- 设置配置</gray>"
+      entry-train-edit: "  <gray>•</gray> <white>/train edit <列车名></white> <gray>- 选中列车以省略参数</gray>"
+      entry-selector: "  <gray>•</gray> <white>@train[...]</white> <gray>- 使用选择器批量操作</gray>"
+      hover-config-list: "<gray>查看列车的速度/加减速配置</gray>"
+      hover-config-set: "<gray>设置列车的速度/加减速配置</gray>"
+      hover-train-edit: "<gray>使用 TrainCarts 原生命令选中列车</gray>"
+      hover-selector: "<gray>使用 TrainCarts 选择器语法</gray>"
+    config:
+      set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 配置已更新: type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
+      list: "<prefix> 列车 <dark_aqua><train></dark_aqua>: type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
+      not-found: "<prefix> <red>未找到列车: <train></red>"
+      invalid-selector: "<prefix> <red>无效的选择器语法: <raw></red>"
+      no-selection: "<prefix> <yellow>未指定列车，请先选中列车或提供列车名/选择器</yellow>"
+      no-selection-entry-train-edit: "  <gray>•</gray> <white>/train edit <列车名></white>"
+      no-selection-hover-train-edit: "<gray>使用 TrainCarts 命令选中列车</gray>"
+      no-selection-entry-selector: "  <gray>•</gray> <white>@train[...]</white> <gray>选择器</gray>"
+      no-selection-hover-selector: "<gray>使用选择器语法</gray>"
+    debug:
+      unavailable: "<prefix> <red>运行时调度服务尚未就绪</red>"
+      no-data: "<prefix> <yellow>列车 <train> 无诊断数据（可能未被调度接管）</yellow>"
+      list-empty: "<prefix> <yellow>当前无缓存的诊断数据</yellow>"
+      list-header: "<prefix> <dark_aqua>诊断数据 (<count> 条)</dark_aqua>"
+      header: "<prefix> <dark_aqua>━━━ 列车 <train> ━━━</dark_aqua> <gray>路线: <route></gray>"
+      nodes: "  <gray>节点:</gray> <white><current></white> <gray>→</gray> <white><next></white>"
+      speed: "  <gray>速度:</gray> 当前=<white><current></white> 目标=<white><target></white> 边限速=<white><edge_limit></white> 建议=<white><recommended></white> <gray>bps</gray>"
+      lookahead: "  <gray>前瞻:</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> <gray>blocks</gray>"
+      signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white>"
+
 enum:
   line-service-type:
     metro: "地铁"

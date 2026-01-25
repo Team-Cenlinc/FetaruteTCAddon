@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -15,9 +16,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  *
  * <ul>
  *   <li>取边的 {@code baseSpeedLimit}（若为 0 或未设则使用 fallback）
- *   <li>考虑初速（当前速度）与末速（下一边限速或 0）
+ *   <li>考虑初速（当前速度）与末速（下一边限速或 approaching 限速）
  *   <li>若需加速/减速，用运动学公式计算实际用时
  * </ul>
+ *
+ * <h2>Approaching 限速</h2>
+ *
+ * <p>当目标节点是站点/车库时，最后一段边会考虑 approaching 限速（通常较低，如 4 bps）。 这能更准确地估算进站时间。
  *
  * <h2>简化假设</h2>
  *
@@ -28,24 +33,42 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * </ul>
  *
  * @see TrainMotionParams
+ * @see ApproachingConfig
  */
 public final class DynamicTravelTimeModel implements RailTravelTimeModel {
 
   private final TrainMotionParams motionParams;
   private final double fallbackSpeedBps;
+  private final ApproachingConfig approachingConfig;
 
   /**
-   * 构造动态模型。
+   * 构造动态模型（不含 approaching 限速）。
    *
    * @param motionParams 列车运动参数（加减速）
    * @param fallbackSpeedBps 当边未设限速时的默认速度（blocks/s），必须为正
    */
   public DynamicTravelTimeModel(TrainMotionParams motionParams, double fallbackSpeedBps) {
+    this(motionParams, fallbackSpeedBps, ApproachingConfig.disabled());
+  }
+
+  /**
+   * 构造动态模型（含 approaching 限速）。
+   *
+   * @param motionParams 列车运动参数（加减速）
+   * @param fallbackSpeedBps 当边未设限速时的默认速度（blocks/s），必须为正
+   * @param approachingConfig approaching 限速配置
+   */
+  public DynamicTravelTimeModel(
+      TrainMotionParams motionParams,
+      double fallbackSpeedBps,
+      ApproachingConfig approachingConfig) {
     this.motionParams = Objects.requireNonNull(motionParams, "motionParams");
     if (!Double.isFinite(fallbackSpeedBps) || fallbackSpeedBps <= 0.0) {
       throw new IllegalArgumentException("fallbackSpeedBps 必须为正数");
     }
     this.fallbackSpeedBps = fallbackSpeedBps;
+    this.approachingConfig =
+        approachingConfig != null ? approachingConfig : ApproachingConfig.disabled();
   }
 
   @Override
@@ -68,12 +91,102 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
   }
 
   /**
+   * 覆盖 pathTravelTime 以支持 approaching 限速。
+   *
+   * <p>最后一段边会根据目标节点类型应用 approaching 限速（站点/车库）。
+   */
+  @Override
+  public Optional<Duration> pathTravelTime(
+      RailGraph graph, List<NodeId> nodes, List<RailEdge> edges) {
+    Objects.requireNonNull(nodes, "nodes");
+    Objects.requireNonNull(edges, "edges");
+    if (edges.isEmpty()) {
+      return Optional.of(Duration.ZERO);
+    }
+    if (nodes.size() != edges.size() + 1) {
+      throw new IllegalArgumentException("nodes 与 edges 数量不匹配");
+    }
+
+    Duration total = Duration.ZERO;
+    int lastIndex = edges.size() - 1;
+
+    for (int i = 0; i < edges.size(); i++) {
+      RailEdge edge = edges.get(i);
+      NodeId from = nodes.get(i);
+      NodeId to = nodes.get(i + 1);
+
+      Optional<Duration> dt;
+      if (i == lastIndex) {
+        // 最后一段边：考虑 approaching 限速
+        dt = edgeTravelTimeWithApproaching(graph, edge, from, to);
+      } else {
+        dt = edgeTravelTime(graph, edge, from, to);
+      }
+
+      if (dt.isEmpty()) {
+        return Optional.empty();
+      }
+      total = total.plus(dt.get());
+    }
+    return Optional.of(total);
+  }
+
+  /** 计算最后一段边的旅行时间（考虑 approaching 限速）。 */
+  private Optional<Duration> edgeTravelTimeWithApproaching(
+      RailGraph graph, RailEdge edge, NodeId from, NodeId to) {
+    if (edge == null) {
+      return Optional.empty();
+    }
+    int lengthBlocks = edge.lengthBlocks();
+    if (lengthBlocks <= 0) {
+      return Optional.empty();
+    }
+
+    double targetSpeed = resolveEdgeSpeed(edge);
+    double finalSpeed = resolveApproachingSpeed(to, targetSpeed);
+
+    // 使用精确计算：初速=targetSpeed，目标速度=targetSpeed，末速=finalSpeed
+    double seconds =
+        computeTravelTimeWithSpeeds(lengthBlocks, targetSpeed, targetSpeed, finalSpeed);
+    if (!Double.isFinite(seconds) || seconds < 0.0) {
+      return Optional.empty();
+    }
+    long millis = Math.round(seconds * 1000.0);
+    return Optional.of(Duration.ofMillis(Math.max(0L, millis)));
+  }
+
+  /** 根据目标节点类型确定 approaching 限速。 */
+  private double resolveApproachingSpeed(NodeId targetNode, double defaultSpeed) {
+    if (targetNode == null || !approachingConfig.enabled()) {
+      return defaultSpeed;
+    }
+
+    // 检查是否为站点
+    if (approachingConfig.isStation().test(targetNode)) {
+      double limit = approachingConfig.stationApproachSpeedBps();
+      if (limit > 0 && limit < defaultSpeed) {
+        return limit;
+      }
+    }
+
+    // 检查是否为车库
+    if (approachingConfig.isDepot().test(targetNode)) {
+      double limit = approachingConfig.depotApproachSpeedBps();
+      if (limit > 0 && limit < defaultSpeed) {
+        return limit;
+      }
+    }
+
+    return defaultSpeed;
+  }
+
+  /**
    * 带初速和末速的精确旅行时间计算。
    *
    * @param lengthBlocks 边长度（blocks）
    * @param initialSpeedBps 初速（blocks/s），非负
    * @param targetSpeedBps 边限速（blocks/s），正数
-   * @param finalSpeedBps 末速（blocks/s），非负，通常为下一边限速或 0
+   * @param finalSpeedBps 末速（blocks/s），非负，通常为下一边限速或 approaching 限速
    * @return 旅行时间（秒）
    */
   public double computeTravelTimeWithSpeeds(

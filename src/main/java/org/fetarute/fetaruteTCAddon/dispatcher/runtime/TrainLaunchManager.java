@@ -11,6 +11,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * 列车控车执行器：把目标速度/加减速参数落到 TrainCarts。
  *
  * <p>职责：速度曲线、限速、发车/停车动作。计算目标速度上限/占用判定仍由调度层完成。
+ *
+ * <p>加减速优化：
+ *
+ * <ul>
+ *   <li>减速：使用物理公式 v = √(2·a·d) 计算安全制动速度
+ *   <li>加速：考虑前方约束点，避免"刚加速就要减速"
+ * </ul>
  */
 public final class TrainLaunchManager {
 
@@ -49,7 +56,9 @@ public final class TrainLaunchManager {
       return;
     }
     properties.setSpeedLimit(targetBpt);
-    if (aspect == SignalAspect.PROCEED && allowLaunch && train != null && !train.isMoving()) {
+    // 非 STOP 信号都允许发车（CAUTION/PROCEED_WITH_CAUTION 以较慢速度）
+    boolean canLaunch = allowLaunch && train != null && !train.isMoving();
+    if (canLaunch) {
       train.launch(targetBpt, accelBpt2);
     }
   }

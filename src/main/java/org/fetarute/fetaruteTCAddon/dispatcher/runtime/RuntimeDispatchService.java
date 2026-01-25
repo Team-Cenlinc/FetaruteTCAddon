@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -41,9 +42,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnosticsCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyLookaheadResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
@@ -100,6 +103,7 @@ public final class RuntimeDispatchService {
       new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
   private final java.util.concurrent.ConcurrentMap<String, Integer> operatorPriorityCache =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
@@ -129,6 +133,25 @@ public final class RuntimeDispatchService {
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
   public void setLayoverListener(Consumer<LayoverRegistry.LayoverCandidate> listener) {
     this.layoverListener = listener != null ? listener : candidate -> {};
+  }
+
+  /**
+   * 获取指定列车的控车诊断数据。
+   *
+   * @param trainName 列车名
+   * @return 诊断数据（如果缓存命中且未过期）
+   */
+  public Optional<ControlDiagnostics> getDiagnostics(String trainName) {
+    return diagnosticsCache.get(trainName, Instant.now());
+  }
+
+  /**
+   * 获取所有缓存的诊断数据快照（用于调试列表）。
+   *
+   * @return 未过期的诊断数据映射
+   */
+  public java.util.Map<String, ControlDiagnostics> getDiagnosticsSnapshot() {
+    return diagnosticsCache.snapshot(Instant.now());
   }
 
   /**
@@ -279,12 +302,18 @@ public final class RuntimeDispatchService {
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(trainName);
         }
+        // TERM 标记：清除 destination 防止继续寻路
+        // 不强制停车，让 handleSignalTick 的 speed curve 自然减速
+        properties.clearDestinationRoute();
+        properties.setDestination("");
         handleLayoverRegistrationIfNeeded(trainName, route, currentNode, properties);
         debugLogger.accept(
             "调度终到: 进入 Layover train="
                 + trainName
                 + " node="
                 + currentNode.value()
+                + " idx="
+                + currentIndex
                 + " route="
                 + route.id().value());
         return;
@@ -298,6 +327,9 @@ public final class RuntimeDispatchService {
       Instant now = Instant.now();
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+      // 无下一目标时清除 destination 防止继续寻路
+      properties.clearDestinationRoute();
+      properties.setDestination("");
       debugLogger.accept(
           "调度推进结束: 已到终点 train="
               + trainName
@@ -353,9 +385,26 @@ public final class RuntimeDispatchService {
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
+    // 诊断：输出请求资源与判定结果
+    debugLogger.accept(
+        "调度推进判定: train="
+            + trainName
+            + " idx="
+            + currentIndex
+            + " node="
+            + definition.nodeId().value()
+            + " resources="
+            + request.resourceList().size()
+            + " allowed="
+            + decision.allowed()
+            + " blockers="
+            + decision.blockers().size()
+            + " signal="
+            + decision.signal());
     if (!decision.allowed()) {
-      OptionalLong lookaheadDistance =
-          OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
+      var lookahead =
+          SignalLookahead.compute(decision, context, SignalAspect.STOP, this::isApproachingNode);
+      OptionalLong lookaheadDistance = lookahead.minConstraintDistance();
       SignalAspect aspect = deriveBlockedAspect(decision, context);
       debugLogger.accept(
           "调度推进阻塞: train="
@@ -378,7 +427,8 @@ public final class RuntimeDispatchService {
           nextTarget.get(),
           graph,
           false,
-          lookaheadDistance);
+          lookaheadDistance,
+          lookahead);
       return;
     }
     occupancyManager.acquire(request);
@@ -684,20 +734,26 @@ public final class RuntimeDispatchService {
     }
 
     if (currentIndex >= route.waypoints().size() - 1) {
-      // 终点停车逻辑：
-      // 1. 无论 forceApply 均强制 setSpeedLimit(0)+stop()，防止滑行穿站。
-      // 2. 若为 REUSE_AT_TERM，补注册 Layover，确保列车进入待命池。
-      // 3. 终点停车与 DSTY 互斥，优先销毁。
+      // 终点：检查列车是否已停止
+      // 若已停止，清理 destination 并注册 Layover
+      // 若仍在运动，设置 speedLimit=0 让 TrainCarts 自然减速
+      double currentSpeed = train.currentSpeedBlocksPerTick();
+      boolean isStopped = Math.abs(currentSpeed) < 0.001;
       properties.setSpeedLimit(0.0);
-      train.stop();
-      if (route.lifecycleMode()
-          == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
-        int lastIndex = Math.max(0, route.waypoints().size() - 1);
-        NodeId terminalNode = route.waypoints().get(lastIndex);
-        if (layoverRegistry.get(trainName).isEmpty()) {
-          handleLayoverRegistrationIfNeeded(trainName, route, terminalNode, properties);
+      if (isStopped) {
+        train.stop(); // 确保完全停止
+        properties.clearDestinationRoute();
+        properties.setDestination("");
+        if (route.lifecycleMode()
+            == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+          int lastIndex = Math.max(0, route.waypoints().size() - 1);
+          NodeId terminalNode = route.waypoints().get(lastIndex);
+          if (layoverRegistry.get(trainName).isEmpty()) {
+            handleLayoverRegistrationIfNeeded(trainName, route, terminalNode, properties);
+          }
         }
       }
+      // 未停止时：speedLimit=0 已设置，让 TrainCarts 自然减速
       return;
     }
     Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());
@@ -727,12 +783,28 @@ public final class RuntimeDispatchService {
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
-    if (decision.allowed()) {
-      occupancyManager.acquire(request);
-    }
     SignalAspect nextAspect =
         decision.allowed() ? decision.signal() : deriveBlockedAspect(decision, context);
     SignalAspect lastAspect = progressEntry.lastSignal();
+    // 诊断：仅在信号变化时输出（减少刷屏）
+    if (lastAspect != nextAspect) {
+      debugLogger.accept(
+          "信号Tick变化: train="
+              + trainName
+              + " idx="
+              + currentIndex
+              + " "
+              + lastAspect
+              + " -> "
+              + nextAspect
+              + " allowed="
+              + decision.allowed()
+              + " blockers="
+              + decision.blockers().size());
+    }
+    if (decision.allowed()) {
+      occupancyManager.acquire(request);
+    }
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
     if (allowLaunch) {
       progressRegistry.updateSignal(trainName, nextAspect, Instant.now());
@@ -779,16 +851,17 @@ public final class RuntimeDispatchService {
         return;
       }
     }
-    // 信号非放行时，按 lookahead 阻塞距离提前下压速度，避免过点再减速。
-    if (runtimeSettings.speedCurveEnabled() && nextAspect != SignalAspect.PROCEED) {
-      OptionalLong lookaheadDistance =
-          OccupancyLookaheadResolver.resolveBlockerDistance(decision, context);
-      if (lookaheadDistance.isPresent()) {
+    // 信号前瞻：计算到前方所有限制点的距离，取最近的作为减速依据
+    SignalLookahead.LookaheadResult lookahead = null;
+    if (runtimeSettings.speedCurveEnabled()) {
+      lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
+      OptionalLong constraintDistance = lookahead.minConstraintDistance();
+      if (constraintDistance.isPresent()) {
         if (distanceOpt.isPresent()) {
           distanceOpt =
-              OptionalLong.of(Math.min(distanceOpt.getAsLong(), lookaheadDistance.getAsLong()));
+              OptionalLong.of(Math.min(distanceOpt.getAsLong(), constraintDistance.getAsLong()));
         } else {
-          distanceOpt = lookaheadDistance;
+          distanceOpt = constraintDistance;
         }
       }
     }
@@ -805,7 +878,8 @@ public final class RuntimeDispatchService {
         nextNode.get(),
         graph,
         allowLaunch,
-        distanceOpt);
+        distanceOpt,
+        lookahead);
     if (stallDecision.triggerFailover()) {
       triggerStallFailover(
           train,
@@ -1113,17 +1187,47 @@ public final class RuntimeDispatchService {
       RailGraph graph,
       boolean allowLaunch,
       OptionalLong distanceOpt) {
+    applyControl(
+        train,
+        properties,
+        aspect,
+        route,
+        currentNode,
+        nextNode,
+        graph,
+        allowLaunch,
+        distanceOpt,
+        null);
+  }
+
+  /**
+   * 将信号许可映射为速度/制动控制（含前瞻数据）。
+   *
+   * <p>PROCEED 发车并恢复巡航速度；CAUTION 限速；STOP 停车并清空限速。
+   *
+   * @param lookahead 前瞻结果（可选），用于记录诊断数据
+   */
+  private void applyControl(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      RouteDefinition route,
+      NodeId currentNode,
+      NodeId nextNode,
+      RailGraph graph,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      SignalLookahead.LookaheadResult lookahead) {
     if (properties == null || aspect == null || route == null) {
       return;
     }
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
-    double targetBps =
-        resolveTargetSpeed(train != null ? train.worldId() : null, aspect, route, nextNode);
+    // 先获取边限速作为 PROCEED 基准（而非固定 defaultSpeed）
     double edgeLimit =
         resolveEdgeSpeedLimit(train, graph, currentNode, nextNode, configManager.current());
-    if (edgeLimit > 0.0) {
-      targetBps = Math.min(targetBps, edgeLimit);
-    }
+    double targetBps =
+        resolveTargetSpeed(
+            train != null ? train.worldId() : null, aspect, route, nextNode, edgeLimit);
     if (allowLaunch && train != null && !train.isMoving()) {
       maybeReverseForLaunch(train, currentNode, nextNode, graph);
     }
@@ -1136,6 +1240,64 @@ public final class RuntimeDispatchService {
         allowLaunch,
         distanceOpt,
         configManager.current().runtimeSettings());
+
+    // 记录诊断数据
+    recordDiagnostics(
+        train,
+        properties,
+        aspect,
+        route,
+        currentNode,
+        nextNode,
+        targetBps,
+        edgeLimit,
+        allowLaunch,
+        lookahead);
+  }
+
+  /** 记录控车诊断数据到缓存。 */
+  private void recordDiagnostics(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      RouteDefinition route,
+      NodeId currentNode,
+      NodeId nextNode,
+      double targetBps,
+      double edgeLimitBps,
+      boolean allowLaunch,
+      SignalLookahead.LookaheadResult lookahead) {
+    if (properties == null) {
+      return;
+    }
+    String trainName = properties.getTrainName();
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    Instant now = Instant.now();
+    double currentSpeedBps =
+        train != null ? train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND : 0.0;
+
+    var builder =
+        new ControlDiagnostics.Builder()
+            .trainName(trainName)
+            .routeId(route != null ? route.id() : null)
+            .currentNode(currentNode)
+            .nextNode(nextNode)
+            .currentSpeedBps(currentSpeedBps)
+            .targetSpeedBps(targetBps)
+            .edgeLimitBps(edgeLimitBps)
+            .currentSignal(aspect)
+            .allowLaunch(allowLaunch)
+            .sampledAt(now);
+
+    if (lookahead != null) {
+      builder.lookahead(lookahead);
+    } else {
+      builder.effectiveSignal(aspect);
+    }
+
+    diagnosticsCache.put(builder.build(), now);
   }
 
   private OptionalLong resolveShortestDistance(RailGraph graph, NodeId from, NodeId to) {
@@ -1618,14 +1780,16 @@ public final class RuntimeDispatchService {
   /**
    * 根据许可等级与进站限速计算目标速度（blocks/s）。
    *
-   * <p>PROCEED 基准速度取调度图默认速度；警示信号使用连通分量的 caution 速度上限（无覆盖时回退为配置默认值）。
+   * <p>PROCEED 基准速度取边限速（若有效），否则回退到调度图默认速度；警示信号使用连通分量的 caution 速度上限（无覆盖时回退为配置默认值）。
    */
   private double resolveTargetSpeed(
-      UUID worldId, SignalAspect aspect, RouteDefinition route, NodeId nextNode) {
+      UUID worldId, SignalAspect aspect, RouteDefinition route, NodeId nextNode, double edgeLimit) {
     double defaultSpeed = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
+    // PROCEED 优先使用边限速，无效时回退 defaultSpeed
+    double proceedBase = edgeLimit > 0.0 ? edgeLimit : defaultSpeed;
     double base =
         switch (aspect) {
-          case PROCEED -> defaultSpeed;
+          case PROCEED -> proceedBase;
           case PROCEED_WITH_CAUTION, CAUTION -> resolveCautionSpeed(worldId, nextNode);
           case STOP -> 0.0;
         };
@@ -1688,6 +1852,15 @@ public final class RuntimeDispatchService {
         .waypointMetadata()
         .map(meta -> meta.kind() == WaypointKind.DEPOT)
         .orElse(false);
+  }
+
+  /**
+   * 判断节点是否需要 approaching 限速（Station 或 Depot）。
+   *
+   * <p>用于信号前瞻计算：提前感知需要减速的目标节点。
+   */
+  private boolean isApproachingNode(NodeId nodeId) {
+    return isStationNode(nodeId) || isDepotNode(nodeId);
   }
 
   private String resolveDestinationName(NodeId nodeId) {
@@ -1767,6 +1940,11 @@ public final class RuntimeDispatchService {
     return Optional.empty();
   }
 
+  /**
+   * 解析从 from 到 to 的边限速。
+   *
+   * <p>优先查找直接相邻边；若不存在则尝试最短路径，取路径上所有边限速的最小值。
+   */
   private double resolveEdgeSpeedLimit(
       RuntimeTrainHandle train,
       RailGraph graph,
@@ -1776,15 +1954,32 @@ public final class RuntimeDispatchService {
     if (train == null || graph == null || from == null || to == null || config == null) {
       return -1.0;
     }
-    Optional<RailEdge> edgeOpt = findEdge(graph, from, to);
-    if (edgeOpt.isEmpty()) {
+    double defaultSpeed = config.graphSettings().defaultSpeedBlocksPerSecond();
+    UUID worldId = train.worldId();
+    Instant now = Instant.now();
+
+    // 1. 尝试直接相邻边
+    Optional<RailEdge> directEdgeOpt = findEdge(graph, from, to);
+    if (directEdgeOpt.isPresent()) {
+      return railGraphService.effectiveSpeedLimitBlocksPerSecond(
+          worldId, directEdgeOpt.get(), now, defaultSpeed);
+    }
+
+    // 2. 回退：通过最短路径查找，取路径上所有边的最小限速
+    Optional<RailGraphPath> pathOpt =
+        pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+    if (pathOpt.isEmpty() || pathOpt.get().edges().isEmpty()) {
       return -1.0;
     }
-    return railGraphService.effectiveSpeedLimitBlocksPerSecond(
-        train.worldId(),
-        edgeOpt.get(),
-        Instant.now(),
-        config.graphSettings().defaultSpeedBlocksPerSecond());
+    double minSpeed = Double.MAX_VALUE;
+    for (RailEdge edge : pathOpt.get().edges()) {
+      double edgeSpeed =
+          railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
+      if (edgeSpeed > 0.0 && edgeSpeed < minSpeed) {
+        minSpeed = edgeSpeed;
+      }
+    }
+    return minSpeed == Double.MAX_VALUE ? defaultSpeed : minSpeed;
   }
 
   private Optional<RailEdge> findEdge(RailGraph graph, NodeId from, NodeId to) {

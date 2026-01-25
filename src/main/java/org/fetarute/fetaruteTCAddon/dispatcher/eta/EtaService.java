@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.cache.EtaCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ArrivingClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ClearanceModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DwellModel;
@@ -110,11 +111,11 @@ public final class EtaService {
   private final ArrivingClassifier arrivingClassifier = new ArrivingClassifier();
   private final WaitEstimator waitEstimator;
 
-  /** 动态旅行时间模型（考虑边限速与加减速）。 */
-  private final DynamicTravelTimeModel dynamicTravelTimeModel;
+  /** 动态旅行时间模型（考虑边限速、加减速与 approaching 限速）。 */
+  private volatile DynamicTravelTimeModel dynamicTravelTimeModel;
 
   /** 适配层，将 DynamicTravelTimeModel 包装为 TravelTimeModel 供现有逻辑使用。 */
-  private final TravelTimeModel travelTimeModel;
+  private volatile TravelTimeModel travelTimeModel;
 
   private final EtaCache<String, EtaResult> trainCache = new EtaCache<>(Duration.ofMillis(800));
   private final EtaCache<String, EtaResult> ticketCache = new EtaCache<>(Duration.ofMillis(1200));
@@ -173,7 +174,9 @@ public final class EtaService {
   }
 
   /**
-   * 绑定 SignNodeRegistry 与配置，用于未发车列车的配置推断。
+   * 绑定 SignNodeRegistry 与配置，用于未发车列车的配置推断与 approaching 限速。
+   *
+   * <p>调用此方法后会重建动态旅行时间模型，加入 approaching 限速支持。
    *
    * @param signNodeRegistry 牌子注册表
    * @param configView 配置视图
@@ -182,6 +185,79 @@ public final class EtaService {
       SignNodeRegistry signNodeRegistry, ConfigManager.ConfigView configView) {
     this.signNodeRegistry = signNodeRegistry;
     this.configView = configView;
+
+    // 重建动态模型，加入 approaching 限速
+    rebuildTravelTimeModel();
+  }
+
+  /** 重建动态旅行时间模型（使用最新的 configView 和 signNodeRegistry）。 */
+  private void rebuildTravelTimeModel() {
+    ApproachingConfig approachingConfig = buildApproachingConfig();
+    this.dynamicTravelTimeModel =
+        new DynamicTravelTimeModel(
+            DynamicTravelTimeModel.TrainMotionParams.defaults(),
+            DEFAULT_FALLBACK_SPEED_BPS,
+            approachingConfig);
+    this.travelTimeModel = new TravelTimeModel(dynamicTravelTimeModel);
+  }
+
+  /** 根据当前配置构建 ApproachingConfig。 */
+  private ApproachingConfig buildApproachingConfig() {
+    ConfigManager.ConfigView config = this.configView;
+    SignNodeRegistry registry = this.signNodeRegistry;
+
+    if (config == null || registry == null) {
+      return ApproachingConfig.disabled();
+    }
+
+    double stationSpeed = config.runtimeSettings().approachSpeedBps();
+    double depotSpeed = config.runtimeSettings().approachDepotSpeedBps();
+
+    return ApproachingConfig.of(
+        stationSpeed,
+        depotSpeed,
+        nodeId -> isStationNode(registry, nodeId),
+        nodeId -> isDepotNode(registry, nodeId));
+  }
+
+  /** 判断节点是否为站点。 */
+  private static boolean isStationNode(SignNodeRegistry registry, NodeId nodeId) {
+    if (registry == null || nodeId == null) {
+      return false;
+    }
+    return registry
+        .findByNodeId(nodeId, null)
+        .map(SignNodeRegistry.SignNodeInfo::definition)
+        .map(
+            def -> {
+              if (def.nodeType() == NodeType.STATION) {
+                return true;
+              }
+              return def.waypointMetadata()
+                  .map(meta -> meta.kind() == WaypointKind.STATION)
+                  .orElse(false);
+            })
+        .orElse(false);
+  }
+
+  /** 判断节点是否为车库。 */
+  private static boolean isDepotNode(SignNodeRegistry registry, NodeId nodeId) {
+    if (registry == null || nodeId == null) {
+      return false;
+    }
+    return registry
+        .findByNodeId(nodeId, null)
+        .map(SignNodeRegistry.SignNodeInfo::definition)
+        .map(
+            def -> {
+              if (def.nodeType() == NodeType.DEPOT) {
+                return true;
+              }
+              return def.waypointMetadata()
+                  .map(meta -> meta.kind() == WaypointKind.DEPOT)
+                  .orElse(false);
+            })
+        .orElse(false);
   }
 
   /**

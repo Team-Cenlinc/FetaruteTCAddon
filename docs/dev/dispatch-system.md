@@ -229,3 +229,145 @@ if (startIndex < 0) {
 
 - `TrainRuntimeSnapshot` 已预留 `currentSpeedBps` / `distanceToNextBlocks` 字段
 - 后续可通过 RailPath position 计算精确边内进度，进一步提升 ETA 精度
+
+## 控车模型
+
+从 v0.x.x 起，控车逻辑使用统一的运动规划器，支持信号前瞻与加减速优化。
+
+### 核心组件
+
+| 类 | 职责 |
+|----|------|
+| `SignalLookahead` | 信号前瞻：计算到阻塞/限速/approaching 节点的距离 |
+| `MotionPlanner` | 运动规划：统一加减速计算与平滑过渡 |
+| `TrainPositionResolver` | 位置解析：获取列车当前速度与边内进度 |
+| `TrainLaunchManager` | 控车执行：应用速度曲线到 TrainCarts |
+
+### 信号前瞻 (`SignalLookahead`)
+
+在每次信号检查时，计算到前方各类约束点的距离：
+
+```java
+var lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
+OptionalLong constraintDistance = lookahead.minConstraintDistance();
+```
+
+**前瞻内容**：
+- `distanceToBlocker`：到首个阻塞资源（红灯/占用区段）的距离
+- `distanceToCaution`：到首个 CAUTION 限速区域的距离
+- `distanceToApproach`：到需要 approaching 限速的 Station/Depot 的距离
+
+### 运动规划 (`MotionPlanner`)
+
+统一处理加减速计算：
+
+```java
+MotionPlanner.MotionInput input = MotionPlanner.MotionInput.withConstraint(
+    currentSpeedBps,    // 当前速度
+    targetSpeedBps,     // 目标速度上限
+    config.accelBps2(), // 加速度
+    config.decelBps2(), // 减速度
+    distanceBlocks,     // 到约束点距离
+    constraintSpeedBps  // 约束点目标速度
+);
+MotionPlanner.MotionOutput output = MotionPlanner.plan(input);
+double recommendedSpeed = output.recommendedSpeedBps();
+```
+
+**核心算法**：
+
+1. **减速限速**：`v = √(v_end² + 2·a·d)` - 计算在约束点前减速到目标速度的安全速度
+2. **加速优化**：发车时检查是否能在约束点前停下，避免"刚加速就要减速"
+3. **峰值速度**：`maxReachableSpeed(v0, vEnd, d, accel, decel)` - 梯形曲线最大可达速度
+
+### 控车执行 (`TrainLaunchManager`)
+
+两种控车模式：
+
+| 方法 | 用途 |
+|------|------|
+| `applyControl` | 基础控车：约束速度默认为 0（停车点） |
+| `applyControlWithConstraint` | 扩展控车：支持指定约束速度（如 approaching 限速） |
+
+**执行流程**：
+1. 获取当前速度
+2. 调用 `MotionPlanner.plan()` 计算建议速度
+3. 设置 `setWaitAcceleration()` 加减速参数
+4. 设置 `setSpeedLimit()` 限速
+5. 如需发车，调用 `train.launch()` 并限制初始速度
+
+### 平滑过渡
+
+```java
+double nextSpeed = MotionPlanner.smoothTransition(
+    currentSpeedBps,  // 当前速度
+    targetSpeedBps,   // 目标速度
+    accelBps2,        // 加速度
+    decelBps2,        // 减速度
+    deltaTicks        // tick 数
+);
+```
+
+每 tick 按加减速率向目标速度靠近，避免阶跃式速度切换。
+
+### 配置项
+
+| 配置 | 说明 | 默认值 |
+|------|------|--------|
+| `runtime.speed-curve-enabled` | 是否启用速度曲线 | `true` |
+| `runtime.speed-curve-type` | 曲线类型：PHYSICS/LINEAR/QUADRATIC/CUBIC | `PHYSICS` |
+| `runtime.speed-curve-factor` | 曲线系数（安全裕度） | `1.0` |
+| `runtime.speed-curve-early-brake-blocks` | 提前制动距离 | `0.0` |
+| `runtime.approach-speed-bps` | 进站限速 | `4.0` |
+| `runtime.approach-depot-speed-bps` | 进库限速 | `3.5` |
+
+## 诊断命令
+
+### `/fta train debug [列车]`
+
+显示指定列车的实时控车诊断数据：
+
+```
+/fta train debug                # 显示当前选中列车
+/fta train debug train1         # 显示指定列车
+/fta train debug @train[tag=X]  # 使用选择器
+```
+
+**输出内容**：
+- **节点**：当前节点 → 下一节点
+- **速度**：当前速度、目标速度、建议速度（bps）
+- **前瞻**：到阻塞点/限速区/进站点的距离（blocks）
+- **信号**：当前信号、有效信号、是否允许发车
+
+### `/fta train debug list`
+
+列出所有缓存的诊断数据快照（仅显示近 150ms 内有数据的列车）。
+
+### 诊断数据缓存
+
+- **缓存类**：`ControlDiagnosticsCache`
+- **TTL**：150ms（约 3 tick）
+- **存储位置**：`RuntimeDispatchService.diagnosticsCache`
+- **写入时机**：每次 `applyControl()` 调用时自动记录
+- **用途**：避免重复采样，支持快速诊断查询
+
+### 数据结构
+
+```java
+record ControlDiagnostics(
+    String trainName,           // 列车名
+    RouteId routeId,            // 线路 ID
+    NodeId currentNode,         // 当前节点
+    NodeId nextNode,            // 下一节点
+    double currentSpeedBps,     // 当前速度 (bps)
+    double targetSpeedBps,      // 目标速度 (bps)
+    OptionalDouble recommendedSpeedBps,  // 建议速度
+    OptionalLong distanceToBlocker,      // 到阻塞点距离
+    OptionalLong distanceToCaution,      // 到限速区距离
+    OptionalLong distanceToApproach,     // 到进站点距离
+    SignalAspect currentSignal,          // 当前信号
+    SignalAspect effectiveSignal,        // 有效信号
+    boolean allowLaunch,                 // 是否允许发车
+    Instant sampledAt                    // 采样时间
+)
+```

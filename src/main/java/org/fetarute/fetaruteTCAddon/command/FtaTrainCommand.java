@@ -210,6 +210,139 @@ public final class FtaTrainCommand {
                                     String.valueOf(config.decelBps2()))));
                   }
                 }));
+
+    // debug 子命令：显示控车诊断数据
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("debug")
+            .permission("fetarute.train.debug")
+            .optional("train", StringParser.stringParser(), trainSuggestions)
+            .handler(
+                ctx -> handleDebug(ctx.sender(), ctx.optional("train").map(String.class::cast))));
+
+    // debug list 子命令：显示所有缓存的诊断数据
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("debug")
+            .literal("list")
+            .permission("fetarute.train.debug")
+            .handler(ctx -> handleDebugList(ctx.sender())));
+  }
+
+  private void handleDebug(CommandSender sender, Optional<String> trainArg) {
+    LocaleManager locale = plugin.getLocaleManager();
+    var dispatchServiceOpt = plugin.getRuntimeDispatchService();
+    if (dispatchServiceOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.train.debug.unavailable"));
+      return;
+    }
+    var dispatchService = dispatchServiceOpt.get();
+    List<TrainProperties> targets = resolveTrainTargets(sender, trainArg, locale);
+    if (targets.isEmpty()) {
+      return;
+    }
+    for (TrainProperties properties : targets) {
+      String trainName = properties.getTrainName();
+      var diagnosticsOpt = dispatchService.getDiagnostics(trainName);
+      if (diagnosticsOpt.isEmpty()) {
+        sender.sendMessage(
+            locale.component("command.train.debug.no-data", Map.of("train", trainName)));
+        continue;
+      }
+      var diag = diagnosticsOpt.get();
+      sendDiagnosticsOutput(sender, diag, locale);
+    }
+  }
+
+  private void handleDebugList(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    var dispatchServiceOpt = plugin.getRuntimeDispatchService();
+    if (dispatchServiceOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.train.debug.unavailable"));
+      return;
+    }
+    var dispatchService = dispatchServiceOpt.get();
+    var snapshot = dispatchService.getDiagnosticsSnapshot();
+    if (snapshot.isEmpty()) {
+      sender.sendMessage(locale.component("command.train.debug.list-empty"));
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.list-header", Map.of("count", String.valueOf(snapshot.size()))));
+    for (var entry : snapshot.entrySet()) {
+      sendDiagnosticsOutput(sender, entry.getValue(), locale);
+    }
+  }
+
+  private void sendDiagnosticsOutput(
+      CommandSender sender,
+      org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics diag,
+      LocaleManager locale) {
+    // 基础信息
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.header",
+            Map.of(
+                "train",
+                diag.trainName(),
+                "route",
+                diag.routeId() != null ? diag.routeId().value() : "-")));
+
+    // 节点信息
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.nodes",
+            Map.of(
+                "current", diag.currentNode() != null ? diag.currentNode().value() : "-",
+                "next", diag.nextNode() != null ? diag.nextNode().value() : "-")));
+
+    // 速度信息（含边限速）
+    String edgeLimitText = diag.edgeLimitBps() > 0 ? formatSpeed(diag.edgeLimitBps()) : "-";
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.speed",
+            Map.of(
+                "current",
+                formatSpeed(diag.currentSpeedBps()),
+                "target",
+                formatSpeed(diag.targetSpeedBps()),
+                "edge_limit",
+                edgeLimitText,
+                "recommended",
+                diag.recommendedSpeedBps().isPresent()
+                    ? formatSpeed(diag.recommendedSpeedBps().getAsDouble())
+                    : "-")));
+
+    // 前瞻距离
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.lookahead",
+            Map.of(
+                "blocker", formatDistance(diag.distanceToBlocker()),
+                "caution", formatDistance(diag.distanceToCaution()),
+                "approach", formatDistance(diag.distanceToApproach()))));
+
+    // 信号与状态
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.signal",
+            Map.of(
+                "current", diag.currentSignal().name(),
+                "effective", diag.effectiveSignal().name(),
+                "launch", diag.allowLaunch() ? "✓" : "✗")));
+  }
+
+  private static String formatSpeed(double bps) {
+    return String.format("%.2f", bps);
+  }
+
+  private static String formatDistance(java.util.OptionalLong distance) {
+    return distance.isPresent() ? String.valueOf(distance.getAsLong()) : "-";
   }
 
   private SuggestionProvider<CommandSender> trainSuggestions() {
