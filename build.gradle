@@ -1,7 +1,7 @@
 plugins {
     id 'java'
     id 'checkstyle'
-    id("com.diffplug.spotless") version "8.1.0"
+    id("com.diffplug.spotless") version "8.2.0"
     id("com.github.spotbugs") version "6.4.8"
     id("xyz.jpenilla.run-paper") version "2.3.1"
     id("com.github.johnrengelman.shadow") version "8.1.1"
