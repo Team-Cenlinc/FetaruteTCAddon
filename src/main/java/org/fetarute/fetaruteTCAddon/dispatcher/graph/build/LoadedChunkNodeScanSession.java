@@ -181,9 +181,20 @@ public final class LoadedChunkNodeScanSession {
     }
   }
 
+  /**
+   * 解析节点牌子对应的“锚点轨道坐标”。
+   *
+   * <p>真实牌子优先使用牌子方块坐标；虚拟牌子（TCC TrackNodeSign）回退为轨道方块坐标。
+   */
   private RailBlockPos resolveRailPosFromTrackedSign(TrackedSign tracked, RailBlockPos fallback) {
     if (tracked == null) {
       return fallback;
+    }
+    if (tracked.isRealSign()) {
+      Block signBlock = tracked.signBlock;
+      if (signBlock != null) {
+        return new RailBlockPos(signBlock.getX(), signBlock.getY(), signBlock.getZ());
+      }
     }
     RailPiece rail = tracked.getRail();
     if (rail == null || rail.block() == null) {

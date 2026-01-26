@@ -75,6 +75,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -129,6 +130,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             signNodeRegistry,
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -186,6 +188,7 @@ class RuntimeDispatchServiceTest {
             registry,
             signNodeRegistry,
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -295,6 +298,7 @@ class RuntimeDispatchServiceTest {
             registry,
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -349,6 +353,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             signNodeRegistry,
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -391,6 +396,7 @@ class RuntimeDispatchServiceTest {
             registry,
             signNodeRegistry,
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -454,6 +460,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             signNodeRegistry,
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -490,6 +497,7 @@ class RuntimeDispatchServiceTest {
             registry,
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -546,6 +554,7 @@ class RuntimeDispatchServiceTest {
             registry,
             signNodeRegistry,
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -786,6 +795,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -837,6 +847,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -888,6 +899,7 @@ class RuntimeDispatchServiceTest {
             new RouteProgressRegistry(),
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
+            new DwellRegistry(),
             configManager,
             null,
             new TrainConfigResolver(),
@@ -899,18 +911,87 @@ class RuntimeDispatchServiceTest {
     verify(occupancyManager).releaseByTrain("train-1");
   }
 
+  @Test
+  void refreshSignalAllowsDepartureWhenNextNodeIsStoppingWaypoint() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("ST"), NodeId.of("TERM")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(1, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(NodeId.of("ST"), NodeId.of("TERM"), 20), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RouteStop termStop =
+        new RouteStop(
+            UUID.randomUUID(),
+            1,
+            Optional.empty(),
+            Optional.of("TERM"),
+            Optional.empty(),
+            RouteStopPassType.TERMINATE,
+            Optional.empty());
+    when(routeDefinitions.findStop(route.id(), 1)).thenReturn(Optional.of(termStop));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+    service.handleSignalTick(train, true); // 模拟 AutoStation dwell 结束后的 refreshSignal(forceApply)
+    assertTrue(train.launchCalls >= 1);
+  }
+
   private static final class FakeTrain implements RuntimeTrainHandle {
     private final UUID worldId;
     private final TrainProperties properties;
     private final boolean moving;
+    private final double speedBlocksPerTick;
     private int launchCalls = 0;
     private int destroyCalls = 0;
     private int stopCalls = 0;
 
     private FakeTrain(UUID worldId, TrainProperties properties, boolean moving) {
+      this(worldId, properties, moving, 0.0);
+    }
+
+    private FakeTrain(
+        UUID worldId, TrainProperties properties, boolean moving, double speedBlocksPerTick) {
       this.worldId = worldId;
       this.properties = properties;
       this.moving = moving;
+      this.speedBlocksPerTick = speedBlocksPerTick;
     }
 
     @Override
@@ -925,7 +1006,7 @@ class RuntimeDispatchServiceTest {
 
     @Override
     public double currentSpeedBlocksPerTick() {
-      return 0.0;
+      return speedBlocksPerTick;
     }
 
     @Override

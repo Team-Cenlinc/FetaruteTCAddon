@@ -1210,7 +1210,7 @@ public final class EtaService {
 
   private DestinationInfo resolveEndOperation(
       RouteDefinition route, TerminalResolveContext context, DestinationInfo endRoute) {
-    Optional<DestinationInfo> endOperationOpt = findLastStationDestination(route, false, context);
+    Optional<DestinationInfo> endOperationOpt = findLastAutoStationDestination(route, context);
     return endOperationOpt.orElse(endRoute);
   }
 
@@ -1254,6 +1254,63 @@ public final class EtaService {
     return Optional.empty();
   }
 
+  /**
+   * 查找线路中“最后一个 AutoStation 停站”的目的地信息。
+   *
+   * <p>用于终到作业：优先以 AutoStation 作为运营终点，避免把纯 waypoint/TERM 当成到站信息。
+   */
+  private Optional<DestinationInfo> findLastAutoStationDestination(
+      RouteDefinition route, TerminalResolveContext context) {
+    if (route == null || route.id() == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return Optional.empty();
+    }
+    for (int i = stops.size() - 1; i >= 0; i--) {
+      RouteStop stop = stops.get(i);
+      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop, context);
+      if (nodeIdOpt.isEmpty() || !isAutoStationNode(nodeIdOpt.get())) {
+        continue;
+      }
+      Optional<DestinationInfo> infoOpt = resolveStationDestination(stop, context);
+      if (infoOpt.isPresent()) {
+        return infoOpt;
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 解析 RouteStop 对应的图节点 ID。
+   *
+   * <p>优先读取 stop 自带的 waypointNodeId；否则通过 stationId 查询站点并读取 graphNodeId。
+   */
+  private Optional<NodeId> resolveStopNodeId(RouteStop stop, TerminalResolveContext context) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    if (stop.waypointNodeId().isPresent()) {
+      return Optional.of(NodeId.of(stop.waypointNodeId().get()));
+    }
+    if (stop.stationId().isEmpty() || context == null) {
+      return Optional.empty();
+    }
+    StorageProvider provider = context.provider();
+    if (provider == null) {
+      return Optional.empty();
+    }
+    Optional<Station> stationOpt = provider.stations().findById(stop.stationId().get());
+    if (stationOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    return stationOpt.get().graphNodeId().map(NodeId::of);
+  }
+
   private Optional<DestinationInfo> resolveStationDestination(
       RouteStop stop, TerminalResolveContext context) {
     if (stop == null) {
@@ -1266,6 +1323,28 @@ public final class EtaService {
       return resolveStationDestination(NodeId.of(stop.waypointNodeId().get()));
     }
     return Optional.empty();
+  }
+
+  /**
+   * 判断节点是否为 AutoStation 节点（Station 类型）。
+   *
+   * <p>若无注册表（如运行时未初始化），回退到 waypoint 元数据推断。
+   */
+  private boolean isAutoStationNode(NodeId nodeId) {
+    if (nodeId == null) {
+      return false;
+    }
+    SignNodeRegistry registry = this.signNodeRegistry;
+    if (registry == null) {
+      return parseWaypointMetadata(nodeId)
+          .map(meta -> meta.kind() == WaypointKind.STATION)
+          .orElse(false);
+    }
+    return registry
+        .findByNodeId(nodeId, null)
+        .map(SignNodeRegistry.SignNodeInfo::definition)
+        .map(def -> def.nodeType() == NodeType.STATION)
+        .orElse(false);
   }
 
   private Optional<DestinationInfo> resolveStationDestination(NodeId nodeId) {

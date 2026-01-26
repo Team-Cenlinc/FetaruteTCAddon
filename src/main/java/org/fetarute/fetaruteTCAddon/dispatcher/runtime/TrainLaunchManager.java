@@ -48,11 +48,10 @@ public final class TrainLaunchManager {
     }
 
     if (aspect == SignalAspect.STOP) {
-      // STOP 信号：使用 speed curve 计算减速目标，而不是直接设置 0
-      // 这样可以让列车平滑减速而不是急刹
-      double curveSpeed = applySpeedCurve(0.0, config, distanceOpt, runtimeSettings);
+      // STOP 信号：根据剩余距离与减速度计算“目标限速”，让 TrainCarts 逐步刹停
+      double curveSpeed = resolveStopSpeed(train, config, distanceOpt, runtimeSettings);
       double curveSpeedBpt = toBlocksPerTick(curveSpeed);
-      // 不设置 TrainCarts 的 speedLimit，让我们的控制逻辑接管
+      properties.setSpeedLimit(curveSpeedBpt);
       // 只在列车真正停下来后调用 stop() 确保完全停止
       if (train != null && curveSpeedBpt < 0.001 && !train.isMoving()) {
         train.stop();
@@ -128,6 +127,60 @@ public final class TrainLaunchManager {
         };
     double adjusted = targetBps * Math.pow(ratio, exponent);
     return Math.min(targetBps, adjusted);
+  }
+
+  private double resolveStopSpeed(
+      RuntimeTrainHandle train,
+      TrainConfig config,
+      OptionalLong distanceOpt,
+      ConfigManager.RuntimeSettings runtimeSettings) {
+    if (train == null || config == null || runtimeSettings == null) {
+      return 0.0;
+    }
+    if (!runtimeSettings.speedCurveEnabled() || distanceOpt == null || distanceOpt.isEmpty()) {
+      return 0.0;
+    }
+    double currentBps = train.currentSpeedBlocksPerTick() * TICKS_PER_SECOND;
+    if (!Double.isFinite(currentBps) || currentBps <= 0.0) {
+      return 0.0;
+    }
+    double decel = config.decelBps2();
+    if (!Double.isFinite(decel) || decel <= 0.0) {
+      return 0.0;
+    }
+    long distanceBlocks = distanceOpt.getAsLong();
+    if (distanceBlocks <= 0) {
+      return 0.0;
+    }
+    double effectiveDistance =
+        Math.max(0.0, distanceBlocks - runtimeSettings.speedCurveEarlyBrakeBlocks());
+    SpeedCurveType curveType = runtimeSettings.speedCurveType();
+    double limit;
+    if (curveType == SpeedCurveType.PHYSICS) {
+      limit = Math.sqrt(2.0 * decel * effectiveDistance * runtimeSettings.speedCurveFactor());
+    } else {
+      double brakingDistance =
+          (currentBps * currentBps) / (2.0 * decel) * runtimeSettings.speedCurveFactor();
+      if (!Double.isFinite(brakingDistance) || brakingDistance <= 0.0) {
+        return 0.0;
+      }
+      double ratio = Math.max(0.0, Math.min(1.0, effectiveDistance / brakingDistance));
+      if (ratio <= 0.0) {
+        return 0.0;
+      }
+      double exponent =
+          switch (curveType) {
+            case LINEAR -> 1.0;
+            case QUADRATIC -> 2.0;
+            case CUBIC -> 3.0;
+            default -> 1.0;
+          };
+      limit = currentBps * Math.pow(ratio, exponent);
+    }
+    if (!Double.isFinite(limit) || limit <= 0.0) {
+      return 0.0;
+    }
+    return Math.min(currentBps, limit);
   }
 
   /** blocks/s -> blocks/tick，非法输入返回 0。 */

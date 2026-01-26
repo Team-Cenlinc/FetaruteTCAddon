@@ -398,6 +398,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           return;
         }
         ticksSinceStop++;
+        if (!opened && doorDirection == AutoStationDoorDirection.NONE) {
+          opened = true;
+          ticksSinceOpen = 0L;
+          closeStarted = true;
+          cachedSession = session;
+          cachedPlanSummary = session == null ? null : session.debugSummary();
+        }
         if (opened) {
           ticksSinceOpen++;
           boolean legacy = cachedSession != null && cachedSession.usesLegacyDoorAnimation();
@@ -480,19 +487,6 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               waitState.stop();
               cancel();
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
-              if (properties != null) {
-                try {
-                  com.bergerkiller.bukkit.tc.Station station =
-                      new com.bergerkiller.bukkit.tc.Station(info);
-                  BlockFace launchFace = station.getNextDirectionFace();
-                  if (launchFace != null && AutoStationDoorController.isCardinal(launchFace)) {
-                    org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper.writeTag(
-                        properties, "FTA_LAUNCH_DIR", launchFace.name());
-                  }
-                } catch (Throwable ignored) {
-                  // 回退到调度控车逻辑
-                }
-              }
               Bukkit.getScheduler()
                   .runTask(
                       plugin,
@@ -1088,6 +1082,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     return Optional.empty();
   }
 
+  /**
+   * 构建出站偏移（ExitOffset）。
+   *
+   * <p>注意：按本地 X 轴偏移（左右门侧），不使用 Z 轴，避免模型旋转导致偏移方向反转。
+   */
   private static Optional<ExitOffset> buildExitOffset(BlockFace face, double distance) {
     if (face == null || !Double.isFinite(distance) || distance <= 0.0) {
       return Optional.empty();
@@ -1095,10 +1094,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     double x = 0.0;
     double z = 0.0;
     switch (face) {
-      case EAST -> z = +distance;
-      case WEST -> z = -distance;
-      case SOUTH -> x = +distance;
-      case NORTH -> x = -distance;
+      case WEST, SOUTH -> x = +distance;
+      case EAST, NORTH -> x = -distance;
       default -> {
         return Optional.empty();
       }

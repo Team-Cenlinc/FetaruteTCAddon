@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
@@ -96,6 +97,13 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (accelBlocksPerTickSquared > 0.0) {
       launchConfig.setAcceleration(accelBlocksPerTickSquared);
     }
+    Optional<BlockFace> directionOpt =
+        resolveLaunchDirectionByTrainCarts(head, group.getProperties());
+    if (directionOpt.isPresent()) {
+      // 使用“带方向”的 launch，确保在折返/道岔附近发车时与 TrainCarts 寻路方向一致。
+      head.getActions().addActionLaunch(directionOpt.get(), launchConfig, targetBlocksPerTick);
+      return;
+    }
     head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
   }
 
@@ -176,15 +184,15 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     // 用轨道方向字段作为“发车/折返”判定依据；模型朝向（orientationForward）可能与轨道前进方向相反，
     // 会导致错误 reverse（例如站台/车库端头直接掉轨）。
     BlockFace face = head.getDirectionTo();
-    if (isCardinal(face)) {
+    if (isCardinalFace(face)) {
       return Optional.of(face);
     }
     face = head.getDirection();
-    if (isCardinal(face)) {
+    if (isCardinalFace(face)) {
       return Optional.of(face);
     }
     face = head.getDirectionFrom();
-    return isCardinal(face) ? Optional.of(face) : Optional.empty();
+    return isCardinalFace(face) ? Optional.of(face) : Optional.empty();
   }
 
   @Override
@@ -199,11 +207,21 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     return Optional.ofNullable(head.getRailTracker().getState());
   }
 
-  private static boolean isCardinal(BlockFace face) {
+  private static boolean isCardinalFace(BlockFace face) {
     return face == BlockFace.NORTH
         || face == BlockFace.SOUTH
         || face == BlockFace.EAST
         || face == BlockFace.WEST;
+  }
+
+  private static boolean isHorizontalFace(BlockFace face) {
+    if (face == null) {
+      return false;
+    }
+    if (face == BlockFace.SELF || face == BlockFace.UP || face == BlockFace.DOWN) {
+      return false;
+    }
+    return face.getModY() == 0;
   }
 
   @Override
@@ -212,5 +230,79 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return;
     }
     group.reverse();
+  }
+
+  /**
+   * 根据 TrainCarts 当前 destination 的寻路结果推导发车方向。
+   *
+   * <p>用于解决 waypoint STOP/TERM 停车后折返发车方向错误的问题：调度层只下发 destination，真正寻路由 TrainCarts 完成，因此发车方向也应以
+   * TrainCarts 的寻路结果为准。
+   */
+  private Optional<BlockFace> resolveLaunchDirectionByTrainCarts(
+      MinecartMember<?> head, TrainProperties properties) {
+    if (head == null || properties == null) {
+      return Optional.empty();
+    }
+    String destination = properties.getDestination();
+    if (destination == null || destination.isBlank()) {
+      return Optional.empty();
+    }
+    try {
+      RailState railState = head.getRailTracker() != null ? head.getRailTracker().getState() : null;
+      if (railState == null || railState.railWorld() == null) {
+        return Optional.empty();
+      }
+      com.bergerkiller.bukkit.tc.TrainCarts trainCarts = group.getTrainCarts();
+      if (trainCarts == null || trainCarts.getPathProvider() == null) {
+        return Optional.empty();
+      }
+      com.bergerkiller.bukkit.tc.pathfinding.PathWorld pathWorld =
+          trainCarts.getPathProvider().getWorld(railState.railWorld());
+      if (pathWorld == null) {
+        return Optional.empty();
+      }
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode currentNode =
+          pathWorld.getNodeAtRail(railState.railBlock());
+      if (currentNode == null) {
+        currentNode = pathWorld.getNodeAtRail(railState.positionBlock());
+      }
+      if (currentNode == null) {
+        return Optional.empty();
+      }
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode destinationNode =
+          pathWorld.getNodeByName(destination.trim());
+      if (destinationNode == null) {
+        return Optional.empty();
+      }
+      com.bergerkiller.bukkit.tc.pathfinding.PathConnection[] route =
+          currentNode.findRoute(destinationNode);
+      if (route == null || route.length == 0) {
+        return Optional.empty();
+      }
+      String junctionName = route[0].junctionName;
+      if (junctionName == null || junctionName.isBlank()) {
+        return Optional.empty();
+      }
+      if (railState.railPiece() == null || railState.railPiece().isNone()) {
+        return Optional.empty();
+      }
+      for (RailJunction junction : railState.railPiece().getJunctions()) {
+        if (junction == null || junction.name() == null) {
+          continue;
+        }
+        if (!junction.name().equalsIgnoreCase(junctionName)) {
+          continue;
+        }
+        BlockFace face =
+            junction.position() != null ? junction.position().getMotionFaceWithSubCardinal() : null;
+        if (isHorizontalFace(face)) {
+          return Optional.of(face);
+        }
+        return Optional.empty();
+      }
+    } catch (Throwable ignored) {
+      // 忽略：回退到无方向发车
+    }
+    return Optional.empty();
   }
 }

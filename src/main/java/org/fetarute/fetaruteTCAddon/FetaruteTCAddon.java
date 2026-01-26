@@ -483,6 +483,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             routeProgressRegistry,
             signNodeRegistry,
             layoverRegistry,
+            dwellRegistry,
             configManager,
             storageManager,
             new TrainConfigResolver(),

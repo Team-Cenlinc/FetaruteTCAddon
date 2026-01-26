@@ -1,11 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
-import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
-import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
-import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
-import com.bergerkiller.bukkit.tc.pathfinding.PathConnection;
-import com.bergerkiller.bukkit.tc.pathfinding.PathNode;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Instant;
@@ -19,8 +14,6 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
-import org.bukkit.block.Block;
-import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -36,7 +29,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -57,6 +49,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -75,12 +68,18 @@ public final class RuntimeDispatchService {
 
   private static final double SPEED_TICKS_PER_SECOND = 20.0;
 
+  /** Waypoint 作为 STOP/TERM 时的默认停站时长（秒）。 */
+  private static final int DEFAULT_WAYPOINT_DWELL_SECONDS = 20;
+
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
   private final RouteProgressRegistry progressRegistry;
   private final SignNodeRegistry signNodeRegistry;
   private final LayoverRegistry layoverRegistry;
+
+  private final DwellRegistry dwellRegistry;
+
   private final ConfigManager configManager;
   private final StorageManager storageManager;
   private final TrainConfigResolver trainConfigResolver;
@@ -116,6 +115,7 @@ public final class RuntimeDispatchService {
       RouteProgressRegistry progressRegistry,
       SignNodeRegistry signNodeRegistry,
       LayoverRegistry layoverRegistry,
+      DwellRegistry dwellRegistry,
       ConfigManager configManager,
       StorageManager storageManager,
       TrainConfigResolver trainConfigResolver,
@@ -126,6 +126,7 @@ public final class RuntimeDispatchService {
     this.progressRegistry = Objects.requireNonNull(progressRegistry, "progressRegistry");
     this.signNodeRegistry = Objects.requireNonNull(signNodeRegistry, "signNodeRegistry");
     this.layoverRegistry = Objects.requireNonNull(layoverRegistry, "layoverRegistry");
+    this.dwellRegistry = dwellRegistry;
     this.configManager = Objects.requireNonNull(configManager, "configManager");
     this.storageManager = storageManager;
     this.trainConfigResolver = Objects.requireNonNull(trainConfigResolver, "trainConfigResolver");
@@ -277,22 +278,19 @@ public final class RuntimeDispatchService {
         handleDestroy(train, properties, trainName, "DSTY");
         return;
       }
-      Optional<BlockFace> pathFace =
-          resolveLaunchDirectionByTrainCarts(
-              train, properties != null ? properties.getDestination() : null);
-      String directionHint = pathFace.map(face -> " pathDirection=" + face.name()).orElse("");
       debugLogger.accept(
           "调度推进跳过: 当前节点不在线路定义内 train="
               + trainName
               + " node="
               + definition.nodeId().value()
               + " route="
-              + route.id().value()
-              + directionHint);
+              + route.id().value());
       return;
     }
     NodeId currentNode = definition.nodeId();
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
+    boolean stopAtWaypoint = false;
+    int waypointDwellSeconds = 0;
     if (stopOpt.isPresent()) {
       RouteStop stop = stopOpt.get();
       if (shouldDestroyAt(stop, currentNode)
@@ -326,6 +324,10 @@ public final class RuntimeDispatchService {
                 + route.id().value());
         return;
       }
+      if (shouldStopAtWaypoint(definition, stop)) {
+        waypointDwellSeconds = resolveWaypointDwellSeconds(stop);
+        stopAtWaypoint = waypointDwellSeconds > 0;
+      }
     }
     Optional<NodeId> nextTarget =
         currentIndex + 1 < route.waypoints().size()
@@ -351,6 +353,32 @@ public final class RuntimeDispatchService {
 
     Instant now = Instant.now();
     Optional<RailGraph> graphOpt = resolveGraph(event);
+    RailGraph graph = graphOpt.orElse(null);
+    if (stopAtWaypoint) {
+      if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
+        dwellRegistry.start(trainName, waypointDwellSeconds);
+      }
+      progressRegistry.advance(
+          trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+      invalidateTrainEta(trainName);
+      progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+      String destinationName = resolveDestinationName(nextTarget.get());
+      if (destinationName != null && !destinationName.isBlank() && properties != null) {
+        properties.clearDestinationRoute();
+        properties.setDestination(destinationName);
+      }
+      applyControl(
+          train,
+          properties,
+          SignalAspect.STOP,
+          route,
+          currentNode,
+          nextTarget.get(),
+          graph,
+          false,
+          OptionalLong.empty());
+      return;
+    }
     if (graphOpt.isEmpty()) {
       debugLogger.accept(
           "调度推进失败: 未找到调度图 train="
@@ -361,7 +389,6 @@ public final class RuntimeDispatchService {
               + route.id().value());
       return;
     }
-    RailGraph graph = graphOpt.get();
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
@@ -437,7 +464,8 @@ public final class RuntimeDispatchService {
           graph,
           false,
           lookaheadDistance,
-          lookahead);
+          lookahead,
+          java.util.OptionalDouble.empty());
       return;
     }
     occupancyManager.acquire(request);
@@ -704,6 +732,7 @@ public final class RuntimeDispatchService {
       return;
     }
     String trainName = properties.getTrainName();
+    Instant now = Instant.now();
     handleRenameIfNeeded(properties, trainName);
     if (TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isEmpty()) {
       if (progressRegistry.get(trainName).isPresent()) {
@@ -742,15 +771,54 @@ public final class RuntimeDispatchService {
       handleDestroy(train, properties, trainName, "DSTY");
       return;
     }
+    if (dwellRegistry != null) {
+      Optional<Integer> remaining = dwellRegistry.remainingSeconds(trainName);
+      if (remaining.isPresent()
+          && stopOpt.isPresent()
+          && stopOpt.get().passType() != RouteStopPassType.PASS) {
+        Optional<NodeId> nextNode =
+            currentIndex + 1 < route.waypoints().size()
+                ? Optional.of(route.waypoints().get(currentIndex + 1))
+                : Optional.empty();
+        if (nextNode.isPresent()) {
+          progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+          applyControl(
+              train,
+              properties,
+              SignalAspect.STOP,
+              route,
+              currentNode,
+              nextNode.get(),
+              null,
+              false,
+              OptionalLong.empty());
+        } else {
+          train.stop();
+        }
+        return;
+      }
+    }
 
     if (currentIndex >= route.waypoints().size() - 1) {
-      // 终点：检查列车是否已停止
+      // 终点：持续下发 STOP 控制，确保减速停车
       // 若已停止，清理 destination 并注册 Layover
-      // 不设置 speedLimit=0，让 speed curve 逐渐减速
+      progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+      TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+      trainLaunchManager.applyControl(
+          train,
+          properties,
+          SignalAspect.STOP,
+          0.0,
+          config,
+          false,
+          OptionalLong.empty(),
+          configManager.current().runtimeSettings());
       double currentSpeed = train.currentSpeedBlocksPerTick();
       boolean isStopped = Math.abs(currentSpeed) < 0.001;
       if (isStopped) {
-        train.stop(); // 确保完全停止
+        if (train.isMoving()) {
+          train.stop(); // 确保完全停止
+        }
         properties.clearDestinationRoute();
         properties.setDestination("");
         if (route.lifecycleMode()
@@ -765,7 +833,7 @@ public final class RuntimeDispatchService {
       // 未停止时：由 applyControl 的 speed curve 逐渐减速
       return;
     }
-    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());
+    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
     if (graphOpt.isEmpty()) {
       return;
     }
@@ -779,12 +847,7 @@ public final class RuntimeDispatchService {
             runtimeSettings.switcherZoneEdges());
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
-            trainName,
-            Optional.ofNullable(route.id()),
-            route.waypoints(),
-            currentIndex,
-            Instant.now(),
-            0);
+            trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now, 0);
     if (contextOpt.isEmpty()) {
       return;
     }
@@ -795,6 +858,24 @@ public final class RuntimeDispatchService {
     SignalAspect nextAspect =
         decision.allowed() ? decision.signal() : deriveBlockedAspect(decision, context);
     SignalAspect lastAspect = progressEntry.lastSignal();
+    Optional<NodeId> nextNode =
+        currentIndex + 1 < route.waypoints().size()
+            ? Optional.of(route.waypoints().get(currentIndex + 1))
+            : Optional.empty();
+    Optional<NodeId> currentNodeOpt =
+        currentIndex < route.waypoints().size()
+            ? Optional.of(route.waypoints().get(currentIndex))
+            : Optional.empty();
+    boolean stopAtNextWaypoint = false;
+    if (nextNode.isPresent()) {
+      Optional<RouteStop> nextStopOpt = routeDefinitions.findStop(route.id(), currentIndex + 1);
+      if (nextStopOpt.isPresent()) {
+        stopAtNextWaypoint = shouldStopAtWaypoint(nextNode.get(), nextStopOpt.get());
+      }
+    }
+    // 注意：下一节点即便需要“停站”（STOP/TERM waypoint），也不能在此处强制将信号置为 STOP。
+    // 否则当列车当前处于静止（例如 AutoStation 停站结束准备出站）时，会被 STOP 信号卡死无法发车。
+    // 停车应通过 speed curve + distanceOpt 在接近目标时自然收敛到 0，并在进入目标节点后由推进点逻辑接管 dwell/TERM。
     // 诊断：仅在信号变化时输出（减少刷屏）
     if (lastAspect != nextAspect) {
       debugLogger.accept(
@@ -816,16 +897,8 @@ public final class RuntimeDispatchService {
     }
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
     if (allowLaunch) {
-      progressRegistry.updateSignal(trainName, nextAspect, Instant.now());
+      progressRegistry.updateSignal(trainName, nextAspect, now);
     }
-    Optional<NodeId> nextNode =
-        currentIndex + 1 < route.waypoints().size()
-            ? Optional.of(route.waypoints().get(currentIndex + 1))
-            : Optional.empty();
-    Optional<NodeId> currentNodeOpt =
-        currentIndex < route.waypoints().size()
-            ? Optional.of(route.waypoints().get(currentIndex))
-            : Optional.empty();
     if (currentNodeOpt.isEmpty() || nextNode.isEmpty()) {
       // 若已到终点且无下一目标，检查是否需要注册 Layover
       if (nextNode.isEmpty() && forceApply && currentNodeOpt.isPresent()) {
@@ -834,12 +907,16 @@ public final class RuntimeDispatchService {
       return;
     }
     OptionalLong distanceOpt = OptionalLong.empty();
+    OptionalLong constraintDistanceOpt = OptionalLong.empty();
     boolean needsDistance =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.failoverUnreachableStop();
     if (needsDistance) {
-      distanceOpt = resolveShortestDistance(graph, currentNodeOpt.get(), nextNode.get());
-      if (runtimeSettings.failoverUnreachableStop() && distanceOpt.isEmpty()) {
-        progressRegistry.updateSignal(trainName, SignalAspect.STOP, Instant.now());
+      OptionalLong shortestDistanceOpt =
+          resolveShortestDistance(graph, currentNodeOpt.get(), nextNode.get());
+      if (runtimeSettings.failoverUnreachableStop()
+          && shortestDistanceOpt.isEmpty()
+          && !stopAtNextWaypoint) {
+        progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
         applyControl(
             train,
             properties,
@@ -859,20 +936,60 @@ public final class RuntimeDispatchService {
                 + nextNode.get().value());
         return;
       }
+      if (runtimeSettings.speedCurveEnabled() && shortestDistanceOpt.isPresent()) {
+        if (!stopAtNextWaypoint) {
+          distanceOpt = shortestDistanceOpt;
+        }
+      }
     }
     // 信号前瞻：计算到前方所有限制点的距离，取最近的作为减速依据
     SignalLookahead.LookaheadResult lookahead = null;
     if (runtimeSettings.speedCurveEnabled()) {
       lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
-      OptionalLong constraintDistance = lookahead.minConstraintDistance();
-      if (constraintDistance.isPresent()) {
+      constraintDistanceOpt = lookahead.minConstraintDistance();
+    }
+    if (runtimeSettings.speedCurveEnabled()) {
+      if (stopAtNextWaypoint && nextAspect != SignalAspect.STOP) {
+        // STOP/TERM waypoint 只允许“前方 blocker”触发减速，不使用到下一节点距离，避免提前刹停在牌子前。
+        distanceOpt = constraintDistanceOpt;
+      } else if (constraintDistanceOpt.isPresent()) {
         if (distanceOpt.isPresent()) {
           distanceOpt =
-              OptionalLong.of(Math.min(distanceOpt.getAsLong(), constraintDistance.getAsLong()));
+              OptionalLong.of(Math.min(distanceOpt.getAsLong(), constraintDistanceOpt.getAsLong()));
         } else {
-          distanceOpt = constraintDistance;
+          distanceOpt = constraintDistanceOpt;
         }
       }
+    }
+    java.util.OptionalDouble targetOverrideBps = java.util.OptionalDouble.empty();
+    if (stopAtNextWaypoint && nextAspect != SignalAspect.STOP) {
+      double approachSpeed = runtimeSettings.approachSpeedBps();
+      if (Double.isFinite(approachSpeed) && approachSpeed > 0.0) {
+        targetOverrideBps = java.util.OptionalDouble.of(approachSpeed);
+      }
+    }
+    if (stopAtNextWaypoint) {
+      debugLogger.accept(
+          "STOP/TERM waypoint 进站: train="
+              + trainName
+              + " idx="
+              + currentIndex
+              + " next="
+              + nextNode.get().value()
+              + " aspect="
+              + nextAspect
+              + " allowLaunch="
+              + allowLaunch
+              + " speedCurve="
+              + runtimeSettings.speedCurveEnabled()
+              + " failoverUnreachableStop="
+              + runtimeSettings.failoverUnreachableStop()
+              + " approachSpeedBps="
+              + (targetOverrideBps.isPresent() ? targetOverrideBps.getAsDouble() : "-")
+              + " distanceOpt="
+              + formatOptionalLong(distanceOpt)
+              + " constraintDistance="
+              + formatOptionalLong(constraintDistanceOpt));
     }
     StallDecision stallDecision = updateStallState(trainName, train, currentIndex, nextAspect);
     if (stallDecision.forceLaunch()) {
@@ -888,7 +1005,8 @@ public final class RuntimeDispatchService {
         graph,
         allowLaunch,
         distanceOpt,
-        lookahead);
+        lookahead,
+        targetOverrideBps);
     if (stallDecision.triggerFailover()) {
       triggerStallFailover(
           train,
@@ -1216,7 +1334,8 @@ public final class RuntimeDispatchService {
         graph,
         allowLaunch,
         distanceOpt,
-        null);
+        null,
+        java.util.OptionalDouble.empty());
   }
 
   /**
@@ -1236,7 +1355,8 @@ public final class RuntimeDispatchService {
       RailGraph graph,
       boolean allowLaunch,
       OptionalLong distanceOpt,
-      SignalLookahead.LookaheadResult lookahead) {
+      SignalLookahead.LookaheadResult lookahead,
+      java.util.OptionalDouble targetOverrideBps) {
     if (properties == null || aspect == null || route == null) {
       return;
     }
@@ -1247,9 +1367,13 @@ public final class RuntimeDispatchService {
     double targetBps =
         resolveTargetSpeed(
             train != null ? train.worldId() : null, aspect, route, nextNode, edgeLimit);
-    if (allowLaunch && train != null && !train.isMoving()) {
-      maybeReverseForLaunch(train, currentNode, nextNode, graph);
+    if (targetOverrideBps != null && targetOverrideBps.isPresent()) {
+      double override = targetOverrideBps.getAsDouble();
+      if (Double.isFinite(override) && override > 0.0) {
+        targetBps = Math.min(targetBps, override);
+      }
     }
+    // 发车方向由 TrainCarts 依据 destination 自动推导（见 TrainCartsRuntimeHandle#launch），此处不写入额外 tag。
     trainLaunchManager.applyControl(
         train,
         properties,
@@ -1329,167 +1453,10 @@ public final class RuntimeDispatchService {
         .orElse(OptionalLong.empty());
   }
 
-  private void maybeReverseForLaunch(
-      RuntimeTrainHandle train, NodeId currentNode, NodeId nextNode, RailGraph graph) {
-    if (train == null || currentNode == null || nextNode == null) {
-      return;
-    }
-    TrainProperties properties = train.properties();
-    Optional<BlockFace> desiredOpt =
-        resolveLaunchDirection(train, properties, graph, currentNode, nextNode);
-    if (desiredOpt.isEmpty()) {
-      return;
-    }
-    BlockFace desired = desiredOpt.get();
-    Optional<BlockFace> facingOpt = train.forwardDirection();
-    if (facingOpt.isEmpty()) {
-      return;
-    }
-    BlockFace facing = facingOpt.get();
-    if (!isCardinal(facing)) {
-      return;
-    }
-    if (facing == desired) {
-      return;
-    }
-    if (facing == desired.getOppositeFace()) {
-      train.reverse();
-      TrainProperties props = train.properties();
-      String trainName = props != null ? props.getTrainName() : "unknown";
-      debugLogger.accept(
-          "发车方向调整: reverse train="
-              + trainName
-              + " from="
-              + currentNode.value()
-              + " to="
-              + nextNode.value());
-    }
-  }
+  // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
 
-  private Optional<BlockFace> resolveLaunchDirection(
-      RuntimeTrainHandle train,
-      TrainProperties properties,
-      RailGraph graph,
-      NodeId currentNode,
-      NodeId nextNode) {
-    Optional<BlockFace> tagOpt = readLaunchDirectionTag(properties);
-    String destination = resolveDestinationName(nextNode);
-    Optional<BlockFace> pathOpt = resolveLaunchDirectionByTrainCarts(train, destination);
-    if (pathOpt.isPresent() && tagOpt.isPresent() && pathOpt.get() != tagOpt.get()) {
-      debugLogger.accept(
-          "发车方向标记与线路方向不一致，使用寻路方向 from="
-              + currentNode.value()
-              + " to="
-              + nextNode.value()
-              + " tag="
-              + tagOpt.get().name()
-              + " path="
-              + pathOpt.get().name());
-    }
-    if (pathOpt.isPresent()) {
-      return pathOpt;
-    }
-    Optional<BlockFace> graphOpt = resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
-    return tagOpt.isPresent() ? tagOpt : graphOpt;
-  }
-
-  private Optional<BlockFace> readLaunchDirectionTag(TrainProperties properties) {
-    if (properties == null) {
-      return Optional.empty();
-    }
-    Optional<String> valueOpt = TrainTagHelper.readTagValue(properties, "FTA_LAUNCH_DIR");
-    if (valueOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    TrainTagHelper.removeTagKey(properties, "FTA_LAUNCH_DIR");
-    try {
-      BlockFace face = BlockFace.valueOf(valueOpt.get().trim().toUpperCase(java.util.Locale.ROOT));
-      return isCardinal(face) ? Optional.of(face) : Optional.empty();
-    } catch (IllegalArgumentException ex) {
-      return Optional.empty();
-    }
-  }
-
-  private Optional<BlockFace> resolveLaunchDirectionByTrainCarts(
-      RuntimeTrainHandle train, String destination) {
-    if (train == null || destination == null || destination.isBlank()) {
-      return Optional.empty();
-    }
-    Optional<RailState> stateOpt = train.railState();
-    if (stateOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    RailState state = stateOpt.get();
-    Block railBlock = state.railBlock();
-    if (railBlock == null) {
-      return Optional.empty();
-    }
-    PathNode node = PathNode.getOrCreate(railBlock);
-    if (node == null || node.containsName(destination)) {
-      return Optional.empty();
-    }
-    PathConnection connection = node.findConnection(destination);
-    if (connection == null || connection.junctionName == null) {
-      return Optional.empty();
-    }
-    RailPiece piece = state.railPiece();
-    if (piece == null || piece.isNone()) {
-      piece = RailPiece.create(railBlock);
-    }
-    if (piece == null || piece.isNone()) {
-      return Optional.empty();
-    }
-    List<RailJunction> junctions = piece.getJunctions();
-    if (junctions == null || junctions.isEmpty()) {
-      return Optional.empty();
-    }
-    for (RailJunction junction : junctions) {
-      if (junction == null || !connection.junctionName.equals(junction.name())) {
-        continue;
-      }
-      BlockFace face = junction.position().getMotionFace();
-      if (isCardinal(face)) {
-        return Optional.of(face);
-      }
-      break;
-    }
-    return Optional.empty();
-  }
-
-  private Optional<BlockFace> resolveLaunchDirectionByGraph(
-      RailGraph graph, NodeId currentNode, NodeId nextNode) {
-    if (graph == null || currentNode == null || nextNode == null) {
-      return Optional.empty();
-    }
-    Optional<RailNode> fromOpt = graph.findNode(currentNode);
-    Optional<RailNode> toOpt = graph.findNode(nextNode);
-    if (fromOpt.isEmpty() || toOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    org.bukkit.util.Vector from = fromOpt.get().worldPosition();
-    org.bukkit.util.Vector to = toOpt.get().worldPosition();
-    if (from == null || to == null) {
-      return Optional.empty();
-    }
-    double dx = to.getX() - from.getX();
-    double dz = to.getZ() - from.getZ();
-    if (!Double.isFinite(dx) || !Double.isFinite(dz)) {
-      return Optional.empty();
-    }
-    if (Math.abs(dx) < 1.0e-6 && Math.abs(dz) < 1.0e-6) {
-      return Optional.empty();
-    }
-    if (Math.abs(dx) >= Math.abs(dz)) {
-      return Optional.of(dx >= 0.0 ? BlockFace.EAST : BlockFace.WEST);
-    }
-    return Optional.of(dz >= 0.0 ? BlockFace.SOUTH : BlockFace.NORTH);
-  }
-
-  private static boolean isCardinal(BlockFace face) {
-    return face == BlockFace.NORTH
-        || face == BlockFace.SOUTH
-        || face == BlockFace.EAST
-        || face == BlockFace.WEST;
+  private static String formatOptionalLong(OptionalLong value) {
+    return value != null && value.isPresent() ? String.valueOf(value.getAsLong()) : "-";
   }
 
   private void triggerStallFailover(
@@ -1656,6 +1623,52 @@ public final class RuntimeDispatchService {
       }
     }
     return false;
+  }
+
+  /**
+   * 判断当前 waypoint 是否需要“停站”语义。
+   *
+   * <p>仅 waypoint 节点且 passType 不是 PASS 时触发；站台停站仍由 AutoStation 负责。
+   */
+  private boolean shouldStopAtWaypoint(SignNodeDefinition definition, RouteStop stop) {
+    if (definition == null || stop == null) {
+      return false;
+    }
+    if (definition.nodeType() != NodeType.WAYPOINT) {
+      return false;
+    }
+    return stop.passType() != RouteStopPassType.PASS;
+  }
+
+  private boolean shouldStopAtWaypoint(NodeId nodeId, RouteStop stop) {
+    if (nodeId == null || stop == null) {
+      return false;
+    }
+    if (stop.passType() == RouteStopPassType.PASS) {
+      return false;
+    }
+    if (isStationNode(nodeId) || isDepotNode(nodeId)) {
+      return false;
+    }
+    Optional<WaypointKind> kindOpt =
+        SignTextParser.parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
+            .flatMap(SignNodeDefinition::waypointMetadata)
+            .map(meta -> meta.kind());
+    if (kindOpt.isPresent()) {
+      WaypointKind kind = kindOpt.get();
+      if (kind == WaypointKind.STATION || kind == WaypointKind.DEPOT) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** 解析 waypoint 停站时长（秒），缺失时回退默认值。 */
+  private int resolveWaypointDwellSeconds(RouteStop stop) {
+    if (stop == null) {
+      return 0;
+    }
+    return stop.dwellSeconds().orElse(DEFAULT_WAYPOINT_DWELL_SECONDS);
   }
 
   private Optional<String> findDirectiveTarget(RouteStop stop, String prefix) {

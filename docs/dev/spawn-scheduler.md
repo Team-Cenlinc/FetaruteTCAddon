@@ -51,6 +51,9 @@
 - 不允许/失败：若 spawn 失败会释放已占用资源，票据按 `spawn.retry-delay-ticks` 延迟后重试。
   - 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
 
+### 出库区块加载
+- Depot 出车前会加载 depot 周边区块，并持有约 10 秒的 plugin chunk ticket，避免刚加载即卸载导致 spawn 失败。
+
 ### Depot lookover
 - Depot 出车会对起步段的道岔执行“lookover”：把道岔分支边一并占用，避免刚出库即被其他列车抢占分支。
 - lookover 优先追加“走廊冲突 + 方向”资源以允许同向放行；方向无法判定时回退为 EDGE 资源。

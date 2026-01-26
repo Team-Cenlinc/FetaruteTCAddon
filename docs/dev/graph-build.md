@@ -86,6 +86,7 @@
    - 识别并记录：
      - 本插件节点牌子：`waypoint/autostation/depot`
      - TrainCarts 节点牌子：`switcher`（只识别 `[train] switcher`，不会把 `[train] tag` 误认为 switcher）
+   - 坐标来源：真实牌子记录牌子方块坐标；虚拟牌子（TCC TrackNodeSign）记录轨道方块坐标。
    - 注意：若线网中没有任何 waypoint/autostation/depot 牌子，则该线网不会被视为“本插件接管的信号线路”，build 可能会提示未扫描到节点。
 
 

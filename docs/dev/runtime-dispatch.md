@@ -11,6 +11,17 @@
 3) 不允许进入：基于 lookahead 阻塞位置细分信号（PROCEED_WITH_CAUTION/CAUTION/STOP）→ 限速或停车
 4) 出站门控（站台/TERM）会额外检查优先级让行：若单线/道岔冲突队列存在更高优先级列车，则保持停站等待。
 
+## Waypoint 停站
+- waypoint 节点在 RouteStop 标记为 STOP/TERMINATE 时也会执行停站（PASS 则直接通过）。
+- 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
+- 停站期间会保持 STOP 信号，直到倒计时结束；同时会提前写入下一跳 destination，确保发车时直接走寻路方向。
+- 对 STOP/TERM waypoint 的进站减速会使用“剩余距离估算 + speed curve”，避免直接急刹。
+- 若估算导致列车停在牌子前，会触发“1 block 爬行”兜底以确保触牌推进。
+
+## 发车方向
+- 发车方向以 TrainCarts 的寻路结果为准（根据当前 destination 计算下一跳 junction）。
+- 调度层不再写入 `FTA_LAUNCH_DIR` 等方向 tag，避免两套方向逻辑相互覆盖。
+
 ## 信号变化监测
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。

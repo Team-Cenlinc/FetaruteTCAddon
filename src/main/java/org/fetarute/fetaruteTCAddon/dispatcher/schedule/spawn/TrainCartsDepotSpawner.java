@@ -49,6 +49,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 public final class TrainCartsDepotSpawner implements DepotSpawner {
 
   private static final String ROUTE_SPAWN_PATTERN_KEY = "spawn_train_pattern";
+  private static final long DEPOT_CHUNK_TICKET_TICKS = 200L;
   private static final PlainTextComponentSerializer PLAIN_TEXT =
       PlainTextComponentSerializer.plainText();
 
@@ -88,6 +89,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       debugLogger.accept("自动发车失败: depot 世界未加载 worldId=" + depotInfo.worldId());
       return Optional.empty();
     }
+    loadNearbyChunks(world, depotInfo.x(), depotInfo.z(), 4, plugin, DEPOT_CHUNK_TICKET_TICKS);
     Block signBlock = world.getBlockAt(depotInfo.x(), depotInfo.y(), depotInfo.z());
     if (!(signBlock.getState() instanceof Sign sign)) {
       debugLogger.accept("自动发车失败: depot 方块不是牌子 @ " + depotInfo.locationText());
@@ -282,6 +284,54 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
     MinecartGroup group = spawnable.spawn(locations);
     return Optional.ofNullable(group);
+  }
+
+  /**
+   * 加载 depot 周边区块，并持有短期 chunk ticket 防止立刻卸载。
+   *
+   * <p>该方法会在 {@code holdTicks} 后自动释放 ticket。
+   */
+  private static void loadNearbyChunks(
+      World world,
+      int blockX,
+      int blockZ,
+      int blockRadius,
+      org.bukkit.plugin.Plugin plugin,
+      long holdTicks) {
+    if (world == null || blockRadius < 0) {
+      return;
+    }
+    int chunkRadius = Math.max(0, (blockRadius + 15) >> 4);
+    int baseChunkX = blockX >> 4;
+    int baseChunkZ = blockZ >> 4;
+    java.util.Set<Long> ticketed = new java.util.HashSet<>();
+    for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+      for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+        int cx = baseChunkX + dx;
+        int cz = baseChunkZ + dz;
+        if (!world.isChunkLoaded(cx, cz)) {
+          world.getChunkAt(cx, cz);
+        }
+        if (plugin != null && holdTicks > 0L) {
+          if (world.addPluginChunkTicket(cx, cz, plugin)) {
+            ticketed.add((((long) cx) << 32) ^ (cz & 0xffffffffL));
+          }
+        }
+      }
+    }
+    if (plugin != null && holdTicks > 0L && !ticketed.isEmpty()) {
+      Bukkit.getScheduler()
+          .runTaskLater(
+              plugin,
+              () -> {
+                for (long key : ticketed) {
+                  int cx = (int) (key >> 32);
+                  int cz = (int) key;
+                  world.removePluginChunkTicket(cx, cz, plugin);
+                }
+              },
+              holdTicks);
+    }
   }
 
   private static SpawnLocationList findSpawnLocations(
