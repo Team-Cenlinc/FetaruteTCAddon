@@ -132,6 +132,11 @@ public final class BossBarTrainHudManager implements Listener {
     debugLogger.accept("BossBarTrainHudManager shutdown");
   }
 
+  /** 清理站点/公司等缓存，下次 tick 时重新从存储加载。 */
+  public void clearCaches() {
+    contextResolver.clearCaches();
+  }
+
   @EventHandler
   public void onQuit(PlayerQuitEvent event) {
     hide(event.getPlayer());

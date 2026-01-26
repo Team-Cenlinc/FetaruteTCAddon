@@ -147,4 +147,11 @@ public final class SimpleDisplayService implements DisplayService {
     scoreboardHud.shutdown();
     scoreboardHud.unregister();
   }
+
+  @Override
+  public void clearStationCaches() {
+    bossBarHud.clearCaches();
+    actionBarHud.clearCaches();
+    scoreboardHud.clearCaches();
+  }
 }

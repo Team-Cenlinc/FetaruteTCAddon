@@ -5,11 +5,16 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
  * 周期性检查信号等级变化，更新列车速度控制。
@@ -22,16 +27,22 @@ public final class RuntimeSignalMonitor implements Runnable {
   private final EtaRuntimeSampler etaSampler;
   private final TrainSnapshotStore snapshotStore;
   private final DwellRegistry dwellRegistry;
+  private final RouteProgressRegistry routeProgressRegistry;
+  private final RouteDefinitionCache routeDefinitions;
 
   public RuntimeSignalMonitor(
       RuntimeDispatchService dispatchService,
       EtaRuntimeSampler etaSampler,
       TrainSnapshotStore snapshotStore,
-      DwellRegistry dwellRegistry) {
+      DwellRegistry dwellRegistry,
+      RouteProgressRegistry routeProgressRegistry,
+      RouteDefinitionCache routeDefinitions) {
     this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
     this.etaSampler = etaSampler;
     this.snapshotStore = snapshotStore;
     this.dwellRegistry = dwellRegistry;
+    this.routeProgressRegistry = routeProgressRegistry;
+    this.routeDefinitions = routeDefinitions;
   }
 
   @Override
@@ -53,19 +64,18 @@ public final class RuntimeSignalMonitor implements Runnable {
         activeTrainNames.add(trainName);
       }
       dispatchService.handleSignalTick(group);
-      if (etaSampler != null) {
+      if (etaSampler != null && trainName != null && !trainName.isBlank()) {
         Optional<Integer> dwellRemainingSec =
-            dwellRegistry != null && trainName != null && !trainName.isBlank()
-                ? dwellRegistry.remainingSeconds(trainName)
-                : Optional.empty();
+            dwellRegistry != null ? dwellRegistry.remainingSeconds(trainName) : Optional.empty();
+        NodeSampleInfo nodeInfo = resolveNodeInfo(trainName);
         etaSampler.sample(
             group,
             tick,
             now,
-            Optional.empty(),
-            Optional.empty(),
+            nodeInfo.currentNodeId,
+            nodeInfo.lastPassedNodeId,
             dwellRemainingSec,
-            Optional.empty());
+            nodeInfo.signalAspect);
       }
     }
     dispatchService.cleanupOrphanOccupancyClaims(activeTrainNames);
@@ -73,6 +83,48 @@ public final class RuntimeSignalMonitor implements Runnable {
     if (dwellRegistry != null) {
       dwellRegistry.retain(activeTrainNames);
     }
+  }
+
+  private NodeSampleInfo resolveNodeInfo(String trainName) {
+    if (routeProgressRegistry == null || routeDefinitions == null) {
+      return NodeSampleInfo.EMPTY;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        routeProgressRegistry.get(trainName);
+    if (entryOpt.isEmpty()) {
+      return NodeSampleInfo.EMPTY;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    if (entry.routeUuid() == null) {
+      return new NodeSampleInfo(
+          Optional.empty(), Optional.empty(), Optional.ofNullable(entry.lastSignal()));
+    }
+    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(entry.routeUuid());
+    if (routeOpt.isEmpty()) {
+      return new NodeSampleInfo(
+          Optional.empty(), Optional.empty(), Optional.ofNullable(entry.lastSignal()));
+    }
+    RouteDefinition route = routeOpt.get();
+    List<NodeId> waypoints = route.waypoints();
+    int currentIndex = entry.currentIndex();
+    Optional<NodeId> currentNodeId =
+        (currentIndex >= 0 && currentIndex < waypoints.size())
+            ? Optional.of(waypoints.get(currentIndex))
+            : Optional.empty();
+    Optional<NodeId> lastPassedNodeId =
+        (currentIndex > 0 && currentIndex - 1 < waypoints.size())
+            ? Optional.of(waypoints.get(currentIndex - 1))
+            : Optional.empty();
+    return new NodeSampleInfo(
+        currentNodeId, lastPassedNodeId, Optional.ofNullable(entry.lastSignal()));
+  }
+
+  private record NodeSampleInfo(
+      Optional<NodeId> currentNodeId,
+      Optional<NodeId> lastPassedNodeId,
+      Optional<SignalAspect> signalAspect) {
+    static final NodeSampleInfo EMPTY =
+        new NodeSampleInfo(Optional.empty(), Optional.empty(), Optional.empty());
   }
 
   private void cleanupSnapshotStore(Set<String> activeTrainNames) {

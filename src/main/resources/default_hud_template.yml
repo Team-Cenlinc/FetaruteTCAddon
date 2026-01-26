@@ -2,7 +2,7 @@ bossbar:
   template: |-
     rotate_ticks: 60
     AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><{line_color_tag}>▋<gray> | </gray><white>开往 {dest_eor}</white>
-    AT_STATION_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>To {dest_eop}</white>
+    AT_STATION_2: <{line_color_tag}>▋<white> {line_lang2}</white><{line_color_tag}>▋<gray> | </gray><white>To {dest_eop_lang2}</white>
     AT_LAST_STATION_1: <white>终点站 {current_station} 到了</white>
     AT_LAST_STATION_2: <white>Final stop {current_station_lang2}</white>
     TERM_ARRIVING_1: <white>终点 {next_station} 到了</white>
@@ -47,7 +47,7 @@ player_display:
           - "<gray>█</gray> <white>开往 {dest_eop}</white>"
           - "<gray>█</gray> <white>车次 {train_name} - {route_pattern_zh_CN}</white>"
         row:
-          - "<{line_color_tag}>◘</{line_color_tag}> <white>{index} - {station_lang2}</white>"
+          - "<{line_color_tag}>◘</{line_color_tag}> <white>{index} - {station}</white>"
           - "<{line_color_tag}>█</{line_color_tag}> <gray>{eta_status_zh_CN}</gray>"
         window:
           size: 3

@@ -1,9 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.explore;
 
+import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
 import com.bergerkiller.bukkit.tc.controller.components.RailPath;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
+import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import com.bergerkiller.bukkit.tc.rails.logic.RailLogic;
 import com.bergerkiller.bukkit.tc.rails.type.RailType;
 import java.util.HashMap;
@@ -107,37 +109,15 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
           neighbors.add(predicted);
         }
       }
+      if (shouldIncludeFallbackNeighbors(piece)) {
+        neighbors.addAll(fallbackNeighborCandidates(railBlock));
+      }
       if (!neighbors.isEmpty()) {
         return Set.copyOf(neighbors);
       }
     }
 
-    Set<RailBlockPos> neighbors = new HashSet<>();
-    // 轨道类型未提供 junctions 时的保守回退：仅扫描相邻方块的轨道（不主动跨未加载区块，避免误触发大范围区块加载）。
-    for (BlockFace face : FALLBACK_NEIGHBOR_FACES) {
-      if (face == null || face == BlockFace.SELF) {
-        continue;
-      }
-      Block candidate = railBlock.getRelative(face);
-      int cx = candidate.getX();
-      int cz = candidate.getZ();
-      if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
-        // 在 loadChunks 模式下，我们也返回未加载区块中的候选位置
-        neighbors.add(new RailBlockPos(candidate.getX(), candidate.getY(), candidate.getZ()));
-        continue;
-      }
-      RailPiece neighborPiece = RailPiece.create(candidate);
-      if (neighborPiece == null || neighborPiece.isNone()) {
-        continue;
-      }
-      Block neighborBlock = neighborPiece.block();
-      RailBlockPos neighborPos =
-          new RailBlockPos(neighborBlock.getX(), neighborBlock.getY(), neighborBlock.getZ());
-      if (!pos.equals(neighborPos)) {
-        neighbors.add(neighborPos);
-      }
-    }
-    return Set.copyOf(neighbors);
+    return Set.copyOf(fallbackNeighborCandidates(railBlock));
   }
 
   /**
@@ -300,6 +280,74 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       targets.add(next);
     }
     return targets.size();
+  }
+
+  private boolean shouldIncludeFallbackNeighbors(RailPiece piece) {
+    if (piece == null || piece.isNone()) {
+      return false;
+    }
+    // 仅在道岔牌子存在时扩展潜在分支，避免误把并行轨道当成可达分支。
+    TrackedSign[] signs = piece.signs();
+    if (signs == null || signs.length == 0) {
+      return false;
+    }
+    for (TrackedSign sign : signs) {
+      if (sign == null) {
+        continue;
+      }
+      SignActionHeader header = sign.getHeader();
+      if (header == null || (!header.isTrain() && !header.isCart())) {
+        continue;
+      }
+      String action = safeTrackedLine(sign, 1).trim().toLowerCase(java.util.Locale.ROOT);
+      if (action.equals("switcher")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private Set<RailBlockPos> fallbackNeighborCandidates(Block railBlock) {
+    Set<RailBlockPos> neighbors = new HashSet<>();
+    if (railBlock == null) {
+      return neighbors;
+    }
+    // 轨道类型未提供 junctions 时的保守回退：仅扫描相邻方块的轨道（不主动跨未加载区块，避免误触发大范围区块加载）。
+    for (BlockFace face : FALLBACK_NEIGHBOR_FACES) {
+      if (face == null || face == BlockFace.SELF) {
+        continue;
+      }
+      Block candidate = railBlock.getRelative(face);
+      int cx = candidate.getX();
+      int cz = candidate.getZ();
+      if (!world.isChunkLoaded(cx >> 4, cz >> 4)) {
+        // 在 loadChunks 模式下，我们也返回未加载区块中的候选位置
+        neighbors.add(new RailBlockPos(candidate.getX(), candidate.getY(), candidate.getZ()));
+        continue;
+      }
+      RailPiece neighborPiece = RailPiece.create(candidate);
+      if (neighborPiece == null || neighborPiece.isNone()) {
+        continue;
+      }
+      Block neighborBlock = neighborPiece.block();
+      RailBlockPos neighborPos =
+          new RailBlockPos(neighborBlock.getX(), neighborBlock.getY(), neighborBlock.getZ());
+      RailBlockPos currentPos =
+          new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
+      if (!currentPos.equals(neighborPos)) {
+        neighbors.add(neighborPos);
+      }
+    }
+    return neighbors;
+  }
+
+  private String safeTrackedLine(TrackedSign sign, int index) {
+    try {
+      String value = sign.getLine(index);
+      return value != null ? value : "";
+    } catch (IndexOutOfBoundsException ex) {
+      return "";
+    }
   }
 
   @Override

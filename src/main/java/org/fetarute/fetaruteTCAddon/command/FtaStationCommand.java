@@ -451,6 +451,7 @@ public final class FtaStationCommand {
                           station.createdAt(),
                           Instant.now());
                   provider.stations().save(updated);
+                  plugin.getDisplayService().ifPresent(ds -> ds.clearStationCaches());
                   sender.sendMessage(
                       locale.component(
                           "command.station.set.success", Map.of("code", station.code())));
@@ -537,6 +538,7 @@ public final class FtaStationCommand {
                           station.createdAt(),
                           Instant.now());
                   provider.stations().save(updated);
+                  plugin.getDisplayService().ifPresent(ds -> ds.clearStationCaches());
                   sender.sendMessage(
                       locale.component(
                           "command.station.link.siding.success",
@@ -729,6 +731,7 @@ public final class FtaStationCommand {
                   for (Station station : orphans) {
                     provider.stations().delete(station.id());
                   }
+                  plugin.getDisplayService().ifPresent(ds -> ds.clearStationCaches());
                   sender.sendMessage(
                       locale.component(
                           "command.station.dump.success",

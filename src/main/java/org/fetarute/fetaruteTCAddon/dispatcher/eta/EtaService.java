@@ -280,6 +280,18 @@ public final class EtaService {
   }
 
   /**
+   * 使指定列车的 ETA 缓存失效，下次 getForTrain 会重新计算。
+   *
+   * <p>适用于列车经过 waypoint 或信号确认等需要立即刷新 ETA 的场景。
+   */
+  public void invalidateTrainEta(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    trainCache.invalidateByPrefix(trainName + "|");
+  }
+
+  /**
    * 预排班/未发车 ETA。
    *
    * <p>说明：仅基于已生成的票据（pending queue），不会读取 SpawnPlan 本身。

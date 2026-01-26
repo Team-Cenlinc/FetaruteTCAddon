@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 
 import com.bergerkiller.bukkit.common.utils.ChunkUtil;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.rails.RailLookup;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -73,7 +74,7 @@ public final class ConnectedRailNodeDiscoverySession {
   private BlockState[] currentStates;
   private int stateIndex;
   private final Set<RailBlockPos> scannedSignBlocks = new HashSet<>();
-  private final Set<Object> scannedVirtualSignKeys = new HashSet<>();
+  private final Set<Object> scannedTrackedSignKeys = new HashSet<>();
 
   private long processedRailSteps;
   private int scannedTileEntities;
@@ -203,71 +204,7 @@ public final class ConnectedRailNodeDiscoverySession {
         if (!scannedSignBlocks.add(signPos)) {
           continue;
         }
-        scannedSigns++;
-        NodeSignDefinitionParser.parse(sign)
-            .or(() -> SwitcherSignDefinitionParser.parse(sign))
-            .ifPresent(
-                def -> {
-                  int x = sign.getLocation().getBlockX();
-                  int y = sign.getLocation().getBlockY();
-                  int z = sign.getLocation().getBlockZ();
-                  if (def.nodeType() == NodeType.SWITCHER) {
-                    Optional<RailBlockPos> railPos =
-                        SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
-                    if (railPos.isPresent()) {
-                      RailBlockPos pos = railPos.get();
-                      x = pos.x();
-                      y = pos.y();
-                      z = pos.z();
-                    }
-                  }
-                  RailNodeRecord record =
-                      new RailNodeRecord(
-                          worldId,
-                          def.nodeId(),
-                          def.nodeType(),
-                          x,
-                          y,
-                          z,
-                          def.trainCartsDestination(),
-                          def.waypointMetadata());
-                  duplicateCollector.record(
-                      def.nodeId(),
-                      new DuplicateNodeId.Occurrence(
-                          def.nodeType(), x, y, z, /* virtualSign= */ false));
-                  RailNodeRecord existing = byNodeId.get(def.nodeId().value());
-                  if (existing == null) {
-                    byNodeId.put(def.nodeId().value(), record);
-                    return;
-                  }
-                  if (existing.nodeType() == NodeType.SWITCHER
-                      && def.nodeType() == NodeType.SWITCHER
-                      && existing.trainCartsDestination().isEmpty()
-                      && def.trainCartsDestination().isPresent()) {
-                    byNodeId.put(def.nodeId().value(), record);
-                    return;
-                  }
-                  if (!existing.equals(record)) {
-                    debugLogger.accept(
-                        "扫描到重复 nodeId，已忽略: node="
-                            + def.nodeId().value()
-                            + " @ "
-                            + world.getName()
-                            + " ("
-                            + x
-                            + ","
-                            + y
-                            + ","
-                            + z
-                            + "), existing=("
-                            + existing.x()
-                            + ","
-                            + existing.y()
-                            + ","
-                            + existing.z()
-                            + ")");
-                  }
-                });
+        scanTrackedSignsFromSign(sign, byNodeId);
         continue;
       }
 
@@ -628,13 +565,9 @@ public final class ConnectedRailNodeDiscoverySession {
         continue;
       }
 
-      // TCCoasters 的 TrackNodeSign 是虚拟牌子（TrackedFakeSign），不会作为 tile entity 被 chunk 扫描发现；
-      // 因此这里只额外处理“非真实牌子”的情况，避免与上面的 tile entity 扫描重复。
-      if (tracked.isRealSign()) {
-        continue;
-      }
+      // 统一通过 RailPiece.signs() 获取 TC 认可的牌子与 railBlock，对齐锚点轨道。
       Object uniqueKey = tracked.getUniqueKey();
-      if (uniqueKey != null && !scannedVirtualSignKeys.add(uniqueKey)) {
+      if (uniqueKey != null && !scannedTrackedSignKeys.add(uniqueKey)) {
         continue;
       }
       scannedSigns++;
@@ -642,9 +575,10 @@ public final class ConnectedRailNodeDiscoverySession {
           .or(() -> SwitcherSignDefinitionParser.parse(tracked))
           .ifPresent(
               def -> {
-                int x = railPos.x();
-                int y = railPos.y();
-                int z = railPos.z();
+                RailBlockPos anchorPos = resolveRailPosFromTrackedSign(tracked, railPos);
+                int x = anchorPos.x();
+                int y = anchorPos.y();
+                int z = anchorPos.z();
                 if (def.nodeType() == NodeType.SWITCHER) {
                   Optional<RailBlockPos> parsed =
                       SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
@@ -668,22 +602,11 @@ public final class ConnectedRailNodeDiscoverySession {
                 duplicateCollector.record(
                     def.nodeId(),
                     new DuplicateNodeId.Occurrence(
-                        def.nodeType(), x, y, z, /* virtualSign= */ true));
-                RailNodeRecord existing = byNodeId.get(def.nodeId().value());
-                if (existing == null) {
-                  byNodeId.put(def.nodeId().value(), record);
-                  return;
-                }
-                if (existing.nodeType() == NodeType.SWITCHER
-                    && def.nodeType() == NodeType.SWITCHER
-                    && existing.trainCartsDestination().isEmpty()
-                    && def.trainCartsDestination().isPresent()) {
-                  byNodeId.put(def.nodeId().value(), record);
-                  return;
-                }
-                if (!existing.equals(record)) {
+                        def.nodeType(), x, y, z, /* virtualSign= */ !tracked.isRealSign()));
+                RailNodeRecord existing = byNodeId.put(def.nodeId().value(), record);
+                if (existing != null && !existing.equals(record)) {
                   debugLogger.accept(
-                      "扫描到重复 nodeId，已忽略: node="
+                      "扫描到重复 nodeId，已用 railPiece.signs() 结果覆盖: node="
                           + def.nodeId().value()
                           + " @ "
                           + world.getName()
@@ -703,5 +626,101 @@ public final class ConnectedRailNodeDiscoverySession {
                 }
               });
     }
+  }
+
+  private void scanTrackedSignsFromSign(Sign sign, Map<String, RailNodeRecord> byNodeId) {
+    if (sign == null) {
+      return;
+    }
+    RailPiece piece = RailLookup.discoverRailPieceFromSign(sign.getBlock());
+    if (piece == null || piece.isNone()) {
+      return;
+    }
+    TrackedSign[] signs = RailLookup.discoverSignsAtRailPiece(piece);
+    if (signs == null || signs.length == 0) {
+      return;
+    }
+    for (TrackedSign tracked : signs) {
+      if (tracked == null) {
+        continue;
+      }
+      Object uniqueKey = tracked.getUniqueKey();
+      if (uniqueKey != null && !scannedTrackedSignKeys.add(uniqueKey)) {
+        continue;
+      }
+      scannedSigns++;
+      NodeSignDefinitionParser.parse(tracked)
+          .or(() -> SwitcherSignDefinitionParser.parse(tracked))
+          .ifPresent(
+              def -> {
+                RailBlockPos anchorPos =
+                    resolveRailPosFromTrackedSign(
+                        tracked,
+                        new RailBlockPos(
+                            sign.getLocation().getBlockX(),
+                            sign.getLocation().getBlockY(),
+                            sign.getLocation().getBlockZ()));
+                int x = anchorPos.x();
+                int y = anchorPos.y();
+                int z = anchorPos.z();
+                if (def.nodeType() == NodeType.SWITCHER) {
+                  Optional<RailBlockPos> parsed =
+                      SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
+                  if (parsed.isPresent()) {
+                    RailBlockPos pos = parsed.get();
+                    x = pos.x();
+                    y = pos.y();
+                    z = pos.z();
+                  }
+                }
+                RailNodeRecord record =
+                    new RailNodeRecord(
+                        worldId,
+                        def.nodeId(),
+                        def.nodeType(),
+                        x,
+                        y,
+                        z,
+                        def.trainCartsDestination(),
+                        def.waypointMetadata());
+                duplicateCollector.record(
+                    def.nodeId(),
+                    new DuplicateNodeId.Occurrence(
+                        def.nodeType(), x, y, z, /* virtualSign= */ !tracked.isRealSign()));
+                RailNodeRecord existing = byNodeId.put(def.nodeId().value(), record);
+                if (existing != null && !existing.equals(record)) {
+                  debugLogger.accept(
+                      "扫描到重复 nodeId，已用 railPiece.signs() 结果覆盖: node="
+                          + def.nodeId().value()
+                          + " @ "
+                          + world.getName()
+                          + " ("
+                          + x
+                          + ","
+                          + y
+                          + ","
+                          + z
+                          + "), existing=("
+                          + existing.x()
+                          + ","
+                          + existing.y()
+                          + ","
+                          + existing.z()
+                          + ")");
+                }
+              });
+    }
+  }
+
+  private RailBlockPos resolveRailPosFromTrackedSign(TrackedSign tracked, RailBlockPos fallback) {
+    if (tracked == null) {
+      return fallback;
+    }
+    RailPiece rail = tracked.getRail();
+    if (rail == null || rail.block() == null) {
+      return fallback;
+    }
+    Block block = rail.block();
+    return new RailBlockPos(block.getX(), block.getY(), block.getZ());
   }
 }

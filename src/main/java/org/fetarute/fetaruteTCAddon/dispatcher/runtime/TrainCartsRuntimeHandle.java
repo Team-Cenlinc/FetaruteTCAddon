@@ -100,6 +100,25 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   }
 
   @Override
+  public void accelerateTo(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
+    MinecartMember<?> head = group.head();
+    if (head == null) {
+      return;
+    }
+    double currentSpeed = currentSpeedBlocksPerTick();
+    // 如果当前速度已经接近或超过目标，不需要重新加速
+    if (currentSpeed >= targetBlocksPerTick * 0.95) {
+      return;
+    }
+    // 无论是否运动，都尝试添加加速动作以"补充能量"
+    LauncherConfig launchConfig = LauncherConfig.createDefault();
+    if (accelBlocksPerTickSquared > 0.0) {
+      launchConfig.setAcceleration(accelBlocksPerTickSquared);
+    }
+    head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
+  }
+
+  @Override
   public void destroy() {
     if (!group.isValid()) {
       return;

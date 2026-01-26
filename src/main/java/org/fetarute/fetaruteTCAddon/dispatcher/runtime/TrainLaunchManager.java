@@ -63,10 +63,15 @@ public final class TrainLaunchManager {
     double adjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
-    // 非 STOP 信号都允许发车（CAUTION/PROCEED_WITH_CAUTION 以较慢速度）
-    boolean canLaunch = allowLaunch && train != null && !train.isMoving();
-    if (canLaunch) {
-      train.launch(targetBpt, accelBpt2);
+    // 非 STOP 信号：允许发车或对运动中列车补充能量
+    if (train != null && allowLaunch) {
+      if (!train.isMoving()) {
+        // 静止时正常发车
+        train.launch(targetBpt, accelBpt2);
+      } else {
+        // 运动中且速度低于目标时，补充能量加速（经过 waypoint 时维持速度）
+        train.accelerateTo(targetBpt, accelBpt2);
+      }
     }
   }
 

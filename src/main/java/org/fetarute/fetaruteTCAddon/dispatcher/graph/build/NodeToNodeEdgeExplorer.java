@@ -18,6 +18,8 @@ import java.util.Set;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -51,8 +53,13 @@ public final class NodeToNodeEdgeExplorer {
   /** 每 tick 最大移动步数（大幅增加以提升速度） */
   private static final int DEFAULT_MAX_STEPS_PER_TICK = 2048;
 
+  private static final BlockFace[] FALLBACK_NEIGHBOR_FACES = {
+    BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN
+  };
+
   private final World world;
   private final Map<RailBlockPos, NodeId> anchorIndex;
+  private final Set<NodeId> switcherNodeIds;
   private final double maxDistance;
   private final Consumer<String> debugLogger;
 
@@ -74,7 +81,15 @@ public final class NodeToNodeEdgeExplorer {
    */
   public NodeToNodeEdgeExplorer(
       World world, Map<RailBlockPos, NodeId> anchorIndex, Consumer<String> debugLogger) {
-    this(world, anchorIndex, DEFAULT_MAX_DISTANCE, debugLogger);
+    this(world, anchorIndex, Set.of(), DEFAULT_MAX_DISTANCE, debugLogger);
+  }
+
+  public NodeToNodeEdgeExplorer(
+      World world,
+      Map<RailBlockPos, NodeId> anchorIndex,
+      Set<NodeId> switcherNodeIds,
+      Consumer<String> debugLogger) {
+    this(world, anchorIndex, switcherNodeIds, DEFAULT_MAX_DISTANCE, debugLogger);
   }
 
   public NodeToNodeEdgeExplorer(
@@ -82,8 +97,18 @@ public final class NodeToNodeEdgeExplorer {
       Map<RailBlockPos, NodeId> anchorIndex,
       double maxDistance,
       Consumer<String> debugLogger) {
+    this(world, anchorIndex, Set.of(), maxDistance, debugLogger);
+  }
+
+  public NodeToNodeEdgeExplorer(
+      World world,
+      Map<RailBlockPos, NodeId> anchorIndex,
+      Set<NodeId> switcherNodeIds,
+      double maxDistance,
+      Consumer<String> debugLogger) {
     this.world = Objects.requireNonNull(world, "world");
     this.anchorIndex = Objects.requireNonNull(anchorIndex, "anchorIndex");
+    this.switcherNodeIds = switcherNodeIds == null ? Set.of() : Set.copyOf(switcherNodeIds);
     this.maxDistance = maxDistance > 0 ? maxDistance : DEFAULT_MAX_DISTANCE;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
@@ -199,6 +224,10 @@ public final class NodeToNodeEdgeExplorer {
       }
     }
 
+    if (switcherNodeIds.contains(task.startNodeId)) {
+      addSwitcherNeighborWalkers(task, railBlock);
+    }
+
     debugLogger.accept(
         "初始化探索任务: node="
             + task.startNodeId
@@ -206,6 +235,54 @@ public final class NodeToNodeEdgeExplorer {
             + anchor
             + " directions="
             + task.walkers.size());
+  }
+
+  private void addSwitcherNeighborWalkers(EdgeExplorationTask task, Block railBlock) {
+    if (task == null || railBlock == null) {
+      return;
+    }
+    Set<RailBlockPos> visited = new HashSet<>();
+    RailBlockPos center = new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
+    for (BlockFace face : FALLBACK_NEIGHBOR_FACES) {
+      if (face == null || face == BlockFace.SELF) {
+        continue;
+      }
+      Block candidate = railBlock.getRelative(face);
+      if (!world.isChunkLoaded(candidate.getX() >> 4, candidate.getZ() >> 4)) {
+        continue;
+      }
+      RailPiece neighborPiece = RailPiece.create(candidate);
+      if (neighborPiece == null || neighborPiece.isNone()) {
+        continue;
+      }
+      Block neighborRailBlock = neighborPiece.block();
+      if (neighborRailBlock == null) {
+        continue;
+      }
+      RailBlockPos neighborPos =
+          new RailBlockPos(
+              neighborRailBlock.getX(), neighborRailBlock.getY(), neighborRailBlock.getZ());
+      if (neighborPos.equals(center) || !visited.add(neighborPos)) {
+        continue;
+      }
+      RailState state = RailState.getSpawnState(neighborPiece);
+      if (state == null || state.railType() == RailType.NONE) {
+        continue;
+      }
+      Vector away =
+          new Vector(
+              neighborRailBlock.getX() - railBlock.getX(),
+              neighborRailBlock.getY() - railBlock.getY(),
+              neighborRailBlock.getZ() - railBlock.getZ());
+      if (away.lengthSquared() <= 0.0) {
+        continue;
+      }
+      state.setMotionVector(away);
+      state.initEnterDirection();
+      task.walkers.add(createWalker(state));
+      RailState reversed = state.cloneAndInvertMotion();
+      task.walkers.add(createWalker(reversed));
+    }
   }
 
   private WalkerState createWalker(RailState state) {

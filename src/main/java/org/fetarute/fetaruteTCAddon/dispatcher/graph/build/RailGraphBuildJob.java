@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -572,12 +573,11 @@ public final class RailGraphBuildJob implements Runnable {
       anchorsByNode.put(node.nodeId(), anchors);
     }
 
-    // 根据模式选择边探索实现
     if (edgeExploreMode.isNodeToNode()) {
       initNodeToNodeExplorer(nodes, anchorsByNode, missingAnchors);
-    } else {
-      initBfsEdgeSession(nodes, anchorsByNode, missingAnchors, currentAccess);
+      return;
     }
+    initBfsEdgeSession(nodes, anchorsByNode, missingAnchors, currentAccess);
   }
 
   private void initBfsEdgeSession(
@@ -611,6 +611,15 @@ public final class RailGraphBuildJob implements Runnable {
       List<RailNodeRecord> nodes,
       Map<NodeId, Set<RailBlockPos>> anchorsByNode,
       int missingAnchors) {
+    Set<NodeId> switcherNodes = new HashSet<>();
+    for (RailNodeRecord node : nodes) {
+      if (node == null) {
+        continue;
+      }
+      if (node.nodeType() == NodeType.SWITCHER) {
+        switcherNodes.add(node.nodeId());
+      }
+    }
     // 构建锚点 → 节点ID 的索引
     Map<RailBlockPos, NodeId> anchorIndex = new HashMap<>();
     for (Map.Entry<NodeId, Set<RailBlockPos>> entry : anchorsByNode.entrySet()) {
@@ -622,7 +631,7 @@ public final class RailGraphBuildJob implements Runnable {
 
     NodeToNodeEdgeExplorer explorer =
         new NodeToNodeEdgeExplorer(
-            world, anchorIndex, edgeExploreMode.maxDistanceBlocks(), debugLogger);
+            world, anchorIndex, switcherNodes, edgeExploreMode.maxDistanceBlocks(), debugLogger);
 
     // 添加所有节点作为探索起点
     for (Map.Entry<NodeId, Set<RailBlockPos>> entry : anchorsByNode.entrySet()) {

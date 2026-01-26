@@ -1,5 +1,9 @@
 prefix: "<gray>[<dark_aqua>FTA</dark_aqua>]</gray>"
 
+common:
+  "yes": "是"
+  "no": "否"
+
 locale:
   loaded: "<prefix> 语言 <dark_aqua><locale></dark_aqua> 已加载"
   fallback: "<prefix> 未找到语言文件 <red><locale></red>，已回退到 <dark_aqua><fallback></dark_aqua>"
@@ -714,6 +718,18 @@ command:
         success: "<prefix> <dark_aqua>已将编辑书归档为成书</dark_aqua>"
         lore-1: "<gray>运行图已写入数据库，可用于存档</gray>"
         lore-2: "<gray>写入时间:</gray> <white><when></white>"
+    path:
+      cache-unavailable: "<prefix> <red>RouteDefinition 缓存未加载</red>"
+      no-definition: "<prefix> <red>未找到运行图定义：</red><white><route></white>"
+      no-graph: "<prefix> <red>未加载调度图快照</red>"
+      no-graph-for-route: "<prefix> <red>未找到运行图所在的调度图</red> <gray>(route=<white><route></white>)</gray>"
+      empty-waypoints: "<prefix> <red>运行图没有 waypoint</red> <gray>(route=<white><route></white>)</gray>"
+      header: "<prefix> <dark_aqua>━━━ 路径展开 <route> ━━━</dark_aqua>"
+      direct: "<gray>→</gray> <white><from></white> <dark_aqua>━━━</dark_aqua> <white><to></white> <gray>(直连 <len> 格)</gray>"
+      detour-header: "<yellow>⚠</yellow> <white><from></white> <dark_aqua>···</dark_aqua> <white><to></white> <yellow>(绕行 <len> 格, <hops> 跳)</yellow>"
+      detour-step: "  <gray>└→</gray> <white><node></white>"
+      unreachable: "<red>✗</red> <white><from></white> <dark_aqua>───</dark_aqua> <white><to></white> <red>(不可达)</red>"
+      summary: "<prefix> <dark_aqua>总计:</dark_aqua> <white><total_blocks></white> <gray>格</gray> | <gray>原节点:</gray> <white><original_count></white> <gray>扩展后:</gray> <white><expanded_count></white> | <gray>绕行:</gray> <white><has_detour></white>"
 
   station:
     not-found: "<prefix> <red>未找到站点：</red><white><operator></white><gray>/</gray><white><station></white>"

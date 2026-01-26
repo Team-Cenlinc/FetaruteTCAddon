@@ -41,8 +41,13 @@ import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -1070,6 +1075,63 @@ public final class FtaRouteCommand {
                       entries,
                       page,
                       navCommand);
+                }));
+
+    // /fta route path <company> <operator> <line> <route> - 显示扩展后的实际路径（包含图最短路填充的中间节点）
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("path")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("route", StringParser.stringParser(), routeSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+
+                  ResolvedRoute resolved =
+                      resolveRoute(ctx, provider, locale, new CompanyQueryService(provider), false);
+                  if (resolved == null) {
+                    return;
+                  }
+
+                  // 尝试获取 RouteDefinition
+                  if (!plugin.isRouteDefinitionCacheReady()) {
+                    sender.sendMessage(locale.component("command.route.path.cache-unavailable"));
+                    return;
+                  }
+                  var definitionOpt =
+                      plugin.findRouteDefinitionByCodes(
+                          resolved.operator().code(),
+                          resolved.line().code(),
+                          resolved.route().code());
+                  if (definitionOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.path.no-definition",
+                            Map.of("route", resolved.route().code())));
+                    return;
+                  }
+                  var definition = definitionOpt.get();
+
+                  // 获取 RailGraph
+                  if (plugin.getRailGraphService() == null
+                      || plugin.getRailGraphService().snapshotCount() <= 0) {
+                    sender.sendMessage(locale.component("command.route.path.no-graph"));
+                    return;
+                  }
+
+                  // 计算扩展路径
+                  sendExpandedPath(locale, sender, definition);
                 }));
   }
 
@@ -2648,5 +2710,131 @@ public final class FtaRouteCommand {
       components.add(Component.text(page == null ? "" : page));
     }
     return components;
+  }
+
+  /**
+   * 显示 Route 在图中扩展后的实际路径。
+   *
+   * <p>当 waypoints 中相邻节点没有直连边时，会用最短路填充中间节点。此方法展示填充后的完整路径， 帮助用户诊断"绕远路"问题。
+   */
+  private void sendExpandedPath(LocaleManager locale, Player sender, RouteDefinition definition) {
+    List<NodeId> waypoints = definition.waypoints();
+    if (waypoints.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.route.path.empty-waypoints", Map.of("route", definition.id().value())));
+      return;
+    }
+
+    // 查找可用的图快照（按路径第一个节点所在世界）
+    var graphService = plugin.getRailGraphService();
+    if (graphService == null) {
+      sender.sendMessage(locale.component("command.route.path.no-graph"));
+      return;
+    }
+    Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+        graphService.findWorldIdForPath(waypoints).flatMap(graphService::getSnapshot);
+    if (snapshotOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.route.path.no-graph-for-route", Map.of("route", definition.id().value())));
+      return;
+    }
+    RailGraph graph = snapshotOpt.get().graph();
+
+    sender.sendMessage(
+        locale.component("command.route.path.header", Map.of("route", definition.id().value())));
+
+    // 逐段扩展并显示
+    RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+    List<NodeId> expandedPath = new ArrayList<>();
+    expandedPath.add(waypoints.get(0));
+
+    boolean hasDetour = false;
+    int totalBlocks = 0;
+
+    for (int i = 0; i < waypoints.size() - 1; i++) {
+      NodeId from = waypoints.get(i);
+      NodeId to = waypoints.get(i + 1);
+
+      // 检查是否有直连边
+      Optional<RailEdge> directEdge = findEdge(graph, from, to);
+      if (directEdge.isPresent()) {
+        // 直连：显示正常
+        int len = directEdge.get().lengthBlocks();
+        totalBlocks += len;
+        sender.sendMessage(
+            locale.component(
+                "command.route.path.direct",
+                Map.of("from", from.value(), "to", to.value(), "len", String.valueOf(len))));
+        expandedPath.add(to);
+      } else {
+        // 需要最短路填充
+        Optional<RailGraphPath> pathOpt =
+            pathFinder.shortestPath(
+                graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+        if (pathOpt.isEmpty()) {
+          sender.sendMessage(
+              locale.component(
+                  "command.route.path.unreachable",
+                  Map.of("from", from.value(), "to", to.value())));
+          continue;
+        }
+
+        RailGraphPath detourPath = pathOpt.get();
+        List<NodeId> detourNodes = detourPath.nodes();
+        int detourLen = (int) detourPath.totalLengthBlocks();
+        totalBlocks += detourLen;
+
+        // 标记为绕行
+        hasDetour = true;
+        sender.sendMessage(
+            locale.component(
+                "command.route.path.detour-header",
+                Map.of(
+                    "from",
+                    from.value(),
+                    "to",
+                    to.value(),
+                    "len",
+                    String.valueOf(detourLen),
+                    "hops",
+                    String.valueOf(detourNodes.size() - 1))));
+
+        // 显示绕行路径中的每一步
+        for (int j = 1; j < detourNodes.size(); j++) {
+          NodeId step = detourNodes.get(j);
+          expandedPath.add(step);
+          sender.sendMessage(
+              locale.component("command.route.path.detour-step", Map.of("node", step.value())));
+        }
+      }
+    }
+
+    // 总结
+    sender.sendMessage(
+        locale.component(
+            "command.route.path.summary",
+            Map.of(
+                "total_blocks",
+                String.valueOf(totalBlocks),
+                "original_count",
+                String.valueOf(waypoints.size()),
+                "expanded_count",
+                String.valueOf(expandedPath.size()),
+                "has_detour",
+                hasDetour ? locale.text("common.yes") : locale.text("common.no"))));
+  }
+
+  private Optional<RailEdge> findEdge(RailGraph graph, NodeId from, NodeId to) {
+    if (graph == null || from == null || to == null) {
+      return Optional.empty();
+    }
+    return graph.edgesFrom(from).stream()
+        .filter(
+            e ->
+                e.from().equals(from) && e.to().equals(to)
+                    || e.from().equals(to) && e.to().equals(from))
+        .findFirst();
   }
 }

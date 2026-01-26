@@ -45,6 +45,21 @@ public final class EtaCache<K, V> {
     map.put(key, new Entry<>(value, now != null ? now : Instant.now()));
   }
 
+  /** 删除特定 key 的缓存。 */
+  public void invalidate(K key) {
+    if (key != null) {
+      map.remove(key);
+    }
+  }
+
+  /** 删除所有 key.toString() 以指定前缀开头的缓存。 */
+  public void invalidateByPrefix(String prefix) {
+    if (prefix == null || prefix.isBlank()) {
+      return;
+    }
+    map.keySet().removeIf(key -> key != null && key.toString().startsWith(prefix));
+  }
+
   public Map<K, V> snapshotValues() {
     java.util.Map<K, V> out = new java.util.HashMap<>();
     for (var e : map.entrySet()) {

@@ -26,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -88,6 +89,7 @@ public final class RuntimeDispatchService {
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
+  private volatile EtaService etaService;
 
   private final java.util.concurrent.atomic.LongAdder orphanCleanupRuns =
       new java.util.concurrent.atomic.LongAdder();
@@ -133,6 +135,11 @@ public final class RuntimeDispatchService {
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
   public void setLayoverListener(Consumer<LayoverRegistry.LayoverCandidate> listener) {
     this.layoverListener = listener != null ? listener : candidate -> {};
+  }
+
+  /** 设置 EtaService（可选），用于在推进点时使 ETA 缓存失效。 */
+  public void setEtaService(EtaService etaService) {
+    this.etaService = etaService;
   }
 
   /**
@@ -299,6 +306,7 @@ public final class RuntimeDispatchService {
         Instant now = Instant.now();
         progressRegistry.advance(
             trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+        invalidateTrainEta(trainName);
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(trainName);
         }
@@ -327,6 +335,7 @@ public final class RuntimeDispatchService {
       Instant now = Instant.now();
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+      invalidateTrainEta(trainName);
       // 无下一目标时清除 destination 防止继续寻路
       properties.clearDestinationRoute();
       properties.setDestination("");
@@ -434,6 +443,7 @@ public final class RuntimeDispatchService {
     occupancyManager.acquire(request);
     progressRegistry.advance(
         trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+    invalidateTrainEta(trainName);
     progressRegistry.updateSignal(trainName, SignalAspect.PROCEED, now);
 
     String destinationName = resolveDestinationName(nextTarget.get());
@@ -1101,6 +1111,7 @@ public final class RuntimeDispatchService {
     }
     TrainTagHelper.writeTag(properties, "FTA_TICKET_ID", ticket.ticketId());
     progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
+    invalidateTrainEta(trainName);
 
     NodeId nextNode = route.waypoints().get(startIndex + 1);
     String destinationName = resolveDestinationName(nextNode);
@@ -1109,7 +1120,16 @@ public final class RuntimeDispatchService {
     }
     properties.clearDestinationRoute();
     trainHandle.setDestination(destinationName);
-    refreshSignal(properties.getHolder());
+
+    // 直接触发发车，不依赖 refreshSignal 的复杂逻辑
+    // refreshSignal 可能因为图路径问题导致 failover 而不发车
+    TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+    double targetBps = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
+    double targetBpt = targetBps / 20.0; // blocks/s -> blocks/tick
+    double accelBpt2 = config.accelBps2() / 400.0; // blocks/s^2 -> blocks/tick^2
+    properties.setSpeedLimit(targetBpt);
+    trainHandle.launch(targetBpt, accelBpt2);
+    progressRegistry.updateSignal(trainName, SignalAspect.PROCEED, now);
 
     debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
     return true;
@@ -2140,6 +2160,14 @@ public final class RuntimeDispatchService {
       return Optional.of(UUID.fromString(raw.trim()));
     } catch (IllegalArgumentException ex) {
       return Optional.empty();
+    }
+  }
+
+  /** 在推进进度后使 ETA 缓存失效，确保下次查询会重新计算。 */
+  private void invalidateTrainEta(String trainName) {
+    EtaService svc = this.etaService;
+    if (svc != null && trainName != null && !trainName.isBlank()) {
+      svc.invalidateTrainEta(trainName);
     }
   }
 }

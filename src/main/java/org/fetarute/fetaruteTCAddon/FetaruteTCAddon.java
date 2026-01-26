@@ -266,6 +266,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** RouteDefinition 缓存是否已加载。 */
+  public boolean isRouteDefinitionCacheReady() {
+    return routeDefinitionCache != null;
+  }
+
+  /** 根据 operator/line/route code 查询缓存定义。 */
+  public Optional<RouteDefinition> findRouteDefinitionByCodes(
+      String operatorCode, String lineCode, String routeCode) {
+    if (routeDefinitionCache == null) {
+      return Optional.empty();
+    }
+    return routeDefinitionCache.findByCodes(operatorCode, lineCode, routeCode);
+  }
+
   /** 返回当前占用管理器（调度闭塞骨架）。 */
   public OccupancyManager getOccupancyManager() {
     return occupancyManager;
@@ -284,6 +298,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /** 返回 TicketAssigner（若未初始化则为空）。 */
   public Optional<TicketAssigner> getSpawnTicketAssigner() {
     return Optional.ofNullable(spawnTicketAssigner);
+  }
+
+  /** 返回展示层服务（若未初始化则为空）。 */
+  public Optional<DisplayService> getDisplayService() {
+    return Optional.ofNullable(displayService);
   }
 
   /** 返回节点牌子注册表（用于 NodeId 冲突检测与路线编辑器）。 */
@@ -472,6 +491,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(new RuntimeDispatchListener(runtimeDispatchService), this);
     initEtaService();
+    if (etaService != null) {
+      runtimeDispatchService.setEtaService(etaService);
+    }
     restartRuntimeMonitor();
     getServer()
         .getScheduler()
@@ -549,7 +571,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
             .runTaskTimer(
                 this,
                 new RuntimeSignalMonitor(
-                    runtimeDispatchService, etaRuntimeSampler, trainSnapshotStore, dwellRegistry),
+                    runtimeDispatchService,
+                    etaRuntimeSampler,
+                    trainSnapshotStore,
+                    dwellRegistry,
+                    routeProgressRegistry,
+                    routeDefinitionCache),
                 interval,
                 interval);
   }

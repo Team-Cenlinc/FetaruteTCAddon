@@ -1,12 +1,18 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 
+import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.rails.RailLookup;
+import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import org.bukkit.Chunk;
 import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
@@ -38,6 +44,7 @@ public final class LoadedChunkNodeScanSession {
   private int chunkIndex;
   private BlockState[] currentStates;
   private int stateIndex;
+  private final Set<Object> scannedTrackedSignKeys = new HashSet<>();
   private int scannedTileEntities;
   private int scannedSigns;
 
@@ -84,19 +91,52 @@ public final class LoadedChunkNodeScanSession {
       if (!(state instanceof Sign sign)) {
         continue;
       }
+      scanTrackedSignsFromSign(sign, byNodeId);
+    }
+
+    return scanned;
+  }
+
+  private void scanTrackedSignsFromSign(Sign sign, Map<String, RailNodeRecord> byNodeId) {
+    if (sign == null) {
+      return;
+    }
+    RailPiece piece = RailLookup.discoverRailPieceFromSign(sign.getBlock());
+    if (piece == null || piece.isNone()) {
+      return;
+    }
+    TrackedSign[] signs = RailLookup.discoverSignsAtRailPiece(piece);
+    if (signs == null || signs.length == 0) {
+      return;
+    }
+    for (TrackedSign tracked : signs) {
+      if (tracked == null) {
+        continue;
+      }
+      Object uniqueKey = tracked.getUniqueKey();
+      if (uniqueKey != null && !scannedTrackedSignKeys.add(uniqueKey)) {
+        continue;
+      }
       scannedSigns++;
-      NodeSignDefinitionParser.parse(sign)
-          .or(() -> SwitcherSignDefinitionParser.parse(sign))
+      NodeSignDefinitionParser.parse(tracked)
+          .or(() -> SwitcherSignDefinitionParser.parse(tracked))
           .ifPresent(
               def -> {
-                int x = sign.getLocation().getBlockX();
-                int y = sign.getLocation().getBlockY();
-                int z = sign.getLocation().getBlockZ();
+                RailBlockPos anchorPos =
+                    resolveRailPosFromTrackedSign(
+                        tracked,
+                        new RailBlockPos(
+                            sign.getLocation().getBlockX(),
+                            sign.getLocation().getBlockY(),
+                            sign.getLocation().getBlockZ()));
+                int x = anchorPos.x();
+                int y = anchorPos.y();
+                int z = anchorPos.z();
                 if (def.nodeType() == NodeType.SWITCHER) {
-                  Optional<RailBlockPos> railPos =
+                  Optional<RailBlockPos> parsed =
                       SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
-                  if (railPos.isPresent()) {
-                    var pos = railPos.get();
+                  if (parsed.isPresent()) {
+                    RailBlockPos pos = parsed.get();
                     x = pos.x();
                     y = pos.y();
                     z = pos.z();
@@ -115,22 +155,11 @@ public final class LoadedChunkNodeScanSession {
                 duplicateCollector.record(
                     def.nodeId(),
                     new DuplicateNodeId.Occurrence(
-                        def.nodeType(), x, y, z, /* virtualSign= */ false));
-                RailNodeRecord existing = byNodeId.get(def.nodeId().value());
-                if (existing == null) {
-                  byNodeId.put(def.nodeId().value(), record);
-                  return;
-                }
-                if (existing.nodeType() == NodeType.SWITCHER
-                    && def.nodeType() == NodeType.SWITCHER
-                    && existing.trainCartsDestination().isEmpty()
-                    && def.trainCartsDestination().isPresent()) {
-                  byNodeId.put(def.nodeId().value(), record);
-                  return;
-                }
-                if (!existing.equals(record)) {
+                        def.nodeType(), x, y, z, /* virtualSign= */ !tracked.isRealSign()));
+                RailNodeRecord existing = byNodeId.put(def.nodeId().value(), record);
+                if (existing != null && !existing.equals(record)) {
                   debugLogger.accept(
-                      "扫描到重复 nodeId，已忽略: node="
+                      "扫描到重复 nodeId，已用 railPiece.signs() 结果覆盖: node="
                           + def.nodeId().value()
                           + " @ "
                           + world.getName()
@@ -150,8 +179,18 @@ public final class LoadedChunkNodeScanSession {
                 }
               });
     }
+  }
 
-    return scanned;
+  private RailBlockPos resolveRailPosFromTrackedSign(TrackedSign tracked, RailBlockPos fallback) {
+    if (tracked == null) {
+      return fallback;
+    }
+    RailPiece rail = tracked.getRail();
+    if (rail == null || rail.block() == null) {
+      return fallback;
+    }
+    Block block = rail.block();
+    return new RailBlockPos(block.getX(), block.getY(), block.getZ());
   }
 
   public boolean isDone() {
