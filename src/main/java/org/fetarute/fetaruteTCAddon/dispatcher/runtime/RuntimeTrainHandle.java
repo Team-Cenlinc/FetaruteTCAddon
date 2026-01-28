@@ -38,6 +38,22 @@ public interface RuntimeTrainHandle {
   void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared);
 
   /**
+   * 在列车静止时发车（含可选方向兜底）。
+   *
+   * <p>默认实现忽略兜底方向，行为等同 {@link #launch(double, double)}。
+   *
+   * @param fallbackDirection 兜底发车方向（调度图推导）
+   * @param targetBlocksPerTick 目标速度（blocks/tick）
+   * @param accelBlocksPerTickSquared 加速度（blocks/tick^2）
+   */
+  default void launchWithFallback(
+      Optional<org.bukkit.block.BlockFace> fallbackDirection,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
+    launch(targetBlocksPerTick, accelBlocksPerTickSquared);
+  }
+
+  /**
    * 加速到目标速度（无论列车是否在运动）。
    *
    * <p>用于在经过 waypoint/switcher 时"补充能量"以维持或恢复速度。

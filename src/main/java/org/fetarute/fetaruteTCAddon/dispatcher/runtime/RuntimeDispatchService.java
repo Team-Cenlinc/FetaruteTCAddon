@@ -71,6 +71,9 @@ public final class RuntimeDispatchService {
   /** Waypoint 作为 STOP/TERM 时的默认停站时长（秒）。 */
   private static final int DEFAULT_WAYPOINT_DWELL_SECONDS = 20;
 
+  /** Waypoint 停站减速：按制动距离的比例估算“软停车距离”。 */
+  private static final double WAYPOINT_STOP_BRAKE_FACTOR = 0.5;
+
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
@@ -88,6 +91,8 @@ public final class RuntimeDispatchService {
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, String> stopWaypointLogState =
+      new java.util.concurrent.ConcurrentHashMap<>();
   private volatile EtaService etaService;
 
   private final java.util.concurrent.atomic.LongAdder orphanCleanupRuns =
@@ -302,6 +307,9 @@ public final class RuntimeDispatchService {
           && route.lifecycleMode()
               == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
         Instant now = Instant.now();
+        if (definition.nodeType() == NodeType.WAYPOINT) {
+          centerTrainAtWaypoint(event, trainName, definition.nodeId());
+        }
         progressRegistry.advance(
             trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
         invalidateTrainEta(trainName);
@@ -355,6 +363,7 @@ public final class RuntimeDispatchService {
     Optional<RailGraph> graphOpt = resolveGraph(event);
     RailGraph graph = graphOpt.orElse(null);
     if (stopAtWaypoint) {
+      centerTrainAtWaypoint(event, trainName, definition.nodeId());
       if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
         dwellRegistry.start(trainName, waypointDwellSeconds);
       }
@@ -367,6 +376,7 @@ public final class RuntimeDispatchService {
         properties.clearDestinationRoute();
         properties.setDestination(destinationName);
       }
+      OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
       applyControl(
           train,
           properties,
@@ -376,7 +386,7 @@ public final class RuntimeDispatchService {
           nextTarget.get(),
           graph,
           false,
-          OptionalLong.empty());
+          stopDistanceOpt);
       return;
     }
     if (graphOpt.isEmpty()) {
@@ -699,6 +709,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
   }
 
   /**
@@ -782,6 +793,7 @@ public final class RuntimeDispatchService {
                 : Optional.empty();
         if (nextNode.isPresent()) {
           progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+          OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
           applyControl(
               train,
               properties,
@@ -791,7 +803,7 @@ public final class RuntimeDispatchService {
               nextNode.get(),
               null,
               false,
-              OptionalLong.empty());
+              stopDistanceOpt);
         } else {
           train.stop();
         }
@@ -812,6 +824,7 @@ public final class RuntimeDispatchService {
           config,
           false,
           OptionalLong.empty(),
+          java.util.Optional.empty(),
           configManager.current().runtimeSettings());
       double currentSpeed = train.currentSpeedBlocksPerTick();
       boolean isStopped = Math.abs(currentSpeed) < 0.001;
@@ -968,7 +981,8 @@ public final class RuntimeDispatchService {
         targetOverrideBps = java.util.OptionalDouble.of(approachSpeed);
       }
     }
-    if (stopAtNextWaypoint) {
+    if (stopAtNextWaypoint
+        && shouldLogStopWaypoint(trainName, currentIndex, nextNode.orElse(null), nextAspect)) {
       debugLogger.accept(
           "STOP/TERM waypoint 进站: train="
               + trainName
@@ -1246,7 +1260,9 @@ public final class RuntimeDispatchService {
     double targetBpt = targetBps / 20.0; // blocks/s -> blocks/tick
     double accelBpt2 = config.accelBps2() / 400.0; // blocks/s^2 -> blocks/tick^2
     properties.setSpeedLimit(targetBpt);
-    trainHandle.launch(targetBpt, accelBpt2);
+    java.util.Optional<org.bukkit.block.BlockFace> fallbackDirection =
+        resolveLaunchDirectionByGraph(graph, route.waypoints().get(startIndex), nextNode);
+    trainHandle.launchWithFallback(fallbackDirection, targetBpt, accelBpt2);
     progressRegistry.updateSignal(trainName, SignalAspect.PROCEED, now);
 
     debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
@@ -1374,6 +1390,8 @@ public final class RuntimeDispatchService {
       }
     }
     // 发车方向由 TrainCarts 依据 destination 自动推导（见 TrainCartsRuntimeHandle#launch），此处不写入额外 tag。
+    java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection =
+        resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
     trainLaunchManager.applyControl(
         train,
         properties,
@@ -1382,6 +1400,7 @@ public final class RuntimeDispatchService {
         config,
         allowLaunch,
         distanceOpt,
+        launchFallbackDirection,
         configManager.current().runtimeSettings());
 
     // 记录诊断数据
@@ -1443,6 +1462,44 @@ public final class RuntimeDispatchService {
     diagnosticsCache.put(builder.build(), now);
   }
 
+  /**
+   * 由调度图推导“发车方向”兜底。
+   *
+   * <p>仅在 TrainCarts 无法从 destination 推导方向时使用，避免依赖 PathNode 创建。
+   */
+  private java.util.Optional<org.bukkit.block.BlockFace> resolveLaunchDirectionByGraph(
+      RailGraph graph, NodeId currentNode, NodeId nextNode) {
+    if (graph == null || currentNode == null || nextNode == null) {
+      return java.util.Optional.empty();
+    }
+    java.util.Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> fromOpt =
+        graph.findNode(currentNode);
+    java.util.Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> toOpt =
+        graph.findNode(nextNode);
+    if (fromOpt.isEmpty() || toOpt.isEmpty()) {
+      return java.util.Optional.empty();
+    }
+    org.bukkit.util.Vector from = fromOpt.get().worldPosition();
+    org.bukkit.util.Vector to = toOpt.get().worldPosition();
+    if (from == null || to == null) {
+      return java.util.Optional.empty();
+    }
+    double dx = to.getX() - from.getX();
+    double dz = to.getZ() - from.getZ();
+    if (!Double.isFinite(dx) || !Double.isFinite(dz)) {
+      return java.util.Optional.empty();
+    }
+    if (Math.abs(dx) < 1.0e-6 && Math.abs(dz) < 1.0e-6) {
+      return java.util.Optional.empty();
+    }
+    if (Math.abs(dx) >= Math.abs(dz)) {
+      return java.util.Optional.of(
+          dx >= 0.0 ? org.bukkit.block.BlockFace.EAST : org.bukkit.block.BlockFace.WEST);
+    }
+    return java.util.Optional.of(
+        dz >= 0.0 ? org.bukkit.block.BlockFace.SOUTH : org.bukkit.block.BlockFace.NORTH);
+  }
+
   private OptionalLong resolveShortestDistance(RailGraph graph, NodeId from, NodeId to) {
     if (graph == null || from == null || to == null) {
       return OptionalLong.empty();
@@ -1455,8 +1512,153 @@ public final class RuntimeDispatchService {
 
   // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
 
+  /**
+   * Waypoint 停站时强制居中列车（对齐牌子中心），以模拟 AutoStation 的停车体验。
+   *
+   * <p>仅在 waypoint STOP/TERM 停站触发时调用；异常时静默降级为普通停车。
+   */
+  private void centerTrainAtWaypoint(SignActionEvent event, String trainName, NodeId nodeId) {
+    if (event == null || !event.hasGroup()) {
+      return;
+    }
+    try {
+      var group = event.getGroup();
+      com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
+      boolean hadAction = group.getActions().hasAction();
+      group.getActions().launchReset();
+      double centerDistance = resolveCenterDistance(event, group);
+      String centerText = formatLocation(event.getCenterLocation());
+      String cartText = formatLocation(resolveCenterCartLocation(group));
+      String signText = formatLocation(event.getBlock().getLocation());
+      boolean realSign = event.getTrackedSign() != null && event.getTrackedSign().isRealSign();
+      station.centerTrain();
+      boolean hasAction = group.getActions().hasAction();
+      debugLogger.accept(
+          "Waypoint 居中: train="
+              + trainName
+              + " node="
+              + (nodeId != null ? nodeId.value() : "-")
+              + " dist="
+              + (Double.isFinite(centerDistance)
+                  ? String.format(java.util.Locale.ROOT, "%.3f", centerDistance)
+                  : "-")
+              + " action="
+              + (hadAction ? "Y" : "N")
+              + "->"
+              + (hasAction ? "Y" : "N")
+              + " center="
+              + centerText
+              + " cart="
+              + cartText
+              + " sign="
+              + signText
+              + " real="
+              + realSign);
+    } catch (Throwable ex) {
+      debugLogger.accept(
+          "Waypoint 居中失败: train="
+              + trainName
+              + " node="
+              + (nodeId != null ? nodeId.value() : "-")
+              + " error="
+              + ex.getClass().getSimpleName());
+    }
+  }
+
+  private org.bukkit.Location resolveCenterCartLocation(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
+    if (group == null) {
+      return null;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartMember<?> cart = group.middle();
+    if (cart == null || cart.getRailTracker() == null) {
+      return null;
+    }
+    com.bergerkiller.bukkit.tc.controller.components.RailState state =
+        cart.getRailTracker().getState();
+    if (state == null) {
+      return null;
+    }
+    return state.positionLocation();
+  }
+
+  private double resolveCenterDistance(
+      SignActionEvent event, com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
+    if (event == null || group == null) {
+      return Double.NaN;
+    }
+    org.bukkit.Location center = event.getCenterLocation();
+    org.bukkit.Location cart = resolveCenterCartLocation(group);
+    if (center == null || cart == null) {
+      return Double.NaN;
+    }
+    return center.distance(cart);
+  }
+
+  private String formatLocation(org.bukkit.Location location) {
+    if (location == null || location.getWorld() == null) {
+      return "-";
+    }
+    return location.getWorld().getName()
+        + "("
+        + location.getBlockX()
+        + ","
+        + location.getBlockY()
+        + ","
+        + location.getBlockZ()
+        + ")";
+  }
+
+  /**
+   * 解析 waypoint 停站的“软刹车距离”。
+   *
+   * <p>基于当前速度与制动能力估算制动距离，并乘以固定比例，确保速度以指数方式逐步降低， 避免 waypoint 触发后出现“立即清零”的急刹体验。
+   */
+  private OptionalLong resolveSoftStopDistance(
+      RuntimeTrainHandle train, TrainProperties properties) {
+    if (train == null || properties == null) {
+      return OptionalLong.empty();
+    }
+    ConfigManager.RuntimeSettings settings = configManager.current().runtimeSettings();
+    if (!settings.speedCurveEnabled()) {
+      return OptionalLong.empty();
+    }
+    TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+    double currentBps = train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND;
+    if (!Double.isFinite(currentBps) || currentBps <= 0.0) {
+      return OptionalLong.empty();
+    }
+    double decel = config.decelBps2();
+    if (!Double.isFinite(decel) || decel <= 0.0) {
+      return OptionalLong.empty();
+    }
+    double brakingDistance = (currentBps * currentBps) / (2.0 * decel);
+    if (!Double.isFinite(brakingDistance) || brakingDistance <= 0.0) {
+      return OptionalLong.empty();
+    }
+    double effective = brakingDistance * WAYPOINT_STOP_BRAKE_FACTOR;
+    if (!Double.isFinite(effective) || effective <= 0.0) {
+      return OptionalLong.empty();
+    }
+    long blocks = (long) Math.ceil(effective);
+    return OptionalLong.of(Math.max(1L, blocks));
+  }
+
   private static String formatOptionalLong(OptionalLong value) {
     return value != null && value.isPresent() ? String.valueOf(value.getAsLong()) : "-";
+  }
+
+  private boolean shouldLogStopWaypoint(
+      String trainName, int currentIndex, NodeId nextNode, SignalAspect aspect) {
+    if (trainName == null || trainName.isBlank()) {
+      return true;
+    }
+    String trainKey = trainName.trim().toLowerCase(java.util.Locale.ROOT);
+    String nextText = nextNode != null ? nextNode.value() : "-";
+    String aspectText = aspect != null ? aspect.name() : "-";
+    String stateKey = currentIndex + ":" + nextText + ":" + aspectText;
+    String prev = stopWaypointLogState.put(trainKey, stateKey);
+    return prev == null || !prev.equals(stateKey);
   }
 
   private void triggerStallFailover(
@@ -1515,6 +1717,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
     debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);

@@ -10,9 +10,14 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import org.bukkit.Bukkit;
+import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
  * TrainCarts 运行时列车句柄实现。
@@ -85,6 +90,14 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
    */
   @Override
   public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
+    launchWithFallback(Optional.empty(), targetBlocksPerTick, accelBlocksPerTickSquared);
+  }
+
+  @Override
+  public void launchWithFallback(
+      Optional<BlockFace> fallbackDirection,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
     if (group.isMoving()) {
       return;
     }
@@ -97,8 +110,34 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (accelBlocksPerTickSquared > 0.0) {
       launchConfig.setAcceleration(accelBlocksPerTickSquared);
     }
-    Optional<BlockFace> directionOpt =
-        resolveLaunchDirectionByTrainCarts(head, group.getProperties());
+    TrainProperties properties = group.getProperties();
+    LoggerManager logger = resolveLoggerManager();
+    LaunchDirectionResult directionResult =
+        resolveLaunchDirectionByTrainCarts(head, properties, logger);
+    Optional<BlockFace> directionOpt = directionResult.face();
+    String detail = directionResult.detail();
+    if (directionOpt.isEmpty() && fallbackDirection != null && fallbackDirection.isPresent()) {
+      directionOpt = fallbackDirection;
+      detail = detail + " fallback_graph";
+    }
+    if (logger != null) {
+      String trainName = properties != null ? properties.getTrainName() : "unknown";
+      String destination = properties != null ? properties.getDestination() : null;
+      String destText = destination == null || destination.isBlank() ? "-" : destination;
+      logger.debug(
+          "发车判定: train="
+              + trainName
+              + " dest="
+              + destText
+              + " dir="
+              + (directionOpt.isPresent()
+                  ? directionOpt.get().name()
+                  : directionResult.directionText())
+              + " targetBpt="
+              + targetBlocksPerTick
+              + " detail="
+              + detail);
+    }
     if (directionOpt.isPresent()) {
       // 使用“带方向”的 launch，确保在折返/道岔附近发车时与 TrainCarts 寻路方向一致。
       head.getActions().addActionLaunch(directionOpt.get(), launchConfig, targetBlocksPerTick);
@@ -238,57 +277,96 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
    * <p>用于解决 waypoint STOP/TERM 停车后折返发车方向错误的问题：调度层只下发 destination，真正寻路由 TrainCarts 完成，因此发车方向也应以
    * TrainCarts 的寻路结果为准。
    */
-  private Optional<BlockFace> resolveLaunchDirectionByTrainCarts(
-      MinecartMember<?> head, TrainProperties properties) {
-    if (head == null || properties == null) {
-      return Optional.empty();
+  private LaunchDirectionResult resolveLaunchDirectionByTrainCarts(
+      MinecartMember<?> head, TrainProperties properties, LoggerManager logger) {
+    if (head == null) {
+      return LaunchDirectionResult.failure("head_null");
+    }
+    if (properties == null) {
+      return LaunchDirectionResult.failure("properties_null");
     }
     String destination = properties.getDestination();
     if (destination == null || destination.isBlank()) {
-      return Optional.empty();
+      return LaunchDirectionResult.failure("destination_empty");
     }
     try {
-      RailState railState = head.getRailTracker() != null ? head.getRailTracker().getState() : null;
-      if (railState == null || railState.railWorld() == null) {
-        return Optional.empty();
+      java.util.List<RailStateCandidate> candidates = collectRailStateCandidates(head);
+      if (candidates.isEmpty()) {
+        return LaunchDirectionResult.failure("rail_state_missing");
       }
+      RailState railState = null;
+      String candidateDebug = "-";
       com.bergerkiller.bukkit.tc.TrainCarts trainCarts = group.getTrainCarts();
       if (trainCarts == null || trainCarts.getPathProvider() == null) {
-        return Optional.empty();
+        RailState fallbackState = candidates.get(0).state();
+        return resolveLaunchDirectionFallback(
+            fallbackState, destination, "path_provider_missing", logger);
       }
       com.bergerkiller.bukkit.tc.pathfinding.PathWorld pathWorld =
-          trainCarts.getPathProvider().getWorld(railState.railWorld());
+          trainCarts.getPathProvider().getWorld(candidates.get(0).state().railWorld());
       if (pathWorld == null) {
-        return Optional.empty();
+        RailState fallbackState = candidates.get(0).state();
+        return resolveLaunchDirectionFallback(
+            fallbackState, destination, "path_world_missing", logger);
       }
-      com.bergerkiller.bukkit.tc.pathfinding.PathNode currentNode =
-          pathWorld.getNodeAtRail(railState.railBlock());
-      if (currentNode == null) {
-        currentNode = pathWorld.getNodeAtRail(railState.positionBlock());
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode currentNode = null;
+      for (RailStateCandidate candidate : candidates) {
+        RailState state = candidate.state();
+        if (state == null) {
+          continue;
+        }
+        Block railBlock = state.railBlock();
+        Block positionBlock = state.positionBlock();
+        com.bergerkiller.bukkit.tc.pathfinding.PathNode node =
+            railBlock != null ? pathWorld.getNodeAtRail(railBlock) : null;
+        if (node == null && positionBlock != null) {
+          node = pathWorld.getNodeAtRail(positionBlock);
+        }
+        if (node != null) {
+          railState = state;
+          currentNode = node;
+          candidateDebug = candidate.describe(railBlock, positionBlock);
+          break;
+        }
+        if (candidateDebug.equals("-")) {
+          candidateDebug = candidate.describe(railBlock, positionBlock);
+        } else if (candidateDebug.length() < 200) {
+          candidateDebug = candidateDebug + "; " + candidate.describe(railBlock, positionBlock);
+        }
       }
-      if (currentNode == null) {
-        return Optional.empty();
+      if (currentNode == null || railState == null) {
+        RailState fallbackState = candidates.get(0).state();
+        return resolveLaunchDirectionFallback(
+            fallbackState, destination, "current_node_missing " + candidateDebug, logger);
       }
       com.bergerkiller.bukkit.tc.pathfinding.PathNode destinationNode =
           pathWorld.getNodeByName(destination.trim());
       if (destinationNode == null) {
-        return Optional.empty();
+        return resolveLaunchDirectionFallback(
+            railState, destination, "destination_node_missing", logger);
       }
       com.bergerkiller.bukkit.tc.pathfinding.PathConnection[] route =
           currentNode.findRoute(destinationNode);
       if (route == null || route.length == 0) {
-        return Optional.empty();
+        return resolveLaunchDirectionFallback(railState, destination, "route_empty", logger);
       }
       String junctionName = route[0].junctionName;
       if (junctionName == null || junctionName.isBlank()) {
-        return Optional.empty();
+        return resolveLaunchDirectionFallback(railState, destination, "junction_empty", logger);
       }
       if (railState.railPiece() == null || railState.railPiece().isNone()) {
-        return Optional.empty();
+        return resolveLaunchDirectionFallback(railState, destination, "rail_piece_missing", logger);
       }
+      StringBuilder available = new StringBuilder();
       for (RailJunction junction : railState.railPiece().getJunctions()) {
         if (junction == null || junction.name() == null) {
           continue;
+        }
+        if (available.length() < 120) {
+          if (available.length() > 0) {
+            available.append(',');
+          }
+          available.append(junction.name());
         }
         if (!junction.name().equalsIgnoreCase(junctionName)) {
           continue;
@@ -296,13 +374,170 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
         BlockFace face =
             junction.position() != null ? junction.position().getMotionFaceWithSubCardinal() : null;
         if (isHorizontalFace(face)) {
-          return Optional.of(face);
+          return LaunchDirectionResult.success(
+              face, "junction=" + junctionName + " source=" + candidateDebug);
         }
-        return Optional.empty();
+        return resolveLaunchDirectionFallback(
+            railState,
+            destination,
+            "junction_face_invalid=" + junctionName + " source=" + candidateDebug,
+            logger);
+      }
+      return resolveLaunchDirectionFallback(
+          railState,
+          destination,
+          "junction_not_found="
+              + junctionName
+              + " available="
+              + available
+              + " source="
+              + candidateDebug,
+          logger);
+    } catch (Throwable ex) {
+      if (logger != null) {
+        logger.debug(
+            "发车方向解析异常: "
+                + ex.getClass().getSimpleName()
+                + (ex.getMessage() != null ? (":" + ex.getMessage()) : ""));
+      }
+      return LaunchDirectionResult.failure("exception");
+    }
+  }
+
+  private java.util.List<RailStateCandidate> collectRailStateCandidates(MinecartMember<?> head) {
+    java.util.List<RailStateCandidate> candidates = new java.util.ArrayList<>();
+    addRailStateCandidate(candidates, "head", head);
+    MinecartMember<?> middle = group != null ? group.middle() : null;
+    addRailStateCandidate(candidates, "middle", middle);
+    MinecartMember<?> tail = group != null ? group.tail() : null;
+    addRailStateCandidate(candidates, "tail", tail);
+    return candidates;
+  }
+
+  private void addRailStateCandidate(
+      java.util.List<RailStateCandidate> candidates, String label, MinecartMember<?> member) {
+    if (member == null) {
+      return;
+    }
+    if (!candidates.isEmpty() && candidates.stream().anyMatch(c -> c.member() == member)) {
+      return;
+    }
+    if (member.getRailTracker() == null) {
+      return;
+    }
+    RailState state = member.getRailTracker().getState();
+    if (state == null || state.railWorld() == null) {
+      return;
+    }
+    candidates.add(new RailStateCandidate(label, member, state));
+  }
+
+  private LaunchDirectionResult resolveLaunchDirectionFallback(
+      RailState railState, String destination, String reason, LoggerManager logger) {
+    Optional<BlockFace> fallback = resolveDirectionByRegistry(railState, destination, logger);
+    if (fallback.isPresent()) {
+      return LaunchDirectionResult.success(fallback.get(), "fallback_registry reason=" + reason);
+    }
+    return LaunchDirectionResult.failure(reason);
+  }
+
+  private Optional<BlockFace> resolveDirectionByRegistry(
+      RailState railState, String destination, LoggerManager logger) {
+    if (railState == null || destination == null || destination.isBlank()) {
+      return Optional.empty();
+    }
+    Plugin plugin;
+    try {
+      plugin = JavaPlugin.getProvidingPlugin(TrainCartsRuntimeHandle.class);
+    } catch (Throwable ignored) {
+      return Optional.empty();
+    }
+    if (!(plugin instanceof FetaruteTCAddon addon)) {
+      return Optional.empty();
+    }
+    SignNodeRegistry registry = addon.getSignNodeRegistry();
+    if (registry == null) {
+      return Optional.empty();
+    }
+    NodeId nodeId = NodeId.of(destination.trim());
+    Optional<SignNodeRegistry.SignNodeInfo> infoOpt = registry.findByNodeId(nodeId, null);
+    if (infoOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    SignNodeRegistry.SignNodeInfo info = infoOpt.get();
+    if (railState.railWorld() != null && !railState.railWorld().getUID().equals(info.worldId())) {
+      return Optional.empty();
+    }
+    Block railBlock = railState.railBlock();
+    if (railBlock == null) {
+      return Optional.empty();
+    }
+    int dx = info.x() - railBlock.getX();
+    int dz = info.z() - railBlock.getZ();
+    if (dx == 0 && dz == 0) {
+      return Optional.empty();
+    }
+    BlockFace face =
+        Math.abs(dx) >= Math.abs(dz)
+            ? (dx > 0 ? BlockFace.EAST : BlockFace.WEST)
+            : (dz > 0 ? BlockFace.SOUTH : BlockFace.NORTH);
+    if (logger != null) {
+      logger.debug(
+          "发车方向回退: dest="
+              + destination
+              + " rail="
+              + formatBlock(railBlock)
+              + " sign="
+              + info.locationText()
+              + " face="
+              + face.name());
+    }
+    return Optional.of(face);
+  }
+
+  private static String formatBlock(Block block) {
+    if (block == null) {
+      return "-";
+    }
+    return block.getWorld().getName()
+        + "("
+        + block.getX()
+        + ","
+        + block.getY()
+        + ","
+        + block.getZ()
+        + ")";
+  }
+
+  private record LaunchDirectionResult(Optional<BlockFace> face, String detail) {
+    static LaunchDirectionResult success(BlockFace face, String detail) {
+      return new LaunchDirectionResult(Optional.ofNullable(face), detail != null ? detail : "-");
+    }
+
+    static LaunchDirectionResult failure(String detail) {
+      return new LaunchDirectionResult(Optional.empty(), detail != null ? detail : "-");
+    }
+
+    String directionText() {
+      return face.map(BlockFace::name).orElse("-");
+    }
+  }
+
+  private record RailStateCandidate(String label, MinecartMember<?> member, RailState state) {
+    String describe(Block railBlock, Block positionBlock) {
+      return label + "(rb=" + formatBlock(railBlock) + " pb=" + formatBlock(positionBlock) + ")";
+    }
+  }
+
+  private LoggerManager resolveLoggerManager() {
+    try {
+      Plugin plugin = JavaPlugin.getProvidingPlugin(TrainCartsRuntimeHandle.class);
+      if (plugin instanceof FetaruteTCAddon addon) {
+        return addon.getLoggerManager();
       }
     } catch (Throwable ignored) {
-      // 忽略：回退到无方向发车
+      return null;
     }
-    return Optional.empty();
+    return null;
   }
 }

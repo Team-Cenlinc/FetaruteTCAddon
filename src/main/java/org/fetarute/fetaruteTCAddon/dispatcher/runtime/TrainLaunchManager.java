@@ -37,6 +37,7 @@ public final class TrainLaunchManager {
       TrainConfig config,
       boolean allowLaunch,
       OptionalLong distanceOpt,
+      java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
       ConfigManager.RuntimeSettings runtimeSettings) {
     if (properties == null || aspect == null || config == null || runtimeSettings == null) {
       return;
@@ -66,7 +67,7 @@ public final class TrainLaunchManager {
     if (train != null && allowLaunch) {
       if (!train.isMoving()) {
         // 静止时正常发车
-        train.launch(targetBpt, accelBpt2);
+        train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
       } else {
         // 运动中且速度低于目标时，补充能量加速（经过 waypoint 时维持速度）
         train.accelerateTo(targetBpt, accelBpt2);
