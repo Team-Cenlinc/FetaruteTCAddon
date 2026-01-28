@@ -14,9 +14,11 @@
 ## Waypoint 停站
 - waypoint 节点在 RouteStop 标记为 STOP/TERMINATE 时也会执行停站（PASS 则直接通过）。
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
-- 停站期间会保持 STOP 信号，直到倒计时结束；同时会提前写入下一跳 destination，确保发车时直接走寻路方向。
+- 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
+- 停站期间会保持 STOP 信号，且提前写入下一跳 destination，确保发车时直接走寻路方向。
 - 对 STOP/TERM waypoint 的进站减速会使用“剩余距离估算 + speed curve”，避免直接急刹。
-- 若估算导致列车停在牌子前，会触发“1 block 爬行”兜底以确保触牌推进。
+- 停稳判定：连续 `1` tick 未移动即视为停稳；若超过 `400` ticks 未停稳则进入超时兜底。
+- 仅在停稳后才会执行居中、启动 dwell，并通过 `addActionWaitState()` 真正 hold 住列车。
 
 ## 发车方向
 - 发车方向以 TrainCarts 的寻路结果为准（根据当前 destination 计算下一跳 junction）。
@@ -26,6 +28,7 @@
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
+- 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。

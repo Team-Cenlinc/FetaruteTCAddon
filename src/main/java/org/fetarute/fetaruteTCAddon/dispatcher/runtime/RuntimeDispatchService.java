@@ -3,8 +3,10 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
+import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -12,8 +14,10 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -74,6 +78,15 @@ public final class RuntimeDispatchService {
   /** Waypoint 停站减速：按制动距离的比例估算“软停车距离”。 */
   private static final double WAYPOINT_STOP_BRAKE_FACTOR = 0.5;
 
+  /** Waypoint 停站等待超时（ticks）。 */
+  private static final int WAYPOINT_STOP_WAIT_TIMEOUT_TICKS = 400;
+
+  /** Waypoint 判定停稳的连续 tick 数。 */
+  private static final int WAYPOINT_STOP_STABLE_TICKS = 1;
+
+  /** 推进点去重窗口（毫秒），用于压制同一节点的重复触发。 */
+  private static final long PROGRESS_TRIGGER_DEDUP_MS = 800L;
+
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
@@ -91,8 +104,14 @@ public final class RuntimeDispatchService {
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
+  private final java.util.Set<String> missingSignalWarned = new HashSet<>();
+  private final java.util.concurrent.ConcurrentMap<String, String> waypointStopSessions =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final AtomicLong waypointStopCounter = new AtomicLong();
   private final java.util.concurrent.ConcurrentMap<String, String> stopWaypointLogState =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, ProgressTriggerState>
+      progressTriggerState = new java.util.concurrent.ConcurrentHashMap<>();
   private volatile EtaService etaService;
 
   private final java.util.concurrent.atomic.LongAdder orphanCleanupRuns =
@@ -293,6 +312,10 @@ public final class RuntimeDispatchService {
       return;
     }
     NodeId currentNode = definition.nodeId();
+    Instant now = Instant.now();
+    if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
+      return;
+    }
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     boolean stopAtWaypoint = false;
     int waypointDwellSeconds = 0;
@@ -306,7 +329,6 @@ public final class RuntimeDispatchService {
       if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
           && route.lifecycleMode()
               == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
-        Instant now = Instant.now();
         if (definition.nodeType() == NodeType.WAYPOINT) {
           centerTrainAtWaypoint(event, trainName, definition.nodeId());
         }
@@ -342,7 +364,6 @@ public final class RuntimeDispatchService {
             ? Optional.of(route.waypoints().get(currentIndex + 1))
             : Optional.empty();
     if (nextTarget.isEmpty()) {
-      Instant now = Instant.now();
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       invalidateTrainEta(trainName);
@@ -359,18 +380,19 @@ public final class RuntimeDispatchService {
       return;
     }
 
-    Instant now = Instant.now();
     Optional<RailGraph> graphOpt = resolveGraph(event);
     RailGraph graph = graphOpt.orElse(null);
     if (stopAtWaypoint) {
-      centerTrainAtWaypoint(event, trainName, definition.nodeId());
-      if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
-        dwellRegistry.start(trainName, waypointDwellSeconds);
+      if (event.getAction() == SignActionType.MEMBER_ENTER) {
+        return;
+      }
+      if (occupancyManager != null) {
+        occupancyManager.releaseByTrain(trainName);
       }
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       invalidateTrainEta(trainName);
-      progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+      updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       String destinationName = resolveDestinationName(nextTarget.get());
       if (destinationName != null && !destinationName.isBlank() && properties != null) {
         properties.clearDestinationRoute();
@@ -387,6 +409,7 @@ public final class RuntimeDispatchService {
           graph,
           false,
           stopDistanceOpt);
+      scheduleWaypointStopSequence(event, definition, trainName, waypointDwellSeconds);
       return;
     }
     if (graphOpt.isEmpty()) {
@@ -463,7 +486,7 @@ public final class RuntimeDispatchService {
               + decision.earliestTime()
               + " blockers="
               + summarizeBlockers(decision));
-      progressRegistry.updateSignal(trainName, aspect, now);
+      updateSignalOrWarn(trainName, aspect, now);
       applyControl(
           train,
           properties,
@@ -482,7 +505,7 @@ public final class RuntimeDispatchService {
     progressRegistry.advance(
         trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
     invalidateTrainEta(trainName);
-    progressRegistry.updateSignal(trainName, SignalAspect.PROCEED, now);
+    updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
 
     String destinationName = resolveDestinationName(nextTarget.get());
     if (destinationName == null || destinationName.isBlank()) {
@@ -709,7 +732,9 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
   }
 
   /**
@@ -745,6 +770,27 @@ public final class RuntimeDispatchService {
     String trainName = properties.getTrainName();
     Instant now = Instant.now();
     handleRenameIfNeeded(properties, trainName);
+    if (layoverRegistry.get(trainName).isPresent()) {
+      if (occupancyManager != null) {
+        occupancyManager.releaseByTrain(trainName);
+      }
+      updateSignalOrWarn(trainName, SignalAspect.STOP, now);
+      TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+      trainLaunchManager.applyControl(
+          train,
+          properties,
+          SignalAspect.STOP,
+          0.0,
+          config,
+          false,
+          OptionalLong.empty(),
+          java.util.Optional.empty(),
+          configManager.current().runtimeSettings());
+      if (train.isMoving()) {
+        train.stop();
+      }
+      return;
+    }
     if (TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isEmpty()) {
       if (progressRegistry.get(trainName).isPresent()) {
         if (occupancyManager != null) {
@@ -753,6 +799,7 @@ public final class RuntimeDispatchService {
         progressRegistry.remove(trainName);
       }
       stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+      missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
       return;
     }
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
@@ -792,7 +839,10 @@ public final class RuntimeDispatchService {
                 ? Optional.of(route.waypoints().get(currentIndex + 1))
                 : Optional.empty();
         if (nextNode.isPresent()) {
-          progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+          if (occupancyManager != null) {
+            occupancyManager.releaseByTrain(trainName);
+          }
+          updateSignalOrWarn(trainName, SignalAspect.STOP, now);
           OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
           applyControl(
               train,
@@ -814,7 +864,7 @@ public final class RuntimeDispatchService {
     if (currentIndex >= route.waypoints().size() - 1) {
       // 终点：持续下发 STOP 控制，确保减速停车
       // 若已停止，清理 destination 并注册 Layover
-      progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+      updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
       trainLaunchManager.applyControl(
           train,
@@ -910,7 +960,7 @@ public final class RuntimeDispatchService {
     }
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
     if (allowLaunch) {
-      progressRegistry.updateSignal(trainName, nextAspect, now);
+      updateSignalOrWarn(trainName, nextAspect, now);
     }
     if (currentNodeOpt.isEmpty() || nextNode.isEmpty()) {
       // 若已到终点且无下一目标，检查是否需要注册 Layover
@@ -929,7 +979,7 @@ public final class RuntimeDispatchService {
       if (runtimeSettings.failoverUnreachableStop()
           && shortestDistanceOpt.isEmpty()
           && !stopAtNextWaypoint) {
-        progressRegistry.updateSignal(trainName, SignalAspect.STOP, now);
+        updateSignalOrWarn(trainName, SignalAspect.STOP, now);
         applyControl(
             train,
             properties,
@@ -1263,7 +1313,7 @@ public final class RuntimeDispatchService {
     java.util.Optional<org.bukkit.block.BlockFace> fallbackDirection =
         resolveLaunchDirectionByGraph(graph, route.waypoints().get(startIndex), nextNode);
     trainHandle.launchWithFallback(fallbackDirection, targetBpt, accelBpt2);
-    progressRegistry.updateSignal(trainName, SignalAspect.PROCEED, now);
+    updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
 
     debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
     return true;
@@ -1323,6 +1373,22 @@ public final class RuntimeDispatchService {
       return SignalAspect.STOP;
     }
     return bestPosition <= 1 ? SignalAspect.CAUTION : SignalAspect.PROCEED_WITH_CAUTION;
+  }
+
+  /** 更新信号并在 entry 缺失时给出一次性告警，避免静默漂移。 */
+  private void updateSignalOrWarn(String trainName, SignalAspect aspect, Instant now) {
+    if (trainName == null || trainName.isBlank() || aspect == null) {
+      return;
+    }
+    boolean updated = progressRegistry.updateSignal(trainName, aspect, now);
+    String key = trainName.toLowerCase(Locale.ROOT);
+    if (updated) {
+      missingSignalWarned.remove(key);
+      return;
+    }
+    if (missingSignalWarned.add(key)) {
+      debugLogger.accept("信号更新失败: entry 缺失 train=" + trainName + " aspect=" + aspect.name());
+    }
   }
 
   /**
@@ -1582,6 +1648,115 @@ public final class RuntimeDispatchService {
     return state.positionLocation();
   }
 
+  /**
+   * Waypoint 停站等待流程：只在 GROUP_ENTER 触发，并等待列车停稳后再居中/进入 dwell/进入 WaitState。
+   *
+   * <p>语义对齐 AutoStation 的停稳判定，避免 MEMBER_ENTER 过早触发导致居中不稳定。
+   */
+  private void scheduleWaypointStopSequence(
+      SignActionEvent event, SignNodeDefinition definition, String trainName, int dwellSeconds) {
+    if (event == null || definition == null || trainName == null || trainName.isBlank()) {
+      return;
+    }
+    if (!event.hasGroup() || event.getGroup() == null) {
+      return;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
+    if (!group.isValid()) {
+      return;
+    }
+    JavaPlugin plugin = resolveSchedulerPlugin();
+    if (plugin == null || !plugin.isEnabled()) {
+      handleWaypointStop(event, definition, trainName, dwellSeconds, true);
+      return;
+    }
+    String key = trainName.toLowerCase(java.util.Locale.ROOT);
+    String sessionId = Long.toString(waypointStopCounter.incrementAndGet());
+    if (waypointStopSessions.putIfAbsent(key, sessionId) != null) {
+      return;
+    }
+    new org.bukkit.scheduler.BukkitRunnable() {
+      private int waitedTicks = 0;
+      private int stoppedTicks = 0;
+
+      @Override
+      public void run() {
+        if (!group.isValid()) {
+          clearWaypointStopSession(key, sessionId);
+          cancel();
+          return;
+        }
+        if (!sessionId.equals(waypointStopSessions.get(key))) {
+          cancel();
+          return;
+        }
+        if (!group.isMoving()) {
+          stoppedTicks++;
+          if (stoppedTicks >= WAYPOINT_STOP_STABLE_TICKS) {
+            clearWaypointStopSession(key, sessionId);
+            cancel();
+            handleWaypointStop(event, definition, trainName, dwellSeconds, false);
+            return;
+          }
+        } else {
+          stoppedTicks = 0;
+        }
+        waitedTicks++;
+        if (waitedTicks >= WAYPOINT_STOP_WAIT_TIMEOUT_TICKS) {
+          clearWaypointStopSession(key, sessionId);
+          cancel();
+          handleWaypointStop(event, definition, trainName, dwellSeconds, true);
+        }
+      }
+    }.runTaskTimer(plugin, 1L, 1L);
+  }
+
+  /**
+   * Waypoint 停站完成处理：执行居中、启动 dwell，并用 WaitState 真正 hold 住列车。
+   *
+   * @param timedOut 是否由超时兜底触发
+   */
+  private void handleWaypointStop(
+      SignActionEvent event,
+      SignNodeDefinition definition,
+      String trainName,
+      int dwellSeconds,
+      boolean timedOut) {
+    if (event == null || definition == null || trainName == null || trainName.isBlank()) {
+      return;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
+    if (group == null || !group.isValid()) {
+      return;
+    }
+    centerTrainAtWaypoint(event, trainName, definition.nodeId());
+    if (dwellSeconds > 0 && !group.isMoving() && dwellRegistry != null) {
+      if (dwellRegistry.remainingSeconds(trainName).isEmpty()) {
+        dwellRegistry.start(trainName, dwellSeconds);
+      }
+    }
+    group.getActions().addActionWaitState();
+    if (timedOut) {
+      debugLogger.accept(
+          "Waypoint 停站超时: train=" + trainName + " node=" + definition.nodeId().value());
+    }
+  }
+
+  private void clearWaypointStopSession(String key, String sessionId) {
+    if (key == null || sessionId == null) {
+      return;
+    }
+    waypointStopSessions.remove(key, sessionId);
+  }
+
+  private JavaPlugin resolveSchedulerPlugin() {
+    try {
+      return JavaPlugin.getProvidingPlugin(RuntimeDispatchService.class);
+    } catch (Throwable ignored) {
+      return null;
+    }
+  }
+
   private double resolveCenterDistance(
       SignActionEvent event, com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
     if (event == null || group == null) {
@@ -1661,6 +1836,24 @@ public final class RuntimeDispatchService {
     return prev == null || !prev.equals(stateKey);
   }
 
+  private boolean shouldHandleProgressTrigger(
+      String trainName, NodeId nodeId, int currentIndex, Instant now) {
+    if (trainName == null || trainName.isBlank() || nodeId == null || now == null) {
+      return true;
+    }
+    String trainKey = trainName.trim().toLowerCase(java.util.Locale.ROOT);
+    String stateKey = nodeId.value() + "#" + currentIndex;
+    long nowMs = now.toEpochMilli();
+    ProgressTriggerState prev = progressTriggerState.get(trainKey);
+    if (prev != null
+        && prev.stateKey().equalsIgnoreCase(stateKey)
+        && nowMs - prev.atMillis() < PROGRESS_TRIGGER_DEDUP_MS) {
+      return false;
+    }
+    progressTriggerState.put(trainKey, new ProgressTriggerState(stateKey, nowMs));
+    return true;
+  }
+
   private void triggerStallFailover(
       RuntimeTrainHandle train,
       TrainProperties properties,
@@ -1732,7 +1925,7 @@ public final class RuntimeDispatchService {
     if (settings.failoverStallSpeedBps() <= 0.0 || settings.failoverStallTicks() <= 0) {
       return StallDecision.none();
     }
-    if (aspect != SignalAspect.PROCEED) {
+    if (aspect == SignalAspect.STOP) {
       stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
       return StallDecision.none();
     }
@@ -1954,6 +2147,8 @@ public final class RuntimeDispatchService {
     private int lastIndex = -1;
     private int ticks = 0;
   }
+
+  private record ProgressTriggerState(String stateKey, long atMillis) {}
 
   private record StallDecision(boolean forceLaunch, boolean triggerFailover) {
     private static StallDecision none() {

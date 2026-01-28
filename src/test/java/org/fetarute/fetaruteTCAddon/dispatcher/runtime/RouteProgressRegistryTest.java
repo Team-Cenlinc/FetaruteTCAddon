@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -17,6 +18,7 @@ import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.junit.jupiter.api.Test;
 
 class RouteProgressRegistryTest {
@@ -59,6 +61,33 @@ class RouteProgressRegistryTest {
     assertTrue(
         TrainTagHelper.readTagValue(store.properties(), RouteProgressRegistry.TAG_ROUTE_UPDATED_AT)
             .isPresent());
+  }
+
+  @Test
+  void updateSignalReportsMissingEntry() {
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    boolean updated =
+        registry.updateSignal("train-1", SignalAspect.STOP, Instant.ofEpochMilli(1000));
+
+    assertFalse(updated);
+  }
+
+  @Test
+  void upsertPreservesLastSignal() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C")),
+            Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    TagStore store = new TagStore("FTA_ROUTE_INDEX=0");
+    registry.initFromTags("train-1", store.properties(), route);
+
+    registry.updateSignal("train-1", SignalAspect.CAUTION, Instant.ofEpochMilli(1000));
+    RouteProgressRegistry.RouteProgressEntry advanced =
+        registry.advance("train-1", null, route, 1, store.properties(), Instant.ofEpochMilli(1100));
+
+    assertEquals(SignalAspect.CAUTION, advanced.lastSignal());
   }
 
   private static final class TagStore {

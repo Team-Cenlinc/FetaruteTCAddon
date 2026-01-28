@@ -287,6 +287,12 @@ public final class FtaGraphCommand {
                       return;
                     }
                     TrainCartsRailBlockAccess railAccess = new TrainCartsRailBlockAccess(world);
+                    int signAnchorRadius =
+                        plugin
+                            .getConfigManager()
+                            .current()
+                            .graphSettings()
+                            .signAnchorSearchRadius();
 
                     if (useTcc) {
                       Optional<RailBlockPos> tccSeedOpt =
@@ -301,7 +307,7 @@ public final class FtaGraphCommand {
                       // 映射到相邻方块）。因此先尝试精确匹配，失败时再做小半径兜底映射，避免 --tcc 莫名无法起步。
                       seedRails = railAccess.findNearestRailBlocks(selected, 0);
                       if (seedRails.isEmpty()) {
-                        seedRails = railAccess.findNearestRailBlocks(selected, 2);
+                        seedRails = railAccess.findNearestRailBlocks(selected, signAnchorRadius);
                       }
                       if (seedRails.isEmpty()) {
                         sender.sendMessage(
@@ -314,7 +320,8 @@ public final class FtaGraphCommand {
                       seedNode = seedOpt.get();
                       seedRails =
                           railAccess.findNearestRailBlocks(
-                              new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()), 2);
+                              new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()),
+                              signAnchorRadius);
                     } else if (!useTcc && seedRails.isEmpty()) {
                       seedRails =
                           railAccess.findNearestRailBlocks(
@@ -322,7 +329,7 @@ public final class FtaGraphCommand {
                                   player.getLocation().getBlockX(),
                                   player.getLocation().getBlockY(),
                                   player.getLocation().getBlockZ()),
-                              2);
+                              signAnchorRadius);
                     }
                     if (seedRails.isEmpty()) {
                       sender.sendMessage(locale.component("command.graph.build.no-start-node"));
@@ -354,6 +361,10 @@ public final class FtaGraphCommand {
                   boolean useBfs = ctx.flags().isPresent(bfsFlag);
                   EdgeExploreMode exploreMode =
                       useBfs ? EdgeExploreMode.bfsMultiSource() : EdgeExploreMode.nodeToNode();
+                  ConfigManager.GraphSettings graphSettings =
+                      plugin.getConfigManager().current().graphSettings();
+                  int signAnchorRadius = graphSettings.signAnchorSearchRadius();
+                  int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
 
                   // --refresh 模式：跳过节点发现，从 SQL 加载现有节点，只重新探索边
                   boolean refresh = ctx.flags().isPresent(refreshFlag);
@@ -374,6 +385,8 @@ public final class FtaGraphCommand {
                           tickBudgetMs,
                           chunkLoadOptions,
                           exploreMode,
+                          signAnchorRadius,
+                          switcherAnchorRadius,
                           outcome -> {
                             AppliedGraphBuild applied =
                                 applyBuildSuccess(world, outcome.result(), outcome.completion());
@@ -502,6 +515,10 @@ public final class FtaGraphCommand {
 
                   ChunkLoadOptions chunkLoadOptions =
                       new ChunkLoadOptions(true, maxChunks, maxConcurrentLoads);
+                  ConfigManager.GraphSettings graphSettings =
+                      plugin.getConfigManager().current().graphSettings();
+                  int signAnchorRadius = graphSettings.signAnchorSearchRadius();
+                  int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
 
                   long startNanos = System.nanoTime();
                   RailGraphBuildJob job =
@@ -512,6 +529,8 @@ public final class FtaGraphCommand {
                           tickBudgetMs,
                           chunkLoadOptions,
                           EdgeExploreMode.bfsMultiSource(), // 默认使用 BFS
+                          signAnchorRadius,
+                          switcherAnchorRadius,
                           outcome -> {
                             AppliedGraphBuild applied =
                                 applyBuildSuccess(world, outcome.result(), outcome.completion());
@@ -6154,6 +6173,9 @@ public final class FtaGraphCommand {
       return;
     }
     StorageProvider provider = providerOpt.get();
+    ConfigManager.GraphSettings graphSettings = plugin.getConfigManager().current().graphSettings();
+    int signAnchorRadius = graphSettings.signAnchorSearchRadius();
+    int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
 
     // 从 SQL 加载现有节点
     List<RailNodeRecord> nodes;
@@ -6181,7 +6203,8 @@ public final class FtaGraphCommand {
     int missingAnchors = 0;
 
     for (RailNodeRecord node : nodes) {
-      int anchorRadius = node.nodeType() == NodeType.SWITCHER ? 2 : 6;
+      int anchorRadius =
+          node.nodeType() == NodeType.SWITCHER ? switcherAnchorRadius : signAnchorRadius;
       Set<RailBlockPos> anchors =
           access.findNearestRailBlocks(
               new RailBlockPos(node.x(), node.y(), node.z()), anchorRadius);

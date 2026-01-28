@@ -15,13 +15,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 11;
+  private static final int EXPECTED_CONFIG_VERSION = 12;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
+  private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
+  private static final int DEFAULT_GRAPH_SWITCHER_ANCHOR_SEARCH_RADIUS = 2;
   private static final String DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND = "BLOCK_NOTE_BLOCK_BELL";
   private static final float DEFAULT_AUTOSTATION_DOOR_CLOSE_VOLUME = 1.0f;
   private static final float DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH = 1.2f;
   private static final int DEFAULT_DISPATCH_TICK_INTERVAL = 10;
+  private static final int DEFAULT_LAUNCH_COOLDOWN_TICKS = 10;
   private static final int DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES = 2;
   private static final int DEFAULT_MIN_CLEAR_EDGES = 1;
   private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
@@ -223,8 +226,10 @@ public final class ConfigManager {
   private static GraphSettings parseGraph(
       ConfigurationSection graphSection, java.util.logging.Logger logger) {
     double defaultSpeedBlocksPerSecond = DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND;
+    int signAnchorRadius = DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS;
+    int switcherAnchorRadius = DEFAULT_GRAPH_SWITCHER_ANCHOR_SEARCH_RADIUS;
     if (graphSection == null) {
-      return new GraphSettings(defaultSpeedBlocksPerSecond);
+      return new GraphSettings(defaultSpeedBlocksPerSecond, signAnchorRadius, switcherAnchorRadius);
     }
     double speed =
         graphSection.getDouble(
@@ -233,7 +238,20 @@ public final class ConfigManager {
       logger.warning("graph.default-speed-blocks-per-second 配置无效: " + speed + "，已回退为默认值");
       speed = DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND;
     }
-    return new GraphSettings(speed);
+    int configuredSignRadius = graphSection.getInt("sign-anchor-search-radius", signAnchorRadius);
+    if (configuredSignRadius >= 0) {
+      signAnchorRadius = configuredSignRadius;
+    } else {
+      logger.warning("graph.sign-anchor-search-radius 配置无效: " + configuredSignRadius);
+    }
+    int configuredSwitcherRadius =
+        graphSection.getInt("switcher-anchor-search-radius", switcherAnchorRadius);
+    if (configuredSwitcherRadius >= 0) {
+      switcherAnchorRadius = configuredSwitcherRadius;
+    } else {
+      logger.warning("graph.switcher-anchor-search-radius 配置无效: " + configuredSwitcherRadius);
+    }
+    return new GraphSettings(speed, signAnchorRadius, switcherAnchorRadius);
   }
 
   /** 解析 autostation 配置段。 */
@@ -268,6 +286,7 @@ public final class ConfigManager {
   private static RuntimeSettings parseRuntime(
       ConfigurationSection section, java.util.logging.Logger logger) {
     int tickInterval = DEFAULT_DISPATCH_TICK_INTERVAL;
+    int launchCooldownTicks = DEFAULT_LAUNCH_COOLDOWN_TICKS;
     int lookaheadEdges = DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES;
     boolean hudBossBarEnabled = DEFAULT_HUD_BOSSBAR_ENABLED;
     int hudBossBarTickInterval = DEFAULT_HUD_BOSSBAR_TICK_INTERVAL;
@@ -347,6 +366,12 @@ public final class ConfigManager {
         tickInterval = configuredInterval;
       } else {
         logger.warning("runtime.dispatch-tick-interval-ticks 配置无效: " + configuredInterval);
+      }
+      int configuredLaunchCooldown = section.getInt("launch-cooldown-ticks", launchCooldownTicks);
+      if (configuredLaunchCooldown >= 0) {
+        launchCooldownTicks = configuredLaunchCooldown;
+      } else {
+        logger.warning("runtime.launch-cooldown-ticks 配置无效: " + configuredLaunchCooldown);
       }
       int configuredLookahead = section.getInt("lookahead-edges", lookaheadEdges);
       if (configuredLookahead > 0) {
@@ -429,6 +454,7 @@ public final class ConfigManager {
     }
     return new RuntimeSettings(
         tickInterval,
+        launchCooldownTicks,
         lookaheadEdges,
         minClearEdges,
         switcherZoneEdges,
@@ -593,11 +619,20 @@ public final class ConfigManager {
     }
   }
 
-  /** 调度图相关配置。 */
-  public record GraphSettings(double defaultSpeedBlocksPerSecond) {
+  /** 调度图相关配置（默认速度 + 牌子锚点搜索半径）。 */
+  public record GraphSettings(
+      double defaultSpeedBlocksPerSecond,
+      int signAnchorSearchRadius,
+      int switcherAnchorSearchRadius) {
     public GraphSettings {
       if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
         throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");
+      }
+      if (signAnchorSearchRadius < 0) {
+        throw new IllegalArgumentException("signAnchorSearchRadius 必须为非负数");
+      }
+      if (switcherAnchorSearchRadius < 0) {
+        throw new IllegalArgumentException("switcherAnchorSearchRadius 必须为非负数");
       }
     }
 
@@ -607,7 +642,10 @@ public final class ConfigManager {
      * <p>默认速度用于诊断/查询命令中的 ETA 估算：ETA = shortestDistanceBlocks / defaultSpeedBlocksPerSecond。
      */
     public static GraphSettings defaults() {
-      return new GraphSettings(DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND);
+      return new GraphSettings(
+          DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND,
+          DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS,
+          DEFAULT_GRAPH_SWITCHER_ANCHOR_SEARCH_RADIUS);
     }
   }
 
@@ -618,6 +656,7 @@ public final class ConfigManager {
   /** 运行时调度配置。 */
   public record RuntimeSettings(
       int dispatchTickIntervalTicks,
+      int launchCooldownTicks,
       int lookaheadEdges,
       int minClearEdges,
       int switcherZoneEdges,
@@ -643,6 +682,9 @@ public final class ConfigManager {
     public RuntimeSettings {
       if (dispatchTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("dispatchTickIntervalTicks 必须为正数");
+      }
+      if (launchCooldownTicks < 0) {
+        throw new IllegalArgumentException("launchCooldownTicks 必须为非负数");
       }
       if (lookaheadEdges <= 0) {
         throw new IllegalArgumentException("lookaheadEdges 必须为正数");

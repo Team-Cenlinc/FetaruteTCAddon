@@ -37,6 +37,11 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
   }
 
   public SignRegistryRailGraphBuilder(
+      SignNodeRegistry registry, Consumer<String> debugLogger, int anchorSearchRadius) {
+    this(registry, debugLogger, anchorSearchRadius, DEFAULT_MAX_EDGE_DISTANCE_BLOCKS);
+  }
+
+  public SignRegistryRailGraphBuilder(
       SignNodeRegistry registry,
       Consumer<String> debugLogger,
       int anchorSearchRadius,

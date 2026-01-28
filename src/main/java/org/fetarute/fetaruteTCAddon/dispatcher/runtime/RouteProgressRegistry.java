@@ -102,22 +102,30 @@ public final class RouteProgressRegistry {
     return true;
   }
 
-  /** 更新当前信号许可状态，用于运行时控车与 UI 反馈。 */
-  public void updateSignal(String trainName, SignalAspect aspect, Instant now) {
+  /**
+   * 更新当前信号许可状态，用于运行时控车与 UI 反馈。
+   *
+   * <p>若 entry 缺失则返回 false，由调用方决定是否补建或告警。
+   *
+   * @return 是否成功更新
+   */
+  public boolean updateSignal(String trainName, SignalAspect aspect, Instant now) {
     if (trainName == null || trainName.isBlank() || aspect == null) {
-      return;
+      return false;
     }
-    entries.computeIfPresent(
-        trainName,
-        (key, entry) ->
-            new RouteProgressEntry(
-                entry.trainName(),
-                entry.routeUuid(),
-                entry.routeId(),
-                entry.currentIndex(),
-                entry.nextTarget(),
-                aspect,
-                now));
+    RouteProgressEntry updated =
+        entries.computeIfPresent(
+            trainName,
+            (key, entry) ->
+                new RouteProgressEntry(
+                    entry.trainName(),
+                    entry.routeUuid(),
+                    entry.routeId(),
+                    entry.currentIndex(),
+                    entry.nextTarget(),
+                    aspect,
+                    now));
+    return updated != null;
   }
 
   public void remove(String trainName) {
@@ -142,9 +150,10 @@ public final class RouteProgressRegistry {
             ? Optional.of(route.waypoints().get(boundedIndex + 1))
             : Optional.empty();
     RouteId routeId = route.id();
+    RouteProgressEntry existing = entries.get(trainName);
+    SignalAspect lastSignal = existing != null ? existing.lastSignal() : SignalAspect.STOP;
     RouteProgressEntry entry =
-        new RouteProgressEntry(
-            trainName, routeUuid, routeId, boundedIndex, next, SignalAspect.PROCEED, now);
+        new RouteProgressEntry(trainName, routeUuid, routeId, boundedIndex, next, lastSignal, now);
     entries.put(trainName, entry);
     return entry;
   }

@@ -192,9 +192,14 @@
 ```yml
 graph:
   default-speed-blocks-per-second: 8.0
+  # 牌子节点寻找轨道锚点的半径（blocks）
+  sign-anchor-search-radius: 6
+  # switcher 节点寻找轨道锚点的半径（blocks）
+  switcher-anchor-search-radius: 2
 ```
 
-该值用于“诊断估算”，建议按服务器实际列车运行速度调参。
+`default-speed-blocks-per-second` 用于“诊断估算”，建议按服务器实际列车运行速度调参。
+锚点半径用于“牌子附近找轨道方块”的容错：站台/装饰距离较大时可适当增大。
 
 ### 区间限速/临时限速（edge speed）
 

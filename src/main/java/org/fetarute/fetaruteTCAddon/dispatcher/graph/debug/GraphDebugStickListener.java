@@ -243,6 +243,7 @@ public final class GraphDebugStickListener implements Listener {
 
     SignNodeDefinition best = null;
     int bestDistance = Integer.MAX_VALUE;
+    int anchorRadius = plugin.getConfigManager().current().graphSettings().signAnchorSearchRadius();
     for (Block candidate : candidates) {
       Optional<SignNodeDefinition> defOpt = resolveNodeFromSignBlock(candidate);
       if (defOpt.isEmpty()) {
@@ -250,7 +251,7 @@ public final class GraphDebugStickListener implements Listener {
       }
       Set<RailBlockPos> anchors =
           access.findNearestRailBlocks(
-              new RailBlockPos(candidate.getX(), candidate.getY(), candidate.getZ()), 2);
+              new RailBlockPos(candidate.getX(), candidate.getY(), candidate.getZ()), anchorRadius);
       if (!anchors.contains(railPos)) {
         continue;
       }

@@ -6,8 +6,11 @@ import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
+import com.bergerkiller.bukkit.tc.utils.TrackIterator;
+import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.block.Block;
@@ -25,6 +28,9 @@ import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
  * <p>仅封装“是否移动/发车/停车”等控车动作，避免运行时逻辑直接依赖 TrainCarts API。
  */
 public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
+
+  private static final String ACTION_TAG_LAUNCH = "fta_launch";
+  private static final int PATH_NODE_SEARCH_DISTANCE = 64;
 
   private final MinecartGroup group;
 
@@ -105,7 +111,10 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (head == null) {
       return;
     }
-    head.getActions().clear();
+    if (head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
+      return;
+    }
+    group.getActions().launchReset();
     LauncherConfig launchConfig = LauncherConfig.createDefault();
     if (accelBlocksPerTickSquared > 0.0) {
       launchConfig.setAcceleration(accelBlocksPerTickSquared);
@@ -140,10 +149,17 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     }
     if (directionOpt.isPresent()) {
       // 使用“带方向”的 launch，确保在折返/道岔附近发车时与 TrainCarts 寻路方向一致。
-      head.getActions().addActionLaunch(directionOpt.get(), launchConfig, targetBlocksPerTick);
+      var action =
+          head.getActions().addActionLaunch(directionOpt.get(), launchConfig, targetBlocksPerTick);
+      if (action != null) {
+        action.addTag(ACTION_TAG_LAUNCH);
+      }
       return;
     }
-    head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
+    var action = head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
+    if (action != null) {
+      action.addTag(ACTION_TAG_LAUNCH);
+    }
   }
 
   @Override
@@ -157,12 +173,18 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (currentSpeed >= targetBlocksPerTick * 0.95) {
       return;
     }
+    if (head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
+      return;
+    }
     // 无论是否运动，都尝试添加加速动作以"补充能量"
     LauncherConfig launchConfig = LauncherConfig.createDefault();
     if (accelBlocksPerTickSquared > 0.0) {
       launchConfig.setAcceleration(accelBlocksPerTickSquared);
     }
-    head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
+    var action = head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
+    if (action != null) {
+      action.addTag(ACTION_TAG_LAUNCH);
+    }
   }
 
   @Override
@@ -317,15 +339,26 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
         }
         Block railBlock = state.railBlock();
         Block positionBlock = state.positionBlock();
+        String foundDetail = null;
         com.bergerkiller.bukkit.tc.pathfinding.PathNode node =
             railBlock != null ? pathWorld.getNodeAtRail(railBlock) : null;
         if (node == null && positionBlock != null) {
           node = pathWorld.getNodeAtRail(positionBlock);
         }
+        if (node == null) {
+          // 若当前位置不在 PathNode 上，沿轨道向前/向后寻找最近节点以对齐 TrainCarts debug destination 语义
+          PathNodeSearchResult search =
+              findNearestPathNode(pathWorld, candidate, railBlock, positionBlock);
+          if (search != null) {
+            node = search.node();
+            foundDetail = candidate.describe(railBlock, positionBlock) + " " + search.detail();
+          }
+        }
         if (node != null) {
           railState = state;
           currentNode = node;
-          candidateDebug = candidate.describe(railBlock, positionBlock);
+          candidateDebug =
+              foundDetail != null ? foundDetail : candidate.describe(railBlock, positionBlock);
           break;
         }
         if (candidateDebug.equals("-")) {
@@ -432,6 +465,77 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     candidates.add(new RailStateCandidate(label, member, state));
   }
 
+  private PathNodeSearchResult findNearestPathNode(
+      com.bergerkiller.bukkit.tc.pathfinding.PathWorld pathWorld,
+      RailStateCandidate candidate,
+      Block railBlock,
+      Block positionBlock) {
+    if (pathWorld == null || candidate == null) {
+      return null;
+    }
+    Block start = railBlock != null ? railBlock : positionBlock;
+    if (start == null) {
+      return null;
+    }
+    Set<BlockFace> directions = resolveSearchDirections(candidate);
+    if (directions.isEmpty()) {
+      return null;
+    }
+    for (BlockFace direction : directions) {
+      TrackIterator iterator = new TrackIterator(start, direction);
+      while (iterator.hasNext()) {
+        Block block = iterator.next();
+        if (iterator.getDistance() > PATH_NODE_SEARCH_DISTANCE) {
+          break;
+        }
+        com.bergerkiller.bukkit.tc.pathfinding.PathNode node = pathWorld.getNodeAtRail(block);
+        if (node != null) {
+          return new PathNodeSearchResult(
+              node, "track_search " + direction.name() + " dist=" + iterator.getDistance());
+        }
+      }
+    }
+    return null;
+  }
+
+  private Set<BlockFace> resolveSearchDirections(RailStateCandidate candidate) {
+    Set<BlockFace> directions = new LinkedHashSet<>();
+    if (candidate == null) {
+      return directions;
+    }
+    RailState state = candidate.state();
+    if (state != null) {
+      try {
+        BlockFace enter = state.enterFace();
+        if (isHorizontalFace(enter)) {
+          directions.add(enter.getOppositeFace());
+          directions.add(enter);
+        }
+      } catch (Throwable ignored) {
+        // ignore
+      }
+    }
+    MinecartMember<?> member = candidate.member();
+    if (member != null) {
+      BlockFace to = member.getDirectionTo();
+      if (isHorizontalFace(to)) {
+        directions.add(to);
+        directions.add(to.getOppositeFace());
+      }
+      BlockFace from = member.getDirectionFrom();
+      if (isHorizontalFace(from)) {
+        directions.add(from);
+        directions.add(from.getOppositeFace());
+      }
+      BlockFace dir = member.getDirection();
+      if (isHorizontalFace(dir)) {
+        directions.add(dir);
+        directions.add(dir.getOppositeFace());
+      }
+    }
+    return directions;
+  }
+
   private LaunchDirectionResult resolveLaunchDirectionFallback(
       RailState railState, String destination, String reason, LoggerManager logger) {
     Optional<BlockFace> fallback = resolveDirectionByRegistry(railState, destination, logger);
@@ -522,6 +626,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return face.map(BlockFace::name).orElse("-");
     }
   }
+
+  private record PathNodeSearchResult(
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode node, String detail) {}
 
   private record RailStateCandidate(String label, MinecartMember<?> member, RailState state) {
     String describe(Block railBlock, Block positionBlock) {

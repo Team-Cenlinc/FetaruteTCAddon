@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRegistryRailGraphBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
@@ -368,7 +369,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   private void registerSignActions() {
     this.signNodeRegistry = new SignNodeRegistry(loggerManager::debug);
-    this.railGraphService = new RailGraphService(signNodeRegistry, loggerManager::debug);
+    ConfigManager.GraphSettings graphSettings =
+        configManager != null
+            ? configManager.current().graphSettings()
+            : ConfigManager.GraphSettings.defaults();
+    this.railGraphService =
+        new RailGraphService(
+            new SignRegistryRailGraphBuilder(
+                signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
+            loggerManager::debug);
     SignNodeStorageSynchronizer storageSync =
         new RailNodeIncrementalSync(storageManager, railGraphService, loggerManager::debug);
     this.waypointSignAction =

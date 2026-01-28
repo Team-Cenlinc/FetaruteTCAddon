@@ -56,8 +56,8 @@ public final class RailGraphBuildJob implements Runnable {
     EXPLORE_EDGES
   }
 
-  private static final int DEFAULT_ANCHOR_SEARCH_RADIUS = 2;
-  private static final int SIGN_ANCHOR_SEARCH_RADIUS = 6;
+  private static final int DEFAULT_SWITCHER_ANCHOR_SEARCH_RADIUS = 2;
+  private static final int DEFAULT_SIGN_ANCHOR_SEARCH_RADIUS = 6;
   private static final int DEFAULT_MAX_DISTANCE_BLOCKS = 512;
 
   /** 边探索阶段每次调用的批量大小。减小该值可降低单帧卡顿但会延长总构建时间。 */
@@ -67,6 +67,8 @@ public final class RailGraphBuildJob implements Runnable {
   private final World world;
   private final BuildMode mode;
   private final EdgeExploreMode edgeExploreMode;
+  private final int signAnchorSearchRadius;
+  private final int switcherAnchorSearchRadius;
   private final RailNodeRecord seedNode;
   private final Set<RailBlockPos> seedRails;
   private final List<RailNodeRecord> preseedNodes;
@@ -107,6 +109,8 @@ public final class RailGraphBuildJob implements Runnable {
       int tickBudgetMs,
       ChunkLoadOptions chunkLoadOptions,
       EdgeExploreMode edgeExploreMode,
+      int signAnchorSearchRadius,
+      int switcherAnchorSearchRadius,
       Consumer<RailGraphBuildOutcome> onFinish,
       Consumer<Throwable> onFailure,
       Consumer<String> debugLogger) {
@@ -115,6 +119,11 @@ public final class RailGraphBuildJob implements Runnable {
     this.mode = Objects.requireNonNull(mode, "mode");
     this.edgeExploreMode =
         edgeExploreMode != null ? edgeExploreMode : EdgeExploreMode.bfsMultiSource();
+    if (signAnchorSearchRadius < 0 || switcherAnchorSearchRadius < 0) {
+      throw new IllegalArgumentException("anchorSearchRadius 不能为负");
+    }
+    this.signAnchorSearchRadius = signAnchorSearchRadius;
+    this.switcherAnchorSearchRadius = switcherAnchorSearchRadius;
     this.seedNode = seedNode;
     this.seedRails = seedRails != null ? Set.copyOf(seedRails) : Set.of();
     this.preseedNodes = preseedNodes != null ? List.copyOf(preseedNodes) : List.of();
@@ -147,6 +156,8 @@ public final class RailGraphBuildJob implements Runnable {
       int tickBudgetMs,
       ChunkLoadOptions chunkLoadOptions,
       EdgeExploreMode edgeExploreMode,
+      int signAnchorSearchRadius,
+      int switcherAnchorSearchRadius,
       Consumer<RailGraphBuildOutcome> onFinish,
       Consumer<Throwable> onFailure,
       Consumer<String> debugLogger) {
@@ -155,6 +166,11 @@ public final class RailGraphBuildJob implements Runnable {
     this.mode = BuildMode.HERE;
     this.edgeExploreMode =
         edgeExploreMode != null ? edgeExploreMode : EdgeExploreMode.bfsMultiSource();
+    if (signAnchorSearchRadius < 0 || switcherAnchorSearchRadius < 0) {
+      throw new IllegalArgumentException("anchorSearchRadius 不能为负");
+    }
+    this.signAnchorSearchRadius = signAnchorSearchRadius;
+    this.switcherAnchorSearchRadius = switcherAnchorSearchRadius;
     this.seedNode = null;
     this.seedRails = Set.of();
     this.preseedNodes = List.of();
@@ -211,7 +227,7 @@ public final class RailGraphBuildJob implements Runnable {
           anchors =
               access.findNearestRailBlocks(
                   new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()),
-                  DEFAULT_ANCHOR_SEARCH_RADIUS);
+                  resolveAnchorRadius(seedNode.nodeType()));
         }
         if (anchors.isEmpty()) {
           throw new IllegalStateException("HERE 模式缺少起始轨道锚点");
@@ -555,16 +571,20 @@ public final class RailGraphBuildJob implements Runnable {
     return false;
   }
 
+  private int resolveAnchorRadius(NodeType nodeType) {
+    if (nodeType == NodeType.SWITCHER) {
+      return switcherAnchorSearchRadius;
+    }
+    return signAnchorSearchRadius;
+  }
+
   private void initEdgeSession(
       List<RailNodeRecord> nodes, TrainCartsRailBlockAccess currentAccess) {
     Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
     int missingAnchors = 0;
     for (RailNodeRecord node : nodes) {
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
-      int anchorRadius =
-          node.nodeType() == NodeType.SWITCHER
-              ? DEFAULT_ANCHOR_SEARCH_RADIUS
-              : SIGN_ANCHOR_SEARCH_RADIUS;
+      int anchorRadius = resolveAnchorRadius(node.nodeType());
       Set<RailBlockPos> anchors = currentAccess.findNearestRailBlocks(center, anchorRadius);
       if (anchors.isEmpty()) {
         missingAnchors++;
@@ -665,7 +685,7 @@ public final class RailGraphBuildJob implements Runnable {
     }
   }
 
-  private static List<RailNodeRecord> filterNodesInComponent(
+  private List<RailNodeRecord> filterNodesInComponent(
       List<RailNodeRecord> discovered,
       Set<RailBlockPos> visitedRails,
       TrainCartsRailBlockAccess access) {
@@ -673,11 +693,7 @@ public final class RailGraphBuildJob implements Runnable {
     for (RailNodeRecord node : discovered) {
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
       Set<RailBlockPos> anchors =
-          access.findNearestRailBlocks(
-              center,
-              node.nodeType() == NodeType.SWITCHER
-                  ? DEFAULT_ANCHOR_SEARCH_RADIUS
-                  : SIGN_ANCHOR_SEARCH_RADIUS);
+          access.findNearestRailBlocks(center, resolveAnchorRadius(node.nodeType()));
       if (anchors.isEmpty()) {
         continue;
       }

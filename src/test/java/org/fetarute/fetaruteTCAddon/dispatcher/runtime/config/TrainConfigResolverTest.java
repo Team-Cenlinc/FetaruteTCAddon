@@ -63,9 +63,10 @@ class TrainConfigResolverTest {
             new ConfigManager.SqliteSettings("data/fetarute.sqlite"),
             Optional.empty(),
             new ConfigManager.PoolSettings(5, 30000, 600000, 1800000)),
-        new ConfigManager.GraphSettings(8.0),
+        new ConfigManager.GraphSettings(8.0, 6, 2),
         new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
         new ConfigManager.RuntimeSettings(
+            10,
             10,
             2,
             1,

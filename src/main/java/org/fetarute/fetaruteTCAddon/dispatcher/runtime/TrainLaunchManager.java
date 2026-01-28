@@ -22,6 +22,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 public final class TrainLaunchManager {
 
   private static final double TICKS_PER_SECOND = 20.0;
+  private static final long TICK_MILLIS = 50L;
+  private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
 
   /**
    * 应用控车动作：限速、加减速曲线、发车/停车。
@@ -65,6 +67,9 @@ public final class TrainLaunchManager {
     properties.setSpeedLimit(targetBpt);
     // 非 STOP 信号：允许发车或对运动中列车补充能量
     if (train != null && allowLaunch) {
+      if (!canIssueLaunch(properties, runtimeSettings)) {
+        return;
+      }
       if (!train.isMoving()) {
         // 静止时正常发车
         train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
@@ -73,6 +78,25 @@ public final class TrainLaunchManager {
         train.accelerateTo(targetBpt, accelBpt2);
       }
     }
+  }
+
+  /** 节流：同一列车在 cooldown 窗口内最多下发一次 launch/加速动作。 */
+  private boolean canIssueLaunch(
+      TrainProperties properties, ConfigManager.RuntimeSettings runtimeSettings) {
+    if (properties == null || runtimeSettings == null) {
+      return false;
+    }
+    int cooldownTicks = runtimeSettings.launchCooldownTicks();
+    if (cooldownTicks <= 0) {
+      return true;
+    }
+    long now = System.currentTimeMillis();
+    long last = TrainTagHelper.readLongTag(properties, TAG_LAST_LAUNCH_AT).orElse(0L);
+    if (last > 0L && now - last < cooldownTicks * TICK_MILLIS) {
+      return false;
+    }
+    TrainTagHelper.writeTag(properties, TAG_LAST_LAUNCH_AT, String.valueOf(now));
+    return true;
   }
 
   /**

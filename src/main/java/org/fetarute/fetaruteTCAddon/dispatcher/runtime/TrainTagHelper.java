@@ -77,6 +77,19 @@ public final class TrainTagHelper {
     }
   }
 
+  /** 读取 long tag，解析失败时返回 empty。 */
+  public static Optional<Long> readLongTag(TrainProperties properties, String key) {
+    Optional<String> valueOpt = readTagValue(properties, key);
+    if (valueOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(Long.parseLong(valueOpt.get().trim()));
+    } catch (NumberFormatException ex) {
+      return Optional.empty();
+    }
+  }
+
   /**
    * 写入/覆盖 tag。
    *

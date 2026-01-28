@@ -139,7 +139,10 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
 
     service.handleSignalTick(train, false);
-    assertTrue(train.launchCalls == 0);
+    assertTrue(train.launchCalls == 1);
+
+    service.handleSignalTick(train, false);
+    assertTrue(train.launchCalls == 1);
   }
 
   @Test
@@ -221,6 +224,7 @@ class RuntimeDispatchServiceTest {
     ConfigManager.RuntimeSettings runtime =
         new ConfigManager.RuntimeSettings(
             base.runtimeSettings().dispatchTickIntervalTicks(),
+            base.runtimeSettings().launchCooldownTicks(),
             2,
             base.runtimeSettings().minClearEdges(),
             base.runtimeSettings().switcherZoneEdges(),
@@ -682,12 +686,13 @@ class RuntimeDispatchServiceTest {
             new ConfigManager.SqliteSettings("data/test.sqlite"),
             Optional.empty(),
             new ConfigManager.PoolSettings(1, 1000, 1000, 1000));
-    ConfigManager.GraphSettings graph = new ConfigManager.GraphSettings(defaultSpeedBps);
+    ConfigManager.GraphSettings graph = new ConfigManager.GraphSettings(defaultSpeedBps, 6, 2);
     ConfigManager.AutoStationSettings autoStation =
         new ConfigManager.AutoStationSettings("", 1.0f, 1.0f);
     ConfigManager.RuntimeSettings runtime =
         new ConfigManager.RuntimeSettings(
             intervalTicks,
+            10,
             1,
             1,
             3,

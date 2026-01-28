@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
 /**
  * 运行时推进点监听：waypoint/autostation/depot/switcher 触发占用判定与下一跳下发。
  *
- * <p>对 MEMBER_ENTER 仅处理车头触发，避免多节车厢重复推进。
+ * <p>对 MEMBER_ENTER 仅处理车头触发，避免多节车厢重复推进；Waypoint 停站仅在 GROUP_ENTER 触发，避免过早点刹。
  *
  * <p>列车卸载/移除事件会主动释放占用，防止资源遗留。
  */
@@ -48,7 +48,16 @@ public final class RuntimeDispatchListener implements Listener {
       return;
     }
     Optional<SignNodeDefinition> definitionOpt = resolveDefinition(event);
-    definitionOpt.ifPresent(def -> dispatchService.handleProgressTrigger(event, def));
+    if (definitionOpt.isEmpty()) {
+      return;
+    }
+    SignNodeDefinition definition = definitionOpt.get();
+    if (action == SignActionType.MEMBER_ENTER
+        && definition.nodeType()
+            == org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.WAYPOINT) {
+      return;
+    }
+    dispatchService.handleProgressTrigger(event, definition);
   }
 
   @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
