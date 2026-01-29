@@ -16,7 +16,8 @@
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
 - 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
 - 停站期间会保持 STOP 信号，且提前写入下一跳 destination，确保发车时直接走寻路方向。
-- 对 STOP/TERM waypoint 的进站减速会使用“剩余距离估算 + speed curve”，避免直接急刹。
+- 对 STOP/TERM waypoint 的进站控车采用 handoff：信号 tick 不强制 STOP，而是把目标速度上限压到 `runtime.approach-speed-bps`（approaching）。
+- 仅当存在前方 blocker（红灯/占用阻塞）时，才使用“到 blocker 的距离”触发进一步减速/停车；不使用到下一节点距离，避免提前刹停在牌子前。
 - 停稳判定：连续 `1` tick 未移动即视为停稳；若超过 `400` ticks 未停稳则进入超时兜底。
 - 仅在停稳后才会执行居中、启动 dwell，并通过 `addActionWaitState()` 真正 hold 住列车。
 
@@ -70,6 +71,7 @@
 速度曲线：
 - 若启用 `runtime.speed-curve-enabled`，将根据“剩余距离 + 制动能力”自动计算限速，提前减速而不是过点再减速。
 - 当信号处于 PROCEED_WITH_CAUTION/CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度。
+- 当“下一站”为 STOP/TERM waypoint 时，信号 tick 的距离只看前方 blocker（不看下一节点距离/CAUTION 距离），避免提前刹停在牌子前。
 - `runtime.speed-curve-type` 控制曲线形态（`physics/linear/quadratic/cubic`）。
 - `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
@@ -92,7 +94,7 @@
 - `bps2 -> bpt2`：除以 20^2
 
 ## 进站限速
-- `runtime.approach-speed-bps` 控制进站限速上限。
+- `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
 - 当下一节点为站点（AutoStation）时，限速会取 `min(默认速度, approach)`，再与边限速取最小值。
 
 ## CAUTION 速度来源

@@ -762,11 +762,6 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 信号 tick 入口：重算占用并根据许可变化调整控车。
-   *
-   * <p>forceApply 用于强制刷新（例如停站结束），即便信号等级未变化也会重新下发速度/发车动作。
-   */
-  /**
    * 信号周期性 tick：推进列车运行状态，处理终点停车、DSTY 销毁与 Layover 注册。
    *
    * <p>主要职责：
@@ -776,6 +771,17 @@ public final class RuntimeDispatchService {
    *   <li>若已到达终点（currentIndex >= last），无论 forceApply 均强制 setSpeedLimit(0)+stop()，避免滑行穿站。
    *   <li>终点为 REUSE_AT_TERM 时补注册 Layover，确保待命池可用。
    *   <li>其余分支推进常规信号/占用/速度控制。
+   * </ul>
+   *
+   * <h4>STOP/TERM waypoint handoff（避免卡死/提前刹停）</h4>
+   *
+   * <p>当“下一站”为 STOP/TERM waypoint 时：
+   *
+   * <ul>
+   *   <li>不在信号 tick 中强制将信号置为 STOP（否则列车静止时会被 STOP 卡死无法发车）。
+   *   <li>仅将目标速度上限压到 {@code runtime.approach-speed-bps}（approaching
+   *       速度），交由推进点（waypoint/autostation）接管真正停站。
+   *   <li>仅当存在前方 blocker（红灯/占用阻塞）时，才使用“到 blocker 的距离”触发进一步减速/停车；不使用到下一节点的距离，避免提前刹停在牌子前。
    * </ul>
    *
    * <p>注意：此处终点停车不再依赖 forceApply，防止未触发信号刷新时列车穿站。
@@ -1021,6 +1027,7 @@ public final class RuntimeDispatchService {
     }
     OptionalLong distanceOpt = OptionalLong.empty();
     OptionalLong constraintDistanceOpt = OptionalLong.empty();
+    OptionalLong blockerDistanceOpt = OptionalLong.empty();
     boolean needsDistance =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.failoverUnreachableStop();
     if (needsDistance) {
@@ -1059,12 +1066,14 @@ public final class RuntimeDispatchService {
     SignalLookahead.LookaheadResult lookahead = null;
     if (runtimeSettings.speedCurveEnabled()) {
       lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
+      blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
     }
     if (runtimeSettings.speedCurveEnabled()) {
-      if (stopAtNextWaypoint && nextAspect != SignalAspect.STOP) {
-        // STOP/TERM waypoint 只允许“前方 blocker”触发减速，不使用到下一节点距离，避免提前刹停在牌子前。
-        distanceOpt = constraintDistanceOpt;
+      if (stopAtNextWaypoint) {
+        // STOP/TERM waypoint：不使用到下一节点距离，避免提前刹停在牌子前。
+        // 只允许“前方 blocker”触发进一步减速（例如占用阻塞/红灯），否则保持 approaching 速度交由 AutoStation 接管。
+        distanceOpt = blockerDistanceOpt;
       } else if (constraintDistanceOpt.isPresent()) {
         if (distanceOpt.isPresent()) {
           distanceOpt =
@@ -1102,6 +1111,8 @@ public final class RuntimeDispatchService {
               + (targetOverrideBps.isPresent() ? targetOverrideBps.getAsDouble() : "-")
               + " distanceOpt="
               + formatOptionalLong(distanceOpt)
+              + " blockerDistance="
+              + formatOptionalLong(blockerDistanceOpt)
               + " constraintDistance="
               + formatOptionalLong(constraintDistanceOpt));
     }

@@ -978,6 +978,118 @@ class RuntimeDispatchServiceTest {
     assertTrue(train.launchCalls >= 1);
   }
 
+  @Test
+  void handleSignalTickCapsApproachSpeedAndDoesNotBrakeAgainstStopWaypointNodeDistance() {
+    NodeId a = NodeId.of("A");
+    NodeId stopWp = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, stopWp), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView base = testConfigView(1, 20.0);
+    ConfigManager.RuntimeSettings runtime =
+        new ConfigManager.RuntimeSettings(
+            base.runtimeSettings().dispatchTickIntervalTicks(),
+            base.runtimeSettings().launchCooldownTicks(),
+            base.runtimeSettings().lookaheadEdges(),
+            base.runtimeSettings().minClearEdges(),
+            base.runtimeSettings().switcherZoneEdges(),
+            6.0, // approaching speed for STOP/TERM waypoint
+            base.runtimeSettings().cautionSpeedBps(),
+            base.runtimeSettings().approachDepotSpeedBps(),
+            base.runtimeSettings().speedCurveEnabled(),
+            base.runtimeSettings().speedCurveType(),
+            base.runtimeSettings().speedCurveFactor(),
+            base.runtimeSettings().speedCurveEarlyBrakeBlocks(),
+            base.runtimeSettings().failoverStallSpeedBps(),
+            base.runtimeSettings().failoverStallTicks(),
+            base.runtimeSettings().failoverUnreachableStop(),
+            base.runtimeSettings().hudBossBarEnabled(),
+            base.runtimeSettings().hudBossBarTickIntervalTicks(),
+            base.runtimeSettings().hudBossBarTemplate(),
+            base.runtimeSettings().hudActionBarEnabled(),
+            base.runtimeSettings().hudActionBarTickIntervalTicks(),
+            base.runtimeSettings().hudActionBarTemplate(),
+            base.runtimeSettings().hudPlayerDisplayEnabled(),
+            base.runtimeSettings().hudPlayerDisplayTickIntervalTicks(),
+            base.runtimeSettings().hudPlayerDisplayTemplate());
+    when(configManager.current())
+        .thenReturn(
+            new ConfigManager.ConfigView(
+                base.configVersion(),
+                base.debugEnabled(),
+                base.locale(),
+                base.storageSettings(),
+                base.graphSettings(),
+                base.autoStationSettings(),
+                runtime,
+                base.spawnSettings(),
+                base.trainConfigSettings(),
+                base.reclaimSettings()));
+
+    // A->B 只有 1 格：若错误地用“到下一节点距离”做 speed curve，会把速度压到非常低导致提前刹停。
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(a, stopWp, 1), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            1,
+            Optional.empty(),
+            Optional.of(stopWp.value()),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    when(routeDefinitions.findStop(route.id(), 1)).thenReturn(Optional.of(stop));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+    service.handleSignalTick(train, true);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+
+    // STOP/TERM waypoint 模式下应进入 approaching（6 bps）而非按 1 格距离提前刹到接近 0。
+    double expectedBpt = runtime.approachSpeedBps() / 20.0;
+    double actualBpt = speedCaptor.getValue();
+    assertTrue(
+        Math.abs(actualBpt - expectedBpt) < 1.0e-6,
+        "expected speedLimitBpt=" + expectedBpt + " but got " + actualBpt);
+  }
+
   private static final class FakeTrain implements RuntimeTrainHandle {
     private final UUID worldId;
     private final TrainProperties properties;

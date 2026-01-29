@@ -232,16 +232,17 @@ if (startIndex < 0) {
 
 ## 控车模型
 
-从 v0.x.x 起，控车逻辑使用统一的运动规划器，支持信号前瞻与加减速优化。
+当前控车主流程以 `TrainLaunchManager` 的 speed curve（基于剩余距离的动态限速）为主；`MotionPlanner`/`TrainPositionResolver`
+已实现为工具类，但暂未完整接入主流程。本文档同时记录当前实现与预留设计，避免与代码行为产生偏差。
 
 ### 核心组件
 
 | 类 | 职责 |
 |----|------|
 | `SignalLookahead` | 信号前瞻：计算到阻塞/限速/approaching 节点的距离 |
-| `MotionPlanner` | 运动规划：统一加减速计算与平滑过渡 |
-| `TrainPositionResolver` | 位置解析：获取列车当前速度与边内进度 |
-| `TrainLaunchManager` | 控车执行：应用速度曲线到 TrainCarts |
+| `MotionPlanner` | 运动规划（工具类，预留用于统一加减速计算与平滑过渡；当前未接入主流程） |
+| `TrainPositionResolver` | 位置解析（工具类，预留用于获取边内进度；当前主流程仅读取 TrainCarts 的速度） |
+| `TrainLaunchManager` | 控车执行：把目标速度/速度曲线落到 TrainCarts（setWaitAcceleration/setSpeedLimit/launch） |
 
 ### 信号前瞻 (`SignalLookahead`)
 
@@ -259,7 +260,7 @@ OptionalLong constraintDistance = lookahead.minConstraintDistance();
 
 ### 运动规划 (`MotionPlanner`)
 
-统一处理加减速计算：
+注意：当前版本控车暂未调用 `MotionPlanner`，以下示例用于未来接入/离线推导的参考。
 
 ```java
 MotionPlanner.MotionInput input = MotionPlanner.MotionInput.withConstraint(
@@ -282,33 +283,15 @@ double recommendedSpeed = output.recommendedSpeedBps();
 
 ### 控车执行 (`TrainLaunchManager`)
 
-两种控车模式：
+当前仅一个入口：`TrainLaunchManager#applyControl(...)`，由 `SignalAspect` 决定停车/放行逻辑：
 
-| 方法 | 用途 |
-|------|------|
-| `applyControl` | 基础控车：约束速度默认为 0（停车点） |
-| `applyControlWithConstraint` | 扩展控车：支持指定约束速度（如 approaching 限速） |
-
-**执行流程**：
-1. 获取当前速度
-2. 调用 `MotionPlanner.plan()` 计算建议速度
-3. 设置 `setWaitAcceleration()` 加减速参数
-4. 设置 `setSpeedLimit()` 限速
-5. 如需发车，调用 `train.launch()` 并限制初始速度
+- `STOP`：根据 `distanceOpt` 与制动能力计算安全制动速度上限，并持续下发 `setSpeedLimit()`，停稳后调用 `stop()` 兜底。
+- `PROCEED/CAUTION`：将目标速度写入 `setSpeedLimit()`；若启用 speed curve 且存在 `distanceOpt`，会基于距离提前下压速度；允许发车时对静止列车下发 `launch`/对运行中列车下发 `accelerateTo`（带 cooldown 节流）。
 
 ### 平滑过渡
 
-```java
-double nextSpeed = MotionPlanner.smoothTransition(
-    currentSpeedBps,  // 当前速度
-    targetSpeedBps,   // 目标速度
-    accelBps2,        // 加速度
-    decelBps2,        // 减速度
-    deltaTicks        // tick 数
-);
-```
-
-每 tick 按加减速率向目标速度靠近，避免阶跃式速度切换。
+TrainCarts 会根据 `setWaitAcceleration()` 与 `setSpeedLimit()` 自行完成平滑过渡；`MotionPlanner.smoothTransition(...)`
+目前仅作为工具方法预留。
 
 ### 配置项
 
@@ -318,7 +301,7 @@ double nextSpeed = MotionPlanner.smoothTransition(
 | `runtime.speed-curve-type` | 曲线类型：PHYSICS/LINEAR/QUADRATIC/CUBIC | `PHYSICS` |
 | `runtime.speed-curve-factor` | 曲线系数（安全裕度） | `1.0` |
 | `runtime.speed-curve-early-brake-blocks` | 提前制动距离 | `0.0` |
-| `runtime.approach-speed-bps` | 进站限速 | `4.0` |
+| `runtime.approach-speed-bps` | approaching 速度上限（进站 + STOP/TERM waypoint handoff） | `4.0` |
 | `runtime.approach-depot-speed-bps` | 进库限速 | `3.5` |
 
 ## 诊断命令
