@@ -82,7 +82,10 @@ public final class RuntimeDispatchService {
   private static final int WAYPOINT_STOP_WAIT_TIMEOUT_TICKS = 400;
 
   /** Waypoint 判定停稳的连续 tick 数。 */
-  private static final int WAYPOINT_STOP_STABLE_TICKS = 1;
+  private static final int WAYPOINT_STOP_STABLE_TICKS = 2;
+
+  /** Waypoint 居中生效的最大距离（blocks）。 */
+  private static final double WAYPOINT_CENTER_MAX_DISTANCE_BLOCKS = 16.0;
 
   /** 推进点去重窗口（毫秒），用于压制同一节点的重复触发。 */
   private static final long PROGRESS_TRIGGER_DEDUP_MS = 800L;
@@ -105,7 +108,7 @@ public final class RuntimeDispatchService {
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
   private final java.util.Set<String> missingSignalWarned = new HashSet<>();
-  private final java.util.concurrent.ConcurrentMap<String, String> waypointStopSessions =
+  private final java.util.concurrent.ConcurrentMap<String, WaypointStopState> waypointStopStates =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final AtomicLong waypointStopCounter = new AtomicLong();
   private final java.util.concurrent.ConcurrentMap<String, String> stopWaypointLogState =
@@ -329,17 +332,36 @@ public final class RuntimeDispatchService {
       if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
           && route.lifecycleMode()
               == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
-        if (definition.nodeType() == NodeType.WAYPOINT) {
-          centerTrainAtWaypoint(event, trainName, definition.nodeId());
-        }
+        int dwellSeconds = resolveWaypointDwellSeconds(stop);
         progressRegistry.advance(
             trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
         invalidateTrainEta(trainName);
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(trainName);
         }
+        updateSignalOrWarn(trainName, SignalAspect.STOP, now);
+        if (definition.nodeType() == NodeType.WAYPOINT) {
+          Optional<NodeId> nextNode =
+              currentIndex + 1 < route.waypoints().size()
+                  ? Optional.of(route.waypoints().get(currentIndex + 1))
+                  : Optional.empty();
+          NodeId stopNext = nextNode.orElse(currentNode);
+          OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
+          Optional<RailGraph> graphOpt = resolveGraph(event);
+          applyControl(
+              train,
+              properties,
+              SignalAspect.STOP,
+              route,
+              currentNode,
+              stopNext,
+              graphOpt.orElse(null),
+              false,
+              stopDistanceOpt);
+          scheduleCenterWhenStopped(
+              event, definition.nodeId(), trainName, dwellSeconds, WAYPOINT_STOP_STABLE_TICKS);
+        }
         // TERM 标记：清除 destination 防止继续寻路
-        // 不强制停车，让 handleSignalTick 的 speed curve 自然减速
         properties.clearDestinationRoute();
         properties.setDestination("");
         handleLayoverRegistrationIfNeeded(trainName, route, currentNode, properties);
@@ -409,7 +431,8 @@ public final class RuntimeDispatchService {
           graph,
           false,
           stopDistanceOpt);
-      scheduleWaypointStopSequence(event, definition, trainName, waypointDwellSeconds);
+      scheduleCenterWhenStopped(
+          event, definition.nodeId(), trainName, waypointDwellSeconds, WAYPOINT_STOP_STABLE_TICKS);
       return;
     }
     if (graphOpt.isEmpty()) {
@@ -732,6 +755,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
@@ -859,6 +883,32 @@ public final class RuntimeDispatchService {
         }
         return;
       }
+    }
+
+    Optional<WaypointStopState> waypointStopState =
+        resolveWaypointStopState(trainName, currentNode);
+    if (waypointStopState.isPresent()) {
+      Optional<NodeId> nextNode =
+          currentIndex + 1 < route.waypoints().size()
+              ? Optional.of(route.waypoints().get(currentIndex + 1))
+              : Optional.empty();
+      updateSignalOrWarn(trainName, SignalAspect.STOP, now);
+      if (nextNode.isPresent()) {
+        OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
+        applyControl(
+            train,
+            properties,
+            SignalAspect.STOP,
+            route,
+            currentNode,
+            nextNode.get(),
+            null,
+            false,
+            stopDistanceOpt);
+      } else {
+        train.stop();
+      }
+      return;
     }
 
     if (currentIndex >= route.waypoints().size() - 1) {
@@ -1587,12 +1637,35 @@ public final class RuntimeDispatchService {
     if (event == null || !event.hasGroup()) {
       return;
     }
+    if (event.getAction() != SignActionType.GROUP_ENTER) {
+      return;
+    }
     try {
       var group = event.getGroup();
+      org.bukkit.Location centerLocation = event.getCenterLocation();
+      double headDistance = resolveMemberDistance(centerLocation, group.head());
+      double middleDistance = resolveMemberDistance(centerLocation, group.middle());
+      double tailDistance = resolveMemberDistance(centerLocation, group.tail());
+      double minDistance = Math.min(headDistance, Math.min(middleDistance, tailDistance));
+      if (!isWithinWaypointCenterRange(minDistance)) {
+        debugLogger.accept(
+            "Waypoint 居中跳过(离牌子太远): train="
+                + trainName
+                + " node="
+                + (nodeId != null ? nodeId.value() : "-")
+                + " min="
+                + formatDistance(minDistance)
+                + " head="
+                + formatDistance(headDistance)
+                + " mid="
+                + formatDistance(middleDistance)
+                + " tail="
+                + formatDistance(tailDistance));
+        return;
+      }
       com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
       boolean hadAction = group.getActions().hasAction();
-      group.getActions().launchReset();
-      double centerDistance = resolveCenterDistance(event, group);
+      double centerDistance = minDistance;
       String centerText = formatLocation(event.getCenterLocation());
       String cartText = formatLocation(resolveCenterCartLocation(group));
       String signText = formatLocation(event.getBlock().getLocation());
@@ -1600,14 +1673,12 @@ public final class RuntimeDispatchService {
       station.centerTrain();
       boolean hasAction = group.getActions().hasAction();
       debugLogger.accept(
-          "Waypoint 居中: train="
+          "Waypoint 居中前: train="
               + trainName
               + " node="
               + (nodeId != null ? nodeId.value() : "-")
               + " dist="
-              + (Double.isFinite(centerDistance)
-                  ? String.format(java.util.Locale.ROOT, "%.3f", centerDistance)
-                  : "-")
+              + formatDistance(centerDistance)
               + " action="
               + (hadAction ? "Y" : "N")
               + "->"
@@ -1620,6 +1691,7 @@ public final class RuntimeDispatchService {
               + signText
               + " real="
               + realSign);
+      scheduleWaypointCenterDiagnostics(event, trainName, nodeId, 5);
     } catch (Throwable ex) {
       debugLogger.accept(
           "Waypoint 居中失败: train="
@@ -1653,9 +1725,12 @@ public final class RuntimeDispatchService {
    *
    * <p>语义对齐 AutoStation 的停稳判定，避免 MEMBER_ENTER 过早触发导致居中不稳定。
    */
-  private void scheduleWaypointStopSequence(
-      SignActionEvent event, SignNodeDefinition definition, String trainName, int dwellSeconds) {
-    if (event == null || definition == null || trainName == null || trainName.isBlank()) {
+  private void scheduleCenterWhenStopped(
+      SignActionEvent event, NodeId nodeId, String trainName, int dwellSeconds, int stableTicks) {
+    if (event == null || nodeId == null || trainName == null || trainName.isBlank()) {
+      return;
+    }
+    if (event.getAction() != SignActionType.GROUP_ENTER) {
       return;
     }
     if (!event.hasGroup() || event.getGroup() == null) {
@@ -1665,14 +1740,16 @@ public final class RuntimeDispatchService {
     if (!group.isValid()) {
       return;
     }
+    int stable = Math.max(1, stableTicks);
     JavaPlugin plugin = resolveSchedulerPlugin();
     if (plugin == null || !plugin.isEnabled()) {
-      handleWaypointStop(event, definition, trainName, dwellSeconds, true);
+      handleWaypointStop(event, nodeId, trainName, dwellSeconds, true, null);
       return;
     }
     String key = trainName.toLowerCase(java.util.Locale.ROOT);
     String sessionId = Long.toString(waypointStopCounter.incrementAndGet());
-    if (waypointStopSessions.putIfAbsent(key, sessionId) != null) {
+    WaypointStopState state = new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds);
+    if (waypointStopStates.putIfAbsent(key, state) != null) {
       return;
     }
     new org.bukkit.scheduler.BukkitRunnable() {
@@ -1682,20 +1759,32 @@ public final class RuntimeDispatchService {
       @Override
       public void run() {
         if (!group.isValid()) {
-          clearWaypointStopSession(key, sessionId);
+          clearWaypointStopState(key, sessionId);
           cancel();
           return;
         }
-        if (!sessionId.equals(waypointStopSessions.get(key))) {
+        WaypointStopState current = waypointStopStates.get(key);
+        if (current == null || !sessionId.equals(current.sessionId())) {
           cancel();
+          return;
+        }
+        double minDistance = resolveMinDistanceToSign(event, group);
+        if (!isWithinWaypointCenterRange(minDistance)) {
+          stoppedTicks = 0;
+          waitedTicks++;
+          if (waitedTicks >= WAYPOINT_STOP_WAIT_TIMEOUT_TICKS) {
+            cancel();
+            handleWaypointStop(event, nodeId, trainName, dwellSeconds, true, current);
+            clearWaypointStopState(key, sessionId);
+          }
           return;
         }
         if (!group.isMoving()) {
           stoppedTicks++;
-          if (stoppedTicks >= WAYPOINT_STOP_STABLE_TICKS) {
-            clearWaypointStopSession(key, sessionId);
+          if (stoppedTicks >= stable) {
             cancel();
-            handleWaypointStop(event, definition, trainName, dwellSeconds, false);
+            handleWaypointStop(event, nodeId, trainName, dwellSeconds, false, current);
+            clearWaypointStopState(key, sessionId);
             return;
           }
         } else {
@@ -1703,9 +1792,9 @@ public final class RuntimeDispatchService {
         }
         waitedTicks++;
         if (waitedTicks >= WAYPOINT_STOP_WAIT_TIMEOUT_TICKS) {
-          clearWaypointStopSession(key, sessionId);
           cancel();
-          handleWaypointStop(event, definition, trainName, dwellSeconds, true);
+          handleWaypointStop(event, nodeId, trainName, dwellSeconds, true, current);
+          clearWaypointStopState(key, sessionId);
         }
       }
     }.runTaskTimer(plugin, 1L, 1L);
@@ -1718,18 +1807,33 @@ public final class RuntimeDispatchService {
    */
   private void handleWaypointStop(
       SignActionEvent event,
-      SignNodeDefinition definition,
+      NodeId nodeId,
       String trainName,
       int dwellSeconds,
-      boolean timedOut) {
-    if (event == null || definition == null || trainName == null || trainName.isBlank()) {
+      boolean timedOut,
+      WaypointStopState expectedState) {
+    if (event == null || nodeId == null || trainName == null || trainName.isBlank()) {
       return;
     }
     com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
     if (group == null || !group.isValid()) {
       return;
     }
-    centerTrainAtWaypoint(event, trainName, definition.nodeId());
+    if (expectedState != null && !matchesWaypointStopState(trainName, nodeId, expectedState)) {
+      return;
+    }
+    double minDistance = resolveMinDistanceToSign(event, group);
+    if (!isWithinWaypointCenterRange(minDistance)) {
+      debugLogger.accept(
+          "Waypoint 停站跳过(离牌子太远): train="
+              + trainName
+              + " node="
+              + nodeId.value()
+              + " min="
+              + formatDistance(minDistance));
+      return;
+    }
+    centerTrainAtWaypoint(event, trainName, nodeId);
     if (dwellSeconds > 0 && !group.isMoving() && dwellRegistry != null) {
       if (dwellRegistry.remainingSeconds(trainName).isEmpty()) {
         dwellRegistry.start(trainName, dwellSeconds);
@@ -1737,16 +1841,100 @@ public final class RuntimeDispatchService {
     }
     group.getActions().addActionWaitState();
     if (timedOut) {
-      debugLogger.accept(
-          "Waypoint 停站超时: train=" + trainName + " node=" + definition.nodeId().value());
+      debugLogger.accept("Waypoint 停站超时: train=" + trainName + " node=" + nodeId.value());
     }
   }
 
-  private void clearWaypointStopSession(String key, String sessionId) {
+  private void clearWaypointStopState(String key, String sessionId) {
     if (key == null || sessionId == null) {
       return;
     }
-    waypointStopSessions.remove(key, sessionId);
+    WaypointStopState state = waypointStopStates.get(key);
+    if (state == null || !sessionId.equals(state.sessionId())) {
+      return;
+    }
+    waypointStopStates.remove(key, state);
+  }
+
+  private boolean matchesWaypointStopState(
+      String trainName, NodeId nodeId, WaypointStopState expectedState) {
+    if (trainName == null || trainName.isBlank() || nodeId == null || expectedState == null) {
+      return false;
+    }
+    String key = trainName.toLowerCase(java.util.Locale.ROOT);
+    WaypointStopState current = waypointStopStates.get(key);
+    if (current == null) {
+      return false;
+    }
+    if (!current.sessionId().equals(expectedState.sessionId())) {
+      return false;
+    }
+    return nodeId.equals(current.nodeId());
+  }
+
+  private Optional<WaypointStopState> resolveWaypointStopState(String trainName, NodeId nodeId) {
+    if (trainName == null || trainName.isBlank() || nodeId == null) {
+      return Optional.empty();
+    }
+    String key = trainName.toLowerCase(java.util.Locale.ROOT);
+    WaypointStopState current = waypointStopStates.get(key);
+    if (current == null) {
+      return Optional.empty();
+    }
+    if (!nodeId.equals(current.nodeId())) {
+      waypointStopStates.remove(key, current);
+      return Optional.empty();
+    }
+    return Optional.of(current);
+  }
+
+  /**
+   * Waypoint 居中后的延迟诊断：用于确认真正居中结果是否被后续动作冲掉。
+   *
+   * <p>仅在 GROUP_ENTER 触发的停站场景下启用。
+   */
+  private void scheduleWaypointCenterDiagnostics(
+      SignActionEvent event, String trainName, NodeId nodeId, int delayTicks) {
+    if (event == null || trainName == null || trainName.isBlank() || delayTicks <= 0) {
+      return;
+    }
+    if (event.getAction() != SignActionType.GROUP_ENTER) {
+      return;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
+    if (group == null) {
+      return;
+    }
+    JavaPlugin plugin = resolveSchedulerPlugin();
+    if (plugin == null || !plugin.isEnabled()) {
+      return;
+    }
+    new org.bukkit.scheduler.BukkitRunnable() {
+      @Override
+      public void run() {
+        if (!group.isValid()) {
+          return;
+        }
+        double centerDistance = resolveMinDistanceToSign(event, group);
+        String centerText = formatLocation(event.getCenterLocation());
+        String cartText = formatLocation(resolveCenterCartLocation(group));
+        debugLogger.accept(
+            "Waypoint 居中后: train="
+                + trainName
+                + " node="
+                + (nodeId != null ? nodeId.value() : "-")
+                + " dist="
+                + formatDistance(centerDistance)
+                + " moving="
+                + (group.isMoving() ? "Y" : "N")
+                + " center="
+                + centerText
+                + " cart="
+                + cartText
+                + " delay="
+                + delayTicks);
+      }
+    }.runTaskLater(plugin, delayTicks);
   }
 
   private JavaPlugin resolveSchedulerPlugin() {
@@ -1757,17 +1945,46 @@ public final class RuntimeDispatchService {
     }
   }
 
-  private double resolveCenterDistance(
+  private double resolveMinDistanceToSign(
       SignActionEvent event, com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
     if (event == null || group == null) {
       return Double.NaN;
     }
     org.bukkit.Location center = event.getCenterLocation();
-    org.bukkit.Location cart = resolveCenterCartLocation(group);
-    if (center == null || cart == null) {
+    if (center == null || center.getWorld() == null) {
       return Double.NaN;
     }
-    return center.distance(cart);
+    double head = resolveMemberDistance(center, group.head());
+    double middle = resolveMemberDistance(center, group.middle());
+    double tail = resolveMemberDistance(center, group.tail());
+    double min = Math.min(head, Math.min(middle, tail));
+    return Double.isFinite(min) ? min : Double.NaN;
+  }
+
+  private double resolveMemberDistance(
+      org.bukkit.Location center, com.bergerkiller.bukkit.tc.controller.MinecartMember<?> member) {
+    if (center == null || member == null) {
+      return Double.POSITIVE_INFINITY;
+    }
+    if (member.getRailTracker() == null || member.getRailTracker().getState() == null) {
+      return Double.POSITIVE_INFINITY;
+    }
+    org.bukkit.Location location = member.getRailTracker().getState().positionLocation();
+    if (location == null || location.getWorld() == null) {
+      return Double.POSITIVE_INFINITY;
+    }
+    if (!location.getWorld().equals(center.getWorld())) {
+      return Double.POSITIVE_INFINITY;
+    }
+    return location.distance(center);
+  }
+
+  private boolean isWithinWaypointCenterRange(double distance) {
+    return Double.isFinite(distance) && distance <= WAYPOINT_CENTER_MAX_DISTANCE_BLOCKS;
+  }
+
+  private static String formatDistance(double value) {
+    return Double.isFinite(value) ? String.format(java.util.Locale.ROOT, "%.3f", value) : "-";
   }
 
   private String formatLocation(org.bukkit.Location location) {
@@ -1910,6 +2127,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
@@ -2141,6 +2359,15 @@ public final class RuntimeDispatchService {
       return rest.isEmpty() ? prefix : prefix + " " + rest;
     }
     return prefix + ":" + rest;
+  }
+
+  private record WaypointStopState(
+      String sessionId, NodeId nodeId, Instant createdAt, int dwellSeconds) {
+    private WaypointStopState {
+      Objects.requireNonNull(sessionId, "sessionId");
+      Objects.requireNonNull(nodeId, "nodeId");
+      Objects.requireNonNull(createdAt, "createdAt");
+    }
   }
 
   private static final class StallState {

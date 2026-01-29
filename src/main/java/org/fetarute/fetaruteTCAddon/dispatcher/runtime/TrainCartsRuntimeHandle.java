@@ -6,7 +6,7 @@ import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
-import com.bergerkiller.bukkit.tc.utils.TrackIterator;
+import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Optional;
@@ -482,16 +482,23 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return null;
     }
     for (BlockFace direction : directions) {
-      TrackIterator iterator = new TrackIterator(start, direction);
-      while (iterator.hasNext()) {
-        Block block = iterator.next();
-        if (iterator.getDistance() > PATH_NODE_SEARCH_DISTANCE) {
+      TrackWalkingPoint walker = new TrackWalkingPoint(start, direction);
+      walker.setLoopFilter(true);
+      if (!walker.moveFull()) {
+        continue;
+      }
+      while (walker.moveFull()) {
+        if (walker.movedTotal > PATH_NODE_SEARCH_DISTANCE) {
           break;
+        }
+        Block block = walker.state != null ? walker.state.railBlock() : null;
+        if (block == null) {
+          continue;
         }
         com.bergerkiller.bukkit.tc.pathfinding.PathNode node = pathWorld.getNodeAtRail(block);
         if (node != null) {
           return new PathNodeSearchResult(
-              node, "track_search " + direction.name() + " dist=" + iterator.getDistance());
+              node, "track_search " + direction.name() + " dist=" + Math.round(walker.movedTotal));
         }
       }
     }
