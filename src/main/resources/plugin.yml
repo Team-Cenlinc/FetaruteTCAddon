@@ -33,6 +33,7 @@ permissions:
       fetarute.occupancy.debug: true
       fetarute.eta: true
       fetarute.train.config: true
+      fetarute.train.debug: true
       fetarute.template: true
   fetarute.template:
     description: HUD 模板管理（/fta template）
@@ -84,6 +85,9 @@ permissions:
     default: op
   fetarute.train.config:
     description: 列车加减速/速度配置（/fta train config）
+    default: op
+  fetarute.train.debug:
+    description: 列车控车诊断与手动调试（/fta train debug）
     default: op
   fetarute.eta:
     description: ETA 诊断命令（/fta eta）

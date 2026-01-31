@@ -281,6 +281,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return routeDefinitionCache.findByCodes(operatorCode, lineCode, routeCode);
   }
 
+  /** 根据 route UUID 查询缓存定义。 */
+  public Optional<RouteDefinition> findRouteDefinitionById(java.util.UUID routeId) {
+    if (routeDefinitionCache == null || routeId == null) {
+      return Optional.empty();
+    }
+    return routeDefinitionCache.findById(routeId);
+  }
+
   /** 返回当前占用管理器（调度闭塞骨架）。 */
   public OccupancyManager getOccupancyManager() {
     return occupancyManager;

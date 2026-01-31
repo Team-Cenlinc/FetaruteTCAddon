@@ -7,7 +7,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -21,10 +20,8 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
-import org.fetarute.fetaruteTCAddon.company.api.PlayerIdentityService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
-import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplate;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
@@ -637,51 +634,22 @@ public final class FtaTemplateCommand {
 
   /** 获取已就绪的 StorageProvider；未就绪时向用户输出统一错误文案。 */
   private Optional<StorageProvider> readyProvider(CommandSender sender) {
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
-    }
-    return providerOpt;
+    return CommandStorageProviders.readyProvider(sender, plugin);
   }
 
   /** 仅在 StorageManager ready 的情况下返回 provider，避免命令线程触发初始化或抛异常。 */
   private Optional<StorageProvider> providerIfReady() {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.providerIfReady(plugin);
   }
 
   /** 判断 sender 是否具备读取指定公司的权限（公司成员或管理员）。 */
   private boolean canReadCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    PlayerIdentity identity =
-        new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    return provider.companyMembers().findMembership(companyId, identity.id()).isPresent();
+    return CompanyAccessChecker.canReadCompany(sender, provider, companyId);
   }
 
   /** 判断 sender 是否具备管理指定公司的权限（Owner/Manager 或管理员）。 */
   private boolean canManageCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    PlayerIdentity identity =
-        new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    Optional<CompanyMember> membership =
-        provider.companyMembers().findMembership(companyId, identity.id());
-    if (membership.isEmpty()) {
-      return false;
-    }
-    Set<MemberRole> roles = membership.get().roles();
-    return roles.contains(MemberRole.OWNER) || roles.contains(MemberRole.MANAGER);
+    return CompanyAccessChecker.canManageCompany(sender, provider, companyId);
   }
 
   private SuggestionProvider<CommandSender> placeholderSuggestion(String placeholder) {
@@ -793,18 +761,7 @@ public final class FtaTemplateCommand {
 
   private boolean canReadCompanyNoCreateIdentity(
       CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    Optional<PlayerIdentity> identityOpt =
-        provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
-    if (identityOpt.isEmpty()) {
-      return false;
-    }
-    return provider.companyMembers().findMembership(companyId, identityOpt.get().id()).isPresent();
+    return CompanyAccessChecker.canReadCompanyNoCreateIdentity(sender, provider, companyId);
   }
 
   private String normalizePrefix(org.incendo.cloud.context.CommandInput input) {

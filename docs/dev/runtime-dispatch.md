@@ -52,6 +52,21 @@
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
 2) `FTA_ROUTE_ID`（兼容旧标签）
 
+## 手动调试（debug set route）
+在不重生列车的情况下，可用命令手动写入 route tags 并同步下一跳 destination：
+
+```
+/fta train debug set route <company> <operator> <line> <route> [index|nodeId]
+/fta train debug set route <company> <operator> <line> <route> train <train|@train[...]> [index|nodeId]
+```
+
+说明：
+- `index` 为“已抵达节点索引”（对应 `FTA_ROUTE_INDEX`）。
+ - 若提供的是 `nodeId`（非数字），会在该 route 的 `waypoints` 中查找其索引并写入；`nodeId` 必须使用双引号包裹（例如 `"OP:S:PTK:1"`）。
+- 若需要显式指定目标列车，可在 route 参数后追加 `train <train|@train[...]>`（注意该关键字必须在可选 `index|nodeId` 之前出现）。
+- 命令会通过存储解析 company/operator/line/route 层级，并同步写入 `FTA_ROUTE_ID`（route UUID）与 code 三元组。
+- 命令会清理运行时缓存/占用并尝试 `refreshSignal`（若能找到在线列车实例），便于立刻观察控车与闭塞行为。
+
 ## 待命与回收 (Layover & Reclaim)
 - 列车抵达 `TERM` 站点且线路生命周期为 `REUSE_AT_TERM` 时，将进入待命（Layover）状态，注册到 `LayoverRegistry`。
 - `TERM` 站点会阻止继续发车（防止驶入未定义后续路径），直到调度分配新票据。

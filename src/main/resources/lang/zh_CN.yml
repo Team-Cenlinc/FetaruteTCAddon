@@ -772,10 +772,16 @@ command:
       header: "<prefix> <dark_aqua>列车配置命令</dark_aqua>"
       entry-config-list: "  <gray>•</gray> <white>/fta train config list [列车]</white> <gray>- 查看配置</gray>"
       entry-config-set: "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel</white> <gray>- 设置配置</gray>"
+      entry-debug: "  <gray>•</gray> <white>/fta train debug [列车]</white> <gray>- 查看控车诊断</gray>"
+      entry-debug-list: "  <gray>•</gray> <white>/fta train debug list</white> <gray>- 列出缓存诊断</gray>"
+      entry-debug-set-route: "  <gray>•</gray> <white>/fta train debug set route <公司> <运营商> <线路> <班次> [index|nodeId]</white> <gray>|</gray> <white>/fta train debug set route <公司> <运营商> <线路> <班次> train <列车|@train[...] > [index|nodeId]</white> <gray>- 手动写入线路</gray>"
       entry-train-edit: "  <gray>•</gray> <white>/train edit <列车名></white> <gray>- 选中列车以省略参数</gray>"
       entry-selector: "  <gray>•</gray> <white>@train[...]</white> <gray>- 使用选择器批量操作</gray>"
       hover-config-list: "<gray>查看列车的速度/加减速配置</gray>"
       hover-config-set: "<gray>设置列车的速度/加减速配置</gray>"
+      hover-debug: "<gray>查看运行时调度的控车诊断数据（信号/速度/前瞻）</gray>"
+      hover-debug-list: "<gray>列出当前缓存的所有诊断数据快照</gray>"
+      hover-debug-set-route: "<gray>用于手动调试：写入 route tags，并可选按 index 或 nodeId 推导当前索引；nodeId 必须用双引号包裹</gray>"
       hover-train-edit: "<gray>使用 TrainCarts 原生命令选中列车</gray>"
       hover-selector: "<gray>使用 TrainCarts 选择器语法</gray>"
     config:
@@ -798,6 +804,18 @@ command:
       speed: "  <gray>速度:</gray> 当前=<white><current></white> 目标=<white><target></white> 边限速=<white><edge_limit></white> 建议=<white><recommended></white> <gray>bps</gray>"
       lookahead: "  <gray>前瞻:</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> <gray>blocks</gray>"
       signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white>"
+      set:
+        route:
+          storage-not-ready: "<prefix> <red>存储尚未就绪，无法解析公司/线路层级（请先 /fta reload 或检查数据库连接）</red>"
+          company-not-found: "<prefix> <red>未找到公司</red> <gray>(company=<white><company></white>)</gray>"
+          operator-not-found: "<prefix> <red>未找到运营商</red> <gray>(company=<white><company></white>, operator=<white><operator></white>)</gray>"
+          line-not-found: "<prefix> <red>未找到线路</red> <gray>(operator=<white><operator></white>, line=<white><line></white>)</gray>"
+          route-not-found: "<prefix> <red>未找到班次</red> <gray>(line=<white><line></white>, route=<white><route></white>)</gray>"
+          definition-missing: "<prefix> <red>RouteDefinition 缓存缺失或节点不足（无法生成运行图）</red> <gray>(company=<white><company></white>, operator=<white><operator></white>, line=<white><line></white>, route=<white><route></white>)</gray>"
+          invalid-index: "<prefix> <red>无效的 index/nodeId: <raw></red> <gray>(route=<white><route></white>)</gray>"
+          index-out-of-range: "<prefix> <red>index 越界: <index></red> <gray>(max=<white><max></white>, route=<white><route></white>)</gray>"
+          success: "<prefix> <dark_aqua>已写入线路调试标签</dark_aqua> <gray>(train=<white><train></white>, company=<white><company></white>, operator=<white><operator></white>, line=<white><line></white>, route=<white><route></white>, index=<white><index></white>, dest=<white><dest></white>)</gray>"
+          refresh-skipped: "<prefix> <yellow>未找到在线列车实例或调度服务未就绪：已写入 tags，但未执行 refreshSignal</yellow>"
 
 enum:
   line-service-type:

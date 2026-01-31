@@ -526,27 +526,12 @@ public final class FtaEtaCommand {
   }
 
   private Optional<StorageProvider> providerIfReady() {
-    StorageManager storage = plugin.getStorageManager();
-    if (storage == null || !storage.isReady()) {
-      return Optional.empty();
-    }
-    return storage.provider();
+    return CommandStorageProviders.providerIfReady(plugin);
   }
 
   private boolean canReadCompanyNoCreateIdentity(
       CommandSender sender, StorageProvider provider, java.util.UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    Optional<org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity> identityOpt =
-        provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
-    if (identityOpt.isEmpty()) {
-      return false;
-    }
-    return provider.companyMembers().findMembership(companyId, identityOpt.get().id()).isPresent();
+    return CompanyAccessChecker.canReadCompanyNoCreateIdentity(sender, provider, companyId);
   }
 
   private record StationNameResolver(

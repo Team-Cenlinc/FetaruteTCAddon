@@ -32,15 +32,12 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
-import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
-import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
-import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -256,11 +253,7 @@ public final class FtaDepotCommand {
 
   private Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> readyProvider(
       CommandSender sender) {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.readyProvider(sender, plugin);
   }
 
   private ResolvedRoute resolveRoute(
@@ -316,44 +309,14 @@ public final class FtaDepotCommand {
       CommandSender sender,
       org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
       UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof org.bukkit.entity.Player player)) {
-      return false;
-    }
-    PlayerIdentityRepository identities = provider.playerIdentities();
-    Optional<PlayerIdentity> identityOpt = identities.findByPlayerUuid(player.getUniqueId());
-    if (identityOpt.isEmpty()) {
-      return false;
-    }
-    CompanyMemberRepository members = provider.companyMembers();
-    return members.findMembership(companyId, identityOpt.get().id()).isPresent();
+    return CompanyAccessChecker.canReadCompanyNoCreateIdentity(sender, provider, companyId);
   }
 
   private boolean canManageCompany(
       CommandSender sender,
       org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
       UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof org.bukkit.entity.Player player)) {
-      return false;
-    }
-    PlayerIdentityRepository identities = provider.playerIdentities();
-    Optional<PlayerIdentity> identityOpt = identities.findByPlayerUuid(player.getUniqueId());
-    if (identityOpt.isEmpty()) {
-      return false;
-    }
-    CompanyMemberRepository members = provider.companyMembers();
-    Optional<org.fetarute.fetaruteTCAddon.company.model.CompanyMember> membershipOpt =
-        members.findMembership(companyId, identityOpt.get().id());
-    if (membershipOpt.isEmpty()) {
-      return false;
-    }
-    Set<MemberRole> roles = membershipOpt.get().roles();
-    return roles.contains(MemberRole.OWNER) || roles.contains(MemberRole.MANAGER);
+    return CompanyAccessChecker.canManageCompanyNoCreateIdentity(sender, provider, companyId);
   }
 
   private SuggestionProvider<CommandSender> companySuggestions() {
@@ -549,28 +512,14 @@ public final class FtaDepotCommand {
   }
 
   private Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerIfReady() {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.providerIfReady(plugin);
   }
 
   private boolean canReadCompanyNoCreateIdentity(
       CommandSender sender,
       org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
       UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof org.bukkit.entity.Player player)) {
-      return false;
-    }
-    Optional<PlayerIdentity> identityOpt =
-        provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
-    if (identityOpt.isEmpty()) {
-      return false;
-    }
-    return provider.companyMembers().findMembership(companyId, identityOpt.get().id()).isPresent();
+    return CompanyAccessChecker.canReadCompanyNoCreateIdentity(sender, provider, companyId);
   }
 
   private List<String> listCompanyCodes(CommandSender sender, String prefix) {

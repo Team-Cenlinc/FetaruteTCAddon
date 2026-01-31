@@ -17,10 +17,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
-import org.fetarute.fetaruteTCAddon.company.api.PlayerIdentityService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
-import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
-import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
@@ -740,19 +737,12 @@ public final class FtaStationCommand {
   }
 
   private Optional<StorageProvider> readyProvider(CommandSender sender) {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.readyProvider(sender, plugin);
   }
 
   /** 用于 tab 补全：存储不可用时不输出错误消息，避免刷屏。 */
   private Optional<StorageProvider> providerForSuggestions() {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.providerIfReady(plugin);
   }
 
   private ResolvedOperator resolveOperator(
@@ -841,31 +831,11 @@ public final class FtaStationCommand {
   }
 
   private boolean canReadCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    var identity = new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    return provider.companyMembers().findMembership(companyId, identity.id()).isPresent();
+    return CompanyAccessChecker.canReadCompany(sender, provider, companyId);
   }
 
   private boolean canManageCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    var identity = new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    Optional<CompanyMember> membership =
-        provider.companyMembers().findMembership(companyId, identity.id());
-    if (membership.isEmpty()) {
-      return false;
-    }
-    var roles = membership.get().roles();
-    return roles.contains(MemberRole.OWNER) || roles.contains(MemberRole.MANAGER);
+    return CompanyAccessChecker.canManageCompany(sender, provider, companyId);
   }
 
   /**
@@ -875,19 +845,7 @@ public final class FtaStationCommand {
    */
   private boolean canReadCompanyNoCreateIdentity(
       CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    return provider
-        .playerIdentities()
-        .findByPlayerUuid(player.getUniqueId())
-        .map(
-            identity ->
-                provider.companyMembers().findMembership(companyId, identity.id()).isPresent())
-        .orElse(false);
+    return CompanyAccessChecker.canReadCompanyNoCreateIdentity(sender, provider, companyId);
   }
 
   private static String normalizeLowerPrefix(CommandInput input) {

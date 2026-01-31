@@ -7,7 +7,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -15,10 +14,8 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
-import org.fetarute.fetaruteTCAddon.company.api.PlayerIdentityService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
-import org.fetarute.fetaruteTCAddon.company.model.MemberRole;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -378,48 +375,19 @@ public final class FtaOperatorCommand {
   }
 
   private Optional<StorageProvider> readyProvider(CommandSender sender) {
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
-    }
-    return providerOpt;
+    return CommandStorageProviders.readyProvider(sender, plugin);
   }
 
   private Optional<StorageProvider> providerIfReady() {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.providerIfReady(plugin);
   }
 
   private boolean canReadCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    PlayerIdentity identity =
-        new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    return provider.companyMembers().findMembership(companyId, identity.id()).isPresent();
+    return CompanyAccessChecker.canReadCompany(sender, provider, companyId);
   }
 
   private boolean canManageCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    PlayerIdentity identity =
-        new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    Optional<CompanyMember> membership =
-        provider.companyMembers().findMembership(companyId, identity.id());
-    if (membership.isEmpty()) {
-      return false;
-    }
-    Set<MemberRole> roles = membership.get().roles();
-    return roles.contains(MemberRole.OWNER) || roles.contains(MemberRole.MANAGER);
+    return CompanyAccessChecker.canManageCompany(sender, provider, companyId);
   }
 
   private Optional<Operator> tryFindOperator(

@@ -1183,48 +1183,19 @@ public final class FtaCompanyCommand {
   }
 
   private Optional<StorageProvider> readyProvider(CommandSender sender) {
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      sender.sendMessage(plugin.getLocaleManager().component("error.storage-unavailable"));
-    }
-    return providerOpt;
+    return CommandStorageProviders.readyProvider(sender, plugin);
   }
 
   private Optional<StorageProvider> providerIfReady() {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
+    return CommandStorageProviders.providerIfReady(plugin);
   }
 
   private boolean canReadCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    PlayerIdentity identity =
-        new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    return provider.companyMembers().findMembership(companyId, identity.id()).isPresent();
+    return CompanyAccessChecker.canReadCompany(sender, provider, companyId);
   }
 
   private boolean canManageCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
-    if (sender.hasPermission("fetarute.admin")) {
-      return true;
-    }
-    if (!(sender instanceof Player player)) {
-      return false;
-    }
-    PlayerIdentity identity =
-        new PlayerIdentityService(provider.playerIdentities()).requireIdentity(player);
-    Optional<CompanyMember> membership =
-        provider.companyMembers().findMembership(companyId, identity.id());
-    if (membership.isEmpty()) {
-      return false;
-    }
-    Set<MemberRole> roles = membership.get().roles();
-    return roles.contains(MemberRole.OWNER) || roles.contains(MemberRole.MANAGER);
+    return CompanyAccessChecker.canManageCompany(sender, provider, companyId);
   }
 
   private Optional<EnumSet<MemberRole>> parseRoles(

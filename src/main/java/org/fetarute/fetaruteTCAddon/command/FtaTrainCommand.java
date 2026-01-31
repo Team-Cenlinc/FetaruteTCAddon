@@ -10,12 +10,14 @@ import com.bergerkiller.bukkit.tc.properties.CartProperties;
 import com.bergerkiller.bukkit.tc.properties.CartPropertiesStore;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -23,9 +25,19 @@ import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.component.CommandComponent;
@@ -83,6 +95,11 @@ public final class FtaTrainCommand {
   /** 注册 {@code /fta train config} 子命令。 */
   public void register(CommandManager<CommandSender> manager) {
     SuggestionProvider<CommandSender> trainSuggestions = trainSuggestions();
+    SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
+    SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
+    SuggestionProvider<CommandSender> lineSuggestions = lineSuggestions();
+    SuggestionProvider<CommandSender> routeSuggestions = routeSuggestions();
+    SuggestionProvider<CommandSender> indexOrNodeSuggestions = indexOrNodeSuggestions();
 
     var typeFlag =
         CommandFlag.builder("type")
@@ -231,6 +248,58 @@ public final class FtaTrainCommand {
             .literal("list")
             .permission("fetarute.train.debug")
             .handler(ctx -> handleDebugList(ctx.sender())));
+
+    // debug set route 子命令：手动写入 route tags（用于调试）
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("debug")
+            .literal("set")
+            .literal("route")
+            .permission("fetarute.train.debug")
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("route", StringParser.stringParser(), routeSuggestions)
+            .optional("index_or_node", StringParser.quotedStringParser(), indexOrNodeSuggestions)
+            .handler(
+                ctx ->
+                    handleDebugSetRoute(
+                        ctx.sender(),
+                        Optional.empty(),
+                        ((String) ctx.get("company")).trim(),
+                        ((String) ctx.get("operator")).trim(),
+                        ((String) ctx.get("line")).trim(),
+                        ((String) ctx.get("route")).trim(),
+                        ctx.optional("index_or_node").map(String.class::cast))));
+
+    // debug set route（指定列车）：使用 "train <train|@train[...]>" 避免与 company 参数歧义
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("debug")
+            .literal("set")
+            .literal("route")
+            .permission("fetarute.train.debug")
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("route", StringParser.stringParser(), routeSuggestions)
+            .literal("train")
+            .required("train", StringParser.stringParser(), trainSuggestions)
+            .optional("index_or_node", StringParser.quotedStringParser(), indexOrNodeSuggestions)
+            .handler(
+                ctx ->
+                    handleDebugSetRoute(
+                        ctx.sender(),
+                        Optional.ofNullable(((String) ctx.get("train"))).map(String::trim),
+                        ((String) ctx.get("company")).trim(),
+                        ((String) ctx.get("operator")).trim(),
+                        ((String) ctx.get("line")).trim(),
+                        ((String) ctx.get("route")).trim(),
+                        ctx.optional("index_or_node").map(String.class::cast))));
   }
 
   private void handleDebug(CommandSender sender, Optional<String> trainArg) {
@@ -256,6 +325,280 @@ public final class FtaTrainCommand {
       var diag = diagnosticsOpt.get();
       sendDiagnosticsOutput(sender, diag, locale);
     }
+  }
+
+  /**
+   * 手动写入 route tags（company/operator/line/route + index），用于在线调试与复现问题。
+   *
+   * <p>命令会：
+   *
+   * <ul>
+   *   <li>从存储解析 company/operator/line/route，确保 company 维度参与定位（避免同名 code 冲突）。
+   *   <li>写入 {@code FTA_ROUTE_ID/FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE/FTA_ROUTE_INDEX} 等
+   *       tags。
+   *   <li>同步下一跳 destination，并尝试对在线列车执行 {@code refreshSignal} 立即生效。
+   * </ul>
+   *
+   * <p>注意：index 语义为“已抵达节点索引”，即列车已到达 {@code waypoints[index]}，下一跳为 {@code waypoints[index+1]}。
+   */
+  private void handleDebugSetRoute(
+      CommandSender sender,
+      Optional<String> trainArg,
+      String companyCode,
+      String operatorCode,
+      String lineCode,
+      String routeCode,
+      Optional<String> indexOrNode) {
+    LocaleManager locale = plugin.getLocaleManager();
+
+    Optional<StorageProvider> providerOpt =
+        plugin.getStorageManager() != null
+            ? plugin.getStorageManager().provider()
+            : Optional.empty();
+    if (providerOpt.isEmpty()
+        || plugin.getStorageManager() == null
+        || !plugin.getStorageManager().isReady()) {
+      sender.sendMessage(locale.component("command.train.debug.set.route.storage-not-ready"));
+      return;
+    }
+
+    StorageProvider provider = providerOpt.get();
+    CompanyQueryService query = new CompanyQueryService(provider);
+    Optional<Company> companyOpt = query.findCompany(companyCode);
+    if (companyOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.company-not-found", Map.of("company", companyCode)));
+      return;
+    }
+    Company company = companyOpt.get();
+    if (!CompanyAccessChecker.canReadCompany(sender, provider, company.id())) {
+      sender.sendMessage(locale.component("error.no-permission"));
+      return;
+    }
+    Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorCode);
+    if (operatorOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.operator-not-found",
+              Map.of("company", company.code(), "operator", operatorCode)));
+      return;
+    }
+    Operator operator = operatorOpt.get();
+    Optional<Line> lineOpt = query.findLine(operator.id(), lineCode);
+    if (lineOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.line-not-found",
+              Map.of("operator", operator.code(), "line", lineCode)));
+      return;
+    }
+    Line line = lineOpt.get();
+    Optional<Route> routeEntityOpt = query.findRoute(line.id(), routeCode);
+    if (routeEntityOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.route-not-found",
+              Map.of("line", line.code(), "route", routeCode)));
+      return;
+    }
+    Route routeEntity = routeEntityOpt.get();
+    Optional<RouteDefinition> definitionOpt = plugin.findRouteDefinitionById(routeEntity.id());
+    if (definitionOpt.isEmpty()) {
+      // 自愈：如果缓存缺失或过期，尝试从 DB 增量刷新该条线路定义。
+      definitionOpt = plugin.refreshRouteDefinition(provider, operator, line, routeEntity);
+    }
+    if (definitionOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.definition-missing",
+              Map.of(
+                  "company",
+                  company.code(),
+                  "operator",
+                  operator.code(),
+                  "line",
+                  line.code(),
+                  "route",
+                  routeEntity.code())));
+      return;
+    }
+
+    RouteDefinition route = definitionOpt.get();
+    Optional<Integer> indexOpt = resolveIndex(indexOrNode, route);
+    if (indexOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.invalid-index",
+              Map.of(
+                  "raw",
+                  indexOrNode.orElse(""),
+                  "route",
+                  route.id() != null ? route.id().value() : "-")));
+      return;
+    }
+    int index = indexOpt.get();
+    if (index < 0 || index >= route.waypoints().size()) {
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.index-out-of-range",
+              Map.of(
+                  "index",
+                  String.valueOf(index),
+                  "max",
+                  String.valueOf(Math.max(0, route.waypoints().size() - 1)),
+                  "route",
+                  route.id() != null ? route.id().value() : "-")));
+      return;
+    }
+
+    List<TrainProperties> targets = resolveTrainTargets(sender, trainArg, locale);
+    if (targets.isEmpty()) {
+      return;
+    }
+
+    boolean refreshedAny = false;
+    for (TrainProperties properties : targets) {
+      String trainName = properties.getTrainName();
+
+      // 清理运行时缓存/占用，避免“换线后仍按旧 route 驱动”。
+      plugin
+          .getRuntimeDispatchService()
+          .ifPresent(service -> service.handleTrainRemoved(trainName));
+
+      // 写入 route tags：同时写 code 三元组与 route UUID，便于后续定位与兼容回退查找。
+      TrainTagHelper.writeTag(
+          properties, RouteProgressRegistry.TAG_ROUTE_ID, String.valueOf(routeEntity.id()));
+      TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_OPERATOR_CODE, operator.code());
+      TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_LINE_CODE, line.code());
+      TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_ROUTE_CODE, routeEntity.code());
+      TrainTagHelper.writeTag(
+          properties, RouteProgressRegistry.TAG_ROUTE_INDEX, String.valueOf(index));
+      TrainTagHelper.writeTag(
+          properties,
+          RouteProgressRegistry.TAG_ROUTE_UPDATED_AT,
+          String.valueOf(Instant.now().toEpochMilli()));
+
+      // 同步下一跳 destination，便于立刻观察调度控车（不依赖推进点再次触发）。
+      String destination = resolveNextDestination(route, index);
+      properties.clearDestinationRoute();
+      properties.setDestination(destination);
+
+      sender.sendMessage(
+          locale.component(
+              "command.train.debug.set.route.success",
+              Map.of(
+                  "train",
+                  trainName != null ? trainName : "-",
+                  "company",
+                  company.code(),
+                  "operator",
+                  operator.code(),
+                  "line",
+                  line.code(),
+                  "route",
+                  routeEntity.code(),
+                  "index",
+                  String.valueOf(index),
+                  "dest",
+                  destination.isBlank() ? "-" : destination)));
+
+      MinecartGroup group = resolveGroupByTrainName(trainName);
+      if (group != null) {
+        plugin.getRuntimeDispatchService().ifPresent(service -> service.refreshSignal(group));
+        refreshedAny = true;
+      }
+    }
+
+    if (!refreshedAny) {
+      sender.sendMessage(locale.component("command.train.debug.set.route.refresh-skipped"));
+    }
+  }
+
+  /**
+   * 解析用户输入的 index 参数。
+   *
+   * <p>支持两种形式：
+   *
+   * <ul>
+   *   <li>数字：直接作为“已抵达节点索引”（写入 {@code FTA_ROUTE_INDEX}）。
+   *   <li>nodeId：在 {@link RouteDefinition#waypoints()} 中查找并返回其索引。
+   * </ul>
+   *
+   * <p>未提供参数时回退为 0（从线路起点开始）。
+   */
+  private Optional<Integer> resolveIndex(Optional<String> indexOrNode, RouteDefinition route) {
+    if (route == null) {
+      return Optional.empty();
+    }
+    if (indexOrNode == null || indexOrNode.isEmpty()) {
+      return Optional.of(0);
+    }
+    String raw = indexOrNode.get();
+    if (raw == null) {
+      return Optional.of(0);
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty()) {
+      return Optional.of(0);
+    }
+    try {
+      return Optional.of(Integer.parseInt(trimmed));
+    } catch (NumberFormatException ex) {
+      // 非数字：视为 nodeId，在 route.waypoints() 中查找其索引
+      NodeId nodeId = NodeId.of(trimmed);
+      int idx = route.waypoints().indexOf(nodeId);
+      return idx >= 0 ? Optional.of(idx) : Optional.empty();
+    }
+  }
+
+  /**
+   * 计算并返回“下一跳 destination”字符串。
+   *
+   * <p>用于 debug set route：写入 tags 后同步 destination，便于立刻观察 TrainCarts 寻路与调度控车行为。
+   */
+  private String resolveNextDestination(RouteDefinition route, int currentIndex) {
+    if (route == null || route.waypoints().isEmpty()) {
+      return "";
+    }
+    int nextIndex = currentIndex + 1;
+    if (nextIndex < 0 || nextIndex >= route.waypoints().size()) {
+      return "";
+    }
+    NodeId nextNode = route.waypoints().get(nextIndex);
+    if (nextNode == null) {
+      return "";
+    }
+    return plugin
+        .getSignNodeRegistry()
+        .findByNodeId(nextNode, null)
+        .map(info -> info.definition().trainCartsDestination().orElse(nextNode.value()))
+        .orElse(nextNode.value());
+  }
+
+  /**
+   * 尝试通过列车名找到在线 MinecartGroup。
+   *
+   * <p>若找不到在线实例，则 debug set route 仍会写入 tags，但不会执行 refreshSignal。
+   */
+  private static MinecartGroup resolveGroupByTrainName(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return null;
+    }
+    Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
+    if (groups == null || groups.isEmpty()) {
+      return null;
+    }
+    for (MinecartGroup group : groups) {
+      if (group == null || !group.isValid() || group.getProperties() == null) {
+        continue;
+      }
+      String name = group.getProperties().getTrainName();
+      if (name != null && name.equalsIgnoreCase(trainName)) {
+        return group;
+      }
+    }
+    return null;
   }
 
   private void handleDebugList(CommandSender sender) {
@@ -674,6 +1017,21 @@ public final class FtaTrainCommand {
         locale.component("command.train.help.hover-config-set"));
     sendHelpEntry(
         sender,
+        locale.component("command.train.help.entry-debug"),
+        ClickEvent.suggestCommand("/fta train debug "),
+        locale.component("command.train.help.hover-debug"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.train.help.entry-debug-list"),
+        ClickEvent.suggestCommand("/fta train debug list"),
+        locale.component("command.train.help.hover-debug-list"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.train.help.entry-debug-set-route"),
+        ClickEvent.suggestCommand("/fta train debug set route "),
+        locale.component("command.train.help.hover-debug-set-route"));
+    sendHelpEntry(
+        sender,
         locale.component("command.train.help.entry-train-edit"),
         ClickEvent.suggestCommand("/train edit "),
         locale.component("command.train.help.hover-train-edit"));
@@ -682,6 +1040,349 @@ public final class FtaTrainCommand {
         locale.component("command.train.help.entry-selector"),
         ClickEvent.suggestCommand("/fta train config list @train["),
         locale.component("command.train.help.hover-selector"));
+  }
+
+  private SuggestionProvider<CommandSender> companySuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizeLowerPrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<company>");
+          }
+          suggestions.addAll(listCompanyCodes(ctx.sender(), prefix));
+          return suggestions;
+        });
+  }
+
+  private SuggestionProvider<CommandSender> operatorSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizeLowerPrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<operator>");
+          }
+          Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          if (companyArgOpt.isEmpty()) {
+            return suggestions;
+          }
+          String companyArg = companyArgOpt.get().trim();
+          if (companyArg.isBlank()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!CompanyAccessChecker.canReadCompanyNoCreateIdentity(
+              ctx.sender(), provider, company.id())) {
+            return suggestions;
+          }
+          provider.operators().listByCompany(company.id()).stream()
+              .map(Operator::code)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(code -> !code.isBlank())
+              .filter(code -> prefix.isBlank() || code.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  private SuggestionProvider<CommandSender> lineSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizeLowerPrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<line>");
+          }
+          Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
+          if (companyArgOpt.isEmpty() || operatorArgOpt.isEmpty()) {
+            return suggestions;
+          }
+          String companyArg = companyArgOpt.get().trim();
+          String operatorArg = operatorArgOpt.get().trim();
+          if (companyArg.isBlank() || operatorArg.isBlank()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!CompanyAccessChecker.canReadCompanyNoCreateIdentity(
+              ctx.sender(), provider, company.id())) {
+            return suggestions;
+          }
+          Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
+          if (operatorOpt.isEmpty()) {
+            return suggestions;
+          }
+          Operator operator = operatorOpt.get();
+          provider.lines().listByOperator(operator.id()).stream()
+              .map(Line::code)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(code -> !code.isBlank())
+              .filter(code -> prefix.isBlank() || code.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  private SuggestionProvider<CommandSender> routeSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizeLowerPrefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("<route>");
+          }
+          Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
+          Optional<String> lineArgOpt = ctx.optional("line").map(String.class::cast);
+          if (companyArgOpt.isEmpty() || operatorArgOpt.isEmpty() || lineArgOpt.isEmpty()) {
+            return suggestions;
+          }
+          String companyArg = companyArgOpt.get().trim();
+          String operatorArg = operatorArgOpt.get().trim();
+          String lineArg = lineArgOpt.get().trim();
+          if (companyArg.isBlank() || operatorArg.isBlank() || lineArg.isBlank()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!CompanyAccessChecker.canReadCompanyNoCreateIdentity(
+              ctx.sender(), provider, company.id())) {
+            return suggestions;
+          }
+          Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
+          if (operatorOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<Line> lineOpt = query.findLine(operatorOpt.get().id(), lineArg);
+          if (lineOpt.isEmpty()) {
+            return suggestions;
+          }
+          Line line = lineOpt.get();
+          provider.routes().listByLine(line.id()).stream()
+              .map(Route::code)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(code -> !code.isBlank())
+              .filter(code -> prefix.isBlank() || code.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  private SuggestionProvider<CommandSender> indexOrNodeSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String token = input == null ? "" : input.lastRemainingToken();
+          String prefix = token.trim();
+          String normalizedPrefix = normalizeQuotedPrefix(prefix);
+          String lowerPrefix = normalizedPrefix.toLowerCase(Locale.ROOT);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isBlank()) {
+            suggestions.add("[index|nodeId]");
+          }
+
+          Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
+          Optional<String> lineArgOpt = ctx.optional("line").map(String.class::cast);
+          Optional<String> routeArgOpt = ctx.optional("route").map(String.class::cast);
+          if (companyArgOpt.isEmpty()
+              || operatorArgOpt.isEmpty()
+              || lineArgOpt.isEmpty()
+              || routeArgOpt.isEmpty()) {
+            return suggestions;
+          }
+
+          String companyArg = companyArgOpt.get().trim();
+          String operatorArg = operatorArgOpt.get().trim();
+          String lineArg = lineArgOpt.get().trim();
+          String routeArg = routeArgOpt.get().trim();
+          if (companyArg.isBlank()
+              || operatorArg.isBlank()
+              || lineArg.isBlank()
+              || routeArg.isBlank()) {
+            return suggestions;
+          }
+
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!CompanyAccessChecker.canReadCompanyNoCreateIdentity(
+              ctx.sender(), provider, company.id())) {
+            return suggestions;
+          }
+          Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
+          if (operatorOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<Line> lineOpt = query.findLine(operatorOpt.get().id(), lineArg);
+          if (lineOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<Route> routeOpt = query.findRoute(lineOpt.get().id(), routeArg);
+          if (routeOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<RouteDefinition> definitionOpt =
+              plugin.findRouteDefinitionById(routeOpt.get().id());
+          if (definitionOpt.isEmpty()) {
+            return suggestions;
+          }
+          RouteDefinition route = definitionOpt.get();
+
+          // 数字索引建议
+          for (int i = 0; i < route.waypoints().size(); i++) {
+            String candidate = String.valueOf(i);
+            if (normalizedPrefix.isBlank() || candidate.startsWith(normalizedPrefix)) {
+              suggestions.add(candidate);
+            }
+            if (suggestions.size() >= SUGGESTION_LIMIT) {
+              return suggestions;
+            }
+          }
+
+          // nodeId 建议（用 value）
+          route.waypoints().stream()
+              .filter(Objects::nonNull)
+              .map(NodeId::value)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(v -> !v.isBlank())
+              .filter(v -> prefix.isBlank() || v.toLowerCase(Locale.ROOT).startsWith(lowerPrefix))
+              .map(FtaTrainCommand::quoteNodeIdSuggestion)
+              .distinct()
+              .limit(SUGGESTION_LIMIT - suggestions.size())
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  private List<String> listCompanyCodes(CommandSender sender, String prefix) {
+    Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+    if (providerOpt.isEmpty()) {
+      return List.of();
+    }
+    StorageProvider provider = providerOpt.get();
+    if (sender.hasPermission("fetarute.admin")) {
+      return provider.companies().listAll().stream()
+          .map(Company::code)
+          .filter(Objects::nonNull)
+          .map(String::trim)
+          .filter(code -> !code.isBlank())
+          .filter(code -> prefix.isBlank() || code.toLowerCase(Locale.ROOT).startsWith(prefix))
+          .distinct()
+          .limit(SUGGESTION_LIMIT)
+          .toList();
+    }
+    if (!(sender instanceof Player player)) {
+      return List.of();
+    }
+    Optional<org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity> identityOpt =
+        provider.playerIdentities().findByPlayerUuid(player.getUniqueId());
+    if (identityOpt.isEmpty()) {
+      return List.of();
+    }
+    return provider.companyMembers().listMemberships(identityOpt.get().id()).stream()
+        .map(org.fetarute.fetaruteTCAddon.company.model.CompanyMember::companyId)
+        .distinct()
+        .map(provider.companies()::findById)
+        .flatMap(Optional::stream)
+        .map(Company::code)
+        .filter(Objects::nonNull)
+        .map(String::trim)
+        .filter(code -> !code.isBlank())
+        .filter(code -> prefix.isBlank() || code.toLowerCase(Locale.ROOT).startsWith(prefix))
+        .distinct()
+        .limit(SUGGESTION_LIMIT)
+        .toList();
+  }
+
+  private static String normalizeLowerPrefix(org.incendo.cloud.context.CommandInput input) {
+    if (input == null) {
+      return "";
+    }
+    return input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
+  }
+
+  /**
+   * 规范化可能带引号的输入前缀（用于补全过滤）。
+   *
+   * <p>玩家可能已经输入了起始引号（但尚未输入结束引号），此时直接用原 token 做 startsWith 会匹配不到候选。
+   *
+   * <p>这里仅去掉两端的双引号（若存在），不做转义解析。
+   */
+  private static String normalizeQuotedPrefix(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return "";
+    }
+    String out = raw.trim();
+    if (out.startsWith("\"")) {
+      out = out.substring(1);
+    }
+    if (out.endsWith("\"") && out.length() > 1) {
+      out = out.substring(0, out.length() - 1);
+    }
+    return out.trim();
+  }
+
+  /**
+   * nodeId 补全返回值：始终加双引号包裹。
+   *
+   * <p>原因：在游戏内输入 {@code :} 形式的字符串时，部分聊天/命令解析路径可能出现歧义；强制引号能确保 nodeId 作为单个参数被 Cloud 正确接收。
+   */
+  private static String quoteNodeIdSuggestion(String raw) {
+    if (raw == null) {
+      return "\"\"";
+    }
+    String trimmed = raw.trim();
+    String escaped = trimmed.replace("\\", "\\\\").replace("\"", "\\\"");
+    return "\"" + escaped + "\"";
   }
 
   private void sendNoSelection(CommandSender sender, LocaleManager locale) {
