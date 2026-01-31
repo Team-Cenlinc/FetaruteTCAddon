@@ -14,7 +14,6 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -78,15 +77,6 @@ public final class RuntimeDispatchService {
   /** Waypoint 停站减速：按制动距离的比例估算“软停车距离”。 */
   private static final double WAYPOINT_STOP_BRAKE_FACTOR = 0.5;
 
-  /** Waypoint 停站等待超时（ticks）。 */
-  private static final int WAYPOINT_STOP_WAIT_TIMEOUT_TICKS = 400;
-
-  /** Waypoint 判定停稳的连续 tick 数。 */
-  private static final int WAYPOINT_STOP_STABLE_TICKS = 2;
-
-  /** Waypoint 居中生效的最大距离（blocks）。 */
-  private static final double WAYPOINT_CENTER_MAX_DISTANCE_BLOCKS = 16.0;
-
   /** 推进点去重窗口（毫秒），用于压制同一节点的重复触发。 */
   private static final long PROGRESS_TRIGGER_DEDUP_MS = 800L;
 
@@ -110,7 +100,6 @@ public final class RuntimeDispatchService {
   private final java.util.Set<String> missingSignalWarned = new HashSet<>();
   private final java.util.concurrent.ConcurrentMap<String, WaypointStopState> waypointStopStates =
       new java.util.concurrent.ConcurrentHashMap<>();
-  private final AtomicLong waypointStopCounter = new AtomicLong();
   private final java.util.concurrent.ConcurrentMap<String, String> stopWaypointLogState =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, ProgressTriggerState>
@@ -131,6 +120,17 @@ public final class RuntimeDispatchService {
       new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
   private final java.util.concurrent.ConcurrentMap<String, Integer> operatorPriorityCache =
       new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 运行时有效节点覆盖（按列车名 + route index）。
+   *
+   * <p>用于支持动态站台/同站不同站台容错：当列车实际到达的 NodeId 与线路定义不一致时，将“该索引的真实 NodeId”写入覆盖表， 后续信号 tick /
+   * 占用请求构建将优先使用覆盖值。
+   */
+  private final java.util.concurrent.ConcurrentMap<
+          String, java.util.concurrent.ConcurrentMap<Integer, NodeId>>
+      effectiveNodeOverrides = new java.util.concurrent.ConcurrentHashMap<>();
+
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
@@ -215,6 +215,8 @@ public final class RuntimeDispatchService {
     if (currentIndex < 0) {
       return true;
     }
+    recordEffectiveNode(trainName, route, currentIndex, definition.nodeId());
+    pruneEffectiveNodeOverrides(trainName, currentIndex);
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     if (stopOpt.isPresent()) {
       RouteStop stop = stopOpt.get();
@@ -244,12 +246,13 @@ public final class RuntimeDispatchService {
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges(), debugLogger);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
 
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
             trainName,
             Optional.ofNullable(route.id()),
-            route.waypoints(),
+            effectiveNodes,
             currentIndex,
             now,
             priority);
@@ -271,6 +274,130 @@ public final class RuntimeDispatchService {
       return false;
     }
     return true;
+  }
+
+  /**
+   * AutoStation 停车时推进 routeIndex 并设置下一站 destination。
+   *
+   * <p>此方法应在列车于 AutoStation 停稳后（进入 dwell 前）调用，用于：
+   *
+   * <ul>
+   *   <li>推进 routeIndex 到当前站点
+   *   <li>解析 Dynamic 站台选择（如果下一站是 DYNAMIC）
+   *   <li>设置下一站 destination
+   *   <li>处理 CHANGE/DSTY 等特殊动作
+   * </ul>
+   *
+   * @param group TrainCarts 列车组
+   * @param definition 当前站点的节点定义
+   */
+  public void handleStationArrival(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group, SignNodeDefinition definition) {
+    if (group == null || definition == null) {
+      return;
+    }
+    RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
+    TrainProperties properties = train.properties();
+    String trainName = properties != null ? properties.getTrainName() : "unknown";
+    handleRenameIfNeeded(properties, trainName);
+    Optional<UUID> routeUuidOpt = readRouteUuid(properties);
+    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
+    if (routeOpt.isEmpty()) {
+      debugLogger.accept(
+          "Station 推进失败: 未找到线路定义 train="
+              + trainName
+              + " "
+              + describeRouteTags(properties, routeUuidOpt));
+      return;
+    }
+    RouteDefinition route = routeOpt.get();
+    OptionalInt tagIndex =
+        TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
+            .map(OptionalInt::of)
+            .orElse(OptionalInt.empty());
+    int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
+    if (currentIndex < 0) {
+      if (matchesDstyTarget(route, definition.nodeId())) {
+        handleDestroy(train, properties, trainName, "DSTY");
+        return;
+      }
+      debugLogger.accept(
+          "Station 推进跳过: 当前节点不在线路定义内 train="
+              + trainName
+              + " node="
+              + definition.nodeId().value()
+              + " route="
+              + route.id().value());
+      return;
+    }
+    NodeId currentNode = definition.nodeId();
+    recordEffectiveNode(trainName, route, currentIndex, currentNode);
+    pruneEffectiveNodeOverrides(trainName, currentIndex);
+    Instant now = Instant.now();
+    // 处理 DSTY 销毁
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
+    if (stopOpt.isPresent()) {
+      RouteStop stop = stopOpt.get();
+      if (shouldDestroyAt(stop, currentNode)) {
+        handleDestroy(train, properties, trainName, "DSTY");
+        return;
+      }
+      // 处理 CHANGE 移交指令
+      handleChangeAction(trainName, properties, stop);
+    }
+    // 推进 routeIndex
+    progressRegistry.advance(
+        trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+    invalidateTrainEta(trainName);
+    debugLogger.accept(
+        "Station 推进: train="
+            + trainName
+            + " idx="
+            + currentIndex
+            + " node="
+            + currentNode.value()
+            + " route="
+            + route.id().value());
+    // 计算下一站并设置 destination
+    int nextIndex = currentIndex + 1;
+    if (nextIndex >= route.waypoints().size()) {
+      // 已到终点，清除 destination
+      properties.clearDestinationRoute();
+      properties.setDestination("");
+      debugLogger.accept(
+          "Station 推进: 已到终点 train="
+              + trainName
+              + " node="
+              + currentNode.value()
+              + " route="
+              + route.id().value());
+      return;
+    }
+    NodeId nextNode = resolveEffectiveNode(trainName, route, nextIndex);
+    // 尝试 Dynamic 站台选择
+    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
+    if (graphOpt.isPresent()) {
+      RailGraph graph = graphOpt.get();
+      resolveDynamicStationTargetIfNeeded(trainName, route, nextIndex, currentNode, graph)
+          .ifPresent(
+              selected -> {
+                recordEffectiveNode(trainName, route, nextIndex, selected);
+              });
+      nextNode = resolveEffectiveNode(trainName, route, nextIndex);
+    }
+    // 设置下一站 destination
+    String destinationName = resolveDestinationName(nextNode);
+    if (destinationName != null && !destinationName.isBlank()) {
+      properties.clearDestinationRoute();
+      properties.setDestination(destinationName);
+      debugLogger.accept(
+          "Station 设置 destination: train="
+              + trainName
+              + " dest="
+              + destinationName
+              + " nextIdx="
+              + nextIndex);
+    }
   }
 
   /**
@@ -315,6 +442,8 @@ public final class RuntimeDispatchService {
       return;
     }
     NodeId currentNode = definition.nodeId();
+    recordEffectiveNode(trainName, route, currentIndex, currentNode);
+    pruneEffectiveNodeOverrides(trainName, currentIndex);
     Instant now = Instant.now();
     if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
       return;
@@ -329,6 +458,8 @@ public final class RuntimeDispatchService {
         handleDestroy(train, properties, trainName, "DSTY");
         return;
       }
+      // 处理 CHANGE 移交指令：仅更新 operator/line 标识，不改变当前 route
+      handleChangeAction(trainName, properties, stop);
       if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
           && route.lifecycleMode()
               == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
@@ -343,7 +474,7 @@ public final class RuntimeDispatchService {
         if (definition.nodeType() == NodeType.WAYPOINT) {
           Optional<NodeId> nextNode =
               currentIndex + 1 < route.waypoints().size()
-                  ? Optional.of(route.waypoints().get(currentIndex + 1))
+                  ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
                   : Optional.empty();
           NodeId stopNext = nextNode.orElse(currentNode);
           OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
@@ -358,8 +489,8 @@ public final class RuntimeDispatchService {
               graphOpt.orElse(null),
               false,
               stopDistanceOpt);
-          scheduleCenterWhenStopped(
-              event, definition.nodeId(), trainName, dwellSeconds, WAYPOINT_STOP_STABLE_TICKS);
+          // 立即居中（与 AutoStation 对齐）
+          centerTrainAtWaypointImmediate(event, definition.nodeId(), trainName, dwellSeconds);
         }
         // TERM 标记：清除 destination 防止继续寻路
         properties.clearDestinationRoute();
@@ -381,11 +512,8 @@ public final class RuntimeDispatchService {
         stopAtWaypoint = waypointDwellSeconds > 0;
       }
     }
-    Optional<NodeId> nextTarget =
-        currentIndex + 1 < route.waypoints().size()
-            ? Optional.of(route.waypoints().get(currentIndex + 1))
-            : Optional.empty();
-    if (nextTarget.isEmpty()) {
+    int nextIndex = currentIndex + 1;
+    if (nextIndex >= route.waypoints().size()) {
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       invalidateTrainEta(trainName);
@@ -401,10 +529,19 @@ public final class RuntimeDispatchService {
               + route.id().value());
       return;
     }
+    NodeId nextNode = resolveEffectiveNode(trainName, route, nextIndex);
 
     Optional<RailGraph> graphOpt = resolveGraph(event);
     RailGraph graph = graphOpt.orElse(null);
     if (stopAtWaypoint) {
+      if (graph != null) {
+        resolveDynamicStationTargetIfNeeded(trainName, route, nextIndex, currentNode, graph)
+            .ifPresent(
+                selected -> {
+                  recordEffectiveNode(trainName, route, nextIndex, selected);
+                });
+        nextNode = resolveEffectiveNode(trainName, route, nextIndex);
+      }
       if (event.getAction() == SignActionType.MEMBER_ENTER) {
         return;
       }
@@ -415,7 +552,7 @@ public final class RuntimeDispatchService {
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       invalidateTrainEta(trainName);
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
-      String destinationName = resolveDestinationName(nextTarget.get());
+      String destinationName = resolveDestinationName(nextNode);
       if (destinationName != null && !destinationName.isBlank() && properties != null) {
         properties.clearDestinationRoute();
         properties.setDestination(destinationName);
@@ -427,12 +564,12 @@ public final class RuntimeDispatchService {
           SignalAspect.STOP,
           route,
           currentNode,
-          nextTarget.get(),
+          nextNode,
           graph,
           false,
           stopDistanceOpt);
-      scheduleCenterWhenStopped(
-          event, definition.nodeId(), trainName, waypointDwellSeconds, WAYPOINT_STOP_STABLE_TICKS);
+      // 立即居中（与 AutoStation 对齐），然后调度 dwell/WaitState
+      centerTrainAtWaypointImmediate(event, definition.nodeId(), trainName, waypointDwellSeconds);
       return;
     }
     if (graphOpt.isEmpty()) {
@@ -452,31 +589,46 @@ public final class RuntimeDispatchService {
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges());
-    Optional<OccupancyRequestContext> contextOpt =
-        builder.buildContextFromNodes(
-            trainName,
-            Optional.ofNullable(route.id()),
-            route.waypoints(),
-            currentIndex,
-            now,
-            priority);
-    if (contextOpt.isEmpty()) {
-      debugLogger.accept(
-          "调度推进失败: 构建占用请求失败 train="
-              + trainName
-              + " node="
-              + definition.nodeId().value()
-              + " route="
-              + route.id().value()
-              + " reason="
-              + diagnoseBuildFailure(
-                  graph, route, currentIndex, Math.max(lookaheadEdges, minClearEdges)));
-      return;
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    Optional<DynamicSelection> dynamicSelectionOpt =
+        selectDynamicStationTargetForProgress(
+            trainName, route, currentIndex, nextIndex, currentNode, graph, builder, now, priority);
+    OccupancyRequestContext context;
+    OccupancyDecision decision;
+    if (dynamicSelectionOpt.isPresent()) {
+      DynamicSelection selection = dynamicSelectionOpt.get();
+      recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
+      nextNode = selection.targetNode();
+      context = selection.context();
+      decision = selection.decision();
+    } else {
+      Optional<OccupancyRequestContext> contextOpt =
+          builder.buildContextFromNodes(
+              trainName,
+              Optional.ofNullable(route.id()),
+              effectiveNodes,
+              currentIndex,
+              now,
+              priority);
+      if (contextOpt.isEmpty()) {
+        debugLogger.accept(
+            "调度推进失败: 构建占用请求失败 train="
+                + trainName
+                + " node="
+                + definition.nodeId().value()
+                + " route="
+                + route.id().value()
+                + " reason="
+                + diagnoseBuildFailure(
+                    graph, route, currentIndex, Math.max(lookaheadEdges, minClearEdges)));
+        return;
+      }
+      context = contextOpt.get();
+      OccupancyRequest request = context.request();
+      decision = occupancyManager.canEnter(request);
     }
-    OccupancyRequestContext context = contextOpt.get();
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
-    OccupancyDecision decision = occupancyManager.canEnter(request);
     // 诊断：输出请求资源与判定结果
     debugLogger.accept(
         "调度推进判定: train="
@@ -516,7 +668,7 @@ public final class RuntimeDispatchService {
           aspect,
           route,
           currentNode,
-          nextTarget.get(),
+          nextNode,
           graph,
           false,
           lookaheadDistance,
@@ -530,7 +682,7 @@ public final class RuntimeDispatchService {
     invalidateTrainEta(trainName);
     updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
 
-    String destinationName = resolveDestinationName(nextTarget.get());
+    String destinationName = resolveDestinationName(nextNode);
     if (destinationName == null || destinationName.isBlank()) {
       return;
     }
@@ -542,7 +694,7 @@ public final class RuntimeDispatchService {
         SignalAspect.PROCEED,
         route,
         currentNode,
-        nextTarget.get(),
+        nextNode,
         graph,
         true,
         OptionalLong.empty());
@@ -759,6 +911,7 @@ public final class RuntimeDispatchService {
     missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
   }
 
   /**
@@ -846,10 +999,11 @@ public final class RuntimeDispatchService {
       return;
     }
 
-    NodeId currentNode =
+    int boundedIndex =
         currentIndex < route.waypoints().size()
-            ? route.waypoints().get(currentIndex)
-            : route.waypoints().get(Math.max(0, route.waypoints().size() - 1));
+            ? currentIndex
+            : Math.max(0, route.waypoints().size() - 1);
+    NodeId currentNode = resolveEffectiveNode(trainName, route, boundedIndex);
 
     // DSTY 销毁必须优先于“终点停车”，否则当线路最后一个节点就是 DSTY 目标时会卡死不销毁。
     // 若当前节点为 DSTY（销毁目标），立即销毁列车并返回，避免后续逻辑干扰。
@@ -866,7 +1020,7 @@ public final class RuntimeDispatchService {
           && stopOpt.get().passType() != RouteStopPassType.PASS) {
         Optional<NodeId> nextNode =
             currentIndex + 1 < route.waypoints().size()
-                ? Optional.of(route.waypoints().get(currentIndex + 1))
+                ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
                 : Optional.empty();
         if (nextNode.isPresent()) {
           if (occupancyManager != null) {
@@ -896,7 +1050,7 @@ public final class RuntimeDispatchService {
     if (waypointStopState.isPresent()) {
       Optional<NodeId> nextNode =
           currentIndex + 1 < route.waypoints().size()
-              ? Optional.of(route.waypoints().get(currentIndex + 1))
+              ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
               : Optional.empty();
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       if (nextNode.isPresent()) {
@@ -943,7 +1097,7 @@ public final class RuntimeDispatchService {
         if (route.lifecycleMode()
             == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
           int lastIndex = Math.max(0, route.waypoints().size() - 1);
-          NodeId terminalNode = route.waypoints().get(lastIndex);
+          NodeId terminalNode = resolveEffectiveNode(trainName, route, lastIndex);
           if (layoverRegistry.get(trainName).isEmpty()) {
             handleLayoverRegistrationIfNeeded(trainName, route, terminalNode, properties);
           }
@@ -964,9 +1118,10 @@ public final class RuntimeDispatchService {
             runtimeSettings.lookaheadEdges(),
             runtimeSettings.minClearEdges(),
             runtimeSettings.switcherZoneEdges());
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
-            trainName, Optional.ofNullable(route.id()), route.waypoints(), currentIndex, now, 0);
+            trainName, Optional.ofNullable(route.id()), effectiveNodes, currentIndex, now, 0);
     if (contextOpt.isEmpty()) {
       return;
     }
@@ -979,11 +1134,11 @@ public final class RuntimeDispatchService {
     SignalAspect lastAspect = progressEntry.lastSignal();
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
-            ? Optional.of(route.waypoints().get(currentIndex + 1))
+            ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
             : Optional.empty();
     Optional<NodeId> currentNodeOpt =
         currentIndex < route.waypoints().size()
-            ? Optional.of(route.waypoints().get(currentIndex))
+            ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex))
             : Optional.empty();
     boolean stopAtNextWaypoint = false;
     if (nextNode.isPresent()) {
@@ -1252,6 +1407,8 @@ public final class RuntimeDispatchService {
       layoverRegistry.unregister(trainName);
       return false;
     }
+    // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
+    effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
     if (routeOpt.isEmpty()) {
@@ -1295,6 +1452,8 @@ public final class RuntimeDispatchService {
       debugLogger.accept("Layover 发车失败: 线路无下一站 train=" + trainName);
       return false;
     }
+    recordEffectiveNode(trainName, route, startIndex, startNode);
+    pruneEffectiveNodeOverrides(trainName, startIndex);
 
     Instant now = Instant.now();
     Optional<RailGraph> graphOpt = resolveGraph(trainHandle.worldId(), now);
@@ -1311,20 +1470,43 @@ public final class RuntimeDispatchService {
             runtime.minClearEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
-    Optional<OccupancyRequestContext> ctxOpt =
-        builder.buildContextFromNodes(
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    int nextIndex = startIndex + 1;
+    Optional<DynamicSelection> dynamicSelectionOpt =
+        selectDynamicStationTargetForProgress(
             trainName,
-            Optional.ofNullable(route.id()),
-            route.waypoints(),
+            route,
             startIndex,
+            nextIndex,
+            startNode,
+            graph,
+            builder,
             now,
             ticket.priority());
-    if (ctxOpt.isEmpty()) {
-      debugLogger.accept("Layover 发车失败: 无法构建占用请求 train=" + trainName);
-      return false;
+    OccupancyRequestContext ctx;
+    OccupancyDecision decision;
+    if (dynamicSelectionOpt.isPresent()) {
+      DynamicSelection selection = dynamicSelectionOpt.get();
+      recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
+      ctx = selection.context();
+      decision = selection.decision();
+    } else {
+      Optional<OccupancyRequestContext> ctxOpt =
+          builder.buildContextFromNodes(
+              trainName,
+              Optional.ofNullable(route.id()),
+              effectiveNodes,
+              startIndex,
+              now,
+              ticket.priority());
+      if (ctxOpt.isEmpty()) {
+        debugLogger.accept("Layover 发车失败: 无法构建占用请求 train=" + trainName);
+        return false;
+      }
+      ctx = ctxOpt.get();
+      decision = occupancyManager.canEnter(ctx.request());
     }
-    OccupancyRequest request = ctxOpt.get().request();
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    OccupancyRequest request = ctx.request();
     if (!decision.allowed()) {
       debugLogger.accept("Layover 发车受阻: train=" + trainName + " signal=" + decision.signal());
       return false;
@@ -1356,7 +1538,7 @@ public final class RuntimeDispatchService {
     progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
     invalidateTrainEta(trainName);
 
-    NodeId nextNode = route.waypoints().get(startIndex + 1);
+    NodeId nextNode = resolveEffectiveNode(trainName, route, startIndex + 1);
     String destinationName = resolveDestinationName(nextNode);
     if (destinationName == null || destinationName.isBlank()) {
       destinationName = nextNode.value();
@@ -1372,7 +1554,8 @@ public final class RuntimeDispatchService {
     double accelBpt2 = config.accelBps2() / 400.0; // blocks/s^2 -> blocks/tick^2
     properties.setSpeedLimit(targetBpt);
     java.util.Optional<org.bukkit.block.BlockFace> fallbackDirection =
-        resolveLaunchDirectionByGraph(graph, route.waypoints().get(startIndex), nextNode);
+        resolveLaunchDirectionByGraph(
+            graph, resolveEffectiveNode(trainName, route, startIndex), nextNode);
     trainHandle.launchWithFallback(fallbackDirection, targetBpt, accelBpt2);
     updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
 
@@ -1640,104 +1823,13 @@ public final class RuntimeDispatchService {
   // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
 
   /**
-   * Waypoint 停站时强制居中列车（对齐牌子中心），以模拟 AutoStation 的停车体验。
+   * Waypoint STOP/TERM 立即居中（与 AutoStation 对齐）。
    *
-   * <p>仅在 waypoint STOP/TERM 停站触发时调用；异常时静默降级为普通停车。
+   * <p>在 GROUP_ENTER 时立即调用 launchReset + centerTrain，然后调度 dwell 和 WaitState。 这与 AutoStation
+   * 的行为一致，确保列车能正确居中停靠。
    */
-  private void centerTrainAtWaypoint(SignActionEvent event, String trainName, NodeId nodeId) {
-    if (event == null || !event.hasGroup()) {
-      return;
-    }
-    if (event.getAction() != SignActionType.GROUP_ENTER) {
-      return;
-    }
-    try {
-      var group = event.getGroup();
-      org.bukkit.Location centerLocation = event.getCenterLocation();
-      double headDistance = resolveMemberDistance(centerLocation, group.head());
-      double middleDistance = resolveMemberDistance(centerLocation, group.middle());
-      double tailDistance = resolveMemberDistance(centerLocation, group.tail());
-      double minDistance = Math.min(headDistance, Math.min(middleDistance, tailDistance));
-      if (!isWithinWaypointCenterRange(minDistance)) {
-        debugLogger.accept(
-            "Waypoint 居中跳过(离牌子太远): train="
-                + trainName
-                + " node="
-                + (nodeId != null ? nodeId.value() : "-")
-                + " min="
-                + formatDistance(minDistance)
-                + " head="
-                + formatDistance(headDistance)
-                + " mid="
-                + formatDistance(middleDistance)
-                + " tail="
-                + formatDistance(tailDistance));
-        return;
-      }
-      com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
-      boolean hadAction = group.getActions().hasAction();
-      double centerDistance = minDistance;
-      String centerText = formatLocation(event.getCenterLocation());
-      String cartText = formatLocation(resolveCenterCartLocation(group));
-      String signText = formatLocation(event.getBlock().getLocation());
-      boolean realSign = event.getTrackedSign() != null && event.getTrackedSign().isRealSign();
-      station.centerTrain();
-      boolean hasAction = group.getActions().hasAction();
-      debugLogger.accept(
-          "Waypoint 居中前: train="
-              + trainName
-              + " node="
-              + (nodeId != null ? nodeId.value() : "-")
-              + " dist="
-              + formatDistance(centerDistance)
-              + " action="
-              + (hadAction ? "Y" : "N")
-              + "->"
-              + (hasAction ? "Y" : "N")
-              + " center="
-              + centerText
-              + " cart="
-              + cartText
-              + " sign="
-              + signText
-              + " real="
-              + realSign);
-      scheduleWaypointCenterDiagnostics(event, trainName, nodeId, 5);
-    } catch (Throwable ex) {
-      debugLogger.accept(
-          "Waypoint 居中失败: train="
-              + trainName
-              + " node="
-              + (nodeId != null ? nodeId.value() : "-")
-              + " error="
-              + ex.getClass().getSimpleName());
-    }
-  }
-
-  private org.bukkit.Location resolveCenterCartLocation(
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
-    if (group == null) {
-      return null;
-    }
-    com.bergerkiller.bukkit.tc.controller.MinecartMember<?> cart = group.middle();
-    if (cart == null || cart.getRailTracker() == null) {
-      return null;
-    }
-    com.bergerkiller.bukkit.tc.controller.components.RailState state =
-        cart.getRailTracker().getState();
-    if (state == null) {
-      return null;
-    }
-    return state.positionLocation();
-  }
-
-  /**
-   * Waypoint 停站等待流程：只在 GROUP_ENTER 触发，并等待列车停稳后再居中/进入 dwell/进入 WaitState。
-   *
-   * <p>语义对齐 AutoStation 的停稳判定，避免 MEMBER_ENTER 过早触发导致居中不稳定。
-   */
-  private void scheduleCenterWhenStopped(
-      SignActionEvent event, NodeId nodeId, String trainName, int dwellSeconds, int stableTicks) {
+  private void centerTrainAtWaypointImmediate(
+      SignActionEvent event, NodeId nodeId, String trainName, int dwellSeconds) {
     if (event == null || nodeId == null || trainName == null || trainName.isBlank()) {
       return;
     }
@@ -1751,136 +1843,96 @@ public final class RuntimeDispatchService {
     if (!group.isValid()) {
       return;
     }
-    int stable = Math.max(1, stableTicks);
+
+    try {
+      // 与 AutoStation 对齐：立即 launchReset + centerTrain
+      com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
+      group.getActions().launchReset();
+      station.centerTrain();
+
+      debugLogger.accept(
+          "Waypoint 立即居中: train="
+              + trainName
+              + " node="
+              + nodeId.value()
+              + " dwell="
+              + dwellSeconds
+              + "s");
+
+      // 调度 dwell 和 WaitState
+      if (dwellSeconds > 0 && dwellRegistry != null) {
+        scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds);
+      } else {
+        // 无 dwell 时直接添加 WaitState（等待信号释放）
+        group.getActions().addActionWaitState();
+      }
+    } catch (Throwable ex) {
+      debugLogger.accept(
+          "Waypoint 立即居中失败: train="
+              + trainName
+              + " node="
+              + nodeId.value()
+              + " error="
+              + ex.getClass().getSimpleName());
+    }
+  }
+
+  /**
+   * Waypoint 居中后调度 dwell：等待列车停稳后启动 dwell 计时。
+   *
+   * <p>与 AutoStation 类似，在列车停稳后（centerTrain 动作完成后）启动 dwell，并添加 WaitState 等待发车信号。
+   */
+  private void scheduleWaypointDwellAfterCenter(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
+      String trainName,
+      int dwellSeconds) {
     JavaPlugin plugin = resolveSchedulerPlugin();
     if (plugin == null || !plugin.isEnabled()) {
-      handleWaypointStop(event, nodeId, trainName, dwellSeconds, true, null);
+      // 兜底：直接启动 dwell
+      if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
+        dwellRegistry.start(trainName, dwellSeconds);
+      }
+      group.getActions().addActionWaitState();
       return;
     }
-    String key = trainName.toLowerCase(java.util.Locale.ROOT);
-    String sessionId = Long.toString(waypointStopCounter.incrementAndGet());
-    WaypointStopState state = new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds);
-    if (waypointStopStates.putIfAbsent(key, state) != null) {
-      return;
-    }
+
+    // 等待居中动作完成后启动 dwell
     new org.bukkit.scheduler.BukkitRunnable() {
       private int waitedTicks = 0;
       private int stoppedTicks = 0;
+      private static final int STABLE_TICKS = 2;
+      private static final int MAX_WAIT_TICKS = 100; // 5 秒超时
 
       @Override
       public void run() {
         if (!group.isValid()) {
-          clearWaypointStopState(key, sessionId);
           cancel();
           return;
         }
-        WaypointStopState current = waypointStopStates.get(key);
-        if (current == null || !sessionId.equals(current.sessionId())) {
-          cancel();
-          return;
-        }
-        double minDistance = resolveMinDistanceToSign(event, group);
-        if (!isWithinWaypointCenterRange(minDistance)) {
-          stoppedTicks = 0;
-          waitedTicks++;
-          if (waitedTicks >= WAYPOINT_STOP_WAIT_TIMEOUT_TICKS) {
-            cancel();
-            handleWaypointStop(event, nodeId, trainName, dwellSeconds, true, current);
-            clearWaypointStopState(key, sessionId);
-          }
-          return;
-        }
+        waitedTicks++;
         if (!group.isMoving()) {
           stoppedTicks++;
-          if (stoppedTicks >= stable) {
+          if (stoppedTicks >= STABLE_TICKS) {
             cancel();
-            handleWaypointStop(event, nodeId, trainName, dwellSeconds, false, current);
-            clearWaypointStopState(key, sessionId);
+            if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
+              dwellRegistry.start(trainName, dwellSeconds);
+            }
+            group.getActions().addActionWaitState();
             return;
           }
         } else {
           stoppedTicks = 0;
         }
-        waitedTicks++;
-        if (waitedTicks >= WAYPOINT_STOP_WAIT_TIMEOUT_TICKS) {
+        if (waitedTicks >= MAX_WAIT_TICKS) {
           cancel();
-          handleWaypointStop(event, nodeId, trainName, dwellSeconds, true, current);
-          clearWaypointStopState(key, sessionId);
+          // 超时兜底
+          if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
+            dwellRegistry.start(trainName, dwellSeconds);
+          }
+          group.getActions().addActionWaitState();
         }
       }
     }.runTaskTimer(plugin, 1L, 1L);
-  }
-
-  /**
-   * Waypoint 停站完成处理：执行居中、启动 dwell，并用 WaitState 真正 hold 住列车。
-   *
-   * @param timedOut 是否由超时兜底触发
-   */
-  private void handleWaypointStop(
-      SignActionEvent event,
-      NodeId nodeId,
-      String trainName,
-      int dwellSeconds,
-      boolean timedOut,
-      WaypointStopState expectedState) {
-    if (event == null || nodeId == null || trainName == null || trainName.isBlank()) {
-      return;
-    }
-    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
-    if (group == null || !group.isValid()) {
-      return;
-    }
-    if (expectedState != null && !matchesWaypointStopState(trainName, nodeId, expectedState)) {
-      return;
-    }
-    double minDistance = resolveMinDistanceToSign(event, group);
-    if (!isWithinWaypointCenterRange(minDistance)) {
-      debugLogger.accept(
-          "Waypoint 停站跳过(离牌子太远): train="
-              + trainName
-              + " node="
-              + nodeId.value()
-              + " min="
-              + formatDistance(minDistance));
-      return;
-    }
-    centerTrainAtWaypoint(event, trainName, nodeId);
-    if (dwellSeconds > 0 && !group.isMoving() && dwellRegistry != null) {
-      if (dwellRegistry.remainingSeconds(trainName).isEmpty()) {
-        dwellRegistry.start(trainName, dwellSeconds);
-      }
-    }
-    group.getActions().addActionWaitState();
-    if (timedOut) {
-      debugLogger.accept("Waypoint 停站超时: train=" + trainName + " node=" + nodeId.value());
-    }
-  }
-
-  private void clearWaypointStopState(String key, String sessionId) {
-    if (key == null || sessionId == null) {
-      return;
-    }
-    WaypointStopState state = waypointStopStates.get(key);
-    if (state == null || !sessionId.equals(state.sessionId())) {
-      return;
-    }
-    waypointStopStates.remove(key, state);
-  }
-
-  private boolean matchesWaypointStopState(
-      String trainName, NodeId nodeId, WaypointStopState expectedState) {
-    if (trainName == null || trainName.isBlank() || nodeId == null || expectedState == null) {
-      return false;
-    }
-    String key = trainName.toLowerCase(java.util.Locale.ROOT);
-    WaypointStopState current = waypointStopStates.get(key);
-    if (current == null) {
-      return false;
-    }
-    if (!current.sessionId().equals(expectedState.sessionId())) {
-      return false;
-    }
-    return nodeId.equals(current.nodeId());
   }
 
   private Optional<WaypointStopState> resolveWaypointStopState(String trainName, NodeId nodeId) {
@@ -1899,117 +1951,12 @@ public final class RuntimeDispatchService {
     return Optional.of(current);
   }
 
-  /**
-   * Waypoint 居中后的延迟诊断：用于确认真正居中结果是否被后续动作冲掉。
-   *
-   * <p>仅在 GROUP_ENTER 触发的停站场景下启用。
-   */
-  private void scheduleWaypointCenterDiagnostics(
-      SignActionEvent event, String trainName, NodeId nodeId, int delayTicks) {
-    if (event == null || trainName == null || trainName.isBlank() || delayTicks <= 0) {
-      return;
-    }
-    if (event.getAction() != SignActionType.GROUP_ENTER) {
-      return;
-    }
-    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
-    if (group == null) {
-      return;
-    }
-    JavaPlugin plugin = resolveSchedulerPlugin();
-    if (plugin == null || !plugin.isEnabled()) {
-      return;
-    }
-    new org.bukkit.scheduler.BukkitRunnable() {
-      @Override
-      public void run() {
-        if (!group.isValid()) {
-          return;
-        }
-        double centerDistance = resolveMinDistanceToSign(event, group);
-        String centerText = formatLocation(event.getCenterLocation());
-        String cartText = formatLocation(resolveCenterCartLocation(group));
-        debugLogger.accept(
-            "Waypoint 居中后: train="
-                + trainName
-                + " node="
-                + (nodeId != null ? nodeId.value() : "-")
-                + " dist="
-                + formatDistance(centerDistance)
-                + " moving="
-                + (group.isMoving() ? "Y" : "N")
-                + " center="
-                + centerText
-                + " cart="
-                + cartText
-                + " delay="
-                + delayTicks);
-      }
-    }.runTaskLater(plugin, delayTicks);
-  }
-
   private JavaPlugin resolveSchedulerPlugin() {
     try {
       return JavaPlugin.getProvidingPlugin(RuntimeDispatchService.class);
     } catch (Throwable ignored) {
       return null;
     }
-  }
-
-  private double resolveMinDistanceToSign(
-      SignActionEvent event, com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
-    if (event == null || group == null) {
-      return Double.NaN;
-    }
-    org.bukkit.Location center = event.getCenterLocation();
-    if (center == null || center.getWorld() == null) {
-      return Double.NaN;
-    }
-    double head = resolveMemberDistance(center, group.head());
-    double middle = resolveMemberDistance(center, group.middle());
-    double tail = resolveMemberDistance(center, group.tail());
-    double min = Math.min(head, Math.min(middle, tail));
-    return Double.isFinite(min) ? min : Double.NaN;
-  }
-
-  private double resolveMemberDistance(
-      org.bukkit.Location center, com.bergerkiller.bukkit.tc.controller.MinecartMember<?> member) {
-    if (center == null || member == null) {
-      return Double.POSITIVE_INFINITY;
-    }
-    if (member.getRailTracker() == null || member.getRailTracker().getState() == null) {
-      return Double.POSITIVE_INFINITY;
-    }
-    org.bukkit.Location location = member.getRailTracker().getState().positionLocation();
-    if (location == null || location.getWorld() == null) {
-      return Double.POSITIVE_INFINITY;
-    }
-    if (!location.getWorld().equals(center.getWorld())) {
-      return Double.POSITIVE_INFINITY;
-    }
-    return location.distance(center);
-  }
-
-  private boolean isWithinWaypointCenterRange(double distance) {
-    return Double.isFinite(distance) && distance <= WAYPOINT_CENTER_MAX_DISTANCE_BLOCKS;
-  }
-
-  private static String formatDistance(double value) {
-    return Double.isFinite(value) ? String.format(java.util.Locale.ROOT, "%.3f", value) : "-";
-  }
-
-  private String formatLocation(org.bukkit.Location location) {
-    if (location == null || location.getWorld() == null) {
-      return "-";
-    }
-    return location.getWorld().getName()
-        + "("
-        + location.getBlockX()
-        + ","
-        + location.getBlockY()
-        + ","
-        + location.getBlockZ()
-        + ")";
   }
 
   /**
@@ -2296,6 +2243,56 @@ public final class RuntimeDispatchService {
     return stop.dwellSeconds().orElse(DEFAULT_WAYPOINT_DWELL_SECONDS);
   }
 
+  /**
+   * 处理 CHANGE 换线指令：更新列车所属的 operator/line 标识。
+   *
+   * <p>语法：{@code CHANGE:<OperatorCode>:<LineCode>}，例如 {@code CHANGE:SURN:LT}。
+   *
+   * <p>行为：
+   *
+   * <ul>
+   *   <li>仅更新列车 tags（OPERATOR_CODE/LINE_CODE），不改变当前 Route 或 routeIndex
+   *   <li>列车继续沿当前 route 运行，但逻辑上归属于新的 operator/line
+   *   <li>典型场景：直通车在枢纽站由 A 线移交给 B 线运营
+   * </ul>
+   *
+   * @param trainName 列车名
+   * @param properties 列车属性
+   * @param stop 当前 RouteStop
+   * @return 是否成功执行换线标识更新
+   */
+  private boolean handleChangeAction(String trainName, TrainProperties properties, RouteStop stop) {
+    if (stop == null || trainName == null || properties == null) {
+      return false;
+    }
+    Optional<String> remainderOpt = findDirectiveTarget(stop, "CHANGE");
+    if (remainderOpt.isEmpty()) {
+      return false;
+    }
+    String remainder = remainderOpt.get();
+    // 解析 CHANGE:OperatorCode:LineCode
+    String[] parts = remainder.split(":", -1);
+    if (parts.length < 2) {
+      debugLogger.accept("CHANGE 解析失败: 格式错误 train=" + trainName + " raw=" + remainder);
+      return false;
+    }
+    String operatorCode = parts[0].trim();
+    String lineCode = parts[1].trim();
+
+    if (operatorCode.isBlank() || lineCode.isBlank()) {
+      debugLogger.accept("CHANGE 解析失败: operator/line 为空 train=" + trainName + " raw=" + remainder);
+      return false;
+    }
+
+    // 仅更新 operator/line tags，不改变 route
+    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_OPERATOR_CODE, operatorCode);
+    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_LINE_CODE, lineCode);
+
+    debugLogger.accept(
+        "CHANGE 移交成功: train=" + trainName + " newOp=" + operatorCode + " newLine=" + lineCode);
+    return true;
+  }
+
   private Optional<String> findDirectiveTarget(RouteStop stop, String prefix) {
     if (stop == null || prefix == null || prefix.isBlank() || stop.notes().isEmpty()) {
       return Optional.empty();
@@ -2322,6 +2319,9 @@ public final class RuntimeDispatchService {
         continue;
       }
       String rest = normalizedAction.substring(actualPrefix.length()).trim();
+      if (rest.startsWith(":")) {
+        rest = rest.substring(1).trim();
+      }
       if (rest.isBlank()) {
         continue;
       }
@@ -2370,6 +2370,376 @@ public final class RuntimeDispatchService {
       return rest.isEmpty() ? prefix : prefix + " " + rest;
     }
     return prefix + ":" + rest;
+  }
+
+  /**
+   * 解析 DYNAMIC 动态站台指令。
+   *
+   * <p>支持格式（大小写不敏感）：
+   *
+   * <ul>
+   *   <li>{@code DYNAMIC:OP:STATION:[1:3]}
+   *   <li>{@code OP:STATION:[1:3]}（已去掉 DYNAMIC: 前缀的 remainder）
+   *   <li>{@code DYNAMIC:OP:STATION} / {@code OP:STATION}（默认 track=1）
+   * </ul>
+   */
+  private static Optional<DynamicStopSpec> parseDynamicStopSpec(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return Optional.empty();
+    }
+    String trimmed = raw.trim();
+    if (trimmed.regionMatches(true, 0, "DYNAMIC", 0, "DYNAMIC".length())) {
+      String rest = trimmed.substring("DYNAMIC".length()).trim();
+      if (rest.startsWith(":")) {
+        rest = rest.substring(1).trim();
+      }
+      trimmed = rest;
+    }
+    if (trimmed.isBlank()) {
+      return Optional.empty();
+    }
+
+    int first = trimmed.indexOf(':');
+    if (first <= 0) {
+      return Optional.empty();
+    }
+    int second = trimmed.indexOf(':', first + 1);
+    String operatorCode;
+    String stationCode;
+    String rangeRaw;
+    if (second < 0) {
+      operatorCode = trimmed.substring(0, first).trim();
+      stationCode = trimmed.substring(first + 1).trim();
+      rangeRaw = "";
+    } else {
+      operatorCode = trimmed.substring(0, first).trim();
+      stationCode = trimmed.substring(first + 1, second).trim();
+      rangeRaw = trimmed.substring(second + 1).trim();
+    }
+    if (operatorCode.isBlank() || stationCode.isBlank()) {
+      return Optional.empty();
+    }
+    int fromTrack = 1;
+    int toTrack = 1;
+    if (!rangeRaw.isBlank()) {
+      String normalizedRange = rangeRaw.trim();
+      if (normalizedRange.startsWith("[") && normalizedRange.endsWith("]")) {
+        normalizedRange = normalizedRange.substring(1, normalizedRange.length() - 1).trim();
+      }
+      if (!normalizedRange.isBlank()) {
+        int colon = normalizedRange.indexOf(':');
+        if (colon < 0) {
+          OptionalInt single = parsePositiveInt(normalizedRange);
+          if (single.isEmpty()) {
+            return Optional.empty();
+          }
+          fromTrack = single.getAsInt();
+          toTrack = single.getAsInt();
+        } else {
+          OptionalInt from = parsePositiveInt(normalizedRange.substring(0, colon));
+          OptionalInt to = parsePositiveInt(normalizedRange.substring(colon + 1));
+          if (from.isEmpty() || to.isEmpty()) {
+            return Optional.empty();
+          }
+          fromTrack = from.getAsInt();
+          toTrack = to.getAsInt();
+        }
+      }
+    }
+    if (fromTrack <= 0 || toTrack <= 0) {
+      return Optional.empty();
+    }
+    int start = Math.min(fromTrack, toTrack);
+    int end = Math.max(fromTrack, toTrack);
+    return Optional.of(new DynamicStopSpec(operatorCode, stationCode, start, end));
+  }
+
+  private static OptionalInt parsePositiveInt(String raw) {
+    if (raw == null) {
+      return OptionalInt.empty();
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty()) {
+      return OptionalInt.empty();
+    }
+    try {
+      int value = Integer.parseInt(trimmed);
+      return value > 0 ? OptionalInt.of(value) : OptionalInt.empty();
+    } catch (NumberFormatException ex) {
+      return OptionalInt.empty();
+    }
+  }
+
+  /** DYNAMIC 动态站台指令规范化结果。 */
+  private record DynamicStopSpec(
+      String operatorCode, String stationCode, int fromTrack, int toTrack) {
+    private DynamicStopSpec {
+      Objects.requireNonNull(operatorCode, "operatorCode");
+      Objects.requireNonNull(stationCode, "stationCode");
+    }
+  }
+
+  private Optional<NodeId> resolveDynamicStationTargetIfNeeded(
+      String trainName, RouteDefinition route, int targetIndex, NodeId fromNode, RailGraph graph) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || fromNode == null
+        || graph == null
+        || targetIndex < 0) {
+      return Optional.empty();
+    }
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), targetIndex);
+    if (stopOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<String> remainder = findDirectiveTarget(stopOpt.get(), "DYNAMIC");
+    if (remainder.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<DynamicStopSpec> specOpt = parseDynamicStopSpec(remainder.get());
+    if (specOpt.isEmpty()) {
+      debugLogger.accept(
+          "DYNAMIC 解析失败: train=" + trainName + " idx=" + targetIndex + " raw=" + remainder.get());
+      return Optional.empty();
+    }
+    DynamicStopSpec spec = specOpt.get();
+    return selectDynamicStationTarget(trainName, fromNode, graph, spec);
+  }
+
+  private Optional<NodeId> selectDynamicStationTarget(
+      String trainName, NodeId fromNode, RailGraph graph, DynamicStopSpec spec) {
+    if (spec == null || fromNode == null || graph == null) {
+      return Optional.empty();
+    }
+    String operator = spec.operatorCode().trim();
+    String station = spec.stationCode().trim();
+    if (operator.isEmpty() || station.isEmpty()) {
+      return Optional.empty();
+    }
+
+    // Pass 1: free first, then reachable.
+    for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
+      NodeId candidate = NodeId.of(operator + ":S:" + station + ":" + track);
+      if (!isDynamicCandidateKnown(candidate, graph)) {
+        continue;
+      }
+      if (!isNodeFree(trainName, candidate)) {
+        continue;
+      }
+      if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
+        continue;
+      }
+      return Optional.of(candidate);
+    }
+
+    // Pass 2 (fallback): if no free platform, pick any reachable platform (still deterministic).
+    for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
+      NodeId candidate = NodeId.of(operator + ":S:" + station + ":" + track);
+      if (!isDynamicCandidateKnown(candidate, graph)) {
+        continue;
+      }
+      if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
+        continue;
+      }
+      debugLogger.accept(
+          "DYNAMIC 回退: 无空闲站台，选择可达站台 train="
+              + trainName
+              + " from="
+              + fromNode.value()
+              + " target="
+              + candidate.value());
+      return Optional.of(candidate);
+    }
+    debugLogger.accept(
+        "DYNAMIC 失败: 未找到可达站台 train="
+            + trainName
+            + " from="
+            + fromNode.value()
+            + " operator="
+            + operator
+            + " station="
+            + station
+            + " range="
+            + spec.fromTrack()
+            + ":"
+            + spec.toTrack());
+    return Optional.empty();
+  }
+
+  /**
+   * 推进点专用：为“下一站 DYNAMIC stop”选择一个可进入的站台，并返回对应的 OccupancyRequestContext。
+   *
+   * <p>选择规则（满足用户语义）：先挑空闲站台（NODE 资源未被其他列车占用），再检查可达性与占用许可。
+   *
+   * <p>实现上通过对每个候选站台构建一次 lookahead 请求并调用 canEnter() 验证，避免“站台空闲但冲突组/走廊方向阻塞”的误选。
+   */
+  private Optional<DynamicSelection> selectDynamicStationTargetForProgress(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      int targetIndex,
+      NodeId fromNode,
+      RailGraph graph,
+      OccupancyRequestBuilder builder,
+      Instant now,
+      int priority) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || fromNode == null
+        || graph == null
+        || builder == null
+        || occupancyManager == null) {
+      return Optional.empty();
+    }
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), targetIndex);
+    if (stopOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<String> remainder = findDirectiveTarget(stopOpt.get(), "DYNAMIC");
+    if (remainder.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<DynamicStopSpec> specOpt = parseDynamicStopSpec(remainder.get());
+    if (specOpt.isEmpty()) {
+      debugLogger.accept(
+          "DYNAMIC 解析失败: train=" + trainName + " idx=" + targetIndex + " raw=" + remainder.get());
+      return Optional.empty();
+    }
+    DynamicStopSpec spec = specOpt.get();
+    List<NodeId> baseNodes = resolveEffectiveWaypoints(trainName, route);
+    if (targetIndex < 0 || targetIndex >= baseNodes.size()) {
+      return Optional.empty();
+    }
+
+    // Pass 1: free first.
+    Optional<DynamicSelection> freeSelection =
+        selectDynamicStationTargetForProgressPass(
+            trainName,
+            route,
+            currentIndex,
+            targetIndex,
+            fromNode,
+            graph,
+            builder,
+            now,
+            priority,
+            baseNodes,
+            spec,
+            true);
+    if (freeSelection.isPresent()) {
+      return freeSelection;
+    }
+
+    // Pass 2: fallback to any enterable platform (deterministic order).
+    return selectDynamicStationTargetForProgressPass(
+        trainName,
+        route,
+        currentIndex,
+        targetIndex,
+        fromNode,
+        graph,
+        builder,
+        now,
+        priority,
+        baseNodes,
+        spec,
+        false);
+  }
+
+  private Optional<DynamicSelection> selectDynamicStationTargetForProgressPass(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      int targetIndex,
+      NodeId fromNode,
+      RailGraph graph,
+      OccupancyRequestBuilder builder,
+      Instant now,
+      int priority,
+      List<NodeId> baseNodes,
+      DynamicStopSpec spec,
+      boolean requireFree) {
+    String operator = spec.operatorCode().trim();
+    String station = spec.stationCode().trim();
+    for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
+      NodeId candidate = NodeId.of(operator + ":S:" + station + ":" + track);
+      if (!isDynamicCandidateKnown(candidate, graph)) {
+        continue;
+      }
+      if (requireFree && !isNodeFree(trainName, candidate)) {
+        continue;
+      }
+      if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
+        continue;
+      }
+      List<NodeId> nodes = new java.util.ArrayList<>(baseNodes);
+      nodes.set(targetIndex, candidate);
+      Optional<OccupancyRequestContext> ctxOpt =
+          builder.buildContextFromNodes(
+              trainName, Optional.ofNullable(route.id()), nodes, currentIndex, now, priority);
+      if (ctxOpt.isEmpty()) {
+        continue;
+      }
+      OccupancyRequest request = ctxOpt.get().request();
+      OccupancyDecision decision = occupancyManager.canEnter(request);
+      if (!decision.allowed()) {
+        continue;
+      }
+      if (!requireFree) {
+        debugLogger.accept(
+            "DYNAMIC 回退: 无空闲站台，选择可进入站台 train="
+                + trainName
+                + " from="
+                + fromNode.value()
+                + " target="
+                + candidate.value());
+      }
+      return Optional.of(new DynamicSelection(candidate, ctxOpt.get(), decision));
+    }
+    return Optional.empty();
+  }
+
+  private record DynamicSelection(
+      NodeId targetNode, OccupancyRequestContext context, OccupancyDecision decision) {
+    private DynamicSelection {
+      Objects.requireNonNull(targetNode, "targetNode");
+      Objects.requireNonNull(context, "context");
+      Objects.requireNonNull(decision, "decision");
+    }
+  }
+
+  private boolean isDynamicCandidateKnown(NodeId candidate, RailGraph graph) {
+    if (candidate == null) {
+      return false;
+    }
+    // 站台节点必须：
+    // 1) 存在于注册表（能解析到 TrainCarts destination）；2) 存在于图快照（否则无法寻路/估距）。
+    if (signNodeRegistry.findByNodeId(candidate, null).isEmpty()) {
+      return false;
+    }
+    return graph.findNode(candidate).isPresent();
+  }
+
+  private boolean isNodeFree(String trainName, NodeId nodeId) {
+    if (nodeId == null || occupancyManager == null) {
+      return true;
+    }
+    OccupancyResource resource = OccupancyResource.forNode(nodeId);
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (!resource.equals(claim.resource())) {
+        continue;
+      }
+      if (claim.trainName() != null && claim.trainName().equalsIgnoreCase(trainName)) {
+        continue;
+      }
+      return false;
+    }
+    return true;
   }
 
   private record WaypointStopState(
@@ -2539,6 +2909,115 @@ public final class RuntimeDispatchService {
         .findByNodeId(nodeId, null)
         .map(info -> info.definition().trainCartsDestination().orElse(nodeId.value()))
         .orElse(nodeId.value());
+  }
+
+  private static String normalizeTrainKey(String trainName) {
+    if (trainName == null) {
+      return "";
+    }
+    return trainName.trim().toLowerCase(java.util.Locale.ROOT);
+  }
+
+  private void recordEffectiveNode(
+      String trainName, RouteDefinition route, int index, NodeId effectiveNode) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || effectiveNode == null
+        || index < 0
+        || index >= route.waypoints().size()) {
+      return;
+    }
+    NodeId declared = route.waypoints().get(index);
+    if (effectiveNode.equals(declared)) {
+      return;
+    }
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    effectiveNodeOverrides
+        .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
+        .put(index, effectiveNode);
+  }
+
+  private Optional<NodeId> readEffectiveNode(String trainName, int index) {
+    if (trainName == null || trainName.isBlank() || index < 0) {
+      return Optional.empty();
+    }
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return Optional.empty();
+    }
+    java.util.concurrent.ConcurrentMap<Integer, NodeId> overrides = effectiveNodeOverrides.get(key);
+    if (overrides == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(overrides.get(index));
+  }
+
+  private NodeId resolveEffectiveNode(String trainName, RouteDefinition route, int index) {
+    if (route == null) {
+      return null;
+    }
+    if (index < 0 || index >= route.waypoints().size()) {
+      return null;
+    }
+    return readEffectiveNode(trainName, index).orElse(route.waypoints().get(index));
+  }
+
+  private List<NodeId> resolveEffectiveWaypoints(String trainName, RouteDefinition route) {
+    if (route == null) {
+      return List.of();
+    }
+    List<NodeId> base = route.waypoints();
+    if (trainName == null || trainName.isBlank()) {
+      return base;
+    }
+    String key = normalizeTrainKey(trainName);
+    java.util.concurrent.ConcurrentMap<Integer, NodeId> overrides =
+        key.isEmpty() ? null : effectiveNodeOverrides.get(key);
+    if (overrides == null || overrides.isEmpty()) {
+      return base;
+    }
+    List<NodeId> copy = new java.util.ArrayList<>(base);
+    for (var entry : overrides.entrySet()) {
+      Integer idx = entry.getKey();
+      NodeId node = entry.getValue();
+      if (idx == null || node == null) {
+        continue;
+      }
+      if (idx < 0 || idx >= copy.size()) {
+        continue;
+      }
+      copy.set(idx, node);
+    }
+    return copy;
+  }
+
+  private void pruneEffectiveNodeOverrides(String trainName, int minIndexToKeep) {
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    java.util.concurrent.ConcurrentMap<Integer, NodeId> overrides = effectiveNodeOverrides.get(key);
+    if (overrides == null || overrides.isEmpty()) {
+      return;
+    }
+    for (Integer idx : new java.util.ArrayList<>(overrides.keySet())) {
+      if (idx == null) {
+        continue;
+      }
+      if (idx < minIndexToKeep) {
+        overrides.remove(idx);
+      }
+    }
+    if (overrides.isEmpty()) {
+      effectiveNodeOverrides.remove(key);
+    }
   }
 
   private int resolvePriority(TrainProperties properties, RouteDefinition route) {

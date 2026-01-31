@@ -639,19 +639,6 @@ command:
     define:
       success: "<prefix> <dark_aqua>停靠表已写入：</dark_aqua><white><code></white> <gray>(<count> stops)</gray>"
       empty: "<prefix> <red>书中没有可用定义</red> <gray>请至少写入一行站点 code 或 nodeId</gray>"
-      debug:
-        header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
-        page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
-        entry: "<white>#<seq></white> <dark_aqua><target></dark_aqua>"
-        hover: "<gray>序号:</gray> <white><seq></white>\n<gray>类型:</gray> <white><pass></white>\n<gray>基准停车(秒):</gray> <white><dwell></white>\n<gray>站点:</gray> <white><station></white>\n<gray>节点:</gray> <white><node></white>\n<gray>调试:</gray> <white><tp></white>"
-        nav:
-          prev: "<dark_aqua>[上一页]</dark_aqua>"
-          prev-disabled: "<gray>[上一页]</gray>"
-          next: "<dark_aqua>[下一页]</dark_aqua>"
-          next-disabled: "<gray>[下一页]</gray>"
-          hint: "<gray>(点击翻页)</gray>"
-    debug:
-      empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
       book:
         missing: "<prefix> <red>请手持书与笔或成书</red>"
         invalid: "<prefix> <red>物品不是书与笔/成书</red>"
@@ -668,6 +655,19 @@ command:
       node-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少节点</red>"
       edge-unreachable: "<prefix> <red>停靠点之间不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       path-cross-world: "<prefix> <red>停靠点跨世界/跨图，未处于同一调度图内</red>"
+      debug:
+        header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
+        page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+        entry: "<white>#<seq></white> <dark_aqua><target></dark_aqua>"
+        hover: "<gray>序号:</gray> <white><seq></white>\n<gray>类型:</gray> <white><pass></white>\n<gray>基准停车(秒):</gray> <white><dwell></white>\n<gray>站点:</gray> <white><station></white>\n<gray>节点:</gray> <white><node></white>\n<gray>调试:</gray> <white><tp></white>"
+        nav:
+          prev: "<dark_aqua>[上一页]</dark_aqua>"
+          prev-disabled: "<gray>[上一页]</gray>"
+          next: "<dark_aqua>[下一页]</dark_aqua>"
+          next-disabled: "<gray>[下一页]</gray>"
+          hint: "<gray>(点击翻页)</gray>"
+    debug:
+      empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
 
     validate:
       header: "<prefix> <dark_aqua>运行图校验</dark_aqua> <gray>(routes=<count>)</gray>"

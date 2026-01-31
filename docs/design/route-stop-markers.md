@@ -7,17 +7,33 @@
 ```
 ACTION:PAYLOAD[:MORE]
 ```
-例如 `CHANGE:SURN:LT`、`DYNAMIC:SURN:PTK:[1:3]`、`CRET SURN:D:DEPOT:1`。若参数较多，可继续拼接冒号片段，或用 `ACTION[参数]` 的数组式写法。运行时解析逻辑由 `RouteStopInterpreter` 统一处理。
+例如 `CHANGE:SURN:LT`、`DYNAMIC:SURN:PTK:[1:3]`、`CRET SURN:D:DEPOT:1`。若参数较多，可继续拼接冒号片段。运行时解析目前由 `RuntimeDispatchService` 直接处理（后续可再抽出专用解释器）。
 
 ### 1.1 换线标记（CHANGE）
 - 语法：`CHANGE:<OperatorCode>:<LineCode>`（例如 `CHANGE:SURN:LT`）。
-- 含义：列车抵达当前 stop 后，调度层将 `RouteProgress` 切换到目标运营商/线路下的默认 Route 或指定 Route，并重新计算后续停靠表。
-- 典型场景：直通车在枢纽站由 FTL 线切换到 SURN-LT 线继续行驶。
+- 含义：列车抵达当前 stop 后，调度层更新列车的所属 operator/line 标识（`FTA_OPERATOR_CODE`/`FTA_LINE_CODE` tags），但**不改变当前 Route 或 routeIndex**。列车继续沿当前 route 运行，仅逻辑归属变更。
+- 典型场景：直通车在枢纽站由 FTL 线移交给 SURN-LT 线运营（列车继续按原 route 行驶，但 HUD/PIDS 显示的线路信息变为新线路）。
+- 行为：
+  - 仅写入 `FTA_OPERATOR_CODE` 和 `FTA_LINE_CODE` tags
+  - 不修改 `FTA_ROUTE_ID`/`FTA_ROUTE_CODE`/routeIndex
+  - HUD placeholder（如 `{line}`/`{line_color}`/`{operator}`）会在下次 tick 时感知变化
 
 ### 1.2 动态站台标记（DYNAMIC）
-- 语法：`DYNAMIC:<OperatorCode>:<StationCode>` 或 `DYNAMIC:<OperatorCode>:<DepotCode>`，可附带区间，如 `DYNAMIC:SURN:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。
-- 行为：调度层根据实时占用情况在指定站台/车库集合中挑选一个空闲 nodeId，将其写入下一目的地，并把选择结果写回列车 MetaTag，供 PIDS/日志使用。
-- 扩展：若只写 `DYNAMIC` 而不带范围，默认使用该站所有站台；如需特殊策略，可在 `[]` 内写 JSON 片段，例如 `[prefer=2,3]`。
+- 语法：`DYNAMIC:<OperatorCode>:<StationCode>[:Range]`，例如 `DYNAMIC:SURN:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。
+  - 当前实现仅支持 Station 节点（候选 NodeId 固定为 `Operator:S:Station:Track`）。
+  - Range 省略时默认视为 `[1:1]`（即固定 track=1），避免“全站扫描”带来的不可控与卡顿风险；如需多站台必须显式给范围。
+- 行为（运行时选择顺序，满足“先空闲后可达”语义）：
+  - 先筛选“空闲站台”：对应 NODE 资源未被其他列车占用（占用系统快照）。
+  - 再检查可达性 + 占用许可：对每个候选站台构建一次 lookahead 请求并调用 `canEnter()` 验证（含走廊方向/冲突组），选出第一个可进入者。
+  - 若无任何“空闲且可进入”候选，会回退为“可进入的第一个站台”（并输出 debug 日志），用于避免全占用时完全无法选站台。
+  - 选定后会覆盖该 stop 的“有效 NodeId”，并写入 TrainCarts destination 触发自动寻路。
+  - TODO：将选定站台写回 MetaTag/事件（供 HUD/PIDS 精确显示）。
+
+在 `route define` 书本语法中，DYNAMIC 可以：
+
+- 作为独立 action 行附着到上一条 stop（推荐，语义最清晰）
+- 或写在 stop 行末尾（便于编辑），例如：`STOP PTK DYNAMIC:SURN:PTK:[1:3]`
+- 或作为 stop 目标的简写（语义：本站=PTK，站台动态选择），例如：`STOP DYNAMIC:SURN:PTK:[1:3]`
 
 ### 1.3 生成标记（CRET）
 - 语法：`CRET <NodeId>` 或 `CRET DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`。

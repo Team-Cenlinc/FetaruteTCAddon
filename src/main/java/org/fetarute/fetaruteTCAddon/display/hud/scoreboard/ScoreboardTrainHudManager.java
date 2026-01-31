@@ -499,6 +499,7 @@ public final class ScoreboardTrainHudManager implements Listener {
         itemPlaceholders.put("station", stop.display().label());
         itemPlaceholders.put("station_code", stop.display().code());
         itemPlaceholders.put("station_lang2", stop.display().lang2());
+        itemPlaceholders.put("station_track", stop.track());
         itemPlaceholders.put("eta", formatEta(stop.eta()));
         itemPlaceholders.put("eta_minutes", formatEtaMinutes(stop.eta()));
         contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, stop.eta());
@@ -508,6 +509,7 @@ public final class ScoreboardTrainHudManager implements Listener {
         itemPlaceholders.put("station", "-");
         itemPlaceholders.put("station_code", "-");
         itemPlaceholders.put("station_lang2", "-");
+        itemPlaceholders.put("station_track", "-");
         itemPlaceholders.put("eta", "");
         itemPlaceholders.put("eta_minutes", "-");
         contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, null);

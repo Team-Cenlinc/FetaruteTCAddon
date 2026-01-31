@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -1578,7 +1579,79 @@ public final class FtaRouteCommand {
                   Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
           return Optional.empty();
         }
-        String normalizedDirective = normalizeActionLine(trimmed);
+        // CRET/DSTY 支持两种格式：
+        // 1. CRET <nodeId> [DYNAMIC:...]  -> 显式 nodeId + 可选 action
+        // 2. CRET DYNAMIC:OP:STATION:[range] -> 由 DYNAMIC 推导 nodeId
+        String argument = directive.argument();
+        String[] argTokens = argument.split("\\s+", 2);
+        String firstToken = argTokens[0].trim();
+        List<String> trailingActions = new ArrayList<>();
+
+        // 检查第一个 token 是否是 DYNAMIC action（无显式 nodeId 的简写形式）
+        boolean firstTokenIsDynamic =
+            isActionLine(firstToken)
+                && firstToken.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:");
+        String nodeIdPart;
+        if (firstTokenIsDynamic) {
+          // CRET DYNAMIC:OP:STATION:[range] -> 从 DYNAMIC 推导 nodeId
+          Optional<DynamicNodeSpec> specOpt = parseDynamicNodeSpec(normalizeActionLine(firstToken));
+          if (specOpt.isEmpty()) {
+            sender.sendMessage(
+                locale.component(
+                    "command.route.define.invalid-line",
+                    Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
+            return Optional.empty();
+          }
+          DynamicNodeSpec spec = specOpt.get();
+          nodeIdPart = spec.resolveDefaultNodeId();
+          trailingActions.add(normalizeActionLine(firstToken));
+          // 继续解析尾部（如果有）
+          if (argTokens.length > 1) {
+            String trailing = argTokens[1].trim();
+            for (String token : trailing.split("\\s+")) {
+              String t = token == null ? "" : token.trim();
+              if (t.isEmpty()) {
+                continue;
+              }
+              if (isActionLine(t)) {
+                trailingActions.add(normalizeActionLine(t));
+              } else {
+                sender.sendMessage(
+                    locale.component(
+                        "command.route.define.invalid-line",
+                        Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
+                return Optional.empty();
+              }
+            }
+          }
+        } else {
+          // CRET <nodeId> [DYNAMIC:...] -> 显式 nodeId
+          nodeIdPart = firstToken;
+          if (argTokens.length > 1) {
+            String trailing = argTokens[1].trim();
+            for (String token : trailing.split("\\s+")) {
+              String t = token == null ? "" : token.trim();
+              if (t.isEmpty()) {
+                continue;
+              }
+              if (isActionLine(t)) {
+                trailingActions.add(normalizeActionLine(t));
+              } else {
+                sender.sendMessage(
+                    locale.component(
+                        "command.route.define.invalid-line",
+                        Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
+                return Optional.empty();
+              }
+            }
+          }
+        }
+        // 重新拼接 directive（只包含 prefix + nodeId，不含尾部 action）
+        String baseDirective = directive.prefix() + " " + nodeIdPart;
+        String mergedNotes =
+            trailingActions.isEmpty()
+                ? baseDirective
+                : baseDirective + "\n" + String.join("\n", trailingActions);
         if ("CRET".equals(directive.prefix())) {
           if (!stops.isEmpty()) {
             sender.sendMessage(
@@ -1592,10 +1665,10 @@ public final class FtaRouteCommand {
                   routeId,
                   0,
                   Optional.empty(),
-                  Optional.of(directive.argument()),
+                  Optional.of(nodeIdPart),
                   Optional.empty(),
                   RouteStopPassType.PASS,
-                  Optional.of(normalizedDirective));
+                  Optional.of(mergedNotes));
           stops.add(stop);
           continue;
         }
@@ -1605,10 +1678,10 @@ public final class FtaRouteCommand {
                   routeId,
                   stops.size(),
                   Optional.empty(),
-                  Optional.of(directive.argument()),
+                  Optional.of(nodeIdPart),
                   Optional.empty(),
                   RouteStopPassType.PASS,
-                  Optional.of(normalizedDirective));
+                  Optional.of(mergedNotes));
           stops.add(stop);
           dstySeen = true;
           continue;
@@ -1689,35 +1762,85 @@ public final class FtaRouteCommand {
         return Optional.empty();
       }
 
+      // 兼容“stop 行尾部附带动作标记”的写法（例如：PTK DYNAMIC:SURN:PTK:[1:3]）。
+      // 动作标记会被写入该 stop 的 notes，与“独立 action 行”保持一致。
+      List<String> inlineActions = new ArrayList<>();
+      String targetToken = content;
+      String[] tokens = content.split("\\s+");
+      if (tokens.length >= 2) {
+        targetToken = tokens[0].trim();
+        for (int i = 1; i < tokens.length; i++) {
+          String token = tokens[i] == null ? "" : tokens[i].trim();
+          if (token.isEmpty()) {
+            continue;
+          }
+          if (isActionLine(token)) {
+            inlineActions.add(normalizeActionLine(token));
+            continue;
+          }
+          sender.sendMessage(
+              locale.component(
+                  "command.route.define.invalid-line",
+                  Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
+          return Optional.empty();
+        }
+      }
+
+      // 允许 STOP DYNAMIC:OP:STATION:[1:3] 作为"动态站台 stop"的简写形式：
+      // - DYNAMIC 行本身携带站点/车库信息（code + 可选范围）
+      // - 停靠表仍需落库为"可解析的图节点"，因此这里会写入一个"占位 nodeId"（默认取范围第一个 track）
+      // - DYNAMIC 会写入 notes，运行时可据此选择真实站台并下发 destination
+      // - 不带范围时表示"所有站台/轨道"，运行时从全部可用中选择
+      boolean dynamicStopShorthand = false;
+      Optional<DynamicNodeSpec> dynamicNodeSpecOpt = Optional.empty();
+      if (isActionLine(targetToken)) {
+        Optional<DirectiveLine> actionOpt = parseActionLine(targetToken);
+        if (actionOpt.isPresent() && "DYNAMIC".equalsIgnoreCase(actionOpt.get().prefix())) {
+          dynamicNodeSpecOpt = parseDynamicNodeSpec(normalizeActionLine(targetToken));
+          dynamicStopShorthand = dynamicNodeSpecOpt.isPresent();
+        }
+        if (!dynamicStopShorthand) {
+          sender.sendMessage(
+              locale.component(
+                  "command.route.define.action-first",
+                  Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
+          return Optional.empty();
+        }
+      }
+
       Optional<UUID> stationId = Optional.empty();
       Optional<String> waypointNodeId = Optional.empty();
-      if (content.contains(":")) {
-        // 形如 SURN:S:PTK:1 或 SURN:A:B:1:00 等：当作“图节点引用”原样写入。
-        waypointNodeId = Optional.of(content);
+      if (dynamicStopShorthand) {
+        DynamicNodeSpec spec = dynamicNodeSpecOpt.orElseThrow();
+        waypointNodeId = Optional.of(spec.resolveDefaultNodeId());
+      } else if (targetToken.contains(":")) {
+        // 形如 SURN:S:PTK:1 或 SURN:A:B:1:00 等：当作"图节点引用"原样写入。
+        waypointNodeId = Optional.of(targetToken);
       } else {
         // 默认按站点 code 解析：用 UUID 外键保证引用一致性（站点重命名不会破坏停靠表）。
         Optional<Station> stationOpt =
-            provider.stations().findByOperatorAndCode(operatorId, content);
+            provider.stations().findByOperatorAndCode(operatorId, targetToken);
         if (stationOpt.isEmpty()) {
           sender.sendMessage(
               locale.component(
                   "command.route.define.station-not-found",
-                  Map.of("line", String.valueOf(line.lineNo()), "station", content)));
+                  Map.of("line", String.valueOf(line.lineNo()), "station", targetToken)));
           return Optional.empty();
         }
         stationId = Optional.of(stationOpt.get().id());
       }
 
+      List<String> noteLines = new ArrayList<>();
+      if (dynamicStopShorthand) {
+        noteLines.add(normalizeActionLine(targetToken));
+      }
+      noteLines.addAll(inlineActions);
+      Optional<String> notes =
+          noteLines.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", noteLines));
       int sequence = stops.size();
       RouteStop stop =
           new RouteStop(
-              routeId,
-              sequence,
-              stationId,
-              waypointNodeId,
-              dwellSeconds,
-              passType,
-              Optional.empty());
+              routeId, sequence, stationId, waypointNodeId, dwellSeconds, passType, notes);
       stops.add(stop);
     }
     return Optional.of(stops);
@@ -1806,6 +1929,48 @@ public final class FtaRouteCommand {
     return trimmed;
   }
 
+  private static Optional<DirectiveLine> parseActionLine(String line) {
+    if (line == null) {
+      return Optional.empty();
+    }
+    String trimmed = line.trim();
+    if (trimmed.isEmpty()) {
+      return Optional.empty();
+    }
+    for (String prefix : ACTION_PREFIXES) {
+      if (!startsWithWord(trimmed, prefix)) {
+        continue;
+      }
+      String rest = trimmed.substring(prefix.length()).trim();
+      if (rest.startsWith(":")) {
+        rest = rest.substring(1).trim();
+      }
+      return Optional.of(new DirectiveLine(prefix, rest));
+    }
+    return Optional.empty();
+  }
+
+  private static OptionalInt parseRangeStart(String raw) {
+    if (raw == null) {
+      return OptionalInt.empty();
+    }
+    String trimmed = raw.trim();
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+      return OptionalInt.empty();
+    }
+    String inner = trimmed.substring(1, trimmed.length() - 1).trim();
+    int idx = inner.indexOf(':');
+    if (idx <= 0) {
+      return OptionalInt.empty();
+    }
+    String left = inner.substring(0, idx).trim();
+    try {
+      return OptionalInt.of(Integer.parseInt(left));
+    } catch (NumberFormatException ex) {
+      return OptionalInt.empty();
+    }
+  }
+
   private static Optional<DirectiveLine> parseDirectiveLine(String line) {
     if (line == null) {
       return Optional.empty();
@@ -1825,6 +1990,101 @@ public final class FtaRouteCommand {
       return Optional.of(new DirectiveLine(prefix, rest));
     }
     return Optional.empty();
+  }
+
+  /**
+   * 通用 DYNAMIC 节点规格：支持站点（S）和车库（D），带或不带范围。
+   *
+   * <p>格式：
+   *
+   * <ul>
+   *   <li>DYNAMIC:OP:STATION → 站点所有站台（nodeType=S）
+   *   <li>DYNAMIC:OP:S:STATION → 站点所有站台（显式 S）
+   *   <li>DYNAMIC:OP:S:STATION:[1:3] → 站点 1~3 站台
+   *   <li>DYNAMIC:OP:D:DEPOT → 车库所有轨道（nodeType=D）
+   *   <li>DYNAMIC:OP:D:DEPOT:[1:2] → 车库 1~2 轨道
+   * </ul>
+   */
+  private record DynamicNodeSpec(
+      String operatorCode, String nodeType, String nodeName, int defaultTrack) {
+    /** 生成默认占位 NodeId（用于图可达性校验）。 */
+    String resolveDefaultNodeId() {
+      return operatorCode + ":" + nodeType + ":" + nodeName + ":" + defaultTrack;
+    }
+  }
+
+  /**
+   * 解析通用 DYNAMIC 节点规格。
+   *
+   * <p>支持格式：
+   *
+   * <ul>
+   *   <li>DYNAMIC:OP:NAME → 默认 nodeType=S
+   *   <li>DYNAMIC:OP:NAME:[range] → 默认 nodeType=S
+   *   <li>DYNAMIC:OP:S:NAME 或 DYNAMIC:OP:D:NAME → 显式 nodeType
+   *   <li>DYNAMIC:OP:S:NAME:[range] 或 DYNAMIC:OP:D:NAME:[range]
+   * </ul>
+   */
+  private static Optional<DynamicNodeSpec> parseDynamicNodeSpec(String normalizedAction) {
+    if (normalizedAction == null) {
+      return Optional.empty();
+    }
+    String trimmed = normalizedAction.trim();
+    if (!trimmed.regionMatches(true, 0, "DYNAMIC:", 0, "DYNAMIC:".length())) {
+      return Optional.empty();
+    }
+    String rest = trimmed.substring("DYNAMIC:".length()).trim();
+
+    // 先提取 [range] 部分（如果存在）
+    String rangePayload = "";
+    int bracketIdx = rest.indexOf('[');
+    if (bracketIdx > 0) {
+      rangePayload = rest.substring(bracketIdx).trim();
+      rest = rest.substring(0, bracketIdx).trim();
+      // 去掉可能的尾部 :
+      if (rest.endsWith(":")) {
+        rest = rest.substring(0, rest.length() - 1).trim();
+      }
+    }
+
+    // 按 : 拆分剩余部分
+    String[] parts = rest.split(":");
+    if (parts.length < 2) {
+      return Optional.empty();
+    }
+    String operatorCode = parts[0].trim();
+    if (operatorCode.isBlank()) {
+      return Optional.empty();
+    }
+    String nodeType;
+    String nodeName;
+    if (parts.length == 2) {
+      // DYNAMIC:OP:NAME → 默认 nodeType=S
+      nodeType = "S";
+      nodeName = parts[1].trim();
+    } else if (parts.length == 3) {
+      // DYNAMIC:OP:X:Y → X 是 S/D 则为 nodeType，否则无效
+      String second = parts[1].trim().toUpperCase(java.util.Locale.ROOT);
+      if ("S".equals(second) || "D".equals(second)) {
+        nodeType = second;
+        nodeName = parts[2].trim();
+      } else {
+        return Optional.empty();
+      }
+    } else {
+      return Optional.empty();
+    }
+    if (nodeName.isBlank()) {
+      return Optional.empty();
+    }
+    int defaultTrack = 1;
+    if (!rangePayload.isBlank()) {
+      OptionalInt startOpt = parseRangeStart(rangePayload);
+      if (startOpt.isPresent()) {
+        defaultTrack = Math.max(1, startOpt.getAsInt());
+      }
+    }
+    return Optional.of(new DynamicNodeSpec(operatorCode, nodeType, nodeName, defaultTrack));
   }
 
   private RouteValidationResult validateRouteStops(
@@ -1895,6 +2155,11 @@ public final class FtaRouteCommand {
         if (plugin.getRailGraphService().findWorldIdForPath(nodes).isEmpty()) {
           boolean pairMissing = false;
           for (int i = 0; i < nodes.size() - 1; i++) {
+            if (hasDynamicAction(stops.get(i)) || hasDynamicAction(stops.get(i + 1))) {
+              // 动态站台：下一跳 nodeId 会在运行时根据占用/可达性选择，define 阶段无法对“占位站台”做严格可达性校验。
+              reachabilitySkipped = true;
+              continue;
+            }
             NodeId from = nodes.get(i);
             NodeId to = nodes.get(i + 1);
             if (plugin.getRailGraphService().findWorldIdForConnectedPair(from, to).isEmpty()) {
@@ -1912,6 +2177,19 @@ public final class FtaRouteCommand {
       }
     }
     return new RouteValidationResult(List.copyOf(issues), reachabilitySkipped);
+  }
+
+  private boolean hasDynamicAction(RouteStop stop) {
+    if (stop == null) {
+      return false;
+    }
+    for (String line : extractActionLines(stop)) {
+      String prefix = firstSegment(line).trim().toUpperCase(Locale.ROOT);
+      if ("DYNAMIC".equals(prefix)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

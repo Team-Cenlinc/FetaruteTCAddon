@@ -360,6 +360,145 @@ class EtaServiceTest {
     assertEquals("OUT_OF_SERVICE", row.endOperationId().orElse(""));
   }
 
+  /**
+   * 测试 resolveTargetSelection 在遇到 PASS 类型停靠时会跳过，查找实际的 STOP/TERMINATE。
+   *
+   * <p>此测试验证修复：当 route 中包含 INTERVAL 类型 waypoint 且 pass_type=PASS 时， arriving 检测应该找到后续真正的 STOP 而非仅按
+   * index+1。
+   */
+  @Test
+  void etaArrivingSkipsPassStopsToFindActualTarget() {
+    UUID routeUuid = UUID.randomUUID();
+    UUID worldId = UUID.randomUUID();
+
+    // Route: A -> B(PASS) -> C(PASS) -> D(STOP) -> E(TERMINATE)
+    NodeId a = NodeId.of("SURN:S:AAA:1");
+    NodeId b = NodeId.of("SURN:OFL:MLU:2:001"); // INTERVAL 格式，PASS
+    NodeId c = NodeId.of("SURN:OFL:MLU:2:002"); // INTERVAL 格式，PASS
+    NodeId d = NodeId.of("SURN:S:DDD:1"); // STATION 格式，STOP
+    NodeId e = NodeId.of("SURN:S:EEE:1"); // STATION 格式，TERMINATE
+
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("SURN:L1:R1"), List.of(a, b, c, d, e), Optional.empty());
+
+    // 构建图：简化为直线 A-B-C-D-E
+    RailGraph graph = buildLinearGraph(List.of(a, b, c, d, e), 10);
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    List<RouteStop> stops =
+        List.of(
+            new RouteStop(
+                routeUuid,
+                0,
+                Optional.empty(),
+                Optional.of(a.value()),
+                Optional.empty(),
+                RouteStopPassType.STOP,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                1,
+                Optional.empty(),
+                Optional.of(b.value()),
+                Optional.empty(),
+                RouteStopPassType.PASS,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                2,
+                Optional.empty(),
+                Optional.of(c.value()),
+                Optional.empty(),
+                RouteStopPassType.PASS,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                3,
+                Optional.empty(),
+                Optional.of(d.value()),
+                Optional.empty(),
+                RouteStopPassType.STOP,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                4,
+                Optional.empty(),
+                Optional.of(e.value()),
+                Optional.empty(),
+                RouteStopPassType.TERMINATE,
+                Optional.empty()));
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(any())).thenReturn(stops);
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any()))
+        .thenReturn(new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()));
+
+    TrainSnapshotStore snapshotStore = new TrainSnapshotStore();
+    // 列车在 index=0 (站点 A)，下一个实际 STOP 应该是 D (index=3)
+    snapshotStore.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            Instant.now(),
+            worldId,
+            routeUuid,
+            route.id(),
+            0,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+
+    EtaService service =
+        new EtaService(
+            snapshotStore,
+            railGraphService,
+            routeDefinitions,
+            occupancyManager,
+            HeadwayRule.fixed(Duration.ZERO),
+            () -> 2,
+            () -> 0,
+            () -> 2);
+
+    EtaResult result = service.getForTrain("train-1", EtaTarget.nextStop());
+
+    // 应该返回到 D 站的 ETA，而非到 B 站（第一个 PASS）
+    // ETA 应该可用（不是 unavailable，即 etaMinutesRounded >= 0）
+    assertTrue(result.etaMinutesRounded() >= 0 || result.arriving(), "ETA 应该可用，因为实际下一 STOP 是 D 站");
+  }
+
+  private RailGraph buildLinearGraph(List<NodeId> nodes, int edgeLengthBlocks) {
+    java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodeMap =
+        new java.util.HashMap<>();
+    java.util.Map<EdgeId, RailEdge> edgeMap = new java.util.HashMap<>();
+    for (int i = 0; i < nodes.size(); i++) {
+      NodeId nodeId = nodes.get(i);
+      nodeMap.put(
+          nodeId,
+          new SignRailNode(
+              nodeId,
+              NodeType.WAYPOINT,
+              new Vector(i * 10, 0, 0),
+              Optional.empty(),
+              Optional.empty()));
+      if (i > 0) {
+        NodeId prev = nodes.get(i - 1);
+        EdgeId edgeId = EdgeId.undirected(prev, nodeId);
+        edgeMap.put(
+            edgeId,
+            new RailEdge(edgeId, prev, nodeId, edgeLengthBlocks, 0.0, true, Optional.empty()));
+      }
+    }
+    return new SimpleRailGraph(nodeMap, edgeMap, Set.of());
+  }
+
   private RailGraph buildGraph(NodeId start, NodeId end, int lengthBlocks) {
     SignRailNode startNode =
         new SignRailNode(

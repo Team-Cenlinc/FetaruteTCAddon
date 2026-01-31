@@ -177,6 +177,8 @@ public final class TrainHudContextResolver {
         resolveRoutePatternType(properties, progressEntry, routeOpt);
     Optional<NextStop> nextStopOpt = resolveNextStop(routeOpt, routeIndex);
     StationDisplay nextStation = nextStopOpt.map(NextStop::display).orElse(StationDisplay.empty());
+    String nextStationTrack =
+        nextStopOpt.flatMap(NextStop::nodeId).map(this::resolveTrackFromNodeId).orElse("-");
     boolean terminalNextStop =
         nextStopOpt.map(NextStop::terminal).orElse(false) && !nextStation.isEmpty();
     Destinations destinations = resolveDestinations(routeOpt);
@@ -213,6 +215,7 @@ public final class TrainHudContextResolver {
             routePatternType,
             currentStation,
             nextStation,
+            nextStationTrack,
             destinations,
             eta,
             signalAspect,
@@ -271,7 +274,8 @@ public final class TrainHudContextResolver {
           target == null
               ? EtaResult.unavailable("-", List.of())
               : etaService.getForTrain(context.trainName(), target);
-      upcoming.add(new UpcomingStop(total, display, eta));
+      String track = nodeIdOpt.map(this::resolveTrackFromNodeId).orElse("-");
+      upcoming.add(new UpcomingStop(total, display, eta, track));
     }
     return new UpcomingStops(List.copyOf(upcoming), total);
   }
@@ -374,6 +378,7 @@ public final class TrainHudContextResolver {
     placeholders.put("next_station", safeNext.label());
     placeholders.put("next_station_code", safeNext.code());
     placeholders.put("next_station_lang2", safeNext.lang2());
+    placeholders.put("next_station_track", context.nextStationTrack());
     placeholders.put("dest_eor", safeEor.label());
     placeholders.put("dest_eor_code", safeEor.code());
     placeholders.put("dest_eor_lang2", safeEor.lang2());
@@ -1202,6 +1207,34 @@ public final class TrainHudContextResolver {
         .flatMap(SignNodeDefinition::waypointMetadata);
   }
 
+  /**
+   * 从 NodeId 解析站台编号。
+   *
+   * <p>支持的格式：
+   *
+   * <ul>
+   *   <li>4 段站点格式 {@code Op:S:Station:Track} → Track
+   *   <li>4 段车库格式 {@code Op:D:Depot:Track} → Track
+   *   <li>5 段站咽喉 {@code Op:S:Station:Track:Seq} → Track
+   *   <li>5 段库咽喉 {@code Op:D:Depot:Track:Seq} → Track
+   *   <li>5 段区间格式 {@code Op:From:To:Track:Seq} → Track
+   * </ul>
+   *
+   * @param nodeId 节点 ID
+   * @return 站台编号字符串（如 "1"/"2"），无法解析时返回 "-"
+   */
+  private String resolveTrackFromNodeId(NodeId nodeId) {
+    if (nodeId == null || nodeId.value() == null || nodeId.value().isBlank()) {
+      return "-";
+    }
+    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeId);
+    if (metaOpt.isPresent()) {
+      int trackNumber = metaOpt.get().trackNumber();
+      return trackNumber >= 0 ? String.valueOf(trackNumber) : "-";
+    }
+    return "-";
+  }
+
   private Optional<NodeId> resolveStationNodeId(UUID stationId) {
     if (stationId == null) {
       return Optional.empty();
@@ -1456,14 +1489,24 @@ public final class TrainHudContextResolver {
     }
   }
 
-  /** 未来停靠预览项（用于 LCD/Scoreboard）。 */
-  public record UpcomingStop(int sequence, StationDisplay display, EtaResult eta) {
+  /**
+   * 未来停靠预览项（用于 LCD/Scoreboard）。
+   *
+   * <p>{@code track} 为站台编号（从 NodeId 解析，如 "1"/"2"），若无法解析则为 "-"。
+   */
+  public record UpcomingStop(int sequence, StationDisplay display, EtaResult eta, String track) {
     public UpcomingStop {
       Objects.requireNonNull(display, "display");
       Objects.requireNonNull(eta, "eta");
       if (sequence <= 0) {
         throw new IllegalArgumentException("sequence 必须为正数");
       }
+      track = track == null || track.isBlank() ? "-" : track;
+    }
+
+    /** 兼容旧构造：不含 track 字段。 */
+    public UpcomingStop(int sequence, StationDisplay display, EtaResult eta) {
+      this(sequence, display, eta, "-");
     }
   }
 

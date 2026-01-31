@@ -23,6 +23,7 @@ public record TrainHudContext(
     Optional<RoutePatternType> routePatternType,
     StationDisplay currentStation,
     StationDisplay nextStation,
+    String nextStationTrack,
     Destinations destinations,
     EtaResult eta,
     SignalAspect signalAspect,
@@ -39,6 +40,8 @@ public record TrainHudContext(
     routePatternType = routePatternType == null ? Optional.empty() : routePatternType;
     Objects.requireNonNull(currentStation, "currentStation");
     Objects.requireNonNull(nextStation, "nextStation");
+    nextStationTrack =
+        nextStationTrack == null || nextStationTrack.isBlank() ? "-" : nextStationTrack;
     Objects.requireNonNull(destinations, "destinations");
     Objects.requireNonNull(eta, "eta");
     layover = layover == null ? Optional.empty() : layover;

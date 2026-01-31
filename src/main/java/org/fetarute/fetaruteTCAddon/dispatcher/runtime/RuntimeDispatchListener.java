@@ -13,14 +13,18 @@ import org.bukkit.block.Sign;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 
 /**
- * 运行时推进点监听：waypoint/autostation/depot/switcher 触发占用判定与下一跳下发。
+ * 运行时推进点监听：waypoint/depot/switcher 触发占用判定与下一跳下发。
  *
  * <p>对 MEMBER_ENTER 仅处理车头触发，避免多节车厢重复推进；Waypoint 停站仅在 GROUP_ENTER 触发，避免过早点刹。
+ *
+ * <p>AutoStation（STATION 类型）节点不由此监听器推进 routeIndex，而是由 {@link
+ * RuntimeDispatchService#handleStationArrival} 在列车停稳后处理，避免列车跳过站点。
  *
  * <p>列车卸载/移除事件会主动释放占用，防止资源遗留。
  */
@@ -52,9 +56,14 @@ public final class RuntimeDispatchListener implements Listener {
       return;
     }
     SignNodeDefinition definition = definitionOpt.get();
-    if (action == SignActionType.MEMBER_ENTER
-        && definition.nodeType()
-            == org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.WAYPOINT) {
+    // Waypoint MEMBER_ENTER 跳过：停站仅在 GROUP_ENTER 触发
+    if (action == SignActionType.MEMBER_ENTER && definition.nodeType() == NodeType.WAYPOINT) {
+      return;
+    }
+    // STATION 类型节点（AutoStation）不由此监听器推进 routeIndex：
+    // 由 AutoStation.handleStop() -> handleStationArrival() 在列车停稳后处理，
+    // 避免 handleProgressTrigger 提前推进导致列车跳过站点。
+    if (definition.nodeType() == NodeType.STATION) {
       return;
     }
     dispatchService.handleProgressTrigger(event, definition);

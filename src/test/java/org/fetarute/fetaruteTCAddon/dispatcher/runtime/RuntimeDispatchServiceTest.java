@@ -1,9 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -743,6 +745,38 @@ class RuntimeDispatchServiceTest {
       when(properties.hasTags()).thenAnswer(inv -> !tags.isEmpty());
       when(properties.getTags()).thenAnswer(inv -> List.copyOf(tags));
       when(properties.toString()).thenReturn("TrainProperties(" + trainName + ")");
+      // 支持 addTags 和 removeTags 以测试 TrainTagHelper
+      // varargs 在 Mockito doAnswer 时，整个 varargs 作为 Object[] 传入
+      lenient()
+          .doAnswer(
+              inv -> {
+                Object[] args = inv.getArguments();
+                if (args != null) {
+                  for (Object arg : args) {
+                    if (arg instanceof String s && !s.isBlank()) {
+                      tags.add(s);
+                    }
+                  }
+                }
+                return null;
+              })
+          .when(properties)
+          .addTags(any(String[].class));
+      lenient()
+          .doAnswer(
+              inv -> {
+                Object[] args = inv.getArguments();
+                if (args != null) {
+                  for (Object arg : args) {
+                    if (arg instanceof String s) {
+                      tags.remove(s);
+                    }
+                  }
+                }
+                return null;
+              })
+          .when(properties)
+          .removeTags(any(String[].class));
     }
 
     private TrainProperties properties() {
@@ -1167,5 +1201,183 @@ class RuntimeDispatchServiceTest {
 
     @Override
     public void reverse() {}
+  }
+
+  // ====== CHANGE Action 测试 ======
+
+  @Test
+  void handleChangeAction_updatesOperatorAndLineTags() throws Exception {
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=SURN",
+            "FTA_LINE_CODE=L1",
+            "FTA_ROUTE_CODE=R1",
+            "FTA_ROUTE_INDEX=0");
+
+    RouteStop stopWithChange =
+        new RouteStop(
+            UUID.randomUUID(),
+            1,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("CHANGE:NEWOP:NEWLINE"));
+
+    RuntimeDispatchService service = createMinimalService();
+    // 使用反射调用 private 方法
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "handleChangeAction",
+            String.class,
+            TrainProperties.class,
+            org.fetarute.fetaruteTCAddon.company.model.RouteStop.class);
+    method.setAccessible(true);
+    boolean result = (boolean) method.invoke(service, "train-1", tags.properties(), stopWithChange);
+
+    assertTrue(result);
+    assertEquals(
+        "NEWOP", TrainTagHelper.readTagValue(tags.properties(), "FTA_OPERATOR_CODE").orElse(""));
+    assertEquals(
+        "NEWLINE", TrainTagHelper.readTagValue(tags.properties(), "FTA_LINE_CODE").orElse(""));
+    // ROUTE_CODE 不应被修改
+    assertEquals("R1", TrainTagHelper.readTagValue(tags.properties(), "FTA_ROUTE_CODE").orElse(""));
+  }
+
+  @Test
+  void handleChangeAction_returnsFalseWhenNoChangeDirective() throws Exception {
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=SURN",
+            "FTA_LINE_CODE=L1",
+            "FTA_ROUTE_CODE=R1",
+            "FTA_ROUTE_INDEX=0");
+
+    RouteStop stopWithoutChange =
+        new RouteStop(
+            UUID.randomUUID(),
+            1,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "handleChangeAction",
+            String.class,
+            TrainProperties.class,
+            org.fetarute.fetaruteTCAddon.company.model.RouteStop.class);
+    method.setAccessible(true);
+    boolean result =
+        (boolean) method.invoke(service, "train-1", tags.properties(), stopWithoutChange);
+
+    assertFalse(result);
+    // 原有 tags 不应被修改
+    assertEquals(
+        "SURN", TrainTagHelper.readTagValue(tags.properties(), "FTA_OPERATOR_CODE").orElse(""));
+    assertEquals("L1", TrainTagHelper.readTagValue(tags.properties(), "FTA_LINE_CODE").orElse(""));
+  }
+
+  @Test
+  void handleChangeAction_returnsFalseWhenInvalidFormat() throws Exception {
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=SURN",
+            "FTA_LINE_CODE=L1",
+            "FTA_ROUTE_CODE=R1",
+            "FTA_ROUTE_INDEX=0");
+
+    // 格式错误：只有一个片段
+    RouteStop stopWithInvalidChange =
+        new RouteStop(
+            UUID.randomUUID(),
+            1,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("CHANGE:ONLYONE"));
+
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "handleChangeAction",
+            String.class,
+            TrainProperties.class,
+            org.fetarute.fetaruteTCAddon.company.model.RouteStop.class);
+    method.setAccessible(true);
+    boolean result =
+        (boolean) method.invoke(service, "train-1", tags.properties(), stopWithInvalidChange);
+
+    assertFalse(result);
+    // 原有 tags 不应被修改
+    assertEquals(
+        "SURN", TrainTagHelper.readTagValue(tags.properties(), "FTA_OPERATOR_CODE").orElse(""));
+  }
+
+  @Test
+  void handleChangeAction_handlesMultilineNotes() throws Exception {
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=SURN",
+            "FTA_LINE_CODE=L1",
+            "FTA_ROUTE_CODE=R1",
+            "FTA_ROUTE_INDEX=0");
+
+    // 多行 notes，CHANGE 在第二行
+    RouteStop stopWithMultilineNotes =
+        new RouteStop(
+            UUID.randomUUID(),
+            1,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("Some comment\nCHANGE:NEWOP2:NEWLINE2\nAnother comment"));
+
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "handleChangeAction",
+            String.class,
+            TrainProperties.class,
+            org.fetarute.fetaruteTCAddon.company.model.RouteStop.class);
+    method.setAccessible(true);
+    boolean result =
+        (boolean) method.invoke(service, "train-1", tags.properties(), stopWithMultilineNotes);
+
+    assertTrue(result);
+    assertEquals(
+        "NEWOP2", TrainTagHelper.readTagValue(tags.properties(), "FTA_OPERATOR_CODE").orElse(""));
+    assertEquals(
+        "NEWLINE2", TrainTagHelper.readTagValue(tags.properties(), "FTA_LINE_CODE").orElse(""));
+  }
+
+  // 注意：handleStationArrival 测试需要 TrainCarts 依赖，改用功能文档验证
+  // handleStationArrival 方法已在 AutoStationSignAction 中调用，功能集成测试由手动验证覆盖
+
+  private RuntimeDispatchService createMinimalService() {
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    return new RuntimeDispatchService(
+        mock(OccupancyManager.class),
+        mock(RailGraphService.class),
+        mock(RouteDefinitionCache.class),
+        new RouteProgressRegistry(),
+        mock(SignNodeRegistry.class),
+        mock(LayoverRegistry.class),
+        new DwellRegistry(),
+        configManager,
+        null,
+        mock(TrainConfigResolver.class),
+        msg -> {});
   }
 }

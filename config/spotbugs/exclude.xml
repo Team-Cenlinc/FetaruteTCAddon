@@ -270,4 +270,10 @@
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ConnectedRailNodeDiscoverySession"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+
+    <!-- 测试类使用反射调用私有方法，测试环境不需要 doPrivileged 包装 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchServiceTest"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
 </FindBugsFilter>

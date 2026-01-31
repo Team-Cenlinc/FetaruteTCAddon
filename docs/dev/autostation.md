@@ -7,6 +7,7 @@ AutoStation 牌子是“站点行为节点”，用于执行停站/开关门/发
 - 若 RouteStop 未填写 `dwellSeconds`，默认停站 20 秒；若填写 `<= 0` 则视为不停车。
 - 未匹配到 RouteStop 或无 route tag 的列车视为 waypoint，直接通过。
 - RouteStop 匹配顺序：先按站点 ID（同运营商 + 站点 code）匹配，失败后再用 waypoint nodeId 匹配。
+- 兼容 `[train]` 与 `[cart]`：`[cart]` 只会触发 `MEMBER_ENTER`，因此仅处理车头触发一次，避免长编组重复停站。
 
 ## 牌子格式
 ```

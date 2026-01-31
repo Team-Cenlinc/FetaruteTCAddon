@@ -940,6 +940,17 @@ public final class EtaService {
     }
   }
 
+  /**
+   * 解析 ETA 目标对应的图节点与 waypoint 索引。
+   *
+   * <p>针对 {@link EtaTarget.NextStop}，会查找下一个"实际停靠点"（{@code STOP}/{@code TERMINATE}）而非仅按 waypoint
+   * 索引推进，避免 PASS 类型的区间点被误认为下一站导致 arriving 判定失败。
+   *
+   * @param route 线路定义
+   * @param currentIndex 当前 waypoint 索引（-1 表示未进入线路）
+   * @param target ETA 目标（nextStop/station/platformNode）
+   * @return 目标节点与索引，若无法解析则返回 empty
+   */
   private Optional<TargetSelection> resolveTargetSelection(
       RouteDefinition route, int currentIndex, EtaTarget target) {
     if (route == null) {
@@ -951,11 +962,8 @@ public final class EtaService {
     }
     int startIndex = Math.max(-1, currentIndex);
     if (target == null || target instanceof EtaTarget.NextStop) {
-      int next = startIndex + 1;
-      if (next >= waypoints.size()) {
-        return Optional.empty();
-      }
-      return Optional.of(new TargetSelection(waypoints.get(next), next));
+      // 查找下一个实际停靠点（STOP/TERMINATE），而非仅按 waypoint 索引推进
+      return findNextActualStop(route, waypoints, startIndex);
     }
     if (target instanceof EtaTarget.PlatformNode pn) {
       return findNodeTarget(waypoints, startIndex + 1, pn.nodeId());
@@ -964,6 +972,106 @@ public final class EtaService {
       return findStationTarget(waypoints, startIndex + 1, station.stationId(), route);
     }
     return Optional.empty();
+  }
+
+  /**
+   * 查找下一个实际停靠点（STOP/TERMINATE）。
+   *
+   * <p>遍历 RouteStop 列表，跳过 PASS 类型，找到第一个 waypoint 索引 > currentIndex 的停靠点。 若 RouteStop 数据不可用，则回退为简单的
+   * waypoint 索引 +1。
+   *
+   * @param route 线路定义
+   * @param waypoints waypoint 列表
+   * @param currentIndex 当前 waypoint 索引
+   * @return 下一停靠点的 NodeId 与索引
+   */
+  private Optional<TargetSelection> findNextActualStop(
+      RouteDefinition route, List<NodeId> waypoints, int currentIndex) {
+    // 构建 NodeId -> waypoint 索引映射
+    Map<NodeId, Integer> nodeIndexMap = new HashMap<>();
+    for (int i = 0; i < waypoints.size(); i++) {
+      NodeId node = waypoints.get(i);
+      if (node != null) {
+        nodeIndexMap.putIfAbsent(node, i); // 保留首次出现的索引
+      }
+    }
+
+    // 获取 RouteStop 列表
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      // 回退：无 stop 数据时使用简单索引推进
+      int next = currentIndex + 1;
+      if (next >= waypoints.size()) {
+        return Optional.empty();
+      }
+      return Optional.of(new TargetSelection(waypoints.get(next), next));
+    }
+
+    // 找到下一个实际停靠点
+    int bestIndex = Integer.MAX_VALUE;
+    NodeId bestNode = null;
+
+    for (RouteStop stop : stops) {
+      if (stop == null) {
+        continue;
+      }
+      // 跳过 PASS 类型
+      if (stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      // 解析 stop 对应的 NodeId
+      Optional<NodeId> nodeIdOpt = resolveRouteStopNodeId(stop);
+      if (nodeIdOpt.isEmpty()) {
+        continue;
+      }
+      NodeId nodeId = nodeIdOpt.get();
+      Integer waypointIndex = nodeIndexMap.get(nodeId);
+      if (waypointIndex == null) {
+        continue;
+      }
+      // 选择 > currentIndex 且最小的索引
+      if (waypointIndex > currentIndex && waypointIndex < bestIndex) {
+        bestIndex = waypointIndex;
+        bestNode = nodeId;
+      }
+    }
+
+    if (bestNode != null) {
+      return Optional.of(new TargetSelection(bestNode, bestIndex));
+    }
+
+    // 回退：若无匹配的停靠点，使用简单索引推进
+    int next = currentIndex + 1;
+    if (next >= waypoints.size()) {
+      return Optional.empty();
+    }
+    return Optional.of(new TargetSelection(waypoints.get(next), next));
+  }
+
+  /**
+   * 解析 RouteStop 对应的 NodeId。
+   *
+   * <p>优先使用 waypointNodeId，其次通过 stationId 查询 Station.graphNodeId。
+   */
+  private Optional<NodeId> resolveRouteStopNodeId(RouteStop stop) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    if (stop.waypointNodeId().isPresent()) {
+      return Optional.of(NodeId.of(stop.waypointNodeId().get()));
+    }
+    if (stop.stationId().isEmpty()) {
+      return Optional.empty();
+    }
+    StorageProvider provider = this.storageProvider;
+    if (provider == null) {
+      return Optional.empty();
+    }
+    return provider
+        .stations()
+        .findById(stop.stationId().get())
+        .flatMap(org.fetarute.fetaruteTCAddon.company.model.Station::graphNodeId)
+        .map(NodeId::of);
   }
 
   private Optional<TargetSelection> findNodeTarget(

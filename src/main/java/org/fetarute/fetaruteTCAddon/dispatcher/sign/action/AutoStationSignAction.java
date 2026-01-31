@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
+import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.attachments.api.Attachment;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
@@ -30,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -119,44 +121,98 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
-   * AutoStation 执行入口：仅在列车进入牌子触发一次。
+   * AutoStation 执行入口。
    *
-   * <p>无 RouteId 或无匹配 RouteStop 时视为 waypoint 直接通过。停站时先居中停稳，再延迟一定 tick 开门；dwell 从开门后开始计时。
+   * <p>兼容 {@code [train]} 与 {@code [cart]} 两种牌子：
+   *
+   * <ul>
+   *   <li>{@code [train]}：使用 {@link SignActionType#GROUP_ENTER} 触发一次。
+   *   <li>{@code [cart]}：TrainCarts 只会触发 {@link SignActionType#MEMBER_ENTER}，这里仅处理车头触发一次。
+   * </ul>
+   *
+   * <p>无 RouteId 或无匹配 RouteStop 时视为直接通过。停站时先居中停稳，再延迟一定 tick 开门；dwell 从开门后开始计时。
    */
   @Override
   public void execute(SignActionEvent info) {
-    if (!info.isAction(SignActionType.GROUP_ENTER)) {
+    if (info == null) {
+      return;
+    }
+    boolean groupEnter = info.isAction(SignActionType.GROUP_ENTER);
+    boolean memberEnter = info.isAction(SignActionType.MEMBER_ENTER);
+    if (!groupEnter && !memberEnter) {
       return;
     }
     if (!info.hasGroup() || plugin == null) {
       return;
     }
+    if (memberEnter && !shouldHandleMemberEnter(info)) {
+      return;
+    }
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
+      debug("AutoStation 跳过: 存储未就绪 @ " + locationText(info));
       return;
     }
     Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
     if (providerOpt.isEmpty()) {
+      debug("AutoStation 跳过: StorageProvider 缺失 @ " + locationText(info));
       return;
     }
     StorageProvider provider = providerOpt.get();
     TrainProperties properties = info.getGroup().getProperties();
     Optional<UUID> routeIdOpt = readRouteId(properties);
     if (routeIdOpt.isEmpty()) {
+      debug(
+          "AutoStation 跳过: 缺少 FTA_ROUTE_ID (train="
+              + safeTrainName(info)
+              + ") @ "
+              + locationText(info));
       return;
     }
     UUID routeId = routeIdOpt.get();
+    Optional<Integer> routeIndexOpt =
+        readIntTagValue(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     Optional<SignNodeDefinition> definitionOpt =
         registry.get(info.getBlock()).or(() -> parseDefinition(info));
     if (definitionOpt.isEmpty()) {
+      debug(
+          "AutoStation 跳过: 无法解析节点 (train="
+              + safeTrainName(info)
+              + ", route="
+              + shortUuid(routeId)
+              + ") @ "
+              + locationText(info));
       return;
     }
     SignNodeDefinition definition = definitionOpt.get();
-    Optional<Integer> dwellOpt = resolveDwellSeconds(provider, routeIdOpt.get(), definition);
+    Optional<Integer> dwellOpt =
+        resolveDwellSeconds(provider, routeIdOpt.get(), definition, routeIndexOpt);
     if (dwellOpt.isEmpty()) {
+      debug(
+          "AutoStation 跳过: 未匹配 RouteStop (train="
+              + safeTrainName(info)
+              + ", route="
+              + shortUuid(routeId)
+              + ", node="
+              + definition.nodeId().value()
+              + ", idx="
+              + routeIndexOpt.map(String::valueOf).orElse("-")
+              + ") @ "
+              + locationText(info));
       return;
     }
     int dwellSeconds = dwellOpt.get();
     if (dwellSeconds <= 0) {
+      debug(
+          "AutoStation 跳过: dwell<=0 (train="
+              + safeTrainName(info)
+              + ", route="
+              + shortUuid(routeId)
+              + ", node="
+              + definition.nodeId().value()
+              + ", dwell="
+              + dwellSeconds
+              + ") @ "
+              + locationText(info));
       return;
     }
 
@@ -237,6 +293,31 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         chimeSettings,
         session,
         firstStop);
+  }
+
+  /**
+   * MEMBER_ENTER 触发的去重规则：
+   *
+   * <ul>
+   *   <li>仅处理 {@code [cart]} 牌子：{@code [train]} 牌子应由 GROUP_ENTER 触发，避免重复执行。
+   *   <li>仅处理车头触发：避免长编组每节车厢重复触发。
+   * </ul>
+   */
+  private boolean shouldHandleMemberEnter(SignActionEvent info) {
+    if (info == null || !info.hasGroup() || !info.hasMember()) {
+      return false;
+    }
+    MinecartGroup group = info.getGroup();
+    MinecartMember<?> member = info.getMember();
+    if (group == null || member == null || group.head() != member) {
+      return false;
+    }
+    SignActionHeader header =
+        info.getTrackedSign() != null ? info.getTrackedSign().getHeader() : null;
+    if (header == null) {
+      header = SignActionHeader.parse(info.getLine(0));
+    }
+    return header != null && header.isCart();
   }
 
   private void scheduleDoorSequence(
@@ -370,6 +451,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + " @ "
               + locationText(info));
     }
+    // 停车后推进 routeIndex 并设置下一站 destination
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(dispatch -> dispatch.handleStationArrival(group, definition));
     long dwellTicks = Math.max(0L, dwellSeconds * 20L);
     String location = locationText(info);
     new org.bukkit.scheduler.BukkitRunnable() {
@@ -926,13 +1011,28 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     return Optional.empty();
   }
 
+  private static Optional<Integer> readIntTagValue(TrainProperties properties, String key) {
+    Optional<String> rawOpt = readTagValue(properties, key);
+    if (rawOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(Integer.parseInt(rawOpt.get().trim()));
+    } catch (NumberFormatException ex) {
+      return Optional.empty();
+    }
+  }
+
   /**
    * 根据 RouteStop 解析停站时长。
    *
    * <p>仅 STOP/TERMINATE 才返回时长；PASS 直接视为不停车。
    */
   private static Optional<Integer> resolveDwellSeconds(
-      StorageProvider provider, UUID routeId, SignNodeDefinition definition) {
+      StorageProvider provider,
+      UUID routeId,
+      SignNodeDefinition definition,
+      Optional<Integer> routeIndexOpt) {
     if (provider == null || routeId == null || definition == null) {
       return Optional.empty();
     }
@@ -958,7 +1058,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (stops.isEmpty()) {
       return Optional.empty();
     }
-    RouteStop match = findStop(stops, definition, stationOpt);
+    RouteStop match = findStop(stops, definition, stationOpt, stationCode, routeIndexOpt);
     if (match == null) {
       return Optional.empty();
     }
@@ -989,7 +1089,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * <p>优先站点 ID 匹配，其次 nodeId。
    */
   private static RouteStop findStop(
-      List<RouteStop> stops, SignNodeDefinition definition, Optional<Station> stationOpt) {
+      List<RouteStop> stops,
+      SignNodeDefinition definition,
+      Optional<Station> stationOpt,
+      String stationCode,
+      Optional<Integer> routeIndexOpt) {
     UUID stationId = stationOpt.map(Station::id).orElse(null);
     String nodeId = definition.nodeId().value();
     for (RouteStop stop : stops) {
@@ -1006,7 +1110,61 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         return stop;
       }
     }
-    return null;
+
+    // fallback: RouteStop 使用 station 的 waypoint_node_id（含 track），但列车实际停靠在同站其他股道时，
+    // 精确 nodeId 无法匹配，导致 AutoStation 误判为 PASS。这里尝试按站码匹配（忽略 track）并用 routeIndex 消歧义。
+    if (stationCode == null || stationCode.isBlank()) {
+      return null;
+    }
+    String expectedOperator =
+        definition.waypointMetadata().map(WaypointMetadata::operator).orElse(null);
+    List<RouteStop> candidates = new java.util.ArrayList<>();
+    for (RouteStop stop : stops) {
+      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      if (stop.waypointNodeId().isEmpty()) {
+        continue;
+      }
+      String raw = stop.waypointNodeId().get();
+      Optional<SignNodeDefinition> parsed = SignTextParser.parseWaypointLike(raw, NodeType.STATION);
+      if (parsed.isEmpty()) {
+        continue;
+      }
+      Optional<WaypointMetadata> metaOpt = parsed.get().waypointMetadata();
+      if (metaOpt.isEmpty() || metaOpt.get().kind() != WaypointKind.STATION) {
+        continue;
+      }
+      WaypointMetadata meta = metaOpt.get();
+      if (expectedOperator != null && !expectedOperator.equalsIgnoreCase(meta.operator())) {
+        continue;
+      }
+      if (!stationCode.equalsIgnoreCase(meta.originStation())) {
+        continue;
+      }
+      candidates.add(stop);
+    }
+    if (candidates.isEmpty()) {
+      return null;
+    }
+    if (candidates.size() == 1) {
+      return candidates.get(0);
+    }
+    if (routeIndexOpt == null || routeIndexOpt.isEmpty()) {
+      return candidates.get(0);
+    }
+    int idx = routeIndexOpt.get();
+    RouteStop best = null;
+    int bestDelta = Integer.MAX_VALUE;
+    for (RouteStop cand : candidates) {
+      int seq = cand.sequence();
+      int delta = seq >= idx ? (seq - idx) : Integer.MAX_VALUE / 2;
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = cand;
+      }
+    }
+    return best != null ? best : candidates.get(0);
   }
 
   private static String shortUuid(UUID uuid) {
