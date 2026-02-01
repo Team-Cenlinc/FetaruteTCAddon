@@ -63,6 +63,11 @@ public final class RouteDefinitionCache {
   }
 
   /** 获取指定线路的 RouteStop 列表（按 sequence 排序）。 */
+  /**
+   * 获取 Route 的有效 RouteStop 列表（与 waypoints 索引对齐）。
+   *
+   * <p>返回的列表只包含有 nodeId 的 RouteStop，索引与 {@link RouteDefinition#waypoints()} 一一对应。
+   */
   public List<RouteStop> listStops(RouteId routeId) {
     if (routeId == null || routeId.value() == null) {
       return List.of();
@@ -70,16 +75,25 @@ public final class RouteDefinitionCache {
     return stopCache.getOrDefault(normalizeRouteId(routeId.value()), List.of());
   }
 
-  /** 按索引获取 RouteStop；找不到时返回 empty。 */
-  public Optional<RouteStop> findStop(RouteId routeId, int sequence) {
-    if (routeId == null || sequence < 0) {
+  /**
+   * 按 waypoints 索引获取对应的 RouteStop。
+   *
+   * <p>索引与 {@link RouteDefinition#waypoints()} 对齐：{@code findStop(routeId, i)} 返回 {@code
+   * waypoints().get(i)} 对应的 RouteStop。
+   *
+   * @param routeId 路线 ID
+   * @param waypointIndex waypoints 数组的索引
+   * @return 对应的 RouteStop，找不到时返回 empty
+   */
+  public Optional<RouteStop> findStop(RouteId routeId, int waypointIndex) {
+    if (routeId == null || waypointIndex < 0) {
       return Optional.empty();
     }
     List<RouteStop> stops = listStops(routeId);
-    if (sequence >= stops.size()) {
+    if (waypointIndex >= stops.size()) {
       return Optional.empty();
     }
-    return Optional.ofNullable(stops.get(sequence));
+    return Optional.ofNullable(stops.get(waypointIndex));
   }
 
   /** 清空所有缓存。 */
@@ -141,8 +155,10 @@ public final class RouteDefinitionCache {
             if (codeKey != null) {
               codeCache.put(codeKey, definition);
             }
+            // 使用 filterStopsWithNodeId 保持 stopCache 索引与 waypoints 对齐
             stopCache.put(
-                normalizeRouteId(definition.id().value()), List.copyOf(sortedStops(stops)));
+                normalizeRouteId(definition.id().value()),
+                List.copyOf(filterStopsWithNodeId(sortedStops(stops), stations)));
             loaded++;
           }
         }
@@ -168,8 +184,9 @@ public final class RouteDefinitionCache {
     Objects.requireNonNull(line, "line");
     Objects.requireNonNull(route, "route");
     List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+    StationRepository stations = provider.stations();
     Optional<RouteDefinition> definitionOpt =
-        buildDefinition(operator, line, route, stops, provider.stations());
+        buildDefinition(operator, line, route, stops, stations);
     RouteCodeKey codeKey = RouteCodeKey.of(operator.code(), line.code(), route.code());
     if (definitionOpt.isPresent()) {
       RouteDefinition definition = definitionOpt.get();
@@ -177,7 +194,10 @@ public final class RouteDefinitionCache {
       if (codeKey != null) {
         codeCache.put(codeKey, definition);
       }
-      stopCache.put(normalizeRouteId(definition.id().value()), List.copyOf(sortedStops(stops)));
+      // 使用 filterStopsWithNodeId 保持 stopCache 索引与 waypoints 对齐
+      stopCache.put(
+          normalizeRouteId(definition.id().value()),
+          List.copyOf(filterStopsWithNodeId(sortedStops(stops), stations)));
     } else {
       cache.remove(route.id());
       if (codeKey != null) {
@@ -304,6 +324,33 @@ public final class RouteDefinitionCache {
     List<RouteStop> sorted = new ArrayList<>(stops);
     sorted.sort(Comparator.comparingInt(RouteStop::sequence));
     return sorted;
+  }
+
+  /**
+   * 过滤并返回只有有效 nodeId 的 RouteStop（与 waypoints 索引对齐）。
+   *
+   * <p>RouteStop 只有在 waypointNodeId 存在或 stationId 对应的 Station 有 graphNodeId 或 DYNAMIC 可解析时， 才会加入
+   * waypoints；此处使用相同的判定逻辑以保持索引一致。
+   *
+   * @param stops 原始 RouteStop 列表（已排序）
+   * @param stations Station 仓库（用于解析 stationId → graphNodeId）
+   * @return 与 waypoints 索引对齐的有效 RouteStop 列表
+   */
+  private List<RouteStop> filterStopsWithNodeId(List<RouteStop> stops, StationRepository stations) {
+    if (stops == null || stops.isEmpty()) {
+      return List.of();
+    }
+    List<RouteStop> result = new ArrayList<>();
+    for (RouteStop stop : stops) {
+      if (stop == null) {
+        continue;
+      }
+      Optional<NodeId> nodeIdOpt = resolveNodeId(stop, stations);
+      if (nodeIdOpt.isPresent()) {
+        result.add(stop);
+      }
+    }
+    return result;
   }
 
   private Optional<NodeId> resolveNodeId(RouteStop stop, StationRepository stations) {

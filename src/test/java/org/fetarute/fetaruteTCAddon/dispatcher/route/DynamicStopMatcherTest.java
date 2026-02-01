@@ -42,12 +42,12 @@ class DynamicStopMatcherTest {
   }
 
   @Test
-  void parseDynamicSpec_withoutRange_defaultsToUnlimited() {
+  void parseDynamicSpec_withoutRange_defaultsToReasonableLimit() {
     Optional<DynamicSpec> result = DynamicStopMatcher.parseDynamicSpec("DYNAMIC:SURC:S:PPK");
     assertTrue(result.isPresent());
     DynamicSpec spec = result.get();
     assertEquals(1, spec.fromTrack());
-    assertEquals(Integer.MAX_VALUE, spec.toTrack());
+    assertEquals(10, spec.toTrack()); // 默认上限为 10，避免无限循环
   }
 
   @Test

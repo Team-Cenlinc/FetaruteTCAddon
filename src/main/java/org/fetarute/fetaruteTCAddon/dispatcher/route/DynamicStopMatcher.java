@@ -163,7 +163,7 @@ public final class DynamicStopMatcher {
 
     // 解析范围
     int fromTrack = 1;
-    int toTrack = Integer.MAX_VALUE; // 默认无限制
+    int toTrack = 10; // 默认上限为 10，避免无范围时产生巨大循环
     if (!rangeRaw.isBlank()) {
       String normalizedRange = rangeRaw.trim();
       if (normalizedRange.startsWith("[") && normalizedRange.endsWith("]")) {
@@ -232,7 +232,8 @@ public final class DynamicStopMatcher {
       return false;
     }
     String[] parts = nodeIdValue.split(":", -1);
-    if (parts.length < 4) {
+    // 必须是 4 段格式（OP:S/D:NAME:TRACK），排除咽喉（5 段）
+    if (parts.length != 4) {
       return false;
     }
 

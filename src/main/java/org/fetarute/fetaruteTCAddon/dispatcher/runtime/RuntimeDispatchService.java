@@ -371,6 +371,23 @@ public final class RuntimeDispatchService {
     // 计算下一站并设置 destination
     int nextIndex = currentIndex + 1;
     if (nextIndex >= route.waypoints().size()) {
+      // 检查是否有 DSTY DYNAMIC depot 需要前往
+      Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
+      if (graphOpt.isPresent()) {
+        boolean allocated =
+            tryAllocateDstyDynamicDepot(
+                trainName, train, properties, route, currentNode, graphOpt.get());
+        if (allocated) {
+          debugLogger.accept(
+              "Station 推进: 继续前往 DSTY DYNAMIC depot train="
+                  + trainName
+                  + " node="
+                  + currentNode.value()
+                  + " route="
+                  + route.id().value());
+          return;
+        }
+      }
       // 已到终点，清除 destination
       properties.clearDestinationRoute();
       properties.setDestination("");
@@ -555,6 +572,23 @@ public final class RuntimeDispatchService {
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       invalidateTrainEta(trainName);
+      // 检查是否有 DSTY DYNAMIC depot 需要前往
+      Optional<RailGraph> graphOpt = resolveGraph(event);
+      if (graphOpt.isPresent()) {
+        boolean allocated =
+            tryAllocateDstyDynamicDepot(
+                trainName, train, properties, route, definition.nodeId(), graphOpt.get());
+        if (allocated) {
+          debugLogger.accept(
+              "调度推进: 继续前往 DSTY DYNAMIC depot train="
+                  + trainName
+                  + " node="
+                  + definition.nodeId().value()
+                  + " route="
+                  + route.id().value());
+          return;
+        }
+      }
       // 无下一目标时清除 destination 防止继续寻路
       properties.clearDestinationRoute();
       properties.setDestination("");
@@ -2235,7 +2269,16 @@ public final class RuntimeDispatchService {
     if (target.isBlank()) {
       return false;
     }
-    return currentNode.value().equalsIgnoreCase(target);
+    // 精确匹配
+    if (currentNode.value().equalsIgnoreCase(target)) {
+      return true;
+    }
+    // 尝试 DYNAMIC 匹配（支持 "DSTY DYNAMIC:OP:D:DEPOT" 格式）
+    Optional<DynamicStopMatcher.DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(target);
+    if (specOpt.isPresent()) {
+      return DynamicStopMatcher.matches(currentNode, specOpt.get());
+    }
+    return false;
   }
 
   /**
@@ -2275,7 +2318,17 @@ public final class RuntimeDispatchService {
         continue;
       }
       String target = targetOpt.get();
-      if (!target.isBlank() && currentNode.value().equalsIgnoreCase(target)) {
+      if (target.isBlank()) {
+        continue;
+      }
+      // 精确匹配
+      if (currentNode.value().equalsIgnoreCase(target)) {
+        return true;
+      }
+      // 尝试 DYNAMIC 匹配（支持 "DSTY DYNAMIC:OP:D:DEPOT" 格式）
+      Optional<DynamicStopMatcher.DynamicSpec> specOpt =
+          DynamicStopMatcher.parseDynamicSpec(target);
+      if (specOpt.isPresent() && DynamicStopMatcher.matches(currentNode, specOpt.get())) {
         return true;
       }
     }
@@ -2441,6 +2494,88 @@ public final class RuntimeDispatchService {
       return Optional.of(target.substring(8));
     }
     return Optional.empty();
+  }
+
+  /**
+   * 查找 route 中的 DSTY DYNAMIC depot 规范。
+   *
+   * <p>用于在"已到终点"时检查是否需要继续前往 depot 销毁。
+   *
+   * @param route RouteDefinition
+   * @return DSTY DYNAMIC depot 的 DynamicSpec，或 empty
+   */
+  private Optional<DynamicStopMatcher.DynamicSpec> findDstyDynamicDepotSpec(RouteDefinition route) {
+    if (route == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    for (RouteStop stop : stops) {
+      Optional<String> dstyTarget = findDirectiveTarget(stop, "DSTY");
+      if (dstyTarget.isEmpty()) {
+        continue;
+      }
+      String target = dstyTarget.get();
+      Optional<DynamicStopMatcher.DynamicSpec> specOpt =
+          DynamicStopMatcher.parseDynamicSpec(target);
+      if (specOpt.isPresent() && specOpt.get().isDepot()) {
+        return specOpt;
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 尝试为 DSTY DYNAMIC depot 分配站台并设置为下一个 destination。
+   *
+   * <p>在"已到终点"时调用，检查是否有 DSTY DYNAMIC depot，如果有则动态分配并继续前进。
+   *
+   * @param trainName 列车名
+   * @param train 列车句柄（未使用但保留签名以便后续扩展）
+   * @param properties 列车属性
+   * @param route RouteDefinition
+   * @param currentNode 当前节点
+   * @param graph RailGraph
+   * @return true 如果成功设置了 depot destination，false 表示无需或无法分配
+   */
+  @SuppressWarnings("unused")
+  private boolean tryAllocateDstyDynamicDepot(
+      String trainName,
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      RouteDefinition route,
+      NodeId currentNode,
+      RailGraph graph) {
+    Optional<DynamicStopMatcher.DynamicSpec> specOpt = findDstyDynamicDepotSpec(route);
+    if (specOpt.isEmpty()) {
+      return false;
+    }
+    DynamicStopMatcher.DynamicSpec spec = specOpt.get();
+    // 使用 DynamicPlatformAllocator 分配 depot 站台
+    Optional<NodeId> allocatedOpt =
+        dynamicAllocator.allocateDirect(trainName, spec, graph, currentNode);
+    if (allocatedOpt.isEmpty()) {
+      debugLogger.accept(
+          "DSTY DYNAMIC depot 分配失败: train="
+              + trainName
+              + " spec="
+              + DynamicStopMatcher.specToStationKey(spec));
+      return false;
+    }
+    NodeId depotNode = allocatedOpt.get();
+    String destinationName = resolveDestinationName(depotNode);
+    if (destinationName == null || destinationName.isBlank()) {
+      destinationName = depotNode.value();
+    }
+    properties.clearDestinationRoute();
+    properties.setDestination(destinationName);
+    debugLogger.accept(
+        "DSTY DYNAMIC depot 分配成功: train="
+            + trainName
+            + " depot="
+            + depotNode.value()
+            + " dest="
+            + destinationName);
+    return true;
   }
 
   private static String firstSegment(String line) {
@@ -3358,7 +3493,8 @@ public final class RuntimeDispatchService {
     RailGraph graph = graphOpt.get();
 
     Optional<DynamicPlatformAllocator.AllocationResult> resultOpt =
-        dynamicAllocator.tryAllocate(trainName, route, currentIndex, graph, currentNode);
+        dynamicAllocator.tryAllocate(
+            trainName, route, currentIndex, graph, currentNode, train.forwardDirection());
     if (resultOpt.isEmpty()) {
       return;
     }
