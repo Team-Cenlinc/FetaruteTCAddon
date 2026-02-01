@@ -77,13 +77,15 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
     Route route = routeOpt.get();
 
-    NodeId depotId = NodeId.of(service.depotNodeId());
-    Optional<SignNodeRegistry.SignNodeInfo> depotInfoOpt = findDepotNode(signNodeRegistry, depotId);
+    // 解析 depot nodeId（可能是 DYNAMIC）
+    String depotSpec = service.depotNodeId();
+    Optional<DepotInfo> depotInfoOpt = resolveDepotInfo(depotSpec);
     if (depotInfoOpt.isEmpty()) {
-      debugLogger.accept("自动发车失败: 未找到 depot 牌子 node=" + depotId.value());
+      debugLogger.accept("自动发车失败: 未找到 depot 牌子 spec=" + depotSpec);
       return Optional.empty();
     }
-    SignNodeRegistry.SignNodeInfo depotInfo = depotInfoOpt.get();
+    DepotInfo depotInfo = depotInfoOpt.get();
+    NodeId depotId = depotInfo.nodeId;
     World world = Bukkit.getWorld(depotInfo.worldId());
     if (world == null) {
       debugLogger.accept("自动发车失败: depot 世界未加载 worldId=" + depotInfo.worldId());
@@ -236,7 +238,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   }
 
   private static Set<RailBlockPos> findAnchorRails(
-      TrainCartsRailBlockAccess access, SignNodeRegistry.SignNodeInfo depotInfo) {
+      TrainCartsRailBlockAccess access, DepotInfo depotInfo) {
     RailBlockPos center = new RailBlockPos(depotInfo.x(), depotInfo.y(), depotInfo.z());
     Set<RailBlockPos> anchors = access.findNearestRailBlocks(center, 2);
     if (!anchors.isEmpty()) {
@@ -444,6 +446,191 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     String normalized = trimmed.replace('=', '-').replace('|', '-');
     return normalized.replaceAll("\\s+", "_");
   }
+
+  /**
+   * 解析 depot 规范并返回 DepotInfo。
+   *
+   * <p>支持：
+   *
+   * <ul>
+   *   <li>普通 nodeId：如 "SURC:D:OFL:1"
+   *   <li>DYNAMIC 规范：如 "DYNAMIC:SURC:D:OFL" 或 "DYNAMIC:SURC:D:OFL:[1:3]"
+   * </ul>
+   */
+  private Optional<DepotInfo> resolveDepotInfo(String depotSpec) {
+    if (depotSpec == null || depotSpec.isBlank()) {
+      return Optional.empty();
+    }
+
+    // 检查是否是 DYNAMIC depot
+    if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
+      return resolveDynamicDepotInfo(depotSpec);
+    }
+
+    // 普通 depot：精确匹配 nodeId
+    NodeId nodeId = NodeId.of(depotSpec);
+    return findDepotNode(signNodeRegistry, nodeId)
+        .map(
+            info ->
+                new DepotInfo(
+                    nodeId, info.worldId(), info.x(), info.y(), info.z(), info.locationText()));
+  }
+
+  /**
+   * 为 DYNAMIC depot 规范查找可用的 depot 轨道。
+   *
+   * <p>解析 "DYNAMIC:OP:D:DEPOT" 或 "DYNAMIC:OP:D:DEPOT:[1:3]" 格式， 选择第一个可用（空闲）的轨道。
+   */
+  private Optional<DepotInfo> resolveDynamicDepotInfo(String dynamicSpec) {
+    // 解析 DYNAMIC:OP:D:DEPOT 或 DYNAMIC:OP:D:DEPOT:[1:3]
+    if (dynamicSpec == null
+        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
+      return Optional.empty();
+    }
+    String rest = dynamicSpec.substring("DYNAMIC:".length());
+    String[] parts = rest.split(":", 4);
+    if (parts.length < 3) {
+      return Optional.empty();
+    }
+    String operatorCode = parts[0].trim();
+    String nodeType = parts[1].trim(); // "D" for depot
+    String nodeName = parts[2].trim();
+
+    // 解析轨道范围
+    int fromTrack = 1;
+    int toTrack = 99;
+    if (parts.length >= 4) {
+      String rangeStr = parts[3].trim();
+      Optional<TrackRange> rangeOpt = parseTrackRange(rangeStr);
+      if (rangeOpt.isPresent()) {
+        fromTrack = rangeOpt.get().from();
+        toTrack = rangeOpt.get().to();
+      }
+    }
+
+    // 构建 nodeId 前缀用于匹配
+    String nodeIdPrefix = operatorCode + ":" + nodeType + ":" + nodeName + ":";
+
+    // 查找所有匹配的 depot 节点
+    List<SignNodeRegistry.SignNodeInfo> candidates =
+        signNodeRegistry.snapshotInfos().values().stream()
+            .filter(info -> info != null && info.definition() != null)
+            .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
+            .filter(
+                info -> {
+                  String nodeIdValue = info.definition().nodeId().value();
+                  return nodeIdValue != null
+                      && nodeIdValue
+                          .toUpperCase(java.util.Locale.ROOT)
+                          .startsWith(nodeIdPrefix.toUpperCase(java.util.Locale.ROOT));
+                })
+            .toList();
+
+    if (candidates.isEmpty()) {
+      debugLogger.accept("DYNAMIC depot: 未找到匹配节点 spec=" + dynamicSpec + " prefix=" + nodeIdPrefix);
+      return Optional.empty();
+    }
+
+    // 按轨道号排序并过滤范围
+    final int fFrom = fromTrack;
+    final int fTo = toTrack;
+    List<SignNodeRegistry.SignNodeInfo> inRange =
+        candidates.stream()
+            .filter(
+                info -> {
+                  int track = extractTrackNumber(info.definition().nodeId().value());
+                  return track >= fFrom && track <= fTo;
+                })
+            .sorted(
+                java.util.Comparator.comparingInt(
+                    info -> extractTrackNumber(info.definition().nodeId().value())))
+            .toList();
+
+    if (inRange.isEmpty()) {
+      debugLogger.accept(
+          "DYNAMIC depot: 范围内无节点 spec="
+              + dynamicSpec
+              + " range=["
+              + fromTrack
+              + ":"
+              + toTrack
+              + "]");
+      return Optional.empty();
+    }
+
+    // TODO: 可以添加占用检查，优先选择空闲轨道
+    // 目前简单选择第一个
+    SignNodeRegistry.SignNodeInfo selected = inRange.get(0);
+    debugLogger.accept(
+        "DYNAMIC depot: 选择轨道 spec=" + dynamicSpec + " selected=" + selected.definition().nodeId());
+
+    return Optional.of(
+        new DepotInfo(
+            selected.definition().nodeId(),
+            selected.worldId(),
+            selected.x(),
+            selected.y(),
+            selected.z(),
+            selected.locationText()));
+  }
+
+  /**
+   * 解析轨道范围字符串。
+   *
+   * @param rangeStr 如 "[1:3]" 或 "1"
+   * @return TrackRange 或 empty
+   */
+  private static Optional<TrackRange> parseTrackRange(String rangeStr) {
+    if (rangeStr == null || rangeStr.isBlank()) {
+      return Optional.empty();
+    }
+    String trimmed = rangeStr.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      String inner = trimmed.substring(1, trimmed.length() - 1);
+      int colonIdx = inner.indexOf(':');
+      if (colonIdx > 0) {
+        try {
+          int from = Integer.parseInt(inner.substring(0, colonIdx).trim());
+          int to = Integer.parseInt(inner.substring(colonIdx + 1).trim());
+          return Optional.of(new TrackRange(from, to));
+        } catch (NumberFormatException e) {
+          return Optional.empty();
+        }
+      }
+    }
+    // 单个数字
+    try {
+      int track = Integer.parseInt(trimmed);
+      return Optional.of(new TrackRange(track, track));
+    } catch (NumberFormatException e) {
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * 从 nodeId 中提取轨道号。
+   *
+   * @param nodeId 如 "SURC:D:OFL:1"
+   * @return 轨道号，解析失败返回 Integer.MAX_VALUE
+   */
+  private static int extractTrackNumber(String nodeId) {
+    if (nodeId == null || nodeId.isBlank()) {
+      return Integer.MAX_VALUE;
+    }
+    int lastColon = nodeId.lastIndexOf(':');
+    if (lastColon < 0 || lastColon >= nodeId.length() - 1) {
+      return Integer.MAX_VALUE;
+    }
+    try {
+      return Integer.parseInt(nodeId.substring(lastColon + 1).trim());
+    } catch (NumberFormatException e) {
+      return Integer.MAX_VALUE;
+    }
+  }
+
+  private record TrackRange(int from, int to) {}
+
+  private record DepotInfo(NodeId nodeId, UUID worldId, int x, int y, int z, String locationText) {}
 
   private record DestinationInfo(String name, String code) {}
 }

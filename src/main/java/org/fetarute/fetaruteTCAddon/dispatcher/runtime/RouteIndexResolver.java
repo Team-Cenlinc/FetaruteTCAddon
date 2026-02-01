@@ -5,13 +5,18 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 
 /**
  * 运行时线路索引解析器：优先相信 tag 中的 index，再在"附近"做容错匹配。
  *
  * <p>用于支持存在重复节点/回环的线路定义，避免简单的 {@code indexOf} 把列车进度误回退到最早出现处。
+ *
+ * <p>支持 DYNAMIC stop 匹配：当 stop 包含 DYNAMIC 指令时，会检查实际 nodeId 是否在 DYNAMIC 范围内。
  */
 public final class RouteIndexResolver {
 
@@ -110,6 +115,76 @@ public final class RouteIndexResolver {
       }
     }
     return -1;
+  }
+
+  /**
+   * 解析"当前已抵达节点"的索引（支持 DYNAMIC stop 匹配）。
+   *
+   * <p>当 route 中的 stop 包含 DYNAMIC 指令时，会检查实际 nodeId 是否在 DYNAMIC 范围内。
+   *
+   * @param route 路线定义
+   * @param stops 路线停靠表（用于 DYNAMIC 匹配）
+   * @param tagIndex tag 中记录的当前索引
+   * @param currentNode 当前实际节点
+   * @return 找不到时返回 -1
+   */
+  public static int resolveCurrentIndexWithDynamic(
+      RouteDefinition route, List<RouteStop> stops, OptionalInt tagIndex, NodeId currentNode) {
+    // 先尝试普通匹配
+    int basicResult = resolveCurrentIndex(route, tagIndex, currentNode);
+    if (basicResult >= 0) {
+      return basicResult;
+    }
+    // 尝试 DYNAMIC 匹配
+    if (stops == null || stops.isEmpty() || currentNode == null) {
+      return -1;
+    }
+    int startIdx = (tagIndex != null && tagIndex.isPresent()) ? tagIndex.getAsInt() : 0;
+    if (startIdx < 0) {
+      startIdx = 0;
+    }
+    // 从当前索引向前搜索 DYNAMIC stop
+    for (int i = startIdx; i < stops.size(); i++) {
+      RouteStop stop = stops.get(i);
+      if (stop == null) {
+        continue;
+      }
+      if (DynamicStopMatcher.matchesStop(currentNode, stop)) {
+        return i;
+      }
+    }
+    // 从头搜索
+    for (int i = 0; i < Math.min(startIdx, stops.size()); i++) {
+      RouteStop stop = stops.get(i);
+      if (stop == null) {
+        continue;
+      }
+      if (DynamicStopMatcher.matchesStop(currentNode, stop)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * 解析"当前已抵达节点"的索引（支持 DYNAMIC stop 匹配，使用 RouteDefinitionCache）。
+   *
+   * @param route 路线定义
+   * @param cache 路线定义缓存
+   * @param tagIndex tag 中记录的当前索引
+   * @param currentNode 当前实际节点
+   * @return 找不到时返回 -1
+   */
+  public static int resolveCurrentIndexWithDynamic(
+      RouteDefinition route, RouteDefinitionCache cache, OptionalInt tagIndex, NodeId currentNode) {
+    if (route == null) {
+      return -1;
+    }
+    if (cache == null) {
+      return resolveCurrentIndex(route, tagIndex, currentNode);
+    }
+    List<RouteStop> stops = cache.listStops(route.id());
+    return resolveCurrentIndexWithDynamic(route, stops, tagIndex, currentNode);
   }
 
   /**

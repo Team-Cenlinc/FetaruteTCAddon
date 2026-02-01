@@ -39,6 +39,27 @@ public final class PathProgressModel {
   /** 计算到目标节点的剩余路径（从 currentIndex->currentIndex+1 开始）。 */
   public Optional<PathProgress> remainingToNode(
       RailGraph graph, RouteDefinition route, int currentIndex, NodeId target) {
+    return remainingToNode(graph, route, currentIndex, target, null);
+  }
+
+  /**
+   * 计算到目标节点的剩余路径，支持从中间图节点开始。
+   *
+   * <p>若 lastPassedGraphNode 不为 null 且在展开路径中，则从该节点开始计算剩余路径， 这样可以在列车经过中间 waypoint（不在 route 定义中）时正确减少
+   * remainingEdgeCount。
+   *
+   * @param graph 调度图
+   * @param route 线路定义
+   * @param currentIndex 当前 route waypoint 索引
+   * @param target 目标节点
+   * @param lastPassedGraphNode 列车经过的最后一个图节点（可为 null）
+   */
+  public Optional<PathProgress> remainingToNode(
+      RailGraph graph,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId target,
+      NodeId lastPassedGraphNode) {
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(route, "route");
     Objects.requireNonNull(target, "target");
@@ -70,11 +91,29 @@ public final class PathProgressModel {
       return Optional.empty();
     }
 
+    // 若指定了 lastPassedGraphNode，从该节点开始截取剩余路径
+    if (lastPassedGraphNode != null) {
+      int passedIndex = -1;
+      for (int i = 0; i < expandedNodes.size(); i++) {
+        if (lastPassedGraphNode.equals(expandedNodes.get(i))) {
+          passedIndex = i;
+          break;
+        }
+      }
+      if (passedIndex > 0 && passedIndex < expandedNodes.size() - 1) {
+        expandedNodes = expandedNodes.subList(passedIndex, expandedNodes.size());
+      }
+    }
+
+    if (expandedNodes.size() < 2) {
+      return Optional.empty();
+    }
+
     List<RailEdge> edges = resolveEdges(graph, expandedNodes);
     if (edges.isEmpty()) {
       return Optional.empty();
     }
-    return Optional.of(new PathProgress(expandedNodes, edges));
+    return Optional.of(new PathProgress(List.copyOf(expandedNodes), edges));
   }
 
   private List<NodeId> expand(RailGraph graph, List<NodeId> nodes) {

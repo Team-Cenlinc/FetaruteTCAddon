@@ -412,10 +412,59 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (service == null || service.depotNodeId().isBlank()) {
       return Optional.empty();
     }
+    String depotSpec = service.depotNodeId();
+
+    // 检查是否是 DYNAMIC depot
+    if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
+      // 解析 DYNAMIC spec，查找任意匹配轨道的世界
+      return resolveDynamicDepotWorldId(depotSpec);
+    }
+
+    // 普通 depot：精确匹配 nodeId
     return signNodeRegistry.snapshotInfos().values().stream()
         .filter(info -> info != null && info.definition() != null)
         .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
-        .filter(info -> service.depotNodeId().equalsIgnoreCase(info.definition().nodeId().value()))
+        .filter(info -> depotSpec.equalsIgnoreCase(info.definition().nodeId().value()))
+        .map(SignNodeRegistry.SignNodeInfo::worldId)
+        .findFirst();
+  }
+
+  /**
+   * 为 DYNAMIC depot 规范查找世界 ID。
+   *
+   * <p>解析 "DYNAMIC:OP:D:DEPOT" 或 "DYNAMIC:OP:D:DEPOT:[1:3]" 格式， 查找任意匹配轨道的世界。
+   */
+  private Optional<java.util.UUID> resolveDynamicDepotWorldId(String dynamicSpec) {
+    // 解析 DYNAMIC:OP:D:DEPOT 或 DYNAMIC:OP:D:DEPOT:[1:3]
+    // 格式：DYNAMIC:operatorCode:nodeType:nodeName[:range]
+    if (dynamicSpec == null
+        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
+      return Optional.empty();
+    }
+    String rest = dynamicSpec.substring("DYNAMIC:".length());
+    String[] parts = rest.split(":", 4);
+    if (parts.length < 3) {
+      return Optional.empty();
+    }
+    String operatorCode = parts[0].trim();
+    String nodeType = parts[1].trim(); // "D" for depot
+    String nodeName = parts[2].trim();
+
+    // 构建 nodeId 前缀用于匹配
+    String nodeIdPrefix = operatorCode + ":" + nodeType + ":" + nodeName + ":";
+
+    // 查找任意匹配的 depot 节点
+    return signNodeRegistry.snapshotInfos().values().stream()
+        .filter(info -> info != null && info.definition() != null)
+        .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
+        .filter(
+            info -> {
+              String nodeIdValue = info.definition().nodeId().value();
+              return nodeIdValue != null
+                  && nodeIdValue
+                      .toUpperCase(java.util.Locale.ROOT)
+                      .startsWith(nodeIdPrefix.toUpperCase(java.util.Locale.ROOT));
+            })
         .map(SignNodeRegistry.SignNodeInfo::worldId)
         .findFirst();
   }

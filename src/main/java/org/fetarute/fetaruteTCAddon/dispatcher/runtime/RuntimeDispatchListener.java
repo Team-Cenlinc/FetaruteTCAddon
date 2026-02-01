@@ -56,8 +56,9 @@ public final class RuntimeDispatchListener implements Listener {
       return;
     }
     SignNodeDefinition definition = definitionOpt.get();
-    // Waypoint MEMBER_ENTER 跳过：停站仅在 GROUP_ENTER 触发
+    // Waypoint MEMBER_ENTER：仅更新 lastPassedGraphNode（用于 arriving 判定），不推进 routeIndex
     if (action == SignActionType.MEMBER_ENTER && definition.nodeType() == NodeType.WAYPOINT) {
+      dispatchService.updateLastPassedGraphNode(event, definition);
       return;
     }
     // STATION 类型节点（AutoStation）不由此监听器推进 routeIndex：

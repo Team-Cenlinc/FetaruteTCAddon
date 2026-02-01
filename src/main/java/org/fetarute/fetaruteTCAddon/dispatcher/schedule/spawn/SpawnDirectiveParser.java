@@ -23,6 +23,18 @@ public final class SpawnDirectiveParser {
     return Optional.empty();
   }
 
+  /**
+   * 从 RouteStop 的 notes 中查找指定 directive（如 CRET/DSTY）的目标。
+   *
+   * <p>返回值可能是：
+   *
+   * <ul>
+   *   <li>普通 nodeId：如 "SURC:D:OFL:1"
+   *   <li>DYNAMIC 规范：如 "DYNAMIC:SURC:D:OFL" 或 "DYNAMIC:SURC:D:OFL:[1:3]"
+   * </ul>
+   *
+   * <p>调用方需检查返回值是否以 "DYNAMIC:" 开头来判断是否需要动态选择。
+   */
   public static Optional<String> findDirectiveTarget(RouteStop stop, String directive) {
     if (stop == null || stop.notes().isEmpty() || directive == null || directive.isBlank()) {
       return Optional.empty();
@@ -51,7 +63,12 @@ public final class SpawnDirectiveParser {
       if (rest.isBlank()) {
         continue;
       }
-      // 指令格式：CRET <NodeId> 或 DSTY <NodeId>（NodeId 不包含空格）
+      // 检查是否是 DYNAMIC 格式
+      if (rest.toUpperCase(Locale.ROOT).startsWith("DYNAMIC:")) {
+        // 返回完整的 DYNAMIC 规范（包含 "DYNAMIC:" 前缀）
+        return Optional.of(rest);
+      }
+      // 普通格式：CRET <NodeId> 或 DSTY <NodeId>（NodeId 不包含空格）
       int ws = rest.indexOf(' ');
       if (ws >= 0) {
         rest = rest.substring(0, ws).trim();
@@ -61,6 +78,16 @@ public final class SpawnDirectiveParser {
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * 检查目标字符串是否是 DYNAMIC 规范。
+   *
+   * @param target findDirectiveTarget 返回的目标字符串
+   * @return 如果是 DYNAMIC 规范返回 true
+   */
+  public static boolean isDynamicTarget(String target) {
+    return target != null && target.toUpperCase(Locale.ROOT).startsWith("DYNAMIC:");
   }
 
   private static String firstToken(String line) {

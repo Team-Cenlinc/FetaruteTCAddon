@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
@@ -863,6 +864,10 @@ public final class FtaDepotCommand {
     if (!matches) {
       Optional<String> cretTarget = resolveCretTarget(first);
       matches = cretTarget.map(target -> target.equalsIgnoreCase(depotId.value())).orElse(false);
+    }
+    // 尝试 DYNAMIC 匹配：首站可能是 DYNAMIC depot stop
+    if (!matches) {
+      matches = DynamicStopMatcher.matchesStop(depotId, first);
     }
     if (!matches) {
       sender.sendMessage(

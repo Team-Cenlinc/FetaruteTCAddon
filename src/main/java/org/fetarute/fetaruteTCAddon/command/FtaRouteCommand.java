@@ -21,6 +21,7 @@ import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -1593,7 +1594,7 @@ public final class FtaRouteCommand {
                 && firstToken.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:");
         String nodeIdPart;
         if (firstTokenIsDynamic) {
-          // CRET DYNAMIC:OP:STATION:[range] -> 从 DYNAMIC 推导 nodeId
+          // CRET DYNAMIC:OP:STATION:[range] -> DYNAMIC 运行时动态选择，不写入固定 nodeId
           Optional<DynamicNodeSpec> specOpt = parseDynamicNodeSpec(normalizeActionLine(firstToken));
           if (specOpt.isEmpty()) {
             sender.sendMessage(
@@ -1602,8 +1603,8 @@ public final class FtaRouteCommand {
                     Map.of("line", String.valueOf(line.lineNo()), "text", trimmed)));
             return Optional.empty();
           }
-          DynamicNodeSpec spec = specOpt.get();
-          nodeIdPart = spec.resolveDefaultNodeId();
+          // nodeIdPart 置空，waypointNodeId 留空
+          nodeIdPart = null;
           trailingActions.add(normalizeActionLine(firstToken));
           // 继续解析尾部（如果有）
           if (argTokens.length > 1) {
@@ -1646,12 +1647,26 @@ public final class FtaRouteCommand {
             }
           }
         }
-        // 重新拼接 directive（只包含 prefix + nodeId，不含尾部 action）
-        String baseDirective = directive.prefix() + " " + nodeIdPart;
-        String mergedNotes =
-            trailingActions.isEmpty()
-                ? baseDirective
-                : baseDirective + "\n" + String.join("\n", trailingActions);
+        // 重新拼接 directive
+        // 当使用 DYNAMIC 简写时（nodeIdPart == null），notes 应写成 "CRET DYNAMIC:OP:D:OFL" 形式
+        // 而不是分行写 "CRET\nDYNAMIC:..."，这样 renderStopLine 才能正确解析
+        String mergedNotes;
+        if (nodeIdPart == null && !trailingActions.isEmpty()) {
+          // CRET/DSTY DYNAMIC:... -> 合并为单行 "CRET DYNAMIC:..."
+          mergedNotes = directive.prefix() + " " + String.join(" ", trailingActions);
+        } else if (nodeIdPart != null) {
+          // CRET/DSTY <nodeId> [actions...] -> "CRET nodeId\naction1\naction2..."
+          String baseDirective = directive.prefix() + " " + nodeIdPart;
+          mergedNotes =
+              trailingActions.isEmpty()
+                  ? baseDirective
+                  : baseDirective + "\n" + String.join("\n", trailingActions);
+        } else {
+          // CRET/DSTY 无参数（不应该发生，但做兜底）
+          mergedNotes = directive.prefix();
+        }
+        Optional<String> waypointNodeIdOpt =
+            nodeIdPart == null ? Optional.empty() : Optional.of(nodeIdPart);
         if ("CRET".equals(directive.prefix())) {
           if (!stops.isEmpty()) {
             sender.sendMessage(
@@ -1665,7 +1680,7 @@ public final class FtaRouteCommand {
                   routeId,
                   0,
                   Optional.empty(),
-                  Optional.of(nodeIdPart),
+                  waypointNodeIdOpt,
                   Optional.empty(),
                   RouteStopPassType.PASS,
                   Optional.of(mergedNotes));
@@ -1678,7 +1693,7 @@ public final class FtaRouteCommand {
                   routeId,
                   stops.size(),
                   Optional.empty(),
-                  Optional.of(nodeIdPart),
+                  waypointNodeIdOpt,
                   Optional.empty(),
                   RouteStopPassType.PASS,
                   Optional.of(mergedNotes));
@@ -1811,8 +1826,8 @@ public final class FtaRouteCommand {
       Optional<UUID> stationId = Optional.empty();
       Optional<String> waypointNodeId = Optional.empty();
       if (dynamicStopShorthand) {
-        DynamicNodeSpec spec = dynamicNodeSpecOpt.orElseThrow();
-        waypointNodeId = Optional.of(spec.resolveDefaultNodeId());
+        // DYNAMIC 运行时动态选择站台，不写入固定 waypointNodeId
+        // waypointNodeId 留空，运行时从 notes 解析 DYNAMIC 指令并选择站台
       } else if (targetToken.contains(":")) {
         // 形如 SURN:S:PTK:1 或 SURN:A:B:1:00 等：当作"图节点引用"原样写入。
         waypointNodeId = Optional.of(targetToken);
@@ -1950,27 +1965,6 @@ public final class FtaRouteCommand {
     return Optional.empty();
   }
 
-  private static OptionalInt parseRangeStart(String raw) {
-    if (raw == null) {
-      return OptionalInt.empty();
-    }
-    String trimmed = raw.trim();
-    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-      return OptionalInt.empty();
-    }
-    String inner = trimmed.substring(1, trimmed.length() - 1).trim();
-    int idx = inner.indexOf(':');
-    if (idx <= 0) {
-      return OptionalInt.empty();
-    }
-    String left = inner.substring(0, idx).trim();
-    try {
-      return OptionalInt.of(Integer.parseInt(left));
-    } catch (NumberFormatException ex) {
-      return OptionalInt.empty();
-    }
-  }
-
   private static Optional<DirectiveLine> parseDirectiveLine(String line) {
     if (line == null) {
       return Optional.empty();
@@ -2006,10 +2000,24 @@ public final class FtaRouteCommand {
    * </ul>
    */
   private record DynamicNodeSpec(
-      String operatorCode, String nodeType, String nodeName, int defaultTrack) {
-    /** 生成默认占位 NodeId（用于图可达性校验）。 */
+      String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
+    /** 生成默认占位 NodeId（用于图可达性校验，取范围第一个轨道）。 */
     String resolveDefaultNodeId() {
-      return operatorCode + ":" + nodeType + ":" + nodeName + ":" + defaultTrack;
+      return operatorCode + ":" + nodeType + ":" + nodeName + ":" + fromTrack;
+    }
+
+    /** 生成指定轨道的 NodeId。 */
+    String resolveNodeIdForTrack(int track) {
+      return operatorCode + ":" + nodeType + ":" + nodeName + ":" + track;
+    }
+
+    /** 生成范围内所有轨道的 NodeId 列表。 */
+    List<String> resolveAllNodeIds() {
+      List<String> ids = new ArrayList<>();
+      for (int t = fromTrack; t <= toTrack; t++) {
+        ids.add(resolveNodeIdForTrack(t));
+      }
+      return ids;
     }
   }
 
@@ -2077,14 +2085,81 @@ public final class FtaRouteCommand {
     if (nodeName.isBlank()) {
       return Optional.empty();
     }
-    int defaultTrack = 1;
+
+    // 解析轨道范围
+    int fromTrack = 1;
+    int toTrack = 1;
     if (!rangePayload.isBlank()) {
-      OptionalInt startOpt = parseRangeStart(rangePayload);
-      if (startOpt.isPresent()) {
-        defaultTrack = Math.max(1, startOpt.getAsInt());
+      Optional<int[]> rangeOpt = parseTrackRange(rangePayload);
+      if (rangeOpt.isPresent()) {
+        int[] range = rangeOpt.get();
+        fromTrack = range[0];
+        toTrack = range[1];
       }
     }
-    return Optional.of(new DynamicNodeSpec(operatorCode, nodeType, nodeName, defaultTrack));
+    return Optional.of(new DynamicNodeSpec(operatorCode, nodeType, nodeName, fromTrack, toTrack));
+  }
+
+  /**
+   * 解析轨道范围。
+   *
+   * <p>支持格式：
+   *
+   * <ul>
+   *   <li>[1:3] → from=1, to=3
+   *   <li>[2] → from=2, to=2
+   *   <li>1:3 → from=1, to=3
+   *   <li>2 → from=2, to=2
+   * </ul>
+   *
+   * @return int[2] = {fromTrack, toTrack}，或 empty 如果解析失败
+   */
+  private static Optional<int[]> parseTrackRange(String rangePayload) {
+    if (rangePayload == null || rangePayload.isBlank()) {
+      return Optional.empty();
+    }
+    String normalized = rangePayload.trim();
+    if (normalized.startsWith("[") && normalized.endsWith("]")) {
+      normalized = normalized.substring(1, normalized.length() - 1).trim();
+    }
+    if (normalized.isBlank()) {
+      return Optional.empty();
+    }
+    int colon = normalized.indexOf(':');
+    if (colon < 0) {
+      // 单值
+      OptionalInt single = parsePositiveInt(normalized);
+      if (single.isEmpty()) {
+        return Optional.empty();
+      }
+      int val = single.getAsInt();
+      return Optional.of(new int[] {val, val});
+    } else {
+      OptionalInt from = parsePositiveInt(normalized.substring(0, colon));
+      OptionalInt to = parsePositiveInt(normalized.substring(colon + 1));
+      if (from.isEmpty() || to.isEmpty()) {
+        return Optional.empty();
+      }
+      int f = from.getAsInt();
+      int t = to.getAsInt();
+      return Optional.of(new int[] {Math.min(f, t), Math.max(f, t)});
+    }
+  }
+
+  private static OptionalInt parsePositiveInt(String raw) {
+    if (raw == null) {
+      return OptionalInt.empty();
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty()) {
+      return OptionalInt.empty();
+    }
+    try {
+      int value = Integer.parseInt(trimmed);
+      return value > 0 ? OptionalInt.of(value) : OptionalInt.empty();
+    } catch (NumberFormatException ex) {
+      return OptionalInt.empty();
+    }
   }
 
   private RouteValidationResult validateRouteStops(
@@ -2132,18 +2207,80 @@ public final class FtaRouteCommand {
     }
 
     boolean missingNode = false;
-    List<NodeId> nodes = new ArrayList<>();
+    // 每个 stop 对应的可用 NodeId 列表（普通 stop 只有 1 个，DYNAMIC 可能有多个）
+    List<List<NodeId>> nodeOptions = new ArrayList<>();
+    // 每个 stop 的 DYNAMIC spec（用于后续可达性检查）
+    List<DynamicNodeSpec> dynamicSpecs = new ArrayList<>();
+
     for (RouteStop stop : stops) {
       if (stop == null) {
+        nodeOptions.add(List.of());
+        dynamicSpecs.add(null);
         continue;
       }
-      Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
-      if (nodeIdOpt.isEmpty()) {
-        missingNode = true;
-        addMissingNodeIssue(provider, stop, issues);
-        continue;
+
+      // 检查是否包含 DYNAMIC 动作
+      Optional<DynamicNodeSpec> dynamicSpecOpt = extractDynamicSpec(stop);
+      if (dynamicSpecOpt.isPresent()) {
+        DynamicNodeSpec spec = dynamicSpecOpt.get();
+        dynamicSpecs.add(spec);
+        // 验证 DYNAMIC 范围内的所有轨道节点
+        List<NodeId> validNodes = new ArrayList<>();
+        List<String> missingTracks = new ArrayList<>();
+        for (String nodeIdStr : spec.resolveAllNodeIds()) {
+          NodeId nodeId = NodeId.of(nodeIdStr);
+          // 检查节点是否存在于图中（遍历所有已加载快照）
+          boolean found = false;
+          if (plugin.getRailGraphService() != null) {
+            for (World w : plugin.getServer().getWorlds()) {
+              Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                  plugin.getRailGraphService().getSnapshot(w);
+              if (snapshotOpt.isPresent()
+                  && snapshotOpt.get().graph().findNode(nodeId).isPresent()) {
+                found = true;
+                break;
+              }
+            }
+          }
+          if (found) {
+            validNodes.add(nodeId);
+          } else {
+            missingTracks.add(nodeIdStr);
+          }
+        }
+        if (validNodes.isEmpty()) {
+          // 所有轨道都不存在
+          missingNode = true;
+          issues.add(
+              new RouteValidationIssue(
+                  "command.route.define.dynamic-no-valid-tracks",
+                  Map.of(
+                      "seq", String.valueOf(stop.sequence()),
+                      "spec", spec.operatorCode() + ":" + spec.nodeType() + ":" + spec.nodeName(),
+                      "range", "[" + spec.fromTrack() + ":" + spec.toTrack() + "]")));
+        } else if (!missingTracks.isEmpty()) {
+          // 部分轨道不存在（警告，不阻止定义）
+          issues.add(
+              new RouteValidationIssue(
+                  "command.route.define.dynamic-partial-tracks",
+                  Map.of(
+                      "seq", String.valueOf(stop.sequence()),
+                      "missing", String.join(", ", missingTracks),
+                      "valid", String.valueOf(validNodes.size()))));
+        }
+        nodeOptions.add(validNodes);
+      } else {
+        dynamicSpecs.add(null);
+        // 普通 stop：解析单个 NodeId
+        Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
+        if (nodeIdOpt.isEmpty()) {
+          missingNode = true;
+          addMissingNodeIssue(provider, stop, issues);
+          nodeOptions.add(List.of());
+        } else {
+          nodeOptions.add(List.of(nodeIdOpt.get()));
+        }
       }
-      nodes.add(nodeIdOpt.get());
     }
 
     boolean reachabilitySkipped = false;
@@ -2151,27 +2288,42 @@ public final class FtaRouteCommand {
       if (plugin.getRailGraphService() == null
           || plugin.getRailGraphService().snapshotCount() <= 0) {
         reachabilitySkipped = true;
-      } else if (!missingNode && nodes.size() >= 2) {
-        if (plugin.getRailGraphService().findWorldIdForPath(nodes).isEmpty()) {
-          boolean pairMissing = false;
-          for (int i = 0; i < nodes.size() - 1; i++) {
-            if (hasDynamicAction(stops.get(i)) || hasDynamicAction(stops.get(i + 1))) {
-              // 动态站台：下一跳 nodeId 会在运行时根据占用/可达性选择，define 阶段无法对“占位站台”做严格可达性校验。
-              reachabilitySkipped = true;
-              continue;
+      } else if (!missingNode) {
+        // 检查相邻 stop 之间的可达性
+        for (int i = 0; i < nodeOptions.size() - 1; i++) {
+          List<NodeId> fromNodes = nodeOptions.get(i);
+          List<NodeId> toNodes = nodeOptions.get(i + 1);
+          if (fromNodes.isEmpty() || toNodes.isEmpty()) {
+            reachabilitySkipped = true;
+            continue;
+          }
+          // 检查是否存在任意一条可达路径
+          boolean anyReachable = false;
+          for (NodeId from : fromNodes) {
+            for (NodeId to : toNodes) {
+              if (plugin.getRailGraphService().findWorldIdForConnectedPair(from, to).isPresent()) {
+                anyReachable = true;
+                break;
+              }
             }
-            NodeId from = nodes.get(i);
-            NodeId to = nodes.get(i + 1);
-            if (plugin.getRailGraphService().findWorldIdForConnectedPair(from, to).isEmpty()) {
-              issues.add(
-                  new RouteValidationIssue(
-                      "command.route.define.edge-unreachable",
-                      Map.of("from", from.value(), "to", to.value())));
-              pairMissing = true;
+            if (anyReachable) {
+              break;
             }
           }
-          if (!pairMissing) {
-            issues.add(new RouteValidationIssue("command.route.define.path-cross-world", Map.of()));
+          if (!anyReachable) {
+            // 构建错误信息
+            String fromDesc =
+                fromNodes.size() == 1
+                    ? fromNodes.get(0).value()
+                    : "DYNAMIC[" + fromNodes.size() + " tracks]";
+            String toDesc =
+                toNodes.size() == 1
+                    ? toNodes.get(0).value()
+                    : "DYNAMIC[" + toNodes.size() + " tracks]";
+            issues.add(
+                new RouteValidationIssue(
+                    "command.route.define.edge-unreachable",
+                    Map.of("from", fromDesc, "to", toDesc)));
           }
         }
       }
@@ -2179,17 +2331,35 @@ public final class FtaRouteCommand {
     return new RouteValidationResult(List.copyOf(issues), reachabilitySkipped);
   }
 
-  private boolean hasDynamicAction(RouteStop stop) {
+  /**
+   * 从 stop 的 notes 中提取 DYNAMIC 规范（如果存在）。
+   *
+   * <p>支持以下格式：
+   *
+   * <ul>
+   *   <li>DYNAMIC:OP:S:STATION:[1:3]
+   *   <li>CRET DYNAMIC:OP:D:DEPOT:[1:3]
+   *   <li>DSTY DYNAMIC:OP:D:DEPOT:[1:3]
+   * </ul>
+   */
+  private Optional<DynamicNodeSpec> extractDynamicSpec(RouteStop stop) {
     if (stop == null) {
-      return false;
+      return Optional.empty();
     }
     for (String line : extractActionLines(stop)) {
-      String prefix = firstSegment(line).trim().toUpperCase(Locale.ROOT);
-      if ("DYNAMIC".equals(prefix)) {
-        return true;
+      String upper = line.toUpperCase(Locale.ROOT);
+      // 独立 DYNAMIC 行
+      if (upper.startsWith("DYNAMIC:")) {
+        return parseDynamicNodeSpec(normalizeActionLine(line));
+      }
+      // CRET/DSTY DYNAMIC:... 格式
+      int dynamicIdx = upper.indexOf(" DYNAMIC:");
+      if (dynamicIdx >= 0) {
+        String dynamicPart = line.substring(dynamicIdx + 1).trim();
+        return parseDynamicNodeSpec(normalizeActionLine(dynamicPart));
       }
     }
-    return false;
+    return Optional.empty();
   }
 
   /**
@@ -2311,10 +2481,20 @@ public final class FtaRouteCommand {
             .filter(
                 s -> {
                   if (directivePrefix.isPresent()) {
-                    Optional<DirectiveLine> parsed = parseDirectiveLine(s);
-                    if (parsed.isPresent()
-                        && parsed.get().prefix().equalsIgnoreCase(directivePrefix.get())) {
-                      return false;
+                    String prefix = directivePrefix.get();
+                    // CRET/DSTY：检查 parseDirectiveLine 匹配
+                    if (DIRECTIVE_PREFIXES.contains(prefix)) {
+                      Optional<DirectiveLine> parsed = parseDirectiveLine(s);
+                      if (parsed.isPresent() && parsed.get().prefix().equalsIgnoreCase(prefix)) {
+                        return false;
+                      }
+                    }
+                    // DYNAMIC/CHANGE/ACTION：检查行是否以该前缀开头
+                    if (ACTION_PREFIXES.contains(prefix)) {
+                      String upper = s.toUpperCase(Locale.ROOT);
+                      if (upper.startsWith(prefix + ":") || upper.startsWith(prefix + " ")) {
+                        return false;
+                      }
                     }
                   }
                   return true;
@@ -2367,13 +2547,35 @@ public final class FtaRouteCommand {
   }
 
   /**
-   * 将一个 RouteStop 渲染为 stop 行。
+   * 将一个 RouteStop 渲染为 stop 行（用于编辑器回显）。
    *
-   * <p>优先显示 waypointNodeId（用于库口/咽喉/区间点）；否则尝试回填 stationId 对应的站点 code。
+   * <p>渲染规则：
+   *
+   * <ul>
+   *   <li>优先从 notes 提取 directive 行（CRET/DSTY/DYNAMIC/CHANGE/ACTION）
+   *   <li>若有 directive，前缀取 directive 类型，target 取 directive 剩余部分
+   *   <li>若无 directive，前缀取 passType（PASS/STOP/TERM），target 取 waypointNodeId 或 stationCode
+   * </ul>
+   *
+   * <p>输出示例：
+   *
+   * <pre>
+   * CRET SURN:D:DEPOT:1
+   * CRET DYNAMIC:SURN:D:DEPOT:[1:3]
+   * DYNAMIC SURN:S:PPK:[1:3]
+   * STOP SURN:S:PPK:1 dwell=30
+   * </pre>
    */
   private String renderStopLine(StorageProvider provider, UUID operatorId, RouteStop stop) {
+    // 从 notes 里提取 directive 行（CRET/DSTY 等）
+    // 注意：DYNAMIC/CHANGE/ACTION 不是 directive prefix，而是 target 的一部分
+    Optional<String> directiveLine = extractDirectiveLine(stop);
+    Optional<String> directivePrefix = resolveDirectivePrefix(stop);
+
+    // prefix 只能是 CRET/DSTY（覆盖 passType），其他情况使用 passType
     String prefix =
-        resolveDirectivePrefix(stop)
+        directivePrefix
+            .filter(DIRECTIVE_PREFIXES::contains) // 只有 CRET/DSTY 可作为 prefix
             .map(value -> value + " ")
             .orElseGet(
                 () ->
@@ -2383,17 +2585,68 @@ public final class FtaRouteCommand {
                       case STOP -> "STOP ";
                     });
     String dwell = stop.dwellSeconds().map(value -> " dwell=" + value).orElse("");
-    String target =
-        stop.waypointNodeId()
-            .filter(s -> !s.isBlank())
-            .or(
-                () ->
-                    stop.stationId()
-                        .flatMap(provider.stations()::findById)
-                        .map(Station::code)
-                        .filter(s -> !s.isBlank()))
-            .orElse("<unknown>");
+
+    // 确定 target
+    String target;
+    if (directiveLine.isPresent()) {
+      String line = directiveLine.get();
+      // 如果 prefix 是 CRET/DSTY，需要从 line 中去掉该前缀
+      if (directivePrefix.isPresent() && DIRECTIVE_PREFIXES.contains(directivePrefix.get())) {
+        String prefixPart = directivePrefix.get();
+        if (line.toUpperCase(Locale.ROOT).startsWith(prefixPart.toUpperCase(Locale.ROOT))) {
+          String remainder = line.substring(prefixPart.length());
+          // 去掉分隔符（空格或冒号）
+          if (!remainder.isEmpty() && (remainder.charAt(0) == ' ' || remainder.charAt(0) == ':')) {
+            remainder = remainder.substring(1);
+          }
+          target = remainder.isEmpty() ? "<unknown>" : remainder;
+        } else {
+          target = line;
+        }
+      } else {
+        // DYNAMIC/CHANGE/ACTION 等：整行作为 target
+        target = line;
+      }
+    } else {
+      target =
+          stop.waypointNodeId()
+              .filter(s -> !s.isBlank())
+              .or(
+                  () ->
+                      stop.stationId()
+                          .flatMap(provider.stations()::findById)
+                          .map(Station::code)
+                          .filter(s -> !s.isBlank()))
+              .orElse("<unknown>");
+    }
     return prefix + target + dwell;
+  }
+
+  /** 从 stop 的 notes 里提取第一条 directive 行（CRET/DSTY/DYNAMIC/CHANGE/ACTION）。 */
+  /**
+   * 从 stop 的 notes 里提取第一条 directive 行。
+   *
+   * <p>支持的 directive 前缀：
+   *
+   * <ul>
+   *   <li>CRET、DSTY（出入库指令）
+   *   <li>DYNAMIC、CHANGE、ACTION（动作指令）
+   * </ul>
+   *
+   * <p>返回完整的 directive 行（如 "CRET SURN:D:DEPOT:1" 或 "DYNAMIC:SURN:S:PPK:[1:3]"）。
+   */
+  private Optional<String> extractDirectiveLine(RouteStop stop) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    for (String line : extractActionLines(stop)) {
+      String prefix = firstSegment(line).trim().toUpperCase(Locale.ROOT);
+      // 支持 CRET/DSTY 以及 DYNAMIC/CHANGE/ACTION
+      if (DIRECTIVE_PREFIXES.contains(prefix) || ACTION_PREFIXES.contains(prefix)) {
+        return Optional.of(line);
+      }
+    }
+    return Optional.empty();
   }
 
   /**
@@ -2627,11 +2880,18 @@ public final class FtaRouteCommand {
           resolveTeleportCommand(provider, operatorId, stationCode)
               .orElseGet(() -> node.equals("-") ? "" : "/train debug destination " + node);
 
+      // 只有 STOP/TERM 才显示 dwell
+      String dwellSuffix = entry.isPass() ? "" : " <gray>dwell=" + dwellBaseline + "</gray>";
+
       sender.sendMessage(
           locale
               .component(
                   "command.route.define.debug.entry",
-                  Map.of("seq", index, "target", stationCode.equals("-") ? node : stationCode))
+                  Map.of(
+                      "seq", index,
+                      "pass", pass,
+                      "target", stationCode.equals("-") ? node : stationCode,
+                      "dwell_suffix", dwellSuffix))
               .hoverEvent(
                   HoverEvent.showText(
                       locale.component(
@@ -2656,36 +2916,73 @@ public final class FtaRouteCommand {
   /**
    * debug 输出中的 passType 展示。
    *
-   * <p>CRET/DSTY 是“动作指令”，语义上等同 PASS（不停车），但为了避免把它们显示成 PASS 造成误解，这里优先显示为 {@code CRET}/{@code DSTY}。
+   * <p>格式：{@code <passType> <directive>:<target>}，例如 "TERM DYNAMIC:SURC:S:PPK"。
+   *
+   * <p>CRET/DSTY/DYNAMIC 等是"动作指令"，会附加到 passType 后面显示。
    */
   private static String resolveStopPassLabel(LocaleManager locale, RouteStop stop) {
     if (stop == null) {
       return "-";
     }
+    String passTypeLabel = resolvePassTypeShort(stop.passType());
     Optional<String> notes = stop.notes();
-    if (notes.isPresent()) {
-      String raw = notes.get();
-      if (raw != null) {
-        String trimmed = raw.trim();
-        String upper = trimmed.toUpperCase(java.util.Locale.ROOT);
-        if (upper.startsWith("CRET ") || "CRET".equals(upper)) {
-          return "CRET";
+    if (notes.isEmpty() || notes.get() == null || notes.get().isBlank()) {
+      return passTypeLabel;
+    }
+    String raw = notes.get().trim();
+    String upper = raw.toUpperCase(java.util.Locale.ROOT);
+    // 按优先级检测 directive 前缀并附加显示
+    for (String directive : List.of("CRET", "DSTY", "DYNAMIC", "CHANGE", "ACTION")) {
+      if (upper.startsWith(directive + " ")
+          || upper.startsWith(directive + ":")
+          || directive.equals(upper)) {
+        // 提取 directive 后面的目标（如 "DYNAMIC:SURC:S:PPK" -> "SURC:S:PPK"）
+        String rest = raw.substring(directive.length()).trim();
+        if (rest.startsWith(":")) {
+          rest = rest.substring(1).trim();
         }
-        if (upper.startsWith("DSTY ") || "DSTY".equals(upper)) {
-          return "DSTY";
+        // 组合格式：TERM DYNAMIC:SURC:S:PPK
+        if (rest.isEmpty()) {
+          return passTypeLabel + " " + directive;
         }
+        return passTypeLabel + " " + directive + ":" + rest;
       }
     }
-    return locale.enumText("enum.route-stop-pass-type", stop.passType());
+    return passTypeLabel;
   }
 
+  /** 返回 passType 的简短标签（STOP/PASS/TERM）。 */
+  private static String resolvePassTypeShort(RouteStopPassType passType) {
+    if (passType == null) {
+      return "-";
+    }
+    return switch (passType) {
+      case STOP -> "STOP";
+      case PASS -> "PASS";
+      case TERMINATE -> "TERM";
+    };
+  }
+
+  /**
+   * 从 stop 的 notes 里提取 directive 前缀。
+   *
+   * <p>返回的前缀可能是：
+   *
+   * <ul>
+   *   <li>CRET/DSTY：出入库指令（会覆盖 passType 显示）
+   *   <li>DYNAMIC/CHANGE/ACTION：动作指令（作为 target 的一部分，不覆盖 passType）
+   * </ul>
+   *
+   * <p>调用方需根据业务逻辑判断是否用作 prefix 替换 passType。
+   */
   private Optional<String> resolveDirectivePrefix(RouteStop stop) {
     if (stop == null) {
       return Optional.empty();
     }
     for (String line : extractActionLines(stop)) {
       String prefix = firstSegment(line).trim().toUpperCase(Locale.ROOT);
-      if (DIRECTIVE_PREFIXES.contains(prefix)) {
+      // 支持 CRET/DSTY 以及 DYNAMIC/CHANGE/ACTION
+      if (DIRECTIVE_PREFIXES.contains(prefix) || ACTION_PREFIXES.contains(prefix)) {
         return Optional.of(prefix);
       }
     }
@@ -2767,24 +3064,43 @@ public final class FtaRouteCommand {
       boolean expanded) {
     String passLabel = expanded ? "PASS (path)" : resolveStopPassLabel(locale, stop);
     String dwellBaseline = stop.dwellSeconds().map(String::valueOf).orElse("-");
-    String node = stop.waypointNodeId().orElse("-");
-    String stationCode =
-        stop.stationId()
-            .flatMap(provider.stations()::findById)
-            .map(Station::code)
-            .orElseGet(
-                () ->
-                    stop.waypointNodeId()
-                        .flatMap(id -> tryExtractStationCodeFromNodeId(id, true))
-                        .orElse("-"));
-    return new DebugStopEntry(seq, passLabel, dwellBaseline, node, stationCode, expanded);
+    boolean isPass = expanded || stop.passType() == RouteStopPassType.PASS;
+
+    // 对于 DYNAMIC stop，从 notes 中提取显示信息
+    Optional<DynamicNodeSpec> dynamicSpec = extractDynamicSpec(stop);
+    String node;
+    String stationCode;
+    if (dynamicSpec.isPresent()) {
+      DynamicNodeSpec spec = dynamicSpec.get();
+      // 显示 DYNAMIC 规范而不是 "-"
+      String typeCode = spec.nodeType(); // "S" or "D"
+      String range =
+          spec.fromTrack() == spec.toTrack()
+              ? String.valueOf(spec.fromTrack())
+              : "[" + spec.fromTrack() + ":" + spec.toTrack() + "]";
+      node =
+          "DYNAMIC:" + spec.operatorCode() + ":" + typeCode + ":" + spec.nodeName() + ":" + range;
+      stationCode = spec.nodeName();
+    } else {
+      node = stop.waypointNodeId().orElse("-");
+      stationCode =
+          stop.stationId()
+              .flatMap(provider.stations()::findById)
+              .map(Station::code)
+              .orElseGet(
+                  () ->
+                      stop.waypointNodeId()
+                          .flatMap(id -> tryExtractStationCodeFromNodeId(id, true))
+                          .orElse("-"));
+    }
+    return new DebugStopEntry(seq, passLabel, dwellBaseline, node, stationCode, expanded, isPass);
   }
 
   private DebugStopEntry toPathDebugEntry(NodeId node, String seq) {
     String nodeValue = node == null ? "-" : node.value();
     String stationCode =
         node == null ? "-" : tryExtractStationCodeFromNodeId(node.value(), true).orElse("-");
-    return new DebugStopEntry(seq, "PASS (path)", "-", nodeValue, stationCode, true);
+    return new DebugStopEntry(seq, "PASS (path)", "-", nodeValue, stationCode, true, true);
   }
 
   private Optional<List<NodeId>> findShortestPathNodes(
@@ -2825,7 +3141,8 @@ public final class FtaRouteCommand {
       String dwellBaseline,
       String node,
       String stationCode,
-      boolean expanded) {}
+      boolean expanded,
+      boolean isPass) {}
 
   /**
    * 根据 stationCode 解析可用的传送命令。

@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
@@ -236,6 +237,7 @@ public final class RouteDefinitionCache {
     int totalStops = sorted.size();
     int waypointStops = 0;
     int stationStops = 0;
+    int dynamicStops = 0;
     int missingStation = 0;
     int missingStationGraph = 0;
     for (RouteStop stop : sorted) {
@@ -255,6 +257,8 @@ public final class RouteDefinitionCache {
             missingStationGraph++;
           }
         }
+      } else if (DynamicStopMatcher.isDynamicStop(stop)) {
+        dynamicStops++;
       }
       nodeIdOpt.ifPresent(nodes::add);
     }
@@ -276,6 +280,8 @@ public final class RouteDefinitionCache {
               + waypointStops
               + " stationStops="
               + stationStops
+              + " dynamicStops="
+              + dynamicStops
               + " missingStation="
               + missingStation
               + " missingStationGraph="
@@ -317,6 +323,21 @@ public final class RouteDefinitionCache {
         return Optional.empty();
       }
       return Optional.of(NodeId.of(station.graphNodeId().get()));
+    }
+    // 尝试从 DYNAMIC 指令解析占位 NodeId
+    Optional<DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(stop);
+    if (specOpt.isPresent()) {
+      DynamicSpec spec = specOpt.get();
+      // 生成占位 NodeId：OP:S:STATION:fromTrack 或 OP:D:DEPOT:fromTrack
+      String placeholder =
+          spec.operatorCode()
+              + ":"
+              + spec.nodeType()
+              + ":"
+              + spec.nodeName()
+              + ":"
+              + spec.fromTrack();
+      return Optional.of(NodeId.of(placeholder));
     }
     return Optional.empty();
   }

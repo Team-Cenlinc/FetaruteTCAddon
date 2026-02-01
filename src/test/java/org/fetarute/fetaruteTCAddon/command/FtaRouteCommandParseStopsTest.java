@@ -135,8 +135,8 @@ class FtaRouteCommandParseStopsTest {
     List<RouteStop> stops = result.get();
     assertEquals(1, stops.size());
     assertEquals(RouteStopPassType.STOP, stops.get(0).passType());
-    assertTrue(stops.get(0).waypointNodeId().isPresent());
-    assertEquals("SURN:S:PTK:1", stops.get(0).waypointNodeId().orElse(""));
+    // DYNAMIC 运行时动态选择站台，不写入固定 waypointNodeId
+    assertTrue(stops.get(0).waypointNodeId().isEmpty());
     assertEquals("DYNAMIC:SURN:PTK:[1:3]", stops.get(0).notes().orElse(""));
   }
 
@@ -220,6 +220,183 @@ class FtaRouteCommandParseStopsTest {
     assertTrue(notes0.contains("CRET SURN:D:DEPOT:1"));
     assertTrue(notes0.contains("DYNAMIC:SURN:PTK:[1:3]"));
     assertTrue(notes0.contains("CHANGE:SURN:LINE2"));
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsCretDynamicShorthand() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    // CRET DYNAMIC:OP:D:DEPOT:[1:3] (无显式 NodeId，由 DYNAMIC 运行时选择)
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(
+            new FtaRouteCommand.BookLine(1, "CRET DYNAMIC:SURN:D:DEPOT:[1:3]"),
+            new FtaRouteCommand.BookLine(2, "SURN:S:STATION:1"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(2, stops.size());
+    // CRET DYNAMIC 简写形式：waypointNodeId 为空（运行时选择）
+    assertTrue(
+        stops.get(0).waypointNodeId().isEmpty(),
+        "waypointNodeId should be empty for DYNAMIC shorthand");
+    assertEquals(RouteStopPassType.PASS, stops.get(0).passType());
+    // notes 应为单行 "CRET DYNAMIC:..."
+    String notes0 = stops.get(0).notes().orElse("");
+    assertTrue(notes0.startsWith("CRET DYNAMIC:"), "notes should be 'CRET DYNAMIC:...' format");
+    assertTrue(notes0.contains("SURN:D:DEPOT:[1:3]"), "notes should contain the DYNAMIC spec");
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsDstyDynamicShorthand() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    // DSTY DYNAMIC:OP:D:DEPOT:[1:3]
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(
+            new FtaRouteCommand.BookLine(1, "SURN:S:STATION:1"),
+            new FtaRouteCommand.BookLine(2, "DSTY DYNAMIC:SURN:D:DEPOT:[2:4]"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(2, stops.size());
+    // DSTY DYNAMIC 简写形式
+    assertTrue(
+        stops.get(1).waypointNodeId().isEmpty(),
+        "waypointNodeId should be empty for DYNAMIC shorthand");
+    assertEquals(RouteStopPassType.PASS, stops.get(1).passType());
+    String notes1 = stops.get(1).notes().orElse("");
+    assertTrue(notes1.startsWith("DSTY DYNAMIC:"), "notes should be 'DSTY DYNAMIC:...' format");
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsStopDynamic() {
+    // STOP DYNAMIC:OP:S:STATION:[1:3] - 独立 DYNAMIC 作为 target
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(new FtaRouteCommand.BookLine(1, "STOP DYNAMIC:SURN:S:PPK:[1:3]"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(1, stops.size());
+    assertEquals(RouteStopPassType.STOP, stops.get(0).passType());
+    assertTrue(
+        stops.get(0).waypointNodeId().isEmpty(), "waypointNodeId should be empty for DYNAMIC");
+    String notes = stops.get(0).notes().orElse("");
+    assertTrue(notes.startsWith("DYNAMIC:"), "notes should start with 'DYNAMIC:'");
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsTermDynamic() {
+    // TERM DYNAMIC:OP:S:STATION:[1:2] - TERMINATE with DYNAMIC
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(
+            new FtaRouteCommand.BookLine(1, "SURN:S:START:1"),
+            new FtaRouteCommand.BookLine(2, "TERM DYNAMIC:SURN:S:END:[1:2]"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(2, stops.size());
+    assertEquals(RouteStopPassType.TERMINATE, stops.get(1).passType());
+    assertTrue(stops.get(1).waypointNodeId().isEmpty());
+    String notes = stops.get(1).notes().orElse("");
+    assertTrue(notes.startsWith("DYNAMIC:"));
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsPassDynamic() {
+    // PASS DYNAMIC:OP:S:STATION:[1:3] - PASS with DYNAMIC (通过不停车)
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(
+            new FtaRouteCommand.BookLine(1, "SURN:S:START:1"),
+            new FtaRouteCommand.BookLine(2, "PASS DYNAMIC:SURN:S:MID:[1:2]"),
+            new FtaRouteCommand.BookLine(3, "SURN:S:END:1"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(3, stops.size());
+    assertEquals(RouteStopPassType.PASS, stops.get(1).passType());
+    assertTrue(stops.get(1).waypointNodeId().isEmpty());
+    String notes = stops.get(1).notes().orElse("");
+    assertTrue(notes.startsWith("DYNAMIC:"));
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsDynamicWithoutRange() {
+    // DYNAMIC:OP:S:STATION (无 range，默认轨道 1)
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(new FtaRouteCommand.BookLine(1, "STOP DYNAMIC:SURN:S:PPK"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(1, stops.size());
+    assertTrue(stops.get(0).waypointNodeId().isEmpty());
+    String notes = stops.get(0).notes().orElse("");
+    assertTrue(notes.contains("DYNAMIC:SURN:S:PPK"));
+  }
+
+  @Test
+  void parseStopsFromBookAcceptsDynamicDepot() {
+    // DYNAMIC:OP:D:DEPOT:[1:3] - Depot 类型
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    UUID routeId = UUID.randomUUID();
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(new FtaRouteCommand.BookLine(1, "CRET DYNAMIC:SURN:D:DEPOT:[1:3]"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(locale, provider, UUID.randomUUID(), routeId, player, lines);
+
+    assertTrue(result.isPresent());
+    List<RouteStop> stops = result.get();
+    assertEquals(1, stops.size());
+    assertTrue(stops.get(0).waypointNodeId().isEmpty());
+    String notes = stops.get(0).notes().orElse("");
+    assertTrue(notes.contains("DYNAMIC:SURN:D:DEPOT:[1:3]"));
   }
 
   private static FetaruteTCAddon mockPlugin() {

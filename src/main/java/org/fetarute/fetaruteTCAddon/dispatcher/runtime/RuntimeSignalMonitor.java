@@ -111,10 +111,12 @@ public final class RuntimeSignalMonitor implements Runnable {
         (currentIndex >= 0 && currentIndex < waypoints.size())
             ? Optional.of(waypoints.get(currentIndex))
             : Optional.empty();
-    Optional<NodeId> lastPassedNodeId =
-        (currentIndex > 0 && currentIndex - 1 < waypoints.size())
-            ? Optional.of(waypoints.get(currentIndex - 1))
-            : Optional.empty();
+    // 优先使用 RouteProgressEntry 中的 lastPassedGraphNode（中间 waypoint 触发会更新）
+    // 若为空则回退到 route waypoints 上一个节点
+    Optional<NodeId> lastPassedNodeId = entry.lastPassedGraphNode();
+    if (lastPassedNodeId.isEmpty() && currentIndex > 0 && currentIndex - 1 < waypoints.size()) {
+      lastPassedNodeId = Optional.of(waypoints.get(currentIndex - 1));
+    }
     return new NodeSampleInfo(
         currentNodeId, lastPassedNodeId, Optional.ofNullable(entry.lastSignal()));
   }

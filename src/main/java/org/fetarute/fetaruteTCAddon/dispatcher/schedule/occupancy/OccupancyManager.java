@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import java.util.List;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
  * 调度占用/闭塞管理器：负责资源互斥（headway 行为由实现决定）。
@@ -26,6 +27,20 @@ public interface OccupancyManager {
 
   /** 释放单个资源占用（可选校验列车名称）。 */
   boolean releaseResource(OccupancyResource resource, Optional<String> trainName);
+
+  /**
+   * 检查节点是否被占用。
+   *
+   * @param nodeId 节点 ID
+   * @return true 如果节点被占用
+   */
+  default boolean isNodeOccupied(NodeId nodeId) {
+    if (nodeId == null) {
+      return false;
+    }
+    OccupancyResource resource = OccupancyResource.forNode(nodeId);
+    return getClaim(resource).isPresent();
+  }
 
   /**
    * 是否需要让行（优先级让行）。

@@ -454,12 +454,7 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
       RouteStop first = stops.get(0);
       Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
       boolean depotSpawn = cret.isPresent();
-      String startNode =
-          cret.orElseGet(
-              () ->
-                  first != null && first.waypointNodeId().isPresent()
-                      ? first.waypointNodeId().get()
-                      : "");
+      String startNode = cret.orElseGet(() -> resolveStopNodeId(first));
       if (startNode == null || startNode.isBlank()) {
         continue;
       }
@@ -576,12 +571,7 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
       RouteStop first = stops.get(0);
       Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
       boolean depotSpawn = cret.isPresent();
-      String startNode =
-          cret.orElseGet(
-              () ->
-                  first != null && first.waypointNodeId().isPresent()
-                      ? first.waypointNodeId().get()
-                      : "");
+      String startNode = cret.orElseGet(() -> resolveStopNodeId(first));
       if (startNode == null || startNode.isBlank()) {
         continue;
       }
@@ -599,6 +589,27 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
               .withResolvedWeight(weight));
     }
     return candidates;
+  }
+
+  /**
+   * 从 RouteStop 解析节点 ID。
+   *
+   * <p>优先使用 waypointNodeId，若为空则尝试解析 DYNAMIC 规范并生成 placeholder。
+   */
+  private static String resolveStopNodeId(RouteStop stop) {
+    if (stop == null) {
+      return "";
+    }
+    if (stop.waypointNodeId().isPresent()) {
+      return stop.waypointNodeId().get();
+    }
+    // 尝试解析 DYNAMIC
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec> specOpt =
+        org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.parseDynamicSpec(stop);
+    if (specOpt.isPresent()) {
+      return specOpt.get().toPlaceholderNodeId();
+    }
+    return "";
   }
 
   private Optional<Boolean> readBoolean(Map<String, Object> meta, String key) {

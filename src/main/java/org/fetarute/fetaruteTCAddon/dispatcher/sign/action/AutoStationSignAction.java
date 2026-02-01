@@ -28,9 +28,11 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -642,7 +644,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         }
         if (!exitOffsetState.applied()) {
           resolveExitFace(doorDirection)
-              .flatMap(face -> buildExitOffset(face, EXIT_OFFSET_DISTANCE_BLOCKS))
+              .flatMap(face -> buildExitOffset(face, facingDirection, EXIT_OFFSET_DISTANCE_BLOCKS))
               .ifPresent(exitOffsetState::apply);
         }
         if (cachedSession == null) {
@@ -1086,7 +1088,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /**
    * 在 RouteStop 中按站点 ID 或 waypoint nodeId 进行匹配。
    *
-   * <p>优先站点 ID 匹配，其次 nodeId。
+   * <p>优先站点 ID 匹配，其次 nodeId，最后尝试 DYNAMIC 范围匹配。
    */
   private static RouteStop findStop(
       List<RouteStop> stops,
@@ -1095,7 +1097,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       String stationCode,
       Optional<Integer> routeIndexOpt) {
     UUID stationId = stationOpt.map(Station::id).orElse(null);
-    String nodeId = definition.nodeId().value();
+    NodeId nodeId = definition.nodeId();
+    String nodeIdValue = nodeId.value();
     for (RouteStop stop : stops) {
       if (stop == null) {
         continue;
@@ -1106,7 +1109,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         return stop;
       }
       if (stop.waypointNodeId().isPresent()
-          && nodeId.equalsIgnoreCase(stop.waypointNodeId().get())) {
+          && nodeIdValue.equalsIgnoreCase(stop.waypointNodeId().get())) {
+        return stop;
+      }
+      // DYNAMIC 范围匹配
+      if (DynamicStopMatcher.matchesStop(nodeId, stop)) {
         return stop;
       }
     }
@@ -1243,22 +1250,57 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /**
    * 构建出站偏移（ExitOffset）。
    *
-   * <p>注意：按本地 X 轴偏移（左右门侧），不使用 Z 轴，避免模型旋转导致偏移方向反转。
+   * <p>ExitOffset 是相对于列车本地坐标系的偏移（X=左右，Z=前后）。 根据列车朝向和开门方向计算乘客应该在列车的左侧还是右侧下车。
+   *
+   * @param doorFace 开门方向（世界方位）
+   * @param trainFacing 列车行进方向（世界方位）
+   * @param distance 偏移距离（方块数）
+   * @return 相对于列车的出站偏移
    */
-  private static Optional<ExitOffset> buildExitOffset(BlockFace face, double distance) {
-    if (face == null || !Double.isFinite(distance) || distance <= 0.0) {
+  private static Optional<ExitOffset> buildExitOffset(
+      BlockFace doorFace, BlockFace trainFacing, double distance) {
+    if (doorFace == null || trainFacing == null || !Double.isFinite(distance) || distance <= 0.0) {
       return Optional.empty();
     }
-    double x = 0.0;
-    double z = 0.0;
-    switch (face) {
-      case WEST, SOUTH -> x = +distance;
-      case EAST, NORTH -> x = -distance;
-      default -> {
-        return Optional.empty();
-      }
+    // 计算开门方向相对于列车行进方向是左侧还是右侧
+    // 列车本地坐标系：+X = 右侧，-X = 左侧
+    Double localX = computeRelativeSide(trainFacing, doorFace, distance);
+    if (localX == null) {
+      return Optional.empty();
     }
-    return Optional.of(ExitOffset.create(x, 0.0, z, Float.NaN, Float.NaN));
+    return Optional.of(ExitOffset.create(localX, 0.0, 0.0, Float.NaN, Float.NaN));
+  }
+
+  /**
+   * 计算开门方向相对于列车行进方向的左右偏移。
+   *
+   * @param trainFacing 列车行进方向
+   * @param doorFace 开门方向（世界方位）
+   * @param distance 偏移距离
+   * @return 正值=右侧，负值=左侧，null=无法计算
+   */
+  private static Double computeRelativeSide(
+      BlockFace trainFacing, BlockFace doorFace, double distance) {
+    // 列车朝向 -> 其右侧方向的映射
+    // 例如：列车朝北(NORTH/-Z)，右侧是东(EAST/+X)
+    BlockFace rightSide =
+        switch (trainFacing) {
+          case NORTH -> BlockFace.EAST;
+          case EAST -> BlockFace.SOUTH;
+          case SOUTH -> BlockFace.WEST;
+          case WEST -> BlockFace.NORTH;
+          default -> null;
+        };
+    if (rightSide == null) {
+      return null;
+    }
+    BlockFace leftSide = rightSide.getOppositeFace();
+    if (doorFace == rightSide) {
+      return +distance; // 右侧开门
+    } else if (doorFace == leftSide) {
+      return -distance; // 左侧开门
+    }
+    return null; // 开门方向与列车行进方向平行，无法确定左右
   }
 
   private static final class ExitOffsetState {

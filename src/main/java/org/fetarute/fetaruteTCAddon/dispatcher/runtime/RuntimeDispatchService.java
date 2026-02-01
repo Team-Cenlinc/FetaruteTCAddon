@@ -33,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
@@ -135,6 +136,9 @@ public final class RuntimeDispatchService {
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
+  /** 动态站台分配器。 */
+  private final DynamicPlatformAllocator dynamicAllocator;
+
   public RuntimeDispatchService(
       OccupancyManager occupancyManager,
       RailGraphService railGraphService,
@@ -158,6 +162,8 @@ public final class RuntimeDispatchService {
     this.storageManager = storageManager;
     this.trainConfigResolver = Objects.requireNonNull(trainConfigResolver, "trainConfigResolver");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    this.dynamicAllocator =
+        new DynamicPlatformAllocator(routeDefinitions, occupancyManager, this.debugLogger);
   }
 
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
@@ -211,7 +217,9 @@ public final class RuntimeDispatchService {
         TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
             .map(OptionalInt::of)
             .orElse(OptionalInt.empty());
-    int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
+    int currentIndex =
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route, routeDefinitions, tagIndex, definition.nodeId());
     if (currentIndex < 0) {
       return true;
     }
@@ -315,7 +323,9 @@ public final class RuntimeDispatchService {
         TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
             .map(OptionalInt::of)
             .orElse(OptionalInt.empty());
-    int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
+    int currentIndex =
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route, routeDefinitions, tagIndex, definition.nodeId());
     if (currentIndex < 0) {
       if (matchesDstyTarget(route, definition.nodeId())) {
         handleDestroy(train, properties, trainName, "DSTY");
@@ -401,6 +411,32 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 更新列车经过的最后一个图节点（用于 arriving 判定优化）。
+   *
+   * <p>当列车经过中间 waypoint（不在 route 定义中）时调用，仅更新 lastPassedGraphNode，不推进 routeIndex。
+   */
+  public void updateLastPassedGraphNode(SignActionEvent event, SignNodeDefinition definition) {
+    if (event == null || definition == null || !event.hasGroup()) {
+      return;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
+    TrainProperties properties = group.getProperties();
+    if (properties == null) {
+      return;
+    }
+    String trainName = properties.getTrainName();
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    NodeId nodeId = definition.nodeId();
+    if (nodeId == null) {
+      return;
+    }
+    Instant now = Instant.now();
+    progressRegistry.updateLastPassedGraphNode(trainName, nodeId, now);
+  }
+
+  /**
    * 推进点触发：申请占用 → 下发目的地 → 发车/限速。
    *
    * <p>当前节点由牌子解析得到，下一跳从 RouteDefinition 中推导。
@@ -426,7 +462,9 @@ public final class RuntimeDispatchService {
         TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
             .map(OptionalInt::of)
             .orElse(OptionalInt.empty());
-    int currentIndex = RouteIndexResolver.resolveCurrentIndex(route, tagIndex, definition.nodeId());
+    int currentIndex =
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route, routeDefinitions, tagIndex, definition.nodeId());
     if (currentIndex < 0) {
       if (matchesDstyTarget(route, definition.nodeId())) {
         handleDestroy(train, properties, trainName, "DSTY");
@@ -787,6 +825,11 @@ public final class RuntimeDispatchService {
       removedLayovers++;
     }
 
+    // 清理不活跃列车的动态站台分配
+    for (String name : released) {
+      dynamicAllocator.clearAllocations(name);
+    }
+
     if (removedProgress > 0) {
       orphanProgressRemoved.add(removedProgress);
     }
@@ -1003,7 +1046,21 @@ public final class RuntimeDispatchService {
         currentIndex < route.waypoints().size()
             ? currentIndex
             : Math.max(0, route.waypoints().size() - 1);
+
+    // 首站位置初始化：从 FTA_DEPOT_ID tag 读取实际 spawn 位置（DYNAMIC depot 支持）
+    if (boundedIndex == 0 && readEffectiveNode(trainName, 0).isEmpty()) {
+      Optional<String> depotIdOpt = TrainTagHelper.readTagValue(properties, "FTA_DEPOT_ID");
+      if (depotIdOpt.isPresent() && !depotIdOpt.get().isBlank()) {
+        NodeId actualStartNode = NodeId.of(depotIdOpt.get());
+        recordEffectiveNode(trainName, route, 0, actualStartNode);
+        debugLogger.accept("首站位置初始化: train=" + trainName + " depotId=" + actualStartNode.value());
+      }
+    }
+
     NodeId currentNode = resolveEffectiveNode(trainName, route, boundedIndex);
+
+    // 动态站台分配：检查前方是否有 DYNAMIC 站点，提前分配具体站台
+    tryDynamicPlatformAllocation(train, properties, trainName, route, currentIndex, currentNode);
 
     // DSTY 销毁必须优先于“终点停车”，否则当线路最后一个节点就是 DSTY 目标时会卡死不销毁。
     // 若当前节点为 DSTY（销毁目标），立即销毁列车并返回，避免后续逻辑干扰。
@@ -1417,13 +1474,25 @@ public final class RuntimeDispatchService {
     }
     RouteDefinition route = routeOpt.get();
     NodeId startNode = candidate.locationNodeId();
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
 
-    // 使用 TerminalKeyResolver 进行首站匹配，支持同站不同站台复用
+    // 首站匹配：支持 TerminalKey 匹配和 DYNAMIC 匹配
     NodeId routeFirstNode = route.waypoints().get(0);
     String startTerminalKey = TerminalKeyResolver.toTerminalKey(startNode);
     String routeFirstTerminalKey = TerminalKeyResolver.toTerminalKey(routeFirstNode);
 
-    if (!TerminalKeyResolver.matches(startTerminalKey, routeFirstTerminalKey)) {
+    boolean firstStopMatches = TerminalKeyResolver.matches(startTerminalKey, routeFirstTerminalKey);
+    // 若普通匹配失败，尝试 DYNAMIC 匹配（首站可能是 DYNAMIC stop）
+    if (!firstStopMatches && !stops.isEmpty()) {
+      RouteStop firstStop = stops.get(0);
+      if (firstStop != null && DynamicStopMatcher.matchesStop(startNode, firstStop)) {
+        firstStopMatches = true;
+        debugLogger.accept(
+            "Layover 发车: DYNAMIC 首站匹配 train=" + trainName + " location=" + startNode.value());
+      }
+    }
+
+    if (!firstStopMatches) {
       debugLogger.accept(
           "Layover 发车失败: 位置与首站不匹配 train="
               + trainName
@@ -1434,8 +1503,10 @@ public final class RuntimeDispatchService {
       return false;
     }
 
-    // 使用精确匹配确定 startIndex，若不匹配则回退为 0（同站不同站台场景）
-    int startIndex = RouteIndexResolver.resolveCurrentIndex(route, OptionalInt.empty(), startNode);
+    // 使用 DYNAMIC 匹配确定 startIndex
+    int startIndex =
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route, stops, OptionalInt.empty(), startNode);
     if (startIndex < 0) {
       // 同站不同站台：从索引 0 开始
       startIndex = 0;
@@ -2087,6 +2158,7 @@ public final class RuntimeDispatchService {
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    dynamicAllocator.clearAllocations(trainName);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
     debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);
@@ -2383,11 +2455,27 @@ public final class RuntimeDispatchService {
    *   <li>{@code DYNAMIC:OP:STATION} / {@code OP:STATION}（默认 track=1）
    * </ul>
    */
+  /**
+   * 解析 DYNAMIC stop 规范字符串。
+   *
+   * <p>支持以下格式：
+   *
+   * <ul>
+   *   <li>{@code OP:S:STATION:[1:3]} - Station 类型，轨道范围 1-3
+   *   <li>{@code OP:D:DEPOT:[1:3]} - Depot 类型，轨道范围 1-3
+   *   <li>{@code OP:S:STATION:1} - Station 类型，单轨道 1
+   *   <li>{@code OP:STATION:[1:3]} - 旧格式兼容（默认 Station 类型）
+   * </ul>
+   *
+   * @param raw 原始字符串（可能带有 DYNAMIC: 前缀）
+   * @return 解析结果
+   */
   private static Optional<DynamicStopSpec> parseDynamicStopSpec(String raw) {
     if (raw == null || raw.isBlank()) {
       return Optional.empty();
     }
     String trimmed = raw.trim();
+    // 去掉可能的 DYNAMIC: 前缀
     if (trimmed.regionMatches(true, 0, "DYNAMIC", 0, "DYNAMIC".length())) {
       String rest = trimmed.substring("DYNAMIC".length()).trim();
       if (rest.startsWith(":")) {
@@ -2399,26 +2487,45 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
 
-    int first = trimmed.indexOf(':');
-    if (first <= 0) {
+    // 解析格式: OP:S:STATION:[range] 或 OP:D:DEPOT:[range] 或 OP:STATION:[range]
+    String[] parts = trimmed.split(":", -1);
+    if (parts.length < 2) {
       return Optional.empty();
     }
-    int second = trimmed.indexOf(':', first + 1);
+
     String operatorCode;
-    String stationCode;
+    String nodeType; // "S" or "D"
+    String nodeName;
     String rangeRaw;
-    if (second < 0) {
-      operatorCode = trimmed.substring(0, first).trim();
-      stationCode = trimmed.substring(first + 1).trim();
-      rangeRaw = "";
+
+    if (parts.length >= 3 && (parts[1].equalsIgnoreCase("S") || parts[1].equalsIgnoreCase("D"))) {
+      // 新格式: OP:S:STATION:... 或 OP:D:DEPOT:...
+      operatorCode = parts[0].trim();
+      nodeType = parts[1].trim().toUpperCase(java.util.Locale.ROOT);
+      nodeName = parts[2].trim();
+      // 剩余部分作为 range（可能是 "1" 或 "[1:3]" 或 "1:3"）
+      if (parts.length > 3) {
+        rangeRaw = String.join(":", java.util.Arrays.copyOfRange(parts, 3, parts.length)).trim();
+      } else {
+        rangeRaw = "";
+      }
     } else {
-      operatorCode = trimmed.substring(0, first).trim();
-      stationCode = trimmed.substring(first + 1, second).trim();
-      rangeRaw = trimmed.substring(second + 1).trim();
+      // 旧格式兼容: OP:STATION:[range]
+      operatorCode = parts[0].trim();
+      nodeType = "S"; // 默认 Station
+      nodeName = parts[1].trim();
+      if (parts.length > 2) {
+        rangeRaw = String.join(":", java.util.Arrays.copyOfRange(parts, 2, parts.length)).trim();
+      } else {
+        rangeRaw = "";
+      }
     }
-    if (operatorCode.isBlank() || stationCode.isBlank()) {
+
+    if (operatorCode.isBlank() || nodeName.isBlank()) {
       return Optional.empty();
     }
+
+    // 解析范围
     int fromTrack = 1;
     int toTrack = 1;
     if (!rangeRaw.isBlank()) {
@@ -2451,7 +2558,7 @@ public final class RuntimeDispatchService {
     }
     int start = Math.min(fromTrack, toTrack);
     int end = Math.max(fromTrack, toTrack);
-    return Optional.of(new DynamicStopSpec(operatorCode, stationCode, start, end));
+    return Optional.of(new DynamicStopSpec(operatorCode, nodeType, nodeName, start, end));
   }
 
   private static OptionalInt parsePositiveInt(String raw) {
@@ -2470,12 +2577,21 @@ public final class RuntimeDispatchService {
     }
   }
 
-  /** DYNAMIC 动态站台指令规范化结果。 */
+  /**
+   * DYNAMIC 动态站台指令规范化结果。
+   *
+   * @param operatorCode 运营商代码
+   * @param nodeType 节点类型："S" 表示 Station，"D" 表示 Depot
+   * @param nodeName 站点/车库名称
+   * @param fromTrack 起始轨道号
+   * @param toTrack 结束轨道号
+   */
   private record DynamicStopSpec(
-      String operatorCode, String stationCode, int fromTrack, int toTrack) {
+      String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
     private DynamicStopSpec {
       Objects.requireNonNull(operatorCode, "operatorCode");
-      Objects.requireNonNull(stationCode, "stationCode");
+      Objects.requireNonNull(nodeType, "nodeType");
+      Objects.requireNonNull(nodeName, "nodeName");
     }
   }
 
@@ -2507,20 +2623,37 @@ public final class RuntimeDispatchService {
     return selectDynamicStationTarget(trainName, fromNode, graph, spec);
   }
 
+  /**
+   * 选择 DYNAMIC 站台/车库目标。
+   *
+   * <p>选择规则：
+   *
+   * <ol>
+   *   <li>Pass 1: 优先选择空闲且可达的轨道（按轨道号顺序）
+   *   <li>Pass 2: 若无空闲，回退到任意可达轨道
+   * </ol>
+   *
+   * @param trainName 列车名称
+   * @param fromNode 当前节点
+   * @param graph 调度图
+   * @param spec DYNAMIC 规范
+   * @return 选择的目标节点
+   */
   private Optional<NodeId> selectDynamicStationTarget(
       String trainName, NodeId fromNode, RailGraph graph, DynamicStopSpec spec) {
     if (spec == null || fromNode == null || graph == null) {
       return Optional.empty();
     }
     String operator = spec.operatorCode().trim();
-    String station = spec.stationCode().trim();
-    if (operator.isEmpty() || station.isEmpty()) {
+    String nodeType = spec.nodeType().trim(); // "S" or "D"
+    String nodeName = spec.nodeName().trim();
+    if (operator.isEmpty() || nodeName.isEmpty()) {
       return Optional.empty();
     }
 
     // Pass 1: free first, then reachable.
     for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
-      NodeId candidate = NodeId.of(operator + ":S:" + station + ":" + track);
+      NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (!isDynamicCandidateKnown(candidate, graph)) {
         continue;
       }
@@ -2535,7 +2668,7 @@ public final class RuntimeDispatchService {
 
     // Pass 2 (fallback): if no free platform, pick any reachable platform (still deterministic).
     for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
-      NodeId candidate = NodeId.of(operator + ":S:" + station + ":" + track);
+      NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (!isDynamicCandidateKnown(candidate, graph)) {
         continue;
       }
@@ -2558,8 +2691,10 @@ public final class RuntimeDispatchService {
             + fromNode.value()
             + " operator="
             + operator
-            + " station="
-            + station
+            + " type="
+            + nodeType
+            + " name="
+            + nodeName
             + " range="
             + spec.fromTrack()
             + ":"
@@ -2662,9 +2797,10 @@ public final class RuntimeDispatchService {
       DynamicStopSpec spec,
       boolean requireFree) {
     String operator = spec.operatorCode().trim();
-    String station = spec.stationCode().trim();
+    String nodeType = spec.nodeType().trim();
+    String nodeName = spec.nodeName().trim();
     for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
-      NodeId candidate = NodeId.of(operator + ":S:" + station + ":" + track);
+      NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (!isDynamicCandidateKnown(candidate, graph)) {
         continue;
       }
@@ -2954,6 +3090,53 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     return Optional.ofNullable(overrides.get(index));
+  }
+
+  /**
+   * 尝试为列车分配动态站台。
+   *
+   * <p>当列车距离 DYNAMIC 站点 ≤5 edges 时，从候选范围内选择可用站台并写入节点覆盖表和 destination。
+   */
+  private void tryDynamicPlatformAllocation(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode) {
+    if (train == null || route == null || railGraphService == null) {
+      return;
+    }
+    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());
+    if (graphOpt.isEmpty()) {
+      return;
+    }
+    RailGraph graph = graphOpt.get();
+
+    Optional<DynamicPlatformAllocator.AllocationResult> resultOpt =
+        dynamicAllocator.tryAllocate(trainName, route, currentIndex, graph, currentNode);
+    if (resultOpt.isEmpty()) {
+      return;
+    }
+
+    DynamicPlatformAllocator.AllocationResult result = resultOpt.get();
+
+    // 写入节点覆盖表
+    recordEffectiveNode(trainName, route, result.stopIndex(), result.allocatedNode());
+
+    // 更新列车 destination（如果分配的是下一站）
+    int nextIndex = currentIndex + 1;
+    if (result.stopIndex() == nextIndex && properties != null) {
+      String dest = result.allocatedNode().value();
+      properties.setDestination(dest);
+      debugLogger.accept(
+          "DYNAMIC destination 写入: train="
+              + trainName
+              + ", dest="
+              + dest
+              + ", idx="
+              + result.stopIndex());
+    }
   }
 
   private NodeId resolveEffectiveNode(String trainName, RouteDefinition route, int index) {

@@ -65,3 +65,81 @@
 ### Layover 复用触发
 - 当 Layover 池暂无可用列车时，票据会进入待命队列（不会持续 requeue 刷屏）。
 - 一旦列车进入 Layover，将立即触发一次复用尝试，减少等待延迟。
+
+### DYNAMIC 首站支持
+
+Route 首站可以是 DYNAMIC 类型（动态选择站台/轨道）：
+
+- 若首站的 `waypointNodeId` 为空但 `notes` 包含 DYNAMIC 指令，会解析 DYNAMIC 规范并生成 placeholder NodeId
+- 例如：`DYNAMIC:SURC:S:PPK:[1:3]` 生成 placeholder `SURC:S:PPK:1`
+- Layover 复用时，placeholder 与实际列车位置通过"站点级匹配"（同站不同站台）进行匹配
+
+详见 [DYNAMIC Route Stops](dynamic-route-stops.md)
+
+## 诊断命令
+
+### `/fta spawn plan [limit]`
+
+查看当前的发车计划（SpawnPlan）：
+
+```
+/fta spawn plan
+[FTA] 发车计划 (count=4, built=2026-01-31T12:00:00Z)
+- SURC/MT/MT-1N_ShortC headway=2m30s depot=SURC:S:PPK:1
+- SURC/MT/MT-1S_ShortC headway=2m30s depot=SURC:S:OFL:1
+- SURC/LT/LT-1N        headway=5m0s  depot=SURC:D:DEPOT:1
+- SURC/LT/LT-1S        headway=5m0s  depot=SURC:D:DEPOT:2
+```
+
+输出字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| operator/line/route | 服务标识 |
+| headway | 发车间隔（如 `2m30s` 表示每 2 分 30 秒发一班） |
+| depot | 出库点 NodeId（DYNAMIC 首站显示 placeholder） |
+
+### `/fta spawn queue [limit]`
+
+查看发车队列（待发票据）：
+
+```
+/fta spawn queue
+[FTA] 发车队列 (count=3)
+- SURC/MT/MT-1N_ShortC due=30s notBefore=30s attempts=0
+- SURC/MT/MT-1S_ShortC due=1m15s notBefore=1m15s attempts=0
+- SURC/LT/LT-1N        due=2m0s notBefore=2m0s attempts=0
+```
+
+输出字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| due | 计划发车时间（相对当前） |
+| notBefore | 最早可发车时间（重试时会延迟） |
+| attempts | 尝试次数（0 表示首次） |
+
+### `/fta spawn pending [limit]`
+
+查看折返待发票据（等待 Layover 列车或占用释放）：
+
+```
+/fta spawn pending
+[FTA] 折返待发 (count=1)
+- SURC/MT/MT-1N_ShortC due=已过期 30s attempts=2 error=无可用 Layover 列车
+```
+
+输出字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| due | 原计划发车时间 |
+| attempts | 尝试次数 |
+| error | 上次失败原因 |
+
+## 相关文件
+
+- `StorageSpawnManager.java`：SpawnPlan 构建与票据生成
+- `SimpleTicketAssigner.java`：票据放行与 Layover 复用
+- `FtaSpawnCommand.java`：诊断命令实现
+- `DynamicStopMatcher.java`：DYNAMIC 规范解析

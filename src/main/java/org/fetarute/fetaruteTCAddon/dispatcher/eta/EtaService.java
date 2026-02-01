@@ -457,8 +457,11 @@ public final class EtaService {
     }
     TargetSelection targetSel = targetSelOpt.get();
 
+    // 使用 lastPassedNodeId 从中间图节点开始计算剩余路径，优化 arriving 判定
+    NodeId lastPassed = snap.lastPassedNodeId().orElse(null);
     Optional<PathProgressModel.PathProgress> progressOpt =
-        pathProgressModel.remainingToNode(graph, route, snap.routeIndex(), targetSel.nodeId());
+        pathProgressModel.remainingToNode(
+            graph, route, snap.routeIndex(), targetSel.nodeId(), lastPassed);
     if (progressOpt.isEmpty()) {
       return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
     }
@@ -499,8 +502,13 @@ public final class EtaService {
     reasons.addAll(wait.reasons());
 
     int remainingEdgeCount = progress.remainingEdgeCount();
+    // 若目标站点有咽喉，检查到咽喉的剩余边数，取较小值用于 arriving 判定
+    Optional<Integer> throatEdgesOpt =
+        remainingEdgesToThroat(graph, route, snap.routeIndex(), targetSel.nodeId(), lastPassed);
+    int edgesForArriving =
+        throatEdgesOpt.map(te -> Math.min(te, remainingEdgeCount)).orElse(remainingEdgeCount);
     ArrivingClassifier.Arriving arriving =
-        arrivingClassifier.classify(remainingEdgeCount, clearance.hardStop());
+        arrivingClassifier.classify(edgesForArriving, clearance.hardStop());
     if (!isApproachTarget(targetSel.nodeId()) && arriving.arriving()) {
       arriving = new ArrivingClassifier.Arriving(false, EtaConfidence.LOW);
     }
@@ -846,7 +854,20 @@ public final class EtaService {
       reasons.add(EtaReason.WAIT);
     }
 
-    ArrivingClassifier.Arriving arriving = arrivingClassifier.classify(remainingEdgeCount, false);
+    // 若目标站点有咽喉，检查到咽喉的剩余边数用于 arriving 判定
+    final int baseEdgeCount = remainingEdgeCount;
+    int edgesForArriving = remainingEdgeCount;
+    if (targetSel.index() > 0) {
+      Optional<RailGraph> graphOptForThroat =
+          resolveGraphForRouteSegment(route, 0, targetSel.index());
+      if (graphOptForThroat.isPresent()) {
+        Optional<Integer> throatEdgesOpt =
+            remainingEdgesToThroat(graphOptForThroat.get(), route, 0, targetSel.nodeId(), null);
+        edgesForArriving =
+            throatEdgesOpt.map(te -> Math.min(te, baseEdgeCount)).orElse(baseEdgeCount);
+      }
+    }
+    ArrivingClassifier.Arriving arriving = arrivingClassifier.classify(edgesForArriving, false);
     if (waitSec > 0 || !isApproachTarget(targetSel.nodeId())) {
       arriving = new ArrivingClassifier.Arriving(false, EtaConfidence.LOW);
     }
@@ -1792,5 +1813,102 @@ public final class EtaService {
   /** 获取动态旅行时间模型（用于诊断/测试）。 */
   public DynamicTravelTimeModel getDynamicTravelTimeModel() {
     return dynamicTravelTimeModel;
+  }
+
+  /**
+   * 查找目标节点对应的站咽喉节点列表。
+   *
+   * <p>仅当目标是 STATION/DEPOT 类型时才会查找；若目标本身就是咽喉则返回空列表。
+   *
+   * <p>站咽喉格式：{@code Operator:S:Station:Track:Seq}（5 段）。 站点格式：{@code Operator:S:Station:Track}（4 段）。
+   * 匹配规则：咽喉的 operator/station/track 与目标站点相同。
+   *
+   * @param graph 调度图
+   * @param target 目标节点（通常是站点）
+   * @return 该站点的咽喉节点列表；若无咽喉则返回空列表
+   */
+  private List<NodeId> findThroatsForStation(RailGraph graph, NodeId target) {
+    if (graph == null || target == null) {
+      return List.of();
+    }
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodeOpt =
+        graph.findNode(target);
+    if (nodeOpt.isEmpty()) {
+      return List.of();
+    }
+    var node = nodeOpt.get();
+    Optional<WaypointMetadata> metaOpt = node.waypointMetadata();
+    if (metaOpt.isEmpty()) {
+      return List.of();
+    }
+    WaypointMetadata meta = metaOpt.get();
+    // 只为 STATION/DEPOT 查找咽喉
+    if (meta.kind() != WaypointKind.STATION && meta.kind() != WaypointKind.DEPOT) {
+      return List.of();
+    }
+    WaypointKind throatKind =
+        meta.kind() == WaypointKind.STATION
+            ? WaypointKind.STATION_THROAT
+            : WaypointKind.DEPOT_THROAT;
+    String operator = meta.operator();
+    String station = meta.originStation();
+    int track = meta.trackNumber();
+
+    List<NodeId> throats = new ArrayList<>();
+    for (var n : graph.nodes()) {
+      Optional<WaypointMetadata> nMetaOpt = n.waypointMetadata();
+      if (nMetaOpt.isEmpty()) {
+        continue;
+      }
+      WaypointMetadata nMeta = nMetaOpt.get();
+      if (nMeta.kind() == throatKind
+          && nMeta.operator().equalsIgnoreCase(operator)
+          && nMeta.originStation().equalsIgnoreCase(station)
+          && nMeta.trackNumber() == track) {
+        throats.add(n.id());
+      }
+    }
+    return throats;
+  }
+
+  /**
+   * 计算到咽喉的剩余边数（若有咽喉）。
+   *
+   * <p>若目标站点有咽喉，返回当前位置到最近咽喉的剩余边数；否则返回空。
+   *
+   * @param graph 调度图
+   * @param route 线路定义
+   * @param currentIndex 当前 route waypoint 索引
+   * @param target 目标节点
+   * @param lastPassed 列车经过的最后一个图节点
+   * @return 到最近咽喉的剩余边数；若无咽喉或不可达则返回空
+   */
+  private Optional<Integer> remainingEdgesToThroat(
+      RailGraph graph, RouteDefinition route, int currentIndex, NodeId target, NodeId lastPassed) {
+    List<NodeId> throats = findThroatsForStation(graph, target);
+    if (throats.isEmpty()) {
+      return Optional.empty();
+    }
+    int minEdges = Integer.MAX_VALUE;
+    for (NodeId throat : throats) {
+      // 构建一个临时路径：从当前位置到咽喉
+      // 由于咽喉不一定在 route waypoints 中，需要用最短路计算
+      var pathFinder =
+          new org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder();
+      NodeId from =
+          lastPassed != null ? lastPassed : route.waypoints().get(Math.max(0, currentIndex));
+      var pathOpt =
+          pathFinder.shortestPath(
+              graph,
+              from,
+              throat,
+              org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder.Options
+                  .shortestDistance());
+      if (pathOpt.isPresent()) {
+        int edgeCount = pathOpt.get().nodes().size() - 1;
+        minEdges = Math.min(minEdges, edgeCount);
+      }
+    }
+    return minEdges == Integer.MAX_VALUE ? Optional.empty() : Optional.of(minEdges);
   }
 }

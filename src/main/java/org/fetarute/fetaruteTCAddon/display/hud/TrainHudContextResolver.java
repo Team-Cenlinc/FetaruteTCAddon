@@ -44,6 +44,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
@@ -1387,6 +1388,12 @@ public final class TrainHudContextResolver {
     return resolveStationDisplay(last);
   }
 
+  /**
+   * 解析运营终点的 NodeId（用于判断列车是否到达终点）。
+   *
+   * <p>仅考虑 STATION 类型的 stop（AutoStation），不包含 WAYPOINT 类型的 STOP/TERM。 支持 DYNAMIC stop：会从 DYNAMIC
+   * 规范中提取站点信息。
+   */
   private Optional<NodeId> resolveEndOfOperationNodeId(RouteDefinition route) {
     if (route == null || routeDefinitions == null) {
       return Optional.empty();
@@ -1401,6 +1408,19 @@ public final class TrainHudContextResolver {
       if (passType == RouteStopPassType.PASS) {
         continue;
       }
+      // 只考虑有 stationId 的 stop（AutoStation），不包含纯 waypoint
+      if (stop.stationId().isEmpty() && !isStationTypeStop(stop)) {
+        continue;
+      }
+      // 优先检查 DYNAMIC
+      Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+          DynamicStopMatcher.parseDynamicSpec(stop);
+      if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
+        // 返回 DYNAMIC 范围内的第一个候选（用于判断终点时取 key 匹配）
+        DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+        String candidate = spec.operatorCode() + ":S:" + spec.nodeName() + ":" + spec.fromTrack();
+        return Optional.of(NodeId.of(candidate));
+      }
       Optional<String> nodeId = stop.waypointNodeId().filter(id -> !id.isBlank());
       if (nodeId.isPresent()) {
         return Optional.of(NodeId.of(nodeId.get()));
@@ -1409,11 +1429,20 @@ public final class TrainHudContextResolver {
       if (stationId.isPresent()) {
         return resolveStationNodeId(stationId.get());
       }
-      break;
     }
     return Optional.empty();
   }
 
+  /**
+   * 解析运营终点的显示信息（End of Operation）。
+   *
+   * <p>仅考虑 STATION 类型的 stop（AutoStation），不包含 WAYPOINT 类型的 STOP/TERM。 支持 DYNAMIC stop：会从 DYNAMIC
+   * 规范中提取站点信息。
+   *
+   * @param route 路线定义
+   * @param fallback 备用显示（通常是 EOR）
+   * @return 终点站显示信息
+   */
   private StationDisplay resolveEndOfOperation(RouteDefinition route, StationDisplay fallback) {
     if (route == null || routeDefinitions == null) {
       return fallback;
@@ -1428,9 +1457,25 @@ public final class TrainHudContextResolver {
       if (passType == RouteStopPassType.PASS) {
         continue;
       }
+      // 只考虑有 stationId 的 stop（AutoStation），不包含纯 waypoint
+      if (stop.stationId().isEmpty() && !isStationTypeStop(stop)) {
+        continue;
+      }
+      // 优先检查 stationId
       Optional<UUID> stationId = stop.stationId();
       if (stationId.isPresent()) {
         StationDisplay resolved = resolveStationDisplay(stationId.get());
+        if (!resolved.isEmpty()) {
+          return resolved;
+        }
+      }
+      // 检查 DYNAMIC
+      Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+          DynamicStopMatcher.parseDynamicSpec(stop);
+      if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
+        DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+        String candidate = spec.operatorCode() + ":S:" + spec.nodeName() + ":" + spec.fromTrack();
+        StationDisplay resolved = resolveStationDisplay(NodeId.of(candidate));
         if (!resolved.isEmpty()) {
           return resolved;
         }
@@ -1442,9 +1487,30 @@ public final class TrainHudContextResolver {
           return resolved;
         }
       }
-      break;
     }
     return fallback;
+  }
+
+  /** 判断 stop 是否为 Station 类型（通过 DYNAMIC 规范或 waypointNodeId 判断）。 */
+  private boolean isStationTypeStop(RouteStop stop) {
+    if (stop == null) {
+      return false;
+    }
+    // 检查 DYNAMIC 规范
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(stop);
+    if (dynamicSpec.isPresent()) {
+      return dynamicSpec.get().isStation();
+    }
+    // 检查 waypointNodeId 格式
+    if (stop.waypointNodeId().isPresent()) {
+      String nodeId = stop.waypointNodeId().get();
+      String[] parts = nodeId.split(":", -1);
+      if (parts.length >= 2) {
+        return "S".equalsIgnoreCase(parts[1]);
+      }
+    }
+    return false;
   }
 
   private String safeOrDash(String value) {

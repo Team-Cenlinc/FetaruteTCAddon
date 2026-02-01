@@ -96,6 +96,7 @@ public final class RouteProgressRegistry {
             existing.routeId(),
             existing.currentIndex(),
             existing.nextTarget(),
+            existing.lastPassedGraphNode(),
             existing.lastSignal(),
             existing.lastUpdatedAt());
     entries.put(newName, migrated);
@@ -123,7 +124,35 @@ public final class RouteProgressRegistry {
                     entry.routeId(),
                     entry.currentIndex(),
                     entry.nextTarget(),
+                    entry.lastPassedGraphNode(),
                     aspect,
+                    now));
+    return updated != null;
+  }
+
+  /**
+   * 更新列车经过的最后一个图节点（用于 arriving 判定优化）。
+   *
+   * <p>当列车经过中间 waypoint（不在 route 定义中）时调用，不会改变 currentIndex。
+   *
+   * @return 是否成功更新
+   */
+  public boolean updateLastPassedGraphNode(String trainName, NodeId nodeId, Instant now) {
+    if (trainName == null || trainName.isBlank() || nodeId == null) {
+      return false;
+    }
+    RouteProgressEntry updated =
+        entries.computeIfPresent(
+            trainName,
+            (key, entry) ->
+                new RouteProgressEntry(
+                    entry.trainName(),
+                    entry.routeUuid(),
+                    entry.routeId(),
+                    entry.currentIndex(),
+                    entry.nextTarget(),
+                    Optional.of(nodeId),
+                    entry.lastSignal(),
                     now));
     return updated != null;
   }
@@ -149,11 +178,20 @@ public final class RouteProgressRegistry {
         boundedIndex + 1 < route.waypoints().size()
             ? Optional.of(route.waypoints().get(boundedIndex + 1))
             : Optional.empty();
+    // 当 currentIndex 变化时，重置 lastPassedGraphNode（从新的 route waypoint 开始）
+    NodeId currentWaypoint =
+        boundedIndex < route.waypoints().size() ? route.waypoints().get(boundedIndex) : null;
     RouteId routeId = route.id();
     RouteProgressEntry existing = entries.get(trainName);
     SignalAspect lastSignal = existing != null ? existing.lastSignal() : SignalAspect.STOP;
+    // 若 currentIndex 变化，重置 lastPassedGraphNode；否则保留已有值
+    Optional<NodeId> lastPassed =
+        existing != null && existing.currentIndex() == boundedIndex
+            ? existing.lastPassedGraphNode()
+            : Optional.ofNullable(currentWaypoint);
     RouteProgressEntry entry =
-        new RouteProgressEntry(trainName, routeUuid, routeId, boundedIndex, next, lastSignal, now);
+        new RouteProgressEntry(
+            trainName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);
     entries.put(trainName, entry);
     return entry;
   }
@@ -185,6 +223,7 @@ public final class RouteProgressRegistry {
       RouteId routeId,
       int currentIndex,
       Optional<NodeId> nextTarget,
+      Optional<NodeId> lastPassedGraphNode,
       SignalAspect lastSignal,
       Instant lastUpdatedAt)
       implements TrainRuntimeState {
@@ -193,6 +232,7 @@ public final class RouteProgressRegistry {
       Objects.requireNonNull(trainName, "trainName");
       Objects.requireNonNull(routeId, "routeId");
       Objects.requireNonNull(nextTarget, "nextTarget");
+      Objects.requireNonNull(lastPassedGraphNode, "lastPassedGraphNode");
       Objects.requireNonNull(lastSignal, "lastSignal");
       Objects.requireNonNull(lastUpdatedAt, "lastUpdatedAt");
     }

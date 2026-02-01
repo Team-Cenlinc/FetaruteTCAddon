@@ -124,6 +124,8 @@ command:
     hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
     hover-occupancy: "<gray>点击填充:</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
+    entry-spawn: "<gray>/fta spawn</gray> <white>-</white> <dark_aqua>发车计划与队列诊断</dark_aqua>"
+    hover-spawn: "<gray>点击填充:</gray> <white>/fta spawn </white>\n<dark_aqua>发车计划与队列诊断</dark_aqua>"
     entry-eta: "<gray>/fta eta</gray> <white>-</white> <dark_aqua>ETA 诊断输出</dark_aqua>"
     hover-eta: "<gray>点击填充:</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
     entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置（速度/加减速）</dark_aqua>"
@@ -229,6 +231,32 @@ command:
       hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\"</dark_aqua>"
       entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
       hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\"</dark_aqua>"
+
+  spawn:
+    not-ready: "<prefix> <red>发车管理器未就绪</red>"
+    help:
+      header: "<prefix> <dark_aqua>发车计划命令</dark_aqua>"
+      entry-plan: "<gray>/fta spawn plan</gray> <white>-</white> <dark_aqua>查看发车计划（可发车服务）</dark_aqua>"
+      hover-plan: "<gray>点击填充:</gray> <white>/fta spawn plan </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-queue: "<gray>/fta spawn queue</gray> <white>-</white> <dark_aqua>查看发车队列（待发票据）</dark_aqua>"
+      hover-queue: "<gray>点击填充:</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-pending: "<gray>/fta spawn pending</gray> <white>-</white> <dark_aqua>查看折返待发（含失败重试）</dark_aqua>"
+      hover-pending: "<gray>点击填充:</gray> <white>/fta spawn pending </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+    plan:
+      header: "<prefix> <dark_aqua>发车计划</dark_aqua> <gray>(count=<white><count></white>, built=<white><built_at></white>)</gray>"
+      empty: "<prefix> <gray>暂无可发车服务</gray>"
+      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>headway=<white><headway></white> depot=<white><depot></white></gray>"
+      truncated: "<gray>… 已截断，使用 /fta spawn plan <limit> 调整数量</gray>"
+    queue:
+      header: "<prefix> <dark_aqua>发车队列</dark_aqua> <gray>(count=<white><count></white>)</gray>"
+      empty: "<prefix> <gray>暂无排队票据</gray>"
+      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> notBefore=<white><not_before></white> attempts=<white><attempts></white></gray>"
+      truncated: "<gray>… 已截断，使用 /fta spawn queue <limit> 调整数量</gray>"
+    pending:
+      header: "<prefix> <dark_aqua>折返待发</dark_aqua> <gray>(count=<white><count></white>)</gray>"
+      empty: "<prefix> <gray>暂无折返待发票据</gray>"
+      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> attempts=<white><attempts></white> error=<white><error></white></gray>"
+      truncated: "<gray>… 已截断，使用 /fta spawn pending <limit> 调整数量</gray>"
 
   eta:
     not-ready: "<prefix> <red>ETA 模块未就绪</red>"
@@ -655,10 +683,12 @@ command:
       node-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少节点</red>"
       edge-unreachable: "<prefix> <red>停靠点之间不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       path-cross-world: "<prefix> <red>停靠点跨世界/跨图，未处于同一调度图内</red>"
+      dynamic-no-valid-tracks: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点所有轨道均不存在</red> <gray>(<white><spec></white> <white><range></white>)</gray>"
+      dynamic-partial-tracks: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失: <white><missing></white>, 有效: <white><valid></white>)</gray>"
       debug:
         header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
         page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
-        entry: "<white>#<seq></white> <dark_aqua><target></dark_aqua>"
+        entry: "<white>#<seq></white> <gray><pass></gray> <dark_aqua><target></dark_aqua><dwell_suffix>"
         hover: "<gray>序号:</gray> <white><seq></white>\n<gray>类型:</gray> <white><pass></white>\n<gray>基准停车(秒):</gray> <white><dwell></white>\n<gray>站点:</gray> <white><station></white>\n<gray>节点:</gray> <white><node></white>\n<gray>调试:</gray> <white><tp></white>"
         nav:
           prev: "<dark_aqua>[上一页]</dark_aqua>"
@@ -837,3 +867,9 @@ enum:
     stop: "停车"
     pass: "通过"
     terminate: "终到"
+  route-stop-directive:
+    dynamic: "动态"
+    cret: "出库"
+    dsty: "入库"
+    change: "换线"
+    action: "动作"
