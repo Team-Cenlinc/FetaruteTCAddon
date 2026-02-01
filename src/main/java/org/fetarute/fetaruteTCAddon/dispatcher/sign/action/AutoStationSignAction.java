@@ -1295,10 +1295,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return null;
     }
     BlockFace leftSide = rightSide.getOppositeFace();
+    // TrainCarts ExitOffset 本地坐标系：+X = 左侧，-X = 右侧（与直觉相反）
     if (doorFace == rightSide) {
-      return +distance; // 右侧开门
+      return -distance; // 右侧开门 -> 负值
     } else if (doorFace == leftSide) {
-      return -distance; // 左侧开门
+      return +distance; // 左侧开门 -> 正值
     }
     return null; // 开门方向与列车行进方向平行，无法确定左右
   }

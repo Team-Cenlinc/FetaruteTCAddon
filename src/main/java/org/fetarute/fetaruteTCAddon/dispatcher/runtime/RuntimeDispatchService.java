@@ -1048,12 +1048,18 @@ public final class RuntimeDispatchService {
             : Math.max(0, route.waypoints().size() - 1);
 
     // 首站位置初始化：从 FTA_DEPOT_ID tag 读取实际 spawn 位置（DYNAMIC depot 支持）
+    // 注：只在首次处理时执行，避免每 tick 重复打印
     if (boundedIndex == 0 && readEffectiveNode(trainName, 0).isEmpty()) {
       Optional<String> depotIdOpt = TrainTagHelper.readTagValue(properties, "FTA_DEPOT_ID");
       if (depotIdOpt.isPresent() && !depotIdOpt.get().isBlank()) {
         NodeId actualStartNode = NodeId.of(depotIdOpt.get());
-        recordEffectiveNode(trainName, route, 0, actualStartNode);
-        debugLogger.accept("首站位置初始化: train=" + trainName + " depotId=" + actualStartNode.value());
+        NodeId declared = route.waypoints().get(0);
+        // 只有当实际起点与声明不同时才打印日志
+        if (!actualStartNode.equals(declared)) {
+          debugLogger.accept("首站位置初始化: train=" + trainName + " depotId=" + actualStartNode.value());
+        }
+        // 无论是否与声明相同，都强制写入覆盖表以防止重复检查
+        forceRecordEffectiveNode(trainName, 0, actualStartNode);
       }
     }
 
@@ -1605,6 +1611,13 @@ public final class RuntimeDispatchService {
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_LINE_CODE);
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_CODE);
     }
+    // 更新终点站 tags（从 End of Operation 解析）
+    resolveEndOfOperationInfo(route)
+        .ifPresent(
+            dest -> {
+              TrainTagHelper.writeTag(properties, "FTA_DEST_NAME", dest.name());
+              TrainTagHelper.writeTag(properties, "FTA_DEST_CODE", dest.code());
+            });
     TrainTagHelper.writeTag(properties, "FTA_TICKET_ID", ticket.ticketId());
     progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
     invalidateTrainEta(trainName);
@@ -2409,6 +2422,27 @@ public final class RuntimeDispatchService {
     return Optional.empty();
   }
 
+  /**
+   * 从 DSTY 指令中提取 DYNAMIC 规范。
+   *
+   * <p>支持格式 {@code DSTY DYNAMIC:OP:STATION:[1:3]}，返回 {@code OP:STATION:[1:3]}。
+   *
+   * @param stop RouteStop
+   * @return DYNAMIC 规范字符串，或 empty
+   */
+  private Optional<String> extractDynamicFromDsty(RouteStop stop) {
+    Optional<String> dstyTarget = findDirectiveTarget(stop, "DSTY");
+    if (dstyTarget.isEmpty()) {
+      return Optional.empty();
+    }
+    String target = dstyTarget.get();
+    // 检查是否以 DYNAMIC: 开头（不区分大小写）
+    if (target.length() > 8 && target.regionMatches(true, 0, "DYNAMIC:", 0, 8)) {
+      return Optional.of(target.substring(8));
+    }
+    return Optional.empty();
+  }
+
   private static String firstSegment(String line) {
     if (line == null || line.isEmpty()) {
       return "";
@@ -2609,7 +2643,12 @@ public final class RuntimeDispatchService {
     if (stopOpt.isEmpty()) {
       return Optional.empty();
     }
+    // 尝试直接 DYNAMIC 指令
     Optional<String> remainder = findDirectiveTarget(stopOpt.get(), "DYNAMIC");
+    // 如果未找到，尝试从 DSTY 指令中提取 DYNAMIC 规范（支持 "DSTY DYNAMIC:..." 格式）
+    if (remainder.isEmpty()) {
+      remainder = extractDynamicFromDsty(stopOpt.get());
+    }
     if (remainder.isEmpty()) {
       return Optional.empty();
     }
@@ -2732,7 +2771,12 @@ public final class RuntimeDispatchService {
     if (stopOpt.isEmpty()) {
       return Optional.empty();
     }
+    // 尝试直接 DYNAMIC 指令
     Optional<String> remainder = findDirectiveTarget(stopOpt.get(), "DYNAMIC");
+    // 如果未找到，尝试从 DSTY 指令中提取 DYNAMIC 规范（支持 "DSTY DYNAMIC:..." 格式）
+    if (remainder.isEmpty()) {
+      remainder = extractDynamicFromDsty(stopOpt.get());
+    }
     if (remainder.isEmpty()) {
       return Optional.empty();
     }
@@ -2799,6 +2843,9 @@ public final class RuntimeDispatchService {
     String operator = spec.operatorCode().trim();
     String nodeType = spec.nodeType().trim();
     String nodeName = spec.nodeName().trim();
+
+    // 收集所有可行的候选
+    List<DynamicCandidate> candidates = new java.util.ArrayList<>();
     for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
       NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (!isDynamicCandidateKnown(candidate, graph)) {
@@ -2823,6 +2870,16 @@ public final class RuntimeDispatchService {
       if (!decision.allowed()) {
         continue;
       }
+      candidates.add(new DynamicCandidate(candidate, ctxOpt.get(), decision));
+    }
+
+    if (candidates.isEmpty()) {
+      return Optional.empty();
+    }
+
+    // 如果只有一个候选，直接返回
+    if (candidates.size() == 1) {
+      DynamicCandidate single = candidates.get(0);
       if (!requireFree) {
         debugLogger.accept(
             "DYNAMIC 回退: 无空闲站台，选择可进入站台 train="
@@ -2830,11 +2887,180 @@ public final class RuntimeDispatchService {
                 + " from="
                 + fromNode.value()
                 + " target="
-                + candidate.value());
+                + single.candidate.value());
       }
-      return Optional.of(new DynamicSelection(candidate, ctxOpt.get(), decision));
+      return Optional.of(new DynamicSelection(single.candidate, single.context, single.decision));
     }
-    return Optional.empty();
+
+    // 多个候选时，按方向优选
+    DynamicCandidate best =
+        selectBestCandidateByDirection(
+            trainName, fromNode, baseNodes, currentIndex, candidates, graph);
+
+    if (!requireFree && best != null) {
+      debugLogger.accept(
+          "DYNAMIC 方向优选: train="
+              + trainName
+              + " from="
+              + fromNode.value()
+              + " target="
+              + best.candidate.value()
+              + " (共 "
+              + candidates.size()
+              + " 个候选)");
+    }
+
+    if (best != null) {
+      return Optional.of(new DynamicSelection(best.candidate, best.context, best.decision));
+    }
+
+    // 兜底：返回第一个候选
+    DynamicCandidate fallback = candidates.get(0);
+    return Optional.of(
+        new DynamicSelection(fallback.candidate, fallback.context, fallback.decision));
+  }
+
+  /** DYNAMIC 候选站台记录。 */
+  private record DynamicCandidate(
+      NodeId candidate, OccupancyRequestContext context, OccupancyDecision decision) {}
+
+  /**
+   * 按方向选择最佳候选站台。
+   *
+   * <p>优选规则：
+   *
+   * <ol>
+   *   <li>计算列车运行方向：从前一个节点到当前节点的向量
+   *   <li>计算每个候选的首跳方向：从当前节点到路径上第一个非 switcher 节点的向量
+   *   <li>选择与运行方向夹角最小的候选（避免 180 度折回）
+   * </ol>
+   */
+  private DynamicCandidate selectBestCandidateByDirection(
+      String trainName,
+      NodeId fromNode,
+      List<NodeId> baseNodes,
+      int currentIndex,
+      List<DynamicCandidate> candidates,
+      RailGraph graph) {
+    if (candidates == null || candidates.isEmpty() || graph == null) {
+      return null;
+    }
+
+    // 获取前一个节点用于计算运行方向
+    NodeId prevNode = currentIndex > 0 ? baseNodes.get(currentIndex - 1) : null;
+    if (prevNode == null) {
+      // 无法确定运行方向，返回第一个
+      return candidates.get(0);
+    }
+
+    // 获取节点位置
+    org.bukkit.util.Vector prevPos = getNodePosition(graph, prevNode);
+    org.bukkit.util.Vector fromPos = getNodePosition(graph, fromNode);
+    if (prevPos == null || fromPos == null) {
+      return candidates.get(0);
+    }
+
+    // 计算运行方向向量
+    double travelDx = fromPos.getX() - prevPos.getX();
+    double travelDz = fromPos.getZ() - prevPos.getZ();
+    double travelMag = Math.sqrt(travelDx * travelDx + travelDz * travelDz);
+    if (travelMag < 1.0e-6) {
+      return candidates.get(0);
+    }
+    // 归一化
+    travelDx /= travelMag;
+    travelDz /= travelMag;
+
+    DynamicCandidate best = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
+
+    for (DynamicCandidate cand : candidates) {
+      // 获取路径中第一个"引导节点"：过了 switcher 区域后的第一个非 switcher 节点
+      NodeId guideNode = findPathGuideNode(cand.context.pathNodes(), graph, fromNode);
+      if (guideNode == null) {
+        guideNode = cand.candidate;
+      }
+
+      org.bukkit.util.Vector guidePos = getNodePosition(graph, guideNode);
+      if (guidePos == null) {
+        continue;
+      }
+
+      // 计算从当前节点到引导节点的方向
+      double guideDx = guidePos.getX() - fromPos.getX();
+      double guideDz = guidePos.getZ() - fromPos.getZ();
+      double guideMag = Math.sqrt(guideDx * guideDx + guideDz * guideDz);
+      if (guideMag < 1.0e-6) {
+        continue;
+      }
+      guideDx /= guideMag;
+      guideDz /= guideMag;
+
+      // 计算方向相似度（点积，范围 -1 到 1，越大越顺）
+      double dotProduct = travelDx * guideDx + travelDz * guideDz;
+
+      debugLogger.accept(
+          "DYNAMIC 候选方向评估: train="
+              + trainName
+              + " candidate="
+              + cand.candidate.value()
+              + " guide="
+              + guideNode.value()
+              + " score="
+              + String.format("%.3f", dotProduct));
+
+      if (dotProduct > bestScore) {
+        bestScore = dotProduct;
+        best = cand;
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * 从路径中找到引导节点：跳过起始的 switcher 区域，返回第一个非 switcher 节点。
+   *
+   * <p>用于确定列车应该朝哪个方向行驶（避免被 switcher 误导）。
+   */
+  private NodeId findPathGuideNode(List<NodeId> pathNodes, RailGraph graph, NodeId fromNode) {
+    if (pathNodes == null || pathNodes.size() < 2 || graph == null) {
+      return null;
+    }
+
+    // 跳过起始节点和 switcher 节点，找到第一个非 switcher 的目标节点
+    boolean passedFrom = false;
+    for (NodeId node : pathNodes) {
+      if (node == null) {
+        continue;
+      }
+      if (!passedFrom) {
+        if (node.equals(fromNode)) {
+          passedFrom = true;
+        }
+        continue;
+      }
+      // 检查是否是 switcher
+      Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> railNodeOpt =
+          graph.findNode(node);
+      if (railNodeOpt.isEmpty()) {
+        continue;
+      }
+      if (railNodeOpt.get().type() != NodeType.SWITCHER) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  private org.bukkit.util.Vector getNodePosition(RailGraph graph, NodeId nodeId) {
+    if (graph == null || nodeId == null) {
+      return null;
+    }
+    return graph
+        .findNode(nodeId)
+        .map(org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode::worldPosition)
+        .orElse(null);
   }
 
   private record DynamicSelection(
@@ -3066,6 +3292,24 @@ public final class RuntimeDispatchService {
     }
     NodeId declared = route.waypoints().get(index);
     if (effectiveNode.equals(declared)) {
+      return;
+    }
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    effectiveNodeOverrides
+        .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
+        .put(index, effectiveNode);
+  }
+
+  /**
+   * 强制写入有效节点覆盖（即使与声明相同也写入）。
+   *
+   * <p>用于"首站位置初始化"场景：即使 spawn 位置与 route 第 0 站相同，也需要写入覆盖表以标记"已处理"，避免每 tick 重复检查和打印日志。
+   */
+  private void forceRecordEffectiveNode(String trainName, int index, NodeId effectiveNode) {
+    if (trainName == null || trainName.isBlank() || effectiveNode == null || index < 0) {
       return;
     }
     String key = normalizeTrainKey(trainName);
@@ -3479,6 +3723,97 @@ public final class RuntimeDispatchService {
     EtaService svc = this.etaService;
     if (svc != null && trainName != null && !trainName.isBlank()) {
       svc.invalidateTrainEta(trainName);
+    }
+  }
+
+  /**
+   * 解析 Route 的终点站信息（End of Operation）。
+   *
+   * <p>优先级：
+   *
+   * <ol>
+   *   <li>TERMINATE 类型的 stop
+   *   <li>最后一个 STOP 类型的 stop
+   *   <li>最后一个 stop
+   * </ol>
+   *
+   * <p>支持 DYNAMIC stop：从 DYNAMIC 规范中提取站点信息。
+   *
+   * @param route RouteDefinition
+   * @return 终点站信息（name, code）
+   */
+  private Optional<DestinationDisplayInfo> resolveEndOfOperationInfo(RouteDefinition route) {
+    if (route == null || routeDefinitions == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return Optional.empty();
+    }
+
+    // 找到终点 stop
+    RouteStop candidate = null;
+    for (RouteStop stop : stops) {
+      if (stop != null && stop.passType() == RouteStopPassType.TERMINATE) {
+        candidate = stop;
+      }
+    }
+    if (candidate == null) {
+      for (RouteStop stop : stops) {
+        if (stop != null && stop.passType() == RouteStopPassType.STOP) {
+          candidate = stop;
+        }
+      }
+    }
+    if (candidate == null) {
+      candidate = stops.get(stops.size() - 1);
+    }
+
+    // 优先从 stationId 解析
+    UUID stationId = candidate.stationId().orElse(null);
+    if (stationId != null && storageManager != null && storageManager.isReady()) {
+      Optional<org.fetarute.fetaruteTCAddon.company.model.Station> stationOpt =
+          storageManager.provider().flatMap(p -> p.stations().findById(stationId));
+      if (stationOpt.isPresent()) {
+        org.fetarute.fetaruteTCAddon.company.model.Station station = stationOpt.get();
+        return Optional.of(new DestinationDisplayInfo(station.name(), station.code()));
+      }
+    }
+
+    // 尝试从 DYNAMIC 规范解析
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(candidate);
+    if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
+      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+      // 直接使用 DYNAMIC 规范中的 nodeName 作为显示名称
+      // 注：完整的站点名称查询需要 operatorId，这里简化处理
+      return Optional.of(new DestinationDisplayInfo(spec.nodeName(), spec.nodeName()));
+    }
+
+    // 从 waypointNodeId 解析
+    if (candidate.waypointNodeId().isPresent()) {
+      String nodeId = candidate.waypointNodeId().get();
+      // 尝试解析站点格式 OP:S:STATION:TRACK
+      String[] parts = nodeId.split(":", -1);
+      if (parts.length >= 4 && "S".equalsIgnoreCase(parts[1])) {
+        String stationName = parts[2];
+        // 直接使用解析出的站点名称
+        return Optional.of(new DestinationDisplayInfo(stationName, stationName));
+      }
+      return Optional.of(new DestinationDisplayInfo(nodeId, nodeId));
+    }
+
+    // fallback: 使用 route name
+    return route
+        .metadata()
+        .map(meta -> new DestinationDisplayInfo(meta.serviceId(), meta.serviceId()));
+  }
+
+  /** 终点站显示信息。 */
+  private record DestinationDisplayInfo(String name, String code) {
+    private DestinationDisplayInfo {
+      name = name == null ? "" : name;
+      code = code == null ? "" : code;
     }
   }
 }

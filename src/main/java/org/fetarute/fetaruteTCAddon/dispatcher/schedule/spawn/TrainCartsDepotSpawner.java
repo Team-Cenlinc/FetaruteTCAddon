@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -421,6 +422,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       candidate = stops.get(stops.size() - 1);
     }
 
+    // 优先从 stationId 解析
     if (candidate.stationId().isPresent()) {
       Optional<Station> stationOpt = provider.stations().findById(candidate.stationId().get());
       if (stationOpt.isPresent()) {
@@ -428,10 +430,28 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
         return Optional.of(new DestinationInfo(station.name(), station.code()));
       }
     }
+
+    // 尝试从 DYNAMIC 规范解析（支持 "DYNAMIC:..." 或 "DSTY DYNAMIC:..." 格式）
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(candidate);
+    if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
+      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+      return Optional.of(new DestinationInfo(spec.nodeName(), spec.nodeName()));
+    }
+
+    // 从 waypointNodeId 解析
     if (candidate.waypointNodeId().isPresent()) {
       String node = candidate.waypointNodeId().get();
+      // 尝试解析站点格式 OP:S:STATION:TRACK
+      String[] parts = node.split(":", -1);
+      if (parts.length >= 4 && "S".equalsIgnoreCase(parts[1])) {
+        String stationName = parts[2];
+        return Optional.of(new DestinationInfo(stationName, stationName));
+      }
       return Optional.of(new DestinationInfo(node, node));
     }
+
+    // fallback: 使用 route name
     return Optional.of(new DestinationInfo(route.name(), route.code()));
   }
 

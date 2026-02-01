@@ -933,6 +933,17 @@ public final class TrainHudContextResolver {
     return indexMap;
   }
 
+  /**
+   * 解析 RouteStop 对应的 NodeId。
+   *
+   * <p>支持三种来源：
+   *
+   * <ul>
+   *   <li>直接的 waypointNodeId
+   *   <li>关联的 stationId 查询
+   *   <li>DYNAMIC 规范中提取（从 notes）
+   * </ul>
+   */
   private Optional<NodeId> resolveStopNodeId(RouteStop stop) {
     if (stop == null) {
       return Optional.empty();
@@ -943,9 +954,28 @@ public final class TrainHudContextResolver {
     if (stop.stationId().isPresent()) {
       return resolveStationNodeId(stop.stationId().get());
     }
+    // 支持 DYNAMIC 规范：从 notes 中解析（例如 TERM DYNAMIC:OP:S:STATION:[1:2]）
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(stop);
+    if (dynamicSpec.isPresent()) {
+      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+      // 使用 placeholder nodeId（取 fromTrack 作为默认轨道）
+      return Optional.of(NodeId.of(spec.toPlaceholderNodeId()));
+    }
     return Optional.empty();
   }
 
+  /**
+   * 解析 RouteStop 的显示信息。
+   *
+   * <p>支持三种来源（按优先级）：
+   *
+   * <ul>
+   *   <li>关联的 stationId 查询
+   *   <li>直接的 nodeIdOpt 解析
+   *   <li>DYNAMIC 规范中提取（当 nodeIdOpt 为空时回退）
+   * </ul>
+   */
   private StationDisplay resolveStopDisplay(RouteStop stop, Optional<NodeId> nodeIdOpt) {
     if (stop == null) {
       return StationDisplay.empty();
@@ -956,17 +986,34 @@ public final class TrainHudContextResolver {
         return display;
       }
     }
-    if (nodeIdOpt.isEmpty()) {
-      return StationDisplay.empty();
-    }
-    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeIdOpt.get());
-    if (metaOpt.isPresent()) {
-      WaypointMetadata meta = metaOpt.get();
-      if (meta.kind() != WaypointKind.STATION && meta.kind() != WaypointKind.STATION_THROAT) {
-        return StationDisplay.empty();
+    // 优先使用传入的 nodeIdOpt（可能已从 DYNAMIC 解析）
+    if (nodeIdOpt.isPresent()) {
+      Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeIdOpt.get());
+      if (metaOpt.isPresent()) {
+        WaypointMetadata meta = metaOpt.get();
+        if (meta.kind() != WaypointKind.STATION && meta.kind() != WaypointKind.STATION_THROAT) {
+          // 非站点类型但有 DYNAMIC 时继续尝试
+          Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+              DynamicStopMatcher.parseDynamicSpec(stop);
+          if (dynamicSpec.isEmpty()) {
+            return StationDisplay.empty();
+          }
+        }
+      }
+      StationDisplay display = resolveStationDisplay(nodeIdOpt.get());
+      if (!display.isEmpty()) {
+        return display;
       }
     }
-    return resolveStationDisplay(nodeIdOpt.get());
+    // 回退：尝试从 DYNAMIC 规范解析（若 nodeIdOpt 为空或解析失败）
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(stop);
+    if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
+      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+      String candidate = spec.toPlaceholderNodeId();
+      return resolveStationDisplay(NodeId.of(candidate));
+    }
+    return StationDisplay.empty();
   }
 
   private double resolveSpeedBlocksPerSecond(MinecartGroup group) {
