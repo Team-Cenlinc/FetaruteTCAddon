@@ -55,7 +55,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   }
 
   /**
-   * @return head cart 的实时速度（blocks/tick），若异常返回 0。
+   * 获取 head cart 的实际速度（blocks/tick）。
+   *
+   * <p>使用实体的物理速度（velocity）而非 TrainCarts 的 getRealSpeed()， 因为后者在 launch 期间会返回目标速度而非实际速度。
    */
   @Override
   public double currentSpeedBlocksPerTick() {
@@ -63,8 +65,16 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (head == null) {
       return 0.0;
     }
-    double speed = head.getRealSpeed();
-    return Double.isFinite(speed) ? Math.abs(speed) : 0.0;
+    org.bukkit.entity.Entity entity =
+        head.getEntity() != null ? head.getEntity().getEntity() : null;
+    if (entity == null) {
+      return 0.0;
+    }
+    org.bukkit.util.Vector velocity = entity.getVelocity();
+    if (velocity == null) {
+      return 0.0;
+    }
+    return velocity.length();
   }
 
   @Override

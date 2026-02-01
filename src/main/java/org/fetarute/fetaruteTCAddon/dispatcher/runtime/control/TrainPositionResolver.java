@@ -112,8 +112,16 @@ public final class TrainPositionResolver {
       return PositionResult.empty();
     }
 
-    // 获取速度
-    double speedBpt = head.getRealSpeedLimited();
+    // 获取实际速度（使用实体 velocity，而非 TrainCarts 目标速度）
+    org.bukkit.entity.Entity entity =
+        head.getEntity() != null ? head.getEntity().getEntity() : null;
+    double speedBpt = 0.0;
+    if (entity != null) {
+      org.bukkit.util.Vector velocity = entity.getVelocity();
+      if (velocity != null) {
+        speedBpt = velocity.length();
+      }
+    }
     double speedBps = speedBpt * 20.0;
 
     // 简化处理：使用边长度作为距离估算

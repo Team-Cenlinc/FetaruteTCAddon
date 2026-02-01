@@ -1016,12 +1016,27 @@ public final class TrainHudContextResolver {
     return StationDisplay.empty();
   }
 
+  /**
+   * 获取列车实际速度（blocks per second）。
+   *
+   * <p>使用实体的物理速度（velocity）而非 TrainCarts 的 getRealSpeed()， 因为后者在 launch 期间会返回目标速度而非实际速度。
+   */
   private double resolveSpeedBlocksPerSecond(MinecartGroup group) {
     if (group == null || group.head() == null) {
       return 0.0;
     }
-    double bpt = Math.abs(group.head().getRealSpeed());
-    return bpt * 20.0;
+    MinecartMember<?> head = group.head();
+    Entity entity = head.getEntity() != null ? head.getEntity().getEntity() : null;
+    if (entity == null) {
+      return 0.0;
+    }
+    // velocity 是每 tick 的移动向量，length() 得到标量速度 (blocks/tick)
+    org.bukkit.util.Vector velocity = entity.getVelocity();
+    if (velocity == null) {
+      return 0.0;
+    }
+    double bpt = velocity.length();
+    return bpt * 20.0; // blocks/tick → blocks/second
   }
 
   private static Optional<UUID> parseUuid(String raw) {

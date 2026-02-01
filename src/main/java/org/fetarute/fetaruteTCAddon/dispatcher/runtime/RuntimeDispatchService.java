@@ -19,6 +19,7 @@ import java.util.regex.Pattern;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -1646,12 +1647,24 @@ public final class RuntimeDispatchService {
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_CODE);
     }
     // 更新终点站 tags（从 End of Operation 解析）
-    resolveEndOfOperationInfo(route)
-        .ifPresent(
-            dest -> {
-              TrainTagHelper.writeTag(properties, "FTA_DEST_NAME", dest.name());
-              TrainTagHelper.writeTag(properties, "FTA_DEST_CODE", dest.code());
-            });
+    Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
+    destInfoOpt.ifPresent(
+        dest -> {
+          TrainTagHelper.writeTag(properties, "FTA_DEST_NAME", dest.name());
+          TrainTagHelper.writeTag(properties, "FTA_DEST_CODE", dest.code());
+        });
+    // 重新生成 trainName（使用新的 destination）
+    String newTrainName =
+        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::name).orElse(null));
+    if (newTrainName != null && !newTrainName.equals(trainName)) {
+      // 迁移注册：先取消旧 trainName 的注册，再用新 trainName 重新注册
+      layoverRegistry.unregister(trainName); // 已在前面 unregister 过，这里是确保
+      occupancyManager.releaseByTrain(trainName);
+      progressRegistry.remove(trainName);
+      properties.setTrainName(newTrainName);
+      trainName = newTrainName;
+      debugLogger.accept("Layover 复用: trainName 更新为 " + newTrainName);
+    }
     TrainTagHelper.writeTag(properties, "FTA_TICKET_ID", ticket.ticketId());
     progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
     invalidateTrainEta(trainName);
@@ -3943,6 +3956,40 @@ public final class RuntimeDispatchService {
     return route
         .metadata()
         .map(meta -> new DestinationDisplayInfo(meta.serviceId(), meta.serviceId()));
+  }
+
+  /**
+   * 根据新的 destination 重新生成 trainName。
+   *
+   * <p>用于 Layover 复用时更新列车名，确保 destination 首字母正确。
+   */
+  private String regenerateTrainName(RouteDefinition route, String destName) {
+    if (route == null) {
+      return null;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata> metaOpt =
+        route.metadata();
+    String operator = metaOpt.map(m -> m.operator()).orElse("OP");
+    String line = metaOpt.map(m -> m.lineId()).orElse("LINE");
+    RoutePatternType pattern = resolvePatternType(route);
+    String dest = destName;
+    if (dest == null || dest.isBlank()) {
+      dest = route.id().value();
+    }
+    return TrainNameFormatter.buildTrainName(operator, line, pattern, dest, UUID.randomUUID());
+  }
+
+  /** 从 RouteDefinition 解析 RoutePatternType，查询数据库或回退默认值。 */
+  /**
+   * 从 RouteDefinition 解析 RoutePatternType。
+   *
+   * <p>当前简化实现：直接使用 LOCAL 作为默认值。 完整实现需要从 metadata 中解析 operator/line 并查询数据库， 但这会增加复杂度且 trainName 中的
+   * pattern 主要用于人眼识别，不影响调度逻辑。
+   */
+  private RoutePatternType resolvePatternType(RouteDefinition route) {
+    // 简化实现：从 route metadata 中无法直接获取 patternType，
+    // 完整查询需要 operator->line->route 链路，这里回退到 LOCAL
+    return RoutePatternType.LOCAL;
   }
 
   /** 终点站显示信息。 */

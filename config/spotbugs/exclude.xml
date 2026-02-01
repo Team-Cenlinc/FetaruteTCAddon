@@ -280,4 +280,38 @@
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchServiceTest"/>
         <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
     </Match>
+
+    <!-- BKCommonLib CommonEntity -> Bukkit Entity 类型转换：getEntity().getEntity() 返回泛型 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle"/>
+        <Method name="currentSpeedBlocksPerTick"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver"/>
+        <Method name="resolveFromGroup"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver"/>
+        <Method name="resolveSpeedBlocksPerSecond"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+
+    <!-- Bukkit API getVelocity() 理论上不返回 null，但防御性检查不应触发 SpotBugs -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle"/>
+        <Method name="currentSpeedBlocksPerTick"/>
+        <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver"/>
+        <Method name="resolveFromGroup"/>
+        <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver"/>
+        <Method name="resolveSpeedBlocksPerSecond"/>
+        <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+    </Match>
 </FindBugsFilter>
