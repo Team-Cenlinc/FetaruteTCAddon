@@ -315,6 +315,7 @@ public final class TrainHudContextResolver {
     String labelLine = localeTextOrDefault("display.hud.bossbar.label.line", "Line");
     String labelNext = localeTextOrDefault("display.hud.bossbar.label.next", "Next");
     String signalStatus = resolveSignalStatus(context.signalAspect());
+    String signalColorTag = resolveSignalColorTag(context.signalAspect());
     String serviceStatus = resolveServiceStatus(context.layover());
     String lineCode = "-";
     String lineName = "-";
@@ -396,6 +397,7 @@ public final class TrainHudContextResolver {
         "signal_aspect",
         context.signalAspect() == null ? "UNKNOWN" : context.signalAspect().name());
     placeholders.put("signal_status", signalStatus);
+    placeholders.put("signal_color_tag", signalColorTag);
     placeholders.put("service_status", serviceStatus);
     placeholders.put("train_name", context.trainName());
     placeholders.put("time_hhmm", timeHhmm);
@@ -1152,6 +1154,23 @@ public final class TrainHudContextResolver {
           "display.hud.bossbar.signal.proceed_with_caution", "CAUTION");
       case CAUTION -> localeTextOrDefault("display.hud.bossbar.signal.caution", "CAUTION");
       case STOP -> localeTextOrDefault("display.hud.bossbar.signal.stop", "STOP");
+    };
+  }
+
+  /**
+   * 根据信号等级返回 MiniMessage 颜色标签。
+   *
+   * <p>用于 HUD 模板中的动态颜色显示：{@code <{signal_color_tag}>●</{signal_color_tag}>}。
+   */
+  private String resolveSignalColorTag(SignalAspect aspect) {
+    if (aspect == null) {
+      return "gray";
+    }
+    return switch (aspect) {
+      case PROCEED -> "green";
+      case PROCEED_WITH_CAUTION -> "yellow";
+      case CAUTION -> "gold";
+      case STOP -> "red";
     };
   }
 

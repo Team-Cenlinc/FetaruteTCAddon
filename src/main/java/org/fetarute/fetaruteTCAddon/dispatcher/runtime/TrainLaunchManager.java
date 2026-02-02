@@ -55,9 +55,13 @@ public final class TrainLaunchManager {
       double curveSpeed = resolveStopSpeed(train, config, distanceOpt, runtimeSettings);
       double curveSpeedBpt = toBlocksPerTick(curveSpeed);
       properties.setSpeedLimit(curveSpeedBpt);
-      // 只在列车真正停下来后调用 stop() 确保完全停止
-      if (train != null && curveSpeedBpt < 0.001 && !train.isMoving()) {
-        train.stop();
+      // 无论列车是否在运动，都应该主动减速/停车
+      if (train != null) {
+        if (curveSpeedBpt < 0.001) {
+          // 目标速度接近零：完全停止
+          train.stop();
+        }
+        // 目标速度非零时，setSpeedLimit + WaitAcceleration 会自动减速，无需额外调用
       }
       return;
     }
@@ -66,15 +70,15 @@ public final class TrainLaunchManager {
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     // 非 STOP 信号：允许发车或对运动中列车补充能量
-    if (train != null && allowLaunch) {
-      if (!canIssueLaunch(properties, runtimeSettings)) {
-        return;
-      }
+    if (train != null) {
       if (!train.isMoving()) {
-        // 静止时正常发车
-        train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
+        // 静止时需要发车：受 allowLaunch 和冷却时间限制
+        if (allowLaunch && canIssueLaunch(properties, runtimeSettings)) {
+          train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
+        }
       } else {
-        // 运动中且速度低于目标时，补充能量加速（经过 waypoint 时维持速度）
+        // 运动中：如果速度低于目标，总是尝试加速（不受发车冷却限制）
+        // accelerateTo 内部已有"速度接近目标时跳过"的保护
         train.accelerateTo(targetBpt, accelBpt2);
       }
     }
