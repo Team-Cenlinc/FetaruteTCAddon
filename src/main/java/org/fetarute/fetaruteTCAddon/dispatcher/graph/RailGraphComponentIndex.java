@@ -76,6 +76,15 @@ public final class RailGraphComponentIndex {
     return Map.copyOf(byNode);
   }
 
+  /**
+   * 返回连通分量的数量。
+   *
+   * @return 连通分量数
+   */
+  public int componentCount() {
+    return (int) byNode.values().stream().distinct().count();
+  }
+
   private static String minKey(Set<NodeId> nodes) {
     String min = null;
     for (NodeId id : nodes) {

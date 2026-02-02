@@ -236,6 +236,20 @@ public final class RailGraphService {
     return Optional.ofNullable(index.componentKey(nodeId));
   }
 
+  /**
+   * 返回指定图的连通分量数量。
+   *
+   * @param graph 调度图实例
+   * @return 连通分量数量
+   */
+  public int componentCount(RailGraph graph) {
+    if (graph == null) {
+      return 0;
+    }
+    // 动态计算，不依赖缓存
+    return RailGraphComponentIndex.fromGraph(graph).componentCount();
+  }
+
   /** 查询某连通分量的 caution 速度覆盖（blocks/s）。 */
   public OptionalDouble componentCautionSpeedBlocksPerSecond(UUID worldId, String componentKey) {
     Objects.requireNonNull(worldId, "worldId");

@@ -143,6 +143,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initHudTemplateService();
     initHudDefaultTemplateService();
     initDisplayService();
+    initApi();
 
     registerCommands();
     getServer()
@@ -154,6 +155,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   @Override
   public void onDisable() {
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     unregisterSignActions();
     if (runtimeMonitorTask != null) {
       runtimeMonitorTask.cancel();
@@ -790,5 +792,54 @@ public final class FetaruteTCAddon extends JavaPlugin {
       runtimeMonitorTask.cancel();
       runtimeMonitorTask = null;
     }
+  }
+
+  /** 初始化外部 API 模块，供外部插件访问调度数据。 */
+  private void initApi() {
+    if (railGraphService == null
+        || trainSnapshotStore == null
+        || routeProgressRegistry == null
+        || routeDefinitionCache == null
+        || occupancyManager == null) {
+      getLogger().warning("无法初始化公开 API：缺少必要的运行时组件");
+      return;
+    }
+    org.fetarute.fetaruteTCAddon.api.graph.GraphApi graphApi =
+        new org.fetarute.fetaruteTCAddon.api.internal.GraphApiImpl(railGraphService);
+    org.fetarute.fetaruteTCAddon.api.train.TrainApi trainApi =
+        new org.fetarute.fetaruteTCAddon.api.internal.TrainApiImpl(
+            trainSnapshotStore, routeProgressRegistry, routeDefinitionCache, etaService);
+    org.fetarute.fetaruteTCAddon.api.route.RouteApi routeApi =
+        new org.fetarute.fetaruteTCAddon.api.internal.RouteApiImpl(
+            routeDefinitionCache,
+            storageManager != null ? storageManager.provider().orElse(null) : null);
+    org.fetarute.fetaruteTCAddon.api.occupancy.OccupancyApi occupancyApi =
+        new org.fetarute.fetaruteTCAddon.api.internal.OccupancyApiImpl(occupancyManager);
+    // 站点 API
+    org.fetarute.fetaruteTCAddon.api.station.StationApi stationApi = null;
+    // 运营商 API
+    org.fetarute.fetaruteTCAddon.api.operator.OperatorApi operatorApi = null;
+    // 线路 API
+    org.fetarute.fetaruteTCAddon.api.line.LineApi lineApi = null;
+    if (storageManager != null && storageManager.provider().isPresent()) {
+      var provider = storageManager.provider().get();
+      stationApi =
+          new org.fetarute.fetaruteTCAddon.api.internal.StationApiImpl(
+              provider.stations(), provider.companies(), provider.operators());
+      operatorApi =
+          new org.fetarute.fetaruteTCAddon.api.internal.OperatorApiImpl(
+              provider.operators(), provider.companies());
+      lineApi =
+          new org.fetarute.fetaruteTCAddon.api.internal.LineApiImpl(
+              provider.lines(), provider.companies(), provider.operators());
+    }
+    org.fetarute.fetaruteTCAddon.api.eta.EtaApi etaApi =
+        etaService != null
+            ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(etaService)
+            : null;
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.initialize(
+        graphApi, trainApi, routeApi, occupancyApi, stationApi, operatorApi, lineApi, etaApi);
+    getLogger()
+        .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");
   }
 }

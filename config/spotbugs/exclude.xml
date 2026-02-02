@@ -314,4 +314,85 @@
         <Method name="resolveSpeedBlocksPerSecond"/>
         <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
     </Match>
+
+    <!-- API 模块的 record 已在构造函数中使用 List.copyOf 保证不可变，但 SpotBugs 仍会报告 EI -->
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.graph"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.graph"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.train"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.route"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.route"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.occupancy"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.occupancy"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.station"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.station"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.operator"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.operator"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.line"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.line"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.eta"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.eta"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- API 内部实现存储外部服务引用，生命周期由插件主类管理 -->
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.internal"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- API 内部实现捕获 Exception 用于防御性编程，忽略 ETA 计算失败 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.api.internal.TrainApiImpl"/>
+        <Method name="convertSnapshot"/>
+        <Bug pattern="REC_CATCH_EXCEPTION"/>
+    </Match>
+
+    <!-- API 性能测试中的死局部变量是测量开销所必需的，不是真正的 bug -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.api.ApiPerformanceTest"/>
+        <Bug pattern="DLS_DEAD_LOCAL_STORE"/>
+    </Match>
 </FindBugsFilter>
