@@ -626,6 +626,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.spawnManager = new StorageSpawnManager(managerSettings, loggerManager::debug);
     TrainCartsDepotSpawner depotSpawner =
         new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
+    depotSpawner.setOccupancyManager(occupancyManager);
     this.spawnTicketAssigner =
         new SimpleTicketAssigner(
             spawnManager,

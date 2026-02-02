@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -467,15 +468,21 @@ public final class EtaService {
     }
 
     PathProgressModel.PathProgress progress = progressOpt.get();
+    // 使用当前速度作为初速以提高 ETA 精度
+    OptionalDouble initialSpeed = snap.currentSpeedBps();
     Optional<Integer> travelSecOpt =
         travelTimeModel.estimateTravelSec(
-            graph, progress.remainingNodes(), progress.remainingEdges());
+            graph, progress.remainingNodes(), progress.remainingEdges(), initialSpeed);
     if (travelSecOpt.isEmpty()) {
       return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
     }
 
     int travelSec = travelSecOpt.get();
-    int dwellSec = dwellModel.dwellSec(snap.dwellRemainingSec().orElse(null)).orElse(0);
+    // 当前停车时间 + 中途站点停车时间
+    int currentDwellSec = dwellModel.dwellSec(snap.dwellRemainingSec().orElse(null)).orElse(0);
+    int intermediateDwellSec =
+        computeIntermediateDwellSec(route, snap.routeIndex(), targetSel.nodeId());
+    int dwellSec = currentDwellSec + intermediateDwellSec;
 
     OccupancyDecision decision = buildAndCanEnter(graph, route, trainName, snap.routeIndex(), now);
     ClearanceModel.Clearance clearance = clearanceModel.classify(decision);
@@ -1910,5 +1917,62 @@ public final class EtaService {
       }
     }
     return minEdges == Integer.MAX_VALUE ? Optional.empty() : Optional.of(minEdges);
+  }
+
+  /**
+   * 计算从当前位置到目标节点之间所有中途停靠站点的累计停车时间。
+   *
+   * <p>只累加 passType 为 STOP 的站点的 dwellSeconds（不含 PASS 和 TERMINATE）。 目标站点本身不计入中途停车（会在到达后单独计算）。
+   *
+   * @param route 当前线路定义
+   * @param currentIndex 当前 waypoint 索引
+   * @param targetNodeId 目标节点
+   * @return 中途停车总秒数
+   */
+  private int computeIntermediateDwellSec(
+      RouteDefinition route, int currentIndex, NodeId targetNodeId) {
+    if (route == null || route.id() == null || currentIndex < 0) {
+      return 0;
+    }
+
+    List<NodeId> waypoints = route.waypoints();
+    if (waypoints.isEmpty() || currentIndex >= waypoints.size() - 1) {
+      return 0;
+    }
+
+    // 找到目标在 waypoint 中的位置
+    int targetIndex = -1;
+    for (int i = currentIndex + 1; i < waypoints.size(); i++) {
+      if (targetNodeId.equals(waypoints.get(i))) {
+        targetIndex = i;
+        break;
+      }
+    }
+    if (targetIndex <= currentIndex) {
+      return 0;
+    }
+
+    // 获取 RouteStop 列表
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    if (stops.isEmpty()) {
+      return 0;
+    }
+
+    int totalDwellSec = 0;
+
+    // 遍历中途站点（currentIndex+1 到 targetIndex-1）
+    for (int i = currentIndex + 1; i < targetIndex; i++) {
+      Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), i);
+      if (stopOpt.isEmpty()) {
+        continue;
+      }
+      RouteStop stop = stopOpt.get();
+      // 只累加 STOP 类型的站点
+      if (stop.passType() == RouteStopPassType.STOP) {
+        totalDwellSec += stop.dwellSeconds().orElse(0);
+      }
+    }
+
+    return totalDwellSec;
   }
 }

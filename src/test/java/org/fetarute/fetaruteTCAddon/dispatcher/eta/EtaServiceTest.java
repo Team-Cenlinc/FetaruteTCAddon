@@ -511,4 +511,181 @@ class EtaServiceTest {
     return new SimpleRailGraph(
         java.util.Map.of(start, startNode, end, endNode), java.util.Map.of(edgeId, edge), Set.of());
   }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 中途停站累加测试
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  @Test
+  void trainEtaIncludesIntermediateStopDwellTime() {
+    // 测试场景：A -> B -> C -> D，列车在 A，目标是 D
+    // B 和 C 都是 STOP 站点，各有 20 秒停车时间
+    // 期望 dwellSec = 0（当前无停车）+ 20 + 20 = 40 秒
+    UUID routeUuid = UUID.randomUUID();
+    UUID worldId = UUID.randomUUID();
+    NodeId nodeA = NodeId.of("SURN:S:AAA:1");
+    NodeId nodeB = NodeId.of("SURN:S:BBB:1");
+    NodeId nodeC = NodeId.of("SURN:S:CCC:1");
+    NodeId nodeD = NodeId.of("SURN:S:DDD:1");
+
+    RouteId routeId = RouteId.of("SURN:L1:R1");
+    RouteDefinition route =
+        new RouteDefinition(routeId, List.of(nodeA, nodeB, nodeC, nodeD), Optional.empty());
+    RailGraph graph = buildLinearGraph(List.of(nodeA, nodeB, nodeC, nodeD), 60);
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    // 构建 RouteStop：B 和 C 都是 STOP，各 20 秒
+    RouteStop stopB =
+        new RouteStop(
+            routeUuid,
+            1,
+            Optional.empty(),
+            Optional.of("SURN:S:BBB:1"),
+            Optional.of(20),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    RouteStop stopC =
+        new RouteStop(
+            routeUuid,
+            2,
+            Optional.empty(),
+            Optional.of("SURN:S:CCC:1"),
+            Optional.of(20),
+            RouteStopPassType.STOP,
+            Optional.empty());
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(routeId)).thenReturn(List.of(stopB, stopC));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stopB));
+    when(routeDefinitions.findStop(routeId, 2)).thenReturn(Optional.of(stopC));
+    when(routeDefinitions.findStop(routeId, 0)).thenReturn(Optional.empty());
+    when(routeDefinitions.findStop(routeId, 3)).thenReturn(Optional.empty());
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any()))
+        .thenReturn(new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()));
+
+    TrainSnapshotStore snapshotStore = new TrainSnapshotStore();
+    snapshotStore.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            Instant.now(),
+            worldId,
+            routeUuid,
+            routeId,
+            0, // 当前在索引 0（nodeA）
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(), // 当前无停车
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+
+    EtaService service =
+        new EtaService(
+            snapshotStore,
+            railGraphService,
+            routeDefinitions,
+            occupancyManager,
+            HeadwayRule.fixed(Duration.ZERO),
+            () -> 2,
+            () -> 0,
+            () -> 4); // arrivingThreshold
+
+    // 计算到 nodeD 的 ETA
+    EtaResult result = service.getForTrain("train-1", new EtaTarget.PlatformNode(nodeD));
+
+    // 期望中途停车时间 = stopB(20) + stopC(20) = 40 秒
+    assertEquals(40, result.dwellSec(), "中途停车时间应为 40 秒（B + C 各 20 秒）");
+  }
+
+  @Test
+  void trainEtaSkipsPassStopsForDwell() {
+    // 测试场景：A -> B -> C -> D，列车在 A，目标是 D
+    // B 是 PASS（通过不停），C 是 STOP（20 秒）
+    // 期望 dwellSec = 0（当前无停车）+ 0（B 通过）+ 20（C 停车）= 20 秒
+    UUID routeUuid = UUID.randomUUID();
+    UUID worldId = UUID.randomUUID();
+    NodeId nodeA = NodeId.of("SURN:S:AAA:1");
+    NodeId nodeB = NodeId.of("SURN:S:BBB:1");
+    NodeId nodeC = NodeId.of("SURN:S:CCC:1");
+    NodeId nodeD = NodeId.of("SURN:S:DDD:1");
+
+    RouteId routeId = RouteId.of("SURN:L1:R1");
+    RouteDefinition route =
+        new RouteDefinition(routeId, List.of(nodeA, nodeB, nodeC, nodeD), Optional.empty());
+    RailGraph graph = buildLinearGraph(List.of(nodeA, nodeB, nodeC, nodeD), 60);
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    // B 是 PASS，C 是 STOP
+    RouteStop stopB =
+        new RouteStop(
+            routeUuid,
+            1,
+            Optional.empty(),
+            Optional.of("SURN:S:BBB:1"),
+            Optional.of(20), // 有 dwell 但是 PASS 类型
+            RouteStopPassType.PASS,
+            Optional.empty());
+    RouteStop stopC =
+        new RouteStop(
+            routeUuid,
+            2,
+            Optional.empty(),
+            Optional.of("SURN:S:CCC:1"),
+            Optional.of(20),
+            RouteStopPassType.STOP,
+            Optional.empty());
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(routeId)).thenReturn(List.of(stopB, stopC));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stopB));
+    when(routeDefinitions.findStop(routeId, 2)).thenReturn(Optional.of(stopC));
+    when(routeDefinitions.findStop(routeId, 0)).thenReturn(Optional.empty());
+    when(routeDefinitions.findStop(routeId, 3)).thenReturn(Optional.empty());
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any()))
+        .thenReturn(new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()));
+
+    TrainSnapshotStore snapshotStore = new TrainSnapshotStore();
+    snapshotStore.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            Instant.now(),
+            worldId,
+            routeUuid,
+            routeId,
+            0,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+
+    EtaService service =
+        new EtaService(
+            snapshotStore,
+            railGraphService,
+            routeDefinitions,
+            occupancyManager,
+            HeadwayRule.fixed(Duration.ZERO),
+            () -> 2,
+            () -> 0,
+            () -> 4);
+
+    EtaResult result = service.getForTrain("train-1", new EtaTarget.PlatformNode(nodeD));
+
+    // B 是 PASS 不计入，只有 C 的 20 秒
+    assertEquals(20, result.dwellSec(), "中途停车时间应为 20 秒（只有 C，B 是 PASS）");
+  }
 }

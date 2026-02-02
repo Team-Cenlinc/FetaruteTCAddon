@@ -3,7 +3,9 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -19,6 +21,8 @@ import org.junit.jupiter.api.Test;
  *   <li>边限速正确应用
  *   <li>fallback 速度在无限速时使用
  *   <li>加减速曲线计算（精确模式）
+ *   <li>边间变速：相邻边限速不同时的减速/加速
+ *   <li>初速参数：当前速度作为首边初速
  * </ul>
  */
 class DynamicTravelTimeModelTest {
@@ -134,6 +138,145 @@ class DynamicTravelTimeModelTest {
     assertThrows(IllegalArgumentException.class, () -> new DynamicTravelTimeModel(params, 0.0));
 
     assertThrows(IllegalArgumentException.class, () -> new DynamicTravelTimeModel(params, -1.0));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 边间变速测试
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  @Test
+  void pathTravelTime_sameSpeedEdges_noSpeedChange() {
+    // 三条边，限速都是 10 bps，总距离 300 blocks
+    // 不需要变速，纯匀速：300 / 10 = 30 秒
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"), nodeId("C"), nodeId("D"));
+    List<RailEdge> edges =
+        List.of(
+            createEdge("A", "B", 100, 10.0),
+            createEdge("B", "C", 100, 10.0),
+            createEdge("C", "D", 100, 10.0));
+
+    Optional<Duration> result = model.pathTravelTime(null, nodes, edges);
+
+    assertTrue(result.isPresent());
+    assertEquals(30, result.get().getSeconds());
+  }
+
+  @Test
+  void pathTravelTime_decelerateForSlowerEdge() {
+    // A->B 限速 10 bps，B->C 限速 5 bps
+    // 进入第二边前需要从 10 减速到 5
+    // 比纯匀速计算要多花时间
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"), nodeId("C"));
+    List<RailEdge> edges = List.of(createEdge("A", "B", 100, 10.0), createEdge("B", "C", 100, 5.0));
+
+    Optional<Duration> result = model.pathTravelTime(null, nodes, edges);
+
+    assertTrue(result.isPresent());
+    // 如果纯匀速：100/10 + 100/5 = 10 + 20 = 30s
+    // 实际需要减速，会更久
+    long seconds = result.get().getSeconds();
+    assertTrue(seconds >= 30, "减速场景应该 >= 30s，实际: " + seconds);
+  }
+
+  @Test
+  void pathTravelTime_accelerateForFasterEdge() {
+    // A->B 限速 5 bps，B->C 限速 10 bps
+    // 第一边末速取 min(5, 10) = 5，进入第二边后需要加速到 10
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"), nodeId("C"));
+    List<RailEdge> edges = List.of(createEdge("A", "B", 100, 5.0), createEdge("B", "C", 100, 10.0));
+
+    Optional<Duration> result = model.pathTravelTime(null, nodes, edges);
+
+    assertTrue(result.isPresent());
+    // 如果纯匀速：100/5 + 100/10 = 20 + 10 = 30s
+    // 第二边需要从 5 加速到 10，会更久
+    long seconds = result.get().getSeconds();
+    assertTrue(seconds >= 30, "加速场景应该 >= 30s，实际: " + seconds);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 初速参数测试
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  @Test
+  void pathTravelTimeWithInitialSpeed_fromZero_accelerates() {
+    // 从静止开始，需要加速到边限速 10 bps
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"));
+    List<RailEdge> edges = List.of(createEdge("A", "B", 100, 10.0));
+
+    // 不带初速
+    Optional<Duration> withoutInitial =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.empty());
+    // 带初速 0
+    Optional<Duration> withZeroInitial =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.of(0.0));
+
+    assertTrue(withoutInitial.isPresent());
+    assertTrue(withZeroInitial.isPresent());
+
+    // 从静止加速需要更多时间
+    // 不带初速默认用边限速作为初速（匀速），带初速 0 需要加速
+    assertTrue(withZeroInitial.get().compareTo(withoutInitial.get()) > 0, "从静止加速应该比匀速更久");
+  }
+
+  @Test
+  void pathTravelTimeWithInitialSpeed_atTargetSpeed_noAcceleration() {
+    // 当前速度等于边限速，不需要加速
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"));
+    List<RailEdge> edges = List.of(createEdge("A", "B", 100, 10.0));
+
+    Optional<Duration> withInitial =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.of(10.0));
+    Optional<Duration> withoutInitial =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.empty());
+
+    assertTrue(withInitial.isPresent());
+    assertTrue(withoutInitial.isPresent());
+
+    // 两者应该相同（都是匀速 10 bps）
+    assertEquals(withoutInitial.get().toMillis(), withInitial.get().toMillis(), 100);
+  }
+
+  @Test
+  void pathTravelTimeWithInitialSpeed_belowTargetSpeed_accelerates() {
+    // 当前速度 5 bps，边限速 10 bps，需要加速
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"));
+    List<RailEdge> edges = List.of(createEdge("A", "B", 100, 10.0));
+
+    Optional<Duration> slow =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.of(5.0));
+    Optional<Duration> fast =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.of(10.0));
+
+    assertTrue(slow.isPresent());
+    assertTrue(fast.isPresent());
+
+    // 从 5 加速到 10 需要更多时间
+    assertTrue(slow.get().compareTo(fast.get()) > 0, "低速起步应该比高速起步更久");
+  }
+
+  @Test
+  void pathTravelTimeWithInitialSpeed_multiEdge_carriesSpeed() {
+    // 三条边测试速度状态传递
+    // A->B: 10 bps, B->C: 5 bps, C->D: 10 bps
+    // 初速 0，需要加速 -> 减速 -> 加速
+    List<NodeId> nodes = List.of(nodeId("A"), nodeId("B"), nodeId("C"), nodeId("D"));
+    List<RailEdge> edges =
+        List.of(
+            createEdge("A", "B", 100, 10.0),
+            createEdge("B", "C", 100, 5.0),
+            createEdge("C", "D", 100, 10.0));
+
+    Optional<Duration> fromZero =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.of(0.0));
+    Optional<Duration> fromTen =
+        model.pathTravelTimeWithInitialSpeed(null, nodes, edges, OptionalDouble.of(10.0));
+
+    assertTrue(fromZero.isPresent());
+    assertTrue(fromTen.isPresent());
+
+    // 从静止开始应该比从高速开始更久
+    assertTrue(fromZero.get().compareTo(fromTen.get()) > 0, "从静止开始应该比从高速开始更久");
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

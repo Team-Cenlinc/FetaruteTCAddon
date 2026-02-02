@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
@@ -91,13 +92,28 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
   }
 
   /**
-   * 覆盖 pathTravelTime 以支持 approaching 限速。
+   * 覆盖 pathTravelTime 以支持边间变速与 approaching 限速。
    *
-   * <p>最后一段边会根据目标节点类型应用 approaching 限速（站点/车库）。
+   * <p>改进点：
+   *
+   * <ul>
+   *   <li>边间变速：考虑相邻边限速不同时的减速/加速
+   *   <li>approaching 限速：最后一段边根据目标节点类型减速
+   * </ul>
    */
   @Override
   public Optional<Duration> pathTravelTime(
       RailGraph graph, List<NodeId> nodes, List<RailEdge> edges) {
+    return pathTravelTimeWithInitialSpeed(graph, nodes, edges, OptionalDouble.empty());
+  }
+
+  /**
+   * 带初速的路径行程时间计算。
+   *
+   * @param initialSpeedBps 初速（blocks/s），empty 时使用第一条边的限速
+   */
+  public Optional<Duration> pathTravelTimeWithInitialSpeed(
+      RailGraph graph, List<NodeId> nodes, List<RailEdge> edges, OptionalDouble initialSpeedBps) {
     Objects.requireNonNull(nodes, "nodes");
     Objects.requireNonNull(edges, "edges");
     if (edges.isEmpty()) {
@@ -107,51 +123,47 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
       throw new IllegalArgumentException("nodes 与 edges 数量不匹配");
     }
 
-    Duration total = Duration.ZERO;
+    double totalSeconds = 0.0;
     int lastIndex = edges.size() - 1;
+
+    // 当前速度状态，用于边间连续计算
+    double currentSpeed = initialSpeedBps.isPresent() ? initialSpeedBps.getAsDouble() : Double.NaN;
 
     for (int i = 0; i < edges.size(); i++) {
       RailEdge edge = edges.get(i);
-      NodeId from = nodes.get(i);
       NodeId to = nodes.get(i + 1);
-
-      Optional<Duration> dt;
-      if (i == lastIndex) {
-        // 最后一段边：考虑 approaching 限速
-        dt = edgeTravelTimeWithApproaching(graph, edge, from, to);
-      } else {
-        dt = edgeTravelTime(graph, edge, from, to);
-      }
-
-      if (dt.isEmpty()) {
+      if (edge == null || edge.lengthBlocks() <= 0) {
         return Optional.empty();
       }
-      total = total.plus(dt.get());
-    }
-    return Optional.of(total);
-  }
 
-  /** 计算最后一段边的旅行时间（考虑 approaching 限速）。 */
-  private Optional<Duration> edgeTravelTimeWithApproaching(
-      RailGraph graph, RailEdge edge, NodeId from, NodeId to) {
-    if (edge == null) {
-      return Optional.empty();
-    }
-    int lengthBlocks = edge.lengthBlocks();
-    if (lengthBlocks <= 0) {
-      return Optional.empty();
+      double edgeTargetSpeed = resolveEdgeSpeed(edge);
+
+      // 确定初速：首边用外部传入或边限速，后续边用上一边出口速度
+      double v0 = Double.isNaN(currentSpeed) ? edgeTargetSpeed : currentSpeed;
+
+      // 确定末速：需要看下一边限速或 approaching 限速
+      double vEnd;
+      if (i == lastIndex) {
+        // 最后一边：考虑 approaching 限速
+        vEnd = resolveApproachingSpeed(to, edgeTargetSpeed);
+      } else {
+        // 中间边：末速取下一边限速与当前边限速的较小值（平滑过渡）
+        RailEdge nextEdge = edges.get(i + 1);
+        double nextSpeed = nextEdge != null ? resolveEdgeSpeed(nextEdge) : edgeTargetSpeed;
+        vEnd = Math.min(edgeTargetSpeed, nextSpeed);
+      }
+
+      double seconds = computeTravelTimeWithSpeeds(edge.lengthBlocks(), v0, edgeTargetSpeed, vEnd);
+      if (!Double.isFinite(seconds) || seconds < 0.0) {
+        return Optional.empty();
+      }
+      totalSeconds += seconds;
+
+      // 更新当前速度为本边出口速度
+      currentSpeed = vEnd;
     }
 
-    double targetSpeed = resolveEdgeSpeed(edge);
-    double finalSpeed = resolveApproachingSpeed(to, targetSpeed);
-
-    // 使用精确计算：初速=targetSpeed，目标速度=targetSpeed，末速=finalSpeed
-    double seconds =
-        computeTravelTimeWithSpeeds(lengthBlocks, targetSpeed, targetSpeed, finalSpeed);
-    if (!Double.isFinite(seconds) || seconds < 0.0) {
-      return Optional.empty();
-    }
-    long millis = Math.round(seconds * 1000.0);
+    long millis = Math.round(totalSeconds * 1000.0);
     return Optional.of(Duration.ofMillis(Math.max(0L, millis)));
   }
 

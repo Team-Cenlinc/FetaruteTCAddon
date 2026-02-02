@@ -96,7 +96,7 @@ for (int i = 0; i < edges.size(); i++) {
     RailEdge edge = edges.get(i);
     NodeId from = pathNodes.get(i);
     NodeId to = pathNodes.get(i + 1);
-    
+
     // 计算方向：基于 edge.id() 的端点排序
     CorridorDirection direction = deriveDirection(edge.id(), from, to);
     corridorDirections.put(OccupancyResource.forEdge(edge.id()).key(), direction);
@@ -131,13 +131,13 @@ for (OccupancyClaim claim : existing) {
     if (claim.trainName().equalsIgnoreCase(request.trainName())) {
         continue; // 同一列车，跳过
     }
-    
+
     // 获取请求方向与占用方向
     CorridorDirection requestDir = request.corridorDirections()
         .getOrDefault(resource.key(), CorridorDirection.UNKNOWN);
     CorridorDirection claimDir = claim.corridorDirection()
         .orElse(CorridorDirection.UNKNOWN);
-    
+
     // 单线走廊特殊处理
     if (isSingleCorridorConflict(resource)) {
         if (isSameDirection(requestDir, claimDir)) {
@@ -149,7 +149,7 @@ for (OccupancyClaim claim : existing) {
         blockedReasons.put(resource, BlockedReason.OPPOSITE_DIRECTION);
         continue;
     }
-    
+
     // 普通资源：直接冲突
     blockers.add(claim);
 }
@@ -205,7 +205,7 @@ IDLE_2: <{signal_color_tag}>⬤</{signal_color_tag}> <white>{blocked_reason_en}<
 class CorridorDirectionState {
     CorridorDirection currentDirection = UNKNOWN; // 当前锁定方向
     Set<String> holders = new HashSet<>();        // 占用该方向的列车
-    
+
     boolean canEnter(String trainName, CorridorDirection requestDir) {
         if (holders.isEmpty()) {
             // 无人占用：可以进入并锁定方向
@@ -222,14 +222,14 @@ class CorridorDirectionState {
         // 反向：必须等待 holders 清空
         return false;
     }
-    
+
     void acquire(String trainName, CorridorDirection direction) {
         if (holders.isEmpty()) {
             currentDirection = direction;
         }
         holders.add(trainName);
     }
-    
+
     void release(String trainName) {
         holders.remove(trainName);
         if (holders.isEmpty()) {

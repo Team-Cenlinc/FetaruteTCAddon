@@ -57,12 +57,24 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   private final FetaruteTCAddon plugin;
   private final SignNodeRegistry signNodeRegistry;
   private final Consumer<String> debugLogger;
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager
+      occupancyManager;
 
   public TrainCartsDepotSpawner(
       FetaruteTCAddon plugin, SignNodeRegistry signNodeRegistry, Consumer<String> debugLogger) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.signNodeRegistry = Objects.requireNonNull(signNodeRegistry, "signNodeRegistry");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+  }
+
+  /**
+   * 注入占用管理器（用于 DYNAMIC depot 时优先选择空闲轨道）。
+   *
+   * @param manager 占用管理器（可为 null）
+   */
+  public void setOccupancyManager(
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager manager) {
+    this.occupancyManager = manager;
   }
 
   @Override
@@ -578,11 +590,36 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       return Optional.empty();
     }
 
-    // TODO: 可以添加占用检查，优先选择空闲轨道
-    // 目前简单选择第一个
-    SignNodeRegistry.SignNodeInfo selected = inRange.get(0);
-    debugLogger.accept(
-        "DYNAMIC depot: 选择轨道 spec=" + dynamicSpec + " selected=" + selected.definition().nodeId());
+    // 占用检查：优先选择空闲轨道
+    var mgr = this.occupancyManager;
+    SignNodeRegistry.SignNodeInfo selected = null;
+    if (mgr != null) {
+      // Pass 1: 优先选择未被占用的轨道
+      for (SignNodeRegistry.SignNodeInfo info : inRange) {
+        NodeId nodeId = info.definition().nodeId();
+        if (!mgr.isNodeOccupied(nodeId)) {
+          selected = info;
+          debugLogger.accept(
+              "DYNAMIC depot: 选择空闲轨道 spec="
+                  + dynamicSpec
+                  + " selected="
+                  + nodeId.value()
+                  + " (free)");
+          break;
+        }
+      }
+    }
+
+    // Pass 2: 无空闲轨道或无 occupancyManager 时，选择第一个（排队等待）
+    if (selected == null) {
+      selected = inRange.get(0);
+      debugLogger.accept(
+          "DYNAMIC depot: 选择轨道 spec="
+              + dynamicSpec
+              + " selected="
+              + selected.definition().nodeId()
+              + (mgr != null ? " (all occupied, fallback)" : ""));
+    }
 
     return Optional.of(
         new DepotInfo(
