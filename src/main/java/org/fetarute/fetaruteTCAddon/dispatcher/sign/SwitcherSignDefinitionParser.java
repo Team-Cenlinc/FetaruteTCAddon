@@ -65,6 +65,12 @@ public final class SwitcherSignDefinitionParser {
     if (!header.equals("switcher")) {
       return Optional.empty();
     }
+    // 第三行/第四行有内容时跳过：这类 switcher 通常用于条件切换/标签过滤等非寻路用途。
+    String line2 = safeLine(sign, side, 2).trim();
+    String line3 = safeLine(sign, side, 3).trim();
+    if (!line2.isEmpty() || !line3.isEmpty()) {
+      return Optional.empty();
+    }
 
     String worldName = sign.getWorld().getName();
     TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(sign.getWorld());
@@ -103,6 +109,12 @@ public final class SwitcherSignDefinitionParser {
 
     String action = safeLine(trackedSign, 1).trim().toLowerCase(java.util.Locale.ROOT);
     if (!action.equals("switcher")) {
+      return Optional.empty();
+    }
+    // 第三行/第四行有内容时跳过：这类 switcher 通常用于条件切换/标签过滤等非寻路用途。
+    String line2 = safeLine(trackedSign, 2).trim();
+    String line3 = safeLine(trackedSign, 3).trim();
+    if (!line2.isEmpty() || !line3.isEmpty()) {
       return Optional.empty();
     }
 

@@ -106,7 +106,12 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, ProgressTriggerState>
       progressTriggerState = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.atomic.AtomicLong waypointStopCounter =
+      new java.util.concurrent.atomic.AtomicLong();
   private volatile EtaService etaService;
+
+  /** 路线列车位置追踪器：用于快速查询前方列车，支持跟车信号计算。 */
+  private final RouteTrainTracker routeTrainTracker = new RouteTrainTracker();
 
   private final java.util.concurrent.atomic.LongAdder orphanCleanupRuns =
       new java.util.concurrent.atomic.LongAdder();
@@ -308,6 +313,12 @@ public final class RuntimeDispatchService {
     RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
     TrainProperties properties = train.properties();
     String trainName = properties != null ? properties.getTrainName() : "unknown";
+
+    // 非 FTA 管控列车：静默跳过
+    if (!isFtaManagedTrain(properties)) {
+      return;
+    }
+
     handleRenameIfNeeded(properties, trainName);
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
@@ -467,6 +478,12 @@ public final class RuntimeDispatchService {
     RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
     TrainProperties properties = train.properties();
     String trainName = properties != null ? properties.getTrainName() : "unknown";
+
+    // 非 FTA 管控列车：静默跳过，不输出日志
+    if (!isFtaManagedTrain(properties)) {
+      return;
+    }
+
     handleRenameIfNeeded(properties, trainName);
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
@@ -523,8 +540,15 @@ public final class RuntimeDispatchService {
         progressRegistry.advance(
             trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
         invalidateTrainEta(trainName);
+        // TERM 到达：只保留当前节点占用，释放窗口外资源，防止后车追尾
         if (occupancyManager != null) {
-          occupancyManager.releaseByTrain(trainName);
+          OccupancyResource keepResource = OccupancyResource.forNode(currentNode);
+          releaseResourcesNotInRequest(trainName, List.of(keepResource));
+          // 确保当前节点占用存在
+          OccupancyRequest locationRequest =
+              new OccupancyRequest(
+                  trainName, Optional.empty(), now, List.of(keepResource), java.util.Map.of(), 0);
+          occupancyManager.acquire(locationRequest);
         }
         updateSignalOrWarn(trainName, SignalAspect.STOP, now);
         if (definition.nodeType() == NodeType.WAYPOINT) {
@@ -551,7 +575,8 @@ public final class RuntimeDispatchService {
         // TERM 标记：清除 destination 防止继续寻路
         properties.clearDestinationRoute();
         properties.setDestination("");
-        handleLayoverRegistrationIfNeeded(trainName, route, currentNode, properties);
+        // 传入 dwellSeconds，readyAt = now + dwell
+        handleLayoverRegistrationIfNeeded(trainName, route, currentNode, properties, dwellSeconds);
         debugLogger.accept(
             "调度终到: 进入 Layover train="
                 + trainName
@@ -560,7 +585,10 @@ public final class RuntimeDispatchService {
                 + " idx="
                 + currentIndex
                 + " route="
-                + route.id().value());
+                + route.id().value()
+                + " readyIn="
+                + dwellSeconds
+                + "s");
         return;
       }
       if (shouldStopAtWaypoint(definition, stop)) {
@@ -618,8 +646,15 @@ public final class RuntimeDispatchService {
       if (event.getAction() == SignActionType.MEMBER_ENTER) {
         return;
       }
+      // STOP waypoint 到达：只保留当前节点占用，释放窗口外资源，防止后车追尾
       if (occupancyManager != null) {
-        occupancyManager.releaseByTrain(trainName);
+        OccupancyResource keepResource = OccupancyResource.forNode(currentNode);
+        releaseResourcesNotInRequest(trainName, List.of(keepResource));
+        // 确保当前节点占用存在
+        OccupancyRequest locationRequest =
+            new OccupancyRequest(
+                trainName, Optional.empty(), now, List.of(keepResource), java.util.Map.of(), 0);
+        occupancyManager.acquire(locationRequest);
       }
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
@@ -1028,12 +1063,27 @@ public final class RuntimeDispatchService {
     if (properties == null) {
       return;
     }
+    // 非 FTA 管控列车：静默跳过
+    if (!isFtaManagedTrain(properties)) {
+      return;
+    }
     String trainName = properties.getTrainName();
     Instant now = Instant.now();
     handleRenameIfNeeded(properties, trainName);
     if (layoverRegistry.get(trainName).isPresent()) {
-      if (occupancyManager != null) {
-        occupancyManager.releaseByTrain(trainName);
+      // Layover 状态：保留当前位置节点的占用，防止后车"反向占用"导致死锁
+      // 只释放前方 lookahead 资源，不释放当前节点
+      LayoverCandidate candidate = layoverRegistry.get(trainName).orElse(null);
+      if (occupancyManager != null && candidate != null) {
+        NodeId locationNode = candidate.locationNodeId();
+        OccupancyResource keepResource = OccupancyResource.forNode(locationNode);
+        // 只保留当前位置节点占用，释放其他所有资源
+        releaseResourcesNotInRequest(trainName, List.of(keepResource));
+        // 确保当前位置占用存在（可能在之前被错误释放）
+        OccupancyRequest locationRequest =
+            new OccupancyRequest(
+                trainName, Optional.empty(), now, List.of(keepResource), java.util.Map.of(), 0);
+        occupancyManager.acquire(locationRequest);
       }
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
@@ -1227,8 +1277,11 @@ public final class RuntimeDispatchService {
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
-    SignalAspect nextAspect =
+    SignalAspect baseAspect =
         decision.allowed() ? decision.signal() : deriveBlockedAspect(decision, context);
+    // 前方列车信号调整：扫描更远范围（4 edges）检测其他列车并降级信号
+    SignalAspect nextAspect =
+        adjustSignalForForwardTrains(trainName, route, currentIndex, graph, baseAspect);
     SignalAspect lastAspect = progressEntry.lastSignal();
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
@@ -1428,8 +1481,27 @@ public final class RuntimeDispatchService {
    * @see TerminalKeyResolver
    * @see LayoverRegistry#register(String, String, NodeId, Instant, java.util.Map)
    */
+  /**
+   * 终点 Layover 注册（无停站时长）：readyAt 立即就绪。
+   *
+   * @see #handleLayoverRegistrationIfNeeded(String, RouteDefinition, NodeId, TrainProperties, int)
+   */
   private void handleLayoverRegistrationIfNeeded(
       String trainName, RouteDefinition route, NodeId location, TrainProperties properties) {
+    handleLayoverRegistrationIfNeeded(trainName, route, location, properties, 0);
+  }
+
+  /**
+   * 终点 Layover 注册（含停站时长）。
+   *
+   * @param dwellSeconds 停站时长（秒），readyAt = now + dwell
+   */
+  private void handleLayoverRegistrationIfNeeded(
+      String trainName,
+      RouteDefinition route,
+      NodeId location,
+      TrainProperties properties,
+      int dwellSeconds) {
     if (route.lifecycleMode()
         != org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
       return;
@@ -1451,7 +1523,9 @@ public final class RuntimeDispatchService {
         }
       }
     }
-    layoverRegistry.register(trainName, terminalKey, location, Instant.now(), tags);
+    // readyAt = 当前时间 + 停站时长
+    Instant readyAt = dwellSeconds > 0 ? Instant.now().plusSeconds(dwellSeconds) : Instant.now();
+    layoverRegistry.register(trainName, terminalKey, location, readyAt, tags);
     debugLogger.accept(
         "Layover 注册: train="
             + trainName
@@ -1750,6 +1824,117 @@ public final class RuntimeDispatchService {
     return bestPosition <= 1 ? SignalAspect.CAUTION : SignalAspect.PROCEED_WITH_CAUTION;
   }
 
+  /**
+   * 前方列车信号调整：扫描更远的前方路径，检测其他列车占用并调整信号。
+   *
+   * <p>信号规则（按 edge 数量）：
+   *
+   * <ul>
+   *   <li>1 edge 内有车 → STOP
+   *   <li>2 edges 内有车 → CAUTION
+   *   <li>3 edges 内有车 → PROCEED_WITH_CAUTION
+   *   <li>3+ edges 或无车 → 保持原信号
+   * </ul>
+   *
+   * @param trainName 当前列车名（用于排除自身占用）
+   * @param route 线路定义
+   * @param currentIndex 当前站点索引
+   * @param graph 调度图
+   * @param baseAspect 基础信号（由 canEnter 决定）
+   * @return 调整后的信号
+   */
+  private SignalAspect adjustSignalForForwardTrains(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      RailGraph graph,
+      SignalAspect baseAspect) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || graph == null
+        || occupancyManager == null) {
+      return baseAspect;
+    }
+    // 扫描前方最多 4 段边（覆盖 STOP/CAUTION/PWC 范围）
+    int scanEdges = 4;
+    List<NodeId> waypoints = route.waypoints();
+    if (waypoints == null || waypoints.isEmpty()) {
+      return baseAspect;
+    }
+    int maxIndex = Math.min(waypoints.size() - 1, currentIndex + scanEdges);
+    if (maxIndex <= currentIndex) {
+      return baseAspect;
+    }
+
+    // 沿路径扫描每个节点和边，检测其他列车占用
+    int forwardEdgeCount = 0;
+    for (int i = currentIndex; i < maxIndex; i++) {
+      NodeId fromNode = resolveEffectiveNode(trainName, route, i);
+      NodeId toNode = resolveEffectiveNode(trainName, route, i + 1);
+      if (fromNode == null || toNode == null) {
+        continue;
+      }
+      forwardEdgeCount++;
+
+      // 检查目标节点是否被其他列车占用
+      Optional<OccupancyClaim> nodeClaim =
+          occupancyManager.getClaim(OccupancyResource.forNode(toNode));
+      if (nodeClaim.isPresent() && !nodeClaim.get().trainName().equalsIgnoreCase(trainName)) {
+        return edgeCountToSignal(forwardEdgeCount);
+      }
+
+      // 检查边是否被其他列车占用（通过 edgesFrom 查找）
+      RailEdge edge = findEdgeBetween(graph, fromNode, toNode);
+      if (edge != null) {
+        Optional<OccupancyClaim> edgeClaim =
+            occupancyManager.getClaim(OccupancyResource.forEdge(edge.id()));
+        if (edgeClaim.isPresent() && !edgeClaim.get().trainName().equalsIgnoreCase(trainName)) {
+          return edgeCountToSignal(forwardEdgeCount);
+        }
+      }
+    }
+
+    return baseAspect;
+  }
+
+  /**
+   * 查找两节点之间的边（如果存在，无向边匹配）。
+   *
+   * @return 边对象，若不存在则返回 null
+   */
+  private RailEdge findEdgeBetween(RailGraph graph, NodeId from, NodeId to) {
+    for (RailEdge edge : graph.edgesFrom(from)) {
+      // 无向边匹配
+      boolean connects =
+          (edge.from().equals(from) && edge.to().equals(to))
+              || (edge.from().equals(to) && edge.to().equals(from));
+      if (connects) {
+        return edge;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 根据到前车的 edge 数量返回信号等级。
+   *
+   * <ul>
+   *   <li>1 edge → STOP
+   *   <li>2 edges → CAUTION
+   *   <li>3+ edges → PROCEED_WITH_CAUTION
+   * </ul>
+   */
+  private SignalAspect edgeCountToSignal(int edgeCount) {
+    if (edgeCount <= 1) {
+      return SignalAspect.STOP;
+    } else if (edgeCount <= 2) {
+      return SignalAspect.CAUTION;
+    } else {
+      return SignalAspect.PROCEED_WITH_CAUTION;
+    }
+  }
+
   /** 更新信号并在 entry 缺失时给出一次性告警，避免静默漂移。 */
   private void updateSignalOrWarn(String trainName, SignalAspect aspect, Instant now) {
     if (trainName == null || trainName.isBlank() || aspect == null) {
@@ -1975,6 +2160,13 @@ public final class RuntimeDispatchService {
       return;
     }
 
+    // 先设置 waypointStopState，防止 handleSignalTick 在列车停稳前走到 stall failover 等逻辑
+    String key = trainName.toLowerCase(java.util.Locale.ROOT);
+    String sessionId = Long.toString(waypointStopCounter.incrementAndGet());
+    WaypointStopState stopState =
+        new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds);
+    waypointStopStates.put(key, stopState);
+
     try {
       // 与 AutoStation 对齐：立即 launchReset + centerTrain
       com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
@@ -1992,12 +2184,15 @@ public final class RuntimeDispatchService {
 
       // 调度 dwell 和 WaitState
       if (dwellSeconds > 0 && dwellRegistry != null) {
-        scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds);
+        scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds, key, sessionId);
       } else {
-        // 无 dwell 时直接添加 WaitState（等待信号释放）
+        // 无 dwell 时直接添加 WaitState（等待信号释放），并清理 waypointStopState
         group.getActions().addActionWaitState();
+        clearWaypointStopState(key, sessionId);
       }
     } catch (Throwable ex) {
+      // 失败时清理 waypointStopState
+      clearWaypointStopState(key, sessionId);
       debugLogger.accept(
           "Waypoint 立即居中失败: train="
               + trainName
@@ -2011,12 +2206,15 @@ public final class RuntimeDispatchService {
   /**
    * Waypoint 居中后调度 dwell：等待列车停稳后启动 dwell 计时。
    *
-   * <p>与 AutoStation 类似，在列车停稳后（centerTrain 动作完成后）启动 dwell，并添加 WaitState 等待发车信号。
+   * <p>与 AutoStation 类似，在列车停稳后（centerTrain 动作完成后）启动 dwell，并添加 WaitState 等待发车信号。 当 dwell 启动后，清理
+   * waypointStopState，由 dwellRegistry 接管控制。
    */
   private void scheduleWaypointDwellAfterCenter(
       com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
       String trainName,
-      int dwellSeconds) {
+      int dwellSeconds,
+      String waypointKey,
+      String sessionId) {
     JavaPlugin plugin = resolveSchedulerPlugin();
     if (plugin == null || !plugin.isEnabled()) {
       // 兜底：直接启动 dwell
@@ -2024,6 +2222,7 @@ public final class RuntimeDispatchService {
         dwellRegistry.start(trainName, dwellSeconds);
       }
       group.getActions().addActionWaitState();
+      clearWaypointStopState(waypointKey, sessionId);
       return;
     }
 
@@ -2038,6 +2237,7 @@ public final class RuntimeDispatchService {
       public void run() {
         if (!group.isValid()) {
           cancel();
+          clearWaypointStopState(waypointKey, sessionId);
           return;
         }
         waitedTicks++;
@@ -2049,6 +2249,8 @@ public final class RuntimeDispatchService {
               dwellRegistry.start(trainName, dwellSeconds);
             }
             group.getActions().addActionWaitState();
+            // dwell 启动后，清理 waypointStopState，由 dwellRegistry 接管
+            clearWaypointStopState(waypointKey, sessionId);
             return;
           }
         } else {
@@ -2061,6 +2263,7 @@ public final class RuntimeDispatchService {
             dwellRegistry.start(trainName, dwellSeconds);
           }
           group.getActions().addActionWaitState();
+          clearWaypointStopState(waypointKey, sessionId);
         }
       }
     }.runTaskTimer(plugin, 1L, 1L);
@@ -2080,6 +2283,22 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     return Optional.of(current);
+  }
+
+  /**
+   * 清理 waypoint 停站状态：仅当 sessionId 匹配时移除，避免并发覆盖。
+   *
+   * @param key 列车名（小写）
+   * @param sessionId 会话 ID
+   */
+  private void clearWaypointStopState(String key, String sessionId) {
+    if (key == null || sessionId == null) {
+      return;
+    }
+    WaypointStopState state = waypointStopStates.get(key);
+    if (state != null && sessionId.equals(state.sessionId())) {
+      waypointStopStates.remove(key, state);
+    }
   }
 
   private JavaPlugin resolveSchedulerPlugin() {
@@ -2315,6 +2534,35 @@ public final class RuntimeDispatchService {
     }
     int lastIndex = Math.max(0, route.waypoints().size() - 1);
     return currentIndex == lastIndex;
+  }
+
+  /**
+   * 判断列车是否由 FTA 管控。
+   *
+   * <p>非 FTA 列车（无 route UUID 或 route code tags）应静默跳过，不做任何调度处理。
+   *
+   * @return true 如果列车有 FTA route tags
+   */
+  private boolean isFtaManagedTrain(TrainProperties properties) {
+    if (properties == null) {
+      return false;
+    }
+    // 检查 route UUID tag
+    Optional<String> routeIdTag =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID);
+    if (routeIdTag.isPresent() && !routeIdTag.get().isBlank()) {
+      return true;
+    }
+    // 检查 route code tags (operator/line/route)
+    Optional<String> operatorTag =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_OPERATOR_CODE);
+    Optional<String> lineTag =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_LINE_CODE);
+    Optional<String> routeTag =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_CODE);
+    return (operatorTag.isPresent() && !operatorTag.get().isBlank())
+        || (lineTag.isPresent() && !lineTag.get().isBlank())
+        || (routeTag.isPresent() && !routeTag.get().isBlank());
   }
 
   private boolean matchesDstyTarget(RouteDefinition route, NodeId currentNode) {

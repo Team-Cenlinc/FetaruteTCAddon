@@ -233,6 +233,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initSpawnScheduler();
     initReclaimManager();
     initDisplayService();
+    // 重新初始化公开 API，确保外部插件引用有效
+    initApi();
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
 

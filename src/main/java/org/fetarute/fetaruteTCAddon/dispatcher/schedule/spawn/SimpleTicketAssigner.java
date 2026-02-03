@@ -315,7 +315,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       return false;
     }
-    LayoverRegistry.LayoverCandidate candidate = candidates.get(0);
+    // 过滤掉 readyAt 尚未到达（dwell 未结束）的候选
+    LayoverRegistry.LayoverCandidate candidate = null;
+    for (LayoverRegistry.LayoverCandidate c : candidates) {
+      if (c.readyAt().isAfter(now)) {
+        // 尚未就绪（仍在 dwell 中）
+        continue;
+      }
+      candidate = c;
+      break;
+    }
+    if (candidate == null) {
+      // 所有候选都在 dwell 中，稍后重试
+      if (!pendingAttempt) {
+        pendingLayoverTickets.put(ticket.id(), ticket);
+        debugLogger.accept(
+            "Layover 复用等待 dwell: route="
+                + service.routeCode()
+                + " candidates="
+                + candidates.size());
+      }
+      return false;
+    }
     ServiceTicket serviceTicket =
         new ServiceTicket(
             ticket.id().toString(),
