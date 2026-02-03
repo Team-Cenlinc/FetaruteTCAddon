@@ -207,6 +207,42 @@ HUD 显示的 "End of Operation"（EOP）是 route 中**最后一个 AutoStation
 
 对于 DYNAMIC stop，会从规范中提取站点信息用于显示。
 
+## API 支持
+
+### RouteApi.StopInfo
+
+DYNAMIC stop 在 API 中的表示：
+
+```java
+record StopInfo(
+    int sequence,
+    String nodeId,              // placeholder nodeId (OP:S/D:NAME:fromTrack)
+    Optional<String> stationName, // 从 DynamicSpec.nodeName() 提取
+    int dwellSeconds,
+    PassType passType,          // 行为：STOP/PASS/TERMINATE
+    boolean dynamic             // true = DYNAMIC 站台
+)
+```
+
+- `nodeId`：DYNAMIC stop 使用 placeholder（`spec.toPlaceholderNodeId()`，取 `fromTrack`）
+- `stationName`：从 DYNAMIC 规范的 `nodeName` 提取
+- `dynamic`：标识是否为动态站台选择
+
+### RouteApi.TerminalInfo
+
+终点信息区分 EOR 和 EOP：
+
+```java
+record TerminalInfo(
+    String endOfRouteNodeId,        // EOR: waypoints 末尾
+    Optional<String> endOfRouteName,
+    String endOfOperationNodeId,    // EOP: 最后一个 Station stop
+    Optional<String> endOfOperationName
+)
+```
+
+DYNAMIC 终点站会正确解析并填入 EOP 字段。
+
 ## 相关文件
 
 - `DynamicStopMatcher.java`：DYNAMIC 规范解析与匹配工具
@@ -215,3 +251,5 @@ HUD 显示的 "End of Operation"（EOP）是 route 中**最后一个 AutoStation
 - `RuntimeDispatchService.java`：运行时 DYNAMIC 选择
 - `TrainHudContextResolver.java`：HUD 终点（EOP）解析
 - `RouteProgressRegistry.java`：Route 进度跟踪
+- `RouteApiImpl.java`：API 层 DYNAMIC 解析与 EOR/EOP 计算
+- `EtaService.java`：ETA 计算中的 DYNAMIC 终点解析

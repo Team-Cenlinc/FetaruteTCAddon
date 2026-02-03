@@ -226,13 +226,32 @@ api.routes().getRoute(routeUuid).ifPresent(detail -> {
             System.out.println("   站名: " + name));
         System.out.println("   停车: " + stop.dwellSeconds() + "s");
         System.out.println("   类型: " + stop.passType()); // STOP, PASS, TERMINATE
+        System.out.println("   动态站台: " + stop.dynamic()); // true = 运行时选择站台
     }
 
-    // 终点站
-    detail.terminalName().ifPresent(terminal ->
-        System.out.println("开往: " + terminal));
+    // 终点信息（EOR/EOP）
+    RouteApi.TerminalInfo terminal = detail.terminal();
+    if (!terminal.isEmpty()) {
+        System.out.println("路线终点 (EOR): " + terminal.endOfRouteNodeId());
+        terminal.endOfRouteName().ifPresent(name ->
+            System.out.println("  EOR 站名: " + name));
+        System.out.println("运营终点 (EOP): " + terminal.endOfOperationNodeId());
+        terminal.endOfOperationName().ifPresent(name ->
+            System.out.println("  开往: " + name));
+    }
 });
 ```
+
+### EOR 与 EOP 区别
+
+- **EOR (End of Route)**: 路线物理终点，即 `waypoints` 列表的最后一个节点
+- **EOP (End of Operation)**: 运营终点，即最后一个 Station 类型的停靠点（跳过 PASS 类型）
+
+大多数情况下 EOR 和 EOP 相同，但以下场景可能不同：
+- 路线末尾有回库/折返点（Depot/Waypoint）
+- 终点站后有咽喉节点
+
+方向牌/信息屏通常显示 **EOP**。
 
 ### 按代码查找
 
@@ -497,8 +516,11 @@ TrainApi.Signal / OccupancyApi.Signal: PROCEED, PROCEED_WITH_CAUTION, CAUTION, S
 // 运营类型
 RouteApi.OperationType: NORMAL, RAPID, EXPRESS, LOCAL, OTHER
 
-// 停靠类型
-RouteApi.PassType: STOP, PASS, TERMINATE, DYNAMIC
+// 停靠类型（行为）
+RouteApi.PassType: STOP, PASS, TERMINATE
+
+// 动态站台标识
+RouteApi.StopInfo.dynamic(): true = 运行时根据占用选择站台
 
 // 运营商 / 线路
 OperatorApi.OperatorInfo
@@ -591,6 +613,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.3.0 | RouteApi: StopInfo 增加 `dynamic` 字段；RouteDetail 增加 `TerminalInfo`（EOR/EOP）；移除 `PassType.DYNAMIC` |
 | 1.2.0 | 新增 OperatorApi / LineApi / EtaApi |
 | 1.1.0 | 新增 StationApi：站点信息查询；新增 API 单元测试 |
 | 1.0.0 | 初始版本：GraphApi, TrainApi, RouteApi, OccupancyApi |

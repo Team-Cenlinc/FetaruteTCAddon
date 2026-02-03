@@ -38,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
@@ -1424,15 +1425,29 @@ public final class EtaService {
   /**
    * 解析 RouteStop 对应的图节点 ID。
    *
-   * <p>优先读取 stop 自带的 waypointNodeId；否则通过 stationId 查询站点并读取 graphNodeId。
+   * <p>解析优先级：
+   *
+   * <ol>
+   *   <li>stop 自带的 {@code waypointNodeId}
+   *   <li>DYNAMIC spec 的 placeholder nodeId（格式 {@code OP:S/D:NAME:fromTrack}）
+   *   <li>通过 {@code stationId} 查询站点并读取 {@code graphNodeId}
+   * </ol>
    */
   private Optional<NodeId> resolveStopNodeId(RouteStop stop, TerminalResolveContext context) {
     if (stop == null) {
       return Optional.empty();
     }
+    // 1. 优先使用 waypointNodeId
     if (stop.waypointNodeId().isPresent()) {
       return Optional.of(NodeId.of(stop.waypointNodeId().get()));
     }
+    // 2. 尝试从 DYNAMIC spec 生成 placeholder nodeId
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(stop);
+    if (dynamicSpec.isPresent()) {
+      return Optional.of(NodeId.of(dynamicSpec.get().toPlaceholderNodeId()));
+    }
+    // 3. 通过 stationId 查询站点
     if (stop.stationId().isEmpty() || context == null) {
       return Optional.empty();
     }
@@ -1452,11 +1467,22 @@ public final class EtaService {
     if (stop == null) {
       return Optional.empty();
     }
+    // 1. 优先通过 stationId 查询
     if (stop.stationId().isPresent()) {
       return resolveStationDestination(stop.stationId().get(), context);
     }
+    // 2. 通过 waypointNodeId 解析
     if (stop.waypointNodeId().isPresent()) {
       return resolveStationDestination(NodeId.of(stop.waypointNodeId().get()));
+    }
+    // 3. 尝试从 DYNAMIC spec 生成 placeholder nodeId 并解析
+    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
+        DynamicStopMatcher.parseDynamicSpec(stop);
+    if (dynamicSpec.isPresent()) {
+      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
+      String displayName = spec.nodeName();
+      String stationKey = spec.operatorCode() + ":" + spec.nodeName();
+      return Optional.of(new DestinationInfo(displayName, Optional.of(stationKey)));
     }
     return Optional.empty();
   }

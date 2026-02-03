@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi.PassType;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi.RouteDetail;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi.RouteInfo;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi.StopInfo;
+import org.fetarute.fetaruteTCAddon.api.route.RouteApi.TerminalInfo;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi.StationInfo;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
@@ -275,7 +276,7 @@ class ApiRecordsTest {
     @Test
     @DisplayName("StopInfo 应正确存储站点停靠信息")
     void stopInfoShouldStoreStopInfo() {
-      StopInfo stop = new StopInfo(1, "SURN:S:AAA:1", Optional.of("测试站"), 30, PassType.STOP);
+      StopInfo stop = new StopInfo(1, "SURN:S:AAA:1", Optional.of("测试站"), 30, PassType.STOP, false);
 
       assertEquals(1, stop.sequence());
       assertEquals("SURN:S:AAA:1", stop.nodeId());
@@ -283,6 +284,24 @@ class ApiRecordsTest {
       assertEquals("测试站", stop.stationName().get());
       assertEquals(30, stop.dwellSeconds());
       assertEquals(PassType.STOP, stop.passType());
+      assertFalse(stop.dynamic());
+    }
+
+    @Test
+    @DisplayName("StopInfo 应正确标识动态站台")
+    void stopInfoShouldIdentifyDynamicStop() {
+      StopInfo dynamicStop =
+          new StopInfo(1, "SURN:S:PPK:1", Optional.of("PPK"), 30, PassType.STOP, true);
+
+      assertTrue(dynamicStop.dynamic());
+      assertEquals(PassType.STOP, dynamicStop.passType());
+
+      // 动态终点站
+      StopInfo dynamicTerminal =
+          new StopInfo(2, "SURN:S:END:1", Optional.of("END"), 0, PassType.TERMINATE, true);
+
+      assertTrue(dynamicTerminal.dynamic());
+      assertEquals(PassType.TERMINATE, dynamicTerminal.passType());
     }
 
     @Test
@@ -298,21 +317,51 @@ class ApiRecordsTest {
               Optional.empty(),
               RouteApi.OperationType.NORMAL);
 
-      List<String> waypoints = List.of("A", "B", "C", "D");
+      List<String> waypoints = List.of("SURN:S:A:1", "SURN:S:B:1", "SURN:S:C:1", "SURN:S:D:1");
       List<StopInfo> stops =
           List.of(
-              new StopInfo(1, "A", Optional.of("起点站"), 0, PassType.STOP),
-              new StopInfo(2, "B", Optional.of("中间站"), 30, PassType.STOP),
-              new StopInfo(3, "D", Optional.of("终点站"), 0, PassType.TERMINATE));
+              new StopInfo(1, "SURN:S:A:1", Optional.of("起点站"), 0, PassType.STOP, false),
+              new StopInfo(2, "SURN:S:B:1", Optional.of("中间站"), 30, PassType.STOP, true),
+              new StopInfo(3, "SURN:S:D:1", Optional.of("终点站"), 0, PassType.TERMINATE, false));
 
-      RouteDetail detail = new RouteDetail(info, waypoints, stops, Optional.of("终点站"), 500);
+      TerminalInfo terminal =
+          new TerminalInfo("SURN:S:D:1", Optional.of("D"), "SURN:S:D:1", Optional.of("终点站"));
+
+      RouteDetail detail = new RouteDetail(info, waypoints, stops, terminal, 500);
 
       assertEquals(info, detail.info());
       assertEquals(4, detail.waypoints().size());
       assertEquals(3, detail.stops().size());
-      assertTrue(detail.terminalName().isPresent());
-      assertEquals("终点站", detail.terminalName().get());
+      // 验证终点信息
+      assertFalse(detail.terminal().isEmpty());
+      assertEquals("SURN:S:D:1", detail.terminal().endOfRouteNodeId());
+      assertEquals("SURN:S:D:1", detail.terminal().endOfOperationNodeId());
+      assertTrue(detail.terminal().endOfOperationName().isPresent());
+      assertEquals("终点站", detail.terminal().endOfOperationName().get());
       assertEquals(500, detail.totalDistanceBlocks());
+      // 验证动态站台标识
+      assertFalse(detail.stops().get(0).dynamic());
+      assertTrue(detail.stops().get(1).dynamic());
+      assertFalse(detail.stops().get(2).dynamic());
+    }
+
+    @Test
+    @DisplayName("TerminalInfo 应正确区分 EOR 和 EOP")
+    void terminalInfoShouldDistinguishEorAndEop() {
+      // EOR 和 EOP 不同的场景（终点后有回库）
+      TerminalInfo terminal =
+          new TerminalInfo(
+              "SURN:D:DEPOT:1", Optional.of("DEPOT"), "SURN:S:TERMINAL:1", Optional.of("终点站"));
+
+      assertEquals("SURN:D:DEPOT:1", terminal.endOfRouteNodeId());
+      assertEquals("SURN:S:TERMINAL:1", terminal.endOfOperationNodeId());
+      assertEquals("DEPOT", terminal.endOfRouteName().orElse(""));
+      assertEquals("终点站", terminal.endOfOperationName().orElse(""));
+      assertFalse(terminal.isEmpty());
+
+      // 空终点信息
+      TerminalInfo empty = TerminalInfo.empty();
+      assertTrue(empty.isEmpty());
     }
   }
 
