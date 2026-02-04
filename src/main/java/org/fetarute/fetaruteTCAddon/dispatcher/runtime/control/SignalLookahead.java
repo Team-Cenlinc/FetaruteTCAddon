@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -24,24 +25,63 @@ public final class SignalLookahead {
   private SignalLookahead() {}
 
   /**
+   * 边限速约束：记录前方限速边的距离和有效限速值。
+   *
+   * <p>用于边限速前瞻：当前方边限速低于当前速度时，需要提前减速。
+   *
+   * @param distanceBlocks 到该限速边起点的距离（方块数）
+   * @param speedLimitBps 该边的有效限速（blocks/s，已考虑 override）
+   */
+  public record EdgeSpeedConstraint(long distanceBlocks, double speedLimitBps) {
+    public EdgeSpeedConstraint {
+      if (distanceBlocks < 0) {
+        throw new IllegalArgumentException("distanceBlocks must be non-negative");
+      }
+      if (!Double.isFinite(speedLimitBps) || speedLimitBps < 0.0) {
+        throw new IllegalArgumentException("speedLimitBps must be a non-negative finite number");
+      }
+    }
+  }
+
+  /**
    * 前瞻结果：包含到各类限制点的距离。
    *
    * @param distanceToBlocker 到首个阻塞资源的距离（STOP 信号来源）
    * @param distanceToCaution 到首个 CAUTION 限速区域的距离
    * @param distanceToApproach 到需要 approaching 限速的节点（Station/Depot）的距离
    * @param effectiveSignal 综合信号（考虑前瞻后的最严格信号）
+   * @param edgeSpeedConstraints 前方边的限速约束列表（按距离排序，已考虑 override）
    */
   public record LookaheadResult(
       OptionalLong distanceToBlocker,
       OptionalLong distanceToCaution,
       OptionalLong distanceToApproach,
-      SignalAspect effectiveSignal) {
+      SignalAspect effectiveSignal,
+      List<EdgeSpeedConstraint> edgeSpeedConstraints) {
 
     public LookaheadResult {
       Objects.requireNonNull(distanceToBlocker, "distanceToBlocker");
       Objects.requireNonNull(distanceToCaution, "distanceToCaution");
       Objects.requireNonNull(distanceToApproach, "distanceToApproach");
       Objects.requireNonNull(effectiveSignal, "effectiveSignal");
+      edgeSpeedConstraints =
+          edgeSpeedConstraints != null
+              ? Collections.unmodifiableList(new ArrayList<>(edgeSpeedConstraints))
+              : Collections.emptyList();
+    }
+
+    /** 兼容旧 API：不含 edgeSpeedConstraints 的构造。 */
+    public LookaheadResult(
+        OptionalLong distanceToBlocker,
+        OptionalLong distanceToCaution,
+        OptionalLong distanceToApproach,
+        SignalAspect effectiveSignal) {
+      this(
+          distanceToBlocker,
+          distanceToCaution,
+          distanceToApproach,
+          effectiveSignal,
+          Collections.emptyList());
     }
 
     /** 获取到最近限制点的距离（用于速度曲线计算）。 */
@@ -69,8 +109,18 @@ public final class SignalLookahead {
     /** 空结果：无任何前方限制。 */
     public static LookaheadResult empty(SignalAspect currentSignal) {
       return new LookaheadResult(
-          OptionalLong.empty(), OptionalLong.empty(), OptionalLong.empty(), currentSignal);
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          currentSignal,
+          Collections.emptyList());
     }
+  }
+
+  /** 边限速解析函数：给定边，返回其有效限速（blocks/s）。 */
+  @FunctionalInterface
+  public interface EdgeSpeedResolver {
+    double resolve(RailEdge edge);
   }
 
   /**
@@ -127,6 +177,98 @@ public final class SignalLookahead {
 
     return new LookaheadResult(
         distanceToBlocker, distanceToCaution, distanceToApproach, effectiveSignal);
+  }
+
+  /**
+   * 计算前瞻结果（含边限速约束）。
+   *
+   * @param decision 当前占用判定结果
+   * @param context 占用请求上下文（含路径信息）
+   * @param currentSignal 当前信号状态
+   * @param approachNodePredicate 判断节点是否需要 approaching 限速
+   * @param edgeSpeedResolver 边限速解析函数（考虑 override），可为 null
+   * @return 前瞻结果（含边限速约束列表）
+   */
+  public static LookaheadResult computeWithEdgeSpeed(
+      OccupancyDecision decision,
+      OccupancyRequestContext context,
+      SignalAspect currentSignal,
+      java.util.function.Predicate<NodeId> approachNodePredicate,
+      EdgeSpeedResolver edgeSpeedResolver) {
+    if (decision == null || context == null || currentSignal == null) {
+      return LookaheadResult.empty(currentSignal != null ? currentSignal : SignalAspect.STOP);
+    }
+
+    List<NodeId> nodes = context.pathNodes();
+    List<RailEdge> edges = context.edges();
+    if (nodes.isEmpty() || edges.isEmpty()) {
+      return LookaheadResult.empty(currentSignal);
+    }
+
+    // 构建节点距离表（一次遍历）
+    List<Long> nodeDistances = computeNodeDistances(nodes, edges);
+
+    // 1. 到阻塞资源的距离
+    OptionalLong distanceToBlocker = resolveBlockerDistance(decision, context, nodeDistances);
+
+    // 2. 到 CAUTION 区域的距离
+    OptionalLong distanceToCaution = OptionalLong.empty();
+    if (currentSignal == SignalAspect.PROCEED
+        && decision.signal() == SignalAspect.PROCEED_WITH_CAUTION) {
+      distanceToCaution = distanceToBlocker;
+    }
+
+    // 3. 到 approaching 节点的距离
+    OptionalLong distanceToApproach = OptionalLong.empty();
+    if (approachNodePredicate != null) {
+      distanceToApproach = findApproachNodeDistance(nodes, nodeDistances, approachNodePredicate);
+    }
+
+    // 4. 边限速约束列表
+    List<EdgeSpeedConstraint> edgeSpeedConstraints =
+        edgeSpeedResolver != null
+            ? collectEdgeSpeedConstraints(edges, edgeSpeedResolver)
+            : Collections.emptyList();
+
+    // 综合信号
+    SignalAspect effectiveSignal = currentSignal;
+    if (distanceToBlocker.isPresent() && distanceToBlocker.getAsLong() <= 0) {
+      effectiveSignal = SignalAspect.STOP;
+    } else if (!decision.allowed()) {
+      effectiveSignal = SignalAspect.STOP;
+    }
+
+    return new LookaheadResult(
+        distanceToBlocker,
+        distanceToCaution,
+        distanceToApproach,
+        effectiveSignal,
+        edgeSpeedConstraints);
+  }
+
+  /**
+   * 收集前方边的限速约束。
+   *
+   * <p>遍历路径上的边，记录每条边的"到边起点的距离"和"有效限速"。
+   */
+  private static List<EdgeSpeedConstraint> collectEdgeSpeedConstraints(
+      List<RailEdge> edges, EdgeSpeedResolver resolver) {
+    if (edges == null || edges.isEmpty() || resolver == null) {
+      return Collections.emptyList();
+    }
+    List<EdgeSpeedConstraint> constraints = new ArrayList<>();
+    long distance = 0;
+    for (RailEdge edge : edges) {
+      if (edge == null) {
+        continue;
+      }
+      double speedLimit = resolver.resolve(edge);
+      if (Double.isFinite(speedLimit) && speedLimit > 0.0) {
+        constraints.add(new EdgeSpeedConstraint(distance, speedLimit));
+      }
+      distance += Math.max(0, edge.lengthBlocks());
+    }
+    return constraints;
   }
 
   /** 计算路径上每个节点到起点的累计距离。 */

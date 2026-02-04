@@ -33,3 +33,7 @@ tags:
 - PROCEED 信号：使用调度图默认速度作为基准，再叠加边限速。
 - CAUTION/PROCEED_WITH_CAUTION 信号：使用连通分量的 caution 速度上限（无覆盖时回退为 `runtime.caution-speed-bps`）。
 - STOP 信号：限速 0 并停车。
+
+## 控车节流与补能
+- 每次调度 tick 都会刷新 `speedLimit`，加减速曲线由 TrainCarts 的 WaitAcceleration 接管。
+- “运动中补能”的 launch/accelerate 只在信号变化、强制刷新或低速 failover 时下发，避免周期性加速打断停靠或在道岔处反向弹回。

@@ -37,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
@@ -552,24 +553,8 @@ public final class RuntimeDispatchService {
         }
         updateSignalOrWarn(trainName, SignalAspect.STOP, now);
         if (definition.nodeType() == NodeType.WAYPOINT) {
-          Optional<NodeId> nextNode =
-              currentIndex + 1 < route.waypoints().size()
-                  ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
-                  : Optional.empty();
-          NodeId stopNext = nextNode.orElse(currentNode);
-          OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
-          Optional<RailGraph> graphOpt = resolveGraph(event);
-          applyControl(
-              train,
-              properties,
-              SignalAspect.STOP,
-              route,
-              currentNode,
-              stopNext,
-              graphOpt.orElse(null),
-              false,
-              stopDistanceOpt);
-          // 立即居中（与 AutoStation 对齐）
+          // 立即居中（与 AutoStation 对齐）：先居中再设置停车，避免列车在居中前被立即停止
+          // centerTrainAtWaypointImmediate 内部会执行 launchReset + centerTrain + addActionWaitState
           centerTrainAtWaypointImmediate(event, definition.nodeId(), trainName, dwellSeconds);
         }
         // TERM 标记：清除 destination 防止继续寻路
@@ -665,18 +650,8 @@ public final class RuntimeDispatchService {
         properties.clearDestinationRoute();
         properties.setDestination(destinationName);
       }
-      OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
-      applyControl(
-          train,
-          properties,
-          SignalAspect.STOP,
-          route,
-          currentNode,
-          nextNode,
-          graph,
-          false,
-          stopDistanceOpt);
-      // 立即居中（与 AutoStation 对齐），然后调度 dwell/WaitState
+      // 立即居中（与 AutoStation 对齐）：先居中再设置停车，避免列车在居中前被立即停止
+      // centerTrainAtWaypointImmediate 内部会执行 launchReset + centerTrain + addActionWaitState
       centerTrainAtWaypointImmediate(event, definition.nodeId(), trainName, waypointDwellSeconds);
       return;
     }
@@ -754,10 +729,17 @@ public final class RuntimeDispatchService {
             + " signal="
             + decision.signal());
     if (!decision.allowed()) {
+      UUID worldId = train.worldId();
+      SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(worldId);
       var lookahead =
-          SignalLookahead.compute(decision, context, SignalAspect.STOP, this::isApproachingNode);
+          SignalLookahead.computeWithEdgeSpeed(
+              decision, context, SignalAspect.STOP, this::isApproachingNode, edgeSpeedResolver);
       OptionalLong lookaheadDistance = lookahead.minConstraintDistance();
       SignalAspect aspect = deriveBlockedAspect(decision, context);
+      OptionalLong stopDistance =
+          aspect == SignalAspect.STOP
+              ? resolveMergedStopDistance(lookaheadDistance, train, properties)
+              : lookaheadDistance;
       debugLogger.accept(
           "调度推进阻塞: train="
               + trainName
@@ -769,6 +751,29 @@ public final class RuntimeDispatchService {
               + decision.earliestTime()
               + " blockers="
               + summarizeBlockers(decision));
+      // 阻塞时：已到达当前节点，仍需推进进度并更新 destination，避免后续道岔回弹
+      progressRegistry.advance(
+          trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
+      invalidateTrainEta(trainName);
+      String destinationName = resolveDestinationName(nextNode);
+      if (destinationName != null && !destinationName.isBlank()) {
+        properties.clearDestinationRoute();
+        properties.setDestination(destinationName);
+      }
+      // 仅保留当前节点占用，避免后车追尾
+      if (occupancyManager != null && currentNode != null) {
+        OccupancyResource keepResource = OccupancyResource.forNode(currentNode);
+        releaseResourcesNotInRequest(trainName, List.of(keepResource));
+        OccupancyRequest locationRequest =
+            new OccupancyRequest(
+                trainName,
+                Optional.of(route.id()),
+                now,
+                List.of(keepResource),
+                java.util.Map.of(),
+                0);
+        occupancyManager.acquire(locationRequest);
+      }
       updateSignalOrWarn(trainName, aspect, now);
       applyControl(
           train,
@@ -779,7 +784,7 @@ public final class RuntimeDispatchService {
           nextNode,
           graph,
           false,
-          lookaheadDistance,
+          stopDistance,
           lookahead,
           java.util.OptionalDouble.empty());
       return;
@@ -1172,7 +1177,21 @@ public final class RuntimeDispatchService {
                 : Optional.empty();
         if (nextNode.isPresent()) {
           if (occupancyManager != null) {
-            occupancyManager.releaseByTrain(trainName);
+            if (currentNode != null) {
+              OccupancyResource keepResource = OccupancyResource.forNode(currentNode);
+              releaseResourcesNotInRequest(trainName, List.of(keepResource));
+              OccupancyRequest locationRequest =
+                  new OccupancyRequest(
+                      trainName,
+                      Optional.of(route.id()),
+                      now,
+                      List.of(keepResource),
+                      java.util.Map.of(),
+                      0);
+              occupancyManager.acquire(locationRequest);
+            } else {
+              occupancyManager.releaseByTrain(trainName);
+            }
           }
           updateSignalOrWarn(trainName, SignalAspect.STOP, now);
           OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
@@ -1371,7 +1390,12 @@ public final class RuntimeDispatchService {
     // 信号前瞻：计算到前方所有限制点的距离，取最近的作为减速依据
     SignalLookahead.LookaheadResult lookahead = null;
     if (runtimeSettings.speedCurveEnabled()) {
-      lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
+      UUID worldIdForLookahead = train.worldId();
+      SignalLookahead.EdgeSpeedResolver edgeSpeedResolver =
+          createEdgeSpeedResolver(worldIdForLookahead);
+      lookahead =
+          SignalLookahead.computeWithEdgeSpeed(
+              decision, context, nextAspect, this::isApproachingNode, edgeSpeedResolver);
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
     }
@@ -1426,6 +1450,10 @@ public final class RuntimeDispatchService {
     if (stallDecision.forceLaunch()) {
       allowLaunch = true;
     }
+    OptionalLong effectiveDistanceOpt =
+        nextAspect == SignalAspect.STOP
+            ? resolveMergedStopDistance(distanceOpt, train, properties)
+            : distanceOpt;
     applyControl(
         train,
         properties,
@@ -1435,7 +1463,7 @@ public final class RuntimeDispatchService {
         nextNode.get(),
         graph,
         allowLaunch,
-        distanceOpt,
+        effectiveDistanceOpt,
         lookahead,
         targetOverrideBps);
     if (stallDecision.triggerFailover()) {
@@ -1774,8 +1802,9 @@ public final class RuntimeDispatchService {
    * <p>语义：
    *
    * <ul>
-   *   <li>CAUTION：下一个区间（第 1 段边或下一节点）会遇到 stop，应更早准备停车。
-   *   <li>PROCEED_WITH_CAUTION：前两个区间内存在 stop，用于提前减速提示。
+   *   <li>STOP：下一段边或下一节点遇到阻塞。
+   *   <li>CAUTION：前两段边内存在阻塞。
+   *   <li>PROCEED_WITH_CAUTION：前三段边内存在阻塞。
    *   <li>STOP：无法定位 blocker 位置（例如仅 CONFLICT 阻塞）时的保守回退。
    * </ul>
    */
@@ -1821,7 +1850,13 @@ public final class RuntimeDispatchService {
     if (bestPosition == Integer.MAX_VALUE) {
       return SignalAspect.STOP;
     }
-    return bestPosition <= 1 ? SignalAspect.CAUTION : SignalAspect.PROCEED_WITH_CAUTION;
+    if (bestPosition <= 1) {
+      return SignalAspect.STOP;
+    }
+    if (bestPosition <= 2) {
+      return SignalAspect.CAUTION;
+    }
+    return SignalAspect.PROCEED_WITH_CAUTION;
   }
 
   /**
@@ -1833,7 +1868,7 @@ public final class RuntimeDispatchService {
    *   <li>1 edge 内有车 → STOP
    *   <li>2 edges 内有车 → CAUTION
    *   <li>3 edges 内有车 → PROCEED_WITH_CAUTION
-   *   <li>3+ edges 或无车 → 保持原信号
+   *   <li>超过扫描范围或无车 → 保持原信号
    * </ul>
    *
    * @param trainName 当前列车名（用于排除自身占用）
@@ -1856,8 +1891,8 @@ public final class RuntimeDispatchService {
         || occupancyManager == null) {
       return baseAspect;
     }
-    // 扫描前方最多 4 段边（覆盖 STOP/CAUTION/PWC 范围）
-    int scanEdges = 4;
+    // 扫描前方最多 3 段边（覆盖 STOP/CAUTION/PWC 范围）
+    int scanEdges = 3;
     List<NodeId> waypoints = route.waypoints();
     if (waypoints == null || waypoints.isEmpty()) {
       return baseAspect;
@@ -1880,7 +1915,8 @@ public final class RuntimeDispatchService {
       // 检查目标节点是否被其他列车占用
       Optional<OccupancyClaim> nodeClaim =
           occupancyManager.getClaim(OccupancyResource.forNode(toNode));
-      if (nodeClaim.isPresent() && !nodeClaim.get().trainName().equalsIgnoreCase(trainName)) {
+      if (nodeClaim.isPresent()
+          && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, nodeClaim.get())) {
         return edgeCountToSignal(forwardEdgeCount);
       }
 
@@ -1889,13 +1925,52 @@ public final class RuntimeDispatchService {
       if (edge != null) {
         Optional<OccupancyClaim> edgeClaim =
             occupancyManager.getClaim(OccupancyResource.forEdge(edge.id()));
-        if (edgeClaim.isPresent() && !edgeClaim.get().trainName().equalsIgnoreCase(trainName)) {
+        if (edgeClaim.isPresent()
+            && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, edgeClaim.get())) {
           return edgeCountToSignal(forwardEdgeCount);
         }
       }
     }
 
     return baseAspect;
+  }
+
+  /**
+   * 判定前方扫描是否应忽略某个占用记录。
+   *
+   * <p>忽略条件：
+   *
+   * <ul>
+   *   <li>同一列车的占用（自占用）
+   *   <li>同线路且进度索引落后当前列车（后车 lookahead）
+   * </ul>
+   */
+  private boolean shouldIgnoreForwardScanClaim(
+      String currentTrainName, RouteDefinition route, int currentIndex, OccupancyClaim claim) {
+    if (claim == null || route == null) {
+      return false;
+    }
+    if (currentTrainName != null && claim.trainName().equalsIgnoreCase(currentTrainName)) {
+      return true;
+    }
+    Optional<RouteId> claimRouteIdOpt = claim.routeId();
+    if (claimRouteIdOpt.isEmpty()) {
+      return false;
+    }
+    RouteId claimRouteId = claimRouteIdOpt.get();
+    if (!claimRouteId.equals(route.id())) {
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(claim.trainName());
+    if (entryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    if (!route.id().equals(entry.routeId())) {
+      return false;
+    }
+    return entry.currentIndex() < currentIndex;
   }
 
   /**
@@ -2014,6 +2089,13 @@ public final class RuntimeDispatchService {
       if (Double.isFinite(override) && override > 0.0) {
         targetBps = Math.min(targetBps, override);
       }
+    }
+    // 边限速前瞻：根据前方边的限速约束提前减速
+    if (lookahead != null
+        && !lookahead.edgeSpeedConstraints().isEmpty()
+        && configManager.current().runtimeSettings().speedCurveEnabled()) {
+      targetBps =
+          applyEdgeSpeedLookahead(targetBps, config.decelBps2(), lookahead.edgeSpeedConstraints());
     }
     // 发车方向由 TrainCarts 依据 destination 自动推导（见 TrainCartsRuntimeHandle#launch），此处不写入额外 tag。
     java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection =
@@ -2346,6 +2428,23 @@ public final class RuntimeDispatchService {
 
   private static String formatOptionalLong(OptionalLong value) {
     return value != null && value.isPresent() ? String.valueOf(value.getAsLong()) : "-";
+  }
+
+  /**
+   * 计算 STOP 信号的制动距离。
+   *
+   * <p>阻塞点距离是“从当前节点起算”的静态值，无法随列车前进而缩短。为避免速度被卡在非零值，STOP 优先使用基于当前速度的软刹车距离；仅当阻塞距离为 0（紧贴阻塞点）时才直接返回 0。
+   */
+  private OptionalLong resolveMergedStopDistance(
+      OptionalLong distanceOpt, RuntimeTrainHandle train, TrainProperties properties) {
+    if (distanceOpt != null && distanceOpt.isPresent() && distanceOpt.getAsLong() <= 0L) {
+      return distanceOpt;
+    }
+    OptionalLong softStop = resolveSoftStopDistance(train, properties);
+    if (softStop.isPresent()) {
+      return softStop;
+    }
+    return distanceOpt != null ? distanceOpt : OptionalLong.empty();
   }
 
   private boolean shouldLogStopWaypoint(
@@ -3951,6 +4050,69 @@ public final class RuntimeDispatchService {
       }
     }
     return minSpeed == Double.MAX_VALUE ? defaultSpeed : minSpeed;
+  }
+
+  /**
+   * 创建边限速解析器（用于 SignalLookahead 前瞻）。
+   *
+   * <p>返回的解析器会考虑 edge override 和 temp speed limit。
+   */
+  private SignalLookahead.EdgeSpeedResolver createEdgeSpeedResolver(UUID worldId) {
+    double defaultSpeed = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
+    Instant now = Instant.now();
+    return edge ->
+        railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
+  }
+
+  /**
+   * 边限速前瞻：根据前方边的限速约束计算当前应该的最大速度。
+   *
+   * <p>算法：对于每个前方的限速约束，使用物理公式反推"从当前位置能安全减速到目标限速所需的最大起始速度"：
+   *
+   * <ul>
+   *   <li>制动距离公式: d = (v² - v_target²) / (2 * a)
+   *   <li>反推: v_max = √(v_target² + 2 * a * d)
+   * </ul>
+   *
+   * <p>取所有约束计算结果的最小值作为当前允许的最大速度。
+   *
+   * @param currentTargetBps 当前目标速度（blocks/s）
+   * @param decelBps2 减速度（blocks/s²）
+   * @param constraints 前方边限速约束列表
+   * @return 调整后的目标速度
+   */
+  private double applyEdgeSpeedLookahead(
+      double currentTargetBps,
+      double decelBps2,
+      List<SignalLookahead.EdgeSpeedConstraint> constraints) {
+    if (constraints == null || constraints.isEmpty()) {
+      return currentTargetBps;
+    }
+    if (!Double.isFinite(decelBps2) || decelBps2 <= 0.0) {
+      return currentTargetBps;
+    }
+
+    double minAllowedSpeed = currentTargetBps;
+    for (SignalLookahead.EdgeSpeedConstraint constraint : constraints) {
+      double distance = constraint.distanceBlocks();
+      double targetLimit = constraint.speedLimitBps();
+
+      // 跳过"距离为 0 且限速不低于当前目标"的约束（当前边，已在 targetBps 中考虑）
+      if (distance <= 0 && targetLimit >= currentTargetBps) {
+        continue;
+      }
+
+      // 计算从当前位置能安全减速到 targetLimit 所需的最大起始速度
+      // v_max = √(v_target² + 2 * a * d)
+      double maxSpeedForConstraint =
+          Math.sqrt(targetLimit * targetLimit + 2.0 * decelBps2 * distance);
+
+      if (Double.isFinite(maxSpeedForConstraint) && maxSpeedForConstraint > 0.0) {
+        minAllowedSpeed = Math.min(minAllowedSpeed, maxSpeedForConstraint);
+      }
+    }
+
+    return minAllowedSpeed;
   }
 
   private Optional<RailEdge> findEdge(RailGraph graph, NodeId from, NodeId to) {

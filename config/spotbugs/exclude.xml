@@ -395,4 +395,11 @@
         <Class name="org.fetarute.fetaruteTCAddon.api.ApiPerformanceTest"/>
         <Bug pattern="DLS_DEAD_LOCAL_STORE"/>
     </Match>
+
+    <!-- LookaheadResult 的 edgeSpeedConstraints 在 compact constructor 中已用 Collections.unmodifiableList 包装，SpotBugs 误报 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead$LookaheadResult"/>
+        <Method name="edgeSpeedConstraints"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
 </FindBugsFilter>

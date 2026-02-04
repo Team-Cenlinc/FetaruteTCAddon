@@ -434,8 +434,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     }
     TrainProperties properties = group.getProperties();
     ExitOffsetState exitOffsetState = new ExitOffsetState(properties);
-    com.bergerkiller.bukkit.tc.actions.GroupActionWaitState waitState =
-        group.getActions().addActionWaitState();
+    // 注意：不在这里添加 WaitState，因为 handleStationArrival 会设置 destination 导致 TC 尝试移动
+    // WaitState 会在 handleStationArrival 之后添加
     if (timedOut) {
       debug(
           "AutoStation 停站超时: nodeId="
@@ -457,6 +457,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     plugin
         .getRuntimeDispatchService()
         .ifPresent(dispatch -> dispatch.handleStationArrival(group, definition));
+    // 设置 destination 后，TC 可能尝试移动列车；通过 stop() 强制停止并添加 WaitState
+    group.stop();
+    var finalWaitState = group.getActions().addActionWaitState();
     long dwellTicks = Math.max(0L, dwellSeconds * 20L);
     String location = locationText(info);
     new org.bukkit.scheduler.BukkitRunnable() {
@@ -480,7 +483,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       public void run() {
         if (!group.isValid()) {
           exitOffsetState.restore();
-          waitState.stop();
+          finalWaitState.stop();
           cancel();
           return;
         }
@@ -571,7 +574,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
             if (canDepart) {
               exitOffsetState.restore();
-              waitState.stop();
+              finalWaitState.stop();
               cancel();
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               Bukkit.getScheduler()
@@ -686,7 +689,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + location);
           }
           gaveUpOpen = true;
-          waitState.stop();
+          finalWaitState.stop();
           cancel();
           return;
         }

@@ -30,6 +30,7 @@ public final class TrainLaunchManager {
    *
    * @param targetBps 目标速度（blocks/s，已考虑信号与边限速）
    * @param distanceOpt 可选“到下一节点的剩余距离”（用于提前减速）
+   * @implNote 运动中列车仅在信号变化/强制刷新时补充加速动作，避免周期性加速打断停靠或干扰道岔方向判定。
    */
   public void applyControl(
       RuntimeTrainHandle train,
@@ -76,8 +77,8 @@ public final class TrainLaunchManager {
         if (allowLaunch && canIssueLaunch(properties, runtimeSettings)) {
           train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
         }
-      } else {
-        // 运动中：如果速度低于目标，总是尝试加速（不受发车冷却限制）
+      } else if (allowLaunch) {
+        // 运动中：仅在信号变化/强制刷新时补充加速，避免周期性反复加速影响停站与道岔
         // accelerateTo 内部已有"速度接近目标时跳过"的保护
         train.accelerateTo(targetBpt, accelBpt2);
       }
