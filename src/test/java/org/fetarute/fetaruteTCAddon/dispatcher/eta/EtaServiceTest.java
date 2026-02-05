@@ -158,7 +158,8 @@ class EtaServiceTest {
             "SURN:D:DEPOT:1");
     Instant dueAt = Instant.now();
     SpawnTicket ticket =
-        new SpawnTicket(UUID.randomUUID(), spawnService, dueAt, dueAt, 0, Optional.empty());
+        new SpawnTicket(
+            UUID.randomUUID(), spawnService, dueAt, dueAt, 0, Optional.empty(), Optional.empty());
 
     SpawnManager spawnManager = mock(SpawnManager.class);
     when(spawnManager.snapshotQueue()).thenReturn(List.of(ticket));

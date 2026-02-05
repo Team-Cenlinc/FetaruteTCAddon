@@ -188,6 +188,42 @@ public final class OccupancyRequestBuilder {
   }
 
   /**
+   * 构建“尾部保护”占用请求：仅保留当前节点与其后方 N 段边资源。
+   *
+   * <p>用于停站期间，避免后车过早释放导致互卡；不会额外占用前方 lookahead 资源。
+   */
+  public OccupancyRequest buildRearGuardRequestFromNodes(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now,
+      int priority) {
+    Objects.requireNonNull(trainName, "trainName");
+    Objects.requireNonNull(routeId, "routeId");
+    Objects.requireNonNull(nodes, "nodes");
+    Instant requestTime = now != null ? now : Instant.now();
+    if (nodes.isEmpty()) {
+      throw new IllegalArgumentException("nodes 列表为空");
+    }
+    if (currentIndex < 0 || currentIndex >= nodes.size()) {
+      throw new IllegalArgumentException(
+          "currentIndex 超出范围 index=" + currentIndex + " size=" + nodes.size());
+    }
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    NodeId currentNode = nodes.get(currentIndex);
+    if (currentNode != null) {
+      resources.add(OccupancyResource.forNode(currentNode));
+    }
+    List<NodeId> rearNodes = resolveRearGuardNodes(nodes, currentIndex);
+    List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
+    List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
+    appendRearGuardResources(resources, rearExpanded, rearEdges);
+    return new OccupancyRequest(
+        trainName, routeId, requestTime, List.copyOf(resources), Map.of(), Map.of(), priority);
+  }
+
+  /**
    * Depot 出车专用：在起步段遇到道岔时，额外把该道岔周边的多分支 edge 也纳入请求，用于 spawn 前的“多方向 lookover”。
    *
    * <p>实现策略：仅追加 EDGE 资源（不追加走廊冲突 key），避免因缺少方向信息导致过度对向锁闭。

@@ -21,13 +21,35 @@
 每条线路可配置多条可发车的 `OPERATION` route，并通过权重保证长期比例正确：
 
 - Route 必须能解析到 `CRET` 出库点（即停靠表首行的 depot nodeId）。
-- 同一条线路中，所有以 `CRET` 开头的“可发车 route”必须共享同一个 `depotNodeId`（不允许跨 depot 混发）；否则该线路会被跳过并输出调试日志。
+- 同一条线路中可配置多个 depot（见下方“线路 Depot 池”），允许跨 depot 混发。
 - 若 route 首行不是 `CRET`（例如 `STOP` 作为 layover 复用起点），则不会参与 depot 一致性校验。
 - 通过 route metadata 配置：
   - `spawn_weight: <int>`：权重（`>0` 才视为可发车）。例如 `1` 与 `2` 表示长期约 1:2 的发车比例。
   - `spawn_enabled: true|false`：可选开关；若显式为 `false`，即使有 `spawn_weight` 也不会参与发车。
 - 若同一线路存在多条候选 route，但没有任何 route 配置 `spawn_weight`（也没有显式 `spawn_enabled=true`），为避免误发车将跳过该线路。
 - `RETURN` route 默认参与 SpawnPlan（用于 Layover 复用与站牌预测），但不会从 Depot 生成列车。
+
+## 线路 Depot 池（多 Depot 支持）
+
+可在 `Line.metadata` 中配置 `spawn_depots` 以集中管理一条线路的多个 depot：
+
+- `spawn_depots` 支持字符串列表或对象列表：
+  - `["OP:D:DEPOT:1", "OP:D:DEPOT:2"]`
+  - `[{"nodeId":"OP:D:DEPOT:1","weight":2},{"nodeId":"OP:D:DEPOT:2"}]`
+- `weight` 用于平衡分配（默认 1）。
+- `enabled=false` 的条目会被忽略。
+
+TicketAssigner 会优先使用 `spawn_depots` 做均衡选择；若未配置，则回退为 route 的 `CRET` depot。
+
+## 线路最大车数（软限制）
+
+可在 `Line.metadata` 中配置 `spawn_max_trains`：
+
+- `spawn_max_trains: <int>`
+
+未显式配置时，系统会尝试根据 `Line.spawnFreqBaselineSec` 与线路运行时间推断最大车数（优先使用 route.runtimeSeconds）。
+
+超过限制时，将延迟发车并重试（不会影响 Layover 复用）。
 
 ### headway 分摊
 
@@ -40,6 +62,11 @@
 ### 配置建议（命令）
 
 - 设置线路发车基准：`/fta line set <company> <operator> <line> --freqBaseline <sec>`
+- 设置线路最大车数：`/fta line set <company> <operator> <line> --maxTrains <count>`
+- 线路 Depot 管理：
+  - `/fta line depot add <company> <operator> <line> <nodeId> [weight]`
+  - `/fta line depot remove <company> <operator> <line> <nodeId>`
+  - `/fta line depot list <company> <operator> <line>`
 - 设置运行图权重：`/fta route set <company> <operator> <line> <route> --spawn-weight <weight>`
   - `weight<=0` 会清除 `spawn_weight`（该 route 不再参与自动发车）
 

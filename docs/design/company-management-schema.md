@@ -161,6 +161,9 @@ interface CompanyRepository {
 - 内部模型：Java 记录或 Lombok-less 数据类，字段均非 null，使用 `Optional` 暴露缺省值。
 - API DTO：由 `RailwayCompanyDtoMapper` 转换，确保对外 JSON 序列化与内部模型解耦。
 - 多语言字段：`name` + `secondaryName` 方案，若未来需要更多语言，可在 metadata 中放 `Map<Locale, String>`。
+- Line metadata 常用键：
+  - `spawn_depots`：线路可用 Depot 池（字符串或对象列表，支持 `weight/enabled`）。
+  - `spawn_max_trains`：线路最大车数（可选）。
 
 ## 与调度图的衔接
 - Station `graph_node_id` 指向 `RailNode`，RouteStop 通过 station 或 waypoint node 映射到 `RailGraph`。

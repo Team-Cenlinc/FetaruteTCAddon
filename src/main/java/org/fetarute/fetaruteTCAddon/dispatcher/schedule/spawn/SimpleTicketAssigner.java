@@ -3,10 +3,18 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -15,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
@@ -176,13 +185,18 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private boolean trySpawn(StorageProvider provider, Instant now, SpawnTicket ticket) {
     SpawnService service = ticket.service();
-    Optional<org.fetarute.fetaruteTCAddon.company.model.Route> routeEntityOpt =
-        provider.routes().findById(service.routeId());
+    Optional<Route> routeEntityOpt = provider.routes().findById(service.routeId());
     if (routeEntityOpt.isEmpty()) {
       requeue(ticket, now, "route-not-found");
       return false;
     }
-    org.fetarute.fetaruteTCAddon.company.model.Route routeEntity = routeEntityOpt.get();
+    Route routeEntity = routeEntityOpt.get();
+    Optional<Line> lineOpt = provider.lines().findById(routeEntity.lineId());
+    if (lineOpt.isEmpty()) {
+      requeue(ticket, now, "line-not-found");
+      return false;
+    }
+    Line line = lineOpt.get();
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
     if (routeOpt.isEmpty()) {
@@ -204,6 +218,35 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return tryReuseLayover(ticket, service, route, now, false);
     }
 
+    OptionalInt lineMaxTrains = resolveLineMaxTrains(provider, line);
+    LineRuntimeSnapshot runtimeSnapshot = null;
+    if (lineMaxTrains.isPresent()) {
+      runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+      int active = runtimeSnapshot.countActiveTrains(provider, line.id());
+      if (active >= lineMaxTrains.getAsInt()) {
+        debugLogger.accept(
+            "自动发车阻塞: line-cap line="
+                + line.code()
+                + " active="
+                + active
+                + " max="
+                + lineMaxTrains.getAsInt());
+        requeue(ticket, now, "line-cap");
+        return false;
+      }
+    }
+
+    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
+    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
+    if (!lineDepots.isEmpty()) {
+      if (runtimeSnapshot == null) {
+        runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+      }
+      selectedDepotOpt = selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot);
+    }
+    SpawnTicket effectiveTicket =
+        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
+
     String destName = resolveDestinationName(provider, routeEntity).orElse(routeEntity.name());
     String trainName =
         TrainNameFormatter.buildTrainName(
@@ -213,9 +256,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             destName,
             ticket.id());
 
-    // 线路信息已在前序步骤解析完成
-
-    Optional<java.util.UUID> worldIdOpt = resolveDepotWorldId(service);
+    Optional<java.util.UUID> worldIdOpt =
+        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
     if (worldIdOpt.isEmpty()) {
       requeue(ticket, now, "depot-world-missing");
       return false;
@@ -254,7 +296,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     Optional<MinecartGroup> groupOpt;
     try {
-      groupOpt = depotSpawner.spawn(provider, ticket, trainName, now);
+      groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
     } catch (Exception e) {
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
@@ -273,8 +315,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       group.getProperties().setDestination(route.waypoints().get(1).value());
     }
     runtimeDispatchService.refreshSignal(group);
-    spawnManager.complete(ticket);
+    spawnManager.complete(effectiveTicket);
     spawnSuccess.increment();
+    String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
     debugLogger.accept(
         "自动发车成功: train="
             + trainName
@@ -285,7 +328,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + "/"
             + service.routeCode()
             + " depot="
-            + service.depotNodeId());
+            + depotUsed);
     return true;
   }
 
@@ -465,11 +508,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
   }
 
-  private Optional<java.util.UUID> resolveDepotWorldId(SpawnService service) {
-    if (service == null || service.depotNodeId().isBlank()) {
+  private Optional<java.util.UUID> resolveDepotWorldId(
+      SpawnService service, Optional<String> depotOverride) {
+    if (service == null) {
       return Optional.empty();
     }
-    String depotSpec = service.depotNodeId();
+    String depotSpec = depotOverride.filter(s -> !s.isBlank()).orElseGet(service::depotNodeId);
+    if (depotSpec == null || depotSpec.isBlank()) {
+      return Optional.empty();
+    }
 
     // 检查是否是 DYNAMIC depot
     if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
@@ -484,6 +531,165 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         .filter(info -> depotSpec.equalsIgnoreCase(info.definition().nodeId().value()))
         .map(SignNodeRegistry.SignNodeInfo::worldId)
         .findFirst();
+  }
+
+  private OptionalInt resolveLineMaxTrains(StorageProvider provider, Line line) {
+    if (provider == null || line == null) {
+      return OptionalInt.empty();
+    }
+    OptionalInt explicit = LineSpawnMetadata.parseMaxTrains(line.metadata());
+    if (explicit.isPresent()) {
+      return explicit;
+    }
+    Optional<Integer> baselineOpt = line.spawnFreqBaselineSec();
+    if (baselineOpt.isEmpty()) {
+      return OptionalInt.empty();
+    }
+    int baseline = baselineOpt.get() == null ? 0 : baselineOpt.get();
+    if (baseline <= 0) {
+      return OptionalInt.empty();
+    }
+    int runtimeSeconds = resolveLineRuntimeSeconds(provider, line.id());
+    if (runtimeSeconds <= 0) {
+      return OptionalInt.empty();
+    }
+    int max = (int) Math.ceil(runtimeSeconds / (double) baseline);
+    return OptionalInt.of(Math.max(1, max));
+  }
+
+  private int resolveLineRuntimeSeconds(StorageProvider provider, UUID lineId) {
+    if (provider == null || lineId == null) {
+      return 0;
+    }
+    int max = 0;
+    List<Route> routes = provider.routes().listByLine(lineId);
+    for (Route route : routes) {
+      if (route == null || route.operationType() != RouteOperationType.OPERATION) {
+        continue;
+      }
+      Optional<Integer> runtimeOpt = route.runtimeSeconds();
+      if (runtimeOpt.isEmpty() || runtimeOpt.get() == null) {
+        continue;
+      }
+      max = Math.max(max, runtimeOpt.get());
+    }
+    return max;
+  }
+
+  private Optional<SpawnDepot> selectBalancedDepot(
+      StorageProvider provider,
+      UUID lineId,
+      List<SpawnDepot> depots,
+      LineRuntimeSnapshot runtimeSnapshot) {
+    if (provider == null || lineId == null || depots == null || depots.isEmpty()) {
+      return Optional.empty();
+    }
+    Map<String, Integer> activeByDepot =
+        runtimeSnapshot.countActiveTrainsByDepot(provider, lineId, depots);
+    SpawnDepot selected = null;
+    double bestScore = Double.MAX_VALUE;
+    for (SpawnDepot depot : depots) {
+      if (depot == null) {
+        continue;
+      }
+      int active = activeByDepot.getOrDefault(depot.normalizedKey(), 0);
+      double score = active / (double) depot.weight();
+      if (selected == null || score < bestScore) {
+        selected = depot;
+        bestScore = score;
+      }
+    }
+    return Optional.ofNullable(selected);
+  }
+
+  /** 一次 tick 内使用的运行时快照，用于线路发车限额与 depot 负载统计。 */
+  private static final class LineRuntimeSnapshot {
+    private final Map<String, RouteProgressRegistry.RouteProgressEntry> progressEntries;
+    private final Map<String, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId> startNodes;
+    private final Map<UUID, UUID> routeLineCache = new HashMap<>();
+
+    private LineRuntimeSnapshot(
+        Map<String, RouteProgressRegistry.RouteProgressEntry> progressEntries,
+        Map<String, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId> startNodes) {
+      this.progressEntries = progressEntries == null ? Map.of() : progressEntries;
+      this.startNodes = startNodes == null ? Map.of() : startNodes;
+    }
+
+    static LineRuntimeSnapshot capture(RuntimeDispatchService runtimeDispatchService) {
+      if (runtimeDispatchService == null) {
+        return new LineRuntimeSnapshot(Map.of(), Map.of());
+      }
+      return new LineRuntimeSnapshot(
+          runtimeDispatchService.snapshotProgressEntries(),
+          runtimeDispatchService.snapshotEffectiveStartNodes());
+    }
+
+    int countActiveTrains(StorageProvider provider, UUID lineId) {
+      if (provider == null || lineId == null) {
+        return 0;
+      }
+      int count = 0;
+      for (RouteProgressRegistry.RouteProgressEntry entry : progressEntries.values()) {
+        UUID routeId = entry == null ? null : entry.routeUuid();
+        if (routeId == null) {
+          continue;
+        }
+        UUID resolvedLine = resolveLineId(provider, routeId);
+        if (lineId.equals(resolvedLine)) {
+          count++;
+        }
+      }
+      return count;
+    }
+
+    Map<String, Integer> countActiveTrainsByDepot(
+        StorageProvider provider, UUID lineId, List<SpawnDepot> depots) {
+      if (provider == null || lineId == null || depots == null || depots.isEmpty()) {
+        return Map.of();
+      }
+      Map<String, Integer> counts = new HashMap<>();
+      Map<String, String> depotKeys =
+          depots.stream()
+              .filter(Objects::nonNull)
+              .collect(
+                  Collectors.toMap(
+                      SpawnDepot::normalizedKey,
+                      SpawnDepot::normalizedKey,
+                      (a, b) -> a,
+                      java.util.LinkedHashMap::new));
+      for (RouteProgressRegistry.RouteProgressEntry entry : progressEntries.values()) {
+        if (entry == null) {
+          continue;
+        }
+        UUID routeId = entry.routeUuid();
+        if (routeId == null) {
+          continue;
+        }
+        UUID resolvedLine = resolveLineId(provider, routeId);
+        if (!lineId.equals(resolvedLine)) {
+          continue;
+        }
+        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId start =
+            startNodes.get(entry.trainName());
+        if (start == null) {
+          continue;
+        }
+        String key = start.value().toLowerCase(Locale.ROOT);
+        if (!depotKeys.containsKey(key)) {
+          continue;
+        }
+        counts.merge(key, 1, Integer::sum);
+      }
+      return counts;
+    }
+
+    private UUID resolveLineId(StorageProvider provider, UUID routeId) {
+      if (routeId == null) {
+        return null;
+      }
+      return routeLineCache.computeIfAbsent(
+          routeId, id -> provider.routes().findById(id).map(Route::lineId).orElse(null));
+    }
   }
 
   /**

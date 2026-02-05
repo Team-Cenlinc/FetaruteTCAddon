@@ -402,4 +402,30 @@
         <Method name="edgeSpeedConstraints"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+
+    <!-- SimpleOccupancyManager 存储 SignalEventBus 外部引用，用于发布占用事件，生命周期由创建方管理 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- 信号事件包的 record 已在 compact constructor 中使用 List.copyOf 保证不可变 -->
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.dispatcher.signal.event"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.dispatcher.signal.event"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- 测试 Mock 类使用 toLowerCase 进行键匹配，测试场景无需 Locale -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalEvaluatorTest$MockOccupancyManager"/>
+        <Bug pattern="DM_CONVERT_CASE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalEvaluatorTest$MockRequestProvider"/>
+        <Bug pattern="DM_CONVERT_CASE"/>
+    </Match>
 </FindBugsFilter>

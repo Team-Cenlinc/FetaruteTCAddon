@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.stream.Stream;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -21,6 +22,12 @@ import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDepot;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplate;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
@@ -88,6 +95,10 @@ public final class FtaLineCommand {
         CommandSuggestionProviders.enumValues(LineServiceType.class, "<service>");
     SuggestionProvider<CommandSender> statusValueSuggestions =
         CommandSuggestionProviders.enumValues(LineStatus.class, "<status>");
+    SuggestionProvider<CommandSender> depotSuggestions =
+        CommandSuggestionProviders.placeholder("<depotNodeId>");
+    SuggestionProvider<CommandSender> depotWeightSuggestions =
+        CommandSuggestionProviders.placeholder("<weight>");
 
     var nameFlag =
         CommandFlag.<CommandSender>builder("name")
@@ -133,6 +144,14 @@ public final class FtaLineCommand {
                         "freqBaseline", IntegerParser.integerParser())
                     .suggestionProvider(CommandSuggestionProviders.placeholder("<seconds>")))
             .build();
+    var maxTrainsFlag =
+        CommandFlag.<CommandSender>builder("maxTrains")
+            .withAliases("m")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "maxTrains", IntegerParser.integerParser(0, 10000))
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<count>")))
+            .build();
 
     manager.command(
         manager
@@ -149,6 +168,7 @@ public final class FtaLineCommand {
             .flag(colorFlag)
             .flag(statusFlag)
             .flag(freqBaselineFlag)
+            .flag(maxTrainsFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -421,6 +441,33 @@ public final class FtaLineCommand {
                           Map.of(
                               "freq_baseline",
                               line.spawnFreqBaselineSec().map(String::valueOf).orElse("-"))));
+                  OptionalInt maxTrainsExplicit = LineSpawnMetadata.parseMaxTrains(line.metadata());
+                  OptionalInt maxTrainsInferred = inferLineMaxTrains(provider, line);
+                  String maxDisplay =
+                      maxTrainsExplicit.isPresent()
+                          ? String.valueOf(maxTrainsExplicit.getAsInt())
+                          : maxTrainsInferred.isPresent()
+                              ? (maxTrainsInferred.getAsInt() + " (infer)")
+                              : "-";
+                  List<SpawnDepot> depots = LineSpawnMetadata.parseDepots(line.metadata());
+                  String depotText =
+                      depots.isEmpty()
+                          ? "-"
+                          : String.join(
+                              ", ",
+                              depots.stream()
+                                  .map(
+                                      depot ->
+                                          depot.weight() == 1
+                                              ? depot.nodeId()
+                                              : depot.nodeId() + "*" + depot.weight())
+                                  .toList());
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.info.spawn-max", Map.of("max_trains", maxDisplay)));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.info.spawn-depots", Map.of("depots", depotText)));
                 }));
 
     manager.command(
@@ -491,7 +538,8 @@ public final class FtaLineCommand {
                           || flags.hasFlag(serviceFlag)
                           || flags.hasFlag(colorFlag)
                           || flags.hasFlag(statusFlag)
-                          || flags.hasFlag(freqBaselineFlag);
+                          || flags.hasFlag(freqBaselineFlag)
+                          || flags.hasFlag(maxTrainsFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.line.set.noop"));
                     return;
@@ -535,6 +583,15 @@ public final class FtaLineCommand {
                   }
                   Integer freqBaseline =
                       flags.getValue(freqBaselineFlag, line.spawnFreqBaselineSec().orElse(null));
+                  Integer maxTrains = flags.getValue(maxTrainsFlag, null);
+                  Map<String, Object> metadata = new java.util.HashMap<>(line.metadata());
+                  if (flags.hasFlag(maxTrainsFlag)) {
+                    if (maxTrains == null || maxTrains <= 0) {
+                      metadata.remove(LineSpawnMetadata.KEY_MAX_TRAINS);
+                    } else {
+                      metadata.put(LineSpawnMetadata.KEY_MAX_TRAINS, maxTrains);
+                    }
+                  }
 
                   Line updated =
                       new Line(
@@ -547,12 +604,286 @@ public final class FtaLineCommand {
                           Optional.ofNullable(color).filter(s -> !s.isBlank()),
                           statusOpt.get(),
                           Optional.ofNullable(freqBaseline),
-                          line.metadata(),
+                          metadata,
                           line.createdAt(),
                           Instant.now());
                   provider.lines().save(updated);
                   sender.sendMessage(
                       locale.component("command.line.set.success", Map.of("code", line.code())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("line")
+            .literal("depot")
+            .literal("list")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  Optional<Company> companyOpt =
+                      query.findCompany(((String) ctx.get("company")).trim());
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found",
+                            Map.of("company", ((String) ctx.get("company")).trim())));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+                  if (!canReadCompany(sender, provider, company.id())) {
+                    sender.sendMessage(locale.component("error.no-permission"));
+                    return;
+                  }
+                  Optional<Operator> operatorOpt =
+                      query.findOperator(company.id(), ((String) ctx.get("operator")).trim());
+                  if (operatorOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.operator.not-found",
+                            Map.of("operator", ((String) ctx.get("operator")).trim())));
+                    return;
+                  }
+                  Operator operator = operatorOpt.get();
+
+                  String lineArg = ((String) ctx.get("line")).trim();
+                  Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+                  if (lineOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.not-found", Map.of("line", lineArg)));
+                    return;
+                  }
+                  Line line = lineOpt.get();
+
+                  List<SpawnDepot> depots = LineSpawnMetadata.parseDepots(line.metadata());
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.depot.list.header",
+                          Map.of("line", line.code(), "count", String.valueOf(depots.size()))));
+                  if (depots.isEmpty()) {
+                    sender.sendMessage(locale.component("command.line.depot.list.empty"));
+                    return;
+                  }
+                  for (SpawnDepot depot : depots) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.line.depot.list.entry",
+                            Map.of(
+                                "node", depot.nodeId(),
+                                "weight", String.valueOf(depot.weight()))));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("line")
+            .literal("depot")
+            .literal("add")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("nodeId", StringParser.stringParser(), depotSuggestions)
+            .optional("weight", IntegerParser.integerParser(1, 10000), depotWeightSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  Optional<Company> companyOpt =
+                      query.findCompany(((String) ctx.get("company")).trim());
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found",
+                            Map.of("company", ((String) ctx.get("company")).trim())));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+                  if (!canManageCompany(sender, provider, company.id())) {
+                    sender.sendMessage(locale.component("error.no-permission"));
+                    return;
+                  }
+                  Optional<Operator> operatorOpt =
+                      query.findOperator(company.id(), ((String) ctx.get("operator")).trim());
+                  if (operatorOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.operator.not-found",
+                            Map.of("operator", ((String) ctx.get("operator")).trim())));
+                    return;
+                  }
+                  Operator operator = operatorOpt.get();
+
+                  String lineArg = ((String) ctx.get("line")).trim();
+                  Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+                  if (lineOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.not-found", Map.of("line", lineArg)));
+                    return;
+                  }
+                  Line line = lineOpt.get();
+
+                  String nodeId = ((String) ctx.get("nodeId")).trim();
+                  Integer weight = ctx.optional("weight").map(Integer.class::cast).orElse(1);
+                  if (!isDynamicDepotSpec(nodeId)) {
+                    if (!isDepotNodeId(plugin.getSignNodeRegistry(), nodeId)) {
+                      sender.sendMessage(
+                          locale.component("command.line.depot.invalid", Map.of("node", nodeId)));
+                      return;
+                    }
+                  }
+
+                  List<SpawnDepot> depots =
+                      new ArrayList<>(LineSpawnMetadata.parseDepots(line.metadata()));
+                  boolean updated = false;
+                  for (int i = 0; i < depots.size(); i++) {
+                    SpawnDepot depot = depots.get(i);
+                    if (depot.nodeId().equalsIgnoreCase(nodeId)) {
+                      depots.set(i, new SpawnDepot(nodeId, weight));
+                      updated = true;
+                      break;
+                    }
+                  }
+                  if (!updated) {
+                    depots.add(new SpawnDepot(nodeId, weight));
+                  }
+                  Map<String, Object> metadata = new java.util.HashMap<>(line.metadata());
+                  metadata.put(
+                      LineSpawnMetadata.KEY_DEPOTS, LineSpawnMetadata.toDepotMetadata(depots));
+                  Line updatedLine =
+                      new Line(
+                          line.id(),
+                          line.code(),
+                          line.operatorId(),
+                          line.name(),
+                          line.secondaryName(),
+                          line.serviceType(),
+                          line.color(),
+                          line.status(),
+                          line.spawnFreqBaselineSec(),
+                          metadata,
+                          line.createdAt(),
+                          Instant.now());
+                  provider.lines().save(updatedLine);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.depot.add.success",
+                          Map.of("line", line.code(), "node", nodeId)));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("line")
+            .literal("depot")
+            .literal("remove")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("nodeId", StringParser.stringParser(), depotSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  Optional<Company> companyOpt =
+                      query.findCompany(((String) ctx.get("company")).trim());
+                  if (companyOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.company.info.not-found",
+                            Map.of("company", ((String) ctx.get("company")).trim())));
+                    return;
+                  }
+                  Company company = companyOpt.get();
+                  if (!canManageCompany(sender, provider, company.id())) {
+                    sender.sendMessage(locale.component("error.no-permission"));
+                    return;
+                  }
+                  Optional<Operator> operatorOpt =
+                      query.findOperator(company.id(), ((String) ctx.get("operator")).trim());
+                  if (operatorOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.operator.not-found",
+                            Map.of("operator", ((String) ctx.get("operator")).trim())));
+                    return;
+                  }
+                  Operator operator = operatorOpt.get();
+
+                  String lineArg = ((String) ctx.get("line")).trim();
+                  Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+                  if (lineOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.line.not-found", Map.of("line", lineArg)));
+                    return;
+                  }
+                  Line line = lineOpt.get();
+
+                  String nodeId = ((String) ctx.get("nodeId")).trim();
+                  List<SpawnDepot> depots =
+                      new ArrayList<>(LineSpawnMetadata.parseDepots(line.metadata()));
+                  int before = depots.size();
+                  depots.removeIf(depot -> depot.nodeId().equalsIgnoreCase(nodeId));
+                  if (depots.size() == before) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.line.depot.remove.not-found", Map.of("node", nodeId)));
+                    return;
+                  }
+                  Map<String, Object> metadata = new java.util.HashMap<>(line.metadata());
+                  if (depots.isEmpty()) {
+                    metadata.remove(LineSpawnMetadata.KEY_DEPOTS);
+                  } else {
+                    metadata.put(
+                        LineSpawnMetadata.KEY_DEPOTS, LineSpawnMetadata.toDepotMetadata(depots));
+                  }
+                  Line updatedLine =
+                      new Line(
+                          line.id(),
+                          line.code(),
+                          line.operatorId(),
+                          line.name(),
+                          line.secondaryName(),
+                          line.serviceType(),
+                          line.color(),
+                          line.status(),
+                          line.spawnFreqBaselineSec(),
+                          metadata,
+                          line.createdAt(),
+                          Instant.now());
+                  provider.lines().save(updatedLine);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.line.depot.remove.success",
+                          Map.of("line", line.code(), "node", nodeId)));
                 }));
 
     manager.command(
@@ -881,6 +1212,51 @@ public final class FtaLineCommand {
   /** 判断 sender 是否具备管理指定公司的权限（Owner/Manager 或管理员）。 */
   private boolean canManageCompany(CommandSender sender, StorageProvider provider, UUID companyId) {
     return CompanyAccessChecker.canManageCompany(sender, provider, companyId);
+  }
+
+  private OptionalInt inferLineMaxTrains(StorageProvider provider, Line line) {
+    if (provider == null || line == null) {
+      return OptionalInt.empty();
+    }
+    Optional<Integer> baselineOpt = line.spawnFreqBaselineSec();
+    if (baselineOpt.isEmpty() || baselineOpt.get() == null || baselineOpt.get() <= 0) {
+      return OptionalInt.empty();
+    }
+    int baseline = baselineOpt.get();
+    int maxRuntime = 0;
+    for (Route route : provider.routes().listByLine(line.id())) {
+      if (route == null || route.operationType() != RouteOperationType.OPERATION) {
+        continue;
+      }
+      Optional<Integer> runtimeOpt = route.runtimeSeconds();
+      if (runtimeOpt.isEmpty() || runtimeOpt.get() == null) {
+        continue;
+      }
+      maxRuntime = Math.max(maxRuntime, runtimeOpt.get());
+    }
+    if (maxRuntime <= 0) {
+      return OptionalInt.empty();
+    }
+    int maxTrains = (int) Math.ceil(maxRuntime / (double) baseline);
+    return OptionalInt.of(Math.max(1, maxTrains));
+  }
+
+  private boolean isDynamicDepotSpec(String nodeId) {
+    if (nodeId == null) {
+      return false;
+    }
+    return nodeId.toUpperCase(Locale.ROOT).startsWith("DYNAMIC:");
+  }
+
+  private boolean isDepotNodeId(SignNodeRegistry registry, String nodeId) {
+    if (registry == null || nodeId == null || nodeId.isBlank()) {
+      return false;
+    }
+    String trimmed = nodeId.trim();
+    return registry.snapshotInfos().values().stream()
+        .filter(info -> info != null && info.definition() != null)
+        .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
+        .anyMatch(info -> trimmed.equalsIgnoreCase(info.definition().nodeId().value()));
   }
 
   private SuggestionProvider<CommandSender> placeholderSuggestion(String placeholder) {

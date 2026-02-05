@@ -148,7 +148,7 @@ class StorageSpawnManagerTest {
   }
 
   @Test
-  void pollDueTicketsSkipsLineWhenEnabledRoutesHaveDifferentDepots() {
+  void pollDueTicketsAllowsEnabledRoutesWithDifferentDepots() {
     StorageProvider provider = mockProvider(twoEnabledRoutesDifferentDepotWithWeights());
     StorageSpawnManager.SpawnManagerSettings settings =
         new StorageSpawnManager.SpawnManagerSettings(
@@ -158,8 +158,8 @@ class StorageSpawnManagerTest {
     Instant now = Instant.parse("2026-01-19T00:00:00Z");
     List<SpawnTicket> due = manager.pollDueTickets(provider, now);
 
-    assertTrue(due.isEmpty());
-    assertEquals(0, manager.snapshotPlan().size());
+    assertEquals(2, due.size());
+    assertEquals(2, manager.snapshotPlan().size());
   }
 
   @Test

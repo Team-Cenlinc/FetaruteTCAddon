@@ -32,7 +32,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *   <li>仅对 {@link LineStatus#ACTIVE} 且配置了 spawnFreqBaselineSec 的线路生成票据
  *   <li>同一条线路可配置多条可发车 OPERATION route：通过 route.metadata 的 {@code spawn_weight} 控制长期比例
  *   <li>RETURN route 也会进入 SpawnPlan（用于 Layover 复用与站牌预测）
- *   <li>若存在多条 CRET route，则要求这些 route 的 depotNodeId 一致（不允许跨 depot 混发）
+ *   <li>允许线路跨 depot 混发（可配合 Line.metadata.spawn_depots 做集中管理）
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
  * </ul>
  */
@@ -159,7 +159,9 @@ public final class StorageSpawnManager
       Instant due = nextDueAt;
       int count = 0;
       while (count < limitPerService && !due.isAfter(cutoff)) {
-        out.add(new SpawnTicket(UUID.randomUUID(), service, due, due, 0, Optional.empty()));
+        out.add(
+            new SpawnTicket(
+                UUID.randomUUID(), service, due, due, 0, Optional.empty(), Optional.empty()));
         count++;
         due = due.plus(headway);
       }
@@ -255,7 +257,8 @@ public final class StorageSpawnManager
           && (state.nextDueAt == null || !now.isBefore(state.nextDueAt))) {
         Instant dueAt = state.nextDueAt != null ? state.nextDueAt : now;
         SpawnTicket ticket =
-            new SpawnTicket(UUID.randomUUID(), service, dueAt, dueAt, 0, Optional.empty());
+            new SpawnTicket(
+                UUID.randomUUID(), service, dueAt, dueAt, 0, Optional.empty(), Optional.empty());
         queue.add(ticket);
         state.backlog++;
         state.nextDueAt = dueAt.plus(service.baseHeadway());
@@ -540,28 +543,6 @@ public final class StorageSpawnManager
     }
 
     enabled.sort(Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
-    List<RouteSelection> depotSelections =
-        enabled.stream().filter(RouteSelection::depotSpawn).toList();
-    if (depotSelections.size() > 1) {
-      String depot = depotSelections.get(0).depotNodeId();
-      boolean depotMismatch =
-          depotSelections.stream()
-              .map(RouteSelection::depotNodeId)
-              .anyMatch(d -> d == null || !d.equalsIgnoreCase(depot));
-      if (depotMismatch) {
-        debugLogger.accept(
-            "SpawnPlan 跳过线路(不允许跨 depot 混发): line="
-                + line.code()
-                + " routes="
-                + String.join(
-                    ", ",
-                    depotSelections.stream()
-                        .map(sel -> sel.route().code() + "@" + sel.depotNodeId())
-                        .toList()));
-        return List.of();
-      }
-    }
-
     return enabled;
   }
 

@@ -14,11 +14,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
+import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -162,21 +166,41 @@ class SimpleTicketAssignerLayoverTest {
             Duration.ofSeconds(60),
             "SURN:D:DEPOT:1");
     Instant now = Instant.now();
-    return new SpawnTicket(UUID.randomUUID(), service, now, now, 0, Optional.empty());
+    return new SpawnTicket(
+        UUID.randomUUID(), service, now, now, 0, Optional.empty(), Optional.empty());
   }
 
   private static StorageProvider mockProvider(UUID routeId, boolean withCret) {
     StorageProvider provider = mock(StorageProvider.class);
+    LineRepository lineRepository = mock(LineRepository.class);
     RouteRepository routeRepository = mock(RouteRepository.class);
     RouteStopRepository stopRepository = mock(RouteStopRepository.class);
+    when(provider.lines()).thenReturn(lineRepository);
     when(provider.routes()).thenReturn(routeRepository);
     when(provider.routeStops()).thenReturn(stopRepository);
+
+    UUID lineId = UUID.randomUUID();
+    Line line =
+        new Line(
+            lineId,
+            "L1",
+            UUID.randomUUID(),
+            "Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(60),
+            Map.of(),
+            Instant.now(),
+            Instant.now());
+    when(lineRepository.findById(lineId)).thenReturn(Optional.of(line));
 
     Route route =
         new Route(
             routeId,
             "R1",
-            UUID.randomUUID(),
+            lineId,
             "Route",
             Optional.empty(),
             RoutePatternType.LOCAL,

@@ -34,7 +34,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *
  * <ul>
  *   <li><b>SpawnPlan</b>：从数据库构建的"可发车服务"快照，包含所有 ACTIVE 线路的发车配置
- *   <li><b>SpawnService</b>：单条可发车服务，包含 route、headway（发车间隔）、depotNodeId（出库点）
+ *   <li><b>SpawnService</b>：单条可发车服务，包含 route、headway（发车间隔）、depotNodeId（默认出库点）
  *   <li><b>SpawnTicket</b>：一张发车票据，由 SpawnManager 生成并由 TicketAssigner 尝试放行
  *   <li><b>Headway</b>：发车间隔，即同一 route 相邻两班车的时间间隔
  *   <li><b>Pending</b>：折返待发，指等待 Layover 列车可用或占用释放的票据

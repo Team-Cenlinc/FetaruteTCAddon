@@ -16,6 +16,7 @@
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
 - 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
 - 停站期间会保持 STOP 信号，且提前写入下一跳 destination，确保发车时直接走寻路方向。
+- 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，避免后车过早释放后互卡。
 - 对 STOP/TERM waypoint 的进站控车采用 handoff：信号 tick 不强制 STOP，而是把目标速度上限压到 `runtime.approach-speed-bps`（approaching）。
 - 仅当存在前方 blocker（红灯/占用阻塞）时，才使用“到 blocker 的距离”触发进一步减速/停车；不使用到下一节点距离，避免提前刹停在牌子前。
 - 停稳判定：连续 `1` tick 未移动即视为停稳；若超过 `400` ticks 未停稳则进入超时兜底。
@@ -33,6 +34,8 @@
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
+- 中间 waypoint（未写入 route）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
+- 当触发“冲突区放行锁”时，信号 tick 会跳过前车扫描/前瞻限速，保证放行列车在锁定期持续获得可发车信号。
 - 可用 `/fta occupancy stats` 观察自愈与出车重试统计，`/fta occupancy heal` 可手动触发清理。
 
 ## tags 与恢复

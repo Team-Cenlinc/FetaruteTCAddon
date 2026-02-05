@@ -16,6 +16,7 @@ public record SpawnTicket(
     Instant dueAt,
     Instant notBefore,
     int attempts,
+    Optional<String> selectedDepotNodeId,
     Optional<String> lastError) {
   public SpawnTicket {
     Objects.requireNonNull(id, "id");
@@ -25,6 +26,10 @@ public record SpawnTicket(
     if (attempts < 0) {
       throw new IllegalArgumentException("attempts 不能为负");
     }
+    selectedDepotNodeId =
+        selectedDepotNodeId == null
+            ? Optional.empty()
+            : selectedDepotNodeId.map(String::trim).filter(s -> !s.isBlank());
     lastError = lastError == null ? Optional.empty() : lastError;
   }
 
@@ -39,6 +44,13 @@ public record SpawnTicket(
         dueAt,
         nextNotBefore == null ? notBefore : nextNotBefore,
         attempts + 1,
+        Optional.empty(),
         Optional.ofNullable(error));
+  }
+
+  /** 返回带有 depot 选择结果的新票据（不会修改 attempts/notBefore）。 */
+  public SpawnTicket withSelectedDepot(String depotNodeId) {
+    return new SpawnTicket(
+        id, service, dueAt, notBefore, attempts, Optional.ofNullable(depotNodeId), lastError);
   }
 }

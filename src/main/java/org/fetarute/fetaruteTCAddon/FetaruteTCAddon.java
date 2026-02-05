@@ -67,6 +67,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.RuntimeDispatchRequestProvider;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalEvaluator;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.TrainController;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
 import org.fetarute.fetaruteTCAddon.display.SimpleDisplayService;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
@@ -99,6 +103,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private DepotSignAction depotSignAction;
   private OccupancyManager occupancyManager;
   private HeadwayRule headwayRule;
+  private SignalEventBus signalEventBus;
+  private SignalEvaluator signalEvaluator;
+  private TrainController trainController;
   private RouteDefinitionCache routeDefinitionCache;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
@@ -157,6 +164,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
   public void onDisable() {
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     unregisterSignActions();
+    if (trainController != null) {
+      trainController.stop();
+      trainController = null;
+    }
+    if (signalEvaluator != null) {
+      signalEvaluator.stop();
+      signalEvaluator = null;
+    }
+    if (signalEventBus != null) {
+      signalEventBus.clear();
+      signalEventBus = null;
+    }
     if (runtimeMonitorTask != null) {
       runtimeMonitorTask.cancel();
       runtimeMonitorTask = null;
@@ -430,8 +449,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   private void initOccupancyManager() {
     this.headwayRule = HeadwayRule.fixed(Duration.ZERO);
+    this.signalEventBus = new SignalEventBus(loggerManager::debug);
     this.occupancyManager =
-        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy(), signalEventBus);
   }
 
   private void initRouteDefinitionCache() {
@@ -519,6 +539,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       runtimeDispatchService.setEtaService(etaService);
     }
     restartRuntimeMonitor();
+    initSignalEventDrivenComponents();
     getServer()
         .getScheduler()
         .runTaskLater(
@@ -539,6 +560,46 @@ public final class FetaruteTCAddon extends JavaPlugin {
               }
             },
             1L);
+  }
+
+  /**
+   * 初始化事件驱动的信号组件（SignalEvaluator + TrainController）。
+   *
+   * <p>这些组件订阅占用变化事件，实现即时信号响应，减少对周期性 tick 的依赖。
+   */
+  private void initSignalEventDrivenComponents() {
+    if (signalEventBus == null
+        || occupancyManager == null
+        || railGraphService == null
+        || loggerManager == null) {
+      return;
+    }
+    // 创建请求提供者
+    RuntimeDispatchRequestProvider requestProvider =
+        new RuntimeDispatchRequestProvider(
+            railGraphService,
+            routeDefinitionCache,
+            routeProgressRegistry,
+            configManager,
+            occupancyManager,
+            loggerManager::debug);
+    // 创建信号评估器
+    signalEvaluator =
+        new SignalEvaluator(
+            signalEventBus, occupancyManager, requestProvider, loggerManager::debug);
+    signalEvaluator.start();
+    // 创建控车器
+    trainController =
+        new TrainController(
+            signalEventBus,
+            (trainName, signal) -> {
+              if (runtimeDispatchService != null) {
+                runtimeDispatchService.applySignalFromEvent(trainName, signal);
+              }
+            },
+            loggerManager::debug);
+    trainController.start();
+    loggerManager.debug("信号事件驱动组件已启动");
   }
 
   private void initEtaService() {

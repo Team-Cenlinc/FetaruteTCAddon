@@ -632,13 +632,26 @@ command:
       status: "<gray>状态:</gray> <dark_aqua><status></dark_aqua>"
       color: "<gray>颜色:</gray> <dark_aqua><color></dark_aqua>"
       spawn: "<gray>发车基准(秒):</gray> <dark_aqua><freq_baseline></dark_aqua>"
+      spawn-max: "<gray>最大车数:</gray> <dark_aqua><max_trains></dark_aqua>"
+      spawn-depots: "<gray>发车 Depot:</gray> <dark_aqua><depots></dark_aqua>"
     not-found: "<prefix> <red>未找到线路：</red><white><line></white>"
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>线路已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline/--maxTrains）</gray>"
     delete:
       success: "<prefix> <dark_aqua>线路已删除：</dark_aqua><white><code></white>"
+    depot:
+      list:
+        header: "<prefix> <dark_aqua>线路 Depot</dark_aqua> <gray>(line=<white><line></white>, count=<white><count></white>)</gray>"
+        empty: "<prefix> <gray>该线路尚未配置 Depot</gray>"
+        entry: "<gray>-</gray> <white><node></white> <gray>(weight=<white><weight></white>)</gray>"
+      add:
+        success: "<prefix> <dark_aqua>已添加 Depot</dark_aqua> <gray>(line=<white><line></white>, node=<white><node></white>)</gray>"
+      remove:
+        success: "<prefix> <dark_aqua>已移除 Depot</dark_aqua> <gray>(line=<white><line></white>, node=<white><node></white>)</gray>"
+        not-found: "<prefix> <red>该线路未配置 Depot：</red><white><node></white>"
+      invalid: "<prefix> <red>无效 Depot 节点：</red><white><node></white>"
     hud:
       invalid-type: "<prefix> <red>无效模板类型:</red> <white><type></white>"
       template-not-found: "<prefix> <red>未找到模板</red> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"

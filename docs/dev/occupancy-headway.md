@@ -44,6 +44,13 @@
 - 运行中通过定时 tick 重新评估 signal，信号降级时限速或停车。
 - 相关说明见 `docs/dev/runtime-dispatch.md`。
 
+## 事件驱动信号系统
+- 占用变化时 `SimpleOccupancyManager` 会发布 `OccupancyAcquiredEvent` / `OccupancyReleasedEvent`。
+- `SignalEvaluator` 订阅这些事件，即时重新评估受影响列车的信号状态。
+- 信号变化时发布 `SignalChangedEvent`，由 `TrainController` 订阅并立即下发控车指令。
+- 此机制大幅降低信号响应延迟（从周期 tick 改为事件触发，延迟 < 1 tick）。
+- 详见 `docs/dev/signal-event-system.md`。
+
 ## Gate Queue（排队控制）
 - `CONFLICT:switcher:*` 与 `CONFLICT:single:*` 使用优先级队列控制放行顺序。
 - **优先级 (Priority)**：
@@ -54,6 +61,8 @@
 - 同向跟驰仍可并行进入走廊，但进入顺序受队列约束。
 - 冲突区放行：当两侧列车互相占用节点而卡死时，会基于 lookahead 的 entryOrder 优先放行更接近冲突入口的一侧。
 - entryOrder 来自占用请求的“首次进入冲突区的边序号”，可避免折返段场景误放行离入口更远的列车。
+- 冲突区放行锁：放行后会锁定同一列车一段时间，避免信号乒乓；锁定期间仍会校验阻塞列车在同一冲突队列内。
+- entryOrder 在队列内取“更小者优先”并保持稳定，避免路径抖动导致队头来回翻转。
 - 出站门控会查询单线/道岔冲突队列的更高优先级列车，必要时让行并保持停站等待（仅站台/TERM）。
 - 队列条目若超过 30 秒未刷新会自动清理（避免遗留阻塞）。
 - `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向、优先级与首见时间）。

@@ -91,7 +91,8 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     Route route = routeOpt.get();
 
     // 解析 depot nodeId（可能是 DYNAMIC）
-    String depotSpec = service.depotNodeId();
+    String depotSpec =
+        ticket.selectedDepotNodeId().filter(s -> !s.isBlank()).orElse(service.depotNodeId());
     Optional<DepotInfo> depotInfoOpt = resolveDepotInfo(depotSpec);
     if (depotInfoOpt.isEmpty()) {
       debugLogger.accept("自动发车失败: 未找到 depot 牌子 spec=" + depotSpec);

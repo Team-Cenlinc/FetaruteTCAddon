@@ -12,6 +12,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 
 /**
  * 基于内存 Map 的占用管理器，适合作为“最小可用版本”。
@@ -34,6 +37,7 @@ public final class SimpleOccupancyManager
 
   private final HeadwayRule headwayRule;
   private final SignalAspectPolicy signalPolicy;
+  private final SignalEventBus eventBus;
   private final Map<OccupancyResource, List<OccupancyClaim>> claims = new LinkedHashMap<>();
   private final Map<OccupancyResource, ConflictQueue> queues = new LinkedHashMap<>();
 
@@ -41,14 +45,27 @@ public final class SimpleOccupancyManager
   private final Map<String, DeadlockReleaseLock> deadlockReleaseLocks = new LinkedHashMap<>();
 
   /**
-   * 构建占用管理器。
+   * 构建占用管理器（无事件总线）。
    *
    * @param headwayRule 追踪间隔策略
    * @param signalPolicy 信号优先级与放行策略
    */
   public SimpleOccupancyManager(HeadwayRule headwayRule, SignalAspectPolicy signalPolicy) {
+    this(headwayRule, signalPolicy, null);
+  }
+
+  /**
+   * 构建占用管理器。
+   *
+   * @param headwayRule 追踪间隔策略
+   * @param signalPolicy 信号优先级与放行策略
+   * @param eventBus 信号事件总线（可选，为 null 时不发布事件）
+   */
+  public SimpleOccupancyManager(
+      HeadwayRule headwayRule, SignalAspectPolicy signalPolicy, SignalEventBus eventBus) {
     this.headwayRule = Objects.requireNonNull(headwayRule, "headwayRule");
     this.signalPolicy = signalPolicy != null ? signalPolicy : SignalAspectPolicy.defaultPolicy();
+    this.eventBus = eventBus;
   }
 
   @Override
@@ -207,6 +224,8 @@ public final class SimpleOccupancyManager
    * 获取占用：将申请列车写入资源占用与队列状态。
    *
    * <p>若不可进入则返回拒绝决策，并写入排队快照供诊断使用。
+   *
+   * <p>成功获取后会发布 {@link OccupancyAcquiredEvent}，通知订阅者重新评估信号。
    */
   public synchronized OccupancyDecision acquire(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
@@ -242,6 +261,8 @@ public final class SimpleOccupancyManager
               resource, request.trainName(), request.routeId(), now, headway, direction));
     }
     removeFromQueuesForResources(request.trainName(), request.resourceList());
+    // 发布占用获取事件
+    publishAcquiredEvent(request, now);
     return decision;
   }
 
@@ -306,6 +327,8 @@ public final class SimpleOccupancyManager
   /**
    * 按列车名释放全部占用资源。
    *
+   * <p>释放后会发布 {@link OccupancyReleasedEvent}，通知订阅者资源已可用。
+   *
    * @return 实际释放的占用数量
    */
   public synchronized int releaseByTrain(String trainName) {
@@ -313,6 +336,7 @@ public final class SimpleOccupancyManager
       return 0;
     }
     int removed = 0;
+    List<OccupancyResource> releasedResources = new ArrayList<>();
     Iterator<Map.Entry<OccupancyResource, List<OccupancyClaim>>> iterator =
         claims.entrySet().iterator();
     while (iterator.hasNext()) {
@@ -327,6 +351,7 @@ public final class SimpleOccupancyManager
         OccupancyClaim claim = claimIterator.next();
         if (claim != null && claim.trainName().equalsIgnoreCase(trainName)) {
           claimIterator.remove();
+          releasedResources.add(entry.getKey());
           removed++;
         }
       }
@@ -336,12 +361,18 @@ public final class SimpleOccupancyManager
     }
     removeFromQueuesForTrain(trainName);
     releaseDeadlockLocksForTrain(trainName);
+    // 发布占用释放事件
+    if (!releasedResources.isEmpty()) {
+      publishReleasedEvent(trainName, releasedResources, Instant.now());
+    }
     return removed;
   }
 
   @Override
   /**
    * 释放指定资源上的单个列车占用。
+   *
+   * <p>释放后会发布 {@link OccupancyReleasedEvent}，通知订阅者资源已可用。
    *
    * @return 是否存在并成功移除
    */
@@ -362,9 +393,15 @@ public final class SimpleOccupancyManager
         claims.remove(resource);
       }
       removeFromQueuesForResources(expected, List.of(resource));
+      // 发布占用释放事件
+      if (removed) {
+        publishReleasedEvent(expected, List.of(resource), Instant.now());
+      }
       return removed;
     }
     claims.remove(resource);
+    // 全量释放时，trainName 为空，使用占位符
+    publishReleasedEvent("*", List.of(resource), Instant.now());
     return true;
   }
 
@@ -614,6 +651,30 @@ public final class SimpleOccupancyManager
   }
 
   /**
+   * 校验阻塞列车是否都在同一冲突队列内。
+   *
+   * <p>用于死锁放行锁生效时的安全校验：允许跳过“队头判断”，但仍需确保阻塞来源来自同一冲突队列。
+   */
+  private boolean areBlockersInQueue(
+      List<OccupancyClaim> blockers, ConflictQueue queue, String trainName) {
+    if (blockers == null || blockers.isEmpty() || queue == null) {
+      return false;
+    }
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.trainName() == null) {
+        continue;
+      }
+      if (trainName != null && claim.trainName().equalsIgnoreCase(trainName)) {
+        continue;
+      }
+      if (!queue.contains(claim.trainName())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * 冲突区放行：当两侧列车互相占用节点导致阻塞时，尝试放行**全局队头**列车进入冲突区。
    *
    * <p>采用"单侧放行 + 稳定性锁定"策略：
@@ -634,6 +695,11 @@ public final class SimpleOccupancyManager
     if (containsConflictBlocker(blockers)) {
       return null;
     }
+    // 优先检查：列车是否持有任意冲突资源的放行锁（避免主冲突切换导致信号乒乓）
+    OccupancyDecision heldLockDecision = tryResolveByHeldLock(request, blockers, now);
+    if (heldLockDecision != null) {
+      return heldLockDecision;
+    }
     Optional<OccupancyResource> conflictOpt = resolvePrimaryConflict(request);
     if (conflictOpt.isEmpty()) {
       return null;
@@ -643,31 +709,21 @@ public final class SimpleOccupancyManager
     if (queue == null || queue.isEmpty()) {
       return null;
     }
-    // 检查是否存在未过期的放行锁
+    // 检查是否有其他车持有该冲突的锁
     DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
     if (existingLock != null && !existingLock.isExpired(now)) {
       if (!existingLock.matches(request.trainName())) {
         // 其他车持有锁，当前车必须等待
         return null;
       }
-      // 当前车持有锁，直接放行（无需再检查队头/blocker 条件，避免信号乒乓）
-      SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-      return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+      // 当前车持有锁（已在 tryResolveByHeldLock 处理，理论上不会到这里）
     }
     // 单侧放行优先：必须是全局队头才能触发冲突放行
     if (!queue.isHeadAny(request.trainName())) {
       return null;
     }
-    for (OccupancyClaim claim : blockers) {
-      if (claim == null || claim.trainName() == null) {
-        continue;
-      }
-      if (claim.trainName().equalsIgnoreCase(request.trainName())) {
-        continue;
-      }
-      if (!queue.contains(claim.trainName())) {
-        return null;
-      }
+    if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      return null;
     }
     // 放行并写入锁定
     Instant expiresAt = now.plus(DEADLOCK_RELEASE_LOCK_TTL);
@@ -675,6 +731,38 @@ public final class SimpleOccupancyManager
         conflict.key(), new DeadlockReleaseLock(request.trainName(), expiresAt));
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
     return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+  }
+
+  /**
+   * 检查列车是否持有任意冲突资源的有效放行锁。
+   *
+   * <p>当列车请求多个冲突资源时，每次 tick 的"主冲突"可能因 blockers 变化而切换。 此方法在确定主冲突之前先扫描所有请求的冲突资源，
+   * 若列车持有任意一个有效锁，则直接放行，避免因主冲突切换导致的信号乒乓。
+   */
+  private OccupancyDecision tryResolveByHeldLock(
+      OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
+    Map<String, Integer> entryOrders = request.conflictEntryOrders();
+    if (entryOrders == null || entryOrders.isEmpty()) {
+      return null;
+    }
+    for (String conflictKey : entryOrders.keySet()) {
+      DeadlockReleaseLock lock = deadlockReleaseLocks.get(conflictKey);
+      if (lock == null || lock.isExpired(now)) {
+        continue;
+      }
+      if (!lock.matches(request.trainName())) {
+        // 其他车持有该冲突的锁，当前车不能被任何锁放行
+        continue;
+      }
+      // 当前车持有该冲突的锁：直接放行。
+      // 注意：不再检查 areBlockersInQueue，因为：
+      // 1. 锁在创建时已验证过阻塞来源
+      // 2. 锁有效期内阻塞列车可能已离开队列（如推进到下一站），但锁本身就是放行依据
+      // 3. 过度校验会导致持锁列车因 blocker 变化而被拒绝，产生信号乒乓
+      SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+      return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    }
+    return null;
   }
 
   /**
@@ -705,7 +793,10 @@ public final class SimpleOccupancyManager
       if (!existingLock.matches(request.trainName())) {
         return null;
       }
-      // 当前车持有锁，直接放行（与真实放行一致）
+      // 当前车持有锁：跳过队头判断，但仍需确保阻塞来源在同一队列中。
+      if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+        return null;
+      }
       SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
       return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
     }
@@ -719,16 +810,8 @@ public final class SimpleOccupancyManager
         now)) {
       return null;
     }
-    for (OccupancyClaim claim : blockers) {
-      if (claim == null || claim.trainName() == null) {
-        continue;
-      }
-      if (claim.trainName().equalsIgnoreCase(request.trainName())) {
-        continue;
-      }
-      if (!queue.contains(claim.trainName())) {
-        return null;
-      }
+    if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      return null;
     }
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
     return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
@@ -853,6 +936,71 @@ public final class SimpleOccupancyManager
     return null;
   }
 
+  // ========== 事件发布 ==========
+
+  /**
+   * 发布占用获取事件。
+   *
+   * <p>收集受影响的列车（等待这些资源的列车），通知它们重新评估信号。
+   */
+  private void publishAcquiredEvent(OccupancyRequest request, Instant now) {
+    if (eventBus == null) {
+      return;
+    }
+    List<String> affectedTrains =
+        collectAffectedTrains(request.resourceList(), request.trainName());
+    OccupancyAcquiredEvent event =
+        new OccupancyAcquiredEvent(
+            now, request.trainName(), request.resourceList(), affectedTrains);
+    eventBus.publish(event);
+  }
+
+  /** 发布占用释放事件。 */
+  private void publishReleasedEvent(
+      String trainName, List<OccupancyResource> resources, Instant now) {
+    if (eventBus == null) {
+      return;
+    }
+    OccupancyReleasedEvent event = new OccupancyReleasedEvent(now, trainName, resources);
+    eventBus.publish(event);
+  }
+
+  /**
+   * 收集等待指定资源的列车名单（排除自己）。
+   *
+   * <p>这些列车是占用变化的"受影响方"，需要重新评估信号。
+   */
+  private List<String> collectAffectedTrains(
+      List<OccupancyResource> resources, String excludeTrain) {
+    Set<String> affected = new LinkedHashSet<>();
+    for (OccupancyResource resource : resources) {
+      if (resource == null) {
+        continue;
+      }
+      // 从队列中收集等待该资源的列车
+      ConflictQueue queue = queues.get(resource);
+      if (queue != null) {
+        affected.addAll(queue.allTrainNames());
+      }
+      // 从现有占用中收集（用于冲突检测）
+      List<OccupancyClaim> existing = claims.get(resource);
+      if (existing != null) {
+        for (OccupancyClaim claim : existing) {
+          if (claim != null && claim.trainName() != null) {
+            affected.add(claim.trainName());
+          }
+        }
+      }
+    }
+    // 排除自己
+    if (excludeTrain != null) {
+      affected.remove(excludeTrain);
+      // 忽略大小写移除
+      affected.removeIf(name -> name.equalsIgnoreCase(excludeTrain));
+    }
+    return new ArrayList<>(affected);
+  }
+
   private static final class ConflictQueue {
 
     private final LinkedHashMap<String, OccupancyQueueEntry> forward = new LinkedHashMap<>();
@@ -868,18 +1016,25 @@ public final class SimpleOccupancyManager
       }
       String key = normalize(trainName);
       priorities.put(key, priority);
-      entryOrders.put(key, entryOrder);
+      int stableEntryOrder = resolveStableEntryOrder(key, entryOrder);
+      entryOrders.put(key, stableEntryOrder);
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       OccupancyQueueEntry existing = target.get(key);
       if (existing == null) {
         target.put(
-            key, new OccupancyQueueEntry(trainName, direction, now, now, priority, entryOrder));
+            key,
+            new OccupancyQueueEntry(trainName, direction, now, now, priority, stableEntryOrder));
         return;
       }
       target.put(
           key,
           new OccupancyQueueEntry(
-              existing.trainName(), direction, existing.firstSeen(), now, priority, entryOrder));
+              existing.trainName(),
+              direction,
+              existing.firstSeen(),
+              now,
+              priority,
+              stableEntryOrder));
     }
 
     void remove(String trainName) {
@@ -900,6 +1055,21 @@ public final class SimpleOccupancyManager
       }
       String key = normalize(trainName);
       return forward.containsKey(key) || backward.containsKey(key) || neutral.containsKey(key);
+    }
+
+    /** 获取队列中所有列车名。 */
+    Set<String> allTrainNames() {
+      Set<String> names = new LinkedHashSet<>();
+      for (OccupancyQueueEntry entry : forward.values()) {
+        names.add(entry.trainName());
+      }
+      for (OccupancyQueueEntry entry : backward.values()) {
+        names.add(entry.trainName());
+      }
+      for (OccupancyQueueEntry entry : neutral.values()) {
+        names.add(entry.trainName());
+      }
+      return names;
     }
 
     boolean isHeadForDirection(String trainName, CorridorDirection direction) {
@@ -1035,6 +1205,17 @@ public final class SimpleOccupancyManager
         return Integer.compare(entryOrderA, entryOrderB);
       }
       return a.firstSeen().compareTo(b.firstSeen());
+    }
+
+    private int resolveStableEntryOrder(String key, int entryOrder) {
+      if (key == null || key.isBlank()) {
+        return entryOrder;
+      }
+      Integer existing = entryOrders.get(key);
+      if (existing == null) {
+        return entryOrder;
+      }
+      return Math.min(existing, entryOrder);
     }
 
     boolean hasHigherPriorityAny(String trainName, int priority, Instant now) {

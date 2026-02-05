@@ -271,6 +271,52 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void rearGuardRequestKeepsOnlyTailSegment() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    NodeId nodeC = NodeId.of("C");
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode c =
+        new SignRailNode(
+            nodeC,
+            NodeType.WAYPOINT,
+            new Vector(20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    EdgeId edgeBC = EdgeId.undirected(nodeB, nodeC);
+    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 12, 8.0, true, Optional.empty());
+    RailEdge bc = new RailEdge(edgeBC, nodeB, nodeC, 18, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(nodeA, a, nodeB, b, nodeC, c), Map.of(edgeAB, ab, edgeBC, bc), Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 1, 0);
+    List<NodeId> nodes = List.of(nodeA, nodeB, nodeC);
+
+    OccupancyRequest request =
+        builder.buildRearGuardRequestFromNodes(
+            "Train-1", Optional.of(RouteId.of("OP:LINE:ROUTE")), nodes, 2, Instant.now(), 0);
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeB)));
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeC)));
+    assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeBC)));
+    assertFalse(request.resourceList().contains(OccupancyResource.forEdge(edgeAB)));
+  }
+
+  @Test
   void depotLookoverAddsDirectionalConflictForBranch() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeB = NodeId.of("B");
