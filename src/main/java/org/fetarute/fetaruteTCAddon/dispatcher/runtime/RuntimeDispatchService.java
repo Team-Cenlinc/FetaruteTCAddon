@@ -256,11 +256,17 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
+    int rearGuardEdges = runtimeSettings.rearGuardEdges();
     int priority = resolvePriority(properties, route);
 
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges(), debugLogger);
+            graph,
+            lookaheadEdges,
+            minClearEdges,
+            rearGuardEdges,
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
 
     Optional<OccupancyRequestContext> contextOpt =
@@ -284,6 +290,7 @@ public final class RuntimeDispatchService {
       return false;
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
+    logDeadlockReleaseIfNeeded(trainName, decision, "departure");
     if (!decision.allowed()) {
       debugLogger.accept("发车门控阻塞: train=" + trainName + " aspect=" + decision.signal());
       return false;
@@ -553,9 +560,8 @@ public final class RuntimeDispatchService {
         }
         updateSignalOrWarn(trainName, SignalAspect.STOP, now);
         if (definition.nodeType() == NodeType.WAYPOINT) {
-          // 立即居中（与 AutoStation 对齐）：先居中再设置停车，避免列车在居中前被立即停止
-          // centerTrainAtWaypointImmediate 内部会执行 launchReset + centerTrain + addActionWaitState
-          centerTrainAtWaypointImmediate(event, definition.nodeId(), trainName, dwellSeconds);
+          // Waypoint STOP/TERM 采用“先软刹停稳再居中”，避免触发即硬停。
+          scheduleWaypointCenterAfterStop(event, definition.nodeId(), trainName, dwellSeconds);
         }
         // TERM 标记：清除 destination 防止继续寻路
         properties.clearDestinationRoute();
@@ -650,9 +656,8 @@ public final class RuntimeDispatchService {
         properties.clearDestinationRoute();
         properties.setDestination(destinationName);
       }
-      // 立即居中（与 AutoStation 对齐）：先居中再设置停车，避免列车在居中前被立即停止
-      // centerTrainAtWaypointImmediate 内部会执行 launchReset + centerTrain + addActionWaitState
-      centerTrainAtWaypointImmediate(event, definition.nodeId(), trainName, waypointDwellSeconds);
+      // Waypoint STOP 采用“先软刹停稳再居中”，避免触发即硬停。
+      scheduleWaypointCenterAfterStop(event, definition.nodeId(), trainName, waypointDwellSeconds);
       return;
     }
     if (graphOpt.isEmpty()) {
@@ -668,10 +673,15 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
+    int rearGuardEdges = runtimeSettings.rearGuardEdges();
     int priority = resolvePriority(properties, route);
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
-            graph, lookaheadEdges, minClearEdges, runtimeSettings.switcherZoneEdges());
+            graph,
+            lookaheadEdges,
+            minClearEdges,
+            rearGuardEdges,
+            runtimeSettings.switcherZoneEdges());
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
     Optional<DynamicSelection> dynamicSelectionOpt =
         selectDynamicStationTargetForProgress(
@@ -728,6 +738,7 @@ public final class RuntimeDispatchService {
             + decision.blockers().size()
             + " signal="
             + decision.signal());
+    logDeadlockReleaseIfNeeded(trainName, decision, "progress");
     if (!decision.allowed()) {
       UUID worldId = train.worldId();
       SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(worldId);
@@ -1284,6 +1295,7 @@ public final class RuntimeDispatchService {
             graph,
             runtimeSettings.lookaheadEdges(),
             runtimeSettings.minClearEdges(),
+            runtimeSettings.rearGuardEdges(),
             runtimeSettings.switcherZoneEdges());
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
     Optional<OccupancyRequestContext> contextOpt =
@@ -1296,6 +1308,7 @@ public final class RuntimeDispatchService {
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
     OccupancyDecision decision = occupancyManager.canEnter(request);
+    logDeadlockReleaseIfNeeded(trainName, decision, "signal");
     SignalAspect baseAspect =
         decision.allowed() ? decision.signal() : deriveBlockedAspect(decision, context);
     // 前方列车信号调整：扫描更远范围（4 edges）检测其他列车并降级信号
@@ -1682,6 +1695,7 @@ public final class RuntimeDispatchService {
             graph,
             runtime.lookaheadEdges(),
             runtime.minClearEdges(),
+            runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
@@ -1857,6 +1871,25 @@ public final class RuntimeDispatchService {
       return SignalAspect.CAUTION;
     }
     return SignalAspect.PROCEED_WITH_CAUTION;
+  }
+
+  /**
+   * 记录冲突区放行日志：allowed=true 且 blockers 非空时触发。
+   *
+   * <p>用于排查“互相占用节点导致的冲突区死锁”是否被放行。
+   */
+  private void logDeadlockReleaseIfNeeded(
+      String trainName, OccupancyDecision decision, String scope) {
+    if (decision == null || !decision.allowed() || decision.blockers().isEmpty()) {
+      return;
+    }
+    debugLogger.accept(
+        "冲突区放行: train="
+            + trainName
+            + " scope="
+            + scope
+            + " blockers="
+            + summarizeBlockers(decision));
   }
 
   /**
@@ -2221,12 +2254,12 @@ public final class RuntimeDispatchService {
   // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
 
   /**
-   * Waypoint STOP/TERM 立即居中（与 AutoStation 对齐）。
+   * Waypoint STOP/TERM 停稳后居中。
    *
-   * <p>在 GROUP_ENTER 时立即调用 launchReset + centerTrain，然后调度 dwell 和 WaitState。 这与 AutoStation
-   * 的行为一致，确保列车能正确居中停靠。
+   * <p>在 GROUP_ENTER 时只写入 stopState，随后等待列车停稳再执行 launchReset + centerTrain， 以获得与 AutoStation
+   * 类似的“先刹车后居中”观感，避免触发即硬停。
    */
-  private void centerTrainAtWaypointImmediate(
+  private void scheduleWaypointCenterAfterStop(
       SignActionEvent event, NodeId nodeId, String trainName, int dwellSeconds) {
     if (event == null || nodeId == null || trainName == null || trainName.isBlank()) {
       return;
@@ -2249,34 +2282,87 @@ public final class RuntimeDispatchService {
         new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds);
     waypointStopStates.put(key, stopState);
 
+    JavaPlugin plugin = resolveSchedulerPlugin();
+    if (plugin == null || !plugin.isEnabled()) {
+      // 兜底：无法调度任务时仍尝试居中，避免停稳后无反馈
+      performWaypointCenter(
+          event, group, trainName, nodeId, dwellSeconds, key, sessionId, "scheduler_missing");
+      return;
+    }
+
+    new org.bukkit.scheduler.BukkitRunnable() {
+      private int waitedTicks = 0;
+      private int stoppedTicks = 0;
+      private static final int STABLE_TICKS = 2;
+      private static final int MAX_WAIT_TICKS = 100; // 5 秒超时
+
+      @Override
+      public void run() {
+        WaypointStopState current = waypointStopStates.get(key);
+        if (current == null || !sessionId.equals(current.sessionId())) {
+          cancel();
+          return;
+        }
+        if (!group.isValid()) {
+          cancel();
+          clearWaypointStopState(key, sessionId);
+          return;
+        }
+        waitedTicks++;
+        if (!group.isMoving()) {
+          stoppedTicks++;
+          if (stoppedTicks >= STABLE_TICKS) {
+            cancel();
+            performWaypointCenter(
+                event, group, trainName, nodeId, dwellSeconds, key, sessionId, "stopped");
+            return;
+          }
+        } else {
+          stoppedTicks = 0;
+        }
+        if (waitedTicks >= MAX_WAIT_TICKS) {
+          cancel();
+          performWaypointCenter(
+              event, group, trainName, nodeId, dwellSeconds, key, sessionId, "timeout");
+        }
+      }
+    }.runTaskTimer(plugin, 1L, 1L);
+  }
+
+  private void performWaypointCenter(
+      SignActionEvent event,
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
+      String trainName,
+      NodeId nodeId,
+      int dwellSeconds,
+      String key,
+      String sessionId,
+      String reason) {
     try {
-      // 与 AutoStation 对齐：立即 launchReset + centerTrain
       com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
       group.getActions().launchReset();
       station.centerTrain();
 
       debugLogger.accept(
-          "Waypoint 立即居中: train="
+          "Waypoint 居中: train="
               + trainName
               + " node="
               + nodeId.value()
               + " dwell="
               + dwellSeconds
-              + "s");
+              + "s reason="
+              + reason);
 
-      // 调度 dwell 和 WaitState
       if (dwellSeconds > 0 && dwellRegistry != null) {
         scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds, key, sessionId);
       } else {
-        // 无 dwell 时直接添加 WaitState（等待信号释放），并清理 waypointStopState
         group.getActions().addActionWaitState();
         clearWaypointStopState(key, sessionId);
       }
     } catch (Throwable ex) {
-      // 失败时清理 waypointStopState
       clearWaypointStopState(key, sessionId);
       debugLogger.accept(
-          "Waypoint 立即居中失败: train="
+          "Waypoint 居中失败: train="
               + trainName
               + " node="
               + nodeId.value()

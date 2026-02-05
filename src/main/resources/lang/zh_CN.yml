@@ -195,7 +195,7 @@ command:
       empty: "<prefix> <gray>当前没有排队中的资源</gray>"
       header: "<prefix> <dark_aqua>占用队列</dark_aqua> <gray>(resources=<white><count></white>, entries=<white><entries></white>)</gray>"
       entry: "<gray>-</gray> <white><resource></white> <gray>active=<white><active></white> dir=<white><direction></white> queued=<white><count></white></gray>"
-      item: "<gray>  •</gray> <white><train></white> <gray>dir=<white><direction></white> since=<white><since></white> seen=<white><seen></white></gray>"
+      item: "<gray>  •</gray> <white><train></white> <gray>dir=<white><direction></white> prio=<white><priority></white> entry=<white><entry_order></white> since=<white><since></white> seen=<white><seen></white></gray>"
       truncated: "<gray>  … 已截断，使用 /fta occupancy queue <limit> 调整数量</gray>"
     stats:
       header: "<prefix> <dark_aqua>调度健康</dark_aqua>"
@@ -213,6 +213,9 @@ command:
       path-not-found: "<prefix> <red>两点不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       no-resources: "<prefix> <red>无法生成占用资源</red>"
       decision: "<prefix> <dark_aqua>占用判定</dark_aqua> <gray>(scope=<white><scope></white>, edges=<white><edges></white>, allowed=<white><allowed></white>, earliest=<white><earliest></white>, signal=<white><signal></white>, blockers=<white><blockers></white>)</gray>"
+      deadlock-release: "<prefix> <gold>冲突区放行</gold> <gray>(blockers=<white><count></white>)</gray>"
+      blocker: "<gray>  •</gray> <white><resource></white> <gray>train=<white><train></white> dir=<white><direction></white></gray>"
+      blocker-truncated: "<gray>  … 已截断（blocker 列表）</gray>"
     help:
       header: "<prefix> <dark_aqua>调度占用命令</dark_aqua>"
       entry-dump: "<gray>/fta occupancy dump</gray> <white>-</white> <dark_aqua>查看占用快照</dark_aqua>"
@@ -242,6 +245,8 @@ command:
       hover-queue: "<gray>点击填充:</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-pending: "<gray>/fta spawn pending</gray> <white>-</white> <dark_aqua>查看折返待发（含失败重试）</dark_aqua>"
       hover-pending: "<gray>点击填充:</gray> <white>/fta spawn pending </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-reset: "<gray>/fta spawn reset</gray> <white>-</white> <dark_aqua>清空发车队列并重置计划</dark_aqua>"
+      hover-reset: "<gray>点击执行:</gray> <white>/fta spawn reset</white>\n<dark_aqua>清空 queue/pending 并重置计划</dark_aqua>"
     plan:
       header: "<prefix> <dark_aqua>发车计划</dark_aqua> <gray>(count=<white><count></white>, built=<white><built_at></white>)</gray>"
       empty: "<prefix> <gray>暂无可发车服务</gray>"
@@ -257,6 +262,9 @@ command:
       empty: "<prefix> <gray>暂无折返待发票据</gray>"
       entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> attempts=<white><attempts></white> error=<white><error></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta spawn pending <limit> 调整数量</gray>"
+    reset:
+      not-supported: "<prefix> <gray>当前发车管理器不支持重置</gray>"
+      done: "<prefix> <dark_aqua>发车队列已重置</dark_aqua> <gray>(queue=<white><queue></white>, pending=<white><pending></white>, states=<white><states></white>, plan=<white><plan></white>)</gray>"
 
   eta:
     not-ready: "<prefix> <red>ETA 模块未就绪</red>"
@@ -372,6 +380,9 @@ command:
         entry: "<gray>-</gray> <white><key></white>"
 
     edge:
+      get:
+        edge:
+          header: "<prefix> <dark_aqua>区间信息</dark_aqua> <gray>(<white><a></white> ↔ <white><b></white>, len=<white><len_blocks></white> blocks, blocked=<white><blocked></white>, base=<white><base_speed></white>, override=<white><override_speed></white>, temp=<white><temp_speed></white>, effective=<white><effective_speed></white>)</gray>"
       list:
         status:
           active: "生效"

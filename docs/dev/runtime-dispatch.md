@@ -120,6 +120,7 @@
 ## lookahead 占用
 - `runtime.lookahead-edges` 控制每次申请占用的边数量。
 - `runtime.min-clear-edges` 用于限制同向跟驰的最小空闲边数（与 lookahead 取最大值）。
+- `runtime.rear-guard-edges` 用于保留当前节点向后 N 段边，保护长编组尾部避免追尾。
 - 值越大越保守，能降低咽喉/道岔前卡死风险。
 - `runtime.switcher-zone-edges` 控制道岔联合锁闭范围（向前 N 段边）。
 - 单线走廊冲突采用方向锁：同向可跟驰，对向需等待走廊清空。
@@ -128,6 +129,10 @@
 ## 已知限制
 - 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。
+
+## Waypoint STOP/TERM 停站
+- Waypoint STOP/TERM 触发时仅写入 stopState，运行时信号 tick 负责软刹减速。
+- 列车停稳后才执行 centerTrain 并开始 dwell/WaitState，避免“触发即硬停”的观感。
 
 ## 后续预留
 - 计划把 SignalAspectPolicy 与速度曲线联动，形成更接近 CBTC 的移动闭塞（远期）。

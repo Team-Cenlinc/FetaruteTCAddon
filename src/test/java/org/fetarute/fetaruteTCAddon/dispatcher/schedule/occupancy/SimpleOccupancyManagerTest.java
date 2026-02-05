@@ -147,6 +147,52 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void conflictDeadlockReleasePrefersNearerEntry() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyResource nodeA = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(conflict.key(), CorridorDirection.B_TO_A);
+
+    manager.acquire(
+        new OccupancyRequest("tA", Optional.empty(), now, List.of(nodeA), java.util.Map.of()));
+    manager.acquire(
+        new OccupancyRequest("tB", Optional.empty(), now, List.of(nodeB), java.util.Map.of()));
+
+    Map<String, Integer> farEntry = Map.of(conflict.key(), 2);
+    Map<String, Integer> nearEntry = Map.of(conflict.key(), 0);
+
+    OccupancyDecision farDecision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "tB",
+                Optional.empty(),
+                now,
+                List.of(conflict, nodeB, nodeA),
+                reverse,
+                farEntry,
+                0));
+    assertFalse(farDecision.allowed());
+
+    OccupancyDecision nearDecision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "tA",
+                Optional.empty(),
+                now,
+                List.of(conflict, nodeA, nodeB),
+                forward,
+                nearEntry,
+                0));
+    assertTrue(nearDecision.allowed());
+  }
+
+  @Test
   void shouldYieldForHigherPriorityOppositeCorridor() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -201,5 +247,29 @@ class SimpleOccupancyManagerTest {
     OccupancyRequest low =
         new OccupancyRequest("slow", Optional.empty(), now, List.of(resource), Map.of(), 1);
     assertTrue(manager.shouldYield(low));
+  }
+
+  @Test
+  void queueSnapshotIncludesPriorityAndEntryOrder() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+    Map<String, Integer> entryOrders = Map.of(resource.key(), 2);
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "t1", Optional.empty(), now, List.of(resource), forward, entryOrders, 7));
+    assertTrue(decision.allowed());
+
+    List<OccupancyQueueSnapshot> snapshots = manager.snapshotQueues();
+    assertEquals(1, snapshots.size());
+    OccupancyQueueEntry entry = snapshots.get(0).entries().get(0);
+    assertEquals(7, entry.priority());
+    assertEquals(2, entry.entryOrder());
   }
 }

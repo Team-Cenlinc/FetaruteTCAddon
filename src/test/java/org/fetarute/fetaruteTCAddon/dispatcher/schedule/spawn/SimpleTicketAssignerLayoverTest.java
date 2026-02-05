@@ -61,7 +61,8 @@ class SimpleTicketAssignerLayoverTest {
             layoverRegistry,
             null,
             Duration.ofSeconds(1),
-            1);
+            1,
+            10);
 
     assigner.tick(provider, Instant.now());
 
@@ -100,7 +101,8 @@ class SimpleTicketAssignerLayoverTest {
             layoverRegistry,
             null,
             Duration.ofSeconds(1),
-            1);
+            1,
+            10);
 
     assigner.tick(provider, Instant.now());
 
@@ -134,7 +136,8 @@ class SimpleTicketAssignerLayoverTest {
             mock(LayoverRegistry.class),
             null,
             Duration.ofSeconds(1),
-            1);
+            1,
+            10);
 
     assigner.tick(provider, Instant.now());
 

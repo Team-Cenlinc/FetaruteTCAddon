@@ -570,6 +570,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     : 0,
             () ->
                 configManager != null
+                    ? configManager.current().runtimeSettings().rearGuardEdges()
+                    : 0,
+            () ->
+                configManager != null
                     ? configManager.current().runtimeSettings().switcherZoneEdges()
                     : 2);
     if (layoverRegistry != null) {
@@ -643,8 +647,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             signNodeRegistry,
             layoverRegistry,
             loggerManager::debug,
-            java.time.Duration.ofMillis(spawnSettings.planRefreshTicks() * 50L),
-            spawnSettings.maxSpawnPerTick());
+            java.time.Duration.ofMillis(spawnSettings.retryDelayTicks() * 50L),
+            spawnSettings.maxSpawnPerTick(),
+            spawnSettings.maxAttempts());
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     if (etaService != null) {
       etaService.attachTicketSources(spawnManager, spawnTicketAssigner);

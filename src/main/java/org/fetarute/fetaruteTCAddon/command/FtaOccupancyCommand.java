@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -47,6 +48,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaOccupancyCommand {
 
   private static final int DEFAULT_LIMIT = 50;
+  private static final int DEBUG_BLOCKER_LIMIT = 8;
 
   private final FetaruteTCAddon plugin;
 
@@ -472,6 +474,10 @@ public final class FtaOccupancyCommand {
                     entry.trainName(),
                     "direction",
                     formatDirection(entry.direction()),
+                    "priority",
+                    String.valueOf(entry.priority()),
+                    "entry_order",
+                    formatEntryOrder(entry.entryOrder()),
                     "since",
                     entry.firstSeen().toString(),
                     "seen",
@@ -584,7 +590,9 @@ public final class FtaOccupancyCommand {
     List<OccupancyResource> resources =
         OccupancyResourceResolver.resourcesForEdge(graphOpt.get(), edgeOpt.get());
     String trainName = resolveTrainName(sender, acquire);
-    OccupancyRequest request = buildRequest(trainName, resources);
+    Map<String, Integer> conflictEntryOrders =
+        resolveConflictEntryOrders(graphOpt.get(), List.of(edgeOpt.get()));
+    OccupancyRequest request = buildRequest(trainName, resources, conflictEntryOrders);
     handleDecision(sender, request, acquire, "edge", resources.size());
   }
 
@@ -615,8 +623,9 @@ public final class FtaOccupancyCommand {
       return;
     }
     RailGraphPath path = pathOpt.get();
+    List<RailEdge> edges = path.edges();
     List<OccupancyResource> resources =
-        path.edges().stream()
+        edges.stream()
             .flatMap(
                 edge -> OccupancyResourceResolver.resourcesForEdge(graphOpt.get(), edge).stream())
             .distinct()
@@ -626,8 +635,9 @@ public final class FtaOccupancyCommand {
       return;
     }
     String trainName = resolveTrainName(sender, acquire);
-    OccupancyRequest request = buildRequest(trainName, resources);
-    handleDecision(sender, request, acquire, "path", path.edges().size());
+    Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(graphOpt.get(), edges);
+    OccupancyRequest request = buildRequest(trainName, resources, conflictEntryOrders);
+    handleDecision(sender, request, acquire, "path", edges.size());
   }
 
   /** 输出占用判定结果（允许/最早时间/信号/阻塞数）。 */
@@ -666,16 +676,47 @@ public final class FtaOccupancyCommand {
                 signal.name(),
                 "blockers",
                 String.valueOf(decision.blockers().size()))));
+    if (decision.allowed() && !decision.blockers().isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.occupancy.debug.deadlock-release",
+              Map.of("count", String.valueOf(decision.blockers().size()))));
+    }
+    if (!decision.blockers().isEmpty()) {
+      int shown = 0;
+      for (OccupancyClaim claim : decision.blockers()) {
+        if (claim == null || claim.resource() == null) {
+          continue;
+        }
+        if (shown >= DEBUG_BLOCKER_LIMIT) {
+          sender.sendMessage(locale.component("command.occupancy.debug.blocker-truncated"));
+          break;
+        }
+        sender.sendMessage(
+            locale.component(
+                "command.occupancy.debug.blocker",
+                Map.of(
+                    "resource",
+                    claim.resource().toString(),
+                    "train",
+                    claim.trainName(),
+                    "direction",
+                    formatDirection(claim.corridorDirection().orElse(null)))));
+        shown++;
+      }
+    }
   }
 
-  /** 构造调试占用请求。 */
   /** 构造调试占用请求（不含线路信息与走廊方向）。 */
-  private OccupancyRequest buildRequest(String trainName, List<OccupancyResource> resources) {
+  private OccupancyRequest buildRequest(
+      String trainName,
+      List<OccupancyResource> resources,
+      Map<String, Integer> conflictEntryOrders) {
     Instant now = Instant.now();
-    return new OccupancyRequest(trainName, Optional.empty(), now, resources, Map.of());
+    return new OccupancyRequest(
+        trainName, Optional.empty(), now, resources, Map.of(), conflictEntryOrders, 0);
   }
 
-  /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */
   /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */
   private String resolveTrainName(CommandSender sender, boolean acquire) {
     String name = sender.getName();
@@ -732,6 +773,38 @@ public final class FtaOccupancyCommand {
       case B_TO_A -> "B->A";
       case UNKNOWN -> "-";
     };
+  }
+
+  private String formatEntryOrder(int entryOrder) {
+    if (entryOrder >= Integer.MAX_VALUE) {
+      return "-";
+    }
+    return String.valueOf(entryOrder);
+  }
+
+  /**
+   * 从路径边列表解析冲突区 entryOrder（首次进入该冲突的边序号）。
+   *
+   * <p>用于调试命令输出，辅助诊断“冲突区放行”与排序行为。
+   */
+  private Map<String, Integer> resolveConflictEntryOrders(RailGraph graph, List<RailEdge> edges) {
+    if (graph == null || edges == null || edges.isEmpty()) {
+      return Map.of();
+    }
+    Map<String, Integer> orders = new LinkedHashMap<>();
+    for (int i = 0; i < edges.size(); i++) {
+      RailEdge edge = edges.get(i);
+      if (edge == null) {
+        continue;
+      }
+      for (OccupancyResource resource : OccupancyResourceResolver.resourcesForEdge(graph, edge)) {
+        if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
+          continue;
+        }
+        orders.putIfAbsent(resource.key(), i);
+      }
+    }
+    return Map.copyOf(orders);
   }
 
   private SuggestionProvider<CommandSender> graphNodeIdSuggestions(String placeholder) {

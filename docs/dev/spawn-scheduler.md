@@ -49,7 +49,8 @@
 
 - 允许：生成列车，写入 `FTA_*` tags 与 `FTA_ROUTE_INDEX=0`，下发下一跳 destination，并触发一次 `RuntimeDispatchService.refreshSignal(...)`。
 - 不允许/失败：若 spawn 失败会释放已占用资源，票据按 `spawn.retry-delay-ticks` 延迟后重试。
-  - 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
+- 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
+- 当 `SpawnTicket.attempts >= spawn.max-attempts` 时会放弃该票据并释放 backlog，避免无限重试。
 
 ### 出库区块加载
 - Depot 出车前会加载 depot 周边区块，并持有约 10 秒的 plugin chunk ticket，避免刚加载即卸载导致 spawn 失败。
@@ -125,6 +126,11 @@ Route 首站可以是 DYNAMIC 类型（动态选择站台/轨道）：
 
 ```
 /fta spawn pending
+
+### `/fta spawn reset`
+清空发车队列与待发列表，并重置 SpawnPlan/状态（下一 tick 会重新生成）：
+
+/fta spawn reset
 [FTA] 折返待发 (count=1)
 - SURC/MT/MT-1N_ShortC due=已过期 30s attempts=2 error=无可用 Layover 列车
 ```

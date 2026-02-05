@@ -124,7 +124,7 @@ public final class EtaService {
   private final EtaCache<String, BoardResult> boardCache = new EtaCache<>(Duration.ofMillis(1500));
 
   private volatile SpawnManager spawnManager;
-  private volatile TicketAssigner ticketAssigner;
+  private volatile java.util.function.Supplier<List<SpawnTicket>> pendingTicketSupplier;
   private volatile LayoverRegistry layoverRegistry;
   private volatile StorageProvider storageProvider;
   private volatile SignNodeRegistry signNodeRegistry;
@@ -132,6 +132,7 @@ public final class EtaService {
 
   private final java.util.function.IntSupplier lookaheadEdges;
   private final java.util.function.IntSupplier minClearEdges;
+  private final java.util.function.IntSupplier rearGuardEdges;
   private final java.util.function.IntSupplier switcherZoneEdges;
 
   public EtaService(
@@ -142,6 +143,7 @@ public final class EtaService {
       HeadwayRule headwayRule,
       java.util.function.IntSupplier lookaheadEdges,
       java.util.function.IntSupplier minClearEdges,
+      java.util.function.IntSupplier rearGuardEdges,
       java.util.function.IntSupplier switcherZoneEdges) {
     this.snapshotStore = Objects.requireNonNull(snapshotStore, "snapshotStore");
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
@@ -150,6 +152,7 @@ public final class EtaService {
     this.waitEstimator = new WaitEstimator(Objects.requireNonNull(headwayRule, "headwayRule"), 30);
     this.lookaheadEdges = lookaheadEdges != null ? lookaheadEdges : () -> 2;
     this.minClearEdges = minClearEdges != null ? minClearEdges : () -> 0;
+    this.rearGuardEdges = rearGuardEdges != null ? rearGuardEdges : () -> 0;
     this.switcherZoneEdges = switcherZoneEdges != null ? switcherZoneEdges : () -> 2;
 
     // 初始化动态旅行时间模型（使用默认加减速参数）
@@ -162,7 +165,8 @@ public final class EtaService {
   /** 绑定票据来源（SpawnManager/TicketAssigner），用于未发车 ETA。 */
   public void attachTicketSources(SpawnManager spawnManager, TicketAssigner ticketAssigner) {
     this.spawnManager = spawnManager;
-    this.ticketAssigner = ticketAssigner;
+    this.pendingTicketSupplier =
+        ticketAssigner != null ? ticketAssigner::snapshotPendingTickets : null;
   }
 
   /** 绑定 LayoverRegistry，用于未发车 ETA 的待命时间修正。 */
@@ -796,9 +800,9 @@ public final class EtaService {
         }
       }
     }
-    TicketAssigner assigner = this.ticketAssigner;
-    if (assigner != null) {
-      for (SpawnTicket ticket : assigner.snapshotPendingTickets()) {
+    java.util.function.Supplier<List<SpawnTicket>> supplier = this.pendingTicketSupplier;
+    if (supplier != null) {
+      for (SpawnTicket ticket : supplier.get()) {
         if (ticket == null) {
           continue;
         }
@@ -1718,9 +1722,10 @@ public final class EtaService {
     try {
       int lookahead = Math.max(1, lookaheadEdges.getAsInt());
       int minClear = Math.max(0, minClearEdges.getAsInt());
+      int rearGuard = Math.max(0, rearGuardEdges.getAsInt());
       int switcherZone = Math.max(0, switcherZoneEdges.getAsInt());
       OccupancyRequestBuilder builder =
-          new OccupancyRequestBuilder(graph, lookahead, minClear, switcherZone);
+          new OccupancyRequestBuilder(graph, lookahead, minClear, rearGuard, switcherZone);
       TrainRuntimeState state =
           new MinimalTrainRuntimeState(trainName, route.id(), Math.max(0, routeIndex), now);
       return builder

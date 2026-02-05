@@ -20,17 +20,25 @@ import java.util.Set;
  *
  * <p>单线走廊冲突支持方向锁：同向允许多车跟驰，对向互斥。
  *
- * <p>道岔/单线冲突使用 FIFO Gate Queue 保障进入顺序。
+ * <p>道岔/单线冲突使用 Gate Queue 保障进入顺序，并基于 lookahead entryOrder 优先放行更接近冲突入口的列车。
+ *
+ * <p>当冲突区两侧车辆互相占用节点而卡死时，会尝试“冲突区放行”以释放队头列车进入。
  */
 public final class SimpleOccupancyManager
     implements OccupancyManager, OccupancyQueueSupport, OccupancyPreviewSupport {
 
   private static final Duration QUEUE_ENTRY_TTL = Duration.ofSeconds(30);
 
+  /** 冲突区放行锁定时长：一旦放行某车，在此期间内不允许对手车放行，避免信号乒乓。 */
+  private static final Duration DEADLOCK_RELEASE_LOCK_TTL = Duration.ofSeconds(8);
+
   private final HeadwayRule headwayRule;
   private final SignalAspectPolicy signalPolicy;
   private final Map<OccupancyResource, List<OccupancyClaim>> claims = new LinkedHashMap<>();
   private final Map<OccupancyResource, ConflictQueue> queues = new LinkedHashMap<>();
+
+  /** 冲突区放行锁：key=冲突资源 key，value=被放行列车与锁定过期时间。 */
+  private final Map<String, DeadlockReleaseLock> deadlockReleaseLocks = new LinkedHashMap<>();
 
   /**
    * 构建占用管理器。
@@ -55,7 +63,6 @@ public final class SimpleOccupancyManager
     purgeExpiredQueueEntries(now);
     List<OccupancyClaim> blockers = new ArrayList<>();
     Set<OccupancyResource> blockedResources = new LinkedHashSet<>();
-    boolean blockedByNonQueueable = false;
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
@@ -77,14 +84,14 @@ public final class SimpleOccupancyManager
         }
         blockers.add(claim);
         blockedResources.add(resource);
-        if (!isQueueableConflict(resource)) {
-          blockedByNonQueueable = true;
-        }
       }
     }
     if (!blockers.isEmpty()) {
-      if (!blockedByNonQueueable) {
-        enqueueWaiting(request, blockedResources, now);
+      Set<OccupancyResource> queueTargets = resolveQueueTargets(request, blockedResources);
+      enqueueWaiting(request, queueTargets, now);
+      OccupancyDecision resolved = tryResolveConflictDeadlock(request, blockers, now);
+      if (resolved != null) {
+        return resolved;
       }
       return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
     }
@@ -99,7 +106,12 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(request.trainName(), direction, now, request.priority());
+      queue.touch(
+          request.trainName(),
+          direction,
+          now,
+          request.priority(),
+          queueEntryOrderFor(request, resource));
       if (!isQueueAllowed(request.trainName(), resource, direction, queue)) {
         queueBlocked = true;
         queue
@@ -148,6 +160,10 @@ public final class SimpleOccupancyManager
       }
     }
     if (!blockers.isEmpty()) {
+      OccupancyDecision resolved = tryResolveConflictDeadlockPreview(request, blockers, now);
+      if (resolved != null) {
+        return resolved;
+      }
       return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
     }
 
@@ -165,7 +181,13 @@ public final class SimpleOccupancyManager
         continue;
       }
       if (!isQueueAllowedPreview(
-          request.trainName(), resource, direction, queue, request.priority(), now)) {
+          request.trainName(),
+          resource,
+          direction,
+          queue,
+          request.priority(),
+          queueEntryOrderFor(request, resource),
+          now)) {
         queueBlocked = true;
         queue
             .blockingEntry(direction)
@@ -313,6 +335,7 @@ public final class SimpleOccupancyManager
       }
     }
     removeFromQueuesForTrain(trainName);
+    releaseDeadlockLocksForTrain(trainName);
     return removed;
   }
 
@@ -452,6 +475,7 @@ public final class SimpleOccupancyManager
       CorridorDirection direction,
       ConflictQueue queue,
       int priority,
+      int entryOrder,
       Instant now) {
     if (queue == null || queue.isEmpty()) {
       return true;
@@ -460,17 +484,17 @@ public final class SimpleOccupancyManager
       return isQueueAllowed(trainName, resource, direction, queue);
     }
     if (!resource.key().startsWith("single:") || resource.key().contains(":cycle:")) {
-      return queue.wouldBeHeadAny(trainName, direction, priority, now);
+      return queue.wouldBeHeadAny(trainName, direction, priority, entryOrder, now);
     }
     Optional<CorridorDirection> activeDirection = activeDirectionFor(resource);
     if (activeDirection.isEmpty()) {
-      return queue.wouldBeHeadAny(trainName, direction, priority, now);
+      return queue.wouldBeHeadAny(trainName, direction, priority, entryOrder, now);
     }
     CorridorDirection active = activeDirection.get();
     if (direction == CorridorDirection.UNKNOWN || direction != active) {
       return false;
     }
-    return queue.wouldBeHeadForDirection(trainName, direction, priority, now);
+    return queue.wouldBeHeadForDirection(trainName, direction, priority, entryOrder, now);
   }
 
   private Optional<CorridorDirection> activeDirectionFor(OccupancyResource resource) {
@@ -513,23 +537,235 @@ public final class SimpleOccupancyManager
     return direction;
   }
 
+  private int queueEntryOrderFor(OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return Integer.MAX_VALUE;
+    }
+    Integer order = request.conflictEntryOrders().get(resource.key());
+    if (order == null || order < 0) {
+      return Integer.MAX_VALUE;
+    }
+    return order;
+  }
+
+  private Set<OccupancyResource> resolveQueueTargets(
+      OccupancyRequest request, Set<OccupancyResource> blockedResources) {
+    Set<OccupancyResource> targets = new LinkedHashSet<>();
+    if (blockedResources != null) {
+      for (OccupancyResource resource : blockedResources) {
+        if (isQueueableConflict(resource)) {
+          targets.add(resource);
+        }
+      }
+    }
+    if (!targets.isEmpty()) {
+      return targets;
+    }
+    resolvePrimaryConflict(request).ifPresent(targets::add);
+    return targets;
+  }
+
+  private Optional<OccupancyResource> resolvePrimaryConflict(OccupancyRequest request) {
+    if (request == null) {
+      return Optional.empty();
+    }
+    Map<String, Integer> entryOrders = request.conflictEntryOrders();
+    if (entryOrders != null && !entryOrders.isEmpty()) {
+      String bestKey = null;
+      int bestOrder = Integer.MAX_VALUE;
+      for (Map.Entry<String, Integer> entry : entryOrders.entrySet()) {
+        if (entry == null || entry.getKey() == null) {
+          continue;
+        }
+        int order = entry.getValue() != null ? entry.getValue() : Integer.MAX_VALUE;
+        if (order < bestOrder) {
+          bestOrder = order;
+          bestKey = entry.getKey();
+        }
+      }
+      if (bestKey != null) {
+        OccupancyResource conflict = OccupancyResource.forConflict(bestKey);
+        if (isQueueableConflict(conflict)) {
+          return Optional.of(conflict);
+        }
+      }
+    }
+    for (OccupancyResource resource : request.resourceList()) {
+      if (isQueueableConflict(resource)) {
+        return Optional.of(resource);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private boolean containsConflictBlocker(List<OccupancyClaim> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      return false;
+    }
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (claim.resource().kind() == ResourceKind.CONFLICT) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 冲突区放行：当两侧列车互相占用节点导致阻塞时，尝试放行**全局队头**列车进入冲突区。
+   *
+   * <p>采用"单侧放行 + 稳定性锁定"策略：
+   *
+   * <ul>
+   *   <li>仅放行全局队头（不区分方向的最早到达者），另一侧必须等待
+   *   <li>一旦放行某车，锁定该决策一段时间，避免信号乒乓
+   *   <li>锁定期间对手车请求直接拒绝
+   * </ul>
+   *
+   * <p>仅当不存在冲突资源占用，且阻塞列车均在同一冲突队列中时生效。
+   */
+  private OccupancyDecision tryResolveConflictDeadlock(
+      OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
+    if (request == null || blockers == null || blockers.isEmpty()) {
+      return null;
+    }
+    if (containsConflictBlocker(blockers)) {
+      return null;
+    }
+    Optional<OccupancyResource> conflictOpt = resolvePrimaryConflict(request);
+    if (conflictOpt.isEmpty()) {
+      return null;
+    }
+    OccupancyResource conflict = conflictOpt.get();
+    ConflictQueue queue = queues.get(conflict);
+    if (queue == null || queue.isEmpty()) {
+      return null;
+    }
+    // 检查是否存在未过期的放行锁
+    DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
+    if (existingLock != null && !existingLock.isExpired(now)) {
+      if (!existingLock.matches(request.trainName())) {
+        // 其他车持有锁，当前车必须等待
+        return null;
+      }
+      // 当前车持有锁，直接放行（无需再检查队头/blocker 条件，避免信号乒乓）
+      SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+      return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    }
+    // 单侧放行优先：必须是全局队头才能触发冲突放行
+    if (!queue.isHeadAny(request.trainName())) {
+      return null;
+    }
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.trainName() == null) {
+        continue;
+      }
+      if (claim.trainName().equalsIgnoreCase(request.trainName())) {
+        continue;
+      }
+      if (!queue.contains(claim.trainName())) {
+        return null;
+      }
+    }
+    // 放行并写入锁定
+    Instant expiresAt = now.plus(DEADLOCK_RELEASE_LOCK_TTL);
+    deadlockReleaseLocks.put(
+        conflict.key(), new DeadlockReleaseLock(request.trainName(), expiresAt));
+    SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+  }
+
+  /**
+   * 预览模式下的冲突区放行：不写入锁定/队列，仅基于现有队列状态与 entryOrder 判断是否可放行。
+   *
+   * <p>用于 ETA/候选站台评估，避免预览逻辑与真实放行决策偏离。
+   */
+  private OccupancyDecision tryResolveConflictDeadlockPreview(
+      OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
+    if (request == null || blockers == null || blockers.isEmpty()) {
+      return null;
+    }
+    if (containsConflictBlocker(blockers)) {
+      return null;
+    }
+    Optional<OccupancyResource> conflictOpt = resolvePrimaryConflict(request);
+    if (conflictOpt.isEmpty()) {
+      return null;
+    }
+    OccupancyResource conflict = conflictOpt.get();
+    ConflictQueue queue = queues.get(conflict);
+    if (queue == null || queue.isEmpty()) {
+      return null;
+    }
+    // 检查放行锁（只读）
+    DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
+    if (existingLock != null && !existingLock.isExpired(now)) {
+      if (!existingLock.matches(request.trainName())) {
+        return null;
+      }
+      // 当前车持有锁，直接放行（与真实放行一致）
+      SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+      return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    }
+    // 单侧放行优先：必须是全局队头才能触发冲突放行
+    CorridorDirection direction = queueDirectionFor(request, conflict);
+    if (!queue.wouldBeHeadAny(
+        request.trainName(),
+        direction,
+        request.priority(),
+        queueEntryOrderFor(request, conflict),
+        now)) {
+      return null;
+    }
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.trainName() == null) {
+        continue;
+      }
+      if (claim.trainName().equalsIgnoreCase(request.trainName())) {
+        continue;
+      }
+      if (!queue.contains(claim.trainName())) {
+        return null;
+      }
+    }
+    SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+  }
+
   private void enqueueWaiting(
-      OccupancyRequest request, Set<OccupancyResource> blockedResources, Instant now) {
-    if (blockedResources == null || blockedResources.isEmpty()) {
+      OccupancyRequest request, Set<OccupancyResource> queueTargets, Instant now) {
+    if (queueTargets == null || queueTargets.isEmpty()) {
       return;
     }
-    for (OccupancyResource resource : blockedResources) {
+    for (OccupancyResource resource : queueTargets) {
       if (!isQueueableConflict(resource)) {
         continue;
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(request.trainName(), direction, now, request.priority());
+      queue.touch(
+          request.trainName(),
+          direction,
+          now,
+          request.priority(),
+          queueEntryOrderFor(request, resource));
     }
   }
 
   private void purgeExpiredQueueEntries(Instant now) {
-    if (now == null || queues.isEmpty()) {
+    if (now == null) {
+      return;
+    }
+    // 清理过期的冲突放行锁
+    if (!deadlockReleaseLocks.isEmpty()) {
+      deadlockReleaseLocks
+          .entrySet()
+          .removeIf(e -> e.getValue() == null || e.getValue().isExpired(now));
+    }
+    // 清理过期的队列条目
+    if (queues.isEmpty()) {
       return;
     }
     Iterator<Map.Entry<OccupancyResource, ConflictQueue>> iterator = queues.entrySet().iterator();
@@ -586,6 +822,16 @@ public final class SimpleOccupancyManager
     }
   }
 
+  /** 释放指定列车持有的冲突区放行锁。 */
+  private void releaseDeadlockLocksForTrain(String trainName) {
+    if (trainName == null || trainName.isBlank() || deadlockReleaseLocks.isEmpty()) {
+      return;
+    }
+    deadlockReleaseLocks
+        .entrySet()
+        .removeIf(e -> e.getValue() != null && e.getValue().matches(trainName));
+  }
+
   private OccupancyClaim createQueueBlocker(OccupancyResource resource, OccupancyQueueEntry entry) {
     Optional<CorridorDirection> direction =
         entry.direction() == CorridorDirection.UNKNOWN
@@ -613,21 +859,27 @@ public final class SimpleOccupancyManager
     private final LinkedHashMap<String, OccupancyQueueEntry> backward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> neutral = new LinkedHashMap<>();
     private final Map<String, Integer> priorities = new java.util.HashMap<>();
+    private final Map<String, Integer> entryOrders = new java.util.HashMap<>();
 
-    void touch(String trainName, CorridorDirection direction, Instant now, int priority) {
+    void touch(
+        String trainName, CorridorDirection direction, Instant now, int priority, int entryOrder) {
       if (trainName == null || trainName.isBlank() || now == null) {
         return;
       }
       String key = normalize(trainName);
       priorities.put(key, priority);
+      entryOrders.put(key, entryOrder);
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       OccupancyQueueEntry existing = target.get(key);
       if (existing == null) {
-        target.put(key, new OccupancyQueueEntry(trainName, direction, now, now));
+        target.put(
+            key, new OccupancyQueueEntry(trainName, direction, now, now, priority, entryOrder));
         return;
       }
       target.put(
-          key, new OccupancyQueueEntry(existing.trainName(), direction, existing.firstSeen(), now));
+          key,
+          new OccupancyQueueEntry(
+              existing.trainName(), direction, existing.firstSeen(), now, priority, entryOrder));
     }
 
     void remove(String trainName) {
@@ -639,6 +891,7 @@ public final class SimpleOccupancyManager
       backward.remove(key);
       neutral.remove(key);
       priorities.remove(key);
+      entryOrders.remove(key);
     }
 
     boolean contains(String trainName) {
@@ -670,24 +923,40 @@ public final class SimpleOccupancyManager
       if (target.isEmpty()) {
         return Optional.empty();
       }
-      // 排序规则：priority 倒序，其次 firstSeen 正序
+      // 排序规则：priority 倒序，其次 entryOrder 正序，再次 firstSeen 正序
       return target.values().stream().sorted(this::compareEntries).findFirst();
     }
 
     Optional<OccupancyQueueEntry> headEntryWithCandidate(
-        CorridorDirection direction, OccupancyQueueEntry candidate, int candidatePriority) {
+        CorridorDirection direction,
+        OccupancyQueueEntry candidate,
+        int candidatePriority,
+        int candidateEntryOrder) {
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       OccupancyQueueEntry best = null;
       int bestPriority = 0;
+      int bestEntryOrder = Integer.MAX_VALUE;
       for (OccupancyQueueEntry entry : target.values()) {
         int priority = priorities.getOrDefault(normalize(entry.trainName()), 0);
-        if (best == null || compareEntries(entry, priority, best, bestPriority) < 0) {
+        int entryOrder = entryOrderFor(entry.trainName());
+        if (best == null
+            || compareEntries(entry, priority, entryOrder, best, bestPriority, bestEntryOrder)
+                < 0) {
           best = entry;
           bestPriority = priority;
+          bestEntryOrder = entryOrder;
         }
       }
       if (candidate != null) {
-        if (best == null || compareEntries(candidate, candidatePriority, best, bestPriority) < 0) {
+        if (best == null
+            || compareEntries(
+                    candidate,
+                    candidatePriority,
+                    candidateEntryOrder,
+                    best,
+                    bestPriority,
+                    bestEntryOrder)
+                < 0) {
           best = candidate;
         }
       }
@@ -695,41 +964,46 @@ public final class SimpleOccupancyManager
     }
 
     boolean wouldBeHeadForDirection(
-        String trainName, CorridorDirection direction, int priority, Instant now) {
+        String trainName, CorridorDirection direction, int priority, int entryOrder, Instant now) {
       if (trainName == null || trainName.isBlank()) {
         return false;
       }
       Instant time = now != null ? now : Instant.now();
-      OccupancyQueueEntry candidate = new OccupancyQueueEntry(trainName, direction, time, time);
-      return headEntryWithCandidate(direction, candidate, priority)
+      OccupancyQueueEntry candidate =
+          new OccupancyQueueEntry(trainName, direction, time, time, priority, entryOrder);
+      return headEntryWithCandidate(direction, candidate, priority, entryOrder)
           .map(entry -> entry.trainName().equalsIgnoreCase(trainName))
           .orElse(false);
     }
 
     boolean wouldBeHeadAny(
-        String trainName, CorridorDirection direction, int priority, Instant now) {
+        String trainName, CorridorDirection direction, int priority, int entryOrder, Instant now) {
       if (trainName == null || trainName.isBlank()) {
         return false;
       }
       Instant time = now != null ? now : Instant.now();
-      OccupancyQueueEntry candidate = new OccupancyQueueEntry(trainName, direction, time, time);
+      OccupancyQueueEntry candidate =
+          new OccupancyQueueEntry(trainName, direction, time, time, priority, entryOrder);
       Optional<OccupancyQueueEntry> head =
           pickEarlier(
               headEntryWithCandidate(
                   CorridorDirection.A_TO_B,
                   direction == CorridorDirection.A_TO_B ? candidate : null,
-                  priority),
+                  priority,
+                  entryOrder),
               headEntryWithCandidate(
                   CorridorDirection.B_TO_A,
                   direction == CorridorDirection.B_TO_A ? candidate : null,
-                  priority));
+                  priority,
+                  entryOrder));
       head =
           pickEarlier(
               head,
               headEntryWithCandidate(
                   CorridorDirection.UNKNOWN,
                   direction == CorridorDirection.UNKNOWN ? candidate : null,
-                  priority));
+                  priority,
+                  entryOrder));
       return head.map(entry -> entry.trainName().equalsIgnoreCase(trainName)).orElse(false);
     }
 
@@ -739,13 +1013,26 @@ public final class SimpleOccupancyManager
       if (pA != pB) {
         return Integer.compare(pB, pA); // 优先级更高者优先
       }
+      int oA = entryOrderFor(a.trainName());
+      int oB = entryOrderFor(b.trainName());
+      if (oA != oB) {
+        return Integer.compare(oA, oB); // entry 更近者优先
+      }
       return a.firstSeen().compareTo(b.firstSeen()); // 首见更早者优先（FIFO）
     }
 
     private int compareEntries(
-        OccupancyQueueEntry a, int priorityA, OccupancyQueueEntry b, int priorityB) {
+        OccupancyQueueEntry a,
+        int priorityA,
+        int entryOrderA,
+        OccupancyQueueEntry b,
+        int priorityB,
+        int entryOrderB) {
       if (priorityA != priorityB) {
         return Integer.compare(priorityB, priorityA);
+      }
+      if (entryOrderA != entryOrderB) {
+        return Integer.compare(entryOrderA, entryOrderB);
       }
       return a.firstSeen().compareTo(b.firstSeen());
     }
@@ -824,14 +1111,7 @@ public final class SimpleOccupancyManager
       entries.addAll(forward.values());
       entries.addAll(backward.values());
       entries.addAll(neutral.values());
-      entries.sort(
-          (left, right) -> {
-            int compare = left.firstSeen().compareTo(right.firstSeen());
-            if (compare != 0) {
-              return compare;
-            }
-            return left.trainName().compareToIgnoreCase(right.trainName());
-          });
+      entries.sort(this::compareEntries);
       return List.copyOf(entries);
     }
 
@@ -874,6 +1154,13 @@ public final class SimpleOccupancyManager
       return trainName.trim().toLowerCase(Locale.ROOT);
     }
 
+    private int entryOrderFor(String trainName) {
+      if (trainName == null || trainName.isBlank()) {
+        return Integer.MAX_VALUE;
+      }
+      return entryOrders.getOrDefault(normalize(trainName), Integer.MAX_VALUE);
+    }
+
     private Optional<OccupancyQueueEntry> pickEarlier(
         Optional<OccupancyQueueEntry> current, Optional<OccupancyQueueEntry> candidate) {
       if (candidate == null || candidate.isEmpty()) {
@@ -887,6 +1174,22 @@ public final class SimpleOccupancyManager
         return candidate;
       }
       return current;
+    }
+  }
+
+  /**
+   * 冲突区放行锁：记录被放行的列车与锁定过期时间。
+   *
+   * @param trainName 被放行的列车名
+   * @param expiresAt 锁定过期时间
+   */
+  private record DeadlockReleaseLock(String trainName, Instant expiresAt) {
+    boolean isExpired(Instant now) {
+      return now != null && now.isAfter(expiresAt);
+    }
+
+    boolean matches(String name) {
+      return trainName != null && trainName.equalsIgnoreCase(name);
     }
   }
 }

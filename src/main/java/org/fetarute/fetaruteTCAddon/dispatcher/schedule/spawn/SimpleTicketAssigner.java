@@ -48,6 +48,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final LayoverRegistry layoverRegistry;
   private final Duration retryDelay;
   private final int maxSpawnPerTick;
+  private final int maxRetryAttempts;
 
   /** 出车成功次数（含 Layover 复用）。 */
   private final java.util.concurrent.atomic.LongAdder spawnSuccess =
@@ -77,7 +78,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry layoverRegistry,
       Consumer<String> debugLogger,
       Duration retryDelay,
-      int maxSpawnPerTick) {
+      int maxSpawnPerTick,
+      int maxRetryAttempts) {
     this.spawnManager = Objects.requireNonNull(spawnManager, "spawnManager");
     this.depotSpawner = Objects.requireNonNull(depotSpawner, "depotSpawner");
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
@@ -91,6 +93,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.retryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
     this.maxSpawnPerTick = Math.max(1, maxSpawnPerTick);
+    this.maxRetryAttempts = Math.max(1, maxRetryAttempts);
   }
 
   public boolean forceAssign(String trainName, ServiceTicket ticket) {
@@ -132,6 +135,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return List.of();
     }
     return List.copyOf(pendingLayoverTickets.values());
+  }
+
+  @Override
+  public int clearPendingTickets() {
+    int count = pendingLayoverTickets.size();
+    pendingLayoverTickets.clear();
+    return count;
+  }
+
+  @Override
+  public void resetDiagnostics() {
+    spawnSuccess.reset();
+    spawnRetries.reset();
+    requeueByError.clear();
+    lastWarnAtMs.clear();
   }
 
   @Override
@@ -214,6 +232,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             graphOpt.get(),
             runtime.lookaheadEdges(),
             runtime.minClearEdges(),
+            runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
@@ -373,6 +392,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private void requeue(SpawnTicket ticket, Instant now, String error) {
     if (ticket == null) {
+      return;
+    }
+    int nextAttempts = ticket.attempts() + 1;
+    if (maxRetryAttempts > 0 && nextAttempts >= maxRetryAttempts) {
+      pendingLayoverTickets.remove(ticket.id());
+      spawnManager.complete(ticket);
+      debugLogger.accept(
+          "自动发车放弃: ticket="
+              + ticket.id()
+              + " route="
+              + ticket.service().routeCode()
+              + " attempts="
+              + nextAttempts
+              + " max="
+              + maxRetryAttempts
+              + " error="
+              + error);
       return;
     }
     spawnRetries.increment();

@@ -27,6 +27,7 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -379,17 +380,28 @@ public final class GraphDebugStickListener implements Listener {
       NodeId b,
       Instant now) {
     double defaultSpeed = defaultSpeedBlocksPerSecond();
+    double baseSpeed =
+        Double.isFinite(edge.baseSpeedLimit()) && edge.baseSpeedLimit() > 0.0
+            ? edge.baseSpeedLimit()
+            : defaultSpeed;
+    String baseText = formatSpeed(baseSpeed);
+    String overrideText = "-";
+    String tempText = "-";
+    var overrides = railGraphService.edgeOverrides(worldId);
+    if (overrides != null) {
+      var override = overrides.get(EdgeId.undirected(edge.from(), edge.to()));
+      if (override != null) {
+        if (override.speedLimitBlocksPerSecond().isPresent()) {
+          overrideText = formatSpeed(override.speedLimitBlocksPerSecond().getAsDouble());
+        }
+        if (override.isTempSpeedActive(now)) {
+          tempText = formatSpeed(override.tempSpeedLimitBlocksPerSecond().getAsDouble());
+        }
+      }
+    }
     double effectiveSpeed =
         railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
-    String effectiveText =
-        org.fetarute
-            .fetaruteTCAddon
-            .dispatcher
-            .graph
-            .control
-            .RailSpeed
-            .ofBlocksPerSecond(effectiveSpeed)
-            .formatWithAllUnits();
+    String effectiveText = formatSpeed(effectiveSpeed);
     boolean blocked = graph.isBlocked(edge.id());
 
     player.sendMessage(
@@ -404,6 +416,12 @@ public final class GraphDebugStickListener implements Listener {
                 String.valueOf(edge.lengthBlocks()),
                 "blocked",
                 blocked ? locale.text("command.common.yes") : locale.text("command.common.no"),
+                "base_speed",
+                baseText,
+                "override_speed",
+                overrideText,
+                "temp_speed",
+                tempText,
                 "effective_speed",
                 effectiveText)));
   }
@@ -451,6 +469,20 @@ public final class GraphDebugStickListener implements Listener {
       return Duration.ZERO;
     }
     return Duration.ofMillis(millis);
+  }
+
+  private String formatSpeed(double speedBlocksPerSecond) {
+    if (!Double.isFinite(speedBlocksPerSecond) || speedBlocksPerSecond <= 0.0) {
+      return "-";
+    }
+    return org.fetarute
+        .fetaruteTCAddon
+        .dispatcher
+        .graph
+        .control
+        .RailSpeed
+        .ofBlocksPerSecond(speedBlocksPerSecond)
+        .formatWithAllUnits();
   }
 
   private String formatEta(Duration duration) {

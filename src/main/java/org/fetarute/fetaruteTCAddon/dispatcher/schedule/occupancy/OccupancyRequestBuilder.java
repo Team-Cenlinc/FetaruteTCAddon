@@ -31,26 +31,35 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
  * 运行时占用请求构建器：把“列车状态 + 线路定义 + 图”转换成 OccupancyRequest。
  *
  * <p>默认会占用 lookahead 边与对应节点资源，并附加走廊/道岔冲突资源；道岔冲突可按 {@code switcherZoneEdges} 限制为“前 N 段边内的道岔”。
- * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。
+ * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。 尾部保护通过 {@code rearGuardEdges} 保留当前节点向后 N
+ * 段边，避免长编组尾部被追尾。
+ *
+ * <p>同时会记录冲突区 entryOrder（首次进入冲突的边序号），用于冲突区放行与死锁解除。
  */
 public final class OccupancyRequestBuilder {
 
   private final RailGraph graph;
   private final int switcherZoneEdges;
+  private final int rearGuardEdges;
   private final int effectiveLookaheadEdges;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
   private final java.util.function.Consumer<String> debugLogger;
 
   public OccupancyRequestBuilder(
-      RailGraph graph, int lookaheadEdges, int minClearEdges, int switcherZoneEdges) {
-    this(graph, lookaheadEdges, minClearEdges, switcherZoneEdges, msg -> {});
+      RailGraph graph,
+      int lookaheadEdges,
+      int minClearEdges,
+      int rearGuardEdges,
+      int switcherZoneEdges) {
+    this(graph, lookaheadEdges, minClearEdges, rearGuardEdges, switcherZoneEdges, msg -> {});
   }
 
   public OccupancyRequestBuilder(
       RailGraph graph,
       int lookaheadEdges,
       int minClearEdges,
+      int rearGuardEdges,
       int switcherZoneEdges,
       java.util.function.Consumer<String> debugLogger) {
     this.graph = Objects.requireNonNull(graph, "graph");
@@ -61,10 +70,14 @@ public final class OccupancyRequestBuilder {
     if (minClearEdges < 0) {
       throw new IllegalArgumentException("minClearEdges 必须为非负数");
     }
+    if (rearGuardEdges < 0) {
+      throw new IllegalArgumentException("rearGuardEdges 必须为非负数");
+    }
     if (switcherZoneEdges < 0) {
       throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");
     }
     this.switcherZoneEdges = switcherZoneEdges;
+    this.rearGuardEdges = rearGuardEdges;
     this.effectiveLookaheadEdges = Math.max(lookaheadEdges, minClearEdges);
   }
 
@@ -145,6 +158,9 @@ public final class OccupancyRequestBuilder {
       debugLogger.accept("构建请求失败: resolveEdges 返回空 (边未找到?) nodes=" + expandedNodes);
       return Optional.empty();
     }
+    List<NodeId> rearNodes = resolveRearGuardNodes(nodes, currentIndex);
+    List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
+    List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
     Set<OccupancyResource> resources = new LinkedHashSet<>();
     for (NodeId node : expandedNodes) {
       if (node == null) {
@@ -156,10 +172,18 @@ public final class OccupancyRequestBuilder {
       resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
     }
     applySwitcherZoneConflicts(resources, expandedNodes);
+    appendRearGuardResources(resources, rearExpanded, rearEdges);
     Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(expandedNodes);
+    Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
     OccupancyRequest request =
         new OccupancyRequest(
-            trainName, routeId, requestTime, List.copyOf(resources), corridorDirections, priority);
+            trainName,
+            routeId,
+            requestTime,
+            List.copyOf(resources),
+            corridorDirections,
+            conflictEntryOrders,
+            priority);
     return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
   }
 
@@ -223,7 +247,74 @@ public final class OccupancyRequestBuilder {
         base.now(),
         List.copyOf(merged),
         Map.copyOf(directions),
+        base.conflictEntryOrders(),
         base.priority());
+  }
+
+  private List<NodeId> resolveRearGuardNodes(List<NodeId> nodes, int currentIndex) {
+    if (rearGuardEdges <= 0) {
+      return List.of();
+    }
+    if (nodes == null || nodes.size() < 2) {
+      return List.of();
+    }
+    if (currentIndex <= 0 || currentIndex >= nodes.size()) {
+      return List.of();
+    }
+    int startIndex = Math.max(0, currentIndex - rearGuardEdges);
+    if (startIndex >= currentIndex) {
+      return List.of();
+    }
+    List<NodeId> rear = new ArrayList<>();
+    for (int i = startIndex; i <= currentIndex; i++) {
+      rear.add(nodes.get(i));
+    }
+    return List.copyOf(rear);
+  }
+
+  private List<NodeId> expandRearGuardNodes(List<NodeId> nodes) {
+    if (nodes == null || nodes.size() < 2) {
+      return List.of();
+    }
+    List<NodeId> expanded = expandPathNodes(nodes);
+    if (expanded.isEmpty()) {
+      debugLogger.accept("rear-guard 解析失败: expandPathNodes 返回空 nodes=" + nodes);
+    }
+    return expanded;
+  }
+
+  private List<RailEdge> resolveRearGuardEdges(List<NodeId> expandedNodes) {
+    if (expandedNodes == null || expandedNodes.size() < 2) {
+      return List.of();
+    }
+    List<RailEdge> edges = resolveEdges(expandedNodes);
+    if (edges.isEmpty()) {
+      debugLogger.accept("rear-guard 解析失败: resolveEdges 返回空 nodes=" + expandedNodes);
+    }
+    return edges;
+  }
+
+  private void appendRearGuardResources(
+      Set<OccupancyResource> resources, List<NodeId> nodes, List<RailEdge> edges) {
+    if (resources == null) {
+      return;
+    }
+    if (nodes != null) {
+      for (NodeId node : nodes) {
+        if (node == null) {
+          continue;
+        }
+        resources.add(OccupancyResource.forNode(node));
+      }
+    }
+    if (edges != null) {
+      for (RailEdge edge : edges) {
+        if (edge == null) {
+          continue;
+        }
+        resources.add(OccupancyResource.forEdge(edge.id()));
+      }
+    }
   }
 
   private boolean tryAddDirectionalLookoverConflict(
@@ -438,6 +529,26 @@ public final class OccupancyRequestBuilder {
               });
     }
     return Map.copyOf(directions);
+  }
+
+  private Map<String, Integer> resolveConflictEntryOrders(List<RailEdge> edges) {
+    if (edges == null || edges.isEmpty()) {
+      return Map.of();
+    }
+    Map<String, Integer> orders = new LinkedHashMap<>();
+    for (int i = 0; i < edges.size(); i++) {
+      RailEdge edge = edges.get(i);
+      if (edge == null) {
+        continue;
+      }
+      for (OccupancyResource resource : OccupancyResourceResolver.resourcesForEdge(graph, edge)) {
+        if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
+          continue;
+        }
+        orders.putIfAbsent(resource.key(), i);
+      }
+    }
+    return Map.copyOf(orders);
   }
 
   private Optional<CorridorDirection> resolveCorridorDirection(

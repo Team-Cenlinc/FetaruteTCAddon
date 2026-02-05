@@ -709,6 +709,7 @@ final class JdbcRepositoryTest {
                 10,
                 2,
                 1,
+                1,
                 3,
                 4.0,
                 6.0,
@@ -729,7 +730,7 @@ final class JdbcRepositoryTest {
                 false,
                 10,
                 Optional.empty()),
-            new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
+            new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10),
             new ConfigManager.TrainConfigSettings(
                 "emu",
                 new ConfigManager.TrainTypeSettings(0.8, 1.0),

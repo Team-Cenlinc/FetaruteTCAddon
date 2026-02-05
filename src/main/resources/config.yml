@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 12
+config-version: 14
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -65,6 +65,8 @@ runtime:
   lookahead-edges: 2
   # 同向跟驰最小空闲边数
   min-clear-edges: 1
+  # 尾部保护占用边数（当前节点向后 N 段边）
+  rear-guard-edges: 1
   # 道岔区联合锁闭范围（向前 N 段边）
   switcher-zone-edges: 3
   # 进站/STOP waypoint approaching 限速（blocks per second）
@@ -105,6 +107,8 @@ spawn:
   max-backlog-per-service: 5
   # spawn 失败/门控阻塞后的重试延迟（ticks）
   retry-delay-ticks: 40
+  # spawn 最大重试次数（attempts >= max 时放弃该票据）
+  max-attempts: 10
 
 train:
   # 默认车种（emu/dmu/diesel_push_pull/electric_loco）

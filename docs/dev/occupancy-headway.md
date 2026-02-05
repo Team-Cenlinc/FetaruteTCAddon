@@ -35,6 +35,7 @@
 ## Lookahead 占用
 - 运行时可按“当前节点 + N 段边”申请占用，降低咽喉/道岔前的卡死。
 - 同向跟驰最小空闲边数由 `runtime.min-clear-edges` 控制（与 lookahead 取最大值）。
+- `runtime.rear-guard-edges` 会保留当前节点向后 N 段边，确保长列车尾部在完全离开前不被后车侵入。
 - 默认会同时占用路径上的 NODE 资源（当前节点 + lookahead 节点），用于阻止前车未离开时后车进入同一节点。
 - `OccupancyRequestBuilder` 负责从 `TrainRuntimeState + RouteDefinition + RailGraph` 构建请求。
 
@@ -51,9 +52,12 @@
   - 当前默认优先级：客运=0，回收（Reclaim）=-10。
 - 走廊为空时会比较两侧队列头部的优先级与首见时间，优先放行更优的一侧。
 - 同向跟驰仍可并行进入走廊，但进入顺序受队列约束。
+- 冲突区放行：当两侧列车互相占用节点而卡死时，会基于 lookahead 的 entryOrder 优先放行更接近冲突入口的一侧。
+- entryOrder 来自占用请求的“首次进入冲突区的边序号”，可避免折返段场景误放行离入口更远的列车。
 - 出站门控会查询单线/道岔冲突队列的更高优先级列车，必要时让行并保持停站等待（仅站台/TERM）。
 - 队列条目若超过 30 秒未刷新会自动清理（避免遗留阻塞）。
 - `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向、优先级与首见时间）。
+- 队列条目包含 `priority` 与 `entryOrder`，用于诊断冲突区放行与“更近者优先”的排序。
 
 ## 观测与运维
 - `/fta occupancy dump [limit]`：查看占用快照。

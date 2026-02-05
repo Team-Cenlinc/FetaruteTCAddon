@@ -27,6 +27,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *   <li>{@code /fta spawn plan [limit]} - 查看发车计划（可发车的 Route 服务列表）
  *   <li>{@code /fta spawn queue [limit]} - 查看发车队列（待发票据）
  *   <li>{@code /fta spawn pending [limit]} - 查看折返待发票据（含失败重试）
+ *   <li>{@code /fta spawn reset} - 清空发车队列并重置发车计划
  * </ul>
  *
  * <h3>术语说明</h3>
@@ -107,6 +108,14 @@ public final class FtaSpawnCommand {
                   int limit = ctx.<Integer>optional("limit").orElse(DEFAULT_LIMIT);
                   listPending(ctx.sender(), limit);
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("spawn")
+            .literal("reset")
+            .permission("fetarute.spawn")
+            .handler(ctx -> resetQueue(ctx.sender())));
   }
 
   private void sendHelp(CommandSender sender) {
@@ -127,6 +136,11 @@ public final class FtaSpawnCommand {
         locale.component("command.spawn.help.entry-pending"),
         locale.component("command.spawn.help.hover-pending"),
         "/fta spawn pending ");
+    sendHelpEntry(
+        sender,
+        locale.component("command.spawn.help.entry-reset"),
+        locale.component("command.spawn.help.hover-reset"),
+        "/fta spawn reset");
   }
 
   private void sendHelpEntry(
@@ -321,6 +335,47 @@ public final class FtaSpawnCommand {
     if (pending.size() > limit) {
       sender.sendMessage(locale.component("command.spawn.pending.truncated"));
     }
+  }
+
+  private void resetQueue(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    var mgrOpt = plugin.getSpawnManager();
+    var assignerOpt = plugin.getSpawnTicketAssigner();
+    if (mgrOpt.isEmpty() || assignerOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.not-ready"));
+      return;
+    }
+
+    int clearedQueue = 0;
+    int clearedStates = 0;
+    boolean planReset = false;
+    if (mgrOpt.get()
+        instanceof
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnResetSupport
+        support) {
+      var result = support.reset(Instant.now());
+      clearedQueue = result.clearedQueue();
+      clearedStates = result.clearedStates();
+      planReset = result.planReset();
+    } else {
+      sender.sendMessage(locale.component("command.spawn.reset.not-supported"));
+    }
+
+    int clearedPending = assignerOpt.get().clearPendingTickets();
+    assignerOpt.get().resetDiagnostics();
+
+    sender.sendMessage(
+        locale.component(
+            "command.spawn.reset.done",
+            Map.of(
+                "queue",
+                String.valueOf(clearedQueue),
+                "pending",
+                String.valueOf(clearedPending),
+                "states",
+                String.valueOf(clearedStates),
+                "plan",
+                planReset ? "✓" : "✗")));
   }
 
   /**

@@ -36,7 +36,8 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
  * </ul>
  */
-public final class StorageSpawnManager implements SpawnManager, SpawnForecastSupport {
+public final class StorageSpawnManager
+    implements SpawnManager, SpawnForecastSupport, SpawnResetSupport {
 
   private final SpawnManagerSettings settings;
   private final Consumer<String> debugLogger;
@@ -110,6 +111,20 @@ public final class StorageSpawnManager implements SpawnManager, SpawnForecastSup
             .thenComparing(ticket -> ticket.service().routeCode(), String.CASE_INSENSITIVE_ORDER)
             .thenComparing(ticket -> ticket.id().toString()));
     return List.copyOf(snapshot);
+  }
+
+  @Override
+  public SpawnResetResult reset(Instant now) {
+    int queueSize = queue.size();
+    int stateSize = states.size();
+    queue.clear();
+    states.clear();
+    plan = SpawnPlan.empty();
+    forecastPlan = SpawnPlan.empty();
+    lastPlanRefresh = Instant.EPOCH;
+    debugLogger.accept(
+        "SpawnManager reset: queue=" + queueSize + " states=" + stateSize + " at " + now);
+    return new SpawnResetResult(queueSize, stateSize, true);
   }
 
   /**

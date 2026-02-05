@@ -97,6 +97,7 @@ class EtaServiceTest {
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
             () -> 0,
+            () -> 0,
             () -> 2);
 
     EtaResult result = service.getForTrain("train-1", EtaTarget.nextStop());
@@ -138,6 +139,7 @@ class EtaServiceTest {
             occupancyManager,
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
+            () -> 0,
             () -> 0,
             () -> 2);
 
@@ -253,6 +255,7 @@ class EtaServiceTest {
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
             () -> 0,
+            () -> 0,
             () -> 2);
 
     BoardResult board = service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10));
@@ -348,6 +351,7 @@ class EtaServiceTest {
             occupancyManager,
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
+            () -> 0,
             () -> 0,
             () -> 2);
     service.attachStorageProvider(provider);
@@ -464,6 +468,7 @@ class EtaServiceTest {
             occupancyManager,
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
+            () -> 0,
             () -> 0,
             () -> 2);
 
@@ -594,6 +599,7 @@ class EtaServiceTest {
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
             () -> 0,
+            () -> 0,
             () -> 4); // arrivingThreshold
 
     // 计算到 nodeD 的 ETA
@@ -680,6 +686,7 @@ class EtaServiceTest {
             occupancyManager,
             HeadwayRule.fixed(Duration.ZERO),
             () -> 2,
+            () -> 0,
             () -> 0,
             () -> 4);
 

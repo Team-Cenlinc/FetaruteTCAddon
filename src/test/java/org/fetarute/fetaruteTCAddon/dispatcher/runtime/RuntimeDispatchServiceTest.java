@@ -319,6 +319,7 @@ class RuntimeDispatchServiceTest {
             base.runtimeSettings().launchCooldownTicks(),
             2,
             base.runtimeSettings().minClearEdges(),
+            base.runtimeSettings().rearGuardEdges(),
             base.runtimeSettings().switcherZoneEdges(),
             base.runtimeSettings().approachSpeedBps(),
             base.runtimeSettings().cautionSpeedBps(),
@@ -948,6 +949,7 @@ class RuntimeDispatchServiceTest {
             10,
             1,
             1,
+            1,
             3,
             0.0,
             6.0,
@@ -980,7 +982,7 @@ class RuntimeDispatchServiceTest {
         graph,
         autoStation,
         runtime,
-        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40),
+        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10),
         train,
         new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L));
   }
@@ -1286,6 +1288,7 @@ class RuntimeDispatchServiceTest {
             base.runtimeSettings().launchCooldownTicks(),
             base.runtimeSettings().lookaheadEdges(),
             base.runtimeSettings().minClearEdges(),
+            base.runtimeSettings().rearGuardEdges(),
             base.runtimeSettings().switcherZoneEdges(),
             6.0, // approaching speed for STOP/TERM waypoint
             base.runtimeSettings().cautionSpeedBps(),

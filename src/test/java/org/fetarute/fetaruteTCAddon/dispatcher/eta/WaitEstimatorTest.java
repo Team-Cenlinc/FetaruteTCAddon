@@ -45,11 +45,26 @@ public class WaitEstimatorTest {
             0,
             List.of(
                 new OccupancyQueueEntry(
-                    "A", CorridorDirection.A_TO_B, Instant.EPOCH, Instant.EPOCH),
+                    "A",
+                    CorridorDirection.A_TO_B,
+                    Instant.EPOCH,
+                    Instant.EPOCH,
+                    0,
+                    Integer.MAX_VALUE),
                 new OccupancyQueueEntry(
-                    "T1", CorridorDirection.A_TO_B, Instant.EPOCH, Instant.EPOCH),
+                    "T1",
+                    CorridorDirection.A_TO_B,
+                    Instant.EPOCH,
+                    Instant.EPOCH,
+                    0,
+                    Integer.MAX_VALUE),
                 new OccupancyQueueEntry(
-                    "C", CorridorDirection.A_TO_B, Instant.EPOCH, Instant.EPOCH)));
+                    "C",
+                    CorridorDirection.A_TO_B,
+                    Instant.EPOCH,
+                    Instant.EPOCH,
+                    0,
+                    Integer.MAX_VALUE)));
 
     OccupancyDecision decision =
         new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of());

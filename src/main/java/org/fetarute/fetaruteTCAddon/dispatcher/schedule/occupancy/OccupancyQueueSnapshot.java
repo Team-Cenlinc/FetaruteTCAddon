@@ -9,6 +9,8 @@ import java.util.Optional;
  *
  * <p>activeDirection 仅适用于单线走廊冲突，用于诊断方向锁状态。
  *
+ * <p>entries 中包含 priority/entryOrder，便于定位冲突区放行与队列排序细节。
+ *
  * @param resource 冲突资源
  * @param activeDirection 当前占用方向（无方向时 empty）
  * @param activeClaims 当前已占用数量

@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 12;
+  private static final int EXPECTED_CONFIG_VERSION = 14;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -27,6 +27,7 @@ public final class ConfigManager {
   private static final int DEFAULT_LAUNCH_COOLDOWN_TICKS = 10;
   private static final int DEFAULT_OCCUPANCY_LOOKAHEAD_EDGES = 2;
   private static final int DEFAULT_MIN_CLEAR_EDGES = 1;
+  private static final int DEFAULT_REAR_GUARD_EDGES = 1;
   private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
   private static final boolean DEFAULT_HUD_BOSSBAR_ENABLED = true;
@@ -55,6 +56,7 @@ public final class ConfigManager {
   private static final double DEFAULT_DIESEL_PP_DECEL_BPS2 = 0.8;
   private static final double DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2 = 0.9;
   private static final double DEFAULT_ELECTRIC_LOCO_DECEL_BPS2 = 1.1;
+  private static final int DEFAULT_SPAWN_MAX_ATTEMPTS = 10;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -153,6 +155,7 @@ public final class ConfigManager {
     int maxGeneratePerTick = 5;
     int maxBacklogPerService = 5;
     int retryDelayTicks = 40;
+    int maxAttempts = DEFAULT_SPAWN_MAX_ATTEMPTS;
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
       tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
@@ -185,6 +188,11 @@ public final class ConfigManager {
         logger.warning("spawn.retry-delay-ticks 配置无效: " + retryDelayTicks);
         retryDelayTicks = 40;
       }
+      maxAttempts = section.getInt("max-attempts", maxAttempts);
+      if (maxAttempts <= 0) {
+        logger.warning("spawn.max-attempts 配置无效: " + maxAttempts);
+        maxAttempts = DEFAULT_SPAWN_MAX_ATTEMPTS;
+      }
     }
     return new SpawnSettings(
         enabled,
@@ -193,7 +201,8 @@ public final class ConfigManager {
         maxSpawnPerTick,
         maxGeneratePerTick,
         maxBacklogPerService,
-        retryDelayTicks);
+        retryDelayTicks,
+        maxAttempts);
   }
 
   /** 解析 storage 配置段。 */
@@ -298,6 +307,7 @@ public final class ConfigManager {
     int hudPlayerDisplayTickInterval = DEFAULT_HUD_PLAYER_DISPLAY_TICK_INTERVAL;
     Optional<String> hudPlayerDisplayTemplate = DEFAULT_HUD_PLAYER_DISPLAY_TEMPLATE;
     int minClearEdges = DEFAULT_MIN_CLEAR_EDGES;
+    int rearGuardEdges = DEFAULT_REAR_GUARD_EDGES;
     int switcherZoneEdges = DEFAULT_SWITCHER_ZONE_EDGES;
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
     double cautionSpeed = DEFAULT_CAUTION_SPEED_BPS;
@@ -385,6 +395,12 @@ public final class ConfigManager {
       } else {
         logger.warning("runtime.min-clear-edges 配置无效: " + configuredMinClear);
       }
+      int configuredRearGuard = section.getInt("rear-guard-edges", rearGuardEdges);
+      if (configuredRearGuard >= 0) {
+        rearGuardEdges = configuredRearGuard;
+      } else {
+        logger.warning("runtime.rear-guard-edges 配置无效: " + configuredRearGuard);
+      }
       int configuredSwitcherZone = section.getInt("switcher-zone-edges", switcherZoneEdges);
       if (configuredSwitcherZone >= 0) {
         switcherZoneEdges = configuredSwitcherZone;
@@ -457,6 +473,7 @@ public final class ConfigManager {
         launchCooldownTicks,
         lookaheadEdges,
         minClearEdges,
+        rearGuardEdges,
         switcherZoneEdges,
         approachSpeed,
         cautionSpeed,
@@ -596,7 +613,8 @@ public final class ConfigManager {
       int maxSpawnPerTick,
       int maxGeneratePerTick,
       int maxBacklogPerService,
-      int retryDelayTicks) {
+      int retryDelayTicks,
+      int maxAttempts) {
     public SpawnSettings {
       if (tickIntervalTicks <= 0) {
         throw new IllegalArgumentException("tickIntervalTicks 必须为正数");
@@ -615,6 +633,9 @@ public final class ConfigManager {
       }
       if (retryDelayTicks < 0) {
         throw new IllegalArgumentException("retryDelayTicks 必须为非负数");
+      }
+      if (maxAttempts <= 0) {
+        throw new IllegalArgumentException("maxAttempts 必须为正数");
       }
     }
   }
@@ -659,6 +680,7 @@ public final class ConfigManager {
       int launchCooldownTicks,
       int lookaheadEdges,
       int minClearEdges,
+      int rearGuardEdges,
       int switcherZoneEdges,
       double approachSpeedBps,
       double cautionSpeedBps,
@@ -691,6 +713,9 @@ public final class ConfigManager {
       }
       if (minClearEdges < 0) {
         throw new IllegalArgumentException("minClearEdges 必须为非负数");
+      }
+      if (rearGuardEdges < 0) {
+        throw new IllegalArgumentException("rearGuardEdges 必须为非负数");
       }
       if (switcherZoneEdges < 0) {
         throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");

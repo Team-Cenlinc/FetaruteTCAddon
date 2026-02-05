@@ -33,4 +33,16 @@ public interface TicketAssigner {
   default java.util.List<SpawnTicket> snapshotPendingTickets() {
     return java.util.List.of();
   }
+
+  /**
+   * 清理待分配/等待 Layover 的票据。
+   *
+   * @return 清理的票据数量
+   */
+  default int clearPendingTickets() {
+    return 0;
+  }
+
+  /** 清理出车诊断计数（成功/重试/错误分布）。 */
+  default void resetDiagnostics() {}
 }
