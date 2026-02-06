@@ -51,11 +51,13 @@ public final class StorageSpawnManager
       new PriorityQueue<>(
           Comparator.<SpawnTicket, Instant>comparing(SpawnTicket::notBefore)
               .thenComparing(SpawnTicket::dueAt)
+              .thenComparing(SpawnTicket::sequenceNumber)
               .thenComparing(
                   ticket -> ticket.service().operatorCode(), String.CASE_INSENSITIVE_ORDER)
               .thenComparing(ticket -> ticket.service().lineCode(), String.CASE_INSENSITIVE_ORDER)
               .thenComparing(ticket -> ticket.service().routeCode(), String.CASE_INSENSITIVE_ORDER)
               .thenComparing(ticket -> ticket.id().toString()));
+  private long globalSequence = 0;
 
   public StorageSpawnManager(SpawnManagerSettings settings, Consumer<String> debugLogger) {
     this.settings = settings == null ? SpawnManagerSettings.defaults() : settings;
@@ -158,10 +160,18 @@ public final class StorageSpawnManager
       Duration headway = service.baseHeadway();
       Instant due = nextDueAt;
       int count = 0;
+      long seq = 0;
       while (count < limitPerService && !due.isAfter(cutoff)) {
         out.add(
             new SpawnTicket(
-                UUID.randomUUID(), service, due, due, 0, Optional.empty(), Optional.empty()));
+                UUID.randomUUID(),
+                service,
+                due,
+                due,
+                0,
+                seq++,
+                Optional.empty(),
+                Optional.empty()));
         count++;
         due = due.plus(headway);
       }
@@ -258,7 +268,14 @@ public final class StorageSpawnManager
         Instant dueAt = state.nextDueAt != null ? state.nextDueAt : now;
         SpawnTicket ticket =
             new SpawnTicket(
-                UUID.randomUUID(), service, dueAt, dueAt, 0, Optional.empty(), Optional.empty());
+                UUID.randomUUID(),
+                service,
+                dueAt,
+                dueAt,
+                0,
+                globalSequence++,
+                Optional.empty(),
+                Optional.empty());
         queue.add(ticket);
         state.backlog++;
         state.nextDueAt = dueAt.plus(service.baseHeadway());

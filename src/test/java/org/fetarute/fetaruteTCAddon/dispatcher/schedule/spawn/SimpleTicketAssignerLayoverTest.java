@@ -167,7 +167,7 @@ class SimpleTicketAssignerLayoverTest {
             "SURN:D:DEPOT:1");
     Instant now = Instant.now();
     return new SpawnTicket(
-        UUID.randomUUID(), service, now, now, 0, Optional.empty(), Optional.empty());
+        UUID.randomUUID(), service, now, now, 0, 0L, Optional.empty(), Optional.empty());
   }
 
   private static StorageProvider mockProvider(UUID routeId, boolean withCret) {
@@ -248,5 +248,50 @@ class SimpleTicketAssignerLayoverTest {
     ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
     when(configManager.current()).thenReturn(view);
     return configManager;
+  }
+
+  @Test
+  void tickCleansUpExpiredPendingLayoverTickets() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    // 首次 tick：返回票据，无候选，票据进入 pending
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    Instant t0 = Instant.now();
+    assigner.tick(provider, t0);
+    assertEquals(1, assigner.snapshotPendingTickets().size(), "票据应进入 pending 队列");
+
+    // 二次 tick：时间未过期，票据仍保留
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of());
+    Instant t1 = t0.plusSeconds(100);
+    assigner.tick(provider, t1);
+    assertEquals(1, assigner.snapshotPendingTickets().size(), "未超时，票据仍保留");
+
+    // 三次 tick：时间超过 300 秒（超时），票据应被清理
+    Instant t2 = t0.plusSeconds(301);
+    assigner.tick(provider, t2);
+    assertEquals(0, assigner.snapshotPendingTickets().size(), "超时后票据应被清理");
+    verify(spawnManager).complete(ticket);
   }
 }

@@ -31,6 +31,11 @@ permissions:
       fetarute.depot.spawn: true
       fetarute.occupancy: true
       fetarute.occupancy.debug: true
+      fetarute.health: true
+      fetarute.health.check: true
+      fetarute.health.heal: true
+      fetarute.health.toggle: true
+      fetarute.health.clear: true
       fetarute.eta: true
       fetarute.train.config: true
       fetarute.train.debug: true
@@ -82,6 +87,21 @@ permissions:
     default: op
   fetarute.occupancy.debug:
     description: 调度占用调试命令（/fta occupancy debug）
+    default: op
+  fetarute.health:
+    description: 健康监控状态查看（/fta health）
+    default: op
+  fetarute.health.check:
+    description: 手动触发健康检查（/fta health check）
+    default: op
+  fetarute.health.heal:
+    description: 手动修复列车（/fta health heal）
+    default: op
+  fetarute.health.toggle:
+    description: 开关健康监控（/fta health toggle）
+    default: op
+  fetarute.health.clear:
+    description: 清除告警历史（/fta health clear）
     default: op
   fetarute.train.config:
     description: 列车加减速/速度配置（/fta train config）

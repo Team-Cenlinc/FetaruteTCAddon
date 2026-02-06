@@ -44,6 +44,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private static final java.util.logging.Logger HEALTH_LOGGER =
       java.util.logging.Logger.getLogger("FetaruteTCAddon");
 
+  /** 待复用票据最大等待时间（秒）：超时后丢弃并记录警告。 */
+  private static final long PENDING_LAYOVER_TIMEOUT_SECONDS = 300L;
+
+  /**
+   * 待复用票据条目：记录票据及其加入时间，用于超时清理。
+   *
+   * @param ticket 原始出车票据
+   * @param addedAt 加入等待队列的时间
+   */
+  private record PendingLayoverEntry(SpawnTicket ticket, Instant addedAt) {}
+
   private final SpawnManager spawnManager;
   private final DepotSpawner depotSpawner;
   private final OccupancyManager occupancyManager;
@@ -72,7 +83,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final java.util.concurrent.ConcurrentMap<String, Long> lastWarnAtMs =
       new java.util.concurrent.ConcurrentHashMap<>();
   // key 为 ticketId：避免同一 route 在 backlog>1 时覆盖导致“丢票据/永久卡 backlog”。
-  private final java.util.Map<java.util.UUID, SpawnTicket> pendingLayoverTickets =
+  private final java.util.Map<java.util.UUID, PendingLayoverEntry> pendingLayoverTickets =
       new java.util.concurrent.ConcurrentHashMap<>();
 
   public SimpleTicketAssigner(
@@ -143,7 +154,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (pendingLayoverTickets.isEmpty()) {
       return List.of();
     }
-    return List.copyOf(pendingLayoverTickets.values());
+    return pendingLayoverTickets.values().stream()
+        .map(PendingLayoverEntry::ticket)
+        .filter(Objects::nonNull)
+        .toList();
   }
 
   @Override
@@ -167,6 +181,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     if (!pendingLayoverTickets.isEmpty()) {
+      cleanupExpiredPendingTickets(now);
       tryDispatchPendingLayover(now, Optional.empty());
     }
     List<SpawnTicket> dueTickets = spawnManager.pollDueTickets(provider, now);
@@ -180,6 +195,48 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       remaining--;
       trySpawn(provider, now, ticket);
+    }
+  }
+
+  /**
+   * 清理超时的待复用票据。
+   *
+   * <p>当票据在 {@link #pendingLayoverTickets} 中等待超过 {@link #PENDING_LAYOVER_TIMEOUT_SECONDS} 秒时，
+   * 将其丢弃并记录警告日志。这防止了无候选 Layover 的票据永久积压。
+   *
+   * @param now 当前时间
+   */
+  private void cleanupExpiredPendingTickets(Instant now) {
+    java.util.List<java.util.UUID> expired = new java.util.ArrayList<>();
+    for (var entry : pendingLayoverTickets.entrySet()) {
+      if (entry.getValue() == null) {
+        expired.add(entry.getKey());
+        continue;
+      }
+      PendingLayoverEntry pendingEntry = entry.getValue();
+      long waitSeconds = java.time.Duration.between(pendingEntry.addedAt(), now).getSeconds();
+      if (waitSeconds > PENDING_LAYOVER_TIMEOUT_SECONDS) {
+        expired.add(entry.getKey());
+        SpawnTicket ticket = pendingEntry.ticket();
+        if (ticket != null) {
+          SpawnService service = ticket.service();
+          HEALTH_LOGGER.warning(
+              "[FTA] 折返票据超时丢弃: route="
+                  + (service != null ? service.routeCode() : "?")
+                  + " 等待="
+                  + waitSeconds
+                  + "s ticketId="
+                  + entry.getKey());
+          // 通知 spawnManager 标记为完成，避免 backlog 计数不一致
+          spawnManager.complete(ticket);
+        }
+      }
+    }
+    for (java.util.UUID id : expired) {
+      pendingLayoverTickets.remove(id);
+    }
+    if (!expired.isEmpty()) {
+      debugLogger.accept("清理过期待复用票据: count=" + expired.size());
     }
   }
 
@@ -206,6 +263,29 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     RouteDefinition route = routeOpt.get();
 
     if (routeEntity.operationType() == RouteOperationType.RETURN) {
+      // 检查是否已等待超过降级超时时间（baselineFreq × multiplier）
+      double multiplier = configManager.current().spawnSettings().layoverFallbackMultiplier();
+      if (multiplier > 0) {
+        PendingLayoverEntry pendingEntry = pendingLayoverTickets.get(ticket.id());
+        if (pendingEntry != null) {
+          long waitSeconds = Duration.between(pendingEntry.addedAt(), now).getSeconds();
+          long baselineSeconds = service.baseHeadway().getSeconds();
+          long fallbackTimeoutSeconds = (long) (baselineSeconds * multiplier);
+          if (waitSeconds >= fallbackTimeoutSeconds) {
+            // 超时，降级为 depot 直接发车
+            pendingLayoverTickets.remove(ticket.id());
+            debugLogger.accept(
+                "Layover 降级发车: route="
+                    + service.routeCode()
+                    + " 等待="
+                    + waitSeconds
+                    + "s (超时="
+                    + fallbackTimeoutSeconds
+                    + "s) 尝试从 depot 补发");
+            return trySpawnFromDepot(provider, ticket, service, route, line, now);
+          }
+        }
+      }
       return tryReuseLayover(ticket, service, route, now, false);
     }
 
@@ -336,12 +416,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (pendingLayoverTickets.isEmpty()) {
       return;
     }
-    java.util.List<SpawnTicket> snapshot =
+    java.util.List<PendingLayoverEntry> snapshot =
         new java.util.ArrayList<>(pendingLayoverTickets.values());
-    for (SpawnTicket ticket : snapshot) {
-      if (ticket == null) {
+    for (PendingLayoverEntry entry : snapshot) {
+      if (entry == null || entry.ticket() == null) {
         continue;
       }
+      SpawnTicket ticket = entry.ticket();
       SpawnService service = ticket.service();
       Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
       if (routeOpt.isEmpty()) {
@@ -372,7 +453,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         layoverRegistry.findCandidates(startNodeVal);
     if (candidates.isEmpty()) {
       if (!pendingAttempt) {
-        pendingLayoverTickets.put(ticket.id(), ticket);
+        pendingLayoverTickets.put(ticket.id(), new PendingLayoverEntry(ticket, now));
         debugLogger.accept("Layover 复用等待: route=" + service.routeCode() + " start=" + startNodeVal);
       }
       return false;
@@ -390,7 +471,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (candidate == null) {
       // 所有候选都在 dwell 中，稍后重试
       if (!pendingAttempt) {
-        pendingLayoverTickets.put(ticket.id(), ticket);
+        pendingLayoverTickets.put(ticket.id(), new PendingLayoverEntry(ticket, now));
         debugLogger.accept(
             "Layover 复用等待 dwell: route="
                 + service.routeCode()
@@ -414,10 +495,151 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       debugLogger.accept("Layover 复用成功: " + candidate.trainName() + " -> " + service.routeCode());
       return true;
     }
-    pendingLayoverTickets.put(ticket.id(), ticket);
+    pendingLayoverTickets.put(ticket.id(), new PendingLayoverEntry(ticket, now));
     debugLogger.accept(
         "Layover 复用受阻: route=" + service.routeCode() + " train=" + candidate.trainName());
     return false;
+  }
+
+  /**
+   * 尝试从 Depot 直接发车（降级发车路径）。
+   *
+   * <p>当 RETURN 票据等待 Layover 超时后，调用此方法尝试从 Depot 直接补发列车。
+   *
+   * @param provider 存储接口
+   * @param ticket 发车票据
+   * @param service 发车服务
+   * @param route 路线定义
+   * @param line 线路
+   * @param now 当前时间
+   * @return 是否成功发车
+   */
+  private boolean trySpawnFromDepot(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      Line line,
+      Instant now) {
+
+    Route routeEntity = provider.routes().findById(service.routeId()).orElse(null);
+    if (routeEntity == null) {
+      requeue(ticket, now, "fallback-route-not-found");
+      return false;
+    }
+
+    OptionalInt lineMaxTrains = resolveLineMaxTrains(provider, line);
+    LineRuntimeSnapshot runtimeSnapshot = null;
+    if (lineMaxTrains.isPresent()) {
+      runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+      int active = runtimeSnapshot.countActiveTrains(provider, line.id());
+      if (active >= lineMaxTrains.getAsInt()) {
+        debugLogger.accept(
+            "Layover 降级发车阻塞: line-cap line="
+                + line.code()
+                + " active="
+                + active
+                + " max="
+                + lineMaxTrains.getAsInt());
+        requeue(ticket, now, "fallback-line-cap");
+        return false;
+      }
+    }
+
+    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
+    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
+    if (!lineDepots.isEmpty()) {
+      if (runtimeSnapshot == null) {
+        runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+      }
+      selectedDepotOpt = selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot);
+    }
+    SpawnTicket effectiveTicket =
+        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
+
+    String destName = resolveDestinationName(provider, routeEntity).orElse(routeEntity.name());
+    String trainName =
+        TrainNameFormatter.buildTrainName(
+            service.operatorCode(),
+            service.lineCode(),
+            routeEntity.patternType(),
+            destName,
+            ticket.id());
+
+    Optional<java.util.UUID> worldIdOpt =
+        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
+    if (worldIdOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-depot-world-missing");
+      return false;
+    }
+    Optional<RailGraph> graphOpt =
+        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
+    if (graphOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-graph-missing");
+      return false;
+    }
+    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(
+            graphOpt.get(),
+            runtime.lookaheadEdges(),
+            runtime.minClearEdges(),
+            runtime.rearGuardEdges(),
+            runtime.switcherZoneEdges(),
+            debugLogger);
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
+        ctxOpt =
+            builder.buildContextFromNodes(
+                trainName, Optional.ofNullable(route.id()), route.waypoints(), 0, now, 100);
+    if (ctxOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-occupancy-context-failed");
+      return false;
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext ctx =
+        ctxOpt.get();
+    OccupancyRequest request = builder.applyDepotLookover(ctx);
+    OccupancyDecision decision = occupancyManager.acquire(request);
+    if (!decision.allowed()) {
+      requeue(ticket, now, "fallback-gate-blocked:" + decision.signal());
+      return false;
+    }
+
+    Optional<MinecartGroup> groupOpt;
+    try {
+      groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
+    } catch (Exception e) {
+      occupancyManager.releaseByTrain(trainName);
+      debugLogger.accept("Layover 降级发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
+      requeue(ticket, now, "fallback-spawn-failed");
+      return false;
+    }
+    if (groupOpt.isEmpty()) {
+      occupancyManager.releaseByTrain(trainName);
+      requeue(ticket, now, "fallback-spawn-failed");
+      return false;
+    }
+    MinecartGroup group = groupOpt.get();
+    if (group.getProperties() != null && route.waypoints().size() >= 2) {
+      group.getProperties().clearDestinationRoute();
+      group.getProperties().clearDestination();
+      group.getProperties().setDestination(route.waypoints().get(1).value());
+    }
+    runtimeDispatchService.refreshSignal(group);
+    spawnManager.complete(effectiveTicket);
+    spawnSuccess.increment();
+    String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
+    debugLogger.accept(
+        "Layover 降级发车成功: train="
+            + trainName
+            + " route="
+            + service.operatorCode()
+            + "/"
+            + service.lineCode()
+            + "/"
+            + service.routeCode()
+            + " depot="
+            + depotUsed);
+    return true;
   }
 
   /** 返回出车诊断快照（成功/重试/错误分布）。 */

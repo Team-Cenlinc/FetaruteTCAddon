@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
@@ -122,6 +123,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private DisplayService displayService;
   private HudTemplateService hudTemplateService;
   private HudDefaultTemplateService hudDefaultTemplateService;
+  private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
 
   @Override
   public void onEnable() {
@@ -179,6 +181,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (runtimeMonitorTask != null) {
       runtimeMonitorTask.cancel();
       runtimeMonitorTask = null;
+    }
+    if (healthMonitor != null) {
+      healthMonitor.clear();
+      healthMonitor = null;
     }
     if (spawnMonitorTask != null) {
       spawnMonitorTask.cancel();
@@ -375,6 +381,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaTrainCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
+    new FtaHealthCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
@@ -540,6 +547,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     restartRuntimeMonitor();
     initSignalEventDrivenComponents();
+    initHealthMonitor();
     getServer()
         .getScheduler()
         .runTaskLater(
@@ -665,13 +673,48 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     trainSnapshotStore,
                     dwellRegistry,
                     routeProgressRegistry,
-                    routeDefinitionCache),
+                    routeDefinitionCache,
+                    healthMonitor),
                 interval,
                 interval);
   }
 
   public Optional<DwellRegistry> getDwellRegistry() {
     return Optional.ofNullable(dwellRegistry);
+  }
+
+  /** 返回健康监控器（若未初始化则为空）。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor> getHealthMonitor() {
+    return Optional.ofNullable(healthMonitor);
+  }
+
+  private void initHealthMonitor() {
+    if (runtimeDispatchService == null
+        || occupancyManager == null
+        || dwellRegistry == null
+        || configManager == null) {
+      return;
+    }
+    ConfigManager.HealthSettings settings = configManager.current().healthSettings();
+    this.healthMonitor =
+        new org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor(
+            runtimeDispatchService,
+            occupancyManager,
+            dwellRegistry,
+            configManager,
+            loggerManager::debug);
+    // 应用配置
+    healthMonitor.setEnabled(settings.enabled());
+    healthMonitor.setCheckInterval(java.time.Duration.ofSeconds(settings.checkIntervalSeconds()));
+    healthMonitor.setStallThreshold(java.time.Duration.ofSeconds(settings.stallThresholdSeconds()));
+    healthMonitor.setProgressStuckThreshold(
+        java.time.Duration.ofSeconds(settings.progressStuckThresholdSeconds()));
+    healthMonitor.setOccupancyTimeout(
+        java.time.Duration.ofMinutes(settings.occupancyTimeoutMinutes()));
+    healthMonitor.setAutoFixEnabled(settings.autoFixEnabled());
+    healthMonitor.setOrphanCleanupEnabled(settings.orphanCleanupEnabled());
+    healthMonitor.setTimeoutCleanupEnabled(settings.timeoutCleanupEnabled());
+    debug("健康监控器已初始化: enabled=" + settings.enabled());
   }
 
   private void initSpawnScheduler() {

@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
+import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -29,6 +30,7 @@ public final class RuntimeSignalMonitor implements Runnable {
   private final DwellRegistry dwellRegistry;
   private final RouteProgressRegistry routeProgressRegistry;
   private final RouteDefinitionCache routeDefinitions;
+  private final HealthMonitor healthMonitor;
 
   public RuntimeSignalMonitor(
       RuntimeDispatchService dispatchService,
@@ -36,13 +38,15 @@ public final class RuntimeSignalMonitor implements Runnable {
       TrainSnapshotStore snapshotStore,
       DwellRegistry dwellRegistry,
       RouteProgressRegistry routeProgressRegistry,
-      RouteDefinitionCache routeDefinitions) {
+      RouteDefinitionCache routeDefinitions,
+      HealthMonitor healthMonitor) {
     this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
     this.etaSampler = etaSampler;
     this.snapshotStore = snapshotStore;
     this.dwellRegistry = dwellRegistry;
     this.routeProgressRegistry = routeProgressRegistry;
     this.routeDefinitions = routeDefinitions;
+    this.healthMonitor = healthMonitor;
   }
 
   @Override
@@ -82,6 +86,10 @@ public final class RuntimeSignalMonitor implements Runnable {
     cleanupSnapshotStore(activeTrainNames);
     if (dwellRegistry != null) {
       dwellRegistry.retain(activeTrainNames);
+    }
+    // 健康监控 tick（内部有 checkInterval 控制，不会每次都检查）
+    if (healthMonitor != null) {
+      healthMonitor.tick();
     }
   }
 

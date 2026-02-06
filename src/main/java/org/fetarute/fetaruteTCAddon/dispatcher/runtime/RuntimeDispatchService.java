@@ -145,6 +145,16 @@ public final class RuntimeDispatchService {
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
+  /** 节点历史缓存：记录列车最近经过的节点（用于回退检测）。 */
+  private final java.util.concurrent.ConcurrentMap<String, NodeHistory> nodeHistoryCache =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 节点历史容量上限。 */
+  private static final int NODE_HISTORY_CAPACITY = 10;
+
+  /** 回退检测冷却时间（毫秒），避免重复触发 relaunch。 */
+  private static final long RELAUNCH_COOLDOWN_MS = 5000L;
+
   /** 动态站台分配器。 */
   private final DynamicPlatformAllocator dynamicAllocator;
 
@@ -528,6 +538,15 @@ public final class RuntimeDispatchService {
       return;
     }
     NodeId currentNode = definition.nodeId();
+
+    // 回退检测：检查是否走回头路（异常反弹）
+    if (detectAndHandleRegression(event, train, properties, trainName, route, currentNode)) {
+      return; // 已触发 relaunch，跳过后续处理
+    }
+
+    // 记录节点历史（用于后续回退检测）
+    recordNodeHistory(trainName, currentNode);
+
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneEffectiveNodeOverrides(trainName, currentIndex);
     Instant now = Instant.now();
@@ -1079,6 +1098,162 @@ public final class RuntimeDispatchService {
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+  }
+
+  /**
+   * 列车运行时状态快照（用于健康检查）。
+   *
+   * @param trainName 列车名
+   * @param progressIndex 当前进度索引
+   * @param signalAspect 当前信号
+   * @param speedBlocksPerTick 当前速度（blocks/tick）
+   */
+  public record TrainRuntimeState(
+      String trainName, int progressIndex, SignalAspect signalAspect, double speedBlocksPerTick) {}
+
+  /**
+   * 获取列车运行时状态快照。
+   *
+   * @param trainName 列车名
+   * @return 状态快照，若列车不存在或无进度则为空
+   */
+  public Optional<TrainRuntimeState> getTrainState(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return Optional.empty();
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt = progressRegistry.get(trainName);
+    if (entryOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    SignalAspect signal = entry.lastSignal();
+    int idx = entry.currentIndex();
+
+    // 获取列车当前速度
+    double speedBpt = 0.0;
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties != null) {
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
+      if (group != null && group.isValid()) {
+        RuntimeTrainHandle handle = new TrainCartsRuntimeHandle(group);
+        speedBpt = handle.currentSpeedBlocksPerTick();
+      }
+    }
+
+    return Optional.of(new TrainRuntimeState(trainName, idx, signal, speedBpt));
+  }
+
+  /**
+   * 通过列车名刷新信号。
+   *
+   * @param trainName 列车名
+   */
+  public void refreshSignalByName(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null) {
+      return;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
+    if (group == null || !group.isValid()) {
+      return;
+    }
+    refreshSignal(group);
+  }
+
+  /**
+   * 强制重发列车（用于健康检查修复）。
+   *
+   * @param trainName 列车名
+   * @return true 表示成功触发重发
+   */
+  public boolean forceRelaunchByName(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return false;
+    }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null) {
+      return false;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
+    if (group == null || !group.isValid()) {
+      return false;
+    }
+
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt = progressRegistry.get(trainName);
+    if (entryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(entry.routeUuid());
+    if (routeOpt.isEmpty()) {
+      return false;
+    }
+    RouteDefinition route = routeOpt.get();
+    int currentIndex = entry.currentIndex();
+    if (currentIndex < 0 || currentIndex >= route.waypoints().size()) {
+      return false;
+    }
+    NodeId currentNode = route.waypoints().get(currentIndex);
+
+    // 获取图
+    Optional<RailGraph> graphOpt = resolveGraphByGroup(group);
+    if (graphOpt.isEmpty()) {
+      return false;
+    }
+    RailGraph graph = graphOpt.get();
+
+    // 计算下一节点和方向
+    int nextIndex = currentIndex + 1;
+    if (nextIndex >= route.waypoints().size()) {
+      return false; // 已到终点
+    }
+    NodeId nextNode = route.waypoints().get(nextIndex);
+    Optional<org.bukkit.block.BlockFace> direction =
+        resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
+    if (direction.isEmpty()) {
+      return false;
+    }
+
+    // 设置 destination
+    String destinationName = resolveDestinationName(nextNode);
+    if (destinationName == null || destinationName.isBlank()) {
+      destinationName = nextNode.value();
+    }
+    properties.clearDestinationRoute();
+    properties.setDestination(destinationName);
+
+    // 执行强制重发
+    TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+    double targetBps = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
+    double targetBpt = targetBps / 20.0;
+    double accelBpt2 = config.accelBps2() / 400.0;
+    properties.setSpeedLimit(targetBpt);
+
+    RuntimeTrainHandle handle = new TrainCartsRuntimeHandle(group);
+    handle.forceRelaunch(direction.get(), targetBpt, accelBpt2);
+
+    debugLogger.accept(
+        "HealthMonitor forceRelaunch: train="
+            + trainName
+            + " from="
+            + currentNode.value()
+            + " to="
+            + nextNode.value()
+            + " dir="
+            + direction.get().name());
+    return true;
+  }
+
+  private Optional<RailGraph> resolveGraphByGroup(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
+    if (group == null || group.getWorld() == null) {
+      return Optional.empty();
+    }
+    UUID worldId = group.getWorld().getUID();
+    return railGraphService.getSnapshot(worldId).map(s -> s.graph());
   }
 
   /**
@@ -2691,6 +2866,7 @@ public final class RuntimeDispatchService {
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    clearNodeHistory(trainName);
     dynamicAllocator.clearAllocations(trainName);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
@@ -2707,6 +2883,11 @@ public final class RuntimeDispatchService {
       return StallDecision.none();
     }
     if (aspect == SignalAspect.STOP) {
+      stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+      return StallDecision.none();
+    }
+    // 排除正在停站（dwell）的列车：停站期间低速是正常的
+    if (dwellRegistry.remainingSeconds(trainName).isPresent()) {
       stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
       return StallDecision.none();
     }
@@ -3801,6 +3982,183 @@ public final class RuntimeDispatchService {
     TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_TRAIN_NAME, trainName);
   }
 
+  // ======== 节点历史与回退检测 ========
+
+  /** 记录节点历史。 */
+  private void recordNodeHistory(String trainName, NodeId node) {
+    if (trainName == null || trainName.isBlank() || node == null) {
+      return;
+    }
+    nodeHistoryCache
+        .computeIfAbsent(trainName, k -> new NodeHistory(NODE_HISTORY_CAPACITY))
+        .record(node);
+  }
+
+  /**
+   * 检测并处理异常回退。
+   *
+   * <p>当列车触发一个"已在历史中且位置更靠前"的节点时，判定为异常回退（被反弹），执行停车 + 重新 launch。
+   *
+   * @return true 表示检测到回退并已处理，调用方应跳过后续流程
+   */
+  private boolean detectAndHandleRegression(
+      SignActionEvent event,
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      NodeId currentNode) {
+    if (trainName == null || currentNode == null || route == null) {
+      return false;
+    }
+    NodeHistory history = nodeHistoryCache.get(trainName);
+    if (history == null) {
+      return false;
+    }
+    int regressionIdx = history.detectRegression(currentNode);
+    if (regressionIdx < 0) {
+      return false; // 未检测到回退
+    }
+    // 冷却检查：避免短时间内反复 relaunch
+    long now = System.currentTimeMillis();
+    if (now - history.lastRelaunchAtMs() < RELAUNCH_COOLDOWN_MS) {
+      debugLogger.accept(
+          "回退检测冷却中: train="
+              + trainName
+              + " node="
+              + currentNode.value()
+              + " cooldownMs="
+              + RELAUNCH_COOLDOWN_MS);
+      return false;
+    }
+    debugLogger.accept(
+        "回退检测触发: train="
+            + trainName
+            + " node="
+            + currentNode.value()
+            + " regressionIdx="
+            + regressionIdx
+            + " history="
+            + history.snapshot());
+
+    // 执行停车 + 重新 launch
+    boolean success =
+        relaunchToCorrectDirection(event, train, properties, trainName, route, currentNode);
+    if (success) {
+      // 先清除历史，再记录 relaunch 时间（避免 clear 重置时间戳）
+      history.clear();
+      history.recordRelaunch();
+      history.record(currentNode); // 重新记录当前节点作为起点
+    }
+    return success;
+  }
+
+  /**
+   * 强制停车并重新 launch 到正确方向。
+   *
+   * @return true 表示成功 relaunch
+   */
+  private boolean relaunchToCorrectDirection(
+      SignActionEvent event,
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      NodeId currentNode) {
+    if (train == null || properties == null || route == null) {
+      return false;
+    }
+
+    // 找到当前节点在 route 中的索引
+    int currentIndex = findIndexInRoute(route, currentNode);
+    if (currentIndex < 0) {
+      debugLogger.accept(
+          "relaunch 失败: 当前节点不在 route 中 train=" + trainName + " node=" + currentNode.value());
+      return false;
+    }
+    int nextIndex = currentIndex + 1;
+    if (nextIndex >= route.waypoints().size()) {
+      debugLogger.accept("relaunch 失败: 已到终点 train=" + trainName);
+      return false;
+    }
+    NodeId nextNode = route.waypoints().get(nextIndex);
+
+    // 获取图以计算 launch 方向
+    Optional<RailGraph> graphOpt = resolveGraph(event);
+    if (graphOpt.isEmpty()) {
+      debugLogger.accept("relaunch 失败: 未找到调度图 train=" + trainName);
+      return false;
+    }
+    RailGraph graph = graphOpt.get();
+
+    // 设置 destination
+    String destinationName = resolveDestinationName(nextNode);
+    if (destinationName == null || destinationName.isBlank()) {
+      destinationName = nextNode.value();
+    }
+    properties.clearDestinationRoute();
+    properties.setDestination(destinationName);
+
+    // 计算 launch 方向（必须有方向才能 forceRelaunch）
+    java.util.Optional<org.bukkit.block.BlockFace> launchDirection =
+        resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
+    if (launchDirection.isEmpty()) {
+      debugLogger.accept(
+          "relaunch 失败: 无法计算方向 train="
+              + trainName
+              + " from="
+              + currentNode.value()
+              + " to="
+              + nextNode.value());
+      return false;
+    }
+
+    // 使用配置的速度参数
+    TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+    double targetBps = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
+    double targetBpt = targetBps / 20.0;
+    double accelBpt2 = config.accelBps2() / 400.0;
+    properties.setSpeedLimit(targetBpt);
+
+    // 执行强制重发（立即停车 + 立即发车，不检查 isMoving）
+    train.forceRelaunch(launchDirection.get(), targetBpt, accelBpt2);
+
+    Instant now = Instant.now();
+    updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
+
+    debugLogger.accept(
+        "relaunch 成功: train="
+            + trainName
+            + " from="
+            + currentNode.value()
+            + " to="
+            + nextNode.value()
+            + " direction="
+            + launchDirection.get().name());
+    return true;
+  }
+
+  /** 在 route 的 waypoints 中查找节点索引。 */
+  private int findIndexInRoute(RouteDefinition route, NodeId node) {
+    if (route == null || node == null) {
+      return -1;
+    }
+    List<NodeId> waypoints = route.waypoints();
+    for (int i = 0; i < waypoints.size(); i++) {
+      if (waypoints.get(i).equals(node)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** 清除列车的节点历史（用于列车销毁时清理）。 */
+  private void clearNodeHistory(String trainName) {
+    if (trainName != null && !trainName.isBlank()) {
+      nodeHistoryCache.remove(trainName);
+    }
+  }
+
   /**
    * 释放“超出当前占用窗口”的资源。
    *
@@ -4668,6 +5026,85 @@ public final class RuntimeDispatchService {
     private DestinationDisplayInfo {
       name = name == null ? "" : name;
       code = code == null ? "" : code;
+    }
+  }
+
+  /**
+   * 节点历史：记录列车最近经过的节点序列。
+   *
+   * <p>用于回退检测：当列车触发一个"已在历史中且位置更靠前"的节点时，判定为异常回退。
+   */
+  private static final class NodeHistory {
+    private final java.util.Deque<NodeId> nodes;
+    private final int capacity;
+    private volatile long lastRelaunchAtMs;
+
+    NodeHistory(int capacity) {
+      this.capacity = capacity;
+      this.nodes = new java.util.concurrent.ConcurrentLinkedDeque<>();
+      this.lastRelaunchAtMs = 0L;
+    }
+
+    /** 记录经过的节点。 */
+    void record(NodeId node) {
+      if (node == null) {
+        return;
+      }
+      // 如果最近一个节点就是当前节点，跳过（去重）
+      NodeId last = nodes.peekLast();
+      if (last != null && last.equals(node)) {
+        return;
+      }
+      nodes.addLast(node);
+      while (nodes.size() > capacity) {
+        nodes.pollFirst();
+      }
+    }
+
+    /**
+     * 检测是否发生回退：当前节点在历史中，且不是最后一个（即走回头路）。
+     *
+     * @return 回退位置（0=最旧，size-1=最新），-1 表示未回退
+     */
+    int detectRegression(NodeId node) {
+      if (node == null || nodes.isEmpty()) {
+        return -1;
+      }
+      // 最后一个节点不算回退（正常经过）
+      NodeId last = nodes.peekLast();
+      if (last != null && last.equals(node)) {
+        return -1;
+      }
+      // 在历史中搜索
+      int idx = 0;
+      for (NodeId n : nodes) {
+        if (n.equals(node)) {
+          return idx;
+        }
+        idx++;
+      }
+      return -1;
+    }
+
+    /** 清除节点历史（保留 relaunch 时间戳）。 */
+    void clear() {
+      nodes.clear();
+      // 注意：不重置 lastRelaunchAtMs，冷却时间应跨越 clear 生效
+    }
+
+    /** 获取最后一次 relaunch 时间戳。 */
+    long lastRelaunchAtMs() {
+      return lastRelaunchAtMs;
+    }
+
+    /** 记录 relaunch 时间戳。 */
+    void recordRelaunch() {
+      this.lastRelaunchAtMs = System.currentTimeMillis();
+    }
+
+    /** 获取历史中的最后 N 个节点（用于诊断）。 */
+    java.util.List<NodeId> snapshot() {
+      return java.util.List.copyOf(nodes);
     }
   }
 }

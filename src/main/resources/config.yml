@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 14
+config-version: 16
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -7,6 +7,25 @@ locale: zh_CN
 debug:
   # 是否启用插件调试日志
   enabled: false
+
+# 健康检查与自动修复
+health:
+  # 是否启用健康监控
+  enabled: true
+  # 检查间隔（秒）
+  check-interval-seconds: 5
+  # 是否启用自动修复（false 则只告警不修复）
+  auto-fix-enabled: true
+  # 列车静止告警阈值（秒）：有 PROCEED 信号但静止超过此时间
+  stall-threshold-seconds: 30
+  # 进度停滞告警阈值（秒）：进度索引长时间不变
+  progress-stuck-threshold-seconds: 60
+  # 占用超时清理阈值（分钟）
+  occupancy-timeout-minutes: 5
+  # 是否启用孤儿占用清理（列车已消失但占用未释放）
+  orphan-cleanup-enabled: true
+  # 是否启用超时占用清理
+  timeout-cleanup-enabled: true
 
 graph:
   # 图查询/ETA 默认速度（blocks per second），用于 /fta graph query/path 等诊断命令的估算
@@ -26,7 +45,7 @@ autostation:
 
 runtime:
   # 运行时信号/闭塞监测 tick 间隔
-  dispatch-tick-interval-ticks: 10
+  dispatch-tick-interval-ticks: 50
   # 发车/加速动作节流（ticks），0 表示不节流
   launch-cooldown-ticks: 10
 
@@ -62,19 +81,19 @@ runtime:
       # Scoreboard 模板（YAML + MiniMessage），留空则使用 default_hud_template.yml
       template: ""
   # 占用请求 lookahead 边数
-  lookahead-edges: 2
+  lookahead-edges: 3
   # 同向跟驰最小空闲边数
-  min-clear-edges: 1
+  min-clear-edges: 2
   # 尾部保护占用边数（当前节点向后 N 段边）
   rear-guard-edges: 1
   # 道岔区联合锁闭范围（向前 N 段边）
   switcher-zone-edges: 3
   # 进站/STOP waypoint approaching 限速（blocks per second）
-  approach-speed-bps: 4.0
+  approach-speed-bps: 10.0
   # 进库前的限速（blocks per second）
-  approach-depot-speed-bps: 3.5
+  approach-depot-speed-bps: 5.0
   # CAUTION 信号速度上限（blocks per second），可被连通分量覆盖
-  caution-speed-bps: 6.0
+  caution-speed-bps: 10.0
   # 是否启用“提前减速”速度曲线（根据剩余距离与制动能力动态限速）
   speed-curve-enabled: true
   # 速度曲线类型：physics/linear/quadratic/cubic
@@ -96,7 +115,7 @@ spawn:
   # - enabled=true 时将周期性生成 SpawnTicket，并在闭塞门控允许时从 CRET 指定的 depot 自动 spawn 列车
   enabled: false
   # 自动发车 tick 间隔（ticks）
-  tick-interval-ticks: 20
+  tick-interval-ticks: 100
   # 刷新发车计划的间隔（ticks）：会从数据库重新读取 Company/Operator/Line/Route/RouteStop
   plan-refresh-ticks: 200
   # 每次 tick 最多尝试 spawn 的数量（避免卡主线程/刷车）
@@ -109,6 +128,9 @@ spawn:
   retry-delay-ticks: 40
   # spawn 最大重试次数（attempts >= max 时放弃该票据）
   max-attempts: 10
+  # Layover 复用降级发车：当 RETURN 票据等待超过 (baselineFreq × layover-fallback-multiplier) 秒后，
+  # 从 Depot 直接补发而非继续等待 Layover 列车。设为 0 禁用降级（永远等待 Layover）。
+  layover-fallback-multiplier: 2.0
 
 train:
   # 默认车种（emu/dmu/diesel_push_pull/electric_loco）

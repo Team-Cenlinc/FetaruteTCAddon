@@ -53,7 +53,9 @@ public final class RailGraphConflictIndex {
       NodeId id = entry.getKey();
       RailNode node = entry.getValue();
       int degree = degrees.getOrDefault(id, 0);
-      if (node.type() == NodeType.SWITCHER || degree != 2) {
+      // 边界：度数≠2 或道岔视为走廊边界
+      // 注意：STATION/DEPOT 不作为边界，避免长单线被分段导致死锁
+      if (degree != 2 || node.type() == NodeType.SWITCHER) {
         boundaries.add(id);
       }
     }

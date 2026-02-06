@@ -172,6 +172,55 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     }
   }
 
+  /**
+   * 强制重发列车（用于回退检测后纠正方向）。
+   *
+   * <p>与 {@link #launchWithFallback} 不同，此方法会立即停车并发车，不检查 isMoving。
+   */
+  @Override
+  public void forceRelaunch(
+      org.bukkit.block.BlockFace direction,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
+    if (direction == null) {
+      return;
+    }
+    MinecartMember<?> head = group.head();
+    if (head == null) {
+      return;
+    }
+    // 立即停车：使用 stop(true) 强制清除所有动作并归零速度
+    group.stop(true);
+    group.getActions().clear();
+    head.getActions().clear();
+
+    // 立即发车
+    LauncherConfig launchConfig = LauncherConfig.createDefault();
+    if (accelBlocksPerTickSquared > 0.0) {
+      launchConfig.setAcceleration(accelBlocksPerTickSquared);
+    }
+    LoggerManager logger = resolveLoggerManager();
+    if (logger != null) {
+      TrainProperties properties = group.getProperties();
+      String trainName = properties != null ? properties.getTrainName() : "unknown";
+      String destination = properties != null ? properties.getDestination() : null;
+      String destText = destination == null || destination.isBlank() ? "-" : destination;
+      logger.debug(
+          "强制重发: train="
+              + trainName
+              + " dest="
+              + destText
+              + " dir="
+              + direction.name()
+              + " targetBpt="
+              + targetBlocksPerTick);
+    }
+    var action = head.getActions().addActionLaunch(direction, launchConfig, targetBlocksPerTick);
+    if (action != null) {
+      action.addTag(ACTION_TAG_LAUNCH);
+    }
+  }
+
   @Override
   public void accelerateTo(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
     MinecartMember<?> head = group.head();

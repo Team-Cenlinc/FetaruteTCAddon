@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 14;
+  private static final int EXPECTED_CONFIG_VERSION = 16;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -103,6 +103,8 @@ public final class ConfigManager {
     TrainConfigSettings trainConfigSettings = parseTrain(trainSection, logger);
     ConfigurationSection reclaimSection = config.getConfigurationSection("reclaim");
     ReclaimSettings reclaimSettings = parseReclaim(reclaimSection, logger);
+    ConfigurationSection healthSection = config.getConfigurationSection("health");
+    HealthSettings healthSettings = parseHealth(healthSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -113,7 +115,60 @@ public final class ConfigManager {
         runtimeSettings,
         spawnSettings,
         trainConfigSettings,
-        reclaimSettings);
+        reclaimSettings,
+        healthSettings);
+  }
+
+  /** 解析 health 配置段。 */
+  private static HealthSettings parseHealth(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    boolean enabled = true;
+    int checkIntervalSeconds = 5;
+    boolean autoFixEnabled = true;
+    int stallThresholdSeconds = 30;
+    int progressStuckThresholdSeconds = 60;
+    int occupancyTimeoutMinutes = 10;
+    boolean orphanCleanupEnabled = true;
+    boolean timeoutCleanupEnabled = true;
+
+    if (section != null) {
+      enabled = section.getBoolean("enabled", enabled);
+      checkIntervalSeconds = section.getInt("check-interval-seconds", checkIntervalSeconds);
+      if (checkIntervalSeconds <= 0) {
+        logger.warning("health.check-interval-seconds 配置无效: " + checkIntervalSeconds);
+        checkIntervalSeconds = 5;
+      }
+      autoFixEnabled = section.getBoolean("auto-fix-enabled", autoFixEnabled);
+      stallThresholdSeconds = section.getInt("stall-threshold-seconds", stallThresholdSeconds);
+      if (stallThresholdSeconds <= 0) {
+        logger.warning("health.stall-threshold-seconds 配置无效: " + stallThresholdSeconds);
+        stallThresholdSeconds = 30;
+      }
+      progressStuckThresholdSeconds =
+          section.getInt("progress-stuck-threshold-seconds", progressStuckThresholdSeconds);
+      if (progressStuckThresholdSeconds <= 0) {
+        logger.warning(
+            "health.progress-stuck-threshold-seconds 配置无效: " + progressStuckThresholdSeconds);
+        progressStuckThresholdSeconds = 60;
+      }
+      occupancyTimeoutMinutes =
+          section.getInt("occupancy-timeout-minutes", occupancyTimeoutMinutes);
+      if (occupancyTimeoutMinutes <= 0) {
+        logger.warning("health.occupancy-timeout-minutes 配置无效: " + occupancyTimeoutMinutes);
+        occupancyTimeoutMinutes = 10;
+      }
+      orphanCleanupEnabled = section.getBoolean("orphan-cleanup-enabled", orphanCleanupEnabled);
+      timeoutCleanupEnabled = section.getBoolean("timeout-cleanup-enabled", timeoutCleanupEnabled);
+    }
+    return new HealthSettings(
+        enabled,
+        checkIntervalSeconds,
+        autoFixEnabled,
+        stallThresholdSeconds,
+        progressStuckThresholdSeconds,
+        occupancyTimeoutMinutes,
+        orphanCleanupEnabled,
+        timeoutCleanupEnabled);
   }
 
   /** 解析 reclaim 配置段。 */
@@ -156,6 +211,7 @@ public final class ConfigManager {
     int maxBacklogPerService = 5;
     int retryDelayTicks = 40;
     int maxAttempts = DEFAULT_SPAWN_MAX_ATTEMPTS;
+    double layoverFallbackMultiplier = 2.0;
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
       tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
@@ -193,6 +249,12 @@ public final class ConfigManager {
         logger.warning("spawn.max-attempts 配置无效: " + maxAttempts);
         maxAttempts = DEFAULT_SPAWN_MAX_ATTEMPTS;
       }
+      layoverFallbackMultiplier =
+          section.getDouble("layover-fallback-multiplier", layoverFallbackMultiplier);
+      if (layoverFallbackMultiplier < 0) {
+        logger.warning("spawn.layover-fallback-multiplier 配置无效: " + layoverFallbackMultiplier);
+        layoverFallbackMultiplier = 2.0;
+      }
     }
     return new SpawnSettings(
         enabled,
@@ -202,7 +264,8 @@ public final class ConfigManager {
         maxGeneratePerTick,
         maxBacklogPerService,
         retryDelayTicks,
-        maxAttempts);
+        maxAttempts,
+        layoverFallbackMultiplier);
   }
 
   /** 解析 storage 配置段。 */
@@ -587,7 +650,38 @@ public final class ConfigManager {
       RuntimeSettings runtimeSettings,
       SpawnSettings spawnSettings,
       TrainConfigSettings trainConfigSettings,
-      ReclaimSettings reclaimSettings) {}
+      ReclaimSettings reclaimSettings,
+      HealthSettings healthSettings) {}
+
+  /** 健康检查与自动修复配置。 */
+  public record HealthSettings(
+      boolean enabled,
+      int checkIntervalSeconds,
+      boolean autoFixEnabled,
+      int stallThresholdSeconds,
+      int progressStuckThresholdSeconds,
+      int occupancyTimeoutMinutes,
+      boolean orphanCleanupEnabled,
+      boolean timeoutCleanupEnabled) {
+    public HealthSettings {
+      if (checkIntervalSeconds <= 0) {
+        throw new IllegalArgumentException("checkIntervalSeconds 必须为正数");
+      }
+      if (stallThresholdSeconds <= 0) {
+        throw new IllegalArgumentException("stallThresholdSeconds 必须为正数");
+      }
+      if (progressStuckThresholdSeconds <= 0) {
+        throw new IllegalArgumentException("progressStuckThresholdSeconds 必须为正数");
+      }
+      if (occupancyTimeoutMinutes <= 0) {
+        throw new IllegalArgumentException("occupancyTimeoutMinutes 必须为正数");
+      }
+    }
+
+    public static HealthSettings defaults() {
+      return new HealthSettings(true, 5, true, 30, 60, 10, true, true);
+    }
+  }
 
   /** 车辆回收配置（ReclaimPolicy）。 */
   public record ReclaimSettings(
@@ -614,7 +708,8 @@ public final class ConfigManager {
       int maxGeneratePerTick,
       int maxBacklogPerService,
       int retryDelayTicks,
-      int maxAttempts) {
+      int maxAttempts,
+      double layoverFallbackMultiplier) {
     public SpawnSettings {
       if (tickIntervalTicks <= 0) {
         throw new IllegalArgumentException("tickIntervalTicks 必须为正数");
@@ -636,6 +731,9 @@ public final class ConfigManager {
       }
       if (maxAttempts <= 0) {
         throw new IllegalArgumentException("maxAttempts 必须为正数");
+      }
+      if (layoverFallbackMultiplier < 0) {
+        throw new IllegalArgumentException("layoverFallbackMultiplier 必须为非负数");
       }
     }
   }

@@ -135,14 +135,15 @@ final class JdbcRepositoryIntegrationTest {
                 false,
                 10,
                 Optional.empty()),
-            new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10),
+            new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
             new ConfigManager.TrainConfigSettings(
                 "emu",
                 new ConfigManager.TrainTypeSettings(0.8, 1.0),
                 new ConfigManager.TrainTypeSettings(0.7, 0.9),
                 new ConfigManager.TrainTypeSettings(0.6, 0.8),
                 new ConfigManager.TrainTypeSettings(0.9, 1.1)),
-            new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L));
+            new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L),
+            ConfigManager.HealthSettings.defaults());
     manager.apply(view);
     return manager.provider().orElseThrow();
   }

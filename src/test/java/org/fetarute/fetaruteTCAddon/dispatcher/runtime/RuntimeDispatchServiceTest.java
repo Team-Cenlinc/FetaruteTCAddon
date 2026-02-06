@@ -352,7 +352,8 @@ class RuntimeDispatchServiceTest {
                 runtime,
                 base.spawnSettings(),
                 base.trainConfigSettings(),
-                base.reclaimSettings()));
+                base.reclaimSettings(),
+                base.healthSettings()));
 
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
@@ -982,9 +983,10 @@ class RuntimeDispatchServiceTest {
         graph,
         autoStation,
         runtime,
-        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10),
+        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
         train,
-        new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L));
+        new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L),
+        ConfigManager.HealthSettings.defaults());
   }
 
   private static final class TagStore {
@@ -1321,7 +1323,8 @@ class RuntimeDispatchServiceTest {
                 runtime,
                 base.spawnSettings(),
                 base.trainConfigSettings(),
-                base.reclaimSettings()));
+                base.reclaimSettings(),
+                base.healthSettings()));
 
     // A->B 只有 1 格：若错误地用“到下一节点距离”做 speed curve，会把速度压到非常低导致提前刹停。
     RailGraphService railGraphService = mock(RailGraphService.class);

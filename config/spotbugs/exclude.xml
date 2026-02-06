@@ -90,6 +90,10 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaHealthCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaTrainCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
@@ -427,5 +431,36 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalEvaluatorTest$MockRequestProvider"/>
         <Bug pattern="DM_CONVERT_CASE"/>
+    </Match>
+
+    <!-- Health 监控器需要暴露 alertBus 以便外部注册监听器 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor"/>
+        <Method name="alertBus"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor$DiagnosticsSnapshot"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor$DiagnosticsSnapshot"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- HealthMonitor 存储外部依赖引用，预留将来使用 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor"/>
+        <Bug pattern="URF_UNREAD_FIELD"/>
+    </Match>
+    <!-- HealthAlertBus 订阅者执行时捕获异常防止扩散，是预期行为 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus"/>
+        <Method name="publish"/>
+        <Bug pattern="DE_MIGHT_IGNORE"/>
+    </Match>
+    <!-- TrainHealthMonitor 存储外部 DwellRegistry 引用用于排除停站列车，生命周期由创建方管理 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
 </FindBugsFilter>

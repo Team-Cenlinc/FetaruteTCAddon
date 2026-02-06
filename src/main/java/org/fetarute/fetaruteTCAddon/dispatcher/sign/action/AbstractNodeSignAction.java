@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.events.SignChangeActionEvent;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
@@ -88,6 +90,10 @@ abstract class AbstractNodeSignAction extends SignAction {
   public boolean build(SignChangeActionEvent event) {
     if (!event.isTrainSign() && !event.isCartSign()) {
       return false;
+    }
+    // 防止重复注册：如果方块已在注册表中，跳过（可能是 TC loadSign 触发）
+    if (registry.get(event.getBlock()).isPresent()) {
+      return true;
     }
     // 仅在建牌阶段写入注册表，后续执行阶段直接复用解析结果。
     Optional<SignNodeDefinition> definition = parseDefinition(event);
@@ -331,6 +337,10 @@ abstract class AbstractNodeSignAction extends SignAction {
     if (!info.hasGroup()) {
       return;
     }
+    // 仅在车头触发时记录，避免多节车厢重复输出
+    if (!isHeadMember(info)) {
+      return;
+    }
     // 仅记录触发，不再改写 TrainCarts destination，保持调度层与 TC 路由解耦。
     registry
         .get(info.getBlock())
@@ -338,6 +348,19 @@ abstract class AbstractNodeSignAction extends SignAction {
             definition ->
                 debugLogger.accept(
                     "触发节点 " + definition.nodeId().value() + " @ " + formatLocation(info)));
+  }
+
+  /** 判断事件是否由车头触发。 */
+  private boolean isHeadMember(SignActionEvent event) {
+    MinecartGroup group = event.getGroup();
+    if (group == null) {
+      return false;
+    }
+    MinecartMember<?> member = event.getMember();
+    if (member == null) {
+      return false;
+    }
+    return group.head() == member;
   }
 
   @Override

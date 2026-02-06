@@ -143,16 +143,18 @@ public final class OccupancyRequestBuilder {
           "构建请求失败: currentIndex 超出范围 index=" + currentIndex + " size=" + nodes.size());
       return Optional.empty();
     }
-    int maxIndex = Math.min(nodes.size() - 1, currentIndex + effectiveLookaheadEdges);
+    // 先展开当前节点到 Route 末尾的完整路径，再按实际边数截断
     List<NodeId> pathNodes = new ArrayList<>();
-    for (int i = currentIndex; i <= maxIndex; i++) {
+    for (int i = currentIndex; i < nodes.size(); i++) {
       pathNodes.add(nodes.get(i));
     }
-    List<NodeId> expandedNodes = expandPathNodes(pathNodes);
-    if (expandedNodes.isEmpty()) {
+    List<NodeId> fullExpanded = expandPathNodes(pathNodes);
+    if (fullExpanded.isEmpty()) {
       debugLogger.accept("构建请求失败: expandPathNodes 返回空 (路径不连通?) nodes=" + pathNodes);
       return Optional.empty();
     }
+    // 按实际边数截断：保留 effectiveLookaheadEdges 条边对应的节点（边数+1 个节点）
+    List<NodeId> expandedNodes = truncateToEdgeCount(fullExpanded, effectiveLookaheadEdges);
     List<RailEdge> edges = resolveEdges(expandedNodes);
     if (edges.isEmpty()) {
       debugLogger.accept("构建请求失败: resolveEdges 返回空 (边未找到?) nodes=" + expandedNodes);
@@ -315,8 +317,28 @@ public final class OccupancyRequestBuilder {
     List<NodeId> expanded = expandPathNodes(nodes);
     if (expanded.isEmpty()) {
       debugLogger.accept("rear-guard 解析失败: expandPathNodes 返回空 nodes=" + nodes);
+      return List.of();
     }
-    return expanded;
+    // 按实际边数截断：从末尾往前保留 rearGuardEdges 条边
+    return truncateRearGuardToEdgeCount(expanded, rearGuardEdges);
+  }
+
+  /**
+   * 从末尾往前截断尾部保护节点列表。
+   *
+   * <p>保留最后 {@code maxEdges} 条边对应的节点（即 maxEdges+1 个节点）。
+   */
+  private List<NodeId> truncateRearGuardToEdgeCount(List<NodeId> nodes, int maxEdges) {
+    if (nodes == null || nodes.isEmpty()) {
+      return List.of();
+    }
+    if (maxEdges <= 0) {
+      return List.of(nodes.get(nodes.size() - 1));
+    }
+    // 边数 = 节点数 - 1，从末尾保留 maxEdges+1 个节点
+    int keepNodes = Math.min(nodes.size(), maxEdges + 1);
+    int startIndex = nodes.size() - keepNodes;
+    return nodes.subList(startIndex, nodes.size());
   }
 
   private List<RailEdge> resolveRearGuardEdges(List<NodeId> expandedNodes) {
@@ -524,6 +546,27 @@ public final class OccupancyRequestBuilder {
     return List.copyOf(expanded);
   }
 
+  /**
+   * 按实际边数截断展开后的节点列表。
+   *
+   * <p>保留前 {@code maxEdges} 条边对应的节点（即 maxEdges+1 个节点）。
+   *
+   * @param nodes 展开后的完整节点列表
+   * @param maxEdges 最大边数
+   * @return 截断后的节点列表
+   */
+  private List<NodeId> truncateToEdgeCount(List<NodeId> nodes, int maxEdges) {
+    if (nodes == null || nodes.isEmpty()) {
+      return List.of();
+    }
+    if (maxEdges <= 0) {
+      return List.of(nodes.get(0));
+    }
+    // 边数 = 节点数 - 1，所以保留 maxEdges+1 个节点
+    int keepNodes = Math.min(nodes.size(), maxEdges + 1);
+    return nodes.subList(0, keepNodes);
+  }
+
   private Optional<RailEdge> findEdge(NodeId from, NodeId to) {
     for (RailEdge edge : graph.edgesFrom(from)) {
       if (edge.from().equals(from) && edge.to().equals(to)) {
@@ -560,8 +603,23 @@ public final class OccupancyRequestBuilder {
                 if (directions.containsKey(info.key())) {
                   return;
                 }
-                resolveCorridorDirection(info, pathNodes, from, to)
-                    .ifPresent(direction -> directions.put(info.key(), direction));
+                Optional<CorridorDirection> dirOpt =
+                    resolveCorridorDirection(info, pathNodes, from, to);
+                if (dirOpt.isPresent()) {
+                  directions.put(info.key(), dirOpt.get());
+                } else {
+                  debugLogger.accept(
+                      "方向判定失败: key="
+                          + info.key()
+                          + " from="
+                          + from.value()
+                          + " to="
+                          + to.value()
+                          + " corridorNodes="
+                          + info.nodes().stream()
+                              .map(NodeId::value)
+                              .collect(java.util.stream.Collectors.joining(",")));
+                }
               });
     }
     return Map.copyOf(directions);

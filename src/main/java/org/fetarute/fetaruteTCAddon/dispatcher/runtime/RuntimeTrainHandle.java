@@ -69,6 +69,28 @@ public interface RuntimeTrainHandle {
   }
 
   /**
+   * 强制重发列车（用于回退检测后纠正方向）。
+   *
+   * <p>与 {@link #launchWithFallback} 不同，此方法会：
+   *
+   * <ul>
+   *   <li>先强制停车（瞬时归零速度）
+   *   <li>然后立即向指定方向发车，不跳过"正在移动"检查
+   * </ul>
+   *
+   * @param direction 发车方向（必填）
+   * @param targetBlocksPerTick 目标速度（blocks/tick）
+   * @param accelBlocksPerTickSquared 加速度（blocks/tick^2）
+   */
+  default void forceRelaunch(
+      org.bukkit.block.BlockFace direction,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
+    stop();
+    launchWithFallback(Optional.of(direction), targetBlocksPerTick, accelBlocksPerTickSquared);
+  }
+
+  /**
    * 销毁列车实体（用于 DSTY 终点回收）。
    *
    * <p>实现应避免在 TrainCarts 内部 tick 过程中直接销毁导致异常。

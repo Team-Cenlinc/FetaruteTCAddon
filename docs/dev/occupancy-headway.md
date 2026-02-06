@@ -34,6 +34,9 @@
 
 ## Lookahead 占用
 - 运行时可按“当前节点 + N 段边”申请占用，降低咽喉/道岔前的卡死。
+- **重要**：lookahead 边数基于 **RailGraph 展开后的实际边**，而非 Route 定义中的节点跨度。
+  - Route 节点 A→B 之间如果在 RailGraph 中有多个中间 Waypoint，会先展开再按边数截断。
+  - 这确保了 `lookahead-edges=2` 始终代表 2 条实际轨道边（约 60-100 blocks），而非 2 个站间区间。
 - 同向跟驰最小空闲边数由 `runtime.min-clear-edges` 控制（与 lookahead 取最大值）。
 - `runtime.rear-guard-edges` 会保留当前节点向后 N 段边，确保长列车尾部在完全离开前不被后车侵入。
 - 默认会同时占用路径上的 NODE 资源（当前节点 + lookahead 节点），用于阻止前车未离开时后车进入同一节点。

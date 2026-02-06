@@ -88,7 +88,6 @@ public class SignalEventBus {
     if (event == null) {
       return;
     }
-    debugLogger.accept("SignalEvent: type=" + event.eventType() + " at " + event.timestamp());
 
     // 调用全局订阅者
     for (Consumer<SignalEvent> subscriber : globalSubscribers) {
