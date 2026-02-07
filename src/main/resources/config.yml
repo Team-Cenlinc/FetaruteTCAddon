@@ -22,6 +22,10 @@ health:
   progress-stuck-threshold-seconds: 60
   # STOP 信号下 progress stuck 的宽限阈值（秒）：用于区分“正常排队”等待与真实异常
   progress-stop-grace-seconds: 180
+  # STOP 状态下“互卡解锁”触发阈值（秒）：超过后会优先尝试双车解锁
+  deadlock-threshold-seconds: 45
+  # blocker 快照有效期（秒）：用于识别互相阻塞的列车对
+  blocker-snapshot-max-age-seconds: 20
   # 自动修复动作冷却（秒）：避免每轮健康检查都重复触发恢复动作
   recovery-cooldown-seconds: 10
   # 占用超时清理阈值（分钟）

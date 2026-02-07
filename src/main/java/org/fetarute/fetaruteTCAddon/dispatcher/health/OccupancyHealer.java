@@ -19,7 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
  *
  * <ul>
  *   <li>孤儿占用：占用存在但列车已不存在
- *   <li>超时占用：占用时间超过配置阈值
+ *   <li>超时占用：占用时间超过配置阈值（仅针对离线列车，避免误清理仍在线列车的合法占用）
  * </ul>
  */
 public final class OccupancyHealer {
@@ -84,9 +84,10 @@ public final class OccupancyHealer {
         continue;
       }
       String trainName = claim.trainName();
+      boolean activeTrain = active.contains(trainName);
 
       // 孤儿检测
-      if (orphanCleanupEnabled && !active.contains(trainName)) {
+      if (orphanCleanupEnabled && !activeTrain) {
         toRelease.add(claim.resource());
         orphanCount++;
         alertBus.publish(
@@ -99,6 +100,10 @@ public final class OccupancyHealer {
 
       // 超时检测
       if (timeoutCleanupEnabled) {
+        // 对在线列车不做超时清理：事件反射式占用的 acquiredAt 可能较早，直接按时长清理会误删合法占用。
+        if (activeTrain) {
+          continue;
+        }
         Duration age = Duration.between(claim.acquiredAt(), now);
         if (age.compareTo(occupancyTimeout) > 0) {
           toRelease.add(claim.resource());

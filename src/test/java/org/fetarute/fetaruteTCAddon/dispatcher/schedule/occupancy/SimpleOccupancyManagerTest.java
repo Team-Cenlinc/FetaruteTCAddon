@@ -193,6 +193,46 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void conflictDeadlockReleaseDoesNotBypassSameDirectionFollowing() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyResource nodeA = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+
+    // 前车先占用目标节点，模拟同向跟驰中的前车占位。
+    manager.acquire(
+        new OccupancyRequest("front", Optional.empty(), now, List.of(nodeB), java.util.Map.of()));
+    manager.canEnter(
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            forward,
+            Map.of(conflict.key(), 0),
+            1));
+
+    // 后车虽然优先级更高，但同向跟驰不应触发“冲突区放行”绕过前车占位。
+    OccupancyDecision followingDecision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict, nodeA, nodeB),
+                forward,
+                Map.of(conflict.key(), 0),
+                10));
+    assertFalse(followingDecision.allowed());
+    assertEquals(SignalAspect.STOP, followingDecision.signal());
+  }
+
+  @Test
   void shouldYieldForHigherPriorityOppositeCorridor() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =

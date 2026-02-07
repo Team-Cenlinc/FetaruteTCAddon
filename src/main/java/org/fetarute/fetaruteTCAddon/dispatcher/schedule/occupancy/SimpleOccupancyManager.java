@@ -675,6 +675,52 @@ public final class SimpleOccupancyManager
   }
 
   /**
+   * 判定当前阻塞是否包含“对向列车”。
+   *
+   * <p>仅在单线冲突资源上生效：冲突区放行的目标是解开对向会车死锁，不应用于同向跟驰场景。对向方向无法判定时（例如未知方向），保持既有放行逻辑。
+   */
+  private boolean hasOppositeDirectionBlockerInQueue(
+      OccupancyRequest request,
+      List<OccupancyClaim> blockers,
+      OccupancyResource conflict,
+      ConflictQueue queue) {
+    if (!isSingleCorridorConflict(conflict)) {
+      return true;
+    }
+    CorridorDirection requestDirection = queueDirectionFor(request, conflict);
+    if (requestDirection == CorridorDirection.UNKNOWN) {
+      return true;
+    }
+    boolean seenDirectionalBlocker = false;
+    for (OccupancyClaim blocker : blockers) {
+      if (blocker == null || blocker.trainName() == null) {
+        continue;
+      }
+      if (blocker.trainName().equalsIgnoreCase(request.trainName())) {
+        continue;
+      }
+      Optional<CorridorDirection> blockerDirection = queue.directionOf(blocker.trainName());
+      if (blockerDirection.isEmpty() || blockerDirection.get() == CorridorDirection.UNKNOWN) {
+        continue;
+      }
+      seenDirectionalBlocker = true;
+      if (isOppositeDirection(requestDirection, blockerDirection.get())) {
+        return true;
+      }
+    }
+    // 若阻塞方没有有效方向信息，保持兼容（不强制拒绝）；否则要求至少有一侧对向。
+    return !seenDirectionalBlocker;
+  }
+
+  private boolean isOppositeDirection(
+      CorridorDirection firstDirection, CorridorDirection secondDirection) {
+    return (firstDirection == CorridorDirection.A_TO_B
+            && secondDirection == CorridorDirection.B_TO_A)
+        || (firstDirection == CorridorDirection.B_TO_A
+            && secondDirection == CorridorDirection.A_TO_B);
+  }
+
+  /**
    * 冲突区放行：当两侧列车互相占用节点导致阻塞时，尝试放行**全局队头**列车进入冲突区。
    *
    * <p>采用"单侧放行 + 稳定性锁定"策略：
@@ -723,6 +769,9 @@ public final class SimpleOccupancyManager
       return null;
     }
     if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      return null;
+    }
+    if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
       return null;
     }
     // 放行并写入锁定
@@ -811,6 +860,9 @@ public final class SimpleOccupancyManager
       return null;
     }
     if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      return null;
+    }
+    if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
       return null;
     }
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
@@ -1055,6 +1107,21 @@ public final class SimpleOccupancyManager
       }
       String key = normalize(trainName);
       return forward.containsKey(key) || backward.containsKey(key) || neutral.containsKey(key);
+    }
+
+    Optional<CorridorDirection> directionOf(String trainName) {
+      if (trainName == null || trainName.isBlank()) {
+        return Optional.empty();
+      }
+      String key = normalize(trainName);
+      OccupancyQueueEntry entry = forward.get(key);
+      if (entry == null) {
+        entry = backward.get(key);
+      }
+      if (entry == null) {
+        entry = neutral.get(key);
+      }
+      return entry == null ? Optional.empty() : Optional.ofNullable(entry.direction());
     }
 
     /** 获取队列中所有列车名。 */

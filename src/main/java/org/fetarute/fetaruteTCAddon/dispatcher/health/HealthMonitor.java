@@ -98,6 +98,16 @@ public final class HealthMonitor {
     trainMonitor.setProgressStopGraceThreshold(threshold);
   }
 
+  /** 设置 STOP 互卡识别阈值。 */
+  public void setDeadlockThreshold(Duration threshold) {
+    trainMonitor.setDeadlockThreshold(threshold);
+  }
+
+  /** 设置 blocker 快照有效期。 */
+  public void setBlockerSnapshotMaxAge(Duration maxAge) {
+    trainMonitor.setBlockerSnapshotMaxAge(maxAge);
+  }
+
   /** 设置自动修复动作冷却时间。 */
   public void setRecoveryCooldown(Duration cooldown) {
     trainMonitor.setRecoveryCooldown(cooldown);
@@ -179,6 +189,35 @@ public final class HealthMonitor {
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
 
     int totalFixed = trainResult.fixedCount() + occupancyResult.total();
+    if (totalFixed > 0) {
+      fixCount.add(totalFixed);
+    }
+
+    lastCheckTime = now;
+    return new CheckResult(
+        trainResult.stallCount(),
+        trainResult.progressStuckCount(),
+        occupancyResult.orphanCleaned(),
+        occupancyResult.timeoutCleaned(),
+        totalFixed);
+  }
+
+  /**
+   * 立即执行一次“检查 + 强制解锁”。
+   *
+   * <p>与 {@link #checkNow()} 的区别在于：额外执行一次手动互卡解锁，不等待停滞阈值窗口，主要用于运维人工干预。
+   */
+  public CheckResult healNow() {
+    Instant now = Instant.now();
+    Set<String> activeTrains = collectActiveTrainNames();
+
+    checkCount.increment();
+
+    TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
+    OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
+    int forcedUnlock = trainMonitor.forceUnlockNow(activeTrains, now);
+
+    int totalFixed = trainResult.fixedCount() + occupancyResult.total() + forcedUnlock;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }

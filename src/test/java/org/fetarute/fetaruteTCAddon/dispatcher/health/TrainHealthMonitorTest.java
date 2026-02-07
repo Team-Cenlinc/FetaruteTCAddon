@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -38,6 +39,18 @@ class TrainHealthMonitorTest {
   private RuntimeDispatchService.TrainRuntimeState state(
       String name, int idx, SignalAspect signal, double speedBpt) {
     return new RuntimeDispatchService.TrainRuntimeState(name, idx, signal, speedBpt);
+  }
+
+  private RuntimeDispatchService.TrainRuntimeState state(
+      String name, int idx, SignalAspect signal, double speedBpt, String lastPassedGraphNode) {
+    return new RuntimeDispatchService.TrainRuntimeState(
+        name,
+        idx,
+        signal,
+        speedBpt,
+        lastPassedGraphNode == null
+            ? Optional.empty()
+            : Optional.of(NodeId.of(lastPassedGraphNode)));
   }
 
   @Test
@@ -186,6 +199,31 @@ class TrainHealthMonitorTest {
   }
 
   @Test
+  @DisplayName("中间 waypoint 推进应重置 progress stuck 计时")
+  void nonRouteWaypointProgressResetsProgressTimer() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(
+            Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:S:CSB:1")),
+            Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:JBS:CSB:1:004")),
+            Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:JBS:CSB:1:003")));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult r1 = monitor.check(Set.of("train1"), t0.plusSeconds(65));
+    TrainHealthMonitor.CheckResult r2 = monitor.check(Set.of("train1"), t0.plusSeconds(130));
+
+    assertEquals(0, r1.progressStuckCount(), "经过中间 waypoint 后不应触发 stuck");
+    assertEquals(0, r2.progressStuckCount(), "持续经过中间 waypoint 时不应触发 stuck");
+    assertTrue(alerts.isEmpty(), "不应产生 progress stuck 告警");
+    verify(dispatchService, never()).refreshSignalByName("train1");
+  }
+
+  @Test
   @DisplayName("进度停滞分级恢复：refresh -> reissue -> relaunch")
   void progressStuckEscalatesRecoveryStages() {
     when(dispatchService.getTrainState("train1"))
@@ -226,6 +264,170 @@ class TrainHealthMonitorTest {
     assertEquals(0, result.progressStuckCount());
     assertTrue(alerts.isEmpty());
     verify(dispatchService, never()).refreshSignalByName("train1");
+  }
+
+  @Test
+  @DisplayName("STOP 信号下 progress stuck 超宽限后分级升级到 relaunch")
+  void stopSignalProgressStuckEscalatesToRelaunchAfterGrace() {
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.reissueDestinationByName("train1")).thenReturn(false);
+    when(dispatchService.forceRelaunchByName("train1")).thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0); // 首次采样
+    monitor.check(Set.of("train1"), t0.plusSeconds(25)); // stage1: refresh-stop
+    monitor.check(Set.of("train1"), t0.plusSeconds(40)); // stage2: reissue-stop
+    monitor.check(Set.of("train1"), t0.plusSeconds(55)); // stage3: relaunch-stop
+
+    verify(dispatchService, atLeastOnce()).refreshSignalByName("train1");
+    verify(dispatchService).reissueDestinationByName("train1");
+    verify(dispatchService).forceRelaunchByName("train1");
+  }
+
+  @Test
+  @DisplayName("互相阻塞：在 STOP 宽限内触发成对解锁（refresh 双车）")
+  void mutualDeadlockTriggersPairRefreshBeforeStopGrace() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+
+    assertEquals(1, result.progressStuckCount(), "仅由一侧执行互卡修复");
+    assertEquals(1, result.fixedCount(), "应执行一轮成对 refresh");
+    verify(dispatchService).refreshSignalByName("trainA");
+    verify(dispatchService).refreshSignalByName("trainB");
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
+    assertFalse(alerts.isEmpty());
+  }
+
+  @Test
+  @DisplayName("互相阻塞分级恢复：refresh -> reissue -> relaunch")
+  void mutualDeadlockEscalatesRecoveryStages() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
+    when(dispatchService.forceRelaunchByName("trainA")).thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // stage1 refresh
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 reissue
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage3 relaunch
+
+    verify(dispatchService, atLeastOnce()).refreshSignalByName("trainA");
+    verify(dispatchService, atLeastOnce()).refreshSignalByName("trainB");
+    verify(dispatchService).reissueDestinationByName("trainA");
+    verify(dispatchService).forceRelaunchByName("trainA");
+  }
+
+  @Test
+  @DisplayName("手动强制解锁：不等待阈值，直接升级到 reissue/relaunch")
+  void forceUnlockNowEscalatesImmediately() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(false);
+    when(dispatchService.reissueDestinationByName("trainB")).thenReturn(false);
+    when(dispatchService.forceRelaunchByName("trainA")).thenReturn(true);
+
+    int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
+
+    assertEquals(1, fixed, "应在单次手动解锁中完成一对互卡修复");
+    verify(dispatchService).refreshSignalByName("trainA");
+    verify(dispatchService).refreshSignalByName("trainB");
+    verify(dispatchService).reissueDestinationByName("trainA");
+    verify(dispatchService).reissueDestinationByName("trainB");
+    verify(dispatchService).forceRelaunchByName("trainA");
+  }
+
+  @Test
+  @DisplayName("手动强制解锁：非互卡场景不触发")
+  void forceUnlockNowSkipsNonMutualBlockers() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.CAUTION, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.CAUTION, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainC"));
+
+    int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
+
+    assertEquals(0, fixed, "非互卡应跳过，避免误触发");
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
+  }
+
+  @Test
+  @DisplayName("手动强制解锁：STOP 单车阻塞时尝试 reissue")
+  void forceUnlockNowReissuesSingleBlockedStopTrain() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.PROCEED, 0.5)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainC"));
+    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
+
+    int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
+
+    assertEquals(1, fixed, "单车 STOP 阻塞时应尝试 reissue");
+    verify(dispatchService).refreshSignalByName("trainA");
+    verify(dispatchService).reissueDestinationByName("trainA");
+  }
+
+  @Test
+  @DisplayName("手动强制解锁：STOP 单车阻塞时 reissue 失败后升级 relaunch")
+  void forceUnlockNowRelaunchesSingleBlockedStopTrainWhenReissueFails() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.PROCEED, 0.5)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainC"));
+    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(false);
+    when(dispatchService.forceRelaunchByName("trainA")).thenReturn(true);
+
+    int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
+
+    assertEquals(1, fixed, "单车 STOP 阻塞时应升级到 relaunch");
+    verify(dispatchService).refreshSignalByName("trainA");
+    verify(dispatchService).reissueDestinationByName("trainA");
+    verify(dispatchService).forceRelaunchByName("trainA");
   }
 
   @Test

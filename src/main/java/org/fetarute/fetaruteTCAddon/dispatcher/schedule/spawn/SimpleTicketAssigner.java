@@ -3,7 +3,11 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -44,8 +48,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private static final java.util.logging.Logger HEALTH_LOGGER =
       java.util.logging.Logger.getLogger("FetaruteTCAddon");
 
-  /** 待复用票据最大等待时间（秒）：超时后丢弃并记录警告。 */
-  private static final long PENDING_LAYOVER_TIMEOUT_SECONDS = 300L;
+  /** 待复用票据刷新窗口（秒）：超过后会刷新等待窗口并记录告警，避免长期静默卡死。 */
+  private static final long PENDING_LAYOVER_REFRESH_SECONDS = 300L;
 
   /**
    * 待复用票据条目：记录票据及其加入时间，用于超时清理。
@@ -54,6 +58,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * @param addedAt 加入等待队列的时间
    */
   private record PendingLayoverEntry(SpawnTicket ticket, Instant addedAt) {}
+
+  /**
+   * 待复用派发快照：缓存一次派发中所需的 route 与分组信息，避免重复查询。
+   *
+   * @param ticket 原始票据
+   * @param service 发车服务
+   * @param route 线路定义
+   * @param terminalKey 复用匹配终端（首站节点）
+   * @param groupKey 轮转分组键（line + terminal）
+   * @param addedAt 进入 pending 的时间
+   */
+  private record PendingLayoverDispatchEntry(
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      String terminalKey,
+      String groupKey,
+      Instant addedAt) {}
 
   private final SpawnManager spawnManager;
   private final DepotSpawner depotSpawner;
@@ -84,6 +106,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       new java.util.concurrent.ConcurrentHashMap<>();
   // key 为 ticketId：避免同一 route 在 backlog>1 时覆盖导致“丢票据/永久卡 backlog”。
   private final java.util.Map<java.util.UUID, PendingLayoverEntry> pendingLayoverTickets =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  // key 为 "<lineId>|<terminal>"：记录下一次优先尝试的 route 游标，实现同组 route 轮转。
+  private final java.util.concurrent.ConcurrentMap<String, Integer> pendingLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
 
   public SimpleTicketAssigner(
@@ -164,6 +189,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   public int clearPendingTickets() {
     int count = pendingLayoverTickets.size();
     pendingLayoverTickets.clear();
+    pendingLayoverRouteCursor.clear();
     return count;
   }
 
@@ -181,7 +207,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     if (!pendingLayoverTickets.isEmpty()) {
-      cleanupExpiredPendingTickets(now);
+      refreshExpiredPendingTickets(provider, now);
       tryDispatchPendingLayover(now, Optional.empty());
     }
     List<SpawnTicket> dueTickets = spawnManager.pollDueTickets(provider, now);
@@ -199,45 +225,129 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
-   * 清理超时的待复用票据。
+   * 刷新超时的待复用票据，并在达到降级阈值时尝试 depot 补发。
    *
-   * <p>当票据在 {@link #pendingLayoverTickets} 中等待超过 {@link #PENDING_LAYOVER_TIMEOUT_SECONDS} 秒时，
-   * 将其丢弃并记录警告日志。这防止了无候选 Layover 的票据永久积压。
+   * <p>设计目标：
    *
-   * @param now 当前时间
+   * <ul>
+   *   <li>避免“超时即删除”导致某条 return route 饥饿
+   *   <li>在可配置阈值到达后，允许 RETURN 服务从 depot 补发，避免 Layover 长时间不可用
+   *   <li>保留 pending 的“首次入队时间语义”，只在真正超时时刷新窗口
+   * </ul>
    */
-  private void cleanupExpiredPendingTickets(Instant now) {
-    java.util.List<java.util.UUID> expired = new java.util.ArrayList<>();
+  private void refreshExpiredPendingTickets(StorageProvider provider, Instant now) {
+    java.util.List<java.util.UUID> removeIds = new java.util.ArrayList<>();
+    java.util.Map<java.util.UUID, PendingLayoverEntry> refreshedEntries = new java.util.HashMap<>();
+    int refreshed = 0;
+    int fallbackTriggered = 0;
+
     for (var entry : pendingLayoverTickets.entrySet()) {
-      if (entry.getValue() == null) {
-        expired.add(entry.getKey());
+      java.util.UUID ticketId = entry.getKey();
+      PendingLayoverEntry pendingEntry = entry.getValue();
+      if (ticketId == null || pendingEntry == null || pendingEntry.ticket() == null) {
+        removeIds.add(ticketId);
         continue;
       }
-      PendingLayoverEntry pendingEntry = entry.getValue();
+      SpawnTicket ticket = pendingEntry.ticket();
+      SpawnService service = ticket.service();
       long waitSeconds = java.time.Duration.between(pendingEntry.addedAt(), now).getSeconds();
-      if (waitSeconds > PENDING_LAYOVER_TIMEOUT_SECONDS) {
-        expired.add(entry.getKey());
-        SpawnTicket ticket = pendingEntry.ticket();
-        if (ticket != null) {
-          SpawnService service = ticket.service();
-          HEALTH_LOGGER.warning(
-              "[FTA] 折返票据超时丢弃: route="
-                  + (service != null ? service.routeCode() : "?")
-                  + " 等待="
-                  + waitSeconds
-                  + "s ticketId="
-                  + entry.getKey());
-          // 通知 spawnManager 标记为完成，避免 backlog 计数不一致
-          spawnManager.complete(ticket);
-        }
+      if (waitSeconds <= 0L) {
+        continue;
+      }
+
+      java.util.OptionalLong fallbackTimeoutSeconds = resolveLayoverFallbackTimeoutSeconds(service);
+      if (fallbackTimeoutSeconds.isPresent() && waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
+        removeIds.add(ticketId);
+        fallbackTriggered++;
+        HEALTH_LOGGER.warning(
+            "[FTA] 折返票据等待过久，尝试 depot 补发: route="
+                + (service != null ? service.routeCode() : "?")
+                + " 等待="
+                + waitSeconds
+                + "s ticketId="
+                + ticketId);
+        tryFallbackSpawnForPending(provider, ticket, now, waitSeconds);
+        continue;
+      }
+
+      if (waitSeconds >= PENDING_LAYOVER_REFRESH_SECONDS) {
+        refreshedEntries.put(ticketId, new PendingLayoverEntry(ticket, now));
+        refreshed++;
+        HEALTH_LOGGER.warning(
+            "[FTA] 折返票据等待过久，刷新等待窗口: route="
+                + (service != null ? service.routeCode() : "?")
+                + " 等待="
+                + waitSeconds
+                + "s ticketId="
+                + ticketId);
       }
     }
-    for (java.util.UUID id : expired) {
-      pendingLayoverTickets.remove(id);
+
+    for (java.util.UUID id : removeIds) {
+      if (id != null) {
+        pendingLayoverTickets.remove(id);
+      }
     }
-    if (!expired.isEmpty()) {
-      debugLogger.accept("清理过期待复用票据: count=" + expired.size());
+    if (!refreshedEntries.isEmpty()) {
+      pendingLayoverTickets.putAll(refreshedEntries);
     }
+    if (refreshed > 0 || fallbackTriggered > 0 || !removeIds.isEmpty()) {
+      debugLogger.accept(
+          "刷新待复用票据: refreshed="
+              + refreshed
+              + " fallback="
+              + fallbackTriggered
+              + " removed="
+              + removeIds.size());
+    }
+  }
+
+  private java.util.OptionalLong resolveLayoverFallbackTimeoutSeconds(SpawnService service) {
+    if (service == null || service.baseHeadway() == null) {
+      return java.util.OptionalLong.empty();
+    }
+    double multiplier = configManager.current().spawnSettings().layoverFallbackMultiplier();
+    if (multiplier <= 0D) {
+      return java.util.OptionalLong.empty();
+    }
+    long baselineSeconds = Math.max(1L, service.baseHeadway().getSeconds());
+    long timeoutSeconds = (long) Math.ceil(baselineSeconds * multiplier);
+    if (timeoutSeconds <= 0L) {
+      return java.util.OptionalLong.empty();
+    }
+    return java.util.OptionalLong.of(timeoutSeconds);
+  }
+
+  private void tryFallbackSpawnForPending(
+      StorageProvider provider, SpawnTicket ticket, Instant now, long waitSeconds) {
+    if (provider == null || ticket == null || ticket.service() == null) {
+      return;
+    }
+    SpawnService service = ticket.service();
+    Optional<Route> routeEntityOpt = provider.routes().findById(service.routeId());
+    if (routeEntityOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-route-not-found");
+      return;
+    }
+    Route routeEntity = routeEntityOpt.get();
+    Optional<Line> lineOpt = provider.lines().findById(routeEntity.lineId());
+    if (lineOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-line-not-found");
+      return;
+    }
+    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
+    if (routeOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-route-definition-not-found");
+      return;
+    }
+    debugLogger.accept(
+        "Layover pending 降级发车: route="
+            + service.routeCode()
+            + " wait="
+            + waitSeconds
+            + "s ticket="
+            + ticket.id());
+    trySpawnFromDepot(provider, ticket, service, routeOpt.get(), lineOpt.get(), now);
   }
 
   private boolean trySpawn(StorageProvider provider, Instant now, SpawnTicket ticket) {
@@ -263,16 +373,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     RouteDefinition route = routeOpt.get();
 
     if (routeEntity.operationType() == RouteOperationType.RETURN) {
-      // 检查是否已等待超过降级超时时间（baselineFreq × multiplier）
-      double multiplier = configManager.current().spawnSettings().layoverFallbackMultiplier();
-      if (multiplier > 0) {
+      // 若票据已经进入 pending 且达到降级阈值，则尝试 depot 补发。
+      java.util.OptionalLong fallbackTimeoutSeconds = resolveLayoverFallbackTimeoutSeconds(service);
+      if (fallbackTimeoutSeconds.isPresent()) {
         PendingLayoverEntry pendingEntry = pendingLayoverTickets.get(ticket.id());
         if (pendingEntry != null) {
           long waitSeconds = Duration.between(pendingEntry.addedAt(), now).getSeconds();
-          long baselineSeconds = service.baseHeadway().getSeconds();
-          long fallbackTimeoutSeconds = (long) (baselineSeconds * multiplier);
-          if (waitSeconds >= fallbackTimeoutSeconds) {
-            // 超时，降级为 depot 直接发车
+          if (waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
             pendingLayoverTickets.remove(ticket.id());
             debugLogger.accept(
                 "Layover 降级发车: route="
@@ -280,7 +387,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                     + " 等待="
                     + waitSeconds
                     + "s (超时="
-                    + fallbackTimeoutSeconds
+                    + fallbackTimeoutSeconds.getAsLong()
                     + "s) 尝试从 depot 补发");
             return trySpawnFromDepot(provider, ticket, service, route, line, now);
           }
@@ -416,30 +523,156 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (pendingLayoverTickets.isEmpty()) {
       return;
     }
-    java.util.List<PendingLayoverEntry> snapshot =
-        new java.util.ArrayList<>(pendingLayoverTickets.values());
-    for (PendingLayoverEntry entry : snapshot) {
-      if (entry == null || entry.ticket() == null) {
-        continue;
-      }
+    List<PendingLayoverDispatchEntry> dispatchOrder = buildPendingDispatchOrder(terminalFilter);
+    for (PendingLayoverDispatchEntry entry : dispatchOrder) {
       SpawnTicket ticket = entry.ticket();
-      SpawnService service = ticket.service();
-      Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
-      if (routeOpt.isEmpty()) {
-        pendingLayoverTickets.remove(ticket.id());
+      if (ticket == null || !pendingLayoverTickets.containsKey(ticket.id())) {
         continue;
       }
-      RouteDefinition route = routeOpt.get();
-      if (terminalFilter.isPresent()) {
-        String startNodeVal = route.waypoints().get(0).value();
-        if (!terminalFilter.get().equalsIgnoreCase(startNodeVal)) {
-          continue;
-        }
-      }
-      if (tryReuseLayover(ticket, service, route, now, true)) {
+      if (tryReuseLayover(ticket, entry.service(), entry.route(), now, true)) {
         pendingLayoverTickets.remove(ticket.id());
       }
     }
+  }
+
+  /**
+   * 构建本轮 pending 派发顺序。
+   *
+   * <p>先保证同 route 内 FIFO，再在同一 (line + terminal) 分组中执行 route 轮转，避免同权重 route 长期偏斜。
+   */
+  private List<PendingLayoverDispatchEntry> buildPendingDispatchOrder(
+      Optional<String> terminalFilter) {
+    Map<String, List<PendingLayoverDispatchEntry>> byGroup = new LinkedHashMap<>();
+    List<PendingLayoverEntry> snapshot = new ArrayList<>(pendingLayoverTickets.values());
+    for (PendingLayoverEntry pendingEntry : snapshot) {
+      if (pendingEntry == null || pendingEntry.ticket() == null) {
+        continue;
+      }
+      SpawnTicket ticket = pendingEntry.ticket();
+      SpawnService service = ticket.service();
+      if (service == null) {
+        pendingLayoverTickets.remove(ticket.id());
+        continue;
+      }
+      Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
+      if (routeOpt.isEmpty()) {
+        pendingLayoverTickets.remove(ticket.id());
+        spawnManager.complete(ticket);
+        debugLogger.accept(
+            "Layover pending 清理: route 定义缺失 route="
+                + service.routeCode()
+                + " ticket="
+                + ticket.id());
+        continue;
+      }
+      RouteDefinition route = routeOpt.get();
+      if (route.waypoints().isEmpty()) {
+        pendingLayoverTickets.remove(ticket.id());
+        spawnManager.complete(ticket);
+        debugLogger.accept(
+            "Layover pending 清理: route 无站点 route="
+                + service.routeCode()
+                + " ticket="
+                + ticket.id());
+        continue;
+      }
+      String terminalKey = route.waypoints().get(0).value();
+      if (terminalFilter.isPresent() && !terminalFilter.get().equalsIgnoreCase(terminalKey)) {
+        continue;
+      }
+      String groupKey = buildPendingLayoverGroupKey(service, terminalKey);
+      PendingLayoverDispatchEntry dispatchEntry =
+          new PendingLayoverDispatchEntry(
+              ticket, service, route, terminalKey, groupKey, pendingEntry.addedAt());
+      byGroup.computeIfAbsent(groupKey, ignored -> new ArrayList<>()).add(dispatchEntry);
+    }
+
+    List<String> groupKeys = new ArrayList<>(byGroup.keySet());
+    groupKeys.sort(String.CASE_INSENSITIVE_ORDER);
+    List<PendingLayoverDispatchEntry> dispatchOrder = new ArrayList<>();
+    for (String groupKey : groupKeys) {
+      List<PendingLayoverDispatchEntry> groupEntries = byGroup.get(groupKey);
+      if (groupEntries == null || groupEntries.isEmpty()) {
+        continue;
+      }
+      dispatchOrder.addAll(orderPendingGroupWithRouteRotation(groupKey, groupEntries));
+    }
+    return dispatchOrder;
+  }
+
+  /**
+   * 对同一 (line + terminal) 分组执行 route 轮转。
+   *
+   * <p>游标按成功候选次序持续推进，确保在高频 pending 下也能保持 route 级公平。
+   */
+  private List<PendingLayoverDispatchEntry> orderPendingGroupWithRouteRotation(
+      String groupKey, List<PendingLayoverDispatchEntry> groupEntries) {
+    Comparator<PendingLayoverDispatchEntry> comparator =
+        Comparator.comparing((PendingLayoverDispatchEntry entry) -> entry.ticket().dueAt())
+            .thenComparingLong(entry -> entry.ticket().sequenceNumber())
+            .thenComparing(PendingLayoverDispatchEntry::addedAt)
+            .thenComparing(entry -> entry.ticket().id().toString());
+    List<PendingLayoverDispatchEntry> sorted = new ArrayList<>(groupEntries);
+    sorted.sort(comparator);
+    if (sorted.size() <= 1) {
+      return sorted;
+    }
+
+    Map<UUID, ArrayDeque<PendingLayoverDispatchEntry>> byRouteQueue = new LinkedHashMap<>();
+    for (PendingLayoverDispatchEntry entry : sorted) {
+      byRouteQueue
+          .computeIfAbsent(entry.service().routeId(), ignored -> new ArrayDeque<>())
+          .add(entry);
+    }
+    List<UUID> routeOrder = new ArrayList<>(byRouteQueue.keySet());
+    routeOrder.sort(
+        Comparator.comparing(
+            routeId -> {
+              ArrayDeque<PendingLayoverDispatchEntry> queue = byRouteQueue.get(routeId);
+              PendingLayoverDispatchEntry first = queue == null ? null : queue.peekFirst();
+              String routeCode = first == null ? "" : first.service().routeCode();
+              return routeCode.toLowerCase(Locale.ROOT);
+            }));
+    if (routeOrder.size() <= 1) {
+      return sorted;
+    }
+
+    int routeCount = routeOrder.size();
+    int startCursor =
+        Math.floorMod(pendingLayoverRouteCursor.getOrDefault(groupKey, 0), Math.max(1, routeCount));
+    int cursor = startCursor;
+    List<PendingLayoverDispatchEntry> ordered = new ArrayList<>(sorted.size());
+    int remaining = sorted.size();
+    while (remaining > 0) {
+      boolean assigned = false;
+      for (int step = 0; step < routeCount; step++) {
+        int index = (cursor + step) % routeCount;
+        UUID routeId = routeOrder.get(index);
+        ArrayDeque<PendingLayoverDispatchEntry> queue = byRouteQueue.get(routeId);
+        if (queue == null || queue.isEmpty()) {
+          continue;
+        }
+        ordered.add(queue.removeFirst());
+        remaining--;
+        cursor = (index + 1) % routeCount;
+        assigned = true;
+        break;
+      }
+      if (!assigned) {
+        break;
+      }
+    }
+    pendingLayoverRouteCursor.put(groupKey, (startCursor + 1) % routeCount);
+    return ordered;
+  }
+
+  private static String buildPendingLayoverGroupKey(SpawnService service, String terminalKey) {
+    if (service == null) {
+      return terminalKey == null ? "" : terminalKey.toLowerCase(Locale.ROOT);
+    }
+    String lineKey = service.lineId() == null ? "unknown" : service.lineId().toString();
+    String terminal = terminalKey == null ? "" : terminalKey.trim().toLowerCase(Locale.ROOT);
+    return lineKey + "|" + terminal;
   }
 
   private boolean tryReuseLayover(
@@ -453,25 +686,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         layoverRegistry.findCandidates(startNodeVal);
     if (candidates.isEmpty()) {
       if (!pendingAttempt) {
-        pendingLayoverTickets.put(ticket.id(), new PendingLayoverEntry(ticket, now));
+        putPendingLayoverTicket(ticket, now);
         debugLogger.accept("Layover 复用等待: route=" + service.routeCode() + " start=" + startNodeVal);
       }
       return false;
     }
     // 过滤掉 readyAt 尚未到达（dwell 未结束）的候选
-    LayoverRegistry.LayoverCandidate candidate = null;
+    List<LayoverRegistry.LayoverCandidate> readyCandidates = new ArrayList<>();
     for (LayoverRegistry.LayoverCandidate c : candidates) {
       if (c.readyAt().isAfter(now)) {
-        // 尚未就绪（仍在 dwell 中）
         continue;
       }
-      candidate = c;
-      break;
+      readyCandidates.add(c);
     }
-    if (candidate == null) {
+    if (readyCandidates.isEmpty()) {
       // 所有候选都在 dwell 中，稍后重试
       if (!pendingAttempt) {
-        pendingLayoverTickets.put(ticket.id(), new PendingLayoverEntry(ticket, now));
+        putPendingLayoverTicket(ticket, now);
         debugLogger.accept(
             "Layover 复用等待 dwell: route="
                 + service.routeCode()
@@ -488,17 +719,39 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             startNodeVal,
             0,
             ServiceTicket.TicketMode.OPERATION);
-    if (runtimeDispatchService.dispatchLayover(candidate, serviceTicket)) {
-      spawnManager.complete(ticket);
-      spawnSuccess.increment();
-      pendingLayoverTickets.remove(ticket.id());
-      debugLogger.accept("Layover 复用成功: " + candidate.trainName() + " -> " + service.routeCode());
-      return true;
+    for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+      if (runtimeDispatchService.dispatchLayover(candidate, serviceTicket)) {
+        spawnManager.complete(ticket);
+        spawnSuccess.increment();
+        pendingLayoverTickets.remove(ticket.id());
+        debugLogger.accept("Layover 复用成功: " + candidate.trainName() + " -> " + service.routeCode());
+        return true;
+      }
     }
-    pendingLayoverTickets.put(ticket.id(), new PendingLayoverEntry(ticket, now));
+    putPendingLayoverTicket(ticket, now);
     debugLogger.accept(
-        "Layover 复用受阻: route=" + service.routeCode() + " train=" + candidate.trainName());
+        "Layover 复用受阻: route="
+            + service.routeCode()
+            + " readyCandidates="
+            + readyCandidates.size());
     return false;
+  }
+
+  /**
+   * 写入 pending layover 票据。
+   *
+   * <p>若票据已在 pending 中，保留首次入队时间，避免重试时不断刷新 addedAt 导致超时清理永不触发。
+   */
+  private void putPendingLayoverTicket(SpawnTicket ticket, Instant now) {
+    if (ticket == null || now == null) {
+      return;
+    }
+    pendingLayoverTickets.compute(
+        ticket.id(),
+        (ignored, existing) -> {
+          Instant addedAt = existing == null ? now : existing.addedAt();
+          return new PendingLayoverEntry(ticket, addedAt);
+        });
   }
 
   /**

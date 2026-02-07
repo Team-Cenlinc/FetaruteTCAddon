@@ -117,6 +117,7 @@
 - 健康检查支持分级修复与冷却控制：
   - `STALL`：`refreshSignal -> forceRelaunch`
   - `PROGRESS_STUCK`：`refreshSignal -> reissueDestination -> forceRelaunch`
+- 健康检查由独立定时任务驱动（每秒 tick + `health.check-interval-seconds` 间隔门控），不再依赖信号监控任务触发。
 - `STOP` 信号下的 progress stuck 允许更长宽限（`health.progress-stop-grace-seconds`），避免将正常排队误判为异常。
 - 连续修复动作之间受 `health.recovery-cooldown-seconds` 限制，降低高频场景下的抖动与过度修复。
 - 详见 `docs/dev/health-monitor.md`。

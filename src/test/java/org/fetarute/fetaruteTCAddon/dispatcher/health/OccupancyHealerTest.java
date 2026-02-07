@@ -62,16 +62,17 @@ class OccupancyHealerTest {
   }
 
   @Test
-  @DisplayName("超时占用：超过阈值时释放占用")
+  @DisplayName("超时占用：仅对离线列车生效（禁用孤儿清理时）")
   void cleanupTimeoutOccupancy() {
+    healer.setOrphanCleanupEnabled(false);
     Instant now = Instant.now();
     OccupancyResource resource = nodeResource("SURC:S:TEST:1");
     // 11 分钟前获取的占用（默认超时 10 分钟）
     OccupancyClaim c = claim(resource, "train1", now.minus(Duration.ofMinutes(11)));
     when(occupancyManager.snapshotClaims()).thenReturn(List.of(c));
 
-    // train1 仍然存活
-    OccupancyHealer.HealResult result = healer.heal(Set.of("train1"), now);
+    // train1 不在活跃列表，走超时清理分支
+    OccupancyHealer.HealResult result = healer.heal(Set.of("other-train"), now);
 
     assertEquals(0, result.orphanCleaned());
     assertEquals(1, result.timeoutCleaned(), "应清理 1 个超时占用");
@@ -126,8 +127,9 @@ class OccupancyHealerTest {
   }
 
   @Test
-  @DisplayName("自定义超时阈值：5分钟")
+  @DisplayName("自定义超时阈值：5分钟（仅离线列车）")
   void customTimeoutThreshold() {
+    healer.setOrphanCleanupEnabled(false);
     healer.setOccupancyTimeout(Duration.ofMinutes(5));
     Instant now = Instant.now();
     OccupancyResource resource = nodeResource("SURC:S:TEST:1");
@@ -135,7 +137,7 @@ class OccupancyHealerTest {
     OccupancyClaim c = claim(resource, "train1", now.minus(Duration.ofMinutes(6)));
     when(occupancyManager.snapshotClaims()).thenReturn(List.of(c));
 
-    OccupancyHealer.HealResult result = healer.heal(Set.of("train1"), now);
+    OccupancyHealer.HealResult result = healer.heal(Set.of("other-train"), now);
 
     assertEquals(1, result.timeoutCleaned(), "应按自定义阈值清理");
   }
@@ -176,7 +178,7 @@ class OccupancyHealerTest {
   }
 
   @Test
-  @DisplayName("混合场景：同时有孤儿和超时占用")
+  @DisplayName("混合场景：在线列车超时不清理，仅清理孤儿占用")
   void mixedCleanup() {
     Instant now = Instant.now();
     OccupancyResource orphanResource = nodeResource("SURC:S:TEST:1");
@@ -189,10 +191,10 @@ class OccupancyHealerTest {
     OccupancyHealer.HealResult result = healer.heal(Set.of("train1"), now);
 
     assertEquals(1, result.orphanCleaned());
-    assertEquals(1, result.timeoutCleaned());
-    assertEquals(2, result.total());
+    assertEquals(0, result.timeoutCleaned());
+    assertEquals(1, result.total());
     assertTrue(result.hasChanges());
-    verify(occupancyManager, times(2)).releaseResource(any(), any());
+    verify(occupancyManager, times(1)).releaseResource(any(), any());
   }
 
   @Test

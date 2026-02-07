@@ -118,8 +118,8 @@ public final class FtaHealthCommand {
     sender.sendMessage(Component.text("===== /fta health =====", NamedTextColor.DARK_AQUA));
     sendHelpLine(sender, "/fta health status", "查看健康监控状态");
     sendHelpLine(sender, "/fta health alerts [limit]", "查看最近告警");
-    sendHelpLine(sender, "/fta health check", "立即执行一次检查");
-    sendHelpLine(sender, "/fta health heal [train]", "手动触发修复");
+    sendHelpLine(sender, "/fta health check", "立即执行一次检查与解锁");
+    sendHelpLine(sender, "/fta health heal [train]", "手动触发强制修复");
     sendHelpLine(sender, "/fta health toggle", "开关健康监控");
     sendHelpLine(sender, "/fta health clear", "清除历史告警");
   }
@@ -224,7 +224,7 @@ public final class FtaHealthCommand {
     }
     sender.sendMessage(Component.text("正在执行健康检查...", NamedTextColor.GRAY));
 
-    HealthMonitor.CheckResult result = monitorOpt.get().checkNow();
+    HealthMonitor.CheckResult result = monitorOpt.get().healNow();
 
     if (!result.hasIssues()) {
       sender.sendMessage(Component.text("检查完成，未发现异常", NamedTextColor.GREEN));
@@ -248,7 +248,7 @@ public final class FtaHealthCommand {
 
     if (train == null || train.isBlank()) {
       // 执行全局检查+修复
-      HealthMonitor.CheckResult result = monitorOpt.get().checkNow();
+      HealthMonitor.CheckResult result = monitorOpt.get().healNow();
       sender.sendMessage(
           Component.text("全局修复完成: 修复了 " + result.totalFixed() + " 个问题", NamedTextColor.GREEN));
     } else {
@@ -258,12 +258,15 @@ public final class FtaHealthCommand {
           .ifPresentOrElse(
               dispatch -> {
                 dispatch.refreshSignalByName(train);
-                boolean relaunched = dispatch.forceRelaunchByName(train);
-                if (relaunched) {
+                boolean reissued = dispatch.reissueDestinationByName(train);
+                boolean relaunched = !reissued && dispatch.forceRelaunchByName(train);
+                if (reissued) {
+                  sender.sendMessage(Component.text("已刷新信号并重发目的地: " + train, NamedTextColor.GREEN));
+                } else if (relaunched) {
                   sender.sendMessage(Component.text("已刷新信号并重发列车: " + train, NamedTextColor.GREEN));
                 } else {
                   sender.sendMessage(
-                      Component.text("已刷新信号，但重发失败（列车可能无 route）: " + train, NamedTextColor.YELLOW));
+                      Component.text("已刷新信号，但修复失败（列车可能无 route）: " + train, NamedTextColor.YELLOW));
                 }
               },
               () -> sender.sendMessage(Component.text("运行时调度服务未初始化", NamedTextColor.RED)));

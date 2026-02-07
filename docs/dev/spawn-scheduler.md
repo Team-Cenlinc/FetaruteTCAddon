@@ -95,7 +95,11 @@ TicketAssigner 会优先使用 `spawn_depots` 做均衡选择；若未配置，�
 ### Layover 复用触发
 - 当 Layover 池暂无可用列车时，票据会进入待命队列（不会持续 requeue 刷屏）。
 - 一旦列车进入 Layover，将立即触发一次复用尝试，减少等待延迟。
-- **超时清理**：票据在待命队列中等待超过 300 秒仍无法复用时，会被丢弃并记录警告日志，防止无候选列车的票据永久积压。
+- 待命队列在同一 `line + terminal` 维度按 route 轮转尝试，避免同权重 route 长期偏斜。
+- 复用时会遍历所有 `readyAt <= now` 的候选列车；若首个候选被门控阻塞，会继续尝试下一个候选。
+- **超时刷新**：票据在待命队列中等待超过 300 秒时，不会直接丢弃；系统会刷新等待窗口并记录告警，避免 route 饥饿。
+- **降级补发**：若配置了 `spawn.layover-fallback-multiplier > 0`，且等待时长达到 `baseHeadway * multiplier`，会尝试从 Depot 补发 RETURN 票据（优先保持服务连续性）。
+- 若 pending 票据对应 route 定义已删除，系统会直接完成该票据并释放 backlog，避免“幽灵 pending”长期占位。
 
 ### DYNAMIC 首站支持
 

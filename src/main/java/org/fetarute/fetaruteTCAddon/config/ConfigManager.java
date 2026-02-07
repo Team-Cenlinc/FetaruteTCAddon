@@ -135,6 +135,8 @@ public final class ConfigManager {
     int stallThresholdSeconds = 30;
     int progressStuckThresholdSeconds = 60;
     int progressStopGraceSeconds = 180;
+    int deadlockThresholdSeconds = 45;
+    int blockerSnapshotMaxAgeSeconds = 20;
     int recoveryCooldownSeconds = 10;
     int occupancyTimeoutMinutes = 10;
     boolean orphanCleanupEnabled = true;
@@ -166,6 +168,19 @@ public final class ConfigManager {
         logger.warning("health.progress-stop-grace-seconds 配置无效: " + progressStopGraceSeconds);
         progressStopGraceSeconds = 180;
       }
+      deadlockThresholdSeconds =
+          section.getInt("deadlock-threshold-seconds", deadlockThresholdSeconds);
+      if (deadlockThresholdSeconds <= 0) {
+        logger.warning("health.deadlock-threshold-seconds 配置无效: " + deadlockThresholdSeconds);
+        deadlockThresholdSeconds = 45;
+      }
+      blockerSnapshotMaxAgeSeconds =
+          section.getInt("blocker-snapshot-max-age-seconds", blockerSnapshotMaxAgeSeconds);
+      if (blockerSnapshotMaxAgeSeconds <= 0) {
+        logger.warning(
+            "health.blocker-snapshot-max-age-seconds 配置无效: " + blockerSnapshotMaxAgeSeconds);
+        blockerSnapshotMaxAgeSeconds = 20;
+      }
       recoveryCooldownSeconds =
           section.getInt("recovery-cooldown-seconds", recoveryCooldownSeconds);
       if (recoveryCooldownSeconds <= 0) {
@@ -188,6 +203,8 @@ public final class ConfigManager {
         stallThresholdSeconds,
         progressStuckThresholdSeconds,
         progressStopGraceSeconds,
+        deadlockThresholdSeconds,
+        blockerSnapshotMaxAgeSeconds,
         recoveryCooldownSeconds,
         occupancyTimeoutMinutes,
         orphanCleanupEnabled,
@@ -750,6 +767,8 @@ public final class ConfigManager {
       int stallThresholdSeconds,
       int progressStuckThresholdSeconds,
       int progressStopGraceSeconds,
+      int deadlockThresholdSeconds,
+      int blockerSnapshotMaxAgeSeconds,
       int recoveryCooldownSeconds,
       int occupancyTimeoutMinutes,
       boolean orphanCleanupEnabled,
@@ -767,6 +786,12 @@ public final class ConfigManager {
       if (progressStopGraceSeconds <= 0) {
         throw new IllegalArgumentException("progressStopGraceSeconds 必须为正数");
       }
+      if (deadlockThresholdSeconds <= 0) {
+        throw new IllegalArgumentException("deadlockThresholdSeconds 必须为正数");
+      }
+      if (blockerSnapshotMaxAgeSeconds <= 0) {
+        throw new IllegalArgumentException("blockerSnapshotMaxAgeSeconds 必须为正数");
+      }
       if (recoveryCooldownSeconds <= 0) {
         throw new IllegalArgumentException("recoveryCooldownSeconds 必须为正数");
       }
@@ -776,7 +801,7 @@ public final class ConfigManager {
     }
 
     public static HealthSettings defaults() {
-      return new HealthSettings(true, 5, true, 30, 60, 180, 10, 10, true, true);
+      return new HealthSettings(true, 5, true, 30, 60, 180, 45, 20, 10, 10, true, true);
     }
   }
 

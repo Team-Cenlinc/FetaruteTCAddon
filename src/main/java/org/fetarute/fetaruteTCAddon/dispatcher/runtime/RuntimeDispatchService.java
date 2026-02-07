@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -16,6 +17,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -136,6 +138,8 @@ public final class RuntimeDispatchService {
       new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
   private final java.util.concurrent.ConcurrentMap<String, Integer> operatorPriorityCache =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, BlockerSnapshot> blockerSnapshots =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   /**
    * 运行时有效节点覆盖（按列车名 + route index）。
@@ -150,6 +154,7 @@ public final class RuntimeDispatchService {
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
+  private static final Duration BLOCKER_SNAPSHOT_TTL = Duration.ofSeconds(20);
 
   /** 节点历史缓存：记录列车最近经过的节点（用于回退检测）。 */
   private final java.util.concurrent.ConcurrentMap<String, NodeHistory> nodeHistoryCache =
@@ -323,6 +328,7 @@ public final class RuntimeDispatchService {
       return false;
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
+    updateBlockerSnapshot(trainName, decision, now);
     logDeadlockReleaseIfNeeded(trainName, decision, "departure");
     if (!decision.allowed()) {
       debugLogger.accept(
@@ -1124,6 +1130,7 @@ public final class RuntimeDispatchService {
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+    blockerSnapshots.remove(normalizeTrainKey(trainName));
   }
 
   /**
@@ -1133,9 +1140,35 @@ public final class RuntimeDispatchService {
    * @param progressIndex 当前进度索引
    * @param signalAspect 当前信号
    * @param speedBlocksPerTick 当前速度（blocks/tick）
+   * @param lastPassedGraphNode 最近一次经过的图节点（可为空）
    */
   public record TrainRuntimeState(
-      String trainName, int progressIndex, SignalAspect signalAspect, double speedBlocksPerTick) {}
+      String trainName,
+      int progressIndex,
+      SignalAspect signalAspect,
+      double speedBlocksPerTick,
+      Optional<NodeId> lastPassedGraphNode) {
+
+    /**
+     * 兼容旧构造：未提供图节点推进信息时，默认视为未知。
+     *
+     * @param trainName 列车名
+     * @param progressIndex 当前进度索引
+     * @param signalAspect 当前信号
+     * @param speedBlocksPerTick 当前速度（blocks/tick）
+     */
+    public TrainRuntimeState(
+        String trainName, int progressIndex, SignalAspect signalAspect, double speedBlocksPerTick) {
+      this(trainName, progressIndex, signalAspect, speedBlocksPerTick, Optional.empty());
+    }
+  }
+
+  private record BlockerSnapshot(Set<String> blockerTrainNames, Instant sampledAt) {
+    private BlockerSnapshot {
+      blockerTrainNames = blockerTrainNames == null ? Set.of() : Set.copyOf(blockerTrainNames);
+      sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
+    }
+  }
 
   /**
    * 获取列车运行时状态快照。
@@ -1166,7 +1199,36 @@ public final class RuntimeDispatchService {
       }
     }
 
-    return Optional.of(new TrainRuntimeState(trainName, idx, signal, speedBpt));
+    return Optional.of(
+        new TrainRuntimeState(trainName, idx, signal, speedBpt, entry.lastPassedGraphNode()));
+  }
+
+  /**
+   * 获取列车最近一次占用判定中的阻塞列车集合。
+   *
+   * <p>用于健康监控识别“互相阻塞”场景。返回值会按 {@code maxAge} 过滤，避免使用过期快照。
+   *
+   * @param trainName 列车名
+   * @param maxAge 最大快照年龄（为空时使用默认 TTL）
+   * @return 阻塞列车集合（不含自身）
+   */
+  public Set<String> recentBlockerTrains(String trainName, Duration maxAge) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return Set.of();
+    }
+    BlockerSnapshot snapshot = blockerSnapshots.get(key);
+    if (snapshot == null) {
+      return Set.of();
+    }
+    Duration ttl =
+        maxAge == null || maxAge.isNegative() || maxAge.isZero() ? BLOCKER_SNAPSHOT_TTL : maxAge;
+    Instant cutoff = Instant.now().minus(ttl);
+    if (snapshot.sampledAt().isBefore(cutoff)) {
+      blockerSnapshots.remove(key, snapshot);
+      return Set.of();
+    }
+    return snapshot.blockerTrainNames();
   }
 
   /**
@@ -1656,6 +1718,7 @@ public final class RuntimeDispatchService {
     releaseResourcesNotInRequest(trainName, keepResources);
     retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
     OccupancyDecision decision = occupancyManager.canEnter(request);
+    updateBlockerSnapshot(trainName, decision, now);
     if (!decision.allowed()) {
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
     }
@@ -2014,6 +2077,7 @@ public final class RuntimeDispatchService {
     }
     // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+    blockerSnapshots.remove(normalizeTrainKey(trainName));
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
     if (routeOpt.isEmpty()) {
@@ -2127,6 +2191,7 @@ public final class RuntimeDispatchService {
       decision = occupancyManager.canEnter(ctx.request());
     }
     OccupancyRequest request = ctx.request();
+    updateBlockerSnapshot(trainName, decision, now);
     if (!decision.allowed()) {
       debugLogger.accept("Layover 发车受阻: train=" + trainName + " signal=" + decision.signal());
       return false;
@@ -5120,6 +5185,34 @@ public final class RuntimeDispatchService {
       builder.append(" +").append(decision.blockers().size() - count);
     }
     return builder.toString();
+  }
+
+  private void updateBlockerSnapshot(String trainName, OccupancyDecision decision, Instant now) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    if (decision == null || decision.blockers().isEmpty()) {
+      blockerSnapshots.remove(key);
+      return;
+    }
+    Set<String> blockers = new LinkedHashSet<>();
+    for (OccupancyClaim claim : decision.blockers()) {
+      if (claim == null || claim.trainName() == null || claim.trainName().isBlank()) {
+        continue;
+      }
+      String blocker = claim.trainName().trim();
+      if (blocker.equalsIgnoreCase(trainName)) {
+        continue;
+      }
+      blockers.add(blocker);
+    }
+    if (blockers.isEmpty()) {
+      blockerSnapshots.remove(key);
+      return;
+    }
+    Instant sampledAt = now == null ? Instant.now() : now;
+    blockerSnapshots.put(key, new BlockerSnapshot(blockers, sampledAt));
   }
 
   private String diagnoseBuildFailure(

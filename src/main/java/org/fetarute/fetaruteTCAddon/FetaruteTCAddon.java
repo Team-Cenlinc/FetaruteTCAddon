@@ -114,6 +114,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private RuntimeDispatchService runtimeDispatchService;
   private ReclaimManager reclaimManager;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
+  private org.bukkit.scheduler.BukkitTask healthMonitorTask;
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
   private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
@@ -181,6 +182,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (runtimeMonitorTask != null) {
       runtimeMonitorTask.cancel();
       runtimeMonitorTask = null;
+    }
+    if (healthMonitorTask != null) {
+      healthMonitorTask.cancel();
+      healthMonitorTask = null;
     }
     if (healthMonitor != null) {
       healthMonitor.clear();
@@ -254,6 +259,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
       hudDefaultTemplateService.reload();
     }
     initRouteDefinitionCache();
+    initHealthMonitor();
+    restartHealthMonitorTask();
     restartRuntimeMonitor();
     initSpawnScheduler();
     initReclaimManager();
@@ -545,9 +552,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (etaService != null) {
       runtimeDispatchService.setEtaService(etaService);
     }
+    initHealthMonitor();
+    restartHealthMonitorTask();
     restartRuntimeMonitor();
     initSignalEventDrivenComponents();
-    initHealthMonitor();
     getServer()
         .getScheduler()
         .runTaskLater(
@@ -673,10 +681,23 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     trainSnapshotStore,
                     dwellRegistry,
                     routeProgressRegistry,
-                    routeDefinitionCache,
-                    healthMonitor),
+                    routeDefinitionCache),
                 interval,
                 interval);
+  }
+
+  /** 重启健康检查定时任务（与 RuntimeSignalMonitor 解耦，避免遗漏初始化或异常链路影响）。 */
+  private void restartHealthMonitorTask() {
+    if (healthMonitorTask != null) {
+      healthMonitorTask.cancel();
+      healthMonitorTask = null;
+    }
+    if (healthMonitor == null) {
+      return;
+    }
+    // 固定 1s tick，具体检查频率由 HealthMonitor.checkInterval 控制。
+    healthMonitorTask =
+        getServer().getScheduler().runTaskTimer(this, healthMonitor::tick, 20L, 20L);
   }
 
   public Optional<DwellRegistry> getDwellRegistry() {
@@ -711,6 +732,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
         java.time.Duration.ofSeconds(settings.progressStuckThresholdSeconds()));
     healthMonitor.setProgressStopGraceThreshold(
         java.time.Duration.ofSeconds(settings.progressStopGraceSeconds()));
+    healthMonitor.setDeadlockThreshold(
+        java.time.Duration.ofSeconds(settings.deadlockThresholdSeconds()));
+    healthMonitor.setBlockerSnapshotMaxAge(
+        java.time.Duration.ofSeconds(settings.blockerSnapshotMaxAgeSeconds()));
     healthMonitor.setRecoveryCooldown(
         java.time.Duration.ofSeconds(settings.recoveryCooldownSeconds()));
     healthMonitor.setOccupancyTimeout(
@@ -906,6 +931,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (runtimeMonitorTask != null) {
       runtimeMonitorTask.cancel();
       runtimeMonitorTask = null;
+    }
+    if (healthMonitorTask != null) {
+      healthMonitorTask.cancel();
+      healthMonitorTask = null;
     }
   }
 
