@@ -2794,7 +2794,10 @@ public final class RuntimeDispatchService {
       String sessionId,
       String reason) {
     try {
-      com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(event);
+      // 关键：强制按 group 语义执行 centerTrain，避免某些事件上下文被识别为 cart sign 后只按单车居中。
+      SignActionEvent centerEvent = adaptForGroupCenter(event, group);
+      com.bergerkiller.bukkit.tc.Station station =
+          new com.bergerkiller.bukkit.tc.Station(centerEvent);
       group.getActions().launchReset();
       station.centerTrain();
 
@@ -2806,7 +2809,11 @@ public final class RuntimeDispatchService {
               + " dwell="
               + dwellSeconds
               + "s reason="
-              + reason);
+              + reason
+              + " signMode="
+              + (event.isTrainSign() ? "train" : event.isCartSign() ? "cart" : "unknown")
+              + " centeredAs="
+              + (centerEvent.isTrainSign() ? "train" : "cart"));
 
       if (dwellSeconds > 0 && dwellRegistry != null) {
         scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds, key, sessionId);
@@ -2824,6 +2831,24 @@ public final class RuntimeDispatchService {
               + " error="
               + ex.getClass().getSimpleName());
     }
+  }
+
+  /**
+   * 生成“组居中专用”的 SignActionEvent。
+   *
+   * <p>Waypoint STOP/TERM 的目标是让整个 MinecartGroup 以牌子中心对齐；若事件在某些上下文被视为 cart sign，TrainCarts 的
+   * Station.centerTrain() 会退化为单车居中。这里通过事件包装强制走 train-sign 分支，保证按整列车计算中心。
+   *
+   * @param original 原始牌子事件
+   * @param group 当前列车组
+   * @return 强制 train-sign 语义的事件视图
+   */
+  private static SignActionEvent adaptForGroupCenter(
+      SignActionEvent original, com.bergerkiller.bukkit.tc.controller.MinecartGroup group) {
+    if (original.getTrackedSign() != null) {
+      return new GroupCenterSignActionEvent(original.getTrackedSign(), group, original.getAction());
+    }
+    return new GroupCenterSignActionEvent(original.getBlock(), group, original.getAction());
   }
 
   /**
@@ -2929,6 +2954,44 @@ public final class RuntimeDispatchService {
       return JavaPlugin.getProvidingPlugin(RuntimeDispatchService.class);
     } catch (Throwable ignored) {
       return null;
+    }
+  }
+
+  /**
+   * 强制“train sign 语义”的事件包装。
+   *
+   * <p>只用于 waypoint 居中流程，避免影响其他调度逻辑。
+   */
+  private static final class GroupCenterSignActionEvent extends SignActionEvent {
+
+    GroupCenterSignActionEvent(
+        com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign sign,
+        com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
+        SignActionType actionType) {
+      super(sign, group);
+      if (actionType != null) {
+        setAction(actionType);
+      }
+    }
+
+    GroupCenterSignActionEvent(
+        org.bukkit.block.Block signBlock,
+        com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
+        SignActionType actionType) {
+      super(signBlock, group);
+      if (actionType != null) {
+        setAction(actionType);
+      }
+    }
+
+    @Override
+    public boolean isCartSign() {
+      return false;
+    }
+
+    @Override
+    public boolean isTrainSign() {
+      return true;
     }
   }
 

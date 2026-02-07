@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -577,7 +578,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         continue;
       }
       String terminalKey = route.waypoints().get(0).value();
-      if (terminalFilter.isPresent() && !terminalFilter.get().equalsIgnoreCase(terminalKey)) {
+      if (terminalFilter.isPresent()
+          && !matchesPendingTerminal(terminalFilter.get(), terminalKey)) {
         continue;
       }
       String groupKey = buildPendingLayoverGroupKey(service, terminalKey);
@@ -598,6 +600,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       dispatchOrder.addAll(orderPendingGroupWithRouteRotation(groupKey, groupEntries));
     }
     return dispatchOrder;
+  }
+
+  /**
+   * 判断 pending 票据的起点是否匹配当前 Layover 触发终端。
+   *
+   * <p>使用 terminalKey 语义匹配而非字符串全等，支持同站不同站台（如 {@code SURC:S:PPK:1} 与 {@code SURC:S:PPK:2}） 的即时唤醒派发。
+   */
+  private static boolean matchesPendingTerminal(
+      String triggerTerminalKey, String pendingTerminalKey) {
+    if (triggerTerminalKey == null || triggerTerminalKey.isBlank()) {
+      return false;
+    }
+    if (pendingTerminalKey == null || pendingTerminalKey.isBlank()) {
+      return false;
+    }
+    return TerminalKeyResolver.matches(triggerTerminalKey, pendingTerminalKey)
+        || TerminalKeyResolver.matches(pendingTerminalKey, triggerTerminalKey);
   }
 
   /**

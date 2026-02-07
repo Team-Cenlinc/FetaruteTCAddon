@@ -40,12 +40,19 @@ public record SpawnTicket(
     return dueAt;
   }
 
+  /**
+   * 创建重试票据。
+   *
+   * <p>重试时会将 {@code dueAt} 推进到不早于 {@code notBefore} 的时间点，避免长期失败票据持续压住队头，造成同权重 route 饥饿。
+   */
   public SpawnTicket withRetry(Instant nextNotBefore, String error) {
+    Instant nextWindow = nextNotBefore == null ? notBefore : nextNotBefore;
+    Instant nextDueAt = nextWindow.isAfter(dueAt) ? nextWindow : dueAt;
     return new SpawnTicket(
         id,
         service,
-        dueAt,
-        nextNotBefore == null ? notBefore : nextNotBefore,
+        nextDueAt,
+        nextWindow,
         attempts + 1,
         sequenceNumber,
         Optional.empty(),

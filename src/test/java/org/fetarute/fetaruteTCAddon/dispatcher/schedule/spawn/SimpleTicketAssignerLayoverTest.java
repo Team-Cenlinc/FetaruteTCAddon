@@ -268,6 +268,54 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
+  void onLayoverRegisteredMatchesPendingTerminalByStationKeyForDynamicPlaceholder() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider = mockProviderForRoutes(lineId, Map.of(routeId, "R1"), false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "surc:s:ppk:2", NodeId.of("SURC:S:PPK:2"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("SURC:S:PPK:1"))
+        .thenReturn(
+            List.of(), // tick: 首次进入 pending
+            List.of(candidate)); // onLayoverRegistered: 触发 pending 派发
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(true);
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(Map.of(routeId, routeDefinition("SURC:MT:R1", "SURC:S:PPK:1"))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+    assertEquals(1, assigner.snapshotPendingTickets().size(), "首次应进入 pending");
+
+    assigner.onLayoverRegistered(candidate);
+
+    verify(runtimeDispatchService).dispatchLayover(eq(candidate), any(ServiceTicket.class));
+    verify(spawnManager).complete(ticket);
+    assertEquals(0, assigner.snapshotPendingTickets().size(), "匹配成功后应从 pending 移除");
+  }
+
+  @Test
   void tickCompletesPendingTicketWhenRouteDefinitionDisappears() {
     UUID lineId = UUID.randomUUID();
     UUID routeId = UUID.randomUUID();
@@ -417,8 +465,12 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   private static RouteDefinition routeDefinition(String routeValue) {
+    return routeDefinition(routeValue, "A");
+  }
+
+  private static RouteDefinition routeDefinition(String routeValue, String startNode) {
     return new RouteDefinition(
-        RouteId.of(routeValue), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+        RouteId.of(routeValue), List.of(NodeId.of(startNode), NodeId.of("B")), Optional.empty());
   }
 
   private static ConfigManager mockConfigManager() {

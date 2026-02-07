@@ -258,6 +258,17 @@
         <Method name="chooseDoorSideByWorld"/>
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
+    <!-- 预热阶段主动触发 attachment 访问以完成模型初始化，返回值不使用属于预期行为。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController"/>
+        <Method name="warmUpDoorAnimations"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController"/>
+        <Method name="warmUpAnchors"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
 
     <!-- EtaService attach 方法存储外部引用，调用方负责生命周期管理 -->
     <Match>
