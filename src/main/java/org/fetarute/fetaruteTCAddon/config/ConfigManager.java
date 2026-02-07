@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 16;
+  private static final int EXPECTED_CONFIG_VERSION = 18;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -45,6 +45,13 @@ public final class ConfigManager {
   private static final SpeedCurveType DEFAULT_SPEED_CURVE_TYPE = SpeedCurveType.PHYSICS;
   private static final double DEFAULT_SPEED_CURVE_FACTOR = 1.0;
   private static final double DEFAULT_SPEED_CURVE_EARLY_BRAKE_BLOCKS = 0.0;
+  private static final boolean DEFAULT_MOVEMENT_AUTHORITY_ENABLED = true;
+  private static final double DEFAULT_MOVEMENT_AUTHORITY_STOP_MARGIN_BLOCKS = 2.0;
+  private static final double DEFAULT_MOVEMENT_AUTHORITY_CAUTION_MARGIN_BLOCKS = 8.0;
+  private static final double DEFAULT_SPEED_COMMAND_HYSTERESIS_BPS = 0.15;
+  private static final double DEFAULT_SPEED_COMMAND_ACCEL_FACTOR = 1.0;
+  private static final double DEFAULT_SPEED_COMMAND_DECEL_FACTOR = 1.0;
+  private static final int DEFAULT_DISTANCE_CACHE_REFRESH_SECONDS = 3;
   private static final double DEFAULT_FAILOVER_STALL_SPEED_BPS = 0.2;
   private static final int DEFAULT_FAILOVER_STALL_TICKS = 60;
   private static final boolean DEFAULT_FAILOVER_UNREACHABLE_STOP = true;
@@ -127,6 +134,8 @@ public final class ConfigManager {
     boolean autoFixEnabled = true;
     int stallThresholdSeconds = 30;
     int progressStuckThresholdSeconds = 60;
+    int progressStopGraceSeconds = 180;
+    int recoveryCooldownSeconds = 10;
     int occupancyTimeoutMinutes = 10;
     boolean orphanCleanupEnabled = true;
     boolean timeoutCleanupEnabled = true;
@@ -151,6 +160,18 @@ public final class ConfigManager {
             "health.progress-stuck-threshold-seconds 配置无效: " + progressStuckThresholdSeconds);
         progressStuckThresholdSeconds = 60;
       }
+      progressStopGraceSeconds =
+          section.getInt("progress-stop-grace-seconds", progressStopGraceSeconds);
+      if (progressStopGraceSeconds <= 0) {
+        logger.warning("health.progress-stop-grace-seconds 配置无效: " + progressStopGraceSeconds);
+        progressStopGraceSeconds = 180;
+      }
+      recoveryCooldownSeconds =
+          section.getInt("recovery-cooldown-seconds", recoveryCooldownSeconds);
+      if (recoveryCooldownSeconds <= 0) {
+        logger.warning("health.recovery-cooldown-seconds 配置无效: " + recoveryCooldownSeconds);
+        recoveryCooldownSeconds = 10;
+      }
       occupancyTimeoutMinutes =
           section.getInt("occupancy-timeout-minutes", occupancyTimeoutMinutes);
       if (occupancyTimeoutMinutes <= 0) {
@@ -166,6 +187,8 @@ public final class ConfigManager {
         autoFixEnabled,
         stallThresholdSeconds,
         progressStuckThresholdSeconds,
+        progressStopGraceSeconds,
+        recoveryCooldownSeconds,
         occupancyTimeoutMinutes,
         orphanCleanupEnabled,
         timeoutCleanupEnabled);
@@ -379,6 +402,13 @@ public final class ConfigManager {
     SpeedCurveType speedCurveType = DEFAULT_SPEED_CURVE_TYPE;
     double speedCurveFactor = DEFAULT_SPEED_CURVE_FACTOR;
     double speedCurveEarlyBrakeBlocks = DEFAULT_SPEED_CURVE_EARLY_BRAKE_BLOCKS;
+    boolean movementAuthorityEnabled = DEFAULT_MOVEMENT_AUTHORITY_ENABLED;
+    double movementAuthorityStopMarginBlocks = DEFAULT_MOVEMENT_AUTHORITY_STOP_MARGIN_BLOCKS;
+    double movementAuthorityCautionMarginBlocks = DEFAULT_MOVEMENT_AUTHORITY_CAUTION_MARGIN_BLOCKS;
+    double speedCommandHysteresisBps = DEFAULT_SPEED_COMMAND_HYSTERESIS_BPS;
+    double speedCommandAccelFactor = DEFAULT_SPEED_COMMAND_ACCEL_FACTOR;
+    double speedCommandDecelFactor = DEFAULT_SPEED_COMMAND_DECEL_FACTOR;
+    int distanceCacheRefreshSeconds = DEFAULT_DISTANCE_CACHE_REFRESH_SECONDS;
     double failoverStallSpeed = DEFAULT_FAILOVER_STALL_SPEED_BPS;
     int failoverStallTicks = DEFAULT_FAILOVER_STALL_TICKS;
     boolean failoverUnreachableStop = DEFAULT_FAILOVER_UNREACHABLE_STOP;
@@ -514,6 +544,58 @@ public final class ConfigManager {
         logger.warning(
             "runtime.speed-curve-early-brake-blocks 配置无效: " + configuredSpeedCurveEarlyBrake);
       }
+      movementAuthorityEnabled =
+          section.getBoolean("movement-authority-enabled", movementAuthorityEnabled);
+      double configuredAuthorityStopMargin =
+          section.getDouble(
+              "movement-authority-stop-margin-blocks", movementAuthorityStopMarginBlocks);
+      if (Double.isFinite(configuredAuthorityStopMargin) && configuredAuthorityStopMargin >= 0.0) {
+        movementAuthorityStopMarginBlocks = configuredAuthorityStopMargin;
+      } else {
+        logger.warning(
+            "runtime.movement-authority-stop-margin-blocks 配置无效: " + configuredAuthorityStopMargin);
+      }
+      double configuredAuthorityCautionMargin =
+          section.getDouble(
+              "movement-authority-caution-margin-blocks", movementAuthorityCautionMarginBlocks);
+      if (Double.isFinite(configuredAuthorityCautionMargin)
+          && configuredAuthorityCautionMargin >= movementAuthorityStopMarginBlocks) {
+        movementAuthorityCautionMarginBlocks = configuredAuthorityCautionMargin;
+      } else {
+        logger.warning(
+            "runtime.movement-authority-caution-margin-blocks 配置无效: "
+                + configuredAuthorityCautionMargin
+                + "（需 >= movement-authority-stop-margin-blocks）");
+      }
+      double configuredHysteresis =
+          section.getDouble("speed-command-hysteresis-bps", speedCommandHysteresisBps);
+      if (Double.isFinite(configuredHysteresis) && configuredHysteresis >= 0.0) {
+        speedCommandHysteresisBps = configuredHysteresis;
+      } else {
+        logger.warning("runtime.speed-command-hysteresis-bps 配置无效: " + configuredHysteresis);
+      }
+      double configuredAccelFactor =
+          section.getDouble("speed-command-accel-factor", speedCommandAccelFactor);
+      if (Double.isFinite(configuredAccelFactor) && configuredAccelFactor > 0.0) {
+        speedCommandAccelFactor = configuredAccelFactor;
+      } else {
+        logger.warning("runtime.speed-command-accel-factor 配置无效: " + configuredAccelFactor);
+      }
+      double configuredDecelFactor =
+          section.getDouble("speed-command-decel-factor", speedCommandDecelFactor);
+      if (Double.isFinite(configuredDecelFactor) && configuredDecelFactor > 0.0) {
+        speedCommandDecelFactor = configuredDecelFactor;
+      } else {
+        logger.warning("runtime.speed-command-decel-factor 配置无效: " + configuredDecelFactor);
+      }
+      int configuredDistanceCacheRefresh =
+          section.getInt("distance-cache-refresh-seconds", distanceCacheRefreshSeconds);
+      if (configuredDistanceCacheRefresh > 0) {
+        distanceCacheRefreshSeconds = configuredDistanceCacheRefresh;
+      } else {
+        logger.warning(
+            "runtime.distance-cache-refresh-seconds 配置无效: " + configuredDistanceCacheRefresh);
+      }
       double configuredStallSpeed =
           section.getDouble("failover-stall-speed-bps", failoverStallSpeed);
       if (Double.isFinite(configuredStallSpeed) && configuredStallSpeed >= 0.0) {
@@ -548,6 +630,13 @@ public final class ConfigManager {
         failoverStallSpeed,
         failoverStallTicks,
         failoverUnreachableStop,
+        movementAuthorityEnabled,
+        movementAuthorityStopMarginBlocks,
+        movementAuthorityCautionMarginBlocks,
+        speedCommandHysteresisBps,
+        speedCommandAccelFactor,
+        speedCommandDecelFactor,
+        distanceCacheRefreshSeconds,
         hudBossBarEnabled,
         hudBossBarTickInterval,
         hudBossBarTemplate,
@@ -660,6 +749,8 @@ public final class ConfigManager {
       boolean autoFixEnabled,
       int stallThresholdSeconds,
       int progressStuckThresholdSeconds,
+      int progressStopGraceSeconds,
+      int recoveryCooldownSeconds,
       int occupancyTimeoutMinutes,
       boolean orphanCleanupEnabled,
       boolean timeoutCleanupEnabled) {
@@ -673,13 +764,19 @@ public final class ConfigManager {
       if (progressStuckThresholdSeconds <= 0) {
         throw new IllegalArgumentException("progressStuckThresholdSeconds 必须为正数");
       }
+      if (progressStopGraceSeconds <= 0) {
+        throw new IllegalArgumentException("progressStopGraceSeconds 必须为正数");
+      }
+      if (recoveryCooldownSeconds <= 0) {
+        throw new IllegalArgumentException("recoveryCooldownSeconds 必须为正数");
+      }
       if (occupancyTimeoutMinutes <= 0) {
         throw new IllegalArgumentException("occupancyTimeoutMinutes 必须为正数");
       }
     }
 
     public static HealthSettings defaults() {
-      return new HealthSettings(true, 5, true, 30, 60, 10, true, true);
+      return new HealthSettings(true, 5, true, 30, 60, 180, 10, 10, true, true);
     }
   }
 
@@ -790,6 +887,13 @@ public final class ConfigManager {
       double failoverStallSpeedBps,
       int failoverStallTicks,
       boolean failoverUnreachableStop,
+      boolean movementAuthorityEnabled,
+      double movementAuthorityStopMarginBlocks,
+      double movementAuthorityCautionMarginBlocks,
+      double speedCommandHysteresisBps,
+      double speedCommandAccelFactor,
+      double speedCommandDecelFactor,
+      int distanceCacheRefreshSeconds,
       boolean hudBossBarEnabled,
       int hudBossBarTickIntervalTicks,
       Optional<String> hudBossBarTemplate,
@@ -841,6 +945,27 @@ public final class ConfigManager {
       }
       if (failoverStallTicks <= 0) {
         throw new IllegalArgumentException("failoverStallTicks 必须为正数");
+      }
+      if (!Double.isFinite(movementAuthorityStopMarginBlocks)
+          || movementAuthorityStopMarginBlocks < 0.0) {
+        throw new IllegalArgumentException("movementAuthorityStopMarginBlocks 必须为非负数");
+      }
+      if (!Double.isFinite(movementAuthorityCautionMarginBlocks)
+          || movementAuthorityCautionMarginBlocks < movementAuthorityStopMarginBlocks) {
+        throw new IllegalArgumentException(
+            "movementAuthorityCautionMarginBlocks 必须大于等于 movementAuthorityStopMarginBlocks");
+      }
+      if (!Double.isFinite(speedCommandHysteresisBps) || speedCommandHysteresisBps < 0.0) {
+        throw new IllegalArgumentException("speedCommandHysteresisBps 必须为非负数");
+      }
+      if (!Double.isFinite(speedCommandAccelFactor) || speedCommandAccelFactor <= 0.0) {
+        throw new IllegalArgumentException("speedCommandAccelFactor 必须为正数");
+      }
+      if (!Double.isFinite(speedCommandDecelFactor) || speedCommandDecelFactor <= 0.0) {
+        throw new IllegalArgumentException("speedCommandDecelFactor 必须为正数");
+      }
+      if (distanceCacheRefreshSeconds <= 0) {
+        throw new IllegalArgumentException("distanceCacheRefreshSeconds 必须为正数");
       }
       if (hudBossBarTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("hudBossBarTickIntervalTicks 必须为正数");

@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -45,6 +46,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnosticsCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthorityService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDistanceCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -53,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -101,6 +105,8 @@ public final class RuntimeDispatchService {
   private final Consumer<String> debugLogger;
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+  private final ShortestPathDistanceCache shortestPathDistanceCache;
+  private final MovementAuthorityService movementAuthorityService = new MovementAuthorityService();
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
   private final java.util.Set<String> missingSignalWarned = new HashSet<>();
   private final java.util.concurrent.ConcurrentMap<String, WaypointStopState> waypointStopStates =
@@ -183,6 +189,21 @@ public final class RuntimeDispatchService {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.dynamicAllocator =
         new DynamicPlatformAllocator(routeDefinitions, occupancyManager, this.debugLogger);
+    this.shortestPathDistanceCache =
+        new ShortestPathDistanceCache(
+            pathFinder, Duration.ofSeconds(resolveDistanceCacheRefreshSeconds()), this.debugLogger);
+  }
+
+  private int resolveDistanceCacheRefreshSeconds() {
+    try {
+      ConfigManager.ConfigView view = configManager.current();
+      if (view != null) {
+        return Math.max(1, view.runtimeSettings().distanceCacheRefreshSeconds());
+      }
+    } catch (RuntimeException ignored) {
+      // 启动早期配置尚未可用时回退默认值
+    }
+    return 3;
   }
 
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
@@ -247,9 +268,7 @@ public final class RuntimeDispatchService {
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     if (stopOpt.isPresent()) {
       RouteStop stop = stopOpt.get();
-      if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
-          && route.lifecycleMode()
-              == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+      if (shouldEnterLayoverAtTerminateStop(route, currentIndex, stop)) {
         handleLayoverRegistrationIfNeeded(trainName, route, definition.nodeId(), properties);
         return false;
       }
@@ -292,6 +311,7 @@ public final class RuntimeDispatchService {
 
     if (contextOpt.isEmpty()) {
       debugLogger.accept("发车门控失败: 构建占用请求失败 train=" + trainName);
+      retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
 
@@ -299,12 +319,20 @@ public final class RuntimeDispatchService {
     releaseResourcesNotInRequest(trainName, request.resourceList());
     if (occupancyManager.shouldYield(request)) {
       debugLogger.accept("发车门控让行: train=" + trainName + " priority=" + priority);
+      retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
     logDeadlockReleaseIfNeeded(trainName, decision, "departure");
     if (!decision.allowed()) {
-      debugLogger.accept("发车门控阻塞: train=" + trainName + " aspect=" + decision.signal());
+      debugLogger.accept(
+          "发车门控阻塞: train="
+              + trainName
+              + " aspect="
+              + decision.signal()
+              + " blockers="
+              + summarizeBlockers(decision));
+      retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
     return true;
@@ -565,9 +593,7 @@ public final class RuntimeDispatchService {
       }
       // 处理 CHANGE 移交指令：仅更新 operator/line 标识，不改变当前 route
       handleChangeAction(trainName, properties, stop);
-      if (stop.passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
-          && route.lifecycleMode()
-              == org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+      if (shouldEnterLayoverAtTerminateStop(route, currentIndex, stop)) {
         int dwellSeconds = resolveWaypointDwellSeconds(stop);
         progressRegistry.advance(
             trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
@@ -1164,6 +1190,60 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 通过列车名重下发“下一跳 destination”（不强制重发）。
+   *
+   * <p>用于健康检查修复：当 routeIndex 长时间不推进、但列车实体仍在线时，先尝试把 destination 恢复为当前索引的下一节点，避免直接 force relaunch
+   * 带来的动作扰动。
+   *
+   * @param trainName 列车名
+   * @return true 表示成功重下发 destination
+   */
+  public boolean reissueDestinationByName(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return false;
+    }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null) {
+      return false;
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
+    if (group == null || !group.isValid()) {
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt = progressRegistry.get(trainName);
+    if (entryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    Optional<RouteDefinition> routeOpt = resolveRouteForRecovery(entry, properties);
+    if (routeOpt.isEmpty()) {
+      return false;
+    }
+    RouteDefinition route = routeOpt.get();
+    int currentIndex = entry.currentIndex();
+    if (currentIndex < 0 || currentIndex >= route.waypoints().size() - 1) {
+      return false;
+    }
+    NodeId nextNode = resolveEffectiveNode(trainName, route, currentIndex + 1);
+    String destinationName = resolveDestinationName(nextNode);
+    if (destinationName == null || destinationName.isBlank()) {
+      destinationName = nextNode.value();
+    }
+    properties.clearDestinationRoute();
+    properties.setDestination(destinationName);
+    debugLogger.accept(
+        "HealthMonitor reissueDestination: train="
+            + trainName
+            + " idx="
+            + currentIndex
+            + " next="
+            + nextNode.value()
+            + " dest="
+            + destinationName);
+    return true;
+  }
+
+  /**
    * 强制重发列车（用于健康检查修复）。
    *
    * @param trainName 列车名
@@ -1187,7 +1267,7 @@ public final class RuntimeDispatchService {
       return false;
     }
     RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
-    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(entry.routeUuid());
+    Optional<RouteDefinition> routeOpt = resolveRouteForRecovery(entry, properties);
     if (routeOpt.isEmpty()) {
       return false;
     }
@@ -1245,6 +1325,22 @@ public final class RuntimeDispatchService {
             + " dir="
             + direction.get().name());
     return true;
+  }
+
+  /**
+   * 健康修复场景下解析线路定义。
+   *
+   * <p>优先使用 progress entry 里的 routeUuid，缺失时回退到列车 tags（operator/line/route 或 FTA_ROUTE_ID）。
+   */
+  private Optional<RouteDefinition> resolveRouteForRecovery(
+      RouteProgressRegistry.RouteProgressEntry entry, TrainProperties properties) {
+    if (entry != null && entry.routeUuid() != null) {
+      Optional<RouteDefinition> byUuid = routeDefinitions.findById(entry.routeUuid());
+      if (byUuid.isPresent()) {
+        return byUuid;
+      }
+    }
+    return resolveRouteDefinition(properties);
   }
 
   private Optional<RailGraph> resolveGraphByGroup(
@@ -1524,6 +1620,8 @@ public final class RuntimeDispatchService {
     }
     RailGraph graph = graphOpt.get();
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
+    shortestPathDistanceCache.setRefreshAfter(
+        Duration.ofSeconds(Math.max(1, runtimeSettings.distanceCacheRefreshSeconds())));
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graph,
@@ -1544,8 +1642,23 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequestContext context = contextOpt.get();
     OccupancyRequest request = context.request();
-    releaseResourcesNotInRequest(trainName, request.resourceList());
+    Optional<NodeId> nextNode =
+        currentIndex + 1 < route.waypoints().size()
+            ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
+            : Optional.empty();
+    Optional<NodeId> currentNodeOpt =
+        currentIndex < route.waypoints().size()
+            ? Optional.ofNullable(currentNodeForSignal)
+            : Optional.empty();
+    List<OccupancyResource> keepResources =
+        mergeKeepResourcesWithCurrentPosition(
+            request.resourceList(), currentNodeOpt, nextNode, graph);
+    releaseResourcesNotInRequest(trainName, keepResources);
+    retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
     OccupancyDecision decision = occupancyManager.canEnter(request);
+    if (!decision.allowed()) {
+      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+    }
     logDeadlockReleaseIfNeeded(trainName, decision, "signal");
     // 冲突区放行锁生效时允许短暂跳过队头/前车扫描，避免信号乒乓
     boolean deadlockRelease = decision.allowed() && !decision.blockers().isEmpty();
@@ -1558,14 +1671,6 @@ public final class RuntimeDispatchService {
             : adjustSignalForForwardTrains(
                 trainName, route, effectiveNodes, currentIndex, graph, baseAspect);
     SignalAspect lastAspect = progressEntry.lastSignal();
-    Optional<NodeId> nextNode =
-        currentIndex + 1 < route.waypoints().size()
-            ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
-            : Optional.empty();
-    Optional<NodeId> currentNodeOpt =
-        currentIndex < route.waypoints().size()
-            ? Optional.ofNullable(currentNodeForSignal)
-            : Optional.empty();
     boolean stopAtNextWaypoint = false;
     if (nextNode.isPresent()) {
       Optional<RouteStop> nextStopOpt = routeDefinitions.findStop(route.id(), currentIndex + 1);
@@ -1573,34 +1678,12 @@ public final class RuntimeDispatchService {
         stopAtNextWaypoint = shouldStopAtWaypoint(nextNode.get(), nextStopOpt.get());
       }
     }
-    // 注意：下一节点即便需要“停站”（STOP/TERM waypoint），也不能在此处强制将信号置为 STOP。
-    // 否则当列车当前处于静止（例如 AutoStation 停站结束准备出站）时，会被 STOP 信号卡死无法发车。
-    // 停车应通过 speed curve + distanceOpt 在接近目标时自然收敛到 0，并在进入目标节点后由推进点逻辑接管 dwell/TERM。
-    // 诊断：仅在信号变化时输出（减少刷屏）
-    if (lastAspect != nextAspect) {
-      debugLogger.accept(
-          "信号Tick变化: train="
-              + trainName
-              + " idx="
-              + currentIndex
-              + " "
-              + lastAspect
-              + " -> "
-              + nextAspect
-              + " allowed="
-              + decision.allowed()
-              + " blockers="
-              + decision.blockers().size());
-    }
-    if (decision.allowed()) {
-      occupancyManager.acquire(request);
-    }
-    boolean allowLaunch = forceApply || lastAspect != nextAspect;
-    if (allowLaunch) {
-      updateSignalOrWarn(trainName, nextAspect, now);
-    }
     if (currentNodeOpt.isEmpty() || nextNode.isEmpty()) {
       // 若已到终点且无下一目标，检查是否需要注册 Layover
+      boolean allowLaunch = forceApply || lastAspect != nextAspect;
+      if (allowLaunch) {
+        updateSignalOrWarn(trainName, nextAspect, now);
+      }
       if (nextNode.isEmpty() && forceApply && currentNodeOpt.isPresent()) {
         handleLayoverRegistrationIfNeeded(trainName, route, currentNodeOpt.get(), properties);
       }
@@ -1643,15 +1726,22 @@ public final class RuntimeDispatchService {
         }
       }
     }
-    // 信号前瞻：计算到前方所有限制点的距离，取最近的作为减速依据
+    // 信号前瞻：计算到前方所有限制点的距离，供速度曲线与移动授权共同使用。
     SignalLookahead.LookaheadResult lookahead = null;
-    if (runtimeSettings.speedCurveEnabled() && !deadlockRelease) {
-      UUID worldIdForLookahead = train.worldId();
-      SignalLookahead.EdgeSpeedResolver edgeSpeedResolver =
-          createEdgeSpeedResolver(worldIdForLookahead);
-      lookahead =
-          SignalLookahead.computeWithEdgeSpeed(
-              decision, context, nextAspect, this::isApproachingNode, edgeSpeedResolver);
+    boolean needsLookahead =
+        !deadlockRelease
+            && (runtimeSettings.speedCurveEnabled() || runtimeSettings.movementAuthorityEnabled());
+    if (needsLookahead) {
+      if (runtimeSettings.speedCurveEnabled()) {
+        UUID worldIdForLookahead = train.worldId();
+        SignalLookahead.EdgeSpeedResolver edgeSpeedResolver =
+            createEdgeSpeedResolver(worldIdForLookahead);
+        lookahead =
+            SignalLookahead.computeWithEdgeSpeed(
+                decision, context, nextAspect, this::isApproachingNode, edgeSpeedResolver);
+      } else {
+        lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
+      }
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
     }
@@ -1676,6 +1766,65 @@ public final class RuntimeDispatchService {
         targetOverrideBps = java.util.OptionalDouble.of(approachSpeed);
       }
     }
+    if (runtimeSettings.movementAuthorityEnabled()) {
+      TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
+      OptionalLong authorityDistance =
+          constraintDistanceOpt.isPresent() ? constraintDistanceOpt : distanceOpt;
+      MovementAuthorityService.MovementAuthorityDecision authorityDecision =
+          movementAuthorityService.evaluate(
+              new MovementAuthorityService.MovementAuthorityInput(
+                  nextAspect,
+                  train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+                  trainConfig.decelBps2(),
+                  authorityDistance,
+                  runtimeSettings.movementAuthorityStopMarginBlocks(),
+                  runtimeSettings.movementAuthorityCautionMarginBlocks()));
+      SignalAspect authorityAspect = authorityDecision.effectiveAspect();
+      if (signalSeverity(authorityAspect) > signalSeverity(nextAspect)) {
+        debugLogger.accept(
+            "移动授权降级: train="
+                + trainName
+                + " idx="
+                + currentIndex
+                + " "
+                + nextAspect
+                + " -> "
+                + authorityAspect
+                + " authorityDistance="
+                + formatOptionalLong(authorityDecision.authorityDistanceBlocks()));
+        nextAspect = authorityAspect;
+      }
+      targetOverrideBps =
+          mergeTargetOverrideBps(targetOverrideBps, authorityDecision.recommendedMaxSpeedBps());
+      if (authorityDecision.authorityDistanceBlocks().isPresent()
+          && runtimeSettings.speedCurveEnabled()) {
+        distanceOpt = minOptionalLong(distanceOpt, authorityDecision.authorityDistanceBlocks());
+      }
+    }
+
+    if (lastAspect != nextAspect) {
+      debugLogger.accept(
+          "信号Tick变化: train="
+              + trainName
+              + " idx="
+              + currentIndex
+              + " "
+              + lastAspect
+              + " -> "
+              + nextAspect
+              + " allowed="
+              + decision.allowed()
+              + " blockers="
+              + decision.blockers().size());
+    }
+    if (decision.allowed()) {
+      occupancyManager.acquire(request);
+    }
+    boolean allowLaunch = forceApply || lastAspect != nextAspect;
+    if (allowLaunch) {
+      updateSignalOrWarn(trainName, nextAspect, now);
+    }
+
     if (stopAtNextWaypoint
         && shouldLogStopWaypoint(trainName, currentIndex, nextNode.orElse(null), nextAspect)) {
       debugLogger.accept(
@@ -2489,10 +2638,7 @@ public final class RuntimeDispatchService {
     if (graph == null || from == null || to == null) {
       return OptionalLong.empty();
     }
-    return pathFinder
-        .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
-        .map(path -> OptionalLong.of(path.totalLengthBlocks()))
-        .orElse(OptionalLong.empty());
+    return shortestPathDistanceCache.resolve(graph, from, to);
   }
 
   // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
@@ -4186,6 +4332,102 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 组合“本次占用窗口 + 当前位置资源”保留集。
+   *
+   * <p>目的：即使前方窗口调整，也持续保留列车当前位置（节点/当前边）占用，避免“车下扳道岔”。
+   */
+  private List<OccupancyResource> mergeKeepResourcesWithCurrentPosition(
+      List<OccupancyResource> requestResources,
+      Optional<NodeId> currentNodeOpt,
+      Optional<NodeId> nextNodeOpt,
+      RailGraph graph) {
+    java.util.LinkedHashSet<OccupancyResource> keep = new java.util.LinkedHashSet<>();
+    if (requestResources != null) {
+      keep.addAll(requestResources);
+    }
+    if (currentNodeOpt.isEmpty()) {
+      return List.copyOf(keep);
+    }
+    NodeId currentNode = currentNodeOpt.get();
+    keep.add(OccupancyResource.forNode(currentNode));
+    if (nextNodeOpt.isPresent() && graph != null) {
+      RailEdge currentEdge = findEdgeBetween(graph, currentNode, nextNodeOpt.get());
+      if (currentEdge != null) {
+        keep.addAll(OccupancyResourceResolver.resourcesForEdge(graph, currentEdge));
+      }
+    }
+    return List.copyOf(keep);
+  }
+
+  /**
+   * 主动维持当前位置占用。
+   *
+   * <p>当列车处于运行中时，当前节点/当前边必须始终保持 claim，以防调度窗口切换导致尾部资源提前释放。
+   */
+  private void retainCurrentPositionOccupancy(
+      String trainName,
+      RouteId routeId,
+      Optional<NodeId> currentNodeOpt,
+      Optional<NodeId> nextNodeOpt,
+      RailGraph graph,
+      Instant now) {
+    if (occupancyManager == null
+        || trainName == null
+        || trainName.isBlank()
+        || currentNodeOpt.isEmpty()) {
+      return;
+    }
+    java.util.LinkedHashSet<OccupancyResource> hold = new java.util.LinkedHashSet<>();
+    NodeId currentNode = currentNodeOpt.get();
+    hold.add(OccupancyResource.forNode(currentNode));
+    if (nextNodeOpt.isPresent() && graph != null) {
+      RailEdge currentEdge = findEdgeBetween(graph, currentNode, nextNodeOpt.get());
+      if (currentEdge != null) {
+        hold.addAll(OccupancyResourceResolver.resourcesForEdge(graph, currentEdge));
+      }
+    }
+    if (hold.isEmpty()) {
+      return;
+    }
+    occupancyManager.acquire(
+        new OccupancyRequest(
+            trainName, Optional.ofNullable(routeId), now, List.copyOf(hold), Map.of(), 0));
+  }
+
+  private static java.util.OptionalDouble mergeTargetOverrideBps(
+      java.util.OptionalDouble first, java.util.OptionalDouble second) {
+    if (first == null || first.isEmpty()) {
+      return second != null ? second : java.util.OptionalDouble.empty();
+    }
+    if (second == null || second.isEmpty()) {
+      return first;
+    }
+    return java.util.OptionalDouble.of(Math.min(first.getAsDouble(), second.getAsDouble()));
+  }
+
+  private static OptionalLong minOptionalLong(OptionalLong first, OptionalLong second) {
+    if (first == null || first.isEmpty()) {
+      return second != null ? second : OptionalLong.empty();
+    }
+    if (second == null || second.isEmpty()) {
+      return first;
+    }
+    return OptionalLong.of(Math.min(first.getAsLong(), second.getAsLong()));
+  }
+
+  private static int signalSeverity(SignalAspect aspect) {
+    if (aspect == null) {
+      return Integer.MAX_VALUE;
+    }
+    return switch (aspect) {
+      case PROCEED -> 0;
+      case PROCEED_WITH_CAUTION -> 1;
+      case CAUTION -> 2;
+      case STOP -> 3;
+    };
+  }
+
+  /**
    * 根据许可等级与进站限速计算目标速度（blocks/s）。
    *
    * <p>PROCEED 基准速度取边限速（若有效），否则回退到调度图默认速度；警示信号使用连通分量的 caution 速度上限（无覆盖时回退为配置默认值）。
@@ -4535,6 +4777,35 @@ public final class RuntimeDispatchService {
             trainName, Optional.ofNullable(route.id()), effectiveNodes, currentIndex, now, 0);
     releaseResourcesNotInRequest(trainName, request.resourceList());
     occupancyManager.acquire(request);
+  }
+
+  /**
+   * 判定 TERMINATE 停靠是否应立即进入 Layover。
+   *
+   * <p>仅当满足以下条件时进入 Layover：
+   *
+   * <ul>
+   *   <li>当前 stop 为 {@link RouteStopPassType#TERMINATE}
+   *   <li>线路生命周期为 {@code REUSE_AT_TERM}
+   *   <li>当前索引已是线路尾节点
+   * </ul>
+   *
+   * <p>这样可避免“线路在 TERM 后仍有回库/折返段”时被提前拦停。
+   */
+  private boolean shouldEnterLayoverAtTerminateStop(
+      RouteDefinition route, int currentIndex, RouteStop stop) {
+    if (route == null || stop == null) {
+      return false;
+    }
+    if (stop.passType() != RouteStopPassType.TERMINATE) {
+      return false;
+    }
+    if (route.lifecycleMode()
+        != org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode.REUSE_AT_TERM) {
+      return false;
+    }
+    int tailIndex = route.waypoints().size() - 1;
+    return currentIndex >= tailIndex;
   }
 
   private void pruneEffectiveNodeOverrides(String trainName, int minIndexToKeep) {

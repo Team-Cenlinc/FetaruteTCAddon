@@ -24,6 +24,8 @@ public final class TrainLaunchManager {
   private static final double TICKS_PER_SECOND = 20.0;
   private static final long TICK_MILLIS = 50L;
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
+  private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
+  private static final String TAG_LAST_SPEED_CMD_AT = "FTA_LAST_SPEED_CMD_AT";
 
   /**
    * 应用控车动作：限速、加减速曲线、发车/停车。
@@ -54,6 +56,8 @@ public final class TrainLaunchManager {
     if (aspect == SignalAspect.STOP) {
       // STOP 信号：根据剩余距离与减速度计算“目标限速”，让 TrainCarts 逐步刹停
       double curveSpeed = resolveStopSpeed(train, config, distanceOpt, runtimeSettings);
+      curveSpeed =
+          applySpeedCommandRateLimit(train, properties, curveSpeed, config, runtimeSettings, true);
       double curveSpeedBpt = toBlocksPerTick(curveSpeed);
       properties.setSpeedLimit(curveSpeedBpt);
       // 无论列车是否在运动，都应该主动减速/停车
@@ -68,6 +72,8 @@ public final class TrainLaunchManager {
     }
 
     double adjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+    adjustedBps =
+        applySpeedCommandRateLimit(train, properties, adjustedBps, config, runtimeSettings, false);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     // 非 STOP 信号：允许发车或对运动中列车补充能量
@@ -211,6 +217,79 @@ public final class TrainLaunchManager {
       return 0.0;
     }
     return Math.min(currentBps, limit);
+  }
+
+  /**
+   * 速度命令限幅与迟滞。
+   *
+   * <p>目标：
+   *
+   * <ul>
+   *   <li>限制单次速度指令变化幅度，避免瞬时剧烈跳变导致附件模型抖动或解挂风险；
+   *   <li>对微小速度变化施加迟滞，抑制道岔密集区的高频抖动。
+   * </ul>
+   */
+  private double applySpeedCommandRateLimit(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      double requestedBps,
+      TrainConfig config,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      boolean bypassHysteresis) {
+    if (properties == null || config == null || runtimeSettings == null) {
+      return Math.max(0.0, requestedBps);
+    }
+    double requested = Math.max(0.0, requestedBps);
+    long nowMs = System.currentTimeMillis();
+    long lastAtMs = TrainTagHelper.readLongTag(properties, TAG_LAST_SPEED_CMD_AT).orElse(nowMs);
+    double deltaSeconds = Math.max(0.05, (nowMs - lastAtMs) / 1000.0);
+    java.util.Optional<Double> lastCommandOpt =
+        TrainTagHelper.readDoubleTag(properties, TAG_LAST_SPEED_CMD_BPS).filter(Double::isFinite);
+
+    // 首次下发不做限幅，避免从 0 速起步被过度限制。
+    if (lastCommandOpt.isEmpty()) {
+      TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_BPS, Double.toString(requested));
+      TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_AT, Long.toString(nowMs));
+      return requested;
+    }
+
+    double accelLimitPerSecond =
+        Math.max(0.0, config.accelBps2() * runtimeSettings.speedCommandAccelFactor());
+    double decelLimitPerSecond =
+        Math.max(0.0, config.decelBps2() * runtimeSettings.speedCommandDecelFactor());
+
+    double referenceSpeed =
+        lastCommandOpt.orElseGet(() -> resolveCurrentSpeedBps(train, requested));
+
+    double limited = requested;
+    if (requested > referenceSpeed) {
+      double maxIncrease = accelLimitPerSecond * deltaSeconds;
+      limited = Math.min(requested, referenceSpeed + maxIncrease);
+    } else if (requested < referenceSpeed) {
+      double maxDecrease = decelLimitPerSecond * deltaSeconds;
+      limited = Math.max(requested, referenceSpeed - maxDecrease);
+    }
+
+    double hysteresis = Math.max(0.0, runtimeSettings.speedCommandHysteresisBps());
+    if (!bypassHysteresis && Math.abs(limited - referenceSpeed) < hysteresis) {
+      limited = referenceSpeed;
+    }
+    limited = Math.max(0.0, limited);
+
+    TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_BPS, Double.toString(limited));
+    TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_AT, Long.toString(nowMs));
+    return limited;
+  }
+
+  private double resolveCurrentSpeedBps(RuntimeTrainHandle train, double fallbackBps) {
+    if (train == null) {
+      return fallbackBps;
+    }
+    double current = train.currentSpeedBlocksPerTick() * TICKS_PER_SECOND;
+    if (!Double.isFinite(current) || current < 0.0) {
+      return fallbackBps;
+    }
+    return current;
   }
 
   /** blocks/s -> blocks/tick，非法输入返回 0。 */

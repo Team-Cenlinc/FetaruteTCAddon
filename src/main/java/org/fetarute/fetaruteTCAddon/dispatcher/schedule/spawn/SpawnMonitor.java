@@ -2,12 +2,16 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import java.time.Instant;
 import java.util.Objects;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /** 自动发车 tick：生成 ticket 并尝试出车。 */
 public final class SpawnMonitor implements Runnable {
+
+  private static final Logger LOGGER = Logger.getLogger("FetaruteTCAddon");
 
   private final StorageManager storageManager;
   private final ConfigManager configManager;
@@ -33,6 +37,10 @@ public final class SpawnMonitor implements Runnable {
     if (provider == null) {
       return;
     }
-    ticketAssigner.tick(provider, Instant.now());
+    try {
+      ticketAssigner.tick(provider, Instant.now());
+    } catch (RuntimeException ex) {
+      LOGGER.log(Level.SEVERE, "SpawnMonitor tick 执行失败，本轮已跳过", ex);
+    }
   }
 }

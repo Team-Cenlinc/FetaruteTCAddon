@@ -2,6 +2,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -32,10 +34,11 @@ public final class RouteProgressRegistry {
   private final ConcurrentMap<String, RouteProgressEntry> entries = new ConcurrentHashMap<>();
 
   public Optional<RouteProgressEntry> get(String trainName) {
-    if (trainName == null || trainName.isBlank()) {
+    String key = keyOf(trainName);
+    if (key == null) {
       return Optional.empty();
     }
-    return Optional.ofNullable(entries.get(trainName));
+    return Optional.ofNullable(entries.get(key));
   }
 
   /**
@@ -46,10 +49,11 @@ public final class RouteProgressRegistry {
   public RouteProgressEntry initFromTags(
       String trainName, TrainProperties properties, RouteDefinition route) {
     Objects.requireNonNull(route, "route");
+    String normalizedName = requireTrainName(trainName);
     int index = TrainTagHelper.readIntTag(properties, TAG_ROUTE_INDEX).orElse(0);
     RouteProgressEntry entry =
-        upsert(trainName, parseRouteId(properties).orElse(null), route, index, Instant.now());
-    TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, trainName);
+        upsert(normalizedName, parseRouteId(properties).orElse(null), route, index, Instant.now());
+    TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     return entry;
   }
 
@@ -65,8 +69,9 @@ public final class RouteProgressRegistry {
       int currentIndex,
       TrainProperties properties,
       Instant now) {
-    RouteProgressEntry entry = upsert(trainName, routeUuid, route, currentIndex, now);
-    TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, trainName);
+    String normalizedName = requireTrainName(trainName);
+    RouteProgressEntry entry = upsert(normalizedName, routeUuid, route, currentIndex, now);
+    TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     TrainTagHelper.writeTag(properties, TAG_ROUTE_INDEX, String.valueOf(currentIndex));
     TrainTagHelper.writeTag(properties, TAG_ROUTE_UPDATED_AT, String.valueOf(now.toEpochMilli()));
     return entry;
@@ -78,20 +83,35 @@ public final class RouteProgressRegistry {
    * @return 是否发生了迁移
    */
   public boolean rename(String oldName, String newName) {
-    if (oldName == null
-        || oldName.isBlank()
-        || newName == null
-        || newName.isBlank()
-        || oldName.equalsIgnoreCase(newName)) {
+    String oldKey = keyOf(oldName);
+    String newKey = keyOf(newName);
+    if (oldKey == null || newKey == null) {
       return false;
     }
-    RouteProgressEntry existing = entries.remove(oldName);
+    String normalizedNewName = newName.trim();
+    if (oldKey.equals(newKey)) {
+      RouteProgressEntry updated =
+          entries.computeIfPresent(
+              oldKey,
+              (key, entry) ->
+                  new RouteProgressEntry(
+                      normalizedNewName,
+                      entry.routeUuid(),
+                      entry.routeId(),
+                      entry.currentIndex(),
+                      entry.nextTarget(),
+                      entry.lastPassedGraphNode(),
+                      entry.lastSignal(),
+                      entry.lastUpdatedAt()));
+      return updated != null;
+    }
+    RouteProgressEntry existing = entries.remove(oldKey);
     if (existing == null) {
       return false;
     }
     RouteProgressEntry migrated =
         new RouteProgressEntry(
-            newName,
+            normalizedNewName,
             existing.routeUuid(),
             existing.routeId(),
             existing.currentIndex(),
@@ -99,7 +119,7 @@ public final class RouteProgressRegistry {
             existing.lastPassedGraphNode(),
             existing.lastSignal(),
             existing.lastUpdatedAt());
-    entries.put(newName, migrated);
+    entries.put(newKey, migrated);
     return true;
   }
 
@@ -111,13 +131,14 @@ public final class RouteProgressRegistry {
    * @return 是否成功更新
    */
   public boolean updateSignal(String trainName, SignalAspect aspect, Instant now) {
-    if (trainName == null || trainName.isBlank() || aspect == null) {
+    String key = keyOf(trainName);
+    if (key == null || aspect == null) {
       return false;
     }
     RouteProgressEntry updated =
         entries.computeIfPresent(
-            trainName,
-            (key, entry) ->
+            key,
+            (unused, entry) ->
                 new RouteProgressEntry(
                     entry.trainName(),
                     entry.routeUuid(),
@@ -138,13 +159,14 @@ public final class RouteProgressRegistry {
    * @return 是否成功更新
    */
   public boolean updateLastPassedGraphNode(String trainName, NodeId nodeId, Instant now) {
-    if (trainName == null || trainName.isBlank() || nodeId == null) {
+    String key = keyOf(trainName);
+    if (key == null || nodeId == null) {
       return false;
     }
     RouteProgressEntry updated =
         entries.computeIfPresent(
-            trainName,
-            (key, entry) ->
+            key,
+            (unused, entry) ->
                 new RouteProgressEntry(
                     entry.trainName(),
                     entry.routeUuid(),
@@ -158,21 +180,30 @@ public final class RouteProgressRegistry {
   }
 
   public void remove(String trainName) {
-    if (trainName == null || trainName.isBlank()) {
+    String key = keyOf(trainName);
+    if (key == null) {
       return;
     }
-    entries.remove(trainName);
+    entries.remove(key);
   }
 
   public Map<String, RouteProgressEntry> snapshot() {
-    return Map.copyOf(entries);
+    Map<String, RouteProgressEntry> copy = new LinkedHashMap<>();
+    for (RouteProgressEntry entry : entries.values()) {
+      if (entry != null) {
+        copy.put(entry.trainName(), entry);
+      }
+    }
+    return Map.copyOf(copy);
   }
 
   private RouteProgressEntry upsert(
       String trainName, UUID routeUuid, RouteDefinition route, int currentIndex, Instant now) {
-    if (trainName == null || trainName.isBlank()) {
-      throw new IllegalArgumentException("trainName 不能为空");
+    String normalizedName = requireTrainName(trainName);
+    if (route.waypoints().isEmpty()) {
+      throw new IllegalArgumentException("route waypoints 不能为空");
     }
+    String key = keyOf(normalizedName);
     int boundedIndex = Math.max(0, Math.min(currentIndex, route.waypoints().size() - 1));
     Optional<NodeId> next =
         boundedIndex + 1 < route.waypoints().size()
@@ -182,7 +213,7 @@ public final class RouteProgressRegistry {
     NodeId currentWaypoint =
         boundedIndex < route.waypoints().size() ? route.waypoints().get(boundedIndex) : null;
     RouteId routeId = route.id();
-    RouteProgressEntry existing = entries.get(trainName);
+    RouteProgressEntry existing = entries.get(key);
     SignalAspect lastSignal = existing != null ? existing.lastSignal() : SignalAspect.STOP;
     // 若 currentIndex 变化，重置 lastPassedGraphNode；否则保留已有值
     Optional<NodeId> lastPassed =
@@ -191,9 +222,27 @@ public final class RouteProgressRegistry {
             : Optional.ofNullable(currentWaypoint);
     RouteProgressEntry entry =
         new RouteProgressEntry(
-            trainName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);
-    entries.put(trainName, entry);
+            normalizedName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);
+    entries.put(key, entry);
     return entry;
+  }
+
+  private static String requireTrainName(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      throw new IllegalArgumentException("trainName 不能为空");
+    }
+    return trainName.trim();
+  }
+
+  private static String keyOf(String trainName) {
+    if (trainName == null) {
+      return null;
+    }
+    String normalized = trainName.trim();
+    if (normalized.isEmpty()) {
+      return null;
+    }
+    return normalized.toLowerCase(Locale.ROOT);
   }
 
   private Optional<UUID> parseRouteId(TrainProperties properties) {

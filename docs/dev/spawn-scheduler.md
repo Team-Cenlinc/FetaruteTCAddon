@@ -12,6 +12,8 @@
 - `spawn.enabled: true`
 - 调整 `tick-interval-ticks`、`max-spawn-per-tick` 等参数，避免一次性刷车导致卡顿。
 
+`SpawnMonitor` 对单次 tick 的运行时异常做了隔离：若 `TicketAssigner` 在某一轮抛出 `RuntimeException`，该轮会被跳过并记录错误日志，但不会导致后续自动发车循环中断。
+
 ## baseFrequency 来源
 
 自动发车使用 `Line.spawnFreqBaselineSec`（`/fta line set --freqBaseline`）作为目标发车间隔（秒）。

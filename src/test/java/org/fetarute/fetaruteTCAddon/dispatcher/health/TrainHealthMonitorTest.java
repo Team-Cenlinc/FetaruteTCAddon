@@ -103,6 +103,23 @@ class TrainHealthMonitorTest {
 
     // 验证调用了修复方法
     verify(dispatchService).refreshSignalByName("train1");
+    verify(dispatchService, never()).forceRelaunchByName("train1");
+  }
+
+  @Test
+  @DisplayName("Stall 分级恢复：第二次触发升级到 relaunch")
+  void stallEscalatesToRelaunchOnSecondAttempt() {
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.PROCEED, 0.0)));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.forceRelaunchByName("train1")).thenReturn(true);
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0); // 首次采样
+    monitor.check(Set.of("train1"), t0.plusSeconds(35)); // stage1: refresh
+    monitor.check(Set.of("train1"), t0.plusSeconds(50)); // stage2: relaunch
+
+    verify(dispatchService, atLeastOnce()).refreshSignalByName("train1");
     verify(dispatchService).forceRelaunchByName("train1");
   }
 
@@ -166,6 +183,49 @@ class TrainHealthMonitorTest {
     assertEquals(1, result.progressStuckCount(), "应检测到进度停滞");
     assertEquals(1, alerts.size());
     assertEquals(HealthAlert.AlertType.PROGRESS_STUCK, alerts.get(0).type());
+  }
+
+  @Test
+  @DisplayName("进度停滞分级恢复：refresh -> reissue -> relaunch")
+  void progressStuckEscalatesRecoveryStages() {
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.PROCEED, 0.5)));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.reissueDestinationByName("train1")).thenReturn(true);
+    when(dispatchService.forceRelaunchByName("train1")).thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0); // 首次采样
+    monitor.check(Set.of("train1"), t0.plusSeconds(65)); // stage1: refresh
+    monitor.check(Set.of("train1"), t0.plusSeconds(80)); // stage2: reissue
+    monitor.check(Set.of("train1"), t0.plusSeconds(95)); // stage3: relaunch
+
+    verify(dispatchService, atLeastOnce()).refreshSignalByName("train1");
+    verify(dispatchService).reissueDestinationByName("train1");
+    verify(dispatchService).forceRelaunchByName("train1");
+  }
+
+  @Test
+  @DisplayName("STOP 信号下 progress stuck 在宽限内不告警")
+  void stopSignalProgressStuckWithinGraceIsIgnored() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(120));
+
+    assertEquals(0, result.progressStuckCount());
+    assertTrue(alerts.isEmpty());
+    verify(dispatchService, never()).refreshSignalByName("train1");
   }
 
   @Test

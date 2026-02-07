@@ -90,6 +90,38 @@ class RouteProgressRegistryTest {
     assertEquals(SignalAspect.CAUTION, advanced.lastSignal());
   }
 
+  @Test
+  void getAndRemoveAreCaseInsensitive() {
+    UUID routeId = UUID.randomUUID();
+    TagStore store = new TagStore("FTA_ROUTE_ID=" + routeId, "FTA_ROUTE_INDEX=1");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("Train-Case", store.properties(), route);
+
+    assertTrue(registry.get("train-case").isPresent());
+    assertTrue(registry.get("TRAIN-CASE").isPresent());
+
+    registry.remove("TRAIN-case");
+    assertTrue(registry.get("train-case").isEmpty());
+  }
+
+  @Test
+  void renameUpdatesEntryWhenOnlyCaseChanges() {
+    UUID routeId = UUID.randomUUID();
+    TagStore store = new TagStore("FTA_ROUTE_ID=" + routeId, "FTA_ROUTE_INDEX=0");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("Train-A", store.properties(), route);
+
+    assertTrue(registry.rename("Train-A", "train-a"));
+    assertTrue(registry.get("TRAIN-A").isPresent());
+    assertEquals("train-a", registry.get("train-a").orElseThrow().trainName());
+  }
+
   private static final class TagStore {
     private final TrainProperties properties;
     private final List<String> tags;

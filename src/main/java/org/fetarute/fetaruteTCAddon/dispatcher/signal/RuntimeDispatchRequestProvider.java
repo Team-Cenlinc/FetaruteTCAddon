@@ -106,10 +106,9 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
     }
     RouteDefinition route = routeOpt.get();
     RouteProgressRegistry.RouteProgressEntry progressEntry =
-        progressRegistry.get(trainName).orElse(null);
-    if (progressEntry == null) {
-      return Optional.empty();
-    }
+        progressRegistry
+            .get(trainName)
+            .orElseGet(() -> progressRegistry.initFromTags(trainName, properties, route));
     int currentIndex = progressEntry.currentIndex();
     if (currentIndex < 0) {
       return Optional.empty();

@@ -49,7 +49,9 @@
 - `FTA_TRAIN_NAME`：上次记录的列车名（用于改名迁移）
 
 未写入 `FTA_ROUTE_INDEX` 时视为“未激活”，信号 tick 不会构建占用；首次触发推进点后才会写入并进入占用/控车流程。
-`TERMINATE` 表示结束载客：若线路在 TERM 后仍有节点（例如回库段/DSTY），继续按线路推进；若已无后续节点，则等待调度分配新 ticket/线路。
+`TERMINATE` 表示结束载客：若线路在 TERM 后仍有节点（例如回库段/DSTY），继续按线路推进；仅当 TERM 位于线路尾节点时，才进入 Layover 等待调度分配新 ticket/线路。
+
+`RouteProgressRegistry` 对列车名采用不区分大小写的键；即使 TrainCarts 发生大小写改名，也能命中同一进度记录，避免出现“信号/占用看似丢失后被误清理”的问题。
 
 线路定义查找顺序：
 1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
@@ -71,13 +73,17 @@
 - 命令会清理运行时缓存/占用并尝试 `refreshSignal`（若能找到在线列车实例），便于立刻观察控车与闭塞行为。
 
 ## 待命与回收 (Layover & Reclaim)
-- 列车抵达 `TERM` 站点且线路生命周期为 `REUSE_AT_TERM` 时，将进入待命（Layover）状态，注册到 `LayoverRegistry`。
-- `TERM` 站点会阻止继续发车（防止驶入未定义后续路径），直到调度分配新票据。
+- 列车抵达 `TERM` 站点且线路生命周期为 `REUSE_AT_TERM` 时，只有“当前索引已到线路尾节点”才会进入待命（Layover）状态并注册到 `LayoverRegistry`。
+- 若 `TERM` 后仍有定义节点（回库/折返段），运行时会继续推进，不会在 TERM 站台永久拦停。
 - Layover 注册时会触发一次即时复用尝试（不必等待下一轮 spawn tick）。
 - `ReclaimManager` 定期检查待命列车：
   - 若闲置超时或服务器车辆超限，会为其分配 `RETURN` 票据。
   - `RETURN` 票据优先级较低（-10），礼让正常客运列车。
 - 详见 `docs/dev/reclaim-policy.md`。
+
+## 发车门控阻塞策略
+- 出站门控在 `shouldYield/blocked` 时会把占用收缩为“停站保护窗口”（当前节点 + rear guard），避免列车在红灯等待期间长时间持有前方资源导致同向互卡。
+- 阻塞日志会输出 blocker 摘要（资源类型/键/持有列车），便于现场定位卡点。
 
 ## 控车重算与 failover
 运行时控车每隔 `runtime.dispatch-tick-interval-ticks` 重新评估占用与信号，并重新下发速度控制。
@@ -85,6 +91,13 @@
 新增 failover 判定：
 - 低速判定：速度低于 `runtime.failover-stall-speed-bps` 持续 `runtime.failover-stall-ticks` 时，会重下发 destination。
 - 不可达判定：若当前节点到下一节点在调度图中不可达，则执行强制停车（`runtime.failover-unreachable-stop`）。
+
+移动授权（Movement Authority）：
+- 启用 `runtime.movement-authority-enabled` 后，运行时会用“当前制动距离 + 安全余量”与前方可用距离做实时比对。
+- 当授权不足时会把信号降级为更保守等级，并下压目标速度，防止冒进进入未清空区段。
+- 安全余量参数：
+  - `runtime.movement-authority-stop-margin-blocks`
+  - `runtime.movement-authority-caution-margin-blocks`
 
 速度曲线：
 - 若启用 `runtime.speed-curve-enabled`，将根据“剩余距离 + 制动能力”自动计算限速，提前减速而不是过点再减速。
@@ -94,10 +107,19 @@
 - `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
 - `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
+- 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
 若运行时内存中缺少该列车的 RouteProgressEntry，将在首次信号 tick 基于 tags 自动初始化，避免“每 tick 反复发车动作”的异常。
 插件启动后会延迟 1 tick 扫描现存列车并重建占用快照（基于 tags 初始化进度并重新评估信号）。
+
+## 健康监控（高频服务）
+- 健康检查支持分级修复与冷却控制：
+  - `STALL`：`refreshSignal -> forceRelaunch`
+  - `PROGRESS_STUCK`：`refreshSignal -> reissueDestination -> forceRelaunch`
+- `STOP` 信号下的 progress stuck 允许更长宽限（`health.progress-stop-grace-seconds`），避免将正常排队误判为异常。
+- 连续修复动作之间受 `health.recovery-cooldown-seconds` 限制，降低高频场景下的抖动与过度修复。
+- 详见 `docs/dev/health-monitor.md`。
 
 ## 列车速度配置
 通过 `/fta train config set|list` 写入列车配置：
@@ -132,6 +154,13 @@
 ## 已知限制
 - 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。
+
+## 速度命令限幅
+- 速度命令会做“限幅 + 迟滞”处理，减少高频抖动引发的解挂风险。
+- 参数：
+  - `runtime.speed-command-hysteresis-bps`
+  - `runtime.speed-command-accel-factor`
+  - `runtime.speed-command-decel-factor`
 
 ## Waypoint STOP/TERM 停站
 - Waypoint STOP/TERM 触发时仅写入 stopState，运行时信号 tick 负责软刹减速。

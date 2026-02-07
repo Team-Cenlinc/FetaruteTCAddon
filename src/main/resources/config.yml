@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 16
+config-version: 18
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -20,6 +20,10 @@ health:
   stall-threshold-seconds: 30
   # 进度停滞告警阈值（秒）：进度索引长时间不变
   progress-stuck-threshold-seconds: 60
+  # STOP 信号下 progress stuck 的宽限阈值（秒）：用于区分“正常排队”等待与真实异常
+  progress-stop-grace-seconds: 180
+  # 自动修复动作冷却（秒）：避免每轮健康检查都重复触发恢复动作
+  recovery-cooldown-seconds: 10
   # 占用超时清理阈值（分钟）
   occupancy-timeout-minutes: 5
   # 是否启用孤儿占用清理（列车已消失但占用未释放）
@@ -102,6 +106,20 @@ runtime:
   speed-curve-factor: 1.0
   # 提前减速缓冲距离（blocks），用于更早开始降速
   speed-curve-early-brake-blocks: 0.0
+  # 是否启用移动授权（Movement Authority）：授权距离不足时主动降级信号并压速
+  movement-authority-enabled: true
+  # STOP 授权安全余量（blocks）：制动距离 + 此余量不足时将强制 STOP
+  movement-authority-stop-margin-blocks: 2.0
+  # CAUTION 授权安全余量（blocks）：制动距离 + 此余量不足时会降级到更保守信号
+  movement-authority-caution-margin-blocks: 8.0
+  # 速度命令迟滞（blocks/s）：目标速度变化小于该值时不更新，抑制抖动
+  speed-command-hysteresis-bps: 0.15
+  # 速度命令增速限幅系数：基于列车 accel（1.0 表示与列车加速度一致）
+  speed-command-accel-factor: 1.0
+  # 速度命令降速限幅系数：基于列车 decel（1.0 表示与列车减速度一致）
+  speed-command-decel-factor: 1.0
+  # 最短路距离缓存异步刷新周期（秒）
+  distance-cache-refresh-seconds: 3
   # failover：低速判定阈值（blocks per second）
   failover-stall-speed-bps: 0.2
   # failover：低速连续 tick 触发阈值（以 dispatch-tick 为单位）

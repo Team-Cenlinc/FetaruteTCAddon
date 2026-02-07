@@ -93,6 +93,16 @@ public final class HealthMonitor {
     trainMonitor.setProgressStuckThreshold(threshold);
   }
 
+  /** 设置 STOP 信号下 progress stuck 的宽限阈值。 */
+  public void setProgressStopGraceThreshold(Duration threshold) {
+    trainMonitor.setProgressStopGraceThreshold(threshold);
+  }
+
+  /** 设置自动修复动作冷却时间。 */
+  public void setRecoveryCooldown(Duration cooldown) {
+    trainMonitor.setRecoveryCooldown(cooldown);
+  }
+
   /** 设置占用超时阈值。 */
   public void setOccupancyTimeout(Duration timeout) {
     occupancyHealer.setOccupancyTimeout(timeout);

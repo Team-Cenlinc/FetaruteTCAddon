@@ -37,3 +37,8 @@ tags:
 ## 控车节流与补能
 - 每次调度 tick 都会刷新 `speedLimit`，加减速曲线由 TrainCarts 的 WaitAcceleration 接管。
 - “运动中补能”的 launch/accelerate 只在信号变化、强制刷新或低速 failover 时下发，避免周期性加速打断停靠或在道岔处反向弹回。
+- 速度命令新增“限幅 + 迟滞”保护：
+  - `runtime.speed-command-hysteresis-bps`
+  - `runtime.speed-command-accel-factor`
+  - `runtime.speed-command-decel-factor`
+- 授权距离不足时会触发移动授权降级（Movement Authority），与速度限幅协同防止冒进与急剧速度跳变。

@@ -709,6 +709,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     healthMonitor.setStallThreshold(java.time.Duration.ofSeconds(settings.stallThresholdSeconds()));
     healthMonitor.setProgressStuckThreshold(
         java.time.Duration.ofSeconds(settings.progressStuckThresholdSeconds()));
+    healthMonitor.setProgressStopGraceThreshold(
+        java.time.Duration.ofSeconds(settings.progressStopGraceSeconds()));
+    healthMonitor.setRecoveryCooldown(
+        java.time.Duration.ofSeconds(settings.recoveryCooldownSeconds()));
     healthMonitor.setOccupancyTimeout(
         java.time.Duration.ofMinutes(settings.occupancyTimeoutMinutes()));
     healthMonitor.setAutoFixEnabled(settings.autoFixEnabled());
