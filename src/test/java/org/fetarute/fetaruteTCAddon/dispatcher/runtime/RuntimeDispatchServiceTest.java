@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -208,7 +209,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void handleSignalTickDowngradesToStopWhenMovementAuthorityIsInsufficient() {
+  void handleSignalTickDoesNotDowngradeProceedWithoutHardConstraint() {
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
@@ -259,7 +260,29 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.STOP, aspect);
+    assertEquals(SignalAspect.PROCEED, aspect);
+  }
+
+  @Test
+  void resolveMovementAuthorityDistanceUsesPathFallbackOnlyForRestrictiveAspect() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "resolveMovementAuthorityDistance",
+            SignalAspect.class,
+            OptionalLong.class,
+            OptionalLong.class);
+    method.setAccessible(true);
+
+    OptionalLong proceedDistance =
+        (OptionalLong)
+            method.invoke(null, SignalAspect.PROCEED, OptionalLong.empty(), OptionalLong.of(44L));
+    assertTrue(proceedDistance.isEmpty());
+
+    OptionalLong cautionDistance =
+        (OptionalLong)
+            method.invoke(null, SignalAspect.CAUTION, OptionalLong.empty(), OptionalLong.of(44L));
+    assertTrue(cautionDistance.isPresent());
+    assertEquals(44L, cautionDistance.getAsLong());
   }
 
   @Test
@@ -350,6 +373,79 @@ class RuntimeDispatchServiceTest {
     verify(occupancyManager, org.mockito.Mockito.never())
         .releaseResource(keepNode, Optional.of("train-1"));
     verify(occupancyManager, org.mockito.Mockito.never()).releaseByTrain("train-1");
+  }
+
+  @Test
+  void handleSignalTickKeepsStopWhileDepartureGateIsHeld() {
+    NodeId current = NodeId.of("ST");
+    NodeId next = NodeId.of("NEXT");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    service.acquireDepartureGate("train-1", "sid-1", "test_hold");
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    assertEquals(0, train.launchCalls);
+    assertTrue(train.stopCalls >= 1);
+    assertTrue(service.hasDepartureGate("train-1"));
+    SignalAspect aspect = service.snapshotProgressEntries().get("train-1").lastSignal();
+    assertEquals(SignalAspect.STOP, aspect);
+  }
+
+  @Test
+  void departureGateRequiresMatchingSessionToRelease() {
+    RuntimeDispatchService service = createMinimalService();
+    service.acquireDepartureGate("train-1", "sid-new", "test");
+    assertTrue(service.hasDepartureGate("train-1"));
+
+    assertFalse(service.releaseDepartureGate("train-1", "sid-old"));
+    assertTrue(service.hasDepartureGate("train-1"));
+
+    assertTrue(service.releaseDepartureGate("train-1", "sid-new"));
+    assertFalse(service.hasDepartureGate("train-1"));
   }
 
   @Test

@@ -204,9 +204,10 @@ class TrainHealthMonitorTest {
     List<HealthAlert> alerts = new ArrayList<>();
     alertBus.subscribe(alerts::add);
     when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:S:CSB:1")))
         .thenReturn(
-            Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:S:CSB:1")),
-            Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:JBS:CSB:1:004")),
+            Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:JBS:CSB:1:004")))
+        .thenReturn(
             Optional.of(state("train1", 4, SignalAspect.PROCEED, 0.2, "SURC:JBS:CSB:1:003")));
     when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
 

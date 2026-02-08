@@ -23,6 +23,7 @@ public final class LineSpawnMetadata {
 
   public static final String KEY_DEPOTS = "spawn_depots";
   public static final String KEY_MAX_TRAINS = "spawn_max_trains";
+  public static final String KEY_GROUPS = "spawn_groups";
 
   private LineSpawnMetadata() {}
 
@@ -114,6 +115,149 @@ public final class LineSpawnMetadata {
       out.add(entry);
     }
     return List.copyOf(out);
+  }
+
+  /**
+   * 解析线路的显式交路组列表。
+   *
+   * <p>支持格式：
+   *
+   * <ul>
+   *   <li>字符串列表：{@code ["ppk_turnback", "rvs_main"]}
+   *   <li>对象列表：{@code [{"name":"ppk_turnback","baselineSec":120}]}
+   * </ul>
+   *
+   * <p>对象字段支持：
+   *
+   * <ul>
+   *   <li>组名：{@code name/group/id}
+   *   <li>基线秒：{@code baselineSec/baseline/baseline_sec/spawn_group_baseline_sec}
+   *   <li>启用：{@code enabled=false} 时忽略
+   * </ul>
+   */
+  public static List<SpawnGroup> parseGroups(Map<String, Object> metadata) {
+    if (metadata == null || metadata.isEmpty()) {
+      return List.of();
+    }
+    Object raw = metadata.get(KEY_GROUPS);
+    if (raw == null) {
+      return List.of();
+    }
+    Map<String, SpawnGroup> dedup = new HashMap<>();
+    if (raw instanceof String text) {
+      addGroup(dedup, text, Optional.empty(), true);
+      return List.copyOf(dedup.values());
+    }
+    if (raw instanceof List<?> list) {
+      for (Object item : list) {
+        if (item == null) {
+          continue;
+        }
+        if (item instanceof String text) {
+          addGroup(dedup, text, Optional.empty(), true);
+          continue;
+        }
+        if (item instanceof Map<?, ?> map) {
+          parseGroupMap(dedup, map);
+        }
+      }
+    }
+    return List.copyOf(dedup.values());
+  }
+
+  /** 将交路组列表写回 metadata 所需结构。 */
+  public static List<Map<String, Object>> toGroupMetadata(List<SpawnGroup> groups) {
+    if (groups == null || groups.isEmpty()) {
+      return List.of();
+    }
+    List<Map<String, Object>> out = new ArrayList<>();
+    for (SpawnGroup group : groups) {
+      if (group == null || group.name().isBlank()) {
+        continue;
+      }
+      Map<String, Object> entry = new HashMap<>();
+      entry.put("name", group.name());
+      group.baselineSeconds().ifPresent(baseline -> entry.put("baselineSec", baseline));
+      out.add(entry);
+    }
+    return List.copyOf(out);
+  }
+
+  /** 在组列表中按名称查找（忽略大小写）。 */
+  public static Optional<SpawnGroup> findGroup(List<SpawnGroup> groups, String name) {
+    if (groups == null || groups.isEmpty() || name == null || name.isBlank()) {
+      return Optional.empty();
+    }
+    String normalized = name.trim().toLowerCase(Locale.ROOT);
+    for (SpawnGroup group : groups) {
+      if (group == null || group.name().isBlank()) {
+        continue;
+      }
+      if (group.normalizedName().equals(normalized)) {
+        return Optional.of(group);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 在组列表中新增或更新组。
+   *
+   * <p>同名（忽略大小写）会被覆盖。
+   */
+  public static List<SpawnGroup> upsertGroup(List<SpawnGroup> groups, SpawnGroup updated) {
+    if (updated == null || updated.name().isBlank()) {
+      return groups == null ? List.of() : List.copyOf(groups);
+    }
+    List<SpawnGroup> mutable = new ArrayList<>(groups == null ? List.of() : groups);
+    String normalized = updated.normalizedName();
+    boolean replaced = false;
+    for (int i = 0; i < mutable.size(); i++) {
+      SpawnGroup current = mutable.get(i);
+      if (current == null) {
+        continue;
+      }
+      if (current.normalizedName().equals(normalized)) {
+        mutable.set(i, updated);
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      mutable.add(updated);
+    }
+    return List.copyOf(mutable);
+  }
+
+  /** 从组列表删除指定组（忽略大小写）。 */
+  public static List<SpawnGroup> removeGroup(List<SpawnGroup> groups, String name) {
+    if (groups == null || groups.isEmpty() || name == null || name.isBlank()) {
+      return groups == null ? List.of() : List.copyOf(groups);
+    }
+    String normalized = name.trim().toLowerCase(Locale.ROOT);
+    List<SpawnGroup> out = new ArrayList<>();
+    for (SpawnGroup group : groups) {
+      if (group == null || group.name().isBlank()) {
+        continue;
+      }
+      if (!group.normalizedName().equals(normalized)) {
+        out.add(group);
+      }
+    }
+    return List.copyOf(out);
+  }
+
+  /**
+   * 从线路 metadata 中读取指定交路组的 baseline 秒。
+   *
+   * <p>未找到组或组未配置 baseline 时返回 empty。
+   */
+  public static Optional<Integer> parseGroupBaseline(
+      Map<String, Object> metadata, String groupName) {
+    if (groupName == null || groupName.isBlank()) {
+      return Optional.empty();
+    }
+    return findGroup(parseGroups(metadata), groupName).flatMap(SpawnGroup::baselineSeconds);
   }
 
   private static void parseDepotMap(List<SpawnDepot> out, Map<?, ?> map) {
@@ -213,6 +357,53 @@ public final class LineSpawnMetadata {
       }
     }
     return Optional.empty();
+  }
+
+  private static void parseGroupMap(Map<String, SpawnGroup> out, Map<?, ?> map) {
+    if (out == null || map == null || map.isEmpty()) {
+      return;
+    }
+    String name = findString(map, "name", "group", "id");
+    if (name == null || name.isBlank()) {
+      return;
+    }
+    Optional<Boolean> enabled = parseBoolean(map.get("enabled"));
+    boolean ok = enabled.orElse(true);
+    Optional<Integer> baseline =
+        Optional.ofNullable(
+                firstNonNullInt(
+                    map.get("baselineSec"),
+                    map.get("baseline"),
+                    map.get("baseline_sec"),
+                    map.get("spawn_group_baseline_sec")))
+            .filter(value -> value > 0);
+    addGroup(out, name, baseline, ok);
+  }
+
+  private static void addGroup(
+      Map<String, SpawnGroup> out, String name, Optional<Integer> baseline, boolean enabled) {
+    if (out == null || name == null || !enabled) {
+      return;
+    }
+    String trimmed = name.trim();
+    if (trimmed.isBlank()) {
+      return;
+    }
+    SpawnGroup group = new SpawnGroup(trimmed, baseline);
+    out.put(group.normalizedName(), group);
+  }
+
+  private static Integer firstNonNullInt(Object... values) {
+    if (values == null || values.length == 0) {
+      return null;
+    }
+    for (Object raw : values) {
+      Integer parsed = parseInt(raw);
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return null;
   }
 
   /** 从 metadata 中读取整数值（若不存在或无效则 empty）。 */

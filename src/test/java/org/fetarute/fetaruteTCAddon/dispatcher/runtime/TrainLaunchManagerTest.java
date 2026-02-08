@@ -80,6 +80,35 @@ class TrainLaunchManagerTest {
     assertTrue(Math.abs(appliedBpt - expectedBpt) < 1.0e-6, "迟滞应保持上一命令速度");
   }
 
+  @Test
+  void applyControlBypassesAccelerationLimitWhenLaunchAllowed() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-3",
+            "FTA_LAST_SPEED_CMD_BPS=0.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), false, 0.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        8.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    double appliedBpt = speedCaptor.getValue();
+    assertTrue(appliedBpt >= 0.39, "发车场景应下发接近目标速度，避免起步龟速");
+  }
+
   private static ConfigManager.RuntimeSettings runtimeSettings(
       double hysteresisBps, double accelFactor, double decelFactor) {
     return new ConfigManager.RuntimeSettings(

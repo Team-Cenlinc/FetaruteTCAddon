@@ -57,7 +57,8 @@ public final class TrainLaunchManager {
       // STOP 信号：根据剩余距离与减速度计算“目标限速”，让 TrainCarts 逐步刹停
       double curveSpeed = resolveStopSpeed(train, config, distanceOpt, runtimeSettings);
       curveSpeed =
-          applySpeedCommandRateLimit(train, properties, curveSpeed, config, runtimeSettings, true);
+          applySpeedCommandRateLimit(
+              train, properties, curveSpeed, config, runtimeSettings, true, false);
       double curveSpeedBpt = toBlocksPerTick(curveSpeed);
       properties.setSpeedLimit(curveSpeedBpt);
       // 无论列车是否在运动，都应该主动减速/停车
@@ -73,7 +74,15 @@ public final class TrainLaunchManager {
 
     double adjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
     adjustedBps =
-        applySpeedCommandRateLimit(train, properties, adjustedBps, config, runtimeSettings, false);
+        applySpeedCommandRateLimit(
+            train,
+            properties,
+            adjustedBps,
+            config,
+            runtimeSettings,
+            false,
+            // 发车/信号放行瞬间不应再被“上行限幅”二次压速，避免列车起步过慢。
+            allowLaunch);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     // 非 STOP 信号：允许发车或对运动中列车补充能量
@@ -235,7 +244,8 @@ public final class TrainLaunchManager {
       double requestedBps,
       TrainConfig config,
       ConfigManager.RuntimeSettings runtimeSettings,
-      boolean bypassHysteresis) {
+      boolean bypassHysteresis,
+      boolean bypassAccelerationLimit) {
     if (properties == null || config == null || runtimeSettings == null) {
       return Math.max(0.0, requestedBps);
     }
@@ -263,8 +273,12 @@ public final class TrainLaunchManager {
 
     double limited = requested;
     if (requested > referenceSpeed) {
-      double maxIncrease = accelLimitPerSecond * deltaSeconds;
-      limited = Math.min(requested, referenceSpeed + maxIncrease);
+      if (bypassAccelerationLimit) {
+        limited = requested;
+      } else {
+        double maxIncrease = accelLimitPerSecond * deltaSeconds;
+        limited = Math.min(requested, referenceSpeed + maxIncrease);
+      }
     } else if (requested < referenceSpeed) {
       double maxDecrease = decelLimitPerSecond * deltaSeconds;
       limited = Math.max(requested, referenceSpeed - maxDecrease);

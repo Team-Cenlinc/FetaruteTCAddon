@@ -140,6 +140,8 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, BlockerSnapshot> blockerSnapshots =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, DepartureGate> departureGates =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   /**
    * 运行时有效节点覆盖（按列车名 + route index）。
@@ -219,6 +221,64 @@ public final class RuntimeDispatchService {
   /** 设置 EtaService（可选），用于在推进点时使 ETA 缓存失效。 */
   public void setEtaService(EtaService etaService) {
     this.etaService = etaService;
+  }
+
+  /**
+   * 获取列车是否持有“发车许可锁”。
+   *
+   * <p>当锁存在时，表示列车处于站台停站/门控等待阶段，信号 tick 必须保持 STOP，不允许发车。
+   *
+   * @param trainName 列车名
+   * @return true 表示锁存在
+   */
+  public boolean hasDepartureGate(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return false;
+    }
+    return departureGates.containsKey(key);
+  }
+
+  /**
+   * 获取（或覆盖）列车的发车许可锁。
+   *
+   * <p>通常由 AutoStation 在进入 WaitState 后调用。若同列车重复调用，会覆盖旧会话。
+   *
+   * @param trainName 列车名
+   * @param sessionId 会话 ID（用于防止旧任务误释放）
+   * @param reason 持锁原因（用于诊断）
+   */
+  public void acquireDepartureGate(String trainName, String sessionId, String reason) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty() || sessionId == null || sessionId.isBlank()) {
+      return;
+    }
+    String normalizedReason = reason == null || reason.isBlank() ? "unspecified" : reason.trim();
+    departureGates.put(key, new DepartureGate(sessionId.trim(), Instant.now(), normalizedReason));
+  }
+
+  /**
+   * 释放列车的发车许可锁。
+   *
+   * <p>当传入 sessionId 时，只有会话匹配才会释放；用于防止旧停站任务误释放新会话的锁。 传入空 sessionId 时会无条件释放该列车锁。
+   *
+   * @param trainName 列车名
+   * @param sessionId 会话 ID（可为空）
+   * @return true 表示成功释放
+   */
+  public boolean releaseDepartureGate(String trainName, String sessionId) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return false;
+    }
+    if (sessionId == null || sessionId.isBlank()) {
+      return departureGates.remove(key) != null;
+    }
+    DepartureGate existing = departureGates.get(key);
+    if (existing == null || !existing.sessionId().equals(sessionId.trim())) {
+      return false;
+    }
+    return departureGates.remove(key, existing);
   }
 
   /**
@@ -913,6 +973,7 @@ public final class RuntimeDispatchService {
       }
       activeLower.add(name.trim().toLowerCase(java.util.Locale.ROOT));
     }
+    departureGates.keySet().removeIf(key -> !activeLower.contains(key));
 
     int removedProgress = 0;
     for (String name : progressRegistry.snapshot().keySet()) {
@@ -1129,6 +1190,7 @@ public final class RuntimeDispatchService {
     missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    clearDepartureGate(trainName);
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
     blockerSnapshots.remove(normalizeTrainKey(trainName));
   }
@@ -1476,14 +1538,16 @@ public final class RuntimeDispatchService {
     if (properties == null) {
       return;
     }
+    String trainName = properties.getTrainName();
     // 非 FTA 管控列车：静默跳过
     if (!isFtaManagedTrain(properties)) {
+      clearDepartureGate(trainName);
       return;
     }
-    String trainName = properties.getTrainName();
     Instant now = Instant.now();
     handleRenameIfNeeded(properties, trainName);
     if (layoverRegistry.get(trainName).isPresent()) {
+      clearDepartureGate(trainName);
       // Layover 状态：保留当前位置节点的占用，防止后车"反向占用"导致死锁
       // 只释放前方 lookahead 资源，不释放当前节点
       LayoverCandidate candidate = layoverRegistry.get(trainName).orElse(null);
@@ -1516,6 +1580,7 @@ public final class RuntimeDispatchService {
       return;
     }
     if (TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isEmpty()) {
+      clearDepartureGate(trainName);
       if (progressRegistry.get(trainName).isPresent()) {
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(trainName);
@@ -1562,6 +1627,42 @@ public final class RuntimeDispatchService {
     }
 
     NodeId currentNode = resolveEffectiveNode(trainName, route, boundedIndex);
+    if (hasDepartureGate(trainName)) {
+      if (train.isMoving()) {
+        // 容错：列车已恢复移动时清理遗留 gate，避免后续长时间锁死。
+        clearDepartureGate(trainName);
+      } else {
+        Optional<NodeId> nextNode =
+            currentIndex + 1 < route.waypoints().size()
+                ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
+                : Optional.empty();
+        if (nextNode.isPresent()) {
+          if (occupancyManager != null) {
+            if (currentNode != null) {
+              RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
+              retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
+            } else {
+              occupancyManager.releaseByTrain(trainName);
+            }
+          }
+          updateSignalOrWarn(trainName, SignalAspect.STOP, now);
+          OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
+          applyControl(
+              train,
+              properties,
+              SignalAspect.STOP,
+              route,
+              currentNode,
+              nextNode.get(),
+              null,
+              false,
+              stopDistanceOpt);
+        } else {
+          train.stop();
+        }
+        return;
+      }
+    }
 
     // 动态站台分配：检查前方是否有 DYNAMIC 站点，提前分配具体站台
     tryDynamicPlatformAllocation(train, properties, trainName, route, currentIndex, currentNode);
@@ -1576,9 +1677,9 @@ public final class RuntimeDispatchService {
     }
     if (dwellRegistry != null) {
       Optional<Integer> remaining = dwellRegistry.remainingSeconds(trainName);
-      if (remaining.isPresent()
-          && stopOpt.isPresent()
-          && stopOpt.get().passType() != RouteStopPassType.PASS) {
+      if (remaining.isPresent()) {
+        // 只要列车仍处于 dwell 窗口，就必须保持 STOP。
+        // 不能依赖当前 index 重新命中 RouteStop：在动态站台/中间点跳过场景下，索引可能短暂偏移，导致“停站后被信号 tick 提前放行”。
         Optional<NodeId> nextNode =
             currentIndex + 1 < route.waypoints().size()
                 ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -1831,8 +1932,14 @@ public final class RuntimeDispatchService {
     }
     if (runtimeSettings.movementAuthorityEnabled()) {
       TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
+      boolean authorityFromHardConstraint =
+          constraintDistanceOpt != null && constraintDistanceOpt.isPresent();
       OptionalLong authorityDistance =
-          constraintDistanceOpt.isPresent() ? constraintDistanceOpt : distanceOpt;
+          resolveMovementAuthorityDistance(nextAspect, constraintDistanceOpt, distanceOpt);
+      String authoritySource =
+          authorityFromHardConstraint
+              ? "hard_constraint"
+              : authorityDistance.isPresent() ? "path_fallback" : "none";
       MovementAuthorityService.MovementAuthorityDecision authorityDecision =
           movementAuthorityService.evaluate(
               new MovementAuthorityService.MovementAuthorityInput(
@@ -1853,6 +1960,8 @@ public final class RuntimeDispatchService {
                 + nextAspect
                 + " -> "
                 + authorityAspect
+                + " source="
+                + authoritySource
                 + " authorityDistance="
                 + formatOptionalLong(authorityDecision.authorityDistanceBlocks()));
         nextAspect = authorityAspect;
@@ -2517,6 +2626,27 @@ public final class RuntimeDispatchService {
     }
   }
 
+  /** 无条件清理列车发车许可锁。 */
+  private void clearDepartureGate(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (!key.isEmpty()) {
+      departureGates.remove(key);
+    }
+  }
+
+  /** 迁移列车发车许可锁（用于列车改名场景）。 */
+  private void moveDepartureGate(String oldTrainName, String newTrainName) {
+    String oldKey = normalizeTrainKey(oldTrainName);
+    String newKey = normalizeTrainKey(newTrainName);
+    if (oldKey.isEmpty() || newKey.isEmpty() || oldKey.equals(newKey)) {
+      return;
+    }
+    DepartureGate gate = departureGates.remove(oldKey);
+    if (gate != null) {
+      departureGates.put(newKey, gate);
+    }
+  }
+
   /**
    * 将信号许可映射为速度/制动控制。
    *
@@ -2848,7 +2978,8 @@ public final class RuntimeDispatchService {
     if (original.getTrackedSign() != null) {
       return new GroupCenterSignActionEvent(original.getTrackedSign(), group, original.getAction());
     }
-    return new GroupCenterSignActionEvent(original.getBlock(), group, original.getAction());
+    // 无 tracked sign 时避免使用已弃用的 Block 构造器，回退原事件语义。
+    return original;
   }
 
   /**
@@ -2969,16 +3100,6 @@ public final class RuntimeDispatchService {
         com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
         SignActionType actionType) {
       super(sign, group);
-      if (actionType != null) {
-        setAction(actionType);
-      }
-    }
-
-    GroupCenterSignActionEvent(
-        org.bukkit.block.Block signBlock,
-        com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
-        SignActionType actionType) {
-      super(signBlock, group);
       if (actionType != null) {
         setAction(actionType);
       }
@@ -3144,6 +3265,7 @@ public final class RuntimeDispatchService {
     dynamicAllocator.clearAllocations(trainName);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
+    clearDepartureGate(trainName);
     debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);
   }
 
@@ -4223,6 +4345,15 @@ public final class RuntimeDispatchService {
     private int ticks = 0;
   }
 
+  /** 发车许可锁快照。 */
+  private record DepartureGate(String sessionId, Instant acquiredAt, String reason) {
+    private DepartureGate {
+      Objects.requireNonNull(sessionId, "sessionId");
+      Objects.requireNonNull(acquiredAt, "acquiredAt");
+      Objects.requireNonNull(reason, "reason");
+    }
+  }
+
   private record ProgressTriggerState(String stateKey, long atMillis) {}
 
   private record StallDecision(boolean forceLaunch, boolean triggerFailover) {
@@ -4248,6 +4379,7 @@ public final class RuntimeDispatchService {
       String previous = previousOpt.get();
       if (!previous.equalsIgnoreCase(trainName)) {
         progressRegistry.rename(previous, trainName);
+        moveDepartureGate(previous, trainName);
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(previous);
         }
@@ -4541,6 +4673,28 @@ public final class RuntimeDispatchService {
       return first;
     }
     return OptionalLong.of(Math.min(first.getAsLong(), second.getAsLong()));
+  }
+
+  /**
+   * 解析移动授权使用的“硬约束距离”。
+   *
+   * <p>规则：
+   *
+   * <ul>
+   *   <li>优先使用 lookahead 的 blocker/caution 距离（硬约束）
+   *   <li>当请求信号已是限制态（非 PROCEED）时，可回退到路径距离作为兜底
+   *   <li>在纯 PROCEED 且无硬约束时返回空，避免“无阻塞被误降级为 STOP”
+   * </ul>
+   */
+  private static OptionalLong resolveMovementAuthorityDistance(
+      SignalAspect requestedAspect, OptionalLong constraintDistance, OptionalLong pathDistance) {
+    if (constraintDistance != null && constraintDistance.isPresent()) {
+      return constraintDistance;
+    }
+    if (requestedAspect == SignalAspect.PROCEED) {
+      return OptionalLong.empty();
+    }
+    return pathDistance != null ? pathDistance : OptionalLong.empty();
   }
 
   private static int signalSeverity(SignalAspect aspect) {

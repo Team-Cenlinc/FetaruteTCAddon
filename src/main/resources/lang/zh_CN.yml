@@ -380,9 +380,6 @@ command:
         entry: "<gray>-</gray> <white><key></white>"
 
     edge:
-      get:
-        edge:
-          header: "<prefix> <dark_aqua>区间信息</dark_aqua> <gray>(<white><a></white> ↔ <white><b></white>, len=<white><len_blocks></white> blocks, blocked=<white><blocked></white>, base=<white><base_speed></white>, override=<white><override_speed></white>, temp=<white><temp_speed></white>, effective=<white><effective_speed></white>)</gray>"
       list:
         status:
           active: "生效"
@@ -672,7 +669,8 @@ command:
       header: "<prefix> <dark_aqua>运行图列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white>"
       empty: "<gray>（暂无运行图）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<pattern>/<operation>)</gray>"
-      hover-entry: "<gray>运行图:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>模式:</dark_aqua> <white><pattern></white>\n<dark_aqua>运营属性:</dark_aqua> <white><operation></white>\n<dark_aqua>运行时间(秒):</dark_aqua> <white><runtime></white>\n<dark_aqua>距离(米):</dark_aqua> <white><distance></white>"
+      hover-entry: "<gray>运行图:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>模式:</dark_aqua> <white><pattern></white>\n<dark_aqua>运营属性:</dark_aqua> <white><operation></white>\n<dark_aqua>运行时间(秒):</dark_aqua> <white><runtime></white>\n<dark_aqua>距离(米):</dark_aqua> <white><distance></white>\n<dark_aqua>交路组:</dark_aqua> <white><spawn_group></white>\n<dark_aqua>交路基线(秒):</dark_aqua> <white><spawn_group_baseline></white>\n<gray><click_hint></gray>"
+      click-hint: "点击查看详情"
     info:
       header: "<prefix> <dark_aqua>运行图</dark_aqua> <white><line></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
       pattern: "<gray>模式:</gray> <dark_aqua><pattern></dark_aqua>"
@@ -680,12 +678,43 @@ command:
       runtime: "<gray>运行时间(秒):</gray> <dark_aqua><runtime></dark_aqua>"
       distance: "<gray>距离(米):</gray> <dark_aqua><distance></dark_aqua>"
       spawn-pattern: "<gray>车型/编组:</gray> <dark_aqua><pattern></dark_aqua>"
+      spawn-group: "<gray>交路组:</gray> <dark_aqua><group></dark_aqua>"
+      spawn-group-baseline: "<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"
       stops: "<gray>停靠点:</gray> <dark_aqua><count></dark_aqua>"
+    group:
+      list:
+        header: "<prefix> <dark_aqua>交路组列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white> <gray>(count=<white><count></white>)</gray>"
+        empty: "<gray>（当前线路尚未创建交路组）</gray>"
+        entry: "<white><group></white> <gray>-</gray> <dark_aqua>baseline=<baseline>s</dark_aqua>"
+        hover-entry: "<gray>交路组:</gray> <white><group></white>\n<dark_aqua>基线(秒):</dark_aqua> <white><baseline></white>\n<gray><click_hint></gray>"
+        click-hint: "点击查看组详情"
+      info:
+        header: "<prefix> <dark_aqua>交路组</dark_aqua> <white><line></white><gray>/</gray><white><group></white> <gray>(baseline=<white><baseline></white>, routes=<white><routes></white>)</gray>"
+        baseline: "<gray>基线(秒):</gray> <dark_aqua><baseline></dark_aqua>"
+      create:
+        success: "<prefix> <dark_aqua>已创建交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>)</gray>"
+        updated: "<prefix> <dark_aqua>已更新交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>)</gray>"
+      set:
+        success: "<prefix> <dark_aqua>已更新交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>, baseline=<white><baseline></white>)</gray>"
+        noop: "<prefix> <gray>未提供可更新字段（可用 --baseline/--baseline-clear）</gray>"
+      routes:
+        header: "<prefix> <dark_aqua>交路组运行图</dark_aqua> <gray>(line=<white><line></white>, group=<white><group></white>, count=<white><count></white>)</gray>"
+        empty: "<gray>该交路组当前没有绑定运行图</gray>"
+      assign:
+        success: "<prefix> <dark_aqua>已绑定运行图到交路组</dark_aqua> <gray>(line=<white><line></white>, route=<white><route></white>, group=<white><group></white>)</gray>"
+      unassign:
+        success: "<prefix> <dark_aqua>已从交路组解绑运行图</dark_aqua> <gray>(line=<white><line></white>, route=<white><route></white>, group=<white><group></white>)</gray>"
+        not-bound: "<prefix> <red>运行图当前不在该交路组中</red> <gray>(route=<white><route></white>, group=<white><group></white>)</gray>"
+      delete:
+        success: "<prefix> <dark_aqua>已删除交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>, clearedRoutes=<white><routes></white>)</gray>"
+      not-found: "<prefix> <red>未找到交路组：</red><white><group></white>"
+      invalid: "<prefix> <red>交路组名称不能为空</red>"
+      baseline-requires-group: "<prefix> <red>设置交路基线前需要先绑定交路组</red> <gray>(使用 --spawn-group)</gray>"
     not-found: "<prefix> <red>未找到运行图：</red><white><route></white>"
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:

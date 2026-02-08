@@ -17,6 +17,7 @@
 - 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
 - 停站期间会保持 STOP 信号，且提前写入下一跳 destination，确保发车时直接走寻路方向。
 - 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，避免后车过早释放后互卡。
+- 运行时只要检测到列车仍在 dwell 窗口，就会强制维持 STOP（不依赖当前 index 再次命中 RouteStop），避免“停站后被提前放行”。
 - 对 STOP/TERM waypoint 的进站控车采用 handoff：信号 tick 不强制 STOP，而是把目标速度上限压到 `runtime.approach-speed-bps`（approaching）。
 - 仅当存在前方 blocker（红灯/占用阻塞）时，才使用“到 blocker 的距离”触发进一步减速/停车；不使用到下一节点距离，避免提前刹停在牌子前。
 - 停稳判定：连续 `1` tick 未移动即视为停稳；若超过 `400` ticks 未停稳则进入超时兜底。
@@ -32,6 +33,7 @@
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
 - 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
+- AutoStation 在 WaitState 期间会向运行时申请 `DepartureGate`（会话锁），信号 tick 会强制维持 STOP；仅在门控放行且会话匹配时释放，避免“停站后被信号 tick 提前发车”。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
@@ -96,6 +98,7 @@
 移动授权（Movement Authority）：
 - 启用 `runtime.movement-authority-enabled` 后，运行时会用“当前制动距离 + 安全余量”与前方可用距离做实时比对。
 - 当授权不足时会把信号降级为更保守等级，并下压目标速度，防止冒进进入未清空区段。
+- `PROCEED` 且前方无硬约束（无 blocker/caution）时，不再使用“到下一节点距离”触发授权降级，避免无阻塞误红灯。
 - 安全余量参数：
   - `runtime.movement-authority-stop-margin-blocks`
   - `runtime.movement-authority-caution-margin-blocks`
@@ -159,6 +162,7 @@
 
 ## 速度命令限幅
 - 速度命令会做“限幅 + 迟滞”处理，减少高频抖动引发的解挂风险。
+- 仅对“常规跟速”做上行限幅；发车/放行（`allowLaunch=true`）会跳过上行限幅，避免起步龟速。
 - 参数：
   - `runtime.speed-command-hysteresis-bps`
   - `runtime.speed-command-accel-factor`

@@ -232,7 +232,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * <ul>
    *   <li>避免“超时即删除”导致某条 return route 饥饿
-   *   <li>在可配置阈值到达后，允许 RETURN 服务从 depot 补发，避免 Layover 长时间不可用
+   *   <li>在可配置阈值到达后，仅对“可从 depot 发车”的 RETURN 服务尝试降级补发
    *   <li>保留 pending 的“首次入队时间语义”，只在真正超时时刷新窗口
    * </ul>
    */
@@ -258,16 +258,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
       java.util.OptionalLong fallbackTimeoutSeconds = resolveLayoverFallbackTimeoutSeconds(service);
       if (fallbackTimeoutSeconds.isPresent() && waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
-        removeIds.add(ticketId);
-        fallbackTriggered++;
-        HEALTH_LOGGER.warning(
-            "[FTA] 折返票据等待过久，尝试 depot 补发: route="
-                + (service != null ? service.routeCode() : "?")
-                + " 等待="
-                + waitSeconds
-                + "s ticketId="
-                + ticketId);
-        tryFallbackSpawnForPending(provider, ticket, now, waitSeconds);
+        if (canFallbackSpawnFromDepot(service)) {
+          removeIds.add(ticketId);
+          fallbackTriggered++;
+          HEALTH_LOGGER.warning(
+              "[FTA] 折返票据等待过久，尝试 depot 补发: route="
+                  + (service != null ? service.routeCode() : "?")
+                  + " 等待="
+                  + waitSeconds
+                  + "s ticketId="
+                  + ticketId);
+          tryFallbackSpawnForPending(provider, ticket, now, waitSeconds);
+        } else {
+          refreshedEntries.put(ticketId, new PendingLayoverEntry(ticket, now));
+          refreshed++;
+          HEALTH_LOGGER.warning(
+              "[FTA] 折返票据等待过久，但首站非 depot，刷新等待窗口: route="
+                  + (service != null ? service.routeCode() : "?")
+                  + " 等待="
+                  + waitSeconds
+                  + "s ticketId="
+                  + ticketId);
+        }
         continue;
       }
 
@@ -381,16 +393,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         if (pendingEntry != null) {
           long waitSeconds = Duration.between(pendingEntry.addedAt(), now).getSeconds();
           if (waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
-            pendingLayoverTickets.remove(ticket.id());
+            if (canFallbackSpawnFromDepot(service)) {
+              pendingLayoverTickets.remove(ticket.id());
+              debugLogger.accept(
+                  "Layover 降级发车: route="
+                      + service.routeCode()
+                      + " 等待="
+                      + waitSeconds
+                      + "s (超时="
+                      + fallbackTimeoutSeconds.getAsLong()
+                      + "s) 尝试从 depot 补发");
+              return trySpawnFromDepot(provider, ticket, service, route, line, now);
+            }
             debugLogger.accept(
-                "Layover 降级发车: route="
+                "Layover 降级跳过: route="
                     + service.routeCode()
                     + " 等待="
                     + waitSeconds
-                    + "s (超时="
-                    + fallbackTimeoutSeconds.getAsLong()
-                    + "s) 尝试从 depot 补发");
-            return trySpawnFromDepot(provider, ticket, service, route, line, now);
+                    + "s 但首站非 depot，继续等待复用");
           }
         }
       }
@@ -1014,6 +1034,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     // 检查是否是 DYNAMIC depot
     if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
+      if (!isDynamicDepotSpec(depotSpec)) {
+        return Optional.empty();
+      }
       // 解析 DYNAMIC spec，查找任意匹配轨道的世界
       return resolveDynamicDepotWorldId(depotSpec);
     }
@@ -1025,6 +1048,36 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         .filter(info -> depotSpec.equalsIgnoreCase(info.definition().nodeId().value()))
         .map(SignNodeRegistry.SignNodeInfo::worldId)
         .findFirst();
+  }
+
+  /**
+   * 判断该 RETURN 服务是否允许走“depot 降级补发”。
+   *
+   * <p>只允许真实 depot 起点（固定 D 节点或 DYNAMIC:*:D:*），避免把站点折返误当成 depot 出车。
+   */
+  private static boolean canFallbackSpawnFromDepot(SpawnService service) {
+    if (service == null) {
+      return false;
+    }
+    String depotSpec = service.depotNodeId();
+    if (depotSpec == null || depotSpec.isBlank()) {
+      return false;
+    }
+    if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
+      return isDynamicDepotSpec(depotSpec);
+    }
+    String[] parts = depotSpec.split(":", 4);
+    return parts.length >= 2 && "D".equalsIgnoreCase(parts[1]);
+  }
+
+  private static boolean isDynamicDepotSpec(String dynamicSpec) {
+    if (dynamicSpec == null
+        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
+      return false;
+    }
+    String rest = dynamicSpec.substring("DYNAMIC:".length());
+    String[] parts = rest.split(":", 4);
+    return parts.length >= 2 && "D".equalsIgnoreCase(parts[1]);
   }
 
   private OptionalInt resolveLineMaxTrains(StorageProvider provider, Line line) {

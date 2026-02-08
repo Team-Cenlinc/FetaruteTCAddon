@@ -433,6 +433,12 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       plugin.getDwellRegistry().ifPresent(registry -> registry.start(trainName, dwellSeconds));
     }
     TrainProperties properties = group.getProperties();
+    // 进入 WaitState 前先获取发车许可锁，避免信号 tick 在门控放行前提前发车。
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(
+            dispatch ->
+                dispatch.acquireDepartureGate(trainName, stopSessionId, "autostation_dwell"));
     ExitOffsetState exitOffsetState = new ExitOffsetState(properties);
     // 注意：不在这里添加 WaitState，因为 handleStationArrival 会设置 destination 导致 TC 尝试移动
     // WaitState 会在 handleStationArrival 之后添加
@@ -482,6 +488,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       @Override
       public void run() {
         if (!group.isValid()) {
+          plugin
+              .getRuntimeDispatchService()
+              .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
           exitOffsetState.restore();
           finalWaitState.stop();
           cancel();
@@ -573,6 +582,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             }
 
             if (canDepart) {
+              plugin
+                  .getRuntimeDispatchService()
+                  .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
               exitOffsetState.restore();
               finalWaitState.stop();
               cancel();

@@ -21,19 +21,30 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
- * 基于存储的 SpawnManager：读取 Line.spawnFreqBaselineSec 并生成发车票据。
+ * 基于存储的 SpawnManager：从线路与交路配置生成发车票据。
  *
  * <p>默认行为：
  *
  * <ul>
- *   <li>仅对 {@link LineStatus#ACTIVE} 且配置了 spawnFreqBaselineSec 的线路生成票据
- *   <li>同一条线路可配置多条可发车 OPERATION route：通过 route.metadata 的 {@code spawn_weight} 控制长期比例
- *   <li>RETURN route 也会进入 SpawnPlan（用于 Layover 复用与站牌预测）
+ *   <li>仅对 {@link LineStatus#ACTIVE} 的线路生成票据（可使用 line baseline 或 group baseline）
+ *   <li>同一条线路可配置多条 OPERATION/RETURN route，并在“交路组”内按权重分配频率
+ *   <li>RETURN route 也会进入 SpawnPlan（用于 Layover 复用、折返与站牌预测）
  *   <li>允许线路跨 depot 混发（可配合 Line.metadata.spawn_depots 做集中管理）
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
+ * </ul>
+ *
+ * <p>交路组规则：
+ *
+ * <ul>
+ *   <li>优先使用 route.metadata 的 {@code spawn_group}
+ *   <li>未配置时按首站/起点（含 DYNAMIC）自动推导，便于同终点折返与回库 route 进入同组
+ *   <li>组内使用 {@code spawn_weight} 分摊
+ *   <li>组优先使用 {@code spawn_group_baseline_sec} 作为发车基准；未配置时才回退 line baseline
+ *   <li>{@code spawn_group_weight} 仅作为旧配置回退（已不推荐）
  * </ul>
  */
 public final class StorageSpawnManager
@@ -45,6 +56,7 @@ public final class StorageSpawnManager
   private SpawnPlan plan = SpawnPlan.empty();
   private SpawnPlan forecastPlan = SpawnPlan.empty();
   private Instant lastPlanRefresh = Instant.EPOCH;
+  private final Map<SpawnServiceKey, Duration> initialOffsets = new HashMap<>();
 
   private final Map<SpawnServiceKey, ServiceState> states = new HashMap<>();
   private final PriorityQueue<SpawnTicket> queue =
@@ -121,6 +133,7 @@ public final class StorageSpawnManager
     int stateSize = states.size();
     queue.clear();
     states.clear();
+    initialOffsets.clear();
     plan = SpawnPlan.empty();
     forecastPlan = SpawnPlan.empty();
     lastPlanRefresh = Instant.EPOCH;
@@ -215,7 +228,7 @@ public final class StorageSpawnManager
     ServiceState state = states.get(service.key());
     Instant nextDueAt = state != null ? state.nextDueAt : null;
     if (nextDueAt == null) {
-      nextDueAt = now.plus(settings.initialJitter());
+      nextDueAt = initialDueAt(service, now);
     }
     if (nextDueAt.isBefore(now)) {
       nextDueAt = alignToNextSlot(nextDueAt, now, service.baseHeadway());
@@ -260,7 +273,7 @@ public final class StorageSpawnManager
       }
       ServiceState state = states.computeIfAbsent(service.key(), key -> new ServiceState());
       if (state.nextDueAt == null) {
-        state.nextDueAt = now.plus(settings.initialJitter());
+        state.nextDueAt = initialDueAt(service, now);
       }
       while (remainingBudget > 0
           && state.backlog < settings.maxBacklogPerService()
@@ -285,6 +298,25 @@ public final class StorageSpawnManager
         break;
       }
     }
+  }
+
+  /**
+   * 计算某条服务的首次出车时刻。
+   *
+   * <p>包含两部分偏移：
+   *
+   * <ul>
+   *   <li>全局 jitter（配置项）
+   *   <li>交路组内相位偏移（避免同组 route 同 tick 同时出票）
+   * </ul>
+   */
+  private Instant initialDueAt(SpawnService service, Instant now) {
+    if (service == null || now == null) {
+      return Instant.EPOCH;
+    }
+    Duration base = settings.initialJitter();
+    Duration offset = initialOffsets.getOrDefault(service.key(), Duration.ZERO);
+    return now.plus(base).plus(offset);
   }
 
   private List<SpawnTicket> drainDueTickets(Instant now) {
@@ -360,36 +392,13 @@ public final class StorageSpawnManager
           if (line.status() != LineStatus.ACTIVE) {
             continue;
           }
-          Optional<Integer> baseline = line.spawnFreqBaselineSec();
-          if (baseline.isEmpty() || baseline.get() == null || baseline.get() <= 0) {
-            continue;
-          }
-          Duration headway = Duration.ofSeconds(baseline.get());
+          Optional<Duration> lineHeadway = resolveLineBaselineHeadway(line);
           List<RouteSelection> selections = selectForecastRoutes(provider, line);
           if (selections.isEmpty()) {
             continue;
           }
-          long sumWeight = selections.stream().mapToLong(RouteSelection::spawnWeight).sum();
-          if (sumWeight <= 0L) {
-            continue;
-          }
-          for (RouteSelection selection : selections) {
-            Duration routeHeadway = scaleHeadway(headway, sumWeight, selection.spawnWeight());
-            SpawnService service =
-                new SpawnService(
-                    new SpawnServiceKey(selection.route().id()),
-                    company.id(),
-                    company.code(),
-                    operator.id(),
-                    operator.code(),
-                    line.id(),
-                    line.code(),
-                    selection.route().id(),
-                    selection.route().code(),
-                    routeHeadway,
-                    selection.depotNodeId());
-            services.add(service);
-          }
+          appendCirculationServices(
+              services, company, operator, line, lineHeadway, selections, new HashMap<>());
         }
       }
     }
@@ -398,6 +407,7 @@ public final class StorageSpawnManager
 
   private SpawnPlan buildPlan(StorageProvider provider, Instant now) {
     List<SpawnService> services = new ArrayList<>();
+    Map<SpawnServiceKey, Duration> computedOffsets = new HashMap<>();
     List<Company> companies = provider.companies().listAll();
     for (Company company : companies) {
       if (company == null) {
@@ -414,16 +424,12 @@ public final class StorageSpawnManager
           if (line.status() != LineStatus.ACTIVE) {
             continue;
           }
-          Optional<Integer> baseline = line.spawnFreqBaselineSec();
-          if (baseline.isEmpty() || baseline.get() == null || baseline.get() <= 0) {
-            continue;
-          }
-          Duration headway = Duration.ofSeconds(baseline.get());
-          List<RouteSelection> selections = selectSpawnRoutes(provider, line);
-          appendServices(services, company, operator, line, headway, selections);
-
+          Optional<Duration> lineHeadway = resolveLineBaselineHeadway(line);
+          List<RouteSelection> selections = new ArrayList<>(selectSpawnRoutes(provider, line));
           List<RouteSelection> returnSelections = selectForecastRoutes(provider, line);
-          appendServices(services, company, operator, line, headway, returnSelections);
+          selections.addAll(returnSelections);
+          appendCirculationServices(
+              services, company, operator, line, lineHeadway, selections, computedOffsets);
         }
       }
     }
@@ -431,40 +437,373 @@ public final class StorageSpawnManager
         Comparator.comparing((SpawnService s) -> s.operatorCode().toLowerCase(Locale.ROOT))
             .thenComparing(s -> s.lineCode().toLowerCase(Locale.ROOT))
             .thenComparing(s -> s.routeCode().toLowerCase(Locale.ROOT)));
+    initialOffsets.clear();
+    initialOffsets.putAll(computedOffsets);
     debugLogger.accept("SpawnPlan 刷新: services=" + services.size() + " at " + now);
     return new SpawnPlan(now, services);
   }
 
-  private void appendServices(
+  /**
+   * 交路组维度构建 SpawnService。
+   *
+   * <p>优先使用 group baseline，再按 route 权重拆分；当 group baseline 缺失时回退 line baseline：
+   *
+   * <ul>
+   *   <li>推荐：使用 {@code spawn_group_baseline_sec} 明确每个交路组频率
+   *   <li>兼容：未配置 group baseline 时，回退 line baseline（旧配置下仍支持 {@code spawn_group_weight}）
+   * </ul>
+   */
+  private void appendCirculationServices(
       List<SpawnService> services,
       Company company,
       Operator operator,
       Line line,
-      Duration headway,
-      List<RouteSelection> selections) {
+      Optional<Duration> lineHeadway,
+      List<RouteSelection> selections,
+      Map<SpawnServiceKey, Duration> offsetByService) {
     if (services == null || selections == null || selections.isEmpty()) {
       return;
     }
-    long sumWeight = selections.stream().mapToLong(RouteSelection::spawnWeight).sum();
-    if (sumWeight <= 0L) {
+    Map<String, List<RouteSelection>> byGroup = new HashMap<>();
+    for (RouteSelection selection : selections) {
+      if (selection == null) {
+        continue;
+      }
+      String group = resolveCirculationGroupKey(line, selection);
+      byGroup.computeIfAbsent(group, ignored -> new ArrayList<>()).add(selection);
+    }
+    if (byGroup.isEmpty()) {
       return;
     }
-    for (RouteSelection selection : selections) {
-      Duration routeHeadway = scaleHeadway(headway, sumWeight, selection.spawnWeight());
-      SpawnService service =
-          new SpawnService(
-              new SpawnServiceKey(selection.route().id()),
-              company.id(),
-              company.code(),
-              operator.id(),
-              operator.code(),
-              line.id(),
-              line.code(),
-              selection.route().id(),
-              selection.route().code(),
-              routeHeadway,
-              selection.depotNodeId());
-      services.add(service);
+    Map<String, SpawnGroup> configuredGroups =
+        indexConfiguredGroups(LineSpawnMetadata.parseGroups(line.metadata()));
+    List<CirculationGroupSelection> groups = new ArrayList<>();
+    for (Map.Entry<String, List<RouteSelection>> entry : byGroup.entrySet()) {
+      List<RouteSelection> groupRoutes = entry.getValue();
+      if (groupRoutes == null || groupRoutes.isEmpty()) {
+        continue;
+      }
+      Optional<Integer> groupBaselineSeconds =
+          resolveGroupBaselineSeconds(configuredGroups, entry.getKey(), groupRoutes);
+      if (groupBaselineSeconds.isEmpty() && (lineHeadway == null || lineHeadway.isEmpty())) {
+        debugLogger.accept(
+            "SpawnPlan 跳过交路组(缺少 baseline): line=" + line.code() + " group=" + entry.getKey());
+        continue;
+      }
+      int groupWeight = resolveGroupWeight(groupRoutes);
+      if (groupWeight <= 0) {
+        continue;
+      }
+      groups.add(
+          new CirculationGroupSelection(
+              entry.getKey(), groupRoutes, groupWeight, groupBaselineSeconds));
+    }
+    if (groups.isEmpty()) {
+      return;
+    }
+    groups.sort(
+        Comparator.comparing(CirculationGroupSelection::key, String.CASE_INSENSITIVE_ORDER));
+    boolean hasExplicitGroupBaseline =
+        groups.stream().anyMatch(group -> group.groupBaselineSeconds().isPresent());
+    long sumGroupWeight = groups.stream().mapToLong(CirculationGroupSelection::groupWeight).sum();
+    if (!hasExplicitGroupBaseline
+        && lineHeadway != null
+        && lineHeadway.isPresent()
+        && sumGroupWeight <= 0L) {
+      return;
+    }
+
+    for (CirculationGroupSelection group : groups) {
+      if (hasExplicitGroupBaseline && group.groupBaselineSeconds().isEmpty()) {
+        debugLogger.accept(
+            "SpawnPlan 交路组回退 line baseline: line=" + line.code() + " group=" + group.key());
+      }
+      Optional<Duration> groupHeadwayOpt =
+          resolveGroupHeadway(group, lineHeadway, hasExplicitGroupBaseline, sumGroupWeight);
+      if (groupHeadwayOpt.isEmpty()) {
+        continue;
+      }
+      Duration groupHeadway = groupHeadwayOpt.get();
+      List<RouteSelection> groupRoutes = new ArrayList<>(group.routes());
+      groupRoutes.sort(
+          Comparator.comparing(
+              selection -> selection.route().code(), String.CASE_INSENSITIVE_ORDER));
+      long sumRouteWeight = groupRoutes.stream().mapToLong(RouteSelection::spawnWeight).sum();
+      if (sumRouteWeight <= 0L) {
+        continue;
+      }
+      for (RouteSelection selection : groupRoutes) {
+        Duration routeHeadway = scaleHeadway(groupHeadway, sumRouteWeight, selection.spawnWeight());
+        SpawnService service =
+            new SpawnService(
+                new SpawnServiceKey(selection.route().id()),
+                company.id(),
+                company.code(),
+                operator.id(),
+                operator.code(),
+                line.id(),
+                line.code(),
+                selection.route().id(),
+                selection.route().code(),
+                routeHeadway,
+                selection.depotNodeId());
+        services.add(service);
+      }
+      assignGroupInitialOffsets(groupRoutes, groupHeadway, offsetByService);
+    }
+  }
+
+  /**
+   * 为同一交路组分配初始相位。
+   *
+   * <p>该偏移只用于首次出车，后续由各服务自身 headway 推进。
+   */
+  private static void assignGroupInitialOffsets(
+      List<RouteSelection> groupRoutes,
+      Duration groupHeadway,
+      Map<SpawnServiceKey, Duration> offsetByService) {
+    if (groupRoutes == null
+        || groupRoutes.isEmpty()
+        || groupHeadway == null
+        || groupHeadway.isZero()
+        || groupHeadway.isNegative()
+        || offsetByService == null) {
+      return;
+    }
+    int slot = 0;
+    for (RouteSelection selection : groupRoutes) {
+      if (selection == null || selection.route() == null) {
+        continue;
+      }
+      SpawnServiceKey key = new SpawnServiceKey(selection.route().id());
+      Duration offset = multiplyDuration(groupHeadway, slot);
+      offsetByService.putIfAbsent(key, offset);
+      slot++;
+    }
+  }
+
+  private static Duration multiplyDuration(Duration duration, int multiplier) {
+    if (duration == null || duration.isZero() || duration.isNegative() || multiplier <= 0) {
+      return Duration.ZERO;
+    }
+    try {
+      return duration.multipliedBy(multiplier);
+    } catch (ArithmeticException overflow) {
+      return Duration.ZERO;
+    }
+  }
+
+  private int resolveGroupWeight(List<RouteSelection> groupRoutes) {
+    if (groupRoutes == null || groupRoutes.isEmpty()) {
+      return 1;
+    }
+    int max = 1;
+    for (RouteSelection selection : groupRoutes) {
+      if (selection == null || selection.route() == null) {
+        continue;
+      }
+      Optional<Integer> configured = readInt(selection.route().metadata(), "spawn_group_weight");
+      if (configured.isPresent() && configured.get() != null && configured.get() > 0) {
+        max = Math.max(max, configured.get());
+      }
+    }
+    return Math.max(1, Math.min(1000, max));
+  }
+
+  /**
+   * 解析交路组发车基准秒数。
+   *
+   * <p>优先读取 {@code spawn_group_baseline_sec}，兼容旧别名 {@code spawn_group_baseline}。同组出现多个值时，
+   * 取更保守（更大的）秒数，避免因配置不一致导致突发增发。
+   */
+  private Optional<Integer> resolveGroupBaselineSeconds(
+      Map<String, SpawnGroup> configuredGroups, String groupKey, List<RouteSelection> groupRoutes) {
+    if (configuredGroups != null && !configuredGroups.isEmpty()) {
+      String normalizedGroupName = extractGroupName(groupKey);
+      if (!normalizedGroupName.isBlank()) {
+        SpawnGroup configured = configuredGroups.get(normalizedGroupName);
+        if (configured != null && configured.baselineSeconds().isPresent()) {
+          return configured.baselineSeconds();
+        }
+      }
+    }
+    if (groupRoutes == null || groupRoutes.isEmpty()) {
+      return Optional.empty();
+    }
+    HashSet<Integer> configuredValues = new HashSet<>();
+    for (RouteSelection selection : groupRoutes) {
+      if (selection == null || selection.route() == null) {
+        continue;
+      }
+      Optional<Integer> configured =
+          readInt(selection.route().metadata(), "spawn_group_baseline_sec");
+      if (configured.isEmpty()) {
+        configured = readInt(selection.route().metadata(), "spawn_group_baseline");
+      }
+      if (configured.isPresent() && configured.get() != null && configured.get() > 0) {
+        configuredValues.add(configured.get());
+      }
+    }
+    if (configuredValues.isEmpty()) {
+      return Optional.empty();
+    }
+    if (configuredValues.size() > 1) {
+      debugLogger.accept("SpawnPlan 交路组 baseline 不一致，取最大值: values=" + configuredValues);
+    }
+    return configuredValues.stream().max(Integer::compareTo);
+  }
+
+  private static Map<String, SpawnGroup> indexConfiguredGroups(List<SpawnGroup> groups) {
+    if (groups == null || groups.isEmpty()) {
+      return Map.of();
+    }
+    Map<String, SpawnGroup> index = new HashMap<>();
+    for (SpawnGroup group : groups) {
+      if (group == null || group.name().isBlank()) {
+        continue;
+      }
+      index.put(group.normalizedName(), group);
+    }
+    return Map.copyOf(index);
+  }
+
+  private static String extractGroupName(String groupKey) {
+    if (groupKey == null || groupKey.isBlank()) {
+      return "";
+    }
+    int separator = groupKey.indexOf('|');
+    String raw = separator >= 0 ? groupKey.substring(separator + 1) : groupKey;
+    return raw.trim().toLowerCase(Locale.ROOT);
+  }
+
+  /**
+   * 解析交路组实际 headway。
+   *
+   * <p>策略：
+   *
+   * <ul>
+   *   <li>有 {@code spawn_group_baseline_sec}：直接使用该值
+   *   <li>无 group baseline 且无任何显式 group baseline：沿用旧逻辑，按 {@code spawn_group_weight} 拆分 line
+   *       baseline
+   *   <li>无 group baseline 但存在其他显式 group baseline：回退为 line baseline（不再使用 group weight）
+   * </ul>
+   */
+  private static Optional<Duration> resolveGroupHeadway(
+      CirculationGroupSelection group,
+      Optional<Duration> lineHeadway,
+      boolean hasExplicitGroupBaseline,
+      long sumGroupWeight) {
+    if (group == null) {
+      return Optional.empty();
+    }
+    if (group.groupBaselineSeconds().isPresent()) {
+      Integer baseline = group.groupBaselineSeconds().get();
+      if (baseline != null && baseline > 0) {
+        return Optional.of(Duration.ofSeconds(baseline));
+      }
+    }
+    if (lineHeadway == null || lineHeadway.isEmpty()) {
+      return Optional.empty();
+    }
+    Duration base = lineHeadway.get();
+    if (hasExplicitGroupBaseline) {
+      return Optional.of(base);
+    }
+    return Optional.of(scaleHeadway(base, Math.max(1L, sumGroupWeight), group.groupWeight()));
+  }
+
+  /**
+   * 解析 route 所属交路组。
+   *
+   * <p>优先使用 {@code spawn_group}，未配置时按首站/起点归并。
+   */
+  private String resolveCirculationGroupKey(Line line, RouteSelection selection) {
+    if (selection == null || selection.route() == null) {
+      return "default";
+    }
+    Optional<String> configured = readString(selection.route().metadata(), "spawn_group");
+    if (configured.isPresent()) {
+      String group = configured.get().trim().toLowerCase(Locale.ROOT);
+      if (!group.isBlank()) {
+        return line.id() + "|" + group;
+      }
+    }
+    String normalizedStart = normalizeStartForGroup(selection.depotNodeId());
+    if (normalizedStart.isBlank()) {
+      normalizedStart = selection.route().code().toLowerCase(Locale.ROOT);
+    }
+    return line.id() + "|" + normalizedStart;
+  }
+
+  private static String normalizeStartForGroup(String startNode) {
+    if (startNode == null || startNode.isBlank()) {
+      return "";
+    }
+    String normalized = startNode.trim().toLowerCase(Locale.ROOT);
+    if (SpawnDirectiveParser.isDynamicTarget(normalized)) {
+      Optional<String> dynamic = parseDynamicGroupKey(normalized);
+      if (dynamic.isPresent()) {
+        return dynamic.get();
+      }
+      return normalized;
+    }
+    Optional<String> stationKey = TerminalKeyResolver.extractStationKey(normalized);
+    return stationKey.orElse(normalized);
+  }
+
+  private static Optional<String> parseDynamicGroupKey(String dynamicSpec) {
+    if (dynamicSpec == null || dynamicSpec.isBlank()) {
+      return Optional.empty();
+    }
+    String normalized = dynamicSpec.trim().toLowerCase(Locale.ROOT);
+    if (!normalized.startsWith("dynamic:")) {
+      return Optional.empty();
+    }
+    String rest = normalized.substring("dynamic:".length());
+    String[] parts = rest.split(":", 4);
+    if (parts.length < 3) {
+      return Optional.empty();
+    }
+    String operator = parts[0].trim();
+    String type = parts[1].trim();
+    String name = parts[2].trim();
+    if (operator.isBlank() || type.isBlank() || name.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(operator + ":" + type + ":" + name);
+  }
+
+  private Optional<String> readString(Map<String, Object> meta, String key) {
+    if (meta == null || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Object value = meta.get(key);
+    if (value == null) {
+      return Optional.empty();
+    }
+    String text = String.valueOf(value).trim();
+    return text.isEmpty() ? Optional.empty() : Optional.of(text);
+  }
+
+  private Optional<Duration> resolveLineBaselineHeadway(Line line) {
+    if (line == null) {
+      return Optional.empty();
+    }
+    Optional<Integer> baseline = line.spawnFreqBaselineSec();
+    if (baseline.isEmpty() || baseline.get() == null || baseline.get() <= 0) {
+      return Optional.empty();
+    }
+    return Optional.of(Duration.ofSeconds(baseline.get()));
+  }
+
+  private record CirculationGroupSelection(
+      String key,
+      List<RouteSelection> routes,
+      int groupWeight,
+      Optional<Integer> groupBaselineSeconds) {
+    private CirculationGroupSelection {
+      routes = routes == null ? List.of() : List.copyOf(routes);
+      groupBaselineSeconds = groupBaselineSeconds == null ? Optional.empty() : groupBaselineSeconds;
     }
   }
 

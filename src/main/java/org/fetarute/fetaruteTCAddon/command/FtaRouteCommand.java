@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -49,6 +50,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -139,6 +142,7 @@ public final class FtaRouteCommand {
         placeholderSuggestion("\"<secondaryName>\"");
     SuggestionProvider<CommandSender> patternValueSuggestions = routePatternSuggestions();
     SuggestionProvider<CommandSender> operationValueSuggestions = routeOperationSuggestions();
+    SuggestionProvider<CommandSender> groupValueSuggestions = spawnGroupSuggestions();
 
     var nameFlag =
         CommandFlag.<CommandSender>builder("name")
@@ -195,6 +199,30 @@ public final class FtaRouteCommand {
                         "spawn-weight", IntegerParser.integerParser())
                     .suggestionProvider(placeholderSuggestion("<weight>")))
             .build();
+    var spawnGroupFlag =
+        CommandFlag.<CommandSender>builder("spawn-group")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "spawn-group", StringParser.quotedStringParser())
+                    .suggestionProvider(groupValueSuggestions))
+            .build();
+    var spawnGroupClearFlag = CommandFlag.builder("spawn-group-clear").build();
+    var spawnGroupBaselineFlag =
+        CommandFlag.<CommandSender>builder("spawn-group-baseline")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "spawn-group-baseline", IntegerParser.integerParser())
+                    .suggestionProvider(placeholderSuggestion("<seconds>")))
+            .build();
+    var spawnGroupBaselineClearFlag = CommandFlag.builder("spawn-group-baseline-clear").build();
+    var groupBaselineFlag =
+        CommandFlag.<CommandSender>builder("baseline")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "baseline", IntegerParser.integerParser(1, 86400))
+                    .suggestionProvider(placeholderSuggestion("<seconds>")))
+            .build();
+    var groupBaselineClearFlag = CommandFlag.builder("baseline-clear").build();
 
     // editor give：允许“空模板”与“绑定到指定 route”两种模式；要么四参齐全要么不填。
     manager.command(
@@ -509,10 +537,24 @@ public final class FtaRouteCommand {
                     String secondary = route.secondaryName().filter(s -> !s.isBlank()).orElse("-");
                     String runtime = route.runtimeSeconds().map(String::valueOf).orElse("-");
                     String distance = route.distanceMeters().map(String::valueOf).orElse("-");
+                    String spawnGroup = readSpawnGroup(route.metadata()).orElse("-");
+                    String spawnGroupBaseline =
+                        resolveSpawnGroupBaselineSeconds(resolved.line(), route)
+                            .map(String::valueOf)
+                            .orElse("-");
                     String pattern =
                         locale.enumText("enum.route-pattern-type", route.patternType());
                     String operation =
                         locale.enumText("enum.route-operation-type", route.operationType());
+                    String infoCommand =
+                        "/fta route info "
+                            + resolved.company().code()
+                            + " "
+                            + resolved.operator().code()
+                            + " "
+                            + resolved.line().code()
+                            + " "
+                            + route.code();
                     sender.sendMessage(
                         locale
                             .component(
@@ -544,7 +586,14 @@ public final class FtaRouteCommand {
                                             "runtime",
                                             runtime,
                                             "distance",
-                                            distance)))));
+                                            distance,
+                                            "spawn_group",
+                                            spawnGroup,
+                                            "spawn_group_baseline",
+                                            spawnGroupBaseline,
+                                            "click_hint",
+                                            locale.text("command.route.list.click-hint")))))
+                            .clickEvent(ClickEvent.runCommand(infoCommand)));
                   }
                 }));
 
@@ -617,12 +666,699 @@ public final class FtaRouteCommand {
                   sender.sendMessage(
                       locale.component(
                           "command.route.info.spawn-pattern", Map.of("pattern", spawnPattern)));
+                  String spawnGroup = readSpawnGroup(route.metadata()).orElse("-");
+                  String spawnGroupBaseline =
+                      resolveSpawnGroupBaselineSeconds(resolved.line(), route)
+                          .map(String::valueOf)
+                          .orElse("-");
+                  String setPrefix =
+                      "/fta route set "
+                          + resolved.company().code()
+                          + " "
+                          + resolved.operator().code()
+                          + " "
+                          + resolved.line().code()
+                          + " "
+                          + route.code()
+                          + " ";
+                  sender.sendMessage(
+                      locale
+                          .component("command.route.info.spawn-group", Map.of("group", spawnGroup))
+                          .clickEvent(ClickEvent.suggestCommand(setPrefix + "--spawn-group ")));
+                  sender.sendMessage(
+                      locale
+                          .component(
+                              "command.route.info.spawn-group-baseline",
+                              Map.of("seconds", spawnGroupBaseline))
+                          .clickEvent(
+                              ClickEvent.suggestCommand(setPrefix + "--spawn-group-baseline ")));
 
                   List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
                   sender.sendMessage(
                       locale.component(
                           "command.route.info.stops",
                           Map.of("count", String.valueOf(stops.size()))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("list")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, false);
+                  if (resolved == null) {
+                    return;
+                  }
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  groups.sort(Comparator.comparing(SpawnGroup::normalizedName));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.list.header",
+                          Map.of(
+                              "company",
+                              resolved.company().code(),
+                              "operator",
+                              resolved.operator().code(),
+                              "line",
+                              resolved.line().code(),
+                              "count",
+                              String.valueOf(groups.size()))));
+                  if (groups.isEmpty()) {
+                    sender.sendMessage(locale.component("command.route.group.list.empty"));
+                    return;
+                  }
+                  for (SpawnGroup group : groups) {
+                    String baseline = group.baselineSeconds().map(String::valueOf).orElse("-");
+                    String infoCommand =
+                        "/fta route group info "
+                            + resolved.company().code()
+                            + " "
+                            + resolved.operator().code()
+                            + " "
+                            + resolved.line().code()
+                            + " "
+                            + quoteCommandArgument(group.name());
+                    sender.sendMessage(
+                        locale
+                            .component(
+                                "command.route.group.list.entry",
+                                Map.of("group", group.name(), "baseline", baseline))
+                            .hoverEvent(
+                                HoverEvent.showText(
+                                    locale.component(
+                                        "command.route.group.list.hover-entry",
+                                        Map.of(
+                                            "group",
+                                            group.name(),
+                                            "baseline",
+                                            baseline,
+                                            "click_hint",
+                                            locale.text("command.route.group.list.click-hint")))))
+                            .clickEvent(ClickEvent.runCommand(infoCommand)));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("info")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, false);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = ((String) ctx.get("group")).trim();
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> groupOpt = LineSpawnMetadata.findGroup(groups, groupArg);
+                  if (groupOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.not-found", Map.of("group", groupArg)));
+                    return;
+                  }
+                  SpawnGroup group = groupOpt.get();
+                  String baseline = group.baselineSeconds().map(String::valueOf).orElse("-");
+                  long routes =
+                      provider.routes().listByLine(resolved.line().id()).stream()
+                          .filter(route -> route != null)
+                          .map(Route::metadata)
+                          .map(FtaRouteCommand::readSpawnGroup)
+                          .flatMap(Optional::stream)
+                          .filter(name -> name.equalsIgnoreCase(group.name()))
+                          .count();
+                  String setPrefix =
+                      "/fta route group set "
+                          + resolved.company().code()
+                          + " "
+                          + resolved.operator().code()
+                          + " "
+                          + resolved.line().code()
+                          + " "
+                          + quoteCommandArgument(group.name())
+                          + " --baseline ";
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.info.header",
+                          Map.of(
+                              "line",
+                              resolved.line().code(),
+                              "group",
+                              group.name(),
+                              "baseline",
+                              baseline,
+                              "routes",
+                              String.valueOf(routes))));
+                  sender.sendMessage(
+                      locale
+                          .component(
+                              "command.route.group.info.baseline", Map.of("baseline", baseline))
+                          .clickEvent(ClickEvent.suggestCommand(setPrefix)));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("create")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .optional("baseline", IntegerParser.integerParser(1, 86400))
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
+                  Integer baseline = ctx.optional("baseline").map(Integer.class::cast).orElse(null);
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> existedGroup = LineSpawnMetadata.findGroup(groups, groupArg);
+                  boolean existed = existedGroup.isPresent();
+                  Optional<Integer> baselineSeconds =
+                      baseline == null
+                          ? existedGroup.flatMap(SpawnGroup::baselineSeconds)
+                          : Optional.of(baseline);
+                  groups =
+                      new ArrayList<>(
+                          LineSpawnMetadata.upsertGroup(
+                              groups, new SpawnGroup(groupArg, baselineSeconds)));
+                  Line updatedLine = withSpawnGroups(resolved.line(), groups);
+                  provider.lines().save(updatedLine);
+                  sender.sendMessage(
+                      locale.component(
+                          existed
+                              ? "command.route.group.create.updated"
+                              : "command.route.group.create.success",
+                          Map.of("group", groupArg, "line", resolved.line().code())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("set")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .flag(groupBaselineFlag)
+            .flag(groupBaselineClearFlag)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
+                  var flags = ctx.flags();
+                  boolean any =
+                      flags.hasFlag(groupBaselineFlag) || flags.hasFlag(groupBaselineClearFlag);
+                  if (!any) {
+                    sender.sendMessage(locale.component("command.route.group.set.noop"));
+                    return;
+                  }
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> target = LineSpawnMetadata.findGroup(groups, groupArg);
+                  if (target.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.not-found", Map.of("group", groupArg)));
+                    return;
+                  }
+                  Optional<Integer> baseline = target.get().baselineSeconds();
+                  if (flags.hasFlag(groupBaselineClearFlag)) {
+                    baseline = Optional.empty();
+                  }
+                  if (flags.hasFlag(groupBaselineFlag)) {
+                    Integer seconds = flags.getValue(groupBaselineFlag, null);
+                    baseline =
+                        (seconds == null || seconds <= 0) ? Optional.empty() : Optional.of(seconds);
+                  }
+                  groups =
+                      new ArrayList<>(
+                          LineSpawnMetadata.upsertGroup(
+                              groups, new SpawnGroup(target.get().name(), baseline)));
+                  Line updatedLine = withSpawnGroups(resolved.line(), groups);
+                  provider.lines().save(updatedLine);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.set.success",
+                          Map.of(
+                              "group", target.get().name(),
+                              "line", resolved.line().code(),
+                              "baseline", baseline.map(String::valueOf).orElse("-"))));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("routes")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, false);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> groupOpt = LineSpawnMetadata.findGroup(groups, groupArg);
+                  if (groupOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.not-found", Map.of("group", groupArg)));
+                    return;
+                  }
+                  SpawnGroup group = groupOpt.get();
+                  List<Route> boundRoutes =
+                      provider.routes().listByLine(resolved.line().id()).stream()
+                          .filter(Objects::nonNull)
+                          .filter(
+                              route ->
+                                  readSpawnGroup(route.metadata())
+                                      .map(name -> name.equalsIgnoreCase(group.name()))
+                                      .orElse(false))
+                          .sorted(Comparator.comparing(Route::code, String.CASE_INSENSITIVE_ORDER))
+                          .toList();
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.routes.header",
+                          Map.of(
+                              "line", resolved.line().code(),
+                              "group", group.name(),
+                              "count", String.valueOf(boundRoutes.size()))));
+                  if (boundRoutes.isEmpty()) {
+                    sender.sendMessage(locale.component("command.route.group.routes.empty"));
+                    return;
+                  }
+                  for (Route route : boundRoutes) {
+                    String secondary = route.secondaryName().filter(s -> !s.isBlank()).orElse("-");
+                    String runtime = route.runtimeSeconds().map(String::valueOf).orElse("-");
+                    String distance = route.distanceMeters().map(String::valueOf).orElse("-");
+                    String spawnGroup = readSpawnGroup(route.metadata()).orElse("-");
+                    String spawnGroupBaseline =
+                        resolveSpawnGroupBaselineSeconds(resolved.line(), route)
+                            .map(String::valueOf)
+                            .orElse("-");
+                    String pattern =
+                        locale.enumText("enum.route-pattern-type", route.patternType());
+                    String operation =
+                        locale.enumText("enum.route-operation-type", route.operationType());
+                    String infoCommand =
+                        "/fta route info "
+                            + resolved.company().code()
+                            + " "
+                            + resolved.operator().code()
+                            + " "
+                            + resolved.line().code()
+                            + " "
+                            + route.code();
+                    sender.sendMessage(
+                        locale
+                            .component(
+                                "command.route.list.entry",
+                                Map.of(
+                                    "code",
+                                    route.code(),
+                                    "name",
+                                    route.name(),
+                                    "pattern",
+                                    pattern,
+                                    "operation",
+                                    operation))
+                            .hoverEvent(
+                                HoverEvent.showText(
+                                    locale.component(
+                                        "command.route.list.hover-entry",
+                                        Map.of(
+                                            "code", route.code(),
+                                            "name", route.name(),
+                                            "secondary", secondary,
+                                            "pattern", pattern,
+                                            "operation", operation,
+                                            "runtime", runtime,
+                                            "distance", distance,
+                                            "spawn_group", spawnGroup,
+                                            "spawn_group_baseline", spawnGroupBaseline,
+                                            "click_hint",
+                                                locale.text("command.route.list.click-hint")))))
+                            .clickEvent(ClickEvent.runCommand(infoCommand)));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("assign")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .required("route", StringParser.stringParser(), routeSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> target = LineSpawnMetadata.findGroup(groups, groupArg);
+                  if (target.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.not-found", Map.of("group", groupArg)));
+                    return;
+                  }
+                  String routeArg = ((String) ctx.get("route")).trim();
+                  Optional<Route> routeOpt =
+                      provider.routes().findByLineAndCode(resolved.line().id(), routeArg);
+                  if (routeOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.route.not-found", Map.of("route", routeArg)));
+                    return;
+                  }
+                  Route route = routeOpt.get();
+                  Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
+                  metadata.put("spawn_group", target.get().name());
+                  metadata.remove("spawn_group_baseline_sec");
+                  metadata.remove("spawn_group_baseline");
+                  metadata.remove("spawn_group_weight");
+                  Route updated =
+                      new Route(
+                          route.id(),
+                          route.code(),
+                          route.lineId(),
+                          route.name(),
+                          route.secondaryName(),
+                          route.patternType(),
+                          route.operationType(),
+                          route.distanceMeters(),
+                          route.runtimeSeconds(),
+                          metadata,
+                          route.createdAt(),
+                          Instant.now());
+                  provider.routes().save(updated);
+                  plugin.refreshRouteDefinition(
+                      provider, resolved.operator(), resolved.line(), updated);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.assign.success",
+                          Map.of(
+                              "group", target.get().name(),
+                              "route", route.code(),
+                              "line", resolved.line().code())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("unassign")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .required("route", StringParser.stringParser(), routeSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> target = LineSpawnMetadata.findGroup(groups, groupArg);
+                  if (target.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.not-found", Map.of("group", groupArg)));
+                    return;
+                  }
+                  String routeArg = ((String) ctx.get("route")).trim();
+                  Optional<Route> routeOpt =
+                      provider.routes().findByLineAndCode(resolved.line().id(), routeArg);
+                  if (routeOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.route.not-found", Map.of("route", routeArg)));
+                    return;
+                  }
+                  Route route = routeOpt.get();
+                  Optional<String> boundGroup = readSpawnGroup(route.metadata());
+                  if (boundGroup.isEmpty()
+                      || !boundGroup.get().equalsIgnoreCase(target.get().name())) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.unassign.not-bound",
+                            Map.of("group", target.get().name(), "route", route.code())));
+                    return;
+                  }
+                  Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
+                  metadata.remove("spawn_group");
+                  metadata.remove("spawn_group_baseline_sec");
+                  metadata.remove("spawn_group_baseline");
+                  metadata.remove("spawn_group_weight");
+                  Route updated =
+                      new Route(
+                          route.id(),
+                          route.code(),
+                          route.lineId(),
+                          route.name(),
+                          route.secondaryName(),
+                          route.patternType(),
+                          route.operationType(),
+                          route.distanceMeters(),
+                          route.runtimeSeconds(),
+                          metadata,
+                          route.createdAt(),
+                          Instant.now());
+                  provider.routes().save(updated);
+                  plugin.refreshRouteDefinition(
+                      provider, resolved.operator(), resolved.line(), updated);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.unassign.success",
+                          Map.of(
+                              "group", target.get().name(),
+                              "route", route.code(),
+                              "line", resolved.line().code())));
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("route")
+            .literal("group")
+            .literal("delete")
+            .senderType(Player.class)
+            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
+            .handler(
+                ctx -> {
+                  Player sender = (Player) ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedLine resolved = resolveLine(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  String groupArg = ((String) ctx.get("group")).trim();
+                  List<SpawnGroup> groups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  Optional<SpawnGroup> target = LineSpawnMetadata.findGroup(groups, groupArg);
+                  if (target.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.group.not-found", Map.of("group", groupArg)));
+                    return;
+                  }
+                  List<SpawnGroup> remained =
+                      new ArrayList<>(LineSpawnMetadata.removeGroup(groups, target.get().name()));
+                  Line updatedLine = withSpawnGroups(resolved.line(), remained);
+
+                  List<Route> routes = provider.routes().listByLine(resolved.line().id());
+                  List<Route> updatedRoutes = new ArrayList<>();
+                  for (Route route : routes) {
+                    if (route == null) {
+                      continue;
+                    }
+                    Optional<String> boundGroup = readSpawnGroup(route.metadata());
+                    if (boundGroup.isEmpty()
+                        || !boundGroup.get().equalsIgnoreCase(target.get().name())) {
+                      continue;
+                    }
+                    Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
+                    metadata.remove("spawn_group");
+                    metadata.remove("spawn_group_baseline_sec");
+                    metadata.remove("spawn_group_baseline");
+                    metadata.remove("spawn_group_weight");
+                    updatedRoutes.add(
+                        new Route(
+                            route.id(),
+                            route.code(),
+                            route.lineId(),
+                            route.name(),
+                            route.secondaryName(),
+                            route.patternType(),
+                            route.operationType(),
+                            route.distanceMeters(),
+                            route.runtimeSeconds(),
+                            metadata,
+                            route.createdAt(),
+                            Instant.now()));
+                  }
+
+                  provider
+                      .transactionManager()
+                      .execute(
+                          () -> {
+                            provider.lines().save(updatedLine);
+                            for (Route route : updatedRoutes) {
+                              provider.routes().save(route);
+                            }
+                            return null;
+                          });
+                  for (Route route : updatedRoutes) {
+                    plugin.refreshRouteDefinition(
+                        provider, resolved.operator(), updatedLine, route);
+                  }
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.group.delete.success",
+                          Map.of(
+                              "group", target.get().name(),
+                              "line", resolved.line().code(),
+                              "routes", String.valueOf(updatedRoutes.size()))));
                 }));
 
     manager.command(
@@ -751,6 +1487,10 @@ public final class FtaRouteCommand {
             .flag(spawnClearFlag)
             .flag(spawnEnabledFlag)
             .flag(spawnWeightFlag)
+            .flag(spawnGroupFlag)
+            .flag(spawnGroupClearFlag)
+            .flag(spawnGroupBaselineFlag)
+            .flag(spawnGroupBaselineClearFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -779,7 +1519,11 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(spawnFlag)
                           || flags.hasFlag(spawnClearFlag)
                           || flags.hasFlag(spawnEnabledFlag)
-                          || flags.hasFlag(spawnWeightFlag);
+                          || flags.hasFlag(spawnWeightFlag)
+                          || flags.hasFlag(spawnGroupFlag)
+                          || flags.hasFlag(spawnGroupClearFlag)
+                          || flags.hasFlag(spawnGroupBaselineFlag)
+                          || flags.hasFlag(spawnGroupBaselineClearFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.route.set.noop"));
                     return;
@@ -856,6 +1600,75 @@ public final class FtaRouteCommand {
                       metadata.put("spawn_weight", weight);
                     }
                   }
+                  List<SpawnGroup> lineGroups =
+                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                  String targetGroup = readSpawnGroup(route.metadata()).orElse(null);
+                  if (flags.hasFlag(spawnGroupClearFlag)) {
+                    targetGroup = null;
+                  }
+                  if (flags.hasFlag(spawnGroupFlag)) {
+                    String group = normalizeSpawnGroup(flags.getValue(spawnGroupFlag, null));
+                    if (group == null) {
+                      targetGroup = null;
+                    } else {
+                      Optional<SpawnGroup> configured =
+                          LineSpawnMetadata.findGroup(lineGroups, group);
+                      if (configured.isEmpty()) {
+                        sender.sendMessage(
+                            locale.component(
+                                "command.route.group.not-found", Map.of("group", group)));
+                        return;
+                      }
+                      targetGroup = configured.get().name();
+                    }
+                  }
+                  if (targetGroup == null || targetGroup.isBlank()) {
+                    metadata.remove("spawn_group");
+                  } else {
+                    metadata.put("spawn_group", targetGroup);
+                  }
+
+                  Optional<Line> updatedLineOpt = Optional.empty();
+                  boolean baselineMutated =
+                      flags.hasFlag(spawnGroupBaselineFlag)
+                          || flags.hasFlag(spawnGroupBaselineClearFlag);
+                  if (baselineMutated) {
+                    if (targetGroup == null || targetGroup.isBlank()) {
+                      sender.sendMessage(
+                          locale.component("command.route.group.baseline-requires-group"));
+                      return;
+                    }
+                    Optional<SpawnGroup> configured =
+                        LineSpawnMetadata.findGroup(lineGroups, targetGroup);
+                    if (configured.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.route.group.not-found", Map.of("group", targetGroup)));
+                      return;
+                    }
+                    Optional<Integer> baselineSeconds = configured.get().baselineSeconds();
+                    if (flags.hasFlag(spawnGroupBaselineClearFlag)) {
+                      baselineSeconds = Optional.empty();
+                    }
+                    if (flags.hasFlag(spawnGroupBaselineFlag)) {
+                      Integer seconds = flags.getValue(spawnGroupBaselineFlag, null);
+                      if (seconds == null || seconds <= 0) {
+                        baselineSeconds = Optional.empty();
+                      } else {
+                        baselineSeconds = Optional.of(seconds);
+                      }
+                    }
+                    lineGroups =
+                        new ArrayList<>(
+                            LineSpawnMetadata.upsertGroup(
+                                lineGroups,
+                                new SpawnGroup(configured.get().name(), baselineSeconds)));
+                    updatedLineOpt = Optional.of(withSpawnGroups(resolved.line(), lineGroups));
+                    // 迁移到 line-level baseline 后，route metadata 中不再保留该字段。
+                    metadata.remove("spawn_group_baseline_sec");
+                    metadata.remove("spawn_group_baseline");
+                    metadata.remove("spawn_group_weight");
+                  }
 
                   Route updated =
                       new Route(
@@ -871,9 +1684,23 @@ public final class FtaRouteCommand {
                           metadata,
                           route.createdAt(),
                           Instant.now());
-                  provider.routes().save(updated);
-                  plugin.refreshRouteDefinition(
-                      provider, resolved.operator(), resolved.line(), updated);
+                  if (updatedLineOpt.isPresent()) {
+                    Line updatedLine = updatedLineOpt.get();
+                    provider
+                        .transactionManager()
+                        .execute(
+                            () -> {
+                              provider.lines().save(updatedLine);
+                              provider.routes().save(updated);
+                              return null;
+                            });
+                    plugin.refreshRouteDefinition(
+                        provider, resolved.operator(), updatedLine, updated);
+                  } else {
+                    provider.routes().save(updated);
+                    plugin.refreshRouteDefinition(
+                        provider, resolved.operator(), resolved.line(), updated);
+                  }
                   sender.sendMessage(
                       locale.component("command.route.set.success", Map.of("code", route.code())));
                 }));
@@ -1378,6 +2205,71 @@ public final class FtaRouteCommand {
               .map(String::trim)
               .filter(code -> !code.isBlank())
               .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .distinct()
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /**
+   * spawn-group 参数补全：仅返回线路上已显式创建的交路组。
+   *
+   * <p>该补全遵循显式创建原则，不会根据 route metadata 自动推导/隐式创建组名。
+   */
+  private SuggestionProvider<CommandSender> spawnGroupSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          if (prefix.startsWith("\"") || prefix.startsWith("'")) {
+            prefix = prefix.substring(1);
+          }
+          final String matchPrefix = prefix;
+          List<String> suggestions = new ArrayList<>();
+          if (matchPrefix.isBlank()) {
+            suggestions.add("<group>");
+          }
+          Optional<StorageProvider> providerOpt = providerIfReady();
+          if (providerOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+          Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
+          Optional<String> lineArgOpt = ctx.optional("line").map(String.class::cast);
+          if (companyArgOpt.isEmpty() || operatorArgOpt.isEmpty() || lineArgOpt.isEmpty()) {
+            return suggestions;
+          }
+          String companyArg = companyArgOpt.get().trim();
+          String operatorArg = operatorArgOpt.get().trim();
+          String lineArg = lineArgOpt.get().trim();
+          if (companyArg.isBlank() || operatorArg.isBlank() || lineArg.isBlank()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          Optional<Company> companyOpt = query.findCompany(companyArg);
+          if (companyOpt.isEmpty()) {
+            return suggestions;
+          }
+          Company company = companyOpt.get();
+          if (!canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id())) {
+            return suggestions;
+          }
+          Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
+          if (operatorOpt.isEmpty()) {
+            return suggestions;
+          }
+          Optional<Line> lineOpt = query.findLine(operatorOpt.get().id(), lineArg);
+          if (lineOpt.isEmpty()) {
+            return suggestions;
+          }
+          LineSpawnMetadata.parseGroups(lineOpt.get().metadata()).stream()
+              .map(SpawnGroup::name)
+              .filter(Objects::nonNull)
+              .map(String::trim)
+              .filter(name -> !name.isBlank())
+              .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(matchPrefix))
+              .map(FtaRouteCommand::suggestCommandArgument)
               .distinct()
               .limit(SUGGESTION_LIMIT)
               .forEach(suggestions::add);
@@ -3242,6 +4134,141 @@ public final class FtaRouteCommand {
       }
     }
     return trimmed.isBlank() ? null : trimmed;
+  }
+
+  /** 归一化交路组名：去除首尾空白，空串返回 {@code null} 表示清除。 */
+  private static String normalizeSpawnGroup(String raw) {
+    if (raw == null) {
+      return null;
+    }
+    String trimmed = raw.trim();
+    return trimmed.isBlank() ? null : trimmed;
+  }
+
+  /**
+   * 将参数格式化为可直接拼接到命令中的形式。
+   *
+   * <p>当参数包含空白或引号时，使用双引号包裹并做最小转义，避免命令分词错误。
+   */
+  private static String quoteCommandArgument(String raw) {
+    if (raw == null) {
+      return "\"\"";
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty()) {
+      return "\"\"";
+    }
+    boolean needsQuote =
+        trimmed.indexOf(' ') >= 0 || trimmed.indexOf('\t') >= 0 || trimmed.indexOf('"') >= 0;
+    if (!needsQuote) {
+      return trimmed;
+    }
+    String escaped = trimmed.replace("\\", "\\\\").replace("\"", "\\\"");
+    return "\"" + escaped + "\"";
+  }
+
+  /** 补全结果用参数：含空白时自动加引号，确保插入后仍是单个参数。 */
+  private static String suggestCommandArgument(String raw) {
+    return quoteCommandArgument(raw);
+  }
+
+  /** 从 route metadata 读取交路组。 */
+  private static Optional<String> readSpawnGroup(Map<String, Object> metadata) {
+    if (metadata == null || metadata.isEmpty()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get("spawn_group");
+    if (raw == null) {
+      return Optional.empty();
+    }
+    String group = String.valueOf(raw).trim();
+    return group.isBlank() ? Optional.empty() : Optional.of(group);
+  }
+
+  /**
+   * 从 route metadata 读取交路组基线秒数。
+   *
+   * <p>优先读取 {@code spawn_group_baseline_sec}，兼容旧别名 {@code spawn_group_baseline}。
+   */
+  private static Optional<Integer> readSpawnGroupBaselineSeconds(Map<String, Object> metadata) {
+    Optional<Integer> canonical = readPositiveInt(metadata, "spawn_group_baseline_sec");
+    if (canonical.isPresent()) {
+      return canonical;
+    }
+    return readPositiveInt(metadata, "spawn_group_baseline");
+  }
+
+  /**
+   * 读取 Route 的交路基线秒数。
+   *
+   * <p>优先使用 line.metadata 中的显式交路组 baseline；当组未配置时兼容读取旧的 route metadata 字段。
+   */
+  private static Optional<Integer> resolveSpawnGroupBaselineSeconds(Line line, Route route) {
+    if (line != null && route != null) {
+      Optional<String> group = readSpawnGroup(route.metadata());
+      if (group.isPresent()) {
+        Optional<Integer> fromLine =
+            LineSpawnMetadata.parseGroupBaseline(line.metadata(), group.get());
+        if (fromLine.isPresent()) {
+          return fromLine;
+        }
+      }
+    }
+    if (route == null) {
+      return Optional.empty();
+    }
+    return readSpawnGroupBaselineSeconds(route.metadata());
+  }
+
+  /** 将交路组配置写回到 Line.metadata（空列表时移除字段）。 */
+  private static Line withSpawnGroups(Line line, List<SpawnGroup> groups) {
+    if (line == null) {
+      throw new IllegalArgumentException("line");
+    }
+    Map<String, Object> metadata = new java.util.HashMap<>(line.metadata());
+    List<Map<String, Object>> encoded = LineSpawnMetadata.toGroupMetadata(groups);
+    if (encoded.isEmpty()) {
+      metadata.remove(LineSpawnMetadata.KEY_GROUPS);
+    } else {
+      metadata.put(LineSpawnMetadata.KEY_GROUPS, encoded);
+    }
+    return new Line(
+        line.id(),
+        line.code(),
+        line.operatorId(),
+        line.name(),
+        line.secondaryName(),
+        line.serviceType(),
+        line.color(),
+        line.status(),
+        line.spawnFreqBaselineSec(),
+        metadata,
+        line.createdAt(),
+        Instant.now());
+  }
+
+  private static Optional<Integer> readPositiveInt(Map<String, Object> metadata, String key) {
+    if (metadata == null || metadata.isEmpty() || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get(key);
+    if (raw instanceof Number number) {
+      int value = number.intValue();
+      return value > 0 ? Optional.of(value) : Optional.empty();
+    }
+    if (raw instanceof String text) {
+      String trimmed = text.trim();
+      if (trimmed.isEmpty()) {
+        return Optional.empty();
+      }
+      try {
+        int value = Integer.parseInt(trimmed);
+        return value > 0 ? Optional.of(value) : Optional.empty();
+      } catch (NumberFormatException ignored) {
+        return Optional.empty();
+      }
+    }
+    return Optional.empty();
   }
 
   /**

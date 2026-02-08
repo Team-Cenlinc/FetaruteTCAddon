@@ -123,6 +123,10 @@ tasks.withType(JavaCompile).configureEach {
     if (project.hasProperty("lintDeprecation")) {
         options.compilerArgs.add("-Xlint:deprecation")
     }
+    // 诊断开关：用 -PlintUnchecked 输出泛型未检查转换位置（默认不刷屏）。
+    if (project.hasProperty("lintUnchecked")) {
+        options.compilerArgs.add("-Xlint:unchecked")
+    }
 }
 
 shadowJar {
