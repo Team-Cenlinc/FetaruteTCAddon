@@ -38,6 +38,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
  */
 public final class OccupancyRequestBuilder {
 
+  private static final int DEPOT_LOOKOVER_MIN_EDGES = 6;
+  private static final int DEPOT_LOOKOVER_EDGE_MULTIPLIER = 3;
+  private static final int DEPOT_LOOKOVER_MAX_EDGES = 24;
+
   private final RailGraph graph;
   private final int switcherZoneEdges;
   private final int rearGuardEdges;
@@ -226,53 +230,82 @@ public final class OccupancyRequestBuilder {
   }
 
   /**
-   * Depot 出车专用：在起步段遇到道岔时，额外把该道岔周边的多分支 edge 也纳入请求，用于 spawn 前的“多方向 lookover”。
+   * Depot 出车专用占用扩展。
    *
-   * <p>实现策略：仅追加 EDGE 资源（不追加走廊冲突 key），避免因缺少方向信息导致过度对向锁闭。
+   * <p>默认以路径首节点作为 depot 起点（兼容旧行为）。
+   *
+   * @param context 占用上下文
+   * @return 追加 lookover 后的请求；若无新增资源则返回原请求
    */
   public OccupancyRequest applyDepotLookover(OccupancyRequestContext context) {
+    return applyDepotLookover(context, Optional.empty());
+  }
+
+  /**
+   * Depot 出车专用占用扩展（支持显式指定 depot 起点）。
+   *
+   * <p>两层防护：
+   *
+   * <ol>
+   *   <li>depot 周边 edge 预占用：显式指定 depot 时，按“加大后的 depot lookover 深度”扩展；
+   *   <li>路径前端 switcher 分支：优先追加“方向冲突”资源，方向不可判定时回退 EDGE 资源。
+   * </ol>
+   *
+   * <p>显式 depot 起点用于处理“route 首节点并非 depot”的出库场景，避免回库车已入道岔区时仍被放行 spawn。
+   *
+   * @param context 占用上下文
+   * @param depotNodeOverride 显式 depot 节点（可空）
+   * @return 追加 lookover 后的请求；若无新增资源则返回原请求
+   */
+  public OccupancyRequest applyDepotLookover(
+      OccupancyRequestContext context, Optional<NodeId> depotNodeOverride) {
     Objects.requireNonNull(context, "context");
+    Objects.requireNonNull(depotNodeOverride, "depotNodeOverride");
     OccupancyRequest base = context.request();
-    if (switcherZoneEdges <= 0) {
-      return base;
-    }
-
     List<NodeId> pathNodes = context.pathNodes();
-    if (pathNodes.size() < 2) {
-      return base;
-    }
-
-    int maxIndex = Math.min(pathNodes.size() - 1, switcherZoneEdges);
-    Set<NodeId> switchers = new LinkedHashSet<>();
-    for (int i = 0; i <= maxIndex; i++) {
-      NodeId nodeId = pathNodes.get(i);
-      if (nodeId == null) {
-        continue;
-      }
-      graph
-          .findNode(nodeId)
-          .filter(node -> node.type() == NodeType.SWITCHER)
-          .ifPresent(node -> switchers.add(node.id()));
-    }
-    if (switchers.isEmpty()) {
-      return base;
-    }
 
     Set<OccupancyResource> merged = new LinkedHashSet<>(base.resourceList());
     Map<String, CorridorDirection> directions = new LinkedHashMap<>(base.corridorDirections());
     boolean updated = false;
-    for (NodeId switcher : switchers) {
-      for (RailEdge edge : collectEdgesWithin(switcher, switcherZoneEdges)) {
-        OccupancyResource edgeResource = OccupancyResource.forEdge(edge.id());
-        if (merged.contains(edgeResource)) {
+
+    Optional<NodeId> depotAnchor = resolveDepotAnchor(pathNodes, depotNodeOverride);
+    if (depotAnchor.isPresent()) {
+      NodeId depotNode = depotAnchor.get();
+      int depotLookoverEdges = resolveDepotLookoverEdges(depotNodeOverride.isPresent());
+      for (RailEdge edge : collectEdgesWithin(depotNode, depotLookoverEdges)) {
+        if (edge == null) {
           continue;
         }
-        if (tryAddDirectionalLookoverConflict(
-            merged, directions, context.pathNodes(), switcher, edge)) {
-          updated = true;
+        updated |= merged.add(OccupancyResource.forEdge(edge.id()));
+      }
+    }
+
+    if (switcherZoneEdges > 0 && pathNodes.size() >= 2) {
+      int maxIndex = Math.min(pathNodes.size() - 1, switcherZoneEdges);
+      Set<NodeId> switchers = new LinkedHashSet<>();
+      for (int i = 0; i <= maxIndex; i++) {
+        NodeId nodeId = pathNodes.get(i);
+        if (nodeId == null) {
           continue;
         }
-        updated |= merged.add(edgeResource);
+        graph
+            .findNode(nodeId)
+            .filter(node -> node.type() == NodeType.SWITCHER)
+            .ifPresent(node -> switchers.add(node.id()));
+      }
+
+      for (NodeId switcher : switchers) {
+        for (RailEdge edge : collectEdgesWithin(switcher, switcherZoneEdges)) {
+          OccupancyResource edgeResource = OccupancyResource.forEdge(edge.id());
+          if (merged.contains(edgeResource)) {
+            continue;
+          }
+          if (tryAddDirectionalLookoverConflict(merged, directions, pathNodes, switcher, edge)) {
+            updated = true;
+            continue;
+          }
+          updated |= merged.add(edgeResource);
+        }
       }
     }
 
@@ -287,6 +320,32 @@ public final class OccupancyRequestBuilder {
         Map.copyOf(directions),
         base.conflictEntryOrders(),
         base.priority());
+  }
+
+  private Optional<NodeId> resolveDepotAnchor(
+      List<NodeId> pathNodes, Optional<NodeId> depotNodeOverride) {
+    if (depotNodeOverride.isPresent()) {
+      return depotNodeOverride;
+    }
+    if (pathNodes == null || pathNodes.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(pathNodes.get(0));
+  }
+
+  /**
+   * 计算 Depot 出车 lookover 深度。
+   *
+   * <p>显式 depot 起点时，使用比常规 lookahead 更深的窗口覆盖车库道岔区，减少“回库车已进道岔但出库车仍被放行”的风险。
+   */
+  private int resolveDepotLookoverEdges(boolean explicitDepotAnchor) {
+    if (!explicitDepotAnchor) {
+      return 1;
+    }
+    int baseDepth =
+        Math.max(effectiveLookaheadEdges, switcherZoneEdges * DEPOT_LOOKOVER_EDGE_MULTIPLIER);
+    int expandedDepth = Math.max(DEPOT_LOOKOVER_MIN_EDGES, baseDepth);
+    return Math.max(1, Math.min(DEPOT_LOOKOVER_MAX_EDGES, expandedDepth));
   }
 
   private List<NodeId> resolveRearGuardNodes(List<NodeId> nodes, int currentIndex) {

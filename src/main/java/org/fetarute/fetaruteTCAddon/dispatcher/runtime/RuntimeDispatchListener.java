@@ -6,6 +6,7 @@ import com.bergerkiller.bukkit.tc.events.GroupCreateEvent;
 import com.bergerkiller.bukkit.tc.events.GroupLinkEvent;
 import com.bergerkiller.bukkit.tc.events.GroupRemoveEvent;
 import com.bergerkiller.bukkit.tc.events.GroupUnloadEvent;
+import com.bergerkiller.bukkit.tc.events.MemberRemoveEvent;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.util.Optional;
@@ -92,6 +93,29 @@ public final class RuntimeDispatchListener implements Listener {
   @EventHandler(priority = EventPriority.MONITOR)
   public void onGroupRemove(GroupRemoveEvent event) {
     handleGroupRemoved(event != null ? event.getGroup() : null);
+  }
+
+  /**
+   * 编组拆分/脱挂兜底：一旦检测到 member 从编组移除，回收涉及的 FTA 列车，避免“半编组”继续参与调度。
+   *
+   * <p>TrainCarts 没有专门的 split 事件，MemberRemoveEvent 是最稳定的异常编组信号。
+   */
+  @EventHandler(priority = EventPriority.MONITOR)
+  public void onMemberRemove(MemberRemoveEvent event) {
+    if (event == null) {
+      return;
+    }
+    MinecartGroup sourceGroup = event.getGroup();
+    dispatchService.handleAbnormalGroup(sourceGroup, "member-remove");
+
+    MinecartMember<?> member = event.getMember();
+    if (member == null) {
+      return;
+    }
+    MinecartGroup detachedGroup = member.getGroup();
+    if (detachedGroup != null && detachedGroup != sourceGroup) {
+      dispatchService.handleAbnormalGroup(detachedGroup, "member-detach");
+    }
   }
 
   private void handleGroupRemoved(MinecartGroup group) {

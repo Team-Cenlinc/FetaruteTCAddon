@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -111,6 +112,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // key 为 "<lineId>|<terminal>"：记录下一次优先尝试的 route 游标，实现同组 route 轮转。
   private final java.util.concurrent.ConcurrentMap<String, Integer> pendingLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
+  // key 为 "<lineId>|<terminal>"：记录即时复用路径（非 pending）的 route 轮转游标。
+  private final java.util.concurrent.ConcurrentMap<String, Integer> immediateLayoverRouteCursor =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   public SimpleTicketAssigner(
       SpawnManager spawnManager,
@@ -191,6 +195,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     int count = pendingLayoverTickets.size();
     pendingLayoverTickets.clear();
     pendingLayoverRouteCursor.clear();
+    immediateLayoverRouteCursor.clear();
     return count;
   }
 
@@ -215,6 +220,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (dueTickets.isEmpty()) {
       return;
     }
+    dueTickets = orderDueTicketsWithRouteRotation(dueTickets);
     int remaining = maxSpawnPerTick;
     for (SpawnTicket ticket : dueTickets) {
       if (ticket == null || remaining <= 0) {
@@ -485,17 +491,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
-    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
-        ctxOpt =
-            builder.buildContextFromNodes(
-                trainName, Optional.ofNullable(route.id()), route.waypoints(), 0, now, 100);
-    if (ctxOpt.isEmpty()) {
+    Optional<OccupancyRequest> requestOpt =
+        buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
+    if (requestOpt.isEmpty()) {
       requeue(ticket, now, "occupancy-context-failed");
       return false;
     }
-    org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext ctx =
-        ctxOpt.get();
-    OccupancyRequest request = builder.applyDepotLookover(ctx);
+    OccupancyRequest request = requestOpt.get();
     OccupancyDecision decision = occupancyManager.acquire(request);
     if (!decision.allowed()) {
       requeue(ticket, now, "gate-blocked:" + decision.signal());
@@ -523,6 +525,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       group.getProperties().setDestination(route.waypoints().get(1).value());
     }
     runtimeDispatchService.refreshSignal(group);
+    runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
     spawnManager.complete(effectiveTicket);
     spawnSuccess.increment();
     String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
@@ -554,6 +557,82 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         pendingLayoverTickets.remove(ticket.id());
       }
     }
+  }
+
+  /**
+   * 对同一 (line + terminal) 的到期票据执行 route 轮转重排。
+   *
+   * <p>该重排只改变“同组票据之间”的处理次序，组外票据保持原位。这样在 layover 候选持续可用且未进入 pending 时，也能维持组内 route
+   * 的公平轮转，避免固定顺序导致连续命中同一路由。
+   */
+  private List<SpawnTicket> orderDueTicketsWithRouteRotation(List<SpawnTicket> dueTickets) {
+    if (dueTickets == null || dueTickets.size() <= 1) {
+      return dueTickets == null ? List.of() : dueTickets;
+    }
+    Map<String, List<PendingLayoverDispatchEntry>> byGroup = new LinkedHashMap<>();
+    Map<UUID, String> ticketToGroup = new HashMap<>();
+    for (SpawnTicket ticket : dueTickets) {
+      if (ticket == null || ticket.service() == null) {
+        continue;
+      }
+      SpawnService service = ticket.service();
+      Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
+      if (routeOpt.isEmpty()) {
+        continue;
+      }
+      RouteDefinition route = routeOpt.get();
+      if (route.waypoints().isEmpty()) {
+        continue;
+      }
+      String terminalKey = route.waypoints().get(0).value();
+      String groupKey = buildPendingLayoverGroupKey(service, terminalKey);
+      PendingLayoverDispatchEntry entry =
+          new PendingLayoverDispatchEntry(
+              ticket, service, route, terminalKey, groupKey, ticket.dueAt());
+      byGroup.computeIfAbsent(groupKey, ignored -> new ArrayList<>()).add(entry);
+      ticketToGroup.put(ticket.id(), groupKey);
+    }
+    if (byGroup.isEmpty()) {
+      return dueTickets;
+    }
+    Map<String, ArrayDeque<SpawnTicket>> reorderedByGroup = new HashMap<>();
+    for (Map.Entry<String, List<PendingLayoverDispatchEntry>> entry : byGroup.entrySet()) {
+      String groupKey = entry.getKey();
+      List<PendingLayoverDispatchEntry> groupEntries = entry.getValue();
+      List<PendingLayoverDispatchEntry> orderedEntries;
+      if (groupEntries == null || groupEntries.size() <= 1) {
+        orderedEntries = groupEntries == null ? List.of() : groupEntries;
+      } else {
+        orderedEntries = orderDueGroupWithRouteRotation(groupKey, groupEntries);
+      }
+      ArrayDeque<SpawnTicket> queue = new ArrayDeque<>(orderedEntries.size());
+      for (PendingLayoverDispatchEntry ordered : orderedEntries) {
+        if (ordered != null && ordered.ticket() != null) {
+          queue.add(ordered.ticket());
+        }
+      }
+      reorderedByGroup.put(groupKey, queue);
+    }
+
+    List<SpawnTicket> reordered = new ArrayList<>(dueTickets.size());
+    for (SpawnTicket original : dueTickets) {
+      if (original == null) {
+        continue;
+      }
+      String groupKey = ticketToGroup.get(original.id());
+      if (groupKey == null) {
+        reordered.add(original);
+        continue;
+      }
+      ArrayDeque<SpawnTicket> queue = reorderedByGroup.get(groupKey);
+      if (queue == null || queue.isEmpty()) {
+        reordered.add(original);
+        continue;
+      }
+      SpawnTicket next = queue.pollFirst();
+      reordered.add(next == null ? original : next);
+    }
+    return reordered;
   }
 
   /**
@@ -646,6 +725,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   private List<PendingLayoverDispatchEntry> orderPendingGroupWithRouteRotation(
       String groupKey, List<PendingLayoverDispatchEntry> groupEntries) {
+    return orderGroupWithRouteRotation(groupKey, groupEntries, pendingLayoverRouteCursor);
+  }
+
+  /**
+   * 对同组即时票据执行 route 轮转。
+   *
+   * <p>与 pending 轮转算法一致，但游标独立，避免两条路径互相污染轮转起点。
+   */
+  private List<PendingLayoverDispatchEntry> orderDueGroupWithRouteRotation(
+      String groupKey, List<PendingLayoverDispatchEntry> groupEntries) {
+    return orderGroupWithRouteRotation(groupKey, groupEntries, immediateLayoverRouteCursor);
+  }
+
+  private static List<PendingLayoverDispatchEntry> orderGroupWithRouteRotation(
+      String groupKey,
+      List<PendingLayoverDispatchEntry> groupEntries,
+      java.util.concurrent.ConcurrentMap<String, Integer> routeCursor) {
     Comparator<PendingLayoverDispatchEntry> comparator =
         Comparator.comparing((PendingLayoverDispatchEntry entry) -> entry.ticket().dueAt())
             .thenComparingLong(entry -> entry.ticket().sequenceNumber())
@@ -677,8 +773,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     int routeCount = routeOrder.size();
-    int startCursor =
-        Math.floorMod(pendingLayoverRouteCursor.getOrDefault(groupKey, 0), Math.max(1, routeCount));
+    int startCursor = Math.floorMod(routeCursor.getOrDefault(groupKey, 0), Math.max(1, routeCount));
     int cursor = startCursor;
     List<PendingLayoverDispatchEntry> ordered = new ArrayList<>(sorted.size());
     int remaining = sorted.size();
@@ -701,7 +796,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         break;
       }
     }
-    pendingLayoverRouteCursor.put(groupKey, (startCursor + 1) % routeCount);
+    routeCursor.put(groupKey, (startCursor + 1) % routeCount);
     return ordered;
   }
 
@@ -879,17 +974,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
-    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
-        ctxOpt =
-            builder.buildContextFromNodes(
-                trainName, Optional.ofNullable(route.id()), route.waypoints(), 0, now, 100);
-    if (ctxOpt.isEmpty()) {
+    Optional<OccupancyRequest> requestOpt =
+        buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
+    if (requestOpt.isEmpty()) {
       requeue(ticket, now, "fallback-occupancy-context-failed");
       return false;
     }
-    org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext ctx =
-        ctxOpt.get();
-    OccupancyRequest request = builder.applyDepotLookover(ctx);
+    OccupancyRequest request = requestOpt.get();
     OccupancyDecision decision = occupancyManager.acquire(request);
     if (!decision.allowed()) {
       requeue(ticket, now, "fallback-gate-blocked:" + decision.signal());
@@ -917,6 +1008,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       group.getProperties().setDestination(route.waypoints().get(1).value());
     }
     runtimeDispatchService.refreshSignal(group);
+    runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
     spawnManager.complete(effectiveTicket);
     spawnSuccess.increment();
     String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
@@ -1022,22 +1114,48 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
   }
 
+  /**
+   * 构建 depot spawn 门控请求。
+   *
+   * <p>优先使用真实 depot 节点做 lookover 锚点，避免 route 首节点不是 depot 时漏检回库车占用。
+   */
+  private Optional<OccupancyRequest> buildDepotSpawnRequest(
+      OccupancyRequestBuilder builder,
+      String trainName,
+      RouteDefinition route,
+      SpawnService service,
+      SpawnTicket ticket,
+      Instant now) {
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
+        ctxOpt =
+            builder.buildContextFromNodes(
+                trainName, Optional.ofNullable(route.id()), route.waypoints(), 0, now, 100);
+    if (ctxOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<NodeId> depotNode =
+        resolveDepotLookoverNode(
+            service, ticket == null ? Optional.empty() : ticket.selectedDepotNodeId());
+    if (depotNode.isEmpty()) {
+      debugLogger.accept("Depot lookover 回退: 未解析到显式 depot 节点 train=" + trainName);
+    }
+    return Optional.of(builder.applyDepotLookover(ctxOpt.get(), depotNode));
+  }
+
   private Optional<java.util.UUID> resolveDepotWorldId(
       SpawnService service, Optional<String> depotOverride) {
-    if (service == null) {
+    Optional<String> depotSpecOpt = resolveDepotSpec(service, depotOverride);
+    if (depotSpecOpt.isEmpty()) {
       return Optional.empty();
     }
-    String depotSpec = depotOverride.filter(s -> !s.isBlank()).orElseGet(service::depotNodeId);
-    if (depotSpec == null || depotSpec.isBlank()) {
-      return Optional.empty();
-    }
+    String depotSpec = depotSpecOpt.get();
 
     // 检查是否是 DYNAMIC depot
     if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
       if (!isDynamicDepotSpec(depotSpec)) {
         return Optional.empty();
       }
-      // 解析 DYNAMIC spec，查找任意匹配轨道的世界
+      // 解析 DYNAMIC spec，查找匹配轨道的世界
       return resolveDynamicDepotWorldId(depotSpec);
     }
 
@@ -1046,6 +1164,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         .filter(info -> info != null && info.definition() != null)
         .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
         .filter(info -> depotSpec.equalsIgnoreCase(info.definition().nodeId().value()))
+        .sorted(
+            Comparator.comparing(
+                info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
         .map(SignNodeRegistry.SignNodeInfo::worldId)
         .findFirst();
   }
@@ -1245,8 +1366,38 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * <p>解析 "DYNAMIC:OP:D:DEPOT" 或 "DYNAMIC:OP:D:DEPOT:[1:3]" 格式， 查找任意匹配轨道的世界。
    */
   private Optional<java.util.UUID> resolveDynamicDepotWorldId(String dynamicSpec) {
-    // 解析 DYNAMIC:OP:D:DEPOT 或 DYNAMIC:OP:D:DEPOT:[1:3]
-    // 格式：DYNAMIC:operatorCode:nodeType:nodeName[:range]
+    return resolveDynamicDepotNodeInfo(dynamicSpec).map(SignNodeRegistry.SignNodeInfo::worldId);
+  }
+
+  private Optional<NodeId> resolveDepotLookoverNode(
+      SpawnService service, Optional<String> depotOverride) {
+    Optional<String> depotSpecOpt = resolveDepotSpec(service, depotOverride);
+    if (depotSpecOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    String depotSpec = depotSpecOpt.get();
+    if (SpawnDirectiveParser.isDynamicTarget(depotSpec)) {
+      if (!isDynamicDepotSpec(depotSpec)) {
+        return Optional.empty();
+      }
+      return resolveDynamicDepotNodeInfo(depotSpec).map(info -> info.definition().nodeId());
+    }
+    return Optional.of(NodeId.of(depotSpec));
+  }
+
+  private static Optional<String> resolveDepotSpec(
+      SpawnService service, Optional<String> depotOverride) {
+    if (service == null) {
+      return Optional.empty();
+    }
+    String depotSpec = depotOverride.filter(s -> !s.isBlank()).orElseGet(service::depotNodeId);
+    if (depotSpec == null || depotSpec.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(depotSpec.trim());
+  }
+
+  private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(String dynamicSpec) {
     if (dynamicSpec == null
         || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
       return Optional.empty();
@@ -1257,13 +1408,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     String operatorCode = parts[0].trim();
-    String nodeType = parts[1].trim(); // "D" for depot
+    String nodeType = parts[1].trim();
     String nodeName = parts[2].trim();
-
-    // 构建 nodeId 前缀用于匹配
+    if (operatorCode.isEmpty() || nodeType.isEmpty() || nodeName.isEmpty()) {
+      return Optional.empty();
+    }
     String nodeIdPrefix = operatorCode + ":" + nodeType + ":" + nodeName + ":";
 
-    // 查找任意匹配的 depot 节点
     return signNodeRegistry.snapshotInfos().values().stream()
         .filter(info -> info != null && info.definition() != null)
         .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
@@ -1275,7 +1426,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                       .toUpperCase(java.util.Locale.ROOT)
                       .startsWith(nodeIdPrefix.toUpperCase(java.util.Locale.ROOT));
             })
-        .map(SignNodeRegistry.SignNodeInfo::worldId)
+        .sorted(
+            Comparator.comparing(
+                info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
         .findFirst();
   }
 

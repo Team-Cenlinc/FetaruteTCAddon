@@ -381,6 +381,84 @@ class OccupancyRequestBuilderTest {
     assertTrue(request.corridorDirections().containsKey(branchConflict));
   }
 
+  @Test
+  void depotLookoverUsesExplicitDepotAnchorWhenRouteStartIsNotDepot() {
+    NodeId nodeDepot = NodeId.of("DEPOT");
+    NodeId nodeThroat = NodeId.of("THROAT");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    NodeId nodeC = NodeId.of("C");
+    RailNode depot =
+        new SignRailNode(
+            nodeDepot,
+            NodeType.DEPOT,
+            new Vector(-10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode throat =
+        new SignRailNode(
+            nodeThroat,
+            NodeType.SWITCHER,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode c =
+        new SignRailNode(
+            nodeC,
+            NodeType.WAYPOINT,
+            new Vector(30.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeDepotThroat = EdgeId.undirected(nodeDepot, nodeThroat);
+    EdgeId edgeThroatA = EdgeId.undirected(nodeThroat, nodeA);
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    EdgeId edgeBC = EdgeId.undirected(nodeB, nodeC);
+    RailEdge depotThroat =
+        new RailEdge(edgeDepotThroat, nodeDepot, nodeThroat, 10, 8.0, true, Optional.empty());
+    RailEdge throatA =
+        new RailEdge(edgeThroatA, nodeThroat, nodeA, 10, 8.0, true, Optional.empty());
+    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty());
+    RailEdge bc = new RailEdge(edgeBC, nodeB, nodeC, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(nodeDepot, depot, nodeThroat, throat, nodeA, a, nodeB, b, nodeC, c),
+            Map.of(edgeDepotThroat, depotThroat, edgeThroatA, throatA, edgeAB, ab, edgeBC, bc),
+            Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 1);
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB), Optional.empty());
+    TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 0));
+
+    Optional<OccupancyRequestContext> ctxOpt =
+        builder.buildContextFromNodes(
+            state.trainName(), Optional.of(route.id()), route.waypoints(), 0, Instant.now(), 0);
+    assertTrue(ctxOpt.isPresent());
+    OccupancyRequest fallbackRequest = builder.applyDepotLookover(ctxOpt.get());
+    OccupancyRequest anchoredRequest =
+        builder.applyDepotLookover(ctxOpt.get(), Optional.of(nodeDepot));
+
+    OccupancyResource depotEdgeResource = OccupancyResource.forEdge(edgeDepotThroat);
+    OccupancyResource deepEdgeResource = OccupancyResource.forEdge(edgeBC);
+    assertFalse(fallbackRequest.resourceList().contains(depotEdgeResource));
+    assertTrue(anchoredRequest.resourceList().contains(depotEdgeResource));
+    assertFalse(fallbackRequest.resourceList().contains(deepEdgeResource));
+    assertTrue(anchoredRequest.resourceList().contains(deepEdgeResource));
+  }
+
   private record StubProgress(RouteId routeId, int currentIndex) implements RouteProgress {
 
     @Override

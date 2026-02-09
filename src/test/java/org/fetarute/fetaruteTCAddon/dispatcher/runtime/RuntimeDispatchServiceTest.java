@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -18,8 +19,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -29,19 +32,25 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -206,6 +215,93 @@ class RuntimeDispatchServiceTest {
 
     service.handleSignalTick(train, false);
     assertTrue(train.launchCalls == 0);
+  }
+
+  @Test
+  void shouldSkipDuplicateAbnormalCleanupWithinDedupWindow() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "shouldSkipDuplicateAbnormalCleanup", String.class);
+    method.setAccessible(true);
+
+    boolean first = (boolean) method.invoke(service, "train-1");
+    boolean second = (boolean) method.invoke(service, "train-1");
+
+    assertFalse(first);
+    assertTrue(second);
+  }
+
+  @Test
+  void handleSignalTickBlocksDeadlockReleaseWhenHardOccupancyBlockersExist() {
+    NodeId current = NodeId.of("A");
+    NodeId next = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      OccupancyResource.forNode(next),
+                      "front-train",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  true, request.now(), SignalAspect.PROCEED, List.of(blocker));
+            });
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    assertEquals(0, train.launchCalls);
+    assertTrue(train.stopCalls >= 1);
+    SignalAspect aspect = service.snapshotProgressEntries().get("train-1").lastSignal();
+    assertEquals(SignalAspect.STOP, aspect);
   }
 
   @Test
@@ -658,6 +754,59 @@ class RuntimeDispatchServiceTest {
 
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
     assertEquals(SignalAspect.CAUTION, aspect);
+  }
+
+  @Test
+  void shouldTrackIntermediateGraphNodeSupportsWaypointAndSwitcher() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "shouldTrackIntermediateGraphNode", SignNodeDefinition.class);
+    method.setAccessible(true);
+
+    boolean waypoint =
+        (boolean)
+            method.invoke(
+                null,
+                new SignNodeDefinition(
+                    NodeId.of("W"), NodeType.WAYPOINT, Optional.empty(), Optional.empty()));
+    boolean switcher =
+        (boolean)
+            method.invoke(
+                null,
+                new SignNodeDefinition(
+                    NodeId.of("S"), NodeType.SWITCHER, Optional.empty(), Optional.empty()));
+    boolean station =
+        (boolean)
+            method.invoke(
+                null,
+                new SignNodeDefinition(
+                    NodeId.of("ST"), NodeType.STATION, Optional.empty(), Optional.empty()));
+
+    assertTrue(waypoint);
+    assertTrue(switcher);
+    assertFalse(station);
+  }
+
+  @Test
+  void shouldApplyEventSignalOnlyForMoreRestrictiveAspect() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "shouldApplyEventSignal", SignalAspect.class, SignalAspect.class);
+    method.setAccessible(true);
+
+    boolean strictFromNull = (boolean) method.invoke(null, null, SignalAspect.STOP);
+    boolean cautionFromNull = (boolean) method.invoke(null, null, SignalAspect.CAUTION);
+    boolean proceedFromNull = (boolean) method.invoke(null, null, SignalAspect.PROCEED);
+    boolean strictUpgrade = (boolean) method.invoke(null, SignalAspect.CAUTION, SignalAspect.STOP);
+    boolean sameLevel = (boolean) method.invoke(null, SignalAspect.STOP, SignalAspect.STOP);
+    boolean permissive = (boolean) method.invoke(null, SignalAspect.STOP, SignalAspect.PROCEED);
+
+    assertTrue(strictFromNull);
+    assertFalse(cautionFromNull);
+    assertFalse(proceedFromNull);
+    assertTrue(strictUpgrade);
+    assertFalse(sameLevel);
+    assertFalse(permissive);
   }
 
   @Test
@@ -1507,6 +1656,12 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     service.handleSignalTick(train, false);
     assertTrue(train.destroyCalls == 1);
+    // 占用释放已移至 handleTrainRemoved（由 GroupRemoveEvent 触发），
+    // 避免 destroy 延迟 1 tick 期间 SpawnMonitor 误判可用而撞车。
+    verify(occupancyManager, never()).releaseByTrain("train-1");
+
+    // 模拟实体销毁后的清理
+    service.handleTrainRemoved("train-1");
     verify(occupancyManager).releaseByTrain("train-1");
   }
 
@@ -1927,6 +2082,70 @@ class RuntimeDispatchServiceTest {
         "NEWOP2", TrainTagHelper.readTagValue(tags.properties(), "FTA_OPERATOR_CODE").orElse(""));
     assertEquals(
         "NEWLINE2", TrainTagHelper.readTagValue(tags.properties(), "FTA_LINE_CODE").orElse(""));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void collectImpactedTrainsForResourceRefreshIncludesClaimsAndQueues() throws Exception {
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings().extraInterfaces(OccupancyQueueSupport.class));
+    OccupancyQueueSupport queueSupport = (OccupancyQueueSupport) occupancyManager;
+    OccupancyResource target = OccupancyResource.forConflict("switcher:test");
+    OccupancyResource other = OccupancyResource.forConflict("switcher:other");
+    Instant now = Instant.now();
+
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    target, "Train-A", Optional.empty(), now, Duration.ZERO, Optional.empty()),
+                new OccupancyClaim(
+                    target, "spawn-train", Optional.empty(), now, Duration.ZERO, Optional.empty()),
+                new OccupancyClaim(
+                    other, "Train-B", Optional.empty(), now, Duration.ZERO, Optional.empty())));
+    when(queueSupport.snapshotQueues())
+        .thenReturn(
+            List.of(
+                new OccupancyQueueSnapshot(
+                    target,
+                    Optional.empty(),
+                    0,
+                    List.of(
+                        new OccupancyQueueEntry(
+                            "Train-C", CorridorDirection.UNKNOWN, now, now, 0, 0),
+                        new OccupancyQueueEntry(
+                            "spawn-train", CorridorDirection.UNKNOWN, now, now, 0, 1))),
+                new OccupancyQueueSnapshot(other, Optional.empty(), 0, List.of())));
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "collectImpactedTrainsForResourceRefresh", Set.class, String.class);
+    method.setAccessible(true);
+    Map<String, String> impacted =
+        (Map<String, String>) method.invoke(service, Set.of(target), "spawn-train");
+
+    assertEquals(2, impacted.size());
+    assertTrue(impacted.containsKey("train-a"));
+    assertTrue(impacted.containsKey("train-c"));
+    assertFalse(impacted.containsKey("spawn-train"));
   }
 
   // 注意：handleStationArrival 测试需要 TrainCarts 依赖，改用功能文档验证

@@ -109,6 +109,36 @@ class TrainLaunchManagerTest {
     assertTrue(appliedBpt >= 0.39, "发车场景应下发接近目标速度，避免起步龟速");
   }
 
+  @Test
+  void applyControlStopBypassesDecelerationRateLimit() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-4",
+            "FTA_LAST_SPEED_CMD_BPS=15.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.currentSpeedBlocksPerTick()).thenReturn(15.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.of(2L),
+        Optional.empty(),
+        runtime);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    double appliedBpt = speedCaptor.getValue();
+    assertTrue(appliedBpt <= 0.2, "STOP 应直接下压到制动曲线限速，避免被速度指令限幅拖慢");
+  }
+
   private static ConfigManager.RuntimeSettings runtimeSettings(
       double hysteresisBps, double accelFactor, double decelFactor) {
     return new ConfigManager.RuntimeSettings(

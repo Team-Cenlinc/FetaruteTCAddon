@@ -36,9 +36,15 @@
 - AutoStation 在 WaitState 期间会向运行时申请 `DepartureGate`（会话锁），信号 tick 会强制维持 STOP；仅在门控放行且会话匹配时释放，避免“停站后被信号 tick 提前发车”。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
+- spawn/layover 发车成功后，运行时会按本次占用资源主动刷新受影响列车（claim + queue），降低“新车占用已生效但他车未及时红灯”的风险。
+- 异常清理：`RuntimeSignalMonitor` 会检测 `TrainStatus.Derailed` 并回收 FTA 列车；`MemberRemoveEvent`（split/脱挂）也会触发异常回收，避免半编组继续参与调度。
+- 异常清理对同一列车启用短窗去重（默认 2 秒）：同一波 `member-remove` 事件风暴只执行一次清理，避免重复日志与重复 destroy。
+- 异常销毁会优先按 trainName 获取当前 holder，再兜底销毁事件 group，避免“状态清了但实体未销毁”的漏回收。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
-- 中间 waypoint（未写入 route）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
-- 当触发“冲突区放行锁”时，信号 tick 会跳过前车扫描/前瞻限速，保证放行列车在锁定期持续获得可发车信号。
+- 中间图节点（未写入 route 的 waypoint/switcher）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
+- 事件驱动信号下发仅接受“更严格”信号（如 STOP）；更宽松信号统一交由周期 tick 决策，避免事件链路误放行。
+- 当当前信号未知（`currentSignal=null`）时，事件链路仅允许 `STOP` 立即生效，不接受 `CAUTION/PROCEED` 的初始化放行。
+- 触发“冲突区放行锁”时，若 blocker 仍包含其他列车的 `NODE/EDGE` 硬占用，会强制回退为阻塞信号并拒绝放行（即使 `canEnter.allowed=true`），优先保证防冒进。
 - 可用 `/fta occupancy stats` 观察自愈与出车重试统计，`/fta occupancy heal` 可手动触发清理。
 
 ## tags 与恢复

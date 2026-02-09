@@ -54,6 +54,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
@@ -88,8 +91,14 @@ public final class RuntimeDispatchService {
   /** Waypoint 停站减速：按制动距离的比例估算“软停车距离”。 */
   private static final double WAYPOINT_STOP_BRAKE_FACTOR = 0.5;
 
+  /** 居中动作执行时的临时速度限制（blocks/tick）。需大于 0 以允许 Station.centerTrain() 移动列车。 */
+  private static final double WAYPOINT_CENTER_SPEED_LIMIT = 0.4;
+
   /** 推进点去重窗口（毫秒），用于压制同一节点的重复触发。 */
   private static final long PROGRESS_TRIGGER_DEDUP_MS = 800L;
+
+  /** 异常列车清理去重窗口（毫秒），用于压制 split/member-remove 事件风暴。 */
+  private static final long ABNORMAL_CLEANUP_DEDUP_MS = 2_000L;
 
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
@@ -133,6 +142,8 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.atomic.LongAdder orphanLayoverRemoved =
       new java.util.concurrent.atomic.LongAdder();
   private final java.util.concurrent.ConcurrentMap<String, Long> healLastWarnAtMs =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Long> abnormalCleanupLastAtMs =
       new java.util.concurrent.ConcurrentHashMap<>();
   private volatile CleanupResult lastCleanupResult =
       new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
@@ -389,8 +400,18 @@ public final class RuntimeDispatchService {
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
     updateBlockerSnapshot(trainName, decision, now);
-    logDeadlockReleaseIfNeeded(trainName, decision, "departure");
-    if (!decision.allowed()) {
+    boolean hardBlockerBypass =
+        decision.allowed() && hasHardBlockersForTrain(trainName, decision.blockers());
+    boolean proceedAllowed = decision.allowed() && !hardBlockerBypass;
+    if (hardBlockerBypass) {
+      debugLogger.accept(
+          "冲突区放行抑制: train="
+              + trainName
+              + " scope=departure reason=hard_blockers blockers="
+              + summarizeBlockers(decision));
+    }
+    logDeadlockReleaseIfNeeded(trainName, decision, "departure", proceedAllowed);
+    if (!proceedAllowed) {
       debugLogger.accept(
           "发车门控阻塞: train="
               + trainName
@@ -556,7 +577,7 @@ public final class RuntimeDispatchService {
   /**
    * 更新列车经过的最后一个图节点（用于 arriving 判定优化）。
    *
-   * <p>当列车经过中间 waypoint（不在 route 定义中）时调用，仅更新 lastPassedGraphNode，不推进 routeIndex。
+   * <p>当列车经过“未写入 route 的中间图节点”（如 waypoint/switcher）时调用，仅更新 lastPassedGraphNode，不推进 routeIndex。
    */
   public void updateLastPassedGraphNode(SignActionEvent event, SignNodeDefinition definition) {
     if (event == null || definition == null || !event.hasGroup()) {
@@ -619,7 +640,10 @@ public final class RuntimeDispatchService {
         handleDestroy(train, properties, trainName, "DSTY");
         return;
       }
-      if (definition.nodeType() == NodeType.WAYPOINT) {
+      if (shouldTrackIntermediateGraphNode(definition)) {
+        if (progressRegistry.get(trainName).isEmpty()) {
+          progressRegistry.initFromTags(trainName, properties, route);
+        }
         updateLastPassedGraphNode(event, definition);
       }
       debugLogger.accept(
@@ -827,6 +851,16 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
+    boolean hardBlockerBypass =
+        decision.allowed() && hasHardBlockersForTrain(trainName, decision.blockers());
+    boolean proceedAllowed = decision.allowed() && !hardBlockerBypass;
+    if (hardBlockerBypass) {
+      debugLogger.accept(
+          "冲突区放行抑制: train="
+              + trainName
+              + " scope=progress reason=hard_blockers blockers="
+              + summarizeBlockers(decision));
+    }
     // 诊断：输出请求资源与判定结果
     debugLogger.accept(
         "调度推进判定: train="
@@ -838,13 +872,15 @@ public final class RuntimeDispatchService {
             + " resources="
             + request.resourceList().size()
             + " allowed="
+            + proceedAllowed
+            + " rawAllowed="
             + decision.allowed()
             + " blockers="
             + decision.blockers().size()
             + " signal="
             + decision.signal());
-    logDeadlockReleaseIfNeeded(trainName, decision, "progress");
-    if (!decision.allowed()) {
+    logDeadlockReleaseIfNeeded(trainName, decision, "progress", proceedAllowed);
+    if (!proceedAllowed) {
       UUID worldId = train.worldId();
       SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(worldId);
       var lookahead =
@@ -1191,8 +1227,117 @@ public final class RuntimeDispatchService {
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     clearDepartureGate(trainName);
+    clearNodeHistory(trainName);
+    dynamicAllocator.clearAllocations(trainName);
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
     blockerSnapshots.remove(normalizeTrainKey(trainName));
+  }
+
+  /**
+   * 异常列车清理入口：用于 derail/split/脱挂等场景的兜底回收。
+   *
+   * <p>仅处理 FTA 托管列车：先清理运行时状态与占用，再触发实体销毁（延迟 1 tick），避免异常编组继续参与调度。
+   *
+   * @param group 目标列车组
+   * @param reason 清理原因（用于日志）
+   */
+  public void handleAbnormalGroup(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group, String reason) {
+    if (group == null) {
+      return;
+    }
+    TrainProperties properties = group.getProperties();
+    if (properties == null || !isFtaManagedTrain(properties)) {
+      return;
+    }
+    String trainName = properties.getTrainName();
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    String normalizedReason =
+        reason == null || reason.isBlank() ? "unknown" : reason.trim().toLowerCase(Locale.ROOT);
+    if (shouldSkipDuplicateAbnormalCleanup(trainName)) {
+      return;
+    }
+    debugLogger.accept("异常列车清理: train=" + trainName + " reason=" + normalizedReason);
+    handleTrainRemoved(trainName);
+    destroyAbnormalTrainEntities(trainName, group, properties);
+  }
+
+  /**
+   * 异常清理去重：同一列车在短窗口内仅执行一次“清状态 + 销毁实体”。
+   *
+   * <p>TrainCarts 在 split/脱挂时可能连续抛出多个 member-remove 事件，不去重会导致重复日志与重复清理。
+   *
+   * @param trainName 列车名
+   * @return true 表示命中去重窗口，应跳过本次处理
+   */
+  private boolean shouldSkipDuplicateAbnormalCleanup(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return false;
+    }
+    long now = System.currentTimeMillis();
+    java.util.concurrent.atomic.AtomicBoolean duplicate =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+    abnormalCleanupLastAtMs.compute(
+        key,
+        (ignored, previous) -> {
+          if (previous != null && now - previous < ABNORMAL_CLEANUP_DEDUP_MS) {
+            duplicate.set(true);
+            return previous;
+          }
+          return now;
+        });
+    if (abnormalCleanupLastAtMs.size() > 2_048) {
+      pruneExpiredAbnormalCleanupKeys(now);
+    }
+    return duplicate.get();
+  }
+
+  /** 清理异常去重表中过期键，避免长期运行时键集合无限增长。 */
+  private void pruneExpiredAbnormalCleanupKeys(long nowMs) {
+    long expireBefore = nowMs - (ABNORMAL_CLEANUP_DEDUP_MS * 30L);
+    abnormalCleanupLastAtMs.entrySet().removeIf(entry -> entry.getValue() < expireBefore);
+  }
+
+  /**
+   * 执行异常列车实体销毁。
+   *
+   * <p>优先销毁 trainName 当前 holder，同时兜底销毁事件传入 group 与其 properties.holder，避免事件组引用失效时漏销毁。
+   */
+  private void destroyAbnormalTrainEntities(
+      String trainName,
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup eventGroup,
+      TrainProperties eventProperties) {
+    java.util.Set<com.bergerkiller.bukkit.tc.controller.MinecartGroup> targets =
+        new java.util.LinkedHashSet<>();
+    TrainProperties canonicalProperties = TrainPropertiesStore.get(trainName);
+    if (canonicalProperties != null) {
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup holder = canonicalProperties.getHolder();
+      if (holder != null) {
+        targets.add(holder);
+      }
+    }
+    if (eventProperties != null) {
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup holder = eventProperties.getHolder();
+      if (holder != null) {
+        targets.add(holder);
+      }
+    }
+    if (eventGroup != null) {
+      targets.add(eventGroup);
+    }
+    for (com.bergerkiller.bukkit.tc.controller.MinecartGroup target : targets) {
+      if (target == null) {
+        continue;
+      }
+      if (target.isValid()) {
+        new TrainCartsRuntimeHandle(target).destroy();
+      } else {
+        debugLogger.accept("异常列车销毁跳过（group 已 invalid）: train=" + trainName);
+      }
+    }
   }
 
   /**
@@ -1311,6 +1456,106 @@ public final class RuntimeDispatchService {
       return;
     }
     refreshSignal(group);
+  }
+
+  /**
+   * 按占用资源集合刷新受影响列车信号。
+   *
+   * <p>用于“新列车出库/复用发车后”的即时联动：在下一次周期 tick 之前，先主动刷新同资源上的列车，减少出库咽喉区的误放行窗口。
+   *
+   * <p>受影响列车来源：
+   *
+   * <ul>
+   *   <li>当前占用快照中命中这些资源的列车
+   *   <li>冲突队列中等待这些资源的列车
+   * </ul>
+   *
+   * @param resources 本次占用资源集合
+   * @param sourceTrainName 触发刷新的列车（会被排除，避免重复刷新）
+   */
+  public void refreshSignalsForResources(
+      List<OccupancyResource> resources, String sourceTrainName) {
+    if (resources == null || resources.isEmpty() || occupancyManager == null) {
+      return;
+    }
+    Set<OccupancyResource> targets = new LinkedHashSet<>();
+    for (OccupancyResource resource : resources) {
+      if (resource != null) {
+        targets.add(resource);
+      }
+    }
+    if (targets.isEmpty()) {
+      return;
+    }
+    String sourceKey = normalizeTrainKey(sourceTrainName);
+    Map<String, String> impactedByKey = collectImpactedTrainsForResourceRefresh(targets, sourceKey);
+    if (impactedByKey.isEmpty()) {
+      return;
+    }
+    for (String impactedTrain : impactedByKey.values()) {
+      refreshSignalByName(impactedTrain);
+    }
+    debugLogger.accept(
+        "占用联动刷新: source="
+            + (sourceTrainName == null || sourceTrainName.isBlank() ? "unknown" : sourceTrainName)
+            + " resources="
+            + targets.size()
+            + " trains="
+            + impactedByKey.values().size());
+  }
+
+  /**
+   * 收集“资源联动刷新”涉及的列车清单（key=规范化列车名，value=原始列车名）。
+   *
+   * <p>抽成独立方法便于单测验证“claim + queue”的收集逻辑。
+   */
+  private Map<String, String> collectImpactedTrainsForResourceRefresh(
+      Set<OccupancyResource> targets, String sourceTrainKey) {
+    Map<String, String> impactedByKey = new java.util.LinkedHashMap<>();
+    if (targets == null || targets.isEmpty() || occupancyManager == null) {
+      return impactedByKey;
+    }
+
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (!targets.contains(claim.resource())) {
+        continue;
+      }
+      String candidate = claim.trainName();
+      if (candidate == null || candidate.isBlank()) {
+        continue;
+      }
+      String key = normalizeTrainKey(candidate);
+      if (key.isEmpty() || key.equals(sourceTrainKey)) {
+        continue;
+      }
+      impactedByKey.putIfAbsent(key, candidate);
+    }
+
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
+      return impactedByKey;
+    }
+    for (OccupancyQueueSnapshot snapshot : queueSupport.snapshotQueues()) {
+      if (snapshot == null || snapshot.resource() == null) {
+        continue;
+      }
+      if (!targets.contains(snapshot.resource())) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : snapshot.entries()) {
+        if (entry == null || entry.trainName() == null || entry.trainName().isBlank()) {
+          continue;
+        }
+        String key = normalizeTrainKey(entry.trainName());
+        if (key.isEmpty() || key.equals(sourceTrainKey)) {
+          continue;
+        }
+        impactedByKey.putIfAbsent(key, entry.trainName());
+      }
+    }
+    return impactedByKey;
   }
 
   /**
@@ -1479,7 +1724,7 @@ public final class RuntimeDispatchService {
   /**
    * 事件驱动的信号下发入口：由 SignalEventBus 触发，立即将新信号应用到列车。
    *
-   * <p>此方法将事件信号与现有的 handleSignalTick 逻辑桥接，实现即时响应。
+   * <p>此方法将事件信号与现有的 handleSignalTick 逻辑桥接：仅“更严格”事件会立即生效；更宽松事件交由周期 tick 决策，避免事件链路误放行。
    *
    * @param trainName 列车名
    * @param signal 新的信号等级
@@ -1497,9 +1742,44 @@ public final class RuntimeDispatchService {
       return;
     }
     RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
-    debugLogger.accept("事件信号下发: train=" + trainName + " signal=" + signal);
-    // 使用 forceApply=true 确保立即生效
-    handleSignalTick(train, true);
+    SignalAspect currentSignal =
+        progressRegistry
+            .get(trainName)
+            .map(RouteProgressRegistry.RouteProgressEntry::lastSignal)
+            .orElse(null);
+    boolean forceApply = shouldApplyEventSignal(currentSignal, signal);
+    debugLogger.accept(
+        "事件信号下发: train="
+            + trainName
+            + " signal="
+            + signal
+            + " current="
+            + (currentSignal == null ? "null" : currentSignal)
+            + " forceApply="
+            + forceApply);
+    if (!forceApply) {
+      return;
+    }
+    handleSignalTick(train, forceApply);
+  }
+
+  private static boolean shouldApplyEventSignal(
+      SignalAspect currentSignal, SignalAspect eventSignal) {
+    if (eventSignal == null) {
+      return false;
+    }
+    if (currentSignal == null) {
+      // 初始化窗口只允许“未知 -> STOP”立即生效，防止事件链路误放行。
+      return eventSignal == SignalAspect.STOP;
+    }
+    return signalSeverity(eventSignal) > signalSeverity(currentSignal);
+  }
+
+  private static boolean shouldTrackIntermediateGraphNode(SignNodeDefinition definition) {
+    if (definition == null || definition.nodeType() == null) {
+      return false;
+    }
+    return definition.nodeType() == NodeType.WAYPOINT || definition.nodeType() == NodeType.SWITCHER;
   }
 
   /**
@@ -1715,6 +1995,10 @@ public final class RuntimeDispatchService {
     Optional<WaypointStopState> waypointStopState =
         resolveWaypointStopState(trainName, currentNode);
     if (waypointStopState.isPresent()) {
+      // 居中进行中：不干预控车，避免 setSpeedLimit(0) 阻止 Station.centerTrain() 移动
+      if (waypointStopState.get().centering()) {
+        return;
+      }
       Optional<NodeId> nextNode =
           currentIndex + 1 < route.waypoints().size()
               ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -1820,20 +2104,31 @@ public final class RuntimeDispatchService {
     retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
     OccupancyDecision decision = occupancyManager.canEnter(request);
     updateBlockerSnapshot(trainName, decision, now);
-    if (!decision.allowed()) {
+    boolean hardBlockerBypass =
+        decision.allowed() && hasHardBlockersForTrain(trainName, decision.blockers());
+    boolean proceedAllowed = decision.allowed() && !hardBlockerBypass;
+    if (!proceedAllowed) {
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
     }
-    logDeadlockReleaseIfNeeded(trainName, decision, "signal");
-    // 冲突区放行锁生效时允许短暂跳过队头/前车扫描，避免信号乒乓
-    boolean deadlockRelease = decision.allowed() && !decision.blockers().isEmpty();
+    if (hardBlockerBypass) {
+      debugLogger.accept(
+          "冲突区放行抑制: train="
+              + trainName
+              + " scope=signal reason=hard_blockers blockers="
+              + summarizeBlockers(decision));
+    }
+    logDeadlockReleaseIfNeeded(trainName, decision, "signal", proceedAllowed);
+    boolean deadlockRelease = proceedAllowed && !decision.blockers().isEmpty();
     SignalAspect baseAspect =
-        decision.allowed() ? decision.signal() : deriveBlockedAspect(decision, context);
+        proceedAllowed ? decision.signal() : deriveBlockedAspect(decision, context);
+    // 安全优先：移动中的列车不享受“冲突区放行”特权，避免在红灯/占用未清时冒进。
+    if (deadlockRelease && train.isMoving()) {
+      baseAspect = deriveBlockedAspect(decision, context);
+    }
     // 前方列车信号调整：扫描更远范围（4 edges）检测其他列车并降级信号
     SignalAspect nextAspect =
-        deadlockRelease
-            ? baseAspect
-            : adjustSignalForForwardTrains(
-                trainName, route, effectiveNodes, currentIndex, graph, baseAspect);
+        adjustSignalForForwardTrains(
+            trainName, route, effectiveNodes, currentIndex, graph, baseAspect);
     SignalAspect lastAspect = progressEntry.lastSignal();
     boolean stopAtNextWaypoint = false;
     if (nextNode.isPresent()) {
@@ -1893,8 +2188,7 @@ public final class RuntimeDispatchService {
     // 信号前瞻：计算到前方所有限制点的距离，供速度曲线与移动授权共同使用。
     SignalLookahead.LookaheadResult lookahead = null;
     boolean needsLookahead =
-        !deadlockRelease
-            && (runtimeSettings.speedCurveEnabled() || runtimeSettings.movementAuthorityEnabled());
+        runtimeSettings.speedCurveEnabled() || runtimeSettings.movementAuthorityEnabled();
     if (needsLookahead) {
       if (runtimeSettings.speedCurveEnabled()) {
         UUID worldIdForLookahead = train.worldId();
@@ -1985,11 +2279,13 @@ public final class RuntimeDispatchService {
               + " -> "
               + nextAspect
               + " allowed="
+              + proceedAllowed
+              + " rawAllowed="
               + decision.allowed()
               + " blockers="
               + decision.blockers().size());
     }
-    if (decision.allowed()) {
+    if (proceedAllowed) {
       occupancyManager.acquire(request);
     }
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
@@ -2308,6 +2604,7 @@ public final class RuntimeDispatchService {
 
     releaseResourcesNotInRequest(trainName, request.resourceList());
     occupancyManager.acquire(request);
+    refreshSignalsForResources(request.resourceList(), trainName);
     layoverRegistry.unregister(trainName);
 
     TrainTagHelper.writeTag(
@@ -2440,13 +2737,41 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 判断 blocker 集合中是否存在“硬占用”冲突。
+   *
+   * <p>当 canEnter 在死锁/冲突放行路径返回 {@code allowed=true} 时，若 blocker 仍包含其他列车的 NODE/EDGE
+   * 占用，必须视为不可放行，避免在前方有车 时被误 authorize。
+   */
+  private static boolean hasHardBlockersForTrain(String trainName, List<OccupancyClaim> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      return false;
+    }
+    String self = trainName == null ? "" : trainName.trim().toLowerCase(Locale.ROOT);
+    for (OccupancyClaim blocker : blockers) {
+      if (blocker == null || blocker.resource() == null) {
+        return true;
+      }
+      String owner =
+          blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
+      if (!owner.isEmpty() && owner.equals(self)) {
+        continue;
+      }
+      ResourceKind kind = blocker.resource().kind();
+      if (kind == ResourceKind.NODE || kind == ResourceKind.EDGE) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * 记录冲突区放行日志：allowed=true 且 blockers 非空时触发。
    *
    * <p>用于排查“互相占用节点导致的冲突区死锁”是否被放行。
    */
   private void logDeadlockReleaseIfNeeded(
-      String trainName, OccupancyDecision decision, String scope) {
-    if (decision == null || !decision.allowed() || decision.blockers().isEmpty()) {
+      String trainName, OccupancyDecision decision, String scope, boolean proceedAllowed) {
+    if (decision == null || !proceedAllowed || decision.blockers().isEmpty()) {
       return;
     }
     debugLogger.accept(
@@ -2864,7 +3189,7 @@ public final class RuntimeDispatchService {
     String key = trainName.toLowerCase(java.util.Locale.ROOT);
     String sessionId = Long.toString(waypointStopCounter.incrementAndGet());
     WaypointStopState stopState =
-        new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds);
+        new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds, false);
     waypointStopStates.put(key, stopState);
 
     JavaPlugin plugin = resolveSchedulerPlugin();
@@ -2924,6 +3249,19 @@ public final class RuntimeDispatchService {
       String sessionId,
       String reason) {
     try {
+      // 标记居中阶段：防止 handleSignalTick 在居中期间下发 speedLimit=0 + stop，阻止居中移动
+      WaypointStopState prev = waypointStopStates.get(key);
+      if (prev != null && sessionId.equals(prev.sessionId())) {
+        waypointStopStates.put(
+            key, new WaypointStopState(sessionId, nodeId, prev.createdAt(), dwellSeconds, true));
+      }
+
+      // 恢复速度限制：signal tick 遗留的 speedLimit=0 会阻止 Station.centerTrain() 的移动动作
+      com.bergerkiller.bukkit.tc.properties.TrainProperties props = group.getProperties();
+      if (props != null) {
+        props.setSpeedLimit(WAYPOINT_CENTER_SPEED_LIMIT);
+      }
+
       // 关键：强制按 group 语义执行 centerTrain，避免某些事件上下文被识别为 cart sign 后只按单车居中。
       SignActionEvent centerEvent = adaptForGroupCenter(event, group);
       com.bergerkiller.bukkit.tc.Station station =
@@ -3254,9 +3592,9 @@ public final class RuntimeDispatchService {
     if (train != null) {
       train.destroy();
     }
-    if (occupancyManager != null) {
-      occupancyManager.releaseByTrain(trainName);
-    }
+    // 注意：不在此处释放占用。train.destroy() 延迟 1 tick 执行物理销毁，
+    // 若此处同步释放占用，SpawnMonitor 可能在物理销毁前 acquire 并 spawn 新车导致撞车。
+    // 占用将由 GroupRemoveEvent → handleTrainRemoved 在实体实际销毁后释放。
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
@@ -4331,8 +4669,13 @@ public final class RuntimeDispatchService {
     return true;
   }
 
+  /**
+   * Waypoint 停站状态快照。
+   *
+   * @param centering 是否正在执行居中动作；居中期间信号 tick 不干预控车，避免 speedLimit=0 阻止移动
+   */
   private record WaypointStopState(
-      String sessionId, NodeId nodeId, Instant createdAt, int dwellSeconds) {
+      String sessionId, NodeId nodeId, Instant createdAt, int dwellSeconds, boolean centering) {
     private WaypointStopState {
       Objects.requireNonNull(sessionId, "sessionId");
       Objects.requireNonNull(nodeId, "nodeId");

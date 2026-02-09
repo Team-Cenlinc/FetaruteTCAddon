@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
@@ -28,15 +29,26 @@ import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
@@ -264,6 +276,67 @@ class SimpleTicketAssignerLayoverTest {
     assertEquals(route2Id, attempted.get(2).routeId(), "第二轮应从 R2 开始（轮转）");
     assertEquals(route1Id, attempted.get(3).routeId(), "第二轮第二次应回到 R1");
     assertTrue(assigner.snapshotPendingTickets().size() >= 2, "派发失败后 pending 不应被误删");
+  }
+
+  @Test
+  void tickRotatesImmediateLayoverDispatchOrderWithinSameLineAndTerminal() {
+    UUID lineId = UUID.randomUUID();
+    UUID route1Id = UUID.randomUUID();
+    UUID route2Id = UUID.randomUUID();
+    SpawnTicket route1TicketA = buildTicket(route1Id, lineId, "R1", 0L);
+    SpawnTicket route2TicketA = buildTicket(route2Id, lineId, "R2", 1L);
+    SpawnTicket route1TicketB = buildTicket(route1Id, lineId, "R1", 2L);
+    SpawnTicket route2TicketB = buildTicket(route2Id, lineId, "R2", 3L);
+    StorageProvider provider =
+        mockProviderForRoutes(lineId, Map.of(route1Id, "R1", route2Id, "R2"), false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(route1TicketA, route2TicketA))
+        .thenReturn(List.of(route1TicketB, route2TicketB));
+
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A"))
+        .thenReturn(List.of(candidate))
+        .thenReturn(List.of(candidate))
+        .thenReturn(List.of(candidate))
+        .thenReturn(List.of(candidate));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(true);
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(
+                Map.of(
+                    route1Id, routeDefinition("OP:L1:R1"),
+                    route2Id, routeDefinition("OP:L1:R2"))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            2,
+            10);
+
+    assigner.tick(provider, Instant.now());
+    assigner.tick(provider, Instant.now().plusSeconds(1));
+
+    ArgumentCaptor<ServiceTicket> ticketCaptor = ArgumentCaptor.forClass(ServiceTicket.class);
+    verify(runtimeDispatchService, times(4)).dispatchLayover(eq(candidate), ticketCaptor.capture());
+    List<ServiceTicket> attempted = ticketCaptor.getAllValues();
+    assertEquals(route1Id, attempted.get(0).routeId(), "第一轮应先尝试 R1");
+    assertEquals(route2Id, attempted.get(1).routeId(), "第一轮第二次应尝试 R2");
+    assertEquals(route2Id, attempted.get(2).routeId(), "第二轮应从 R2 开始（轮转）");
+    assertEquals(route1Id, attempted.get(3).routeId(), "第二轮第二次应回到 R1");
   }
 
   @Test
@@ -551,9 +624,15 @@ class SimpleTicketAssignerLayoverTest {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
     ConfigManager.SpawnSettings spawnSettings = mock(ConfigManager.SpawnSettings.class);
+    ConfigManager.RuntimeSettings runtimeSettings = mock(ConfigManager.RuntimeSettings.class);
     when(configManager.current()).thenReturn(view);
     when(view.spawnSettings()).thenReturn(spawnSettings);
+    when(view.runtimeSettings()).thenReturn(runtimeSettings);
     when(spawnSettings.layoverFallbackMultiplier()).thenReturn(layoverFallbackMultiplier);
+    when(runtimeSettings.lookaheadEdges()).thenReturn(2);
+    when(runtimeSettings.minClearEdges()).thenReturn(0);
+    when(runtimeSettings.rearGuardEdges()).thenReturn(0);
+    when(runtimeSettings.switcherZoneEdges()).thenReturn(1);
     return configManager;
   }
 
@@ -710,6 +789,104 @@ class SimpleTicketAssignerLayoverTest {
     assigner.tick(provider, t0.plusSeconds(70));
     assertEquals(1, assigner.snapshotPendingTickets().size(), "非 depot 首站应继续等待 Layover 复用");
     verify(spawnManager, never()).requeue(any());
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void tickDepotSpawnRequestIncludesDepotLookoverWhenRouteStartsAtStation() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    UUID worldId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId throatNode = NodeId.of("SURN:D:DEPOT:1:001");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    RailNode depot =
+        new SignRailNode(
+            depotNode,
+            NodeType.DEPOT,
+            new Vector(-10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode throat =
+        new SignRailNode(
+            throatNode,
+            NodeType.SWITCHER,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeDepotThroat = EdgeId.undirected(depotNode, throatNode);
+    EdgeId edgeThroatA = EdgeId.undirected(throatNode, nodeA);
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    RailEdge depotThroat =
+        new RailEdge(edgeDepotThroat, depotNode, throatNode, 10, 8.0, true, Optional.empty());
+    RailEdge throatA =
+        new RailEdge(edgeThroatA, throatNode, nodeA, 10, 8.0, true, Optional.empty());
+    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(depotNode, depot, throatNode, throat, nodeA, a, nodeB, b),
+            Map.of(edgeDepotThroat, depotThroat, edgeThroatA, throatA, edgeAB, ab),
+            java.util.Set.of());
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    when(occupancyManager.acquire(requestCaptor.capture()))
+        .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
+
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeDefinition depotDefinition =
+        new SignNodeDefinition(depotNode, NodeType.DEPOT, Optional.empty(), Optional.empty());
+    SignNodeRegistry.SignNodeInfo depotInfo =
+        new SignNodeRegistry.SignNodeInfo(depotDefinition, worldId, "TestWorld", 0, 64, 0);
+    when(signNodeRegistry.snapshotInfos()).thenReturn(Map.of("depot", depotInfo));
+
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    OccupancyRequest captured = requestCaptor.getValue();
+    assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotThroat)));
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
   }
 }

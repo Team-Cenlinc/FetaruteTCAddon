@@ -2,6 +2,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
+import com.bergerkiller.bukkit.tc.controller.status.TrainStatus;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashSet;
@@ -11,6 +13,7 @@ import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
+import org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -29,6 +32,17 @@ public final class RuntimeSignalMonitor implements Runnable {
   private final DwellRegistry dwellRegistry;
   private final RouteProgressRegistry routeProgressRegistry;
   private final RouteDefinitionCache routeDefinitions;
+
+  /**
+   * FTA tag 存在但 route 无法解析的列车，累计被观测到的 tick 次数。超过阈值视为"脱管"并清理。
+   *
+   * <p>避免因瞬时加载延迟误杀正在初始化的列车。
+   */
+  private final java.util.Map<String, Integer> staleTrainTicks =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** "脱管"列车被判定为异常前需连续被观测到的 tick 次数。 */
+  private static final int STALE_THRESHOLD_TICKS = 60;
 
   public RuntimeSignalMonitor(
       RuntimeDispatchService dispatchService,
@@ -58,12 +72,20 @@ public final class RuntimeSignalMonitor implements Runnable {
       if (group == null || !group.isValid()) {
         continue;
       }
+      if (isDerailed(group)) {
+        dispatchService.handleAbnormalGroup(group, "status-derailed");
+        continue;
+      }
       String trainName =
           group.getProperties() != null ? group.getProperties().getTrainName() : null;
       if (trainName != null && !trainName.isBlank()) {
         activeTrainNames.add(trainName);
       }
       dispatchService.handleSignalTick(group);
+      // 检测"脱管"列车：有 FTA tag 但 route 无法解析，连续多 tick 后视为异常并清理
+      if (trainName != null && !trainName.isBlank()) {
+        detectStaleFtaTrain(group, trainName);
+      }
       if (etaSampler != null && trainName != null && !trainName.isBlank()) {
         Optional<Integer> dwellRemainingSec =
             dwellRegistry != null ? dwellRegistry.remainingSeconds(trainName) : Optional.empty();
@@ -80,9 +102,68 @@ public final class RuntimeSignalMonitor implements Runnable {
     }
     dispatchService.cleanupOrphanOccupancyClaims(activeTrainNames);
     cleanupSnapshotStore(activeTrainNames);
+    staleTrainTicks.keySet().removeIf(name -> !activeTrainNames.contains(name));
     if (dwellRegistry != null) {
       dwellRegistry.retain(activeTrainNames);
     }
+  }
+
+  /**
+   * 检测"脱管" FTA 列车：有 FTA tag 但 route 无法解析或 progressRegistry 无条目。
+   *
+   * <p>这类列车不会被 {@link TrainHealthMonitor} 检测（因无 progress entry），也不会被 {@code isDerailed}
+   * 捕获。连续观测超过阈值后视为异常并清理，避免因瞬时加载延迟误杀正在初始化的列车。
+   */
+  private void detectStaleFtaTrain(MinecartGroup group, String trainName) {
+    if (routeProgressRegistry == null) {
+      return;
+    }
+    // 已有 progress 条目的列车由 TrainHealthMonitor 监控
+    if (routeProgressRegistry.get(trainName).isPresent()) {
+      staleTrainTicks.remove(trainName);
+      return;
+    }
+    TrainProperties properties = group.getProperties();
+    if (properties == null) {
+      return;
+    }
+    // 检查是否有 FTA route tag（只检测曾经被 FTA 管控的列车）
+    boolean hasRouteIndex =
+        TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isPresent();
+    boolean hasRouteId =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
+            .filter(v -> !v.isBlank())
+            .isPresent();
+    boolean hasOperator =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_OPERATOR_CODE)
+            .filter(v -> !v.isBlank())
+            .isPresent();
+    if (!hasRouteIndex && !hasRouteId && !hasOperator) {
+      // 非 FTA 列车，不检测
+      staleTrainTicks.remove(trainName);
+      return;
+    }
+    int ticks = staleTrainTicks.merge(trainName, 1, Integer::sum);
+    if (ticks >= STALE_THRESHOLD_TICKS) {
+      staleTrainTicks.remove(trainName);
+      dispatchService.handleAbnormalGroup(group, "stale-no-progress");
+    }
+  }
+
+  private static boolean isDerailed(MinecartGroup group) {
+    if (group == null) {
+      return false;
+    }
+    List<TrainStatus> statuses = group.getStatusInfo();
+    if (statuses == null || statuses.isEmpty()) {
+      return false;
+    }
+    for (TrainStatus status : statuses) {
+      if (status instanceof TrainStatus.Derailed) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private NodeSampleInfo resolveNodeInfo(String trainName) {

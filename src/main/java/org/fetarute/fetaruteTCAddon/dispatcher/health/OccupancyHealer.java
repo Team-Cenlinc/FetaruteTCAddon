@@ -72,7 +72,15 @@ public final class OccupancyHealer {
     if (now == null) {
       now = Instant.now();
     }
-    Set<String> active = activeTrains == null ? Set.of() : Set.copyOf(activeTrains);
+    // 构建小写集合以做大小写不敏感比较，避免 TrainCarts 不同路径返回不同大小写时误判孤儿
+    Set<String> activeLower = new java.util.HashSet<>();
+    if (activeTrains != null) {
+      for (String name : activeTrains) {
+        if (name != null) {
+          activeLower.add(name.toLowerCase(java.util.Locale.ROOT));
+        }
+      }
+    }
 
     List<OccupancyClaim> claims = occupancyManager.snapshotClaims();
     int orphanCount = 0;
@@ -84,7 +92,8 @@ public final class OccupancyHealer {
         continue;
       }
       String trainName = claim.trainName();
-      boolean activeTrain = active.contains(trainName);
+      boolean activeTrain =
+          trainName != null && activeLower.contains(trainName.toLowerCase(java.util.Locale.ROOT));
 
       // 孤儿检测
       if (orphanCleanupEnabled && !activeTrain) {
