@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -12,7 +13,10 @@ import java.util.Set;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -457,6 +461,135 @@ class OccupancyRequestBuilderTest {
     assertTrue(anchoredRequest.resourceList().contains(depotEdgeResource));
     assertFalse(fallbackRequest.resourceList().contains(deepEdgeResource));
     assertTrue(anchoredRequest.resourceList().contains(deepEdgeResource));
+  }
+
+  @Test
+  void depotLookoverFallsBackToAllDirectionConflictWhenDirectionUnavailable() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    NodeId nodeC = NodeId.of("C");
+    NodeId nodeS = NodeId.of("S");
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode s =
+        new SignRailNode(
+            nodeS,
+            NodeType.SWITCHER,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode c =
+        new SignRailNode(
+            nodeC,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 10.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeAS = EdgeId.undirected(nodeA, nodeS);
+    EdgeId edgeSB = EdgeId.undirected(nodeS, nodeB);
+    EdgeId edgeSC = EdgeId.undirected(nodeS, nodeC);
+    RailEdge as = new RailEdge(edgeAS, nodeA, nodeS, 10, 8.0, true, Optional.empty());
+    RailEdge sb = new RailEdge(edgeSB, nodeS, nodeB, 10, 8.0, true, Optional.empty());
+    RailEdge sc = new RailEdge(edgeSC, nodeS, nodeC, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.of(nodeA, a, nodeS, s, nodeB, b, nodeC, c),
+            Map.of(edgeAS, as, edgeSB, sb, edgeSC, sc),
+            Set.of());
+    String branchConflict =
+        ((RailGraphConflictSupport) delegate).conflictKeyForEdge(edgeSC).orElseThrow();
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeSC,
+                new RailGraphCorridorInfo(branchConflict, nodeA, nodeB, List.of(nodeS), false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 1);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeS, nodeB), Optional.empty());
+    TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 0));
+
+    Optional<OccupancyRequestContext> ctxOpt =
+        builder.buildContextFromNodes(
+            state.trainName(), Optional.of(route.id()), route.waypoints(), 0, Instant.now(), 0);
+    assertTrue(ctxOpt.isPresent());
+    OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get());
+
+    OccupancyResource branchEdge = OccupancyResource.forEdge(edgeSC);
+    assertFalse(request.resourceList().contains(branchEdge));
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(branchConflict)));
+    assertFalse(request.corridorDirections().containsKey(branchConflict));
+  }
+
+  private static final class CorridorInfoOverrideGraph
+      implements RailGraph, RailGraphCorridorSupport {
+
+    private final SimpleRailGraph delegate;
+    private final Map<EdgeId, RailGraphCorridorInfo> overrides;
+
+    private CorridorInfoOverrideGraph(
+        SimpleRailGraph delegate, Map<EdgeId, RailGraphCorridorInfo> overrides) {
+      this.delegate = delegate;
+      this.overrides = overrides == null ? Map.of() : Map.copyOf(overrides);
+    }
+
+    @Override
+    public Collection<RailNode> nodes() {
+      return delegate.nodes();
+    }
+
+    @Override
+    public Collection<RailEdge> edges() {
+      return delegate.edges();
+    }
+
+    @Override
+    public Optional<RailNode> findNode(NodeId id) {
+      return delegate.findNode(id);
+    }
+
+    @Override
+    public Set<RailEdge> edgesFrom(NodeId id) {
+      return delegate.edgesFrom(id);
+    }
+
+    @Override
+    public boolean isBlocked(EdgeId id) {
+      return delegate.isBlocked(id);
+    }
+
+    @Override
+    public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+      return delegate.conflictKeyForEdge(edgeId);
+    }
+
+    @Override
+    public Optional<RailGraphCorridorInfo> corridorInfoForEdge(EdgeId edgeId) {
+      if (edgeId == null) {
+        return Optional.empty();
+      }
+      RailGraphCorridorInfo info = overrides.get(edgeId);
+      if (info == null) {
+        info = overrides.get(EdgeId.undirected(edgeId.a(), edgeId.b()));
+      }
+      if (info != null) {
+        return Optional.of(info);
+      }
+      return delegate.corridorInfoForEdge(edgeId);
+    }
   }
 
   private record StubProgress(RouteId routeId, int currentIndex) implements RouteProgress {

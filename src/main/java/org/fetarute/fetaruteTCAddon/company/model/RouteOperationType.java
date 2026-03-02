@@ -3,8 +3,15 @@ package org.fetarute.fetaruteTCAddon.company.model;
 import java.util.Locale;
 import java.util.Optional;
 
-/** 路线运营属性：运营班次或回库/回送。 */
+/** 路线运营属性：补车、运营班次、回库/回送。 */
 public enum RouteOperationType {
+
+  /**
+   * 补车班次（Create）。
+   *
+   * <p>通常用于从 Depot 注入运力，不参与“站内折返复用”。
+   */
+  CREATE,
 
   /** 常规运营班次（客运/正线运行）。 */
   OPERATION,
@@ -14,9 +21,11 @@ public enum RouteOperationType {
 
   private static final java.util.Map<String, RouteOperationType> TOKEN_MAP =
       java.util.Map.ofEntries(
+          java.util.Map.entry("CREATE", CREATE),
           java.util.Map.entry("OPERATION", OPERATION),
           java.util.Map.entry("RETURN", RETURN),
           // 常用缩写
+          java.util.Map.entry("CRT", CREATE),
           java.util.Map.entry("OP", OPERATION),
           java.util.Map.entry("RET", RETURN),
           java.util.Map.entry("BACK", RETURN));

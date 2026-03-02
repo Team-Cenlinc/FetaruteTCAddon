@@ -41,8 +41,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
@@ -888,5 +890,137 @@ class SimpleTicketAssignerLayoverTest {
     OccupancyRequest captured = requestCaptor.getValue();
     assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotThroat)));
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void tickRequeuesOperationTicketWhenCongestionHoldTriggered() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "R1", RouteOperationType.OPERATION, "SURN:D:DEPOT:1", "B");
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of(congestedEdgeClaim()));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(congestedProgressEntries(routeId, "OP:L1:R1"));
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(spawnManager).requeue(any(SpawnTicket.class));
+    verify(spawnManager, never()).complete(any());
+    assertEquals(1L, assigner.snapshotDiagnostics().retries());
+    assertEquals(
+        1L, assigner.snapshotDiagnostics().requeueByError().getOrDefault("congestion-hold", 0L));
+  }
+
+  @Test
+  void tickAllowsReturnRouteToEnterPendingWhenCongestionHigh() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "RET-1", 0L);
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "RET-1", RouteOperationType.RETURN, "A", "B");
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of(congestedEdgeClaim()));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(congestedProgressEntries(routeId, "OP:L1:RET-1"));
+
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            mockRouteDefinitions(Map.of(routeId, routeDefinition("OP:L1:RET-1", "A"))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(spawnManager, never()).requeue(any(SpawnTicket.class));
+    assertEquals(1, assigner.snapshotPendingTickets().size());
+    assertEquals(0L, assigner.snapshotDiagnostics().retries());
+  }
+
+  private static OccupancyClaim congestedEdgeClaim() {
+    return new OccupancyClaim(
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B"))),
+        "T-BUSY",
+        Optional.empty(),
+        Instant.now(),
+        Duration.ZERO,
+        Optional.empty());
+  }
+
+  private static Map<String, RouteProgressRegistry.RouteProgressEntry> congestedProgressEntries(
+      UUID routeId, String routeValue) {
+    RouteProgressRegistry.RouteProgressEntry entry1 =
+        new RouteProgressRegistry.RouteProgressEntry(
+            "T1",
+            routeId,
+            RouteId.of(routeValue),
+            0,
+            Optional.of(NodeId.of("B")),
+            Optional.empty(),
+            SignalAspect.STOP,
+            Instant.now());
+    RouteProgressRegistry.RouteProgressEntry entry2 =
+        new RouteProgressRegistry.RouteProgressEntry(
+            "T2",
+            routeId,
+            RouteId.of(routeValue),
+            0,
+            Optional.of(NodeId.of("B")),
+            Optional.empty(),
+            SignalAspect.STOP,
+            Instant.now());
+    RouteProgressRegistry.RouteProgressEntry entry3 =
+        new RouteProgressRegistry.RouteProgressEntry(
+            "T3",
+            routeId,
+            RouteId.of(routeValue),
+            0,
+            Optional.of(NodeId.of("B")),
+            Optional.empty(),
+            SignalAspect.STOP,
+            Instant.now());
+    return Map.of("t1", entry1, "t2", entry2, "t3", entry3);
   }
 }

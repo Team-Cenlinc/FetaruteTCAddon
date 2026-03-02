@@ -685,18 +685,19 @@ command:
       list:
         header: "<prefix> <dark_aqua>交路组列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white> <gray>(count=<white><count></white>)</gray>"
         empty: "<gray>（当前线路尚未创建交路组）</gray>"
-        entry: "<white><group></white> <gray>-</gray> <dark_aqua>baseline=<baseline>s</dark_aqua>"
-        hover-entry: "<gray>交路组:</gray> <white><group></white>\n<dark_aqua>基线(秒):</dark_aqua> <white><baseline></white>\n<gray><click_hint></gray>"
+        entry: "<white><group></white> <gray>-</gray> <dark_aqua>baseline=<baseline>s</dark_aqua> <gray>/</gray> <dark_aqua>maxTrips=<max_trips></dark_aqua>"
+        hover-entry: "<gray>交路组:</gray> <white><group></white>\n<dark_aqua>基线(秒):</dark_aqua> <white><baseline></white>\n<dark_aqua>最大运营圈数:</dark_aqua> <white><max_trips></white>\n<gray><click_hint></gray>"
         click-hint: "点击查看组详情"
       info:
-        header: "<prefix> <dark_aqua>交路组</dark_aqua> <white><line></white><gray>/</gray><white><group></white> <gray>(baseline=<white><baseline></white>, routes=<white><routes></white>)</gray>"
+        header: "<prefix> <dark_aqua>交路组</dark_aqua> <white><line></white><gray>/</gray><white><group></white> <gray>(baseline=<white><baseline></white>, maxTrips=<white><max_trips></white>, routes=<white><routes></white>)</gray>"
         baseline: "<gray>基线(秒):</gray> <dark_aqua><baseline></dark_aqua>"
+        max-trips: "<gray>最大运营圈数:</gray> <dark_aqua><max_trips></dark_aqua>"
       create:
         success: "<prefix> <dark_aqua>已创建交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>)</gray>"
         updated: "<prefix> <dark_aqua>已更新交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>)</gray>"
       set:
-        success: "<prefix> <dark_aqua>已更新交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>, baseline=<white><baseline></white>)</gray>"
-        noop: "<prefix> <gray>未提供可更新字段（可用 --baseline/--baseline-clear）</gray>"
+        success: "<prefix> <dark_aqua>已更新交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>, baseline=<white><baseline></white>, maxTrips=<white><max_trips></white>)</gray>"
+        noop: "<prefix> <gray>未提供可更新字段（可用 --baseline/--baseline-clear/--max-trips/--max-trips-clear）</gray>"
       routes:
         header: "<prefix> <dark_aqua>交路组运行图</dark_aqua> <gray>(line=<white><line></white>, group=<white><group></white>, count=<white><count></white>)</gray>"
         empty: "<gray>该交路组当前没有绑定运行图</gray>"
@@ -914,6 +915,7 @@ enum:
     express: "特快"
     limited_express: "特急"
   route-operation-type:
+    create: "补车"
     operation: "运营"
     return: "回送"
   route-stop-pass-type:

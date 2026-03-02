@@ -124,6 +124,42 @@ class ReclaimManagerTest {
     verify(ticketAssigner, never()).forceAssign(any(), any());
   }
 
+  @Test
+  void performReclaimCheckReclaimsWhenOperationTripsReachMax() {
+    Instant now = Instant.now();
+    UUID routeId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, stationId);
+
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq("train-life"), any())).thenReturn(true);
+
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-life",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        now.minusSeconds(30),
+        Map.of(
+            "FTA_OPERATOR_CODE", "SURC",
+            "FTA_OP_TRIPS", "4",
+            "FTA_OP_MAX", "4"));
+
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 99);
+
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, times(1)).forceAssign(eq("train-life"), any());
+  }
+
   private static ConfigManager mockConfigManager() {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);

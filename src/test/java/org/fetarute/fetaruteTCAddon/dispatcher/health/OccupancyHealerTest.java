@@ -211,12 +211,31 @@ class OccupancyHealerTest {
   }
 
   @Test
-  @DisplayName("null 参数处理：使用默认值")
-  void nullParameters() {
-    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+  @DisplayName("大小写不敏感：活跃列车名大小写不一致时不误判为孤儿")
+  void caseInsensitiveActiveTrainMatching() {
+    Instant now = Instant.now();
+    OccupancyResource resource = nodeResource("SURC:S:TEST:1");
+    // 列车名用小写
+    OccupancyClaim c = claim(resource, "Train-Alpha", now.minus(Duration.ofSeconds(10)));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of(c));
 
-    // null activeTrains 应视为空集
-    // null now 应使用当前时间
-    assertDoesNotThrow(() -> healer.heal(null, null));
+    // 活跃列车名用大写
+    OccupancyHealer.HealResult result = healer.heal(Set.of("TRAIN-ALPHA"), now);
+
+    assertEquals(0, result.orphanCleaned(), "大小写不同但匹配，不应清理");
+    verify(occupancyManager, never()).releaseResource(any(), any());
+  }
+
+  @Test
+  @DisplayName("null 活跃列车集：所有占用视为孤儿")
+  void nullActiveTrainsTreatsAllAsOrphan() {
+    Instant now = Instant.now();
+    OccupancyResource resource = nodeResource("SURC:S:TEST:1");
+    OccupancyClaim c = claim(resource, "train-1", now.minus(Duration.ofSeconds(10)));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of(c));
+
+    OccupancyHealer.HealResult result = healer.heal(null, now);
+
+    assertEquals(1, result.orphanCleaned());
   }
 }

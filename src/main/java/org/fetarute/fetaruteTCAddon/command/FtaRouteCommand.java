@@ -91,7 +91,7 @@ public final class FtaRouteCommand {
   private static final List<String> ROUTE_PATTERN_ALIASES =
       List.of("LOCAL", "RAPID", "NEO_RAPID", "EXPRESS", "LTD_EXPRESS", "LIMITED_EXPRESS");
   private static final List<String> ROUTE_OPERATION_ALIASES =
-      List.of("OPERATION", "RETURN", "OP", "RET");
+      List.of("CREATE", "OPERATION", "RETURN", "CRT", "OP", "RET");
   private static final PlainTextComponentSerializer PLAIN_TEXT =
       PlainTextComponentSerializer.plainText();
 
@@ -223,6 +223,14 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("<seconds>")))
             .build();
     var groupBaselineClearFlag = CommandFlag.builder("baseline-clear").build();
+    var groupMaxTripsFlag =
+        CommandFlag.<CommandSender>builder("max-trips")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "max-trips", IntegerParser.integerParser(1, 1000))
+                    .suggestionProvider(placeholderSuggestion("<count>")))
+            .build();
+    var groupMaxTripsClearFlag = CommandFlag.builder("max-trips-clear").build();
 
     // editor give：允许“空模板”与“绑定到指定 route”两种模式；要么四参齐全要么不填。
     manager.command(
@@ -746,6 +754,7 @@ public final class FtaRouteCommand {
                   }
                   for (SpawnGroup group : groups) {
                     String baseline = group.baselineSeconds().map(String::valueOf).orElse("-");
+                    String maxTrips = group.maxOperationTrips().map(String::valueOf).orElse("-");
                     String infoCommand =
                         "/fta route group info "
                             + resolved.company().code()
@@ -759,7 +768,13 @@ public final class FtaRouteCommand {
                         locale
                             .component(
                                 "command.route.group.list.entry",
-                                Map.of("group", group.name(), "baseline", baseline))
+                                Map.of(
+                                    "group",
+                                    group.name(),
+                                    "baseline",
+                                    baseline,
+                                    "max_trips",
+                                    maxTrips))
                             .hoverEvent(
                                 HoverEvent.showText(
                                     locale.component(
@@ -769,6 +784,8 @@ public final class FtaRouteCommand {
                                             group.name(),
                                             "baseline",
                                             baseline,
+                                            "max_trips",
+                                            maxTrips,
                                             "click_hint",
                                             locale.text("command.route.group.list.click-hint")))))
                             .clickEvent(ClickEvent.runCommand(infoCommand)));
@@ -801,7 +818,11 @@ public final class FtaRouteCommand {
                   if (resolved == null) {
                     return;
                   }
-                  String groupArg = ((String) ctx.get("group")).trim();
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
                   List<SpawnGroup> groups =
                       new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
                   Optional<SpawnGroup> groupOpt = LineSpawnMetadata.findGroup(groups, groupArg);
@@ -813,6 +834,7 @@ public final class FtaRouteCommand {
                   }
                   SpawnGroup group = groupOpt.get();
                   String baseline = group.baselineSeconds().map(String::valueOf).orElse("-");
+                  String maxTrips = group.maxOperationTrips().map(String::valueOf).orElse("-");
                   long routes =
                       provider.routes().listByLine(resolved.line().id()).stream()
                           .filter(route -> route != null)
@@ -841,6 +863,8 @@ public final class FtaRouteCommand {
                               group.name(),
                               "baseline",
                               baseline,
+                              "max_trips",
+                              maxTrips,
                               "routes",
                               String.valueOf(routes))));
                   sender.sendMessage(
@@ -848,6 +872,21 @@ public final class FtaRouteCommand {
                           .component(
                               "command.route.group.info.baseline", Map.of("baseline", baseline))
                           .clickEvent(ClickEvent.suggestCommand(setPrefix)));
+                  String maxTripsPrefix =
+                      "/fta route group set "
+                          + resolved.company().code()
+                          + " "
+                          + resolved.operator().code()
+                          + " "
+                          + resolved.line().code()
+                          + " "
+                          + quoteCommandArgument(group.name())
+                          + " --max-trips ";
+                  sender.sendMessage(
+                      locale
+                          .component(
+                              "command.route.group.info.max-trips", Map.of("max_trips", maxTrips))
+                          .clickEvent(ClickEvent.suggestCommand(maxTripsPrefix)));
                 }));
 
     manager.command(
@@ -891,10 +930,11 @@ public final class FtaRouteCommand {
                       baseline == null
                           ? existedGroup.flatMap(SpawnGroup::baselineSeconds)
                           : Optional.of(baseline);
+                  Optional<Integer> maxTrips = existedGroup.flatMap(SpawnGroup::maxOperationTrips);
                   groups =
                       new ArrayList<>(
                           LineSpawnMetadata.upsertGroup(
-                              groups, new SpawnGroup(groupArg, baselineSeconds)));
+                              groups, new SpawnGroup(groupArg, baselineSeconds, maxTrips)));
                   Line updatedLine = withSpawnGroups(resolved.line(), groups);
                   provider.lines().save(updatedLine);
                   sender.sendMessage(
@@ -918,6 +958,8 @@ public final class FtaRouteCommand {
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
             .flag(groupBaselineFlag)
             .flag(groupBaselineClearFlag)
+            .flag(groupMaxTripsFlag)
+            .flag(groupMaxTripsClearFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -940,7 +982,10 @@ public final class FtaRouteCommand {
                   }
                   var flags = ctx.flags();
                   boolean any =
-                      flags.hasFlag(groupBaselineFlag) || flags.hasFlag(groupBaselineClearFlag);
+                      flags.hasFlag(groupBaselineFlag)
+                          || flags.hasFlag(groupBaselineClearFlag)
+                          || flags.hasFlag(groupMaxTripsFlag)
+                          || flags.hasFlag(groupMaxTripsClearFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.route.group.set.noop"));
                     return;
@@ -955,6 +1000,7 @@ public final class FtaRouteCommand {
                     return;
                   }
                   Optional<Integer> baseline = target.get().baselineSeconds();
+                  Optional<Integer> maxTrips = target.get().maxOperationTrips();
                   if (flags.hasFlag(groupBaselineClearFlag)) {
                     baseline = Optional.empty();
                   }
@@ -963,10 +1009,18 @@ public final class FtaRouteCommand {
                     baseline =
                         (seconds == null || seconds <= 0) ? Optional.empty() : Optional.of(seconds);
                   }
+                  if (flags.hasFlag(groupMaxTripsClearFlag)) {
+                    maxTrips = Optional.empty();
+                  }
+                  if (flags.hasFlag(groupMaxTripsFlag)) {
+                    Integer count = flags.getValue(groupMaxTripsFlag, null);
+                    maxTrips =
+                        (count == null || count <= 0) ? Optional.empty() : Optional.of(count);
+                  }
                   groups =
                       new ArrayList<>(
                           LineSpawnMetadata.upsertGroup(
-                              groups, new SpawnGroup(target.get().name(), baseline)));
+                              groups, new SpawnGroup(target.get().name(), baseline, maxTrips)));
                   Line updatedLine = withSpawnGroups(resolved.line(), groups);
                   provider.lines().save(updatedLine);
                   sender.sendMessage(
@@ -975,7 +1029,8 @@ public final class FtaRouteCommand {
                           Map.of(
                               "group", target.get().name(),
                               "line", resolved.line().code(),
-                              "baseline", baseline.map(String::valueOf).orElse("-"))));
+                              "baseline", baseline.map(String::valueOf).orElse("-"),
+                              "max_trips", maxTrips.map(String::valueOf).orElse("-"))));
                 }));
 
     manager.command(
@@ -1292,7 +1347,11 @@ public final class FtaRouteCommand {
                   if (resolved == null) {
                     return;
                   }
-                  String groupArg = ((String) ctx.get("group")).trim();
+                  String groupArg = normalizeSpawnGroup((String) ctx.get("group"));
+                  if (groupArg == null) {
+                    sender.sendMessage(locale.component("command.route.group.invalid"));
+                    return;
+                  }
                   List<SpawnGroup> groups =
                       new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
                   Optional<SpawnGroup> target = LineSpawnMetadata.findGroup(groups, groupArg);
@@ -1662,7 +1721,10 @@ public final class FtaRouteCommand {
                         new ArrayList<>(
                             LineSpawnMetadata.upsertGroup(
                                 lineGroups,
-                                new SpawnGroup(configured.get().name(), baselineSeconds)));
+                                new SpawnGroup(
+                                    configured.get().name(),
+                                    baselineSeconds,
+                                    configured.get().maxOperationTrips())));
                     updatedLineOpt = Optional.of(withSpawnGroups(resolved.line(), lineGroups));
                     // 迁移到 line-level baseline 后，route metadata 中不再保留该字段。
                     metadata.remove("spawn_group_baseline_sec");
@@ -4142,6 +4204,13 @@ public final class FtaRouteCommand {
       return null;
     }
     String trimmed = raw.trim();
+    if (trimmed.length() >= 2) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+        trimmed = trimmed.substring(1, trimmed.length() - 1).trim();
+      }
+    }
     return trimmed.isBlank() ? null : trimmed;
   }
 

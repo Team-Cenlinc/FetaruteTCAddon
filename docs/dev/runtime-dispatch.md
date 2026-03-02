@@ -166,6 +166,19 @@
 - 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。
 
+## 调度销毁（handleDestroy）与完整清理
+- 调度销毁清理范围与 `handleTrainRemoved` 保持一致（进度、stall 状态、停站状态、trigger 状态、信号警告、departure gate、节点历史、动态分配、有效节点覆盖、blocker 快照），唯一区别是不在此处释放占用——`train.destroy()` 延迟 1 tick 执行物理销毁，占用由 `GroupRemoveEvent → handleTrainRemoved` 在实体实际消亡后释放，避免 SpawnMonitor 在物理销毁前 acquire 导致撞车。
+- 异常编组清理（`handleAbnormalGroup`）启用 2 秒去重窗口，抑制 TrainCarts split/脱挂事件风暴的重复处理。
+
+## 硬占用阻塞检查（Hard Blocker）
+- 即使死锁解析器/冲突放行路径返回 `allowed=true`，若 blocker 中仍包含其他列车的 NODE/EDGE 硬占用，会强制回退为阻塞信号（STOP），杜绝误放行。
+- CONFLICT 类型资源不视为硬阻塞（由死锁解析器管理）。
+- 自身占用（blocker 中 trainName 与当前列车匹配）被跳过。
+- blocker 元素为 null 或 resource 为 null 时视为硬阻塞（保守策略）。
+
+## 健康修复使用有效节点（DYNAMIC 覆盖）
+- `forceRelaunchByName` 和 `reissueDestinationByName` 均使用 `resolveEffectiveNode` 获取 DYNAMIC 站台覆盖后的有效节点，确保修复操作将列车发往正确的站台而非 route 定义中的占位符节点。
+
 ## 速度命令限幅
 - 速度命令会做“限幅 + 迟滞”处理，减少高频抖动引发的解挂风险。
 - 仅对“常规跟速”做上行限幅；发车/放行（`allowLaunch=true`）会跳过上行限幅，避免起步龟速。

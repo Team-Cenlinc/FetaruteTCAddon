@@ -233,6 +233,61 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void conflictDeadlockReleaseKeepsStopWhenRequesterSideStillHasTrainAhead() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyResource nodeA = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(conflict.key(), CorridorDirection.B_TO_A);
+
+    // 互卡基础：对向列车占住 A 侧节点。
+    manager.acquire(
+        new OccupancyRequest("tOpp", Optional.empty(), now, List.of(nodeA), java.util.Map.of()));
+    // 请求侧前方仍有同向列车占住 B 侧节点。
+    manager.acquire(
+        new OccupancyRequest("tFront", Optional.empty(), now, List.of(nodeB), java.util.Map.of()));
+
+    // 将两侧列车都放入冲突队列，模拟会车区等待态。
+    manager.canEnter(
+        new OccupancyRequest(
+            "tOpp",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            reverse,
+            Map.of(conflict.key(), 1),
+            0));
+    manager.canEnter(
+        new OccupancyRequest(
+            "tFront",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            forward,
+            Map.of(conflict.key(), 2),
+            0));
+
+    // 请求车虽然靠近冲突入口，但同向前方仍有列车占位，不应触发死锁放行。
+    OccupancyDecision blocked =
+        manager.canEnter(
+            new OccupancyRequest(
+                "tReq",
+                Optional.empty(),
+                now,
+                List.of(conflict, nodeA, nodeB),
+                forward,
+                Map.of(conflict.key(), 0),
+                0));
+    assertFalse(blocked.allowed());
+    assertEquals(SignalAspect.STOP, blocked.signal());
+  }
+
+  @Test
   void shouldYieldForHigherPriorityOppositeCorridor() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =

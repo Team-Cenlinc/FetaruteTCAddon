@@ -983,8 +983,9 @@ public final class RuntimeDispatchService {
    * 清理“已不存在列车”的占用记录与进度缓存（事件反射式占用的兜底）。
    *
    * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。
+   *
+   * @param activeTrainNames 当前存活的列车名集合
    */
-  /** 清理“已不存在列车”的占用记录与进度缓存。 */
   public void cleanupOrphanOccupancyClaims(java.util.Set<String> activeTrainNames) {
     cleanupOrphanOccupancyClaimsWithReport(activeTrainNames);
   }
@@ -992,7 +993,20 @@ public final class RuntimeDispatchService {
   /**
    * 清理“已不存在列车”的占用记录与进度缓存，并返回本次自愈的统计结果。
    *
-   * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。
+   * <p>清理范围：
+   *
+   * <ul>
+   *   <li>进度注册表（{@link RouteProgressRegistry}）中已不存在列车的条目
+   *   <li>占用管理器中已不存在列车的所有占用资源
+   *   <li>折返候选注册表中已不存在列车的记录
+   *   <li>动态站台分配缓存
+   *   <li>发车门控缓存
+   * </ul>
+   *
+   * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。比较使用小写规范化， 以兼容 TrainCarts 不同路径返回不同大小写的情况。
+   *
+   * @param activeTrainNames 当前存活的列车名集合
+   * @return 本次清理的统计结果
    */
   public CleanupResult cleanupOrphanOccupancyClaimsWithReport(
       java.util.Set<String> activeTrainNames) {
@@ -1645,7 +1659,7 @@ public final class RuntimeDispatchService {
     if (currentIndex < 0 || currentIndex >= route.waypoints().size()) {
       return false;
     }
-    NodeId currentNode = route.waypoints().get(currentIndex);
+    NodeId currentNode = resolveEffectiveNode(trainName, route, currentIndex);
 
     // 获取图
     Optional<RailGraph> graphOpt = resolveGraphByGroup(group);
@@ -1654,12 +1668,12 @@ public final class RuntimeDispatchService {
     }
     RailGraph graph = graphOpt.get();
 
-    // 计算下一节点和方向
+    // 计算下一节点和方向（使用 DYNAMIC 覆盖后的有效节点）
     int nextIndex = currentIndex + 1;
     if (nextIndex >= route.waypoints().size()) {
       return false; // 已到终点
     }
-    NodeId nextNode = route.waypoints().get(nextIndex);
+    NodeId nextNode = resolveEffectiveNode(trainName, route, nextIndex);
     Optional<org.bukkit.block.BlockFace> direction =
         resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
     if (direction.isEmpty()) {
@@ -2740,7 +2754,19 @@ public final class RuntimeDispatchService {
    * 判断 blocker 集合中是否存在“硬占用”冲突。
    *
    * <p>当 canEnter 在死锁/冲突放行路径返回 {@code allowed=true} 时，若 blocker 仍包含其他列车的 NODE/EDGE
-   * 占用，必须视为不可放行，避免在前方有车 时被误 authorize。
+   * 占用，必须视为不可放行，避免在前方有车时被误 authorize。
+   *
+   * <p>边界行为：
+   *
+   * <ul>
+   *   <li>blocker 元素为 {@code null} 或其 resource 为 {@code null} → 视为硬阻塞（保守策略）
+   *   <li>blocker 为自身占用 → 跳过（不视为硬阻塞）
+   *   <li>blocker 仅包含 CONFLICT 类型资源 → 不视为硬阻塞（CONFLICT 由死锁解析器管理）
+   * </ul>
+   *
+   * @param trainName 当前列车名（用于排除自身占用）
+   * @param blockers 占用判定返回的阻塞列表
+   * @return true 表示存在硬阻塞，应阻止放行
    */
   private static boolean hasHardBlockersForTrain(String trainName, List<OccupancyClaim> blockers) {
     if (blockers == null || blockers.isEmpty()) {
@@ -3583,6 +3609,19 @@ public final class RuntimeDispatchService {
    * @param trainName 列车名
    * @param reason 销毁原因（如 DSTY/命令）
    */
+  /**
+   * 执行列车调度销毁：清理运行时状态并触发实体销毁。
+   *
+   * <p>不在此处释放占用——{@code train.destroy()} 延迟 1 tick 执行物理销毁，若同步释放占用，{@code SpawnMonitor} 可能在物理销毁前
+   * acquire 并 spawn 新车导致撞车。占用将由 {@code GroupRemoveEvent → handleTrainRemoved} 在实体实际销毁后释放。
+   *
+   * <p>清理范围与 {@link #handleTrainRemoved} 保持一致（除占用释放外），避免残留缓存数据。
+   *
+   * @param train 运行时句柄（可为空，此时仅清理缓存不销毁实体）
+   * @param properties 列车属性（用于清理 tag）
+   * @param trainName 列车名
+   * @param reason 销毁原因（用于日志）
+   */
   private void handleDestroy(
       RuntimeTrainHandle train, TrainProperties properties, String trainName, String reason) {
     if (properties == null || trainName == null || trainName.isBlank()) {
@@ -3592,18 +3631,19 @@ public final class RuntimeDispatchService {
     if (train != null) {
       train.destroy();
     }
-    // 注意：不在此处释放占用。train.destroy() 延迟 1 tick 执行物理销毁，
-    // 若此处同步释放占用，SpawnMonitor 可能在物理销毁前 acquire 并 spawn 新车导致撞车。
-    // 占用将由 GroupRemoveEvent → handleTrainRemoved 在实体实际销毁后释放。
     progressRegistry.remove(trainName);
     stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+    progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
     clearNodeHistory(trainName);
+    clearDepartureGate(trainName);
     dynamicAllocator.clearAllocations(trainName);
+    effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+    blockerSnapshots.remove(normalizeTrainKey(trainName));
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
-    clearDepartureGate(trainName);
     debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);
   }
 

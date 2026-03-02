@@ -32,6 +32,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public class ReclaimManager {
 
+  private static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
+  private static final String TAG_MAX_OPERATION_TRIPS = "FTA_OP_MAX";
+
   /**
    * 方向供需回库阈值：当同方向待命数量 > pending 需求数量 + 此阈值时触发回库。
    *
@@ -124,8 +127,19 @@ public class ReclaimManager {
       boolean shouldReclaim = false;
       long idleSec = ChronoUnit.SECONDS.between(candidate.readyAt(), now);
       String directionKey = toDirectionKey(candidate.terminalKey());
+      int operationTrips = readPositiveIntTag(candidate.tags(), TAG_OPERATION_TRIPS);
+      int maxOperationTrips = readPositiveIntTag(candidate.tags(), TAG_MAX_OPERATION_TRIPS);
 
-      if (idleSec > maxIdleSec) {
+      if (maxOperationTrips > 0 && operationTrips >= maxOperationTrips) {
+        shouldReclaim = true;
+        debugLogger.accept(
+            "回收触发: 生命周期到达上限 train="
+                + candidate.trainName()
+                + " trips="
+                + operationTrips
+                + "/"
+                + maxOperationTrips);
+      } else if (idleSec > maxIdleSec) {
         shouldReclaim = true;
         debugLogger.accept("回收触发: 闲置超时 train=" + candidate.trainName() + " idle=" + idleSec + "s");
       } else if (pressure) {
@@ -331,5 +345,30 @@ public class ReclaimManager {
             + " 的 RETURN 线路 train="
             + candidate.trainName());
     return false;
+  }
+
+  private static int readPositiveIntTag(Map<String, String> tags, String key) {
+    if (tags == null || tags.isEmpty() || key == null || key.isBlank()) {
+      return 0;
+    }
+    for (Map.Entry<String, String> entry : tags.entrySet()) {
+      if (entry == null || entry.getKey() == null) {
+        continue;
+      }
+      if (!entry.getKey().equalsIgnoreCase(key)) {
+        continue;
+      }
+      String raw = entry.getValue();
+      if (raw == null || raw.isBlank()) {
+        return 0;
+      }
+      try {
+        int parsed = Integer.parseInt(raw.trim());
+        return Math.max(0, parsed);
+      } catch (NumberFormatException ignored) {
+        return 0;
+      }
+    }
+    return 0;
   }
 }

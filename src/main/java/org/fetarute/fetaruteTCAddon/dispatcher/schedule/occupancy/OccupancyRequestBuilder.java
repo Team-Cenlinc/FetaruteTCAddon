@@ -461,15 +461,18 @@ public final class OccupancyRequestBuilder {
     if (conflictKeyOpt.isEmpty()) {
       return false;
     }
+    String key = conflictKeyOpt.get();
     Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(edge.id());
     if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
-      return false;
+      resources.add(OccupancyResource.forConflict(key));
+      return true;
     }
-    String key = conflictKeyOpt.get();
     Optional<CorridorDirection> directionOpt =
         resolveCorridorDirection(infoOpt.get(), pathNodes, from, to);
     if (directionOpt.isEmpty()) {
-      return false;
+      // 方向不可判定时回退为“全方向冲突”资源，避免只占 edge 导致道岔放行过宽。
+      resources.add(OccupancyResource.forConflict(key));
+      return true;
     }
     if (!directions.containsKey(key)) {
       directions.put(key, directionOpt.get());

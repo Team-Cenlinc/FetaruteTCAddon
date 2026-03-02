@@ -132,6 +132,7 @@ public final class LineSpawnMetadata {
    * <ul>
    *   <li>组名：{@code name/group/id}
    *   <li>基线秒：{@code baselineSec/baseline/baseline_sec/spawn_group_baseline_sec}
+   *   <li>运营回库阈值：{@code maxOperationTrips/max_operation_trips/maxTrips}
    *   <li>启用：{@code enabled=false} 时忽略
    * </ul>
    */
@@ -145,7 +146,7 @@ public final class LineSpawnMetadata {
     }
     Map<String, SpawnGroup> dedup = new HashMap<>();
     if (raw instanceof String text) {
-      addGroup(dedup, text, Optional.empty(), true);
+      addGroup(dedup, text, Optional.empty(), Optional.empty(), true);
       return List.copyOf(dedup.values());
     }
     if (raw instanceof List<?> list) {
@@ -154,7 +155,7 @@ public final class LineSpawnMetadata {
           continue;
         }
         if (item instanceof String text) {
-          addGroup(dedup, text, Optional.empty(), true);
+          addGroup(dedup, text, Optional.empty(), Optional.empty(), true);
           continue;
         }
         if (item instanceof Map<?, ?> map) {
@@ -178,6 +179,7 @@ public final class LineSpawnMetadata {
       Map<String, Object> entry = new HashMap<>();
       entry.put("name", group.name());
       group.baselineSeconds().ifPresent(baseline -> entry.put("baselineSec", baseline));
+      group.maxOperationTrips().ifPresent(maxTrips -> entry.put("maxOperationTrips", maxTrips));
       out.add(entry);
     }
     return List.copyOf(out);
@@ -258,6 +260,19 @@ public final class LineSpawnMetadata {
       return Optional.empty();
     }
     return findGroup(parseGroups(metadata), groupName).flatMap(SpawnGroup::baselineSeconds);
+  }
+
+  /**
+   * 从线路 metadata 中读取指定交路组的最大运营圈数。
+   *
+   * <p>未找到组或组未配置阈值时返回 empty。
+   */
+  public static Optional<Integer> parseGroupMaxOperationTrips(
+      Map<String, Object> metadata, String groupName) {
+    if (groupName == null || groupName.isBlank()) {
+      return Optional.empty();
+    }
+    return findGroup(parseGroups(metadata), groupName).flatMap(SpawnGroup::maxOperationTrips);
   }
 
   private static void parseDepotMap(List<SpawnDepot> out, Map<?, ?> map) {
@@ -377,11 +392,23 @@ public final class LineSpawnMetadata {
                     map.get("baseline_sec"),
                     map.get("spawn_group_baseline_sec")))
             .filter(value -> value > 0);
-    addGroup(out, name, baseline, ok);
+    Optional<Integer> maxOperationTrips =
+        Optional.ofNullable(
+                firstNonNullInt(
+                    map.get("maxOperationTrips"),
+                    map.get("max_operation_trips"),
+                    map.get("maxTrips"),
+                    map.get("max_trips")))
+            .filter(value -> value > 0);
+    addGroup(out, name, baseline, maxOperationTrips, ok);
   }
 
   private static void addGroup(
-      Map<String, SpawnGroup> out, String name, Optional<Integer> baseline, boolean enabled) {
+      Map<String, SpawnGroup> out,
+      String name,
+      Optional<Integer> baseline,
+      Optional<Integer> maxOperationTrips,
+      boolean enabled) {
     if (out == null || name == null || !enabled) {
       return;
     }
@@ -389,7 +416,7 @@ public final class LineSpawnMetadata {
     if (trimmed.isBlank()) {
       return;
     }
-    SpawnGroup group = new SpawnGroup(trimmed, baseline);
+    SpawnGroup group = new SpawnGroup(trimmed, baseline, maxOperationTrips);
     out.put(group.normalizedName(), group);
   }
 

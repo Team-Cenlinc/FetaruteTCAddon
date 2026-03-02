@@ -227,6 +227,45 @@ class StorageSpawnManagerTest {
     assertEquals(Duration.ofSeconds(240), servicesByRoute.get("RET-G").baseHeadway());
   }
 
+  @Test
+  void pollDueTicketsIncludesCreateRouteEvenWhenOperationWeightsMissing() {
+    StorageProvider provider = mockProvider(multiOperationWithoutWeightAndCreateRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 10, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now);
+
+    assertEquals(1, due.size());
+    assertEquals(1, manager.snapshotPlan().size());
+    assertEquals("CRT", due.get(0).service().routeCode());
+  }
+
+  @Test
+  void pollDueTicketsKeepsReturnRouteWhenReturnWeightIsZero() {
+    StorageProvider provider =
+        mockProvider(operationAndReturnSharedCirculationGroupWithReturnWeightZero());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 10, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now);
+
+    assertEquals(1, due.size());
+    Map<String, SpawnService> servicesByRoute =
+        manager.snapshotPlan().services().stream()
+            .collect(Collectors.toMap(SpawnService::routeCode, Function.identity()));
+    assertEquals(2, servicesByRoute.size());
+    assertTrue(servicesByRoute.containsKey("R-OP"));
+    assertTrue(servicesByRoute.containsKey("R-RET"));
+    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-OP").baseHeadway());
+    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-RET").baseHeadway());
+  }
+
   private static Fixture enabledRoute() {
     UUID companyId = UUID.randomUUID();
     UUID ownerIdentityId = UUID.randomUUID();
@@ -521,6 +560,265 @@ class StorageSpawnManagerTest {
         base.line(),
         List.of(route1, route2),
         Map.of(route1.id(), List.of(cret1), route2.id(), List.of(cret2)));
+  }
+
+  private static Fixture multiOperationWithoutWeightAndCreateRoute() {
+    UUID companyId = UUID.randomUUID();
+    UUID ownerIdentityId = UUID.randomUUID();
+    UUID operatorId = UUID.randomUUID();
+    UUID lineId = UUID.randomUUID();
+    UUID operationRouteAId = UUID.randomUUID();
+    UUID operationRouteBId = UUID.randomUUID();
+    UUID createRouteId = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+
+    Company company =
+        new Company(
+            companyId,
+            "C1",
+            "Company",
+            Optional.empty(),
+            ownerIdentityId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            ts,
+            ts);
+    Operator operator =
+        new Operator(
+            operatorId,
+            "SURN",
+            companyId,
+            "Operator",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    Line line =
+        new Line(
+            lineId,
+            "L1",
+            operatorId,
+            "Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(300),
+            Map.of(),
+            ts,
+            ts);
+
+    Route operationA =
+        new Route(
+            operationRouteAId,
+            "OP-A",
+            lineId,
+            "Operation A",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    Route operationB =
+        new Route(
+            operationRouteBId,
+            "OP-B",
+            lineId,
+            "Operation B",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    Route createRoute =
+        new Route(
+            createRouteId,
+            "CRT",
+            lineId,
+            "Create",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.CREATE,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+
+    RouteStop opAStart =
+        new RouteStop(
+            operationRouteAId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+    RouteStop opBStart =
+        new RouteStop(
+            operationRouteBId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:2"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:2"));
+    RouteStop createStart =
+        new RouteStop(
+            createRouteId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+
+    return new Fixture(
+        company,
+        operator,
+        line,
+        List.of(operationA, operationB, createRoute),
+        Map.of(
+            operationRouteAId,
+            List.of(opAStart),
+            operationRouteBId,
+            List.of(opBStart),
+            createRouteId,
+            List.of(createStart)));
+  }
+
+  private static Fixture operationAndReturnSharedCirculationGroupWithReturnWeightZero() {
+    UUID companyId = UUID.randomUUID();
+    UUID ownerIdentityId = UUID.randomUUID();
+    UUID operatorId = UUID.randomUUID();
+    UUID lineId = UUID.randomUUID();
+    UUID operationRouteId = UUID.randomUUID();
+    UUID returnRouteId = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+
+    Company company =
+        new Company(
+            companyId,
+            "C1",
+            "Company",
+            Optional.empty(),
+            ownerIdentityId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            ts,
+            ts);
+    Operator operator =
+        new Operator(
+            operatorId,
+            "SURN",
+            companyId,
+            "Operator",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    Line line =
+        new Line(
+            lineId,
+            "L1",
+            operatorId,
+            "Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(100),
+            Map.of(),
+            ts,
+            ts);
+
+    Route operationRoute =
+        new Route(
+            operationRouteId,
+            "R-OP",
+            lineId,
+            "Operation",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_enabled", true, "spawn_weight", 1),
+            ts,
+            ts);
+    Route returnRoute =
+        new Route(
+            returnRouteId,
+            "R-RET",
+            lineId,
+            "Return",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.RETURN,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_enabled", true, "spawn_weight", 0),
+            ts,
+            ts);
+
+    RouteStop opStart =
+        new RouteStop(
+            operationRouteId,
+            0,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:SURN:S:PPK"));
+    RouteStop opNext =
+        new RouteStop(
+            operationRouteId,
+            1,
+            Optional.empty(),
+            Optional.of("SURN:S:RVS:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    RouteStop retStart =
+        new RouteStop(
+            returnRouteId,
+            0,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:SURN:S:PPK"));
+    RouteStop retNext =
+        new RouteStop(
+            returnRouteId,
+            1,
+            Optional.empty(),
+            Optional.of("SURN:S:OFL:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+
+    return new Fixture(
+        company,
+        operator,
+        line,
+        List.of(operationRoute, returnRoute),
+        Map.of(
+            operationRouteId, List.of(opStart, opNext), returnRouteId, List.of(retStart, retNext)));
   }
 
   private static Fixture groupBaselineWithoutLineBaseline() {

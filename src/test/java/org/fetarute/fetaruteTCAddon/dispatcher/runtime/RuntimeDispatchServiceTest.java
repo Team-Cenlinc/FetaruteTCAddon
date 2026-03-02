@@ -2151,6 +2151,327 @@ class RuntimeDispatchServiceTest {
   // 注意：handleStationArrival 测试需要 TrainCarts 依赖，改用功能文档验证
   // handleStationArrival 方法已在 AutoStationSignAction 中调用，功能集成测试由手动验证覆盖
 
+  // ====== 互锁检查（hasHardBlockersForTrain）测试 ======
+
+  @Test
+  void hasHardBlockersReturnsFalseForEmptyBlockers() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    assertFalse((boolean) method.invoke(null, "train-1", List.of()));
+    assertFalse((boolean) method.invoke(null, "train-1", null));
+  }
+
+  @Test
+  void hasHardBlockersReturnsTrueForNullBlockerElement() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    List<OccupancyClaim> blockers = new ArrayList<>();
+    blockers.add(null);
+    assertTrue((boolean) method.invoke(null, "train-1", blockers));
+  }
+
+  @Test
+  void hasHardBlockersReturnsTrueForNullResource() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    // OccupancyClaim 构造器不允许 null resource，使用 mock 模拟损坏状态
+    OccupancyClaim blocker = mock(OccupancyClaim.class);
+    when(blocker.resource()).thenReturn(null);
+    when(blocker.trainName()).thenReturn("other");
+    assertTrue((boolean) method.invoke(null, "train-1", List.of(blocker)));
+  }
+
+  @Test
+  void hasHardBlockersSkipsSelfOccupancy() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    OccupancyClaim selfBlocker =
+        new OccupancyClaim(
+            OccupancyResource.forNode(NodeId.of("A")),
+            "train-1",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty());
+    assertFalse((boolean) method.invoke(null, "train-1", List.of(selfBlocker)));
+  }
+
+  @Test
+  void hasHardBlockersReturnsFalseForConflictOnly() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    OccupancyClaim conflictBlocker =
+        new OccupancyClaim(
+            OccupancyResource.forConflict("switcher:test"),
+            "other-train",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty());
+    assertFalse((boolean) method.invoke(null, "train-1", List.of(conflictBlocker)));
+  }
+
+  @Test
+  void hasHardBlockersReturnsTrueForOtherTrainNodeOccupancy() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    OccupancyClaim nodeBlocker =
+        new OccupancyClaim(
+            OccupancyResource.forNode(NodeId.of("B")),
+            "other-train",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty());
+    assertTrue((boolean) method.invoke(null, "train-1", List.of(nodeBlocker)));
+  }
+
+  @Test
+  void hasHardBlockersReturnsTrueForOtherTrainEdgeOccupancy() throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasHardBlockersForTrain", String.class, List.class);
+    method.setAccessible(true);
+
+    OccupancyClaim edgeBlocker =
+        new OccupancyClaim(
+            new OccupancyResource(ResourceKind.EDGE, "A~B"),
+            "other-train",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty());
+    assertTrue((boolean) method.invoke(null, "train-1", List.of(edgeBlocker)));
+  }
+
+  // ====== 异常列车清理去重测试 ======
+
+  @Test
+  void shouldSkipDuplicateAbnormalCleanupCaseInsensitive() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "shouldSkipDuplicateAbnormalCleanup", String.class);
+    method.setAccessible(true);
+
+    boolean first = (boolean) method.invoke(service, "Train-1");
+    boolean duplicateWithDifferentCase = (boolean) method.invoke(service, "TRAIN-1");
+
+    assertFalse(first);
+    assertTrue(duplicateWithDifferentCase);
+  }
+
+  @Test
+  void shouldSkipDuplicateAbnormalCleanupReturnsFalseForBlank() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "shouldSkipDuplicateAbnormalCleanup", String.class);
+    method.setAccessible(true);
+
+    // normalizeTrainKey("") returns "" and the method should return false
+    assertFalse((boolean) method.invoke(service, ""));
+  }
+
+  // ====== handleTrainRemoved 完整清理验证 ======
+
+  @Test
+  void handleTrainRemovedClearsAllCaches() {
+    String trainName = "train-1";
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags = new TagStore(trainName, "FTA_ROUTE_INDEX=0");
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(trainName, tags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleTrainRemoved(trainName);
+
+    // 验证所有清理操作
+    verify(occupancyManager).releaseByTrain(trainName);
+    verify(layoverRegistry).unregister(trainName);
+    assertTrue(registry.get(trainName).isEmpty(), "进度应已清理");
+  }
+
+  @Test
+  void handleTrainRemovedIgnoresBlankName() {
+    RuntimeDispatchService service = createMinimalService();
+    // 不应抛异常
+    service.handleTrainRemoved("");
+    service.handleTrainRemoved(null);
+  }
+
+  // ====== 孤儿清理返回统计结果测试 ======
+
+  @Test
+  void cleanupOrphanOccupancyClaimsWithReportReturnsStatistics() {
+    String orphanTrain = "orphan-train";
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags = new TagStore(orphanTrain, "FTA_ROUTE_INDEX=0");
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    Instant now = Instant.now();
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(NodeId.of("A")),
+                    orphanTrain,
+                    Optional.empty(),
+                    now,
+                    Duration.ZERO,
+                    Optional.empty())));
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(orphanTrain, tags.properties(), route);
+
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.snapshot()).thenReturn(List.of());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    // 活跃列车集不含 orphanTrain
+    RuntimeDispatchService.CleanupResult result =
+        service.cleanupOrphanOccupancyClaimsWithReport(java.util.Set.of("active-train"));
+
+    assertEquals(1, result.removedProgress(), "应清理 1 个进度条目");
+    assertEquals(1, result.releasedTrains(), "应释放 1 个列车占用");
+    assertTrue(registry.get(orphanTrain).isEmpty());
+    verify(occupancyManager).releaseByTrain(orphanTrain);
+  }
+
+  @Test
+  void cleanupOrphanOccupancyClaimsIsCaseInsensitive() {
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    Instant now = Instant.now();
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(NodeId.of("A")),
+                    "Train-A",
+                    Optional.empty(),
+                    now,
+                    Duration.ZERO,
+                    Optional.empty())));
+
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.snapshot()).thenReturn(List.of());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    // 大小写不同但应匹配
+    RuntimeDispatchService.CleanupResult result =
+        service.cleanupOrphanOccupancyClaimsWithReport(java.util.Set.of("TRAIN-A"));
+
+    assertEquals(0, result.releasedTrains(), "大小写不同但匹配，不应释放");
+  }
+
+  // ====== refreshSignalsForResources 测试 ======
+
+  @Test
+  void refreshSignalsForResourcesSkipsEmptyInput() {
+    RuntimeDispatchService service = createMinimalService();
+    // 不应抛异常
+    service.refreshSignalsForResources(List.of(), "source");
+    service.refreshSignalsForResources(null, "source");
+  }
+
+  // ====== recentBlockerTrains 测试 ======
+
+  @Test
+  void recentBlockerTrainsReturnsEmptyForUnknownTrain() {
+    RuntimeDispatchService service = createMinimalService();
+    Set<String> blockers = service.recentBlockerTrains("unknown-train", Duration.ofSeconds(30));
+    assertTrue(blockers.isEmpty());
+  }
+
+  // ====== getTrainState 测试 ======
+
+  @Test
+  void getTrainStateReturnsEmptyForNullOrBlankName() {
+    RuntimeDispatchService service = createMinimalService();
+    assertTrue(service.getTrainState(null).isEmpty());
+    assertTrue(service.getTrainState("").isEmpty());
+    assertTrue(service.getTrainState("  ").isEmpty());
+  }
+
+  @Test
+  void getTrainStateReturnsEmptyForUnknownTrain() {
+    RuntimeDispatchService service = createMinimalService();
+    assertTrue(service.getTrainState("nonexistent").isEmpty());
+  }
+
   private RuntimeDispatchService createMinimalService() {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));

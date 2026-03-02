@@ -31,7 +31,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *
  * <ul>
  *   <li>仅对 {@link LineStatus#ACTIVE} 的线路生成票据（可使用 line baseline 或 group baseline）
- *   <li>同一条线路可配置多条 OPERATION/RETURN route，并在“交路组”内按权重分配频率
+ *   <li>同一条线路可配置多条 CREATE/OPERATION/RETURN route，并在“交路组”内按权重分配频率
  *   <li>RETURN route 也会进入 SpawnPlan（用于 Layover 复用、折返与站牌预测）
  *   <li>允许线路跨 depot 混发（可配合 Line.metadata.spawn_depots 做集中管理）
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
@@ -42,7 +42,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <ul>
  *   <li>优先使用 route.metadata 的 {@code spawn_group}
  *   <li>未配置时按首站/起点（含 DYNAMIC）自动推导，便于同终点折返与回库 route 进入同组
- *   <li>组内使用 {@code spawn_weight} 分摊
+ *   <li>组内仅 {@code OPERATION} 使用 {@code spawn_weight} 分摊；{@code CREATE/RETURN} 固定为 1
  *   <li>组优先使用 {@code spawn_group_baseline_sec} 作为发车基准；未配置时才回退 line baseline
  *   <li>{@code spawn_group_weight} 仅作为旧配置回退（已不推荐）
  * </ul>
@@ -446,7 +446,14 @@ public final class StorageSpawnManager
   /**
    * 交路组维度构建 SpawnService。
    *
-   * <p>优先使用 group baseline，再按 route 权重拆分；当 group baseline 缺失时回退 line baseline：
+   * <p>优先使用 group baseline，再按 route 权重拆分；当 group baseline 缺失时回退 line baseline。
+   *
+   * <p>权重策略：
+   *
+   * <ul>
+   *   <li>{@code OPERATION}: 使用 {@code spawn_weight}（默认 1）
+   *   <li>{@code CREATE/RETURN}: 固定权重 1（不受 {@code spawn_weight} 影响）
+   * </ul>
    *
    * <ul>
    *   <li>推荐：使用 {@code spawn_group_baseline_sec} 明确每个交路组频率
@@ -816,9 +823,14 @@ public final class StorageSpawnManager
     if (routes.isEmpty()) {
       return List.of();
     }
-    List<RouteSelection> candidates = new ArrayList<>();
+    List<RouteSelection> operationCandidates = new ArrayList<>();
+    List<RouteSelection> createCandidates = new ArrayList<>();
     for (Route route : routes) {
-      if (route == null || route.operationType() != RouteOperationType.OPERATION) {
+      if (route == null) {
+        continue;
+      }
+      if (route.operationType() != RouteOperationType.OPERATION
+          && route.operationType() != RouteOperationType.CREATE) {
         continue;
       }
       List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
@@ -827,6 +839,11 @@ public final class StorageSpawnManager
       }
       RouteStop first = stops.get(0);
       Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
+      if (route.operationType() == RouteOperationType.CREATE && cret.isEmpty()) {
+        debugLogger.accept(
+            "SpawnPlan 跳过 CREATE route(缺少 CRET): line=" + line.code() + " route=" + route.code());
+        continue;
+      }
       boolean depotSpawn = cret.isPresent();
       String startNode = cret.orElseGet(() -> resolveStopNodeId(first));
       if (startNode == null || startNode.isBlank()) {
@@ -834,17 +851,36 @@ public final class StorageSpawnManager
       }
       Optional<Boolean> enabledFlag = readBoolean(route.metadata(), "spawn_enabled");
       Optional<Integer> weight = readInt(route.metadata(), "spawn_weight");
-      candidates.add(new RouteSelection(route, startNode.trim(), depotSpawn, enabledFlag, weight));
+      RouteSelection selection =
+          new RouteSelection(route, startNode.trim(), depotSpawn, enabledFlag, weight);
+      if (route.operationType() == RouteOperationType.OPERATION) {
+        operationCandidates.add(selection);
+      } else {
+        createCandidates.add(selection);
+      }
     }
-    if (candidates.isEmpty()) {
+    if (operationCandidates.isEmpty() && createCandidates.isEmpty()) {
       return List.of();
     }
 
-    boolean multi = candidates.size() > 1;
+    List<RouteSelection> enabled = new ArrayList<>();
+
+    // CREATE 路由不参与权重分摊，只受 spawn_enabled 开关控制。
+    for (RouteSelection selection : createCandidates) {
+      if (selection == null) {
+        continue;
+      }
+      if (selection.spawnEnabledFlag().isPresent() && !selection.spawnEnabledFlag().get()) {
+        continue;
+      }
+      enabled.add(selection.withResolvedWeight(1));
+    }
+
+    boolean multi = operationCandidates.size() > 1;
     boolean hasExplicitDisable = false;
     boolean hasExplicitWeightZero = false;
-    List<RouteSelection> enabled = new ArrayList<>();
-    for (RouteSelection selection : candidates) {
+    List<RouteSelection> enabledOperations = new ArrayList<>();
+    for (RouteSelection selection : operationCandidates) {
       if (selection == null) {
         continue;
       }
@@ -859,45 +895,51 @@ public final class StorageSpawnManager
           hasExplicitWeightZero = true;
           continue;
         }
-        enabled.add(selection.withResolvedWeight(w));
+        enabledOperations.add(selection.withResolvedWeight(w));
         continue;
       }
       if (!multi) {
-        enabled.add(selection.withResolvedWeight(1));
+        enabledOperations.add(selection.withResolvedWeight(1));
       } else if (selection.spawnEnabledFlag().orElse(false)) {
-        enabled.add(selection.withResolvedWeight(1));
+        enabledOperations.add(selection.withResolvedWeight(1));
       }
     }
 
-    if (enabled.isEmpty()) {
-      if (candidates.size() == 1) {
-        RouteSelection only = candidates.get(0);
+    if (enabledOperations.isEmpty()) {
+      if (operationCandidates.size() == 1) {
+        RouteSelection only = operationCandidates.get(0);
         if (only.spawnEnabledFlag().isPresent() && !only.spawnEnabledFlag().get()) {
-          return List.of();
+          return List.copyOf(enabled);
         }
         if (only.spawnWeightRaw().isPresent()) {
-          return List.of();
+          return List.copyOf(enabled);
         }
-        return List.of(only.withResolvedWeight(1));
+        enabledOperations.add(only.withResolvedWeight(1));
+      } else if (operationCandidates.size() > 1) {
+        if (hasExplicitDisable || hasExplicitWeightZero) {
+          debugLogger.accept(
+              "SpawnPlan 跳过线路(运营候选已禁用或权重为 0): line="
+                  + line.code()
+                  + " routes="
+                  + String.join(
+                      ", ", operationCandidates.stream().map(sel -> sel.route().code()).toList()));
+        } else {
+          operationCandidates.sort(
+              Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
+          debugLogger.accept(
+              "SpawnPlan 跳过线路(运营候选过多未配置 spawn_weight): line="
+                  + line.code()
+                  + " routes="
+                  + String.join(
+                      ", ", operationCandidates.stream().map(sel -> sel.route().code()).toList()));
+        }
       }
-      if (hasExplicitDisable || hasExplicitWeightZero) {
-        debugLogger.accept(
-            "SpawnPlan 跳过线路(候选 route 已禁用或权重为 0): line="
-                + line.code()
-                + " routes="
-                + String.join(", ", candidates.stream().map(sel -> sel.route().code()).toList()));
-        return List.of();
-      }
-      candidates.sort(
-          Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
-      debugLogger.accept(
-          "SpawnPlan 跳过线路(候选过多未配置 spawn_weight): line="
-              + line.code()
-              + " routes="
-              + String.join(", ", candidates.stream().map(sel -> sel.route().code()).toList()));
-      return List.of();
     }
 
+    enabled.addAll(enabledOperations);
+    if (enabled.isEmpty()) {
+      return List.of();
+    }
     enabled.sort(Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
     return enabled;
   }
@@ -931,14 +973,9 @@ public final class StorageSpawnManager
       if (enabledFlag.isPresent() && !enabledFlag.get()) {
         continue;
       }
-      Optional<Integer> weightOpt = readInt(route.metadata(), "spawn_weight");
-      int weight = weightOpt.orElse(1);
-      if (weight <= 0) {
-        continue;
-      }
       candidates.add(
-          new RouteSelection(route, startNode.trim(), depotSpawn, enabledFlag, weightOpt)
-              .withResolvedWeight(weight));
+          new RouteSelection(route, startNode.trim(), depotSpawn, enabledFlag, Optional.empty())
+              .withResolvedWeight(1));
     }
     return candidates;
   }

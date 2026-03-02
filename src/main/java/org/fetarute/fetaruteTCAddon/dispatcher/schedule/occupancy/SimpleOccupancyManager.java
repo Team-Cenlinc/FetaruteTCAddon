@@ -677,7 +677,8 @@ public final class SimpleOccupancyManager
   /**
    * 判定当前阻塞是否包含“对向列车”。
    *
-   * <p>仅在单线冲突资源上生效：冲突区放行的目标是解开对向会车死锁，不应用于同向跟驰场景。对向方向无法判定时（例如未知方向），保持既有放行逻辑。
+   * <p>仅在单线冲突资源上生效：冲突区放行的目标是解开对向会车死锁，不应用于同向跟驰场景。 若存在同向阻塞列车，说明请求侧前方仍有列车，不应优先放行。
+   * 对向方向无法判定时（例如未知方向），保持既有放行逻辑。
    */
   private boolean hasOppositeDirectionBlockerInQueue(
       OccupancyRequest request,
@@ -692,6 +693,7 @@ public final class SimpleOccupancyManager
       return true;
     }
     boolean seenDirectionalBlocker = false;
+    boolean hasOppositeDirectionBlocker = false;
     for (OccupancyClaim blocker : blockers) {
       if (blocker == null || blocker.trainName() == null) {
         continue;
@@ -704,9 +706,15 @@ public final class SimpleOccupancyManager
         continue;
       }
       seenDirectionalBlocker = true;
-      if (isOppositeDirection(requestDirection, blockerDirection.get())) {
-        return true;
+      if (blockerDirection.get() == requestDirection) {
+        return false;
       }
+      if (isOppositeDirection(requestDirection, blockerDirection.get())) {
+        hasOppositeDirectionBlocker = true;
+      }
+    }
+    if (hasOppositeDirectionBlocker) {
+      return true;
     }
     // 若阻塞方没有有效方向信息，保持兼容（不强制拒绝）；否则要求至少有一侧对向。
     return !seenDirectionalBlocker;

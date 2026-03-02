@@ -1,16 +1,22 @@
 # Route 运营属性与停靠标记
 
-本文描述 Route 的运营属性（Operation/Return）以及 CRET/TERM/DSTY 的停靠标记约定，供调度与运维参考。
+本文描述 Route 的运营属性（Create/Operation/Return）以及 CRET/TERM/DSTY 的停靠标记约定，供调度与运维参考。
 
 ## Route 运营属性
+- `CREATE`：补车班次（通常用于从 Depot 注入运力）。
 - `OPERATION`：运营班次（客运/正线运行）。
 - `RETURN`：回库/回送班次（非运营）。
 
 命令示例：
-- 创建：`/fta route create ... --operation OPERATION`
-- 更新：`/fta route set ... --operation RETURN`
+- 创建补车路由：`/fta route create ... --operation CREATE`
+- 创建运营路由：`/fta route create ... --operation OPERATION`
+- 更新为回库路由：`/fta route set ... --operation RETURN`
 
-> 路线属性用于后续调度决策与班次筛选，当前仅作为元数据保存。
+> 当前调度会基于运营属性做实际分流：`CREATE` 优先用于补车、`OPERATION` 用于在线运行、`RETURN` 用于回库/摘车。
+
+补充说明（交路组）：
+- `spawn_weight` 仅对 `OPERATION` 生效；`CREATE/RETURN` 固定按权重 `1` 参与。
+- 交路组可配置 `maxOperationTrips`，列车达到圈数后会优先进入 `RETURN` 回库流程。
 
 ## 停靠标记（action）
 RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
@@ -18,6 +24,7 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 ### CRET（生成）
 - 语法：`CRET <NodeId>` 或 `CRET DYNAMIC:<OperatorCode>:<DepotCode>[:Range]`
 - 约束：整条路线仅允许一个 `CRET`，且必须为首个 stop（CRET 自身占一行 stop）。
+- 说明：`CREATE` route 需要首 stop 为 `CRET` 才能进入 depot 出车计划。
 
 ### TERM（终到）
 - 使用 stop 前缀 `TERM`/`TERMINATE`（即 RouteStopPassType.TERMINATE）。

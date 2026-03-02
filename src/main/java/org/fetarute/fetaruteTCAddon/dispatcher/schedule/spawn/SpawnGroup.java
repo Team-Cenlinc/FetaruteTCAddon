@@ -8,7 +8,8 @@ import java.util.Optional;
  *
  * <p>交路组在线路维度管理（Line.metadata），Route 通过 {@code spawn_group} 引用组名。
  */
-public record SpawnGroup(String name, Optional<Integer> baselineSeconds) {
+public record SpawnGroup(
+    String name, Optional<Integer> baselineSeconds, Optional<Integer> maxOperationTrips) {
 
   public SpawnGroup {
     name = name == null ? "" : name.trim();
@@ -16,6 +17,14 @@ public record SpawnGroup(String name, Optional<Integer> baselineSeconds) {
         baselineSeconds == null
             ? Optional.empty()
             : baselineSeconds.filter(value -> value != null && value > 0);
+    maxOperationTrips =
+        maxOperationTrips == null
+            ? Optional.empty()
+            : maxOperationTrips.filter(value -> value != null && value > 0);
+  }
+
+  public SpawnGroup(String name, Optional<Integer> baselineSeconds) {
+    this(name, baselineSeconds, Optional.empty());
   }
 
   /** 返回用于匹配的标准化组名（小写）。 */

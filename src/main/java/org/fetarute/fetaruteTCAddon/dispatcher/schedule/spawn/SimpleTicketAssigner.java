@@ -1,12 +1,15 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -14,6 +17,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -33,10 +37,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -50,8 +57,26 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private static final java.util.logging.Logger HEALTH_LOGGER =
       java.util.logging.Logger.getLogger("FetaruteTCAddon");
 
+  /** 列车已完成运营圈数（按 OPERATION 票据发车成功累计）。 */
+  static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
+
+  /** 列车最大运营圈数（达到后应优先分配 RETURN 回库）。 */
+  static final String TAG_MAX_OPERATION_TRIPS = "FTA_OP_MAX";
+
+  /** 列车绑定的交路组名（用于诊断）。 */
+  static final String TAG_CIRCULATION_GROUP = "FTA_SPAWN_GROUP";
+
   /** 待复用票据刷新窗口（秒）：超过后会刷新等待窗口并记录告警，避免长期静默卡死。 */
   private static final long PENDING_LAYOVER_REFRESH_SECONDS = 300L;
+
+  /** 拥挤度进入 HOLD 的阈值。 */
+  private static final double CONGESTION_HOLD_THRESHOLD = 0.72D;
+
+  /** 拥挤度退出 HOLD 的阈值（滞回，避免频繁抖动）。 */
+  private static final double CONGESTION_RELEASE_THRESHOLD = 0.58D;
+
+  /** 拥挤门控状态保留时长（超过后会自动清理）。 */
+  private static final Duration CONGESTION_GATE_TTL = Duration.ofMinutes(10);
 
   /**
    * 待复用票据条目：记录票据及其加入时间，用于超时清理。
@@ -78,6 +103,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       String terminalKey,
       String groupKey,
       Instant addedAt) {}
+
+  /**
+   * 拥挤度评估快照。
+   *
+   * <p>score 范围为 [0,1]，值越高表示越拥挤。
+   */
+  private record CongestionAssessment(
+      double score,
+      double edgeBusyRate,
+      double routeTrainPressure,
+      double lineSignalPressure,
+      int busyEdges,
+      int totalEdges,
+      int activeRouteTrains,
+      int targetRouteTrains) {}
+
+  /** 拥挤门控状态（按 line+方向 key）。 */
+  private record CongestionGateState(boolean holding, double lastScore, Instant updatedAt) {}
 
   private final SpawnManager spawnManager;
   private final DepotSpawner depotSpawner;
@@ -115,6 +158,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // key 为 "<lineId>|<terminal>"：记录即时复用路径（非 pending）的 route 轮转游标。
   private final java.util.concurrent.ConcurrentMap<String, Integer> immediateLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
+  // key 为 "<lineId>|<direction>"：记录该方向当前是否触发拥挤 HOLD。
+  private final java.util.concurrent.ConcurrentMap<String, CongestionGateState> congestionGates =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.atomic.AtomicLong lastCongestionCleanupMs =
+      new java.util.concurrent.atomic.AtomicLong(0L);
 
   public SimpleTicketAssigner(
       SpawnManager spawnManager,
@@ -176,7 +224,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (candidate == null) {
       return;
     }
-    tryDispatchPendingLayover(Instant.now(), Optional.of(candidate.terminalKey()));
+    tryDispatchPendingLayover(
+        Instant.now(), Optional.empty(), Optional.of(candidate.terminalKey()));
   }
 
   @Override
@@ -212,9 +261,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (provider == null || now == null) {
       return;
     }
+    cleanupStaleCongestionGates(now);
     if (!pendingLayoverTickets.isEmpty()) {
       refreshExpiredPendingTickets(provider, now);
-      tryDispatchPendingLayover(now, Optional.empty());
+      tryDispatchPendingLayover(now, Optional.of(provider), Optional.empty());
     }
     List<SpawnTicket> dueTickets = spawnManager.pollDueTickets(provider, now);
     if (dueTickets.isEmpty()) {
@@ -420,7 +470,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           }
         }
       }
-      return tryReuseLayover(ticket, service, route, now, false);
+      return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
+    }
+
+    if (shouldHoldByCongestion(provider, service, line, routeEntity, route, now)) {
+      requeue(ticket, now, "congestion-hold");
+      return false;
     }
 
     List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
@@ -428,8 +483,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     boolean startsWithCret =
         !stops.isEmpty()
             && SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isPresent();
+    if (routeEntity.operationType() == RouteOperationType.CREATE && !startsWithCret) {
+      requeue(ticket, now, "create-without-cret");
+      return false;
+    }
+    if (routeEntity.operationType() == RouteOperationType.OPERATION
+        && startsWithCret
+        && lineHasCreateRoute(provider, line.id())) {
+      debugLogger.accept(
+          "自动发车改为复用: line="
+              + line.code()
+              + " route="
+              + routeEntity.code()
+              + " reason=create-route-present");
+      return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
+    }
     if (!startsWithCret) {
-      return tryReuseLayover(ticket, service, route, now, false);
+      return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
 
     OptionalInt lineMaxTrains = resolveLineMaxTrains(provider, line);
@@ -523,6 +593,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
       group.getProperties().setDestination(route.waypoints().get(1).value());
+      applySpawnLifecycleTags(
+          Optional.of(provider), group.getProperties(), service, routeEntity.operationType());
     }
     runtimeDispatchService.refreshSignal(group);
     runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
@@ -543,7 +615,378 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return true;
   }
 
-  private void tryDispatchPendingLayover(Instant now, Optional<String> terminalFilter) {
+  /**
+   * 按“线路+方向”的拥挤度执行 HOLD 门控。
+   *
+   * <p>该门控只作用于 {@code OPERATION/CREATE}，RETURN 始终允许通过以便回库释放压力。
+   */
+  private boolean shouldHoldByCongestion(
+      StorageProvider provider,
+      SpawnService service,
+      Line line,
+      Route routeEntity,
+      RouteDefinition route,
+      Instant now) {
+    if (provider == null
+        || service == null
+        || line == null
+        || routeEntity == null
+        || route == null) {
+      return false;
+    }
+    if (routeEntity.operationType() == RouteOperationType.RETURN) {
+      return false;
+    }
+    CongestionAssessment assessment =
+        evaluateCongestion(provider, service, line, routeEntity, route);
+    String gateKey = buildCongestionGateKey(service);
+    CongestionGateState previous = congestionGates.get(gateKey);
+    boolean wasHolding = previous != null && previous.holding();
+    boolean holding =
+        wasHolding
+            ? assessment.score() >= CONGESTION_RELEASE_THRESHOLD
+            : assessment.score() >= CONGESTION_HOLD_THRESHOLD;
+    congestionGates.put(gateKey, new CongestionGateState(holding, assessment.score(), now));
+
+    if (holding) {
+      String scoreSummary =
+          String.format(
+              Locale.ROOT,
+              "score=%.2f edge=%.2f(%d/%d) route=%.2f(%d/%d) signal=%.2f",
+              assessment.score(),
+              assessment.edgeBusyRate(),
+              assessment.busyEdges(),
+              assessment.totalEdges(),
+              assessment.routeTrainPressure(),
+              assessment.activeRouteTrains(),
+              assessment.targetRouteTrains(),
+              assessment.lineSignalPressure());
+      debugLogger.accept(
+          "自动发车拥挤门控: line="
+              + line.code()
+              + " route="
+              + routeEntity.code()
+              + " key="
+              + gateKey
+              + " "
+              + scoreSummary);
+      warnThrottled(
+          "congestion-hold:" + gateKey,
+          "[FTA] 自动发车拥挤门控: line="
+              + line.code()
+              + " route="
+              + routeEntity.code()
+              + " "
+              + scoreSummary);
+      return true;
+    }
+    if (wasHolding) {
+      debugLogger.accept(
+          "自动发车拥挤门控解除: line="
+              + line.code()
+              + " route="
+              + routeEntity.code()
+              + " key="
+              + gateKey
+              + " score="
+              + String.format(Locale.ROOT, "%.2f", assessment.score()));
+    }
+    return false;
+  }
+
+  /**
+   * 评估当前票据对应方向的拥挤度。
+   *
+   * <p>评分由三部分线性组合：
+   *
+   * <ul>
+   *   <li>edgeBusyRate：route 边集合中被占用的比例
+   *   <li>routeTrainPressure：同 route 在途车数 / 目标车数
+   *   <li>lineSignalPressure：同 line 列车信号压力（STOP/CAUTION 等）
+   * </ul>
+   */
+  private CongestionAssessment evaluateCongestion(
+      StorageProvider provider,
+      SpawnService service,
+      Line line,
+      Route routeEntity,
+      RouteDefinition route) {
+    Set<String> routeEdges = collectRouteEdgeKeys(route);
+    int totalEdges = routeEdges.size();
+    Set<String> busyEdgeKeys = new HashSet<>();
+    if (!routeEdges.isEmpty()) {
+      for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+        if (claim == null || claim.resource() == null) {
+          continue;
+        }
+        if (claim.resource().kind() != ResourceKind.EDGE) {
+          continue;
+        }
+        String key = normalizeEdgeKey(claim.resource().key());
+        if (!key.isBlank() && routeEdges.contains(key)) {
+          busyEdgeKeys.add(key);
+        }
+      }
+    }
+    int busyEdges = busyEdgeKeys.size();
+    double edgeBusyRate =
+        totalEdges <= 0 ? 0.0D : clamp01((double) busyEdges / (double) totalEdges);
+
+    Map<String, RouteProgressRegistry.RouteProgressEntry> progressEntries =
+        runtimeDispatchService.snapshotProgressEntries();
+    Map<UUID, Route> routeCache = new HashMap<>();
+    int activeRouteTrains = 0;
+    int lineSignalSamples = 0;
+    double lineSignalSum = 0.0D;
+    for (RouteProgressRegistry.RouteProgressEntry entry : progressEntries.values()) {
+      if (entry == null || entry.routeUuid() == null) {
+        continue;
+      }
+      if (service.routeId().equals(entry.routeUuid())) {
+        activeRouteTrains++;
+      }
+      Route progressRoute =
+          routeCache.computeIfAbsent(
+              entry.routeUuid(), id -> provider.routes().findById(id).orElse(null));
+      if (progressRoute == null || !line.id().equals(progressRoute.lineId())) {
+        continue;
+      }
+      lineSignalSamples++;
+      lineSignalSum += signalPressure(entry.lastSignal());
+    }
+    double lineSignalPressure =
+        lineSignalSamples <= 0 ? 0.0D : clamp01(lineSignalSum / (double) lineSignalSamples);
+
+    int targetRouteTrains = estimateRouteTargetTrains(service, routeEntity, route);
+    double routeTrainPressure =
+        targetRouteTrains <= 0
+            ? 0.0D
+            : clamp01((double) activeRouteTrains / (double) targetRouteTrains);
+
+    double score =
+        clamp01(edgeBusyRate * 0.55D + routeTrainPressure * 0.30D + lineSignalPressure * 0.15D);
+    return new CongestionAssessment(
+        score,
+        edgeBusyRate,
+        routeTrainPressure,
+        lineSignalPressure,
+        busyEdges,
+        totalEdges,
+        activeRouteTrains,
+        targetRouteTrains);
+  }
+
+  /**
+   * 估算某 route 的目标在线列车数。
+   *
+   * <p>优先使用 route.runtimeSeconds；缺失时按停站数保守估算，避免因 metadata 缺失导致拥挤度长期失真。
+   */
+  private static int estimateRouteTargetTrains(
+      SpawnService service, Route routeEntity, RouteDefinition route) {
+    long headwaySeconds =
+        service != null && service.baseHeadway() != null
+            ? Math.max(1L, service.baseHeadway().getSeconds())
+            : 60L;
+    long runtimeSeconds =
+        routeEntity != null
+            ? routeEntity
+                .runtimeSeconds()
+                .map(Integer::longValue)
+                .orElse(estimateRuntimeSeconds(route))
+            : estimateRuntimeSeconds(route);
+    if (runtimeSeconds <= 0L) {
+      runtimeSeconds = 60L;
+    }
+    long target = (runtimeSeconds + headwaySeconds - 1L) / headwaySeconds;
+    target = Math.max(1L, Math.min(32L, target));
+    return (int) target;
+  }
+
+  private static long estimateRuntimeSeconds(RouteDefinition route) {
+    if (route == null || route.waypoints() == null || route.waypoints().isEmpty()) {
+      return 300L;
+    }
+    // 无 runtime 元数据时，用“每节点 30 秒 + 基础 120 秒”做保守估算。
+    long estimated = 120L + (long) route.waypoints().size() * 30L;
+    return Math.max(180L, Math.min(7200L, estimated));
+  }
+
+  /** 将 route waypoint 序列归一化为无向 edge key 集合。 */
+  private static Set<String> collectRouteEdgeKeys(RouteDefinition route) {
+    if (route == null || route.waypoints() == null || route.waypoints().size() < 2) {
+      return Set.of();
+    }
+    Set<String> keys = new HashSet<>();
+    List<NodeId> waypoints = route.waypoints();
+    for (int i = 0; i + 1 < waypoints.size(); i++) {
+      NodeId from = waypoints.get(i);
+      NodeId to = waypoints.get(i + 1);
+      if (from == null || to == null) {
+        continue;
+      }
+      String key = normalizeUndirectedEdgeKey(from.value(), to.value());
+      if (!key.isBlank()) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }
+
+  private static String normalizeEdgeKey(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return "";
+    }
+    String trimmed = raw.trim();
+    int separator = trimmed.indexOf('~');
+    if (separator <= 0 || separator >= trimmed.length() - 1) {
+      return trimmed;
+    }
+    String left = trimmed.substring(0, separator);
+    String right = trimmed.substring(separator + 1);
+    return normalizeUndirectedEdgeKey(left, right);
+  }
+
+  private static String normalizeUndirectedEdgeKey(String left, String right) {
+    if (left == null || right == null) {
+      return "";
+    }
+    String a = left.trim();
+    String b = right.trim();
+    if (a.isBlank() || b.isBlank()) {
+      return "";
+    }
+    return a.compareToIgnoreCase(b) <= 0 ? a + "~" + b : b + "~" + a;
+  }
+
+  private static double signalPressure(
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect signal) {
+    if (signal == null) {
+      return 0.0D;
+    }
+    return switch (signal) {
+      case STOP -> 1.0D;
+      case CAUTION -> 0.65D;
+      case PROCEED_WITH_CAUTION -> 0.35D;
+      case PROCEED -> 0.0D;
+    };
+  }
+
+  private static double clamp01(double value) {
+    if (value <= 0.0D) {
+      return 0.0D;
+    }
+    if (value >= 1.0D) {
+      return 1.0D;
+    }
+    return value;
+  }
+
+  /** 生成拥挤门控 key：lineId + 方向（按首站/起点归一化）。 */
+  private static String buildCongestionGateKey(SpawnService service) {
+    if (service == null) {
+      return "";
+    }
+    String direction = normalizeDirectionKey(service.depotNodeId());
+    return service.lineId() + "|" + direction;
+  }
+
+  private static String normalizeDirectionKey(String startNode) {
+    if (startNode == null || startNode.isBlank()) {
+      return "unknown";
+    }
+    String normalized = startNode.trim().toLowerCase(Locale.ROOT);
+    if (SpawnDirectiveParser.isDynamicTarget(normalized)) {
+      Optional<String> dynamic = parseDynamicDirectionKey(normalized);
+      if (dynamic.isPresent()) {
+        return dynamic.get();
+      }
+    }
+    return TerminalKeyResolver.extractStationKey(normalized).orElse(normalized);
+  }
+
+  private static Optional<String> parseDynamicDirectionKey(String dynamicSpec) {
+    if (dynamicSpec == null || dynamicSpec.isBlank()) {
+      return Optional.empty();
+    }
+    if (!dynamicSpec.startsWith("dynamic:")) {
+      return Optional.empty();
+    }
+    String rest = dynamicSpec.substring("dynamic:".length());
+    String[] parts = rest.split(":", 4);
+    if (parts.length < 3) {
+      return Optional.empty();
+    }
+    String operator = parts[0].trim();
+    String type = parts[1].trim();
+    String name = parts[2].trim();
+    if (operator.isBlank() || type.isBlank() || name.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(operator + ":" + type + ":" + name);
+  }
+
+  /** 定期清理长时间未更新的拥挤门控状态，避免内存累积。 */
+  private void cleanupStaleCongestionGates(Instant now) {
+    long nowMs = System.currentTimeMillis();
+    long previous = lastCongestionCleanupMs.get();
+    if (nowMs - previous < 60_000L) {
+      return;
+    }
+    if (!lastCongestionCleanupMs.compareAndSet(previous, nowMs)) {
+      return;
+    }
+    if (congestionGates.isEmpty()) {
+      return;
+    }
+    Instant cutoff = now.minus(CONGESTION_GATE_TTL);
+    congestionGates
+        .entrySet()
+        .removeIf(
+            entry ->
+                entry.getValue() == null
+                    || entry.getValue().updatedAt() == null
+                    || entry.getValue().updatedAt().isBefore(cutoff));
+  }
+
+  private static boolean lineHasCreateRoute(StorageProvider provider, UUID lineId) {
+    if (provider == null || lineId == null) {
+      return false;
+    }
+    for (Route route : provider.routes().listByLine(lineId)) {
+      if (route != null && route.operationType() == RouteOperationType.CREATE) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void applySpawnLifecycleTags(
+      Optional<StorageProvider> providerOpt,
+      TrainProperties properties,
+      SpawnService service,
+      RouteOperationType operationType) {
+    if (properties == null || service == null || operationType == null) {
+      return;
+    }
+    TrainTagHelper.writeTag(properties, TAG_OPERATION_TRIPS, "0");
+    Optional<String> groupOpt = resolveServiceSpawnGroup(providerOpt, service.routeId());
+    if (groupOpt.isPresent()) {
+      TrainTagHelper.writeTag(properties, TAG_CIRCULATION_GROUP, groupOpt.get());
+    } else {
+      TrainTagHelper.removeTagKey(properties, TAG_CIRCULATION_GROUP);
+    }
+    Optional<Integer> maxTripsOpt =
+        resolveServiceMaxOperationTrips(providerOpt, service.routeId(), groupOpt);
+    if (maxTripsOpt.isPresent()) {
+      TrainTagHelper.writeTag(
+          properties, TAG_MAX_OPERATION_TRIPS, String.valueOf(maxTripsOpt.get()));
+    } else {
+      TrainTagHelper.removeTagKey(properties, TAG_MAX_OPERATION_TRIPS);
+    }
+  }
+
+  private void tryDispatchPendingLayover(
+      Instant now, Optional<StorageProvider> providerOpt, Optional<String> terminalFilter) {
     if (pendingLayoverTickets.isEmpty()) {
       return;
     }
@@ -553,7 +996,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       if (ticket == null || !pendingLayoverTickets.containsKey(ticket.id())) {
         continue;
       }
-      if (tryReuseLayover(ticket, entry.service(), entry.route(), now, true)) {
+      if (tryReuseLayover(providerOpt, ticket, entry.service(), entry.route(), now, true)) {
         pendingLayoverTickets.remove(ticket.id());
       }
     }
@@ -810,6 +1253,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private boolean tryReuseLayover(
+      Optional<StorageProvider> providerOpt,
       SpawnTicket ticket,
       SpawnService service,
       RouteDefinition route,
@@ -845,6 +1289,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       return false;
     }
+    RouteOperationType operationType =
+        resolveRouteOperationType(providerOpt, service.routeId())
+            .orElse(RouteOperationType.OPERATION);
     ServiceTicket serviceTicket =
         new ServiceTicket(
             ticket.id().toString(),
@@ -852,9 +1299,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             service.routeId(),
             startNodeVal,
             0,
-            ServiceTicket.TicketMode.OPERATION);
+            toTicketMode(operationType));
     for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
       if (runtimeDispatchService.dispatchLayover(candidate, serviceTicket)) {
+        applyDispatchLifecycleTags(providerOpt, candidate.trainName(), service, operationType);
         spawnManager.complete(ticket);
         spawnSuccess.increment();
         pendingLayoverTickets.remove(ticket.id());
@@ -869,6 +1317,159 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + " readyCandidates="
             + readyCandidates.size());
     return false;
+  }
+
+  private static ServiceTicket.TicketMode toTicketMode(RouteOperationType operationType) {
+    if (operationType == RouteOperationType.RETURN) {
+      return ServiceTicket.TicketMode.RETURN;
+    }
+    return ServiceTicket.TicketMode.OPERATION;
+  }
+
+  private Optional<RouteOperationType> resolveRouteOperationType(
+      Optional<StorageProvider> providerOpt, UUID routeId) {
+    if (providerOpt.isEmpty() || routeId == null) {
+      return Optional.empty();
+    }
+    return providerOpt.get().routes().findById(routeId).map(Route::operationType);
+  }
+
+  /**
+   * 更新列车生命周期标签。
+   *
+   * <p>约定：
+   *
+   * <ul>
+   *   <li>OPERATION 发车成功：{@code FTA_OP_TRIPS +1}
+   *   <li>CREATE/RETURN 发车成功：{@code FTA_OP_TRIPS=0}
+   *   <li>若 route 绑定了交路组，写入 {@code FTA_SPAWN_GROUP}
+   *   <li>若交路组配置了 {@code maxOperationTrips}，写入 {@code FTA_OP_MAX}
+   * </ul>
+   */
+  private void applyDispatchLifecycleTags(
+      Optional<StorageProvider> providerOpt,
+      String trainName,
+      SpawnService service,
+      RouteOperationType operationType) {
+    if (trainName == null || trainName.isBlank() || service == null) {
+      return;
+    }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null) {
+      return;
+    }
+
+    int currentTrips = TrainTagHelper.readIntTag(properties, TAG_OPERATION_TRIPS).orElse(0);
+    int nextTrips =
+        switch (operationType) {
+          case OPERATION -> Math.max(0, currentTrips + 1);
+          case CREATE, RETURN -> 0;
+        };
+    TrainTagHelper.writeTag(properties, TAG_OPERATION_TRIPS, String.valueOf(nextTrips));
+
+    Optional<String> groupOpt = resolveServiceSpawnGroup(providerOpt, service.routeId());
+    if (groupOpt.isPresent()) {
+      TrainTagHelper.writeTag(properties, TAG_CIRCULATION_GROUP, groupOpt.get());
+    } else {
+      TrainTagHelper.removeTagKey(properties, TAG_CIRCULATION_GROUP);
+    }
+
+    Optional<Integer> maxTripsOpt =
+        resolveServiceMaxOperationTrips(providerOpt, service.routeId(), groupOpt);
+    if (maxTripsOpt.isPresent()) {
+      TrainTagHelper.writeTag(
+          properties, TAG_MAX_OPERATION_TRIPS, String.valueOf(maxTripsOpt.get()));
+    } else {
+      TrainTagHelper.removeTagKey(properties, TAG_MAX_OPERATION_TRIPS);
+    }
+  }
+
+  private Optional<String> resolveServiceSpawnGroup(
+      Optional<StorageProvider> providerOpt, UUID routeId) {
+    if (providerOpt.isEmpty() || routeId == null) {
+      return Optional.empty();
+    }
+    return providerOpt
+        .get()
+        .routes()
+        .findById(routeId)
+        .flatMap(route -> readSpawnGroup(route.metadata()));
+  }
+
+  private Optional<Integer> resolveServiceMaxOperationTrips(
+      Optional<StorageProvider> providerOpt, UUID routeId, Optional<String> groupOpt) {
+    if (providerOpt.isEmpty() || routeId == null) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    Optional<Route> routeOpt = provider.routes().findById(routeId);
+    if (routeOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Route route = routeOpt.get();
+    Optional<Integer> routeOverride =
+        readPositiveInt(route.metadata(), "spawn_group_max_trips", "max_operation_trips");
+    if (routeOverride.isPresent()) {
+      return routeOverride;
+    }
+    if (groupOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<Line> lineOpt = provider.lines().findById(route.lineId());
+    if (lineOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    return LineSpawnMetadata.parseGroupMaxOperationTrips(lineOpt.get().metadata(), groupOpt.get());
+  }
+
+  private static Optional<String> readSpawnGroup(Map<String, Object> metadata) {
+    if (metadata == null || metadata.isEmpty()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get("spawn_group");
+    if (raw == null) {
+      return Optional.empty();
+    }
+    String group = raw.toString().trim();
+    return group.isBlank() ? Optional.empty() : Optional.of(group);
+  }
+
+  private static Optional<Integer> readPositiveInt(Map<String, Object> metadata, String... keys) {
+    if (metadata == null || metadata.isEmpty() || keys == null) {
+      return Optional.empty();
+    }
+    for (String key : keys) {
+      if (key == null || key.isBlank()) {
+        continue;
+      }
+      Object raw = metadata.get(key);
+      Integer value = tryParseInteger(raw);
+      if (value != null && value > 0) {
+        return Optional.of(value);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static Integer tryParseInteger(Object raw) {
+    if (raw == null) {
+      return null;
+    }
+    if (raw instanceof Number number) {
+      return number.intValue();
+    }
+    if (raw instanceof String text) {
+      String trimmed = text.trim();
+      if (trimmed.isBlank()) {
+        return null;
+      }
+      try {
+        return Integer.parseInt(trimmed);
+      } catch (NumberFormatException ignored) {
+        return null;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1006,6 +1607,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
       group.getProperties().setDestination(route.waypoints().get(1).value());
+      applySpawnLifecycleTags(
+          Optional.of(provider), group.getProperties(), service, routeEntity.operationType());
     }
     runtimeDispatchService.refreshSignal(group);
     runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
@@ -1414,22 +2017,31 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     String nodeIdPrefix = operatorCode + ":" + nodeType + ":" + nodeName + ":";
-
-    return signNodeRegistry.snapshotInfos().values().stream()
-        .filter(info -> info != null && info.definition() != null)
-        .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
-        .filter(
-            info -> {
-              String nodeIdValue = info.definition().nodeId().value();
-              return nodeIdValue != null
-                  && nodeIdValue
-                      .toUpperCase(java.util.Locale.ROOT)
-                      .startsWith(nodeIdPrefix.toUpperCase(java.util.Locale.ROOT));
-            })
-        .sorted(
-            Comparator.comparing(
-                info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
-        .findFirst();
+    String upperPrefix = nodeIdPrefix.toUpperCase(java.util.Locale.ROOT);
+    List<SignNodeRegistry.SignNodeInfo> matches =
+        signNodeRegistry.snapshotInfos().values().stream()
+            .filter(info -> info != null && info.definition() != null)
+            .filter(
+                info -> {
+                  String nodeIdValue = info.definition().nodeId().value();
+                  return nodeIdValue != null
+                      && nodeIdValue.toUpperCase(java.util.Locale.ROOT).startsWith(upperPrefix);
+                })
+            .sorted(
+                Comparator.comparing(
+                    info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
+            .toList();
+    if (matches.isEmpty()) {
+      return Optional.empty();
+    }
+    // 优先使用 Depot 行为节点；若不存在则回退到同前缀的图节点（如咽喉 Waypoint），用于兜底 world 推断。
+    for (SignNodeRegistry.SignNodeInfo info : matches) {
+      if (info.definition().nodeType() == NodeType.DEPOT) {
+        return Optional.of(info);
+      }
+    }
+    debugLogger.accept("DYNAMIC depot world 回退: 未找到 DEPOT 行为节点，使用同前缀图节点 " + dynamicSpec);
+    return Optional.of(matches.get(0));
   }
 
   private static Optional<String> resolveDestinationName(
