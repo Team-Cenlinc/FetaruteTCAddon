@@ -26,9 +26,21 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
- * 车辆回收管理器 (ReclaimPolicy)。
+ * 车辆回收管理器。
  *
- * <p>定期检查 LayoverRegistry 中的列车，回收长期闲置或超出数量限制的车辆。 回收方式为：分配 RETURN 类型的 Ticket，使其驶向 DSTY 销毁。
+ * <p>职责只覆盖“待命列车的回库/销毁入口”，不直接改写运行时信号、占用或进度状态；真正的 dispatch / signal / occupancy 收敛仍由 {@link
+ * TicketAssigner} 与 {@link RuntimeDispatchService} 完成。
+ *
+ * <p>回收优先级从高到低为：
+ *
+ * <ul>
+ *   <li>列车已达到 {@code FTA_OP_MAX} 上限
+ *   <li>待命超时
+ *   <li>全局活跃列车超限
+ *   <li>方向供需失衡
+ * </ul>
+ *
+ * <p>若某次回收成功，本轮会立即扣减方向供给计数，避免同方向连续过回收；失败只记日志，不会 伪造“已回收”状态。
  */
 public class ReclaimManager {
 
@@ -99,6 +111,12 @@ public class ReclaimManager {
     task = null;
   }
 
+  /**
+   * 执行一次回收扫描。
+   *
+   * <p>扫描对象仅限 {@link LayoverRegistry} 中的候选列车。若候选列车缺少 RETURN 路线、运营商
+   * 标签或存储服务不可用，则只记录诊断并跳过，不会对运行中的普通列车做破坏性清理。
+   */
   void performReclaimCheck() {
     ConfigManager.ReclaimSettings settings = configManager.current().reclaimSettings();
     if (!settings.enabled()) {
@@ -253,6 +271,11 @@ public class ReclaimManager {
     return TerminalKeyResolver.extractStationKey(normalized).orElse(normalized);
   }
 
+  /**
+   * 为待回收列车分配 RETURN 票据。
+   *
+   * <p>该方法只负责票据分配，不直接销毁列车。若找不到匹配的 RETURN 线路或 TicketAssigner 拒绝 分配，则返回 false，交由下一轮扫描重试。
+   */
   private boolean assignReturnTicket(
       LayoverRegistry.LayoverCandidate candidate, Optional<StorageProvider> providerOpt) {
     if (providerOpt.isEmpty()) {

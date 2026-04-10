@@ -623,6 +623,11 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   private static ConfigManager mockConfigManager(double layoverFallbackMultiplier) {
+    return mockConfigManager(layoverFallbackMultiplier, Duration.ofDays(1));
+  }
+
+  private static ConfigManager mockConfigManager(
+      double layoverFallbackMultiplier, Duration pendingLayoverMaxAge) {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
     ConfigManager.SpawnSettings spawnSettings = mock(ConfigManager.SpawnSettings.class);
@@ -631,6 +636,8 @@ class SimpleTicketAssignerLayoverTest {
     when(view.spawnSettings()).thenReturn(spawnSettings);
     when(view.runtimeSettings()).thenReturn(runtimeSettings);
     when(spawnSettings.layoverFallbackMultiplier()).thenReturn(layoverFallbackMultiplier);
+    when(spawnSettings.pendingLayoverMaxAgeSeconds())
+        .thenReturn(Math.max(0L, pendingLayoverMaxAge.toSeconds()));
     when(runtimeSettings.lookaheadEdges()).thenReturn(2);
     when(runtimeSettings.minClearEdges()).thenReturn(0);
     when(runtimeSettings.rearGuardEdges()).thenReturn(0);
@@ -681,6 +688,46 @@ class SimpleTicketAssignerLayoverTest {
     assigner.tick(provider, t2);
     assertEquals(1, assigner.snapshotPendingTickets().size(), "超时后应仅刷新窗口，不应丢票据");
     verify(spawnManager, never()).complete(ticket);
+  }
+
+  @Test
+  void tickDropsPendingLayoverTicketsAfterHardMaxAgeEvenAfterRefresh() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(0.0, Duration.ofSeconds(600)),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    Instant t0 = Instant.now();
+    assigner.tick(provider, t0);
+    assertEquals(1, assigner.snapshotPendingTickets().size(), "首次无候选应进入 pending");
+
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of());
+    assigner.tick(provider, t0.plusSeconds(301));
+    assertEquals(1, assigner.snapshotPendingTickets().size(), "刷新窗口不应重置首次入队时间");
+
+    assigner.tick(provider, t0.plusSeconds(601));
+    assertEquals(0, assigner.snapshotPendingTickets().size(), "超过硬最大等待时间后应清理 pending");
+    verify(spawnManager).complete(ticket);
   }
 
   @Test

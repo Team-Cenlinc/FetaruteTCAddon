@@ -36,6 +36,7 @@ class SpawnTicketTest {
 
     assertEquals(retryAt, retry.notBefore());
     assertEquals(retryAt, retry.dueAt());
+    assertEquals(dueAt, retry.firstDueAt());
     assertEquals(1, retry.attempts());
   }
 }

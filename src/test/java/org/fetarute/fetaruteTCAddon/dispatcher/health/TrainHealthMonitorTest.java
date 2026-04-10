@@ -292,6 +292,59 @@ class TrainHealthMonitorTest {
   }
 
   @Test
+  @DisplayName("STOP 信号下若 blocker 快照仍新鲜则不触发 progress stuck 恢复")
+  void stopSignalWithFreshBlockerDoesNotTriggerProgressRecovery() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of("front"));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(25));
+
+    assertEquals(0, result.progressStuckCount(), "新鲜 blocker 存在时应视为合法等待");
+    assertTrue(alerts.isEmpty(), "合法 STOP 等待不应产生 stuck 告警");
+    verify(dispatchService, never()).refreshSignalByName("train1");
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
+  }
+
+  @Test
+  @DisplayName("STOP 信号下 blocker 快照过期后应重新进入 progress stuck 恢复链")
+  void stopSignalProgressRecoveryResumesAfterBlockerSnapshotExpires() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any()))
+        .thenReturn(Set.of("front"))
+        .thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setBlockerSnapshotMaxAge(Duration.ofSeconds(5));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult blocked = monitor.check(Set.of("train1"), t0.plusSeconds(25));
+    TrainHealthMonitor.CheckResult recovered = monitor.check(Set.of("train1"), t0.plusSeconds(40));
+
+    assertEquals(0, blocked.progressStuckCount(), "blocker 仍新鲜时不应进入 stuck 恢复");
+    assertEquals(1, recovered.progressStuckCount(), "快照过期后应重新进入 stuck 恢复");
+    assertEquals(1, alerts.size(), "恢复链重新生效后应产生一条告警");
+    verify(dispatchService).refreshSignalByName("train1");
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
+  }
+
+  @Test
   @DisplayName("互相阻塞：在 STOP 宽限内触发成对解锁（refresh 双车）")
   void mutualDeadlockTriggersPairRefreshBeforeStopGrace() {
     List<HealthAlert> alerts = new ArrayList<>();

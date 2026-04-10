@@ -35,6 +35,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
  * 段边，避免长编组尾部被追尾。
  *
  * <p>同时会记录冲突区 entryOrder（首次进入冲突的边序号），用于冲突区放行与死锁解除。
+ *
+ * <p>这个构建器只负责“把图上的可见状态翻译成请求”，不直接改写占用管理器状态。也就是说，真正的放行/阻塞/队列公平性仍由 {@link SimpleOccupancyManager}
+ * 统一裁决，构建器只保证请求携带足够且稳定的上下文。
  */
 public final class OccupancyRequestBuilder {
 

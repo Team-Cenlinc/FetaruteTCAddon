@@ -48,9 +48,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
- * 简单票据分配器：优先复用 Layover 列车，不足时从 Depot 生成。
+ * 简单票据分配器。
  *
- * <p>当前实现整合 LayoverRegistry 查找与 RuntimeDispatchService 的“复用发车”能力。
+ * <p>这个类只负责“票据到列车”的执行，不重新规划时刻表，也不接管运行时信号控制。它会先尝试复用 {@link LayoverRegistry} 中的待命列车，失败后再走 Depot
+ * 出车；所有失败都回退到重试或 pending 队列，不直接修改运行时占用/信号状态。
+ *
+ * <p>真正的运行控制仍由 {@link RuntimeDispatchService} 负责。
  */
 public final class SimpleTicketAssigner implements TicketAssigner {
 
@@ -69,6 +72,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** 待复用票据刷新窗口（秒）：超过后会刷新等待窗口并记录告警，避免长期静默卡死。 */
   private static final long PENDING_LAYOVER_REFRESH_SECONDS = 300L;
 
+  /** 待复用票据默认最大保留时间；配置缺失时使用，0 表示显式禁用硬清理。 */
+  private static final Duration DEFAULT_PENDING_LAYOVER_MAX_AGE = Duration.ofDays(1);
+
   /** 拥挤度进入 HOLD 的阈值。 */
   private static final double CONGESTION_HOLD_THRESHOLD = 0.72D;
 
@@ -82,9 +88,22 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 待复用票据条目：记录票据及其加入时间，用于超时清理。
    *
    * @param ticket 原始出车票据
-   * @param addedAt 加入等待队列的时间
+   * @param addedAt 当前等待窗口开始时间
+   * @param firstAddedAt 首次进入等待队列的时间
    */
-  private record PendingLayoverEntry(SpawnTicket ticket, Instant addedAt) {}
+  private record PendingLayoverEntry(SpawnTicket ticket, Instant addedAt, Instant firstAddedAt) {
+    private PendingLayoverEntry(SpawnTicket ticket, Instant addedAt) {
+      this(ticket, addedAt, addedAt);
+    }
+
+    private PendingLayoverEntry {
+      firstAddedAt = firstAddedAt == null ? addedAt : firstAddedAt;
+    }
+
+    private PendingLayoverEntry refreshedAt(Instant now) {
+      return new PendingLayoverEntry(ticket, now, firstAddedAt);
+    }
+  }
 
   /**
    * 待复用派发快照：缓存一次派发中所需的 route 与分组信息，避免重复查询。
@@ -297,6 +316,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     java.util.Map<java.util.UUID, PendingLayoverEntry> refreshedEntries = new java.util.HashMap<>();
     int refreshed = 0;
     int fallbackTriggered = 0;
+    int hardExpired = 0;
+    Duration hardMaxAge = resolvePendingLayoverMaxAge();
 
     for (var entry : pendingLayoverTickets.entrySet()) {
       java.util.UUID ticketId = entry.getKey();
@@ -309,6 +330,22 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnService service = ticket.service();
       long waitSeconds = java.time.Duration.between(pendingEntry.addedAt(), now).getSeconds();
       if (waitSeconds <= 0L) {
+        continue;
+      }
+
+      if (isPendingLayoverHardExpired(pendingEntry, now, hardMaxAge)) {
+        long totalWaitSeconds =
+            java.time.Duration.between(pendingEntry.firstAddedAt(), now).getSeconds();
+        removeIds.add(ticketId);
+        hardExpired++;
+        spawnManager.complete(ticket);
+        HEALTH_LOGGER.warning(
+            "[FTA] 折返票据超过最大等待时间，放弃并释放 backlog: route="
+                + (service != null ? service.routeCode() : "?")
+                + " 等待="
+                + totalWaitSeconds
+                + "s ticketId="
+                + ticketId);
         continue;
       }
 
@@ -326,7 +363,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                   + ticketId);
           tryFallbackSpawnForPending(provider, ticket, now, waitSeconds);
         } else {
-          refreshedEntries.put(ticketId, new PendingLayoverEntry(ticket, now));
+          refreshedEntries.put(ticketId, pendingEntry.refreshedAt(now));
           refreshed++;
           HEALTH_LOGGER.warning(
               "[FTA] 折返票据等待过久，但首站非 depot，刷新等待窗口: route="
@@ -340,7 +377,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
 
       if (waitSeconds >= PENDING_LAYOVER_REFRESH_SECONDS) {
-        refreshedEntries.put(ticketId, new PendingLayoverEntry(ticket, now));
+        refreshedEntries.put(ticketId, pendingEntry.refreshedAt(now));
         refreshed++;
         HEALTH_LOGGER.warning(
             "[FTA] 折返票据等待过久，刷新等待窗口: route="
@@ -360,15 +397,48 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (!refreshedEntries.isEmpty()) {
       pendingLayoverTickets.putAll(refreshedEntries);
     }
-    if (refreshed > 0 || fallbackTriggered > 0 || !removeIds.isEmpty()) {
+    if (refreshed > 0 || fallbackTriggered > 0 || hardExpired > 0 || !removeIds.isEmpty()) {
       debugLogger.accept(
           "刷新待复用票据: refreshed="
               + refreshed
               + " fallback="
               + fallbackTriggered
+              + " hardExpired="
+              + hardExpired
               + " removed="
               + removeIds.size());
     }
+  }
+
+  private Duration resolvePendingLayoverMaxAge() {
+    if (configManager == null) {
+      return DEFAULT_PENDING_LAYOVER_MAX_AGE;
+    }
+    ConfigManager.ConfigView view = configManager.current();
+    if (view == null || view.spawnSettings() == null) {
+      return DEFAULT_PENDING_LAYOVER_MAX_AGE;
+    }
+    long seconds = view.spawnSettings().pendingLayoverMaxAgeSeconds();
+    if (seconds <= 0L) {
+      return Duration.ZERO;
+    }
+    return Duration.ofSeconds(seconds);
+  }
+
+  private boolean isPendingLayoverHardExpired(
+      PendingLayoverEntry pendingEntry, Instant now, Duration maxAge) {
+    if (pendingEntry == null || now == null || maxAge == null) {
+      return false;
+    }
+    if (maxAge.isZero() || maxAge.isNegative()) {
+      return false;
+    }
+    Instant firstAddedAt =
+        pendingEntry.firstAddedAt() == null ? pendingEntry.addedAt() : pendingEntry.firstAddedAt();
+    if (firstAddedAt == null || firstAddedAt.isAfter(now)) {
+      return false;
+    }
+    return Duration.between(firstAddedAt, now).compareTo(maxAge) >= 0;
   }
 
   private java.util.OptionalLong resolveLayoverFallbackTimeoutSeconds(SpawnService service) {
@@ -960,6 +1030,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return false;
   }
 
+  /**
+   * 写入列车生命周期标签。
+   *
+   * <p>约定如下：
+   *
+   * <ul>
+   *   <li>{@code FTA_OP_TRIPS} 只在 {@link RouteOperationType#OPERATION} 成功发车后递增
+   *   <li>{@link RouteOperationType#CREATE} 与 {@link RouteOperationType#RETURN} 会把 {@code
+   *       FTA_OP_TRIPS} 重置为 0
+   *   <li>{@code FTA_SPAWN_GROUP} 记录交路组名，供回收与诊断共用
+   *   <li>{@code FTA_OP_MAX} 记录最大运营圈数，用于到期后触发回收
+   * </ul>
+   *
+   * <p>该方法只改写 tag，不直接修改 route 或 occupancy 状态。
+   */
   private void applySpawnLifecycleTags(
       Optional<StorageProvider> providerOpt,
       TrainProperties properties,
@@ -1252,6 +1337,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return lineKey + "|" + terminal;
   }
 
+  /**
+   * 尝试复用待命列车。
+   *
+   * <p>若当前没有可用候选，会把票据放入 pending 队列并保留首次入队时间；若候选存在但暂时被闭塞或门控阻塞，则保持 pending，等待后续 layover 通知或超时刷新。
+   *
+   * <p>成功时会同步写入生命周期标签、清理 pending，并通知调度层刷新相关占用。
+   */
   private boolean tryReuseLayover(
       Optional<StorageProvider> providerOpt,
       SpawnTicket ticket,
@@ -1485,14 +1577,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         ticket.id(),
         (ignored, existing) -> {
           Instant addedAt = existing == null ? now : existing.addedAt();
-          return new PendingLayoverEntry(ticket, addedAt);
+          Instant firstAddedAt = existing == null ? now : existing.firstAddedAt();
+          return new PendingLayoverEntry(ticket, addedAt, firstAddedAt);
         });
   }
 
   /**
-   * 尝试从 Depot 直接发车（降级发车路径）。
+   * 从 Depot 直接发车的降级路径。
    *
-   * <p>当 RETURN 票据等待 Layover 超时后，调用此方法尝试从 Depot 直接补发列车。
+   * <p>仅用于 RETURN 票据的 fallback 补发，不参与常规运营调度。若发车成功，会同步写入生命周期标签并刷新相关占用；失败则回到重试队列。
    *
    * @param provider 存储接口
    * @param ticket 发车票据

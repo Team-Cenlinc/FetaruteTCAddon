@@ -27,12 +27,14 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 /**
  * 基于存储的 SpawnManager：从线路与交路配置生成发车票据。
  *
+ * <p>这个类只负责“计划生成”和“票据排序”，不直接创建列车，也不接管运行时信号/占用。实际出车由 {@link SimpleTicketAssigner} 执行。
+ *
  * <p>默认行为：
  *
  * <ul>
  *   <li>仅对 {@link LineStatus#ACTIVE} 的线路生成票据（可使用 line baseline 或 group baseline）
  *   <li>同一条线路可配置多条 CREATE/OPERATION/RETURN route，并在“交路组”内按权重分配频率
- *   <li>RETURN route 也会进入 SpawnPlan（用于 Layover 复用、折返与站牌预测）
+ *   <li>RETURN route 也会进入 SpawnPlan 与 forecast（用于 Layover 复用、折返与站牌预测）
  *   <li>允许线路跨 depot 混发（可配合 Line.metadata.spawn_depots 做集中管理）
  *   <li>出库点从 route 的 CRET 指令推导；若首行不是 CRET，则使用首站 nodeId 作为 layover 复用起点
  * </ul>
@@ -46,6 +48,10 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *   <li>组优先使用 {@code spawn_group_baseline_sec} 作为发车基准；未配置时才回退 line baseline
  *   <li>{@code spawn_group_weight} 仅作为旧配置回退（已不推荐）
  * </ul>
+ *
+ * <p>这意味着它不会修改列车的生命周期标签，也不会触碰 pending layover 或 reclaim 状态。
+ *
+ * <p>长期运行时会按票据首次 due 时间清理过旧队列项，并同步释放对应 service 的 backlog，避免堵塞 route 在数天后形成幽灵积压。
  */
 public final class StorageSpawnManager
     implements SpawnManager, SpawnForecastSupport, SpawnResetSupport {
@@ -82,6 +88,7 @@ public final class StorageSpawnManager
       return List.of();
     }
     refreshPlanIfNeeded(provider, now);
+    cleanupExpiredQueuedTickets(now);
     generateTickets(now);
     return drainDueTickets(now);
   }
@@ -219,6 +226,60 @@ public final class StorageSpawnManager
         debugLogger.accept("SpawnPlan 清理过期票据: removed=" + removed);
       }
     }
+  }
+
+  /** 清理超过最大保留时间的队列票据，并释放对应 service 的 backlog。 */
+  private void cleanupExpiredQueuedTickets(Instant now) {
+    Duration maxAge = settings.queuedTicketMaxAge();
+    if (now == null
+        || maxAge == null
+        || maxAge.isZero()
+        || maxAge.isNegative()
+        || queue.isEmpty()) {
+      return;
+    }
+    Map<SpawnServiceKey, Integer> removedByService = new HashMap<>();
+    int before = queue.size();
+    queue.removeIf(
+        ticket -> {
+          if (!isExpiredQueuedTicket(ticket, now, maxAge)) {
+            return false;
+          }
+          if (ticket != null && ticket.service() != null) {
+            removedByService.merge(ticket.service().key(), 1, Integer::sum);
+          }
+          return true;
+        });
+    if (removedByService.isEmpty()) {
+      return;
+    }
+    for (Map.Entry<SpawnServiceKey, Integer> entry : removedByService.entrySet()) {
+      ServiceState state = states.get(entry.getKey());
+      if (state == null) {
+        continue;
+      }
+      state.backlog = Math.max(0, state.backlog - entry.getValue());
+    }
+    debugLogger.accept(
+        "SpawnPlan 清理超龄票据: removed="
+            + (before - queue.size())
+            + " maxAge="
+            + maxAge.toSeconds()
+            + "s");
+  }
+
+  private boolean isExpiredQueuedTicket(SpawnTicket ticket, Instant now, Duration maxAge) {
+    if (ticket == null || now == null || maxAge == null) {
+      return ticket == null;
+    }
+    Instant firstDueAt = ticket.firstDueAt();
+    if (firstDueAt == null) {
+      firstDueAt = ticket.dueAt();
+    }
+    if (firstDueAt == null || firstDueAt.isAfter(now)) {
+      return false;
+    }
+    return Duration.between(firstDueAt, now).compareTo(maxAge) >= 0;
   }
 
   private Instant resolveForecastStart(SpawnService service, Instant now) {
@@ -1107,11 +1168,28 @@ public final class StorageSpawnManager
       Duration initialJitter,
       int maxBacklogPerService,
       int maxGeneratePerTick,
-      int maxPollPerTick) {
+      int maxPollPerTick,
+      Duration queuedTicketMaxAge) {
+    public SpawnManagerSettings(
+        Duration planRefreshInterval,
+        Duration initialJitter,
+        int maxBacklogPerService,
+        int maxGeneratePerTick,
+        int maxPollPerTick) {
+      this(
+          planRefreshInterval,
+          initialJitter,
+          maxBacklogPerService,
+          maxGeneratePerTick,
+          maxPollPerTick,
+          Duration.ofDays(1));
+    }
+
     public SpawnManagerSettings {
       planRefreshInterval =
           planRefreshInterval == null ? Duration.ofSeconds(10) : planRefreshInterval;
       initialJitter = initialJitter == null ? Duration.ZERO : initialJitter;
+      queuedTicketMaxAge = queuedTicketMaxAge == null ? Duration.ofDays(1) : queuedTicketMaxAge;
       if (maxBacklogPerService <= 0) {
         maxBacklogPerService = 5;
       }
@@ -1124,7 +1202,8 @@ public final class StorageSpawnManager
     }
 
     public static SpawnManagerSettings defaults() {
-      return new SpawnManagerSettings(Duration.ofSeconds(10), Duration.ZERO, 5, 5, 1);
+      return new SpawnManagerSettings(
+          Duration.ofSeconds(10), Duration.ZERO, 5, 5, 1, Duration.ofDays(1));
     }
   }
 }

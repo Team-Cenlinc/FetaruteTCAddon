@@ -21,6 +21,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
  *   <li>孤儿占用：占用存在但列车已不存在
  *   <li>超时占用：占用时间超过配置阈值（仅针对离线列车，避免误清理仍在线列车的合法占用）
  * </ul>
+ *
+ * <p>清理时默认按 claim 粒度释放，并尽可能携带列车名执行精确释放，避免在共享冲突资源上误删其他合法列车的占用。
  */
 public final class OccupancyHealer {
 
@@ -85,7 +87,7 @@ public final class OccupancyHealer {
     List<OccupancyClaim> claims = occupancyManager.snapshotClaims();
     int orphanCount = 0;
     int timeoutCount = 0;
-    List<OccupancyResource> toRelease = new ArrayList<>();
+    List<ReleaseTarget> toRelease = new ArrayList<>();
 
     for (OccupancyClaim claim : claims) {
       if (claim == null || claim.resource() == null) {
@@ -97,7 +99,7 @@ public final class OccupancyHealer {
 
       // 孤儿检测
       if (orphanCleanupEnabled && !activeTrain) {
-        toRelease.add(claim.resource());
+        toRelease.add(ReleaseTarget.forClaim(claim));
         orphanCount++;
         alertBus.publish(
             HealthAlert.fixed(
@@ -115,7 +117,7 @@ public final class OccupancyHealer {
         }
         Duration age = Duration.between(claim.acquiredAt(), now);
         if (age.compareTo(occupancyTimeout) > 0) {
-          toRelease.add(claim.resource());
+          toRelease.add(ReleaseTarget.forClaim(claim));
           timeoutCount++;
           alertBus.publish(
               HealthAlert.fixed(
@@ -135,11 +137,32 @@ public final class OccupancyHealer {
     }
 
     // 释放
-    for (OccupancyResource resource : toRelease) {
-      occupancyManager.releaseResource(resource, Optional.empty());
+    for (ReleaseTarget target : toRelease) {
+      occupancyManager.releaseResource(target.resource(), target.trainName());
     }
 
     return new HealResult(orphanCount, timeoutCount);
+  }
+
+  /**
+   * 精确描述一次自愈释放目标。
+   *
+   * <p>优先携带列车名，避免在同一资源允许多列车合法共占（例如同向单线走廊）时误删其他有效 claim。
+   */
+  private record ReleaseTarget(OccupancyResource resource, Optional<String> trainName) {
+
+    private ReleaseTarget {
+      Objects.requireNonNull(resource, "resource");
+      Objects.requireNonNull(trainName, "trainName");
+    }
+
+    private static ReleaseTarget forClaim(OccupancyClaim claim) {
+      Objects.requireNonNull(claim, "claim");
+      String trainName = claim.trainName();
+      Optional<String> preciseTrainName =
+          trainName == null || trainName.isBlank() ? Optional.empty() : Optional.of(trainName);
+      return new ReleaseTarget(claim.resource(), preciseTrainName);
+    }
   }
 
   /** 自愈结果。 */

@@ -8,6 +8,7 @@ import com.bergerkiller.bukkit.tc.events.GroupRemoveEvent;
 import com.bergerkiller.bukkit.tc.events.GroupUnloadEvent;
 import com.bergerkiller.bukkit.tc.events.MemberRemoveEvent;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.util.Optional;
 import org.bukkit.block.Sign;
@@ -96,7 +97,7 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   /**
-   * 编组拆分/脱挂兜底：一旦检测到 member 从编组移除，回收涉及的 FTA 列车，避免“半编组”继续参与调度。
+   * 编组拆分/脱挂兜底：一旦检测到 member 从编组移除，删除涉及的所有列车，避免“半编组”继续参与调度。
    *
    * <p>TrainCarts 没有专门的 split 事件，MemberRemoveEvent 是最稳定的异常编组信号。
    */
@@ -105,16 +106,17 @@ public final class RuntimeDispatchListener implements Listener {
     if (event == null) {
       return;
     }
-    MinecartGroup sourceGroup = event.getGroup();
-    dispatchService.handleAbnormalGroup(sourceGroup, "member-remove");
-
     MinecartMember<?> member = event.getMember();
+    MinecartGroup sourceGroup = event.getGroup();
+    MinecartGroup detachedGroup = member != null ? member.getGroup() : null;
+    String splitDetail = buildUnexpectedSplitDetail(sourceGroup, detachedGroup, member);
+    dispatchService.handleAbnormalGroup(sourceGroup, "unexpected-split-source", splitDetail);
+
     if (member == null) {
       return;
     }
-    MinecartGroup detachedGroup = member.getGroup();
     if (detachedGroup != null && detachedGroup != sourceGroup) {
-      dispatchService.handleAbnormalGroup(detachedGroup, "member-detach");
+      dispatchService.handleAbnormalGroup(detachedGroup, "unexpected-split-detached", splitDetail);
     }
   }
 
@@ -122,7 +124,7 @@ public final class RuntimeDispatchListener implements Listener {
     if (group == null || group.getProperties() == null) {
       return;
     }
-    String trainName = group.getProperties().getTrainName();
+    String trainName = dispatchService.resolveManagedTrainName(group.getProperties()).orElse(null);
     if (trainName == null || trainName.isBlank()) {
       return;
     }
@@ -169,5 +171,43 @@ public final class RuntimeDispatchListener implements Listener {
       return false;
     }
     return group.head() == member;
+  }
+
+  private String buildUnexpectedSplitDetail(
+      MinecartGroup sourceGroup, MinecartGroup detachedGroup, MinecartMember<?> member) {
+    StringBuilder builder = new StringBuilder();
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "removedMemberPos", describeMember(member));
+    RuntimeDiagnosticFormatter.appendKeyValue(
+        builder, "sourceTrain", describeGroupName(sourceGroup));
+    if (detachedGroup != null && detachedGroup != sourceGroup) {
+      RuntimeDiagnosticFormatter.appendKeyValue(
+          builder, "detachedTrain", describeGroupName(detachedGroup));
+    }
+    return builder.length() == 0 ? null : builder.toString();
+  }
+
+  private String describeGroupName(MinecartGroup group) {
+    if (group == null) {
+      return null;
+    }
+    TrainProperties properties = group.getProperties();
+    if (properties == null) {
+      return null;
+    }
+    return dispatchService
+        .resolveTrackedTrainName(properties)
+        .orElseGet(
+            () -> {
+              String rawName = properties.getTrainName();
+              return rawName == null || rawName.isBlank() ? null : rawName.trim();
+            });
+  }
+
+  private static String describeMember(MinecartMember<?> member) {
+    if (member == null) {
+      return null;
+    }
+    org.bukkit.block.Block block = member.getBlock(0, 0, 0);
+    return block != null ? RuntimeDiagnosticFormatter.formatLocation(block.getLocation()) : null;
   }
 }

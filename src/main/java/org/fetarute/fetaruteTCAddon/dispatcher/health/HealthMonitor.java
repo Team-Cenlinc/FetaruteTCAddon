@@ -251,7 +251,10 @@ public final class HealthMonitor {
         continue;
       }
       if (group.getProperties() != null) {
-        String name = group.getProperties().getTrainName();
+        String name =
+            dispatchService
+                .resolveTrackedTrainName(group.getProperties())
+                .orElse(group.getProperties().getTrainName());
         if (name != null && !name.isBlank()) {
           names.add(name);
         }

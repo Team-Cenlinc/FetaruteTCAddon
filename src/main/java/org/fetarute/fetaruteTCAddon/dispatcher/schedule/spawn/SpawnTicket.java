@@ -11,21 +11,48 @@ import java.util.UUID;
  * <p>ticket 允许重试：失败时更新 notBefore 与 attempts 并重新入队。
  *
  * <p>{@code sequenceNumber} 用于在 dueAt 相同时确定顺序，避免同 line 多 route 按 routeCode 排序导致"批量"发车。
+ *
+ * <p>{@code firstDueAt} 记录票据首次进入计划窗口的时间；重试会推进 {@code dueAt} 以避免压住队头，但不会推进 {@code
+ * firstDueAt}，用于长期运行时清理过旧票据。
  */
 public record SpawnTicket(
     UUID id,
     SpawnService service,
     Instant dueAt,
     Instant notBefore,
+    Instant firstDueAt,
     int attempts,
     long sequenceNumber,
     Optional<String> selectedDepotNodeId,
     Optional<String> lastError) {
+  /** 使用 {@code dueAt} 作为首次计划时间创建票据。 */
+  public SpawnTicket(
+      UUID id,
+      SpawnService service,
+      Instant dueAt,
+      Instant notBefore,
+      int attempts,
+      long sequenceNumber,
+      Optional<String> selectedDepotNodeId,
+      Optional<String> lastError) {
+    this(
+        id,
+        service,
+        dueAt,
+        notBefore,
+        dueAt,
+        attempts,
+        sequenceNumber,
+        selectedDepotNodeId,
+        lastError);
+  }
+
   public SpawnTicket {
     Objects.requireNonNull(id, "id");
     Objects.requireNonNull(service, "service");
     dueAt = dueAt == null ? Instant.EPOCH : dueAt;
     notBefore = notBefore == null ? dueAt : notBefore;
+    firstDueAt = firstDueAt == null ? dueAt : firstDueAt;
     if (attempts < 0) {
       throw new IllegalArgumentException("attempts 不能为负");
     }
@@ -53,6 +80,7 @@ public record SpawnTicket(
         service,
         nextDueAt,
         nextWindow,
+        firstDueAt,
         attempts + 1,
         sequenceNumber,
         Optional.empty(),
@@ -66,6 +94,7 @@ public record SpawnTicket(
         service,
         dueAt,
         notBefore,
+        firstDueAt,
         attempts,
         sequenceNumber,
         Optional.ofNullable(depotNodeId),

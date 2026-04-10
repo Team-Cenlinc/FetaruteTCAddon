@@ -125,6 +125,92 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void touchQueuesKeepsStoppedTrainAtQueueHeadWithoutClaimingResources() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:SW-1");
+
+    OccupancyRequest frontWaiting =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0);
+    manager.touchQueues(frontWaiting);
+
+    assertTrue(manager.getClaim(resource).isEmpty());
+
+    OccupancyDecision rearDecision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(resource),
+                Map.of(),
+                Map.of(resource.key(), 0),
+                0));
+    assertFalse(rearDecision.allowed());
+
+    OccupancyDecision frontDecision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "front",
+                Optional.empty(),
+                now.plusSeconds(2),
+                List.of(resource),
+                Map.of(),
+                Map.of(resource.key(), 0),
+                0));
+    assertTrue(frontDecision.allowed());
+  }
+
+  @Test
+  void previewDoesNotMutateQueueState() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:SW-1");
+
+    OccupancyRequest frontWaiting =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0);
+    manager.touchQueues(frontWaiting);
+
+    OccupancyDecision preview =
+        manager.canEnterPreview(
+            new OccupancyRequest(
+                "rear",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(resource),
+                Map.of(),
+                Map.of(resource.key(), 0),
+                0));
+
+    assertFalse(preview.allowed());
+    assertEquals(SignalAspect.STOP, preview.signal());
+    List<OccupancyQueueSnapshot> snapshots = manager.snapshotQueues();
+    assertEquals(1, snapshots.size());
+    assertEquals(1, snapshots.get(0).entries().size());
+    assertEquals("front", snapshots.get(0).entries().get(0).trainName());
+  }
+
+  @Test
   void queuePrefersEarliestSingleCorridorEntry() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -366,5 +452,139 @@ class SimpleOccupancyManagerTest {
     OccupancyQueueEntry entry = snapshots.get(0).entries().get(0);
     assertEquals(7, entry.priority());
     assertEquals(2, entry.entryOrder());
+  }
+
+  @Test
+  void queueTouchMovesTrainBetweenDirectionBucketsWithoutDuplication() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+
+    manager.canEnter(
+        new OccupancyRequest(
+            "t1",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 3),
+            0));
+    manager.canEnter(
+        new OccupancyRequest(
+            "t1",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(resource),
+            forward,
+            Map.of(resource.key(), 2),
+            0));
+
+    List<OccupancyQueueSnapshot> snapshots = manager.snapshotQueues();
+    assertEquals(1, snapshots.size());
+    assertEquals(1, snapshots.get(0).entries().size());
+    assertEquals(CorridorDirection.A_TO_B, snapshots.get(0).entries().get(0).direction());
+  }
+
+  @Test
+  void releaseResourceWildcardCleansUpQueueEntries() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+
+    // 两列车占用同一冲突资源（同向跟驰）
+    manager.acquire(
+        new OccupancyRequest("t1", Optional.empty(), now, List.of(conflict), forward, 0));
+    manager.acquire(
+        new OccupancyRequest("t2", Optional.empty(), now, List.of(conflict), forward, 0));
+
+    // 全量释放（不指定列车名）
+    boolean released = manager.releaseResource(conflict, Optional.empty());
+    assertTrue(released);
+
+    // 队列也应被清理：第三辆车应能直接进入
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest("t3", Optional.empty(), now, List.of(conflict), forward, 0));
+    assertTrue(decision.allowed(), "全量释放后队列应为空，新列车可直接进入");
+  }
+
+  @Test
+  void releaseByTrainIsCaseInsensitive() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("NODE-1"));
+    manager.acquire(
+        new OccupancyRequest("Train-Alpha", Optional.empty(), now, List.of(resource), Map.of()));
+
+    // 释放时用不同大小写
+    int removed = manager.releaseByTrain("TRAIN-ALPHA");
+    assertEquals(1, removed, "大小写不同但应匹配释放");
+    assertTrue(manager.snapshotClaims().isEmpty());
+  }
+
+  @Test
+  void queueEntryOrderResetsAfterExpiredEntryIsPurged() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:SW-1");
+
+    manager.canEnter(
+        new OccupancyRequest(
+            "stale",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0));
+    manager.canEnter(
+        new OccupancyRequest(
+            "keeper",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 9),
+            0));
+    manager.canEnter(
+        new OccupancyRequest(
+            "keeper",
+            Optional.empty(),
+            now.plusSeconds(20),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 9),
+            0));
+    manager.canEnter(
+        new OccupancyRequest(
+            "stale",
+            Optional.empty(),
+            now.plusSeconds(31),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 5),
+            0));
+
+    OccupancyQueueEntry staleEntry =
+        manager.snapshotQueues().stream()
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .filter(entry -> entry.trainName().equalsIgnoreCase("stale"))
+            .findFirst()
+            .orElseThrow();
+    assertEquals(5, staleEntry.entryOrder());
   }
 }

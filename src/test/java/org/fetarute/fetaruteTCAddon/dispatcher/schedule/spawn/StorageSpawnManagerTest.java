@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -61,6 +62,26 @@ class StorageSpawnManagerTest {
     assertEquals("SURN:D:DEPOT:1", ticket.service().depotNodeId());
     assertEquals(now, ticket.dueAt());
     assertEquals(now, ticket.notBefore());
+  }
+
+  @Test
+  void pollDueTicketsDropsStaleQueuedTicketAndReleasesBacklog() {
+    StorageProvider provider = mockProvider(enabledRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 1, 1, 10, Duration.ofHours(1));
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    SpawnTicket first = manager.pollDueTickets(provider, now).get(0);
+    SpawnTicket retry = first.withRetry(now.plusSeconds(5), "gate-blocked:STOP");
+    manager.requeue(retry);
+
+    List<SpawnTicket> recovered = manager.pollDueTickets(provider, now.plusSeconds(3600));
+
+    assertEquals(1, recovered.size(), "清理超龄票据后应释放 backlog 并允许生成新票据");
+    assertNotEquals(first.id(), recovered.get(0).id(), "返回的应是新票据，而不是超龄重试票据");
+    assertTrue(manager.snapshotQueue().isEmpty());
   }
 
   @Test

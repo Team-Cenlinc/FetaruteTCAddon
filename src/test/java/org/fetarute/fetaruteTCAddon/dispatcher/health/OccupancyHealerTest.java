@@ -7,12 +7,18 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -58,7 +64,7 @@ class OccupancyHealerTest {
 
     assertEquals(1, result.orphanCleaned(), "应清理 1 个孤儿占用");
     assertEquals(0, result.timeoutCleaned());
-    verify(occupancyManager).releaseResource(eq(resource), eq(Optional.empty()));
+    verify(occupancyManager).releaseResource(eq(resource), eq(Optional.of("ghost-train")));
   }
 
   @Test
@@ -76,7 +82,7 @@ class OccupancyHealerTest {
 
     assertEquals(0, result.orphanCleaned());
     assertEquals(1, result.timeoutCleaned(), "应清理 1 个超时占用");
-    verify(occupancyManager).releaseResource(eq(resource), eq(Optional.empty()));
+    verify(occupancyManager).releaseResource(eq(resource), eq(Optional.of("train1")));
   }
 
   @Test
@@ -195,6 +201,34 @@ class OccupancyHealerTest {
     assertEquals(1, result.total());
     assertTrue(result.hasChanges());
     verify(occupancyManager, times(1)).releaseResource(any(), any());
+  }
+
+  @Test
+  @DisplayName("共享冲突资源时只清理离线列车 claim，不误删在线列车")
+  void healReleasesOnlyOfflineClaimFromSharedConflictResource() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+    OccupancyHealer preciseHealer = new OccupancyHealer(manager, new HealthAlertBus(), msg -> {});
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+
+    manager.acquire(
+        new OccupancyRequest("ghost-train", Optional.empty(), now, List.of(conflict), forward, 0));
+    manager.acquire(
+        new OccupancyRequest("active-train", Optional.empty(), now, List.of(conflict), forward, 0));
+
+    OccupancyHealer.HealResult result =
+        preciseHealer.heal(Set.of("active-train"), now.plusSeconds(5));
+
+    assertEquals(1, result.orphanCleaned());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(claim -> claim.trainName().equalsIgnoreCase("active-train")));
+    assertFalse(
+        manager.snapshotClaims().stream()
+            .anyMatch(claim -> claim.trainName().equalsIgnoreCase("ghost-train")));
   }
 
   @Test

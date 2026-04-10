@@ -16,8 +16,9 @@
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
 - 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
 - 停站期间会保持 STOP 信号，且提前写入下一跳 destination，确保发车时直接走寻路方向。
-- 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，避免后车过早释放后互卡。
-- 运行时只要检测到列车仍在 dwell 窗口，就会强制维持 STOP（不依赖当前 index 再次命中 RouteStop），避免“停站后被提前放行”。
+- 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，并同步刷新前方冲突队列位次，避免后车在等待窗口内抢占发车顺序。
+- 运行时只要检测到列车仍在 dwell 窗口，就会强制维持 STOP（不依赖当前 index 再次命中 RouteStop），避免”停站后被提前放行”。
+- 信号 tick 中门控等待、dwell 窗口、waypoint 停站三种”保持 STOP”场景统一由 `holdStopAtCurrentNode` 处理，保留当前占用 + 下发 STOP 控车。
 - 对 STOP/TERM waypoint 的进站控车采用 handoff：信号 tick 不强制 STOP，而是把目标速度上限压到 `runtime.approach-speed-bps`（approaching）。
 - 仅当存在前方 blocker（红灯/占用阻塞）时，才使用“到 blocker 的距离”触发进一步减速/停车；不使用到下一节点距离，避免提前刹停在牌子前。
 - 停稳判定：连续 `1` tick 未移动即视为停稳；若超过 `400` ticks 未停稳则进入超时兜底。
@@ -30,6 +31,7 @@
 
 ## 信号变化监测
 - 定时任务每 N tick 运行（`runtime.dispatch-tick-interval-ticks`）。
+- `RuntimeSignalMonitor` 只负责巡检、异常清理与 ETA 采样，实际信号控制仍由 `RuntimeDispatchService.handleSignalTick(...)` 完成。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
 - 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
@@ -37,9 +39,10 @@
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - spawn/layover 发车成功后，运行时会按本次占用资源主动刷新受影响列车（claim + queue），降低“新车占用已生效但他车未及时红灯”的风险。
-- 异常清理：`RuntimeSignalMonitor` 会检测 `TrainStatus.Derailed` 并回收 FTA 列车；`MemberRemoveEvent`（split/脱挂）也会触发异常回收，避免半编组继续参与调度。
+- 异常清理：`RuntimeSignalMonitor` 会检测 `TrainStatus.Derailed`；`MemberRemoveEvent`（split/脱挂）会监听所有 TrainCarts 列车并触发异常回收，避免半编组继续参与调度。
 - 异常清理对同一列车启用短窗去重（默认 2 秒）：同一波 `member-remove` 事件风暴只执行一次清理，避免重复日志与重复 destroy。
 - 异常销毁会优先按 trainName 获取当前 holder，再兜底销毁事件 group，避免“状态清了但实体未销毁”的漏回收。
+- 每次异常清理都会输出 warning 级诊断日志，包含原因、逻辑列车名/raw TrainCarts 名、head/tail 位置、车厢数量，以及可用的 route/progress 信息；split 日志还会附带被拆出车厢的位置与源/目标编组名，便于排查 unexpected split。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
 - 中间图节点（未写入 route 的 waypoint/switcher）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
 - 事件驱动信号下发仅接受“更严格”信号（如 STOP）；更宽松信号统一交由周期 tick 决策，避免事件链路误放行。
@@ -91,7 +94,7 @@
 - 详见 `docs/dev/reclaim-policy.md`。
 
 ## 发车门控阻塞策略
-- 出站门控在 `shouldYield/blocked` 时会把占用收缩为“停站保护窗口”（当前节点 + rear guard），避免列车在红灯等待期间长时间持有前方资源导致同向互卡。
+- 出站门控在 `shouldYield/blocked` 时会把占用收缩为“停站保护窗口”（当前节点 + rear guard），同时保留前向冲突队列位次，避免列车在红灯等待期间被后车反超队头。
 - 阻塞日志会输出 blocker 摘要（资源类型/键/持有列车），便于现场定位卡点。
 
 ## 控车重算与 failover
@@ -167,14 +170,24 @@
 - 目前默认用 speedLimit/launch 控车，未实现更精细的制动曲线。
 
 ## 调度销毁（handleDestroy）与完整清理
-- 调度销毁清理范围与 `handleTrainRemoved` 保持一致（进度、stall 状态、停站状态、trigger 状态、信号警告、departure gate、节点历史、动态分配、有效节点覆盖、blocker 快照），唯一区别是不在此处释放占用——`train.destroy()` 延迟 1 tick 执行物理销毁，占用由 `GroupRemoveEvent → handleTrainRemoved` 在实体实际消亡后释放，避免 SpawnMonitor 在物理销毁前 acquire 导致撞车。
-- 异常编组清理（`handleAbnormalGroup`）启用 2 秒去重窗口，抑制 TrainCarts split/脱挂事件风暴的重复处理。
+- 调度销毁清理范围与 `handleTrainRemoved` 保持一致（进度、stall 状态、停站状态、trigger 状态、信号警告、departure gate、节点历史、动态分配、有效节点覆盖、blocker 快照、routeTrainTracker 位置条目），唯一区别是不在此处释放占用——`train.destroy()` 延迟 1 tick 执行物理销毁，占用由 `GroupRemoveEvent → handleTrainRemoved` 在实体实际消亡后释放，避免 SpawnMonitor 在物理销毁前 acquire 导致撞车。
+- TrainCarts split 后若把列车临时改成 `main~a/main~b`，运行时会优先使用 `FTA_TRAIN_NAME` 作为逻辑主键，不把这些后缀别名当作真实 rename，避免把进度/占用主键污染成临时名。
+- `RuntimeSignalMonitor` 会额外检测“同一逻辑列车名对应多个 live group”的异常场景；但只会把非 split 过渡态的真实重复判为异常，避免 TrainCarts 正常 split/merge 窗口被误杀。
+- 异常编组清理（`handleAbnormalGroup`）对所有列车生效：FTA 托管列车会额外清理 progress/occupancy，普通列车则直接记录诊断并销毁。状态清理启用 2 秒去重窗口，抑制 TrainCarts split/脱挂事件风暴的重复处理。
+- `GroupRemoveEvent` 只会清理“真实离线或真正被销毁”的 FTA 编组；split 临时别名会被识别并跳过，避免把仍在线的 canonical 列车一起清掉。
 
 ## 硬占用阻塞检查（Hard Blocker）
 - 即使死锁解析器/冲突放行路径返回 `allowed=true`，若 blocker 中仍包含其他列车的 NODE/EDGE 硬占用，会强制回退为阻塞信号（STOP），杜绝误放行。
 - CONFLICT 类型资源不视为硬阻塞（由死锁解析器管理）。
 - 自身占用（blocker 中 trainName 与当前列车匹配）被跳过。
 - blocker 元素为 null 或 resource 为 null 时视为硬阻塞（保守策略）。
+
+## Signal 验证矩阵
+- `PROCEED`：前方无占用且无更严格约束时放行。
+- `STOP`：前方硬占用、departure gate 持有、或无法定位阻塞位置时停车。
+- `CAUTION` / `PROCEED_WITH_CAUTION`：由更远 blocker 或移动授权降级触发。
+- `holdStopAtCurrentNode(...)`：统一处理门控等待、dwell、waypoint 停站三类“保持 STOP”场景，并刷新前向队列位次。
+- `recentBlockerTrains(...)`：健康监控只读 blocker 快照；过期后会自动失效，避免 stale 阻塞误触发修复。
 
 ## 健康修复使用有效节点（DYNAMIC 覆盖）
 - `forceRelaunchByName` 和 `reissueDestinationByName` 均使用 `resolveEffectiveNode` 获取 DYNAMIC 站台覆盖后的有效节点，确保修复操作将列车发往正确的站台而非 route 定义中的占位符节点。

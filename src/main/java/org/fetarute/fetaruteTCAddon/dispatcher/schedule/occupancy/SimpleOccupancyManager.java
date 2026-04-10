@@ -25,6 +25,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
  *
  * <p>道岔/单线冲突使用 Gate Queue 保障进入顺序，并基于 lookahead entryOrder 优先放行更接近冲突入口的列车。
  *
+ * <p>这个实现只负责“资源互斥 + 队列公平性 + 冲突区放行”，不承担列车控车、恢复和调度重排。若上层信号看起来不稳定， 这里优先排查的通常是队列位次、锁定边界和 claim
+ * 释放粒度，而不是时刻表本身。
+ *
  * <p>当冲突区两侧车辆互相占用节点而卡死时，会尝试“冲突区放行”以释放队头列车进入。
  */
 public final class SimpleOccupancyManager
@@ -68,12 +71,12 @@ public final class SimpleOccupancyManager
     this.eventBus = eventBus;
   }
 
-  @Override
   /**
    * 预判是否允许进入指定资源集合（不写入状态）。
    *
-   * <p>用于运行时“尝试放行”的决策预演。
+   * <p>用于运行时”尝试放行”的决策预演。
    */
+  @Override
   public synchronized OccupancyDecision canEnter(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
     Instant now = request.now();
@@ -144,12 +147,12 @@ public final class SimpleOccupancyManager
     return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
   }
 
-  @Override
   /**
    * 预览占用判定（不写入状态、不入队）。
    *
    * <p>用于 ETA 估算，避免对运行时队列造成副作用。
    */
+  @Override
   public synchronized OccupancyDecision canEnterPreview(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
     Instant now = request.now();
@@ -219,7 +222,6 @@ public final class SimpleOccupancyManager
     return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
   }
 
-  @Override
   /**
    * 获取占用：将申请列车写入资源占用与队列状态。
    *
@@ -227,6 +229,7 @@ public final class SimpleOccupancyManager
    *
    * <p>成功获取后会发布 {@link OccupancyAcquiredEvent}，通知订阅者重新评估信号。
    */
+  @Override
   public synchronized OccupancyDecision acquire(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
     OccupancyDecision decision = canEnter(request);
@@ -266,12 +269,12 @@ public final class SimpleOccupancyManager
     return decision;
   }
 
-  @Override
   /**
    * 查询某资源当前占用（只返回首个占用者）。
    *
    * <p>用于诊断，不保证公平队列顺序。
    */
+  @Override
   public synchronized Optional<OccupancyClaim> getClaim(OccupancyResource resource) {
     if (resource == null) {
       return Optional.empty();
@@ -283,12 +286,12 @@ public final class SimpleOccupancyManager
     return Optional.ofNullable(list.get(0));
   }
 
-  @Override
   /**
    * 获取全部占用快照。
    *
    * <p>用于诊断，不建议高频调用。
    */
+  @Override
   public synchronized List<OccupancyClaim> snapshotClaims() {
     List<OccupancyClaim> snapshot = new ArrayList<>();
     for (List<OccupancyClaim> list : claims.values()) {
@@ -300,12 +303,12 @@ public final class SimpleOccupancyManager
     return List.copyOf(snapshot);
   }
 
-  @Override
   /**
    * 获取排队快照。
    *
    * <p>用于诊断单线走廊方向与排队情况。
    */
+  @Override
   public synchronized List<OccupancyQueueSnapshot> snapshotQueues() {
     List<OccupancyQueueSnapshot> snapshots = new ArrayList<>();
     for (Map.Entry<OccupancyResource, ConflictQueue> entry : queues.entrySet()) {
@@ -323,7 +326,36 @@ public final class SimpleOccupancyManager
     return List.copyOf(snapshots);
   }
 
+  /**
+   * 仅刷新冲突队列中的排队位次，不真正获取占用。
+   *
+   * <p>用于停站/门控场景：列车还停在当前位置，但需要持续保留自己在前方冲突区的排队顺序，避免后车先抢到队头。
+   */
   @Override
+  public synchronized void touchQueues(OccupancyRequest request) {
+    if (request == null) {
+      return;
+    }
+    Instant now = request.now();
+    purgeExpiredQueueEntries(now);
+    for (OccupancyResource resource : request.resourceList()) {
+      if (!isQueueableConflict(resource)) {
+        continue;
+      }
+      if (findClaim(claims.get(resource), request.trainName()) != null) {
+        continue;
+      }
+      CorridorDirection direction = queueDirectionFor(request, resource);
+      ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
+      queue.touch(
+          request.trainName(),
+          direction,
+          now,
+          request.priority(),
+          queueEntryOrderFor(request, resource));
+    }
+  }
+
   /**
    * 按列车名释放全部占用资源。
    *
@@ -331,6 +363,7 @@ public final class SimpleOccupancyManager
    *
    * @return 实际释放的占用数量
    */
+  @Override
   public synchronized int releaseByTrain(String trainName) {
     if (trainName == null || trainName.isBlank()) {
       return 0;
@@ -368,7 +401,6 @@ public final class SimpleOccupancyManager
     return removed;
   }
 
-  @Override
   /**
    * 释放指定资源上的单个列车占用。
    *
@@ -376,6 +408,7 @@ public final class SimpleOccupancyManager
    *
    * @return 是否存在并成功移除
    */
+  @Override
   public synchronized boolean releaseResource(
       OccupancyResource resource, Optional<String> trainName) {
     if (resource == null) {
@@ -399,18 +432,27 @@ public final class SimpleOccupancyManager
       }
       return removed;
     }
+    // 全量释放：先收集被驱逐的列车名，再逐一清理队列条目
+    List<String> evictedTrains = new ArrayList<>();
+    for (OccupancyClaim claim : list) {
+      if (claim != null && claim.trainName() != null && !claim.trainName().isBlank()) {
+        evictedTrains.add(claim.trainName());
+      }
+    }
     claims.remove(resource);
-    // 全量释放时，trainName 为空，使用占位符
+    for (String evicted : evictedTrains) {
+      removeFromQueuesForResources(evicted, List.of(resource));
+    }
     publishReleasedEvent("*", List.of(resource), Instant.now());
     return true;
   }
 
-  @Override
   /**
    * 优先级让行判定：当冲突队列中存在更高优先级列车时返回 true。
    *
    * <p>仅针对单线走廊与道岔冲突资源；同向单线不触发让行。
    */
+  @Override
   public synchronized boolean shouldYield(OccupancyRequest request) {
     if (request == null || request.trainName() == null || request.trainName().isBlank()) {
       return false;
@@ -1052,10 +1094,8 @@ public final class SimpleOccupancyManager
         }
       }
     }
-    // 排除自己
+    // 排除自己（大小写不敏感）
     if (excludeTrain != null) {
-      affected.remove(excludeTrain);
-      // 忽略大小写移除
       affected.removeIf(name -> name.equalsIgnoreCase(excludeTrain));
     }
     return new ArrayList<>(affected);
@@ -1076,22 +1116,16 @@ public final class SimpleOccupancyManager
       }
       String key = normalize(trainName);
       priorities.put(key, priority);
-      int stableEntryOrder = resolveStableEntryOrder(key, entryOrder);
+      OccupancyQueueEntry existing = detachEntry(key);
+      int stableEntryOrder = resolveStableEntryOrder(existing, entryOrder);
       entryOrders.put(key, stableEntryOrder);
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
-      OccupancyQueueEntry existing = target.get(key);
-      if (existing == null) {
-        target.put(
-            key,
-            new OccupancyQueueEntry(trainName, direction, now, now, priority, stableEntryOrder));
-        return;
-      }
       target.put(
           key,
           new OccupancyQueueEntry(
-              existing.trainName(),
+              existing != null ? existing.trainName() : trainName,
               direction,
-              existing.firstSeen(),
+              existing != null ? existing.firstSeen() : now,
               now,
               priority,
               stableEntryOrder));
@@ -1282,15 +1316,16 @@ public final class SimpleOccupancyManager
       return a.firstSeen().compareTo(b.firstSeen());
     }
 
-    private int resolveStableEntryOrder(String key, int entryOrder) {
-      if (key == null || key.isBlank()) {
-        return entryOrder;
-      }
-      Integer existing = entryOrders.get(key);
+    /**
+     * 计算稳定的冲突入口序号。
+     *
+     * <p>仅在列车当前仍处于队列中时沿用更小的 entryOrder；旧条目已移除/过期时会重新采用本次值。
+     */
+    private int resolveStableEntryOrder(OccupancyQueueEntry existing, int entryOrder) {
       if (existing == null) {
         return entryOrder;
       }
-      return Math.min(existing, entryOrder);
+      return Math.min(existing.entryOrder(), entryOrder);
     }
 
     boolean hasHigherPriorityAny(String trainName, int priority, Instant now) {
@@ -1378,6 +1413,7 @@ public final class SimpleOccupancyManager
       purgeExpired(forward, now, ttl);
       purgeExpired(backward, now, ttl);
       purgeExpired(neutral, now, ttl);
+      pruneDetachedMetadata();
     }
 
     private void purgeExpired(
@@ -1394,6 +1430,51 @@ public final class SimpleOccupancyManager
           iterator.remove();
         }
       }
+    }
+
+    /**
+     * 从所有方向队列中摘除旧条目，并保留最早 firstSeen。
+     *
+     * <p>用于处理方向更新时的“中立队列 -> 定向队列”迁移，避免同一列车在多个方向桶中重复存在。
+     */
+    private OccupancyQueueEntry detachEntry(String key) {
+      if (key == null || key.isBlank()) {
+        return null;
+      }
+      OccupancyQueueEntry existing = removeEntry(forward, key);
+      existing = pickOlder(existing, removeEntry(backward, key));
+      existing = pickOlder(existing, removeEntry(neutral, key));
+      return existing;
+    }
+
+    private static OccupancyQueueEntry removeEntry(
+        LinkedHashMap<String, OccupancyQueueEntry> map, String key) {
+      return map == null || key == null ? null : map.remove(key);
+    }
+
+    private static OccupancyQueueEntry pickOlder(
+        OccupancyQueueEntry current, OccupancyQueueEntry candidate) {
+      if (candidate == null) {
+        return current;
+      }
+      if (current == null) {
+        return candidate;
+      }
+      return candidate.firstSeen().isBefore(current.firstSeen()) ? candidate : current;
+    }
+
+    /**
+     * 清理不再出现在任一方向桶中的元数据。
+     *
+     * <p>防止 TTL 回收后残留旧 priority/entryOrder，影响列车重新排队时的排序结果。
+     */
+    private void pruneDetachedMetadata() {
+      Set<String> activeKeys = new LinkedHashSet<>();
+      activeKeys.addAll(forward.keySet());
+      activeKeys.addAll(backward.keySet());
+      activeKeys.addAll(neutral.keySet());
+      priorities.keySet().removeIf(key -> !activeKeys.contains(key));
+      entryOrders.keySet().removeIf(key -> !activeKeys.contains(key));
     }
 
     private LinkedHashMap<String, OccupancyQueueEntry> mapFor(CorridorDirection direction) {

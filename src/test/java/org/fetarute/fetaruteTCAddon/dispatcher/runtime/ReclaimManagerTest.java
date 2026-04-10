@@ -160,6 +160,46 @@ class ReclaimManagerTest {
     verify(ticketAssigner, times(1)).forceAssign(eq("train-life"), any());
   }
 
+  @Test
+  void performReclaimCheckDoesNotOverReclaimSameDirectionAfterSuccessfulClaim() {
+    Instant now = Instant.now();
+    UUID routeId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, stationId);
+
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq("train-a"), any())).thenReturn(true);
+
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-a",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        now.minusSeconds(360),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    layoverRegistry.register(
+        "train-b",
+        "surc:s:ppk:2",
+        NodeId.of("SURC:S:PPK:2"),
+        now.minusSeconds(240),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, times(1)).forceAssign(eq("train-a"), any());
+    verify(ticketAssigner, never()).forceAssign(eq("train-b"), any());
+  }
+
   private static ConfigManager mockConfigManager() {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);

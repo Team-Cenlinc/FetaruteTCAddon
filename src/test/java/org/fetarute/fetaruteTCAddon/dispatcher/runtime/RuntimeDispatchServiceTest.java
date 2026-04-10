@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -31,6 +32,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus;
+import org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -233,6 +236,52 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleRenameIfNeededKeepsTaggedCanonicalNameForSplitAlias() {
+    RuntimeDispatchService service = createMinimalService();
+    TagStore tags = new TagStore("train-1~a", "FTA_TRAIN_NAME=train-1");
+
+    assertEquals("train-1", service.resolveTrackedTrainName(tags.properties()).orElseThrow());
+    assertTrue(service.resolveManagedTrainName(tags.properties()).isEmpty());
+    assertEquals("train-1", service.handleRenameIfNeeded(tags.properties()));
+    assertEquals(
+        "train-1",
+        TrainTagHelper.readTagValue(tags.properties(), RouteProgressRegistry.TAG_TRAIN_NAME)
+            .orElseThrow());
+  }
+
+  @Test
+  void buildAbnormalCleanupWarningIncludesReasonLocationsAndProgress() {
+    RuntimeDispatchService.AbnormalProgressSnapshot progress =
+        new RuntimeDispatchService.AbnormalProgressSnapshot(
+            "route-1", 4, "NEXT", "LAST", SignalAspect.STOP.name());
+    RuntimeDispatchService.AbnormalGroupSnapshot snapshot =
+        new RuntimeDispatchService.AbnormalGroupSnapshot(
+            "unexpected-split-source",
+            "removedMember=abc@world(1.00,2.00,3.00) sourceTrain=train-1",
+            "train-1~a",
+            "train-1",
+            "train-1",
+            "train-1",
+            true,
+            3,
+            "world",
+            "world(1.00,2.00,3.00)",
+            "world(0.50,2.00,2.50)",
+            "world(0.00,2.00,2.00)",
+            progress);
+
+    String message = RuntimeDispatchService.buildAbnormalCleanupWarning(snapshot);
+
+    assertTrue(message.contains("reason=unexpected-split-source"));
+    assertTrue(message.contains("rawTrain=train-1~a"));
+    assertTrue(message.contains("logicalTrain=train-1"));
+    assertTrue(message.contains("head=world(1.00,2.00,3.00)"));
+    assertTrue(message.contains("route=route-1"));
+    assertTrue(message.contains("index=4"));
+    assertTrue(message.contains("signal=STOP"));
+  }
+
+  @Test
   void handleSignalTickBlocksDeadlockReleaseWhenHardOccupancyBlockersExist() {
     NodeId current = NodeId.of("A");
     NodeId next = NodeId.of("B");
@@ -302,6 +351,169 @@ class RuntimeDispatchServiceTest {
     assertTrue(train.stopCalls >= 1);
     SignalAspect aspect = service.snapshotProgressEntries().get("train-1").lastSignal();
     assertEquals(SignalAspect.STOP, aspect);
+    assertTrue(
+        service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
+  }
+
+  @Test
+  void handleSignalTickAllowsConflictOnlyBlockerWhileRecordingSnapshot() {
+    NodeId current = NodeId.of("A");
+    NodeId next = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      OccupancyResource.forConflict("switcher:test"),
+                      "front-train",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  true, request.now(), SignalAspect.PROCEED, List.of(blocker));
+            });
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    assertTrue(
+        service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
+    assertEquals(
+        SignalAspect.PROCEED, service.snapshotProgressEntries().get("train-1").lastSignal());
+  }
+
+  @Test
+  void handleSignalTickBlockerSnapshotSuppressesHealthRecoveryWhileFresh() {
+    RuntimeDispatchService service = createServiceWithHardNodeBlocker();
+    UUID worldId = UUID.randomUUID();
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+    assertTrue(
+        service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
+
+    RuntimeDispatchService dispatchFacade = mock(RuntimeDispatchService.class);
+    when(dispatchFacade.getTrainState("train-1"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.TrainRuntimeState(
+                    "train-1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchFacade.recentBlockerTrains(eq("train-1"), any()))
+        .thenAnswer(
+            invocation -> service.recentBlockerTrains("train-1", invocation.getArgument(1)));
+
+    DwellRegistry dwellRegistry = mock(DwellRegistry.class);
+    when(dwellRegistry.remainingSeconds("train-1")).thenReturn(Optional.empty());
+
+    TrainHealthMonitor monitor =
+        new TrainHealthMonitor(dispatchFacade, dwellRegistry, new HealthAlertBus(), msg -> {});
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train-1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train-1"), t0.plusSeconds(25));
+
+    assertEquals(0, result.progressStuckCount());
+    verify(dispatchFacade, never()).refreshSignalByName("train-1");
+    verify(dispatchFacade, never()).reissueDestinationByName("train-1");
+    verify(dispatchFacade, never()).forceRelaunchByName("train-1");
+  }
+
+  @Test
+  void staleBlockerSnapshotAllowsHealthRecoveryAfterSignalTickChain() throws Exception {
+    RuntimeDispatchService service = createServiceWithHardNodeBlocker();
+    UUID worldId = UUID.randomUUID();
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+    backdateBlockerSnapshot(service, "train-1", Instant.now().minusSeconds(120));
+
+    RuntimeDispatchService dispatchFacade = mock(RuntimeDispatchService.class);
+    when(dispatchFacade.getTrainState("train-1"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.TrainRuntimeState(
+                    "train-1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchFacade.recentBlockerTrains(eq("train-1"), any()))
+        .thenAnswer(
+            invocation -> service.recentBlockerTrains("train-1", invocation.getArgument(1)));
+
+    DwellRegistry dwellRegistry = mock(DwellRegistry.class);
+    when(dwellRegistry.remainingSeconds("train-1")).thenReturn(Optional.empty());
+
+    TrainHealthMonitor monitor =
+        new TrainHealthMonitor(dispatchFacade, dwellRegistry, new HealthAlertBus(), msg -> {});
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setBlockerSnapshotMaxAge(Duration.ofSeconds(30));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train-1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train-1"), t0.plusSeconds(25));
+
+    assertEquals(1, result.progressStuckCount());
+    verify(dispatchFacade).refreshSignalByName("train-1");
+    verify(dispatchFacade, never()).reissueDestinationByName("train-1");
+    verify(dispatchFacade, never()).forceRelaunchByName("train-1");
   }
 
   @Test
@@ -529,6 +741,65 @@ class RuntimeDispatchServiceTest {
     assertTrue(service.hasDepartureGate("train-1"));
     SignalAspect aspect = service.snapshotProgressEntries().get("train-1").lastSignal();
     assertEquals(SignalAspect.STOP, aspect);
+  }
+
+  @Test
+  void handleSignalTickRefreshesForwardQueueWhileDepartureGateIsHeld() {
+    NodeId current = NodeId.of("ST");
+    NodeId next = NodeId.of("NEXT");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings().extraInterfaces(OccupancyQueueSupport.class));
+    OccupancyQueueSupport queueSupport = (OccupancyQueueSupport) occupancyManager;
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    service.acquireDepartureGate("train-1", "sid-1", "test_hold");
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    verify(queueSupport).touchQueues(any());
   }
 
   @Test
@@ -2456,6 +2727,28 @@ class RuntimeDispatchServiceTest {
     assertTrue(blockers.isEmpty());
   }
 
+  @Test
+  void recentBlockerTrainsExpiresStaleSnapshot() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    java.lang.reflect.Field field =
+        RuntimeDispatchService.class.getDeclaredField("blockerSnapshots");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, Object> blockerSnapshots =
+        (java.util.concurrent.ConcurrentMap<String, Object>) field.get(service);
+    Class<?> snapshotClass =
+        Class.forName(
+            "org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService$BlockerSnapshot");
+    java.lang.reflect.Constructor<?> constructor =
+        snapshotClass.getDeclaredConstructor(Set.class, Instant.class);
+    constructor.setAccessible(true);
+    Object snapshot =
+        constructor.newInstance(Set.of("front-train"), Instant.now().minusSeconds(120));
+    blockerSnapshots.put("train-1", snapshot);
+
+    assertTrue(service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).isEmpty());
+  }
+
   // ====== getTrainState 测试 ======
 
   @Test
@@ -2488,5 +2781,76 @@ class RuntimeDispatchServiceTest {
         null,
         mock(TrainConfigResolver.class),
         msg -> {});
+  }
+
+  private RuntimeDispatchService createServiceWithHardNodeBlocker() {
+    NodeId current = NodeId.of("A");
+    NodeId next = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(any(UUID.class)))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      OccupancyResource.forNode(next),
+                      "front-train",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  true, request.now(), SignalAspect.PROCEED, List.of(blocker));
+            });
+
+    return new RuntimeDispatchService(
+        occupancyManager,
+        railGraphService,
+        routeDefinitions,
+        new RouteProgressRegistry(),
+        mock(SignNodeRegistry.class),
+        mock(LayoverRegistry.class),
+        new DwellRegistry(),
+        configManager,
+        null,
+        new TrainConfigResolver(),
+        null);
+  }
+
+  private static void backdateBlockerSnapshot(
+      RuntimeDispatchService service, String trainName, Instant sampledAt) throws Exception {
+    java.lang.reflect.Field field =
+        RuntimeDispatchService.class.getDeclaredField("blockerSnapshots");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, Object> blockerSnapshots =
+        (java.util.concurrent.ConcurrentMap<String, Object>) field.get(service);
+    Class<?> snapshotClass =
+        Class.forName(
+            "org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService$BlockerSnapshot");
+    java.lang.reflect.Constructor<?> constructor =
+        snapshotClass.getDeclaredConstructor(Set.class, Instant.class);
+    constructor.setAccessible(true);
+    blockerSnapshots.put(trainName, constructor.newInstance(Set.of("front-train"), sampledAt));
   }
 }

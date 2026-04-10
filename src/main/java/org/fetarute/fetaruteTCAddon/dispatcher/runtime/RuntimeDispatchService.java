@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
@@ -323,7 +325,10 @@ public final class RuntimeDispatchService {
     }
     RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
     TrainProperties properties = train.properties();
-    String trainName = properties != null ? properties.getTrainName() : "unknown";
+    String trainName = resolveTrackedTrainName(properties).orElse(null);
+    if (trainName == null || trainName.isBlank()) {
+      trainName = "unknown";
+    }
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
     if (routeOpt.isEmpty()) {
       return true;
@@ -399,18 +404,9 @@ public final class RuntimeDispatchService {
       return false;
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
-    updateBlockerSnapshot(trainName, decision, now);
-    boolean hardBlockerBypass =
-        decision.allowed() && hasHardBlockersForTrain(trainName, decision.blockers());
-    boolean proceedAllowed = decision.allowed() && !hardBlockerBypass;
-    if (hardBlockerBypass) {
-      debugLogger.accept(
-          "冲突区放行抑制: train="
-              + trainName
-              + " scope=departure reason=hard_blockers blockers="
-              + summarizeBlockers(decision));
-    }
-    logDeadlockReleaseIfNeeded(trainName, decision, "departure", proceedAllowed);
+    ProceedDecision proceedDecision =
+        evaluateProceedDecision(trainName, decision, now, "departure");
+    boolean proceedAllowed = proceedDecision.proceedAllowed();
     if (!proceedAllowed) {
       debugLogger.accept(
           "发车门控阻塞: train="
@@ -447,14 +443,16 @@ public final class RuntimeDispatchService {
     }
     RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
     TrainProperties properties = train.properties();
-    String trainName = properties != null ? properties.getTrainName() : "unknown";
 
     // 非 FTA 管控列车：静默跳过
     if (!isFtaManagedTrain(properties)) {
       return;
     }
 
-    handleRenameIfNeeded(properties, trainName);
+    String trainName = handleRenameIfNeeded(properties);
+    if (trainName == null || trainName.isBlank()) {
+      trainName = resolveTrackedTrainName(properties).orElse("unknown");
+    }
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
     if (routeOpt.isEmpty()) {
@@ -552,10 +550,11 @@ public final class RuntimeDispatchService {
     Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
     if (graphOpt.isPresent()) {
       RailGraph graph = graphOpt.get();
+      final String logicalTrainName = trainName;
       resolveDynamicStationTargetIfNeeded(trainName, route, nextIndex, currentNode, graph)
           .ifPresent(
               selected -> {
-                recordEffectiveNode(trainName, route, nextIndex, selected);
+                recordEffectiveNode(logicalTrainName, route, nextIndex, selected);
               });
       nextNode = resolveEffectiveNode(trainName, route, nextIndex);
     }
@@ -588,7 +587,7 @@ public final class RuntimeDispatchService {
     if (properties == null) {
       return;
     }
-    String trainName = properties.getTrainName();
+    String trainName = resolveTrackedTrainName(properties).orElse(null);
     if (trainName == null || trainName.isBlank()) {
       return;
     }
@@ -612,14 +611,16 @@ public final class RuntimeDispatchService {
     com.bergerkiller.bukkit.tc.controller.MinecartGroup group = event.getGroup();
     RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
     TrainProperties properties = train.properties();
-    String trainName = properties != null ? properties.getTrainName() : "unknown";
 
     // 非 FTA 管控列车：静默跳过，不输出日志
     if (!isFtaManagedTrain(properties)) {
       return;
     }
 
-    handleRenameIfNeeded(properties, trainName);
+    String trainName = handleRenameIfNeeded(properties);
+    if (trainName == null || trainName.isBlank()) {
+      trainName = resolveTrackedTrainName(properties).orElse("unknown");
+    }
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
     if (routeOpt.isEmpty()) {
@@ -762,10 +763,11 @@ public final class RuntimeDispatchService {
     RailGraph graph = graphOpt.orElse(null);
     if (stopAtWaypoint) {
       if (graph != null) {
+        final String logicalTrainName = trainName;
         resolveDynamicStationTargetIfNeeded(trainName, route, nextIndex, currentNode, graph)
             .ifPresent(
                 selected -> {
-                  recordEffectiveNode(trainName, route, nextIndex, selected);
+                  recordEffectiveNode(logicalTrainName, route, nextIndex, selected);
                 });
         nextNode = resolveEffectiveNode(trainName, route, nextIndex);
       }
@@ -810,7 +812,8 @@ public final class RuntimeDispatchService {
             lookaheadEdges,
             minClearEdges,
             rearGuardEdges,
-            runtimeSettings.switcherZoneEdges());
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
     Optional<DynamicSelection> dynamicSelectionOpt =
         selectDynamicStationTargetForProgress(
@@ -851,16 +854,8 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
-    boolean hardBlockerBypass =
-        decision.allowed() && hasHardBlockersForTrain(trainName, decision.blockers());
-    boolean proceedAllowed = decision.allowed() && !hardBlockerBypass;
-    if (hardBlockerBypass) {
-      debugLogger.accept(
-          "冲突区放行抑制: train="
-              + trainName
-              + " scope=progress reason=hard_blockers blockers="
-              + summarizeBlockers(decision));
-    }
+    ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, "progress");
+    boolean proceedAllowed = proceedDecision.proceedAllowed();
     // 诊断：输出请求资源与判定结果
     debugLogger.accept(
         "调度推进判定: train="
@@ -874,12 +869,11 @@ public final class RuntimeDispatchService {
             + " allowed="
             + proceedAllowed
             + " rawAllowed="
-            + decision.allowed()
+            + proceedDecision.rawAllowed()
             + " blockers="
             + decision.blockers().size()
             + " signal="
             + decision.signal());
-    logDeadlockReleaseIfNeeded(trainName, decision, "progress", proceedAllowed);
     if (!proceedAllowed) {
       UUID worldId = train.worldId();
       SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(worldId);
@@ -912,19 +906,10 @@ public final class RuntimeDispatchService {
         properties.clearDestinationRoute();
         properties.setDestination(destinationName);
       }
-      // 仅保留当前节点占用，避免后车追尾
-      if (occupancyManager != null && currentNode != null) {
-        OccupancyResource keepResource = OccupancyResource.forNode(currentNode);
-        releaseResourcesNotInRequest(trainName, List.of(keepResource));
-        OccupancyRequest locationRequest =
-            new OccupancyRequest(
-                trainName,
-                Optional.of(route.id()),
-                now,
-                List.of(keepResource),
-                java.util.Map.of(),
-                0);
-        occupancyManager.acquire(locationRequest);
+      // 阻塞等待期间与停站逻辑保持一致：保留当前位置/尾部保护，并持续刷新前向冲突队列位次，
+      // 避免后车在当前车等待放行时先抢到更靠前的队头。
+      if (occupancyManager != null) {
+        retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
       }
       updateSignalOrWarn(trainName, aspect, now);
       applyControl(
@@ -1213,9 +1198,7 @@ public final class RuntimeDispatchService {
         continue;
       }
       TrainProperties properties = train.properties();
-      if (properties != null && properties.getTrainName() != null) {
-        activeTrainNames.add(properties.getTrainName());
-      }
+      resolveTrackedTrainName(properties).ifPresent(activeTrainNames::add);
       handleSignalTick(train, false);
     }
     cleanupOrphanOccupancyClaims(activeTrainNames);
@@ -1230,61 +1213,111 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank()) {
       return;
     }
-    layoverRegistry.unregister(trainName);
-    if (occupancyManager != null) {
-      occupancyManager.releaseByTrain(trainName);
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    String resolvedTrainName =
+        resolveTrackedTrainName(properties)
+            .filter(name -> !name.isBlank())
+            .orElse(trainName.trim());
+    if (properties != null
+        && isSplitAliasName(
+            normalizeTrainName(properties.getTrainName()).orElse(null), resolvedTrainName)) {
+      return;
     }
-    progressRegistry.remove(trainName);
-    stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    clearDepartureGate(trainName);
-    clearNodeHistory(trainName);
-    dynamicAllocator.clearAllocations(trainName);
-    effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
-    blockerSnapshots.remove(normalizeTrainKey(trainName));
+    layoverRegistry.unregister(resolvedTrainName);
+    if (occupancyManager != null) {
+      occupancyManager.releaseByTrain(resolvedTrainName);
+    }
+    progressRegistry.remove(resolvedTrainName);
+    stallStates.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
+    waypointStopStates.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
+    missingSignalWarned.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
+    stopWaypointLogState.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
+    progressTriggerState.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
+    clearDepartureGate(resolvedTrainName);
+    clearNodeHistory(resolvedTrainName);
+    dynamicAllocator.clearAllocations(resolvedTrainName);
+    routeTrainTracker.remove(resolvedTrainName);
+    effectiveNodeOverrides.remove(normalizeTrainKey(resolvedTrainName));
+    blockerSnapshots.remove(normalizeTrainKey(resolvedTrainName));
   }
 
   /**
    * 异常列车清理入口：用于 derail/split/脱挂等场景的兜底回收。
    *
-   * <p>仅处理 FTA 托管列车：先清理运行时状态与占用，再触发实体销毁（延迟 1 tick），避免异常编组继续参与调度。
+   * <p>对所有 TrainCarts 列车生效：
+   *
+   * <ul>
+   *   <li>FTA 托管列车：记录诊断日志、清理运行时状态与占用，再销毁实体
+   *   <li>普通列车：记录诊断日志并直接销毁实体
+   * </ul>
    *
    * @param group 目标列车组
    * @param reason 清理原因（用于日志）
    */
-  public void handleAbnormalGroup(
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup group, String reason) {
+  public void handleAbnormalGroup(MinecartGroup group, String reason) {
+    handleAbnormalGroup(group, reason, null);
+  }
+
+  /**
+   * 异常列车清理入口：记录 split/脱轨等诊断上下文后执行兜底回收。
+   *
+   * <p>detail 用于补充事件侧信息（例如被拆出的 member UUID、源/目标编组名），方便事后排查 TrainCarts unexpected split 的成因。
+   *
+   * @param group 目标列车组
+   * @param reason 清理原因（用于日志）
+   * @param detail 补充诊断信息（可为空）
+   */
+  public void handleAbnormalGroup(MinecartGroup group, String reason, String detail) {
     if (group == null) {
       return;
     }
     TrainProperties properties = group.getProperties();
-    if (properties == null || !isFtaManagedTrain(properties)) {
-      return;
-    }
-    String trainName = properties.getTrainName();
-    if (trainName == null || trainName.isBlank()) {
-      return;
-    }
     String normalizedReason =
         reason == null || reason.isBlank() ? "unknown" : reason.trim().toLowerCase(Locale.ROOT);
-    if (shouldSkipDuplicateAbnormalCleanup(trainName)) {
-      return;
+    boolean ftaManaged = properties != null && isFtaManagedTrain(properties);
+    String rawTrainName =
+        properties != null ? normalizeTrainName(properties.getTrainName()).orElse(null) : null;
+    String logicalTrainName =
+        ftaManaged
+            ? normalizeTrainName(handleRenameIfNeeded(properties)).orElse(rawTrainName)
+            : resolveTrackedTrainName(properties).orElse(rawTrainName);
+    AbnormalGroupSnapshot snapshot =
+        captureAbnormalGroupSnapshot(
+            group,
+            properties,
+            normalizedReason,
+            detail,
+            rawTrainName,
+            logicalTrainName,
+            ftaManaged);
+    HEALTH_LOGGER.warning(buildAbnormalCleanupWarning(snapshot));
+
+    if (snapshot.ftaManaged()
+        && snapshot.cleanupTrainName() != null
+        && !snapshot.cleanupTrainName().isBlank()) {
+      boolean skipStateCleanup = shouldSkipDuplicateAbnormalCleanup(snapshot.cleanupKey());
+      if (!skipStateCleanup) {
+        debugLogger.accept(
+            "异常列车清理: train=" + snapshot.cleanupTrainName() + " reason=" + normalizedReason);
+        handleTrainRemoved(snapshot.cleanupTrainName());
+      } else {
+        debugLogger.accept(
+            "异常列车状态清理去重: train=" + snapshot.cleanupTrainName() + " reason=" + normalizedReason);
+      }
     }
-    debugLogger.accept("异常列车清理: train=" + trainName + " reason=" + normalizedReason);
-    handleTrainRemoved(trainName);
-    destroyAbnormalTrainEntities(trainName, group, properties);
+    // 状态清理按 trainName 去重，但实体销毁必须始终尝试覆盖当前事件组，
+    // 否则 split/脱挂时后续拆出的“半编组”可能因为命中去重窗口而残留。
+    destroyAbnormalTrainEntities(snapshot.cleanupTrainName(), group, properties);
   }
 
   /**
-   * 异常清理去重：同一列车在短窗口内仅执行一次“清状态 + 销毁实体”。
+   * 异常清理去重：同一列车在短窗口内仅执行一次“运行时状态清理”。
    *
-   * <p>TrainCarts 在 split/脱挂时可能连续抛出多个 member-remove 事件，不去重会导致重复日志与重复清理。
+   * <p>TrainCarts 在 split/脱挂时可能连续抛出多个 member-remove 事件，不去重会导致重复日志与重复释放占用；但实体销毁仍由调用方继续尝试，
+   * 以覆盖后续拆出的残余编组。
    *
    * @param trainName 列车名
-   * @return true 表示命中去重窗口，应跳过本次处理
+   * @return true 表示命中去重窗口，应跳过本次状态清理
    */
   private boolean shouldSkipDuplicateAbnormalCleanup(String trainName) {
     String key = normalizeTrainKey(trainName);
@@ -1321,20 +1354,18 @@ public final class RuntimeDispatchService {
    * <p>优先销毁 trainName 当前 holder，同时兜底销毁事件传入 group 与其 properties.holder，避免事件组引用失效时漏销毁。
    */
   private void destroyAbnormalTrainEntities(
-      String trainName,
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup eventGroup,
-      TrainProperties eventProperties) {
-    java.util.Set<com.bergerkiller.bukkit.tc.controller.MinecartGroup> targets =
-        new java.util.LinkedHashSet<>();
-    TrainProperties canonicalProperties = TrainPropertiesStore.get(trainName);
+      String trainName, MinecartGroup eventGroup, TrainProperties eventProperties) {
+    java.util.Set<MinecartGroup> targets = new java.util.LinkedHashSet<>();
+    TrainProperties canonicalProperties =
+        trainName == null || trainName.isBlank() ? null : TrainPropertiesStore.get(trainName);
     if (canonicalProperties != null) {
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup holder = canonicalProperties.getHolder();
+      MinecartGroup holder = canonicalProperties.getHolder();
       if (holder != null) {
         targets.add(holder);
       }
     }
     if (eventProperties != null) {
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup holder = eventProperties.getHolder();
+      MinecartGroup holder = eventProperties.getHolder();
       if (holder != null) {
         targets.add(holder);
       }
@@ -1349,10 +1380,175 @@ public final class RuntimeDispatchService {
       if (target.isValid()) {
         new TrainCartsRuntimeHandle(target).destroy();
       } else {
-        debugLogger.accept("异常列车销毁跳过（group 已 invalid）: train=" + trainName);
+        debugLogger.accept(
+            "异常列车销毁跳过（group 已 invalid）: train="
+                + (trainName == null || trainName.isBlank() ? "-" : trainName));
       }
     }
   }
+
+  private AbnormalGroupSnapshot captureAbnormalGroupSnapshot(
+      MinecartGroup group,
+      TrainProperties properties,
+      String reason,
+      String detail,
+      String rawTrainName,
+      String logicalTrainName,
+      boolean ftaManaged) {
+    String cleanupTrainName = firstNonBlank(logicalTrainName, rawTrainName);
+    String cleanupKey =
+        cleanupTrainName != null
+            ? cleanupTrainName
+            : "group@" + Integer.toHexString(System.identityHashCode(group));
+    RouteProgressRegistry.RouteProgressEntry progressEntry =
+        cleanupTrainName != null ? progressRegistry.get(cleanupTrainName).orElse(null) : null;
+    return new AbnormalGroupSnapshot(
+        reason,
+        detail,
+        rawTrainName,
+        logicalTrainName,
+        cleanupTrainName,
+        cleanupKey,
+        ftaManaged,
+        safeGroupSize(group),
+        resolveGroupWorldName(group),
+        describeMemberLocation(group != null ? group.head() : null),
+        describeMemberLocation(group != null ? group.middle() : null),
+        describeMemberLocation(group != null ? group.tail() : null),
+        captureAbnormalProgressSnapshot(properties, progressEntry));
+  }
+
+  private AbnormalProgressSnapshot captureAbnormalProgressSnapshot(
+      TrainProperties properties, RouteProgressRegistry.RouteProgressEntry entry) {
+    if (entry != null) {
+      return new AbnormalProgressSnapshot(
+          entry.routeId() != null ? entry.routeId().value() : null,
+          entry.currentIndex(),
+          entry.nextTarget().map(NodeId::value).orElse(null),
+          entry.lastPassedGraphNode().map(NodeId::value).orElse(null),
+          entry.lastSignal() != null ? entry.lastSignal().name() : null);
+    }
+    Integer taggedIndex =
+        properties != null
+            ? TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
+                .orElse(null)
+            : null;
+    String routeCode =
+        properties != null
+            ? TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_CODE)
+                .orElse(null)
+            : null;
+    if (taggedIndex == null && routeCode == null) {
+      return null;
+    }
+    return new AbnormalProgressSnapshot(routeCode, taggedIndex, null, null, null);
+  }
+
+  static String buildAbnormalCleanupWarning(AbnormalGroupSnapshot snapshot) {
+    StringBuilder builder = new StringBuilder("异常列车清理");
+    if (snapshot == null) {
+      return builder.toString();
+    }
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "reason", snapshot.reason());
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "detail", snapshot.detail());
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "rawTrain", snapshot.rawTrainName());
+    if (!sameDiagnosticText(snapshot.logicalTrainName(), snapshot.rawTrainName())) {
+      RuntimeDiagnosticFormatter.appendKeyValue(
+          builder, "logicalTrain", snapshot.logicalTrainName());
+    }
+    builder.append(" ftaManaged=").append(snapshot.ftaManaged());
+    if (snapshot.carCount() >= 0) {
+      builder.append(" cars=").append(snapshot.carCount());
+    }
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "world", snapshot.worldName());
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "head", snapshot.headLocation());
+    if (!sameDiagnosticText(snapshot.middleLocation(), snapshot.headLocation())
+        && !sameDiagnosticText(snapshot.middleLocation(), snapshot.tailLocation())) {
+      RuntimeDiagnosticFormatter.appendKeyValue(builder, "middle", snapshot.middleLocation());
+    }
+    RuntimeDiagnosticFormatter.appendKeyValue(builder, "tail", snapshot.tailLocation());
+    if (snapshot.progress() != null) {
+      RuntimeDiagnosticFormatter.appendKeyValue(builder, "route", snapshot.progress().routeId());
+      if (snapshot.progress().currentIndex() != null) {
+        builder.append(" index=").append(snapshot.progress().currentIndex());
+      }
+      RuntimeDiagnosticFormatter.appendKeyValue(builder, "next", snapshot.progress().nextTarget());
+      RuntimeDiagnosticFormatter.appendKeyValue(
+          builder, "lastPassed", snapshot.progress().lastPassedNode());
+      RuntimeDiagnosticFormatter.appendKeyValue(
+          builder, "signal", snapshot.progress().lastSignal());
+    }
+    return builder.toString();
+  }
+
+  private static boolean sameDiagnosticText(String left, String right) {
+    if (left == null || right == null) {
+      return false;
+    }
+    return left.equalsIgnoreCase(right);
+  }
+
+  private static String firstNonBlank(String... candidates) {
+    if (candidates == null) {
+      return null;
+    }
+    for (String candidate : candidates) {
+      if (candidate != null && !candidate.isBlank()) {
+        return candidate.trim();
+      }
+    }
+    return null;
+  }
+
+  private static int safeGroupSize(MinecartGroup group) {
+    if (group == null) {
+      return -1;
+    }
+    try {
+      return group.size();
+    } catch (Throwable ignored) {
+      return -1;
+    }
+  }
+
+  private static String resolveGroupWorldName(MinecartGroup group) {
+    if (group != null && group.getWorld() != null) {
+      return group.getWorld().getName();
+    }
+    return null;
+  }
+
+  private static String describeMemberLocation(MinecartMember<?> member) {
+    if (member == null) {
+      return null;
+    }
+    org.bukkit.block.Block block = member.getBlock(0, 0, 0);
+    return block != null ? RuntimeDiagnosticFormatter.formatLocation(block.getLocation()) : null;
+  }
+
+  /** 异常列车诊断快照。 */
+  record AbnormalGroupSnapshot(
+      String reason,
+      String detail,
+      String rawTrainName,
+      String logicalTrainName,
+      String cleanupTrainName,
+      String cleanupKey,
+      boolean ftaManaged,
+      int carCount,
+      String worldName,
+      String headLocation,
+      String middleLocation,
+      String tailLocation,
+      AbnormalProgressSnapshot progress) {}
+
+  /** 异常列车的运行时进度快照。 */
+  record AbnormalProgressSnapshot(
+      String routeId,
+      Integer currentIndex,
+      String nextTarget,
+      String lastPassedNode,
+      String lastSignal) {}
 
   /**
    * 列车运行时状态快照（用于健康检查）。
@@ -1390,6 +1586,16 @@ public final class RuntimeDispatchService {
       sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
     }
   }
+
+  /**
+   * 放行判定结果。
+   *
+   * @param proceedAllowed 最终是否允许放行（已扣除硬阻塞抑制）
+   * @param rawAllowed 占用判定原始结果
+   * @param hardBlockerBypass 是否命中了“allowed=true 但仍有硬阻塞”的抑制场景
+   */
+  private record ProceedDecision(
+      boolean proceedAllowed, boolean rawAllowed, boolean hardBlockerBypass) {}
 
   /**
    * 获取列车运行时状态快照。
@@ -1832,14 +2038,14 @@ public final class RuntimeDispatchService {
     if (properties == null) {
       return;
     }
-    String trainName = properties.getTrainName();
+    String trainName = resolveTrackedTrainName(properties).orElse(properties.getTrainName());
     // 非 FTA 管控列车：静默跳过
     if (!isFtaManagedTrain(properties)) {
       clearDepartureGate(trainName);
       return;
     }
     Instant now = Instant.now();
-    handleRenameIfNeeded(properties, trainName);
+    trainName = handleRenameIfNeeded(properties);
     if (layoverRegistry.get(trainName).isPresent()) {
       clearDepartureGate(trainName);
       // Layover 状态：保留当前位置节点的占用，防止后车"反向占用"导致死锁
@@ -1890,10 +2096,11 @@ public final class RuntimeDispatchService {
       return;
     }
     RouteDefinition route = routeOpt.get();
+    final String logicalTrainName = trainName;
     RouteProgressRegistry.RouteProgressEntry progressEntry =
         progressRegistry
             .get(trainName)
-            .orElseGet(() -> progressRegistry.initFromTags(trainName, properties, route));
+            .orElseGet(() -> progressRegistry.initFromTags(logicalTrainName, properties, route));
     int currentIndex = progressEntry.currentIndex();
     if (currentIndex < 0) {
       return;
@@ -1926,34 +2133,7 @@ public final class RuntimeDispatchService {
         // 容错：列车已恢复移动时清理遗留 gate，避免后续长时间锁死。
         clearDepartureGate(trainName);
       } else {
-        Optional<NodeId> nextNode =
-            currentIndex + 1 < route.waypoints().size()
-                ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
-                : Optional.empty();
-        if (nextNode.isPresent()) {
-          if (occupancyManager != null) {
-            if (currentNode != null) {
-              RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
-              retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
-            } else {
-              occupancyManager.releaseByTrain(trainName);
-            }
-          }
-          updateSignalOrWarn(trainName, SignalAspect.STOP, now);
-          OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
-          applyControl(
-              train,
-              properties,
-              SignalAspect.STOP,
-              route,
-              currentNode,
-              nextNode.get(),
-              null,
-              false,
-              stopDistanceOpt);
-        } else {
-          train.stop();
-        }
+        holdStopAtCurrentNode(train, properties, trainName, route, currentIndex, currentNode, now);
         return;
       }
     }
@@ -1973,35 +2153,8 @@ public final class RuntimeDispatchService {
       Optional<Integer> remaining = dwellRegistry.remainingSeconds(trainName);
       if (remaining.isPresent()) {
         // 只要列车仍处于 dwell 窗口，就必须保持 STOP。
-        // 不能依赖当前 index 重新命中 RouteStop：在动态站台/中间点跳过场景下，索引可能短暂偏移，导致“停站后被信号 tick 提前放行”。
-        Optional<NodeId> nextNode =
-            currentIndex + 1 < route.waypoints().size()
-                ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
-                : Optional.empty();
-        if (nextNode.isPresent()) {
-          if (occupancyManager != null) {
-            if (currentNode != null) {
-              RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
-              retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
-            } else {
-              occupancyManager.releaseByTrain(trainName);
-            }
-          }
-          updateSignalOrWarn(trainName, SignalAspect.STOP, now);
-          OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
-          applyControl(
-              train,
-              properties,
-              SignalAspect.STOP,
-              route,
-              currentNode,
-              nextNode.get(),
-              null,
-              false,
-              stopDistanceOpt);
-        } else {
-          train.stop();
-        }
+        // 不能依赖当前 index 重新命中 RouteStop：在动态站台/中间点跳过场景下，索引可能短暂偏移，导致”停站后被信号 tick 提前放行”。
+        holdStopAtCurrentNode(train, properties, trainName, route, currentIndex, currentNode, now);
         return;
       }
     }
@@ -2013,30 +2166,7 @@ public final class RuntimeDispatchService {
       if (waypointStopState.get().centering()) {
         return;
       }
-      Optional<NodeId> nextNode =
-          currentIndex + 1 < route.waypoints().size()
-              ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
-              : Optional.empty();
-      updateSignalOrWarn(trainName, SignalAspect.STOP, now);
-      if (nextNode.isPresent()) {
-        if (occupancyManager != null && currentNode != null) {
-          RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
-          retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
-        }
-        OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
-        applyControl(
-            train,
-            properties,
-            SignalAspect.STOP,
-            route,
-            currentNode,
-            nextNode.get(),
-            null,
-            false,
-            stopDistanceOpt);
-      } else {
-        train.stop();
-      }
+      holdStopAtCurrentNode(train, properties, trainName, route, currentIndex, currentNode, now);
       return;
     }
 
@@ -2089,7 +2219,8 @@ public final class RuntimeDispatchService {
             runtimeSettings.lookaheadEdges(),
             runtimeSettings.minClearEdges(),
             runtimeSettings.rearGuardEdges(),
-            runtimeSettings.switcherZoneEdges());
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
     NodeId currentNodeForSignal =
         resolveEffectiveCurrentNodeForSignal(trainName, route, currentIndex, graph);
     List<NodeId> effectiveNodes =
@@ -2117,21 +2248,11 @@ public final class RuntimeDispatchService {
     releaseResourcesNotInRequest(trainName, keepResources);
     retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
     OccupancyDecision decision = occupancyManager.canEnter(request);
-    updateBlockerSnapshot(trainName, decision, now);
-    boolean hardBlockerBypass =
-        decision.allowed() && hasHardBlockersForTrain(trainName, decision.blockers());
-    boolean proceedAllowed = decision.allowed() && !hardBlockerBypass;
+    ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, "signal");
+    boolean proceedAllowed = proceedDecision.proceedAllowed();
     if (!proceedAllowed) {
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
     }
-    if (hardBlockerBypass) {
-      debugLogger.accept(
-          "冲突区放行抑制: train="
-              + trainName
-              + " scope=signal reason=hard_blockers blockers="
-              + summarizeBlockers(decision));
-    }
-    logDeadlockReleaseIfNeeded(trainName, decision, "signal", proceedAllowed);
     boolean deadlockRelease = proceedAllowed && !decision.blockers().isEmpty();
     SignalAspect baseAspect =
         proceedAllowed ? decision.signal() : deriveBlockedAspect(decision, context);
@@ -2610,8 +2731,8 @@ public final class RuntimeDispatchService {
       decision = occupancyManager.canEnter(ctx.request());
     }
     OccupancyRequest request = ctx.request();
-    updateBlockerSnapshot(trainName, decision, now);
-    if (!decision.allowed()) {
+    ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, "layover");
+    if (!proceedDecision.proceedAllowed()) {
       debugLogger.accept("Layover 发车受阻: train=" + trainName + " signal=" + decision.signal());
       return false;
     }
@@ -2810,6 +2931,48 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 统一计算“当前判定是否允许继续放行”。
+   *
+   * <p>会顺序执行：
+   *
+   * <ul>
+   *   <li>刷新 blocker 快照（供 HealthMonitor 诊断）
+   *   <li>检查 {@code allowed=true} 但仍存在 NODE/EDGE 硬阻塞的“误放行”场景
+   *   <li>输出冲突区放行/抑制日志
+   * </ul>
+   *
+   * <p>用于统一 departure/progress/signal/layover 四条路径的信号放行判定，避免各处分支各自复制同一套逻辑而逐步漂移。
+   *
+   * @param trainName 当前列车名
+   * @param decision 占用判定结果
+   * @param now 当前时间（用于 blocker 快照）
+   * @param scope 日志作用域（如 departure/progress/signal）
+   * @return 统一的放行结果
+   */
+  private ProceedDecision evaluateProceedDecision(
+      String trainName, OccupancyDecision decision, Instant now, String scope) {
+    if (decision == null) {
+      return new ProceedDecision(false, false, false);
+    }
+    updateBlockerSnapshot(trainName, decision, now);
+    boolean rawAllowed = decision.allowed();
+    boolean hardBlockerBypass =
+        rawAllowed && hasHardBlockersForTrain(trainName, decision.blockers());
+    boolean proceedAllowed = rawAllowed && !hardBlockerBypass;
+    if (hardBlockerBypass) {
+      debugLogger.accept(
+          "冲突区放行抑制: train="
+              + trainName
+              + " scope="
+              + scope
+              + " reason=hard_blockers blockers="
+              + summarizeBlockers(decision));
+    }
+    logDeadlockReleaseIfNeeded(trainName, decision, scope, proceedAllowed);
+    return new ProceedDecision(proceedAllowed, rawAllowed, hardBlockerBypass);
+  }
+
+  /**
    * 前方列车信号调整：扫描更远的前方路径，检测其他列车占用并调整信号。
    *
    * <p>信号规则（按 edge 数量）：
@@ -2995,6 +3158,57 @@ public final class RuntimeDispatchService {
     DepartureGate gate = departureGates.remove(oldKey);
     if (gate != null) {
       departureGates.put(newKey, gate);
+    }
+  }
+
+  /**
+   * 信号 tick 中"保持 STOP 并保留当前占用"的统一处理。
+   *
+   * <p>用于门控等待、dwell 窗口、waypoint 停站三种场景，避免在 handleSignalTick 中重复相同的占用保留 + 控车下发逻辑。
+   *
+   * @param train 列车句柄
+   * @param properties 列车属性
+   * @param trainName 逻辑列车名
+   * @param route 当前线路定义
+   * @param currentIndex 当前进度索引
+   * @param currentNode 当前有效节点（可为 null）
+   * @param now 当前时间
+   */
+  private void holdStopAtCurrentNode(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      Instant now) {
+    Optional<NodeId> nextNode =
+        currentIndex + 1 < route.waypoints().size()
+            ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
+            : Optional.empty();
+    if (nextNode.isPresent()) {
+      if (occupancyManager != null) {
+        if (currentNode != null) {
+          RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
+          retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
+        } else {
+          occupancyManager.releaseByTrain(trainName);
+        }
+      }
+      updateSignalOrWarn(trainName, SignalAspect.STOP, now);
+      OptionalLong stopDistanceOpt = resolveSoftStopDistance(train, properties);
+      applyControl(
+          train,
+          properties,
+          SignalAspect.STOP,
+          route,
+          currentNode,
+          nextNode.get(),
+          null,
+          false,
+          stopDistanceOpt);
+    } else {
+      train.stop();
     }
   }
 
@@ -4745,30 +4959,138 @@ public final class RuntimeDispatchService {
     }
   }
 
-  /** 处理列车改名：迁移进度缓存并释放旧名占用，随后写回当前名称 tag。 */
+  /**
+   * 解析运行时应使用的“逻辑列车名”。
+   *
+   * <p>优先使用 {@code FTA_TRAIN_NAME}，并把 TrainCarts split 后自动追加的 {@code ~a/~b/...}
+   * 视为临时别名，避免异常分裂时把临时名误当成真实主键。 对于真正的人为重命名（不符合 split 别名形态），则仍以当前 TrainCarts 名为准，后续由 {@link
+   * #handleRenameIfNeeded(TrainProperties)} 迁移运行时状态。
+   *
+   * @param properties 列车属性
+   * @return 逻辑列车名；无法解析时返回 empty
+   */
+  public Optional<String> resolveTrackedTrainName(TrainProperties properties) {
+    if (properties == null) {
+      return Optional.empty();
+    }
+    Optional<String> currentOpt = normalizeTrainName(properties.getTrainName());
+    Optional<String> taggedOpt =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+            .flatMap(RuntimeDispatchService::normalizeTrainName);
+    if (taggedOpt.isEmpty()) {
+      return currentOpt;
+    }
+    if (currentOpt.isEmpty()) {
+      return taggedOpt;
+    }
+    String current = currentOpt.get();
+    String tagged = taggedOpt.get();
+    if (tagged.equalsIgnoreCase(current) || isSplitAliasName(current, tagged)) {
+      return Optional.of(tagged);
+    }
+    return Optional.of(current);
+  }
+
+  /**
+   * 解析应参与运行时状态清理的 FTA 托管列车名。
+   *
+   * <p>普通 TrainCarts 列车即使被 split/异常销毁，也不应触发 progress 或 occupancy 清理。 split 过渡态的临时别名同样返回空，避免
+   * `GroupRemoveEvent` 把残留的 canonical 列车误当成已拆除实体一起清掉。
+   *
+   * @param properties 列车属性
+   * @return 受调度托管的逻辑列车名；非 FTA 列车返回 empty
+   */
+  Optional<String> resolveManagedTrainName(TrainProperties properties) {
+    if (properties == null || !isFtaManagedTrain(properties)) {
+      return Optional.empty();
+    }
+    Optional<String> resolved = resolveTrackedTrainName(properties).filter(name -> !name.isBlank());
+    if (resolved.isEmpty()) {
+      return Optional.empty();
+    }
+    String currentName = normalizeTrainName(properties.getTrainName()).orElse(null);
+    return resolved.filter(name -> !isSplitAliasName(currentName, name));
+  }
+
   /**
    * 列车重命名处理：如有必要，自动同步列车名与属性。
    *
+   * <p>split 后的 {@code ~a/~b} 临时名不会触发 rename 迁移，而是继续沿用 tag 中记录的原始列车名。
+   *
    * @param properties 列车属性
-   * @param trainName 当前列车名
+   * @return 同步后应使用的逻辑列车名；无法解析时返回 null
    */
-  void handleRenameIfNeeded(TrainProperties properties, String trainName) {
-    if (properties == null || trainName == null || trainName.isBlank()) {
-      return;
+  String handleRenameIfNeeded(TrainProperties properties) {
+    if (properties == null) {
+      return null;
     }
+    Optional<String> currentOpt = normalizeTrainName(properties.getTrainName());
     Optional<String> previousOpt =
-        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME);
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+            .flatMap(RuntimeDispatchService::normalizeTrainName);
+    if (currentOpt.isEmpty()) {
+      return previousOpt.orElse(null);
+    }
+
+    String current = currentOpt.get();
+    String resolved = current;
     if (previousOpt.isPresent()) {
       String previous = previousOpt.get();
-      if (!previous.equalsIgnoreCase(trainName)) {
-        progressRegistry.rename(previous, trainName);
-        moveDepartureGate(previous, trainName);
+      if (!previous.equalsIgnoreCase(current) && !isSplitAliasName(current, previous)) {
+        progressRegistry.rename(previous, current);
+        moveDepartureGate(previous, current);
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(previous);
         }
+        resolved = current;
+      } else {
+        resolved = previous;
       }
     }
-    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_TRAIN_NAME, trainName);
+    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_TRAIN_NAME, resolved);
+    return resolved;
+  }
+
+  private static Optional<String> normalizeTrainName(String trainName) {
+    if (trainName == null) {
+      return Optional.empty();
+    }
+    String normalized = trainName.trim();
+    return normalized.isEmpty() ? Optional.empty() : Optional.of(normalized);
+  }
+
+  /**
+   * 判断当前 TrainCarts 列车名是否只是 split 后附加的临时别名。
+   *
+   * <p>形如 {@code main~a}、{@code main~b}、{@code main~a~b} 都视为同一逻辑列车的分裂别名。
+   */
+  private static boolean isSplitAliasName(String currentTrainName, String taggedTrainName) {
+    if (currentTrainName == null || taggedTrainName == null) {
+      return false;
+    }
+    if (currentTrainName.length() <= taggedTrainName.length()
+        || !currentTrainName.regionMatches(true, 0, taggedTrainName, 0, taggedTrainName.length())) {
+      return false;
+    }
+    int index = taggedTrainName.length();
+    while (index < currentTrainName.length()) {
+      if (currentTrainName.charAt(index) != '~') {
+        return false;
+      }
+      index++;
+      int segmentStart = index;
+      while (index < currentTrainName.length() && currentTrainName.charAt(index) != '~') {
+        char c = currentTrainName.charAt(index);
+        if (!Character.isLetterOrDigit(c)) {
+          return false;
+        }
+        index++;
+      }
+      if (segmentStart == index) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // ======== 节点历史与回退检测 ========
@@ -5435,13 +5757,45 @@ public final class RuntimeDispatchService {
             runtimeSettings.lookaheadEdges(),
             runtimeSettings.minClearEdges(),
             runtimeSettings.rearGuardEdges(),
-            runtimeSettings.switcherZoneEdges());
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
     OccupancyRequest request =
         builder.buildRearGuardRequestFromNodes(
             trainName, Optional.ofNullable(route.id()), effectiveNodes, currentIndex, now, 0);
     releaseResourcesNotInRequest(trainName, request.resourceList());
     occupancyManager.acquire(request);
+    retainForwardQueuePositionAtStop(trainName, route, currentIndex, now, builder, effectiveNodes);
+  }
+
+  /**
+   * 停站/阻塞等待期间刷新前向冲突队列位次。
+   *
+   * <p>列车在门控等待时虽然不会立即占用前方区段，但应持续保留自己在冲突队列中的先后顺序；否则后车可能在等待窗口内先触发一次前向判定， 反而抢到更靠前的队头，造成前车被后车卡住。
+   */
+  private void retainForwardQueuePositionAtStop(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      Instant now,
+      OccupancyRequestBuilder builder,
+      List<NodeId> effectiveNodes) {
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)
+        || trainName == null
+        || trainName.isBlank()
+        || route == null
+        || now == null
+        || builder == null
+        || effectiveNodes == null) {
+      return;
+    }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    int priority = resolvePriority(properties, route);
+    builder
+        .buildContextFromNodes(
+            trainName, Optional.ofNullable(route.id()), effectiveNodes, currentIndex, now, priority)
+        .map(OccupancyRequestContext::request)
+        .ifPresent(queueSupport::touchQueues);
   }
 
   /**

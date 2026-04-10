@@ -763,7 +763,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ZERO,
             spawnSettings.maxBacklogPerService(),
             spawnSettings.maxGeneratePerTick(),
-            Math.max(1, spawnSettings.maxSpawnPerTick()));
+            Math.max(1, spawnSettings.maxSpawnPerTick()),
+            java.time.Duration.ofSeconds(spawnSettings.queuedTicketMaxAgeSeconds()));
     this.spawnManager = new StorageSpawnManager(managerSettings, loggerManager::debug);
     TrainCartsDepotSpawner depotSpawner =
         new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
