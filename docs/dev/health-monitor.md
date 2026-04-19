@@ -67,3 +67,7 @@
 ## 与调度占用的配合
 - 信号 tick 在 `canEnter=false` 时会收缩占用到“停站保护窗口”（当前节点 + rear guard）。
 - 目的：减少红灯等待期间对前方资源的长期占用，降低同向互卡概率。
+- `HealthMonitor` 每次 `tick/check/heal` 都会先收集当前 TrainCarts 存活列车名，并调用 `RuntimeDispatchService.cleanupOrphanOccupancyClaimsWithReport(...)` 清理 progress、运行时占用、layover、departure gate、blocker snapshot 与动态站台缓存残留，然后再执行 `TrainHealthMonitor` 与 `OccupancyHealer`。
+- 这条兜底链路用于覆盖 `/train destroyall` 或其他未触发 `GroupRemoveEvent` 的全服列车消失场景：即使事件侧没有逐车回调，`/fta health heal` 与周期 health tick 也能按“当前存活列车集合”释放孤儿 claim 和脱管 progress。
+- `OccupancyHealer` 仍负责传统的占用超时/孤儿 claim 诊断；运行时 cleanup 负责与 progress、layover、departure gate 同步，避免只释放 occupancy 但保留调度状态。
+- `RuntimeSignalMonitor` 对普通非 FTA TrainCarts 列车只做脱轨安全兜底：明确 `TrainStatus.Derailed` 时销毁实体，但不会把普通列车加入 dispatch、ETA 或 orphan active 集合；事件侧 `MemberRemoveEvent` 也只有在源/目标编组已带 derailed 状态时才清理普通列车。

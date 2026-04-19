@@ -23,6 +23,20 @@ public interface TicketAssigner {
   }
 
   /**
+   * 强制分配一张票据，并携带存储上下文供实现执行 SpawnControl 容量判定。
+   *
+   * <p>默认回退到旧入口，兼容不关心容量上下文的实现。
+   *
+   * @param provider 存储提供者
+   * @param trainName 目标列车名
+   * @param ticket 服务票据
+   * @return 分配成功返回 true
+   */
+  default boolean forceAssign(StorageProvider provider, String trainName, ServiceTicket ticket) {
+    return forceAssign(trainName, ticket);
+  }
+
+  /**
    * Layover 注册事件回调：有列车进入待命池时触发。
    *
    * <p>默认不处理，具体行为由实现类决定。

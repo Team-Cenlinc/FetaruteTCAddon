@@ -97,9 +97,10 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   /**
-   * 编组拆分/脱挂兜底：一旦检测到 member 从编组移除，删除涉及的所有列车，避免“半编组”继续参与调度。
+   * 编组拆分/脱挂兜底：一旦检测到 FTA member 从编组移除，删除涉及的整列逻辑列车，避免“半编组”继续参与调度。
    *
-   * <p>TrainCarts 没有专门的 split 事件，MemberRemoveEvent 是最稳定的异常编组信号。
+   * <p>TrainCarts 没有专门的 split 事件，MemberRemoveEvent 是最稳定的异常编组信号。该事件对普通 TrainCarts
+   * 列车语义过宽，可能只是玩家拆车或其他插件重组；因此这里必须先确认源/目标编组带有 FTA runtime tag。
    */
   @EventHandler(priority = EventPriority.MONITOR)
   public void onMemberRemove(MemberRemoveEvent event) {
@@ -109,15 +110,34 @@ public final class RuntimeDispatchListener implements Listener {
     MinecartMember<?> member = event.getMember();
     MinecartGroup sourceGroup = event.getGroup();
     MinecartGroup detachedGroup = member != null ? member.getGroup() : null;
+    boolean sourceFta = hasFtaRuntimeTag(sourceGroup);
+    boolean detachedFta = hasFtaRuntimeTag(detachedGroup);
+    boolean sourceDerailed = RuntimeSignalMonitor.isDerailed(sourceGroup);
+    boolean detachedDerailed = RuntimeSignalMonitor.isDerailed(detachedGroup);
+    if (!sourceFta && !detachedFta && !sourceDerailed && !detachedDerailed) {
+      return;
+    }
     String splitDetail = buildUnexpectedSplitDetail(sourceGroup, detachedGroup, member);
-    dispatchService.handleAbnormalGroup(sourceGroup, "unexpected-split-source", splitDetail);
+    if (sourceFta) {
+      dispatchService.handleAbnormalGroup(sourceGroup, "unexpected-split-source", splitDetail);
+    } else if (sourceDerailed) {
+      dispatchService.handleAbnormalGroup(sourceGroup, "status-derailed", splitDetail);
+    }
 
     if (member == null) {
       return;
     }
-    if (detachedGroup != null && detachedGroup != sourceGroup) {
+    if (detachedFta && detachedGroup != null && detachedGroup != sourceGroup) {
       dispatchService.handleAbnormalGroup(detachedGroup, "unexpected-split-detached", splitDetail);
+    } else if (detachedDerailed && detachedGroup != null && detachedGroup != sourceGroup) {
+      dispatchService.handleAbnormalGroup(detachedGroup, "status-derailed", splitDetail);
     }
+  }
+
+  private boolean hasFtaRuntimeTag(MinecartGroup group) {
+    return group != null
+        && group.getProperties() != null
+        && dispatchService.hasFtaRuntimeTag(group.getProperties());
   }
 
   private void handleGroupRemoved(MinecartGroup group) {

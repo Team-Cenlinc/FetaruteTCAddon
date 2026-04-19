@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -101,6 +102,9 @@ public final class RuntimeDispatchService {
 
   /** 异常列车清理去重窗口（毫秒），用于压制 split/member-remove 事件风暴。 */
   private static final long ABNORMAL_CLEANUP_DEDUP_MS = 2_000L;
+
+  /** 非 FTA 列车只允许因明确脱轨状态进入实体销毁兜底。 */
+  private static final String ABNORMAL_REASON_STATUS_DERAILED = "status-derailed";
 
   private final OccupancyManager occupancyManager;
   private final RailGraphService railGraphService;
@@ -323,7 +327,18 @@ public final class RuntimeDispatchService {
     if (group == null || definition == null) {
       return true;
     }
-    RuntimeTrainHandle train = new TrainCartsRuntimeHandle(group);
+    return checkDeparture(new TrainCartsRuntimeHandle(group), definition);
+  }
+
+  /**
+   * 检查列车是否允许从当前站点发车。
+   *
+   * <p>该重载用于把 TrainCarts 句柄适配与门控判定拆开，便于测试验证“先预判、后写占用”的安全边界。
+   */
+  boolean checkDeparture(RuntimeTrainHandle train, SignNodeDefinition definition) {
+    if (train == null || definition == null) {
+      return true;
+    }
     TrainProperties properties = train.properties();
     String trainName = resolveTrackedTrainName(properties).orElse(null);
     if (trainName == null || trainName.isBlank()) {
@@ -403,7 +418,7 @@ public final class RuntimeDispatchService {
       retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
-    OccupancyDecision decision = occupancyManager.acquire(request);
+    OccupancyDecision decision = occupancyManager.canEnter(request);
     ProceedDecision proceedDecision =
         evaluateProceedDecision(trainName, decision, now, "departure");
     boolean proceedAllowed = proceedDecision.proceedAllowed();
@@ -418,6 +433,7 @@ public final class RuntimeDispatchService {
       retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
+    occupancyManager.acquire(request);
     return true;
   }
 
@@ -985,7 +1001,7 @@ public final class RuntimeDispatchService {
    *   <li>占用管理器中已不存在列车的所有占用资源
    *   <li>折返候选注册表中已不存在列车的记录
    *   <li>动态站台分配缓存
-   *   <li>发车门控缓存
+   *   <li>发车门控、blocker 快照与其他运行时派生缓存
    * </ul>
    *
    * <p>该方法不会主动加载区块或扫描轨道，仅根据当前在线列车名集合做一致性修复。比较使用小写规范化， 以兼容 TrainCarts 不同路径返回不同大小写的情况。
@@ -1017,6 +1033,7 @@ public final class RuntimeDispatchService {
       }
       if (!activeLower.contains(name.trim().toLowerCase(java.util.Locale.ROOT))) {
         progressRegistry.remove(name);
+        clearRuntimeCachesForTrain(name);
         removedProgress++;
       }
     }
@@ -1036,6 +1053,7 @@ public final class RuntimeDispatchService {
         continue;
       }
       occupancyManager.releaseByTrain(trainName);
+      clearRuntimeCachesForTrain(trainName);
       releasedTrains++;
     }
 
@@ -1049,12 +1067,8 @@ public final class RuntimeDispatchService {
         continue;
       }
       layoverRegistry.unregister(candidate.trainName());
+      clearRuntimeCachesForTrain(candidate.trainName());
       removedLayovers++;
-    }
-
-    // 清理不活跃列车的动态站台分配
-    for (String name : released) {
-      dynamicAllocator.clearAllocations(name);
     }
 
     if (removedProgress > 0) {
@@ -1228,28 +1242,39 @@ public final class RuntimeDispatchService {
       occupancyManager.releaseByTrain(resolvedTrainName);
     }
     progressRegistry.remove(resolvedTrainName);
-    stallStates.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
-    waypointStopStates.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
-    missingSignalWarned.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
-    stopWaypointLogState.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
-    progressTriggerState.remove(resolvedTrainName.toLowerCase(java.util.Locale.ROOT));
-    clearDepartureGate(resolvedTrainName);
-    clearNodeHistory(resolvedTrainName);
-    dynamicAllocator.clearAllocations(resolvedTrainName);
-    routeTrainTracker.remove(resolvedTrainName);
-    effectiveNodeOverrides.remove(normalizeTrainKey(resolvedTrainName));
-    blockerSnapshots.remove(normalizeTrainKey(resolvedTrainName));
+    clearRuntimeCachesForTrain(resolvedTrainName);
+  }
+
+  /** 清理某列车的运行时派生缓存，供事件链与周期 heal 共用。 */
+  private void clearRuntimeCachesForTrain(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    stallStates.remove(key);
+    waypointStopStates.remove(key);
+    missingSignalWarned.remove(key);
+    stopWaypointLogState.remove(key);
+    progressTriggerState.remove(key);
+    clearDepartureGate(trainName);
+    clearNodeHistory(trainName);
+    dynamicAllocator.clearAllocations(trainName);
+    routeTrainTracker.remove(trainName);
+    effectiveNodeOverrides.remove(key);
+    blockerSnapshots.remove(key);
   }
 
   /**
    * 异常列车清理入口：用于 derail/split/脱挂等场景的兜底回收。
    *
-   * <p>对所有 TrainCarts 列车生效：
+   * <p>按来源收窄清理边界：
    *
    * <ul>
-   *   <li>FTA 托管列车：记录诊断日志、清理运行时状态与占用，再销毁实体
-   *   <li>普通列车：记录诊断日志并直接销毁实体
+   *   <li>FTA 托管列车：split/脱挂/脱轨都记录诊断、清理运行时状态与占用，再销毁实体
+   *   <li>普通 TrainCarts 列车：仅在 TrainCarts 明确报告 {@code Derailed} 时销毁实体
    * </ul>
+   *
+   * <p>普通列车的 member-remove 可能来自玩家拆车、其他插件重组或 TrainCarts 内部拆分过渡，不能按 FTA 半编组异常处理，否则会误伤非 FTA 列车。
    *
    * @param group 目标列车组
    * @param reason 清理原因（用于日志）
@@ -1261,7 +1286,8 @@ public final class RuntimeDispatchService {
   /**
    * 异常列车清理入口：记录 split/脱轨等诊断上下文后执行兜底回收。
    *
-   * <p>detail 用于补充事件侧信息（例如被拆出的 member UUID、源/目标编组名），方便事后排查 TrainCarts unexpected split 的成因。
+   * <p>detail 用于补充事件侧信息（例如被拆出的 member UUID、源/目标编组名），方便事后排查 TrainCarts unexpected split 的成因。 非 FTA
+   * 列车只有明确脱轨状态会进入此清理；普通 split 事件会静默跳过并仅写入 debug，避免把其他系统的列车误当成 FTA 残编。
    *
    * @param group 目标列车组
    * @param reason 清理原因（用于日志）
@@ -1274,7 +1300,20 @@ public final class RuntimeDispatchService {
     TrainProperties properties = group.getProperties();
     String normalizedReason =
         reason == null || reason.isBlank() ? "unknown" : reason.trim().toLowerCase(Locale.ROOT);
-    boolean ftaManaged = properties != null && isFtaManagedTrain(properties);
+    boolean ftaManaged = properties != null && hasFtaRuntimeTag(properties);
+    AbnormalCleanupPolicy cleanupPolicy =
+        resolveAbnormalCleanupPolicy(ftaManaged, normalizedReason);
+    if (!cleanupPolicy.process()) {
+      debugLogger.accept(
+          "异常列车清理跳过: train="
+              + (properties != null
+                  ? normalizeTrainName(properties.getTrainName()).orElse("-")
+                  : "-")
+              + " reason="
+              + normalizedReason
+              + " ftaManaged=false");
+      return;
+    }
     String rawTrainName =
         properties != null ? normalizeTrainName(properties.getTrainName()).orElse(null) : null;
     String logicalTrainName =
@@ -1292,7 +1331,7 @@ public final class RuntimeDispatchService {
             ftaManaged);
     HEALTH_LOGGER.warning(buildAbnormalCleanupWarning(snapshot));
 
-    if (snapshot.ftaManaged()
+    if (cleanupPolicy.cleanupRuntimeState()
         && snapshot.cleanupTrainName() != null
         && !snapshot.cleanupTrainName().isBlank()) {
       boolean skipStateCleanup = shouldSkipDuplicateAbnormalCleanup(snapshot.cleanupKey());
@@ -1305,9 +1344,12 @@ public final class RuntimeDispatchService {
             "异常列车状态清理去重: train=" + snapshot.cleanupTrainName() + " reason=" + normalizedReason);
       }
     }
-    // 状态清理按 trainName 去重，但实体销毁必须始终尝试覆盖当前事件组，
-    // 否则 split/脱挂时后续拆出的“半编组”可能因为命中去重窗口而残留。
-    destroyAbnormalTrainEntities(snapshot.cleanupTrainName(), group, properties);
+    // 状态清理按 trainName 去重，但实体销毁必须始终尝试覆盖当前事件组。
+    // FTA split/脱挂的后续半编组可能命中去重窗口；非 FTA derailed 也没有 progress 可清，
+    // 两者都依赖这里继续尝试销毁事件传入的实体。
+    if (cleanupPolicy.destroyEntities()) {
+      destroyAbnormalTrainEntities(snapshot.cleanupTrainName(), group, properties);
+    }
   }
 
   /**
@@ -1373,6 +1415,7 @@ public final class RuntimeDispatchService {
     if (eventGroup != null) {
       targets.add(eventGroup);
     }
+    targets.addAll(findRelatedGroupsByLogicalTrainName(trainName));
     for (com.bergerkiller.bukkit.tc.controller.MinecartGroup target : targets) {
       if (target == null) {
         continue;
@@ -1385,6 +1428,52 @@ public final class RuntimeDispatchService {
                 + (trainName == null || trainName.isBlank() ? "-" : trainName));
       }
     }
+  }
+
+  /**
+   * 按逻辑列车名查找同一列车的所有当前实体。
+   *
+   * <p>TrainCarts 脱轨或 split 事件可能只把单节车厢所在的半编组交给事件回调；这里再扫描当前在线 group，补齐仍携带同一 {@code FTA_TRAIN_NAME} 或
+   * split 临时别名的其他半编组，尽量做到“发现单节异常，销毁整列逻辑列车”。
+   */
+  private Set<MinecartGroup> findRelatedGroupsByLogicalTrainName(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return Set.of();
+    }
+    Set<MinecartGroup> matches = new LinkedHashSet<>();
+    java.util.Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
+    if (groups == null || groups.isEmpty()) {
+      return matches;
+    }
+    for (MinecartGroup group : groups) {
+      if (group == null || group.getProperties() == null) {
+        continue;
+      }
+      if (isRelatedLogicalTrain(group.getProperties(), trainName)) {
+        matches.add(group);
+      }
+    }
+    return matches;
+  }
+
+  /**
+   * 判断 TrainProperties 是否属于指定逻辑列车。
+   *
+   * <p>优先使用 {@code FTA_TRAIN_NAME}，同时兼容 TrainCarts split 后的 {@code ~a/~b}
+   * 临时别名；用于异常清理时定位同一逻辑列车的所有残余实体。
+   */
+  boolean isRelatedLogicalTrain(TrainProperties properties, String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (properties == null || key.isEmpty()) {
+      return false;
+    }
+    Optional<String> tracked = resolveTrackedTrainName(properties);
+    if (tracked.isPresent() && key.equals(normalizeTrainKey(tracked.get()))) {
+      return true;
+    }
+    String rawName = normalizeTrainName(properties.getTrainName()).orElse(null);
+    return isSplitAliasName(rawName, trainName);
   }
 
   private AbnormalGroupSnapshot captureAbnormalGroupSnapshot(
@@ -1549,6 +1638,10 @@ public final class RuntimeDispatchService {
       String nextTarget,
       String lastPassedNode,
       String lastSignal) {}
+
+  /** 异常列车清理策略。 */
+  record AbnormalCleanupPolicy(
+      boolean process, boolean cleanupRuntimeState, boolean destroyEntities) {}
 
   /**
    * 列车运行时状态快照（用于健康检查）。
@@ -2253,7 +2346,11 @@ public final class RuntimeDispatchService {
     if (!proceedAllowed) {
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
     }
-    boolean deadlockRelease = proceedAllowed && !decision.blockers().isEmpty();
+    boolean deadlockRelease = proceedAllowed && decision.conflictRelease();
+    if (deadlockRelease && train.isMoving()) {
+      proceedAllowed = false;
+      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+    }
     SignalAspect baseAspect =
         proceedAllowed ? decision.signal() : deriveBlockedAspect(decision, context);
     // 安全优先：移动中的列车不享受“冲突区放行”特权，避免在红灯/占用未清时冒进。
@@ -2874,8 +2971,8 @@ public final class RuntimeDispatchService {
   /**
    * 判断 blocker 集合中是否存在“硬占用”冲突。
    *
-   * <p>当 canEnter 在死锁/冲突放行路径返回 {@code allowed=true} 时，若 blocker 仍包含其他列车的 NODE/EDGE
-   * 占用，必须视为不可放行，避免在前方有车时被误 authorize。
+   * <p>当 canEnter 返回 {@code allowed=true} 但没有 {@code conflictRelease} 标记时，若 blocker 仍包含其他列车的
+   * NODE/EDGE 占用，必须视为不可放行，避免在前方有车时被误 authorize。
    *
    * <p>边界行为：
    *
@@ -2883,6 +2980,7 @@ public final class RuntimeDispatchService {
    *   <li>blocker 元素为 {@code null} 或其 resource 为 {@code null} → 视为硬阻塞（保守策略）
    *   <li>blocker 为自身占用 → 跳过（不视为硬阻塞）
    *   <li>blocker 仅包含 CONFLICT 类型资源 → 不视为硬阻塞（CONFLICT 由死锁解析器管理）
+   *   <li>decision 带 {@code conflictRelease=true} → 由占用管理器执行 partial acquire，不在运行时二次抑制
    * </ul>
    *
    * @param trainName 当前列车名（用于排除自身占用）
@@ -2937,7 +3035,7 @@ public final class RuntimeDispatchService {
    *
    * <ul>
    *   <li>刷新 blocker 快照（供 HealthMonitor 诊断）
-   *   <li>检查 {@code allowed=true} 但仍存在 NODE/EDGE 硬阻塞的“误放行”场景
+   *   <li>检查 {@code allowed=true} 但未带 conflictRelease 标记的 NODE/EDGE 硬阻塞“误放行”场景
    *   <li>输出冲突区放行/抑制日志
    * </ul>
    *
@@ -2957,7 +3055,9 @@ public final class RuntimeDispatchService {
     updateBlockerSnapshot(trainName, decision, now);
     boolean rawAllowed = decision.allowed();
     boolean hardBlockerBypass =
-        rawAllowed && hasHardBlockersForTrain(trainName, decision.blockers());
+        rawAllowed
+            && !decision.conflictRelease()
+            && hasHardBlockersForTrain(trainName, decision.blockers());
     boolean proceedAllowed = rawAllowed && !hardBlockerBypass;
     if (hardBlockerBypass) {
       debugLogger.accept(
@@ -3846,16 +3946,7 @@ public final class RuntimeDispatchService {
       train.destroy();
     }
     progressRegistry.remove(trainName);
-    stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    waypointStopStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    stopWaypointLogState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    progressTriggerState.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-    clearNodeHistory(trainName);
-    clearDepartureGate(trainName);
-    dynamicAllocator.clearAllocations(trainName);
-    effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
-    blockerSnapshots.remove(normalizeTrainKey(trainName));
+    clearRuntimeCachesForTrain(trainName);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
     debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);
@@ -3986,6 +4077,61 @@ public final class RuntimeDispatchService {
     return (operatorTag.isPresent() && !operatorTag.get().isBlank())
         || (lineTag.isPresent() && !lineTag.get().isBlank())
         || (routeTag.isPresent() && !routeTag.get().isBlank());
+  }
+
+  /**
+   * 判断 TrainProperties 是否携带任意 FTA 运行时标签。
+   *
+   * <p>异常清理比常规 dispatch 更宽：split 事件中残编可能只保留 {@code FTA_TRAIN_NAME} 或 {@code FTA_ROUTE_INDEX}，仍应视为
+   * FTA 残余实体并清理整列；常规信号控制则继续使用 {@link #isFtaManagedTrain(TrainProperties)}，要求具备可解析的交路标签。
+   *
+   * @param properties TrainCarts 列车属性
+   * @return true 表示该列车曾由 FTA 写入过运行时标签
+   */
+  boolean hasFtaRuntimeTag(TrainProperties properties) {
+    if (properties == null) {
+      return false;
+    }
+    if (isFtaManagedTrain(properties)) {
+      return true;
+    }
+    if (TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isPresent()) {
+      return true;
+    }
+    return TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+        .filter(value -> !value.isBlank())
+        .isPresent();
+  }
+
+  /**
+   * 判断普通 TrainCarts 列车是否允许进入异常实体销毁。
+   *
+   * <p>非 FTA 列车的 split/member-remove 语义不可靠，只有 TrainCarts 状态明确为 derailed 时才按安全兜底销毁。
+   */
+  static boolean shouldCleanupUnmanagedAbnormalReason(String normalizedReason) {
+    return ABNORMAL_REASON_STATUS_DERAILED.equals(normalizedReason);
+  }
+
+  /**
+   * 解析异常编组清理策略。
+   *
+   * <p>抽成纯逻辑，避免在单测中直接构造 TrainCarts {@link MinecartGroup}。策略含义：
+   *
+   * <ul>
+   *   <li>FTA runtime tag 存在：清理运行时状态并销毁实体
+   *   <li>非 FTA 且明确 derailed：只销毁实体，不触碰 FTA progress/occupancy
+   *   <li>非 FTA split/member-remove：跳过，避免误伤普通 TrainCarts 列车
+   * </ul>
+   */
+  static AbnormalCleanupPolicy resolveAbnormalCleanupPolicy(
+      boolean hasFtaRuntimeTag, String normalizedReason) {
+    if (hasFtaRuntimeTag) {
+      return new AbnormalCleanupPolicy(true, true, true);
+    }
+    if (shouldCleanupUnmanagedAbnormalReason(normalizedReason)) {
+      return new AbnormalCleanupPolicy(true, false, true);
+    }
+    return new AbnormalCleanupPolicy(false, false, false);
   }
 
   private boolean matchesDstyTarget(RouteDefinition route, NodeId currentNode) {

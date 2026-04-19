@@ -149,6 +149,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final RuntimeDispatchService runtimeDispatchService;
   private final ConfigManager configManager;
   private final SignNodeRegistry signNodeRegistry;
+  private final SpawnControl spawnControl;
   private final Consumer<String> debugLogger;
 
   private final LayoverRegistry layoverRegistry;
@@ -174,6 +175,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // key 为 "<lineId>|<terminal>"：记录下一次优先尝试的 route 游标，实现同组 route 轮转。
   private final java.util.concurrent.ConcurrentMap<String, Integer> pendingLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private volatile StorageProvider lastStorageProvider;
   // key 为 "<lineId>|<terminal>"：记录即时复用路径（非 pending）的 route 轮转游标。
   private final java.util.concurrent.ConcurrentMap<String, Integer> immediateLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -197,6 +199,38 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Duration retryDelay,
       int maxSpawnPerTick,
       int maxRetryAttempts) {
+    this(
+        spawnManager,
+        depotSpawner,
+        occupancyManager,
+        railGraphService,
+        routeDefinitions,
+        runtimeDispatchService,
+        configManager,
+        signNodeRegistry,
+        layoverRegistry,
+        new SpawnControl(),
+        debugLogger,
+        retryDelay,
+        maxSpawnPerTick,
+        maxRetryAttempts);
+  }
+
+  public SimpleTicketAssigner(
+      SpawnManager spawnManager,
+      DepotSpawner depotSpawner,
+      OccupancyManager occupancyManager,
+      RailGraphService railGraphService,
+      RouteDefinitionCache routeDefinitions,
+      RuntimeDispatchService runtimeDispatchService,
+      ConfigManager configManager,
+      SignNodeRegistry signNodeRegistry,
+      org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry layoverRegistry,
+      SpawnControl spawnControl,
+      Consumer<String> debugLogger,
+      Duration retryDelay,
+      int maxSpawnPerTick,
+      int maxRetryAttempts) {
     this.spawnManager = Objects.requireNonNull(spawnManager, "spawnManager");
     this.depotSpawner = Objects.requireNonNull(depotSpawner, "depotSpawner");
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
@@ -207,6 +241,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.configManager = Objects.requireNonNull(configManager, "configManager");
     this.signNodeRegistry = Objects.requireNonNull(signNodeRegistry, "signNodeRegistry");
     this.layoverRegistry = Objects.requireNonNull(layoverRegistry, "layoverRegistry");
+    this.spawnControl = Objects.requireNonNull(spawnControl, "spawnControl");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.retryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
     this.maxSpawnPerTick = Math.max(1, maxSpawnPerTick);
@@ -214,6 +249,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   public boolean forceAssign(String trainName, ServiceTicket ticket) {
+    debugLogger.accept("强制分配失败: 缺少 StorageProvider，无法执行 SpawnControl 容量判定 train=" + trainName);
+    return false;
+  }
+
+  @Override
+  public boolean forceAssign(StorageProvider provider, String trainName, ServiceTicket ticket) {
+    if (provider == null) {
+      debugLogger.accept("强制分配失败: 缺少 StorageProvider，无法执行 SpawnControl 容量判定 train=" + trainName);
+      return false;
+    }
     // 在 LayoverRegistry 中查找候选列车
     Optional<LayoverRegistry.LayoverCandidate> candidateOpt = layoverRegistry.get(trainName);
     if (candidateOpt.isEmpty()) {
@@ -222,6 +267,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     LayoverRegistry.LayoverCandidate candidate = candidateOpt.get();
+    SpawnControl.Lease lease =
+        tryAcquireSpawnControlForLayover(
+                Optional.ofNullable(provider),
+                ticket,
+                SpawnControl.LeaseKind.RECLAIM_RETURN,
+                Optional.of(candidate),
+                Instant.now())
+            .orElse(null);
+    if (lease == null) {
+      return false;
+    }
 
     // 尝试复用发车
     if (runtimeDispatchService.dispatchLayover(candidate, ticket)) {
@@ -229,6 +285,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return true;
     }
 
+    lease.release();
     debugLogger.accept("强制分配失败: dispatchLayover 拒绝 " + trainName);
     return false;
   }
@@ -243,8 +300,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (candidate == null) {
       return;
     }
+    StorageProvider provider = lastStorageProvider;
+    if (provider == null) {
+      debugLogger.accept("Layover 即时复用跳过: 缺少 StorageProvider，等待下一轮 spawn tick");
+      return;
+    }
     tryDispatchPendingLayover(
-        Instant.now(), Optional.empty(), Optional.of(candidate.terminalKey()));
+        Instant.now(), Optional.of(provider), Optional.of(candidate.terminalKey()));
   }
 
   @Override
@@ -280,6 +342,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (provider == null || now == null) {
       return;
     }
+    lastStorageProvider = provider;
+    spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
     if (!pendingLayoverTickets.isEmpty()) {
       refreshExpiredPendingTickets(provider, now);
@@ -572,30 +636,26 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
 
-    OptionalInt lineMaxTrains = resolveLineMaxTrains(provider, line);
-    LineRuntimeSnapshot runtimeSnapshot = null;
-    if (lineMaxTrains.isPresent()) {
-      runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      int active = runtimeSnapshot.countActiveTrains(provider, line.id());
-      if (active >= lineMaxTrains.getAsInt()) {
-        debugLogger.accept(
-            "自动发车阻塞: line-cap line="
-                + line.code()
-                + " active="
-                + active
-                + " max="
-                + lineMaxTrains.getAsInt());
-        requeue(ticket, now, "line-cap");
-        return false;
-      }
+    Optional<SpawnControl.Lease> spawnLeaseOpt =
+        tryAcquireSpawnControlForTicket(
+            provider,
+            line,
+            ticket,
+            service,
+            routeEntity,
+            SpawnControl.LeaseKind.SPAWN,
+            Optional.empty(),
+            now);
+    if (spawnLeaseOpt.isEmpty()) {
+      requeue(ticket, now, "line-cap");
+      return false;
     }
+    SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
     Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
     if (!lineDepots.isEmpty()) {
-      if (runtimeSnapshot == null) {
-        runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      }
+      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
       selectedDepotOpt = selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot);
     }
     SpawnTicket effectiveTicket =
@@ -613,12 +673,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Optional<java.util.UUID> worldIdOpt =
         resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
     if (worldIdOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       requeue(ticket, now, "depot-world-missing");
       return false;
     }
     Optional<RailGraph> graphOpt =
         railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
     if (graphOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       requeue(ticket, now, "graph-missing");
       return false;
     }
@@ -634,13 +696,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Optional<OccupancyRequest> requestOpt =
         buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
     if (requestOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       requeue(ticket, now, "occupancy-context-failed");
       return false;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = occupancyManager.acquire(request);
-    if (!decision.allowed()) {
-      requeue(ticket, now, "gate-blocked:" + decision.signal());
+    OccupancyDecision decision = occupancyManager.canEnter(request);
+    if (!isCleanSpawnGateDecision(decision)) {
+      releaseSpawnLease(spawnLease);
+      requeue(ticket, now, "gate-blocked:" + spawnGateSignalText(decision));
+      return false;
+    }
+    decision = occupancyManager.acquire(request);
+    if (!isCleanSpawnGateDecision(decision)) {
+      releaseSpawnLease(spawnLease);
+      requeue(ticket, now, "gate-blocked:" + spawnGateSignalText(decision));
       return false;
     }
 
@@ -648,12 +718,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     try {
       groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
     } catch (Exception e) {
+      releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
       requeue(ticket, now, "spawn-failed");
       return false;
     }
     if (groupOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       requeue(ticket, now, "spawn-failed");
       return false;
@@ -1351,6 +1423,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       RouteDefinition route,
       Instant now,
       boolean pendingAttempt) {
+    if (providerOpt.isEmpty()) {
+      putPendingLayoverTicket(ticket, now);
+      debugLogger.accept("Layover 复用等待: 缺少 StorageProvider，等待下一轮 spawn tick");
+      return false;
+    }
     String startNodeVal = route.waypoints().get(0).value();
     List<LayoverRegistry.LayoverCandidate> candidates =
         layoverRegistry.findCandidates(startNodeVal);
@@ -1393,6 +1470,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             0,
             toTicketMode(operationType));
     for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+      SpawnControl.Lease spawnLease =
+          tryAcquireSpawnControlForLayover(
+                  providerOpt,
+                  ticket,
+                  SpawnControl.LeaseKind.LAYOVER_REUSE,
+                  Optional.of(candidate),
+                  now)
+              .orElse(null);
+      if (spawnLease == null) {
+        continue;
+      }
       if (runtimeDispatchService.dispatchLayover(candidate, serviceTicket)) {
         applyDispatchLifecycleTags(providerOpt, candidate.trainName(), service, operationType);
         spawnManager.complete(ticket);
@@ -1401,6 +1489,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         debugLogger.accept("Layover 复用成功: " + candidate.trainName() + " -> " + service.routeCode());
         return true;
       }
+      releaseSpawnLease(spawnLease);
     }
     putPendingLayoverTicket(ticket, now);
     debugLogger.accept(
@@ -1609,30 +1698,26 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
 
-    OptionalInt lineMaxTrains = resolveLineMaxTrains(provider, line);
-    LineRuntimeSnapshot runtimeSnapshot = null;
-    if (lineMaxTrains.isPresent()) {
-      runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      int active = runtimeSnapshot.countActiveTrains(provider, line.id());
-      if (active >= lineMaxTrains.getAsInt()) {
-        debugLogger.accept(
-            "Layover 降级发车阻塞: line-cap line="
-                + line.code()
-                + " active="
-                + active
-                + " max="
-                + lineMaxTrains.getAsInt());
-        requeue(ticket, now, "fallback-line-cap");
-        return false;
-      }
+    Optional<SpawnControl.Lease> spawnLeaseOpt =
+        tryAcquireSpawnControlForTicket(
+            provider,
+            line,
+            ticket,
+            service,
+            routeEntity,
+            SpawnControl.LeaseKind.FALLBACK,
+            Optional.empty(),
+            now);
+    if (spawnLeaseOpt.isEmpty()) {
+      requeue(ticket, now, "fallback-line-cap");
+      return false;
     }
+    SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
     Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
     if (!lineDepots.isEmpty()) {
-      if (runtimeSnapshot == null) {
-        runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      }
+      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
       selectedDepotOpt = selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot);
     }
     SpawnTicket effectiveTicket =
@@ -1650,12 +1735,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Optional<java.util.UUID> worldIdOpt =
         resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
     if (worldIdOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       requeue(ticket, now, "fallback-depot-world-missing");
       return false;
     }
     Optional<RailGraph> graphOpt =
         railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
     if (graphOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       requeue(ticket, now, "fallback-graph-missing");
       return false;
     }
@@ -1671,13 +1758,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Optional<OccupancyRequest> requestOpt =
         buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
     if (requestOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       requeue(ticket, now, "fallback-occupancy-context-failed");
       return false;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = occupancyManager.acquire(request);
-    if (!decision.allowed()) {
-      requeue(ticket, now, "fallback-gate-blocked:" + decision.signal());
+    OccupancyDecision decision = occupancyManager.canEnter(request);
+    if (!isCleanSpawnGateDecision(decision)) {
+      releaseSpawnLease(spawnLease);
+      requeue(ticket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
+      return false;
+    }
+    decision = occupancyManager.acquire(request);
+    if (!isCleanSpawnGateDecision(decision)) {
+      releaseSpawnLease(spawnLease);
+      requeue(ticket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
       return false;
     }
 
@@ -1685,12 +1780,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     try {
       groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
     } catch (Exception e) {
+      releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("Layover 降级发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
       requeue(ticket, now, "fallback-spawn-failed");
       return false;
     }
     if (groupOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       requeue(ticket, now, "fallback-spawn-failed");
       return false;
@@ -1897,6 +1994,215 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return parts.length >= 2 && "D".equalsIgnoreCase(parts[1]);
   }
 
+  /**
+   * 为实体发车票据申请 SpawnControl 租约。
+   *
+   * <p>该方法统一处理普通 spawn 与 fallback spawn 的容量判断；若拒绝，会输出包含 running/pending/lease 细分的诊断，调用方负责 requeue。
+   */
+  private Optional<SpawnControl.Lease> tryAcquireSpawnControlForTicket(
+      StorageProvider provider,
+      Line line,
+      SpawnTicket ticket,
+      SpawnService service,
+      Route routeEntity,
+      SpawnControl.LeaseKind kind,
+      Optional<String> excludedTrain,
+      Instant now) {
+    if (provider == null || line == null || ticket == null || service == null) {
+      return Optional.empty();
+    }
+    OptionalInt maxTrains = resolveLineMaxTrains(provider, line);
+    SpawnControl.BaseCounters counters =
+        buildSpawnControlCounters(provider, line.id(), ticket.id(), excludedTrain);
+    SpawnControl.Decision decision =
+        spawnControl.tryAcquire(
+            new SpawnControl.Request(
+                ticket.id().toString(),
+                line.id(),
+                service.routeId(),
+                ticket.id(),
+                excludedTrain,
+                kind,
+                maxTrains,
+                counters,
+                now));
+    if (decision.allowed()) {
+      return decision.lease();
+    }
+    logSpawnControlBlocked(line, routeEntity, kind, decision);
+    return Optional.empty();
+  }
+
+  /** 为 Layover/RETURN 复用申请 SpawnControl 租约。 */
+  private Optional<SpawnControl.Lease> tryAcquireSpawnControlForLayover(
+      Optional<StorageProvider> providerOpt,
+      SpawnTicket ticket,
+      SpawnControl.LeaseKind kind,
+      Optional<LayoverRegistry.LayoverCandidate> candidateOpt,
+      Instant now) {
+    if (providerOpt.isEmpty() || ticket == null || ticket.service() == null) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    SpawnService service = ticket.service();
+    Optional<Route> routeEntityOpt = provider.routes().findById(service.routeId());
+    if (routeEntityOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<Line> lineOpt = provider.lines().findById(routeEntityOpt.get().lineId());
+    if (lineOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<String> trainName = candidateOpt.map(LayoverRegistry.LayoverCandidate::trainName);
+    return tryAcquireSpawnControlForTicket(
+        provider, lineOpt.get(), ticket, service, routeEntityOpt.get(), kind, trainName, now);
+  }
+
+  /** 为 ReclaimManager 的 RETURN ServiceTicket 申请 SpawnControl 租约。 */
+  private Optional<SpawnControl.Lease> tryAcquireSpawnControlForLayover(
+      Optional<StorageProvider> providerOpt,
+      ServiceTicket ticket,
+      SpawnControl.LeaseKind kind,
+      Optional<LayoverRegistry.LayoverCandidate> candidateOpt,
+      Instant now) {
+    if (providerOpt.isEmpty() || ticket == null || ticket.routeId() == null) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    Optional<Route> routeEntityOpt = provider.routes().findById(ticket.routeId());
+    if (routeEntityOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Route routeEntity = routeEntityOpt.get();
+    Optional<Line> lineOpt = provider.lines().findById(routeEntity.lineId());
+    if (lineOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Line line = lineOpt.get();
+    Optional<String> trainName = candidateOpt.map(LayoverRegistry.LayoverCandidate::trainName);
+    OptionalInt maxTrains = resolveLineMaxTrains(provider, line);
+    SpawnControl.BaseCounters counters =
+        buildSpawnControlCounters(provider, line.id(), null, trainName);
+    UUID ownerTicketId = parseUuid(ticket.ticketId()).orElseGet(UUID::randomUUID);
+    SpawnControl.Decision decision =
+        spawnControl.tryAcquire(
+            new SpawnControl.Request(
+                ticket.ticketId(),
+                line.id(),
+                routeEntity.id(),
+                ownerTicketId,
+                trainName,
+                kind,
+                maxTrains,
+                counters,
+                now));
+    if (decision.allowed()) {
+      return decision.lease();
+    }
+    logSpawnControlBlocked(line, routeEntity, kind, decision);
+    return Optional.empty();
+  }
+
+  private SpawnControl.BaseCounters buildSpawnControlCounters(
+      StorageProvider provider,
+      UUID lineId,
+      UUID excludedTicketId,
+      Optional<String> excludedTrain) {
+    if (provider == null || lineId == null) {
+      return SpawnControl.BaseCounters.empty();
+    }
+    LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+    int running = runtimeSnapshot.countActiveTrains(provider, lineId, excludedTrain);
+    int pending = countPendingTicketsForLine(lineId, excludedTicketId);
+    return new SpawnControl.BaseCounters(running, pending);
+  }
+
+  private int countPendingTicketsForLine(UUID lineId, UUID excludedTicketId) {
+    if (lineId == null) {
+      return 0;
+    }
+    int count = 0;
+    List<SpawnTicket> queuedTickets = spawnManager.snapshotQueue();
+    if (queuedTickets != null) {
+      for (SpawnTicket queued : queuedTickets) {
+        if (isTicketForLine(queued, lineId, excludedTicketId)) {
+          count++;
+        }
+      }
+    }
+    for (PendingLayoverEntry pending : pendingLayoverTickets.values()) {
+      SpawnTicket ticket = pending == null ? null : pending.ticket();
+      if (isTicketForLine(ticket, lineId, excludedTicketId)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private static boolean isTicketForLine(SpawnTicket ticket, UUID lineId, UUID excludedTicketId) {
+    if (ticket == null || ticket.service() == null || lineId == null) {
+      return false;
+    }
+    if (excludedTicketId != null && excludedTicketId.equals(ticket.id())) {
+      return false;
+    }
+    return lineId.equals(ticket.service().lineId());
+  }
+
+  private static Optional<UUID> parseUuid(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(UUID.fromString(raw.trim()));
+    } catch (IllegalArgumentException ignored) {
+      return Optional.empty();
+    }
+  }
+
+  private void logSpawnControlBlocked(
+      Line line, Route routeEntity, SpawnControl.LeaseKind kind, SpawnControl.Decision decision) {
+    SpawnControl.Snapshot snapshot =
+        decision == null
+            ? SpawnControl.Snapshot.empty(line == null ? null : line.id())
+            : decision.snapshot();
+    debugLogger.accept(
+        "SpawnControl 阻塞: line="
+            + (line == null ? "?" : line.code())
+            + " route="
+            + (routeEntity == null ? "?" : routeEntity.code())
+            + " kind="
+            + kind
+            + " reason="
+            + (decision == null ? "unknown" : decision.reason())
+            + " running="
+            + snapshot.running()
+            + " pending="
+            + snapshot.pending()
+            + " spawnReserved="
+            + snapshot.spawnReserved()
+            + " layoverReserved="
+            + snapshot.layoverReserved()
+            + " reclaimReturn="
+            + snapshot.reclaimReturn()
+            + " total="
+            + snapshot.total());
+  }
+
+  private static boolean isCleanSpawnGateDecision(OccupancyDecision decision) {
+    return decision != null && decision.allowed() && decision.blockers().isEmpty();
+  }
+
+  private static String spawnGateSignalText(OccupancyDecision decision) {
+    return decision == null || decision.signal() == null ? "unknown" : decision.signal().name();
+  }
+
+  private static void releaseSpawnLease(SpawnControl.Lease lease) {
+    if (lease != null) {
+      lease.release();
+    }
+  }
+
   private OptionalInt resolveLineMaxTrains(StorageProvider provider, Line line) {
     if (provider == null || line == null) {
       return OptionalInt.empty();
@@ -1989,11 +2295,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     int countActiveTrains(StorageProvider provider, UUID lineId) {
+      return countActiveTrains(provider, lineId, Optional.empty());
+    }
+
+    int countActiveTrains(StorageProvider provider, UUID lineId, Optional<String> excludedTrain) {
       if (provider == null || lineId == null) {
         return 0;
       }
+      String excludedKey =
+          excludedTrain == null || excludedTrain.isEmpty()
+              ? ""
+              : excludedTrain.get().trim().toLowerCase(Locale.ROOT);
       int count = 0;
       for (RouteProgressRegistry.RouteProgressEntry entry : progressEntries.values()) {
+        if (entry != null
+            && entry.trainName() != null
+            && !excludedKey.isBlank()
+            && excludedKey.equals(entry.trainName().trim().toLowerCase(Locale.ROOT))) {
+          continue;
+        }
         UUID routeId = entry == null ? null : entry.routeUuid();
         if (routeId == null) {
           continue;

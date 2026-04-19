@@ -51,6 +51,24 @@ class RuntimeSignalMonitorTest {
   }
 
   @Test
+  @DisplayName("已有 progress 的列车不应进入 stale-no-progress 清理计数")
+  void staleFtaTrainCounterSkipsTrainsWithProgressEntry() {
+    assertFalse(RuntimeSignalMonitor.shouldTrackStaleFtaTrain(true, true, false, false));
+    assertTrue(RuntimeSignalMonitor.shouldTrackStaleFtaTrain(false, true, false, false));
+    assertTrue(RuntimeSignalMonitor.shouldTrackStaleFtaTrain(false, false, true, false));
+    assertTrue(RuntimeSignalMonitor.shouldTrackStaleFtaTrain(false, false, false, true));
+    assertFalse(RuntimeSignalMonitor.shouldTrackStaleFtaTrain(false, false, false, false));
+  }
+
+  @Test
+  @DisplayName("普通列车仅在明确脱轨时进入巡检兜底")
+  void unmanagedTrainInspectionOnlyAllowsDerailedSafetyCleanup() {
+    assertFalse(RuntimeSignalMonitor.shouldInspectRuntimeGroup(false, false));
+    assertTrue(RuntimeSignalMonitor.shouldInspectRuntimeGroup(false, true));
+    assertTrue(RuntimeSignalMonitor.shouldInspectRuntimeGroup(true, false));
+  }
+
+  @Test
   @DisplayName("空 groupCounts 应返回空集合")
   void findDuplicateLogicalTrainNamesEmptyInput() {
     assertEquals(Set.of(), RuntimeSignalMonitor.findDuplicateLogicalTrainNames(Map.of()));

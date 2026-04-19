@@ -154,9 +154,9 @@ spawn:
   # 从 Depot 直接补发而非继续等待 Layover 列车。设为 0 禁用降级（永远等待 Layover）。
   layover-fallback-multiplier: 2.0
   # 发车队列票据最大保留时间（秒）：超过后丢弃并释放 backlog，0 表示禁用硬清理
-  queued-ticket-max-age-seconds: 86400
+  queued-ticket-max-age-seconds: 7200
   # Layover pending 票据最大等待时间（秒）：超过后丢弃并释放 backlog，0 表示禁用硬清理
-  pending-layover-max-age-seconds: 86400
+  pending-layover-max-age-seconds: 7200
 
 train:
   # 默认车种（emu/dmu/diesel_push_pull/electric_loco）

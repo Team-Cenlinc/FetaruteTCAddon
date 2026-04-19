@@ -7,9 +7,9 @@
 
 ## 运行时流程
 1) 推进点触发：解析当前节点 → 构建 OccupancyRequest → canEnter
-2) 允许进入：acquire → 写入下一跳 destination → 发车/限速
+2) 允许进入且通过 hard-blocker 抑制检查：acquire → 写入下一跳 destination → 发车/限速；若是带 `conflictRelease` 标记的冲突区释放，占用层只写入未被 blocker 持有的资源。
 3) 不允许进入：基于 lookahead 阻塞位置细分信号（PROCEED_WITH_CAUTION/CAUTION/STOP）→ 限速或停车
-4) 出站门控（站台/TERM）会额外检查优先级让行：若单线/道岔冲突队列存在更高优先级列车，则保持停站等待。
+4) 出站门控（站台/TERM）会额外检查优先级让行：若单线/道岔冲突队列存在更高优先级列车，则保持停站等待；若占用层返回 `allowed=true` 但没有 `conflictRelease` 标记且 blockers 中仍有其他列车的 NODE/EDGE 硬占用，则先回退 STOP，不会写入前向占用窗口。
 
 ## Waypoint 停站
 - waypoint 节点在 RouteStop 标记为 STOP/TERMINATE 时也会执行停站（PASS 则直接通过）。
@@ -36,18 +36,21 @@
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
 - 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
 - AutoStation 在 WaitState 期间会向运行时申请 `DepartureGate`（会话锁），信号 tick 会强制维持 STOP；仅在门控放行且会话匹配时释放，避免“停站后被信号 tick 提前发车”。
+- 出站门控和周期信号 tick 统一采用“先 `canEnter` / `evaluateProceedDecision`，确认无未标记 hard-blocker bypass 后再 `acquire`”的顺序；带 `conflictRelease` 标记的场景由占用层 partial acquire，避免死锁释放被误抑制，同时不污染 blocker 的 NODE/EDGE claim。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - spawn/layover 发车成功后，运行时会按本次占用资源主动刷新受影响列车（claim + queue），降低“新车占用已生效但他车未及时红灯”的风险。
-- 异常清理：`RuntimeSignalMonitor` 会检测 `TrainStatus.Derailed`；`MemberRemoveEvent`（split/脱挂）会监听所有 TrainCarts 列车并触发异常回收，避免半编组继续参与调度。
+- 异常清理：`RuntimeSignalMonitor` 会检测所有 TrainCarts 编组的 `TrainStatus.Derailed` 并做安全销毁；`MemberRemoveEvent`（split/脱挂）默认只在源/目标编组携带 FTA runtime tag 时触发异常回收，但若事件编组本身已带 `Derailed` 状态，普通 TrainCarts 列车也会按安全兜底销毁。
+- stale/no-progress 清理只针对“无 progress entry 但仍携带 FTA route/operator 标签”的脱管列车；已有 progress entry 的列车即使 STOP 等待也不会进入该清理计数。
 - 异常清理对同一列车启用短窗去重（默认 2 秒）：同一波 `member-remove` 事件风暴只执行一次清理，避免重复日志与重复 destroy。
-- 异常销毁会优先按 trainName 获取当前 holder，再兜底销毁事件 group，避免“状态清了但实体未销毁”的漏回收。
+- 异常销毁会优先按 trainName 获取当前 holder，再兜底销毁事件 group 与 properties holder，并扫描当前在线 group 中携带同一 `FTA_TRAIN_NAME` 或 split 临时别名的残余编组，避免脱轨/逐节删除后只清掉半列车。
 - 每次异常清理都会输出 warning 级诊断日志，包含原因、逻辑列车名/raw TrainCarts 名、head/tail 位置、车厢数量，以及可用的 route/progress 信息；split 日志还会附带被拆出车厢的位置与源/目标编组名，便于排查 unexpected split。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
 - 中间图节点（未写入 route 的 waypoint/switcher）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
 - 事件驱动信号下发仅接受“更严格”信号（如 STOP）；更宽松信号统一交由周期 tick 决策，避免事件链路误放行。
 - 当当前信号未知（`currentSignal=null`）时，事件链路仅允许 `STOP` 立即生效，不接受 `CAUTION/PROCEED` 的初始化放行。
-- 触发“冲突区放行锁”时，若 blocker 仍包含其他列车的 `NODE/EDGE` 硬占用，会强制回退为阻塞信号并拒绝放行（即使 `canEnter.allowed=true`），优先保证防冒进。
+- 触发“冲突区放行锁”时，`canEnter.allowed=true` 会同时携带 `conflictRelease=true`；运行时允许该释放继续，实际 `acquire` 会跳过 blocker 已持有的 `NODE/EDGE` 资源。移动中的列车不使用该释放特权，会回退为阻塞信号。
+- 单线走廊的冲突区放行候选仅在请求列车与 blocker 的方向都能判定且互为对向时成立；方向为 `UNKNOWN` 或队列中缺少方向信息时保持 STOP，避免把同向前后车误判为会车死锁。
 - 可用 `/fta occupancy stats` 观察自愈与出车重试统计，`/fta occupancy heal` 可手动触发清理。
 
 ## tags 与恢复
@@ -95,6 +98,7 @@
 
 ## 发车门控阻塞策略
 - 出站门控在 `shouldYield/blocked` 时会把占用收缩为“停站保护窗口”（当前节点 + rear guard），同时保留前向冲突队列位次，避免列车在红灯等待期间被后车反超队头。
+- 出站门控不会直接信任 `acquire()` 的副作用判定：先用 `canEnter()` 取得候选结果，再走 `evaluateProceedDecision()` 刷新 blocker 快照并执行 hard-blocker 抑制；只有最终允许时才写入前向占用，冲突区释放则由占用层只写入未阻塞资源。
 - 阻塞日志会输出 blocker 摘要（资源类型/键/持有列车），便于现场定位卡点。
 
 ## 控车重算与 failover
@@ -173,11 +177,13 @@
 - 调度销毁清理范围与 `handleTrainRemoved` 保持一致（进度、stall 状态、停站状态、trigger 状态、信号警告、departure gate、节点历史、动态分配、有效节点覆盖、blocker 快照、routeTrainTracker 位置条目），唯一区别是不在此处释放占用——`train.destroy()` 延迟 1 tick 执行物理销毁，占用由 `GroupRemoveEvent → handleTrainRemoved` 在实体实际消亡后释放，避免 SpawnMonitor 在物理销毁前 acquire 导致撞车。
 - TrainCarts split 后若把列车临时改成 `main~a/main~b`，运行时会优先使用 `FTA_TRAIN_NAME` 作为逻辑主键，不把这些后缀别名当作真实 rename，避免把进度/占用主键污染成临时名。
 - `RuntimeSignalMonitor` 会额外检测“同一逻辑列车名对应多个 live group”的异常场景；但只会把非 split 过渡态的真实重复判为异常，避免 TrainCarts 正常 split/merge 窗口被误杀。
-- 异常编组清理（`handleAbnormalGroup`）对所有列车生效：FTA 托管列车会额外清理 progress/occupancy，普通列车则直接记录诊断并销毁。状态清理启用 2 秒去重窗口，抑制 TrainCarts split/脱挂事件风暴的重复处理。
+- 异常编组清理（`handleAbnormalGroup`）按来源分级：FTA runtime tag 明确存在的列车会清理 progress/occupancy 并销毁整列实体；普通 TrainCarts 列车只有在巡检或事件侧看到 `TrainStatus.Derailed` 时才进入安全销毁。无 derailed 状态的 `MemberRemoveEvent` 对普通列车不触发异常清理，避免玩家拆车、其他插件重组或 TrainCarts 内部 split 过渡被误判。
+- 状态清理启用 2 秒去重窗口，抑制 TrainCarts split/脱挂事件风暴的重复处理；实体销毁仍会继续尝试覆盖当前事件组，避免 FTA 半编组残留。
 - `GroupRemoveEvent` 只会清理“真实离线或真正被销毁”的 FTA 编组；split 临时别名会被识别并跳过，避免把仍在线的 canonical 列车一起清掉。
 
 ## 硬占用阻塞检查（Hard Blocker）
-- 即使死锁解析器/冲突放行路径返回 `allowed=true`，若 blocker 中仍包含其他列车的 NODE/EDGE 硬占用，会强制回退为阻塞信号（STOP），杜绝误放行。
+- 普通 `allowed=true` 若 blocker 中仍包含其他列车的 NODE/EDGE 硬占用，会强制回退为阻塞信号（STOP），杜绝误放行。
+- 带 `conflictRelease=true` 的冲突区释放是例外：它只允许静止/待发列车使用，并由占用层执行 partial acquire，跳过对向列车已持有的 NODE/EDGE 资源。
 - CONFLICT 类型资源不视为硬阻塞（由死锁解析器管理）。
 - 自身占用（blocker 中 trainName 与当前列车匹配）被跳过。
 - blocker 元素为 null 或 resource 为 null 时视为硬阻塞（保守策略）。

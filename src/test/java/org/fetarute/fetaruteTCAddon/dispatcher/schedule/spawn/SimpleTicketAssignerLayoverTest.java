@@ -134,6 +134,50 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
+  void tickKeepsLayoverPendingWhenSpawnControlLineCapIsFull() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider =
+        mockProviderForRoutes(
+            lineId, Map.of(routeId, "R1"), false, Map.of(LineSpawnMetadata.KEY_MAX_TRAINS, 1));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(congestedProgressEntries(routeId, "OP:L1:R1"));
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(runtimeDispatchService, never())
+        .dispatchLayover(eq(candidate), any(ServiceTicket.class));
+    assertEquals(1, assigner.snapshotPendingTickets().size(), "超出容量时应等待后续复用窗口");
+  }
+
+  @Test
   void tickRequeueIncrementsDiagnostics() {
     UUID routeId = UUID.randomUUID();
     SpawnTicket ticket = buildTicket(routeId);
@@ -462,6 +506,11 @@ class SimpleTicketAssignerLayoverTest {
 
   private static StorageProvider mockProviderForRoutes(
       UUID lineId, Map<UUID, String> routes, boolean withCret) {
+    return mockProviderForRoutes(lineId, routes, withCret, Map.of());
+  }
+
+  private static StorageProvider mockProviderForRoutes(
+      UUID lineId, Map<UUID, String> routes, boolean withCret, Map<String, Object> lineMetadata) {
     StorageProvider provider = mock(StorageProvider.class);
     LineRepository lineRepository = mock(LineRepository.class);
     RouteRepository routeRepository = mock(RouteRepository.class);
@@ -481,7 +530,7 @@ class SimpleTicketAssignerLayoverTest {
             Optional.empty(),
             LineStatus.ACTIVE,
             Optional.of(60),
-            Map.of(),
+            lineMetadata,
             Instant.now(),
             Instant.now());
     when(lineRepository.findById(lineId)).thenReturn(Optional.of(line));
@@ -902,7 +951,7 @@ class SimpleTicketAssignerLayoverTest {
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.acquire(requestCaptor.capture()))
+    when(occupancyManager.canEnter(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);

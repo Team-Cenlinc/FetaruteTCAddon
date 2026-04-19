@@ -276,6 +276,111 @@ class SimpleOccupancyManagerTest {
                 nearEntry,
                 0));
     assertTrue(nearDecision.allowed());
+    assertTrue(nearDecision.conflictRelease());
+  }
+
+  @Test
+  void conflictDeadlockReleaseScansLaterConflictWhenPrimaryDoesNotContainBlocker() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource nearConflict = OccupancyResource.forConflict("single:comp:NEAR");
+    OccupancyResource farConflict = OccupancyResource.forConflict("single:comp:FAR");
+    OccupancyResource nodeA = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+    Map<String, CorridorDirection> requestDirections =
+        Map.of(
+            nearConflict.key(),
+            CorridorDirection.A_TO_B,
+            farConflict.key(),
+            CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> blockerDirections =
+        Map.of(farConflict.key(), CorridorDirection.B_TO_A);
+
+    manager.acquire(
+        new OccupancyRequest("tReq", Optional.empty(), now, List.of(nodeA), java.util.Map.of()));
+    manager.acquire(
+        new OccupancyRequest(
+            "tBlocker", Optional.empty(), now, List.of(nodeB), java.util.Map.of()));
+    manager.canEnter(
+        new OccupancyRequest(
+            "tBlocker",
+            Optional.empty(),
+            now,
+            List.of(farConflict),
+            blockerDirections,
+            Map.of(farConflict.key(), 5),
+            0));
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "tReq",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(nearConflict, farConflict, nodeA, nodeB),
+                requestDirections,
+                Map.of(nearConflict.key(), 0, farConflict.key(), 2),
+                0));
+
+    assertTrue(decision.allowed());
+    assertTrue(decision.conflictRelease());
+  }
+
+  @Test
+  void conflictReleaseAcquireSkipsBlockedHardResources() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyResource nodeA = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(conflict.key(), CorridorDirection.B_TO_A);
+
+    manager.acquire(
+        new OccupancyRequest("tReq", Optional.empty(), now, List.of(nodeA), java.util.Map.of()));
+    manager.acquire(
+        new OccupancyRequest(
+            "tBlocker", Optional.empty(), now, List.of(nodeB), java.util.Map.of()));
+    manager.canEnter(
+        new OccupancyRequest(
+            "tBlocker",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            reverse,
+            Map.of(conflict.key(), 2),
+            0));
+
+    OccupancyDecision decision =
+        manager.acquire(
+            new OccupancyRequest(
+                "tReq",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict, nodeA, nodeB),
+                forward,
+                Map.of(conflict.key(), 0),
+                0));
+
+    assertTrue(decision.allowed());
+    assertTrue(decision.conflictRelease());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim -> conflict.equals(claim.resource()) && claim.trainName().equals("tReq")));
+    assertFalse(
+        manager.snapshotClaims().stream()
+            .anyMatch(claim -> nodeB.equals(claim.resource()) && claim.trainName().equals("tReq")));
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim -> nodeB.equals(claim.resource()) && claim.trainName().equals("tBlocker")));
   }
 
   @Test
@@ -371,6 +476,46 @@ class SimpleOccupancyManagerTest {
                 0));
     assertFalse(blocked.allowed());
     assertEquals(SignalAspect.STOP, blocked.signal());
+  }
+
+  @Test
+  void conflictDeadlockReleaseRequiresKnownOppositeDirectionForSingleCorridor() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyResource nodeA = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+
+    manager.acquire(new OccupancyRequest("tReq", Optional.empty(), now, List.of(nodeA), Map.of()));
+    manager.acquire(
+        new OccupancyRequest("tBlocker", Optional.empty(), now, List.of(nodeB), Map.of()));
+
+    manager.canEnter(
+        new OccupancyRequest(
+            "tBlocker",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 2),
+            0));
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "tReq",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict, nodeA, nodeB),
+                Map.of(),
+                Map.of(conflict.key(), 0),
+                0));
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
   }
 
   @Test

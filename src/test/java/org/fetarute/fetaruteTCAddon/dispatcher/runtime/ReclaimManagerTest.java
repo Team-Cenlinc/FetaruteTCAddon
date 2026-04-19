@@ -60,7 +60,7 @@ class ReclaimManagerTest {
 
     TicketAssigner ticketAssigner = mock(TicketAssigner.class);
     when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
-    when(ticketAssigner.forceAssign(eq("train-a"), any())).thenReturn(true);
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-a"), any())).thenReturn(true);
 
     LayoverRegistry layoverRegistry = new LayoverRegistry();
     layoverRegistry.register(
@@ -82,7 +82,7 @@ class ReclaimManagerTest {
 
     manager.performReclaimCheck();
 
-    verify(ticketAssigner, times(1)).forceAssign(eq("train-a"), any());
+    verify(ticketAssigner, times(1)).forceAssign(eq(provider), eq("train-a"), any());
   }
 
   @Test
@@ -121,7 +121,7 @@ class ReclaimManagerTest {
 
     manager.performReclaimCheck();
 
-    verify(ticketAssigner, never()).forceAssign(any(), any());
+    verify(ticketAssigner, never()).forceAssign(any(), any(), any());
   }
 
   @Test
@@ -138,7 +138,7 @@ class ReclaimManagerTest {
 
     TicketAssigner ticketAssigner = mock(TicketAssigner.class);
     when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
-    when(ticketAssigner.forceAssign(eq("train-life"), any())).thenReturn(true);
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-life"), any())).thenReturn(true);
 
     LayoverRegistry layoverRegistry = new LayoverRegistry();
     layoverRegistry.register(
@@ -157,7 +157,7 @@ class ReclaimManagerTest {
 
     manager.performReclaimCheck();
 
-    verify(ticketAssigner, times(1)).forceAssign(eq("train-life"), any());
+    verify(ticketAssigner, times(1)).forceAssign(eq(provider), eq("train-life"), any());
   }
 
   @Test
@@ -174,7 +174,7 @@ class ReclaimManagerTest {
 
     TicketAssigner ticketAssigner = mock(TicketAssigner.class);
     when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
-    when(ticketAssigner.forceAssign(eq("train-a"), any())).thenReturn(true);
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-a"), any())).thenReturn(true);
 
     LayoverRegistry layoverRegistry = new LayoverRegistry();
     layoverRegistry.register(
@@ -196,8 +196,8 @@ class ReclaimManagerTest {
 
     manager.performReclaimCheck();
 
-    verify(ticketAssigner, times(1)).forceAssign(eq("train-a"), any());
-    verify(ticketAssigner, never()).forceAssign(eq("train-b"), any());
+    verify(ticketAssigner, times(1)).forceAssign(eq(provider), eq("train-a"), any());
+    verify(ticketAssigner, never()).forceAssign(eq(provider), eq("train-b"), any());
   }
 
   private static ConfigManager mockConfigManager() {

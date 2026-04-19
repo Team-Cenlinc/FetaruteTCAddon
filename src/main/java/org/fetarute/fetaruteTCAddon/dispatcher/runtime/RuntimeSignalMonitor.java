@@ -81,7 +81,13 @@ public final class RuntimeSignalMonitor implements Runnable {
       if (group == null || !group.isValid()) {
         continue;
       }
-      if (isDerailed(group)) {
+      TrainProperties properties = group.getProperties();
+      boolean ftaTagged = dispatchService.hasFtaRuntimeTag(properties);
+      boolean derailed = isDerailed(group);
+      if (!shouldInspectRuntimeGroup(ftaTagged, derailed)) {
+        continue;
+      }
+      if (derailed) {
         dispatchService.handleAbnormalGroup(group, "status-derailed");
         continue;
       }
@@ -299,7 +305,8 @@ public final class RuntimeSignalMonitor implements Runnable {
       return;
     }
     // 已有 progress 条目的列车由 TrainHealthMonitor 监控
-    if (routeProgressRegistry.get(trainName).isPresent()) {
+    boolean hasProgressEntry = routeProgressRegistry.get(trainName).isPresent();
+    if (hasProgressEntry) {
       staleTrainTicks.remove(trainName);
       return;
     }
@@ -318,7 +325,7 @@ public final class RuntimeSignalMonitor implements Runnable {
         TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_OPERATOR_CODE)
             .filter(v -> !v.isBlank())
             .isPresent();
-    if (!hasRouteIndex && !hasRouteId && !hasOperator) {
+    if (!shouldTrackStaleFtaTrain(hasProgressEntry, hasRouteIndex, hasRouteId, hasOperator)) {
       // 非 FTA 列车，不检测
       staleTrainTicks.remove(trainName);
       return;
@@ -330,7 +337,31 @@ public final class RuntimeSignalMonitor implements Runnable {
     }
   }
 
-  private static boolean isDerailed(MinecartGroup group) {
+  /**
+   * 判断当前列车是否应进入“脱管 FTA 列车”连续计数。
+   *
+   * <p>已有 progress entry 的列车可能正在正常红灯、dwell 或 queue 等待，不能按 no-progress 清理；只有没有 progress 且仍携带 FTA
+   * 线路标签的列车，才视为可能脱管。
+   */
+  static boolean shouldTrackStaleFtaTrain(
+      boolean hasProgressEntry, boolean hasRouteIndex, boolean hasRouteId, boolean hasOperator) {
+    if (hasProgressEntry) {
+      return false;
+    }
+    return hasRouteIndex || hasRouteId || hasOperator;
+  }
+
+  /**
+   * 判断周期巡检是否需要处理某个 TrainCarts 编组。
+   *
+   * <p>普通非 FTA 列车不进入 dispatch/ETA/orphan active 集合，避免与 FTA 状态同名时影响清理；但明确 derailed 的普通列车仍必须进入安全销毁兜底。
+   */
+  static boolean shouldInspectRuntimeGroup(boolean hasFtaRuntimeTag, boolean derailed) {
+    return hasFtaRuntimeTag || derailed;
+  }
+
+  /** 判断 TrainCarts 当前状态列表中是否包含明确脱轨标记，供巡检与事件侧共用。 */
+  static boolean isDerailed(MinecartGroup group) {
     if (group == null) {
       return false;
     }

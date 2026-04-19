@@ -353,7 +353,7 @@ public class ReclaimManager {
         debugLogger.accept(
             "尝试回收: 分配 RETURN ticket route=" + route.code() + " train=" + candidate.trainName());
 
-        boolean success = ticketAssigner.forceAssign(candidate.trainName(), ticket);
+        boolean success = ticketAssigner.forceAssign(provider, candidate.trainName(), ticket);
         if (success) {
           debugLogger.accept("回收成功: 已分配 RETURN ticket train=" + candidate.trainName());
         } else {

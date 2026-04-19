@@ -237,8 +237,16 @@ public final class SimpleOccupancyManager
       return decision;
     }
     Instant now = request.now();
+    Set<OccupancyResource> blockedResources =
+        decision.conflictRelease()
+            ? resolveBlockedResourcesForPartialAcquire(decision, request.trainName())
+            : Set.of();
+    List<OccupancyResource> acquiredResources = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
+        continue;
+      }
+      if (blockedResources.contains(resource)) {
         continue;
       }
       Duration headway = headwayRule.headwayFor(request.routeId(), resource);
@@ -257,15 +265,19 @@ public final class SimpleOccupancyManager
                 current.acquiredAt(),
                 nextHeadway,
                 direction));
+        acquiredResources.add(resource);
         continue;
       }
       existing.add(
           new OccupancyClaim(
               resource, request.trainName(), request.routeId(), now, headway, direction));
+      acquiredResources.add(resource);
     }
-    removeFromQueuesForResources(request.trainName(), request.resourceList());
+    if (!acquiredResources.isEmpty()) {
+      removeFromQueuesForResources(request.trainName(), acquiredResources);
+    }
     // 发布占用获取事件
-    publishAcquiredEvent(request, now);
+    publishAcquiredEvent(request, acquiredResources, now);
     return decision;
   }
 
@@ -640,41 +652,42 @@ public final class SimpleOccupancyManager
     if (!targets.isEmpty()) {
       return targets;
     }
-    resolvePrimaryConflict(request).ifPresent(targets::add);
+    targets.addAll(resolveConflictCandidates(request));
     return targets;
   }
 
-  private Optional<OccupancyResource> resolvePrimaryConflict(OccupancyRequest request) {
+  /**
+   * 按入口距离解析冲突释放候选。
+   *
+   * <p>长单线 lookahead 可能同时覆盖多个 conflict。若只看最近的 primary conflict，当 blocker 所在列车排在后续 conflict
+   * 队列中时会漏掉真实互锁。这里按 entryOrder 从近到远扫描所有候选，并以请求资源顺序补齐没有 entryOrder 的冲突资源，避免主冲突窗口切换导致稳定互卡。
+   */
+  private List<OccupancyResource> resolveConflictCandidates(OccupancyRequest request) {
     if (request == null) {
-      return Optional.empty();
+      return List.of();
     }
     Map<String, Integer> entryOrders = request.conflictEntryOrders();
+    LinkedHashSet<OccupancyResource> candidates = new LinkedHashSet<>();
     if (entryOrders != null && !entryOrders.isEmpty()) {
-      String bestKey = null;
-      int bestOrder = Integer.MAX_VALUE;
-      for (Map.Entry<String, Integer> entry : entryOrders.entrySet()) {
-        if (entry == null || entry.getKey() == null) {
-          continue;
-        }
-        int order = entry.getValue() != null ? entry.getValue() : Integer.MAX_VALUE;
-        if (order < bestOrder) {
-          bestOrder = order;
-          bestKey = entry.getKey();
-        }
-      }
-      if (bestKey != null) {
-        OccupancyResource conflict = OccupancyResource.forConflict(bestKey);
-        if (isQueueableConflict(conflict)) {
-          return Optional.of(conflict);
-        }
-      }
+      entryOrders.entrySet().stream()
+          .filter(entry -> entry != null && entry.getKey() != null)
+          .sorted(
+              java.util.Comparator.comparingInt(
+                  entry -> entry.getValue() != null ? entry.getValue() : Integer.MAX_VALUE))
+          .forEach(
+              entry -> {
+                OccupancyResource conflict = OccupancyResource.forConflict(entry.getKey());
+                if (isQueueableConflict(conflict)) {
+                  candidates.add(conflict);
+                }
+              });
     }
     for (OccupancyResource resource : request.resourceList()) {
       if (isQueueableConflict(resource)) {
-        return Optional.of(resource);
+        candidates.add(resource);
       }
     }
-    return Optional.empty();
+    return List.copyOf(candidates);
   }
 
   private boolean containsConflictBlocker(List<OccupancyClaim> blockers) {
@@ -690,6 +703,33 @@ public final class SimpleOccupancyManager
       }
     }
     return false;
+  }
+
+  /**
+   * 计算冲突释放时不能写入的 blocker 资源。
+   *
+   * <p>冲突区释放的目的只是允许队头车进入可用的冲突窗口，而不是覆盖对向车已经持有的 NODE/EDGE claim。 因此 acquire 阶段会跳过所有由其他列车持有的 blocker
+   * 资源，避免“判定放行”变成“抢占前方占用”。
+   */
+  private Set<OccupancyResource> resolveBlockedResourcesForPartialAcquire(
+      OccupancyDecision decision, String trainName) {
+    if (decision == null || decision.blockers().isEmpty()) {
+      return Set.of();
+    }
+    String self = trainName == null ? "" : trainName.trim().toLowerCase(Locale.ROOT);
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    for (OccupancyClaim blocker : decision.blockers()) {
+      if (blocker == null || blocker.resource() == null) {
+        continue;
+      }
+      String owner =
+          blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
+      if (!owner.isEmpty() && owner.equals(self)) {
+        continue;
+      }
+      resources.add(blocker.resource());
+    }
+    return Set.copyOf(resources);
   }
 
   /**
@@ -719,8 +759,8 @@ public final class SimpleOccupancyManager
   /**
    * 判定当前阻塞是否包含“对向列车”。
    *
-   * <p>仅在单线冲突资源上生效：冲突区放行的目标是解开对向会车死锁，不应用于同向跟驰场景。 若存在同向阻塞列车，说明请求侧前方仍有列车，不应优先放行。
-   * 对向方向无法判定时（例如未知方向），保持既有放行逻辑。
+   * <p>仅在单线冲突资源上生效：冲突区放行的目标是解开对向会车死锁，不应用于同向跟驰场景。 若存在同向阻塞列车，说明请求侧前方仍有列车，不应优先放行。 对向方向无法判定时（例如 UNKNOWN
+   * 或队列中缺少方向），按安全侧拒绝放行，避免把同向前后车误判为会车死锁。
    */
   private boolean hasOppositeDirectionBlockerInQueue(
       OccupancyRequest request,
@@ -732,9 +772,8 @@ public final class SimpleOccupancyManager
     }
     CorridorDirection requestDirection = queueDirectionFor(request, conflict);
     if (requestDirection == CorridorDirection.UNKNOWN) {
-      return true;
+      return false;
     }
-    boolean seenDirectionalBlocker = false;
     boolean hasOppositeDirectionBlocker = false;
     for (OccupancyClaim blocker : blockers) {
       if (blocker == null || blocker.trainName() == null) {
@@ -745,9 +784,8 @@ public final class SimpleOccupancyManager
       }
       Optional<CorridorDirection> blockerDirection = queue.directionOf(blocker.trainName());
       if (blockerDirection.isEmpty() || blockerDirection.get() == CorridorDirection.UNKNOWN) {
-        continue;
+        return false;
       }
-      seenDirectionalBlocker = true;
       if (blockerDirection.get() == requestDirection) {
         return false;
       }
@@ -755,11 +793,7 @@ public final class SimpleOccupancyManager
         hasOppositeDirectionBlocker = true;
       }
     }
-    if (hasOppositeDirectionBlocker) {
-      return true;
-    }
-    // 若阻塞方没有有效方向信息，保持兼容（不强制拒绝）；否则要求至少有一侧对向。
-    return !seenDirectionalBlocker;
+    return hasOppositeDirectionBlocker;
   }
 
   private boolean isOppositeDirection(
@@ -796,40 +830,42 @@ public final class SimpleOccupancyManager
     if (heldLockDecision != null) {
       return heldLockDecision;
     }
-    Optional<OccupancyResource> conflictOpt = resolvePrimaryConflict(request);
-    if (conflictOpt.isEmpty()) {
+    List<OccupancyResource> candidates = resolveConflictCandidates(request);
+    if (candidates.isEmpty()) {
       return null;
     }
-    OccupancyResource conflict = conflictOpt.get();
-    ConflictQueue queue = queues.get(conflict);
-    if (queue == null || queue.isEmpty()) {
-      return null;
-    }
-    // 检查是否有其他车持有该冲突的锁
-    DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
-    if (existingLock != null && !existingLock.isExpired(now)) {
-      if (!existingLock.matches(request.trainName())) {
-        // 其他车持有锁，当前车必须等待
-        return null;
+    for (OccupancyResource conflict : candidates) {
+      ConflictQueue queue = queues.get(conflict);
+      if (queue == null || queue.isEmpty()) {
+        continue;
       }
-      // 当前车持有锁（已在 tryResolveByHeldLock 处理，理论上不会到这里）
+      // 检查是否有其他车持有该冲突的锁
+      DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
+      if (existingLock != null && !existingLock.isExpired(now)) {
+        if (!existingLock.matches(request.trainName())) {
+          // 其他车持有锁，当前车必须等待
+          continue;
+        }
+        // 当前车持有锁（已在 tryResolveByHeldLock 处理，理论上不会到这里）
+      }
+      // 单侧放行优先：必须是全局队头才能触发冲突放行
+      if (!queue.isHeadAny(request.trainName())) {
+        continue;
+      }
+      if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+        continue;
+      }
+      if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
+        continue;
+      }
+      // 放行并写入锁定
+      Instant expiresAt = now.plus(DEADLOCK_RELEASE_LOCK_TTL);
+      deadlockReleaseLocks.put(
+          conflict.key(), new DeadlockReleaseLock(request.trainName(), expiresAt));
+      SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+      return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
     }
-    // 单侧放行优先：必须是全局队头才能触发冲突放行
-    if (!queue.isHeadAny(request.trainName())) {
-      return null;
-    }
-    if (!areBlockersInQueue(blockers, queue, request.trainName())) {
-      return null;
-    }
-    if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
-      return null;
-    }
-    // 放行并写入锁定
-    Instant expiresAt = now.plus(DEADLOCK_RELEASE_LOCK_TTL);
-    deadlockReleaseLocks.put(
-        conflict.key(), new DeadlockReleaseLock(request.trainName(), expiresAt));
-    SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    return null;
   }
 
   /**
@@ -859,7 +895,7 @@ public final class SimpleOccupancyManager
       // 2. 锁有效期内阻塞列车可能已离开队列（如推进到下一站），但锁本身就是放行依据
       // 3. 过度校验会导致持锁列车因 blocker 变化而被拒绝，产生信号乒乓
       SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-      return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+      return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
     }
     return null;
   }
@@ -877,46 +913,48 @@ public final class SimpleOccupancyManager
     if (containsConflictBlocker(blockers)) {
       return null;
     }
-    Optional<OccupancyResource> conflictOpt = resolvePrimaryConflict(request);
-    if (conflictOpt.isEmpty()) {
+    List<OccupancyResource> candidates = resolveConflictCandidates(request);
+    if (candidates.isEmpty()) {
       return null;
     }
-    OccupancyResource conflict = conflictOpt.get();
-    ConflictQueue queue = queues.get(conflict);
-    if (queue == null || queue.isEmpty()) {
-      return null;
-    }
-    // 检查放行锁（只读）
-    DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
-    if (existingLock != null && !existingLock.isExpired(now)) {
-      if (!existingLock.matches(request.trainName())) {
-        return null;
+    for (OccupancyResource conflict : candidates) {
+      ConflictQueue queue = queues.get(conflict);
+      if (queue == null || queue.isEmpty()) {
+        continue;
       }
-      // 当前车持有锁：跳过队头判断，但仍需确保阻塞来源在同一队列中。
+      // 检查放行锁（只读）
+      DeadlockReleaseLock existingLock = deadlockReleaseLocks.get(conflict.key());
+      if (existingLock != null && !existingLock.isExpired(now)) {
+        if (!existingLock.matches(request.trainName())) {
+          continue;
+        }
+        // 当前车持有锁：跳过队头判断，但仍需确保阻塞来源在同一队列中。
+        if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+          continue;
+        }
+        SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
+        return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
+      }
+      // 单侧放行优先：必须是全局队头才能触发冲突放行
+      CorridorDirection direction = queueDirectionFor(request, conflict);
+      if (!queue.wouldBeHeadAny(
+          request.trainName(),
+          direction,
+          request.priority(),
+          queueEntryOrderFor(request, conflict),
+          now)) {
+        continue;
+      }
       if (!areBlockersInQueue(blockers, queue, request.trainName())) {
-        return null;
+        continue;
+      }
+      if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
+        continue;
       }
       SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-      return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+      return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
     }
-    // 单侧放行优先：必须是全局队头才能触发冲突放行
-    CorridorDirection direction = queueDirectionFor(request, conflict);
-    if (!queue.wouldBeHeadAny(
-        request.trainName(),
-        direction,
-        request.priority(),
-        queueEntryOrderFor(request, conflict),
-        now)) {
-      return null;
-    }
-    if (!areBlockersInQueue(blockers, queue, request.trainName())) {
-      return null;
-    }
-    if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
-      return null;
-    }
-    SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    return null;
   }
 
   private void enqueueWaiting(
@@ -1045,15 +1083,19 @@ public final class SimpleOccupancyManager
    *
    * <p>收集受影响的列车（等待这些资源的列车），通知它们重新评估信号。
    */
-  private void publishAcquiredEvent(OccupancyRequest request, Instant now) {
+  private void publishAcquiredEvent(
+      OccupancyRequest request, List<OccupancyResource> acquiredResources, Instant now) {
     if (eventBus == null) {
       return;
     }
-    List<String> affectedTrains =
-        collectAffectedTrains(request.resourceList(), request.trainName());
+    List<OccupancyResource> resources =
+        acquiredResources == null ? List.of() : List.copyOf(acquiredResources);
+    if (resources.isEmpty()) {
+      return;
+    }
+    List<String> affectedTrains = collectAffectedTrains(resources, request.trainName());
     OccupancyAcquiredEvent event =
-        new OccupancyAcquiredEvent(
-            now, request.trainName(), request.resourceList(), affectedTrains);
+        new OccupancyAcquiredEvent(now, request.trainName(), resources, affectedTrains);
     eventBus.publish(event);
   }
 

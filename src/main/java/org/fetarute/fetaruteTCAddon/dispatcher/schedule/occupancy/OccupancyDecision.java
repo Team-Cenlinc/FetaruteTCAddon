@@ -9,10 +9,20 @@ import java.util.Objects;
  *
  * <p>signal 用于给运行时层决策限速/停车；earliestTime 仅作诊断提示。
  *
- * <p>当 allowed=true 且 blockers 非空时，通常代表“冲突区放行”的特殊判定。
+ * <p>当 allowed=true 且 blockers 非空时，通常代表“冲突区放行”的特殊判定。此时 {@code conflictRelease=true}
+ * 表示占用管理器已确认这是对向冲突释放，调用方可在不污染 blocker 资源的前提下继续放行。
  */
 public record OccupancyDecision(
-    boolean allowed, Instant earliestTime, SignalAspect signal, List<OccupancyClaim> blockers) {
+    boolean allowed,
+    Instant earliestTime,
+    SignalAspect signal,
+    List<OccupancyClaim> blockers,
+    boolean conflictRelease) {
+
+  public OccupancyDecision(
+      boolean allowed, Instant earliestTime, SignalAspect signal, List<OccupancyClaim> blockers) {
+    this(allowed, earliestTime, signal, blockers, false);
+  }
 
   public OccupancyDecision {
     Objects.requireNonNull(earliestTime, "earliestTime");

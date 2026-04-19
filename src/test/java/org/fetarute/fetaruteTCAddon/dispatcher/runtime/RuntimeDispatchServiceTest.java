@@ -282,6 +282,44 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void abnormalCleanupPolicySkipsUnmanagedUnexpectedSplit() {
+    RuntimeDispatchService.AbnormalCleanupPolicy policy =
+        RuntimeDispatchService.resolveAbnormalCleanupPolicy(false, "unexpected-split-source");
+
+    assertFalse(policy.process());
+    assertFalse(policy.cleanupRuntimeState());
+    assertFalse(policy.destroyEntities());
+  }
+
+  @Test
+  void abnormalCleanupPolicyDestroysUnmanagedDerailedWithoutRuntimeCleanup() {
+    RuntimeDispatchService.AbnormalCleanupPolicy policy =
+        RuntimeDispatchService.resolveAbnormalCleanupPolicy(false, "status-derailed");
+
+    assertTrue(policy.process());
+    assertFalse(policy.cleanupRuntimeState());
+    assertTrue(policy.destroyEntities());
+  }
+
+  @Test
+  void abnormalCleanupPolicyCleansFtaRuntimeTaggedTrain() {
+    RuntimeDispatchService.AbnormalCleanupPolicy policy =
+        RuntimeDispatchService.resolveAbnormalCleanupPolicy(true, "unexpected-split-source");
+
+    assertTrue(policy.process());
+    assertTrue(policy.cleanupRuntimeState());
+    assertTrue(policy.destroyEntities());
+  }
+
+  @Test
+  void hasFtaRuntimeTagRecognizesTrainNameOnlySplitRemainder() {
+    RuntimeDispatchService service = createMinimalService();
+    TagStore tags = new TagStore("train-main~a", "FTA_TRAIN_NAME=train-main");
+
+    assertTrue(service.hasFtaRuntimeTag(tags.properties()));
+  }
+
+  @Test
   void handleSignalTickBlocksDeadlockReleaseWhenHardOccupancyBlockersExist() {
     NodeId current = NodeId.of("A");
     NodeId next = NodeId.of("B");
@@ -813,6 +851,157 @@ class RuntimeDispatchServiceTest {
 
     assertTrue(service.releaseDepartureGate("train-1", "sid-new"));
     assertFalse(service.hasDepartureGate("train-1"));
+  }
+
+  @Test
+  void checkDepartureDoesNotAcquireForwardWindowWhenHardBlockerBypassIsSuppressed() {
+    NodeId current = NodeId.of("ST");
+    NodeId next = NodeId.of("NEXT");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      OccupancyResource.forNode(next),
+                      "front-train",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  true, request.now(), SignalAspect.PROCEED, List.of(blocker));
+            });
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertFalse(service.checkDeparture(train, definition));
+
+    ArgumentCaptor<OccupancyRequest> acquireCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager).acquire(acquireCaptor.capture());
+    assertEquals(
+        List.of(OccupancyResource.forNode(current)), acquireCaptor.getValue().resourceList());
+    assertTrue(
+        service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
+  }
+
+  @Test
+  void checkDepartureAllowsMarkedConflictReleaseWithHardBlockers() {
+    NodeId current = NodeId.of("ST");
+    NodeId next = NodeId.of("NEXT");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, next, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      OccupancyResource.forNode(next),
+                      "opposite-train",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  true, request.now(), SignalAspect.PROCEED, List.of(blocker), true);
+            });
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertTrue(service.checkDeparture(train, definition));
+    verify(occupancyManager).acquire(any());
+    assertTrue(
+        service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("opposite-train"));
   }
 
   @Test
@@ -2613,7 +2802,7 @@ class RuntimeDispatchServiceTest {
   // ====== 孤儿清理返回统计结果测试 ======
 
   @Test
-  void cleanupOrphanOccupancyClaimsWithReportReturnsStatistics() {
+  void cleanupOrphanOccupancyClaimsWithReportReturnsStatistics() throws Exception {
     String orphanTrain = "orphan-train";
     RouteDefinition route =
         new RouteDefinition(
@@ -2655,6 +2844,8 @@ class RuntimeDispatchServiceTest {
             null,
             new TrainConfigResolver(),
             null);
+    service.acquireDepartureGate(orphanTrain, "session-1", "test");
+    backdateBlockerSnapshot(service, orphanTrain, Instant.now());
 
     // 活跃列车集不含 orphanTrain
     RuntimeDispatchService.CleanupResult result =
@@ -2663,6 +2854,10 @@ class RuntimeDispatchServiceTest {
     assertEquals(1, result.removedProgress(), "应清理 1 个进度条目");
     assertEquals(1, result.releasedTrains(), "应释放 1 个列车占用");
     assertTrue(registry.get(orphanTrain).isEmpty());
+    assertFalse(service.hasDepartureGate(orphanTrain), "destroyall 兜底应清理 departure gate");
+    assertTrue(
+        service.recentBlockerTrains(orphanTrain, Duration.ofSeconds(30)).isEmpty(),
+        "destroyall 兜底应清理 blocker snapshot");
     verify(occupancyManager).releaseByTrain(orphanTrain);
   }
 
@@ -2706,6 +2901,30 @@ class RuntimeDispatchServiceTest {
         service.cleanupOrphanOccupancyClaimsWithReport(java.util.Set.of("TRAIN-A"));
 
     assertEquals(0, result.releasedTrains(), "大小写不同但匹配，不应释放");
+  }
+
+  @Test
+  void relatedLogicalTrainMatchingUsesTrackedNameAndSplitAlias() {
+    RuntimeDispatchService service = createMinimalService();
+    TagStore taggedSplit =
+        new TagStore(
+            "train-main~a",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_TRAIN_NAME=train-main");
+    TagStore rawSplitAlias = new TagStore("train-main~b");
+    TagStore unrelated =
+        new TagStore(
+            "train-other",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r2",
+            "FTA_TRAIN_NAME=train-other");
+
+    assertTrue(service.isRelatedLogicalTrain(taggedSplit.properties(), "train-main"));
+    assertTrue(service.isRelatedLogicalTrain(rawSplitAlias.properties(), "train-main"));
+    assertFalse(service.isRelatedLogicalTrain(unrelated.properties(), "train-main"));
   }
 
   // ====== refreshSignalsForResources 测试 ======
@@ -2766,11 +2985,16 @@ class RuntimeDispatchServiceTest {
   }
 
   private RuntimeDispatchService createMinimalService() {
+    return createMinimalService(mock(OccupancyManager.class), new ArrayList<>());
+  }
+
+  private RuntimeDispatchService createMinimalService(
+      OccupancyManager occupancyManager, List<String> debugMessages) {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
     return new RuntimeDispatchService(
-        mock(OccupancyManager.class),
+        occupancyManager,
         mock(RailGraphService.class),
         mock(RouteDefinitionCache.class),
         new RouteProgressRegistry(),
@@ -2780,7 +3004,7 @@ class RuntimeDispatchServiceTest {
         configManager,
         null,
         mock(TrainConfigResolver.class),
-        msg -> {});
+        debugMessages::add);
   }
 
   private RuntimeDispatchService createServiceWithHardNodeBlocker() {

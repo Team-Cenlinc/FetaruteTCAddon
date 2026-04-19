@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
@@ -24,6 +25,7 @@ public final class HealthMonitor {
   private final OccupancyManager occupancyManager;
   private final ConfigManager configManager;
   private final Consumer<String> debugLogger;
+  private final Supplier<Set<String>> activeTrainNamesSupplier;
 
   private final HealthAlertBus alertBus;
   private final TrainHealthMonitor trainMonitor;
@@ -52,10 +54,21 @@ public final class HealthMonitor {
       DwellRegistry dwellRegistry,
       ConfigManager configManager,
       Consumer<String> debugLogger) {
+    this(dispatchService, occupancyManager, dwellRegistry, configManager, debugLogger, null);
+  }
+
+  HealthMonitor(
+      RuntimeDispatchService dispatchService,
+      OccupancyManager occupancyManager,
+      DwellRegistry dwellRegistry,
+      ConfigManager configManager,
+      Consumer<String> debugLogger,
+      Supplier<Set<String>> activeTrainNamesSupplier) {
     this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
     this.configManager = configManager;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
+    this.activeTrainNamesSupplier = activeTrainNamesSupplier;
 
     this.alertBus = new HealthAlertBus();
     this.trainMonitor =
@@ -154,16 +167,22 @@ public final class HealthMonitor {
     // 执行检查
     checkCount.increment();
 
+    RuntimeDispatchService.CleanupResult runtimeCleanup =
+        dispatchService.cleanupOrphanOccupancyClaimsWithReport(activeTrains);
     TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
 
-    int totalFixed = trainResult.fixedCount() + occupancyResult.total();
+    int runtimeFixed =
+        runtimeCleanup.removedProgress()
+            + runtimeCleanup.releasedTrains()
+            + runtimeCleanup.removedLayovers();
+    int totalFixed = trainResult.fixedCount() + occupancyResult.total() + runtimeFixed;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }
 
     // 调试日志（仅在有异常时输出）
-    if (trainResult.hasAnomalies() || occupancyResult.hasChanges()) {
+    if (trainResult.hasAnomalies() || occupancyResult.hasChanges() || runtimeFixed > 0) {
       debugLogger.accept(
           "HealthMonitor tick: stall="
               + trainResult.stallCount()
@@ -173,6 +192,12 @@ public final class HealthMonitor {
               + occupancyResult.orphanCleaned()
               + " timeout="
               + occupancyResult.timeoutCleaned()
+              + " runtimeProgress="
+              + runtimeCleanup.removedProgress()
+              + " runtimeOccupancy="
+              + runtimeCleanup.releasedTrains()
+              + " runtimeLayover="
+              + runtimeCleanup.removedLayovers()
               + " fixed="
               + totalFixed);
     }
@@ -185,10 +210,16 @@ public final class HealthMonitor {
 
     checkCount.increment();
 
+    RuntimeDispatchService.CleanupResult runtimeCleanup =
+        dispatchService.cleanupOrphanOccupancyClaimsWithReport(activeTrains);
     TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
 
-    int totalFixed = trainResult.fixedCount() + occupancyResult.total();
+    int runtimeFixed =
+        runtimeCleanup.removedProgress()
+            + runtimeCleanup.releasedTrains()
+            + runtimeCleanup.removedLayovers();
+    int totalFixed = trainResult.fixedCount() + occupancyResult.total() + runtimeFixed;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }
@@ -197,7 +228,7 @@ public final class HealthMonitor {
     return new CheckResult(
         trainResult.stallCount(),
         trainResult.progressStuckCount(),
-        occupancyResult.orphanCleaned(),
+        occupancyResult.orphanCleaned() + runtimeCleanup.releasedTrains(),
         occupancyResult.timeoutCleaned(),
         totalFixed);
   }
@@ -213,11 +244,18 @@ public final class HealthMonitor {
 
     checkCount.increment();
 
+    RuntimeDispatchService.CleanupResult runtimeCleanup =
+        dispatchService.cleanupOrphanOccupancyClaimsWithReport(activeTrains);
     TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
     int forcedUnlock = trainMonitor.forceUnlockNow(activeTrains, now);
 
-    int totalFixed = trainResult.fixedCount() + occupancyResult.total() + forcedUnlock;
+    int runtimeFixed =
+        runtimeCleanup.removedProgress()
+            + runtimeCleanup.releasedTrains()
+            + runtimeCleanup.removedLayovers();
+    int totalFixed =
+        trainResult.fixedCount() + occupancyResult.total() + forcedUnlock + runtimeFixed;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }
@@ -226,7 +264,7 @@ public final class HealthMonitor {
     return new CheckResult(
         trainResult.stallCount(),
         trainResult.progressStuckCount(),
-        occupancyResult.orphanCleaned(),
+        occupancyResult.orphanCleaned() + runtimeCleanup.releasedTrains(),
         occupancyResult.timeoutCleaned(),
         totalFixed);
   }
@@ -245,6 +283,19 @@ public final class HealthMonitor {
   }
 
   private Set<String> collectActiveTrainNames() {
+    if (activeTrainNamesSupplier != null) {
+      Set<String> suppliedNames = activeTrainNamesSupplier.get();
+      if (suppliedNames == null || suppliedNames.isEmpty()) {
+        return Set.of();
+      }
+      Set<String> names = new HashSet<>();
+      for (String name : suppliedNames) {
+        if (name != null && !name.isBlank()) {
+          names.add(name.trim());
+        }
+      }
+      return names;
+    }
     Set<String> names = new HashSet<>();
     for (MinecartGroup group : MinecartGroupStore.getGroups()) {
       if (group == null || !group.isValid()) {
