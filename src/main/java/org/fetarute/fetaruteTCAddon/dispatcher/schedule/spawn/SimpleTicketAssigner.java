@@ -184,6 +184,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.atomic.AtomicLong lastCongestionCleanupMs =
       new java.util.concurrent.atomic.AtomicLong(0L);
+  // key 为 lineId：同负载 depot 的轮转游标。负载统计在同一 tick 内可能还看不到刚生成的车，
+  // 因此需要一个轻量游标防止连续票据都选中配置列表第一个 depot。
+  private final java.util.concurrent.ConcurrentMap<UUID, java.util.concurrent.atomic.AtomicInteger>
+      depotSelectionCursors = new java.util.concurrent.ConcurrentHashMap<>();
 
   public SimpleTicketAssigner(
       SpawnManager spawnManager,
@@ -621,17 +625,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       requeue(ticket, now, "create-without-cret");
       return false;
     }
-    if (routeEntity.operationType() == RouteOperationType.OPERATION
-        && startsWithCret
-        && lineHasCreateRoute(provider, line.id())) {
-      debugLogger.accept(
-          "自动发车改为复用: line="
-              + line.code()
-              + " route="
-              + routeEntity.code()
-              + " reason=create-route-present");
-      return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
-    }
     if (!startsWithCret) {
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
@@ -660,6 +653,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
+    effectiveTicket = materializeDynamicDepotSelection(service, effectiveTicket);
 
     String destName = resolveDestinationName(provider, routeEntity).orElse(routeEntity.name());
     String trainName =
@@ -1088,18 +1082,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                 entry.getValue() == null
                     || entry.getValue().updatedAt() == null
                     || entry.getValue().updatedAt().isBefore(cutoff));
-  }
-
-  private static boolean lineHasCreateRoute(StorageProvider provider, UUID lineId) {
-    if (provider == null || lineId == null) {
-      return false;
-    }
-    for (Route route : provider.routes().listByLine(lineId)) {
-      if (route != null && route.operationType() == RouteOperationType.CREATE) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /**
@@ -1722,6 +1704,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
+    effectiveTicket = materializeDynamicDepotSelection(service, effectiveTicket);
 
     String destName = resolveDestinationName(provider, routeEntity).orElse(routeEntity.name());
     String trainName =
@@ -1919,10 +1902,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnService service,
       SpawnTicket ticket,
       Instant now) {
+    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, ticket);
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
         ctxOpt =
             builder.buildContextFromNodes(
-                trainName, Optional.ofNullable(route.id()), route.waypoints(), 0, now, 100);
+                trainName, Optional.ofNullable(route.id()), spawnWaypoints, 0, now, 100);
     if (ctxOpt.isEmpty()) {
       return Optional.empty();
     }
@@ -1933,6 +1917,52 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       debugLogger.accept("Depot lookover 回退: 未解析到显式 depot 节点 train=" + trainName);
     }
     return Optional.of(builder.applyDepotLookover(ctxOpt.get(), depotNode));
+  }
+
+  /**
+   * 解析本次发车实际使用的节点序列。
+   *
+   * <p>SpawnPlan 的 RouteDefinition 首节点来自 route 原始 CRET 或 DYNAMIC 占位；当 line depot pool 或动态 depot
+   * 选择了其他实际股道时，若仍用原始首节点构建占用请求，默认股道被占用就会提前 gate-block，本次票据根本到不了真正的 spawner。这里把第 0 个节点替换为本次实际
+   * depot，使闭塞检查、路径可达性与最终出车位置一致。
+   */
+  private List<NodeId> resolveDepotSpawnWaypoints(
+      RouteDefinition route, SpawnService service, SpawnTicket ticket) {
+    if (route == null || route.waypoints().isEmpty()) {
+      return List.of();
+    }
+    Optional<NodeId> depotNode =
+        resolveDepotLookoverNode(
+            service, ticket == null ? Optional.empty() : ticket.selectedDepotNodeId());
+    if (depotNode.isEmpty()) {
+      return route.waypoints();
+    }
+    List<NodeId> nodes = new ArrayList<>(route.waypoints());
+    nodes.set(0, depotNode.get());
+    return List.copyOf(nodes);
+  }
+
+  /**
+   * 将 DYNAMIC depot 选择固化为实际节点。
+   *
+   * <p>TrainCartsDepotSpawner 也能解析 DYNAMIC，但闭塞 gate 发生在 spawner 之前。提前固化可以让 gate 使用同一条实际股道，避免“检查的是 1
+   * 号股道、生成想去 2 号股道”的状态分裂。
+   */
+  private SpawnTicket materializeDynamicDepotSelection(SpawnService service, SpawnTicket ticket) {
+    if (ticket == null || service == null) {
+      return ticket;
+    }
+    Optional<String> depotSpecOpt = resolveDepotSpec(service, ticket.selectedDepotNodeId());
+    if (depotSpecOpt.isEmpty()) {
+      return ticket;
+    }
+    String depotSpec = depotSpecOpt.get();
+    if (!SpawnDirectiveParser.isDynamicTarget(depotSpec) || !isDynamicDepotSpec(depotSpec)) {
+      return ticket;
+    }
+    return resolveDynamicDepotNodeInfo(depotSpec, true)
+        .map(info -> ticket.withSelectedDepot(info.definition().nodeId().value()))
+        .orElse(ticket);
   }
 
   private Optional<java.util.UUID> resolveDepotWorldId(
@@ -1952,8 +1982,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return resolveDynamicDepotWorldId(depotSpec);
     }
 
-    // 普通 depot：精确匹配 nodeId
-    return signNodeRegistry.snapshotInfos().values().stream()
+    // 普通 depot：精确匹配 nodeId。测试或重载早期 registry 可能尚未返回快照，按缺失处理。
+    Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
+    if (infos == null || infos.isEmpty()) {
+      return Optional.empty();
+    }
+    return infos.values().stream()
         .filter(info -> info != null && info.definition() != null)
         .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
         .filter(info -> depotSpec.equalsIgnoreCase(info.definition().nodeId().value()))
@@ -2254,9 +2288,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (provider == null || lineId == null || depots == null || depots.isEmpty()) {
       return Optional.empty();
     }
+    Map<String, String> depotAliasIndex = buildDepotAliasIndex(depots);
     Map<String, Integer> activeByDepot =
-        runtimeSnapshot.countActiveTrainsByDepot(provider, lineId, depots);
-    SpawnDepot selected = null;
+        runtimeSnapshot.countActiveTrainsByDepot(provider, lineId, depots, depotAliasIndex);
+    List<SpawnDepot> bestDepots = new ArrayList<>();
     double bestScore = Double.MAX_VALUE;
     for (SpawnDepot depot : depots) {
       if (depot == null) {
@@ -2264,13 +2299,180 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       int active = activeByDepot.getOrDefault(depot.normalizedKey(), 0);
       double score = active / (double) depot.weight();
-      if (selected == null || score < bestScore) {
-        selected = depot;
+      if (score < bestScore - 0.000001D) {
+        bestDepots.clear();
+        bestDepots.add(depot);
         bestScore = score;
+        continue;
+      }
+      if (Math.abs(score - bestScore) <= 0.000001D) {
+        bestDepots.add(depot);
       }
     }
-    return Optional.ofNullable(selected);
+    return pickDepotByRoundRobin(lineId, bestDepots);
   }
+
+  /**
+   * 构建“实际 depot 节点 → 配置 depot”索引。
+   *
+   * <p>线路配置允许使用 {@code DYNAMIC:OP:D:DEPOT:[1:3]}。列车生成后写入的 {@code FTA_DEPOT_ID} 是实际股道（例如 {@code
+   * OP:D:DEPOT:2}），如果只做字符串全等，运行时统计永远匹配不到 DYNAMIC 配置，负载均衡就会一直认为第一个 depot 没车。这里把已注册的实际 Depot
+   * 节点映射回配置项，确保动态与固定 depot 共用同一套计数口径。
+   */
+  private Map<String, String> buildDepotAliasIndex(List<SpawnDepot> depots) {
+    if (depots == null || depots.isEmpty()) {
+      return Map.of();
+    }
+    Map<String, String> aliases = new HashMap<>();
+    Map<String, SignNodeRegistry.SignNodeInfo> registeredNodes = signNodeRegistry.snapshotInfos();
+    Map<String, SignNodeRegistry.SignNodeInfo> safeRegisteredNodes =
+        registeredNodes == null ? Map.of() : registeredNodes;
+    for (SpawnDepot depot : depots) {
+      if (depot == null) {
+        continue;
+      }
+      String configuredKey = depot.normalizedKey();
+      aliases.put(configuredKey, configuredKey);
+      if (!SpawnDirectiveParser.isDynamicTarget(depot.nodeId())) {
+        continue;
+      }
+      if (safeRegisteredNodes.isEmpty()) {
+        continue;
+      }
+      for (SignNodeRegistry.SignNodeInfo info : safeRegisteredNodes.values()) {
+        if (info == null || info.definition() == null || info.definition().nodeId() == null) {
+          continue;
+        }
+        if (info.definition().nodeType() != NodeType.DEPOT) {
+          continue;
+        }
+        NodeId actualNode = info.definition().nodeId();
+        if (matchesDynamicDepotNode(depot.nodeId(), actualNode.value())) {
+          aliases.put(actualNode.value().toLowerCase(Locale.ROOT), configuredKey);
+        }
+      }
+    }
+    return Map.copyOf(aliases);
+  }
+
+  /**
+   * 从同负载 depot 中按权重轮转选择。
+   *
+   * <p>负载分数负责“少车优先”，本方法只处理分数相同的情况。权重通过复制槽位实现，并限制最大权重，避免错误配置造成过大临时集合。
+   */
+  private Optional<SpawnDepot> pickDepotByRoundRobin(UUID lineId, List<SpawnDepot> candidates) {
+    if (lineId == null || candidates == null || candidates.isEmpty()) {
+      return Optional.empty();
+    }
+    if (candidates.size() == 1) {
+      return Optional.of(candidates.get(0));
+    }
+    List<SpawnDepot> weightedSlots = new ArrayList<>();
+    for (SpawnDepot depot : candidates) {
+      if (depot == null) {
+        continue;
+      }
+      int weight = Math.max(1, Math.min(1000, depot.weight()));
+      for (int i = 0; i < weight; i++) {
+        weightedSlots.add(depot);
+      }
+    }
+    if (weightedSlots.isEmpty()) {
+      return Optional.empty();
+    }
+    int cursor =
+        depotSelectionCursors
+            .computeIfAbsent(lineId, ignored -> new java.util.concurrent.atomic.AtomicInteger())
+            .getAndIncrement();
+    return Optional.of(weightedSlots.get(Math.floorMod(cursor, weightedSlots.size())));
+  }
+
+  /**
+   * 判断实际 Depot 节点是否落在 DYNAMIC depot 规范内。
+   *
+   * <p>DYNAMIC depot 支持 {@code DYNAMIC:OP:D:DEPOT} 与 {@code DYNAMIC:OP:D:DEPOT:[1:3]}
+   * 两种常用写法。后者需要按轨道号过滤，否则负载统计与实际发车会把同名 depot 的其它股道错误纳入候选。
+   */
+  private static boolean matchesDynamicDepotNode(String dynamicSpec, String nodeId) {
+    if (dynamicSpec == null
+        || nodeId == null
+        || !SpawnDirectiveParser.isDynamicTarget(dynamicSpec)) {
+      return false;
+    }
+    String rest = dynamicSpec.substring("DYNAMIC:".length());
+    String[] parts = rest.split(":", 4);
+    if (parts.length < 3 || !"D".equalsIgnoreCase(parts[1].trim())) {
+      return false;
+    }
+    String prefix = parts[0].trim() + ":" + parts[1].trim() + ":" + parts[2].trim() + ":";
+    if (!nodeId.toUpperCase(Locale.ROOT).startsWith(prefix.toUpperCase(Locale.ROOT))) {
+      return false;
+    }
+    if (parts.length < 4 || parts[3].isBlank()) {
+      return true;
+    }
+    Optional<TrackRange> range = parseTrackRange(parts[3]);
+    if (range.isEmpty()) {
+      return true;
+    }
+    int track = extractTrackNumber(nodeId);
+    return track >= range.get().from() && track <= range.get().to();
+  }
+
+  /**
+   * 解析 DYNAMIC 轨道范围。
+   *
+   * <p>当前仅支持单股道（{@code 2}）和闭区间（{@code [1:3]}）。解析失败返回 empty，上层会按“无范围限制” 处理，以兼容历史上未写范围的 DYNAMIC
+   * depot。
+   */
+  private static Optional<TrackRange> parseTrackRange(String rawRange) {
+    if (rawRange == null || rawRange.isBlank()) {
+      return Optional.empty();
+    }
+    String trimmed = rawRange.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      String inner = trimmed.substring(1, trimmed.length() - 1);
+      int colon = inner.indexOf(':');
+      if (colon > 0) {
+        try {
+          int from = Integer.parseInt(inner.substring(0, colon).trim());
+          int to = Integer.parseInt(inner.substring(colon + 1).trim());
+          return Optional.of(new TrackRange(Math.min(from, to), Math.max(from, to)));
+        } catch (NumberFormatException ignored) {
+          return Optional.empty();
+        }
+      }
+    }
+    try {
+      int track = Integer.parseInt(trimmed);
+      return Optional.of(new TrackRange(track, track));
+    } catch (NumberFormatException ignored) {
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * 从 NodeId 最后一段提取轨道号。
+   *
+   * <p>Depot 行为节点的轨道号位于最后一段；若传入的是无法识别的咽喉/自定义节点，则返回 {@link Integer#MAX_VALUE}， 使带范围的 DYNAMIC 匹配自然失败。
+   */
+  private static int extractTrackNumber(String nodeId) {
+    if (nodeId == null || nodeId.isBlank()) {
+      return Integer.MAX_VALUE;
+    }
+    int lastColon = nodeId.lastIndexOf(':');
+    if (lastColon < 0 || lastColon >= nodeId.length() - 1) {
+      return Integer.MAX_VALUE;
+    }
+    try {
+      return Integer.parseInt(nodeId.substring(lastColon + 1).trim());
+    } catch (NumberFormatException ignored) {
+      return Integer.MAX_VALUE;
+    }
+  }
+
+  /** DYNAMIC depot 轨道号闭区间。 */
+  private record TrackRange(int from, int to) {}
 
   /** 一次 tick 内使用的运行时快照，用于线路发车限额与 depot 负载统计。 */
   private static final class LineRuntimeSnapshot {
@@ -2327,20 +2529,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     Map<String, Integer> countActiveTrainsByDepot(
-        StorageProvider provider, UUID lineId, List<SpawnDepot> depots) {
+        StorageProvider provider,
+        UUID lineId,
+        List<SpawnDepot> depots,
+        Map<String, String> depotAliasIndex) {
       if (provider == null || lineId == null || depots == null || depots.isEmpty()) {
         return Map.of();
       }
       Map<String, Integer> counts = new HashMap<>();
       Map<String, String> depotKeys =
-          depots.stream()
-              .filter(Objects::nonNull)
-              .collect(
-                  Collectors.toMap(
-                      SpawnDepot::normalizedKey,
-                      SpawnDepot::normalizedKey,
-                      (a, b) -> a,
-                      java.util.LinkedHashMap::new));
+          depotAliasIndex == null || depotAliasIndex.isEmpty()
+              ? depots.stream()
+                  .filter(Objects::nonNull)
+                  .collect(
+                      Collectors.toMap(
+                          SpawnDepot::normalizedKey,
+                          SpawnDepot::normalizedKey,
+                          (a, b) -> a,
+                          java.util.LinkedHashMap::new))
+              : depotAliasIndex;
       for (RouteProgressRegistry.RouteProgressEntry entry : progressEntries.values()) {
         if (entry == null) {
           continue;
@@ -2359,10 +2566,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           continue;
         }
         String key = start.value().toLowerCase(Locale.ROOT);
-        if (!depotKeys.containsKey(key)) {
+        String configuredKey = depotKeys.get(key);
+        if (configuredKey == null) {
           continue;
         }
-        counts.merge(key, 1, Integer::sum);
+        counts.merge(configuredKey, 1, Integer::sum);
       }
       return counts;
     }
@@ -2414,6 +2622,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(String dynamicSpec) {
+    return resolveDynamicDepotNodeInfo(dynamicSpec, true);
+  }
+
+  /**
+   * 为 DYNAMIC depot 规范选择实际节点。
+   *
+   * <p>优先选择未被占用的 Depot 行为节点；这与实际 spawn 阶段的选择口径一致，能避免发车 gate 总是用排序第一个股道做检查。若没有空闲 Depot，则回退到第一个
+   * Depot，使上层 gate 正常阻塞并重试。
+   */
+  private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(
+      String dynamicSpec, boolean preferFreeDepot) {
     if (dynamicSpec == null
         || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
       return Optional.empty();
@@ -2429,16 +2648,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (operatorCode.isEmpty() || nodeType.isEmpty() || nodeName.isEmpty()) {
       return Optional.empty();
     }
-    String nodeIdPrefix = operatorCode + ":" + nodeType + ":" + nodeName + ":";
-    String upperPrefix = nodeIdPrefix.toUpperCase(java.util.Locale.ROOT);
+    Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
+    if (infos == null || infos.isEmpty()) {
+      return Optional.empty();
+    }
     List<SignNodeRegistry.SignNodeInfo> matches =
-        signNodeRegistry.snapshotInfos().values().stream()
+        infos.values().stream()
             .filter(info -> info != null && info.definition() != null)
             .filter(
                 info -> {
                   String nodeIdValue = info.definition().nodeId().value();
-                  return nodeIdValue != null
-                      && nodeIdValue.toUpperCase(java.util.Locale.ROOT).startsWith(upperPrefix);
+                  return matchesDynamicDepotNode(dynamicSpec, nodeIdValue);
                 })
             .sorted(
                 Comparator.comparing(
@@ -2448,6 +2668,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     // 优先使用 Depot 行为节点；若不存在则回退到同前缀的图节点（如咽喉 Waypoint），用于兜底 world 推断。
+    if (preferFreeDepot) {
+      for (SignNodeRegistry.SignNodeInfo info : matches) {
+        if (info.definition().nodeType() == NodeType.DEPOT
+            && !occupancyManager.isNodeOccupied(info.definition().nodeId())) {
+          return Optional.of(info);
+        }
+      }
+    }
     for (SignNodeRegistry.SignNodeInfo info : matches) {
       if (info.definition().nodeType() == NodeType.DEPOT) {
         return Optional.of(info);

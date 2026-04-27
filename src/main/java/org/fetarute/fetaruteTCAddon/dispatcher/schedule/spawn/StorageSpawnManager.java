@@ -14,6 +14,7 @@ import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
@@ -937,10 +938,44 @@ public final class StorageSpawnManager
       enabled.add(selection.withResolvedWeight(1));
     }
 
-    boolean multi = operationCandidates.size() > 1;
+    List<RouteSelection> enabledOperations =
+        selectEnabledOperationRoutes(line, operationCandidates);
+
+    enabled.addAll(enabledOperations);
+    if (enabled.isEmpty()) {
+      return List.of();
+    }
+    enabled.sort(Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
+    return enabled;
+  }
+
+  /**
+   * 选择可参与自动发车的运营 route。
+   *
+   * <p>旧逻辑按整条线路判断“多 route 必须配置 spawn_weight”，会把“两个显式交路组、每组一条 route” 误判为歧义配置并跳过整条线路。这里把默认权重 1
+   * 的放行范围缩小到单个显式交路组：同组多条运营 route 仍需要 {@code spawn_weight} 或 {@code spawn_enabled=true} 明确表达比例。
+   */
+  private List<RouteSelection> selectEnabledOperationRoutes(
+      Line line, List<RouteSelection> operationCandidates) {
+    if (operationCandidates == null || operationCandidates.isEmpty()) {
+      return List.of();
+    }
+    if (operationCandidates.size() == 1) {
+      return selectSingleOperationRoute(operationCandidates.get(0));
+    }
+
+    Map<String, Long> explicitGroupSizes =
+        operationCandidates.stream()
+            .filter(this::hasExplicitSpawnGroup)
+            .collect(
+                Collectors.groupingBy(
+                    selection -> resolveCirculationGroupKey(line, selection),
+                    Collectors.counting()));
+    List<RouteSelection> enabledOperations = new ArrayList<>();
     boolean hasExplicitDisable = false;
     boolean hasExplicitWeightZero = false;
-    List<RouteSelection> enabledOperations = new ArrayList<>();
+    List<RouteSelection> ambiguous = new ArrayList<>();
+
     for (RouteSelection selection : operationCandidates) {
       if (selection == null) {
         continue;
@@ -959,50 +994,80 @@ public final class StorageSpawnManager
         enabledOperations.add(selection.withResolvedWeight(w));
         continue;
       }
-      if (!multi) {
+      if (selection.spawnEnabledFlag().orElse(false)) {
         enabledOperations.add(selection.withResolvedWeight(1));
-      } else if (selection.spawnEnabledFlag().orElse(false)) {
+        continue;
+      }
+      if (isSingleRouteInExplicitGroup(line, selection, explicitGroupSizes)) {
         enabledOperations.add(selection.withResolvedWeight(1));
+      } else {
+        ambiguous.add(selection);
       }
     }
 
-    if (enabledOperations.isEmpty()) {
-      if (operationCandidates.size() == 1) {
-        RouteSelection only = operationCandidates.get(0);
-        if (only.spawnEnabledFlag().isPresent() && !only.spawnEnabledFlag().get()) {
-          return List.copyOf(enabled);
-        }
-        if (only.spawnWeightRaw().isPresent()) {
-          return List.copyOf(enabled);
-        }
-        enabledOperations.add(only.withResolvedWeight(1));
-      } else if (operationCandidates.size() > 1) {
-        if (hasExplicitDisable || hasExplicitWeightZero) {
-          debugLogger.accept(
-              "SpawnPlan 跳过线路(运营候选已禁用或权重为 0): line="
-                  + line.code()
-                  + " routes="
-                  + String.join(
-                      ", ", operationCandidates.stream().map(sel -> sel.route().code()).toList()));
-        } else {
-          operationCandidates.sort(
-              Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
-          debugLogger.accept(
-              "SpawnPlan 跳过线路(运营候选过多未配置 spawn_weight): line="
-                  + line.code()
-                  + " routes="
-                  + String.join(
-                      ", ", operationCandidates.stream().map(sel -> sel.route().code()).toList()));
-        }
-      }
+    if (!enabledOperations.isEmpty()) {
+      logSkippedOperationRoutes(line, ambiguous, hasExplicitDisable, hasExplicitWeightZero);
+      return List.copyOf(enabledOperations);
     }
+    logSkippedOperationRoutes(line, operationCandidates, hasExplicitDisable, hasExplicitWeightZero);
+    return List.of();
+  }
 
-    enabled.addAll(enabledOperations);
-    if (enabled.isEmpty()) {
+  private List<RouteSelection> selectSingleOperationRoute(RouteSelection selection) {
+    if (selection == null) {
       return List.of();
     }
-    enabled.sort(Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
-    return enabled;
+    if (selection.spawnEnabledFlag().isPresent() && !selection.spawnEnabledFlag().get()) {
+      return List.of();
+    }
+    if (selection.spawnWeightRaw().isPresent()) {
+      Integer weight = selection.spawnWeightRaw().get();
+      if (weight == null || weight <= 0) {
+        return List.of();
+      }
+      return List.of(selection.withResolvedWeight(weight));
+    }
+    return List.of(selection.withResolvedWeight(1));
+  }
+
+  private boolean isSingleRouteInExplicitGroup(
+      Line line, RouteSelection selection, Map<String, Long> explicitGroupSizes) {
+    if (!hasExplicitSpawnGroup(selection)) {
+      return false;
+    }
+    if (explicitGroupSizes == null || explicitGroupSizes.isEmpty()) {
+      return false;
+    }
+    String groupKey = resolveCirculationGroupKey(line, selection);
+    return explicitGroupSizes.getOrDefault(groupKey, 0L) == 1L;
+  }
+
+  private boolean hasExplicitSpawnGroup(RouteSelection selection) {
+    return selection != null
+        && selection.route() != null
+        && readString(selection.route().metadata(), "spawn_group").isPresent();
+  }
+
+  private void logSkippedOperationRoutes(
+      Line line,
+      List<RouteSelection> skipped,
+      boolean hasExplicitDisable,
+      boolean hasExplicitWeightZero) {
+    if (skipped == null || skipped.isEmpty()) {
+      return;
+    }
+    List<RouteSelection> sorted = new ArrayList<>(skipped);
+    sorted.sort(Comparator.comparing(sel -> sel.route().code(), String.CASE_INSENSITIVE_ORDER));
+    String routes = String.join(", ", sorted.stream().map(sel -> sel.route().code()).toList());
+    if (hasExplicitDisable || hasExplicitWeightZero) {
+      debugLogger.accept("SpawnPlan 跳过运营候选(已禁用或权重为 0): line=" + line.code() + " routes=" + routes);
+      return;
+    }
+    debugLogger.accept(
+        "SpawnPlan 跳过运营候选(未配置 spawn_weight 且不满足单 route 显式交路组): line="
+            + line.code()
+            + " routes="
+            + routes);
   }
 
   private List<RouteSelection> selectForecastRoutes(StorageProvider provider, Line line) {

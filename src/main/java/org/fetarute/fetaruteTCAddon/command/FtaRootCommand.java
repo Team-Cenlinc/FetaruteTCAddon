@@ -107,7 +107,9 @@ public final class FtaRootCommand implements CommandExecutor, TabCompleter {
     if (sender.hasPermission("fetarute.eta") || sender.hasPermission("fetarute.admin")) {
       options.add("eta");
     }
-    if (sender.hasPermission("fetarute.train.config") || sender.hasPermission("fetarute.admin")) {
+    if (sender.hasPermission("fetarute.train.config")
+        || sender.hasPermission("fetarute.train.debug")
+        || sender.hasPermission("fetarute.admin")) {
       options.add("train");
     }
     if (sender.hasPermission("fetarute.template") || sender.hasPermission("fetarute.admin")) {

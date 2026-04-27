@@ -590,6 +590,44 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 判断经过的 AutoStation 是否应按 PASS 站推进。
+   *
+   * <p>AutoStation 的 STOP/TERMINATE 必须等列车停稳后由 {@link #handleStationArrival(MinecartGroup,
+   * SignNodeDefinition)} 推进；PASS 不会进入停站流程，因此需要在牌子触发时直接走普通推进逻辑。
+   *
+   * @param properties TrainCarts 列车属性
+   * @param definition 当前 AutoStation 节点定义
+   * @return 当前节点对应 RouteStop 且 passType 为 PASS 时返回 true
+   */
+  boolean shouldAdvancePassedStation(TrainProperties properties, SignNodeDefinition definition) {
+    if (properties == null || definition == null || definition.nodeType() != NodeType.STATION) {
+      return false;
+    }
+    if (!isFtaManagedTrain(properties) || routeDefinitions == null) {
+      return false;
+    }
+    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
+    if (routeOpt.isEmpty()) {
+      return false;
+    }
+    RouteDefinition route = routeOpt.get();
+    OptionalInt tagIndex =
+        TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
+            .map(OptionalInt::of)
+            .orElse(OptionalInt.empty());
+    int currentIndex =
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route, routeDefinitions, tagIndex, definition.nodeId());
+    if (currentIndex < 0) {
+      return false;
+    }
+    return routeDefinitions
+        .findStop(route.id(), currentIndex)
+        .map(stop -> stop.passType() == RouteStopPassType.PASS)
+        .orElse(false);
+  }
+
+  /**
    * 更新列车经过的最后一个图节点（用于 arriving 判定优化）。
    *
    * <p>当列车经过“未写入 route 的中间图节点”（如 waypoint/switcher）时调用，仅更新 lastPassedGraphNode，不推进 routeIndex。
@@ -2010,6 +2048,39 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 按列车名销毁一列 FTA 管控列车。
+   *
+   * <p>该入口供健康监控在多轮互卡恢复无效后兜底使用。销毁仍走 {@link #handleDestroy(RuntimeTrainHandle, TrainProperties,
+   * String, String)}，因此不会在物理实体消失前立即释放占用；占用释放继续等待 {@code GroupRemoveEvent →
+   * handleTrainRemoved}，避免后车在旧实体尚未删除时抢占同一段轨道。
+   *
+   * @param trainName 列车名或 FTA 逻辑列车名
+   * @param reason 销毁原因
+   * @return 找到列车属性并发起销毁时返回 true
+   */
+  public boolean destroyTrainByName(String trainName, String reason) {
+    if (trainName == null || trainName.isBlank()) {
+      return false;
+    }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null) {
+      return false;
+    }
+    String logicalTrainName =
+        resolveTrackedTrainName(properties).orElseGet(() -> properties.getTrainName());
+    if (logicalTrainName == null || logicalTrainName.isBlank()) {
+      logicalTrainName = trainName.trim();
+    }
+    com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
+    RuntimeTrainHandle handle =
+        group != null && group.isValid() ? new TrainCartsRuntimeHandle(group) : null;
+    String normalizedReason =
+        reason == null || reason.isBlank() ? "health-deadlock" : reason.trim();
+    handleDestroy(handle, properties, logicalTrainName, normalizedReason);
+    return true;
+  }
+
+  /**
    * 健康修复场景下解析线路定义。
    *
    * <p>优先使用 progress entry 里的 routeUuid，缺失时回退到列车 tags（operator/line/route 或 FTA_ROUTE_ID）。
@@ -2327,6 +2398,11 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequestContext context = contextOpt.get();
     OccupancyRequest request = context.request();
+    OccupancyRequestContext authorizationContext =
+        buildForwardAuthorizationContext(
+                graph, runtimeSettings, trainName, route, effectiveNodes, currentIndex, now, 0)
+            .orElse(context);
+    OccupancyRequest authorizationRequest = authorizationContext.request();
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -2339,8 +2415,10 @@ public final class RuntimeDispatchService {
         mergeKeepResourcesWithCurrentPosition(
             request.resourceList(), currentNodeOpt, nextNode, graph);
     releaseResourcesNotInRequest(trainName, keepResources);
+    releaseSpeculativeClaimsFromBehindSameRoute(
+        trainName, route, currentIndex, authorizationRequest.resourceList());
     retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    OccupancyDecision decision = occupancyManager.canEnter(authorizationRequest);
     ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, "signal");
     boolean proceedAllowed = proceedDecision.proceedAllowed();
     if (!proceedAllowed) {
@@ -2352,10 +2430,10 @@ public final class RuntimeDispatchService {
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
     }
     SignalAspect baseAspect =
-        proceedAllowed ? decision.signal() : deriveBlockedAspect(decision, context);
+        proceedAllowed ? decision.signal() : deriveBlockedAspect(decision, authorizationContext);
     // 安全优先：移动中的列车不享受“冲突区放行”特权，避免在红灯/占用未清时冒进。
     if (deadlockRelease && train.isMoving()) {
-      baseAspect = deriveBlockedAspect(decision, context);
+      baseAspect = deriveBlockedAspect(decision, authorizationContext);
     }
     // 前方列车信号调整：扫描更远范围（4 edges）检测其他列车并降级信号
     SignalAspect nextAspect =
@@ -2428,9 +2506,15 @@ public final class RuntimeDispatchService {
             createEdgeSpeedResolver(worldIdForLookahead);
         lookahead =
             SignalLookahead.computeWithEdgeSpeed(
-                decision, context, nextAspect, this::isApproachingNode, edgeSpeedResolver);
+                decision,
+                authorizationContext,
+                nextAspect,
+                this::isApproachingNode,
+                edgeSpeedResolver);
       } else {
-        lookahead = SignalLookahead.compute(decision, context, nextAspect, this::isApproachingNode);
+        lookahead =
+            SignalLookahead.compute(
+                decision, authorizationContext, nextAspect, this::isApproachingNode);
       }
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
@@ -2518,7 +2602,9 @@ public final class RuntimeDispatchService {
               + decision.blockers().size());
     }
     if (proceedAllowed) {
-      occupancyManager.acquire(request);
+      occupancyManager.acquire(authorizationRequest);
+      retainRearGuardOccupancyBestEffort(
+          trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
     }
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
     if (allowLaunch) {
@@ -5503,6 +5589,135 @@ public final class RuntimeDispatchService {
     occupancyManager.acquire(
         new OccupancyRequest(
             trainName, Optional.ofNullable(routeId), now, List.copyOf(hold), Map.of(), 0));
+  }
+
+  /**
+   * 构建“前向授权”占用请求。
+   *
+   * <p>常规运行请求会同时携带尾部保护资源；这些资源只用于防止后车贴近，不应参与前车的红绿灯判定。信号判定使用该前向请求， 避免后车在尾部保护/预占用窗口内反向把前车打成 STOP。
+   */
+  private Optional<OccupancyRequestContext> buildForwardAuthorizationContext(
+      RailGraph graph,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      String trainName,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      int currentIndex,
+      Instant now,
+      int priority) {
+    if (graph == null || runtimeSettings == null || route == null) {
+      return Optional.empty();
+    }
+    OccupancyRequestBuilder authorizationBuilder =
+        new OccupancyRequestBuilder(
+            graph,
+            runtimeSettings.lookaheadEdges(),
+            runtimeSettings.minClearEdges(),
+            0,
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
+    return authorizationBuilder.buildContextFromNodes(
+        trainName, Optional.ofNullable(route.id()), effectiveNodes, currentIndex, now, priority);
+  }
+
+  /**
+   * 清理同线路后车留在前车授权窗口内的预占用。
+   *
+   * <p>后车 lookahead 可能提前占到前车当前节点或下一段边；若前车下一次 signal tick 再申请这些资源，就会被后车错误阻塞。 这里仅清理“同 Route
+   * 且进度索引更小”的列车，并且只清理前向授权资源，不碰尾部保护资源。
+   */
+  private int releaseSpeculativeClaimsFromBehindSameRoute(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      List<OccupancyResource> authorityResources) {
+    if (occupancyManager == null
+        || progressRegistry == null
+        || trainName == null
+        || trainName.isBlank()
+        || route == null
+        || currentIndex <= 0
+        || authorityResources == null
+        || authorityResources.isEmpty()) {
+      return 0;
+    }
+    Set<OccupancyResource> authoritySet = Set.copyOf(authorityResources);
+    Set<String> releasedOwners = new LinkedHashSet<>();
+    int released = 0;
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (!isSpeculativeBehindClaim(trainName, route, currentIndex, authoritySet, claim)) {
+        continue;
+      }
+      if (occupancyManager.releaseResource(claim.resource(), Optional.of(claim.trainName()))) {
+        released++;
+        releasedOwners.add(claim.trainName());
+      }
+    }
+    if (released > 0) {
+      debugLogger.accept(
+          "清理后车前瞻占用: train=" + trainName + " released=" + released + " owners=" + releasedOwners);
+    }
+    return released;
+  }
+
+  private boolean isSpeculativeBehindClaim(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      Set<OccupancyResource> authorityResources,
+      OccupancyClaim claim) {
+    if (claim == null
+        || claim.resource() == null
+        || claim.trainName() == null
+        || claim.trainName().equalsIgnoreCase(trainName)
+        || !authorityResources.contains(claim.resource())) {
+      return false;
+    }
+    if (claim.routeId().isEmpty() || !claim.routeId().get().equals(route.id())) {
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> ownerEntryOpt =
+        progressRegistry.get(claim.trainName());
+    if (ownerEntryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry ownerEntry = ownerEntryOpt.get();
+    return route.id().equals(ownerEntry.routeId()) && ownerEntry.currentIndex() < currentIndex;
+  }
+
+  /**
+   * 成功取得前向授权后，尽力补齐尾部保护资源。
+   *
+   * <p>该步骤不能反过来影响信号：若后车已经过近并持有尾部资源，前车仍应继续前进，真正需要停车的是后车。
+   */
+  private void retainRearGuardOccupancyBestEffort(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      List<NodeId> effectiveNodes,
+      RailGraph graph,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      Instant now) {
+    if (occupancyManager == null
+        || runtimeSettings == null
+        || runtimeSettings.rearGuardEdges() <= 0
+        || graph == null
+        || route == null
+        || effectiveNodes == null) {
+      return;
+    }
+    OccupancyRequestBuilder rearGuardBuilder =
+        new OccupancyRequestBuilder(
+            graph,
+            runtimeSettings.lookaheadEdges(),
+            runtimeSettings.minClearEdges(),
+            runtimeSettings.rearGuardEdges(),
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
+    OccupancyRequest rearGuardRequest =
+        rearGuardBuilder.buildRearGuardRequestFromNodes(
+            trainName, Optional.ofNullable(route.id()), effectiveNodes, currentIndex, now, 0);
+    occupancyManager.acquire(rearGuardRequest);
   }
 
   private static java.util.OptionalDouble mergeTargetOverrideBps(

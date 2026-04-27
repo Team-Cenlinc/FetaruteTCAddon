@@ -2,17 +2,34 @@ package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.command.CommandSender;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.parser.standard.IntegerParser;
@@ -25,6 +42,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *
  * <ul>
  *   <li>{@code /fta spawn plan [limit]} - 查看发车计划（可发车的 Route 服务列表）
+ *   <li>{@code /fta spawn diagnose [limit]} - 查看发车配置、交路组与跳过原因
  *   <li>{@code /fta spawn queue [limit]} - 查看发车队列（待发票据）
  *   <li>{@code /fta spawn pending [limit]} - 查看折返待发票据（含失败重试）
  *   <li>{@code /fta spawn reset} - 清空发车队列并重置发车计划
@@ -87,6 +105,19 @@ public final class FtaSpawnCommand {
         manager
             .commandBuilder("fta")
             .literal("spawn")
+            .literal("diagnose")
+            .permission("fetarute.spawn")
+            .optional("limit", IntegerParser.integerParser(1, 200), limitSuggestions)
+            .handler(
+                ctx -> {
+                  int limit = ctx.<Integer>optional("limit").orElse(DEFAULT_LIMIT);
+                  diagnosePlan(ctx.sender(), limit);
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("spawn")
             .literal("queue")
             .permission("fetarute.spawn")
             .optional("limit", IntegerParser.integerParser(1, 100), limitSuggestions)
@@ -126,6 +157,11 @@ public final class FtaSpawnCommand {
         locale.component("command.spawn.help.entry-plan"),
         locale.component("command.spawn.help.hover-plan"),
         "/fta spawn plan ");
+    sendHelpEntry(
+        sender,
+        locale.component("command.spawn.help.entry-diagnose"),
+        locale.component("command.spawn.help.hover-diagnose"),
+        "/fta spawn diagnose ");
     sendHelpEntry(
         sender,
         locale.component("command.spawn.help.entry-queue"),
@@ -213,6 +249,438 @@ public final class FtaSpawnCommand {
     if (services.size() > limit) {
       sender.sendMessage(locale.component("command.spawn.plan.truncated"));
     }
+  }
+
+  /**
+   * 输出 SpawnPlan 配置诊断。
+   *
+   * <p>该命令直接读取存储层并复用 SpawnManager 的核心选择规则，重点暴露“服务为什么没有进入 SpawnPlan”的原因，避免只在 debug logger 中留下线索。
+   */
+  private void diagnosePlan(CommandSender sender, int limit) {
+    LocaleManager locale = plugin.getLocaleManager();
+    Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+    if (providerOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.not-ready"));
+      return;
+    }
+
+    List<LineSpawnDiagnosis> lines = buildSpawnDiagnostics(providerOpt.get());
+    int groupCount = lines.stream().mapToInt(line -> line.groups().size()).sum();
+    int routeCount = lines.stream().mapToInt(line -> line.routes().size()).reduce(0, Integer::sum);
+    sender.sendMessage(
+        locale.component(
+            "command.spawn.diagnose.header",
+            Map.of(
+                "lines",
+                String.valueOf(lines.size()),
+                "groups",
+                String.valueOf(groupCount),
+                "routes",
+                String.valueOf(routeCount))));
+
+    if (lines.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.diagnose.empty"));
+      return;
+    }
+
+    int shown = 0;
+    for (LineSpawnDiagnosis line : lines) {
+      if (shown >= limit) {
+        break;
+      }
+      sender.sendMessage(
+          locale.component(
+              "command.spawn.diagnose.line",
+              Map.of(
+                  "operator",
+                  line.operator().code(),
+                  "line",
+                  line.line().code(),
+                  "line_baseline",
+                  line.lineBaseline(),
+                  "status",
+                  line.line().status().name())));
+      for (GroupSpawnDiagnosis group : line.groups()) {
+        sender.sendMessage(
+            locale.component(
+                "command.spawn.diagnose.group",
+                Map.of(
+                    "group",
+                    group.group(),
+                    "baseline",
+                    group.baseline(),
+                    "routes",
+                    group.routes())));
+      }
+      for (RouteSpawnDiagnosis route : line.routes()) {
+        if (shown >= limit) {
+          break;
+        }
+        shown++;
+        sender.sendMessage(
+            locale.component(
+                "command.spawn.diagnose.route",
+                Map.of(
+                    "route",
+                    route.route().code(),
+                    "operation",
+                    route.route().operationType().name(),
+                    "group",
+                    route.group(),
+                    "weight",
+                    route.weight(),
+                    "start",
+                    route.startNode(),
+                    "participates",
+                    route.participates() ? "是" : "否",
+                    "reasons",
+                    route.reasons())));
+      }
+    }
+
+    if (routeCount > shown) {
+      sender.sendMessage(
+          locale.component(
+              "command.spawn.diagnose.truncated",
+              Map.of("count", String.valueOf(routeCount - shown))));
+    }
+  }
+
+  private List<LineSpawnDiagnosis> buildSpawnDiagnostics(StorageProvider provider) {
+    List<LineSpawnDiagnosis> lines = new ArrayList<>();
+    for (Company company : provider.companies().listAll()) {
+      if (company == null) {
+        continue;
+      }
+      for (Operator operator : provider.operators().listByCompany(company.id())) {
+        if (operator == null) {
+          continue;
+        }
+        for (Line line : provider.lines().listByOperator(operator.id())) {
+          if (line == null) {
+            continue;
+          }
+          LineSpawnDiagnosis diagnosis = diagnoseLine(provider, operator, line);
+          if (!diagnosis.routes().isEmpty() || !diagnosis.groups().isEmpty()) {
+            lines.add(diagnosis);
+          }
+        }
+      }
+    }
+    lines.sort(
+        Comparator.comparing((LineSpawnDiagnosis line) -> line.operator().code())
+            .thenComparing(line -> line.line().code(), String.CASE_INSENSITIVE_ORDER));
+    return List.copyOf(lines);
+  }
+
+  private LineSpawnDiagnosis diagnoseLine(StorageProvider provider, Operator operator, Line line) {
+    List<Route> routes =
+        provider.routes().listByLine(line.id()).stream()
+            .filter(route -> route != null)
+            .sorted(Comparator.comparing(Route::code, String.CASE_INSENSITIVE_ORDER))
+            .toList();
+    Map<Route, List<RouteStop>> stopsByRoute = new LinkedHashMap<>();
+    for (Route route : routes) {
+      stopsByRoute.put(route, provider.routeStops().listByRoute(route.id()));
+    }
+    List<SpawnGroup> configuredGroups =
+        LineSpawnMetadata.parseGroups(line.metadata()).stream()
+            .sorted(Comparator.comparing(SpawnGroup::name, String.CASE_INSENSITIVE_ORDER))
+            .toList();
+    List<RouteSpawnDiagnosis> routeDiagnostics = new ArrayList<>();
+    for (Route route : routes) {
+      if (!isSpawnRelevant(route)) {
+        continue;
+      }
+      routeDiagnostics.add(diagnoseRoute(line, route, routes, stopsByRoute, configuredGroups));
+    }
+    List<GroupSpawnDiagnosis> groups = diagnoseGroups(line, configuredGroups, routeDiagnostics);
+    return new LineSpawnDiagnosis(
+        operator,
+        line,
+        formatSeconds(line.spawnFreqBaselineSec().filter(value -> value > 0)),
+        groups,
+        routeDiagnostics);
+  }
+
+  private RouteSpawnDiagnosis diagnoseRoute(
+      Line line,
+      Route route,
+      List<Route> allRoutes,
+      Map<Route, List<RouteStop>> stopsByRoute,
+      List<SpawnGroup> configuredGroups) {
+    List<RouteStop> stops = stopsByRoute.getOrDefault(route, List.of());
+    RouteStop first = stops.isEmpty() ? null : stops.get(0);
+    Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
+    Optional<String> start = cret.or(() -> resolveStopNodeId(first));
+    Optional<String> explicitGroup = readString(route.metadata(), "spawn_group");
+    String group = explicitGroup.orElseGet(() -> resolveCirculationGroupKey(route, stops));
+    Optional<Integer> groupBaseline = resolveRouteGroupBaseline(line, route, explicitGroup);
+    Optional<Integer> lineBaseline = line.spawnFreqBaselineSec().filter(value -> value > 0);
+    Optional<Boolean> enabled = readBoolean(route.metadata(), "spawn_enabled");
+    Optional<Integer> weight = readInt(route.metadata(), "spawn_weight");
+
+    List<String> blockers = new ArrayList<>();
+    List<String> notes = new ArrayList<>();
+    if (line.status() != LineStatus.ACTIVE) {
+      blockers.add("line 非 ACTIVE");
+    }
+    if (enabled.isPresent() && !enabled.get()) {
+      blockers.add("disabled");
+    }
+    if (stops.isEmpty()) {
+      blockers.add("缺停靠表");
+    }
+    if (route.operationType() == RouteOperationType.CREATE && cret.isEmpty()) {
+      blockers.add("CREATE 缺 CRET");
+    }
+    if (start.isEmpty()) {
+      blockers.add("首站无法解析");
+    }
+    if (explicitGroup.isPresent()
+        && LineSpawnMetadata.findGroup(configuredGroups, explicitGroup.get()).isEmpty()) {
+      notes.add("spawn_group 不存在");
+    }
+    if (groupBaseline.isEmpty() && lineBaseline.isEmpty()) {
+      blockers.add("缺 baseline");
+    }
+    if (route.operationType() == RouteOperationType.OPERATION) {
+      if (weight.isPresent() && weight.get() <= 0) {
+        blockers.add("spawn_weight<=0");
+      } else if (weight.isEmpty()
+          && !enabled.orElse(false)
+          && allOperationCandidateCount(allRoutes, stopsByRoute) > 1
+          && !isSingleRouteInExplicitGroup(route, line, allRoutes)) {
+        blockers.add("缺 spawn_weight");
+      }
+    }
+
+    List<String> reasons = new ArrayList<>(blockers);
+    reasons.addAll(notes);
+    String weightText =
+        switch (route.operationType()) {
+          case OPERATION -> weight.map(String::valueOf).orElse("-");
+          case CREATE, RETURN -> "fixed=1";
+        };
+    return new RouteSpawnDiagnosis(
+        route,
+        group,
+        weightText,
+        start.orElse("-"),
+        blockers.isEmpty(),
+        reasons.isEmpty() ? "-" : String.join(", ", reasons));
+  }
+
+  private List<GroupSpawnDiagnosis> diagnoseGroups(
+      Line line, List<SpawnGroup> configuredGroups, List<RouteSpawnDiagnosis> routes) {
+    Map<String, List<String>> routesByGroup = new LinkedHashMap<>();
+    Map<String, String> baselinesByGroup = new LinkedHashMap<>();
+    for (SpawnGroup group : configuredGroups) {
+      routesByGroup.put(group.name(), new ArrayList<>());
+      baselinesByGroup.put(group.name(), formatSeconds(group.baselineSeconds()));
+    }
+    for (RouteSpawnDiagnosis route : routes) {
+      routesByGroup
+          .computeIfAbsent(route.group(), ignored -> new ArrayList<>())
+          .add(route.route().code());
+      baselinesByGroup.putIfAbsent(
+          route.group(),
+          resolveRouteGroupBaseline(
+                  line, route.route(), readString(route.route().metadata(), "spawn_group"))
+              .map(value -> value + "s")
+              .orElse("-"));
+    }
+    List<GroupSpawnDiagnosis> groups = new ArrayList<>();
+    for (Map.Entry<String, List<String>> entry : routesByGroup.entrySet()) {
+      List<String> groupRoutes = entry.getValue();
+      groupRoutes.sort(String.CASE_INSENSITIVE_ORDER);
+      groups.add(
+          new GroupSpawnDiagnosis(
+              entry.getKey(),
+              baselinesByGroup.getOrDefault(entry.getKey(), "-"),
+              groupRoutes.isEmpty() ? "-" : String.join(", ", groupRoutes)));
+    }
+    return List.copyOf(groups);
+  }
+
+  private static boolean isSpawnRelevant(Route route) {
+    return route != null
+        && (route.operationType() == RouteOperationType.OPERATION
+            || route.operationType() == RouteOperationType.CREATE
+            || route.operationType() == RouteOperationType.RETURN);
+  }
+
+  private int allOperationCandidateCount(
+      List<Route> allRoutes, Map<Route, List<RouteStop>> stopsByRoute) {
+    int count = 0;
+    for (Route candidate : allRoutes) {
+      if (candidate == null || candidate.operationType() != RouteOperationType.OPERATION) {
+        continue;
+      }
+      List<RouteStop> stops = stopsByRoute.getOrDefault(candidate, List.of());
+      RouteStop first = stops.isEmpty() ? null : stops.get(0);
+      if (SpawnDirectiveParser.findDirectiveTarget(first, "CRET").isPresent()
+          || resolveStopNodeId(first).isPresent()) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private boolean isSingleRouteInExplicitGroup(Route route, Line line, List<Route> allRoutes) {
+    Optional<String> group = readString(route.metadata(), "spawn_group");
+    if (group.isEmpty()) {
+      return false;
+    }
+    String key = explicitGroupKey(line, group.get());
+    long count = 0L;
+    for (Route candidate : allRoutes) {
+      if (candidate == null || candidate.operationType() != RouteOperationType.OPERATION) {
+        continue;
+      }
+      Optional<String> candidateGroup = readString(candidate.metadata(), "spawn_group");
+      if (candidateGroup.isEmpty()) {
+        continue;
+      }
+      if (explicitGroupKey(line, candidateGroup.get()).equalsIgnoreCase(key)) {
+        count++;
+      }
+    }
+    return count == 1L;
+  }
+
+  private Optional<Integer> resolveRouteGroupBaseline(
+      Line line, Route route, Optional<String> explicitGroup) {
+    if (line != null && explicitGroup.isPresent()) {
+      Optional<Integer> fromLine =
+          LineSpawnMetadata.parseGroupBaseline(line.metadata(), explicitGroup.get());
+      if (fromLine.isPresent()) {
+        return fromLine;
+      }
+    }
+    if (route == null) {
+      return Optional.empty();
+    }
+    Optional<Integer> canonical = readPositiveInt(route.metadata(), "spawn_group_baseline_sec");
+    return canonical.isPresent()
+        ? canonical
+        : readPositiveInt(route.metadata(), "spawn_group_baseline");
+  }
+
+  private String resolveCirculationGroupKey(Route route, List<RouteStop> stops) {
+    Optional<String> explicitGroup = readString(route.metadata(), "spawn_group");
+    if (explicitGroup.isPresent()) {
+      return explicitGroup.get();
+    }
+    Optional<String> start = resolveStartNode(stops);
+    if (start.isEmpty()) {
+      return route.code();
+    }
+    String normalized = start.get().trim().toLowerCase(Locale.ROOT);
+    if (SpawnDirectiveParser.isDynamicTarget(normalized)) {
+      Optional<DynamicStopMatcher.DynamicSpec> spec =
+          DynamicStopMatcher.parseDynamicSpec(normalized);
+      if (spec.isPresent()) {
+        DynamicStopMatcher.DynamicSpec value = spec.get();
+        return value.operatorCode().toLowerCase(Locale.ROOT)
+            + ":"
+            + value.nodeType().toLowerCase(Locale.ROOT)
+            + ":"
+            + value.nodeName().toLowerCase(Locale.ROOT);
+      }
+      return normalized;
+    }
+    return TerminalKeyResolver.extractStationKey(normalized).orElse(normalized);
+  }
+
+  private Optional<String> resolveStartNode(List<RouteStop> stops) {
+    if (stops == null || stops.isEmpty()) {
+      return Optional.empty();
+    }
+    RouteStop first = stops.get(0);
+    return SpawnDirectiveParser.findDirectiveTarget(first, "CRET")
+        .or(() -> resolveStopNodeId(first));
+  }
+
+  /**
+   * 按 SpawnManager 的规则从首停靠点解析起点。
+   *
+   * <p>普通 stop 使用 {@code waypointNodeId}；DYNAMIC stop 使用 placeholder NodeId。站点 UUID 外键不会被自动换算为
+   * nodeId，这能直接暴露“首站无法参与发车计划”的配置问题。
+   */
+  private Optional<String> resolveStopNodeId(RouteStop stop) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    if (stop.waypointNodeId().isPresent()) {
+      return stop.waypointNodeId();
+    }
+    return DynamicStopMatcher.parseDynamicSpec(stop)
+        .map(DynamicStopMatcher.DynamicSpec::toPlaceholderNodeId);
+  }
+
+  private static String explicitGroupKey(Line line, String group) {
+    String lineKey = line == null ? "" : line.id().toString();
+    String groupKey = group == null ? "" : group.trim().toLowerCase(Locale.ROOT);
+    return lineKey + "|" + groupKey;
+  }
+
+  private static Optional<Boolean> readBoolean(Map<String, Object> metadata, String key) {
+    if (metadata == null || metadata.isEmpty() || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get(key);
+    if (raw instanceof Boolean value) {
+      return Optional.of(value);
+    }
+    if (raw instanceof String text) {
+      String normalized = text.trim().toLowerCase(Locale.ROOT);
+      if ("true".equals(normalized)) {
+        return Optional.of(true);
+      }
+      if ("false".equals(normalized)) {
+        return Optional.of(false);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static Optional<Integer> readPositiveInt(Map<String, Object> metadata, String key) {
+    return readInt(metadata, key).filter(value -> value > 0);
+  }
+
+  private static Optional<Integer> readInt(Map<String, Object> metadata, String key) {
+    if (metadata == null || metadata.isEmpty() || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get(key);
+    if (raw instanceof Number number) {
+      return Optional.of(number.intValue());
+    }
+    if (raw instanceof String text) {
+      try {
+        return Optional.of(Integer.parseInt(text.trim()));
+      } catch (NumberFormatException ignored) {
+        return Optional.empty();
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static Optional<String> readString(Map<String, Object> metadata, String key) {
+    if (metadata == null || metadata.isEmpty() || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get(key);
+    if (raw == null) {
+      return Optional.empty();
+    }
+    String value = String.valueOf(raw).trim();
+    return value.isBlank() ? Optional.empty() : Optional.of(value);
+  }
+
+  private static String formatSeconds(Optional<Integer> seconds) {
+    return seconds.filter(value -> value > 0).map(value -> value + "s").orElse("-");
   }
 
   /**
@@ -377,6 +845,28 @@ public final class FtaSpawnCommand {
                 "plan",
                 planReset ? "✓" : "✗")));
   }
+
+  private record LineSpawnDiagnosis(
+      Operator operator,
+      Line line,
+      String lineBaseline,
+      List<GroupSpawnDiagnosis> groups,
+      List<RouteSpawnDiagnosis> routes) {
+    private LineSpawnDiagnosis {
+      groups = groups == null ? List.of() : List.copyOf(groups);
+      routes = routes == null ? List.of() : List.copyOf(routes);
+    }
+  }
+
+  private record GroupSpawnDiagnosis(String group, String baseline, String routes) {}
+
+  private record RouteSpawnDiagnosis(
+      Route route,
+      String group,
+      String weight,
+      String startNode,
+      boolean participates,
+      String reasons) {}
 
   /**
    * 格式化 Instant 为 ISO 字符串。

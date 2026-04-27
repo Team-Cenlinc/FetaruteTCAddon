@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  *   <li>PROGRESS_STUCK：先 refreshSignal，再升级到 reissueDestination，最后 forceRelaunch
  *   <li>STOP 下的长时间停滞也会按同样链路升级，避免只 refresh 不解锁
  *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则优先视为合法排队等待，不急于升级到重发/重启
+ *   <li>互相阻塞会按列车对执行 refresh → reissue → relaunch → destroy-victim，避免不可恢复的对顶/重叠长期占住线路
  *   <li>STOP 信号下的 progress stuck 允许更长宽限，避免把正常排队误判为故障
  * </ul>
  */
@@ -598,7 +599,7 @@ public final class TrainHealthMonitor {
   }
 
   /**
-   * 互卡解锁：优先轻量恢复，必要时升级到定向重发。
+   * 互卡解锁：优先轻量恢复，必要时升级到定向重发、重启与销毁。
    *
    * <p>为避免两车同时执行恢复动作导致抖动，仅由 pair key 较小的一侧执行。
    */
@@ -621,7 +622,7 @@ public final class TrainHealthMonitor {
     if (!canAttempt(now, pairLast) || !canAttempt(now, recovery.lastDeadlockAttemptAt)) {
       return false;
     }
-    int nextStage = Math.min(recovery.deadlockStage + 1, 3);
+    int nextStage = Math.min(recovery.deadlockStage + 1, 4);
     boolean fixed;
     if (nextStage == 1) {
       debugLogger.accept(
@@ -646,7 +647,7 @@ public final class TrainHealthMonitor {
         dispatchService.refreshSignalByName(trainName);
         dispatchService.refreshSignalByName(blockerTrain);
       }
-    } else {
+    } else if (nextStage == 3) {
       debugLogger.accept(
           "TrainHealthMonitor 解锁互卡(stage=relaunch-pair): train="
               + trainName
@@ -666,11 +667,32 @@ public final class TrainHealthMonitor {
         dispatchService.refreshSignalByName(trainName);
         dispatchService.refreshSignalByName(blockerTrain);
       }
+    } else {
+      debugLogger.accept(
+          "TrainHealthMonitor 解锁互卡(stage=destroy-victim): train="
+              + trainName
+              + " blocker="
+              + blockerTrain);
+      fixed = destroyDeadlockVictim(trainName, blockerTrain);
     }
     recovery.lastDeadlockAttemptAt = now;
     recovery.deadlockStage = fixed ? nextStage : 0;
     deadlockPairLastAttemptAt.put(pairKey, now);
     return fixed;
+  }
+
+  /**
+   * 删除无法恢复的互卡列车。
+   *
+   * <p>互卡恢复已按 refresh、reissue、relaunch 递进尝试；如果下一轮仍然保持同一互相阻塞关系，说明列车大概率已经进入不可恢复的物理重叠或进路对顶状态。 这里仅由
+   * pair leader 执行，并优先删除 leader，失败时再尝试对端，避免双方同时销毁。
+   */
+  private boolean destroyDeadlockVictim(String trainName, String blockerTrain) {
+    String reason = "health-deadlock:" + blockerTrain;
+    if (dispatchService.destroyTrainByName(trainName, reason)) {
+      return true;
+    }
+    return dispatchService.destroyTrainByName(blockerTrain, "health-deadlock:" + trainName);
   }
 
   /**

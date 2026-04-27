@@ -43,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -53,6 +54,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
@@ -1350,6 +1353,76 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleSignalTickClearsBehindLookaheadClaimsBeforeAuthorizingFrontTrain() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, c), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=1");
+    TagStore backTags = new TagStore("train-back", "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    RailGraph graph = graphWithTwoEdges(a, b, c, 10, 10);
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    OccupancyResource frontNode = OccupancyResource.forNode(b);
+    OccupancyResource forwardEdge = OccupancyResource.forEdge(EdgeId.undirected(b, c));
+    occupancyManager.acquire(
+        new OccupancyRequest(
+            "train-back",
+            Optional.of(route.id()),
+            Instant.now(),
+            List.of(frontNode, forwardEdge),
+            Map.of(),
+            0));
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-1", tags.properties(), route);
+    registry.initFromTags("train-back", backTags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
+    assertEquals(SignalAspect.PROCEED, aspect);
+    assertEquals("train-1", occupancyManager.getClaim(forwardEdge).orElseThrow().trainName());
+  }
+
+  @Test
   void handleSignalTickDowngradesWhenForwardClaimIsFromAheadSameRoute() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
@@ -2608,6 +2681,56 @@ class RuntimeDispatchServiceTest {
     assertFalse(impacted.containsKey("spawn-train"));
   }
 
+  @Test
+  void shouldAdvancePassedStationReturnsTrueForPassStation() {
+    NodeId start = NodeId.of("SURN:S:START:1");
+    NodeId passStation = NodeId.of("SURN:S:MID:1");
+    NodeId next = NodeId.of("SURN:S:NEXT:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(start, passStation, next), Optional.empty());
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(routeStop(1, passStation, RouteStopPassType.PASS)));
+    RuntimeDispatchService service = createMinimalService(routeDefinitions);
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    SignNodeDefinition definition =
+        new SignNodeDefinition(passStation, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertTrue(service.shouldAdvancePassedStation(tags.properties(), definition));
+  }
+
+  @Test
+  void shouldAdvancePassedStationReturnsFalseForStopStation() {
+    NodeId start = NodeId.of("SURN:S:START:1");
+    NodeId stopStation = NodeId.of("SURN:S:MID:1");
+    NodeId next = NodeId.of("SURN:S:NEXT:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(start, stopStation, next), Optional.empty());
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(routeStop(1, stopStation, RouteStopPassType.STOP)));
+    RuntimeDispatchService service = createMinimalService(routeDefinitions);
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    SignNodeDefinition definition =
+        new SignNodeDefinition(stopStation, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertFalse(service.shouldAdvancePassedStation(tags.properties(), definition));
+  }
+
   // 注意：handleStationArrival 测试需要 TrainCarts 依赖，改用功能文档验证
   // handleStationArrival 方法已在 AutoStationSignAction 中调用，功能集成测试由手动验证覆盖
 
@@ -2988,16 +3111,36 @@ class RuntimeDispatchServiceTest {
     return createMinimalService(mock(OccupancyManager.class), new ArrayList<>());
   }
 
+  private RuntimeDispatchService createMinimalService(RouteDefinitionCache routeDefinitions) {
+    return createMinimalService(
+        mock(OccupancyManager.class),
+        routeDefinitions,
+        new RouteProgressRegistry(),
+        new ArrayList<>());
+  }
+
   private RuntimeDispatchService createMinimalService(
       OccupancyManager occupancyManager, List<String> debugMessages) {
+    return createMinimalService(
+        occupancyManager,
+        mock(RouteDefinitionCache.class),
+        new RouteProgressRegistry(),
+        debugMessages);
+  }
+
+  private RuntimeDispatchService createMinimalService(
+      OccupancyManager occupancyManager,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry progressRegistry,
+      List<String> debugMessages) {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
     return new RuntimeDispatchService(
         occupancyManager,
         mock(RailGraphService.class),
-        mock(RouteDefinitionCache.class),
-        new RouteProgressRegistry(),
+        routeDefinitions,
+        progressRegistry,
         mock(SignNodeRegistry.class),
         mock(LayoverRegistry.class),
         new DwellRegistry(),
@@ -3005,6 +3148,17 @@ class RuntimeDispatchServiceTest {
         null,
         mock(TrainConfigResolver.class),
         debugMessages::add);
+  }
+
+  private static RouteStop routeStop(int sequence, NodeId nodeId, RouteStopPassType passType) {
+    return new RouteStop(
+        UUID.randomUUID(),
+        sequence,
+        Optional.empty(),
+        Optional.of(nodeId.value()),
+        Optional.empty(),
+        passType,
+        Optional.empty());
   }
 
   private RuntimeDispatchService createServiceWithHardNodeBlocker() {

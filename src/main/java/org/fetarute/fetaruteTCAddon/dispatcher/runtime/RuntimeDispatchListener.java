@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.GroupCreateEvent;
@@ -25,8 +26,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  *
  * <p>对 MEMBER_ENTER 仅处理车头触发，避免多节车厢重复推进；Waypoint 停站仅在 GROUP_ENTER 触发，避免过早点刹。
  *
- * <p>AutoStation（STATION 类型）节点不由此监听器推进 routeIndex，而是由 {@link
- * RuntimeDispatchService#handleStationArrival} 在列车停稳后处理，避免列车跳过站点。
+ * <p>AutoStation（STATION 类型）节点中，STOP/TERMINATE 由 {@link
+ * RuntimeDispatchService#handleStationArrival} 在列车停稳后处理；PASS 不会停稳，因此在牌子触发时即时推进，避免 destination
+ * 卡在已通过的站台。
  *
  * <p>列车卸载/移除事件会主动释放占用，防止资源遗留。
  */
@@ -63,10 +65,14 @@ public final class RuntimeDispatchListener implements Listener {
       dispatchService.updateLastPassedGraphNode(event, definition);
       return;
     }
-    // STATION 类型节点（AutoStation）不由此监听器推进 routeIndex：
-    // 由 AutoStation.handleStop() -> handleStationArrival() 在列车停稳后处理，
-    // 避免 handleProgressTrigger 提前推进导致列车跳过站点。
+    // STATION STOP/TERM 由 AutoStation.handleStop() -> handleStationArrival() 在列车停稳后推进，
+    // 但 PASS 站不会停稳，必须在经过牌子时推进，否则 destination 会卡在被通过的站。
     if (definition.nodeType() == NodeType.STATION) {
+      if (shouldHandleStationPassProgress(event)
+          && dispatchService.shouldAdvancePassedStation(
+              event.getGroup().getProperties(), definition)) {
+        dispatchService.handleProgressTrigger(event, definition);
+      }
       return;
     }
     dispatchService.handleProgressTrigger(event, definition);
@@ -191,6 +197,42 @@ public final class RuntimeDispatchListener implements Listener {
       return false;
     }
     return group.head() == member;
+  }
+
+  /**
+   * 判断 AutoStation PASS 是否应由运行时监听器推进。
+   *
+   * <p>{@code [train]} 牌子使用 GROUP_ENTER；{@code [cart]} 牌子没有 GROUP_ENTER，只处理车头 MEMBER_ENTER。
+   */
+  private boolean shouldHandleStationPassProgress(SignActionEvent event) {
+    if (event == null) {
+      return false;
+    }
+    SignActionType action = event.getAction();
+    if (action == SignActionType.GROUP_ENTER) {
+      return true;
+    }
+    if (action != SignActionType.MEMBER_ENTER) {
+      return false;
+    }
+    SignActionHeader header =
+        event.getTrackedSign() != null ? event.getTrackedSign().getHeader() : null;
+    if (header == null) {
+      header = SignActionHeader.parse(event.getLine(0));
+    }
+    return shouldHandleStationPassProgress(action, header != null && header.isCart());
+  }
+
+  /**
+   * 判断 AutoStation PASS 是否应在当前触发类型下推进。
+   *
+   * <p>该纯判定用于隔离 TrainCarts 事件对象，确保测试可直接覆盖 `[train]` 与 `[cart]` 牌子的触发差异。
+   */
+  static boolean shouldHandleStationPassProgress(SignActionType action, boolean cartHeader) {
+    if (action == SignActionType.GROUP_ENTER) {
+      return true;
+    }
+    return action == SignActionType.MEMBER_ENTER && cartHeader;
   }
 
   private String buildUnexpectedSplitDetail(

@@ -228,17 +228,6 @@ public final class FtaTrainCommand {
                   }
                 }));
 
-    // debug 子命令：显示控车诊断数据
-    manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("train")
-            .literal("debug")
-            .permission("fetarute.train.debug")
-            .optional("train", StringParser.stringParser(), trainSuggestions)
-            .handler(
-                ctx -> handleDebug(ctx.sender(), ctx.optional("train").map(String.class::cast))));
-
     // debug list 子命令：显示所有缓存的诊断数据
     manager.command(
         manager
@@ -300,6 +289,17 @@ public final class FtaTrainCommand {
                         ((String) ctx.get("line")).trim(),
                         ((String) ctx.get("route")).trim(),
                         ctx.optional("index_or_node").map(String.class::cast))));
+
+    // debug 子命令：显示控车诊断数据。泛化的 [train] 放在具体子命令之后注册，避免吞掉 list/set。
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("debug")
+            .permission("fetarute.train.debug")
+            .optional("train", StringParser.stringParser(), trainSuggestions)
+            .handler(
+                ctx -> handleDebug(ctx.sender(), ctx.optional("train").map(String.class::cast))));
   }
 
   private void handleDebug(CommandSender sender, Optional<String> trainArg) {
@@ -317,6 +317,13 @@ public final class FtaTrainCommand {
     for (TrainProperties properties : targets) {
       String trainName = properties.getTrainName();
       var diagnosticsOpt = dispatchService.getDiagnostics(trainName);
+      if (diagnosticsOpt.isEmpty()) {
+        MinecartGroup group = resolveGroupByTrainName(trainName);
+        if (group != null) {
+          dispatchService.refreshSignal(group);
+          diagnosticsOpt = dispatchService.getDiagnostics(trainName);
+        }
+      }
       if (diagnosticsOpt.isEmpty()) {
         sender.sendMessage(
             locale.component("command.train.debug.no-data", Map.of("train", trainName)));

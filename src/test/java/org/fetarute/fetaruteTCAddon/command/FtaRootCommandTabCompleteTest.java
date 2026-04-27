@@ -54,4 +54,19 @@ class FtaRootCommandTabCompleteTest {
         java.util.List.of("reload"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {"re"}));
   }
+
+  /** 只有列车诊断权限时也应显示 train 入口。 */
+  @Test
+  void completesTrainWhenSenderOnlyHasTrainDebugPermission() {
+    FtaRootCommand root = new FtaRootCommand(null, null, null);
+
+    CommandSender sender = Mockito.mock(CommandSender.class);
+    Mockito.when(sender.hasPermission("fetarute.train.config")).thenReturn(false);
+    Mockito.when(sender.hasPermission("fetarute.train.debug")).thenReturn(true);
+    Mockito.when(sender.hasPermission("fetarute.admin")).thenReturn(false);
+
+    assertEquals(
+        java.util.List.of("train"),
+        root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {"tr"}));
+  }
 }

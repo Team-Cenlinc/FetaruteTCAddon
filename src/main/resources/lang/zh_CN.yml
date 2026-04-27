@@ -128,8 +128,8 @@ command:
     hover-spawn: "<gray>点击填充:</gray> <white>/fta spawn </white>\n<dark_aqua>发车计划与队列诊断</dark_aqua>"
     entry-eta: "<gray>/fta eta</gray> <white>-</white> <dark_aqua>ETA 诊断输出</dark_aqua>"
     hover-eta: "<gray>点击填充:</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
-    entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置（速度/加减速）</dark_aqua>"
-    hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置（速度/加减速）</dark_aqua>"
+    entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置与诊断</dark_aqua>"
+    hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置与诊断</dark_aqua>"
     entry-template: "<gray>/fta template</gray> <white>-</white> <dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
     hover-template: "<gray>点击填充:</gray> <white>/fta template </white>\n<dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
@@ -241,6 +241,8 @@ command:
       header: "<prefix> <dark_aqua>发车计划命令</dark_aqua>"
       entry-plan: "<gray>/fta spawn plan</gray> <white>-</white> <dark_aqua>查看发车计划（可发车服务）</dark_aqua>"
       hover-plan: "<gray>点击填充:</gray> <white>/fta spawn plan </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-diagnose: "<gray>/fta spawn diagnose</gray> <white>-</white> <dark_aqua>诊断发车配置与跳过原因</dark_aqua>"
+      hover-diagnose: "<gray>点击填充:</gray> <white>/fta spawn diagnose </white>\n<dark_aqua>显示 line/group/route 的 baseline、权重与跳过原因</dark_aqua>"
       entry-queue: "<gray>/fta spawn queue</gray> <white>-</white> <dark_aqua>查看发车队列（待发票据）</dark_aqua>"
       hover-queue: "<gray>点击填充:</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-pending: "<gray>/fta spawn pending</gray> <white>-</white> <dark_aqua>查看折返待发（含失败重试）</dark_aqua>"
@@ -252,6 +254,13 @@ command:
       empty: "<prefix> <gray>暂无可发车服务</gray>"
       entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>headway=<white><headway></white> depot=<white><depot></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta spawn plan <limit> 调整数量</gray>"
+    diagnose:
+      header: "<prefix> <dark_aqua>发车配置诊断</dark_aqua> <gray>(lines=<white><lines></white>, groups=<white><groups></white>, routes=<white><routes></white>)</gray>"
+      empty: "<prefix> <gray>暂无可诊断的发车 route</gray>"
+      line: "<prefix> <dark_aqua><operator></dark_aqua>/<dark_aqua><line></dark_aqua> <gray>lineBaseline=<white><line_baseline></white> status=<white><status></white></gray>"
+      group: "<gray>  group=<white><group></white> baseline=<white><baseline></white> routes=<white><routes></white></gray>"
+      route: "<gray>  - route=<white><route></white> op=<white><operation></white> group=<white><group></white> weight=<white><weight></white> start=<white><start></white> participates=<white><participates></white> reasons=<white><reasons></white></gray>"
+      truncated: "<gray>… 已省略 <white><count></white> 条 route，使用 /fta spawn diagnose <limit> 调整数量</gray>"
     queue:
       header: "<prefix> <dark_aqua>发车队列</dark_aqua> <gray>(count=<white><count></white>)</gray>"
       empty: "<prefix> <gray>暂无排队票据</gray>"
@@ -759,6 +768,10 @@ command:
       summary: "<prefix> <red>发现问题</red> <gray>(routes=<routes>, issues=<issues>)</gray>"
       entry: "<prefix> <gray>[<route>]</gray> <error>"
       more: "<prefix> <gray>已省略 <white><count></white> 条问题</gray>"
+      spawn-group-missing: "<prefix> <red>route 绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"
+      spawn-baseline-missing: "<prefix> <red>交路组与线路都缺少发车基线</red> <gray>(group=<white><group></white>)</gray>"
+      spawn-weight-missing: "<prefix> <red>同一交路组存在多条 OPERATION route，但本 route 未配置 spawn_weight</red> <gray>(group=<white><group></white>)</gray>"
+      create-missing-cret: "<prefix> <red>CREATE route 首个停靠点必须配置 CRET</red>"
 
     editor:
       append:

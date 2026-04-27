@@ -25,6 +25,11 @@
 - 仅在停稳后才会执行居中、启动 dwell，并通过 `addActionWaitState()` 真正 hold 住列车。
 - Waypoint 居中会强制使用 train-sign 语义调用 `centerTrain()`，确保以整个 `MinecartGroup` 为中心对齐，不退化为单车居中。
 
+## AutoStation PASS
+- AutoStation 的 STOP/TERMINATE 仍由停稳后的 `handleStationArrival` 推进，避免提前推进导致列车跳站。
+- AutoStation 的 PASS 不会进入停站/开门流程，因此运行时监听器会在牌子触发时确认当前 RouteStop 为 PASS，并立即执行普通推进，避免列车 destination 卡在被通过的站台。
+- `[train]` AutoStation 使用 `GROUP_ENTER` 推进 PASS；`[cart]` AutoStation 仅处理车头 `MEMBER_ENTER`，避免长编组重复推进。
+
 ## 发车方向
 - 发车方向以 TrainCarts 的寻路结果为准（根据当前 destination 计算下一跳 junction）。
 - 调度层不再写入 `FTA_LAUNCH_DIR` 等方向 tag，避免两套方向逻辑相互覆盖。
@@ -134,6 +139,7 @@
 - 健康检查支持分级修复与冷却控制：
   - `STALL`：`refreshSignal -> forceRelaunch`
   - `PROGRESS_STUCK`：`refreshSignal -> reissueDestination -> forceRelaunch`
+  - STOP 互卡：`refresh 双车 -> reissue 单车 -> relaunch 单车 -> destroy 单车`
 - 健康检查由独立定时任务驱动（每秒 tick + `health.check-interval-seconds` 间隔门控），不再依赖信号监控任务触发。
 - `STOP` 信号下的 progress stuck 允许更长宽限（`health.progress-stop-grace-seconds`），避免将正常排队误判为异常。
 - 连续修复动作之间受 `health.recovery-cooldown-seconds` 限制，降低高频场景下的抖动与过度修复。

@@ -3,6 +3,8 @@ package org.fetarute.fetaruteTCAddon.command;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -48,9 +50,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -1469,17 +1474,33 @@ public final class FtaRouteCommand {
                   List<RouteValidationEntry> entries = new ArrayList<>();
                   int routeIssueCount = 0;
                   boolean reachabilitySkipped = false;
+                  List<Route> allLineRoutes = provider.routes().listByLine(resolved.line().id());
+                  Map<UUID, List<RouteStop>> stopsByRoute = new HashMap<>();
+                  for (Route lineRoute : allLineRoutes) {
+                    if (lineRoute != null) {
+                      stopsByRoute.put(
+                          lineRoute.id(), provider.routeStops().listByRoute(lineRoute.id()));
+                    }
+                  }
                   for (Route route : routes) {
-                    List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+                    List<RouteStop> stops =
+                        stopsByRoute.computeIfAbsent(
+                            route.id(), ignored -> provider.routeStops().listByRoute(route.id()));
                     RouteValidationResult result = validateRouteStops(provider, stops, true);
+                    List<RouteValidationIssue> spawnIssues =
+                        validateRouteSpawnConfig(
+                            resolved.line(), route, allLineRoutes, stopsByRoute);
                     if (result.reachabilitySkipped()) {
                       reachabilitySkipped = true;
                     }
-                    if (result.issues().isEmpty()) {
+                    if (result.issues().isEmpty() && spawnIssues.isEmpty()) {
                       continue;
                     }
                     routeIssueCount++;
                     for (RouteValidationIssue issue : result.issues()) {
+                      entries.add(new RouteValidationEntry(route.code(), issue));
+                    }
+                    for (RouteValidationIssue issue : spawnIssues) {
                       entries.add(new RouteValidationEntry(route.code(), issue));
                     }
                   }
@@ -2954,7 +2975,12 @@ public final class FtaRouteCommand {
    * </ul>
    */
   private record DynamicNodeSpec(
-      String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
+      String operatorCode,
+      String nodeType,
+      String nodeName,
+      int fromTrack,
+      int toTrack,
+      boolean rangeExplicit) {
     /** 生成默认占位 NodeId（用于图可达性校验，取范围第一个轨道）。 */
     String resolveDefaultNodeId() {
       return operatorCode + ":" + nodeType + ":" + nodeName + ":" + fromTrack;
@@ -2997,44 +3023,32 @@ public final class FtaRouteCommand {
     }
     String rest = trimmed.substring("DYNAMIC:".length()).trim();
 
-    // 先提取 [range] 部分（如果存在）
-    String rangePayload = "";
-    int bracketIdx = rest.indexOf('[');
-    if (bracketIdx > 0) {
-      rangePayload = rest.substring(bracketIdx).trim();
-      rest = rest.substring(0, bracketIdx).trim();
-      // 去掉可能的尾部 :
-      if (rest.endsWith(":")) {
-        rest = rest.substring(0, rest.length() - 1).trim();
-      }
-    }
-
-    // 按 : 拆分剩余部分
-    String[] parts = rest.split(":");
+    // 按 : 拆分，兼容 DYNAMIC:OP:S:NAME:[1:3]、DYNAMIC:OP:S:NAME:1:3
+    // 以及旧格式 DYNAMIC:OP:NAME:[1:3]。
+    String[] parts = rest.split(":", -1);
     if (parts.length < 2) {
       return Optional.empty();
     }
-    String operatorCode = parts[0].trim();
+    String operatorCode = parts[0] == null ? "" : parts[0].trim();
     if (operatorCode.isBlank()) {
       return Optional.empty();
     }
     String nodeType;
     String nodeName;
-    if (parts.length == 2) {
+    String rangePayload = "";
+    if (parts.length >= 3 && isDynamicNodeType(parts[1])) {
+      nodeType = parts[1].trim().toUpperCase(Locale.ROOT);
+      nodeName = parts[2].trim();
+      if (parts.length > 3) {
+        rangePayload = String.join(":", java.util.Arrays.copyOfRange(parts, 3, parts.length));
+      }
+    } else {
       // DYNAMIC:OP:NAME → 默认 nodeType=S
       nodeType = "S";
       nodeName = parts[1].trim();
-    } else if (parts.length == 3) {
-      // DYNAMIC:OP:X:Y → X 是 S/D 则为 nodeType，否则无效
-      String second = parts[1].trim().toUpperCase(java.util.Locale.ROOT);
-      if ("S".equals(second) || "D".equals(second)) {
-        nodeType = second;
-        nodeName = parts[2].trim();
-      } else {
-        return Optional.empty();
+      if (parts.length > 2) {
+        rangePayload = String.join(":", java.util.Arrays.copyOfRange(parts, 2, parts.length));
       }
-    } else {
-      return Optional.empty();
     }
     if (nodeName.isBlank()) {
       return Optional.empty();
@@ -3042,16 +3056,28 @@ public final class FtaRouteCommand {
 
     // 解析轨道范围
     int fromTrack = 1;
-    int toTrack = 1;
-    if (!rangePayload.isBlank()) {
-      Optional<int[]> rangeOpt = parseTrackRange(rangePayload);
+    int toTrack = 10;
+    boolean rangeExplicit = !rangePayload.isBlank();
+    if (rangeExplicit) {
+      Optional<int[]> rangeOpt = parseTrackRange(rangePayload.trim());
       if (rangeOpt.isPresent()) {
         int[] range = rangeOpt.get();
         fromTrack = range[0];
         toTrack = range[1];
+      } else {
+        return Optional.empty();
       }
     }
-    return Optional.of(new DynamicNodeSpec(operatorCode, nodeType, nodeName, fromTrack, toTrack));
+    return Optional.of(
+        new DynamicNodeSpec(operatorCode, nodeType, nodeName, fromTrack, toTrack, rangeExplicit));
+  }
+
+  private static boolean isDynamicNodeType(String raw) {
+    if (raw == null) {
+      return false;
+    }
+    String normalized = raw.trim().toUpperCase(Locale.ROOT);
+    return "S".equals(normalized) || "D".equals(normalized);
   }
 
   /**
@@ -3178,28 +3204,19 @@ public final class FtaRouteCommand {
       if (dynamicSpecOpt.isPresent()) {
         DynamicNodeSpec spec = dynamicSpecOpt.get();
         dynamicSpecs.add(spec);
-        // 验证 DYNAMIC 范围内的所有轨道节点
-        List<NodeId> validNodes = new ArrayList<>();
+        // 验证 DYNAMIC 范围内的可用轨道节点。未显式写范围时，按图中真实站台候选扫描，
+        // 避免只检查 :1 导致 graph build 后误报。
+        List<NodeId> validNodes = findDynamicGraphNodes(spec);
         List<String> missingTracks = new ArrayList<>();
-        for (String nodeIdStr : spec.resolveAllNodeIds()) {
-          NodeId nodeId = NodeId.of(nodeIdStr);
-          // 检查节点是否存在于图中（遍历所有已加载快照）
-          boolean found = false;
-          if (plugin.getRailGraphService() != null) {
-            for (World w : plugin.getServer().getWorlds()) {
-              Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
-                  plugin.getRailGraphService().getSnapshot(w);
-              if (snapshotOpt.isPresent()
-                  && snapshotOpt.get().graph().findNode(nodeId).isPresent()) {
-                found = true;
-                break;
-              }
-            }
+        if (spec.rangeExplicit()) {
+          Set<String> validValues = new LinkedHashSet<>();
+          for (NodeId nodeId : validNodes) {
+            validValues.add(nodeId.value().toLowerCase(Locale.ROOT));
           }
-          if (found) {
-            validNodes.add(nodeId);
-          } else {
-            missingTracks.add(nodeIdStr);
+          for (String nodeIdStr : spec.resolveAllNodeIds()) {
+            if (!validValues.contains(nodeIdStr.toLowerCase(Locale.ROOT))) {
+              missingTracks.add(nodeIdStr);
+            }
           }
         }
         if (validNodes.isEmpty()) {
@@ -3283,6 +3300,210 @@ public final class FtaRouteCommand {
       }
     }
     return new RouteValidationResult(List.copyOf(issues), reachabilitySkipped);
+  }
+
+  /**
+   * 校验 route 与自动发车配置之间的关系。
+   *
+   * <p>这里覆盖容易导致 SpawnPlan 静默跳过的配置项：交路组引用、baseline 来源、组内运营 route 权重，以及 CREATE 首站 CRET 要求。
+   */
+  private List<RouteValidationIssue> validateRouteSpawnConfig(
+      Line line, Route route, List<Route> allLineRoutes, Map<UUID, List<RouteStop>> stopsByRoute) {
+    if (line == null || route == null) {
+      return List.of();
+    }
+    List<RouteValidationIssue> issues = new ArrayList<>();
+    List<SpawnGroup> configuredGroups = LineSpawnMetadata.parseGroups(line.metadata());
+    Optional<String> groupOpt = readSpawnGroup(route.metadata());
+    if (groupOpt.isPresent()
+        && LineSpawnMetadata.findGroup(configuredGroups, groupOpt.get()).isEmpty()) {
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.validate.spawn-group-missing", Map.of("group", groupOpt.get())));
+    }
+
+    List<RouteStop> stops = stopsByRoute.getOrDefault(route.id(), List.of());
+    RouteStop first = stops.isEmpty() ? null : stops.get(0);
+    Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
+    if (route.operationType() == RouteOperationType.CREATE && cret.isEmpty()) {
+      issues.add(new RouteValidationIssue("command.route.validate.create-missing-cret", Map.of()));
+    }
+
+    if (route.operationType() != RouteOperationType.CREATE
+        && route.operationType() != RouteOperationType.OPERATION
+        && route.operationType() != RouteOperationType.RETURN) {
+      return List.copyOf(issues);
+    }
+    if (!readBoolean(route.metadata(), "spawn_enabled").orElse(true)) {
+      return List.copyOf(issues);
+    }
+
+    Optional<Integer> routeGroupBaseline = resolveValidationGroupBaselineSeconds(line, route);
+    Optional<Integer> lineBaseline = line.spawnFreqBaselineSec().filter(value -> value > 0);
+    if (routeGroupBaseline.isEmpty() && lineBaseline.isEmpty()) {
+      String group = groupOpt.orElseGet(() -> resolveValidationGroupKey(route, stops));
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.validate.spawn-baseline-missing", Map.of("group", group)));
+    }
+
+    if (route.operationType() == RouteOperationType.OPERATION
+        && readPositiveInt(route.metadata(), "spawn_weight").isEmpty()
+        && !readBoolean(route.metadata(), "spawn_enabled").orElse(false)
+        && countOperationRoutesInValidationGroup(route, allLineRoutes, stopsByRoute) > 1) {
+      String group = groupOpt.orElseGet(() -> resolveValidationGroupKey(route, stops));
+      issues.add(
+          new RouteValidationIssue(
+              "command.route.validate.spawn-weight-missing", Map.of("group", group)));
+    }
+
+    return List.copyOf(issues);
+  }
+
+  private int countOperationRoutesInValidationGroup(
+      Route route, List<Route> allLineRoutes, Map<UUID, List<RouteStop>> stopsByRoute) {
+    if (route == null || allLineRoutes == null || allLineRoutes.isEmpty()) {
+      return 0;
+    }
+    String targetGroup =
+        resolveValidationGroupKey(route, stopsByRoute.getOrDefault(route.id(), List.of()));
+    int count = 0;
+    for (Route candidate : allLineRoutes) {
+      if (candidate == null || candidate.operationType() != RouteOperationType.OPERATION) {
+        continue;
+      }
+      List<RouteStop> stops = stopsByRoute.getOrDefault(candidate.id(), List.of());
+      String group = resolveValidationGroupKey(candidate, stops);
+      if (targetGroup.equalsIgnoreCase(group)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private Optional<Integer> resolveValidationGroupBaselineSeconds(Line line, Route route) {
+    if (line != null && route != null) {
+      Optional<String> group = readSpawnGroup(route.metadata());
+      if (group.isPresent()) {
+        Optional<Integer> fromLine =
+            LineSpawnMetadata.parseGroupBaseline(line.metadata(), group.get());
+        if (fromLine.isPresent()) {
+          return fromLine;
+        }
+      }
+    }
+    if (route == null) {
+      return Optional.empty();
+    }
+    return readSpawnGroupBaselineSeconds(route.metadata());
+  }
+
+  private String resolveValidationGroupKey(Route route, List<RouteStop> stops) {
+    if (route == null) {
+      return "default";
+    }
+    Optional<String> group = readSpawnGroup(route.metadata());
+    if (group.isPresent()) {
+      return group.get();
+    }
+    Optional<String> start = resolveValidationStartNode(stops);
+    if (start.isEmpty()) {
+      return route.code();
+    }
+    String normalized = start.get().trim();
+    if (SpawnDirectiveParser.isDynamicTarget(normalized)) {
+      return parseDynamicNodeSpec(normalizeActionLine(normalized))
+          .map(
+              spec ->
+                  spec.operatorCode().toLowerCase(Locale.ROOT)
+                      + ":"
+                      + spec.nodeType().toLowerCase(Locale.ROOT)
+                      + ":"
+                      + spec.nodeName().toLowerCase(Locale.ROOT))
+          .orElse(normalized.toLowerCase(Locale.ROOT));
+    }
+    return TerminalKeyResolver.extractStationKey(normalized)
+        .orElse(normalized.toLowerCase(Locale.ROOT));
+  }
+
+  private Optional<String> resolveValidationStartNode(List<RouteStop> stops) {
+    if (stops == null || stops.isEmpty()) {
+      return Optional.empty();
+    }
+    RouteStop first = stops.get(0);
+    Optional<String> cret = SpawnDirectiveParser.findDirectiveTarget(first, "CRET");
+    if (cret.isPresent()) {
+      return cret;
+    }
+    if (first.waypointNodeId().isPresent()) {
+      return first.waypointNodeId();
+    }
+    return extractDynamicSpec(first)
+        .map(
+            spec ->
+                "DYNAMIC:"
+                    + spec.operatorCode()
+                    + ":"
+                    + spec.nodeType()
+                    + ":"
+                    + spec.nodeName()
+                    + ":["
+                    + spec.fromTrack()
+                    + ":"
+                    + spec.toTrack()
+                    + "]");
+  }
+
+  /**
+   * 从已加载图快照中查找 DYNAMIC 规范匹配的候选节点。
+   *
+   * <p>只匹配 4 段 Station/Depot 行为节点（{@code OP:S/D:NAME:TRACK}），不会把 5 段站咽喉/车库咽喉误认为可停靠站台。
+   */
+  private List<NodeId> findDynamicGraphNodes(DynamicNodeSpec spec) {
+    if (spec == null || plugin.getRailGraphService() == null) {
+      return List.of();
+    }
+    Set<NodeId> found = new LinkedHashSet<>();
+    for (World world : plugin.getServer().getWorlds()) {
+      Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+          plugin.getRailGraphService().getSnapshot(world);
+      if (snapshotOpt.isEmpty()) {
+        continue;
+      }
+      for (RailNode node : snapshotOpt.get().graph().nodes()) {
+        if (node != null && matchesDynamicNode(node.id(), spec)) {
+          found.add(node.id());
+        }
+      }
+    }
+    return found.stream()
+        .sorted(Comparator.comparing(NodeId::value, String.CASE_INSENSITIVE_ORDER))
+        .toList();
+  }
+
+  private static boolean matchesDynamicNode(NodeId nodeId, DynamicNodeSpec spec) {
+    if (nodeId == null || nodeId.value() == null || spec == null) {
+      return false;
+    }
+    String[] parts = nodeId.value().split(":", -1);
+    if (parts.length != 4) {
+      return false;
+    }
+    if (!parts[0].trim().equalsIgnoreCase(spec.operatorCode())) {
+      return false;
+    }
+    if (!parts[1].trim().equalsIgnoreCase(spec.nodeType())) {
+      return false;
+    }
+    if (!parts[2].trim().equalsIgnoreCase(spec.nodeName())) {
+      return false;
+    }
+    OptionalInt track = parsePositiveInt(parts[3]);
+    if (track.isEmpty()) {
+      return false;
+    }
+    int value = track.getAsInt();
+    return value >= spec.fromTrack() && value <= spec.toTrack();
   }
 
   /**
@@ -4028,10 +4249,15 @@ public final class FtaRouteCommand {
       DynamicNodeSpec spec = dynamicSpec.get();
       // 显示 DYNAMIC 规范而不是 "-"
       String typeCode = spec.nodeType(); // "S" or "D"
-      String range =
-          spec.fromTrack() == spec.toTrack()
-              ? String.valueOf(spec.fromTrack())
-              : "[" + spec.fromTrack() + ":" + spec.toTrack() + "]";
+      String range;
+      if (!spec.rangeExplicit()) {
+        range = "*";
+      } else {
+        range =
+            spec.fromTrack() == spec.toTrack()
+                ? String.valueOf(spec.fromTrack())
+                : "[" + spec.fromTrack() + ":" + spec.toTrack() + "]";
+      }
       node =
           "DYNAMIC:" + spec.operatorCode() + ":" + typeCode + ":" + spec.nodeName() + ":" + range;
       stationCode = spec.nodeName();
@@ -4252,6 +4478,27 @@ public final class FtaRouteCommand {
     }
     String group = String.valueOf(raw).trim();
     return group.isBlank() ? Optional.empty() : Optional.of(group);
+  }
+
+  /** 从 metadata 中读取布尔值，支持 boolean 与 true/false 字符串。 */
+  private static Optional<Boolean> readBoolean(Map<String, Object> metadata, String key) {
+    if (metadata == null || metadata.isEmpty() || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get(key);
+    if (raw instanceof Boolean value) {
+      return Optional.of(value);
+    }
+    if (raw instanceof String text) {
+      String normalized = text.trim().toLowerCase(Locale.ROOT);
+      if ("true".equals(normalized)) {
+        return Optional.of(true);
+      }
+      if ("false".equals(normalized)) {
+        return Optional.of(false);
+      }
+    }
+    return Optional.empty();
   }
 
   /**

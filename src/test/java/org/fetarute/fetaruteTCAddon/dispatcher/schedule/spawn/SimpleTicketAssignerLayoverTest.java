@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -646,6 +647,106 @@ class SimpleTicketAssignerLayoverTest {
     return provider;
   }
 
+  private static StorageProvider mockProviderForOperationAndCreateRoute(
+      UUID lineId, UUID operationRouteId, UUID createRouteId) {
+    StorageProvider provider = mock(StorageProvider.class);
+    LineRepository lineRepository = mock(LineRepository.class);
+    RouteRepository routeRepository = mock(RouteRepository.class);
+    RouteStopRepository stopRepository = mock(RouteStopRepository.class);
+    when(provider.lines()).thenReturn(lineRepository);
+    when(provider.routes()).thenReturn(routeRepository);
+    when(provider.routeStops()).thenReturn(stopRepository);
+
+    Line line =
+        new Line(
+            lineId,
+            "L1",
+            UUID.randomUUID(),
+            "Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(60),
+            Map.of(),
+            Instant.now(),
+            Instant.now());
+    when(lineRepository.findById(lineId)).thenReturn(Optional.of(line));
+
+    Route operationRoute =
+        new Route(
+            operationRouteId,
+            "OP-1",
+            lineId,
+            "Operation",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            Instant.now(),
+            Instant.now());
+    Route createRoute =
+        new Route(
+            createRouteId,
+            "CREATE-1",
+            lineId,
+            "Create",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.CREATE,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            Instant.now(),
+            Instant.now());
+    when(routeRepository.findById(operationRouteId)).thenReturn(Optional.of(operationRoute));
+    when(routeRepository.findById(createRouteId)).thenReturn(Optional.of(createRoute));
+    when(routeRepository.listByLine(lineId)).thenReturn(List.of(operationRoute, createRoute));
+
+    RouteStop operationFirst =
+        new RouteStop(
+            operationRouteId,
+            0,
+            Optional.empty(),
+            Optional.of("A"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+    RouteStop operationSecond =
+        new RouteStop(
+            operationRouteId,
+            1,
+            Optional.empty(),
+            Optional.of("B"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    RouteStop createFirst =
+        new RouteStop(
+            createRouteId,
+            0,
+            Optional.empty(),
+            Optional.of("A"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("CRET SURN:D:DEPOT:2"));
+    RouteStop createSecond =
+        new RouteStop(
+            createRouteId,
+            1,
+            Optional.empty(),
+            Optional.of("B"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    when(stopRepository.listByRoute(operationRouteId))
+        .thenReturn(List.of(operationFirst, operationSecond));
+    when(stopRepository.listByRoute(createRouteId)).thenReturn(List.of(createFirst, createSecond));
+    return provider;
+  }
+
   private static RouteDefinitionCache mockRouteDefinitions(UUID routeId) {
     return mockRouteDefinitions(Map.of(routeId, routeDefinition("OP:L1:R1")));
   }
@@ -986,6 +1087,222 @@ class SimpleTicketAssignerLayoverTest {
     OccupancyRequest captured = requestCaptor.getValue();
     assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotThroat)));
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void tickDepotSpawnRequestUsesSelectedLineDepotAsGateStart() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    NodeId depotOne = NodeId.of("SURN:D:DEPOT:1");
+    NodeId depotTwo = NodeId.of("SURN:D:DEPOT:2");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider =
+        mockProviderForRoutes(
+            lineId,
+            Map.of(routeId, "R1"),
+            true,
+            Map.of(LineSpawnMetadata.KEY_DEPOTS, List.of(depotTwo.value())));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    UUID worldId = UUID.randomUUID();
+    RailNode depot1 =
+        new SignRailNode(
+            depotOne,
+            NodeType.DEPOT,
+            new Vector(-20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode depot2 =
+        new SignRailNode(
+            depotTwo,
+            NodeType.DEPOT,
+            new Vector(-10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeDepotOneA = EdgeId.undirected(depotOne, nodeA);
+    EdgeId edgeDepotTwoA = EdgeId.undirected(depotTwo, nodeA);
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(depotOne, depot1, depotTwo, depot2, nodeA, a, nodeB, b),
+            Map.of(
+                edgeDepotOneA,
+                new RailEdge(edgeDepotOneA, depotOne, nodeA, 10, 8.0, true, Optional.empty()),
+                edgeDepotTwoA,
+                new RailEdge(edgeDepotTwoA, depotTwo, nodeA, 10, 8.0, true, Optional.empty()),
+                edgeAB,
+                new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty())),
+            java.util.Set.of());
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeRegistry.SignNodeInfo depotOneInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(depotOne, NodeType.DEPOT, Optional.empty(), Optional.empty()),
+            worldId,
+            "TestWorld",
+            -20,
+            64,
+            0);
+    SignNodeRegistry.SignNodeInfo depotTwoInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(depotTwo, NodeType.DEPOT, Optional.empty(), Optional.empty()),
+            worldId,
+            "TestWorld",
+            -10,
+            64,
+            0);
+    when(signNodeRegistry.snapshotInfos())
+        .thenReturn(Map.of("depot-1", depotOneInfo, "depot-2", depotTwoInfo));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    when(occupancyManager.canEnter(requestCaptor.capture()))
+        .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
+    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R1"), List.of(depotOne, nodeA, nodeB), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(routeId, route)),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    OccupancyRequest captured = requestCaptor.getValue();
+    assertTrue(captured.resourceList().contains(OccupancyResource.forNode(depotTwo)));
+    assertFalse(captured.resourceList().contains(OccupancyResource.forNode(depotOne)));
+    assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotTwoA)));
+  }
+
+  @Test
+  void tickOperationRouteWithCretStillSpawnsWhenLineHasCreateRoute() {
+    UUID lineId = UUID.randomUUID();
+    UUID operationRouteId = UUID.randomUUID();
+    UUID createRouteId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    SpawnTicket ticket = buildTicket(operationRouteId, lineId, "OP-1", 0L);
+    StorageProvider provider =
+        mockProviderForOperationAndCreateRoute(lineId, operationRouteId, createRouteId);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    UUID worldId = UUID.randomUUID();
+    RailNode depot =
+        new SignRailNode(
+            depotNode,
+            NodeType.DEPOT,
+            new Vector(-10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeDepotA = EdgeId.undirected(depotNode, nodeA);
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(depotNode, depot, nodeA, a, nodeB, b),
+            Map.of(
+                edgeDepotA,
+                new RailEdge(edgeDepotA, depotNode, nodeA, 10, 8.0, true, Optional.empty()),
+                edgeAB,
+                new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty())),
+            java.util.Set.of());
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeRegistry.SignNodeInfo depotInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(depotNode, NodeType.DEPOT, Optional.empty(), Optional.empty()),
+            worldId,
+            "TestWorld",
+            0,
+            64,
+            0);
+    when(signNodeRegistry.snapshotInfos()).thenReturn(Map.of("depot", depotInfo));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+        .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates(any())).thenReturn(List.of());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:L1:OP-1"), List.of(depotNode, nodeA, nodeB), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(operationRouteId, route)),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            signNodeRegistry,
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(occupancyManager).canEnter(any(OccupancyRequest.class));
+    assertEquals(
+        0,
+        assigner.snapshotPendingTickets().size(),
+        "CRET 运营 route 不应因 CREATE route 存在而转入 Layover");
   }
 
   @Test

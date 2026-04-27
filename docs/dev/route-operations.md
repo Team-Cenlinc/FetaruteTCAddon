@@ -53,5 +53,7 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 `/fta route validate <company> <operator> <line> [route]`
 - 触发与 define 相同的基础校验逻辑，并汇总输出问题路线。
 - 调度图快照未加载时仅做结构校验，跳过可达性检查。
+- 额外校验自动发车配置：不存在的 `spawn_group`、缺失 line/group baseline、同组多条 `OPERATION` route 缺少 `spawn_weight`、`CREATE` 首站缺少 `CRET`。
+- 对 `DYNAMIC` stop：显式范围（如 `[1:3]`）会逐轨道检查；未显式范围时会在已加载图快照中扫描实际匹配的 Station/Depot 节点，避免只检查 `:1`。
 
 > 调度层的实际行为（终到等待/回库/销毁）将在后续运行时调度阶段接入。

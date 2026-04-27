@@ -457,8 +457,12 @@ class OccupancyRequestBuilderTest {
 
     OccupancyResource depotEdgeResource = OccupancyResource.forEdge(edgeDepotThroat);
     OccupancyResource deepEdgeResource = OccupancyResource.forEdge(edgeBC);
+    String depotConflict =
+        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeDepotThroat).orElseThrow();
     assertFalse(fallbackRequest.resourceList().contains(depotEdgeResource));
     assertTrue(anchoredRequest.resourceList().contains(depotEdgeResource));
+    assertTrue(
+        anchoredRequest.resourceList().contains(OccupancyResource.forConflict(depotConflict)));
     assertFalse(fallbackRequest.resourceList().contains(deepEdgeResource));
     assertTrue(anchoredRequest.resourceList().contains(deepEdgeResource));
   }

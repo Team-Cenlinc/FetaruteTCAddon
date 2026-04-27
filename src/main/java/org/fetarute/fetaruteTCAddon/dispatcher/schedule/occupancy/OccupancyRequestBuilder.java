@@ -279,7 +279,14 @@ public final class OccupancyRequestBuilder {
         if (edge == null) {
           continue;
         }
-        updated |= merged.add(OccupancyResource.forEdge(edge.id()));
+        // Depot lookover 必须携带 edge 派生的 CONFLICT 资源。长单线/入库线常共享一个
+        // single conflict；只预占 EDGE 会漏掉已在长走廊内的回库车，导致出库车在入口处被放行。
+        for (OccupancyResource resource : OccupancyResourceResolver.resourcesForEdge(graph, edge)) {
+          if (resource == null) {
+            continue;
+          }
+          updated |= merged.add(resource);
+        }
       }
     }
 

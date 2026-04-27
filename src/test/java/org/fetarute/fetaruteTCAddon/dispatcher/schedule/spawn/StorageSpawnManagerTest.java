@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -246,6 +247,47 @@ class StorageSpawnManagerTest {
     assertEquals(2, servicesByRoute.size());
     assertEquals(Duration.ofSeconds(240), servicesByRoute.get("OP-G").baseHeadway());
     assertEquals(Duration.ofSeconds(240), servicesByRoute.get("RET-G").baseHeadway());
+  }
+
+  @Test
+  void pollDueTicketsAllowsSingleOperationRoutePerExplicitGroupWithoutRouteWeights() {
+    StorageProvider provider = mockProvider(twoSingleRouteGroupsWithoutRouteWeights());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 10, 10);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now);
+
+    assertEquals(2, due.size());
+    Map<String, SpawnService> servicesByRoute =
+        manager.snapshotPlan().services().stream()
+            .collect(Collectors.toMap(SpawnService::routeCode, Function.identity()));
+    assertEquals(2, servicesByRoute.size());
+    assertEquals(Duration.ofSeconds(120), servicesByRoute.get("OP-A").baseHeadway());
+    assertEquals(Duration.ofSeconds(180), servicesByRoute.get("OP-B").baseHeadway());
+  }
+
+  @Test
+  void pollDueTicketsMixesExplicitGroupsAcrossPollsWhenPollLimitIsOne() {
+    StorageProvider provider = mockProvider(twoSingleRouteGroupsWithoutRouteWeights());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 10, 1);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> firstPoll = manager.pollDueTickets(provider, now);
+    List<SpawnTicket> secondPoll = manager.pollDueTickets(provider, now.plusSeconds(1));
+
+    Set<String> routes =
+        Stream.concat(firstPoll.stream(), secondPoll.stream())
+            .map(ticket -> ticket.service().routeCode())
+            .collect(Collectors.toSet());
+    assertEquals(1, firstPoll.size());
+    assertEquals(1, secondPoll.size());
+    assertEquals(Set.of("OP-A", "OP-B"), routes);
   }
 
   @Test
@@ -968,6 +1010,114 @@ class StorageSpawnManagerTest {
         List.of(operationRoute, returnRoute),
         Map.of(
             operationRouteId, List.of(opStart, opNext), returnRouteId, List.of(retStart, retNext)));
+  }
+
+  private static Fixture twoSingleRouteGroupsWithoutRouteWeights() {
+    UUID companyId = UUID.randomUUID();
+    UUID ownerIdentityId = UUID.randomUUID();
+    UUID operatorId = UUID.randomUUID();
+    UUID lineId = UUID.randomUUID();
+    UUID routeAId = UUID.randomUUID();
+    UUID routeBId = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+
+    Company company =
+        new Company(
+            companyId,
+            "C1",
+            "Company",
+            Optional.empty(),
+            ownerIdentityId,
+            CompanyStatus.ACTIVE,
+            0L,
+            Map.of(),
+            ts,
+            ts);
+    Operator operator =
+        new Operator(
+            operatorId,
+            "SURN",
+            companyId,
+            "Operator",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    Line line =
+        new Line(
+            lineId,
+            "L1",
+            operatorId,
+            "Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.empty(),
+            Map.of(
+                LineSpawnMetadata.KEY_GROUPS,
+                LineSpawnMetadata.toGroupMetadata(
+                    List.of(
+                        new SpawnGroup("group-a", Optional.of(120)),
+                        new SpawnGroup("group-b", Optional.of(180))))),
+            ts,
+            ts);
+    Route routeA =
+        new Route(
+            routeAId,
+            "OP-A",
+            lineId,
+            "Operation A",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_group", "group-a"),
+            ts,
+            ts);
+    Route routeB =
+        new Route(
+            routeBId,
+            "OP-B",
+            lineId,
+            "Operation B",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_group", "group-b"),
+            ts,
+            ts);
+    RouteStop routeAStart =
+        new RouteStop(
+            routeAId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:1"));
+    RouteStop routeBStart =
+        new RouteStop(
+            routeBId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:D:DEPOT:2"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURN:D:DEPOT:2"));
+
+    return new Fixture(
+        company,
+        operator,
+        line,
+        List.of(routeA, routeB),
+        Map.of(routeAId, List.of(routeAStart), routeBId, List.of(routeBStart)));
   }
 
   private static Fixture baselineZeroRoute() {

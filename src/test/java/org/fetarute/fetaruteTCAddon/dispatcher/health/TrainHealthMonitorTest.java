@@ -403,6 +403,35 @@ class TrainHealthMonitorTest {
   }
 
   @Test
+  @DisplayName("互相阻塞分级恢复：relaunch 后仍互卡则销毁一侧列车")
+  void mutualDeadlockDestroysVictimAfterRelaunchFailsToClear() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
+    when(dispatchService.forceRelaunchByName("trainA")).thenReturn(true);
+    when(dispatchService.destroyTrainByName(eq("trainA"), eq("health-deadlock:trainB")))
+        .thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // stage1 refresh
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 reissue
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage3 relaunch
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // stage4 destroy
+
+    verify(dispatchService).destroyTrainByName("trainA", "health-deadlock:trainB");
+    verify(dispatchService, never()).destroyTrainByName("trainB", "health-deadlock:trainA");
+  }
+
+  @Test
   @DisplayName("手动强制解锁：不等待阈值，直接升级到 reissue/relaunch")
   void forceUnlockNowEscalatesImmediately() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
