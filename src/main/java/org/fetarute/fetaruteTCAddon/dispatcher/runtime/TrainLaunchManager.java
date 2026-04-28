@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
@@ -28,13 +29,38 @@ public final class TrainLaunchManager {
   private static final String TAG_LAST_SPEED_CMD_AT = "FTA_LAST_SPEED_CMD_AT";
 
   /**
+   * 一次控车命令的速度落地结果。
+   *
+   * <p>调度层已经计算出信号、边限速、移动授权等上限；执行层仍可能因为停车速度曲线或速度命令限幅进一步下压。该结果用于 {@code /fta train debug} 解释最终
+   * speedLimit 的来源。
+   *
+   * @param requestedTargetBps 调度层传入的目标速度
+   * @param speedCurveLimitBps 执行层速度曲线限制后的速度；未触发时为空
+   * @param finalTargetBps 最终写入 TrainCarts 前的速度
+   * @param finalLimiterSource 执行层最终限制来源
+   */
+  public record ControlApplicationResult(
+      double requestedTargetBps,
+      OptionalDouble speedCurveLimitBps,
+      double finalTargetBps,
+      String finalLimiterSource) {
+    public ControlApplicationResult {
+      speedCurveLimitBps = speedCurveLimitBps == null ? OptionalDouble.empty() : speedCurveLimitBps;
+      finalLimiterSource =
+          finalLimiterSource == null || finalLimiterSource.isBlank()
+              ? "none"
+              : finalLimiterSource.trim();
+    }
+  }
+
+  /**
    * 应用控车动作：限速、加减速曲线、发车/停车。
    *
    * @param targetBps 目标速度（blocks/s，已考虑信号与边限速）
    * @param distanceOpt 可选“到下一节点的剩余距离”（用于提前减速）
    * @implNote 运动中列车仅在信号变化/强制刷新时补充加速动作，避免周期性加速打断停靠或干扰道岔方向判定。
    */
-  public void applyControl(
+  public ControlApplicationResult applyControl(
       RuntimeTrainHandle train,
       TrainProperties properties,
       SignalAspect aspect,
@@ -45,7 +71,8 @@ public final class TrainLaunchManager {
       java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
       ConfigManager.RuntimeSettings runtimeSettings) {
     if (properties == null || aspect == null || config == null || runtimeSettings == null) {
-      return;
+      return new ControlApplicationResult(
+          targetBps, OptionalDouble.empty(), Math.max(0.0, targetBps), "none");
     }
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
     double decelBpt2 = toBlocksPerTickSquared(config.decelBps2());
@@ -69,10 +96,19 @@ public final class TrainLaunchManager {
         }
         // 目标速度非零时，setSpeedLimit + WaitAcceleration 会自动减速，无需额外调用
       }
-      return;
+      OptionalDouble curveLimit =
+          runtimeSettings.speedCurveEnabled() && distanceOpt != null && distanceOpt.isPresent()
+              ? OptionalDouble.of(curveSpeed)
+              : OptionalDouble.empty();
+      return new ControlApplicationResult(targetBps, curveLimit, curveSpeed, "stop");
     }
 
-    double adjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+    double curveAdjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+    OptionalDouble speedCurveLimit =
+        curveAdjustedBps < Math.max(0.0, targetBps) - 1.0e-6
+            ? OptionalDouble.of(curveAdjustedBps)
+            : OptionalDouble.empty();
+    double adjustedBps = curveAdjustedBps;
     adjustedBps =
         applySpeedCommandRateLimit(
             train,
@@ -98,6 +134,13 @@ public final class TrainLaunchManager {
         train.accelerateTo(targetBpt, accelBpt2);
       }
     }
+    String limiterSource = "none";
+    if (adjustedBps < curveAdjustedBps - 1.0e-6) {
+      limiterSource = "speed_command_rate_limit";
+    } else if (speedCurveLimit.isPresent()) {
+      limiterSource = "speed_curve";
+    }
+    return new ControlApplicationResult(targetBps, speedCurveLimit, adjustedBps, limiterSource);
   }
 
   /** 节流：同一列车在 cooldown 窗口内最多下发一次 launch/加速动作。 */

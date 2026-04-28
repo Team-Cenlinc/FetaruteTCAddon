@@ -81,7 +81,7 @@ public final class FtaEtaCommand {
             .literal("eta")
             .literal("train")
             .permission("fetarute.eta")
-            .required("train", StringParser.stringParser(), trainSuggestions)
+            .required("train", StringParser.quotedStringParser(), trainSuggestions)
             .handler(
                 ctx -> {
                   String trainName = ctx.get("train");
@@ -95,8 +95,8 @@ public final class FtaEtaCommand {
             .literal("train")
             .literal("station")
             .permission("fetarute.eta")
-            .required("train", StringParser.stringParser(), trainSuggestions)
-            .required("station", StringParser.stringParser(), stationSuggestions)
+            .required("train", StringParser.quotedStringParser(), trainSuggestions)
+            .required("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx -> {
                   String trainName = ctx.get("train");
@@ -111,7 +111,7 @@ public final class FtaEtaCommand {
             .literal("train")
             .literal("platform")
             .permission("fetarute.eta")
-            .required("train", StringParser.stringParser(), trainSuggestions)
+            .required("train", StringParser.quotedStringParser(), trainSuggestions)
             .required("node", StringParser.quotedStringParser(), platformSuggestions)
             .handler(
                 ctx -> {
@@ -127,7 +127,7 @@ public final class FtaEtaCommand {
             .literal("eta")
             .literal("ticket")
             .permission("fetarute.eta")
-            .required("ticket", StringParser.stringParser(), ticketSuggestions)
+            .required("ticket", StringParser.quotedStringParser(), ticketSuggestions)
             .handler(
                 ctx -> {
                   String ticketId = ctx.get("ticket");
@@ -140,10 +140,13 @@ public final class FtaEtaCommand {
             .literal("eta")
             .literal("board")
             .permission("fetarute.eta")
-            .required("operator", StringParser.stringParser(), operatorSuggestions("<operator>"))
             .required(
-                "station", StringParser.stringParser(), stationCodeSuggestions("<stationCode>"))
-            .optional("line", StringParser.stringParser(), lineSuggestions)
+                "operator", StringParser.quotedStringParser(), operatorSuggestions("<operator>"))
+            .required(
+                "station",
+                StringParser.quotedStringParser(),
+                stationCodeSuggestions("<stationCode>"))
+            .optional("line", StringParser.quotedStringParser(), lineSuggestions)
             .optional("horizon", IntegerParser.integerParser(10, 3600), horizonSuggestions)
             .handler(
                 ctx -> {
@@ -240,6 +243,18 @@ public final class FtaEtaCommand {
                 lastPassed,
                 "ticket",
                 ticket)));
+    sender.sendMessage(
+        Component.text("  ")
+            .append(
+                CommandUx.actions(
+                    CommandUx.runAction(
+                        "[train debug]",
+                        "/fta train debug " + CommandUx.commandArgument(trainName),
+                        "查看列车运行时诊断"),
+                    CommandUx.suggestAction(
+                        "[config]",
+                        "/fta train config list " + CommandUx.commandArgument(trainName),
+                        "填充列车配置查看命令"))));
   }
 
   private void showTicketEta(CommandSender sender, String ticketId) {
@@ -252,6 +267,12 @@ public final class FtaEtaCommand {
     EtaResult result = service.getForTicket(ticketId);
     sender.sendMessage(locale.component("command.eta.ticket.header", Map.of("ticket", ticketId)));
     sendEtaSummary(sender, locale, result, false);
+    sender.sendMessage(
+        Component.text("  ")
+            .append(
+                CommandUx.actions(
+                    CommandUx.runAction("[队列]", "/fta spawn queue", "查看待发票据"),
+                    CommandUx.runAction("[pending]", "/fta spawn pending", "查看折返待发票据"))));
   }
 
   private void showBoard(
@@ -276,6 +297,19 @@ public final class FtaEtaCommand {
                 lineText,
                 "rows",
                 String.valueOf(board.rows().size()))));
+    sender.sendMessage(
+        Component.text("  ")
+            .append(
+                CommandUx.actions(
+                    CommandUx.suggestAction(
+                        "[刷新]",
+                        "/fta eta board "
+                            + CommandUx.commandArgument(operator)
+                            + " "
+                            + CommandUx.commandArgument(stationCode)
+                            + " ",
+                        "填充站牌 ETA 查询命令"),
+                    CommandUx.runAction("[spawn plan]", "/fta spawn plan", "查看发车计划"))));
     if (board.rows().isEmpty()) {
       sender.sendMessage(locale.component("command.eta.board.empty"));
       return;

@@ -135,7 +135,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -199,7 +199,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("invite")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("player", StringParser.stringParser(), playerSuggestions)
             .optional("roles", StringParser.greedyStringParser(), roleSuggestions)
             .handler(
@@ -358,7 +358,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("accept")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), inviteCompanySuggestions)
+            .required("company", StringParser.quotedStringParser(), inviteCompanySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -449,7 +449,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("decline")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), inviteCompanySuggestions)
+            .required("company", StringParser.quotedStringParser(), inviteCompanySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -512,7 +512,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("setroles")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("player", StringParser.stringParser(), playerSuggestions)
             .required("roles", StringParser.greedyStringParser(), roleSuggestions)
             .handler(
@@ -605,7 +605,7 @@ public final class FtaCompanyCommand {
             .literal("member")
             .literal("remove")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("player", StringParser.stringParser(), playerSuggestions)
             .handler(
                 ctx -> {
@@ -736,7 +736,7 @@ public final class FtaCompanyCommand {
             .commandBuilder("fta")
             .literal("company")
             .literal("info")
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -795,7 +795,7 @@ public final class FtaCompanyCommand {
             .commandBuilder("fta")
             .literal("company")
             .literal("rename")
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("name", StringParser.quotedStringParser(), nameSuggestions)
             .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
             .handler(
@@ -850,7 +850,7 @@ public final class FtaCompanyCommand {
             .commandBuilder("fta")
             .literal("company")
             .literal("transfer")
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("player", StringParser.stringParser(), playerSuggestions)
             .handler(
                 ctx -> {
@@ -929,7 +929,7 @@ public final class FtaCompanyCommand {
             .literal("company")
             .literal("delete")
             .flag(confirmFlag)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -1031,7 +1031,7 @@ public final class FtaCompanyCommand {
             .literal("admin")
             .literal("restore")
             .permission("fetarute.admin")
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -1087,7 +1087,7 @@ public final class FtaCompanyCommand {
             .literal("purge")
             .permission("fetarute.admin")
             .flag(confirmFlag)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -1128,7 +1128,7 @@ public final class FtaCompanyCommand {
             .literal("takeover")
             .permission("fetarute.admin")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();

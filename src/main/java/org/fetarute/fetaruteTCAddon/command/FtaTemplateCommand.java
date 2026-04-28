@@ -77,7 +77,7 @@ public final class FtaTemplateCommand {
             .literal("create")
             .senderType(Player.class)
             .required("type", StringParser.stringParser(), typeSuggestions)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("name", StringParser.stringParser(), nameSuggestions)
             .handler(
                 ctx -> {
@@ -147,7 +147,7 @@ public final class FtaTemplateCommand {
             .literal("edit")
             .senderType(Player.class)
             .required("type", StringParser.stringParser(), typeSuggestions)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("name", StringParser.stringParser(), templateSuggestions)
             .handler(
                 ctx -> {
@@ -309,7 +309,7 @@ public final class FtaTemplateCommand {
             .literal("template")
             .literal("info")
             .required("type", StringParser.stringParser(), typeSuggestions)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("name", StringParser.stringParser(), templateSuggestions)
             .handler(
                 ctx -> {
@@ -369,7 +369,7 @@ public final class FtaTemplateCommand {
             .commandBuilder("fta")
             .literal("template")
             .literal("list")
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .optional("type", StringParser.stringParser(), typeSuggestions)
             .handler(
                 ctx -> {
@@ -430,7 +430,7 @@ public final class FtaTemplateCommand {
             .literal("delete")
             .senderType(Player.class)
             .required("type", StringParser.stringParser(), typeSuggestions)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("name", StringParser.stringParser(), templateSuggestions)
             .flag(confirmFlag)
             .handler(

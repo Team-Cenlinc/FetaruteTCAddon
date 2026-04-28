@@ -14,6 +14,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManag
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalChangedEvent;
@@ -148,7 +150,58 @@ class SignalEvaluatorTest {
     assertFalse(change.isBlocked());
   }
 
+  @Test
+  void eventEvaluationUsesPreviewWithoutMutatingConflictQueue() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> java.time.Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:SW-1");
+    SignalEvaluator previewEvaluator =
+        new SignalEvaluator(eventBus, manager, new FixedConflictRequestProvider(conflict));
+
+    previewEvaluator.start();
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            "train-A",
+            List.of(conflict),
+            List.of("train-B")));
+
+    assertTrue(manager.snapshotQueues().isEmpty());
+  }
+
   // ========== Mock 实现 ==========
+
+  private static final class FixedConflictRequestProvider
+      implements SignalEvaluator.TrainRequestProvider {
+
+    private final OccupancyResource conflict;
+
+    private FixedConflictRequestProvider(OccupancyResource conflict) {
+      this.conflict = conflict;
+    }
+
+    @Override
+    public Optional<OccupancyRequest> buildRequest(String trainName, Instant now) {
+      if (!"train-B".equals(trainName)) {
+        return Optional.empty();
+      }
+      return Optional.of(
+          new OccupancyRequest(
+              trainName,
+              Optional.empty(),
+              now,
+              List.of(conflict),
+              Map.of(),
+              Map.of(conflict.key(), 0),
+              0));
+    }
+
+    @Override
+    public List<String> trainsWaitingFor(List<OccupancyResource> resources) {
+      return List.of("train-B");
+    }
+  }
 
   private static class MockOccupancyManager implements OccupancyManager {
     private final java.util.Map<String, OccupancyDecision> decisions =

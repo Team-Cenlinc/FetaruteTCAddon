@@ -113,19 +113,14 @@ public final class AutoStationDoorController {
     BlockFace desired = desiredOpt.get();
     DoorSideDecision decision = chooseDoorSideByWorldDecision(group, desired);
     if (decision.selection() == null) {
-      if (isCardinal(facingDirection)) {
-        BlockFace left = leftOf(facingDirection);
-        BlockFace right = rightOf(facingDirection);
-        boolean openLeft = desired == left;
-        boolean openRight = desired == right;
-        if (openLeft || openRight) {
-          return new DoorSession(
-              group,
-              openLeft,
-              openRight,
-              resolved,
-              decision.summary() + ",fallback=facing(" + facingDirection + ")");
-        }
+      DoorSideSelection vectorFallback = chooseSideByTravelFace(facingDirection, desired);
+      if (vectorFallback != null && (vectorFallback.openLeft || vectorFallback.openRight)) {
+        return new DoorSession(
+            group,
+            vectorFallback.openLeft,
+            vectorFallback.openRight,
+            resolved,
+            decision.summary() + ",fallback=facing(" + facingDirection + ")");
       }
       return DoorSession.empty(resolved, decision.summary());
     }
@@ -976,6 +971,58 @@ public final class AutoStationDoorController {
       return BlockFace.SOUTH;
     }
     return face;
+  }
+
+  /**
+   * 使用水平向量判断指定平台方向位于列车左侧还是右侧。
+   *
+   * <p>与 {@link #leftOf(BlockFace)} 不同，此方法支持斜向轨道。坐标系采用 Bukkit 水平轴：X 向东、Z 向南。 这使得 NORTH_EAST
+   * 行驶时，NORTH 被判为左侧、EAST 被判为右侧，避免斜向停靠回退到世界单轴比较。
+   */
+  static DoorSideSelection chooseSideByTravelFace(BlockFace travelFace, BlockFace desiredSide) {
+    Vector forward = horizontalVector(travelFace);
+    Vector desired = horizontalVector(desiredSide);
+    if (forward == null || desired == null) {
+      return null;
+    }
+    Vector left = new Vector(forward.getZ(), 0.0, -forward.getX());
+    Vector right = new Vector(-forward.getZ(), 0.0, forward.getX());
+    double leftScore = left.dot(desired);
+    double rightScore = right.dot(desired);
+    if (Math.abs(leftScore - rightScore) <= 1.0e-6) {
+      return null;
+    }
+    return leftScore > rightScore
+        ? new DoorSideSelection(true, false)
+        : new DoorSideSelection(false, true);
+  }
+
+  static String chooseSideNameByTravelFace(BlockFace travelFace, BlockFace desiredSide) {
+    DoorSideSelection selection = chooseSideByTravelFace(travelFace, desiredSide);
+    return formatChosen(selection);
+  }
+
+  private static Vector horizontalVector(BlockFace face) {
+    if (face == null) {
+      return null;
+    }
+    Vector vector =
+        switch (face) {
+          case NORTH -> new Vector(0.0, 0.0, -1.0);
+          case NORTH_EAST -> new Vector(1.0, 0.0, -1.0);
+          case EAST -> new Vector(1.0, 0.0, 0.0);
+          case SOUTH_EAST -> new Vector(1.0, 0.0, 1.0);
+          case SOUTH -> new Vector(0.0, 0.0, 1.0);
+          case SOUTH_WEST -> new Vector(-1.0, 0.0, 1.0);
+          case WEST -> new Vector(-1.0, 0.0, 0.0);
+          case NORTH_WEST -> new Vector(-1.0, 0.0, -1.0);
+          default -> null;
+        };
+    if (vector == null) {
+      return null;
+    }
+    double length = vector.length();
+    return length <= 1.0e-6 ? null : vector.multiply(1.0 / length);
   }
 
   /** 返回相对于列车行进方向的右侧方位。 */

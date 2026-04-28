@@ -22,4 +22,15 @@ class AutoStationDoorControllerTest {
     assertEquals(BlockFace.SOUTH, AutoStationDoorController.leftOf(BlockFace.WEST));
     assertEquals(BlockFace.NORTH, AutoStationDoorController.rightOf(BlockFace.WEST));
   }
+
+  @Test
+  void vectorFallbackHandlesDiagonalTravel() {
+    assertEquals(
+        "left",
+        AutoStationDoorController.chooseSideNameByTravelFace(
+            BlockFace.NORTH_EAST, BlockFace.NORTH));
+    assertEquals(
+        "right",
+        AutoStationDoorController.chooseSideNameByTravelFace(BlockFace.NORTH_EAST, BlockFace.EAST));
+  }
 }

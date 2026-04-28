@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 
 /**
  * 一张发车票据：由 SpawnManager 生成，TicketAssigner 负责尝试放行并触发实际出库/生成。
@@ -14,6 +15,9 @@ import java.util.UUID;
  *
  * <p>{@code firstDueAt} 记录票据首次进入计划窗口的时间；重试会推进 {@code dueAt} 以避免压住队头，但不会推进 {@code
  * firstDueAt}，用于长期运行时清理过旧票据。
+ *
+ * <p>{@code serviceTripId/source/priority} 是 schedule backbone 接入后的轻量扩展：旧的 headway 票据默认视为 {@link
+ * TripSource#SCHEDULED}，优先级为 0；由 ServiceTrip 派生的票据可以携带更明确的计划来源和仲裁优先级。
  */
 public record SpawnTicket(
     UUID id,
@@ -24,7 +28,10 @@ public record SpawnTicket(
     int attempts,
     long sequenceNumber,
     Optional<String> selectedDepotNodeId,
-    Optional<String> lastError) {
+    Optional<String> lastError,
+    Optional<String> serviceTripId,
+    TripSource source,
+    int priority) {
   /** 使用 {@code dueAt} 作为首次计划时间创建票据。 */
   public SpawnTicket(
       UUID id,
@@ -47,6 +54,59 @@ public record SpawnTicket(
         lastError);
   }
 
+  /** 使用 {@code dueAt} 作为首次计划时间创建带计划来源的票据。 */
+  public SpawnTicket(
+      UUID id,
+      SpawnService service,
+      Instant dueAt,
+      Instant notBefore,
+      int attempts,
+      long sequenceNumber,
+      Optional<String> selectedDepotNodeId,
+      Optional<String> lastError,
+      Optional<String> serviceTripId,
+      TripSource source,
+      int priority) {
+    this(
+        id,
+        service,
+        dueAt,
+        notBefore,
+        dueAt,
+        attempts,
+        sequenceNumber,
+        selectedDepotNodeId,
+        lastError,
+        serviceTripId,
+        source,
+        priority);
+  }
+
+  public SpawnTicket(
+      UUID id,
+      SpawnService service,
+      Instant dueAt,
+      Instant notBefore,
+      Instant firstDueAt,
+      int attempts,
+      long sequenceNumber,
+      Optional<String> selectedDepotNodeId,
+      Optional<String> lastError) {
+    this(
+        id,
+        service,
+        dueAt,
+        notBefore,
+        firstDueAt,
+        attempts,
+        sequenceNumber,
+        selectedDepotNodeId,
+        lastError,
+        Optional.empty(),
+        TripSource.SCHEDULED,
+        0);
+  }
+
   public SpawnTicket {
     Objects.requireNonNull(id, "id");
     Objects.requireNonNull(service, "service");
@@ -61,6 +121,11 @@ public record SpawnTicket(
             ? Optional.empty()
             : selectedDepotNodeId.map(String::trim).filter(s -> !s.isBlank());
     lastError = lastError == null ? Optional.empty() : lastError;
+    serviceTripId =
+        serviceTripId == null
+            ? Optional.empty()
+            : serviceTripId.map(String::trim).filter(s -> !s.isBlank());
+    source = source == null ? TripSource.SCHEDULED : source;
   }
 
   public Instant scheduledTime() {
@@ -84,7 +149,29 @@ public record SpawnTicket(
         attempts + 1,
         sequenceNumber,
         Optional.empty(),
-        Optional.ofNullable(error));
+        Optional.ofNullable(error),
+        serviceTripId,
+        source,
+        priority);
+  }
+
+  /** 创建延迟票据，不增加 attempts，用于 depot 仲裁等未真正尝试的退避。 */
+  public SpawnTicket delayedUntil(Instant nextNotBefore, String reason) {
+    Instant nextWindow = nextNotBefore == null ? notBefore : nextNotBefore;
+    Instant nextDueAt = nextWindow.isAfter(dueAt) ? nextWindow : dueAt;
+    return new SpawnTicket(
+        id,
+        service,
+        nextDueAt,
+        nextWindow,
+        firstDueAt,
+        attempts,
+        sequenceNumber,
+        selectedDepotNodeId,
+        Optional.ofNullable(reason),
+        serviceTripId,
+        source,
+        priority);
   }
 
   /** 返回带有 depot 选择结果的新票据（不会修改 attempts/notBefore）。 */
@@ -98,6 +185,9 @@ public record SpawnTicket(
         attempts,
         sequenceNumber,
         Optional.ofNullable(depotNodeId),
-        lastError);
+        lastError,
+        serviceTripId,
+        source,
+        priority);
   }
 }

@@ -234,16 +234,10 @@ public final class EtaService {
     return registry
         .findByNodeId(nodeId, null)
         .map(SignNodeRegistry.SignNodeInfo::definition)
-        .map(
-            def -> {
-              if (def.nodeType() == NodeType.STATION) {
-                return true;
-              }
-              return def.waypointMetadata()
-                  .map(meta -> meta.kind() == WaypointKind.STATION)
-                  .orElse(false);
-            })
-        .orElse(false);
+        .map(def -> def.nodeType() == NodeType.STATION)
+        .orElseGet(
+            () ->
+                parseWaypointKind(nodeId).map(kind -> kind == WaypointKind.STATION).orElse(false));
   }
 
   /** 判断节点是否为车库。 */
@@ -254,16 +248,23 @@ public final class EtaService {
     return registry
         .findByNodeId(nodeId, null)
         .map(SignNodeRegistry.SignNodeInfo::definition)
-        .map(
-            def -> {
-              if (def.nodeType() == NodeType.DEPOT) {
-                return true;
-              }
-              return def.waypointMetadata()
-                  .map(meta -> meta.kind() == WaypointKind.DEPOT)
-                  .orElse(false);
-            })
-        .orElse(false);
+        .map(def -> def.nodeType() == NodeType.DEPOT)
+        .orElseGet(
+            () -> parseWaypointKind(nodeId).map(kind -> kind == WaypointKind.DEPOT).orElse(false));
+  }
+
+  private static Optional<WaypointKind> parseWaypointKind(NodeId nodeId) {
+    if (nodeId == null || nodeId.value() == null) {
+      return Optional.empty();
+    }
+    return org.fetarute
+        .fetaruteTCAddon
+        .dispatcher
+        .sign
+        .SignTextParser
+        .parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
+        .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition::waypointMetadata)
+        .map(meta -> meta.kind());
   }
 
   /**
@@ -475,8 +476,9 @@ public final class EtaService {
     PathProgressModel.PathProgress progress = progressOpt.get();
     // 使用当前速度作为初速以提高 ETA 精度
     OptionalDouble initialSpeed = snap.currentSpeedBps();
+    TravelTimeModel effectiveTravelTimeModel = travelTimeModelForWorld(snap.worldId(), now);
     Optional<Integer> travelSecOpt =
-        travelTimeModel.estimateTravelSec(
+        effectiveTravelTimeModel.estimateTravelSec(
             graph, progress.remainingNodes(), progress.remainingEdges(), initialSpeed);
     if (travelSecOpt.isEmpty()) {
       return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
@@ -1846,6 +1848,28 @@ public final class EtaService {
     DynamicTravelTimeModel dynamicModel =
         new DynamicTravelTimeModel(params, DEFAULT_FALLBACK_SPEED_BPS);
     return new TravelTimeModel(dynamicModel);
+  }
+
+  /**
+   * 构建与运行时一致的边限速 ETA 模型。
+   *
+   * <p>运行时控车会合并图基础限速、永久 override 与临时限速；ETA 在有 worldId 时复用同一解析入口，避免 section speed 生效后仍按 base speed
+   * 估算。
+   */
+  private TravelTimeModel travelTimeModelForWorld(UUID worldId, Instant now) {
+    if (worldId == null) {
+      return travelTimeModel;
+    }
+    ApproachingConfig approachingConfig = buildApproachingConfig();
+    DynamicTravelTimeModel model =
+        new DynamicTravelTimeModel(
+            DynamicTravelTimeModel.TrainMotionParams.defaults(),
+            DEFAULT_FALLBACK_SPEED_BPS,
+            approachingConfig,
+            (graph, edge, fallbackSpeed) ->
+                railGraphService.effectiveSpeedLimitBlocksPerSecond(
+                    worldId, edge, now != null ? now : Instant.now(), fallbackSpeed));
+    return new TravelTimeModel(model);
   }
 
   /** 获取动态旅行时间模型（用于诊断/测试）。 */

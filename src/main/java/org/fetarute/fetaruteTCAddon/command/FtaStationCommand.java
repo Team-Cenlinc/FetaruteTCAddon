@@ -232,8 +232,8 @@ public final class FtaStationCommand {
             .literal("station")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .handler(
                 ctx -> {
                   Player sender = ctx.sender();
@@ -280,9 +280,9 @@ public final class FtaStationCommand {
             .literal("station")
             .literal("info")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("station", StringParser.stringParser(), stationSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx -> {
                   Player sender = ctx.sender();
@@ -344,9 +344,9 @@ public final class FtaStationCommand {
             .literal("station")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("station", StringParser.stringParser(), stationSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("station", StringParser.quotedStringParser(), stationSuggestions)
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(secondaryClearFlag)
@@ -471,9 +471,9 @@ public final class FtaStationCommand {
             .literal("link")
             .literal("siding")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("station", StringParser.stringParser(), stationSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("station", StringParser.quotedStringParser(), stationSuggestions)
             .required("poolId", StringParser.stringParser())
             .required("nodes", StringArrayParser.stringArrayParser())
             .flag(capacityFlag)
@@ -558,9 +558,9 @@ public final class FtaStationCommand {
             .literal("siding")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("station", StringParser.stringParser(), stationSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx -> {
                   Player sender = ctx.sender();
@@ -608,8 +608,8 @@ public final class FtaStationCommand {
             .literal("station")
             .literal("dump")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .flag(confirmFlag)
             .handler(
                 ctx -> {

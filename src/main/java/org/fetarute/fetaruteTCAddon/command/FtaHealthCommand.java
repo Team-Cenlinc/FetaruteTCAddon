@@ -171,6 +171,7 @@ public final class FtaHealthCommand {
         Component.text("最近告警数: ", NamedTextColor.GRAY)
             .append(
                 Component.text(String.valueOf(diag.recentAlerts().size()), NamedTextColor.YELLOW)));
+    sender.sendMessage(healthActions());
   }
 
   private void handleAlerts(CommandSender sender, int limit) {
@@ -214,6 +215,7 @@ public final class FtaHealthCommand {
         sender.sendMessage(Component.text("  " + alert.message(), NamedTextColor.DARK_GRAY));
       }
     }
+    sender.sendMessage(healthActions());
   }
 
   private void handleCheck(CommandSender sender) {
@@ -237,6 +239,7 @@ public final class FtaHealthCommand {
               .append(Component.text(" timeout=" + result.timeoutCleaned(), NamedTextColor.WHITE))
               .append(Component.text(" 已修复=" + result.totalFixed(), NamedTextColor.GREEN)));
     }
+    sender.sendMessage(healthActions());
   }
 
   private void handleHeal(CommandSender sender, String train) {
@@ -251,6 +254,7 @@ public final class FtaHealthCommand {
       HealthMonitor.CheckResult result = monitorOpt.get().healNow();
       sender.sendMessage(
           Component.text("全局修复完成: 修复了 " + result.totalFixed() + " 个问题", NamedTextColor.GREEN));
+      sender.sendMessage(healthActions());
     } else {
       // 针对单列车修复
       plugin
@@ -268,6 +272,7 @@ public final class FtaHealthCommand {
                   sender.sendMessage(
                       Component.text("已刷新信号，但修复失败（列车可能无 route）: " + train, NamedTextColor.YELLOW));
                 }
+                sender.sendMessage(healthActions());
               },
               () -> sender.sendMessage(Component.text("运行时调度服务未初始化", NamedTextColor.RED)));
     }
@@ -286,6 +291,7 @@ public final class FtaHealthCommand {
     String newState = !current ? "启用" : "禁用";
     NamedTextColor color = !current ? NamedTextColor.GREEN : NamedTextColor.RED;
     sender.sendMessage(Component.text("健康监控已" + newState, color));
+    sender.sendMessage(healthActions());
   }
 
   private void handleClear(CommandSender sender) {
@@ -296,6 +302,17 @@ public final class FtaHealthCommand {
     }
     monitorOpt.get().alertBus().clear();
     sender.sendMessage(Component.text("已清除告警历史", NamedTextColor.GREEN));
+    sender.sendMessage(healthActions());
+  }
+
+  private Component healthActions() {
+    return Component.text("  ")
+        .append(
+            CommandUx.actions(
+                CommandUx.runAction("[status]", "/fta health status", "查看健康状态"),
+                CommandUx.runAction("[alerts]", "/fta health alerts", "查看最近告警"),
+                CommandUx.runAction("[check]", "/fta health check", "执行一次健康检查"),
+                CommandUx.suggestAction("[heal]", "/fta health heal ", "填充修复命令；可补列车名")));
   }
 
   private String formatDuration(Duration d) {

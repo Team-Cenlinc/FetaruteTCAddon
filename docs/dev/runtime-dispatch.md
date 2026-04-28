@@ -129,6 +129,7 @@
 - `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
 - `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
+- approach 窗口内会按 expanded route 的末尾 edge 数平滑收敛到 approaching 限速；`runtime.approach-target-edges` 控制剩余多少条 edge 时必须已经达到该限速。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
@@ -159,7 +160,8 @@
 
 ## 进站限速
 - `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
-- 当下一节点为站点（AutoStation）时，限速会取 `min(默认速度, approach)`，再与边限速取最小值。
+- `runtime.approach-window-blocks` / `runtime.approach-window-edges` 控制何时进入 approach。
+- `runtime.approach-target-edges` 控制剩余多少条调度图 edge 时必须降到 approach 速度；窗口内不会直接硬切低速，而是按 expanded path 的 edge 长度生成制动包络。
 
 ## CAUTION 速度来源
 - 优先使用“连通分量 caution 覆盖”（`rail_component_cautions`）。

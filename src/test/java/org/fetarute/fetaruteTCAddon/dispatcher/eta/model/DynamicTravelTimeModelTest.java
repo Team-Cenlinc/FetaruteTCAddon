@@ -60,6 +60,21 @@ class DynamicTravelTimeModelTest {
   }
 
   @Test
+  void edgeTravelTime_usesEffectiveSpeedResolverBeforeBaseLimit() {
+    DynamicTravelTimeModel.TrainMotionParams params =
+        new DynamicTravelTimeModel.TrainMotionParams(1.0, 1.2);
+    DynamicTravelTimeModel effectiveModel =
+        new DynamicTravelTimeModel(
+            params, FALLBACK_SPEED, ApproachingConfig.disabled(), (graph, edge, fallback) -> 5.0);
+    RailEdge edge = createEdge("A", "B", 100, 20.0);
+
+    Optional<Duration> result = effectiveModel.edgeTravelTime(null, edge, nodeId("A"), nodeId("B"));
+
+    assertTrue(result.isPresent());
+    assertEquals(Duration.ofSeconds(20), result.get());
+  }
+
+  @Test
   void edgeTravelTime_zeroLength_returnsEmpty() {
     RailEdge edge = createEdge("A", "B", 0, 6.0);
 

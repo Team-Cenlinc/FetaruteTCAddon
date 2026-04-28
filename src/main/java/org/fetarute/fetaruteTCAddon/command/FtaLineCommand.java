@@ -159,8 +159,8 @@ public final class FtaLineCommand {
             .literal("line")
             .literal("create")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .required("code", StringParser.stringParser(), codeSuggestions)
             .required("name", StringParser.quotedStringParser(), nameSuggestions)
             .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
@@ -271,8 +271,8 @@ public final class FtaLineCommand {
             .literal("line")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -364,9 +364,9 @@ public final class FtaLineCommand {
             .literal("line")
             .literal("info")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -476,9 +476,9 @@ public final class FtaLineCommand {
             .literal("line")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(serviceFlag)
@@ -619,9 +619,9 @@ public final class FtaLineCommand {
             .literal("depot")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -693,9 +693,9 @@ public final class FtaLineCommand {
             .literal("depot")
             .literal("add")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("nodeId", StringParser.stringParser(), depotSuggestions)
             .optional("weight", IntegerParser.integerParser(1, 10000), depotWeightSuggestions)
             .handler(
@@ -798,9 +798,9 @@ public final class FtaLineCommand {
             .literal("depot")
             .literal("remove")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("nodeId", StringParser.stringParser(), depotSuggestions)
             .handler(
                 ctx -> {
@@ -892,9 +892,9 @@ public final class FtaLineCommand {
             .literal("line")
             .literal("delete")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .flag(confirmFlag)
             .handler(
                 ctx -> {
@@ -959,9 +959,9 @@ public final class FtaLineCommand {
             .literal("hud")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("type", StringParser.stringParser(), templateTypeSuggestions)
             .required("template", StringParser.stringParser(), templateNameSuggestions)
             .handler(
@@ -1050,9 +1050,9 @@ public final class FtaLineCommand {
             .literal("hud")
             .literal("clear")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("type", StringParser.stringParser(), templateTypeSuggestions)
             .handler(
                 ctx -> {
@@ -1121,9 +1121,9 @@ public final class FtaLineCommand {
             .literal("line")
             .literal("hud")
             .literal("show")
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();

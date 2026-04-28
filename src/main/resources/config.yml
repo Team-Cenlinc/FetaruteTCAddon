@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 19
+config-version: 21
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -100,6 +100,13 @@ runtime:
   approach-speed-bps: 10.0
   # 进库前的限速（blocks per second）
   approach-depot-speed-bps: 5.0
+  # 到下一处停靠 station/depot/STOP waypoint 的距离小于等于该值时才进入 approaching（blocks）
+  # station/depot 包含本体、对应咽喉，以及与本体/咽喉立即相邻的 switcher；0 表示不按距离触发
+  approach-window-blocks: 96.0
+  # 到下一处停靠节点的展开路径边数小于等于该值时也可进入 approaching；0 表示禁用边数触发
+  approach-window-edges: 0
+  # 到 approach 触发点剩余边数小于等于该值时必须已经降到 approaching 限速；0 表示只在触发点收敛
+  approach-target-edges: 1
   # CAUTION 信号速度上限（blocks per second），可被连通分量覆盖
   caution-speed-bps: 10.0
   # 是否启用“提前减速”速度曲线（根据剩余距离与制动能力动态限速）

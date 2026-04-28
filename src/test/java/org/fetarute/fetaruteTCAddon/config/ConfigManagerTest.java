@@ -59,4 +59,19 @@ class ConfigManagerTest {
     assertEquals(ConfigManager.StorageBackend.SQLITE, view.storageSettings().backend());
     assertEquals("data/fetarute.sqlite", view.storageSettings().sqliteSettings().file());
   }
+
+  @Test
+  // approach 窗口用于控制“离停靠点多近才算 approaching”
+  void parseRuntimeApproachWindowSettings() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("runtime.approach-window-blocks", 72.5);
+    config.set("runtime.approach-window-edges", 2);
+    config.set("runtime.approach-target-edges", 1);
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(72.5, view.runtimeSettings().approachWindowBlocks());
+    assertEquals(2, view.runtimeSettings().approachWindowEdges());
+    assertEquals(1, view.runtimeSettings().approachTargetEdges());
+  }
 }

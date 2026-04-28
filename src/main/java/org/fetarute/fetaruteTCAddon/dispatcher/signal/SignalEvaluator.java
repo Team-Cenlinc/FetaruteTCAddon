@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
@@ -148,7 +149,7 @@ public class SignalEvaluator {
       return;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    OccupancyDecision decision = previewDecision(request);
     SignalAspect newSignal = decision.signal();
     SignalAspect previous = lastSignalCache.get(trainName);
 
@@ -176,6 +177,19 @@ public class SignalEvaluator {
   /** 获取列车上次信号状态（用于诊断）。 */
   public Optional<SignalAspect> lastSignal(String trainName) {
     return Optional.ofNullable(lastSignalCache.get(trainName));
+  }
+
+  /**
+   * 事件评估只负责判断是否需要触发一次更严格信号刷新，不能写入冲突队列。
+   *
+   * <p>真实放行/排队由 {@code RuntimeDispatchService#handleSignalTick} 执行；这里若调用带副作用的 {@link
+   * OccupancyManager#canEnter(OccupancyRequest)}，会在没有实体申请的事件链路里留下队列项，进而造成后续异常 STOP。
+   */
+  private OccupancyDecision previewDecision(OccupancyRequest request) {
+    if (occupancyManager instanceof OccupancyPreviewSupport preview) {
+      return preview.canEnterPreview(request);
+    }
+    return occupancyManager.canEnter(request);
   }
 
   /** 清除列车信号缓存（列车销毁时调用）。 */

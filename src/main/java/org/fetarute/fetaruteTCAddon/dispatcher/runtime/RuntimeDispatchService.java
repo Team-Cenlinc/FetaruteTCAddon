@@ -18,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -42,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -57,6 +59,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSupport;
@@ -187,6 +190,177 @@ public final class RuntimeDispatchService {
 
   /** 动态站台分配器。 */
   private final DynamicPlatformAllocator dynamicAllocator;
+
+  /**
+   * 控车速度附加限制。
+   *
+   * <p>基础速度由信号等级与边限速决定；这里仅承载运行时额外限制，例如 STOP/TERM 停靠点 approach 速度，以及移动授权反推出的最大速度。
+   */
+  private record ControlSpeedOverrides(
+      OptionalDouble approachLimitBps,
+      OptionalDouble movementAuthorityLimitBps,
+      ApproachControl approachControl,
+      ControlDebugResources debugResources) {
+    private ControlSpeedOverrides {
+      approachLimitBps = approachLimitBps == null ? OptionalDouble.empty() : approachLimitBps;
+      movementAuthorityLimitBps =
+          movementAuthorityLimitBps == null ? OptionalDouble.empty() : movementAuthorityLimitBps;
+      approachControl = approachControl == null ? ApproachControl.none() : approachControl;
+      debugResources = debugResources == null ? ControlDebugResources.empty() : debugResources;
+    }
+
+    private static ControlSpeedOverrides empty() {
+      return new ControlSpeedOverrides(
+          OptionalDouble.empty(),
+          OptionalDouble.empty(),
+          ApproachControl.none(),
+          ControlDebugResources.empty());
+    }
+  }
+
+  /** 本次控车判定的资源诊断摘要。 */
+  private record ControlDebugResources(
+      List<String> blockers, List<String> requestResources, List<String> currentClaims) {
+    private ControlDebugResources {
+      blockers = blockers == null ? List.of() : List.copyOf(blockers);
+      requestResources = requestResources == null ? List.of() : List.copyOf(requestResources);
+      currentClaims = currentClaims == null ? List.of() : List.copyOf(currentClaims);
+    }
+
+    private static ControlDebugResources empty() {
+      return new ControlDebugResources(List.of(), List.of(), List.of());
+    }
+  }
+
+  /**
+   * 当前信号 tick 的 approach 限速语义。
+   *
+   * <p>approach 只描述“列车已经进入下一处停靠 stop 的进路窗口”。窗口按当前节点到停靠 stop 的展开路径距离计算，普通 PASS
+   * 站、普通区间点与动态占位符不应仅凭节点编码触发 approach。
+   */
+  private record ApproachControl(
+      Optional<NodeId> node,
+      String kind,
+      String reason,
+      OptionalDouble limitBps,
+      OptionalLong distanceBlocks,
+      OptionalLong targetEdgeDistanceBlocks,
+      int edgeCount) {
+    private ApproachControl {
+      node = node == null ? Optional.empty() : node;
+      kind = kind == null || kind.isBlank() ? "none" : kind.trim();
+      reason = reason == null || reason.isBlank() ? "none" : reason.trim();
+      limitBps = limitBps == null ? OptionalDouble.empty() : limitBps;
+      distanceBlocks = distanceBlocks == null ? OptionalLong.empty() : distanceBlocks;
+      targetEdgeDistanceBlocks =
+          targetEdgeDistanceBlocks == null ? OptionalLong.empty() : targetEdgeDistanceBlocks;
+    }
+
+    private static ApproachControl none() {
+      return new ApproachControl(
+          Optional.empty(),
+          "none",
+          "none",
+          OptionalDouble.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          -1);
+    }
+
+    private boolean activeFor(NodeId candidate) {
+      return candidate != null && node.isPresent() && node.get().equals(candidate);
+    }
+  }
+
+  /** 下一处需要停靠的 route stop。 */
+  private record IndexedRouteStop(int index, NodeId node, RouteStop stop) {}
+
+  /** station/depot approach 目标的结构化匹配键。 */
+  private record ApproachNodeKey(String kind, String operator, String name, int trackNumber) {
+    private ApproachNodeKey {
+      kind = normalizeKeyPart(kind);
+      operator = normalizeKeyPart(operator);
+      name = normalizeKeyPart(name);
+    }
+
+    private boolean matches(ApproachNodeKey other) {
+      return other != null
+          && kind.equals(other.kind())
+          && operator.equals(other.operator())
+          && name.equals(other.name())
+          && trackNumber == other.trackNumber();
+    }
+  }
+
+  /** 下一停靠 stop 在图上的 approach 语义。 */
+  private record ApproachTarget(
+      NodeId stopNode, String kind, RouteStopPassType passType, Optional<ApproachNodeKey> key) {
+    private ApproachTarget {
+      key = key == null ? Optional.empty() : key;
+    }
+  }
+
+  /** route stop 序列按调度图展开后的路径。 */
+  private record ExpandedRoutePath(List<NodeId> nodes, List<RailEdge> edges) {
+    private ExpandedRoutePath {
+      nodes = nodes == null ? List.of() : List.copyOf(nodes);
+      edges = edges == null ? List.of() : List.copyOf(edges);
+    }
+  }
+
+  /** 展开路径上可触发 approach 的节点。 */
+  private record ApproachTrigger(
+      NodeId node, long distanceBlocks, int edgeCount, List<Long> edgeLengths, String reason) {
+    private ApproachTrigger {
+      edgeLengths = edgeLengths == null ? List.of() : List.copyOf(edgeLengths);
+    }
+
+    private long targetEdgeDistanceBlocks(int targetEdges) {
+      if (targetEdges <= 0 || edgeLengths.isEmpty()) {
+        return 0L;
+      }
+      int from = Math.max(0, edgeLengths.size() - targetEdges);
+      long sum = 0L;
+      for (int i = from; i < edgeLengths.size(); i++) {
+        sum += Math.max(0L, edgeLengths.get(i));
+      }
+      return sum;
+    }
+  }
+
+  /**
+   * 调度层速度决策结果。
+   *
+   * <p>该结果刻意保留每一层限制的原始值，用于把“为什么最终只有某个速度”清楚暴露给运维诊断。
+   */
+  private record TargetSpeedDecision(
+      double edgeLimitBps,
+      double aspectBaseSpeedBps,
+      String cautionSource,
+      OptionalDouble approachLimitBps,
+      OptionalDouble movementAuthorityLimitBps,
+      OptionalDouble edgeSpeedLookaheadMinBps,
+      double targetBps,
+      String limiterSource) {
+    private TargetSpeedDecision {
+      cautionSource =
+          cautionSource == null || cautionSource.isBlank() ? "none" : cautionSource.trim();
+      approachLimitBps = approachLimitBps == null ? OptionalDouble.empty() : approachLimitBps;
+      movementAuthorityLimitBps =
+          movementAuthorityLimitBps == null ? OptionalDouble.empty() : movementAuthorityLimitBps;
+      edgeSpeedLookaheadMinBps =
+          edgeSpeedLookaheadMinBps == null ? OptionalDouble.empty() : edgeSpeedLookaheadMinBps;
+      limiterSource =
+          limiterSource == null || limiterSource.isBlank() ? "none" : limiterSource.trim();
+    }
+  }
+
+  /** CAUTION 速度解析结果。 */
+  private record CautionSpeedDecision(double speedBps, String source) {
+    private CautionSpeedDecision {
+      source = source == null || source.isBlank() ? "config" : source.trim();
+    }
+  }
 
   public RuntimeDispatchService(
       OccupancyManager occupancyManager,
@@ -411,14 +585,35 @@ public final class RuntimeDispatchService {
       return false;
     }
 
-    OccupancyRequest request = contextOpt.get().request();
-    releaseResourcesNotInRequest(trainName, request.resourceList());
-    if (occupancyManager.shouldYield(request)) {
+    OccupancyRequestContext context = contextOpt.get();
+    OccupancyRequestContext authorizationContext =
+        buildForwardAuthorizationContext(
+                graph,
+                runtimeSettings,
+                trainName,
+                route,
+                effectiveNodes,
+                currentIndex,
+                now,
+                priority)
+            .orElse(context);
+    OccupancyRequest authorizationRequest = authorizationContext.request();
+    Optional<NodeId> nextNode =
+        currentIndex + 1 < route.waypoints().size()
+            ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
+            : Optional.empty();
+    List<OccupancyResource> keepResources =
+        mergeKeepResourcesWithCurrentPosition(
+            authorizationRequest.resourceList(), Optional.of(definition.nodeId()), nextNode, graph);
+    releaseResourcesNotInRequest(trainName, keepResources);
+    releaseSpeculativeClaimsFromBehindSameRoute(
+        trainName, route, currentIndex, authorizationRequest.resourceList());
+    if (occupancyManager.shouldYield(authorizationRequest)) {
       debugLogger.accept("发车门控让行: train=" + trainName + " priority=" + priority);
       retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    OccupancyDecision decision = occupancyManager.canEnter(authorizationRequest);
     ProceedDecision proceedDecision =
         evaluateProceedDecision(trainName, decision, now, "departure");
     boolean proceedAllowed = proceedDecision.proceedAllowed();
@@ -433,7 +628,24 @@ public final class RuntimeDispatchService {
       retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
       return false;
     }
-    occupancyManager.acquire(request);
+    OccupancyDecision acquired = occupancyManager.acquire(authorizationRequest);
+    if (!acquired.allowed() || !acquired.blockers().isEmpty()) {
+      ProceedDecision acquiredProceed =
+          evaluateProceedDecision(trainName, acquired, now, "departure-acquire");
+      if (!acquiredProceed.proceedAllowed()) {
+        debugLogger.accept(
+            "发车门控阻塞: acquire 失败 train="
+                + trainName
+                + " aspect="
+                + acquired.signal()
+                + " blockers="
+                + summarizeBlockers(acquired));
+        retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
+        return false;
+      }
+    }
+    retainRearGuardOccupancyBestEffort(
+        trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
     return true;
   }
 
@@ -977,7 +1189,7 @@ public final class RuntimeDispatchService {
           false,
           stopDistance,
           lookahead,
-          java.util.OptionalDouble.empty());
+          ControlSpeedOverrides.empty());
       return;
     }
     occupancyManager.acquire(request);
@@ -2458,6 +2670,8 @@ public final class RuntimeDispatchService {
       }
       return;
     }
+    ApproachControl approachControl =
+        resolveApproachControl(graph, route, effectiveNodes, currentIndex, currentNodeOpt.get());
     OptionalLong distanceOpt = OptionalLong.empty();
     OptionalLong constraintDistanceOpt = OptionalLong.empty();
     OptionalLong blockerDistanceOpt = OptionalLong.empty();
@@ -2489,11 +2703,6 @@ public final class RuntimeDispatchService {
                 + nextNode.get().value());
         return;
       }
-      if (runtimeSettings.speedCurveEnabled() && shortestDistanceOpt.isPresent()) {
-        if (!stopAtNextWaypoint) {
-          distanceOpt = shortestDistanceOpt;
-        }
-      }
     }
     // 信号前瞻：计算到前方所有限制点的距离，供速度曲线与移动授权共同使用。
     SignalLookahead.LookaheadResult lookahead = null;
@@ -2509,12 +2718,12 @@ public final class RuntimeDispatchService {
                 decision,
                 authorizationContext,
                 nextAspect,
-                this::isApproachingNode,
+                approachControl::activeFor,
                 edgeSpeedResolver);
       } else {
         lookahead =
             SignalLookahead.compute(
-                decision, authorizationContext, nextAspect, this::isApproachingNode);
+                decision, authorizationContext, nextAspect, approachControl::activeFor);
       }
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
@@ -2533,12 +2742,10 @@ public final class RuntimeDispatchService {
         }
       }
     }
-    java.util.OptionalDouble targetOverrideBps = java.util.OptionalDouble.empty();
-    if (stopAtNextWaypoint && nextAspect != SignalAspect.STOP) {
-      double approachSpeed = runtimeSettings.approachSpeedBps();
-      if (Double.isFinite(approachSpeed) && approachSpeed > 0.0) {
-        targetOverrideBps = java.util.OptionalDouble.of(approachSpeed);
-      }
+    OptionalDouble approachOverrideBps = OptionalDouble.empty();
+    OptionalDouble movementAuthorityLimitBps = OptionalDouble.empty();
+    if (nextAspect != SignalAspect.STOP && approachControl.limitBps().isPresent()) {
+      approachOverrideBps = approachControl.limitBps();
     }
     if (runtimeSettings.movementAuthorityEnabled()) {
       TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
@@ -2576,8 +2783,7 @@ public final class RuntimeDispatchService {
                 + formatOptionalLong(authorityDecision.authorityDistanceBlocks()));
         nextAspect = authorityAspect;
       }
-      targetOverrideBps =
-          mergeTargetOverrideBps(targetOverrideBps, authorityDecision.recommendedMaxSpeedBps());
+      movementAuthorityLimitBps = authorityDecision.recommendedMaxSpeedBps();
       if (authorityDecision.authorityDistanceBlocks().isPresent()
           && runtimeSettings.speedCurveEnabled()) {
         distanceOpt = minOptionalLong(distanceOpt, authorityDecision.authorityDistanceBlocks());
@@ -2629,7 +2835,7 @@ public final class RuntimeDispatchService {
               + " failoverUnreachableStop="
               + runtimeSettings.failoverUnreachableStop()
               + " approachSpeedBps="
-              + (targetOverrideBps.isPresent() ? targetOverrideBps.getAsDouble() : "-")
+              + (approachOverrideBps.isPresent() ? approachOverrideBps.getAsDouble() : "-")
               + " distanceOpt="
               + formatOptionalLong(distanceOpt)
               + " blockerDistance="
@@ -2656,7 +2862,24 @@ public final class RuntimeDispatchService {
         allowLaunch,
         effectiveDistanceOpt,
         lookahead,
-        targetOverrideBps);
+        new ControlSpeedOverrides(
+            approachOverrideBps,
+            movementAuthorityLimitBps,
+            approachControl,
+            new ControlDebugResources(
+                summarizeClaims(
+                    decision.blockers(),
+                    trainName,
+                    route,
+                    currentIndex,
+                    Set.copyOf(authorizationRequest.resourceList())),
+                summarizeResources(authorizationRequest.resourceList(), 12),
+                summarizeTrainClaims(
+                    trainName,
+                    route,
+                    currentIndex,
+                    Set.copyOf(authorizationRequest.resourceList()),
+                    12))));
     if (stallDecision.triggerFailover()) {
       triggerStallFailover(
           train,
@@ -3347,6 +3570,30 @@ public final class RuntimeDispatchService {
     }
   }
 
+  private static String formatDepartureGate(DepartureGate gate) {
+    if (gate == null) {
+      return "none";
+    }
+    return gate.reason() + "@" + gate.sessionId();
+  }
+
+  private static String resolveSignalReason(
+      SignalAspect aspect,
+      boolean allowLaunch,
+      DepartureGate gate,
+      ControlDebugResources debugResources) {
+    if (gate != null) {
+      return "door_gate:" + gate.reason();
+    }
+    if (debugResources != null && !debugResources.blockers().isEmpty()) {
+      return "occupancy_blocked";
+    }
+    if (aspect == SignalAspect.STOP && !allowLaunch) {
+      return "hold_stop";
+    }
+    return allowLaunch ? "authorized_launch" : "signal_refresh";
+  }
+
   /**
    * 信号 tick 中"保持 STOP 并保留当前占用"的统一处理。
    *
@@ -3424,7 +3671,7 @@ public final class RuntimeDispatchService {
         allowLaunch,
         distanceOpt,
         null,
-        java.util.OptionalDouble.empty());
+        ControlSpeedOverrides.empty());
   }
 
   /**
@@ -3445,7 +3692,7 @@ public final class RuntimeDispatchService {
       boolean allowLaunch,
       OptionalLong distanceOpt,
       SignalLookahead.LookaheadResult lookahead,
-      java.util.OptionalDouble targetOverrideBps) {
+      ControlSpeedOverrides speedOverrides) {
     if (properties == null || aspect == null || route == null) {
       return;
     }
@@ -3453,35 +3700,29 @@ public final class RuntimeDispatchService {
     // 先获取边限速作为 PROCEED 基准（而非固定 defaultSpeed）
     double edgeLimit =
         resolveEdgeSpeedLimit(train, graph, currentNode, nextNode, configManager.current());
-    double targetBps =
-        resolveTargetSpeed(
-            train != null ? train.worldId() : null, aspect, route, nextNode, edgeLimit);
-    if (targetOverrideBps != null && targetOverrideBps.isPresent()) {
-      double override = targetOverrideBps.getAsDouble();
-      if (Double.isFinite(override) && override > 0.0) {
-        targetBps = Math.min(targetBps, override);
-      }
-    }
-    // 边限速前瞻：根据前方边的限速约束提前减速
-    if (lookahead != null
-        && !lookahead.edgeSpeedConstraints().isEmpty()
-        && configManager.current().runtimeSettings().speedCurveEnabled()) {
-      targetBps =
-          applyEdgeSpeedLookahead(targetBps, config.decelBps2(), lookahead.edgeSpeedConstraints());
-    }
+    TargetSpeedDecision speedDecision =
+        resolveTargetSpeedDecision(
+            train != null ? train.worldId() : null,
+            aspect,
+            nextNode,
+            edgeLimit,
+            config.decelBps2(),
+            lookahead,
+            speedOverrides);
     // 发车方向由 TrainCarts 依据 destination 自动推导（见 TrainCartsRuntimeHandle#launch），此处不写入额外 tag。
     java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection =
         resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
-    trainLaunchManager.applyControl(
-        train,
-        properties,
-        aspect,
-        targetBps,
-        config,
-        allowLaunch,
-        distanceOpt,
-        launchFallbackDirection,
-        configManager.current().runtimeSettings());
+    TrainLaunchManager.ControlApplicationResult applicationResult =
+        trainLaunchManager.applyControl(
+            train,
+            properties,
+            aspect,
+            speedDecision.targetBps(),
+            config,
+            allowLaunch,
+            distanceOpt,
+            launchFallbackDirection,
+            configManager.current().runtimeSettings());
 
     // 记录诊断数据
     recordDiagnostics(
@@ -3491,10 +3732,11 @@ public final class RuntimeDispatchService {
         route,
         currentNode,
         nextNode,
-        targetBps,
-        edgeLimit,
+        speedDecision,
+        applicationResult,
         allowLaunch,
-        lookahead);
+        lookahead,
+        speedOverrides);
   }
 
   /** 记录控车诊断数据到缓存。 */
@@ -3505,10 +3747,11 @@ public final class RuntimeDispatchService {
       RouteDefinition route,
       NodeId currentNode,
       NodeId nextNode,
-      double targetBps,
-      double edgeLimitBps,
+      TargetSpeedDecision speedDecision,
+      TrainLaunchManager.ControlApplicationResult applicationResult,
       boolean allowLaunch,
-      SignalLookahead.LookaheadResult lookahead) {
+      SignalLookahead.LookaheadResult lookahead,
+      ControlSpeedOverrides speedOverrides) {
     if (properties == null) {
       return;
     }
@@ -3516,9 +3759,39 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank()) {
       return;
     }
+    int progressIndex =
+        progressRegistry
+            .get(trainName)
+            .map(RouteProgressRegistry.RouteProgressEntry::currentIndex)
+            .orElse(-1);
+    DepartureGate departureGate = departureGates.get(normalizeTrainKey(trainName));
     Instant now = Instant.now();
     double currentSpeedBps =
         train != null ? train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND : 0.0;
+    TargetSpeedDecision decision =
+        speedDecision != null
+            ? speedDecision
+            : new TargetSpeedDecision(
+                -1.0,
+                0.0,
+                "none",
+                OptionalDouble.empty(),
+                OptionalDouble.empty(),
+                OptionalDouble.empty(),
+                0.0,
+                "none");
+    TrainLaunchManager.ControlApplicationResult result =
+        applicationResult != null
+            ? applicationResult
+            : new TrainLaunchManager.ControlApplicationResult(
+                decision.targetBps(), OptionalDouble.empty(), decision.targetBps(), "none");
+    String finalLimiterSource =
+        "none".equals(result.finalLimiterSource())
+            ? decision.limiterSource()
+            : result.finalLimiterSource();
+    ControlSpeedOverrides overrides =
+        speedOverrides != null ? speedOverrides : ControlSpeedOverrides.empty();
+    ApproachControl approach = overrides.approachControl();
 
     var builder =
         new ControlDiagnostics.Builder()
@@ -3526,17 +3799,38 @@ public final class RuntimeDispatchService {
             .routeId(route != null ? route.id() : null)
             .currentNode(currentNode)
             .nextNode(nextNode)
+            .currentIndex(progressIndex)
+            .departureGate(formatDepartureGate(departureGate))
+            .signalReason(
+                resolveSignalReason(aspect, allowLaunch, departureGate, overrides.debugResources()))
             .currentSpeedBps(currentSpeedBps)
-            .targetSpeedBps(targetBps)
-            .edgeLimitBps(edgeLimitBps)
+            .targetSpeedBps(result.finalTargetBps())
+            .edgeLimitBps(decision.edgeLimitBps())
+            .aspectBaseSpeedBps(decision.aspectBaseSpeedBps())
+            .cautionSource(decision.cautionSource())
+            .approachLimitBps(decision.approachLimitBps())
+            .movementAuthorityLimitBps(decision.movementAuthorityLimitBps())
+            .edgeSpeedLookaheadMinBps(decision.edgeSpeedLookaheadMinBps())
+            .speedCurveLimitBps(result.speedCurveLimitBps())
+            .finalTargetBps(result.finalTargetBps())
+            .finalLimiterSource(finalLimiterSource)
+            .approachNode(approach.node().orElse(null))
+            .approachKind(approach.kind())
+            .approachReason(approach.reason())
             .currentSignal(aspect)
             .allowLaunch(allowLaunch)
+            .signalBlockerResources(overrides.debugResources().blockers())
+            .requestResources(overrides.debugResources().requestResources())
+            .currentClaimsForTrain(overrides.debugResources().currentClaims())
             .sampledAt(now);
 
     if (lookahead != null) {
       builder.lookahead(lookahead);
     } else {
       builder.effectiveSignal(aspect);
+    }
+    if (approach.distanceBlocks().isPresent()) {
+      builder.distanceToApproach(approach.distanceBlocks());
     }
 
     diagnosticsCache.put(builder.build(), now);
@@ -4276,10 +4570,7 @@ public final class RuntimeDispatchService {
     if (isStationNode(nodeId) || isDepotNode(nodeId)) {
       return false;
     }
-    Optional<WaypointKind> kindOpt =
-        SignTextParser.parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
-            .flatMap(SignNodeDefinition::waypointMetadata)
-            .map(meta -> meta.kind());
+    Optional<WaypointKind> kindOpt = parseWaypointKind(nodeId);
     if (kindOpt.isPresent()) {
       WaypointKind kind = kindOpt.get();
       if (kind == WaypointKind.STATION || kind == WaypointKind.DEPOT) {
@@ -4917,7 +5208,7 @@ public final class RuntimeDispatchService {
         continue;
       }
       OccupancyRequest request = ctxOpt.get().request();
-      OccupancyDecision decision = occupancyManager.canEnter(request);
+      OccupancyDecision decision = previewOccupancyDecision(request);
       if (!decision.allowed()) {
         continue;
       }
@@ -4974,6 +5265,19 @@ public final class RuntimeDispatchService {
   /** DYNAMIC 候选站台记录。 */
   private record DynamicCandidate(
       NodeId candidate, OccupancyRequestContext context, OccupancyDecision decision) {}
+
+  /**
+   * 只读占用预判。
+   *
+   * <p>候选站台筛选会连续尝试多个候选目标，未被选中的候选不能写入冲突队列。否则一次 DYNAMIC 选择就可能把列车排进多个无关站台/道岔队列，后续信号 tick
+   * 会看到“没有真实占用但队列阻塞”的异常 STOP。
+   */
+  private OccupancyDecision previewOccupancyDecision(OccupancyRequest request) {
+    if (occupancyManager instanceof OccupancyPreviewSupport preview) {
+      return preview.canEnterPreview(request);
+    }
+    return occupancyManager.canEnter(request);
+  }
 
   /**
    * 按方向选择最佳候选站台。
@@ -5720,17 +6024,6 @@ public final class RuntimeDispatchService {
     occupancyManager.acquire(rearGuardRequest);
   }
 
-  private static java.util.OptionalDouble mergeTargetOverrideBps(
-      java.util.OptionalDouble first, java.util.OptionalDouble second) {
-    if (first == null || first.isEmpty()) {
-      return second != null ? second : java.util.OptionalDouble.empty();
-    }
-    if (second == null || second.isEmpty()) {
-      return first;
-    }
-    return java.util.OptionalDouble.of(Math.min(first.getAsDouble(), second.getAsDouble()));
-  }
-
   private static OptionalLong minOptionalLong(OptionalLong first, OptionalLong second) {
     if (first == null || first.isEmpty()) {
       return second != null ? second : OptionalLong.empty();
@@ -5776,44 +6069,543 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 根据许可等级与进站限速计算目标速度（blocks/s）。
+   * 根据许可等级与全部附加限制计算目标速度（blocks/s）。
    *
-   * <p>PROCEED 基准速度取边限速（若有效），否则回退到调度图默认速度；警示信号使用连通分量的 caution 速度上限（无覆盖时回退为配置默认值）。
+   * <p>PROCEED 基准速度取边限速（若有效），否则回退 defaultSpeed；警示信号使用连通分量的 caution
+   * 速度上限（无覆盖时回退为配置默认值）。后续再依次应用进站/停靠点限速、移动授权限速与前方低限速边前瞻，并记录最终限制来源。
    */
-  private double resolveTargetSpeed(
-      UUID worldId, SignalAspect aspect, RouteDefinition route, NodeId nextNode, double edgeLimit) {
+  private TargetSpeedDecision resolveTargetSpeedDecision(
+      UUID worldId,
+      SignalAspect aspect,
+      NodeId nextNode,
+      double edgeLimit,
+      double decelBps2,
+      SignalLookahead.LookaheadResult lookahead,
+      ControlSpeedOverrides speedOverrides) {
     double defaultSpeed = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
-    // PROCEED 优先使用边限速，无效时回退 defaultSpeed
     double proceedBase = edgeLimit > 0.0 ? edgeLimit : defaultSpeed;
-    double base =
-        switch (aspect) {
-          case PROCEED -> proceedBase;
-          case PROCEED_WITH_CAUTION, CAUTION -> resolveCautionSpeed(worldId, nextNode);
-          case STOP -> 0.0;
-        };
-    double approachLimit = configManager.current().runtimeSettings().approachSpeedBps();
-    if (aspect == SignalAspect.PROCEED && approachLimit > 0.0 && isStationNode(nextNode)) {
-      return Math.min(base, approachLimit);
+    String limiterSource = edgeLimit > 0.0 ? "edge_limit" : "default_speed";
+    CautionSpeedDecision caution = new CautionSpeedDecision(0.0, "none");
+    double base = 0.0;
+    switch (aspect) {
+      case PROCEED -> base = proceedBase;
+      case PROCEED_WITH_CAUTION, CAUTION -> {
+        caution = resolveCautionSpeedDecision(worldId, nextNode);
+        base = caution.speedBps();
+        limiterSource =
+            "component".equals(caution.source()) ? "component_caution" : "config_caution";
+      }
+      case STOP -> {
+        base = 0.0;
+        limiterSource = "stop";
+      }
     }
-    double depotLimit = configManager.current().runtimeSettings().approachDepotSpeedBps();
-    if (aspect == SignalAspect.PROCEED && depotLimit > 0.0 && isDepotNode(nextNode)) {
-      return Math.min(base, depotLimit);
+    double target = base;
+    OptionalDouble approachLimitBps = OptionalDouble.empty();
+    ControlSpeedOverrides overrides =
+        speedOverrides != null ? speedOverrides : ControlSpeedOverrides.empty();
+    if (overrides.approachLimitBps().isPresent()) {
+      double override = overrides.approachLimitBps().getAsDouble();
+      if (Double.isFinite(override) && override > 0.0) {
+        ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
+        double approachEnvelope =
+            resolveApproachSpeedEnvelope(target, override, decelBps2, overrides, runtime);
+        approachLimitBps =
+            OptionalDouble.of(
+                approachLimitBps.isPresent()
+                    ? Math.min(approachLimitBps.getAsDouble(), override)
+                    : override);
+        if (approachEnvelope < target) {
+          target = approachEnvelope;
+          limiterSource =
+              resolveApproachLimiterSource(overrides.approachControl(), override, target);
+        }
+      }
     }
-    return base;
+    if (overrides.movementAuthorityLimitBps().isPresent()) {
+      double authorityLimit = overrides.movementAuthorityLimitBps().getAsDouble();
+      if (Double.isFinite(authorityLimit) && authorityLimit >= 0.0 && authorityLimit < target) {
+        target = authorityLimit;
+        limiterSource = "movement_authority";
+      }
+    }
+    OptionalDouble edgeLookaheadLimit = OptionalDouble.empty();
+    if (lookahead != null
+        && !lookahead.edgeSpeedConstraints().isEmpty()
+        && configManager.current().runtimeSettings().speedCurveEnabled()) {
+      double lookedAhead =
+          applyEdgeSpeedLookahead(target, decelBps2, lookahead.edgeSpeedConstraints());
+      if (lookedAhead < target - 1.0e-6) {
+        edgeLookaheadLimit = OptionalDouble.of(lookedAhead);
+        target = lookedAhead;
+        limiterSource = "edge_speed_lookahead";
+      }
+    }
+    return new TargetSpeedDecision(
+        edgeLimit,
+        base,
+        caution.source(),
+        approachLimitBps,
+        overrides.movementAuthorityLimitBps(),
+        edgeLookaheadLimit,
+        target,
+        limiterSource);
   }
 
-  private double resolveCautionSpeed(UUID worldId, NodeId nodeId) {
+  /**
+   * 计算进站/进库 approach 的速度包络。
+   *
+   * <p>旧逻辑在进入 approach 窗口后立即把目标速度硬切到 {@code approach-speed-bps}，会导致窗口外仍继续加速、窗口内突然降速。
+   * 这里把下一处停靠点视作“前方限速点”：列车应在 {@code approach-target-edges} 对应的末尾 edge 范围内达到 approach
+   * 速度，窗口内按物理制动公式逐步收敛。
+   */
+  private static double resolveApproachSpeedEnvelope(
+      double currentTargetBps,
+      double approachLimitBps,
+      double decelBps2,
+      ControlSpeedOverrides overrides,
+      ConfigManager.RuntimeSettings runtime) {
+    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
+      return 0.0;
+    }
+    if (!Double.isFinite(approachLimitBps) || approachLimitBps <= 0.0) {
+      return currentTargetBps;
+    }
+    if (runtime == null
+        || !runtime.speedCurveEnabled()
+        || overrides == null
+        || overrides.approachControl().distanceBlocks().isEmpty()
+        || overrides.approachControl().targetEdgeDistanceBlocks().isEmpty()
+        || !Double.isFinite(decelBps2)
+        || decelBps2 <= 0.0) {
+      return Math.min(currentTargetBps, approachLimitBps);
+    }
+    double distance =
+        Math.max(
+            0.0,
+            overrides.approachControl().distanceBlocks().getAsLong()
+                - overrides.approachControl().targetEdgeDistanceBlocks().getAsLong());
+    double envelope =
+        Math.sqrt(
+            approachLimitBps * approachLimitBps
+                + 2.0 * decelBps2 * distance * runtime.speedCurveFactor());
+    if (!Double.isFinite(envelope) || envelope <= 0.0) {
+      return Math.min(currentTargetBps, approachLimitBps);
+    }
+    return Math.min(currentTargetBps, Math.max(approachLimitBps, envelope));
+  }
+
+  private static String resolveApproachLimiterSource(
+      ApproachControl approachControl, double configuredLimitBps, double appliedLimitBps) {
+    boolean atConfiguredLimit = appliedLimitBps <= configuredLimitBps + 1.0e-6;
+    if (!atConfiguredLimit) {
+      return "approach_curve";
+    }
+    return switch (approachControl.kind()) {
+      case "station" -> "approach";
+      case "depot" -> "depot_approach";
+      case "stop_waypoint" -> "stop_waypoint_approach";
+      default -> "approach";
+    };
+  }
+
+  /**
+   * 按展开后的 route 路径解析当前是否进入 approach 窗口。
+   *
+   * <p>Route 往往只写停靠点，不写沿途 throat/switcher。本方法从当前 route index 向前找到下一处非 PASS stop，再按调度图最短路展开 route
+   * 片段，计算到 station/depot/STOP waypoint 的真实距离。只有距离或边数进入配置窗口后，才返回有效 approach 限速。
+   */
+  private ApproachControl resolveApproachControl(
+      RailGraph graph,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      int currentIndex,
+      NodeId currentNode) {
+    if (graph == null
+        || route == null
+        || effectiveNodes == null
+        || effectiveNodes.isEmpty()
+        || currentNode == null
+        || currentIndex < 0
+        || currentIndex >= effectiveNodes.size() - 1) {
+      return ApproachControl.none();
+    }
+    Optional<IndexedRouteStop> stopOpt =
+        findNextStoppingRouteStop(route, effectiveNodes, currentIndex);
+    if (stopOpt.isEmpty()) {
+      return ApproachControl.none();
+    }
+    IndexedRouteStop indexedStop = stopOpt.get();
+    Optional<ApproachTarget> targetOpt = resolveApproachTarget(graph, indexedStop);
+    if (targetOpt.isEmpty()) {
+      return ApproachControl.none();
+    }
+    Optional<ExpandedRoutePath> pathOpt =
+        expandRoutePath(graph, effectiveNodes, currentIndex, indexedStop.index());
+    if (pathOpt.isEmpty()) {
+      return ApproachControl.none();
+    }
+    ApproachTarget target = targetOpt.get();
+    Optional<ApproachTrigger> triggerOpt = findApproachTrigger(graph, pathOpt.get(), target);
+    if (triggerOpt.isEmpty()) {
+      return ApproachControl.none();
+    }
+    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
+    ApproachTrigger trigger = triggerOpt.get();
+    if (!withinApproachWindow(runtime, trigger.distanceBlocks(), trigger.edgeCount())) {
+      return ApproachControl.none();
+    }
+    double limit =
+        "depot".equals(target.kind())
+            ? runtime.approachDepotSpeedBps()
+            : runtime.approachSpeedBps();
+    long targetEdgeDistance = trigger.targetEdgeDistanceBlocks(runtime.approachTargetEdges());
+    String reason =
+        "route_stop:"
+            + target.passType().name()
+            + ";"
+            + trigger.reason()
+            + ";distance="
+            + trigger.distanceBlocks()
+            + ";edges="
+            + trigger.edgeCount()
+            + ";target_edges="
+            + runtime.approachTargetEdges()
+            + ";target_edge_distance="
+            + targetEdgeDistance;
+    return approachWithLimit(
+        trigger.node(),
+        target.kind(),
+        reason,
+        limit,
+        OptionalLong.of(trigger.distanceBlocks()),
+        OptionalLong.of(targetEdgeDistance),
+        trigger.edgeCount());
+  }
+
+  private Optional<IndexedRouteStop> findNextStoppingRouteStop(
+      RouteDefinition route, List<NodeId> effectiveNodes, int currentIndex) {
+    if (route == null
+        || effectiveNodes == null
+        || currentIndex < 0
+        || currentIndex >= effectiveNodes.size() - 1) {
+      return Optional.empty();
+    }
+    for (int i = currentIndex + 1; i < effectiveNodes.size(); i++) {
+      Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), i);
+      if (stopOpt.isEmpty() || stopOpt.get().passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      return Optional.of(new IndexedRouteStop(i, effectiveNodes.get(i), stopOpt.get()));
+    }
+    return Optional.empty();
+  }
+
+  private Optional<ApproachTarget> resolveApproachTarget(
+      RailGraph graph, IndexedRouteStop indexedStop) {
+    if (graph == null || indexedStop == null || indexedStop.node() == null) {
+      return Optional.empty();
+    }
+    NodeId node = indexedStop.node();
+    RouteStop stop = indexedStop.stop();
+    if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+      return Optional.empty();
+    }
+    Optional<WaypointMetadata> metadataOpt = resolveWaypointMetadata(graph, node);
+    Optional<ApproachNodeKey> keyOpt = metadataOpt.flatMap(RuntimeDispatchService::approachKey);
+    if (isStationApproachNode(graph, node, keyOpt)) {
+      return Optional.of(new ApproachTarget(node, "station", stop.passType(), keyOpt));
+    }
+    if (isDepotApproachNode(graph, node, keyOpt)) {
+      return Optional.of(new ApproachTarget(node, "depot", stop.passType(), keyOpt));
+    }
+    if (shouldStopAtWaypoint(node, stop)) {
+      return Optional.of(
+          new ApproachTarget(node, "stop_waypoint", stop.passType(), Optional.empty()));
+    }
+    return Optional.empty();
+  }
+
+  private Optional<ExpandedRoutePath> expandRoutePath(
+      RailGraph graph, List<NodeId> nodes, int fromIndex, int toIndex) {
+    if (graph == null
+        || nodes == null
+        || fromIndex < 0
+        || toIndex <= fromIndex
+        || toIndex >= nodes.size()) {
+      return Optional.empty();
+    }
+    List<NodeId> expandedNodes = new ArrayList<>();
+    List<RailEdge> expandedEdges = new ArrayList<>();
+    expandedNodes.add(nodes.get(fromIndex));
+    for (int i = fromIndex; i < toIndex; i++) {
+      NodeId from = nodes.get(i);
+      NodeId to = nodes.get(i + 1);
+      if (from == null || to == null) {
+        return Optional.empty();
+      }
+      Optional<RailEdge> directEdge = findEdge(graph, from, to);
+      if (directEdge.isPresent()) {
+        expandedEdges.add(directEdge.get());
+        expandedNodes.add(to);
+        continue;
+      }
+      Optional<RailGraphPath> pathOpt =
+          pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
+      if (pathOpt.isEmpty()
+          || pathOpt.get().nodes().size() < 2
+          || pathOpt.get().edges().isEmpty()) {
+        return Optional.empty();
+      }
+      RailGraphPath segment = pathOpt.get();
+      expandedEdges.addAll(segment.edges());
+      List<NodeId> segmentNodes = segment.nodes();
+      for (int j = 1; j < segmentNodes.size(); j++) {
+        expandedNodes.add(segmentNodes.get(j));
+      }
+    }
+    if (expandedNodes.size() < 2 || expandedEdges.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(new ExpandedRoutePath(expandedNodes, expandedEdges));
+  }
+
+  private Optional<ApproachTrigger> findApproachTrigger(
+      RailGraph graph, ExpandedRoutePath path, ApproachTarget target) {
+    if (graph == null || path == null || target == null || path.nodes().size() < 2) {
+      return Optional.empty();
+    }
+    long distance = 0L;
+    int edgeCount = 0;
+    List<Long> edgeLengths = new ArrayList<>();
+    for (int i = 1; i < path.nodes().size(); i++) {
+      if (i - 1 < path.edges().size()) {
+        RailEdge previous = path.edges().get(i - 1);
+        long edgeLength = previous == null ? 0L : Math.max(0, previous.lengthBlocks());
+        distance += edgeLength;
+        edgeLengths.add(edgeLength);
+        edgeCount++;
+      }
+      NodeId node = path.nodes().get(i);
+      if (!matchesApproachTarget(graph, node, target)) {
+        continue;
+      }
+      return Optional.of(
+          new ApproachTrigger(
+              node,
+              distance,
+              edgeCount,
+              edgeLengths,
+              "expanded_route:" + target.stopNode().value()));
+    }
+    return Optional.empty();
+  }
+
+  private boolean matchesApproachTarget(RailGraph graph, NodeId node, ApproachTarget target) {
+    if (graph == null || node == null || target == null) {
+      return false;
+    }
+    if ("stop_waypoint".equals(target.kind())) {
+      return node.equals(target.stopNode());
+    }
+    if (target.key().isEmpty()) {
+      return node.equals(target.stopNode());
+    }
+    if ("station".equals(target.kind())) {
+      return isStationApproachNode(graph, node, target.key());
+    }
+    if ("depot".equals(target.kind())) {
+      return isDepotApproachNode(graph, node, target.key());
+    }
+    return false;
+  }
+
+  private static boolean withinApproachWindow(
+      ConfigManager.RuntimeSettings runtime, long distanceBlocks, int edgeCount) {
+    if (runtime == null) {
+      return false;
+    }
+    double windowBlocks = runtime.approachWindowBlocks();
+    if (Double.isFinite(windowBlocks) && windowBlocks > 0.0 && distanceBlocks <= windowBlocks) {
+      return true;
+    }
+    int windowEdges = runtime.approachWindowEdges();
+    return windowEdges > 0 && edgeCount >= 0 && edgeCount <= windowEdges;
+  }
+
+  private static ApproachControl approachWithLimit(
+      NodeId node,
+      String kind,
+      String reason,
+      double limitBps,
+      OptionalLong distanceBlocks,
+      OptionalLong targetEdgeDistanceBlocks,
+      int edgeCount) {
+    OptionalDouble limit =
+        Double.isFinite(limitBps) && limitBps > 0.0
+            ? OptionalDouble.of(limitBps)
+            : OptionalDouble.empty();
+    return new ApproachControl(
+        Optional.of(node),
+        kind,
+        reason,
+        limit,
+        distanceBlocks,
+        targetEdgeDistanceBlocks,
+        edgeCount);
+  }
+
+  private CautionSpeedDecision resolveCautionSpeedDecision(UUID worldId, NodeId nodeId) {
     double fallback = configManager.current().runtimeSettings().cautionSpeedBps();
     if (worldId == null || nodeId == null || railGraphService == null) {
-      return fallback;
+      return new CautionSpeedDecision(fallback, "config");
     }
     Optional<String> componentKey = railGraphService.componentKey(worldId, nodeId);
     if (componentKey.isEmpty()) {
-      return fallback;
+      return new CautionSpeedDecision(fallback, "config");
     }
-    return railGraphService
-        .componentCautionSpeedBlocksPerSecond(worldId, componentKey.get())
-        .orElse(fallback);
+    OptionalDouble componentSpeed =
+        railGraphService.componentCautionSpeedBlocksPerSecond(worldId, componentKey.get());
+    return componentSpeed.isPresent()
+        ? new CautionSpeedDecision(componentSpeed.getAsDouble(), "component")
+        : new CautionSpeedDecision(fallback, "config");
+  }
+
+  private boolean isStationApproachNode(
+      RailGraph graph, NodeId nodeId, Optional<ApproachNodeKey> targetKey) {
+    if (nodeId == null) {
+      return false;
+    }
+    Optional<ApproachNodeKey> nodeKey = resolveApproachKey(graph, nodeId);
+    if (targetKey != null && targetKey.isPresent()) {
+      ApproachNodeKey target = targetKey.get();
+      if (nodeKey.map(target::matches).orElse(false) && isStationOrStationThroat(graph, nodeId)) {
+        return true;
+      }
+      return isSwitcherAdjacentTo(graph, nodeId, target);
+    }
+    return isStationOrStationThroat(graph, nodeId);
+  }
+
+  private boolean isDepotApproachNode(
+      RailGraph graph, NodeId nodeId, Optional<ApproachNodeKey> targetKey) {
+    if (nodeId == null) {
+      return false;
+    }
+    Optional<ApproachNodeKey> nodeKey = resolveApproachKey(graph, nodeId);
+    if (targetKey != null && targetKey.isPresent()) {
+      ApproachNodeKey target = targetKey.get();
+      if (nodeKey.map(target::matches).orElse(false) && isDepotOrDepotThroat(graph, nodeId)) {
+        return true;
+      }
+      return isSwitcherAdjacentTo(graph, nodeId, target);
+    }
+    return isDepotOrDepotThroat(graph, nodeId);
+  }
+
+  private boolean isStationOrStationThroat(RailGraph graph, NodeId nodeId) {
+    if (graph != null
+        && graph.findNode(nodeId).map(node -> node.type() == NodeType.STATION).orElse(false)) {
+      return true;
+    }
+    if (isStationNode(nodeId)) {
+      return true;
+    }
+    return resolveWaypointMetadata(graph, nodeId)
+        .map(metadata -> metadata.kind() == WaypointKind.STATION_THROAT)
+        .orElse(false);
+  }
+
+  private boolean isDepotOrDepotThroat(RailGraph graph, NodeId nodeId) {
+    if (graph != null
+        && graph.findNode(nodeId).map(node -> node.type() == NodeType.DEPOT).orElse(false)) {
+      return true;
+    }
+    if (isDepotNode(nodeId)) {
+      return true;
+    }
+    return resolveWaypointMetadata(graph, nodeId)
+        .map(metadata -> metadata.kind() == WaypointKind.DEPOT_THROAT)
+        .orElse(false);
+  }
+
+  private boolean isSwitcherAdjacentTo(RailGraph graph, NodeId nodeId, ApproachNodeKey targetKey) {
+    if (graph == null || nodeId == null || targetKey == null || !isSwitcherNode(graph, nodeId)) {
+      return false;
+    }
+    for (RailEdge edge : graph.edgesFrom(nodeId)) {
+      if (edge == null) {
+        continue;
+      }
+      NodeId neighbor = nodeId.equals(edge.from()) ? edge.to() : edge.from();
+      if (neighbor == null) {
+        continue;
+      }
+      Optional<ApproachNodeKey> neighborKey = resolveApproachKey(graph, neighbor);
+      if (neighborKey.map(targetKey::matches).orElse(false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean isSwitcherNode(RailGraph graph, NodeId nodeId) {
+    if (nodeId == null) {
+      return false;
+    }
+    if (graph != null
+        && graph.findNode(nodeId).map(node -> node.type() == NodeType.SWITCHER).orElse(false)) {
+      return true;
+    }
+    Optional<SignNodeDefinition> def =
+        signNodeRegistry.findByNodeId(nodeId, null).map(SignNodeRegistry.SignNodeInfo::definition);
+    if (def.map(value -> value.nodeType() == NodeType.SWITCHER).orElse(false)) {
+      return true;
+    }
+    return resolveWaypointMetadata(graph, nodeId)
+        .map(metadata -> metadata.kind() == WaypointKind.SWITCHER)
+        .orElse(false);
+  }
+
+  private Optional<ApproachNodeKey> resolveApproachKey(RailGraph graph, NodeId nodeId) {
+    return resolveWaypointMetadata(graph, nodeId).flatMap(RuntimeDispatchService::approachKey);
+  }
+
+  private Optional<WaypointMetadata> resolveWaypointMetadata(RailGraph graph, NodeId nodeId) {
+    if (nodeId == null) {
+      return Optional.empty();
+    }
+    Optional<WaypointMetadata> graphMetadata =
+        graph != null
+            ? graph.findNode(nodeId).flatMap(node -> node.waypointMetadata())
+            : Optional.empty();
+    if (graphMetadata.isPresent()) {
+      return graphMetadata;
+    }
+    Optional<WaypointMetadata> registryMetadata =
+        signNodeRegistry
+            .findByNodeId(nodeId, null)
+            .map(SignNodeRegistry.SignNodeInfo::definition)
+            .flatMap(SignNodeDefinition::waypointMetadata);
+    if (registryMetadata.isPresent()) {
+      return registryMetadata;
+    }
+    return parseWaypointMetadata(nodeId);
+  }
+
+  private static Optional<ApproachNodeKey> approachKey(WaypointMetadata metadata) {
+    if (metadata == null) {
+      return Optional.empty();
+    }
+    return switch (metadata.kind()) {
+      case STATION, STATION_THROAT -> Optional.of(
+          new ApproachNodeKey(
+              "station", metadata.operator(), metadata.originStation(), metadata.trackNumber()));
+      case DEPOT, DEPOT_THROAT -> Optional.of(
+          new ApproachNodeKey(
+              "depot", metadata.operator(), metadata.originStation(), metadata.trackNumber()));
+      default -> Optional.empty();
+    };
   }
 
   private boolean isStationNode(NodeId nodeId) {
@@ -5823,15 +6615,12 @@ public final class RuntimeDispatchService {
     Optional<SignNodeDefinition> def =
         signNodeRegistry.findByNodeId(nodeId, null).map(SignNodeRegistry.SignNodeInfo::definition);
     if (def.isEmpty()) {
-      return false;
+      return parseWaypointKind(nodeId).map(kind -> kind == WaypointKind.STATION).orElse(false);
     }
     if (def.get().nodeType() == NodeType.STATION) {
       return true;
     }
-    return def.get()
-        .waypointMetadata()
-        .map(meta -> meta.kind() == WaypointKind.STATION)
-        .orElse(false);
+    return false;
   }
 
   private boolean isDepotNode(NodeId nodeId) {
@@ -5841,15 +6630,24 @@ public final class RuntimeDispatchService {
     Optional<SignNodeDefinition> def =
         signNodeRegistry.findByNodeId(nodeId, null).map(SignNodeRegistry.SignNodeInfo::definition);
     if (def.isEmpty()) {
-      return false;
+      return parseWaypointKind(nodeId).map(kind -> kind == WaypointKind.DEPOT).orElse(false);
     }
     if (def.get().nodeType() == NodeType.DEPOT) {
       return true;
     }
-    return def.get()
-        .waypointMetadata()
-        .map(meta -> meta.kind() == WaypointKind.DEPOT)
-        .orElse(false);
+    return false;
+  }
+
+  private static Optional<WaypointKind> parseWaypointKind(NodeId nodeId) {
+    return parseWaypointMetadata(nodeId).map(WaypointMetadata::kind);
+  }
+
+  private static Optional<WaypointMetadata> parseWaypointMetadata(NodeId nodeId) {
+    if (nodeId == null || nodeId.value() == null) {
+      return Optional.empty();
+    }
+    return SignTextParser.parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
+        .flatMap(SignNodeDefinition::waypointMetadata);
   }
 
   /**
@@ -5876,6 +6674,10 @@ public final class RuntimeDispatchService {
       return "";
     }
     return trainName.trim().toLowerCase(java.util.Locale.ROOT);
+  }
+
+  private static String normalizeKeyPart(String value) {
+    return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
   }
 
   private void recordEffectiveNode(
@@ -6500,6 +7302,129 @@ public final class RuntimeDispatchService {
       builder.append(" +").append(decision.blockers().size() - count);
     }
     return builder.toString();
+  }
+
+  private List<String> summarizeClaims(
+      List<OccupancyClaim> claims,
+      String currentTrainName,
+      RouteDefinition route,
+      int currentIndex,
+      Set<OccupancyResource> authorityResources) {
+    if (claims == null || claims.isEmpty()) {
+      return List.of();
+    }
+    List<String> result = new ArrayList<>();
+    for (OccupancyClaim claim : claims) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      result.add(
+          formatClaimSummary(claim, currentTrainName, route, currentIndex, authorityResources));
+      if (result.size() >= 12) {
+        break;
+      }
+    }
+    return List.copyOf(result);
+  }
+
+  private List<String> summarizeTrainClaims(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      Set<OccupancyResource> authorityResources,
+      int limit) {
+    if (occupancyManager == null || trainName == null || trainName.isBlank()) {
+      return List.of();
+    }
+    int max = Math.max(1, limit);
+    List<String> result = new ArrayList<>();
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null || claim.resource() == null || claim.trainName() == null) {
+        continue;
+      }
+      if (!claim.trainName().equalsIgnoreCase(trainName)) {
+        continue;
+      }
+      result.add(formatClaimSummary(claim, trainName, route, currentIndex, authorityResources));
+      if (result.size() >= max) {
+        break;
+      }
+    }
+    return List.copyOf(result);
+  }
+
+  private static List<String> summarizeResources(List<OccupancyResource> resources, int limit) {
+    if (resources == null || resources.isEmpty()) {
+      return List.of();
+    }
+    int max = Math.max(1, limit);
+    List<String> result = new ArrayList<>();
+    for (OccupancyResource resource : resources) {
+      if (resource == null) {
+        continue;
+      }
+      result.add(resource.kind() + ":" + resource.key());
+      if (result.size() >= max) {
+        break;
+      }
+    }
+    return List.copyOf(result);
+  }
+
+  private String formatClaimSummary(
+      OccupancyClaim claim,
+      String currentTrainName,
+      RouteDefinition route,
+      int currentIndex,
+      Set<OccupancyResource> authorityResources) {
+    StringBuilder builder = new StringBuilder();
+    builder.append(claim.resource().kind()).append(":").append(claim.resource().key());
+    builder.append("@").append(claim.trainName());
+    claim.routeId().ifPresent(routeId -> builder.append(" route=").append(routeId.value()));
+    progressRegistry
+        .get(claim.trainName())
+        .ifPresent(entry -> builder.append(" idx=").append(entry.currentIndex()));
+    builder
+        .append(" role=")
+        .append(classifyClaim(claim, currentTrainName, route, currentIndex, authorityResources));
+    return builder.toString();
+  }
+
+  private String classifyClaim(
+      OccupancyClaim claim,
+      String currentTrainName,
+      RouteDefinition route,
+      int currentIndex,
+      Set<OccupancyResource> authorityResources) {
+    if (claim == null || claim.trainName() == null) {
+      return "unknown";
+    }
+    if (currentTrainName != null && claim.trainName().equalsIgnoreCase(currentTrainName)) {
+      return "self";
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> ownerEntryOpt =
+        progressRegistry.get(claim.trainName());
+    if (ownerEntryOpt.isEmpty()) {
+      return claim.routeId().isPresent() ? "depot_spawn" : "orphan";
+    }
+    if (route == null || currentIndex < 0) {
+      return "other";
+    }
+    RouteProgressRegistry.RouteProgressEntry ownerEntry = ownerEntryOpt.get();
+    if (!route.id().equals(ownerEntry.routeId())) {
+      return "other_route";
+    }
+    boolean inAuthority =
+        authorityResources != null
+            && claim.resource() != null
+            && authorityResources.contains(claim.resource());
+    if (ownerEntry.currentIndex() < currentIndex && inAuthority) {
+      return "speculative";
+    }
+    if (ownerEntry.currentIndex() <= currentIndex && !inAuthority) {
+      return "rear_guard";
+    }
+    return "forward";
   }
 
   private void updateBlockerSnapshot(String trainName, OccupancyDecision decision, Instant now) {

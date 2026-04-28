@@ -44,7 +44,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
  *   <li>通过 {@link OccupancyQueueSupport} 查询等待特定资源的列车
  * </ul>
  *
- * <p>此类作为信号事件驱动系统与运行时调度的桥梁，由 {@link SignalEvaluator} 在资源释放时回调。
+ * <p>此类作为信号事件驱动系统与运行时调度的桥梁，由 {@link SignalEvaluator} 在资源释放时回调。事件链路只构建前向授权请求， 不携带 rear
+ * guard；尾部保护由运行时 tick 获取，不能反向参与当前列车红灯判定。
  *
  * @see SignalEvaluator
  * @see SignalEvaluator.TrainRequestProvider
@@ -123,7 +124,6 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     int lookaheadEdges = runtimeSettings.lookaheadEdges();
     int minClearEdges = runtimeSettings.minClearEdges();
-    int rearGuardEdges = runtimeSettings.rearGuardEdges();
     int priority = resolvePriority(properties, route);
 
     OccupancyRequestBuilder builder =
@@ -131,7 +131,7 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
             graph,
             lookaheadEdges,
             minClearEdges,
-            rearGuardEdges,
+            0,
             runtimeSettings.switcherZoneEdges(),
             debugLogger);
     List<NodeId> waypoints = route.waypoints();

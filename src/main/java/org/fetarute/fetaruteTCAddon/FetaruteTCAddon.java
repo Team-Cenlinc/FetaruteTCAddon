@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaSpeedCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand;
@@ -34,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRegistryRailGraphBuilder;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
@@ -118,6 +120,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
   private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
+  private SpeedSettingStickListener speedSettingStickListener;
   private TrainSnapshotStore trainSnapshotStore;
   private EtaRuntimeSampler etaRuntimeSampler;
   private EtaService etaService;
@@ -304,6 +307,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** 返回限速设置棍监听器；插件未完成初始化时为空。 */
+  public Optional<SpeedSettingStickListener> getSpeedSettingStickListener() {
+    return Optional.ofNullable(speedSettingStickListener);
+  }
+
   /** RouteDefinition 缓存是否已加载。 */
   public boolean isRouteDefinitionCacheReady() {
     return routeDefinitionCache != null;
@@ -385,6 +393,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaEtaCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
     new FtaSpawnCommand(this).register(commandManager);
+    new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
@@ -456,6 +465,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
             new GraphDebugStickListener(
                 this, signNodeRegistry, railGraphService, localeManager, loggerManager::debug),
             this);
+    this.speedSettingStickListener =
+        new SpeedSettingStickListener(
+            this, signNodeRegistry, railGraphService, localeManager, loggerManager::debug);
+    getServer().getPluginManager().registerEvents(speedSettingStickListener, this);
     getServer()
         .getPluginManager()
         .registerEvents(new TrainSignBypassListener(loggerManager::debug), this);

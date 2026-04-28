@@ -146,7 +146,7 @@ public final class FtaTrainCommand {
             .literal("config")
             .literal("set")
             .permission("fetarute.train.config")
-            .optional("train", StringParser.stringParser(), trainSuggestions)
+            .optional("train", StringParser.quotedStringParser(), trainSuggestions)
             .flag(typeFlag)
             .flag(accelFlag)
             .flag(decelFlag)
@@ -198,7 +198,7 @@ public final class FtaTrainCommand {
             .literal("config")
             .literal("list")
             .permission("fetarute.train.config")
-            .optional("train", StringParser.stringParser(), trainSuggestions)
+            .optional("train", StringParser.quotedStringParser(), trainSuggestions)
             .handler(
                 ctx -> {
                   LocaleManager locale = plugin.getLocaleManager();
@@ -247,10 +247,10 @@ public final class FtaTrainCommand {
             .literal("set")
             .literal("route")
             .permission("fetarute.train.debug")
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .optional("index_or_node", StringParser.quotedStringParser(), indexOrNodeSuggestions)
             .handler(
                 ctx ->
@@ -272,12 +272,12 @@ public final class FtaTrainCommand {
             .literal("set")
             .literal("route")
             .permission("fetarute.train.debug")
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .literal("train")
-            .required("train", StringParser.stringParser(), trainSuggestions)
+            .required("train", StringParser.quotedStringParser(), trainSuggestions)
             .optional("index_or_node", StringParser.quotedStringParser(), indexOrNodeSuggestions)
             .handler(
                 ctx ->
@@ -297,7 +297,7 @@ public final class FtaTrainCommand {
             .literal("train")
             .literal("debug")
             .permission("fetarute.train.debug")
-            .optional("train", StringParser.stringParser(), trainSuggestions)
+            .optional("train", StringParser.quotedStringParser(), trainSuggestions)
             .handler(
                 ctx -> handleDebug(ctx.sender(), ctx.optional("train").map(String.class::cast))));
   }
@@ -650,6 +650,16 @@ public final class FtaTrainCommand {
             Map.of(
                 "current", diag.currentNode() != null ? diag.currentNode().value() : "-",
                 "next", diag.nextNode() != null ? diag.nextNode().value() : "-")));
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.state",
+            Map.of(
+                "index",
+                String.valueOf(diag.currentIndex()),
+                "gate",
+                diag.departureGate(),
+                "reason",
+                diag.signalReason())));
 
     // 速度信息（含边限速）
     String edgeLimitText = diag.edgeLimitBps() > 0 ? formatSpeed(diag.edgeLimitBps()) : "-";
@@ -668,6 +678,27 @@ public final class FtaTrainCommand {
                     ? formatSpeed(diag.recommendedSpeedBps().getAsDouble())
                     : "-")));
 
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.speed-limits",
+            Map.of(
+                "aspect_base_speed",
+                formatSpeed(diag.aspectBaseSpeedBps()),
+                "caution_source",
+                diag.cautionSource(),
+                "approach_limit",
+                formatOptionalSpeed(diag.approachLimitBps()),
+                "movement_authority_limit",
+                formatOptionalSpeed(diag.movementAuthorityLimitBps()),
+                "edge_speed_lookahead",
+                formatOptionalSpeed(diag.edgeSpeedLookaheadMinBps()),
+                "speed_curve_limit",
+                formatOptionalSpeed(diag.speedCurveLimitBps()),
+                "final_target",
+                formatSpeed(diag.finalTargetBps()),
+                "final_limiter",
+                diag.finalLimiterSource())));
+
     // 前瞻距离
     sender.sendMessage(
         locale.component(
@@ -676,6 +707,22 @@ public final class FtaTrainCommand {
                 "blocker", formatDistance(diag.distanceToBlocker()),
                 "caution", formatDistance(diag.distanceToCaution()),
                 "approach", formatDistance(diag.distanceToApproach()))));
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.approach",
+            Map.of(
+                "node", diag.approachNode() != null ? diag.approachNode().value() : "-",
+                "kind", diag.approachKind(),
+                "reason", diag.approachReason(),
+                "distance", formatDistance(diag.distanceToApproach()),
+                "limit", formatOptionalSpeed(diag.approachLimitBps()))));
+    sender.sendMessage(
+        locale.component(
+            "command.train.debug.occupancy",
+            Map.of(
+                "blockers", formatDebugList(diag.signalBlockerResources()),
+                "request", formatDebugList(diag.requestResources()),
+                "claims", formatDebugList(diag.currentClaimsForTrain()))));
 
     // 信号与状态
     sender.sendMessage(
@@ -685,10 +732,35 @@ public final class FtaTrainCommand {
                 "current", diag.currentSignal().name(),
                 "effective", diag.effectiveSignal().name(),
                 "launch", diag.allowLaunch() ? "✓" : "✗")));
+    sender.sendMessage(
+        Component.text("  ")
+            .append(
+                CommandUx.actions(
+                    CommandUx.suggestAction(
+                        "[config]",
+                        "/fta train config list " + CommandUx.commandArgument(diag.trainName()),
+                        "填充列车配置查看命令"),
+                    CommandUx.suggestAction(
+                        "[eta]",
+                        "/fta eta train " + CommandUx.commandArgument(diag.trainName()),
+                        "填充列车 ETA 命令"),
+                    CommandUx.suggestAction(
+                        "[set route]", "/fta train debug set route ", "填充临时改写线路/路由的调试命令"))));
   }
 
   private static String formatSpeed(double bps) {
     return String.format("%.2f", bps);
+  }
+
+  private static String formatDebugList(List<String> values) {
+    if (values == null || values.isEmpty()) {
+      return "-";
+    }
+    return values.stream().limit(6).collect(java.util.stream.Collectors.joining(", "));
+  }
+
+  private static String formatOptionalSpeed(java.util.OptionalDouble bps) {
+    return bps != null && bps.isPresent() ? formatSpeed(bps.getAsDouble()) : "-";
   }
 
   private static String formatDistance(java.util.OptionalLong distance) {

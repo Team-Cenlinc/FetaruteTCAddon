@@ -288,10 +288,10 @@ public final class FtaRouteCommand {
             .literal("editor")
             .literal("give")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -423,9 +423,9 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("create")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("code", StringParser.stringParser(), codeSuggestions)
             .required("name", StringParser.quotedStringParser(), nameSuggestions)
             .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
@@ -512,9 +512,9 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -616,10 +616,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("info")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -720,9 +720,9 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -804,9 +804,9 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("info")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
             .handler(
                 ctx -> {
@@ -901,9 +901,9 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("create")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
             .optional("baseline", IntegerParser.integerParser(1, 86400))
             .handler(
@@ -957,9 +957,9 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
             .flag(groupBaselineFlag)
             .flag(groupBaselineClearFlag)
@@ -1045,9 +1045,9 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("routes")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
             .handler(
                 ctx -> {
@@ -1162,11 +1162,11 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("assign")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -1243,11 +1243,11 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("unassign")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -1333,9 +1333,9 @@ public final class FtaRouteCommand {
             .literal("group")
             .literal("delete")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
             .required("group", StringParser.quotedStringParser(), groupValueSuggestions)
             .handler(
                 ctx -> {
@@ -1431,10 +1431,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("validate")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .optional("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .optional("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -1553,10 +1553,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(patternFlag)
@@ -1794,10 +1794,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("delete")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .flag(confirmFlag)
             .handler(
                 ctx -> {
@@ -1841,10 +1841,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("define")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -1937,10 +1937,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("debug")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .optional("page", IntegerParser.integerParser())
             .handler(
                 ctx -> {
@@ -1994,10 +1994,10 @@ public final class FtaRouteCommand {
             .literal("route")
             .literal("path")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
-            .required("line", StringParser.stringParser(), lineSuggestions)
-            .required("route", StringParser.stringParser(), routeSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();

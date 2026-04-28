@@ -23,6 +23,11 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExporter;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ScheduleWindow;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
@@ -147,6 +152,20 @@ public final class FtaSpawnCommand {
             .literal("reset")
             .permission("fetarute.spawn")
             .handler(ctx -> resetQueue(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("spawn")
+            .literal("export")
+            .literal("csv")
+            .permission("fetarute.spawn")
+            .optional("limit", IntegerParser.integerParser(1, 50), limitSuggestions)
+            .handler(
+                ctx -> {
+                  int limit = ctx.<Integer>optional("limit").orElse(12);
+                  previewCsv(ctx.sender(), limit);
+                }));
   }
 
   private void sendHelp(CommandSender sender) {
@@ -177,6 +196,11 @@ public final class FtaSpawnCommand {
         locale.component("command.spawn.help.entry-reset"),
         locale.component("command.spawn.help.hover-reset"),
         "/fta spawn reset");
+    sendHelpEntry(
+        sender,
+        locale.component("command.spawn.help.entry-export-csv"),
+        locale.component("command.spawn.help.hover-export-csv"),
+        "/fta spawn export csv ");
   }
 
   private void sendHelpEntry(
@@ -189,12 +213,12 @@ public final class FtaSpawnCommand {
   /**
    * 列出发车计划（SpawnPlan）。
    *
-   * <p>显示所有可发车服务，包括：
+   * <p>显示所有可发车服务。存储可用时优先展示 {@link ScheduleWindow} 中的未来服务车次；否则回退到旧的 {@link SpawnPlan} 服务快照。输出包括：
    *
    * <ul>
    *   <li>operator/line/route：服务标识
-   *   <li>headway：发车间隔（如 2m30s 表示每 2 分 30 秒发一班）
-   *   <li>depot：出库点 NodeId（对于 DYNAMIC 首站会显示 placeholder）
+   *   <li>source/plannedDeparture：计划来源与发车时刻（旧快照回退为 {@code SCHEDULED/-}）
+   *   <li>depots：候选出库点；带权重时显示为 {@code nodeId*weight}
    * </ul>
    *
    * @param sender 命令发送者
@@ -211,6 +235,11 @@ public final class FtaSpawnCommand {
 
     SpawnPlan plan = mgrOpt.get().snapshotPlan();
     List<SpawnService> services = plan.services();
+    Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+    if (providerOpt.isPresent()) {
+      listSchedulePreview(sender, locale, providerOpt.get(), plan, limit);
+      return;
+    }
 
     sender.sendMessage(
         locale.component(
@@ -218,6 +247,7 @@ public final class FtaSpawnCommand {
             Map.of(
                 "count", String.valueOf(services.size()),
                 "built_at", formatInstant(plan.builtAt()))));
+    sender.sendMessage(spawnNavigationActions());
 
     if (services.isEmpty()) {
       sender.sendMessage(locale.component("command.spawn.plan.empty"));
@@ -236,17 +266,76 @@ public final class FtaSpawnCommand {
 
     for (SpawnService svc : sorted) {
       sender.sendMessage(
-          locale.component(
-              "command.spawn.plan.entry",
-              Map.of(
-                  "operator", svc.operatorCode(),
-                  "line", svc.lineCode(),
-                  "route", svc.routeCode(),
-                  "headway", formatDuration(svc.baseHeadway()),
-                  "depot", svc.depotNodeId())));
+          locale
+              .component(
+                  "command.spawn.plan.entry",
+                  Map.of(
+                      "source", TripSource.SCHEDULED.name(),
+                      "planned_departure", "-",
+                      "operator", svc.operatorCode(),
+                      "line", svc.lineCode(),
+                      "route", svc.routeCode(),
+                      "headway", formatDuration(svc.baseHeadway()),
+                      "depots", svc.depotNodeId()))
+              .append(Component.space())
+              .append(
+                  routeActions(
+                      svc.companyCode(), svc.operatorCode(), svc.lineCode(), svc.routeCode())));
     }
 
     if (services.size() > limit) {
+      sender.sendMessage(locale.component("command.spawn.plan.truncated"));
+    }
+  }
+
+  private void listSchedulePreview(
+      CommandSender sender,
+      LocaleManager locale,
+      StorageProvider provider,
+      SpawnPlan legacyPlan,
+      int limit) {
+    Instant now = Instant.now();
+    ScheduleWindow window =
+        new SchedulePlanner(plugin.getLoggerManager()::debug)
+            .plan(provider, now, now.plus(Duration.ofHours(1)));
+    List<ServiceTrip> trips = window.trips();
+    sender.sendMessage(
+        locale.component(
+            "command.spawn.plan.header",
+            Map.of(
+                "count", String.valueOf(trips.size()),
+                "built_at",
+                    formatInstant(
+                        window.generatedAt().equals(Instant.EPOCH)
+                            ? legacyPlan.builtAt()
+                            : window.generatedAt()))));
+    sender.sendMessage(spawnNavigationActions());
+
+    if (trips.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.plan.empty"));
+      return;
+    }
+
+    for (ServiceTrip trip : trips.stream().limit(limit).toList()) {
+      sender.sendMessage(
+          locale
+              .component(
+                  "command.spawn.plan.entry",
+                  Map.of(
+                      "source", trip.source().name(),
+                      "planned_departure", formatInstant(trip.plannedDeparture()),
+                      "operator", trip.operatorCode(),
+                      "line", trip.lineCode(),
+                      "route", trip.routeCode(),
+                      "headway", "-",
+                      "depots", ScheduleCsvExporter.formatDepotCandidates(trip)))
+              .append(Component.space())
+              .append(
+                  routeActions(
+                      trip.companyCode(), trip.operatorCode(), trip.lineCode(), trip.routeCode())));
+    }
+
+    if (trips.size() > limit) {
       sender.sendMessage(locale.component("command.spawn.plan.truncated"));
     }
   }
@@ -277,29 +366,35 @@ public final class FtaSpawnCommand {
                 String.valueOf(groupCount),
                 "routes",
                 String.valueOf(routeCount))));
+    sender.sendMessage(spawnNavigationActions());
 
     if (lines.isEmpty()) {
       sender.sendMessage(locale.component("command.spawn.diagnose.empty"));
       return;
     }
 
+    Map<java.util.UUID, TicketRuntimeDiagnosis> runtimeDiagnostics =
+        buildTicketRuntimeDiagnostics();
     int shown = 0;
     for (LineSpawnDiagnosis line : lines) {
       if (shown >= limit) {
         break;
       }
       sender.sendMessage(
-          locale.component(
-              "command.spawn.diagnose.line",
-              Map.of(
-                  "operator",
-                  line.operator().code(),
-                  "line",
-                  line.line().code(),
-                  "line_baseline",
-                  line.lineBaseline(),
-                  "status",
-                  line.line().status().name())));
+          locale
+              .component(
+                  "command.spawn.diagnose.line",
+                  Map.of(
+                      "operator",
+                      line.operator().code(),
+                      "line",
+                      line.line().code(),
+                      "line_baseline",
+                      line.lineBaseline(),
+                      "status",
+                      line.line().status().name()))
+              .append(Component.space())
+              .append(lineActions(line.companyCode(), line.operator().code(), line.line().code())));
       for (GroupSpawnDiagnosis group : line.groups()) {
         sender.sendMessage(
             locale.component(
@@ -317,24 +412,31 @@ public final class FtaSpawnCommand {
           break;
         }
         shown++;
+        TicketRuntimeDiagnosis runtime =
+            runtimeDiagnostics.getOrDefault(route.route().id(), TicketRuntimeDiagnosis.empty());
         sender.sendMessage(
-            locale.component(
-                "command.spawn.diagnose.route",
-                Map.of(
-                    "route",
-                    route.route().code(),
-                    "operation",
-                    route.route().operationType().name(),
-                    "group",
-                    route.group(),
-                    "weight",
-                    route.weight(),
-                    "start",
-                    route.startNode(),
-                    "participates",
-                    route.participates() ? "是" : "否",
-                    "reasons",
-                    route.reasons())));
+            locale
+                .component(
+                    "command.spawn.diagnose.route",
+                    Map.ofEntries(
+                        Map.entry("route", route.route().code()),
+                        Map.entry("operation", route.route().operationType().name()),
+                        Map.entry("group", route.group()),
+                        Map.entry("weight", route.weight()),
+                        Map.entry("start", route.startNode()),
+                        Map.entry("depots", route.depotCandidates()),
+                        Map.entry("participates", route.participates() ? "是" : "否"),
+                        Map.entry("selected_depot", runtime.selectedDepot()),
+                        Map.entry("backoff_reason", runtime.backoffReason()),
+                        Map.entry("gate_blocker", runtime.gateBlocker()),
+                        Map.entry("reasons", route.reasons())))
+                .append(Component.space())
+                .append(
+                    routeActions(
+                        line.companyCode(),
+                        line.operator().code(),
+                        line.line().code(),
+                        route.route().code())));
       }
     }
 
@@ -360,7 +462,7 @@ public final class FtaSpawnCommand {
           if (line == null) {
             continue;
           }
-          LineSpawnDiagnosis diagnosis = diagnoseLine(provider, operator, line);
+          LineSpawnDiagnosis diagnosis = diagnoseLine(provider, company, operator, line);
           if (!diagnosis.routes().isEmpty() || !diagnosis.groups().isEmpty()) {
             lines.add(diagnosis);
           }
@@ -373,7 +475,8 @@ public final class FtaSpawnCommand {
     return List.copyOf(lines);
   }
 
-  private LineSpawnDiagnosis diagnoseLine(StorageProvider provider, Operator operator, Line line) {
+  private LineSpawnDiagnosis diagnoseLine(
+      StorageProvider provider, Company company, Operator operator, Line line) {
     List<Route> routes =
         provider.routes().listByLine(line.id()).stream()
             .filter(route -> route != null)
@@ -396,6 +499,7 @@ public final class FtaSpawnCommand {
     }
     List<GroupSpawnDiagnosis> groups = diagnoseGroups(line, configuredGroups, routeDiagnostics);
     return new LineSpawnDiagnosis(
+        company.code(),
         operator,
         line,
         formatSeconds(line.spawnFreqBaselineSec().filter(value -> value > 0)),
@@ -467,6 +571,7 @@ public final class FtaSpawnCommand {
         group,
         weightText,
         start.orElse("-"),
+        formatLineDepotCandidates(line, start.orElse("-")),
         blockers.isEmpty(),
         reasons.isEmpty() ? "-" : String.join(", ", reasons));
   }
@@ -501,6 +606,36 @@ public final class FtaSpawnCommand {
               groupRoutes.isEmpty() ? "-" : String.join(", ", groupRoutes)));
     }
     return List.copyOf(groups);
+  }
+
+  private Map<java.util.UUID, TicketRuntimeDiagnosis> buildTicketRuntimeDiagnostics() {
+    Map<java.util.UUID, TicketRuntimeDiagnosis> result = new LinkedHashMap<>();
+    plugin
+        .getSpawnManager()
+        .ifPresent(manager -> mergeTicketRuntimeDiagnostics(result, manager.snapshotQueue()));
+    plugin
+        .getSpawnTicketAssigner()
+        .ifPresent(
+            assigner -> mergeTicketRuntimeDiagnostics(result, assigner.snapshotPendingTickets()));
+    return Map.copyOf(result);
+  }
+
+  private static void mergeTicketRuntimeDiagnostics(
+      Map<java.util.UUID, TicketRuntimeDiagnosis> result, List<SpawnTicket> tickets) {
+    if (result == null || tickets == null || tickets.isEmpty()) {
+      return;
+    }
+    for (SpawnTicket ticket : tickets) {
+      if (ticket == null || ticket.service() == null || ticket.service().routeId() == null) {
+        continue;
+      }
+      TicketRuntimeDiagnosis diagnosis =
+          new TicketRuntimeDiagnosis(
+              ticket.selectedDepotNodeId().orElse("-"),
+              ticket.lastError().orElse("-"),
+              formatGateBlocker(ticket.lastError().orElse("-")));
+      result.merge(ticket.service().routeId(), diagnosis, TicketRuntimeDiagnosis::merge);
+    }
   }
 
   private static boolean isSpawnRelevant(Route route) {
@@ -683,6 +818,57 @@ public final class FtaSpawnCommand {
     return seconds.filter(value -> value > 0).map(value -> value + "s").orElse("-");
   }
 
+  private static String formatDepotCandidates(
+      Optional<StorageProvider> providerOpt, SpawnTicket ticket) {
+    if (ticket == null || ticket.service() == null) {
+      return "-";
+    }
+    if (providerOpt != null && providerOpt.isPresent()) {
+      StorageProvider provider = providerOpt.get();
+      Optional<Route> routeOpt = provider.routes().findById(ticket.service().routeId());
+      Optional<Line> lineOpt = routeOpt.flatMap(route -> provider.lines().findById(route.lineId()));
+      if (lineOpt.isPresent()) {
+        List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDepot> depots =
+            LineSpawnMetadata.parseDepots(lineOpt.get().metadata());
+        if (!depots.isEmpty()) {
+          return depots.stream()
+              .map(
+                  depot ->
+                      depot.weight() == 1 ? depot.nodeId() : depot.nodeId() + "*" + depot.weight())
+              .collect(java.util.stream.Collectors.joining(","));
+        }
+      }
+    }
+    String depot = ticket.service().depotNodeId();
+    return depot == null || depot.isBlank() ? "-" : depot;
+  }
+
+  private static String formatLineDepotCandidates(Line line, String fallback) {
+    if (line != null) {
+      List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDepot> depots =
+          LineSpawnMetadata.parseDepots(line.metadata());
+      if (!depots.isEmpty()) {
+        return depots.stream()
+            .map(
+                depot ->
+                    depot.weight() == 1 ? depot.nodeId() : depot.nodeId() + "*" + depot.weight())
+            .collect(java.util.stream.Collectors.joining(","));
+      }
+    }
+    return fallback == null || fallback.isBlank() ? "-" : fallback;
+  }
+
+  private static String formatGateBlocker(String error) {
+    if (error == null || error.isBlank()) {
+      return "-";
+    }
+    int marker = error.indexOf("blockers=");
+    if (marker < 0) {
+      return error.contains("gate-blocked") ? error : "-";
+    }
+    return error.substring(marker + "blockers=".length()).trim();
+  }
+
   /**
    * 列出发车队列（待发票据）。
    *
@@ -712,6 +898,7 @@ public final class FtaSpawnCommand {
     sender.sendMessage(
         locale.component(
             "command.spawn.queue.header", Map.of("count", String.valueOf(queue.size()))));
+    sender.sendMessage(spawnNavigationActions());
 
     if (queue.isEmpty()) {
       sender.sendMessage(locale.component("command.spawn.queue.empty"));
@@ -723,20 +910,31 @@ public final class FtaSpawnCommand {
         queue.stream().sorted(Comparator.comparing(SpawnTicket::dueAt)).limit(limit).toList();
 
     Instant now = Instant.now();
+    Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
     for (SpawnTicket ticket : sorted) {
       SpawnService svc = ticket.service();
       String dueSec = formatDurationSec(Duration.between(now, ticket.dueAt()));
       String notBeforeSec = formatDurationSec(Duration.between(now, ticket.notBefore()));
+      String error = ticket.lastError().orElse("-");
       sender.sendMessage(
-          locale.component(
-              "command.spawn.queue.entry",
-              Map.of(
-                  "operator", svc.operatorCode(),
-                  "line", svc.lineCode(),
-                  "route", svc.routeCode(),
-                  "due", dueSec,
-                  "not_before", notBeforeSec,
-                  "attempts", String.valueOf(ticket.attempts()))));
+          locale
+              .component(
+                  "command.spawn.queue.entry",
+                  Map.of(
+                      "operator", svc.operatorCode(),
+                      "line", svc.lineCode(),
+                      "route", svc.routeCode(),
+                      "due", dueSec,
+                      "not_before", notBeforeSec,
+                      "attempts", String.valueOf(ticket.attempts()),
+                      "candidates", formatDepotCandidates(providerOpt, ticket),
+                      "selected_depot", ticket.selectedDepotNodeId().orElse("-"),
+                      "backoff_reason", error,
+                      "gate_blocker", formatGateBlocker(error)))
+              .append(Component.space())
+              .append(
+                  routeActions(
+                      svc.companyCode(), svc.operatorCode(), svc.lineCode(), svc.routeCode())));
     }
 
     if (queue.size() > limit) {
@@ -773,6 +971,7 @@ public final class FtaSpawnCommand {
     sender.sendMessage(
         locale.component(
             "command.spawn.pending.header", Map.of("count", String.valueOf(pending.size()))));
+    sender.sendMessage(spawnNavigationActions());
 
     if (pending.isEmpty()) {
       sender.sendMessage(locale.component("command.spawn.pending.empty"));
@@ -784,20 +983,29 @@ public final class FtaSpawnCommand {
         pending.stream().sorted(Comparator.comparing(SpawnTicket::dueAt)).limit(limit).toList();
 
     Instant now = Instant.now();
+    Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
     for (SpawnTicket ticket : sorted) {
       SpawnService svc = ticket.service();
       String dueSec = formatDurationSec(Duration.between(now, ticket.dueAt()));
       String error = ticket.lastError().orElse("-");
       sender.sendMessage(
-          locale.component(
-              "command.spawn.pending.entry",
-              Map.of(
-                  "operator", svc.operatorCode(),
-                  "line", svc.lineCode(),
-                  "route", svc.routeCode(),
-                  "due", dueSec,
-                  "attempts", String.valueOf(ticket.attempts()),
-                  "error", error)));
+          locale
+              .component(
+                  "command.spawn.pending.entry",
+                  Map.of(
+                      "operator", svc.operatorCode(),
+                      "line", svc.lineCode(),
+                      "route", svc.routeCode(),
+                      "due", dueSec,
+                      "attempts", String.valueOf(ticket.attempts()),
+                      "error", error,
+                      "candidates", formatDepotCandidates(providerOpt, ticket),
+                      "selected_depot", ticket.selectedDepotNodeId().orElse("-"),
+                      "gate_blocker", formatGateBlocker(error)))
+              .append(Component.space())
+              .append(
+                  routeActions(
+                      svc.companyCode(), svc.operatorCode(), svc.lineCode(), svc.routeCode())));
     }
 
     if (pending.size() > limit) {
@@ -833,20 +1041,88 @@ public final class FtaSpawnCommand {
     assignerOpt.get().resetDiagnostics();
 
     sender.sendMessage(
+        locale
+            .component(
+                "command.spawn.reset.done",
+                Map.of(
+                    "queue",
+                    String.valueOf(clearedQueue),
+                    "pending",
+                    String.valueOf(clearedPending),
+                    "states",
+                    String.valueOf(clearedStates),
+                    "plan",
+                    planReset ? "✓" : "✗"))
+            .append(Component.space())
+            .append(spawnNavigationActions()));
+  }
+
+  private void previewCsv(CommandSender sender, int limit) {
+    LocaleManager locale = plugin.getLocaleManager();
+    Optional<StorageProvider> providerOpt = CommandStorageProviders.providerIfReady(plugin);
+    if (providerOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.not-ready"));
+      return;
+    }
+    Instant now = Instant.now();
+    ScheduleWindow window =
+        new SchedulePlanner(plugin.getLoggerManager()::debug)
+            .plan(providerOpt.get(), now, now.plus(Duration.ofHours(1)));
+    List<String> rows = ScheduleCsvExporter.export(window).lines().limit(limit + 1L).toList();
+    sender.sendMessage(
         locale.component(
-            "command.spawn.reset.done",
+            "command.spawn.export.csv.header",
             Map.of(
-                "queue",
-                String.valueOf(clearedQueue),
-                "pending",
-                String.valueOf(clearedPending),
-                "states",
-                String.valueOf(clearedStates),
-                "plan",
-                planReset ? "✓" : "✗")));
+                "rows",
+                String.valueOf(Math.max(0, rows.size() - 1)),
+                "limit",
+                String.valueOf(limit))));
+    for (String row : rows) {
+      sender.sendMessage(Component.text(row));
+    }
+    if (window.trips().stream().mapToInt(trip -> trip.plannedStops().size()).sum() > limit) {
+      sender.sendMessage(locale.component("command.spawn.export.csv.truncated"));
+    }
+  }
+
+  private Component spawnNavigationActions() {
+    return Component.text("  ")
+        .append(
+            CommandUx.actions(
+                CommandUx.runAction("[队列]", "/fta spawn queue", "查看待发票据"),
+                CommandUx.runAction("[pending]", "/fta spawn pending", "查看折返待发票据"),
+                CommandUx.runAction("[diagnose]", "/fta spawn diagnose", "诊断发车配置"),
+                CommandUx.runAction("[预览CSV]", "/fta spawn export csv 12", "预览计划 CSV 的前几行")));
+  }
+
+  private Component routeActions(String company, String operator, String line, String route) {
+    String prefix =
+        CommandUx.commandArgument(company)
+            + " "
+            + CommandUx.commandArgument(operator)
+            + " "
+            + CommandUx.commandArgument(line)
+            + " "
+            + CommandUx.commandArgument(route);
+    return CommandUx.actions(
+        CommandUx.runAction("[Route]", "/fta route info " + prefix, "查看 Route 信息"),
+        CommandUx.suggestAction("[调试]", "/fta route debug " + prefix + " ", "填充 Route 调试命令"));
+  }
+
+  private Component lineActions(String company, String operator, String line) {
+    String prefix =
+        CommandUx.commandArgument(company)
+            + " "
+            + CommandUx.commandArgument(operator)
+            + " "
+            + CommandUx.commandArgument(line);
+    return CommandUx.actions(
+        CommandUx.runAction("[线路]", "/fta line info " + prefix, "查看线路信息"),
+        CommandUx.suggestAction("[设置]", "/fta line set " + prefix + " ", "填充线路配置命令；继续输入 flag"));
   }
 
   private record LineSpawnDiagnosis(
+      String companyCode,
       Operator operator,
       Line line,
       String lineBaseline,
@@ -865,8 +1141,36 @@ public final class FtaSpawnCommand {
       String group,
       String weight,
       String startNode,
+      String depotCandidates,
       boolean participates,
       String reasons) {}
+
+  private record TicketRuntimeDiagnosis(
+      String selectedDepot, String backoffReason, String gateBlocker) {
+    private TicketRuntimeDiagnosis {
+      selectedDepot = selectedDepot == null || selectedDepot.isBlank() ? "-" : selectedDepot;
+      backoffReason = backoffReason == null || backoffReason.isBlank() ? "-" : backoffReason;
+      gateBlocker = gateBlocker == null || gateBlocker.isBlank() ? "-" : gateBlocker;
+    }
+
+    private static TicketRuntimeDiagnosis empty() {
+      return new TicketRuntimeDiagnosis("-", "-", "-");
+    }
+
+    private TicketRuntimeDiagnosis merge(TicketRuntimeDiagnosis other) {
+      if (other == null) {
+        return this;
+      }
+      return new TicketRuntimeDiagnosis(
+          prefer(this.selectedDepot, other.selectedDepot),
+          prefer(this.backoffReason, other.backoffReason),
+          prefer(this.gateBlocker, other.gateBlocker));
+    }
+
+    private static String prefer(String current, String next) {
+      return current == null || current.isBlank() || "-".equals(current) ? next : current;
+    }
+  }
 
   /**
    * 格式化 Instant 为 ISO 字符串。

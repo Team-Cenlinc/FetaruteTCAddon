@@ -121,7 +121,7 @@ public final class FtaOccupancyCommand {
             .permission("fetarute.occupancy")
             .required(
                 "train",
-                StringParser.stringParser(),
+                StringParser.quotedStringParser(),
                 CommandSuggestionProviders.<CommandSender>placeholder("<train>"))
             .handler(
                 ctx -> {
@@ -159,7 +159,7 @@ public final class FtaOccupancyCommand {
                     return;
                   }
                   String kindRaw = ctx.get("kind");
-                  String key = ctx.get("key");
+                  String key = CommandUx.unquoteCommandArgument(ctx.get("key"));
                   ResourceKind kind;
                   try {
                     kind = ResourceKind.valueOf(kindRaw.toUpperCase(Locale.ROOT));
@@ -342,6 +342,7 @@ public final class FtaOccupancyCommand {
               "command.occupancy.stats.spawn-error",
               Map.of("error", entry.getKey(), "count", String.valueOf(entry.getValue()))));
     }
+    sender.sendMessage(occupancyNavigationActions());
   }
 
   private void healOrphans(CommandSender sender) {
@@ -365,17 +366,20 @@ public final class FtaOccupancyCommand {
     RuntimeDispatchService.CleanupResult result =
         dispatch.cleanupOrphanOccupancyClaimsWithReport(active);
     sender.sendMessage(
-        locale.component(
-            "command.occupancy.heal.success",
-            Map.of(
-                "released",
-                String.valueOf(result.releasedTrains()),
-                "removed_progress",
-                String.valueOf(result.removedProgress()),
-                "removed_layover",
-                String.valueOf(result.removedLayovers()),
-                "at",
-                result.at().toString())));
+        locale
+            .component(
+                "command.occupancy.heal.success",
+                Map.of(
+                    "released",
+                    String.valueOf(result.releasedTrains()),
+                    "removed_progress",
+                    String.valueOf(result.removedProgress()),
+                    "removed_layover",
+                    String.valueOf(result.removedLayovers()),
+                    "at",
+                    result.at().toString()))
+            .append(Component.space())
+            .append(occupancyNavigationActions()));
   }
 
   /** 输出当前占用快照（按资源排序）。 */
@@ -402,17 +406,20 @@ public final class FtaOccupancyCommand {
         break;
       }
       sender.sendMessage(
-          locale.component(
-              "command.occupancy.dump.entry",
-              Map.of(
-                  "resource",
-                  claim.resource().toString(),
-                  "train",
-                  claim.trainName(),
-                  "since",
-                  claim.acquiredAt().toString(),
-                  "headway",
-                  claim.headway().toString())));
+          locale
+              .component(
+                  "command.occupancy.dump.entry",
+                  Map.of(
+                      "resource",
+                      claim.resource().toString(),
+                      "train",
+                      claim.trainName(),
+                      "since",
+                      claim.acquiredAt().toString(),
+                      "headway",
+                      claim.headway().toString()))
+              .append(Component.space())
+              .append(claimActions(claim)));
       count++;
     }
   }
@@ -467,24 +474,58 @@ public final class FtaOccupancyCommand {
           break;
         }
         sender.sendMessage(
-            locale.component(
-                "command.occupancy.queue.item",
-                Map.of(
-                    "train",
-                    entry.trainName(),
-                    "direction",
-                    formatDirection(entry.direction()),
-                    "priority",
-                    String.valueOf(entry.priority()),
-                    "entry_order",
-                    formatEntryOrder(entry.entryOrder()),
-                    "since",
-                    entry.firstSeen().toString(),
-                    "seen",
-                    entry.lastSeen().toString())));
+            locale
+                .component(
+                    "command.occupancy.queue.item",
+                    Map.of(
+                        "train",
+                        entry.trainName(),
+                        "direction",
+                        formatDirection(entry.direction()),
+                        "priority",
+                        String.valueOf(entry.priority()),
+                        "entry_order",
+                        formatEntryOrder(entry.entryOrder()),
+                        "since",
+                        entry.firstSeen().toString(),
+                        "seen",
+                        entry.lastSeen().toString()))
+                .append(Component.space())
+                .append(trainReleaseAction(entry.trainName())));
         printed++;
       }
     }
+  }
+
+  private Component claimActions(OccupancyClaim claim) {
+    return CommandUx.actions(
+        trainReleaseAction(claim.trainName()), resourceReleaseAction(claim.resource()));
+  }
+
+  private Component trainReleaseAction(String trainName) {
+    return CommandUx.suggestAction(
+        "[release]",
+        "/fta occupancy release " + CommandUx.commandArgument(trainName),
+        "填充按列车释放占用命令；回车后才执行");
+  }
+
+  private Component resourceReleaseAction(OccupancyResource resource) {
+    return CommandUx.suggestAction(
+        "[release-resource]",
+        "/fta occupancy release-resource "
+            + resource.kind().name()
+            + " "
+            + CommandUx.commandArgument(resource.key()),
+        "填充按资源释放占用命令；回车后才执行");
+  }
+
+  private Component occupancyNavigationActions() {
+    return Component.text("  ")
+        .append(
+            CommandUx.actions(
+                CommandUx.runAction("[dump]", "/fta occupancy dump", "查看当前占用"),
+                CommandUx.runAction("[queue]", "/fta occupancy queue", "查看排队队列"),
+                CommandUx.runAction("[stats]", "/fta occupancy stats", "查看运行统计")));
   }
 
   /** 注册 /fta occupancy debug 子命令。 */
@@ -684,6 +725,19 @@ public final class FtaOccupancyCommand {
     }
     if (!decision.blockers().isEmpty()) {
       int shown = 0;
+      Map<
+              String,
+              org.fetarute
+                  .fetaruteTCAddon
+                  .dispatcher
+                  .runtime
+                  .RouteProgressRegistry
+                  .RouteProgressEntry>
+          progress =
+              plugin
+                  .getRuntimeDispatchService()
+                  .map(RuntimeDispatchService::snapshotProgressEntries)
+                  .orElse(Map.of());
       for (OccupancyClaim claim : decision.blockers()) {
         if (claim == null || claim.resource() == null) {
           continue;
@@ -700,11 +754,87 @@ public final class FtaOccupancyCommand {
                     claim.resource().toString(),
                     "train",
                     claim.trainName(),
+                    "route",
+                    claim.routeId().map(routeId -> routeId.value()).orElse("-"),
+                    "index",
+                    formatClaimIndex(progress, claim.trainName()),
+                    "role",
+                    classifyDebugBlocker(request.trainName(), progress, claim),
                     "direction",
                     formatDirection(claim.corridorDirection().orElse(null)))));
         shown++;
       }
     }
+  }
+
+  private static String formatClaimIndex(
+      Map<
+              String,
+              org.fetarute
+                  .fetaruteTCAddon
+                  .dispatcher
+                  .runtime
+                  .RouteProgressRegistry
+                  .RouteProgressEntry>
+          progress,
+      String trainName) {
+    return findProgressEntry(progress, trainName)
+        .map(entry -> String.valueOf(entry.currentIndex()))
+        .orElse("-");
+  }
+
+  private static String classifyDebugBlocker(
+      String requestTrainName,
+      Map<
+              String,
+              org.fetarute
+                  .fetaruteTCAddon
+                  .dispatcher
+                  .runtime
+                  .RouteProgressRegistry
+                  .RouteProgressEntry>
+          progress,
+      OccupancyClaim claim) {
+    if (claim == null || claim.trainName() == null) {
+      return "unknown";
+    }
+    if (requestTrainName != null && claim.trainName().equalsIgnoreCase(requestTrainName)) {
+      return "self";
+    }
+    if (findProgressEntry(progress, claim.trainName()).isEmpty()) {
+      return claim.routeId().isPresent() ? "depot_spawn" : "orphan";
+    }
+    return "active";
+  }
+
+  private static Optional<
+          org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry.RouteProgressEntry>
+      findProgressEntry(
+          Map<
+                  String,
+                  org.fetarute
+                      .fetaruteTCAddon
+                      .dispatcher
+                      .runtime
+                      .RouteProgressRegistry
+                      .RouteProgressEntry>
+              progress,
+          String trainName) {
+    if (progress == null || progress.isEmpty() || trainName == null || trainName.isBlank()) {
+      return Optional.empty();
+    }
+    for (var entry : progress.entrySet()) {
+      if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(trainName)) {
+        return Optional.ofNullable(entry.getValue());
+      }
+      var value = entry.getValue();
+      if (value != null
+          && value.trainName() != null
+          && value.trainName().equalsIgnoreCase(trainName)) {
+        return Optional.of(value);
+      }
+    }
+    return Optional.empty();
   }
 
   /** 构造调试占用请求（不含线路信息与走廊方向）。 */

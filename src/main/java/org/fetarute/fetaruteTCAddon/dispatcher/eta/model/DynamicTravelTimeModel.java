@@ -41,6 +41,13 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
   private final TrainMotionParams motionParams;
   private final double fallbackSpeedBps;
   private final ApproachingConfig approachingConfig;
+  private final EdgeSpeedResolver edgeSpeedResolver;
+
+  /** 解析 ETA 使用的边有效限速。 */
+  @FunctionalInterface
+  public interface EdgeSpeedResolver {
+    double resolve(RailGraph graph, RailEdge edge, double fallbackSpeedBps);
+  }
 
   /**
    * 构造动态模型（不含 approaching 限速）。
@@ -63,6 +70,22 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
       TrainMotionParams motionParams,
       double fallbackSpeedBps,
       ApproachingConfig approachingConfig) {
+    this(motionParams, fallbackSpeedBps, approachingConfig, null);
+  }
+
+  /**
+   * 构造动态模型（含 approaching 与边有效限速解析器）。
+   *
+   * @param motionParams 列车运动参数（加减速）
+   * @param fallbackSpeedBps 当边未设限速时的默认速度（blocks/s），必须为正
+   * @param approachingConfig approaching 限速配置
+   * @param edgeSpeedResolver 边有效限速解析器；为空时使用 {@link RailEdge#baseSpeedLimit()}
+   */
+  public DynamicTravelTimeModel(
+      TrainMotionParams motionParams,
+      double fallbackSpeedBps,
+      ApproachingConfig approachingConfig,
+      EdgeSpeedResolver edgeSpeedResolver) {
     this.motionParams = Objects.requireNonNull(motionParams, "motionParams");
     if (!Double.isFinite(fallbackSpeedBps) || fallbackSpeedBps <= 0.0) {
       throw new IllegalArgumentException("fallbackSpeedBps 必须为正数");
@@ -70,6 +93,7 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
     this.fallbackSpeedBps = fallbackSpeedBps;
     this.approachingConfig =
         approachingConfig != null ? approachingConfig : ApproachingConfig.disabled();
+    this.edgeSpeedResolver = edgeSpeedResolver;
   }
 
   @Override
@@ -82,7 +106,7 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
       return Optional.empty();
     }
 
-    double targetSpeed = resolveEdgeSpeed(edge);
+    double targetSpeed = resolveEdgeSpeed(graph, edge);
     double seconds = computeTravelTime(lengthBlocks, targetSpeed, motionParams);
     if (!Double.isFinite(seconds) || seconds < 0.0) {
       return Optional.empty();
@@ -136,7 +160,7 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
         return Optional.empty();
       }
 
-      double edgeTargetSpeed = resolveEdgeSpeed(edge);
+      double edgeTargetSpeed = resolveEdgeSpeed(graph, edge);
 
       // 确定初速：首边用外部传入或边限速，后续边用上一边出口速度
       double v0 = Double.isNaN(currentSpeed) ? edgeTargetSpeed : currentSpeed;
@@ -149,7 +173,7 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
       } else {
         // 中间边：末速取下一边限速与当前边限速的较小值（平滑过渡）
         RailEdge nextEdge = edges.get(i + 1);
-        double nextSpeed = nextEdge != null ? resolveEdgeSpeed(nextEdge) : edgeTargetSpeed;
+        double nextSpeed = nextEdge != null ? resolveEdgeSpeed(graph, nextEdge) : edgeTargetSpeed;
         vEnd = Math.min(edgeTargetSpeed, nextSpeed);
       }
 
@@ -284,7 +308,13 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
     return lengthBlocks / speed;
   }
 
-  private double resolveEdgeSpeed(RailEdge edge) {
+  private double resolveEdgeSpeed(RailGraph graph, RailEdge edge) {
+    if (edgeSpeedResolver != null) {
+      double effective = edgeSpeedResolver.resolve(graph, edge, fallbackSpeedBps);
+      if (Double.isFinite(effective) && effective > 0.0) {
+        return effective;
+      }
+    }
     double limit = edge.baseSpeedLimit();
     if (limit > 0.0 && Double.isFinite(limit)) {
       return limit;

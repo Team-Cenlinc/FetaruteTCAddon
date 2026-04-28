@@ -18,8 +18,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -67,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideLister;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailControlParsers;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailSpeed;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphExplorer;
@@ -133,11 +132,6 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaGraphCommand {
 
   private final FetaruteTCAddon plugin;
-  private static final Pattern SPEED_PATTERN =
-      Pattern.compile(
-          "^\\s*(?<value>[+-]?(?:\\d+(?:\\.\\d+)?|\\.\\d+))\\s*(?<unit>kmh|km/h|kph|bps|bpt)?\\s*$",
-          Pattern.CASE_INSENSITIVE);
-  private static final Pattern TTL_PATTERN = Pattern.compile("(?i)(\\d+)([smhd])");
   private static final int VALIDATION_ISSUE_LIMIT = 20;
 
   /** 世界维度的构建任务：同一世界同一时间只允许一个 build/continue 任务运行。 */
@@ -4036,21 +4030,39 @@ public final class FtaGraphCommand {
                   }
 
                   sender.sendMessage(
-                      locale.component(
-                          "command.graph.query.result",
-                          Map.of(
-                              "from",
-                              from.value(),
-                              "to",
-                              to.value(),
-                              "hops",
-                              String.valueOf(path.edges().size()),
-                              "distance_blocks",
-                              String.valueOf(path.totalLengthBlocks()),
-                              "speed",
-                              speedText,
-                              "eta",
-                              etaText)));
+                      locale
+                          .component(
+                              "command.graph.query.result",
+                              Map.of(
+                                  "from",
+                                  from.value(),
+                                  "to",
+                                  to.value(),
+                                  "hops",
+                                  String.valueOf(path.edges().size()),
+                                  "distance_blocks",
+                                  String.valueOf(path.totalLengthBlocks()),
+                                  "speed",
+                                  speedText,
+                                  "eta",
+                                  etaText))
+                          .append(Component.space())
+                          .append(
+                              CommandUx.actions(
+                                  CommandUx.runAction(
+                                      "[路径]",
+                                      "/fta graph path "
+                                          + CommandUx.quoteCommandArgument(from.value())
+                                          + " "
+                                          + CommandUx.quoteCommandArgument(to.value()),
+                                      "查看分页最短路"),
+                                  CommandUx.runAction(
+                                      "[区间详情]",
+                                      "/fta graph edge get path "
+                                          + CommandUx.quoteCommandArgument(from.value())
+                                          + " "
+                                          + CommandUx.quoteCommandArgument(to.value()),
+                                      "查看路径 edge 详情"))));
                 }));
 
     manager.command(
@@ -4925,84 +4937,12 @@ public final class FtaGraphCommand {
    * <p>支持：{@code 80kmh} / {@code 8bps} / {@code 0.4bpt}；省略单位时默认视为 {@code kmh}。
    */
   private static Optional<RailSpeed> parseSpeedArg(String raw) {
-    if (raw == null || raw.isBlank()) {
-      return Optional.empty();
-    }
-    Matcher matcher = SPEED_PATTERN.matcher(raw);
-    if (!matcher.matches()) {
-      return Optional.empty();
-    }
-    String valueText = matcher.group("value");
-    String unit = matcher.group("unit");
-    if (valueText == null || valueText.isBlank()) {
-      return Optional.empty();
-    }
-    double value;
-    try {
-      value = Double.parseDouble(valueText);
-    } catch (NumberFormatException ex) {
-      return Optional.empty();
-    }
-    if (!Double.isFinite(value) || value <= 0.0) {
-      return Optional.empty();
-    }
-
-    String normalizedUnit = unit != null ? unit.trim().toLowerCase(Locale.ROOT) : "kmh";
-    try {
-      return switch (normalizedUnit) {
-        case "kmh", "km/h", "kph" -> Optional.of(RailSpeed.ofKilometersPerHour(value));
-        case "bps" -> Optional.of(RailSpeed.ofBlocksPerSecond(value));
-        case "bpt" -> Optional.of(RailSpeed.ofBlocksPerTick(value));
-        default -> Optional.empty();
-      };
-    } catch (IllegalArgumentException ex) {
-      return Optional.empty();
-    }
+    return RailControlParsers.parseSpeed(raw);
   }
 
   /** 解析 TTL 参数：支持 {@code 90s}、{@code 1m}、{@code 2h}、{@code 1d}，以及组合形式（如 {@code 1h30m}）。 */
   private static Optional<Duration> parseTtlArg(String raw) {
-    if (raw == null || raw.isBlank()) {
-      return Optional.empty();
-    }
-    String trimmed = raw.trim();
-    Matcher matcher = TTL_PATTERN.matcher(trimmed);
-    int index = 0;
-    Duration total = Duration.ZERO;
-    boolean matchedAny = false;
-    while (matcher.find()) {
-      if (matcher.start() != index) {
-        return Optional.empty();
-      }
-      matchedAny = true;
-      long value;
-      try {
-        value = Long.parseLong(matcher.group(1));
-      } catch (NumberFormatException ex) {
-        return Optional.empty();
-      }
-      if (value <= 0) {
-        return Optional.empty();
-      }
-      char unit = matcher.group(2).toLowerCase(Locale.ROOT).charAt(0);
-      try {
-        total =
-            switch (unit) {
-              case 's' -> total.plusSeconds(value);
-              case 'm' -> total.plusMinutes(value);
-              case 'h' -> total.plusHours(value);
-              case 'd' -> total.plusDays(value);
-              default -> total;
-            };
-      } catch (ArithmeticException ex) {
-        return Optional.empty();
-      }
-      index = matcher.end();
-    }
-    if (!matchedAny || index != trimmed.length()) {
-      return Optional.empty();
-    }
-    return total.isZero() ? Optional.empty() : Optional.of(total);
+    return RailControlParsers.parseTtl(raw);
   }
 
   /** 判断图中是否存在某条“直接区间边”。 */

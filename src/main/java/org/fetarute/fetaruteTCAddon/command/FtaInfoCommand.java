@@ -108,6 +108,11 @@ public final class FtaInfoCommand {
         locale.component("command.help.hover-spawn"));
     sendHelpEntry(
         sender,
+        locale.component("command.help.entry-speed"),
+        ClickEvent.suggestCommand("/fta speed section "),
+        locale.component("command.help.hover-speed"));
+    sendHelpEntry(
+        sender,
         locale.component("command.help.entry-eta"),
         ClickEvent.suggestCommand("/fta eta "),
         locale.component("command.help.hover-eta"));

@@ -126,6 +126,8 @@ command:
     hover-occupancy: "<gray>点击填充:</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
     entry-spawn: "<gray>/fta spawn</gray> <white>-</white> <dark_aqua>发车计划与队列诊断</dark_aqua>"
     hover-spawn: "<gray>点击填充:</gray> <white>/fta spawn </white>\n<dark_aqua>发车计划与队列诊断</dark_aqua>"
+    entry-speed: "<gray>/fta speed section</gray> <white>-</white> <dark_aqua>业务区间限速</dark_aqua>"
+    hover-speed: "<gray>点击填充:</gray> <white>/fta speed section </white>\n<dark_aqua>按车站/节点区间批量设置 rail_edge_overrides</dark_aqua>"
     entry-eta: "<gray>/fta eta</gray> <white>-</white> <dark_aqua>ETA 诊断输出</dark_aqua>"
     hover-eta: "<gray>点击填充:</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
     entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置与诊断</dark_aqua>"
@@ -141,6 +143,58 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+
+  speed:
+    section:
+      help:
+        header: "<prefix> <dark_aqua>业务区间限速</dark_aqua>"
+        entry-preview: "<gray>/fta speed section preview</gray> <white>-</white> <dark_aqua>预览区间展开路径</dark_aqua>"
+        hover-preview: "<gray>点击填充:</gray> <white>/fta speed section preview </white>\n<dark_aqua>参数:</dark_aqua> <white>\"fromNode\" \"toNode\" [speed] [ttl]</white>"
+        entry-set: "<gray>/fta speed section set</gray> <white>-</white> <dark_aqua>按区间设置长期/临时限速</dark_aqua>"
+        hover-set: "<gray>点击填充:</gray> <white>/fta speed section set </white>\n<dark_aqua>参数:</dark_aqua> <white>\"fromNode\" \"toNode\" 80kmh [5m]</white>"
+        entry-clear: "<gray>/fta speed section clear</gray> <white>-</white> <dark_aqua>清除区间长期与临时限速</dark_aqua>"
+        hover-clear: "<gray>点击填充:</gray> <white>/fta speed section clear </white>\n<dark_aqua>参数:</dark_aqua> <white>\"fromNode\" \"toNode\"</white>"
+        entry-list: "<gray>/fta speed section list</gray> <white>-</white> <dark_aqua>列出业务入口写入的区间限速覆盖</dark_aqua>"
+        hover-list: "<gray>点击填充:</gray> <white>/fta speed section list </white>\n<dark_aqua>可选:</dark_aqua> <white>node \"nodeId\" [page]</white>"
+        entry-stick: "<gray>/fta speed stick give</gray> <white>-</white> <dark_aqua>发放区间限速设置棍</dark_aqua>"
+        hover-stick: "<gray>点击填充:</gray> <white>/fta speed stick give </white>\n<dark_aqua>用法:</dark_aqua> <white>速度 [ttl]</white>\n<dark_aqua>左键两端节点后按最短路径直接应用</dark_aqua>"
+      invalid-speed: "<prefix> <red>速度参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
+      invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持:</dark_aqua> <white>90s/1m/2h/1h30m</white>"
+      no-world: "<prefix> <red>未找到可用世界</red>"
+      unreachable: "<prefix> <red>区间不可达或节点缺失</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray> <dark_aqua>请先检查 /fta graph build</dark_aqua>"
+      storage-failed: "<prefix> <red>写入区间限速失败</red> <gray><error></gray>"
+      preview:
+        path: "<prefix> <dark_aqua>区间路径预览</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, len=<white><distance_blocks></white> blocks)</gray> <gray><path></gray>"
+        with-speed: "<prefix> <yellow>区间限速预览</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>, ttl=<white><ttl></white>)</gray> <gray><path></gray>"
+        edge: "<gray>  #<seq></gray> <white><a></white> <gray>↔</gray> <white><b></white>"
+      set:
+        success: "<prefix> <dark_aqua>已设置业务区间限速</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, speed=<white><speed></white>)</gray>"
+        temp-success: "<prefix> <yellow>已设置业务区间临时限速</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>, speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
+      clear:
+        none: "<prefix> <gray>该业务区间没有可清除的限速覆盖</gray> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
+        success: "<prefix> <dark_aqua>已清除业务区间限速</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, edges=<white><edges></white>)</gray>"
+      list:
+        header: "<prefix> <dark_aqua>业务区间限速覆盖</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>, page=<white><page></white>/<white><pages></white>)</gray>"
+        empty: "<prefix> <gray>当前世界没有生效中的区间限速覆盖</gray>"
+        entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(speed=<white><speed></white>, temp=<white><temp_speed></white>, until=<white><until></white>, updatedAt=<white><updated_at></white>)</gray>"
+    stick:
+      player-only: "<prefix> <red>限速设置棍只能由玩家领取</red>"
+      not-ready: "<prefix> <red>限速设置棍尚未初始化</red>"
+      invalid: "<prefix> <red>这根限速设置棍缺少速度参数</red> <dark_aqua>请重新执行</dark_aqua> <white>/fta speed stick give 80kmh [ttl]</white>"
+      no-sign: "<prefix> <gray>这里没有可识别的调度节点</gray> <gray>(x=<white><x></white>, y=<white><y></white>, z=<white><z></white>)</gray>"
+      name: "<dark_aqua>FTA 限速设置棍</dark_aqua> <gray>(<speed>)</gray>"
+      lore-1: "<gray>左键两个节点：按当前最短路径应用限速</gray>"
+      lore-2: "<gray>速度:</gray> <white><speed></white> <gray>TTL:</gray> <white><ttl></white>"
+      lore-3: "<gray>右键可清除当前选点；不会改变调度核心行为</gray>"
+      give:
+        success: "<prefix> <dark_aqua>已获得限速设置棍</dark_aqua> <gray>(speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
+        dropped: "<prefix> <gray>背包已满，限速设置棍已掉落在脚下</gray>"
+      select:
+        first: "<prefix> <dark_aqua>已选择限速起点：</dark_aqua><white><node></white> <gray>(speed=<white><speed></white>, ttl=<white><ttl></white>；请再点终点)</gray>"
+        cancelled: "<prefix> <gray>已清除限速设置棍选点</gray>"
+      apply:
+        success: "<prefix> <dark_aqua>已通过设置棍应用区间限速</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>)</gray>"
+        temp-success: "<prefix> <yellow>已通过设置棍应用区间临时限速</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
 
   template:
     invalid-type: "<prefix> <red>未知模板类型:</red> <white><type></white>"
@@ -214,7 +268,7 @@ command:
       no-resources: "<prefix> <red>无法生成占用资源</red>"
       decision: "<prefix> <dark_aqua>占用判定</dark_aqua> <gray>(scope=<white><scope></white>, edges=<white><edges></white>, allowed=<white><allowed></white>, earliest=<white><earliest></white>, signal=<white><signal></white>, blockers=<white><blockers></white>)</gray>"
       deadlock-release: "<prefix> <gold>冲突区放行</gold> <gray>(blockers=<white><count></white>)</gray>"
-      blocker: "<gray>  •</gray> <white><resource></white> <gray>train=<white><train></white> dir=<white><direction></white></gray>"
+      blocker: "<gray>  •</gray> <white><resource></white> <gray>train=<white><train></white> route=<white><route></white> idx=<white><index></white> role=<white><role></white> dir=<white><direction></white></gray>"
       blocker-truncated: "<gray>  … 已截断（blocker 列表）</gray>"
     help:
       header: "<prefix> <dark_aqua>调度占用命令</dark_aqua>"
@@ -249,31 +303,37 @@ command:
       hover-pending: "<gray>点击填充:</gray> <white>/fta spawn pending </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-reset: "<gray>/fta spawn reset</gray> <white>-</white> <dark_aqua>清空发车队列并重置计划</dark_aqua>"
       hover-reset: "<gray>点击执行:</gray> <white>/fta spawn reset</white>\n<dark_aqua>清空 queue/pending 并重置计划</dark_aqua>"
+      entry-export-csv: "<gray>/fta spawn export csv</gray> <white>-</white> <dark_aqua>预览计划 CSV</dark_aqua>"
+      hover-export-csv: "<gray>点击填充:</gray> <white>/fta spawn export csv </white>\n<dark_aqua>只在聊天中预览，不写文件、不改变队列</dark_aqua>"
     plan:
       header: "<prefix> <dark_aqua>发车计划</dark_aqua> <gray>(count=<white><count></white>, built=<white><built_at></white>)</gray>"
       empty: "<prefix> <gray>暂无可发车服务</gray>"
-      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>headway=<white><headway></white> depot=<white><depot></white></gray>"
+      entry: "<gray>-</gray> <white><source></white> <gray>depart=<white><planned_departure></white></gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>depots=<white><depots></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta spawn plan <limit> 调整数量</gray>"
     diagnose:
       header: "<prefix> <dark_aqua>发车配置诊断</dark_aqua> <gray>(lines=<white><lines></white>, groups=<white><groups></white>, routes=<white><routes></white>)</gray>"
       empty: "<prefix> <gray>暂无可诊断的发车 route</gray>"
       line: "<prefix> <dark_aqua><operator></dark_aqua>/<dark_aqua><line></dark_aqua> <gray>lineBaseline=<white><line_baseline></white> status=<white><status></white></gray>"
       group: "<gray>  group=<white><group></white> baseline=<white><baseline></white> routes=<white><routes></white></gray>"
-      route: "<gray>  - route=<white><route></white> op=<white><operation></white> group=<white><group></white> weight=<white><weight></white> start=<white><start></white> participates=<white><participates></white> reasons=<white><reasons></white></gray>"
+      route: "<gray>  - route=<white><route></white> op=<white><operation></white> group=<white><group></white> weight=<white><weight></white> start=<white><start></white> depots=<white><depots></white> participates=<white><participates></white> selectedDepot=<white><selected_depot></white> backoff=<white><backoff_reason></white> gate=<white><gate_blocker></white> reasons=<white><reasons></white></gray>"
       truncated: "<gray>… 已省略 <white><count></white> 条 route，使用 /fta spawn diagnose <limit> 调整数量</gray>"
     queue:
       header: "<prefix> <dark_aqua>发车队列</dark_aqua> <gray>(count=<white><count></white>)</gray>"
       empty: "<prefix> <gray>暂无排队票据</gray>"
-      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> notBefore=<white><not_before></white> attempts=<white><attempts></white></gray>"
+      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> notBefore=<white><not_before></white> attempts=<white><attempts></white> candidates=<white><candidates></white> selectedDepot=<white><selected_depot></white> backoff=<white><backoff_reason></white> gate=<white><gate_blocker></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta spawn queue <limit> 调整数量</gray>"
     pending:
       header: "<prefix> <dark_aqua>折返待发</dark_aqua> <gray>(count=<white><count></white>)</gray>"
       empty: "<prefix> <gray>暂无折返待发票据</gray>"
-      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> attempts=<white><attempts></white> error=<white><error></white></gray>"
+      entry: "<gray>-</gray> <white><operator></white>/<white><line></white>/<white><route></white> <gray>due=<white><due></white> attempts=<white><attempts></white> candidates=<white><candidates></white> selectedDepot=<white><selected_depot></white> gate=<white><gate_blocker></white> error=<white><error></white></gray>"
       truncated: "<gray>… 已截断，使用 /fta spawn pending <limit> 调整数量</gray>"
     reset:
       not-supported: "<prefix> <gray>当前发车管理器不支持重置</gray>"
       done: "<prefix> <dark_aqua>发车队列已重置</dark_aqua> <gray>(queue=<white><queue></white>, pending=<white><pending></white>, states=<white><states></white>, plan=<white><plan></white>)</gray>"
+    export:
+      csv:
+        header: "<prefix> <dark_aqua>计划 CSV 预览</dark_aqua> <gray>(rows=<white><rows></white>, limit=<white><limit></white>)</gray>"
+        truncated: "<gray>… 已截断，使用 /fta spawn export csv <limit> 调整预览行数</gray>"
 
   eta:
     not-ready: "<prefix> <red>ETA 模块未就绪</red>"
@@ -898,8 +958,12 @@ command:
       list-header: "<prefix> <dark_aqua>诊断数据 (<count> 条)</dark_aqua>"
       header: "<prefix> <dark_aqua>━━━ 列车 <train> ━━━</dark_aqua> <gray>路线: <route></gray>"
       nodes: "  <gray>节点:</gray> <white><current></white> <gray>→</gray> <white><next></white>"
+      state: "  <gray>状态:</gray> index=<white><index></white> gate=<white><gate></white> reason=<white><reason></white>"
       speed: "  <gray>速度:</gray> 当前=<white><current></white> 目标=<white><target></white> 边限速=<white><edge_limit></white> 建议=<white><recommended></white> <gray>bps</gray>"
+      speed-limits: "  <gray>限速链:</gray> aspect=<white><aspect_base_speed></white> caution=<white><caution_source></white> approach=<white><approach_limit></white> ma=<white><movement_authority_limit></white> edgeAhead=<white><edge_speed_lookahead></white> curve=<white><speed_curve_limit></white> final=<white><final_target></white> limiter=<white><final_limiter></white> <gray>bps</gray>"
       lookahead: "  <gray>前瞻:</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> <gray>blocks</gray>"
+      approach: "  <gray>Approach:</gray> node=<white><node></white> kind=<white><kind></white> reason=<white><reason></white> distance=<white><distance></white> limit=<white><limit></white>"
+      occupancy: "  <gray>占用诊断:</gray> blockers=<white><blockers></white> request=<white><request></white> claims=<white><claims></white>"
       signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white>"
       set:
         route:

@@ -36,11 +36,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
@@ -150,6 +152,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final ConfigManager configManager;
   private final SignNodeRegistry signNodeRegistry;
   private final SpawnControl spawnControl;
+  private final DepotDispatchCoordinator depotDispatchCoordinator;
   private final Consumer<String> debugLogger;
 
   private final LayoverRegistry layoverRegistry;
@@ -248,6 +251,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.spawnControl = Objects.requireNonNull(spawnControl, "spawnControl");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.retryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
+    this.depotDispatchCoordinator = new DepotSpawnScheduler(this.retryDelay);
     this.maxSpawnPerTick = Math.max(1, maxSpawnPerTick);
     this.maxRetryAttempts = Math.max(1, maxRetryAttempts);
   }
@@ -358,14 +362,119 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     dueTickets = orderDueTicketsWithRouteRotation(dueTickets);
+    dueTickets = applyDepotDispatchCoordination(provider, dueTickets, now);
+    dueTickets = orderDepotTicketsByLineDepotLoad(provider, dueTickets);
     int remaining = maxSpawnPerTick;
     for (SpawnTicket ticket : dueTickets) {
-      if (ticket == null || remaining <= 0) {
-        break;
+      if (ticket == null) {
+        continue;
+      }
+      if (remaining <= 0) {
+        deferWithoutAttempt(ticket, now, "spawn-per-tick-limit");
+        continue;
       }
       remaining--;
       trySpawn(provider, now, ticket);
     }
+  }
+
+  private List<SpawnTicket> applyDepotDispatchCoordination(
+      StorageProvider provider, List<SpawnTicket> dueTickets, Instant now) {
+    if (provider == null || dueTickets == null || dueTickets.isEmpty()) {
+      return dueTickets == null ? List.of() : dueTickets;
+    }
+    List<SpawnTicket> depotTickets = new ArrayList<>();
+    LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+    Map<String, Integer> selectedThisTick = new HashMap<>();
+    for (SpawnTicket ticket : dueTickets) {
+      if (!isDepotSpawnTicket(provider, ticket)) {
+        continue;
+      }
+      SpawnTicket prepared =
+          prepareDepotDispatchTicket(provider, ticket, runtimeSnapshot, selectedThisTick, now);
+      depotTickets.add(prepared);
+    }
+    if (depotTickets.isEmpty()) {
+      return dueTickets;
+    }
+    DepotDispatchCoordinator.DispatchBatch batch =
+        depotDispatchCoordinator.coordinate(depotTickets, now);
+    for (SpawnTicket deferred : batch.deferred()) {
+      spawnManager.requeue(deferred);
+    }
+    Map<UUID, SpawnTicket> readyDepotTickets =
+        batch.ready().stream().collect(Collectors.toMap(SpawnTicket::id, ticket -> ticket));
+    List<SpawnTicket> result = new ArrayList<>(dueTickets.size());
+    for (SpawnTicket original : dueTickets) {
+      if (!isDepotSpawnTicket(provider, original)) {
+        result.add(original);
+        continue;
+      }
+      SpawnTicket ready = readyDepotTickets.get(original.id());
+      if (ready != null) {
+        result.add(ready);
+      }
+    }
+    return List.copyOf(result);
+  }
+
+  /**
+   * 在 depot 仲裁前固化本次实际 depot。
+   *
+   * <p>原始票据可能只携带 route 的默认 CRET 或 DYNAMIC depot 规范；如果直接按该值仲裁，会把多 depot 线路和动态股道错误折叠到同一个 key。这里复用实际
+   * spawn 前的 depot 选择口径，使仲裁、backoff 与 gate 检查使用同一个 depot。
+   */
+  private SpawnTicket prepareDepotDispatchTicket(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      LineRuntimeSnapshot runtimeSnapshot,
+      Map<String, Integer> selectedThisTick,
+      Instant now) {
+    if (provider == null || ticket == null || ticket.service() == null) {
+      return ticket;
+    }
+    SpawnTicket prepared = ticket;
+    List<SpawnDepot> lineDepots = List.of();
+    Optional<SpawnDepot> configuredSelection = Optional.empty();
+    if (prepared.selectedDepotNodeId().isEmpty()) {
+      Optional<Route> routeOpt = provider.routes().findById(ticket.service().routeId());
+      Optional<Line> lineOpt = routeOpt.flatMap(route -> provider.lines().findById(route.lineId()));
+      if (lineOpt.isPresent()) {
+        lineDepots = LineSpawnMetadata.parseDepots(lineOpt.get().metadata());
+        if (!lineDepots.isEmpty()) {
+          Optional<SpawnDepot> selectedDepotOpt =
+              selectBalancedDepot(
+                  provider, lineOpt.get().id(), lineDepots, runtimeSnapshot, selectedThisTick, now);
+          if (selectedDepotOpt.isPresent()) {
+            configuredSelection = selectedDepotOpt;
+            prepared = prepared.withSelectedDepot(selectedDepotOpt.get().nodeId());
+          }
+        }
+      }
+    } else {
+      Optional<Route> routeOpt = provider.routes().findById(ticket.service().routeId());
+      Optional<Line> lineOpt = routeOpt.flatMap(route -> provider.lines().findById(route.lineId()));
+      if (lineOpt.isPresent()) {
+        lineDepots = LineSpawnMetadata.parseDepots(lineOpt.get().metadata());
+      }
+    }
+    prepared = materializeDynamicDepotSelection(ticket.service(), prepared);
+    recordSelectedDepotForTick(prepared, lineDepots, configuredSelection, selectedThisTick);
+    return prepared;
+  }
+
+  private static boolean isDepotSpawnTicket(StorageProvider provider, SpawnTicket ticket) {
+    if (provider == null || ticket == null || ticket.service() == null) {
+      return false;
+    }
+    Optional<Route> routeOpt = provider.routes().findById(ticket.service().routeId());
+    if (routeOpt.isEmpty() || routeOpt.get().operationType() == RouteOperationType.RETURN) {
+      return false;
+    }
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
+        provider.routeStops().listByRoute(routeOpt.get().id());
+    return !stops.isEmpty()
+        && SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isPresent();
   }
 
   /**
@@ -647,9 +756,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
     Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty()) {
+    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
       LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      selectedDepotOpt = selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot);
+      selectedDepotOpt =
+          selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot, Map.of(), now);
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
@@ -668,14 +778,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
     if (worldIdOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "depot-world-missing");
+      requeue(effectiveTicket, now, "depot-world-missing");
       return false;
     }
     Optional<RailGraph> graphOpt =
         railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
     if (graphOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "graph-missing");
+      requeue(effectiveTicket, now, "graph-missing");
       return false;
     }
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
@@ -691,20 +801,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
     if (requestOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "occupancy-context-failed");
+      requeue(effectiveTicket, now, "occupancy-context-failed");
       return false;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    OccupancyDecision decision = previewSpawnGateDecision(request);
     if (!isCleanSpawnGateDecision(decision)) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "gate-blocked:" + spawnGateSignalText(decision));
-      return false;
-    }
-    decision = occupancyManager.acquire(request);
-    if (!isCleanSpawnGateDecision(decision)) {
-      releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "gate-blocked:" + spawnGateSignalText(decision));
+      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(decision));
       return false;
     }
 
@@ -715,16 +819,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
-      requeue(ticket, now, "spawn-failed");
+      requeue(effectiveTicket, now, "spawn-failed");
       return false;
     }
     if (groupOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
-      requeue(ticket, now, "spawn-failed");
+      requeue(effectiveTicket, now, "spawn-failed");
       return false;
     }
     MinecartGroup group = groupOpt.get();
+    decision = occupancyManager.acquire(request);
+    if (!isCleanSpawnGateDecision(decision)) {
+      releaseSpawnLease(spawnLease);
+      occupancyManager.releaseByTrain(trainName);
+      destroySpawnedGroup(group);
+      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(decision));
+      return false;
+    }
     if (group.getProperties() != null && route.waypoints().size() >= 2) {
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
@@ -1698,9 +1810,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
     Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty()) {
+    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
       LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      selectedDepotOpt = selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot);
+      selectedDepotOpt =
+          selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot, Map.of(), now);
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
@@ -1719,14 +1832,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
     if (worldIdOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "fallback-depot-world-missing");
+      requeue(effectiveTicket, now, "fallback-depot-world-missing");
       return false;
     }
     Optional<RailGraph> graphOpt =
         railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
     if (graphOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "fallback-graph-missing");
+      requeue(effectiveTicket, now, "fallback-graph-missing");
       return false;
     }
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
@@ -1742,20 +1855,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
     if (requestOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "fallback-occupancy-context-failed");
+      requeue(effectiveTicket, now, "fallback-occupancy-context-failed");
       return false;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = occupancyManager.canEnter(request);
+    OccupancyDecision decision = previewSpawnGateDecision(request);
     if (!isCleanSpawnGateDecision(decision)) {
       releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
-      return false;
-    }
-    decision = occupancyManager.acquire(request);
-    if (!isCleanSpawnGateDecision(decision)) {
-      releaseSpawnLease(spawnLease);
-      requeue(ticket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
+      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
       return false;
     }
 
@@ -1766,16 +1873,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("Layover 降级发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
-      requeue(ticket, now, "fallback-spawn-failed");
+      requeue(effectiveTicket, now, "fallback-spawn-failed");
       return false;
     }
     if (groupOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
-      requeue(ticket, now, "fallback-spawn-failed");
+      requeue(effectiveTicket, now, "fallback-spawn-failed");
       return false;
     }
     MinecartGroup group = groupOpt.get();
+    decision = occupancyManager.acquire(request);
+    if (!isCleanSpawnGateDecision(decision)) {
+      releaseSpawnLease(spawnLease);
+      occupancyManager.releaseByTrain(trainName);
+      destroySpawnedGroup(group);
+      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
+      return false;
+    }
     if (group.getProperties() != null && route.waypoints().size() >= 2) {
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
@@ -1818,6 +1933,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private void requeue(SpawnTicket ticket, Instant now, String error) {
     if (ticket == null) {
       return;
+    }
+    if (isDepotGateFailure(error)) {
+      depotDispatchCoordinator.recordOccupancyFailure(ticket, now);
     }
     int nextAttempts = ticket.attempts() + 1;
     if (maxRetryAttempts > 0 && nextAttempts >= maxRetryAttempts) {
@@ -1867,6 +1985,32 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
   }
 
+  private void deferWithoutAttempt(SpawnTicket ticket, Instant now, String reason) {
+    if (ticket == null) {
+      return;
+    }
+    Instant base = now == null ? Instant.now() : now;
+    Instant next = base.plus(retryDelay);
+    SpawnTicket deferred = ticket.delayedUntil(next, reason);
+    spawnManager.requeue(deferred);
+    debugLogger.accept(
+        "自动发车延后: ticket="
+            + ticket.id()
+            + " route="
+            + ticket.service().routeCode()
+            + " notBefore="
+            + deferred.notBefore()
+            + " reason="
+            + reason);
+  }
+
+  private static boolean isDepotGateFailure(String error) {
+    if (error == null) {
+      return false;
+    }
+    return error.contains("gate-blocked") || error.contains("occupancy");
+  }
+
   private void warnThrottled(String key, String message) {
     long now = System.currentTimeMillis();
     long intervalMs = 60_000L;
@@ -1906,7 +2050,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
         ctxOpt =
             builder.buildContextFromNodes(
-                trainName, Optional.ofNullable(route.id()), spawnWaypoints, 0, now, 100);
+                trainName,
+                Optional.ofNullable(route.id()),
+                spawnWaypoints,
+                0,
+                now,
+                100 + Math.max(0, ticket == null ? 0 : ticket.priority()));
     if (ctxOpt.isEmpty()) {
       return Optional.empty();
     }
@@ -2228,13 +2377,61 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private static String spawnGateSignalText(OccupancyDecision decision) {
-    return decision == null || decision.signal() == null ? "unknown" : decision.signal().name();
+    if (decision == null) {
+      return "unknown";
+    }
+    String signal = decision.signal() == null ? "unknown" : decision.signal().name();
+    if (decision.blockers().isEmpty()) {
+      return signal;
+    }
+    String blockers =
+        decision.blockers().stream()
+            .filter(Objects::nonNull)
+            .limit(3)
+            .map(SimpleTicketAssigner::formatGateBlocker)
+            .collect(Collectors.joining(","));
+    return blockers.isBlank() ? signal : signal + " blockers=" + blockers;
+  }
+
+  private static String formatGateBlocker(OccupancyClaim claim) {
+    if (claim == null || claim.resource() == null) {
+      return "unknown";
+    }
+    String owner =
+        claim.trainName() == null || claim.trainName().isBlank() ? "-" : claim.trainName();
+    return claim.resource().kind().name() + ":" + claim.resource().key() + "@" + owner;
+  }
+
+  /**
+   * Depot 实体化前只做只读 gate 预判。
+   *
+   * <p>预判阶段还没有 TrainCarts group，不能写入 occupancy claim，也不能把待生成列车加入冲突队列。真正的资源 acquire 必须在 spawn 成功后执行；
+   * 若此时 acquire 失败，会销毁刚创建的 group 并重排票据。
+   */
+  private OccupancyDecision previewSpawnGateDecision(OccupancyRequest request) {
+    if (occupancyManager instanceof OccupancyPreviewSupport preview) {
+      return preview.canEnterPreview(request);
+    }
+    return occupancyManager.canEnter(request);
   }
 
   private static void releaseSpawnLease(SpawnControl.Lease lease) {
     if (lease != null) {
       lease.release();
     }
+  }
+
+  /**
+   * 回收已实体化但未取得调度占用的 Depot 列车。
+   *
+   * <p>spawn 后 acquire 可能因同 tick 内其他状态变化失败；此时必须销毁刚创建的 TrainCarts group，避免没有 occupancy lease
+   * 的实体车留在线路上。
+   */
+  private static void destroySpawnedGroup(MinecartGroup group) {
+    if (group == null) {
+      return;
+    }
+    new TrainCartsRuntimeHandle(group).destroy();
   }
 
   private OptionalInt resolveLineMaxTrains(StorageProvider provider, Line line) {
@@ -2280,11 +2477,127 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return max;
   }
 
+  /**
+   * 按“本线路各 depot 在线负载”重排本轮 depot 发车票据。
+   *
+   * <p>{@code DepotDispatchCoordinator} 只负责同一 depot 的互斥与退避；当 {@code maxSpawnPerTick} 小于本轮 ready
+   * 票据数时，仍需要在进入执行循环前把低负载 depot 的票据排到前面。否则列表稳定排序会让 route code 靠前、且经常被单线 depot gate 阻塞的票据反复占用本 tick
+   * 执行名额，导致同线路另一个 depot 的交路组长期得不到尝试。
+   */
+  private List<SpawnTicket> orderDepotTicketsByLineDepotLoad(
+      StorageProvider provider, List<SpawnTicket> dueTickets) {
+    if (provider == null || dueTickets == null || dueTickets.size() <= 1) {
+      return dueTickets == null ? List.of() : dueTickets;
+    }
+    LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+    Map<UUID, DepotLoadSnapshot> loadByLine = new HashMap<>();
+    List<DepotExecutionCandidate> candidates = new ArrayList<>();
+    for (int index = 0; index < dueTickets.size(); index++) {
+      SpawnTicket ticket = dueTickets.get(index);
+      if (!isDepotSpawnTicket(provider, ticket)) {
+        continue;
+      }
+      Optional<DepotExecutionCandidate> candidate =
+          buildDepotExecutionCandidate(provider, runtimeSnapshot, loadByLine, ticket, index);
+      candidate.ifPresent(candidates::add);
+    }
+    if (candidates.size() <= 1) {
+      return dueTickets;
+    }
+    candidates.sort(
+        Comparator.comparingDouble(DepotExecutionCandidate::loadScore)
+            .thenComparingInt(DepotExecutionCandidate::originalIndex));
+    Set<UUID> reorderIds =
+        candidates.stream().map(candidate -> candidate.ticket().id()).collect(Collectors.toSet());
+    ArrayDeque<SpawnTicket> orderedDepotTickets = new ArrayDeque<>();
+    for (DepotExecutionCandidate candidate : candidates) {
+      orderedDepotTickets.add(candidate.ticket());
+    }
+
+    List<SpawnTicket> reordered = new ArrayList<>(dueTickets.size());
+    for (SpawnTicket original : dueTickets) {
+      if (original == null || !reorderIds.contains(original.id())) {
+        reordered.add(original);
+        continue;
+      }
+      SpawnTicket next = orderedDepotTickets.pollFirst();
+      reordered.add(next == null ? original : next);
+    }
+    return List.copyOf(reordered);
+  }
+
+  private Optional<DepotExecutionCandidate> buildDepotExecutionCandidate(
+      StorageProvider provider,
+      LineRuntimeSnapshot runtimeSnapshot,
+      Map<UUID, DepotLoadSnapshot> loadByLine,
+      SpawnTicket ticket,
+      int originalIndex) {
+    if (provider == null
+        || runtimeSnapshot == null
+        || loadByLine == null
+        || ticket == null
+        || ticket.service() == null) {
+      return Optional.empty();
+    }
+    UUID lineId = ticket.service().lineId();
+    if (lineId == null) {
+      return Optional.empty();
+    }
+    DepotLoadSnapshot loadSnapshot =
+        loadByLine.computeIfAbsent(
+            lineId, ignored -> buildDepotLoadSnapshot(provider, runtimeSnapshot, lineId));
+    if (loadSnapshot == null || loadSnapshot.depots().isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<String> depotSpec = resolveDepotSpec(ticket.service(), ticket.selectedDepotNodeId());
+    if (depotSpec.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<String> configuredKey =
+        resolveConfiguredDepotKey(
+            depotSpec.get(), loadSnapshot.depots(), loadSnapshot.aliasIndex());
+    if (configuredKey.isEmpty()) {
+      return Optional.empty();
+    }
+    int active = loadSnapshot.activeByDepot().getOrDefault(configuredKey.get(), 0);
+    int weight = Math.max(1, loadSnapshot.weightByDepot().getOrDefault(configuredKey.get(), 1));
+    double score = active / (double) weight;
+    return Optional.of(new DepotExecutionCandidate(ticket, originalIndex, score));
+  }
+
+  private DepotLoadSnapshot buildDepotLoadSnapshot(
+      StorageProvider provider, LineRuntimeSnapshot runtimeSnapshot, UUID lineId) {
+    if (provider == null || runtimeSnapshot == null || lineId == null) {
+      return DepotLoadSnapshot.empty();
+    }
+    Optional<Line> lineOpt = provider.lines().findById(lineId);
+    if (lineOpt.isEmpty()) {
+      return DepotLoadSnapshot.empty();
+    }
+    List<SpawnDepot> depots = LineSpawnMetadata.parseDepots(lineOpt.get().metadata());
+    if (depots.isEmpty()) {
+      return DepotLoadSnapshot.empty();
+    }
+    Map<String, String> aliasIndex = buildDepotAliasIndex(depots);
+    Map<String, Integer> activeByDepot =
+        runtimeSnapshot.countActiveTrainsByDepot(provider, lineId, depots, aliasIndex);
+    Map<String, Integer> weightByDepot = new HashMap<>();
+    for (SpawnDepot depot : depots) {
+      if (depot == null) {
+        continue;
+      }
+      weightByDepot.merge(depot.normalizedKey(), Math.max(1, depot.weight()), Integer::sum);
+    }
+    return new DepotLoadSnapshot(depots, aliasIndex, activeByDepot, Map.copyOf(weightByDepot));
+  }
+
   private Optional<SpawnDepot> selectBalancedDepot(
       StorageProvider provider,
       UUID lineId,
       List<SpawnDepot> depots,
-      LineRuntimeSnapshot runtimeSnapshot) {
+      LineRuntimeSnapshot runtimeSnapshot,
+      Map<String, Integer> selectedThisTick,
+      Instant now) {
     if (provider == null || lineId == null || depots == null || depots.isEmpty()) {
       return Optional.empty();
     }
@@ -2298,7 +2611,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         continue;
       }
       int active = activeByDepot.getOrDefault(depot.normalizedKey(), 0);
-      double score = active / (double) depot.weight();
+      int selected =
+          selectedThisTick == null ? 0 : selectedThisTick.getOrDefault(depot.normalizedKey(), 0);
+      double backoffPenalty =
+          depotDispatchCoordinator.backoffUntil(depot.nodeId(), now).isPresent() ? 1000.0D : 0.0D;
+      double score = active / (double) depot.weight() + selected + backoffPenalty;
       if (score < bestScore - 0.000001D) {
         bestDepots.clear();
         bestDepots.add(depot);
@@ -2310,6 +2627,43 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
     }
     return pickDepotByRoundRobin(lineId, bestDepots);
+  }
+
+  private void recordSelectedDepotForTick(
+      SpawnTicket ticket,
+      List<SpawnDepot> lineDepots,
+      Optional<SpawnDepot> configuredSelection,
+      Map<String, Integer> selectedThisTick) {
+    if (ticket == null || selectedThisTick == null) {
+      return;
+    }
+    Optional<String> configuredKey =
+        configuredSelection
+            .map(SpawnDepot::normalizedKey)
+            .or(
+                () ->
+                    resolveDepotSpec(ticket.service(), ticket.selectedDepotNodeId())
+                        .flatMap(
+                            depotSpec ->
+                                resolveConfiguredDepotKey(
+                                    depotSpec, lineDepots, buildDepotAliasIndex(lineDepots))));
+    String key =
+        configuredKey.orElseGet(
+            () ->
+                ticket
+                    .selectedDepotNodeId()
+                    .map(SimpleTicketAssigner::normalizeDepotKey)
+                    .orElse(""));
+    if (!key.isBlank()) {
+      selectedThisTick.merge(key, 1, Integer::sum);
+    }
+  }
+
+  private static String normalizeDepotKey(String depotNodeId) {
+    if (depotNodeId == null || depotNodeId.isBlank()) {
+      return "";
+    }
+    return depotNodeId.trim().toLowerCase(Locale.ROOT);
   }
 
   /**
@@ -2353,6 +2707,30 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
     }
     return Map.copyOf(aliases);
+  }
+
+  private static Optional<String> resolveConfiguredDepotKey(
+      String depotSpec, List<SpawnDepot> depots, Map<String, String> aliasIndex) {
+    if (depotSpec == null || depotSpec.isBlank() || depots == null || depots.isEmpty()) {
+      return Optional.empty();
+    }
+    String normalized = normalizeDepotKey(depotSpec);
+    if (aliasIndex != null && aliasIndex.containsKey(normalized)) {
+      return Optional.of(aliasIndex.get(normalized));
+    }
+    for (SpawnDepot depot : depots) {
+      if (depot == null) {
+        continue;
+      }
+      if (depot.normalizedKey().equals(normalized)) {
+        return Optional.of(depot.normalizedKey());
+      }
+      if (SpawnDirectiveParser.isDynamicTarget(depot.nodeId())
+          && matchesDynamicDepotNode(depot.nodeId(), depotSpec)) {
+        return Optional.of(depot.normalizedKey());
+      }
+    }
+    return Optional.empty();
   }
 
   /**
@@ -2473,6 +2851,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   /** DYNAMIC depot 轨道号闭区间。 */
   private record TrackRange(int from, int to) {}
+
+  /** 本轮执行排序使用的 depot 负载候选。 */
+  private record DepotExecutionCandidate(SpawnTicket ticket, int originalIndex, double loadScore) {}
+
+  /** 某条线路的 depot 负载快照。 */
+  private record DepotLoadSnapshot(
+      List<SpawnDepot> depots,
+      Map<String, String> aliasIndex,
+      Map<String, Integer> activeByDepot,
+      Map<String, Integer> weightByDepot) {
+    private DepotLoadSnapshot {
+      depots = depots == null ? List.of() : List.copyOf(depots);
+      aliasIndex = aliasIndex == null ? Map.of() : Map.copyOf(aliasIndex);
+      activeByDepot = activeByDepot == null ? Map.of() : Map.copyOf(activeByDepot);
+      weightByDepot = weightByDepot == null ? Map.of() : Map.copyOf(weightByDepot);
+    }
+
+    private static DepotLoadSnapshot empty() {
+      return new DepotLoadSnapshot(List.of(), Map.of(), Map.of(), Map.of());
+    }
+  }
 
   /** 一次 tick 内使用的运行时快照，用于线路发车限额与 depot 负载统计。 */
   private static final class LineRuntimeSnapshot {

@@ -71,7 +71,7 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("create")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("code", StringParser.stringParser(), codeSuggestions)
             .required("name", StringParser.quotedStringParser(), nameSuggestions)
             .optional("secondaryName", StringParser.quotedStringParser(), secondarySuggestions)
@@ -139,7 +139,7 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("list")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -217,8 +217,8 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("set")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(colorFlag)
@@ -323,8 +323,8 @@ public final class FtaOperatorCommand {
             .literal("operator")
             .literal("delete")
             .senderType(Player.class)
-            .required("company", StringParser.stringParser(), companySuggestions)
-            .required("operator", StringParser.stringParser(), operatorSuggestions)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .flag(confirmFlag)
             .handler(
                 ctx -> {

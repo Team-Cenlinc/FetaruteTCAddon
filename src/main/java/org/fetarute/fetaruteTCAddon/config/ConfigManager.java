@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 19;
+  private static final int EXPECTED_CONFIG_VERSION = 21;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -30,6 +30,9 @@ public final class ConfigManager {
   private static final int DEFAULT_REAR_GUARD_EDGES = 1;
   private static final int DEFAULT_SWITCHER_ZONE_EDGES = 3;
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
+  private static final double DEFAULT_APPROACH_WINDOW_BLOCKS = 96.0;
+  private static final int DEFAULT_APPROACH_WINDOW_EDGES = 0;
+  private static final int DEFAULT_APPROACH_TARGET_EDGES = 1;
   private static final boolean DEFAULT_HUD_BOSSBAR_ENABLED = true;
   private static final int DEFAULT_HUD_BOSSBAR_TICK_INTERVAL = 10;
   private static final Optional<String> DEFAULT_HUD_BOSSBAR_TEMPLATE = Optional.empty();
@@ -434,6 +437,9 @@ public final class ConfigManager {
     double approachSpeed = DEFAULT_APPROACH_SPEED_BPS;
     double cautionSpeed = DEFAULT_CAUTION_SPEED_BPS;
     double approachDepotSpeed = DEFAULT_APPROACH_DEPOT_SPEED_BPS;
+    double approachWindowBlocks = DEFAULT_APPROACH_WINDOW_BLOCKS;
+    int approachWindowEdges = DEFAULT_APPROACH_WINDOW_EDGES;
+    int approachTargetEdges = DEFAULT_APPROACH_TARGET_EDGES;
     boolean speedCurveEnabled = DEFAULT_SPEED_CURVE_ENABLED;
     SpeedCurveType speedCurveType = DEFAULT_SPEED_CURVE_TYPE;
     double speedCurveFactor = DEFAULT_SPEED_CURVE_FACTOR;
@@ -555,6 +561,28 @@ public final class ConfigManager {
       } else {
         logger.warning("runtime.approach-depot-speed-bps 配置无效: " + configuredDepotApproach);
       }
+      double configuredApproachWindowBlocks =
+          section.getDouble("approach-window-blocks", approachWindowBlocks);
+      if (Double.isFinite(configuredApproachWindowBlocks)
+          && configuredApproachWindowBlocks >= 0.0) {
+        approachWindowBlocks = configuredApproachWindowBlocks;
+      } else {
+        logger.warning("runtime.approach-window-blocks 配置无效: " + configuredApproachWindowBlocks);
+      }
+      int configuredApproachWindowEdges =
+          section.getInt("approach-window-edges", approachWindowEdges);
+      if (configuredApproachWindowEdges >= 0) {
+        approachWindowEdges = configuredApproachWindowEdges;
+      } else {
+        logger.warning("runtime.approach-window-edges 配置无效: " + configuredApproachWindowEdges);
+      }
+      int configuredApproachTargetEdges =
+          section.getInt("approach-target-edges", approachTargetEdges);
+      if (configuredApproachTargetEdges >= 0) {
+        approachTargetEdges = configuredApproachTargetEdges;
+      } else {
+        logger.warning("runtime.approach-target-edges 配置无效: " + configuredApproachTargetEdges);
+      }
       boolean configuredSpeedCurve = section.getBoolean("speed-curve-enabled", speedCurveEnabled);
       speedCurveEnabled = configuredSpeedCurve;
       String rawCurveType = section.getString("speed-curve-type", speedCurveType.name());
@@ -659,6 +687,9 @@ public final class ConfigManager {
         approachSpeed,
         cautionSpeed,
         approachDepotSpeed,
+        approachWindowBlocks,
+        approachWindowEdges,
+        approachTargetEdges,
         speedCurveEnabled,
         speedCurveType,
         speedCurveFactor,
@@ -956,6 +987,9 @@ public final class ConfigManager {
       double approachSpeedBps,
       double cautionSpeedBps,
       double approachDepotSpeedBps,
+      double approachWindowBlocks,
+      int approachWindowEdges,
+      int approachTargetEdges,
       boolean speedCurveEnabled,
       SpeedCurveType speedCurveType,
       double speedCurveFactor,
@@ -1006,6 +1040,15 @@ public final class ConfigManager {
       }
       if (!Double.isFinite(approachDepotSpeedBps) || approachDepotSpeedBps < 0.0) {
         throw new IllegalArgumentException("approachDepotSpeedBps 必须为非负数");
+      }
+      if (!Double.isFinite(approachWindowBlocks) || approachWindowBlocks < 0.0) {
+        throw new IllegalArgumentException("approachWindowBlocks 必须为非负数");
+      }
+      if (approachWindowEdges < 0) {
+        throw new IllegalArgumentException("approachWindowEdges 必须为非负数");
+      }
+      if (approachTargetEdges < 0) {
+        throw new IllegalArgumentException("approachTargetEdges 必须为非负数");
       }
       if (speedCurveType == null) {
         throw new IllegalArgumentException("speedCurveType 不能为空");
@@ -1060,6 +1103,78 @@ public final class ConfigManager {
           hudPlayerDisplayTemplate == null
               ? Optional.empty()
               : hudPlayerDisplayTemplate.map(String::trim);
+    }
+
+    /** 兼容仍按旧参数列表创建配置快照的调用点；新 approach 窗口使用内置默认值。 */
+    public RuntimeSettings(
+        int dispatchTickIntervalTicks,
+        int launchCooldownTicks,
+        int lookaheadEdges,
+        int minClearEdges,
+        int rearGuardEdges,
+        int switcherZoneEdges,
+        double approachSpeedBps,
+        double cautionSpeedBps,
+        double approachDepotSpeedBps,
+        boolean speedCurveEnabled,
+        SpeedCurveType speedCurveType,
+        double speedCurveFactor,
+        double speedCurveEarlyBrakeBlocks,
+        double failoverStallSpeedBps,
+        int failoverStallTicks,
+        boolean failoverUnreachableStop,
+        boolean movementAuthorityEnabled,
+        double movementAuthorityStopMarginBlocks,
+        double movementAuthorityCautionMarginBlocks,
+        double speedCommandHysteresisBps,
+        double speedCommandAccelFactor,
+        double speedCommandDecelFactor,
+        int distanceCacheRefreshSeconds,
+        boolean hudBossBarEnabled,
+        int hudBossBarTickIntervalTicks,
+        Optional<String> hudBossBarTemplate,
+        boolean hudActionBarEnabled,
+        int hudActionBarTickIntervalTicks,
+        Optional<String> hudActionBarTemplate,
+        boolean hudPlayerDisplayEnabled,
+        int hudPlayerDisplayTickIntervalTicks,
+        Optional<String> hudPlayerDisplayTemplate) {
+      this(
+          dispatchTickIntervalTicks,
+          launchCooldownTicks,
+          lookaheadEdges,
+          minClearEdges,
+          rearGuardEdges,
+          switcherZoneEdges,
+          approachSpeedBps,
+          cautionSpeedBps,
+          approachDepotSpeedBps,
+          DEFAULT_APPROACH_WINDOW_BLOCKS,
+          DEFAULT_APPROACH_WINDOW_EDGES,
+          DEFAULT_APPROACH_TARGET_EDGES,
+          speedCurveEnabled,
+          speedCurveType,
+          speedCurveFactor,
+          speedCurveEarlyBrakeBlocks,
+          failoverStallSpeedBps,
+          failoverStallTicks,
+          failoverUnreachableStop,
+          movementAuthorityEnabled,
+          movementAuthorityStopMarginBlocks,
+          movementAuthorityCautionMarginBlocks,
+          speedCommandHysteresisBps,
+          speedCommandAccelFactor,
+          speedCommandDecelFactor,
+          distanceCacheRefreshSeconds,
+          hudBossBarEnabled,
+          hudBossBarTickIntervalTicks,
+          hudBossBarTemplate,
+          hudActionBarEnabled,
+          hudActionBarTickIntervalTicks,
+          hudActionBarTemplate,
+          hudPlayerDisplayEnabled,
+          hudPlayerDisplayTickIntervalTicks,
+          hudPlayerDisplayTemplate);
     }
   }
 
