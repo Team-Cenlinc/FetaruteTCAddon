@@ -308,13 +308,11 @@ public final class TrainLaunchManager {
 
     double accelLimitPerSecond =
         Math.max(0.0, config.accelBps2() * runtimeSettings.speedCommandAccelFactor());
-    double decelLimitPerSecond =
-        Math.max(0.0, config.decelBps2() * runtimeSettings.speedCommandDecelFactor());
-
     double referenceSpeed =
         lastCommandOpt.orElseGet(() -> resolveCurrentSpeedBps(train, requested));
 
     double limited = requested;
+    boolean lowering = requested < referenceSpeed;
     if (requested > referenceSpeed) {
       if (bypassAccelerationLimit) {
         limited = requested;
@@ -322,13 +320,13 @@ public final class TrainLaunchManager {
         double maxIncrease = accelLimitPerSecond * deltaSeconds;
         limited = Math.min(requested, referenceSpeed + maxIncrease);
       }
-    } else if (requested < referenceSpeed) {
-      double maxDecrease = decelLimitPerSecond * deltaSeconds;
-      limited = Math.max(requested, referenceSpeed - maxDecrease);
+    } else if (lowering) {
+      // 降低 speedLimit 是安全约束，不能被命令限幅延迟；实际平滑制动由 TrainCarts WaitAcceleration 接管。
+      limited = requested;
     }
 
     double hysteresis = Math.max(0.0, runtimeSettings.speedCommandHysteresisBps());
-    if (!bypassHysteresis && Math.abs(limited - referenceSpeed) < hysteresis) {
+    if (!lowering && !bypassHysteresis && Math.abs(limited - referenceSpeed) < hysteresis) {
       limited = referenceSpeed;
     }
     limited = Math.max(0.0, limited);

@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
@@ -78,6 +79,37 @@ class TrainLaunchManagerTest {
     double appliedBpt = speedCaptor.getValue();
     double expectedBpt = 5.0 / 20.0;
     assertTrue(Math.abs(appliedBpt - expectedBpt) < 1.0e-6, "迟滞应保持上一命令速度");
+  }
+
+  @Test
+  void applyControlAppliesLowerSpeedLimitWithoutDecelerationRateLimit() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-lower",
+            "FTA_LAST_SPEED_CMD_BPS=20.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 20.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            false,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+
+    assertEquals(8.0 / 20.0, speedCaptor.getValue(), 1.0e-6);
+    assertEquals(8.0, result.finalTargetBps(), 1.0e-6);
   }
 
   @Test

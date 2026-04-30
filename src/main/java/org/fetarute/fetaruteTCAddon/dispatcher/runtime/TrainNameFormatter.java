@@ -18,17 +18,17 @@ public final class TrainNameFormatter {
    * <ul>
    *   <li>{@code OP}/{@code LINE}：运营商/线路 code（空值会回退为占位符）
    *   <li>{@code PATTERN}：运行图模式首字母（L/R/N/E/X）
-   *   <li>{@code DEST}：目的地显示名的首字符（用于人眼快速识别）
+   *   <li>{@code DEST}：目的地 code 的首字符（用于人眼快速识别）
    *   <li>{@code SEQ}：由 runId 派生的 4 位序号（仅用于区分，不保证连续）
    * </ul>
    */
   public static String buildTrainName(
-      String operator, String line, RoutePatternType pattern, String destName, UUID runId) {
+      String operator, String line, RoutePatternType pattern, String destinationCode, UUID runId) {
     Objects.requireNonNull(runId, "runId");
     String op = safeNameToken(operator, "OP");
     String ln = safeNameToken(line, "LINE");
     String patternInit = patternInitial(pattern);
-    String destInit = firstGlyph(destName);
+    String destInit = firstGlyph(destinationCode);
     int raw = runId.hashCode();
     int normalized = raw == Integer.MIN_VALUE ? 0 : Math.abs(raw);
     String seq = String.format(Locale.ROOT, "%04d", normalized % 10000);

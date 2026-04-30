@@ -86,4 +86,5 @@ tags:
   - `runtime.speed-command-accel-factor`
   - `runtime.speed-command-decel-factor`
 - 发车/放行时会跳过“上行限幅”，由 TrainCarts launch + WaitAcceleration 接管起步斜率，避免发车目标速度被压到极低。
+- 降低 `speedLimit` 不做降速限幅，也不受迟滞保护。边限速、前方低限速、移动授权、approach 与 STOP 这类安全上限必须立即写入；实际车辆不会瞬间减速，平滑制动由 WaitAcceleration 负责。
 - 授权距离不足时会触发移动授权降级（Movement Authority），与速度限幅协同防止冒进与急剧速度跳变。

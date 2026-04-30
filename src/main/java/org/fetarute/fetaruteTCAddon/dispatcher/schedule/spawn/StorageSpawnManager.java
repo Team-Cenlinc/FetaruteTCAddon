@@ -78,6 +78,9 @@ public final class StorageSpawnManager
               .thenComparing(ticket -> ticket.id().toString()));
   private long globalSequence = 0;
 
+  /** 计划生成游标：在多线路/多交路组长期积压时按服务轮转出票，避免固定排序饿死后续服务。 */
+  private int generationCursor = 0;
+
   public StorageSpawnManager(SpawnManagerSettings settings, Consumer<String> debugLogger) {
     this.settings = settings == null ? SpawnManagerSettings.defaults() : settings;
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
@@ -145,6 +148,7 @@ public final class StorageSpawnManager
     plan = SpawnPlan.empty();
     forecastPlan = SpawnPlan.empty();
     lastPlanRefresh = Instant.EPOCH;
+    generationCursor = 0;
     debugLogger.accept(
         "SpawnManager reset: queue=" + queueSize + " states=" + stateSize + " at " + now);
     return new SpawnResetResult(queueSize, stateSize, true);
@@ -217,6 +221,9 @@ public final class StorageSpawnManager
       }
     }
     states.keySet().removeIf(key -> !live.contains(key));
+    if (generationCursor >= refreshed.services().size()) {
+      generationCursor = 0;
+    }
     if (!queue.isEmpty()) {
       int before = queue.size();
       queue.removeIf(
@@ -329,37 +336,63 @@ public final class StorageSpawnManager
 
   private void generateTickets(Instant now) {
     int remainingBudget = settings.maxGeneratePerTick();
-    for (SpawnService service : plan.services()) {
-      if (service == null) {
-        continue;
-      }
-      ServiceState state = states.computeIfAbsent(service.key(), key -> new ServiceState());
-      if (state.nextDueAt == null) {
-        state.nextDueAt = initialDueAt(service, now);
-      }
-      while (remainingBudget > 0
-          && state.backlog < settings.maxBacklogPerService()
-          && (state.nextDueAt == null || !now.isBefore(state.nextDueAt))) {
-        Instant dueAt = state.nextDueAt != null ? state.nextDueAt : now;
-        SpawnTicket ticket =
-            new SpawnTicket(
-                UUID.randomUUID(),
-                service,
-                dueAt,
-                dueAt,
-                0,
-                globalSequence++,
-                Optional.empty(),
-                Optional.empty());
-        queue.add(ticket);
-        state.backlog++;
-        state.nextDueAt = dueAt.plus(service.baseHeadway());
-        remainingBudget--;
-      }
-      if (remainingBudget <= 0) {
-        break;
+    List<SpawnService> services = plan.services();
+    if (remainingBudget <= 0 || services.isEmpty()) {
+      return;
+    }
+    if (generationCursor < 0 || generationCursor >= services.size()) {
+      generationCursor = 0;
+    }
+    int cursor = generationCursor;
+    boolean generatedInCycle = true;
+    while (remainingBudget > 0 && generatedInCycle) {
+      generatedInCycle = false;
+      int checked = 0;
+      while (remainingBudget > 0 && checked < services.size()) {
+        SpawnService service = services.get(cursor);
+        cursor = (cursor + 1) % services.size();
+        checked++;
+        if (tryGenerateOneTicket(service, now)) {
+          remainingBudget--;
+          generatedInCycle = true;
+          generationCursor = cursor;
+        }
       }
     }
+  }
+
+  /**
+   * 对单个服务最多生成一张票据。
+   *
+   * <p>票据追赶由外层轮转多轮完成，这样在 {@code maxGeneratePerTick} 较小时，长期积压的第一条服务不会独占全部生成预算。
+   */
+  private boolean tryGenerateOneTicket(SpawnService service, Instant now) {
+    if (service == null) {
+      return false;
+    }
+    ServiceState state = states.computeIfAbsent(service.key(), key -> new ServiceState());
+    if (state.nextDueAt == null) {
+      state.nextDueAt = initialDueAt(service, now);
+    }
+    if (state.backlog >= settings.maxBacklogPerService()
+        || (state.nextDueAt != null && now.isBefore(state.nextDueAt))) {
+      return false;
+    }
+    Instant dueAt = state.nextDueAt != null ? state.nextDueAt : now;
+    SpawnTicket ticket =
+        new SpawnTicket(
+            UUID.randomUUID(),
+            service,
+            dueAt,
+            dueAt,
+            0,
+            globalSequence++,
+            Optional.empty(),
+            Optional.empty());
+    queue.add(ticket);
+    state.backlog++;
+    state.nextDueAt = dueAt.plus(service.baseHeadway());
+    return true;
   }
 
   /**

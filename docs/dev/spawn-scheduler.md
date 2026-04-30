@@ -57,7 +57,7 @@
 
 TicketAssigner 会优先使用 `spawn_depots` 做均衡选择；若未配置，则回退为 route 的 `CRET` depot。同负载 depot 会按权重轮转，避免同一 tick 内连续票据都命中列表第一个 depot。
 
-动态 depot（例如 `DYNAMIC:OP:D:DEPOT:[1:3]`）的负载统计会把实际生成股道（如 `OP:D:DEPOT:2`）归并回配置项，避免动态配置永远显示“空闲”或固定命中首个实际股道。
+动态 depot（例如 `DYNAMIC:OP:D:DEPOT:[1:3]`）会在进入 depot 仲裁前固化为实际股道。选择实际股道时会同时看该线路在各股道的活跃列车数、本 tick 已选择次数、节点占用和 backoff；负载统计再把实际生成股道（如 `OP:D:DEPOT:2`）归并回配置项，避免动态配置永远显示“空闲”或固定命中首个实际股道。
 
 Depot 选择会同时考虑：
 
@@ -66,7 +66,9 @@ Depot 选择会同时考虑：
 - `DepotDispatchCoordinator` 记录的 backoff，刚被 gate/occupancy 阻塞的 depot 会被强烈降权；同线路还有其它候选 depot 时，下一次会优先尝试其它候选。
 - 进入 `spawn.max-spawn-per-tick` 截断前，本轮 ready 的 depot 票据会再按本线路各 depot 的在线负载排序，避免单线 depot 的票据持续占用执行名额而饿死另一 depot 的交路组。
 
-Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 执行。动态 depot 会先 materialize 成具体 `selectedDepotNodeId`，再进入全局 depot key 仲裁。同一个 depot 同 tick 只放行一张票据，其余票据以 `depot-backoff:<depot_key>` 延迟重试；多线路共享同一 depot 时，仲裁器会记录该 depot 上一次放行的 line，并在无长期饥饿票据时轮转到其它 line。
+Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 执行。动态 depot 会先 materialize 成具体 `selectedDepotNodeId`，再进入全局 depot key 仲裁。同一个 depot 同 tick 只放行一张票据，其余票据以 `depot-backoff:<depot_key>` 延迟重试；多线路共享同一 depot 时，仲裁器会记录该 depot 上一次放行的 line，并在无长期饥饿票据时轮转到其它 line。同一线路多个交路组共享同一 depot 时，也会记录上一次放行的 route，避免固定排序导致某个交路组长期压住其它交路组。
+
+自动与手动出车的列车名均使用 `<OP>-<LINE>-<PATTERN><DEST>-<SEQ>`。其中 `DEST` 取解析出的运营目的地 `code` 首字符，而不是 station name 或 route name；`FTA_DEST_CODE/FTA_DEST_NAME` tags 仍保留完整目的地信息。
 
 `spawn.max-spawn-per-tick` 只是执行层吞吐上限，不应丢弃已到期票据。超过本 tick 容量的票据会以 `spawn-per-tick-limit` 延迟重入队，且不增加 `attempts`，避免多 depot 或多线路共享单股道 depot 时因为瞬时到期票据过多而破坏 baseline/backlog。
 
@@ -267,6 +269,7 @@ Route 首站可以是 DYNAMIC 类型（动态选择站台/轨道）：
 - `[队列]`：执行只读 `/fta spawn queue`。
 - `[pending]`：执行只读 `/fta spawn pending`。
 - `[diagnose]`：执行只读 `/fta spawn diagnose`。
+- `[debug]`：执行只读 `/fta spawn debug`，汇总运行时队列与重试原因。
 - `[预览CSV]`：执行 `/fta spawn export csv 12`，只在聊天中预览 CSV 前几行，不写文件、不改变发车队列。
 - 每条服务行的 `[Route]` 会打开 route 信息；`[调试]` 只填充 `/fta route debug ...`，需要运维确认后回车。
 - 点击动作会统一给 company/operator/line/route/train 等参数加双引号；相关命令参数已改为 quote-aware，允许中文、空格或其他文本继续作为同一个参数解析。
@@ -298,6 +301,53 @@ Route 首站可以是 DYNAMIC 类型（动态选择站台/轨道）：
 - `CREATE 缺 CRET`：`CREATE` route 首停靠点没有 `CRET`。
 - `spawn_group 不存在`：route 绑定了 line 中不存在的显式交路组；这不一定阻止当前实现生成计划，但属于应修复的配置漂移。
 - `首站无法解析`：首停靠点既没有固定 `waypointNodeId`，也不是可解析的 `DYNAMIC` stop。
+
+### `/fta spawn debug [limit]`
+
+查看发车运行时汇总。该命令不展开每张票据，而是把 `SpawnPlan`、主队列、pending layover、成功/重试计数与错误分布放在同一屏，适合长期运行后判断是“没有出票”还是“已经出票但持续退避”：
+
+```
+/fta spawn debug
+[FTA] 发车运行时诊断 (plan=8, queue=4, pending=2, enabled=是, maxSpawn=1, maxGenerate=2, success=120, retry=9)
+- reason=depot-backoff:surc:d:depot:1 count=3
+- reason=gate-blocked:STOP blockers=NODE:SURC:D:DEPOT:1@Train-Depot count=2
+- requeueError=spawn-per-tick-limit count=4
+```
+
+字段口径：
+
+| 字段 | 说明 |
+|------|------|
+| plan | 当前 `SpawnPlan` 中可发车服务数量 |
+| queue | 已出票但还在 `SpawnManager` 队列中的票据数量 |
+| pending | 等待 Layover 复用或 fallback 的票据数量 |
+| success/retry | `SimpleTicketAssigner` 累计成功/重试计数 |
+| reason | 当前 queue/pending 按票据状态归纳出的原因，例如 `not-before:45s`、`depot-backoff:*`、`gate-blocked:*` |
+| requeueError | 历史重试错误分布，来自执行层诊断计数 |
+
+若 `plan` 正常但 `queue/pending` 长期为 0，通常是尚未到 due、`SpawnMonitor` 没有 tick、队列刚被 reset，或 `max-generate-per-tick/max-backlog-per-service` 让其它服务占满生成窗口。若 `queue/pending` 持续增长，则优先查看 `reason/requeueError`。
+
+### `/fta depot schedule check "<nodeId>" [limit]`
+
+按 depot 节点检查“这个 depot 接下来会不会发车，以及为什么没发”。该命令会校验 nodeId 必须是已注册的 Depot 节点，然后输出三层数据：
+
+- 未来 1 小时 `ScheduleWindow` 中匹配该 depot 的 `ServiceTrip`。
+- 当前 `SpawnPlan` 中匹配该 depot 的 `SpawnService`。
+- 当前 queue/pending 中已经选中该 depot，或候选 depot 能匹配该节点的票据。
+
+示例：
+
+```
+/fta depot schedule check "SURC:D:DEPOT:1" 12
+[FTA] Depot 发车检查 (node=SURC:D:DEPOT:1, trips=2, services=2, queue=1, pending=1)
+- spawn.enabled=是 tick=20 maxSpawn=1 maxGenerate=2
+- trip depart=2026-01-31T12:00:00Z SURC/MT/MT-1N depots=SURC:D:DEPOT:1*2;SURC:D:DEPOT:2
+- service SURC/MT/MT-1N headway=2m0s depots=SURC:D:DEPOT:1*2,SURC:D:DEPOT:2
+- queue SURC/MT/MT-1N due=已过期 15s notBefore=30s attempts=0 selectedDepot=SURC:D:DEPOT:1 reason=depot-backoff:surc:d:depot:1
+- reason depot-backoff:surc:d:depot:1 count=1
+```
+
+匹配规则与运行时一致：线路 `spawn_depots` 优先于 route 默认 `CRET`；动态 depot（如 `DYNAMIC:OP:D:DEPOT:[1:3]`）会匹配具体股道节点。若输出显示“没有匹配计划”，重点检查 route 首站/`CRET`、线路 depot pool 与 `/fta spawn diagnose` 的 `depots/reasons`。若有计划但无 queue/pending，则说明静态配置已匹配，但运行时还没有出票或刚被重置。
 
 ### `/fta spawn queue [limit]`
 

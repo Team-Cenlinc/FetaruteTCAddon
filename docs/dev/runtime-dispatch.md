@@ -40,6 +40,7 @@
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
 - 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
+- 降低 `speedLimit` 属于安全上限，执行层不会再用速度命令限幅延迟它；平滑减速仍由 TrainCarts `WaitAcceleration` 接管。若 `/fta train debug` 显示 `edge_limit`、`edge_speed_lookahead`、`movement_authority` 或 approach limiter，写入的 cap 应立即反映该限制。
 - AutoStation 在 WaitState 期间会向运行时申请 `DepartureGate`（会话锁），信号 tick 会强制维持 STOP；仅在门控放行且会话匹配时释放，避免“停站后被信号 tick 提前发车”。
 - 出站门控和周期信号 tick 统一采用“先 `canEnter` / `evaluateProceedDecision`，确认无未标记 hard-blocker bypass 后再 `acquire`”的顺序；带 `conflictRelease` 标记的场景由占用层 partial acquire，避免死锁释放被误抑制，同时不污染 blocker 的 NODE/EDGE claim。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
@@ -56,6 +57,7 @@
 - 当当前信号未知（`currentSignal=null`）时，事件链路仅允许 `STOP` 立即生效，不接受 `CAUTION/PROCEED` 的初始化放行。
 - 触发“冲突区放行锁”时，`canEnter.allowed=true` 会同时携带 `conflictRelease=true`；运行时允许该释放继续，实际 `acquire` 会跳过 blocker 已持有的 `NODE/EDGE` 资源。移动中的列车不使用该释放特权，会回退为阻塞信号。
 - 单线走廊的冲突区放行候选仅在请求列车与 blocker 的方向都能判定且互为对向时成立；方向为 `UNKNOWN` 或队列中缺少方向信息时保持 STOP，避免把同向前后车误判为会车死锁。
+- 发车门控和周期信号 tick 在正式 `canEnter()` 前会清理同 Route 后方列车留在当前授权资源上的前瞻 queue entry；该步骤不释放 claim，且不同 route、未知进度、索引不在后方的列车仍会作为真实冲突阻塞。
 - 可用 `/fta occupancy stats` 观察自愈与出车重试统计，`/fta occupancy heal` 可手动触发清理。
 
 ## tags 与恢复
@@ -100,6 +102,11 @@
   - 若闲置超时或服务器车辆超限，会为其分配 `RETURN` 票据。
   - `RETURN` 票据优先级较低（-10），礼让正常客运列车。
 - 详见 `docs/dev/reclaim-policy.md`。
+
+## 发车票据公平性
+- `StorageSpawnManager` 生成 due ticket 时按 SpawnService 轮转，而不是每 tick 从排序后的第一条 service 一直补 backlog。
+- 这样在服务器长时间停顿、多个线路/交路组同时 overdue、且 `spawn.max-generate-per-tick` 较小时，前面的线路/组不会长期独占生成预算。
+- 不同 depot 的实际出车仍由 `SimpleTicketAssigner` 与 depot 门控决定；若某个 depot 持续出车少，先检查该 depot 是否被占用、是否存在 retry/backoff、以及 route 是否写死了 `CRET <depot>` 而不是使用线路 depot 池。
 
 ## 发车门控阻塞策略
 - 出站门控在 `shouldYield/blocked` 时会把占用收缩为“停站保护窗口”（当前节点 + rear guard），同时保留前向冲突队列位次，避免列车在红灯等待期间被后车反超队头。
@@ -209,6 +216,7 @@
 ## 速度命令限幅
 - 速度命令会做“限幅 + 迟滞”处理，减少高频抖动引发的解挂风险。
 - 仅对“常规跟速”做上行限幅；发车/放行（`allowLaunch=true`）会跳过上行限幅，避免起步龟速。
+- 降低 `speedLimit` 不做降速限幅；`runtime.speed-command-decel-factor` 仅作为兼容配置保留，实际减速平滑交由 TrainCarts acceleration/deceleration。
 - 参数：
   - `runtime.speed-command-hysteresis-bps`
   - `runtime.speed-command-accel-factor`

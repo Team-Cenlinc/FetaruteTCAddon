@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager.SpawnSettings;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExporter;
@@ -29,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
@@ -48,6 +50,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  * <ul>
  *   <li>{@code /fta spawn plan [limit]} - 查看发车计划（可发车的 Route 服务列表）
  *   <li>{@code /fta spawn diagnose [limit]} - 查看发车配置、交路组与跳过原因
+ *   <li>{@code /fta spawn debug [limit]} - 查看运行时队列、pending 与重试原因汇总
  *   <li>{@code /fta spawn queue [limit]} - 查看发车队列（待发票据）
  *   <li>{@code /fta spawn pending [limit]} - 查看折返待发票据（含失败重试）
  *   <li>{@code /fta spawn reset} - 清空发车队列并重置发车计划
@@ -123,6 +126,19 @@ public final class FtaSpawnCommand {
         manager
             .commandBuilder("fta")
             .literal("spawn")
+            .literal("debug")
+            .permission("fetarute.spawn")
+            .optional("limit", IntegerParser.integerParser(1, 100), limitSuggestions)
+            .handler(
+                ctx -> {
+                  int limit = ctx.<Integer>optional("limit").orElse(DEFAULT_LIMIT);
+                  debugSpawn(ctx.sender(), limit);
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("spawn")
             .literal("queue")
             .permission("fetarute.spawn")
             .optional("limit", IntegerParser.integerParser(1, 100), limitSuggestions)
@@ -181,6 +197,11 @@ public final class FtaSpawnCommand {
         locale.component("command.spawn.help.entry-diagnose"),
         locale.component("command.spawn.help.hover-diagnose"),
         "/fta spawn diagnose ");
+    sendHelpEntry(
+        sender,
+        locale.component("command.spawn.help.entry-debug"),
+        locale.component("command.spawn.help.hover-debug"),
+        "/fta spawn debug ");
     sendHelpEntry(
         sender,
         locale.component("command.spawn.help.entry-queue"),
@@ -445,6 +466,85 @@ public final class FtaSpawnCommand {
           locale.component(
               "command.spawn.diagnose.truncated",
               Map.of("count", String.valueOf(routeCount - shown))));
+    }
+  }
+
+  /**
+   * 输出发车运行时诊断汇总。
+   *
+   * <p>该命令关注“已经进入运行时之后为什么还没发车”：queue/pending 大小、重试错误分布、按票据当前状态归纳的 notBefore/backoff/gate-blocked
+   * 等原因。配置层问题仍由 {@code /fta spawn diagnose} 展开。
+   */
+  private void debugSpawn(CommandSender sender, int limit) {
+    LocaleManager locale = plugin.getLocaleManager();
+    var mgrOpt = plugin.getSpawnManager();
+    if (mgrOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.not-ready"));
+      return;
+    }
+
+    SpawnPlan plan = mgrOpt.get().snapshotPlan();
+    List<SpawnTicket> queue = mgrOpt.get().snapshotQueue();
+    List<SpawnTicket> pending =
+        plugin
+            .getSpawnTicketAssigner()
+            .map(assigner -> assigner.snapshotPendingTickets())
+            .orElse(List.of());
+    SpawnSettings settings = plugin.getConfigManager().current().spawnSettings();
+    Optional<SimpleTicketAssigner.SpawnDiagnostics> diagnostics = spawnDiagnostics();
+    long success = diagnostics.map(SimpleTicketAssigner.SpawnDiagnostics::success).orElse(0L);
+    long retries = diagnostics.map(SimpleTicketAssigner.SpawnDiagnostics::retries).orElse(0L);
+
+    sender.sendMessage(
+        locale.component(
+            "command.spawn.debug.header",
+            Map.ofEntries(
+                Map.entry("plan", String.valueOf(plan.size())),
+                Map.entry("queue", String.valueOf(queue.size())),
+                Map.entry("pending", String.valueOf(pending.size())),
+                Map.entry("enabled", settings.enabled() ? "是" : "否"),
+                Map.entry("max_spawn", String.valueOf(settings.maxSpawnPerTick())),
+                Map.entry("max_generate", String.valueOf(settings.maxGeneratePerTick())),
+                Map.entry("success", String.valueOf(success)),
+                Map.entry("retries", String.valueOf(retries)))));
+    sender.sendMessage(spawnNavigationActions());
+
+    Instant now = Instant.now();
+    List<SpawnTicket> tickets = new ArrayList<>(queue.size() + pending.size());
+    tickets.addAll(queue);
+    tickets.addAll(pending);
+    Map<String, Long> reasons = SpawnScheduleDiagnostics.reasonSummary(tickets, now);
+    int shown = 0;
+    List<Map.Entry<String, Long>> sortedReasons =
+        reasons.entrySet().stream()
+            .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+            .limit(limit)
+            .toList();
+    for (Map.Entry<String, Long> entry : sortedReasons) {
+      shown++;
+      sender.sendMessage(
+          locale.component(
+              "command.spawn.debug.reason",
+              Map.of("reason", entry.getKey(), "count", String.valueOf(entry.getValue()))));
+    }
+
+    Map<String, Long> errors =
+        diagnostics.map(SimpleTicketAssigner.SpawnDiagnostics::requeueByError).orElse(Map.of());
+    List<Map.Entry<String, Long>> sortedErrors =
+        errors.entrySet().stream()
+            .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+            .limit(limit)
+            .toList();
+    for (Map.Entry<String, Long> entry : sortedErrors) {
+      shown++;
+      sender.sendMessage(
+          locale.component(
+              "command.spawn.debug.error",
+              Map.of("error", entry.getKey(), "count", String.valueOf(entry.getValue()))));
+    }
+
+    if (shown == 0) {
+      sender.sendMessage(locale.component("command.spawn.debug.empty"));
     }
   }
 
@@ -1085,6 +1185,14 @@ public final class FtaSpawnCommand {
     }
   }
 
+  private Optional<SimpleTicketAssigner.SpawnDiagnostics> spawnDiagnostics() {
+    return plugin
+        .getSpawnTicketAssigner()
+        .filter(SimpleTicketAssigner.class::isInstance)
+        .map(SimpleTicketAssigner.class::cast)
+        .map(SimpleTicketAssigner::snapshotDiagnostics);
+  }
+
   private Component spawnNavigationActions() {
     return Component.text("  ")
         .append(
@@ -1092,6 +1200,7 @@ public final class FtaSpawnCommand {
                 CommandUx.runAction("[队列]", "/fta spawn queue", "查看待发票据"),
                 CommandUx.runAction("[pending]", "/fta spawn pending", "查看折返待发票据"),
                 CommandUx.runAction("[diagnose]", "/fta spawn diagnose", "诊断发车配置"),
+                CommandUx.runAction("[debug]", "/fta spawn debug", "查看发车运行时原因汇总"),
                 CommandUx.runAction("[预览CSV]", "/fta spawn export csv 12", "预览计划 CSV 的前几行")));
   }
 

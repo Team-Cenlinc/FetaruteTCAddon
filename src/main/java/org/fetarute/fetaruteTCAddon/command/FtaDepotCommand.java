@@ -9,8 +9,10 @@ import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup;
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnLocationList;
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnMode;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -36,17 +38,26 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
-import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager.SpawnSettings;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExporter;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ScheduleWindow;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController;
@@ -54,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.context.CommandInput;
 import org.incendo.cloud.parser.flag.CommandFlag;
+import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
@@ -79,16 +91,33 @@ public final class FtaDepotCommand {
     this.plugin = plugin;
   }
 
-  /** 注册 {@code /fta depot spawn} 命令（手动生成列车）。 */
+  /** 注册 {@code /fta depot spawn} 与 depot 计划诊断命令。 */
   public void register(CommandManager<CommandSender> manager) {
     SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
     SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
     SuggestionProvider<CommandSender> lineSuggestions = lineSuggestions();
     SuggestionProvider<CommandSender> routeSuggestions = routeSuggestions();
     SuggestionProvider<CommandSender> depotSuggestions = depotSuggestions();
+    SuggestionProvider<CommandSender> limitSuggestions =
+        CommandSuggestionProviders.placeholder("<limit>");
 
     var patternFlag =
         CommandFlag.builder("pattern").withComponent(StringParser.greedyStringParser()).build();
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("depot")
+            .literal("schedule")
+            .literal("check")
+            .permission("fetarute.spawn")
+            .required("node", StringParser.quotedStringParser(), depotSuggestions)
+            .optional("limit", IntegerParser.integerParser(1, 100), limitSuggestions)
+            .handler(
+                ctx -> {
+                  int limit = ctx.<Integer>optional("limit").orElse(12);
+                  checkDepotSchedule(ctx.sender(), normalizeNodeIdArg(ctx.get("node")), limit);
+                }));
 
     manager.command(
         manager
@@ -208,17 +237,18 @@ public final class FtaDepotCommand {
                   MinecartGroup group = spawnedOpt.get();
                   TrainProperties properties = group.getProperties();
                   UUID runId = UUID.randomUUID();
-                  Optional<DestinationInfo> destInfoOpt =
-                      resolveDestination(provider, resolved.route());
-                  DestinationInfo destInfo =
+                  Optional<RouteDestinationResolver.DestinationInfo> destInfoOpt =
+                      RouteDestinationResolver.resolve(provider, resolved.route());
+                  RouteDestinationResolver.DestinationInfo destInfo =
                       destInfoOpt.orElse(
-                          new DestinationInfo(resolved.route().name(), resolved.route().code()));
+                          new RouteDestinationResolver.DestinationInfo(
+                              resolved.route().name(), resolved.route().code()));
                   String trainName =
                       TrainNameFormatter.buildTrainName(
                           resolved.operator().code(),
                           resolved.line().code(),
                           resolved.route().patternType(),
-                          destInfo.name(),
+                          destInfo.code(),
                           runId);
                   if (properties != null) {
                     properties.clearDestinationRoute();
@@ -250,6 +280,279 @@ public final class FtaDepotCommand {
                               "run_id",
                               runId.toString())));
                 }));
+  }
+
+  /**
+   * 检查指定 depot 的发车计划与运行时阻塞原因。
+   *
+   * <p>输出分三层：未来一小时静态计划、当前 SpawnPlan 服务、运行时 queue/pending 票据。这样可以区分“根本没有匹配计划”和“计划已出票但被
+   * backoff/gate/上限限制卡住”两类问题。
+   */
+  private void checkDepotSchedule(CommandSender sender, String nodeRaw, int limit) {
+    LocaleManager locale = plugin.getLocaleManager();
+    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerOpt =
+        readyProvider(sender);
+    if (providerOpt.isEmpty()) {
+      return;
+    }
+    var provider = providerOpt.get();
+
+    NodeId depotId = NodeId.of(nodeRaw);
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    if (registry == null) {
+      sender.sendMessage(
+          locale.component("command.depot.spawn.not-found", Map.of("node", depotId.value())));
+      return;
+    }
+    Optional<SignNodeInfo> depotInfoOpt = findDepotNode(registry, depotId);
+    if (depotInfoOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component("command.depot.spawn.not-found", Map.of("node", depotId.value())));
+      return;
+    }
+    SignNodeInfo depotInfo = depotInfoOpt.get();
+    if (depotInfo.definition().nodeType() != NodeType.DEPOT) {
+      sender.sendMessage(
+          locale.component("command.depot.spawn.not-depot", Map.of("node", depotId.value())));
+      return;
+    }
+
+    Optional<SpawnManager> managerOpt = plugin.getSpawnManager();
+    if (managerOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.not-ready"));
+      return;
+    }
+    SpawnManager manager = managerOpt.get();
+    Optional<TicketAssigner> assignerOpt = plugin.getSpawnTicketAssigner();
+    SpawnSettings settings = plugin.getConfigManager().current().spawnSettings();
+    Instant now = Instant.now();
+
+    SpawnPlan plan = manager.snapshotPlan();
+    List<SpawnService> matchedServices =
+        plan.services().stream()
+            .filter(
+                service ->
+                    SpawnScheduleDiagnostics.serviceMatchesDepot(
+                        provider, service, depotId.value()))
+            .sorted(
+                Comparator.comparing(SpawnService::operatorCode, String.CASE_INSENSITIVE_ORDER)
+                    .thenComparing(SpawnService::lineCode, String.CASE_INSENSITIVE_ORDER)
+                    .thenComparing(SpawnService::routeCode, String.CASE_INSENSITIVE_ORDER))
+            .toList();
+    ScheduleWindow window =
+        new SchedulePlanner(plugin.getLoggerManager()::debug)
+            .plan(provider, now, now.plus(Duration.ofHours(1)));
+    List<ServiceTrip> matchedTrips =
+        window.trips().stream()
+            .filter(trip -> SpawnScheduleDiagnostics.tripMatchesDepot(trip, depotId.value()))
+            .sorted(Comparator.comparing(ServiceTrip::plannedDeparture))
+            .toList();
+    List<SpawnTicket> matchedQueue =
+        manager.snapshotQueue().stream()
+            .filter(
+                ticket ->
+                    SpawnScheduleDiagnostics.ticketMatchesDepot(provider, ticket, depotId.value()))
+            .sorted(
+                Comparator.comparing(SpawnTicket::notBefore)
+                    .thenComparing(SpawnTicket::dueAt)
+                    .thenComparing(ticket -> ticket.service().routeCode()))
+            .toList();
+    List<SpawnTicket> pendingSource =
+        assignerOpt.map(TicketAssigner::snapshotPendingTickets).orElse(List.of());
+    List<SpawnTicket> matchedPending =
+        pendingSource.stream()
+            .filter(
+                ticket ->
+                    SpawnScheduleDiagnostics.ticketMatchesDepot(provider, ticket, depotId.value()))
+            .sorted(
+                Comparator.comparing(SpawnTicket::notBefore)
+                    .thenComparing(SpawnTicket::dueAt)
+                    .thenComparing(ticket -> ticket.service().routeCode()))
+            .toList();
+
+    sender.sendMessage(
+        locale.component(
+            "command.depot.schedule.header",
+            Map.of(
+                "node",
+                depotId.value(),
+                "trips",
+                String.valueOf(matchedTrips.size()),
+                "services",
+                String.valueOf(matchedServices.size()),
+                "queue",
+                String.valueOf(matchedQueue.size()),
+                "pending",
+                String.valueOf(matchedPending.size()))));
+    sender.sendMessage(
+        locale.component(
+            "command.depot.schedule.settings",
+            Map.of(
+                "enabled",
+                settings.enabled() ? "是" : "否",
+                "tick",
+                String.valueOf(settings.tickIntervalTicks()),
+                "max_spawn",
+                String.valueOf(settings.maxSpawnPerTick()),
+                "max_generate",
+                String.valueOf(settings.maxGeneratePerTick()))));
+
+    sendDepotScheduleTrips(sender, locale, matchedTrips, limit);
+    sendDepotScheduleServices(sender, locale, provider, matchedServices, limit);
+    sendDepotScheduleTickets(
+        sender, locale, "command.depot.schedule.queue", matchedQueue, now, limit);
+    sendDepotScheduleTickets(
+        sender, locale, "command.depot.schedule.pending", matchedPending, now, limit);
+    sendDepotScheduleReasons(
+        sender, locale, settings, matchedServices, matchedTrips, matchedQueue, matchedPending, now);
+  }
+
+  private void sendDepotScheduleTrips(
+      CommandSender sender, LocaleManager locale, List<ServiceTrip> trips, int limit) {
+    if (trips.isEmpty()) {
+      sender.sendMessage(locale.component("command.depot.schedule.empty-trips"));
+      return;
+    }
+    for (ServiceTrip trip : trips.stream().limit(limit).toList()) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.trip",
+              Map.of(
+                  "depart",
+                  formatInstant(trip.plannedDeparture()),
+                  "operator",
+                  trip.operatorCode(),
+                  "line",
+                  trip.lineCode(),
+                  "route",
+                  trip.routeCode(),
+                  "depots",
+                  ScheduleCsvExporter.formatDepotCandidates(trip))));
+    }
+    if (trips.size() > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.truncated",
+              Map.of("count", String.valueOf(trips.size() - limit))));
+    }
+  }
+
+  private void sendDepotScheduleServices(
+      CommandSender sender,
+      LocaleManager locale,
+      org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
+      List<SpawnService> services,
+      int limit) {
+    if (services.isEmpty()) {
+      sender.sendMessage(locale.component("command.depot.schedule.empty-services"));
+      return;
+    }
+    for (SpawnService service : services.stream().limit(limit).toList()) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.service",
+              Map.of(
+                  "operator",
+                  service.operatorCode(),
+                  "line",
+                  service.lineCode(),
+                  "route",
+                  service.routeCode(),
+                  "headway",
+                  formatDuration(service.baseHeadway()),
+                  "depots",
+                  SpawnScheduleDiagnostics.depotCandidatesText(provider, service))));
+    }
+    if (services.size() > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.truncated",
+              Map.of("count", String.valueOf(services.size() - limit))));
+    }
+  }
+
+  private void sendDepotScheduleTickets(
+      CommandSender sender,
+      LocaleManager locale,
+      String localeKey,
+      List<SpawnTicket> tickets,
+      Instant now,
+      int limit) {
+    if (tickets.isEmpty()) {
+      return;
+    }
+    for (SpawnTicket ticket : tickets.stream().limit(limit).toList()) {
+      SpawnService service = ticket.service();
+      sender.sendMessage(
+          locale.component(
+              localeKey,
+              Map.of(
+                  "operator",
+                  service.operatorCode(),
+                  "line",
+                  service.lineCode(),
+                  "route",
+                  service.routeCode(),
+                  "due",
+                  formatDurationSec(Duration.between(now, ticket.dueAt())),
+                  "not_before",
+                  formatDurationSec(Duration.between(now, ticket.notBefore())),
+                  "attempts",
+                  String.valueOf(ticket.attempts()),
+                  "selected_depot",
+                  ticket.selectedDepotNodeId().orElse("-"),
+                  "reason",
+                  SpawnScheduleDiagnostics.ticketReason(ticket, now))));
+    }
+    if (tickets.size() > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.truncated",
+              Map.of("count", String.valueOf(tickets.size() - limit))));
+    }
+  }
+
+  private void sendDepotScheduleReasons(
+      CommandSender sender,
+      LocaleManager locale,
+      SpawnSettings settings,
+      List<SpawnService> services,
+      List<ServiceTrip> trips,
+      List<SpawnTicket> queue,
+      List<SpawnTicket> pending,
+      Instant now) {
+    List<SpawnTicket> tickets = new ArrayList<>(queue.size() + pending.size());
+    tickets.addAll(queue);
+    tickets.addAll(pending);
+    Map<String, Long> reasons = SpawnScheduleDiagnostics.reasonSummary(tickets, now);
+    if (reasons.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.idle",
+              Map.of("reason", depotIdleReason(settings, services, trips))));
+      return;
+    }
+    List<Map.Entry<String, Long>> sortedReasons =
+        reasons.entrySet().stream()
+            .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+            .toList();
+    for (Map.Entry<String, Long> entry : sortedReasons) {
+      sender.sendMessage(
+          locale.component(
+              "command.depot.schedule.reason",
+              Map.of("reason", entry.getKey(), "count", String.valueOf(entry.getValue()))));
+    }
+  }
+
+  private static String depotIdleReason(
+      SpawnSettings settings, List<SpawnService> services, List<ServiceTrip> trips) {
+    if (settings != null && !settings.enabled()) {
+      return "spawn.enabled=false";
+    }
+    if ((services == null || services.isEmpty()) && (trips == null || trips.isEmpty())) {
+      return "该 depot 没有匹配计划：检查 route 首站/CRET、line depot pool 或 /fta spawn diagnose";
+    }
+    return "该 depot 有计划但暂无已出票 ticket：可能未到 due、SpawnMonitor 尚未 tick、队列刚 reset，或被 backlog/generate 上限限制";
   }
 
   private Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> readyProvider(
@@ -750,70 +1053,6 @@ public final class FtaDepotCommand {
   }
 
   /**
-   * 从 RouteStop 推导终点信息：优先 TERMINATE，其次 STOP，最后取末尾 stop。
-   *
-   * <p>返回站点名/站码；若无法解析站点则回退到 waypoint/nodeId 或 route 名称。
-   */
-  private static Optional<DestinationInfo> resolveDestination(
-      org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider, Route route) {
-    if (provider == null || route == null) {
-      return Optional.empty();
-    }
-    List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
-    if (stops.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteStop candidate = null;
-    for (RouteStop stop : stops) {
-      if (stop != null && stop.passType() == RouteStopPassType.TERMINATE) {
-        candidate = stop;
-      }
-    }
-    if (candidate == null) {
-      for (RouteStop stop : stops) {
-        if (stop != null && stop.passType() == RouteStopPassType.STOP) {
-          candidate = stop;
-        }
-      }
-    }
-    if (candidate == null) {
-      candidate = stops.get(stops.size() - 1);
-    }
-
-    // 优先从 stationId 解析
-    if (candidate.stationId().isPresent()) {
-      Optional<Station> stationOpt = provider.stations().findById(candidate.stationId().get());
-      if (stationOpt.isPresent()) {
-        Station station = stationOpt.get();
-        return Optional.of(new DestinationInfo(station.name(), station.code()));
-      }
-    }
-
-    // 尝试从 DYNAMIC 规范解析（支持 "DYNAMIC:..." 或 "DSTY DYNAMIC:..." 格式）
-    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-        DynamicStopMatcher.parseDynamicSpec(candidate);
-    if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
-      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
-      return Optional.of(new DestinationInfo(spec.nodeName(), spec.nodeName()));
-    }
-
-    // 从 waypointNodeId 解析
-    if (candidate.waypointNodeId().isPresent()) {
-      String node = candidate.waypointNodeId().get();
-      // 尝试解析站点格式 OP:S:STATION:TRACK
-      String[] parts = node.split(":", -1);
-      if (parts.length >= 4 && "S".equalsIgnoreCase(parts[1])) {
-        String stationName = parts[2];
-        return Optional.of(new DestinationInfo(stationName, stationName));
-      }
-      return Optional.of(new DestinationInfo(node, node));
-    }
-
-    // fallback: 使用 route name
-    return Optional.of(new DestinationInfo(route.name(), route.code()));
-  }
-
-  /**
    * 写入 FTA_* tags（key=value）用于机读调度/PIDS。
    *
    * <p>tag 值会做简单清洗，避免空白或分隔符污染。
@@ -824,7 +1063,7 @@ public final class FtaDepotCommand {
       ResolvedRoute resolved,
       NodeId depotId,
       String spawnPattern,
-      DestinationInfo destInfo) {
+      RouteDestinationResolver.DestinationInfo destInfo) {
     if (properties == null || runId == null || resolved == null) {
       return;
     }
@@ -954,6 +1193,56 @@ public final class FtaDepotCommand {
     return normalized.replaceAll("\\s+", "_");
   }
 
+  /**
+   * 格式化计划时间。
+   *
+   * @param instant 现实时间
+   * @return ISO-8601 字符串；空值或占位时间返回 {@code -}
+   */
+  private static String formatInstant(Instant instant) {
+    if (instant == null || instant.equals(Instant.EPOCH)) {
+      return "-";
+    }
+    return instant.toString();
+  }
+
+  /**
+   * 格式化正向间隔。
+   *
+   * @param duration 间隔
+   * @return 便于聊天窗口阅读的秒/分钟文本
+   */
+  private static String formatDuration(Duration duration) {
+    if (duration == null) {
+      return "-";
+    }
+    long secs = duration.toSeconds();
+    if (secs < 60) {
+      return secs + "s";
+    }
+    return (secs / 60) + "m" + (secs % 60) + "s";
+  }
+
+  /**
+   * 格式化相对时间。
+   *
+   * @param duration 相对当前时间，负值表示已过期
+   * @return 便于聊天窗口阅读的相对时间文本
+   */
+  private static String formatDurationSec(Duration duration) {
+    if (duration == null) {
+      return "-";
+    }
+    long secs = duration.toSeconds();
+    if (secs < 0) {
+      return "已过期 " + (-secs) + "s";
+    }
+    if (secs < 60) {
+      return secs + "s";
+    }
+    return (secs / 60) + "m" + (secs % 60) + "s";
+  }
+
   private static String normalizeNodeIdArg(String raw) {
     if (raw == null) {
       return "";
@@ -985,6 +1274,4 @@ public final class FtaDepotCommand {
   }
 
   private record ResolvedRoute(Company company, Operator operator, Line line, Route route) {}
-
-  private record DestinationInfo(String name, String code) {}
 }

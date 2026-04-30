@@ -21,6 +21,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import org.bukkit.Bukkit;
 import org.bukkit.block.BlockFace;
+import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
@@ -67,6 +68,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final int DOOR_OPEN_MAX_ATTEMPTS = 12;
   private static final long DOOR_OPEN_MAX_RETRY_WINDOW_TICKS = 160L;
   private static final double EXIT_OFFSET_DISTANCE_BLOCKS = 3.0;
+  private static final double HORIZONTAL_DIAGONAL_MIN_RATIO = Math.tan(Math.PI / 8.0);
 
   private final FetaruteTCAddon plugin;
 
@@ -1233,20 +1235,20 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return FacingResult.empty();
     }
     var head = info.getGroup().head();
-    BlockFace face = toCardinalFace(head.getOrientationForward());
+    BlockFace face = toHorizontalFace(head.getOrientationForward());
     if (face != null) {
       return new FacingResult(face, "orientation");
     }
     face = head.getDirectionTo();
-    if (AutoStationDoorController.isCardinal(face)) {
+    if (AutoStationDoorController.isHorizontalCompass(face)) {
       return new FacingResult(face, "direction_to");
     }
     face = head.getDirectionFrom();
-    if (AutoStationDoorController.isCardinal(face)) {
+    if (AutoStationDoorController.isHorizontalCompass(face)) {
       return new FacingResult(face, "direction_from");
     }
     face = head.getDirection();
-    if (AutoStationDoorController.isCardinal(face)) {
+    if (AutoStationDoorController.isHorizontalCompass(face)) {
       return new FacingResult(face, "direction");
     }
     return FacingResult.empty();
@@ -1277,8 +1279,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (doorFace == null || trainFacing == null || !Double.isFinite(distance) || distance <= 0.0) {
       return Optional.empty();
     }
-    // 计算开门方向相对于列车行进方向是左侧还是右侧
-    // 列车本地坐标系：+X = 右侧，-X = 左侧
+    // 计算开门方向相对于列车行进方向是左侧还是右侧。
     Double localX = computeRelativeSide(trainFacing, doorFace, distance);
     if (localX == null) {
       return Optional.empty();
@@ -1292,31 +1293,21 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * @param trainFacing 列车行进方向
    * @param doorFace 开门方向（世界方位）
    * @param distance 偏移距离
-   * @return 正值=右侧，负值=左侧，null=无法计算
+   * @return 正值=TrainCarts 本地 +X（左侧），负值=本地 -X（右侧），null=无法计算
    */
-  private static Double computeRelativeSide(
-      BlockFace trainFacing, BlockFace doorFace, double distance) {
-    // 列车朝向 -> 其右侧方向的映射
-    // 例如：列车朝北(NORTH/-Z)，右侧是东(EAST/+X)
-    BlockFace rightSide =
-        switch (trainFacing) {
-          case NORTH -> BlockFace.EAST;
-          case EAST -> BlockFace.SOUTH;
-          case SOUTH -> BlockFace.WEST;
-          case WEST -> BlockFace.NORTH;
-          default -> null;
-        };
-    if (rightSide == null) {
+  static Double computeRelativeSide(BlockFace trainFacing, BlockFace doorFace, double distance) {
+    if (!Double.isFinite(distance) || distance <= 0.0) {
       return null;
     }
-    BlockFace leftSide = rightSide.getOppositeFace();
-    // TrainCarts ExitOffset 本地坐标系：+X = 左侧，-X = 右侧（与直觉相反）
-    if (doorFace == rightSide) {
-      return -distance; // 右侧开门 -> 负值
-    } else if (doorFace == leftSide) {
-      return +distance; // 左侧开门 -> 正值
+    String side = AutoStationDoorController.chooseSideNameByTravelFace(trainFacing, doorFace);
+    // TrainCarts ExitOffset 本地坐标系：+X = 左侧，-X = 右侧（与直觉相反）。
+    if ("left".equals(side)) {
+      return distance;
     }
-    return null; // 开门方向与列车行进方向平行，无法确定左右
+    if ("right".equals(side)) {
+      return -distance;
+    }
+    return null;
   }
 
   private static final class ExitOffsetState {
@@ -1357,7 +1348,12 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     }
   }
 
-  private static BlockFace toCardinalFace(org.bukkit.util.Vector vector) {
+  /**
+   * 将车体朝向向量解析为水平八向。
+   *
+   * <p>直线附近仍归入 N/E/S/W；当次轴分量达到 22.5 度扇区阈值时保留 NE/NW/SE/SW，供斜向站台开门侧判定使用。
+   */
+  static BlockFace toHorizontalFace(Vector vector) {
     if (vector == null) {
       return null;
     }
@@ -1369,7 +1365,28 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (Math.abs(x) < 1.0e-6 && Math.abs(z) < 1.0e-6) {
       return null;
     }
-    if (Math.abs(x) >= Math.abs(z)) {
+    double absX = Math.abs(x);
+    double absZ = Math.abs(z);
+    if (absX <= 1.0e-6) {
+      return z >= 0.0 ? BlockFace.SOUTH : BlockFace.NORTH;
+    }
+    if (absZ <= 1.0e-6) {
+      return x >= 0.0 ? BlockFace.EAST : BlockFace.WEST;
+    }
+    double ratio = Math.min(absX, absZ) / Math.max(absX, absZ);
+    if (ratio >= HORIZONTAL_DIAGONAL_MIN_RATIO) {
+      if (x >= 0.0 && z < 0.0) {
+        return BlockFace.NORTH_EAST;
+      }
+      if (x >= 0.0) {
+        return BlockFace.SOUTH_EAST;
+      }
+      if (z >= 0.0) {
+        return BlockFace.SOUTH_WEST;
+      }
+      return BlockFace.NORTH_WEST;
+    }
+    if (absX > absZ) {
       return x >= 0.0 ? BlockFace.EAST : BlockFace.WEST;
     }
     return z >= 0.0 ? BlockFace.SOUTH : BlockFace.NORTH;

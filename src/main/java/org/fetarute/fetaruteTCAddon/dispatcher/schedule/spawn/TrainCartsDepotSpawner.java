@@ -29,14 +29,11 @@ import org.bukkit.block.sign.SignSide;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
-import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
-import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -389,7 +386,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     tags.put("FTA_SPAWN_PATTERN", spawnPattern);
     tags.put("FTA_RUN_AT", String.valueOf(ts.toEpochMilli()));
 
-    resolveDestinationInfo(provider, route)
+    RouteDestinationResolver.resolve(provider, route)
         .ifPresent(
             dest -> {
               tags.put("FTA_DEST_CODE", dest.code());
@@ -407,65 +404,6 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (!out.isEmpty()) {
       properties.addTags(out.toArray(new String[0]));
     }
-  }
-
-  private static Optional<DestinationInfo> resolveDestinationInfo(
-      StorageProvider provider, Route route) {
-    if (provider == null || route == null) {
-      return Optional.empty();
-    }
-    List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
-    if (stops.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteStop candidate = null;
-    for (RouteStop stop : stops) {
-      if (stop != null && stop.passType() == RouteStopPassType.TERMINATE) {
-        candidate = stop;
-      }
-    }
-    if (candidate == null) {
-      for (RouteStop stop : stops) {
-        if (stop != null && stop.passType() == RouteStopPassType.STOP) {
-          candidate = stop;
-        }
-      }
-    }
-    if (candidate == null) {
-      candidate = stops.get(stops.size() - 1);
-    }
-
-    // 优先从 stationId 解析
-    if (candidate.stationId().isPresent()) {
-      Optional<Station> stationOpt = provider.stations().findById(candidate.stationId().get());
-      if (stationOpt.isPresent()) {
-        Station station = stationOpt.get();
-        return Optional.of(new DestinationInfo(station.name(), station.code()));
-      }
-    }
-
-    // 尝试从 DYNAMIC 规范解析（支持 "DYNAMIC:..." 或 "DSTY DYNAMIC:..." 格式）
-    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-        DynamicStopMatcher.parseDynamicSpec(candidate);
-    if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
-      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
-      return Optional.of(new DestinationInfo(spec.nodeName(), spec.nodeName()));
-    }
-
-    // 从 waypointNodeId 解析
-    if (candidate.waypointNodeId().isPresent()) {
-      String node = candidate.waypointNodeId().get();
-      // 尝试解析站点格式 OP:S:STATION:TRACK
-      String[] parts = node.split(":", -1);
-      if (parts.length >= 4 && "S".equalsIgnoreCase(parts[1])) {
-        String stationName = parts[2];
-        return Optional.of(new DestinationInfo(stationName, stationName));
-      }
-      return Optional.of(new DestinationInfo(node, node));
-    }
-
-    // fallback: 使用 route name
-    return Optional.of(new DestinationInfo(route.name(), route.code()));
   }
 
   private static String sanitizeTagValue(String raw) {
@@ -689,6 +627,4 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   private record TrackRange(int from, int to) {}
 
   private record DepotInfo(NodeId nodeId, UUID worldId, int x, int y, int z, String locationText) {}
-
-  private record DestinationInfo(String name, String code) {}
 }

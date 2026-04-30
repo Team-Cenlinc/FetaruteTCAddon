@@ -98,6 +98,29 @@ class DepotSpawnSchedulerTest {
   }
 
   @Test
+  void sharedDepotRotatesRouteWithinSameLineAfterPreviousRouteWasServed() {
+    Instant now = Instant.parse("2026-02-01T00:00:00Z");
+    DepotSpawnScheduler scheduler = new DepotSpawnScheduler(Duration.ofSeconds(5));
+    String depot = "OP:D:DEPOT:1";
+    UUID lineId = UUID.fromString("00000000-0000-0000-0000-000000000101");
+
+    SpawnTicket routeOne = ticket("R1", "L1", lineId, depot, now, 0, 1);
+    SpawnTicket routeTwo = ticket("R2", "L1", lineId, depot, now, 0, 2);
+    DepotDispatchCoordinator.DispatchBatch firstBatch =
+        scheduler.coordinate(List.of(routeOne, routeTwo), now);
+
+    assertEquals("R1", firstBatch.ready().get(0).service().routeCode());
+
+    SpawnTicket routeOneNext = ticket("R1", "L1", lineId, depot, now.plusSeconds(10), 0, 3);
+    SpawnTicket routeTwoNext = ticket("R2", "L1", lineId, depot, now.plusSeconds(10), 0, 4);
+    DepotDispatchCoordinator.DispatchBatch secondBatch =
+        scheduler.coordinate(List.of(routeOneNext, routeTwoNext), now.plusSeconds(10));
+
+    assertEquals(1, secondBatch.ready().size());
+    assertEquals("R2", secondBatch.ready().get(0).service().routeCode());
+  }
+
+  @Test
   void backoffUntilExpiresAfterOccupancyFailureWindow() {
     Instant now = Instant.parse("2026-02-01T00:00:00Z");
     DepotSpawnScheduler scheduler = new DepotSpawnScheduler(Duration.ofSeconds(5));

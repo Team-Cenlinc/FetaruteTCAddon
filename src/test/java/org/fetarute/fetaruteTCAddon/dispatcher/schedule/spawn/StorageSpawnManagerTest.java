@@ -291,6 +291,38 @@ class StorageSpawnManagerTest {
   }
 
   @Test
+  void pollDueTicketsRotatesOverdueServicesWhenGenerateBudgetIsOne() {
+    StorageProvider provider = mockProvider(twoSingleRouteGroupsWithoutRouteWeights());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 20, 1, 1);
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    List<SpawnTicket> firstPoll = manager.pollDueTickets(provider, now);
+    firstPoll.forEach(manager::complete);
+    List<SpawnTicket> secondPoll = manager.pollDueTickets(provider, now.plusSeconds(1));
+    secondPoll.forEach(manager::complete);
+
+    Instant afterLongPause = now.plusSeconds(3600);
+    List<String> generatedRoutes = new java.util.ArrayList<>();
+    for (int i = 0; i < 4; i++) {
+      List<SpawnTicket> due = manager.pollDueTickets(provider, afterLongPause.plusSeconds(i));
+      due.forEach(
+          ticket -> {
+            generatedRoutes.add(ticket.service().routeCode());
+            manager.complete(ticket);
+          });
+    }
+
+    assertEquals(
+        List.of("OP-A", "OP-B"),
+        List.of(firstPoll.get(0).service().routeCode(), secondPoll.get(0).service().routeCode()));
+    assertTrue(generatedRoutes.contains("OP-A"), "长时间停顿后仍应补发 A 组");
+    assertTrue(generatedRoutes.contains("OP-B"), "长时间停顿后不能被 A 组 backlog 饿死");
+  }
+
+  @Test
   void pollDueTicketsIncludesCreateRouteEvenWhenOperationWeightsMissing() {
     StorageProvider provider = mockProvider(multiOperationWithoutWeightAndCreateRoute());
     StorageSpawnManager.SpawnManagerSettings settings =

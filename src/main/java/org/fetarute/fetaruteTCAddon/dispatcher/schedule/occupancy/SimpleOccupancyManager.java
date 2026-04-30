@@ -369,6 +369,34 @@ public final class SimpleOccupancyManager
   }
 
   /**
+   * 从指定冲突队列中移除列车排队条目。
+   *
+   * <p>只清理 queue，不释放 claim。调用方必须先判断该条目确实是可丢弃的前瞻位次，避免破坏真实会车或道岔让行顺序。
+   */
+  @Override
+  public synchronized int removeQueueEntries(String trainName, List<OccupancyResource> resources) {
+    if (trainName == null || trainName.isBlank() || resources == null || resources.isEmpty()) {
+      return 0;
+    }
+    int removed = 0;
+    for (OccupancyResource resource : resources) {
+      if (!isQueueableConflict(resource)) {
+        continue;
+      }
+      ConflictQueue queue = queues.get(resource);
+      if (queue == null || !queue.contains(trainName)) {
+        continue;
+      }
+      queue.remove(trainName);
+      removed++;
+      if (queue.isEmpty()) {
+        queues.remove(resource);
+      }
+    }
+    return removed;
+  }
+
+  /**
    * 按列车名释放全部占用资源。
    *
    * <p>释放后会发布 {@link OccupancyReleasedEvent}，通知订阅者资源已可用。

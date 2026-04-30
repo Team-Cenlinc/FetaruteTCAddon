@@ -22,4 +22,17 @@ public interface OccupancyQueueSupport {
    * @param request 需要刷新位次的请求
    */
   default void touchQueues(OccupancyRequest request) {}
+
+  /**
+   * 从指定资源的冲突队列中移除某列车的排队条目。
+   *
+   * <p>该方法只移除队列位次，不释放任何占用 claim。运行时用于清理同线路后车留下的前瞻队列条目，避免后车在没有真实占用时反向把前车挡成红灯。
+   *
+   * @param trainName 待移除的列车名
+   * @param resources 限定清理的资源；为空时实现可选择不处理
+   * @return 实际移除的队列条目数量
+   */
+  default int removeQueueEntries(String trainName, List<OccupancyResource> resources) {
+    return 0;
+  }
 }

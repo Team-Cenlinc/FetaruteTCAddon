@@ -23,12 +23,14 @@
 2. `reissueDestinationByName(train)`：重下发下一跳 destination，修复“目标丢失/被覆盖”。
 3. `forceRelaunchByName(train)`：最后兜底重发。
 4. 当信号为 `STOP` 且超过宽限后，同样会按分级策略升级（不再只停留在 refresh）。
+5. 新鲜 blocker 快照只会在 STOP 宽限窗口内抑制恢复；超过 `health.progress-stop-grace-seconds` 后，即使 blocker 仍被信号 tick 持续刷新，也会进入恢复链，避免“看似合法红灯等待”永久掩盖互卡。
 
 ### STOP 互卡解锁
 1. 识别条件：列车处于 `STOP`、持续低速、且最近 blockers 显示与另一列车“互相阻塞”。
 2. 只由互卡对中的一侧执行（稳定 leader 选择），避免两车同时抢修导致抖动。
 3. 分级动作：`refresh 双车 -> reissue 单车 -> relaunch 单车 -> destroy 单车`。
-4. `destroy` 只由互卡对 leader 执行，优先删除 leader，失败时再尝试对端；占用释放仍等待 TrainCarts 的移除事件，避免实体尚未消失时后车抢占同一段轨道。
+4. `reissue` 或 `relaunch` 返回失败时仍会推进互卡阶段；否则故障列车可能反复回到 refresh，永远到不了 destroy 兜底。
+5. `destroy` 只由互卡对 leader 执行，优先删除 leader，失败时再尝试对端；占用释放仍等待 TrainCarts 的移除事件，避免实体尚未消失时后车抢占同一段轨道。
 
 ### 手动强制解锁（`/fta health check|heal`）
 1. 手动触发时会额外执行一次“互卡优先”解锁，不等待 `progress stuck` 阈值窗口。
@@ -39,6 +41,7 @@
 ## STOP 宽限
 - 当信号为 `STOP` 时，`progress stuck` 在宽限窗口内不判定异常（默认 180 秒）。
 - 用于支持咽喉区排队等待，减少“红灯等待被误判为故障”的噪声告警。
+- 宽限结束后不再因为 blocker 快照仍新鲜而跳过恢复；这类场景会先走 refresh/reissue/relaunch，只有确认双方互相阻塞且多轮恢复无效时才进入 destroy。
 
 ## 恢复冷却
 - 每列车每类恢复动作受冷却时间限制（默认 10 秒）。

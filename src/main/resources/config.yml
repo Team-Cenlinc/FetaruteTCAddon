@@ -127,7 +127,7 @@ runtime:
   speed-command-hysteresis-bps: 0.15
   # 速度命令增速限幅系数：基于列车 accel（1.0 表示与列车加速度一致）
   speed-command-accel-factor: 1.0
-  # 速度命令降速限幅系数：基于列车 decel（1.0 表示与列车减速度一致）
+  # 速度命令降速限幅系数：兼容旧配置；降低 speedLimit 会立即写入，实际减速由 TrainCarts WaitAcceleration 接管
   speed-command-decel-factor: 1.0
   # 最短路距离缓存异步刷新周期（秒）
   distance-cache-refresh-seconds: 3

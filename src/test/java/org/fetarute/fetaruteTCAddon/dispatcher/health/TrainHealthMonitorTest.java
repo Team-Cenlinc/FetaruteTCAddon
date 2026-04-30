@@ -292,8 +292,32 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("STOP 信号下若 blocker 快照仍新鲜则不触发 progress stuck 恢复")
-  void stopSignalWithFreshBlockerDoesNotTriggerProgressRecovery() {
+  @DisplayName("STOP 信号下若 blocker 快照仍新鲜且仍在宽限内则不触发 progress stuck 恢复")
+  void stopSignalWithFreshBlockerWithinGraceDoesNotTriggerProgressRecovery() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of("front"));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(15));
+
+    assertEquals(0, result.progressStuckCount(), "新鲜 blocker 存在时应视为合法等待");
+    assertTrue(alerts.isEmpty(), "合法 STOP 等待不应产生 stuck 告警");
+    verify(dispatchService, never()).refreshSignalByName("train1");
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
+  }
+
+  @Test
+  @DisplayName("STOP 信号下 blocker 持续刷新但超过宽限后仍应进入恢复链")
+  void stopSignalWithFreshBlockerAfterGraceEscalatesProgressRecovery() {
     List<HealthAlert> alerts = new ArrayList<>();
     alertBus.subscribe(alerts::add);
     when(dispatchService.getTrainState("train1"))
@@ -308,15 +332,14 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("train1"), t0);
     TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(25));
 
-    assertEquals(0, result.progressStuckCount(), "新鲜 blocker 存在时应视为合法等待");
-    assertTrue(alerts.isEmpty(), "合法 STOP 等待不应产生 stuck 告警");
-    verify(dispatchService, never()).refreshSignalByName("train1");
-    verify(dispatchService, never()).reissueDestinationByName(anyString());
-    verify(dispatchService, never()).forceRelaunchByName(anyString());
+    assertEquals(1, result.progressStuckCount(), "超过 STOP 宽限后不能被新鲜 blocker 无限压制");
+    assertEquals(1, alerts.size(), "进入恢复链后应产生 stuck 告警");
+    verify(dispatchService).refreshSignalByName("train1");
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
   @Test
-  @DisplayName("STOP 信号下 blocker 快照过期后应重新进入 progress stuck 恢复链")
+  @DisplayName("STOP 信号下 blocker 宽限内等待，超宽限后进入 progress stuck 恢复链")
   void stopSignalProgressRecoveryResumesAfterBlockerSnapshotExpires() {
     List<HealthAlert> alerts = new ArrayList<>();
     alertBus.subscribe(alerts::add);
@@ -328,7 +351,7 @@ class TrainHealthMonitorTest {
     when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
-    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(30));
     monitor.setBlockerSnapshotMaxAge(Duration.ofSeconds(5));
 
     Instant t0 = Instant.now();
@@ -336,8 +359,8 @@ class TrainHealthMonitorTest {
     TrainHealthMonitor.CheckResult blocked = monitor.check(Set.of("train1"), t0.plusSeconds(25));
     TrainHealthMonitor.CheckResult recovered = monitor.check(Set.of("train1"), t0.plusSeconds(40));
 
-    assertEquals(0, blocked.progressStuckCount(), "blocker 仍新鲜时不应进入 stuck 恢复");
-    assertEquals(1, recovered.progressStuckCount(), "快照过期后应重新进入 stuck 恢复");
+    assertEquals(0, blocked.progressStuckCount(), "STOP 宽限内有 blocker 时不应进入 stuck 恢复");
+    assertEquals(1, recovered.progressStuckCount(), "超过 STOP 宽限后应重新进入 stuck 恢复");
     assertEquals(1, alerts.size(), "恢复链重新生效后应产生一条告警");
     verify(dispatchService).refreshSignalByName("train1");
     verify(dispatchService, never()).reissueDestinationByName(anyString());
@@ -429,6 +452,38 @@ class TrainHealthMonitorTest {
 
     verify(dispatchService).destroyTrainByName("trainA", "health-deadlock:trainB");
     verify(dispatchService, never()).destroyTrainByName("trainB", "health-deadlock:trainA");
+  }
+
+  @Test
+  @DisplayName("互相阻塞分级恢复：重发和重启失败也必须继续升级到销毁兜底")
+  void mutualDeadlockEscalatesToDestroyWhenRecoveryActionsFail() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    when(dispatchService.reissueDestinationByName(anyString())).thenReturn(false);
+    when(dispatchService.forceRelaunchByName(anyString())).thenReturn(false);
+    when(dispatchService.destroyTrainByName(eq("trainA"), eq("health-deadlock:trainB")))
+        .thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // stage1 refresh
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 reissue 失败
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage3 relaunch 失败
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // stage4 destroy
+
+    verify(dispatchService, atLeastOnce()).reissueDestinationByName("trainA");
+    verify(dispatchService, atLeastOnce()).reissueDestinationByName("trainB");
+    verify(dispatchService).forceRelaunchByName("trainA");
+    verify(dispatchService).forceRelaunchByName("trainB");
+    verify(dispatchService).destroyTrainByName("trainA", "health-deadlock:trainB");
   }
 
   @Test

@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -607,6 +608,8 @@ public final class RuntimeDispatchService {
             authorizationRequest.resourceList(), Optional.of(definition.nodeId()), nextNode, graph);
     releaseResourcesNotInRequest(trainName, keepResources);
     releaseSpeculativeClaimsFromBehindSameRoute(
+        trainName, route, currentIndex, authorizationRequest.resourceList());
+    releaseSpeculativeQueueEntriesFromBehindSameRoute(
         trainName, route, currentIndex, authorizationRequest.resourceList());
     if (occupancyManager.shouldYield(authorizationRequest)) {
       debugLogger.accept("发车门控让行: train=" + trainName + " priority=" + priority);
@@ -2628,6 +2631,8 @@ public final class RuntimeDispatchService {
             request.resourceList(), currentNodeOpt, nextNode, graph);
     releaseResourcesNotInRequest(trainName, keepResources);
     releaseSpeculativeClaimsFromBehindSameRoute(
+        trainName, route, currentIndex, authorizationRequest.resourceList());
+    releaseSpeculativeQueueEntriesFromBehindSameRoute(
         trainName, route, currentIndex, authorizationRequest.resourceList());
     retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
     OccupancyDecision decision = occupancyManager.canEnter(authorizationRequest);
@@ -5964,6 +5969,65 @@ public final class RuntimeDispatchService {
     return released;
   }
 
+  /**
+   * 清理同线路后车留在前车授权窗口内的冲突队列条目。
+   *
+   * <p>后车可能只刷新了 queue entry，尚未写入 claim。若不清理，这类队列条目会在 {@code canEnter()} 阶段把前车判为非队头，导致前车被后车反向锁成
+   * STOP。这里仅清理“同 Route 且进度索引更小”的列车，并且只作用于当前前向授权请求覆盖的冲突资源，不影响对向列车、交叉线路或真实道岔冲突。
+   */
+  private int releaseSpeculativeQueueEntriesFromBehindSameRoute(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      List<OccupancyResource> authorityResources) {
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)
+        || progressRegistry == null
+        || trainName == null
+        || trainName.isBlank()
+        || route == null
+        || currentIndex <= 0
+        || authorityResources == null
+        || authorityResources.isEmpty()) {
+      return 0;
+    }
+    Set<OccupancyResource> authoritySet = Set.copyOf(authorityResources);
+    Map<String, LinkedHashSet<OccupancyResource>> resourcesByTrain = new LinkedHashMap<>();
+    for (OccupancyQueueSnapshot snapshot : queueSupport.snapshotQueues()) {
+      if (snapshot == null || snapshot.resource() == null) {
+        continue;
+      }
+      OccupancyResource resource = snapshot.resource();
+      if (!authoritySet.contains(resource)) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : snapshot.entries()) {
+        if (!isSpeculativeBehindQueueEntry(trainName, route, currentIndex, entry)) {
+          continue;
+        }
+        resourcesByTrain
+            .computeIfAbsent(entry.trainName(), unused -> new LinkedHashSet<>())
+            .add(resource);
+      }
+    }
+    if (resourcesByTrain.isEmpty()) {
+      return 0;
+    }
+    int removed = 0;
+    for (Map.Entry<String, LinkedHashSet<OccupancyResource>> entry : resourcesByTrain.entrySet()) {
+      removed += queueSupport.removeQueueEntries(entry.getKey(), List.copyOf(entry.getValue()));
+    }
+    if (removed > 0) {
+      debugLogger.accept(
+          "清理后车冲突队列: train="
+              + trainName
+              + " removed="
+              + removed
+              + " owners="
+              + resourcesByTrain.keySet());
+    }
+    return removed;
+  }
+
   private boolean isSpeculativeBehindClaim(
       String trainName,
       RouteDefinition route,
@@ -5982,6 +6046,24 @@ public final class RuntimeDispatchService {
     }
     Optional<RouteProgressRegistry.RouteProgressEntry> ownerEntryOpt =
         progressRegistry.get(claim.trainName());
+    if (ownerEntryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry ownerEntry = ownerEntryOpt.get();
+    return route.id().equals(ownerEntry.routeId()) && ownerEntry.currentIndex() < currentIndex;
+  }
+
+  private boolean isSpeculativeBehindQueueEntry(
+      String trainName, RouteDefinition route, int currentIndex, OccupancyQueueEntry entry) {
+    if (entry == null
+        || entry.trainName() == null
+        || entry.trainName().equalsIgnoreCase(trainName)
+        || route == null
+        || currentIndex <= 0) {
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> ownerEntryOpt =
+        progressRegistry.get(entry.trainName());
     if (ownerEntryOpt.isEmpty()) {
       return false;
     }

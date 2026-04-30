@@ -297,6 +297,8 @@ command:
       hover-plan: "<gray>点击填充:</gray> <white>/fta spawn plan </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-diagnose: "<gray>/fta spawn diagnose</gray> <white>-</white> <dark_aqua>诊断发车配置与跳过原因</dark_aqua>"
       hover-diagnose: "<gray>点击填充:</gray> <white>/fta spawn diagnose </white>\n<dark_aqua>显示 line/group/route 的 baseline、权重与跳过原因</dark_aqua>"
+      entry-debug: "<gray>/fta spawn debug</gray> <white>-</white> <dark_aqua>汇总运行时队列、pending 与重试原因</dark_aqua>"
+      hover-debug: "<gray>点击填充:</gray> <white>/fta spawn debug </white>\n<dark_aqua>用于排查已经出票但没有发车的原因</dark_aqua>"
       entry-queue: "<gray>/fta spawn queue</gray> <white>-</white> <dark_aqua>查看发车队列（待发票据）</dark_aqua>"
       hover-queue: "<gray>点击填充:</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-pending: "<gray>/fta spawn pending</gray> <white>-</white> <dark_aqua>查看折返待发（含失败重试）</dark_aqua>"
@@ -317,6 +319,11 @@ command:
       group: "<gray>  group=<white><group></white> baseline=<white><baseline></white> routes=<white><routes></white></gray>"
       route: "<gray>  - route=<white><route></white> op=<white><operation></white> group=<white><group></white> weight=<white><weight></white> start=<white><start></white> depots=<white><depots></white> participates=<white><participates></white> selectedDepot=<white><selected_depot></white> backoff=<white><backoff_reason></white> gate=<white><gate_blocker></white> reasons=<white><reasons></white></gray>"
       truncated: "<gray>… 已省略 <white><count></white> 条 route，使用 /fta spawn diagnose <limit> 调整数量</gray>"
+    debug:
+      header: "<prefix> <dark_aqua>发车运行时诊断</dark_aqua> <gray>(plan=<white><plan></white>, queue=<white><queue></white>, pending=<white><pending></white>, enabled=<white><enabled></white>, maxSpawn=<white><max_spawn></white>, maxGenerate=<white><max_generate></white>, success=<white><success></white>, retry=<white><retries></white>)</gray>"
+      reason: "<gray>-</gray> reason=<white><reason></white> count=<white><count></white>"
+      error: "<gray>-</gray> requeueError=<white><error></white> count=<white><count></white>"
+      empty: "<prefix> <gray>暂无重试或阻塞诊断</gray>"
     queue:
       header: "<prefix> <dark_aqua>发车队列</dark_aqua> <gray>(count=<white><count></white>)</gray>"
       empty: "<prefix> <gray>暂无排队票据</gray>"
@@ -923,6 +930,18 @@ command:
       route-empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
       route-mismatch: "<prefix> <red>首个 stop 与车库不匹配</red> <gray>(route=<white><route></white>, node=<white><node></white>)</gray>"
       success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
+    schedule:
+      header: "<prefix> <dark_aqua>Depot 发车检查</dark_aqua> <gray>(node=<white><node></white>, trips=<white><trips></white>, services=<white><services></white>, queue=<white><queue></white>, pending=<white><pending></white>)</gray>"
+      settings: "<gray>-</gray> spawn.enabled=<white><enabled></white> tick=<white><tick></white> maxSpawn=<white><max_spawn></white> maxGenerate=<white><max_generate></white>"
+      empty-trips: "<gray>-</gray> <yellow>未来 1 小时没有匹配该 depot 的计划车次</yellow>"
+      empty-services: "<gray>-</gray> <yellow>当前 SpawnPlan 没有匹配该 depot 的服务</yellow>"
+      trip: "<gray>- trip</gray> depart=<white><depart></white> <white><operator></white>/<white><line></white>/<white><route></white> depots=<white><depots></white>"
+      service: "<gray>- service</gray> <white><operator></white>/<white><line></white>/<white><route></white> headway=<white><headway></white> depots=<white><depots></white>"
+      queue: "<gray>- queue</gray> <white><operator></white>/<white><line></white>/<white><route></white> due=<white><due></white> notBefore=<white><not_before></white> attempts=<white><attempts></white> selectedDepot=<white><selected_depot></white> reason=<white><reason></white>"
+      pending: "<gray>- pending</gray> <white><operator></white>/<white><line></white>/<white><route></white> due=<white><due></white> notBefore=<white><not_before></white> attempts=<white><attempts></white> selectedDepot=<white><selected_depot></white> reason=<white><reason></white>"
+      reason: "<gray>- reason</gray> <white><reason></white> count=<white><count></white>"
+      idle: "<gray>- reason</gray> <white><reason></white>"
+      truncated: "<gray>… 已省略 <white><count></white> 条记录，可加大 limit 查看</gray>"
 
   train:
     help:

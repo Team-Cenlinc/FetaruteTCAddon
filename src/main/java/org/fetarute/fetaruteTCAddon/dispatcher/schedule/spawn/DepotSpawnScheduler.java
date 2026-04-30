@@ -27,6 +27,7 @@ public final class DepotSpawnScheduler implements DepotDispatchCoordinator {
   private final Duration backoff;
   private final Map<String, Instant> blockedUntilByDepot = new HashMap<>();
   private final Map<String, UUID> lastLineByDepot = new HashMap<>();
+  private final Map<String, UUID> lastRouteByDepot = new HashMap<>();
 
   public DepotSpawnScheduler(Duration backoff) {
     this.backoff =
@@ -73,6 +74,7 @@ public final class DepotSpawnScheduler implements DepotDispatchCoordinator {
       SpawnTicket selected = selectTicketForDepot(depotKey, candidates, current);
       ready.add(selected);
       lastLineByDepot.put(depotKey, selected.service().lineId());
+      lastRouteByDepot.put(depotKey, selected.service().routeId());
       for (SpawnTicket candidate : candidates) {
         if (candidate == null || Objects.equals(candidate.id(), selected.id())) {
           continue;
@@ -125,22 +127,36 @@ public final class DepotSpawnScheduler implements DepotDispatchCoordinator {
     }
     List<SpawnTicket> sorted = candidates.stream().sorted(ticketComparator()).toList();
     UUID lastLine = lastLineByDepot.get(depotKey);
-    if (lastLine == null) {
-      return sorted.get(0);
-    }
     Instant earliestDue = sorted.get(0).dueAt();
     Duration starvationWindow = backoff.multipliedBy(2L);
-    for (SpawnTicket candidate : sorted) {
-      if (candidate == null || candidate.service() == null) {
-        continue;
+    if (lastLine != null) {
+      for (SpawnTicket candidate : sorted) {
+        if (candidate == null || candidate.service() == null) {
+          continue;
+        }
+        if (lastLine.equals(candidate.service().lineId())) {
+          continue;
+        }
+        if (candidate.dueAt().isAfter(earliestDue.plus(starvationWindow))) {
+          continue;
+        }
+        return candidate;
       }
-      if (lastLine.equals(candidate.service().lineId())) {
-        continue;
+    }
+    UUID lastRoute = lastRouteByDepot.get(depotKey);
+    if (lastRoute != null) {
+      for (SpawnTicket candidate : sorted) {
+        if (candidate == null || candidate.service() == null) {
+          continue;
+        }
+        if (lastRoute.equals(candidate.service().routeId())) {
+          continue;
+        }
+        if (candidate.dueAt().isAfter(earliestDue.plus(starvationWindow))) {
+          continue;
+        }
+        return candidate;
       }
-      if (candidate.dueAt().isAfter(earliestDue.plus(starvationWindow))) {
-        continue;
-      }
-      return candidate;
     }
     return sorted.get(0);
   }

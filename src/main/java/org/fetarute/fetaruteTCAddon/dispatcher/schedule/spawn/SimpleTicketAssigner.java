@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
@@ -191,6 +192,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // 因此需要一个轻量游标防止连续票据都选中配置列表第一个 depot。
   private final java.util.concurrent.ConcurrentMap<UUID, java.util.concurrent.atomic.AtomicInteger>
       depotSelectionCursors = new java.util.concurrent.ConcurrentHashMap<>();
+  // key 为 "<lineId>|<dynamicDepotSpec>"：DYNAMIC depot 内实际股道轮转游标。
+  private final java.util.concurrent.ConcurrentMap<
+          String, java.util.concurrent.atomic.AtomicInteger>
+      dynamicDepotSelectionCursors = new java.util.concurrent.ConcurrentHashMap<>();
 
   public SimpleTicketAssigner(
       SpawnManager spawnManager,
@@ -458,7 +463,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         lineDepots = LineSpawnMetadata.parseDepots(lineOpt.get().metadata());
       }
     }
-    prepared = materializeDynamicDepotSelection(ticket.service(), prepared);
+    prepared =
+        materializeDynamicDepotSelection(
+            provider, ticket.service(), prepared, runtimeSnapshot, selectedThisTick, now);
     recordSelectedDepotForTick(prepared, lineDepots, configuredSelection, selectedThisTick);
     return prepared;
   }
@@ -763,15 +770,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket = materializeDynamicDepotSelection(service, effectiveTicket);
+    effectiveTicket =
+        materializeDynamicDepotSelection(
+            provider,
+            service,
+            effectiveTicket,
+            LineRuntimeSnapshot.capture(runtimeDispatchService),
+            Map.of(),
+            now);
 
-    String destName = resolveDestinationName(provider, routeEntity).orElse(routeEntity.name());
+    String destCode =
+        RouteDestinationResolver.resolve(provider, routeEntity)
+            .map(RouteDestinationResolver.DestinationInfo::code)
+            .orElse(routeEntity.code());
     String trainName =
         TrainNameFormatter.buildTrainName(
             service.operatorCode(),
             service.lineCode(),
             routeEntity.patternType(),
-            destName,
+            destCode,
             ticket.id());
 
     Optional<java.util.UUID> worldIdOpt =
@@ -1817,15 +1834,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket = materializeDynamicDepotSelection(service, effectiveTicket);
+    effectiveTicket =
+        materializeDynamicDepotSelection(
+            provider,
+            service,
+            effectiveTicket,
+            LineRuntimeSnapshot.capture(runtimeDispatchService),
+            Map.of(),
+            now);
 
-    String destName = resolveDestinationName(provider, routeEntity).orElse(routeEntity.name());
+    String destCode =
+        RouteDestinationResolver.resolve(provider, routeEntity)
+            .map(RouteDestinationResolver.DestinationInfo::code)
+            .orElse(routeEntity.code());
     String trainName =
         TrainNameFormatter.buildTrainName(
             service.operatorCode(),
             service.lineCode(),
             routeEntity.patternType(),
-            destName,
+            destCode,
             ticket.id());
 
     Optional<java.util.UUID> worldIdOpt =
@@ -2097,8 +2124,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * <p>TrainCartsDepotSpawner 也能解析 DYNAMIC，但闭塞 gate 发生在 spawner 之前。提前固化可以让 gate 使用同一条实际股道，避免“检查的是 1
    * 号股道、生成想去 2 号股道”的状态分裂。
    */
-  private SpawnTicket materializeDynamicDepotSelection(SpawnService service, SpawnTicket ticket) {
-    if (ticket == null || service == null) {
+  private SpawnTicket materializeDynamicDepotSelection(
+      StorageProvider provider,
+      SpawnService service,
+      SpawnTicket ticket,
+      LineRuntimeSnapshot runtimeSnapshot,
+      Map<String, Integer> selectedThisTick,
+      Instant now) {
+    if (provider == null || ticket == null || service == null) {
       return ticket;
     }
     Optional<String> depotSpecOpt = resolveDepotSpec(service, ticket.selectedDepotNodeId());
@@ -2109,7 +2142,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (!SpawnDirectiveParser.isDynamicTarget(depotSpec) || !isDynamicDepotSpec(depotSpec)) {
       return ticket;
     }
-    return resolveDynamicDepotNodeInfo(depotSpec, true)
+    return resolveDynamicDepotNodeInfo(
+            depotSpec, true, provider, service.lineId(), runtimeSnapshot, selectedThisTick, now)
         .map(info -> ticket.withSelectedDepot(info.definition().nodeId().value()))
         .orElse(ticket);
   }
@@ -2647,15 +2681,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                             depotSpec ->
                                 resolveConfiguredDepotKey(
                                     depotSpec, lineDepots, buildDepotAliasIndex(lineDepots))));
-    String key =
-        configuredKey.orElseGet(
-            () ->
-                ticket
-                    .selectedDepotNodeId()
-                    .map(SimpleTicketAssigner::normalizeDepotKey)
-                    .orElse(""));
-    if (!key.isBlank()) {
-      selectedThisTick.merge(key, 1, Integer::sum);
+    String actualKey =
+        ticket.selectedDepotNodeId().map(SimpleTicketAssigner::normalizeDepotKey).orElse("");
+    configuredKey
+        .filter(key -> !key.isBlank())
+        .ifPresent(key -> selectedThisTick.merge(key, 1, Integer::sum));
+    if (!actualKey.isBlank()) {
+      selectedThisTick.merge(actualKey, 1, Integer::sum);
     }
   }
 
@@ -2974,6 +3006,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return counts;
     }
 
+    int countActiveTrainsAtDepot(StorageProvider provider, UUID lineId, NodeId depotNode) {
+      if (provider == null || lineId == null || depotNode == null) {
+        return 0;
+      }
+      String expected = depotNode.value().toLowerCase(Locale.ROOT);
+      int count = 0;
+      for (RouteProgressRegistry.RouteProgressEntry entry : progressEntries.values()) {
+        if (entry == null || entry.routeUuid() == null || entry.trainName() == null) {
+          continue;
+        }
+        UUID resolvedLine = resolveLineId(provider, entry.routeUuid());
+        if (!lineId.equals(resolvedLine)) {
+          continue;
+        }
+        NodeId start = startNodes.get(entry.trainName());
+        if (start != null && expected.equals(start.value().toLowerCase(Locale.ROOT))) {
+          count++;
+        }
+      }
+      return count;
+    }
+
     private UUID resolveLineId(StorageProvider provider, UUID routeId) {
       if (routeId == null) {
         return null;
@@ -3032,41 +3086,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(
       String dynamicSpec, boolean preferFreeDepot) {
-    if (dynamicSpec == null
-        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
-      return Optional.empty();
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    String operatorCode = parts[0].trim();
-    String nodeType = parts[1].trim();
-    String nodeName = parts[2].trim();
-    if (operatorCode.isEmpty() || nodeType.isEmpty() || nodeName.isEmpty()) {
-      return Optional.empty();
-    }
-    Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
-    if (infos == null || infos.isEmpty()) {
-      return Optional.empty();
-    }
-    List<SignNodeRegistry.SignNodeInfo> matches =
-        infos.values().stream()
-            .filter(info -> info != null && info.definition() != null)
-            .filter(
-                info -> {
-                  String nodeIdValue = info.definition().nodeId().value();
-                  return matchesDynamicDepotNode(dynamicSpec, nodeIdValue);
-                })
-            .sorted(
-                Comparator.comparing(
-                    info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
-            .toList();
+    List<SignNodeRegistry.SignNodeInfo> matches = findDynamicDepotNodeInfos(dynamicSpec);
     if (matches.isEmpty()) {
       return Optional.empty();
     }
-    // 优先使用 Depot 行为节点；若不存在则回退到同前缀的图节点（如咽喉 Waypoint），用于兜底 world 推断。
     if (preferFreeDepot) {
       for (SignNodeRegistry.SignNodeInfo info : matches) {
         if (info.definition().nodeType() == NodeType.DEPOT
@@ -3084,46 +3107,105 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return Optional.of(matches.get(0));
   }
 
-  private static Optional<String> resolveDestinationName(
-      StorageProvider provider, org.fetarute.fetaruteTCAddon.company.model.Route route) {
-    if (provider == null || route == null) {
+  /**
+   * 为 DYNAMIC depot 规范按实际股道负载选择节点。
+   *
+   * <p>同一个 DYNAMIC 配置可能覆盖多个真实 Depot 股道。本方法会把当前线路在各股道的活跃列车数、本 tick 已选择次数、占用状态与 depot backoff
+   * 一并纳入评分，避免多张票据在同一轮全部固化到排序第一个股道。
+   */
+  private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(
+      String dynamicSpec,
+      boolean preferFreeDepot,
+      StorageProvider provider,
+      UUID lineId,
+      LineRuntimeSnapshot runtimeSnapshot,
+      Map<String, Integer> selectedThisTick,
+      Instant now) {
+    List<SignNodeRegistry.SignNodeInfo> matches = findDynamicDepotNodeInfos(dynamicSpec);
+    if (matches.isEmpty()) {
       return Optional.empty();
     }
-    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
-        provider.routeStops().listByRoute(route.id());
-    if (stops.isEmpty()) {
+    List<SignNodeRegistry.SignNodeInfo> depotMatches =
+        matches.stream().filter(info -> info.definition().nodeType() == NodeType.DEPOT).toList();
+    if (depotMatches.isEmpty()) {
+      debugLogger.accept("DYNAMIC depot world 回退: 未找到 DEPOT 行为节点，使用同前缀图节点 " + dynamicSpec);
+      return Optional.of(matches.get(0));
+    }
+
+    double bestScore = Double.MAX_VALUE;
+    List<SignNodeRegistry.SignNodeInfo> best = new ArrayList<>();
+    for (SignNodeRegistry.SignNodeInfo info : depotMatches) {
+      NodeId nodeId = info.definition().nodeId();
+      String key = normalizeDepotKey(nodeId.value());
+      int active =
+          runtimeSnapshot == null
+              ? 0
+              : runtimeSnapshot.countActiveTrainsAtDepot(provider, lineId, nodeId);
+      int selected = selectedThisTick == null ? 0 : selectedThisTick.getOrDefault(key, 0);
+      double occupiedPenalty =
+          preferFreeDepot && occupancyManager.isNodeOccupied(nodeId) ? 1000.0D : 0.0D;
+      double backoffPenalty =
+          depotDispatchCoordinator.backoffUntil(nodeId.value(), now).isPresent() ? 1000.0D : 0.0D;
+      double score = active + selected + occupiedPenalty + backoffPenalty;
+      if (score < bestScore - 0.000001D) {
+        best.clear();
+        best.add(info);
+        bestScore = score;
+        continue;
+      }
+      if (Math.abs(score - bestScore) <= 0.000001D) {
+        best.add(info);
+      }
+    }
+    return pickDynamicDepotByRoundRobin(lineId, dynamicSpec, best);
+  }
+
+  private Optional<SignNodeRegistry.SignNodeInfo> pickDynamicDepotByRoundRobin(
+      UUID lineId, String dynamicSpec, List<SignNodeRegistry.SignNodeInfo> candidates) {
+    if (candidates == null || candidates.isEmpty()) {
       return Optional.empty();
     }
-    org.fetarute.fetaruteTCAddon.company.model.RouteStop candidate = null;
-    for (org.fetarute.fetaruteTCAddon.company.model.RouteStop stop : stops) {
-      if (stop != null
-          && stop.passType()
-              == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE) {
-        candidate = stop;
-      }
+    if (candidates.size() == 1 || lineId == null) {
+      return Optional.of(candidates.get(0));
     }
-    if (candidate == null) {
-      for (org.fetarute.fetaruteTCAddon.company.model.RouteStop stop : stops) {
-        if (stop != null
-            && stop.passType()
-                == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP) {
-          candidate = stop;
-        }
-      }
+    String cursorKey = lineId + "|" + normalizeDepotKey(dynamicSpec);
+    int cursor =
+        dynamicDepotSelectionCursors
+            .computeIfAbsent(cursorKey, ignored -> new java.util.concurrent.atomic.AtomicInteger())
+            .getAndIncrement();
+    return Optional.of(candidates.get(Math.floorMod(cursor, candidates.size())));
+  }
+
+  private List<SignNodeRegistry.SignNodeInfo> findDynamicDepotNodeInfos(String dynamicSpec) {
+    if (dynamicSpec == null
+        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
+      return List.of();
     }
-    if (candidate == null) {
-      candidate = stops.get(stops.size() - 1);
+    String rest = dynamicSpec.substring("DYNAMIC:".length());
+    String[] parts = rest.split(":", 4);
+    if (parts.length < 3) {
+      return List.of();
     }
-    if (candidate.stationId().isPresent()) {
-      Optional<org.fetarute.fetaruteTCAddon.company.model.Station> stationOpt =
-          provider.stations().findById(candidate.stationId().get());
-      if (stationOpt.isPresent()) {
-        return Optional.of(stationOpt.get().name());
-      }
+    String operatorCode = parts[0].trim();
+    String nodeType = parts[1].trim();
+    String nodeName = parts[2].trim();
+    if (operatorCode.isEmpty() || nodeType.isEmpty() || nodeName.isEmpty()) {
+      return List.of();
     }
-    if (candidate.waypointNodeId().isPresent()) {
-      return Optional.of(candidate.waypointNodeId().get());
+    Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
+    if (infos == null || infos.isEmpty()) {
+      return List.of();
     }
-    return Optional.of(route.name());
+    return infos.values().stream()
+        .filter(info -> info != null && info.definition() != null)
+        .filter(
+            info -> {
+              String nodeIdValue = info.definition().nodeId().value();
+              return matchesDynamicDepotNode(dynamicSpec, nodeIdValue);
+            })
+        .sorted(
+            Comparator.comparing(
+                info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
+        .toList();
   }
 }

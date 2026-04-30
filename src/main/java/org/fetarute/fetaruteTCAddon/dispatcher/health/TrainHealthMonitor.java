@@ -29,7 +29,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  *   <li>STALL：先 refreshSignal，再升级到 forceRelaunch
  *   <li>PROGRESS_STUCK：先 refreshSignal，再升级到 reissueDestination，最后 forceRelaunch
  *   <li>STOP 下的长时间停滞也会按同样链路升级，避免只 refresh 不解锁
- *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则优先视为合法排队等待，不急于升级到重发/重启
+ *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则只在 STOP 宽限窗口内视为合法排队；超宽限后仍进入恢复链，避免 blocker 持续刷新导致永久不自愈
  *   <li>互相阻塞会按列车对执行 refresh → reissue → relaunch → destroy-victim，避免不可恢复的对顶/重叠长期占住线路
  *   <li>STOP 信号下的 progress stuck 允许更长宽限，避免把正常排队误判为故障
  * </ul>
@@ -395,9 +395,11 @@ public final class TrainHealthMonitor {
       }
       recovery.resetDeadlock();
 
-      boolean hasFreshStopBlockers =
-          currentSignal == SignalAspect.STOP && hasRecentBlockers(trainName);
-      if (hasFreshStopBlockers) {
+      boolean waitingOnFreshStopBlockersWithinGrace =
+          currentSignal == SignalAspect.STOP
+              && progressDuration.compareTo(progressStopGraceThreshold) <= 0
+              && hasRecentBlockers(trainName);
+      if (waitingOnFreshStopBlockersWithinGrace) {
         recovery.resetProgress();
         continue;
       }
@@ -590,7 +592,7 @@ public final class TrainHealthMonitor {
    * 判断列车当前是否仍持有“新鲜”的 blocker 快照。
    *
    * <p>用于区分“合法 STOP 排队等待”和“信号/调度状态疑似丢失”。 只要 blocker 快照仍在有效期内，就优先认为列车正在等待前车或冲突区放行， 不立即升级到 {@code
-   * reissueDestination/forceRelaunch}；待快照过期后再进入停滞恢复链。
+   * reissueDestination/forceRelaunch}；超过 STOP 宽限后即使 blocker 仍持续刷新，也会进入停滞恢复链，避免长时间互卡被“新鲜快照”无限掩盖。
    */
   private boolean hasRecentBlockers(String trainName) {
     return trainName != null
@@ -676,7 +678,8 @@ public final class TrainHealthMonitor {
       fixed = destroyDeadlockVictim(trainName, blockerTrain);
     }
     recovery.lastDeadlockAttemptAt = now;
-    recovery.deadlockStage = fixed ? nextStage : 0;
+    // 互卡恢复即使 reissue/relaunch 返回 false，也必须继续升级；否则会在非破坏动作失败时反复回到 refresh，永远到不了 destroy 兜底。
+    recovery.deadlockStage = nextStage;
     deadlockPairLastAttemptAt.put(pairKey, now);
     return fixed;
   }

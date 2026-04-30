@@ -38,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -508,7 +509,7 @@ class RuntimeDispatchServiceTest {
 
     Instant t0 = Instant.now();
     monitor.check(Set.of("train-1"), t0);
-    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train-1"), t0.plusSeconds(25));
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train-1"), t0.plusSeconds(15));
 
     assertEquals(0, result.progressStuckCount());
     verify(dispatchFacade, never()).refreshSignalByName("train-1");
@@ -1562,6 +1563,150 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleSignalTickClearsBehindQueueEntryBeforeAuthorizingFrontTrain() {
+    NodeId a = NodeId.of("A");
+    NodeId switcher = NodeId.of("SW");
+    NodeId b = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, switcher, b), Optional.empty());
+    TagStore frontTags =
+        new TagStore(
+            "train-front",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=1");
+    TagStore rearTags = new TagStore("train-rear", "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithSwitcher(a, switcher, b, 10, 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    OccupancyResource switcherConflict = OccupancyResource.forConflict("switcher:SW");
+    occupancyManager.touchQueues(
+        new OccupancyRequest(
+            "train-rear",
+            Optional.of(route.id()),
+            Instant.now(),
+            List.of(switcherConflict),
+            Map.of(),
+            Map.of(switcherConflict.key(), 0),
+            0));
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-front", frontTags.properties(), route);
+    registry.initFromTags("train-rear", rearTags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, frontTags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    SignalAspect aspect = registry.get("train-front").orElseThrow().lastSignal();
+    assertEquals(SignalAspect.PROCEED, aspect);
+    assertTrue(
+        occupancyManager.snapshotQueues().stream()
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .noneMatch(entry -> entry.trainName().equalsIgnoreCase("train-rear")));
+  }
+
+  @Test
+  void handleSignalTickKeepsSwitcherQueueBlockerFromDifferentRoute() {
+    NodeId a = NodeId.of("A");
+    NodeId switcher = NodeId.of("SW");
+    NodeId b = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, switcher, b), Optional.empty());
+    TagStore frontTags =
+        new TagStore(
+            "train-front",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=1");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithSwitcher(a, switcher, b, 10, 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    OccupancyResource switcherConflict = OccupancyResource.forConflict("switcher:SW");
+    occupancyManager.touchQueues(
+        new OccupancyRequest(
+            "crossing-train",
+            Optional.of(RouteId.of("other-route")),
+            Instant.now(),
+            List.of(switcherConflict),
+            Map.of(),
+            Map.of(switcherConflict.key(), 0),
+            0));
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-front", frontTags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, frontTags.properties(), false);
+    service.handleSignalTick(train, false);
+
+    SignalAspect aspect = registry.get("train-front").orElseThrow().lastSignal();
+    assertEquals(SignalAspect.STOP, aspect);
+    assertTrue(
+        service
+            .recentBlockerTrains("train-front", Duration.ofSeconds(30))
+            .contains("crossing-train"));
+  }
+
+  @Test
   void handleSignalTickDowngradesWhenForwardClaimIsFromAheadSameRoute() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
@@ -2005,6 +2150,37 @@ class RuntimeDispatchServiceTest {
         return false;
       }
     };
+  }
+
+  private static RailGraph graphWithSwitcher(
+      NodeId a, NodeId switcher, NodeId b, int length1, int length2) {
+    RailEdge edge1 =
+        new RailEdge(
+            EdgeId.undirected(a, switcher), a, switcher, length1, -1.0, true, Optional.empty());
+    RailEdge edge2 =
+        new RailEdge(
+            EdgeId.undirected(switcher, b), switcher, b, length2, -1.0, true, Optional.empty());
+    return new SimpleRailGraph(
+        Map.of(
+            a, new RailNodeTest(a),
+            switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+            b, new RailNodeTest(b)),
+        Map.of(edge1.id(), edge1, edge2.id(), edge2),
+        Set.of());
+  }
+
+  private static RailGraph graphWithTypedSingleEdge(NodeId from, RailNode to, int lengthBlocks) {
+    RailEdge edge =
+        new RailEdge(
+            EdgeId.undirected(from, to.id()),
+            from,
+            to.id(),
+            lengthBlocks,
+            -1.0,
+            true,
+            Optional.empty());
+    return new SimpleRailGraph(
+        Map.of(from, new RailNodeTest(from), to.id(), to), Map.of(edge.id(), edge), Set.of());
   }
 
   private static RailGraph graphWithStationSwitcherPath(
@@ -2990,6 +3166,133 @@ class RuntimeDispatchServiceTest {
     assertEquals(switcher, diagnostics.approachNode());
     assertEquals(90L, diagnostics.distanceToApproach().orElseThrow());
     assertEquals("approach_curve", diagnostics.finalLimiterSource());
+  }
+
+  @Test
+  void stationApproachEnvelopeUsesTrainDecelConfig() {
+    NodeId a = NodeId.of("A");
+    NodeId waypoint = NodeId.of("W");
+    NodeId switcher = NodeId.of("SW");
+    NodeId station = NodeId.of("OP:S:CENTRAL:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, station), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0",
+            "FTA_TRAIN_DECEL_BPS2=0.25");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView base = testConfigView(1, 40.0);
+    when(configManager.current())
+        .thenReturn(withRuntimeSettings(base, runtimeWithApproachSpeed(base, 6.0)));
+
+    RailGraph graph = graphWithStationSwitcherPath(a, waypoint, switcher, station, 80, 10, 20);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(28.8);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(any(), eq(1)))
+        .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+    service.handleSignalTick(train, true);
+
+    ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
+    double expectedEnvelope = Math.sqrt(6.0 * 6.0 + 2.0 * 0.25 * (90.0 - 10.0));
+    assertEquals("station", diagnostics.approachKind());
+    assertEquals("approach_curve", diagnostics.finalLimiterSource());
+    assertTrue(diagnostics.approachReason().contains("target_edge_distance=10"));
+    assertEquals(expectedEnvelope, diagnostics.finalTargetBps(), 1.0e-6);
+  }
+
+  @Test
+  void depotStopUsesDepotApproachLimiter() {
+    NodeId a = NodeId.of("A");
+    NodeId depot = NodeId.of("OP:D:YARD:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, depot), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(1, 40.0));
+
+    RailGraph graph =
+        graphWithTypedSingleEdge(
+            a,
+            new RailNodeTest(
+                depot, NodeType.DEPOT, Optional.of(WaypointMetadata.depot("OP", "YARD", 1))),
+            50);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(28.8);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(any(), eq(1)))
+        .thenReturn(Optional.of(routeStop(1, depot, RouteStopPassType.TERMINATE)));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+    service.handleSignalTick(train, true);
+
+    ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
+    assertEquals("depot", diagnostics.approachKind());
+    assertEquals(depot, diagnostics.approachNode());
+    assertEquals("depot_approach", diagnostics.finalLimiterSource());
+    assertEquals(3.5, diagnostics.finalTargetBps(), 1.0e-6);
   }
 
   @Test

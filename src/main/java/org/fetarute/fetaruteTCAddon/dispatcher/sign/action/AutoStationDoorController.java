@@ -956,6 +956,15 @@ public final class AutoStationDoorController {
         || face == BlockFace.WEST;
   }
 
+  /** 判断方位是否为水平八向（含 45 度斜向）。 */
+  static boolean isHorizontalCompass(BlockFace face) {
+    return isCardinal(face)
+        || face == BlockFace.NORTH_EAST
+        || face == BlockFace.SOUTH_EAST
+        || face == BlockFace.SOUTH_WEST
+        || face == BlockFace.NORTH_WEST;
+  }
+
   /** 返回相对于列车行进方向的左侧方位。 */
   static BlockFace leftOf(BlockFace face) {
     if (face == BlockFace.NORTH) {
