@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
@@ -49,6 +50,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -917,6 +919,87 @@ class SimpleTicketAssignerLayoverTest {
     return new SimpleRailGraph(Map.of(from, fromNode, to, toNode), Map.of(edgeId, edge), Set.of());
   }
 
+  private static SimpleRailGraph graphWithDepotLinearPath(List<NodeId> nodes) {
+    java.util.Map<NodeId, RailNode> railNodes = new java.util.LinkedHashMap<>();
+    java.util.Map<EdgeId, RailEdge> edges = new java.util.LinkedHashMap<>();
+    for (int i = 0; i < nodes.size(); i++) {
+      NodeId node = nodes.get(i);
+      NodeType type = i == 0 ? NodeType.DEPOT : NodeType.WAYPOINT;
+      railNodes.put(
+          node,
+          new SignRailNode(
+              node, type, new Vector(i * 10.0, 64.0, 0.0), Optional.empty(), Optional.empty()));
+    }
+    for (int i = 0; i + 1 < nodes.size(); i++) {
+      NodeId from = nodes.get(i);
+      NodeId to = nodes.get(i + 1);
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.put(edgeId, new RailEdge(edgeId, from, to, 10, 8.0, true, Optional.empty()));
+    }
+    return new SimpleRailGraph(railNodes, edges, Set.of());
+  }
+
+  private static SimpleTicketAssigner createDepotGateAssigner(
+      StorageProvider provider,
+      UUID routeId,
+      NodeId depotNode,
+      SimpleRailGraph graph,
+      RouteDefinition route,
+      OccupancyResource blockedResource,
+      DepotSpawner depotSpawner) {
+    SpawnTicket ticket = buildTicket(routeId);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+        .thenAnswer(
+            inv -> {
+              OccupancyRequest request = inv.getArgument(0);
+              boolean blocked = request.resourceList().contains(blockedResource);
+              if (!blocked) {
+                return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+              }
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      blockedResource,
+                      "busy-train",
+                      Optional.empty(),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  false, request.now(), SignalAspect.STOP, List.of(blocker));
+            });
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
+    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+
+    return new SimpleTicketAssigner(
+        spawnManager,
+        depotSpawner,
+        occupancyManager,
+        railGraphService,
+        mockRouteDefinitions(Map.of(routeId, route)),
+        runtimeDispatchService,
+        mockConfigManager(),
+        signNodeRegistry,
+        mock(LayoverRegistry.class),
+        null,
+        Duration.ofSeconds(1),
+        1,
+        10);
+  }
+
   private static SimpleRailGraph graphWithTwoDepotStarts(
       NodeId depotOne, NodeId depotTwo, NodeId nodeA, NodeId nodeB) {
     RailNode depotOneNode =
@@ -1440,6 +1523,109 @@ class SimpleTicketAssignerLayoverTest {
     assertTrue(captured.resourceList().contains(OccupancyResource.forNode(depotTwo)));
     assertFalse(captured.resourceList().contains(OccupancyResource.forNode(depotOne)));
     assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotTwoA)));
+    String conflictKey =
+        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeDepotTwoA).orElseThrow();
+    assertEquals(CorridorDirection.B_TO_A, captured.corridorDirections().get(conflictKey));
+    assertEquals(0, captured.conflictEntryOrders().get(conflictKey));
+  }
+
+  @Test
+  void tickDepotSpawnBlocksWhenLookoverCoversLongSingleOccupancy() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId throatNode = NodeId.of("SURN:D:DEPOT:1:001");
+    NodeId midOne = NodeId.of("M1");
+    NodeId midTwo = NodeId.of("M2");
+    NodeId midThree = NodeId.of("M3");
+    NodeId endNode = NodeId.of("B");
+    EdgeId blockedEdge = EdgeId.undirected(midTwo, midThree);
+    SimpleRailGraph graph =
+        graphWithDepotLinearPath(List.of(depotNode, throatNode, midOne, midTwo, midThree, endNode));
+    StorageProvider provider = mockProvider(routeId, true);
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    SimpleTicketAssigner assigner =
+        createDepotGateAssigner(
+            provider,
+            routeId,
+            depotNode,
+            graph,
+            new RouteDefinition(
+                RouteId.of("OP:L1:R1"), List.of(depotNode, endNode), Optional.empty()),
+            OccupancyResource.forEdge(blockedEdge),
+            depotSpawner);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void tickDepotSpawnBlocksWhenLookoverCoversSwitcherBranchOccupancy() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId switcherNode = NodeId.of("SW");
+    NodeId mainNode = NodeId.of("B");
+    NodeId branchNode = NodeId.of("BRANCH");
+    EdgeId depotSwitcher = EdgeId.undirected(depotNode, switcherNode);
+    EdgeId switcherMain = EdgeId.undirected(switcherNode, mainNode);
+    EdgeId switcherBranch = EdgeId.undirected(switcherNode, branchNode);
+    RailNode depot =
+        new SignRailNode(
+            depotNode,
+            NodeType.DEPOT,
+            new Vector(-10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode switcher =
+        new SignRailNode(
+            switcherNode,
+            NodeType.SWITCHER,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode main =
+        new SignRailNode(
+            mainNode,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode branch =
+        new SignRailNode(
+            branchNode,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 10.0),
+            Optional.empty(),
+            Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(depotNode, depot, switcherNode, switcher, mainNode, main, branchNode, branch),
+            Map.of(
+                depotSwitcher,
+                new RailEdge(
+                    depotSwitcher, depotNode, switcherNode, 10, 8.0, true, Optional.empty()),
+                switcherMain,
+                new RailEdge(switcherMain, switcherNode, mainNode, 10, 8.0, true, Optional.empty()),
+                switcherBranch,
+                new RailEdge(
+                    switcherBranch, switcherNode, branchNode, 10, 8.0, true, Optional.empty())),
+            Set.of());
+    StorageProvider provider = mockProvider(routeId, true);
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    SimpleTicketAssigner assigner =
+        createDepotGateAssigner(
+            provider,
+            routeId,
+            depotNode,
+            graph,
+            new RouteDefinition(
+                RouteId.of("OP:L1:R1"), List.of(depotNode, mainNode), Optional.empty()),
+            OccupancyResource.forEdge(switcherBranch),
+            depotSpawner);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
   }
 
   @Test

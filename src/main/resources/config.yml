@@ -24,6 +24,8 @@ health:
   progress-stop-grace-seconds: 180
   # STOP 状态下“互卡解锁”触发阈值（秒）：超过后会优先尝试双车解锁
   deadlock-threshold-seconds: 45
+  # STOP 互卡最终销毁阈值（秒）：超过后仍未恢复则销毁互卡对中的稳定 leader；0 表示禁用
+  deadlock-destroy-threshold-seconds: 900
   # blocker 快照有效期（秒）：用于识别互相阻塞的列车对
   blocker-snapshot-max-age-seconds: 20
   # 自动修复动作冷却（秒）：避免每轮健康检查都重复触发恢复动作

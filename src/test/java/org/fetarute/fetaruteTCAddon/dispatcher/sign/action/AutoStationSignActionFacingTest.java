@@ -45,6 +45,30 @@ class AutoStationSignActionFacingTest {
   }
 
   @Test
+  void exitOffsetSideSupportsExplicitDiagonalDoorFace() {
+    assertEquals(
+        3.0,
+        AutoStationSignAction.computeRelativeSide(BlockFace.NORTH_EAST, BlockFace.NORTH_WEST, 3.0));
+    assertEquals(
+        -3.0,
+        AutoStationSignAction.computeRelativeSide(BlockFace.NORTH_EAST, BlockFace.SOUTH_EAST, 3.0));
+  }
+
+  @Test
+  void exitOffsetSideSupportsContinuousFacingVector() {
+    Vector thirtyDegreesEastOfNorth = new Vector(0.5, 0.0, -0.8660254038);
+
+    assertEquals(
+        3.0,
+        AutoStationSignAction.computeRelativeSide(
+            BlockFace.NORTH_EAST, thirtyDegreesEastOfNorth, BlockFace.NORTH, 3.0));
+    assertEquals(
+        -3.0,
+        AutoStationSignAction.computeRelativeSide(
+            BlockFace.NORTH_EAST, thirtyDegreesEastOfNorth, BlockFace.EAST, 3.0));
+  }
+
+  @Test
   void exitOffsetSideKeepsCardinalFacingSign() {
     assertEquals(
         -3.0, AutoStationSignAction.computeRelativeSide(BlockFace.NORTH, BlockFace.EAST, 3.0));

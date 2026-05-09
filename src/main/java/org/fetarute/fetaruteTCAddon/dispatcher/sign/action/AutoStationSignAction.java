@@ -233,7 +233,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     String facingSource = facingResult.source();
     AutoStationDoorController.DoorChimeSettings chimeSettings = resolveChimeSettings();
     AutoStationDoorController.DoorSession session =
-        AutoStationDoorController.plan(group, facingDirection, doorDirection, chimeSettings);
+        AutoStationDoorController.plan(
+            group, facingDirection, facingResult.vector(), doorDirection, chimeSettings);
     String planSummary = session.debugSummary();
     boolean firstStop = isFirstStop(properties);
     if (session.hasActions()) {
@@ -255,6 +256,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + facingDirection
               + ", source="
               + facingSource
+              + ", facingVector="
+              + formatFacingVector(facingResult.vector())
               + ", plan="
               + planSummary
               + ", animations="
@@ -271,6 +274,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + facingDirection
               + ", source="
               + facingSource
+              + ", facingVector="
+              + formatFacingVector(facingResult.vector())
               + ", train="
               + trainName
               + ", route="
@@ -293,6 +298,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         dwellSeconds,
         doorDirection,
         facingDirection,
+        facingResult.vector(),
         facingSource,
         chimeSettings,
         session,
@@ -333,6 +339,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       int dwellSeconds,
       AutoStationDoorDirection doorDirection,
       BlockFace facingDirection,
+      Vector facingVector,
       String facingSource,
       AutoStationDoorController.DoorChimeSettings chimeSettings,
       AutoStationDoorController.DoorSession session,
@@ -377,6 +384,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 dwellSeconds,
                 doorDirection,
                 facingDirection,
+                facingVector,
                 facingSource,
                 chimeSettings,
                 session,
@@ -399,6 +407,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               dwellSeconds,
               doorDirection,
               facingDirection,
+              facingVector,
               facingSource,
               chimeSettings,
               session,
@@ -418,6 +427,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       int dwellSeconds,
       AutoStationDoorDirection doorDirection,
       BlockFace facingDirection,
+      Vector facingVector,
       String facingSource,
       AutoStationDoorController.DoorChimeSettings chimeSettings,
       AutoStationDoorController.DoorSession session,
@@ -483,6 +493,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       private boolean closeAnimationTriggered = false;
       private boolean closeSoundPlayed = false;
       private BlockFace cachedFacing = null;
+      private Vector cachedFacingVector = null;
       private String cachedAnimations = null;
       private String cachedPlanSummary = null;
       private AutoStationDoorController.DoorSession cachedSession = null;
@@ -618,17 +629,22 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         FacingResult facingResult = resolveFacingDirectionResult(info);
         BlockFace resolvedFacing =
             facingResult.face() == null ? facingDirection : facingResult.face();
+        Vector resolvedVector =
+            facingResult.vector() == null ? facingVector : facingResult.vector();
         String resolvedSource = facingResult.face() == null ? facingSource : facingResult.source();
         String animations = summarizeDoorAnimations(group);
         boolean shouldRebuild =
             cachedSession == null
                 || cachedFacing != resolvedFacing
+                || !sameHorizontalVector(cachedFacingVector, resolvedVector)
                 || !java.util.Objects.equals(cachedAnimations, animations);
         if (shouldRebuild) {
           cachedFacing = resolvedFacing;
+          cachedFacingVector = cloneVector(resolvedVector);
           cachedAnimations = animations;
           cachedSession =
-              AutoStationDoorController.plan(group, resolvedFacing, doorDirection, chimeSettings);
+              AutoStationDoorController.plan(
+                  group, resolvedFacing, resolvedVector, doorDirection, chimeSettings);
           String nextPlan = cachedSession.debugSummary();
           if (cachedPlanSummary == null || !cachedPlanSummary.equals(nextPlan)) {
             debug(
@@ -648,6 +664,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + resolvedFacing
                     + ", source="
                     + resolvedSource
+                    + ", facingVector="
+                    + formatFacingVector(resolvedVector)
                     + ", plan="
                     + nextPlan
                     + ", animations="
@@ -661,7 +679,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         }
         if (!exitOffsetState.applied()) {
           resolveExitFace(doorDirection)
-              .flatMap(face -> buildExitOffset(face, facingDirection, EXIT_OFFSET_DISTANCE_BLOCKS))
+              .flatMap(
+                  face ->
+                      buildExitOffset(
+                          face, resolvedFacing, resolvedVector, EXIT_OFFSET_DISTANCE_BLOCKS))
               .ifPresent(exitOffsetState::apply);
         }
         if (cachedSession == null) {
@@ -687,6 +708,12 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + actionableSinceTick
                     + ", door="
                     + doorDirection
+                    + ", facing="
+                    + resolvedFacing
+                    + ", source="
+                    + resolvedSource
+                    + ", facingVector="
+                    + formatFacingVector(resolvedVector)
                     + ", train="
                     + trainName
                     + ", route="
@@ -723,6 +750,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 + ticksSinceStop
                 + ", spawnAgeMs="
                 + readRunAgeMillis(group.getProperties())
+                + ", door="
+                + doorDirection
+                + ", facing="
+                + resolvedFacing
+                + ", source="
+                + resolvedSource
+                + ", facingVector="
+                + formatFacingVector(resolvedVector)
                 + ", plan="
                 + (cachedPlanSummary == null ? "-" : cachedPlanSummary)
                 + ", animations="
@@ -753,6 +788,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + resolvedFacing
                     + ", source="
                     + resolvedSource
+                    + ", facingVector="
+                    + formatFacingVector(resolvedVector)
                     + ", plan="
                     + cachedSession.debugSummary()
                     + ", animations="
@@ -789,6 +826,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 + resolvedFacing
                 + ", source="
                 + resolvedSource
+                + ", facingVector="
+                + formatFacingVector(resolvedVector)
                 + ", plan="
                 + planSummary
                 + ", animations="
@@ -1235,21 +1274,25 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return FacingResult.empty();
     }
     var head = info.getGroup().head();
-    BlockFace face = toHorizontalFace(head.getOrientationForward());
+    Vector orientationVector =
+        AutoStationDoorController.normalizeHorizontalVector(head.getOrientationForward());
+    BlockFace face = toHorizontalFace(orientationVector);
     if (face != null) {
-      return new FacingResult(face, "orientation");
+      return new FacingResult(face, orientationVector, "orientation");
     }
     face = head.getDirectionTo();
     if (AutoStationDoorController.isHorizontalCompass(face)) {
-      return new FacingResult(face, "direction_to");
+      return new FacingResult(
+          face, AutoStationDoorController.horizontalVector(face), "direction_to");
     }
     face = head.getDirectionFrom();
     if (AutoStationDoorController.isHorizontalCompass(face)) {
-      return new FacingResult(face, "direction_from");
+      return new FacingResult(
+          face, AutoStationDoorController.horizontalVector(face), "direction_from");
     }
     face = head.getDirection();
     if (AutoStationDoorController.isHorizontalCompass(face)) {
-      return new FacingResult(face, "direction");
+      return new FacingResult(face, AutoStationDoorController.horizontalVector(face), "direction");
     }
     return FacingResult.empty();
   }
@@ -1275,12 +1318,12 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * @return 相对于列车的出站偏移
    */
   private static Optional<ExitOffset> buildExitOffset(
-      BlockFace doorFace, BlockFace trainFacing, double distance) {
+      BlockFace doorFace, BlockFace trainFacing, Vector trainFacingVector, double distance) {
     if (doorFace == null || trainFacing == null || !Double.isFinite(distance) || distance <= 0.0) {
       return Optional.empty();
     }
     // 计算开门方向相对于列车行进方向是左侧还是右侧。
-    Double localX = computeRelativeSide(trainFacing, doorFace, distance);
+    Double localX = computeRelativeSide(trainFacing, trainFacingVector, doorFace, distance);
     if (localX == null) {
       return Optional.empty();
     }
@@ -1296,10 +1339,18 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * @return 正值=TrainCarts 本地 +X（左侧），负值=本地 -X（右侧），null=无法计算
    */
   static Double computeRelativeSide(BlockFace trainFacing, BlockFace doorFace, double distance) {
+    return computeRelativeSide(trainFacing, null, doorFace, distance);
+  }
+
+  static Double computeRelativeSide(
+      BlockFace trainFacing, Vector trainFacingVector, BlockFace doorFace, double distance) {
     if (!Double.isFinite(distance) || distance <= 0.0) {
       return null;
     }
-    String side = AutoStationDoorController.chooseSideNameByTravelFace(trainFacing, doorFace);
+    String side =
+        trainFacingVector == null
+            ? AutoStationDoorController.chooseSideNameByTravelFace(trainFacing, doorFace)
+            : AutoStationDoorController.chooseSideNameByTravelVector(trainFacingVector, doorFace);
     // TrainCarts ExitOffset 本地坐标系：+X = 左侧，-X = 右侧（与直觉相反）。
     if ("left".equals(side)) {
       return distance;
@@ -1342,9 +1393,31 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     }
   }
 
-  private record FacingResult(BlockFace face, String source) {
+  private static boolean sameHorizontalVector(Vector left, Vector right) {
+    Vector a = AutoStationDoorController.normalizeHorizontalVector(left);
+    Vector b = AutoStationDoorController.normalizeHorizontalVector(right);
+    if (a == null || b == null) {
+      return a == b;
+    }
+    return Math.abs(a.getX() - b.getX()) <= 1.0e-4 && Math.abs(a.getZ() - b.getZ()) <= 1.0e-4;
+  }
+
+  private static Vector cloneVector(Vector vector) {
+    Vector normalized = AutoStationDoorController.normalizeHorizontalVector(vector);
+    return normalized == null ? null : normalized.clone();
+  }
+
+  private static String formatFacingVector(Vector vector) {
+    Vector normalized = AutoStationDoorController.normalizeHorizontalVector(vector);
+    if (normalized == null) {
+      return "none";
+    }
+    return String.format(Locale.ROOT, "(%.3f,%.3f)", normalized.getX(), normalized.getZ());
+  }
+
+  private record FacingResult(BlockFace face, Vector vector, String source) {
     private static FacingResult empty() {
-      return new FacingResult(null, "unknown");
+      return new FacingResult(null, null, "unknown");
     }
   }
 

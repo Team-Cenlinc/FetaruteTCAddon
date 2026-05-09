@@ -97,6 +97,10 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   @Override
   public void stop() {
     group.stop(false);
+    MinecartMember<?> head = group.head();
+    if (head != null && head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
+      head.getActions().clear();
+    }
   }
 
   /**
@@ -228,14 +232,19 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return;
     }
     double currentSpeed = currentSpeedBlocksPerTick();
-    // 如果当前速度已经接近或超过目标，不需要重新加速
-    if (currentSpeed >= targetBlocksPerTick * 0.95) {
+    double tolerance = Math.max(0.005, Math.abs(targetBlocksPerTick) * 0.05);
+    // 如果当前速度已经接近目标，不需要重新下发动作
+    if (Math.abs(currentSpeed - targetBlocksPerTick) <= tolerance) {
       return;
     }
+    boolean slowingDown = currentSpeed > targetBlocksPerTick + tolerance;
     if (head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
-      return;
+      if (!slowingDown) {
+        return;
+      }
+      head.getActions().clear();
     }
-    // 无论是否运动，都尝试添加加速动作以"补充能量"
+    // 无论目标是加速还是减速，都交给 TrainCarts launch action 按加速度平滑收敛。
     LauncherConfig launchConfig = LauncherConfig.createDefault();
     if (accelBlocksPerTickSquared > 0.0) {
       launchConfig.setAcceleration(accelBlocksPerTickSquared);

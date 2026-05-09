@@ -747,6 +747,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         java.time.Duration.ofSeconds(settings.progressStopGraceSeconds()));
     healthMonitor.setDeadlockThreshold(
         java.time.Duration.ofSeconds(settings.deadlockThresholdSeconds()));
+    healthMonitor.setDeadlockDestroyThreshold(
+        java.time.Duration.ofSeconds(settings.deadlockDestroyThresholdSeconds()));
     healthMonitor.setBlockerSnapshotMaxAge(
         java.time.Duration.ofSeconds(settings.blockerSnapshotMaxAgeSeconds()));
     healthMonitor.setRecoveryCooldown(

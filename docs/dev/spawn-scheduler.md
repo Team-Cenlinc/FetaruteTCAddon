@@ -149,10 +149,10 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 
 ## 运行时门控
 
-`TicketAssigner` 在实际 spawn 前会先经过 `SpawnControl`，再构建一次“gate 占用请求”。占用门控采用 `canEnter(...) -> acquire(...)` 两段判定：
+`TicketAssigner` 在实际 spawn 前会先经过 `SpawnControl`，再构建一次“gate 占用请求”。占用门控统一走 `LaunchAuthorizationService`，分为 spawn 前只读 preview 与 spawn 后真实 acquire：
 
-- `canEnter` 必须允许且没有 blocker；若 depot throat、长单线 conflict、lookover 分支或入库/出库混行资源被占住，会 requeue/hold，不会强行生成列车。
-- `acquire` 再次确认后才预占用资源；若 acquire 阶段发现 blocker，同样释放 SpawnControl 租约并重试。
+- spawn 前 preview 必须允许且没有 blocker；若 depot throat、长单线 conflict、lookover 分支或入库/出库混行资源被占住，会 requeue/hold，不会强行生成列车。
+- spawn 后 acquire 再次确认并写入真实占用；若 acquire 阶段发现 blocker，会释放 SpawnControl 租约、释放该 train 的占用、销毁刚生成的 TrainCarts group，并延迟重试。
 - gate 阻塞会记录具体 blocker 资源（如 `NODE:...@train`、`EDGE:...@train`、`CONFLICT:...@train`），并对实际 selected depot 写入短暂 backoff。单股道 depot 若没有其它候选，会在队列诊断中持续显示阻塞资源；若同线路还有其它 depot，后续选择会避开当前 backoff depot。
 - 允许：生成列车，写入 `FTA_*` tags 与 `FTA_ROUTE_INDEX=0`，下发下一跳 destination，并触发一次 `RuntimeDispatchService.refreshSignal(...)`。
 - 允许：生成列车后还会基于本次 `acquire` 的资源集合，主动刷新同资源上的其他列车信号（含冲突队列等待列车），缩短“新车出库后他车仍维持旧信号”的窗口。
@@ -190,7 +190,8 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 - lookover 优先追加“走廊冲突 + 方向”资源以允许同向放行；方向无法判定时回退为“全方向冲突”资源（而不是仅 EDGE），避免道岔门控放宽。
 - `TicketAssigner` 会优先以“实际 depot 节点”（`selectedDepotNodeId`/`depotNodeId`）作为 gate 路径起点和 lookover 锚点，而不是盲目使用 `route.waypoints()[0]`。
 - 当 route 首节点不是 depot 时，lookover 仍会覆盖 depot 周边道岔区，并使用加深窗口（`max(6, max(lookahead, switcherZone*3))`，上限 24 边）用于拦截“回库车已进道岔区但未离开”场景。
-- depot 周边 lookover 会同时加入 edge 派生的 `CONFLICT` 资源；长单线入库线共享同一冲突组时，出库车会看到已在走廊内的回库车并延迟生成。
+- depot 周边 lookover 会同时加入 edge 派生的 `CONFLICT` 资源，并为这些冲突补齐走廊方向与 entryOrder；长单线入库线共享同一冲突组时，出库车会看到已在走廊内的回库车并延迟生成。
+- 回归覆盖：route 首节点不是实际 depot、depot 前方长单线有车、depot 前方 switcher 分支有车时，spawn 前 gate 均应阻止生成，不允许“先出库再发现 conflict”。
 
 > 当前版本已实现两条执行路径：
 > - 停靠表首行为 `CRET`：从 Depot 生成列车。

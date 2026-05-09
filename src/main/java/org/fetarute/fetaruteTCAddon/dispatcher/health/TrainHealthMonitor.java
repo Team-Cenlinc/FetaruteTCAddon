@@ -27,10 +27,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  *
  * <ul>
  *   <li>STALL：先 refreshSignal，再升级到 forceRelaunch
- *   <li>PROGRESS_STUCK：先 refreshSignal，再升级到 reissueDestination，最后 forceRelaunch
- *   <li>STOP 下的长时间停滞也会按同样链路升级，避免只 refresh 不解锁
- *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则只在 STOP 宽限窗口内视为合法排队；超宽限后仍进入恢复链，避免 blocker 持续刷新导致永久不自愈
- *   <li>互相阻塞会按列车对执行 refresh → reissue → relaunch → destroy-victim，避免不可恢复的对顶/重叠长期占住线路
+ *   <li>PROGRESS_STUCK：非 STOP 时先 refreshSignal，再升级到 reissueDestination，最后 forceRelaunch
+ *   <li>STOP 下的长时间停滞只做 refresh/reissue，不自动 forceRelaunch，避免健康监控绕过红灯强制动车
+ *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则只在 STOP 宽限窗口内视为合法排队；超宽限后仍进入非动车恢复链，避免 blocker 持续刷新导致永久不自愈
+ *   <li>互相阻塞的自动恢复先按列车对执行 refresh → reissue；超过销毁阈值且仍未恢复时，销毁 pair leader 作为最终兜底，避免永久占线
  *   <li>STOP 信号下的 progress stuck 允许更长宽限，避免把正常排队误判为故障
  * </ul>
  */
@@ -94,6 +94,9 @@ public final class TrainHealthMonitor {
   /** STOP 互卡识别阈值（秒）：用于比 progress STOP 宽限更早触发“解锁尝试”。 */
   private Duration deadlockThreshold = Duration.ofSeconds(45);
 
+  /** STOP 互卡最终销毁阈值：为 0 时禁用自动销毁。 */
+  private Duration deadlockDestroyThreshold = Duration.ofSeconds(900);
+
   /** 阻塞快照有效期：仅在最近可见的 blocker 信息上执行互卡解锁。 */
   private Duration blockerSnapshotMaxAge = Duration.ofSeconds(20);
 
@@ -142,6 +145,13 @@ public final class TrainHealthMonitor {
   public void setDeadlockThreshold(Duration threshold) {
     if (threshold != null && !threshold.isNegative() && !threshold.isZero()) {
       this.deadlockThreshold = threshold;
+    }
+  }
+
+  /** 设置 STOP 互卡最终销毁阈值；0 表示禁用自动销毁。 */
+  public void setDeadlockDestroyThreshold(Duration threshold) {
+    if (threshold != null && !threshold.isNegative()) {
+      this.deadlockDestroyThreshold = threshold;
     }
   }
 
@@ -371,7 +381,8 @@ public final class TrainHealthMonitor {
         progressStuckCount++;
         boolean fixed = false;
         if (autoFixEnabled) {
-          fixed = tryFixMutualDeadlock(trainName, mutualBlocker.get(), recovery, now);
+          fixed =
+              tryFixMutualDeadlock(trainName, mutualBlocker.get(), progressDuration, recovery, now);
           if (fixed) {
             fixedCount++;
           }
@@ -459,7 +470,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     int nextStage = Math.min(recovery.stallStage + 1, 2);
-    boolean fixed;
+    boolean fixed = false;
     if (nextStage == 1) {
       debugLogger.accept("TrainHealthMonitor 修复静止(stage=refresh): train=" + trainName);
       dispatchService.refreshSignalByName(trainName);
@@ -490,36 +501,27 @@ public final class TrainHealthMonitor {
       if (progressDuration.compareTo(progressStopGraceThreshold) <= 0) {
         return false;
       }
-      int nextStage = Math.min(recovery.progressStage + 1, 3);
+      int nextStage = Math.min(recovery.progressStage + 1, 2);
       boolean fixed;
       if (nextStage == 1) {
         debugLogger.accept("TrainHealthMonitor 修复停滞(stage=refresh-stop): train=" + trainName);
         dispatchService.refreshSignalByName(trainName);
         fixed = true;
-      } else if (nextStage == 2) {
+      } else {
         debugLogger.accept("TrainHealthMonitor 修复停滞(stage=reissue-stop): train=" + trainName);
         fixed = dispatchService.reissueDestinationByName(trainName);
         if (!fixed) {
           dispatchService.refreshSignalByName(trainName);
         }
-      } else {
-        debugLogger.accept("TrainHealthMonitor 修复停滞(stage=relaunch-stop): train=" + trainName);
-        fixed = dispatchService.forceRelaunchByName(trainName);
-        if (!fixed) {
-          fixed = dispatchService.reissueDestinationByName(trainName);
-        }
-        if (!fixed) {
-          dispatchService.refreshSignalByName(trainName);
-        }
       }
       recovery.lastProgressAttemptAt = now;
-      // STOP 停滞下允许“失败后继续升级”，避免永远停留在 refresh/reissue。
+      // STOP 停滞下不自动 relaunch，避免健康监控绕过红灯；后续 tick 继续 refresh/reissue。
       recovery.progressStage = nextStage;
       return fixed;
     }
 
     int nextStage = Math.min(recovery.progressStage + 1, 3);
-    boolean fixed;
+    boolean fixed = false;
     if (nextStage == 1) {
       debugLogger.accept("TrainHealthMonitor 修复停滞(stage=refresh): train=" + trainName);
       dispatchService.refreshSignalByName(trainName);
@@ -592,7 +594,7 @@ public final class TrainHealthMonitor {
    * 判断列车当前是否仍持有“新鲜”的 blocker 快照。
    *
    * <p>用于区分“合法 STOP 排队等待”和“信号/调度状态疑似丢失”。 只要 blocker 快照仍在有效期内，就优先认为列车正在等待前车或冲突区放行， 不立即升级到 {@code
-   * reissueDestination/forceRelaunch}；超过 STOP 宽限后即使 blocker 仍持续刷新，也会进入停滞恢复链，避免长时间互卡被“新鲜快照”无限掩盖。
+   * reissueDestination}；超过 STOP 宽限后即使 blocker 仍持续刷新，也会进入停滞恢复链，避免长时间互卡被“新鲜快照”无限掩盖。
    */
   private boolean hasRecentBlockers(String trainName) {
     return trainName != null
@@ -601,12 +603,16 @@ public final class TrainHealthMonitor {
   }
 
   /**
-   * 互卡解锁：优先轻量恢复，必要时升级到定向重发、重启与销毁。
+   * 互卡解锁：优先轻量恢复，超过销毁阈值且多轮恢复无效时销毁 pair leader。
    *
    * <p>为避免两车同时执行恢复动作导致抖动，仅由 pair key 较小的一侧执行。
    */
   private boolean tryFixMutualDeadlock(
-      String trainName, String blockerTrain, RecoveryState recovery, Instant now) {
+      String trainName,
+      String blockerTrain,
+      Duration progressDuration,
+      RecoveryState recovery,
+      Instant now) {
     if (trainName == null || blockerTrain == null) {
       return false;
     }
@@ -624,8 +630,23 @@ public final class TrainHealthMonitor {
     if (!canAttempt(now, pairLast) || !canAttempt(now, recovery.lastDeadlockAttemptAt)) {
       return false;
     }
-    int nextStage = Math.min(recovery.deadlockStage + 1, 4);
-    boolean fixed;
+    if (shouldDestroyDeadlockVictim(progressDuration, recovery)) {
+      debugLogger.accept(
+          "TrainHealthMonitor 解锁互卡(stage=destroy-leader): train="
+              + trainName
+              + " blocker="
+              + blockerTrain
+              + " duration="
+              + progressDuration.toSeconds()
+              + "s");
+      boolean fixed = dispatchService.destroyTrainByName(trainName, "health-deadlock-timeout");
+      recovery.lastDeadlockAttemptAt = now;
+      recovery.deadlockStage = fixed ? 3 : 2;
+      deadlockPairLastAttemptAt.put(pairKey, now);
+      return fixed;
+    }
+    int nextStage = Math.min(recovery.deadlockStage + 1, 2);
+    boolean fixed = false;
     if (nextStage == 1) {
       debugLogger.accept(
           "TrainHealthMonitor 解锁互卡(stage=refresh-pair): train="
@@ -649,53 +670,20 @@ public final class TrainHealthMonitor {
         dispatchService.refreshSignalByName(trainName);
         dispatchService.refreshSignalByName(blockerTrain);
       }
-    } else if (nextStage == 3) {
-      debugLogger.accept(
-          "TrainHealthMonitor 解锁互卡(stage=relaunch-pair): train="
-              + trainName
-              + " blocker="
-              + blockerTrain);
-      fixed = dispatchService.forceRelaunchByName(trainName);
-      if (!fixed) {
-        fixed = dispatchService.forceRelaunchByName(blockerTrain);
-      }
-      if (!fixed) {
-        fixed = dispatchService.reissueDestinationByName(trainName);
-      }
-      if (!fixed) {
-        fixed = dispatchService.reissueDestinationByName(blockerTrain);
-      }
-      if (!fixed) {
-        dispatchService.refreshSignalByName(trainName);
-        dispatchService.refreshSignalByName(blockerTrain);
-      }
-    } else {
-      debugLogger.accept(
-          "TrainHealthMonitor 解锁互卡(stage=destroy-victim): train="
-              + trainName
-              + " blocker="
-              + blockerTrain);
-      fixed = destroyDeadlockVictim(trainName, blockerTrain);
     }
     recovery.lastDeadlockAttemptAt = now;
-    // 互卡恢复即使 reissue/relaunch 返回 false，也必须继续升级；否则会在非破坏动作失败时反复回到 refresh，永远到不了 destroy 兜底。
     recovery.deadlockStage = nextStage;
     deadlockPairLastAttemptAt.put(pairKey, now);
     return fixed;
   }
 
-  /**
-   * 删除无法恢复的互卡列车。
-   *
-   * <p>互卡恢复已按 refresh、reissue、relaunch 递进尝试；如果下一轮仍然保持同一互相阻塞关系，说明列车大概率已经进入不可恢复的物理重叠或进路对顶状态。 这里仅由
-   * pair leader 执行，并优先删除 leader，失败时再尝试对端，避免双方同时销毁。
-   */
-  private boolean destroyDeadlockVictim(String trainName, String blockerTrain) {
-    String reason = "health-deadlock:" + blockerTrain;
-    if (dispatchService.destroyTrainByName(trainName, reason)) {
-      return true;
-    }
-    return dispatchService.destroyTrainByName(blockerTrain, "health-deadlock:" + trainName);
+  private boolean shouldDestroyDeadlockVictim(Duration progressDuration, RecoveryState recovery) {
+    return deadlockDestroyThreshold != null
+        && !deadlockDestroyThreshold.isZero()
+        && progressDuration != null
+        && progressDuration.compareTo(deadlockDestroyThreshold) >= 0
+        && recovery != null
+        && recovery.deadlockStage >= 2;
   }
 
   /**

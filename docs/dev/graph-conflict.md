@@ -16,6 +16,11 @@
 - 道岔联合锁闭范围由 `runtime.switcher-zone-edges` 控制（向前 N 段边）。
 - 占用层会对 `CONFLICT:switcher` 与 `CONFLICT:single` 资源启用 Gate Queue。
 - `RailGraphCorridorInfo` 提供走廊端点与路径节点列表，方向以端点排序为准。
+- single conflict 的方向属于安全上下文：常规 lookahead、运行中当前位置保护、停站前向队列、Depot 出车 lookover 都会尽量携带方向。
+  如果后续 hold 请求没有方向，占用管理器会保留已有 claim 的方向，避免长单线内列车被降级为 `UNKNOWN` 后破坏对向识别。
+- Depot 出车 lookover 还会为追加的冲突补齐 entryOrder，使 gate queue 能识别“这辆车从 depot 口进入前方冲突区”的队列位置。
+- route waypoint 不是冲突方向的最小单位。构建 OccupancyRequest 和运行时前方列车扫描时，必须先把 route-defined segment 展开成实际图 edge，再解析 corridor direction 与 entryOrder；否则长单线中间 edge 会丢失方向上下文，表现为同向车被压成 CAUTION/STOP。
+- 若同一长走廊的多条 edge 共享同一个 `CONFLICT:single` key，`entryOrder` 记录的是首次进入该冲突组的展开 edge 序号，而不是每条 edge 各自覆盖一次。
 
 ## 运维命令
 - `/fta graph conflict list [--node "<nodeId>"] [page]`：列出冲突组与覆盖区间数量。

@@ -256,6 +256,8 @@ public final class SimpleOccupancyManager
       if (current != null) {
         Duration nextHeadway =
             current.headway().compareTo(headway) >= 0 ? current.headway() : headway;
+        Optional<CorridorDirection> nextDirection =
+            direction.isPresent() ? direction : current.corridorDirection();
         existing.remove(current);
         existing.add(
             new OccupancyClaim(
@@ -264,7 +266,7 @@ public final class SimpleOccupancyManager
                 request.routeId(),
                 current.acquiredAt(),
                 nextHeadway,
-                direction));
+                nextDirection));
         acquiredResources.add(resource);
         continue;
       }
@@ -579,11 +581,17 @@ public final class SimpleOccupancyManager
     }
     Optional<CorridorDirection> activeDirection = activeDirectionFor(resource);
     if (activeDirection.isEmpty()) {
+      if (direction != CorridorDirection.UNKNOWN && !queue.hasEntriesOutside(direction)) {
+        return true;
+      }
       return queue.isHeadAny(trainName);
     }
     CorridorDirection active = activeDirection.get();
     if (direction == CorridorDirection.UNKNOWN || direction != active) {
       return false;
+    }
+    if (!queue.hasEntriesOutside(active)) {
+      return true;
     }
     return queue.isHeadForDirection(trainName, direction);
   }
@@ -607,11 +615,17 @@ public final class SimpleOccupancyManager
     }
     Optional<CorridorDirection> activeDirection = activeDirectionFor(resource);
     if (activeDirection.isEmpty()) {
+      if (direction != CorridorDirection.UNKNOWN && !queue.hasEntriesOutside(direction)) {
+        return true;
+      }
       return queue.wouldBeHeadAny(trainName, direction, priority, entryOrder, now);
     }
     CorridorDirection active = activeDirection.get();
     if (direction == CorridorDirection.UNKNOWN || direction != active) {
       return false;
+    }
+    if (!queue.hasEntriesOutside(active)) {
+      return true;
     }
     return queue.wouldBeHeadForDirection(trainName, direction, priority, entryOrder, now);
   }
@@ -1443,6 +1457,21 @@ public final class SimpleOccupancyManager
         }
       }
       return false;
+    }
+
+    /**
+     * 是否存在指定方向以外的排队条目。
+     *
+     * <p>单线冲突本身只互斥对向列车；队列中全是同向列车时，不应把 conflict 队列当成额外闭塞块串行化。真正的同向追踪距离由 NODE/EDGE 硬占用负责。
+     */
+    boolean hasEntriesOutside(CorridorDirection direction) {
+      if (direction == CorridorDirection.A_TO_B) {
+        return !backward.isEmpty() || !neutral.isEmpty();
+      }
+      if (direction == CorridorDirection.B_TO_A) {
+        return !forward.isEmpty() || !neutral.isEmpty();
+      }
+      return !forward.isEmpty() || !backward.isEmpty();
     }
 
     Optional<OccupancyQueueEntry> blockingEntry(CorridorDirection direction) {

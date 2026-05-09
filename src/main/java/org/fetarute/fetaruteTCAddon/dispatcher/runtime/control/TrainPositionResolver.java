@@ -10,6 +10,7 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 
 /**
@@ -147,15 +148,15 @@ public final class TrainPositionResolver {
     Vector trainPos = railState.positionLocation().toVector();
 
     // 获取节点坐标（从图或注册表）
-    Optional<org.bukkit.Location> currentLocOpt = getNodeLocation(graph, currentNode);
-    Optional<org.bukkit.Location> nextLocOpt = getNodeLocation(graph, nextNode);
+    Optional<Vector> currentLocOpt = getNodePosition(graph, currentNode);
+    Optional<Vector> nextLocOpt = getNodePosition(graph, nextNode);
 
     if (currentLocOpt.isEmpty() || nextLocOpt.isEmpty()) {
       return OptionalDouble.empty();
     }
 
-    Vector currentPos = currentLocOpt.get().toVector();
-    Vector nextPos = nextLocOpt.get().toVector();
+    Vector currentPos = currentLocOpt.get();
+    Vector nextPos = nextLocOpt.get();
 
     // 计算总距离和已行驶距离
     double totalDistance = currentPos.distance(nextPos);
@@ -170,14 +171,22 @@ public final class TrainPositionResolver {
   }
 
   /** 获取节点的世界坐标（从图的节点数据）。 */
-  private static Optional<org.bukkit.Location> getNodeLocation(RailGraph graph, NodeId nodeId) {
+  private static Optional<Vector> getNodePosition(RailGraph graph, NodeId nodeId) {
     if (graph == null || nodeId == null) {
       return Optional.empty();
     }
-    // 从图中查找节点的 anchor 位置
-    // 当前实现：RailGraph 不直接存储坐标，需要从 SignNodeRegistry 查找
-    // 这里返回 empty，让调用方 fallback 到边长度估算
-    return Optional.empty();
+    return graph
+        .findNode(nodeId)
+        .map(RailNode::worldPosition)
+        .filter(TrainPositionResolver::isFiniteVector)
+        .map(Vector::clone);
+  }
+
+  private static boolean isFiniteVector(Vector vector) {
+    return vector != null
+        && Double.isFinite(vector.getX())
+        && Double.isFinite(vector.getY())
+        && Double.isFinite(vector.getZ());
   }
 
   /**

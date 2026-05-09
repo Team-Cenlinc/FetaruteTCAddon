@@ -116,6 +116,11 @@ public final class HealthMonitor {
     trainMonitor.setDeadlockThreshold(threshold);
   }
 
+  /** 设置 STOP 互卡最终销毁阈值；0 表示禁用自动销毁。 */
+  public void setDeadlockDestroyThreshold(Duration threshold) {
+    trainMonitor.setDeadlockDestroyThreshold(threshold);
+  }
+
   /** 设置 blocker 快照有效期。 */
   public void setBlockerSnapshotMaxAge(Duration maxAge) {
     trainMonitor.setBlockerSnapshotMaxAge(maxAge);

@@ -24,6 +24,7 @@ public final class TrainLaunchManager {
 
   private static final double TICKS_PER_SECOND = 20.0;
   private static final long TICK_MILLIS = 50L;
+  private static final double MOVING_CONTROL_EPSILON_BPT = 0.005;
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
   private static final String TAG_LAST_SPEED_CMD_AT = "FTA_LAST_SPEED_CMD_AT";
@@ -58,7 +59,8 @@ public final class TrainLaunchManager {
    *
    * @param targetBps 目标速度（blocks/s，已考虑信号与边限速）
    * @param distanceOpt 可选“到下一节点的剩余距离”（用于提前减速）
-   * @implNote 运动中列车仅在信号变化/强制刷新时补充加速动作，避免周期性加速打断停靠或干扰道岔方向判定。
+   * @implNote 运动中列车在信号变化/强制刷新时补充控车动作；若目标速度低于当前速度，也会下发一次平滑减速动作， 避免 approach/限速只硬切 {@link
+   *     TrainProperties#setSpeedLimit(double)}。
    */
   public ControlApplicationResult applyControl(
       RuntimeTrainHandle train,
@@ -81,26 +83,25 @@ public final class TrainLaunchManager {
     }
 
     if (aspect == SignalAspect.STOP) {
-      // STOP 信号：根据剩余距离与减速度计算“目标限速”，让 TrainCarts 逐步刹停
-      // STOP 分支不做速度命令减速限幅，避免高 tick 间隔下“红灯仍持续滑行”。
+      // STOP 是闭塞硬约束，但控车仍按剩余授权距离做制动曲线；距离缺失或已到停车点时才硬停。
       double curveSpeed =
           Math.max(0.0, resolveStopSpeed(train, config, distanceOpt, runtimeSettings));
       rememberSpeedCommand(properties, curveSpeed);
       double curveSpeedBpt = toBlocksPerTick(curveSpeed);
       properties.setSpeedLimit(curveSpeedBpt);
-      // 无论列车是否在运动，都应该主动减速/停车
       if (train != null) {
         if (curveSpeedBpt < 0.001) {
-          // 目标速度接近零：完全停止
           train.stop();
+        } else if (train.isMoving()) {
+          train.accelerateTo(curveSpeedBpt, decelBpt2);
         }
-        // 目标速度非零时，setSpeedLimit + WaitAcceleration 会自动减速，无需额外调用
       }
       OptionalDouble curveLimit =
           runtimeSettings.speedCurveEnabled() && distanceOpt != null && distanceOpt.isPresent()
               ? OptionalDouble.of(curveSpeed)
               : OptionalDouble.empty();
-      return new ControlApplicationResult(targetBps, curveLimit, curveSpeed, "stop");
+      return new ControlApplicationResult(
+          targetBps, curveLimit, curveSpeed, curveSpeed > 0.0 ? "stop_curve" : "stop");
     }
 
     double curveAdjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
@@ -128,10 +129,14 @@ public final class TrainLaunchManager {
         if (allowLaunch && canIssueLaunch(properties, runtimeSettings)) {
           train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
         }
-      } else if (allowLaunch) {
-        // 运动中：仅在信号变化/强制刷新时补充加速，避免周期性反复加速影响停站与道岔
-        // accelerateTo 内部已有"速度接近目标时跳过"的保护
-        train.accelerateTo(targetBpt, accelBpt2);
+      } else {
+        boolean needsMovingControl = shouldIssueMovingControl(train, targetBpt);
+        if (allowLaunch || needsMovingControl) {
+          double controlAcceleration = needsMovingControl ? decelBpt2 : accelBpt2;
+          // 运动中：放行/信号变化时补充牵引；目标速度下降时也下发一次 launch，让 TrainCarts
+          // 按加减速度平滑收敛到 approach/限速目标，而不是只硬切 speedLimit。
+          train.accelerateTo(targetBpt, controlAcceleration);
+        }
       }
     }
     String limiterSource = "none";
@@ -141,6 +146,17 @@ public final class TrainLaunchManager {
       limiterSource = "speed_curve";
     }
     return new ControlApplicationResult(targetBps, speedCurveLimit, adjustedBps, limiterSource);
+  }
+
+  /** 判断运动中列车是否需要补发控速动作。 */
+  private boolean shouldIssueMovingControl(RuntimeTrainHandle train, double targetBlocksPerTick) {
+    if (train == null) {
+      return false;
+    }
+    double current = train.currentSpeedBlocksPerTick();
+    return Double.isFinite(current)
+        && Double.isFinite(targetBlocksPerTick)
+        && current > targetBlocksPerTick + MOVING_CONTROL_EPSILON_BPT;
   }
 
   /** 节流：同一列车在 cooldown 窗口内最多下发一次 launch/加速动作。 */
@@ -242,6 +258,9 @@ public final class TrainLaunchManager {
     }
     double effectiveDistance =
         Math.max(0.0, distanceBlocks - runtimeSettings.speedCurveEarlyBrakeBlocks());
+    if (effectiveDistance <= 0.0) {
+      return 0.0;
+    }
     SpeedCurveType curveType = runtimeSettings.speedCurveType();
     double limit;
     if (curveType == SpeedCurveType.PHYSICS) {

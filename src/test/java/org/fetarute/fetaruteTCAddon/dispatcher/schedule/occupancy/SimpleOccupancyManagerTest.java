@@ -82,6 +82,85 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void singleCorridorClaimKeepsDirectionWhenHoldRequestOmitsIt() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse = Map.of(resource.key(), CorridorDirection.B_TO_A);
+
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest("front", Optional.empty(), now, List.of(resource), forward))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "front", Optional.empty(), now.plusSeconds(1), List.of(resource), Map.of()))
+            .allowed());
+
+    OccupancyDecision sameDirection =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear", Optional.empty(), now.plusSeconds(2), List.of(resource), forward));
+    assertTrue(sameDirection.allowed());
+
+    OccupancyDecision oppositeDirection =
+        manager.canEnter(
+            new OccupancyRequest(
+                "opposite", Optional.empty(), now.plusSeconds(3), List.of(resource), reverse));
+    assertFalse(oppositeDirection.allowed());
+  }
+
+  @Test
+  void singleCorridorQueueDoesNotSerializeSameDirectionFollowing() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+
+    manager.touchQueues(
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            forward,
+            Map.of(resource.key(), 0),
+            0));
+    manager.touchQueues(
+        new OccupancyRequest(
+            "rear",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(resource),
+            forward,
+            Map.of(resource.key(), 0),
+            0));
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear",
+                Optional.empty(),
+                now.plusSeconds(2),
+                List.of(resource),
+                forward,
+                Map.of(resource.key(), 0),
+                0));
+
+    assertTrue(decision.allowed());
+  }
+
+  @Test
   void singleCorridorBlocksOppositeDirection() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =

@@ -32,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LaunchAuthorizationService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
@@ -41,9 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
@@ -147,6 +146,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final SpawnManager spawnManager;
   private final DepotSpawner depotSpawner;
   private final OccupancyManager occupancyManager;
+  private final LaunchAuthorizationService launchAuthorizationService;
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
   private final RuntimeDispatchService runtimeDispatchService;
@@ -255,6 +255,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.layoverRegistry = Objects.requireNonNull(layoverRegistry, "layoverRegistry");
     this.spawnControl = Objects.requireNonNull(spawnControl, "spawnControl");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    this.launchAuthorizationService =
+        new LaunchAuthorizationService(occupancyManager, null, this.debugLogger);
     this.retryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
     this.depotDispatchCoordinator = new DepotSpawnScheduler(this.retryDelay);
     this.maxSpawnPerTick = Math.max(1, maxSpawnPerTick);
@@ -822,10 +824,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = previewSpawnGateDecision(request);
-    if (!isCleanSpawnGateDecision(decision)) {
+    LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
+    if (!authorization.allowed()) {
       releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(decision));
+      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
       return false;
     }
 
@@ -846,12 +848,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     MinecartGroup group = groupOpt.get();
-    decision = occupancyManager.acquire(request);
-    if (!isCleanSpawnGateDecision(decision)) {
+    authorization = acquireSpawnGate(request);
+    if (!authorization.allowed()) {
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       destroySpawnedGroup(group);
-      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(decision));
+      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
       return false;
     }
     if (group.getProperties() != null && route.waypoints().size() >= 2) {
@@ -1886,10 +1888,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = previewSpawnGateDecision(request);
-    if (!isCleanSpawnGateDecision(decision)) {
+    LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
+    if (!authorization.allowed()) {
       releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
+      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
       return false;
     }
 
@@ -1910,12 +1912,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     MinecartGroup group = groupOpt.get();
-    decision = occupancyManager.acquire(request);
-    if (!isCleanSpawnGateDecision(decision)) {
+    authorization = acquireSpawnGate(request);
+    if (!authorization.allowed()) {
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       destroySpawnedGroup(group);
-      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(decision));
+      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
       return false;
     }
     if (group.getProperties() != null && route.waypoints().size() >= 2) {
@@ -2406,20 +2408,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + snapshot.total());
   }
 
-  private static boolean isCleanSpawnGateDecision(OccupancyDecision decision) {
-    return decision != null && decision.allowed() && decision.blockers().isEmpty();
-  }
-
-  private static String spawnGateSignalText(OccupancyDecision decision) {
-    if (decision == null) {
+  private static String spawnGateSignalText(
+      LaunchAuthorizationService.AuthorizationResult authorization) {
+    if (authorization == null) {
       return "unknown";
     }
-    String signal = decision.signal() == null ? "unknown" : decision.signal().name();
-    if (decision.blockers().isEmpty()) {
+    String signal = authorization.signal() == null ? "unknown" : authorization.signal().name();
+    if (authorization.blockers().isEmpty()) {
       return signal;
     }
     String blockers =
-        decision.blockers().stream()
+        authorization.blockers().stream()
             .filter(Objects::nonNull)
             .limit(3)
             .map(SimpleTicketAssigner::formatGateBlocker)
@@ -2442,11 +2441,36 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * <p>预判阶段还没有 TrainCarts group，不能写入 occupancy claim，也不能把待生成列车加入冲突队列。真正的资源 acquire 必须在 spawn 成功后执行；
    * 若此时 acquire 失败，会销毁刚创建的 group 并重排票据。
    */
-  private OccupancyDecision previewSpawnGateDecision(OccupancyRequest request) {
-    if (occupancyManager instanceof OccupancyPreviewSupport preview) {
-      return preview.canEnterPreview(request);
-    }
-    return occupancyManager.canEnter(request);
+  private LaunchAuthorizationService.AuthorizationResult previewSpawnGate(
+      OccupancyRequest request) {
+    return launchAuthorizationService.authorize(
+        new LaunchAuthorizationService.AuthorizationPlan(
+            request,
+            "depot-spawn-preview",
+            true,
+            false,
+            false,
+            true,
+            LaunchAuthorizationService.LaunchActions.none()));
+  }
+
+  /**
+   * Depot 实体化后写入真实占用。
+   *
+   * <p>spawn 和 acquire 之间可能有同 tick 竞争；因此 acquire 失败时必须销毁刚生成的列车并释放 SpawnControl lease。该流程仍使用统一授权服务，
+   * 保持 hard blocker 与 clean blocker 语义和站台/折返出发一致。
+   */
+  private LaunchAuthorizationService.AuthorizationResult acquireSpawnGate(
+      OccupancyRequest request) {
+    return launchAuthorizationService.authorize(
+        new LaunchAuthorizationService.AuthorizationPlan(
+            request,
+            "depot-spawn",
+            false,
+            true,
+            false,
+            true,
+            LaunchAuthorizationService.LaunchActions.none()));
   }
 
   private static void releaseSpawnLease(SpawnControl.Lease lease) {

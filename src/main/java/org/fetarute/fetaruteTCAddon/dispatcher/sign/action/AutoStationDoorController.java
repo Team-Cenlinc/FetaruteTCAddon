@@ -46,6 +46,8 @@ public final class AutoStationDoorController {
   private static final long LEGACY_CLOSE_SOUND_DELAY_TICKS = 80L;
   private static final int MAX_WORLD_SELECT_ANCHOR_DEPTH = 6;
   private static final double WORLD_SELECT_PROBE_OFFSET_BLOCKS = 0.75;
+  private static final double OBLIQUE_MIN_COMPONENT_RATIO = Math.tan(Math.toRadians(10.0));
+  private static final double LATERAL_SELECTION_EPS = 0.02;
   private static final Set<String> LEFT_ANIMATIONS =
       Set.of(DOOR_LEFT.toLowerCase(Locale.ROOT), DOOR_LEFT_LEGACY.toLowerCase(Locale.ROOT));
   private static final Set<String> RIGHT_ANIMATIONS =
@@ -92,11 +94,26 @@ public final class AutoStationDoorController {
   /**
    * 根据列车朝向 + 牌子方向生成开关门计划。
    *
-   * <p>BOTH 直接双侧开门；N/E/S/W 优先按门附件在世界中的位置判断开门侧（不随折返翻转），无法判别时回退到基于车头朝向的 leftOf/rightOf 推导。
+   * <p>BOTH 直接双侧开门；N/E/S/W/NE/NW/SE/SW 优先按门附件在世界中的位置判断开门侧（不随折返翻转），无法判别时回退到基于车头朝向的 leftOf/rightOf
+   * 推导。 非正交轨道会优先使用连续朝向向量与门附件横向投影，避免把不同车厢的前后位移误当成左右门位。
    */
   static DoorSession plan(
       MinecartGroup group,
       BlockFace facingDirection,
+      AutoStationDoorDirection doorDirection,
+      DoorChimeSettings chimeSettings) {
+    return plan(group, facingDirection, null, doorDirection, chimeSettings);
+  }
+
+  /**
+   * 根据列车连续朝向向量 + 牌子方向生成开关门计划。
+   *
+   * <p>当 {@code facingVector} 可用且不是近似正交方向时，优先用连续向量做斜向/弯角站台判侧；这样 30 度、60 度等非 45 度轨道不会被压成八向枚举后误判。
+   */
+  static DoorSession plan(
+      MinecartGroup group,
+      BlockFace facingDirection,
+      Vector facingVector,
       AutoStationDoorDirection doorDirection,
       DoorChimeSettings chimeSettings) {
     DoorChimeSettings resolved = chimeSettings == null ? DoorChimeSettings.none() : chimeSettings;
@@ -111,16 +128,38 @@ public final class AutoStationDoorController {
       return DoorSession.empty(resolved, "door=" + doorDirection + ",desired=unknown");
     }
     BlockFace desired = desiredOpt.get();
-    DoorSideDecision decision = chooseDoorSideByWorldDecision(group, desired);
+    Vector forward = normalizeHorizontalVector(facingVector);
+    forward = forward != null ? forward : horizontalVector(facingDirection);
+    boolean attachmentRequired = isObliqueVector(forward) || isDiagonal(desired);
+    DoorSideDecision obliqueDecision = chooseObliqueDoorSideDecision(group, forward, desired);
+    if (obliqueDecision.selection() != null) {
+      DoorSideSelection selection = obliqueDecision.selection();
+      return new DoorSession(
+          group, selection.openLeft, selection.openRight, resolved, obliqueDecision.summary());
+    }
+    DoorSideDecision decision = chooseDoorSideByWorldDecision(group, desired, !attachmentRequired);
     if (decision.selection() == null) {
-      DoorSideSelection vectorFallback = chooseSideByTravelFace(facingDirection, desired);
+      if (attachmentRequired) {
+        return DoorSession.empty(
+            resolved,
+            decision.summary()
+                + ",oblique="
+                + obliqueDecision.summary()
+                + ",fallback=attachmentRequired");
+      }
+      DoorSideSelection vectorFallback = chooseSideByTravelVector(forward, desired);
       if (vectorFallback != null && (vectorFallback.openLeft || vectorFallback.openRight)) {
         return new DoorSession(
             group,
             vectorFallback.openLeft,
             vectorFallback.openRight,
             resolved,
-            decision.summary() + ",fallback=facing(" + facingDirection + ")");
+            decision.summary()
+                + ",fallback=facing("
+                + facingDirection
+                + ",vector="
+                + formatVector(forward)
+                + ")");
       }
       return DoorSession.empty(resolved, decision.summary());
     }
@@ -161,8 +200,8 @@ public final class AutoStationDoorController {
    * <p>当门附件尚未 attach 或无法计算位置时返回 null，让上层继续等待/重试。
    */
   private static DoorSideDecision chooseDoorSideByWorldDecision(
-      MinecartGroup group, BlockFace desired) {
-    if (group == null || desired == null || !isCardinal(desired)) {
+      MinecartGroup group, BlockFace desired, boolean allowAxisFallback) {
+    if (group == null || desired == null || !isHorizontalCompass(desired)) {
       return new DoorSideDecision(null, "worldSelect=invalidInput(desired=" + desired + ")");
     }
 
@@ -302,7 +341,7 @@ public final class AutoStationDoorController {
     double scoreL = attempt.scoreL();
     double scoreR = attempt.scoreR();
     double delta = attempt.delta();
-    if (selection == null) {
+    if (selection == null && allowAxisFallback) {
       DoorSideSelection axisSelection =
           axisSideSelection(
               world, desired, candidates.leftTargets(), candidates.rightTargets(), eps);
@@ -432,6 +471,457 @@ public final class AutoStationDoorController {
             + (trainFallback != null ? formatXZ(trainFallback) : "none")
             + ")";
     return new DoorSideDecision(selection, summary);
+  }
+
+  /**
+   * 斜向/非正交站台的门侧选择。
+   *
+   * <p>该路径不再依赖 N/E/S/W 单轴世界坐标差值，而是先用列车连续 forward 向量建立横向轴，再用门附件相对列车中心的横向投影判断 {@code doorL/doorR}
+   * 实际位于哪一侧。这样 30 度、60 度等非 45 度站台不会被八向枚举量化，也不会把多节车厢前后位移误当成左右门位。附件局部轴只输出诊断候选，不再作为斜向站台的最终判侧来源。
+   */
+  private static DoorSideDecision chooseObliqueDoorSideDecision(
+      MinecartGroup group, Vector forwardVector, BlockFace desired) {
+    Vector forward = normalizeHorizontalVector(forwardVector);
+    if (group == null
+        || desired == null
+        || !isHorizontalCompass(desired)
+        || !isObliqueVector(forward)) {
+      return new DoorSideDecision(null, "oblique=notApplicable");
+    }
+    DoorTargetContext context = buildDoorTargetContext(group);
+    if (context == null || context.world() == null) {
+      return new DoorSideDecision(
+          null,
+          "oblique=unavailable(desired=" + desired + ",forward=" + formatVector(forward) + ")");
+    }
+
+    LateralAttempt lateralAttempt = chooseByLateralProjection(context, forward, desired);
+    DoorSideSelection selection = lateralAttempt.selection();
+    boolean lateralUsed = selection != null;
+    DoorSideSelection axisCandidate =
+        isCardinal(desired)
+            ? axisSideSelection(
+                context.world(),
+                desired,
+                context.candidates().leftTargets(),
+                context.candidates().rightTargets(),
+                LATERAL_SELECTION_EPS)
+            : null;
+    String reason = lateralUsed ? "lateral" : "undecided";
+    String summary =
+        "obliqueSelect(desired="
+            + desired
+            + ",forward="
+            + formatVector(forward)
+            + ",world="
+            + context.world().getName()
+            + ",leftAnim="
+            + (context.leftName() != null ? context.leftName() : "none")
+            + ",rightAnim="
+            + (context.rightName() != null ? context.rightName() : "none")
+            + ",leftTargets="
+            + context.leftTargets().size()
+            + "/"
+            + context.leftAttached()
+            + ",rightTargets="
+            + context.rightTargets().size()
+            + "/"
+            + context.rightAttached()
+            + ",overlap="
+            + context.overlap()
+            + ",candL="
+            + context.candidates().leftTargets().size()
+            + ",candR="
+            + context.candidates().rightTargets().size()
+            + ",desiredSide="
+            + formatScore(lateralAttempt.desiredSide())
+            + ",leftProj="
+            + formatNullableScore(lateralAttempt.leftMedian())
+            + ",rightProj="
+            + formatNullableScore(lateralAttempt.rightMedian())
+            + ",lateralDelta="
+            + formatScore(lateralAttempt.delta())
+            + ",lateralAnchor="
+            + formatAnchorDepth(lateralAttempt.anchorDepth())
+            + ",lateralProbe="
+            + formatProbe(lateralAttempt.probe())
+            + ",pairLongDelta="
+            + formatScore(lateralAttempt.pairLongitudinalDelta())
+            + ",pairLateralGap="
+            + formatScore(lateralAttempt.pairLateralGap())
+            + ",lateralUsed="
+            + lateralUsed
+            + ",axisCandidate="
+            + formatChosen(axisCandidate)
+            + ",axisFallback=false"
+            + ",vectorFallback=false"
+            + ",reason="
+            + reason
+            + ",chosen="
+            + formatChosen(selection)
+            + ")";
+    return new DoorSideDecision(selection, summary);
+  }
+
+  private static DoorTargetContext buildDoorTargetContext(MinecartGroup group) {
+    if (group == null) {
+      return null;
+    }
+    World world = null;
+    double sumX = 0.0;
+    double sumY = 0.0;
+    double sumZ = 0.0;
+    int locationCount = 0;
+    for (MinecartMember<?> member : group) {
+      if (member == null) {
+        continue;
+      }
+      World memberWorld = member.getWorld();
+      if (memberWorld == null) {
+        continue;
+      }
+      if (world == null) {
+        world = memberWorld;
+      }
+      if (world != memberWorld) {
+        continue;
+      }
+      Location location = member.getBlock(0, 0, 0).getLocation();
+      sumX += location.getX();
+      sumY += location.getY();
+      sumZ += location.getZ();
+      locationCount++;
+    }
+    if (world == null) {
+      return null;
+    }
+    Location trainCenter =
+        locationCount > 0
+            ? new Location(world, sumX / locationCount, sumY / locationCount, sumZ / locationCount)
+            : null;
+
+    Collection<String> animationNames = group.getAnimationNames();
+    String leftName = findAnimationName(animationNames, DOOR_LEFT);
+    leftName = leftName != null ? leftName : findAnimationName(animationNames, DOOR_LEFT_LEGACY);
+    String rightName = findAnimationName(animationNames, DOOR_RIGHT);
+    rightName =
+        rightName != null ? rightName : findAnimationName(animationNames, DOOR_RIGHT_LEGACY);
+
+    List<Attachment> leftTargets =
+        leftName == null ? List.of() : findAnimationTargets(group, leftName);
+    List<Attachment> rightTargets =
+        rightName == null ? List.of() : findAnimationTargets(group, rightName);
+    int leftAttached = countAttachedTargets(leftTargets);
+    int rightAttached = countAttachedTargets(rightTargets);
+    int overlap = countOverlapTargets(leftTargets, rightTargets);
+    TargetCandidates candidates =
+        buildCandidates(leftName, rightName, leftTargets, rightTargets, overlap);
+    return new DoorTargetContext(
+        world,
+        trainCenter,
+        leftName,
+        rightName,
+        leftTargets,
+        rightTargets,
+        leftAttached,
+        rightAttached,
+        overlap,
+        candidates);
+  }
+
+  private static LateralAttempt chooseByLateralProjection(
+      DoorTargetContext context, Vector forwardVector, BlockFace desired) {
+    if (context == null || context.trainCenter() == null || forwardVector == null) {
+      return LateralAttempt.empty();
+    }
+    Vector forward = normalizeHorizontalVector(forwardVector);
+    Vector desiredVector = horizontalVector(desired);
+    Vector leftAxis = leftLateralVector(forward);
+    if (forward == null || desiredVector == null || leftAxis == null) {
+      return LateralAttempt.empty();
+    }
+    double desiredSide = leftAxis.dot(desiredVector);
+    if (!Double.isFinite(desiredSide) || Math.abs(desiredSide) <= LATERAL_SELECTION_EPS) {
+      return LateralAttempt.emptyWithDesiredSide(desiredSide);
+    }
+    int maxAnchorDepth =
+        maxAnchorDepth(
+            context.leftName(), context.rightName(), context.leftTargets(), context.rightTargets());
+    LateralAttempt best =
+        computeLateralAttempt(context, forward, leftAxis, desiredSide, 0, WorldSelectProbe.PIVOT);
+    for (int depth = 0; depth <= maxAnchorDepth; depth++) {
+      for (WorldSelectProbe probe : WorldSelectProbe.candidates()) {
+        LateralAttempt candidate =
+            computeLateralAttempt(context, forward, leftAxis, desiredSide, depth, probe);
+        if (isLateralAttemptBetter(candidate, best)) {
+          best = candidate;
+        }
+      }
+    }
+    return best;
+  }
+
+  private static LateralAttempt computeLateralAttempt(
+      DoorTargetContext context,
+      Vector forward,
+      Vector leftAxis,
+      double desiredSide,
+      int anchorDepth,
+      WorldSelectProbe probe) {
+    if (context == null || forward == null || leftAxis == null || context.trainCenter() == null) {
+      return LateralAttempt.emptyWithDesiredSide(desiredSide);
+    }
+    List<Location> leftLocations =
+        collectAttachedLocations(
+            context.world(), context.candidates().leftTargets(), anchorDepth, probe);
+    List<Location> rightLocations =
+        collectAttachedLocations(
+            context.world(), context.candidates().rightTargets(), anchorDepth, probe);
+    LateralPairProjection pair =
+        bestLateralPairProjection(
+            leftLocations, rightLocations, context.trainCenter(), forward, leftAxis);
+    Double leftProjection =
+        pair == null
+            ? medianProjection(leftLocations, context.trainCenter(), leftAxis)
+            : pair.leftProjection();
+    Double rightProjection =
+        pair == null
+            ? medianProjection(rightLocations, context.trainCenter(), leftAxis)
+            : pair.rightProjection();
+    boolean hasBothSides = !leftLocations.isEmpty() && !rightLocations.isEmpty();
+    DoorSideSelection selection =
+        pair != null || !hasBothSides
+            ? selectByDesiredSide(leftProjection, rightProjection, desiredSide)
+            : null;
+    double delta = signedLateralDelta(leftProjection, rightProjection, desiredSide);
+    return new LateralAttempt(
+        selection,
+        delta,
+        leftProjection,
+        rightProjection,
+        desiredSide,
+        anchorDepth,
+        probe,
+        pair == null ? Double.NaN : pair.longitudinalDelta(),
+        pair == null ? Double.NaN : pair.lateralGap());
+  }
+
+  private static boolean isLateralAttemptBetter(LateralAttempt candidate, LateralAttempt baseline) {
+    if (candidate == null || candidate.selection() == null) {
+      return false;
+    }
+    if (baseline == null || baseline.selection() == null) {
+      return true;
+    }
+    double candidateAbs = safeAbs(candidate.delta());
+    double baselineAbs = safeAbs(baseline.delta());
+    if (!Double.isFinite(candidateAbs) && Double.isFinite(baselineAbs)) {
+      return false;
+    }
+    if (Double.isFinite(candidateAbs) && !Double.isFinite(baselineAbs)) {
+      return true;
+    }
+    return candidateAbs > baselineAbs + 0.01;
+  }
+
+  private static double signedLateralDelta(
+      Double leftProjection, Double rightProjection, double desiredSide) {
+    if (leftProjection == null || rightProjection == null) {
+      return Double.NaN;
+    }
+    double sign = desiredSide > 0.0 ? 1.0 : -1.0;
+    return sign * leftProjection - sign * rightProjection;
+  }
+
+  private static DoorSideSelection selectByDesiredSide(
+      Double leftMedian, Double rightMedian, double desiredSide) {
+    double sign = desiredSide > 0.0 ? 1.0 : -1.0;
+    boolean hasLeft = leftMedian != null && Double.isFinite(leftMedian);
+    boolean hasRight = rightMedian != null && Double.isFinite(rightMedian);
+    if (!hasLeft && !hasRight) {
+      return null;
+    }
+    double leftScore = hasLeft ? sign * leftMedian : Double.NEGATIVE_INFINITY;
+    double rightScore = hasRight ? sign * rightMedian : Double.NEGATIVE_INFINITY;
+    boolean leftMatches = leftScore > LATERAL_SELECTION_EPS;
+    boolean rightMatches = rightScore > LATERAL_SELECTION_EPS;
+    if (leftMatches && rightMatches && Math.abs(leftScore - rightScore) <= LATERAL_SELECTION_EPS) {
+      return new DoorSideSelection(true, true);
+    }
+    if (leftScore > rightScore + LATERAL_SELECTION_EPS && leftMatches) {
+      return new DoorSideSelection(true, false);
+    }
+    if (rightScore > leftScore + LATERAL_SELECTION_EPS && rightMatches) {
+      return new DoorSideSelection(false, true);
+    }
+    if (leftMatches && !rightMatches) {
+      return new DoorSideSelection(true, false);
+    }
+    if (rightMatches && !leftMatches) {
+      return new DoorSideSelection(false, true);
+    }
+    return null;
+  }
+
+  private static Double medianProjection(
+      List<Location> locations, Location center, Vector leftAxis) {
+    if (locations == null || locations.isEmpty() || center == null || leftAxis == null) {
+      return null;
+    }
+    List<Double> scores = new ArrayList<>();
+    Vector centerVector = center.toVector();
+    for (Location location : locations) {
+      if (location == null) {
+        continue;
+      }
+      double score = location.toVector().subtract(centerVector).dot(leftAxis);
+      if (Double.isFinite(score)) {
+        scores.add(score);
+      }
+    }
+    return medianScore(scores);
+  }
+
+  /**
+   * 找出最像同一门位的一对左右门，并返回它们在列车横向轴上的投影。
+   *
+   * <p>斜向列车上，整列车的左右门 median 可能被不成对的 anchor/probe 污染；先按纵向距离配对，可以避免把前后车厢距离误当成左右侧差异。
+   */
+  private static LateralPairProjection bestLateralPairProjection(
+      List<Location> leftLocations,
+      List<Location> rightLocations,
+      Location center,
+      Vector forward,
+      Vector leftAxis) {
+    Vector normalizedForward = normalizeHorizontalVector(forward);
+    Vector normalizedLeftAxis = normalizeHorizontalVector(leftAxis);
+    if (leftLocations == null
+        || rightLocations == null
+        || leftLocations.isEmpty()
+        || rightLocations.isEmpty()
+        || center == null
+        || normalizedForward == null
+        || normalizedLeftAxis == null) {
+      return null;
+    }
+    Vector centerVector = center.toVector();
+    LateralPairProjection best = null;
+    for (Location left : leftLocations) {
+      if (left == null) {
+        continue;
+      }
+      Vector leftDelta = left.toVector().subtract(centerVector);
+      double leftProjection = leftDelta.dot(normalizedLeftAxis);
+      double leftLongitudinal = leftDelta.dot(normalizedForward);
+      if (!Double.isFinite(leftProjection) || !Double.isFinite(leftLongitudinal)) {
+        continue;
+      }
+      for (Location right : rightLocations) {
+        if (right == null) {
+          continue;
+        }
+        Vector rightDelta = right.toVector().subtract(centerVector);
+        double rightProjection = rightDelta.dot(normalizedLeftAxis);
+        double rightLongitudinal = rightDelta.dot(normalizedForward);
+        if (!Double.isFinite(rightProjection) || !Double.isFinite(rightLongitudinal)) {
+          continue;
+        }
+        double lateralGap = Math.abs(leftProjection - rightProjection);
+        if (lateralGap <= LATERAL_SELECTION_EPS) {
+          continue;
+        }
+        double longitudinalDelta = Math.abs(leftLongitudinal - rightLongitudinal);
+        double distanceSquared = distanceSquared(left, right);
+        LateralPairProjection candidate =
+            new LateralPairProjection(
+                leftProjection, rightProjection, longitudinalDelta, lateralGap, distanceSquared);
+        if (isBetterLateralPair(candidate, best)) {
+          best = candidate;
+        }
+      }
+    }
+    return best;
+  }
+
+  private static boolean isBetterLateralPair(
+      LateralPairProjection candidate, LateralPairProjection baseline) {
+    if (candidate == null) {
+      return false;
+    }
+    if (baseline == null) {
+      return true;
+    }
+    double longDelta = candidate.longitudinalDelta() - baseline.longitudinalDelta();
+    if (Math.abs(longDelta) > 0.10) {
+      return longDelta < 0.0;
+    }
+    double lateralDelta = candidate.lateralGap() - baseline.lateralGap();
+    if (Math.abs(lateralDelta) > 0.01) {
+      return lateralDelta > 0.0;
+    }
+    return candidate.distanceSquared() < baseline.distanceSquared();
+  }
+
+  private static double distanceSquared(Location left, Location right) {
+    if (left == null || right == null) {
+      return Double.POSITIVE_INFINITY;
+    }
+    double dx = left.getX() - right.getX();
+    double dy = left.getY() - right.getY();
+    double dz = left.getZ() - right.getZ();
+    return dx * dx + dy * dy + dz * dz;
+  }
+
+  private record LateralPairProjection(
+      double leftProjection,
+      double rightProjection,
+      double longitudinalDelta,
+      double lateralGap,
+      double distanceSquared) {}
+
+  private record DoorTargetContext(
+      World world,
+      Location trainCenter,
+      String leftName,
+      String rightName,
+      List<Attachment> leftTargets,
+      List<Attachment> rightTargets,
+      int leftAttached,
+      int rightAttached,
+      int overlap,
+      TargetCandidates candidates) {}
+
+  private record LateralAttempt(
+      DoorSideSelection selection,
+      double delta,
+      Double leftMedian,
+      Double rightMedian,
+      double desiredSide,
+      int anchorDepth,
+      WorldSelectProbe probe,
+      double pairLongitudinalDelta,
+      double pairLateralGap) {
+
+    private LateralAttempt {
+      probe = probe == null ? WorldSelectProbe.PIVOT : probe;
+    }
+
+    private static LateralAttempt empty() {
+      return emptyWithDesiredSide(Double.NaN);
+    }
+
+    private static LateralAttempt emptyWithDesiredSide(double desiredSide) {
+      return new LateralAttempt(
+          null,
+          Double.NaN,
+          null,
+          null,
+          desiredSide,
+          0,
+          WorldSelectProbe.PIVOT,
+          Double.NaN,
+          Double.NaN);
+    }
   }
 
   private static String formatAnchorDepth(int depth) {
@@ -907,6 +1397,13 @@ public final class AutoStationDoorController {
     return String.format(Locale.ROOT, "%.3f", value);
   }
 
+  private static String formatNullableScore(Double value) {
+    if (value == null) {
+      return "none";
+    }
+    return formatScore(value);
+  }
+
   private static String formatXZ(Location location) {
     if (location == null) {
       return "none";
@@ -920,6 +1417,9 @@ public final class AutoStationDoorController {
     }
     if (desired == BlockFace.EAST || desired == BlockFace.WEST) {
       return "X";
+    }
+    if (isDiagonal(desired)) {
+      return "DOT";
     }
     return "?";
   }
@@ -938,14 +1438,31 @@ public final class AutoStationDoorController {
     if (location == null || desired == null) {
       return Double.NaN;
     }
-    double sign = desiredSign(desired);
-    if (desired == BlockFace.NORTH || desired == BlockFace.SOUTH) {
-      return sign * location.getZ();
+    Vector desiredVector = horizontalVector(desired);
+    if (desiredVector == null) {
+      return Double.NaN;
     }
-    if (desired == BlockFace.EAST || desired == BlockFace.WEST) {
-      return sign * location.getX();
+    return location.getX() * desiredVector.getX() + location.getZ() * desiredVector.getZ();
+  }
+
+  /**
+   * 按门附件世界位置选择动画侧。
+   *
+   * <p>第 4 行方向表示站台所在的世界方向；这里把 {@code doorL/doorR} 的附件位置投影到该方向上，投影更靠近站台的一侧就是应播放的动画名。
+   */
+  static String chooseSideNameByAttachmentPositions(
+      BlockFace desired, Location leftLocation, Location rightLocation) {
+    double leftScore = desiredScore(desired, leftLocation);
+    double rightScore = desiredScore(desired, rightLocation);
+    if (!Double.isFinite(leftScore) || !Double.isFinite(rightScore)) {
+      return "none";
     }
-    return Double.NaN;
+    double delta = leftScore - rightScore;
+    if (Math.abs(delta) <= LATERAL_SELECTION_EPS) {
+      return "none";
+    }
+    return formatChosen(
+        delta > 0.0 ? new DoorSideSelection(true, false) : new DoorSideSelection(false, true));
   }
 
   /** 判断方位是否为水平四向（N/E/S/W）。 */
@@ -985,17 +1502,28 @@ public final class AutoStationDoorController {
   /**
    * 使用水平向量判断指定平台方向位于列车左侧还是右侧。
    *
-   * <p>与 {@link #leftOf(BlockFace)} 不同，此方法支持斜向轨道。坐标系采用 Bukkit 水平轴：X 向东、Z 向南。 这使得 NORTH_EAST
-   * 行驶时，NORTH 被判为左侧、EAST 被判为右侧，避免斜向停靠回退到世界单轴比较。
+   * <p>与 {@link #leftOf(BlockFace)} 不同，此方法支持斜向轨道。坐标系采用 Bukkit 水平轴：X 向东、Z 向南。
    */
   static DoorSideSelection chooseSideByTravelFace(BlockFace travelFace, BlockFace desiredSide) {
-    Vector forward = horizontalVector(travelFace);
+    return chooseSideByTravelVector(horizontalVector(travelFace), desiredSide);
+  }
+
+  /**
+   * 使用连续水平向量判断指定平台方向位于列车左侧还是右侧。
+   *
+   * <p>该方法保留 30 度、60 度等非 45 度角度信息；仅在最终无法从附件位置判定实际动画侧时作为几何兜底。
+   */
+  static DoorSideSelection chooseSideByTravelVector(Vector travelVector, BlockFace desiredSide) {
+    Vector forward = normalizeHorizontalVector(travelVector);
     Vector desired = horizontalVector(desiredSide);
     if (forward == null || desired == null) {
       return null;
     }
-    Vector left = new Vector(forward.getZ(), 0.0, -forward.getX());
-    Vector right = new Vector(-forward.getZ(), 0.0, forward.getX());
+    Vector left = leftLateralVector(forward);
+    Vector right = rightLateralVector(forward);
+    if (left == null || right == null) {
+      return null;
+    }
     double leftScore = left.dot(desired);
     double rightScore = right.dot(desired);
     if (Math.abs(leftScore - rightScore) <= 1.0e-6) {
@@ -1006,12 +1534,87 @@ public final class AutoStationDoorController {
         : new DoorSideSelection(false, true);
   }
 
+  /**
+   * 斜向轨道的四向站台侧选择兜底。
+   *
+   * <p>保留该方法供单元测试与旧调用使用；实际停站计划会优先使用连续向量与附件横向投影。
+   */
+  static DoorSideSelection chooseDiagonalSideByTravelFace(
+      BlockFace travelFace, BlockFace desiredSide) {
+    if (!isDiagonal(travelFace) || !isCardinal(desiredSide)) {
+      return null;
+    }
+    return chooseSideByTravelFace(travelFace, desiredSide);
+  }
+
   static String chooseSideNameByTravelFace(BlockFace travelFace, BlockFace desiredSide) {
     DoorSideSelection selection = chooseSideByTravelFace(travelFace, desiredSide);
     return formatChosen(selection);
   }
 
-  private static Vector horizontalVector(BlockFace face) {
+  static String chooseSideNameByTravelVector(Vector travelVector, BlockFace desiredSide) {
+    DoorSideSelection selection = chooseSideByTravelVector(travelVector, desiredSide);
+    return formatChosen(selection);
+  }
+
+  /**
+   * 按斜向横向投影选择门侧，仅在左右门附件投影可用时返回结果。
+   *
+   * <p>该方法保留给回归测试使用：斜向站台不能在缺少附件位置时退回到纯行进向量猜测，否则 doorL/doorR 与模型实际侧别不一致时会误开对侧门。
+   */
+  static String chooseSideNameByLateralProjections(
+      Vector travelVector, BlockFace desiredSide, Double leftProjection, Double rightProjection) {
+    Vector forward = normalizeHorizontalVector(travelVector);
+    Vector desired = horizontalVector(desiredSide);
+    Vector leftAxis = leftLateralVector(forward);
+    if (desired == null || leftAxis == null) {
+      return "none";
+    }
+    double desiredSideScore = leftAxis.dot(desired);
+    if (!Double.isFinite(desiredSideScore) || Math.abs(desiredSideScore) <= LATERAL_SELECTION_EPS) {
+      return "none";
+    }
+    return formatChosen(selectByDesiredSide(leftProjection, rightProjection, desiredSideScore));
+  }
+
+  static String chooseSideNameByLateralDoorLocations(
+      Vector travelVector,
+      BlockFace desiredSide,
+      Location center,
+      List<Location> leftLocations,
+      List<Location> rightLocations) {
+    Vector forward = normalizeHorizontalVector(travelVector);
+    Vector desired = horizontalVector(desiredSide);
+    Vector leftAxis = leftLateralVector(forward);
+    if (desired == null || leftAxis == null || center == null) {
+      return "none";
+    }
+    double desiredSideScore = leftAxis.dot(desired);
+    if (!Double.isFinite(desiredSideScore) || Math.abs(desiredSideScore) <= LATERAL_SELECTION_EPS) {
+      return "none";
+    }
+    LateralPairProjection pair =
+        bestLateralPairProjection(leftLocations, rightLocations, center, forward, leftAxis);
+    if (pair == null) {
+      return "none";
+    }
+    return formatChosen(
+        selectByDesiredSide(pair.leftProjection(), pair.rightProjection(), desiredSideScore));
+  }
+
+  static String chooseDiagonalSideNameByTravelFace(BlockFace travelFace, BlockFace desiredSide) {
+    DoorSideSelection selection = chooseDiagonalSideByTravelFace(travelFace, desiredSide);
+    return formatChosen(selection);
+  }
+
+  private static boolean isDiagonal(BlockFace face) {
+    return face == BlockFace.NORTH_EAST
+        || face == BlockFace.SOUTH_EAST
+        || face == BlockFace.SOUTH_WEST
+        || face == BlockFace.NORTH_WEST;
+  }
+
+  static Vector horizontalVector(BlockFace face) {
     if (face == null) {
       return null;
     }
@@ -1032,6 +1635,52 @@ public final class AutoStationDoorController {
     }
     double length = vector.length();
     return length <= 1.0e-6 ? null : vector.multiply(1.0 / length);
+  }
+
+  static Vector normalizeHorizontalVector(Vector vector) {
+    if (vector == null) {
+      return null;
+    }
+    double x = vector.getX();
+    double z = vector.getZ();
+    if (!Double.isFinite(x) || !Double.isFinite(z)) {
+      return null;
+    }
+    Vector horizontal = new Vector(x, 0.0, z);
+    double length = horizontal.length();
+    return length <= 1.0e-6 ? null : horizontal.multiply(1.0 / length);
+  }
+
+  private static boolean isObliqueVector(Vector vector) {
+    Vector horizontal = normalizeHorizontalVector(vector);
+    if (horizontal == null) {
+      return false;
+    }
+    double absX = Math.abs(horizontal.getX());
+    double absZ = Math.abs(horizontal.getZ());
+    if (absX <= 1.0e-6 || absZ <= 1.0e-6) {
+      return false;
+    }
+    double ratio = Math.min(absX, absZ) / Math.max(absX, absZ);
+    return ratio >= OBLIQUE_MIN_COMPONENT_RATIO;
+  }
+
+  private static Vector leftLateralVector(Vector forward) {
+    Vector normalized = normalizeHorizontalVector(forward);
+    return normalized == null ? null : new Vector(normalized.getZ(), 0.0, -normalized.getX());
+  }
+
+  private static Vector rightLateralVector(Vector forward) {
+    Vector normalized = normalizeHorizontalVector(forward);
+    return normalized == null ? null : new Vector(-normalized.getZ(), 0.0, normalized.getX());
+  }
+
+  private static String formatVector(Vector vector) {
+    Vector normalized = normalizeHorizontalVector(vector);
+    if (normalized == null) {
+      return "none";
+    }
+    return String.format(Locale.ROOT, "(%.3f,%.3f)", normalized.getX(), normalized.getZ());
   }
 
   /** 返回相对于列车行进方向的右侧方位。 */
@@ -1715,10 +2364,7 @@ public final class AutoStationDoorController {
         if (group == null || name == null || !hasAttachedTargets(targets)) {
           return false;
         }
-        AnimationOptions options = new AnimationOptions(name);
-        options.setReset(true);
-        options.setSpeed(1.0);
-        return group.playNamedAnimation(options);
+        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, 1.0));
       }
 
       @Override
@@ -1726,10 +2372,7 @@ public final class AutoStationDoorController {
         if (group == null || name == null || !hasAttachedTargets(targets)) {
           return false;
         }
-        AnimationOptions options = new AnimationOptions(name);
-        options.setReset(true);
-        options.setSpeed(-1.0);
-        return group.playNamedAnimation(options);
+        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, -1.0));
       }
 
       @Override
@@ -1805,7 +2448,7 @@ public final class AutoStationDoorController {
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        boolean played = group.playNamedAnimation(name);
+        boolean played = group.playNamedAnimation(doorAnimationOptions(name, 1.0));
         if (played) {
           fallbackUsed = true;
         }
@@ -1824,10 +2467,7 @@ public final class AutoStationDoorController {
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        AnimationOptions options = new AnimationOptions(name);
-        options.setReset(true);
-        options.setSpeed(-1.0);
-        return group.playNamedAnimation(options);
+        return group.playNamedAnimation(doorAnimationOptions(name, -1.0));
       }
 
       @Override
@@ -1862,6 +2502,36 @@ public final class AutoStationDoorController {
   private record LegacyTarget(Attachment target, AnimationPair pair) {}
 
   /**
+   * 生成门动画播放选项。
+   *
+   * <p>{@code queue=true} 让开/关门排进 TrainCarts 的动画队列，避免打断同一附件上正在执行的升弓、受电弓复位等模型动画。
+   */
+  static AnimationOptions doorAnimationOptions(String name, double speed) {
+    AnimationOptions options = new AnimationOptions(name);
+    options.setReset(true);
+    options.setSpeed(speed);
+    options.setQueue(true);
+    return options;
+  }
+
+  private static boolean playNamedAnimationOnTargets(
+      List<Attachment> targets, AnimationOptions options) {
+    if (targets == null || targets.isEmpty() || options == null) {
+      return false;
+    }
+    boolean played = false;
+    for (Attachment target : targets) {
+      if (target == null || !target.isAttached()) {
+        continue;
+      }
+      if (target.playNamedAnimation(options.clone())) {
+        played = true;
+      }
+    }
+    return played;
+  }
+
+  /**
    * 在所有成员的附件根节点上启动动画。
    *
    * <p>仅对已绑定附件的成员生效，避免空指针和未加载模型时误触发。
@@ -1875,7 +2545,7 @@ public final class AutoStationDoorController {
       if (target == null || !target.isAttached()) {
         continue;
       }
-      target.startAnimation(animation.clone());
+      target.startAnimation(queuedAnimation(animation));
       started = true;
     }
     return started;
@@ -1897,7 +2567,7 @@ public final class AutoStationDoorController {
       if (animation == null) {
         continue;
       }
-      entry.target().startAnimation(animation.clone());
+      entry.target().startAnimation(queuedAnimation(animation));
       started = true;
     }
     return started;
@@ -1920,10 +2590,16 @@ public final class AutoStationDoorController {
       if (root == null) {
         continue;
       }
-      root.startAnimation(animation.clone());
+      root.startAnimation(queuedAnimation(animation));
       started = true;
     }
     return started;
+  }
+
+  private static Animation queuedAnimation(Animation animation) {
+    Animation copy = animation.clone();
+    copy.getOptions().setQueue(true);
+    return copy;
   }
 
   private static boolean hasAttachedTargets(List<Attachment> targets) {
@@ -2505,14 +3181,11 @@ public final class AutoStationDoorController {
     if (direction == null || desired == null) {
       return Double.NaN;
     }
-    double sign = desiredSign(desired);
-    if (desired == BlockFace.NORTH || desired == BlockFace.SOUTH) {
-      return sign * direction.getZ();
+    Vector desiredVector = horizontalVector(desired);
+    if (desiredVector == null) {
+      return Double.NaN;
     }
-    if (desired == BlockFace.EAST || desired == BlockFace.WEST) {
-      return sign * direction.getX();
-    }
-    return Double.NaN;
+    return direction.getX() * desiredVector.getX() + direction.getZ() * desiredVector.getZ();
   }
 
   private static Double medianScore(List<Double> scores) {

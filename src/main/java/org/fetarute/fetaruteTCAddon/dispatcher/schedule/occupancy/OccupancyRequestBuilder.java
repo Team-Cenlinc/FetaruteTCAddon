@@ -233,6 +233,58 @@ public final class OccupancyRequestBuilder {
   }
 
   /**
+   * 构建列车当前位置保护请求。
+   *
+   * <p>当前位置保护用于运行中持续占住“车头所在节点 + 朝目标方向的下一段图边”。当 {@code targetNode}
+   * 不是相邻图节点时，会先走一次最短路，只取当前节点后的第一段边。这样长单线内的中间节点也能继续持有正确的 single conflict
+   * claim，并携带走廊方向，避免后续信号把对向/同向列车判错。
+   *
+   * @param trainName 列车名
+   * @param routeId 线路 route id
+   * @param currentNode 当前图节点
+   * @param targetNode 目标图节点（通常是下一个 route waypoint）
+   * @param now 请求时间
+   * @param priority 队列优先级
+   * @return 当前位置保护请求
+   */
+  public OccupancyRequest buildCurrentPositionRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      Instant now,
+      int priority) {
+    Objects.requireNonNull(trainName, "trainName");
+    Objects.requireNonNull(routeId, "routeId");
+    Objects.requireNonNull(currentNode, "currentNode");
+    Instant requestTime = now != null ? now : Instant.now();
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    resources.add(OccupancyResource.forNode(currentNode));
+
+    List<NodeId> pathNodes = List.of(currentNode);
+    List<RailEdge> edges = List.of();
+    Optional<NodeId> target = targetNode != null ? targetNode : Optional.empty();
+    if (target.isPresent() && !currentNode.equals(target.get())) {
+      Optional<CurrentStep> stepOpt = resolveCurrentStep(currentNode, target.get());
+      if (stepOpt.isPresent()) {
+        CurrentStep step = stepOpt.get();
+        resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, step.edge()));
+        pathNodes = step.nodes();
+        edges = List.of(step.edge());
+      }
+    }
+
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        requestTime,
+        List.copyOf(resources),
+        resolveCorridorDirections(pathNodes),
+        resolveConflictEntryOrders(edges),
+        priority);
+  }
+
+  /**
    * Depot 出车专用占用扩展。
    *
    * <p>默认以路径首节点作为 depot 起点（兼容旧行为）。
@@ -269,24 +321,16 @@ public final class OccupancyRequestBuilder {
 
     Set<OccupancyResource> merged = new LinkedHashSet<>(base.resourceList());
     Map<String, CorridorDirection> directions = new LinkedHashMap<>(base.corridorDirections());
+    Map<String, Integer> entryOrders = new LinkedHashMap<>(base.conflictEntryOrders());
     boolean updated = false;
 
     Optional<NodeId> depotAnchor = resolveDepotAnchor(pathNodes, depotNodeOverride);
     if (depotAnchor.isPresent()) {
       NodeId depotNode = depotAnchor.get();
       int depotLookoverEdges = resolveDepotLookoverEdges(depotNodeOverride.isPresent());
-      for (RailEdge edge : collectEdgesWithin(depotNode, depotLookoverEdges)) {
-        if (edge == null) {
-          continue;
-        }
-        // Depot lookover 必须携带 edge 派生的 CONFLICT 资源。长单线/入库线常共享一个
-        // single conflict；只预占 EDGE 会漏掉已在长走廊内的回库车，导致出库车在入口处被放行。
-        for (OccupancyResource resource : OccupancyResourceResolver.resourcesForEdge(graph, edge)) {
-          if (resource == null) {
-            continue;
-          }
-          updated |= merged.add(resource);
-        }
+      for (LookoverEdge lookover : collectDirectedEdgesWithin(depotNode, depotLookoverEdges)) {
+        updated |=
+            addEdgeDerivedLookoverResources(merged, directions, entryOrders, pathNodes, lookover);
       }
     }
 
@@ -305,12 +349,13 @@ public final class OccupancyRequestBuilder {
       }
 
       for (NodeId switcher : switchers) {
-        for (RailEdge edge : collectEdgesWithin(switcher, switcherZoneEdges)) {
-          OccupancyResource edgeResource = OccupancyResource.forEdge(edge.id());
+        for (LookoverEdge lookover : collectDirectedEdgesWithin(switcher, switcherZoneEdges)) {
+          OccupancyResource edgeResource = OccupancyResource.forEdge(lookover.edge().id());
           if (merged.contains(edgeResource)) {
             continue;
           }
-          if (tryAddDirectionalLookoverConflict(merged, directions, pathNodes, switcher, edge)) {
+          if (tryAddDirectionalLookoverConflict(
+              merged, directions, entryOrders, pathNodes, lookover)) {
             updated = true;
             continue;
           }
@@ -328,7 +373,7 @@ public final class OccupancyRequestBuilder {
         base.now(),
         List.copyOf(merged),
         Map.copyOf(directions),
-        base.conflictEntryOrders(),
+        Map.copyOf(entryOrders),
         base.priority());
   }
 
@@ -444,61 +489,119 @@ public final class OccupancyRequestBuilder {
     }
   }
 
+  /**
+   * 追加 Depot 周边边资源，并同步补齐冲突方向与队列入口序号。
+   *
+   * <p>Depot 出库门控必须把单线走廊的方向上下文带给占用层；否则 gate queue 只能看到“有 conflict
+   * 资源”，却不知道出库车从哪一端进入，长单线同向/对向判定会退化为过宽或过窄的阻塞。
+   */
+  private boolean addEdgeDerivedLookoverResources(
+      Set<OccupancyResource> resources,
+      Map<String, CorridorDirection> directions,
+      Map<String, Integer> entryOrders,
+      List<NodeId> pathNodes,
+      LookoverEdge lookover) {
+    if (resources == null || directions == null || entryOrders == null || lookover == null) {
+      return false;
+    }
+    boolean updated = false;
+    List<OccupancyResource> edgeResources =
+        OccupancyResourceResolver.resourcesForEdge(graph, lookover.edge());
+    for (OccupancyResource resource : edgeResources) {
+      if (resource == null) {
+        continue;
+      }
+      if (resource.kind() == ResourceKind.CONFLICT) {
+        updated |= putConflictEntryOrder(entryOrders, resource.key(), lookover.entryOrder());
+      }
+      updated |= resources.add(resource);
+    }
+    updated |= putCorridorDirection(directions, pathNodes, lookover);
+    return updated;
+  }
+
   private boolean tryAddDirectionalLookoverConflict(
       Set<OccupancyResource> resources,
       Map<String, CorridorDirection> directions,
+      Map<String, Integer> entryOrders,
       List<NodeId> pathNodes,
-      NodeId switcher,
-      RailEdge edge) {
-    if (resources == null || directions == null || switcher == null || edge == null) {
+      LookoverEdge lookover) {
+    if (resources == null || directions == null || entryOrders == null || lookover == null) {
       return false;
     }
     if (!(graph instanceof RailGraphCorridorSupport support)) {
       return false;
     }
-    NodeId from;
-    NodeId to;
-    if (switcher.equals(edge.from())) {
-      from = edge.from();
-      to = edge.to();
-    } else if (switcher.equals(edge.to())) {
-      from = edge.to();
-      to = edge.from();
-    } else {
-      return false;
-    }
-    Optional<String> conflictKeyOpt = support.conflictKeyForEdge(edge.id());
+    Optional<String> conflictKeyOpt = support.conflictKeyForEdge(lookover.edge().id());
     if (conflictKeyOpt.isEmpty()) {
       return false;
     }
     String key = conflictKeyOpt.get();
-    Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(edge.id());
+    resources.add(OccupancyResource.forConflict(key));
+    putConflictEntryOrder(entryOrders, key, lookover.entryOrder());
+    Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
     if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
-      resources.add(OccupancyResource.forConflict(key));
       return true;
     }
     Optional<CorridorDirection> directionOpt =
-        resolveCorridorDirection(infoOpt.get(), pathNodes, from, to);
+        resolveCorridorDirection(infoOpt.get(), pathNodes, lookover.from(), lookover.to());
     if (directionOpt.isEmpty()) {
       // 方向不可判定时回退为“全方向冲突”资源，避免只占 edge 导致道岔放行过宽。
-      resources.add(OccupancyResource.forConflict(key));
       return true;
     }
     if (!directions.containsKey(key)) {
       directions.put(key, directionOpt.get());
     }
-    resources.add(OccupancyResource.forConflict(key));
     return true;
   }
 
-  private Set<RailEdge> collectEdgesWithin(NodeId start, int maxEdges) {
+  private boolean putCorridorDirection(
+      Map<String, CorridorDirection> directions, List<NodeId> pathNodes, LookoverEdge lookover) {
+    if (directions == null || lookover == null) {
+      return false;
+    }
+    if (!(graph instanceof RailGraphCorridorSupport support)) {
+      return false;
+    }
+    Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
+    if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
+      return false;
+    }
+    RailGraphCorridorInfo info = infoOpt.get();
+    if (directions.containsKey(info.key())) {
+      return false;
+    }
+    Optional<CorridorDirection> directionOpt =
+        resolveCorridorDirection(info, pathNodes, lookover.from(), lookover.to());
+    if (directionOpt.isEmpty()) {
+      return false;
+    }
+    directions.put(info.key(), directionOpt.get());
+    return true;
+  }
+
+  private boolean putConflictEntryOrder(
+      Map<String, Integer> entryOrders, String key, int entryOrder) {
+    if (entryOrders == null || key == null || key.isBlank()) {
+      return false;
+    }
+    Integer previous = entryOrders.putIfAbsent(key, Math.max(0, entryOrder));
+    return previous == null;
+  }
+
+  /**
+   * 从指定节点向外收集 lookover 边，并保留 BFS 进入方向。
+   *
+   * <p>图本身是无向的，但单线走廊的同向/对向判断依赖“列车从哪一端进入”。因此 lookover 不能只返回边，还必须携带从起点向外展开时的 from/to 方向与入口序号。
+   */
+  private List<LookoverEdge> collectDirectedEdgesWithin(NodeId start, int maxEdges) {
     if (start == null || maxEdges <= 0) {
-      return Set.of();
+      return List.of();
     }
 
     record NodeDepth(NodeId node, int depth) {}
 
-    Set<RailEdge> collected = new LinkedHashSet<>();
+    List<LookoverEdge> collected = new ArrayList<>();
     Set<EdgeId> visitedEdges = new HashSet<>();
     Map<NodeId, Integer> bestDepth = new HashMap<>();
     Deque<NodeDepth> queue = new ArrayDeque<>();
@@ -518,12 +621,12 @@ public final class OccupancyRequestBuilder {
         if (!visitedEdges.add(edgeId)) {
           continue;
         }
-        collected.add(edge);
         NodeId next = current.node().equals(edge.from()) ? edge.to() : edge.from();
         if (next == null) {
           continue;
         }
         int nextDepth = current.depth() + 1;
+        collected.add(new LookoverEdge(edge, current.node(), next, nextDepth - 1));
         Integer known = bestDepth.get(next);
         if (known != null && known <= nextDepth) {
           continue;
@@ -533,7 +636,7 @@ public final class OccupancyRequestBuilder {
       }
     }
 
-    return Set.copyOf(collected);
+    return List.copyOf(collected);
   }
 
   private void applySwitcherZoneConflicts(
@@ -650,6 +753,23 @@ public final class OccupancyRequestBuilder {
     }
     // 无向图：只要两端点相连即可视为可达。
     return Optional.empty();
+  }
+
+  private Optional<CurrentStep> resolveCurrentStep(NodeId currentNode, NodeId targetNode) {
+    Optional<RailEdge> direct = findEdge(currentNode, targetNode);
+    if (direct.isPresent()) {
+      return Optional.of(new CurrentStep(List.of(currentNode, targetNode), direct.get()));
+    }
+    Optional<RailGraphPath> pathOpt =
+        pathFinder.shortestPath(
+            graph, currentNode, targetNode, RailGraphPathFinder.Options.shortestDistance());
+    if (pathOpt.isEmpty() || pathOpt.get().nodes().size() < 2) {
+      return Optional.empty();
+    }
+    List<NodeId> path = pathOpt.get().nodes();
+    NodeId nextNode = path.get(1);
+    Optional<RailEdge> edge = findEdge(currentNode, nextNode);
+    return edge.map(railEdge -> new CurrentStep(List.of(currentNode, nextNode), railEdge));
   }
 
   private Map<String, CorridorDirection> resolveCorridorDirections(List<NodeId> pathNodes) {
@@ -788,4 +908,8 @@ public final class OccupancyRequestBuilder {
     }
     return -1;
   }
+
+  private record LookoverEdge(RailEdge edge, NodeId from, NodeId to, int entryOrder) {}
+
+  private record CurrentStep(List<NodeId> nodes, RailEdge edge) {}
 }

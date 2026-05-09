@@ -141,6 +141,7 @@ public final class ConfigManager {
     int progressStuckThresholdSeconds = 60;
     int progressStopGraceSeconds = 180;
     int deadlockThresholdSeconds = 45;
+    int deadlockDestroyThresholdSeconds = 900;
     int blockerSnapshotMaxAgeSeconds = 20;
     int recoveryCooldownSeconds = 10;
     int occupancyTimeoutMinutes = 10;
@@ -179,6 +180,13 @@ public final class ConfigManager {
         logger.warning("health.deadlock-threshold-seconds 配置无效: " + deadlockThresholdSeconds);
         deadlockThresholdSeconds = 45;
       }
+      deadlockDestroyThresholdSeconds =
+          section.getInt("deadlock-destroy-threshold-seconds", deadlockDestroyThresholdSeconds);
+      if (deadlockDestroyThresholdSeconds < 0) {
+        logger.warning(
+            "health.deadlock-destroy-threshold-seconds 配置无效: " + deadlockDestroyThresholdSeconds);
+        deadlockDestroyThresholdSeconds = 900;
+      }
       blockerSnapshotMaxAgeSeconds =
           section.getInt("blocker-snapshot-max-age-seconds", blockerSnapshotMaxAgeSeconds);
       if (blockerSnapshotMaxAgeSeconds <= 0) {
@@ -209,6 +217,7 @@ public final class ConfigManager {
         progressStuckThresholdSeconds,
         progressStopGraceSeconds,
         deadlockThresholdSeconds,
+        deadlockDestroyThresholdSeconds,
         blockerSnapshotMaxAgeSeconds,
         recoveryCooldownSeconds,
         occupancyTimeoutMinutes,
@@ -818,6 +827,7 @@ public final class ConfigManager {
       int progressStuckThresholdSeconds,
       int progressStopGraceSeconds,
       int deadlockThresholdSeconds,
+      int deadlockDestroyThresholdSeconds,
       int blockerSnapshotMaxAgeSeconds,
       int recoveryCooldownSeconds,
       int occupancyTimeoutMinutes,
@@ -839,6 +849,9 @@ public final class ConfigManager {
       if (deadlockThresholdSeconds <= 0) {
         throw new IllegalArgumentException("deadlockThresholdSeconds 必须为正数");
       }
+      if (deadlockDestroyThresholdSeconds < 0) {
+        throw new IllegalArgumentException("deadlockDestroyThresholdSeconds 必须为非负数");
+      }
       if (blockerSnapshotMaxAgeSeconds <= 0) {
         throw new IllegalArgumentException("blockerSnapshotMaxAgeSeconds 必须为正数");
       }
@@ -851,7 +864,7 @@ public final class ConfigManager {
     }
 
     public static HealthSettings defaults() {
-      return new HealthSettings(true, 5, true, 30, 60, 180, 45, 20, 10, 10, true, true);
+      return new HealthSettings(true, 5, true, 30, 60, 180, 45, 900, 20, 10, 10, true, true);
     }
   }
 

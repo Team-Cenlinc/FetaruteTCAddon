@@ -54,12 +54,12 @@ public interface RuntimeTrainHandle {
   }
 
   /**
-   * 加速到目标速度（无论列车是否在运动）。
+   * 平滑调整到目标速度（无论列车是否在运动）。
    *
-   * <p>用于在经过 waypoint/switcher 时"补充能量"以维持或恢复速度。
+   * <p>用于在经过 waypoint/switcher 时补充牵引，也用于 approach/限速场景下按 TrainCarts launch 动作平滑减速。
    *
    * @param targetBlocksPerTick 目标速度（blocks/tick）
-   * @param accelBlocksPerTickSquared 加速度（blocks/tick^2）
+   * @param accelBlocksPerTickSquared 加减速度（blocks/tick^2）
    */
   default void accelerateTo(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
     // 默认实现：如果静止，尝试发车加速；运动中由 WaitAcceleration + speedLimit 接管

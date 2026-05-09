@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,7 +34,7 @@ class TrainLaunchManagerTest {
             "FTA_LAST_SPEED_CMD_BPS=0.0",
             "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
     RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 0.0);
-    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 2.0);
     ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
 
     manager.applyControl(
@@ -90,7 +91,7 @@ class TrainLaunchManagerTest {
             "FTA_LAST_SPEED_CMD_BPS=20.0",
             "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
     RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 20.0 / 20.0);
-    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 2.0);
     ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
 
     TrainLaunchManager.ControlApplicationResult result =
@@ -110,6 +111,39 @@ class TrainLaunchManagerTest {
 
     assertEquals(8.0 / 20.0, speedCaptor.getValue(), 1.0e-6);
     assertEquals(8.0, result.finalTargetBps(), 1.0e-6);
+  }
+
+  @Test
+  void applyControlUsesLaunchActionForMovingDeceleration() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-decel",
+            "FTA_LAST_SPEED_CMD_BPS=20.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isMoving()).thenReturn(true);
+    when(train.currentSpeedBlocksPerTick()).thenReturn(20.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 2.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        8.0,
+        config,
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime);
+
+    ArgumentCaptor<Double> targetCaptor = ArgumentCaptor.forClass(Double.class);
+    ArgumentCaptor<Double> accelCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(train).accelerateTo(targetCaptor.capture(), accelCaptor.capture());
+
+    assertEquals(8.0 / 20.0, targetCaptor.getValue(), 1.0e-6);
+    assertEquals(2.0 / 400.0, accelCaptor.getValue(), 1.0e-6);
   }
 
   @Test
@@ -150,6 +184,7 @@ class TrainLaunchManagerTest {
             "FTA_LAST_SPEED_CMD_BPS=15.0",
             "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
     RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isMoving()).thenReturn(true);
     when(train.currentSpeedBlocksPerTick()).thenReturn(15.0 / 20.0);
     TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
     ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
@@ -168,7 +203,40 @@ class TrainLaunchManagerTest {
     ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
     verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
     double appliedBpt = speedCaptor.getValue();
-    assertTrue(appliedBpt <= 0.2, "STOP 应直接下压到制动曲线限速，避免被速度指令限幅拖慢");
+    assertEquals(2.0 / 20.0, appliedBpt, 1.0e-6, "STOP 应按剩余距离下压到制动曲线限速");
+    verify(train).accelerateTo(2.0 / 20.0, 1.0 / 400.0);
+    verify(train, never()).stop();
+  }
+
+  @Test
+  void applyControlStopStopsAtConstraintPoint() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-stop-zero",
+            "FTA_LAST_SPEED_CMD_BPS=15.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.currentSpeedBlocksPerTick()).thenReturn(15.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.of(0L),
+        Optional.empty(),
+        runtime);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+
+    assertEquals(0.0, speedCaptor.getValue(), 1.0e-6);
+    verify(train).stop();
   }
 
   private static ConfigManager.RuntimeSettings runtimeSettings(
