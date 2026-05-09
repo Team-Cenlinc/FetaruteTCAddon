@@ -149,7 +149,7 @@
 - `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
 - `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
-- approach 窗口内会按 expanded route 的末尾 edge 数平滑收敛到 approaching 限速；`runtime.approach-target-edges` 控制剩余多少条 edge 时必须已经达到该限速。
+- approach 正式窗口外 64 blocks 内会先进入 preview 制动区，速度上限从当前目标速度线性收敛到 approaching 限速；进入正式窗口后保持 approaching 限速。若速度曲线启用，还会叠加到停靠目标的物理制动包络并取更低上限。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
@@ -181,8 +181,8 @@
 
 ## 进站限速
 - `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
-- `runtime.approach-window-blocks` / `runtime.approach-window-edges` 控制何时进入 approach。
-- `runtime.approach-target-edges` 控制剩余多少条调度图 edge 时必须降到 approach 速度；窗口内不会直接硬切低速，而是按 expanded path 的 edge 长度生成制动包络。
+- `runtime.approach-window-blocks` / `runtime.approach-window-edges` 控制正式 approach 边界；正式边界外 64 blocks 内会提前进入 preview，避免到边界才突然套低速上限。
+- `runtime.approach-target-edges` 控制物理制动包络参考的末尾 edge 范围；最终上限取 preview 线性包络与物理制动包络中的较低值。
 
 ## CAUTION 速度来源
 - 优先使用“连通分量 caution 覆盖”（`rail_component_cautions`）。

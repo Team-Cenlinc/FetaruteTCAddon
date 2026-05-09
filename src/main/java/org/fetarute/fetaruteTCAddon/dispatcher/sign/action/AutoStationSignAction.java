@@ -250,7 +250,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + stopSessionId
               + ", dwell="
               + dwellSeconds
-              + "s, door="
+              + "s, worldDoorDirection="
               + doorDirection
               + ", facing="
               + facingDirection
@@ -268,7 +268,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + locationText(info));
     } else {
       debug(
-          "AutoStation 跳过: 无法判定开门方向 (door="
+          "AutoStation 跳过: 无法判定开门世界方向 (worldDoorDirection="
               + doorDirection
               + ", facing="
               + facingDirection
@@ -464,7 +464,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + shortUuid(routeId)
               + ", sid="
               + stopSessionId
-              + ", door="
+              + ", worldDoorDirection="
               + doorDirection
               + ", attachments="
               + summarizeAttachments(group)
@@ -492,8 +492,6 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       private boolean closeStarted = false;
       private boolean closeAnimationTriggered = false;
       private boolean closeSoundPlayed = false;
-      private BlockFace cachedFacing = null;
-      private Vector cachedFacingVector = null;
       private String cachedAnimations = null;
       private String cachedPlanSummary = null;
       private AutoStationDoorController.DoorSession cachedSession = null;
@@ -551,7 +549,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + shortUuid(routeId)
                     + ", sid="
                     + stopSessionId
-                    + ", door="
+                    + ", worldDoorDirection="
                     + doorDirection
                     + ", t="
                     + ticksSinceOpen
@@ -634,13 +632,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         String resolvedSource = facingResult.face() == null ? facingSource : facingResult.source();
         String animations = summarizeDoorAnimations(group);
         boolean shouldRebuild =
-            cachedSession == null
-                || cachedFacing != resolvedFacing
-                || !sameHorizontalVector(cachedFacingVector, resolvedVector)
-                || !java.util.Objects.equals(cachedAnimations, animations);
+            cachedSession == null || !java.util.Objects.equals(cachedAnimations, animations);
         if (shouldRebuild) {
-          cachedFacing = resolvedFacing;
-          cachedFacingVector = cloneVector(resolvedVector);
           cachedAnimations = animations;
           cachedSession =
               AutoStationDoorController.plan(
@@ -658,7 +651,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + stopSessionId
                     + ", attempt="
                     + openAttempts
-                    + ", door="
+                    + ", worldDoorDirection="
                     + doorDirection
                     + ", facing="
                     + resolvedFacing
@@ -706,7 +699,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + retryWindow
                     + ", windowFromTick="
                     + actionableSinceTick
-                    + ", door="
+                    + ", worldDoorDirection="
                     + doorDirection
                     + ", facing="
                     + resolvedFacing
@@ -750,7 +743,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 + ticksSinceStop
                 + ", spawnAgeMs="
                 + readRunAgeMillis(group.getProperties())
-                + ", door="
+                + ", worldDoorDirection="
                 + doorDirection
                 + ", facing="
                 + resolvedFacing
@@ -780,7 +773,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + shortUuid(routeId)
                     + ", sid="
                     + stopSessionId
-                    + ", door="
+                    + ", worldDoorDirection="
                     + doorDirection
                     + ", attempt="
                     + openAttempts
@@ -820,7 +813,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 + shortUuid(routeId)
                 + ", sid="
                 + stopSessionId
-                + ", door="
+                + ", worldDoorDirection="
                 + doorDirection
                 + ", facing="
                 + resolvedFacing
@@ -1391,20 +1384,6 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       properties.set(StandardProperties.EXIT_OFFSET, target);
       applied = false;
     }
-  }
-
-  private static boolean sameHorizontalVector(Vector left, Vector right) {
-    Vector a = AutoStationDoorController.normalizeHorizontalVector(left);
-    Vector b = AutoStationDoorController.normalizeHorizontalVector(right);
-    if (a == null || b == null) {
-      return a == b;
-    }
-    return Math.abs(a.getX() - b.getX()) <= 1.0e-4 && Math.abs(a.getZ() - b.getZ()) <= 1.0e-4;
-  }
-
-  private static Vector cloneVector(Vector vector) {
-    Vector normalized = AutoStationDoorController.normalizeHorizontalVector(vector);
-    return normalized == null ? null : normalized.clone();
   }
 
   private static String formatFacingVector(Vector vector) {

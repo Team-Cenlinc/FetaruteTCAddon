@@ -92,6 +92,9 @@ public final class RuntimeDispatchService {
 
   private static final double SPEED_TICKS_PER_SECOND = 20.0;
 
+  /** approach 正式窗口外的预制动距离（blocks），用于避免到窗口边界才突然套低速上限。 */
+  static final double APPROACH_PREVIEW_DISTANCE_BLOCKS = 64.0;
+
   /** Waypoint 作为 STOP/TERM 时的默认停站时长（秒）。 */
   private static final int DEFAULT_WAYPOINT_DWELL_SECONDS = 20;
 
@@ -234,7 +237,7 @@ public final class RuntimeDispatchService {
   /**
    * 当前信号 tick 的 approach 限速语义。
    *
-   * <p>approach 只描述“列车已经进入下一处停靠 stop 的进路窗口”。窗口按当前节点到停靠 stop 的展开路径距离计算，普通 PASS
+   * <p>approach 描述“列车已经进入下一处停靠 stop 的进路窗口或预制动 preview 区”。窗口按当前节点到停靠 stop 的展开路径距离计算，普通 PASS
    * 站、普通区间点与动态占位符不应仅凭节点编码触发 approach。
    */
   private record ApproachControl(
@@ -268,6 +271,19 @@ public final class RuntimeDispatchService {
 
     private boolean activeFor(NodeId candidate) {
       return candidate != null && node.isPresent() && node.get().equals(candidate);
+    }
+  }
+
+  /** approach 窗口与预制动区间的判定结果。 */
+  private record ApproachWindowState(
+      boolean active,
+      boolean preview,
+      double previewDistanceBlocks,
+      double distanceToBoundaryBlocks,
+      double ratio) {
+    private static ApproachWindowState inactive(double previewDistanceBlocks) {
+      return new ApproachWindowState(
+          false, false, previewDistanceBlocks, Double.POSITIVE_INFINITY, 0.0);
     }
   }
 
@@ -4274,6 +4290,10 @@ public final class RuntimeDispatchService {
     return value != null && value.isPresent() ? String.valueOf(value.getAsLong()) : "-";
   }
 
+  private static String formatApproachDouble(double value) {
+    return Double.isFinite(value) ? String.format(Locale.ROOT, "%.3f", value) : "-";
+  }
+
   private boolean shouldLogStopWaypoint(
       String trainName, int currentIndex, NodeId nextNode, SignalAspect aspect) {
     if (trainName == null || trainName.isBlank()) {
@@ -6366,9 +6386,9 @@ public final class RuntimeDispatchService {
   /**
    * 计算进站/进库 approach 的速度包络。
    *
-   * <p>旧逻辑在进入 approach 窗口后立即把目标速度硬切到 {@code approach-speed-bps}，会导致窗口外仍继续加速、窗口内突然降速。
-   * 这里把下一处停靠点视作“前方限速点”：列车应在 {@code approach-target-edges} 对应的末尾 edge 范围内达到 approach
-   * 速度，窗口内按物理制动公式逐步收敛。
+   * <p>旧逻辑在进入 approach 窗口后立即把目标速度硬切到 {@code approach-speed-bps}，会导致窗口外仍继续加速、窗口内突然降速。 这里把 approach
+   * 正式窗口前的固定距离作为 preview 区：preview 起点保持原目标速度，越接近正式窗口越接近 approach
+   * 速度。若速度曲线启用，再叠加到停靠目标的物理制动包络，最终取更低的安全上限。
    */
   private static double resolveApproachSpeedEnvelope(
       double currentTargetBps,
@@ -6383,27 +6403,77 @@ public final class RuntimeDispatchService {
       return currentTargetBps;
     }
     if (runtime == null
-        || !runtime.speedCurveEnabled()
         || overrides == null
-        || overrides.approachControl().distanceBlocks().isEmpty()
-        || overrides.approachControl().targetEdgeDistanceBlocks().isEmpty()
-        || !Double.isFinite(decelBps2)
-        || decelBps2 <= 0.0) {
+        || overrides.approachControl().distanceBlocks().isEmpty()) {
       return Math.min(currentTargetBps, approachLimitBps);
     }
+    ApproachControl approachControl = overrides.approachControl();
+    long distanceBlocks = approachControl.distanceBlocks().getAsLong();
+    double previewRatio =
+        resolveApproachPreviewRatio(runtime, distanceBlocks, approachControl.edgeCount());
+    double previewEnvelope =
+        approachPreviewSpeedLimit(currentTargetBps, approachLimitBps, previewRatio);
+    if (!runtime.speedCurveEnabled()
+        || approachControl.targetEdgeDistanceBlocks().isEmpty()
+        || !Double.isFinite(decelBps2)
+        || decelBps2 <= 0.0) {
+      return previewEnvelope;
+    }
     double distance =
-        Math.max(
-            0.0,
-            overrides.approachControl().distanceBlocks().getAsLong()
-                - overrides.approachControl().targetEdgeDistanceBlocks().getAsLong());
-    double envelope =
+        Math.max(0.0, distanceBlocks - approachControl.targetEdgeDistanceBlocks().getAsLong());
+    double brakingEnvelope =
         Math.sqrt(
             approachLimitBps * approachLimitBps
                 + 2.0 * decelBps2 * distance * runtime.speedCurveFactor());
-    if (!Double.isFinite(envelope) || envelope <= 0.0) {
-      return Math.min(currentTargetBps, approachLimitBps);
+    if (!Double.isFinite(brakingEnvelope) || brakingEnvelope <= 0.0) {
+      return previewEnvelope;
     }
-    return Math.min(currentTargetBps, Math.max(approachLimitBps, envelope));
+    return Math.min(previewEnvelope, Math.max(approachLimitBps, brakingEnvelope));
+  }
+
+  static double approachPreviewRatio(
+      double approachWindowBlocks, double previewDistanceBlocks, long distanceBlocks) {
+    if (!Double.isFinite(approachWindowBlocks)
+        || approachWindowBlocks < 0.0
+        || !Double.isFinite(previewDistanceBlocks)
+        || previewDistanceBlocks <= 0.0
+        || distanceBlocks < 0L) {
+      return 0.0;
+    }
+    if (distanceBlocks <= approachWindowBlocks) {
+      return 1.0;
+    }
+    double distanceToBoundary = distanceBlocks - approachWindowBlocks;
+    if (distanceToBoundary >= previewDistanceBlocks) {
+      return 0.0;
+    }
+    return Math.max(0.0, Math.min(1.0, 1.0 - distanceToBoundary / previewDistanceBlocks));
+  }
+
+  static double approachPreviewSpeedLimit(
+      double currentTargetBps, double approachLimitBps, double ratio) {
+    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
+      return 0.0;
+    }
+    if (!Double.isFinite(approachLimitBps)
+        || approachLimitBps <= 0.0
+        || approachLimitBps >= currentTargetBps) {
+      return currentTargetBps;
+    }
+    double clampedRatio = Double.isFinite(ratio) ? Math.max(0.0, Math.min(1.0, ratio)) : 0.0;
+    return approachLimitBps + (currentTargetBps - approachLimitBps) * (1.0 - clampedRatio);
+  }
+
+  private static double resolveApproachPreviewRatio(
+      ConfigManager.RuntimeSettings runtime, long distanceBlocks, int edgeCount) {
+    if (runtime == null) {
+      return 0.0;
+    }
+    if (withinApproachWindow(runtime, distanceBlocks, edgeCount)) {
+      return 1.0;
+    }
+    return approachPreviewRatio(
+        runtime.approachWindowBlocks(), APPROACH_PREVIEW_DISTANCE_BLOCKS, distanceBlocks);
   }
 
   private static String resolveApproachLimiterSource(
@@ -6463,7 +6533,9 @@ public final class RuntimeDispatchService {
     }
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
     ApproachTrigger trigger = triggerOpt.get();
-    if (!withinApproachWindow(runtime, trigger.distanceBlocks(), trigger.edgeCount())) {
+    ApproachWindowState windowState =
+        resolveApproachWindowState(runtime, trigger.distanceBlocks(), trigger.edgeCount());
+    if (!windowState.active()) {
       return ApproachControl.none();
     }
     double limit =
@@ -6483,7 +6555,17 @@ public final class RuntimeDispatchService {
             + ";target_edges="
             + runtime.approachTargetEdges()
             + ";target_edge_distance="
-            + targetEdgeDistance;
+            + targetEdgeDistance
+            + ";preview="
+            + windowState.preview()
+            + ";preview_distance="
+            + formatApproachDouble(windowState.previewDistanceBlocks())
+            + ";distance_to_approach_boundary="
+            + formatApproachDouble(windowState.distanceToBoundaryBlocks())
+            + ";approach_ratio="
+            + formatApproachDouble(windowState.ratio())
+            + ";approach_limit="
+            + formatApproachDouble(limit);
     return approachWithLimit(
         trigger.node(),
         target.kind(),
@@ -6629,6 +6711,41 @@ public final class RuntimeDispatchService {
       return isDepotApproachNode(graph, node, target.key());
     }
     return false;
+  }
+
+  private static ApproachWindowState resolveApproachWindowState(
+      ConfigManager.RuntimeSettings runtime, long distanceBlocks, int edgeCount) {
+    if (runtime == null) {
+      return ApproachWindowState.inactive(APPROACH_PREVIEW_DISTANCE_BLOCKS);
+    }
+    if (withinApproachWindow(runtime, distanceBlocks, edgeCount)) {
+      return new ApproachWindowState(
+          true,
+          false,
+          APPROACH_PREVIEW_DISTANCE_BLOCKS,
+          approachDistanceToBoundary(runtime.approachWindowBlocks(), distanceBlocks),
+          1.0);
+    }
+    double ratio =
+        approachPreviewRatio(
+            runtime.approachWindowBlocks(), APPROACH_PREVIEW_DISTANCE_BLOCKS, distanceBlocks);
+    if (ratio <= 0.0) {
+      return ApproachWindowState.inactive(APPROACH_PREVIEW_DISTANCE_BLOCKS);
+    }
+    return new ApproachWindowState(
+        true,
+        true,
+        APPROACH_PREVIEW_DISTANCE_BLOCKS,
+        approachDistanceToBoundary(runtime.approachWindowBlocks(), distanceBlocks),
+        ratio);
+  }
+
+  private static double approachDistanceToBoundary(
+      double approachWindowBlocks, long distanceBlocks) {
+    if (!Double.isFinite(approachWindowBlocks) || approachWindowBlocks < 0.0) {
+      return Double.NaN;
+    }
+    return Math.max(0.0, distanceBlocks - approachWindowBlocks);
   }
 
   private static boolean withinApproachWindow(

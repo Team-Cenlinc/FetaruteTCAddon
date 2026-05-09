@@ -3416,7 +3416,7 @@ class RuntimeDispatchServiceTest {
     assertEquals("station", diagnostics.approachKind());
     assertEquals(switcher, diagnostics.approachNode());
     assertEquals(90L, diagnostics.distanceToApproach().orElseThrow());
-    assertEquals("approach_curve", diagnostics.finalLimiterSource());
+    assertEquals("approach", diagnostics.finalLimiterSource());
   }
 
   @Test
@@ -3442,7 +3442,7 @@ class RuntimeDispatchServiceTest {
     when(configManager.current())
         .thenReturn(withRuntimeSettings(base, runtimeWithApproachSpeed(base, 6.0)));
 
-    RailGraph graph = graphWithStationSwitcherPath(a, waypoint, switcher, station, 80, 10, 20);
+    RailGraph graph = graphWithStationSwitcherPath(a, waypoint, switcher, station, 110, 10, 20);
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
@@ -3476,10 +3476,11 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
-    double expectedEnvelope = Math.sqrt(6.0 * 6.0 + 2.0 * 0.25 * (90.0 - 10.0));
+    double expectedEnvelope = Math.sqrt(6.0 * 6.0 + 2.0 * 0.25 * (120.0 - 10.0));
     assertEquals("station", diagnostics.approachKind());
     assertEquals("approach_curve", diagnostics.finalLimiterSource());
     assertTrue(diagnostics.approachReason().contains("target_edge_distance=10"));
+    assertTrue(diagnostics.approachReason().contains("preview=true"));
     assertEquals(expectedEnvelope, diagnostics.finalTargetBps(), 1.0e-6);
   }
 

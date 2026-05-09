@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationOptions;
-import java.util.List;
 import org.bukkit.Location;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
@@ -29,7 +28,7 @@ class AutoStationDoorControllerTest {
   }
 
   @Test
-  void vectorFallbackHandlesDiagonalTravel() {
+  void relativeSideHandlesDiagonalTravel() {
     assertEquals(
         "left",
         AutoStationDoorController.chooseSideNameByTravelFace(
@@ -40,7 +39,7 @@ class AutoStationDoorControllerTest {
   }
 
   @Test
-  void vectorFallbackCoversAllDiagonalNorthSouthSides() {
+  void relativeSideCoversAllDiagonalNorthSouthSides() {
     assertEquals(
         "right",
         AutoStationDoorController.chooseSideNameByTravelFace(
@@ -60,7 +59,7 @@ class AutoStationDoorControllerTest {
   }
 
   @Test
-  void vectorFallbackAcceptsExplicitDiagonalPlatformSides() {
+  void relativeSideAcceptsExplicitDiagonalPlatformSides() {
     assertEquals(
         "left",
         AutoStationDoorController.chooseSideNameByTravelFace(
@@ -80,14 +79,10 @@ class AutoStationDoorControllerTest {
   }
 
   @Test
-  void attachmentPositionProjectionAcceptsExplicitDiagonalPlatformSides() {
+  void worldProjectionSelectsSouthEastDoorSide() {
     Location doorLeftNorthWest = new Location(null, -2.0, 0.0, -2.0);
     Location doorRightSouthEast = new Location(null, 2.0, 0.0, 2.0);
 
-    assertEquals(
-        "left",
-        AutoStationDoorController.chooseSideNameByAttachmentPositions(
-            BlockFace.NORTH_WEST, doorLeftNorthWest, doorRightSouthEast));
     assertEquals(
         "right",
         AutoStationDoorController.chooseSideNameByAttachmentPositions(
@@ -95,130 +90,53 @@ class AutoStationDoorControllerTest {
   }
 
   @Test
-  void lateralProjectionDoesNotGuessDoorSideWithoutAttachmentPositions() {
-    Vector northEast = new Vector(1.0, 0.0, -1.0);
-
-    assertEquals(
-        "none",
-        AutoStationDoorController.chooseSideNameByLateralProjections(
-            northEast, BlockFace.SOUTH_EAST, null, null));
-    assertEquals(
-        "right",
-        AutoStationDoorController.chooseSideNameByTravelVector(northEast, BlockFace.SOUTH_EAST));
-  }
-
-  @Test
-  void lateralProjectionSeparatesSouthEastAndNorthWestDoors() {
-    Vector northEast = new Vector(1.0, 0.0, -1.0);
-    double doorLeftNorthWest = 2.0;
-    double doorRightSouthEast = -2.0;
+  void worldProjectionSelectsNorthWestMirrorOppositeDoorSide() {
+    Location doorLeftSouthEast = new Location(null, 2.0, 0.0, 2.0);
+    Location doorRightNorthWest = new Location(null, -2.0, 0.0, -2.0);
 
     assertEquals(
         "left",
-        AutoStationDoorController.chooseSideNameByLateralProjections(
-            northEast, BlockFace.NORTH_WEST, doorLeftNorthWest, doorRightSouthEast));
+        AutoStationDoorController.chooseSideNameByAttachmentPositions(
+            BlockFace.SOUTH_EAST, doorLeftSouthEast, doorRightNorthWest));
     assertEquals(
         "right",
-        AutoStationDoorController.chooseSideNameByLateralProjections(
-            northEast, BlockFace.SOUTH_EAST, doorLeftNorthWest, doorRightSouthEast));
+        AutoStationDoorController.chooseSideNameByAttachmentPositions(
+            BlockFace.NORTH_WEST, doorLeftSouthEast, doorRightNorthWest));
   }
 
   @Test
-  void pairedLateralProjectionKeepsSouthEastOppositeOfNorthWest() {
-    Vector northEast = new Vector(1.0, 0.0, -1.0);
-    Location center = new Location(null, 0.0, 0.0, 0.0);
-    List<Location> leftDoors = List.of(pointOnTrainAxis(northEast, 0.0, 2.0));
-    List<Location> rightDoors = List.of(pointOnTrainAxis(northEast, 0.0, -2.0));
+  void worldProjectionCoversNorthEastAndSouthWestDoorSides() {
+    Location doorLeftNorthEast = new Location(null, 2.0, 0.0, -2.0);
+    Location doorRightSouthWest = new Location(null, -2.0, 0.0, 2.0);
 
     assertEquals(
         "left",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            northEast, BlockFace.NORTH_WEST, center, leftDoors, rightDoors));
+        AutoStationDoorController.chooseSideNameByAttachmentPositions(
+            BlockFace.NORTH_EAST, doorLeftNorthEast, doorRightSouthWest));
     assertEquals(
         "right",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            northEast, BlockFace.SOUTH_EAST, center, leftDoors, rightDoors));
+        AutoStationDoorController.chooseSideNameByAttachmentPositions(
+            BlockFace.SOUTH_WEST, doorLeftNorthEast, doorRightSouthWest));
   }
 
   @Test
-  void pairedLateralProjectionIgnoresUnpairedLongitudinalOutlier() {
-    Vector northEast = new Vector(1.0, 0.0, -1.0);
-    Location center = new Location(null, 0.0, 0.0, 0.0);
-    List<Location> leftDoors =
-        List.of(pointOnTrainAxis(northEast, 0.0, 2.0), pointOnTrainAxis(northEast, 100.0, -8.0));
-    List<Location> rightDoors = List.of(pointOnTrainAxis(northEast, 0.0, -2.0));
+  void worldProjectionDoesNotUseTrainFacingVector() {
+    Vector northEastTrainFacing = new Vector(1.0, 0.0, -1.0);
+    Location doorLeftSouthEast = new Location(null, 2.0, 0.0, 2.0);
+    Location doorRightNorthWest = new Location(null, -2.0, 0.0, -2.0);
 
     assertEquals(
         "left",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            northEast, BlockFace.NORTH_WEST, center, leftDoors, rightDoors));
+        AutoStationDoorController.chooseSideNameByAttachmentPositions(
+            BlockFace.SOUTH_EAST, doorLeftSouthEast, doorRightNorthWest));
     assertEquals(
         "right",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            northEast, BlockFace.SOUTH_EAST, center, leftDoors, rightDoors));
+        AutoStationDoorController.chooseSideNameByTravelVector(
+            northEastTrainFacing, BlockFace.SOUTH_EAST));
   }
 
   @Test
-  void pairedLateralProjectionKeepsNorthEastOppositeOfSouthWest() {
-    Vector southEast = new Vector(1.0, 0.0, 1.0);
-    Location center = new Location(null, 0.0, 0.0, 0.0);
-    List<Location> leftDoors = List.of(pointOnTrainAxis(southEast, 0.0, 2.0));
-    List<Location> rightDoors = List.of(pointOnTrainAxis(southEast, 0.0, -2.0));
-
-    assertEquals(
-        "left",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            southEast, BlockFace.NORTH_EAST, center, leftDoors, rightDoors));
-    assertEquals(
-        "right",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            southEast, BlockFace.SOUTH_WEST, center, leftDoors, rightDoors));
-  }
-
-  @Test
-  void pairedLateralProjectionIgnoresNorthEastSouthWestOutlier() {
-    Vector southEast = new Vector(1.0, 0.0, 1.0);
-    Location center = new Location(null, 0.0, 0.0, 0.0);
-    List<Location> leftDoors =
-        List.of(pointOnTrainAxis(southEast, 0.0, 2.0), pointOnTrainAxis(southEast, 100.0, -8.0));
-    List<Location> rightDoors = List.of(pointOnTrainAxis(southEast, 0.0, -2.0));
-
-    assertEquals(
-        "left",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            southEast, BlockFace.NORTH_EAST, center, leftDoors, rightDoors));
-    assertEquals(
-        "right",
-        AutoStationDoorController.chooseSideNameByLateralDoorLocations(
-            southEast, BlockFace.SOUTH_WEST, center, leftDoors, rightDoors));
-  }
-
-  @Test
-  void diagonalFallbackUsesUnifiedVectorSideForAllCardinalDoors() {
-    assertEquals(
-        "left",
-        AutoStationDoorController.chooseDiagonalSideNameByTravelFace(
-            BlockFace.NORTH_EAST, BlockFace.NORTH));
-    assertEquals(
-        "right",
-        AutoStationDoorController.chooseDiagonalSideNameByTravelFace(
-            BlockFace.NORTH_EAST, BlockFace.EAST));
-    assertEquals(
-        "right",
-        AutoStationDoorController.chooseDiagonalSideNameByTravelFace(
-            BlockFace.SOUTH_EAST, BlockFace.SOUTH));
-    assertEquals(
-        "left",
-        AutoStationDoorController.chooseDiagonalSideNameByTravelFace(
-            BlockFace.SOUTH_WEST, BlockFace.SOUTH));
-    assertEquals(
-        "right",
-        AutoStationDoorController.chooseDiagonalSideNameByTravelFace(
-            BlockFace.SOUTH_WEST, BlockFace.NORTH));
-  }
-
-  @Test
-  void vectorFallbackPreservesNonFortyFiveDegreeAngles() {
+  void relativeSidePreservesNonFortyFiveDegreeAngles() {
     Vector thirtyDegreesEastOfNorth = new Vector(0.5, 0.0, -0.8660254038);
 
     assertEquals(
@@ -246,14 +164,5 @@ class AutoStationDoorControllerTest {
     assertTrue(options.getQueue());
     assertTrue(options.getReset());
     assertEquals(1.0, options.getSpeed());
-  }
-
-  private static Location pointOnTrainAxis(
-      Vector travelVector, double longitudinal, double lateral) {
-    Vector forward = AutoStationDoorController.normalizeHorizontalVector(travelVector);
-    Vector leftAxis = new Vector(forward.getZ(), 0.0, -forward.getX()).normalize();
-    double x = forward.getX() * longitudinal + leftAxis.getX() * lateral;
-    double z = forward.getZ() * longitudinal + leftAxis.getZ() * lateral;
-    return new Location(null, x, 0.0, z);
   }
 }
