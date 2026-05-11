@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -7,6 +8,7 @@ import java.util.function.Consumer;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 
@@ -43,6 +45,18 @@ final class DynamicDestinationResolver {
       UUID worldId,
       NodeId currentNode,
       Optional<BlockFace> forwardDirection) {
+    return resolveSignalTickDestination(
+        trainName, route, currentIndex, worldId, currentNode, forwardDirection, Instant.now());
+  }
+
+  Optional<ResolvedDynamicDestination> resolveSignalTickDestination(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      UUID worldId,
+      NodeId currentNode,
+      Optional<BlockFace> forwardDirection,
+      Instant now) {
     if (trainName == null
         || trainName.isBlank()
         || route == null
@@ -51,7 +65,18 @@ final class DynamicDestinationResolver {
       return Optional.empty();
     }
     Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldId).map(snapshot -> snapshot.graph());
+        railGraphService
+            .getSnapshot(worldId)
+            .map(
+                snapshot -> {
+                  RailGraph graph = snapshot.graph();
+                  var overrides = railGraphService.edgeOverrides(worldId);
+                  if (overrides.isEmpty()) {
+                    return graph;
+                  }
+                  Instant snapshotTime = now != null ? now : Instant.now();
+                  return new EdgeOverrideRailGraph(graph, overrides, snapshotTime);
+                });
     if (graphOpt.isEmpty()) {
       return Optional.empty();
     }

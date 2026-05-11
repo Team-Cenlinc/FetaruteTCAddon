@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -13,6 +14,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.UUID;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
@@ -22,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -78,6 +81,64 @@ class DynamicDestinationResolverTest {
     assertTrue(result.isPresent());
     assertEquals(1, result.get().stopIndex());
     assertEquals(freeId, result.get().node());
+    verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
+  }
+
+  @Test
+  void resolverHonorsEdgeOverridesWhenCheckingReachability() {
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    RailGraph graph = mock(RailGraph.class);
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    railGraphService.putSnapshot(world, graph, Instant.parse("2026-01-01T00:00:00Z"));
+
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(graph, fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(graph, targetId, new Vector(10, 0, 0), NodeType.STATION);
+    RailEdge blockedEdge = edge(from, target);
+    mockEdges(graph, fromId, blockedEdge);
+    mockEdges(graph, targetId);
+    when(graph.nodes()).thenReturn(List.of(from, target));
+    railGraphService.putEdgeOverride(
+        new RailEdgeOverrideRecord(
+            worldId,
+            blockedEdge.id(),
+            OptionalDouble.empty(),
+            OptionalDouble.empty(),
+            Optional.empty(),
+            true,
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z")));
+
+    RouteId routeId = RouteId.of("DYNAMIC-BLOCKED");
+    RouteDefinition route = mock(RouteDefinition.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.waypoints()).thenReturn(Arrays.asList(fromId, NodeId.of("PLACEHOLDER")));
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    DynamicDestinationResolver resolver =
+        new DynamicDestinationResolver(
+            new DynamicPlatformAllocator(routeDefinitions, occupancyManager, message -> {}),
+            railGraphService,
+            message -> {});
+
+    Optional<DynamicDestinationResolver.ResolvedDynamicDestination> result =
+        resolver.resolveSignalTickDestination(
+            "train-dynamic",
+            route,
+            0,
+            worldId,
+            fromId,
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"));
+
+    assertFalse(result.isPresent());
     verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
   }
 
