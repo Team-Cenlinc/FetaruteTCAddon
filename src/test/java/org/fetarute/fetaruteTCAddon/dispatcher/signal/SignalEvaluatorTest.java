@@ -2,11 +2,13 @@ package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -188,6 +190,21 @@ class SignalEvaluatorTest {
     assertEquals(0, manager.canEnterCalls());
     assertEquals(1, receivedEvents.size());
     assertEquals(SignalAspect.STOP, receivedEvents.get(0).newSignal());
+  }
+
+  @Test
+  void signalEvaluatorDoesNotOwnTrainControlDependencies() {
+    Set<String> controlDependencies =
+        Set.of("TrainProperties", "RuntimeTrainController", "TrainLaunchManager", "TrainCarts");
+
+    for (Field field : SignalEvaluator.class.getDeclaredFields()) {
+      String fieldType = field.getType().getSimpleName();
+      for (String dependency : controlDependencies) {
+        assertFalse(
+            fieldType.contains(dependency),
+            "SignalEvaluator must remain a pure signal evaluator: " + fieldType);
+      }
+    }
   }
 
   // ========== Mock 实现 ==========

@@ -503,6 +503,45 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void conflictDeadlockReleaseFailsClosedWhenDirectionUnknown() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+    Map<String, CorridorDirection> reverse = Map.of(conflict.key(), CorridorDirection.B_TO_A);
+
+    manager.acquire(
+        new OccupancyRequest("blocker", Optional.empty(), now, List.of(nodeB), java.util.Map.of()));
+    manager.canEnter(
+        new OccupancyRequest(
+            "blocker",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            reverse,
+            Map.of(conflict.key(), 1),
+            0));
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "requester",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict, nodeB),
+                Map.of(conflict.key(), CorridorDirection.UNKNOWN),
+                Map.of(conflict.key(), 0),
+                10));
+
+    assertFalse(decision.allowed());
+    assertFalse(decision.conflictRelease());
+    assertEquals(SignalAspect.STOP, decision.signal());
+  }
+
+  @Test
   void conflictDeadlockReleaseKeepsStopWhenRequesterSideStillHasTrainAhead() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =

@@ -41,7 +41,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * @param edgeSpeedLookaheadMinBps 前方低限速边反推的当前最大速度
  * @param speedCurveLimitBps TrainLaunchManager 内部速度曲线限制后的速度
  * @param finalTargetBps 最终写入 TrainCarts speedLimit 前的目标速度（blocks/s）
- * @param finalLimiterSource 最终限速来源
+ * @param finalLimiterSource 最终限速来源，也作为控车来源（controlSource）诊断字段
  * @param recommendedSpeedBps 建议速度（经 MotionPlanner 计算）
  * @param distanceToBlocker 到阻塞点距离（blocks）
  * @param distanceToCaution 到 CAUTION 区域距离
@@ -122,6 +122,15 @@ public record ControlDiagnostics(
   /** 获取到最近约束点的距离（取三种距离的最小值）。 */
   public OptionalLong minConstraintDistance() {
     return minStopConstraintDistance();
+  }
+
+  /**
+   * 控车来源别名。
+   *
+   * <p>保留 {@link #finalLimiterSource()} 作为历史字段，同时提供更贴近运行时边界审计的 controlSource 语义。
+   */
+  public String controlSource() {
+    return finalLimiterSource();
   }
 
   /**

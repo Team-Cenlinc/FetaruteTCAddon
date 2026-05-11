@@ -25,7 +25,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -78,9 +77,14 @@ import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
- * 运行时调度控制：推进点触发下发目的地 + 信号等级变化时控车。
+ * 运行时调度编排器。
  *
- * <p>推进点逻辑用于“进入节点时下发下一跳 destination”；信号监测用于“运行中根据信号变化调整限速/制动”。
+ * <p>本类负责 route progress、RouteStop action 意图、DYNAMIC effective node、Layover/Depot/Station
+ * 授权，以及授权成功后的 destination 写入。TrainCarts 控车动作由 {@link RuntimeTrainController} 执行；RouteStop 纯解析由
+ * {@link RouteStopActionResolver} 处理；普通移动授权顺序由 {@link MovementAuthorizationCoordinator} 收敛。
+ *
+ * <p>普通下一跳 destination 只能在 preview/canEnter、hard blocker 检查、acquire 与 acquire 结果复核均允许后写入。站点行为、
+ * waypoint dwell、debug setup、spawn execution 等行为例外必须在写入处保留 reason 注释。
  *
  * <p>假设列车已写入 {@code FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE}（或 {@code FTA_ROUTE_ID}）与 {@code
  * FTA_ROUTE_INDEX} tag，且 RouteDefinitionCache 已完成预热。
@@ -112,6 +116,8 @@ public final class RuntimeDispatchService {
 
   private final OccupancyManager occupancyManager;
   private final LaunchAuthorizationService launchAuthorizationService;
+  private final MovementAuthorizationCoordinator movementAuthorizationCoordinator;
+  private final RouteStopActionResolver routeStopActionResolver = new RouteStopActionResolver();
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
   private final RouteProgressRegistry progressRegistry;
@@ -176,8 +182,6 @@ public final class RuntimeDispatchService {
       effectiveNodeOverrides = new java.util.concurrent.ConcurrentHashMap<>();
 
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
-  private static final Pattern ACTION_PREFIX_PATTERN =
-      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
   private static final Duration BLOCKER_SNAPSHOT_TTL = Duration.ofSeconds(20);
 
   /** 节点历史缓存：记录列车最近经过的节点（用于回退检测）。 */
@@ -192,6 +196,9 @@ public final class RuntimeDispatchService {
 
   /** 动态站台分配器。 */
   private final DynamicPlatformAllocator dynamicAllocator;
+
+  /** DYNAMIC effective node 解析器：只返回候选选择结果，不写 TrainCarts destination。 */
+  private final DynamicDestinationResolver dynamicDestinationResolver;
 
   /**
    * 控车速度附加限制。
@@ -405,8 +412,12 @@ public final class RuntimeDispatchService {
             occupancyManager,
             (trainName, decision, now, scope) -> updateBlockerSnapshot(trainName, decision, now),
             this.debugLogger);
+    this.movementAuthorizationCoordinator =
+        new MovementAuthorizationCoordinator(occupancyManager, this.debugLogger);
     this.dynamicAllocator =
         new DynamicPlatformAllocator(routeDefinitions, occupancyManager, this.debugLogger);
+    this.dynamicDestinationResolver =
+        new DynamicDestinationResolver(dynamicAllocator, railGraphService, this.debugLogger);
     this.shortestPathDistanceCache =
         new ShortestPathDistanceCache(
             pathFinder, Duration.ofSeconds(resolveDistanceCacheRefreshSeconds()), this.debugLogger);
@@ -821,7 +832,8 @@ public final class RuntimeDispatchService {
               });
       nextNode = resolveEffectiveNode(trainName, route, nextIndex);
     }
-    // 设置下一站 destination
+    // 行为流程例外：AutoStation 已完成到站推进，此处只 materialize 下一跳 destination。
+    // 真正离站仍会经过 Station/TERM departure gate 与 LaunchAuthorizationService 授权。
     String destinationName = resolveDestinationName(nextNode);
     if (destinationName != null && !destinationName.isBlank()) {
       properties.clearDestinationRoute();
@@ -1085,6 +1097,8 @@ public final class RuntimeDispatchService {
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       String destinationName = resolveDestinationName(nextNode);
       if (destinationName != null && !destinationName.isBlank() && properties != null) {
+        // 行为流程例外：STOP waypoint dwell handoff 需要提前写入下一跳，便于停站结束后恢复寻路。
+        // 控车仍保持 STOP/居中/等待动作，不在此处放行或发车。
         properties.clearDestinationRoute();
         properties.setDestination(destinationName);
       }
@@ -1120,13 +1134,13 @@ public final class RuntimeDispatchService {
         selectDynamicStationTargetForProgress(
             trainName, route, currentIndex, nextIndex, currentNode, graph, builder, now, priority);
     OccupancyRequestContext context;
-    OccupancyDecision decision;
+    Optional<OccupancyDecision> previewDecision = Optional.empty();
     if (dynamicSelectionOpt.isPresent()) {
       DynamicSelection selection = dynamicSelectionOpt.get();
       recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
       nextNode = selection.targetNode();
       context = selection.context();
-      decision = selection.decision();
+      previewDecision = Optional.of(selection.decision());
     } else {
       Optional<OccupancyRequestContext> contextOpt =
           builder.buildContextFromNodes(
@@ -1156,12 +1170,21 @@ public final class RuntimeDispatchService {
           trainName, route, currentIndex, currentNode, graph, request.resourceList());
       releaseSpeculativeQueueEntriesFromBehindSameRoute(
           trainName, route, currentIndex, currentNode, graph, request.resourceList());
-      decision = occupancyManager.canEnter(request);
     }
     OccupancyRequest request = context.request();
     releaseResourcesNotInRequest(trainName, request.resourceList());
-    ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, "progress");
-    boolean proceedAllowed = proceedDecision.proceedAllowed();
+    MovementAuthorizationCoordinator.AuthorizationResult authorization =
+        movementAuthorizationCoordinator.authorize(
+            new MovementAuthorizationCoordinator.AuthorizationRequest(
+                trainName,
+                request,
+                previewDecision,
+                now,
+                "progress",
+                "progress-acquire",
+                this::evaluateMovementAuthorization));
+    OccupancyDecision decision = authorization.decision();
+    boolean proceedAllowed = authorization.proceedAllowed();
     // 诊断：输出请求资源与判定结果
     debugLogger.accept(
         "调度推进判定: train="
@@ -1175,29 +1198,11 @@ public final class RuntimeDispatchService {
             + " allowed="
             + proceedAllowed
             + " rawAllowed="
-            + proceedDecision.rawAllowed()
+            + authorization.rawAllowed()
             + " blockers="
             + decision.blockers().size()
             + " signal="
             + decision.signal());
-    if (proceedAllowed) {
-      OccupancyDecision acquired = occupancyManager.acquire(request);
-      ProceedDecision acquiredProceed =
-          evaluateProceedDecision(trainName, acquired, now, "progress-acquire");
-      if (!acquiredProceed.proceedAllowed()) {
-        decision = acquired;
-        proceedAllowed = false;
-        debugLogger.accept(
-            "调度推进 acquire 阻塞: train="
-                + trainName
-                + " node="
-                + definition.nodeId().value()
-                + " signal="
-                + acquired.signal()
-                + " blockers="
-                + summarizeBlockers(acquired));
-      }
-    }
     if (!proceedAllowed) {
       UUID worldId = train.worldId();
       SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(worldId);
@@ -1254,6 +1259,7 @@ public final class RuntimeDispatchService {
     if (destinationName == null || destinationName.isBlank()) {
       return;
     }
+    // 授权路径：只有 progress canEnter/acquire 均允许后才写入下一跳 destination。
     properties.clearDestinationRoute();
     properties.setDestination(destinationName);
     applyControl(
@@ -2213,6 +2219,7 @@ public final class RuntimeDispatchService {
     if (destinationName == null || destinationName.isBlank()) {
       destinationName = nextNode.value();
     }
+    // 健康修复边界：只恢复已知 routeIndex 的下一跳，不触发发车。
     properties.clearDestinationRoute();
     properties.setDestination(destinationName);
     debugLogger.accept(
@@ -2281,7 +2288,7 @@ public final class RuntimeDispatchService {
       return false;
     }
 
-    // 设置 destination
+    // 健康修复边界：force relaunch 只用于人工/健康检查恢复，保留在 Dispatcher 恢复路径内。
     String destinationName = resolveDestinationName(nextNode);
     if (destinationName == null || destinationName.isBlank()) {
       destinationName = nextNode.value();
@@ -2563,7 +2570,7 @@ public final class RuntimeDispatchService {
     }
 
     // 动态站台分配：检查前方是否有 DYNAMIC 站点，提前分配具体站台
-    tryDynamicPlatformAllocation(train, properties, trainName, route, currentIndex, currentNode);
+    tryDynamicPlatformAllocation(train, trainName, route, currentIndex, currentNode);
 
     // DSTY 销毁必须优先于“终点停车”，否则当线路最后一个节点就是 DSTY 目标时会卡死不销毁。
     // 若当前节点为 DSTY（销毁目标），立即销毁列车并返回，避免后续逻辑干扰。
@@ -2897,6 +2904,10 @@ public final class RuntimeDispatchService {
     if (allowLaunch) {
       updateSignalOrWarn(trainName, nextAspect, now);
     }
+    if (proceedAllowed && nextAspect != SignalAspect.STOP && nextNode.isPresent()) {
+      writeAuthorizedDynamicDestination(
+          properties, trainName, route, currentIndex + 1, nextNode.get());
+    }
 
     if (stopAtNextWaypoint
         && shouldLogStopWaypoint(trainName, currentIndex, nextNode.orElse(null), nextAspect)) {
@@ -2967,6 +2978,7 @@ public final class RuntimeDispatchService {
           train,
           properties,
           trainName,
+          nextAspect,
           route,
           currentNodeOpt.get(),
           nextNode.get(),
@@ -3287,6 +3299,7 @@ public final class RuntimeDispatchService {
     if (destinationName == null || destinationName.isBlank()) {
       destinationName = nextNode.value();
     }
+    // 授权路径：Layover 复用已经通过 LaunchAuthorizationService.authorize 后才写 destination。
     properties.clearDestinationRoute();
     trainHandle.setDestination(destinationName);
 
@@ -3409,6 +3422,15 @@ public final class RuntimeDispatchService {
     LaunchAuthorizationService.AuthorizationResult result =
         launchAuthorizationService.evaluateDecision(trainName, decision, now, scope, false);
     return new ProceedDecision(result.allowed(), result.rawAllowed(), result.hardBlockerBypass());
+  }
+
+  private MovementAuthorizationCoordinator.ProceedEvaluation evaluateMovementAuthorization(
+      String trainName, OccupancyDecision decision, Instant now, String scope) {
+    ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, scope);
+    return new MovementAuthorizationCoordinator.ProceedEvaluation(
+        proceedDecision.proceedAllowed(),
+        proceedDecision.rawAllowed(),
+        proceedDecision.hardBlockerBypass());
   }
 
   /**
@@ -4326,12 +4348,18 @@ public final class RuntimeDispatchService {
       RuntimeTrainHandle train,
       TrainProperties properties,
       String trainName,
+      SignalAspect aspect,
       RouteDefinition route,
       NodeId currentNode,
       NodeId nextNode,
       RailGraph graph,
       OptionalLong distanceOpt) {
-    if (train == null || properties == null || trainName == null || trainName.isBlank()) {
+    if (train == null
+        || properties == null
+        || trainName == null
+        || trainName.isBlank()
+        || aspect == null
+        || aspect == SignalAspect.STOP) {
       return;
     }
     String destination = resolveDestinationName(nextNode);
@@ -4340,18 +4368,14 @@ public final class RuntimeDispatchService {
     }
     properties.clearDestinationRoute();
     properties.setDestination(destination);
-    applyControl(
-        train,
-        properties,
-        SignalAspect.PROCEED,
-        route,
-        currentNode,
-        nextNode,
-        graph,
-        true,
-        distanceOpt);
+    applyControl(train, properties, aspect, route, currentNode, nextNode, graph, true, distanceOpt);
     debugLogger.accept(
-        "调度 failover: 低速重下发 destination train=" + trainName + " dest=" + destination);
+        "调度 failover: 低速按已授权信号重下发 destination train="
+            + trainName
+            + " signal="
+            + aspect
+            + " dest="
+            + destination);
   }
 
   /**
@@ -4432,12 +4456,6 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 判定当前节点是否应执行 DSTY 销毁。
-   *
-   * <p>DSTY 在 DSL 中带目标 NodeId（如 {@code DSTY <NodeId>}），且历史版本可能把 DSTY 写在其他 stop 的 notes
-   * 上。为避免在错误节点提前销毁，只有当“目标 NodeId == 当前节点”时才触发。
-   */
-  /**
    * 判断当前节点是否为 DSTY（销毁目标）。
    *
    * @param stop 当前 RouteStop
@@ -4445,27 +4463,7 @@ public final class RuntimeDispatchService {
    * @return 是否应销毁
    */
   private boolean shouldDestroyAt(RouteStop stop, NodeId currentNode) {
-    if (stop == null || currentNode == null) {
-      return false;
-    }
-    Optional<String> targetOpt = findDirectiveTarget(stop, "DSTY");
-    if (targetOpt.isEmpty()) {
-      return false;
-    }
-    String target = targetOpt.get();
-    if (target.isBlank()) {
-      return false;
-    }
-    // 精确匹配
-    if (currentNode.value().equalsIgnoreCase(target)) {
-      return true;
-    }
-    // 尝试 DYNAMIC 匹配（支持 "DSTY DYNAMIC:OP:D:DEPOT" 格式）
-    Optional<DynamicStopMatcher.DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(target);
-    if (specOpt.isPresent()) {
-      return DynamicStopMatcher.matches(currentNode, specOpt.get());
-    }
-    return false;
+    return routeStopActionResolver.shouldDestroyAt(stop, currentNode);
   }
 
   /**
@@ -4475,20 +4473,7 @@ public final class RuntimeDispatchService {
    */
   private boolean shouldDestroyAtFallback(
       RouteStop stop, int currentIndex, RouteDefinition route, SignNodeDefinition definition) {
-    if (stop == null || route == null || definition == null) {
-      return false;
-    }
-    if (definition.nodeType() != NodeType.DEPOT) {
-      return false;
-    }
-    if (stop.notes().isPresent() && !stop.notes().get().isBlank()) {
-      return false;
-    }
-    if (stop.passType() != RouteStopPassType.PASS) {
-      return false;
-    }
-    int lastIndex = Math.max(0, route.waypoints().size() - 1);
-    return currentIndex == lastIndex;
+    return routeStopActionResolver.shouldDestroyAtFallback(stop, currentIndex, route, definition);
   }
 
   /**
@@ -4580,30 +4565,7 @@ public final class RuntimeDispatchService {
       return false;
     }
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    if (stops.isEmpty()) {
-      return false;
-    }
-    for (RouteStop stop : stops) {
-      Optional<String> targetOpt = findDirectiveTarget(stop, "DSTY");
-      if (targetOpt.isEmpty()) {
-        continue;
-      }
-      String target = targetOpt.get();
-      if (target.isBlank()) {
-        continue;
-      }
-      // 精确匹配
-      if (currentNode.value().equalsIgnoreCase(target)) {
-        return true;
-      }
-      // 尝试 DYNAMIC 匹配（支持 "DSTY DYNAMIC:OP:D:DEPOT" 格式）
-      Optional<DynamicStopMatcher.DynamicSpec> specOpt =
-          DynamicStopMatcher.parseDynamicSpec(target);
-      if (specOpt.isPresent() && DynamicStopMatcher.matches(currentNode, specOpt.get())) {
-        return true;
-      }
-    }
-    return false;
+    return routeStopActionResolver.routeMatchesDstyTarget(stops, currentNode);
   }
 
   /**
@@ -4671,97 +4633,36 @@ public final class RuntimeDispatchService {
     if (stop == null || trainName == null || properties == null) {
       return false;
     }
-    Optional<String> remainderOpt = findDirectiveTarget(stop, "CHANGE");
-    if (remainderOpt.isEmpty()) {
+    Optional<RouteStopActionResolver.ChangeIntent> intentOpt =
+        routeStopActionResolver.changeIntent(stop);
+    if (intentOpt.isEmpty()) {
       return false;
     }
-    String remainder = remainderOpt.get();
-    // 解析 CHANGE:OperatorCode:LineCode
-    String[] parts = remainder.split(":", -1);
-    if (parts.length < 2) {
-      debugLogger.accept("CHANGE 解析失败: 格式错误 train=" + trainName + " raw=" + remainder);
-      return false;
-    }
-    String operatorCode = parts[0].trim();
-    String lineCode = parts[1].trim();
-
-    if (operatorCode.isBlank() || lineCode.isBlank()) {
-      debugLogger.accept("CHANGE 解析失败: operator/line 为空 train=" + trainName + " raw=" + remainder);
+    RouteStopActionResolver.ChangeIntent intent = intentOpt.get();
+    if (!intent.valid()) {
+      debugLogger.accept(
+          "CHANGE 解析失败: reason="
+              + intent.reason()
+              + " train="
+              + trainName
+              + " raw="
+              + intent.raw());
       return false;
     }
 
     // 仅更新 operator/line tags，不改变 route
-    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_OPERATOR_CODE, operatorCode);
-    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_LINE_CODE, lineCode);
+    TrainTagHelper.writeTag(
+        properties, RouteProgressRegistry.TAG_OPERATOR_CODE, intent.operatorCode());
+    TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_LINE_CODE, intent.lineCode());
 
     debugLogger.accept(
-        "CHANGE 移交成功: train=" + trainName + " newOp=" + operatorCode + " newLine=" + lineCode);
+        "CHANGE 移交成功: train="
+            + trainName
+            + " newOp="
+            + intent.operatorCode()
+            + " newLine="
+            + intent.lineCode());
     return true;
-  }
-
-  private Optional<String> findDirectiveTarget(RouteStop stop, String prefix) {
-    if (stop == null || prefix == null || prefix.isBlank() || stop.notes().isEmpty()) {
-      return Optional.empty();
-    }
-    String raw = stop.notes().orElse("");
-    if (raw.isBlank()) {
-      return Optional.empty();
-    }
-    String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
-    for (String line : normalized.split("\n", -1)) {
-      if (line == null) {
-        continue;
-      }
-      String trimmed = line.trim();
-      if (trimmed.isEmpty()) {
-        continue;
-      }
-      if (!ACTION_PREFIX_PATTERN.matcher(trimmed).find()) {
-        continue;
-      }
-      String normalizedAction = normalizeActionLine(trimmed);
-      String actualPrefix = firstSegment(normalizedAction).trim();
-      if (!actualPrefix.equalsIgnoreCase(prefix)) {
-        continue;
-      }
-      String rest = normalizedAction.substring(actualPrefix.length()).trim();
-      if (rest.startsWith(":")) {
-        rest = rest.substring(1).trim();
-      }
-      if (rest.isBlank()) {
-        continue;
-      }
-      // DSTY/CRET 语法使用空格分隔；这里取整段 remainder 作为目标 NodeId（不支持带空格的 NodeId）。
-      int ws = rest.indexOf(' ');
-      if (ws >= 0) {
-        rest = rest.substring(0, ws).trim();
-      }
-      if (!rest.isBlank()) {
-        return Optional.of(rest);
-      }
-    }
-    return Optional.empty();
-  }
-
-  /**
-   * 从 DSTY 指令中提取 DYNAMIC 规范。
-   *
-   * <p>支持格式 {@code DSTY DYNAMIC:OP:STATION:[1:3]}，返回 {@code OP:STATION:[1:3]}。
-   *
-   * @param stop RouteStop
-   * @return DYNAMIC 规范字符串，或 empty
-   */
-  private Optional<String> extractDynamicFromDsty(RouteStop stop) {
-    Optional<String> dstyTarget = findDirectiveTarget(stop, "DSTY");
-    if (dstyTarget.isEmpty()) {
-      return Optional.empty();
-    }
-    String target = dstyTarget.get();
-    // 检查是否以 DYNAMIC: 开头（不区分大小写）
-    if (target.length() > 8 && target.regionMatches(true, 0, "DYNAMIC:", 0, 8)) {
-      return Optional.of(target.substring(8));
-    }
-    return Optional.empty();
   }
 
   /**
@@ -4777,19 +4678,7 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    for (RouteStop stop : stops) {
-      Optional<String> dstyTarget = findDirectiveTarget(stop, "DSTY");
-      if (dstyTarget.isEmpty()) {
-        continue;
-      }
-      String target = dstyTarget.get();
-      Optional<DynamicStopMatcher.DynamicSpec> specOpt =
-          DynamicStopMatcher.parseDynamicSpec(target);
-      if (specOpt.isPresent() && specOpt.get().isDepot()) {
-        return specOpt;
-      }
-    }
-    return Optional.empty();
+    return routeStopActionResolver.dstyDynamicDepotSpec(stops);
   }
 
   /**
@@ -4834,6 +4723,7 @@ public final class RuntimeDispatchService {
     if (destinationName == null || destinationName.isBlank()) {
       destinationName = depotNode.value();
     }
+    // DYNAMIC materialize 例外：这里仅把已选车库写给 TrainCarts 寻路，发车/控车不在此处分发。
     properties.clearDestinationRoute();
     properties.setDestination(destinationName);
     debugLogger.accept(
@@ -4844,41 +4734,6 @@ public final class RuntimeDispatchService {
             + " dest="
             + destinationName);
     return true;
-  }
-
-  private static String firstSegment(String line) {
-    if (line == null || line.isEmpty()) {
-      return "";
-    }
-    int idx = 0;
-    while (idx < line.length()) {
-      char ch = line.charAt(idx);
-      if (Character.isWhitespace(ch) || ch == ':') {
-        break;
-      }
-      idx++;
-    }
-    return line.substring(0, idx);
-  }
-
-  private static String normalizeActionLine(String line) {
-    String trimmed = line.trim();
-    java.util.regex.Matcher matcher = ACTION_PREFIX_PATTERN.matcher(trimmed);
-    if (!matcher.find()) {
-      return trimmed;
-    }
-    String prefix = matcher.group(1).toUpperCase(java.util.Locale.ROOT);
-    String rest = trimmed.substring(prefix.length()).trim();
-    if (rest.isEmpty()) {
-      return prefix;
-    }
-    if (rest.startsWith(":")) {
-      rest = rest.substring(1).trim();
-    }
-    if ("CRET".equals(prefix) || "DSTY".equals(prefix)) {
-      return rest.isEmpty() ? prefix : prefix + " " + rest;
-    }
-    return prefix + ":" + rest;
   }
 
   /**
@@ -5046,12 +4901,7 @@ public final class RuntimeDispatchService {
     if (stopOpt.isEmpty()) {
       return Optional.empty();
     }
-    // 尝试直接 DYNAMIC 指令
-    Optional<String> remainder = findDirectiveTarget(stopOpt.get(), "DYNAMIC");
-    // 如果未找到，尝试从 DSTY 指令中提取 DYNAMIC 规范（支持 "DSTY DYNAMIC:..." 格式）
-    if (remainder.isEmpty()) {
-      remainder = extractDynamicFromDsty(stopOpt.get());
-    }
+    Optional<String> remainder = routeStopActionResolver.dynamicTarget(stopOpt.get());
     if (remainder.isEmpty()) {
       return Optional.empty();
     }
@@ -5174,12 +5024,7 @@ public final class RuntimeDispatchService {
     if (stopOpt.isEmpty()) {
       return Optional.empty();
     }
-    // 尝试直接 DYNAMIC 指令
-    Optional<String> remainder = findDirectiveTarget(stopOpt.get(), "DYNAMIC");
-    // 如果未找到，尝试从 DSTY 指令中提取 DYNAMIC 规范（支持 "DSTY DYNAMIC:..." 格式）
-    if (remainder.isEmpty()) {
-      remainder = extractDynamicFromDsty(stopOpt.get());
-    }
+    Optional<String> remainder = routeStopActionResolver.dynamicTarget(stopOpt.get());
     if (remainder.isEmpty()) {
       return Optional.empty();
     }
@@ -5799,7 +5644,7 @@ public final class RuntimeDispatchService {
     }
     RailGraph graph = graphOpt.get();
 
-    // 设置 destination
+    // 手动 relaunch 恢复边界：由明确恢复入口触发，不作为常规信号放行路径。
     String destinationName = resolveDestinationName(nextNode);
     if (destinationName == null || destinationName.isBlank()) {
       destinationName = nextNode.value();
@@ -6976,49 +6821,86 @@ public final class RuntimeDispatchService {
   /**
    * 尝试为列车分配动态站台。
    *
-   * <p>当列车距离 DYNAMIC 站点 ≤5 edges 时，从候选范围内选择可用站台并写入节点覆盖表和 destination。
+   * <p>当列车距离 DYNAMIC 站点 ≤5 edges 时，从候选范围内选择可用站台并写入节点覆盖表。TrainCarts destination 必须等本轮信号 tick 的
+   * canEnter/acquire 成功后再写入，避免未授权寻路。
    */
   private void tryDynamicPlatformAllocation(
       RuntimeTrainHandle train,
-      TrainProperties properties,
       String trainName,
       RouteDefinition route,
       int currentIndex,
       NodeId currentNode) {
-    if (train == null || route == null || railGraphService == null) {
+    if (train == null || route == null || dynamicDestinationResolver == null) {
       return;
     }
-    Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), Instant.now());
-    if (graphOpt.isEmpty()) {
-      return;
-    }
-    RailGraph graph = graphOpt.get();
-
-    Optional<DynamicPlatformAllocator.AllocationResult> resultOpt =
-        dynamicAllocator.tryAllocate(
-            trainName, route, currentIndex, graph, currentNode, train.forwardDirection());
+    Optional<DynamicDestinationResolver.ResolvedDynamicDestination> resultOpt =
+        dynamicDestinationResolver.resolveSignalTickDestination(
+            trainName, route, currentIndex, train.worldId(), currentNode, train.forwardDirection());
     if (resultOpt.isEmpty()) {
       return;
     }
-
-    DynamicPlatformAllocator.AllocationResult result = resultOpt.get();
+    DynamicDestinationResolver.ResolvedDynamicDestination result = resultOpt.get();
 
     // 写入节点覆盖表
-    recordEffectiveNode(trainName, route, result.stopIndex(), result.allocatedNode());
+    recordEffectiveNode(trainName, route, result.stopIndex(), result.node());
 
-    // 更新列车 destination（如果分配的是下一站）
-    int nextIndex = currentIndex + 1;
-    if (result.stopIndex() == nextIndex && properties != null) {
-      String dest = result.allocatedNode().value();
-      properties.setDestination(dest);
-      debugLogger.accept(
-          "DYNAMIC destination 写入: train="
-              + trainName
-              + ", dest="
-              + dest
-              + ", idx="
-              + result.stopIndex());
+    debugLogger.accept(
+        "DYNAMIC effective node 写入: train="
+            + trainName
+            + ", node="
+            + result.node().value()
+            + ", idx="
+            + result.stopIndex()
+            + ", reason="
+            + result.reason());
+  }
+
+  /**
+   * 授权后写入 DYNAMIC materialized destination。
+   *
+   * <p>该方法只处理“下一站 DYNAMIC stop 已经被 effective node 覆盖”的场景。调用方必须已经完成本轮信号 tick 的
+   * canEnter/acquire，并确认最终信号不是 STOP。
+   */
+  private void writeAuthorizedDynamicDestination(
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      int targetIndex,
+      NodeId targetNode) {
+    if (properties == null
+        || trainName == null
+        || trainName.isBlank()
+        || route == null
+        || targetIndex < 0
+        || targetNode == null
+        || !isDynamicMaterializedStop(route, targetIndex)
+        || readEffectiveNode(trainName, targetIndex).filter(targetNode::equals).isEmpty()) {
+      return;
     }
+    String destinationName = resolveDestinationName(targetNode);
+    if (destinationName == null || destinationName.isBlank()) {
+      destinationName = targetNode.value();
+    }
+    properties.clearDestinationRoute();
+    properties.setDestination(destinationName);
+    debugLogger.accept(
+        "DYNAMIC destination 授权写入: train="
+            + trainName
+            + ", dest="
+            + destinationName
+            + ", idx="
+            + targetIndex);
+  }
+
+  private boolean isDynamicMaterializedStop(RouteDefinition route, int targetIndex) {
+    if (route == null || targetIndex < 0) {
+      return false;
+    }
+    Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), targetIndex);
+    if (stopOpt.isEmpty()) {
+      return false;
+    }
+    return routeStopActionResolver.dynamicTarget(stopOpt.get()).isPresent();
   }
 
   private NodeId resolveEffectiveNode(String trainName, RouteDefinition route, int index) {

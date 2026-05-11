@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -8,10 +9,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
@@ -63,6 +66,28 @@ class RuntimeTrainControllerTest {
 
     verify(properties).setSpeedLimit(10.0 / 20.0);
     verify(train).forceRelaunch(BlockFace.NORTH, 10.0 / 20.0, 2.0 / 400.0);
+  }
+
+  @Test
+  void runtimeTrainControllerDoesNotOwnDispatcherState() {
+    Set<String> dispatcherOwners =
+        Set.of(
+            "Occupancy",
+            "LaunchAuthorization",
+            "DynamicPlatform",
+            "RouteProgress",
+            "Spawn",
+            "Ticket",
+            "Layover");
+
+    for (Field field : RuntimeTrainController.class.getDeclaredFields()) {
+      String fieldType = field.getType().getSimpleName();
+      for (String owner : dispatcherOwners) {
+        assertFalse(
+            fieldType.contains(owner),
+            "RuntimeTrainController must not own dispatcher state: " + fieldType);
+      }
+    }
   }
 
   private static ConfigManager.RuntimeSettings runtimeSettings() {

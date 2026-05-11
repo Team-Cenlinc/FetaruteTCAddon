@@ -7,7 +7,7 @@
 ```
 ACTION:PAYLOAD[:MORE]
 ```
-例如 `CHANGE:SURN:LT`、`DYNAMIC:SURN:PTK:[1:3]`、`CRET SURN:D:DEPOT:1`。若参数较多，可继续拼接冒号片段。运行时解析目前由 `RuntimeDispatchService` 直接处理（后续可再抽出专用解释器）。
+例如 `CHANGE:SURN:LT`、`DYNAMIC:SURN:PTK:[1:3]`、`CRET SURN:D:DEPOT:1`。若参数较多，可继续拼接冒号片段。运行时由 `RouteStopActionResolver` 解析为调度意图，再由 `RuntimeDispatchService` 在授权边界内执行。
 
 ### 1.1 换线标记（CHANGE）
 - 语法：`CHANGE:<OperatorCode>:<LineCode>`（例如 `CHANGE:SURN:LT`）。
@@ -19,14 +19,16 @@ ACTION:PAYLOAD[:MORE]
   - HUD placeholder（如 `{line}`/`{line_color}`/`{operator}`）会在下次 tick 时感知变化
 
 ### 1.2 动态站台标记（DYNAMIC）
-- 语法：`DYNAMIC:<OperatorCode>:<StationCode>[:Range]`，例如 `DYNAMIC:SURN:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。
-  - 当前实现仅支持 Station 节点（候选 NodeId 固定为 `Operator:S:Station:Track`）。
-  - Range 省略时默认视为 `[1:1]`（即固定 track=1），避免“全站扫描”带来的不可控与卡顿风险；如需多站台必须显式给范围。
+- 语法：`DYNAMIC:<OperatorCode>:<S|D>:<NodeCode>[:Range]`，例如 `DYNAMIC:SURN:S:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。
+  - 旧格式 `DYNAMIC:<OperatorCode>:<StationCode>[:Range]` 仍按 Station 解析。
+  - Station 候选 NodeId 固定为 `Operator:S:Station:Track`；Depot 候选 NodeId 固定为 `Operator:D:Depot:Track`。
+  - Range 省略时默认使用受限候选范围，避免“全站扫描”带来的不可控与卡顿风险；多站台建议显式给范围。
 - 行为（运行时选择顺序，满足“先空闲后可达”语义）：
   - 先筛选“空闲站台”：对应 NODE 资源未被其他列车占用（占用系统快照）。
   - 再检查可达性 + 占用许可：对每个候选站台构建一次 lookahead 请求并调用 `canEnter()` 验证（含走廊方向/冲突组），选出第一个可进入者。
   - 若无任何“空闲且可进入”候选，会回退为“可进入的第一个站台”（并输出 debug 日志），用于避免全占用时完全无法选站台。
-  - 选定后会覆盖该 stop 的“有效 NodeId”，并写入 TrainCarts destination 触发自动寻路。
+  - 选定后只覆盖该 stop 的“有效 NodeId”；普通 TrainCarts destination 必须等 Dispatcher 完成 `canEnter/acquire` 且无 hard blocker 后才写入。
+  - DYNAMIC resolver / allocator 不控车、不 launch、不 stop、不 acquire。
   - TODO：将选定站台写回 MetaTag/事件（供 HUD/PIDS 精确显示）。
 
 在 `route define` 书本语法中，DYNAMIC 可以：
@@ -57,7 +59,9 @@ ACTION:PAYLOAD[:MORE]
 | Depot throat | `Operator:D:Depot:Track:Seq` | 车库咽喉（图节点/Waypoint；同车库下的多个咽喉用 Seq 区分） |
 
 ## 3. 与 Runtime 的关系
-- RouteStop 标记只影响我们向 TrainCarts 写“下一 destination”时的逻辑。在执行 `CHANGE`/`DYNAMIC` 等动作后，仍通过 `train.getProperties().setDestination(nodeId)` 交给 TC 寻路
+- RouteStop 标记先被解析为调度意图，不直接操作 TrainCarts、routeIndex 或 occupancy。
+- 普通下一跳 destination 只在 Dispatcher 完成授权后写入；AutoStation/waypoint dwell、debug setup、spawn execution 等行为流程例外必须在代码里带明确 reason。
+- 执行 `CHANGE` 只更新逻辑归属 tag；执行 `DYNAMIC` 只 materialize effective node，后续仍由授权路径决定是否写 `setDestination(...)` 交给 TrainCarts 寻路。
 - PIDS/Scoreboard 读取 `RouteProgress` + RouteStop 列表即可展示未来停靠。执行 `DYNAMIC` 时，选定的站台节点应写入列车 MetaTag（如 `fta:current-platform=PTK2`）并广播事件，便于 UI 更新。
 - `RouteProgress` 中需缓存 `routeId`、`sequence`、`nextStop` 等字段，跨服或列车重载时从 MetaTag 恢复，再继续应用 RouteStop 标记。
 
