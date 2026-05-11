@@ -26,11 +26,12 @@
 5. 新鲜 blocker 快照只会在 STOP 宽限窗口内抑制恢复；超过 `health.progress-stop-grace-seconds` 后，即使 blocker 仍被信号 tick 持续刷新，也会进入非动车恢复链，避免“看似合法红灯等待”永久掩盖互卡。
 
 ### STOP 互卡解锁
-1. 识别条件：列车处于 `STOP`、持续低速、且最近 blockers 显示与另一列车“互相阻塞”。
-2. 只由互卡对中的一侧执行（稳定 leader 选择），避免两车同时抢修导致抖动。
-3. 自动分级动作：`refresh 双车 -> reissue 单车`；不会自动 relaunch，避免绕过红灯强制动车。
-4. 若持续超过 `health.deadlock-destroy-threshold-seconds` 且已经尝试过 reissue，销毁互卡对中的稳定 leader，释放线路容量。
-5. 若确实需要绕过红灯做物理重发，必须使用手动强制解锁入口。
+1. 识别条件：两车均为 `STOP`、持续低速、双方 blocker 快照互相包含、方向已知且对向，并且优先要求命中同一个 `CONFLICT:single`。`UNKNOWN` 方向、cycle conflict、NODE/EDGE 硬 blocker 不会进入自动销毁 episode。
+2. 互卡使用 `DeadlockEpisode` 追踪，key 为 `canonical(trainA, trainB, conflictKey)`；`firstSeenAt` 不随每 tick 重置，blocker 快照短暂抖动时会保留 `health.deadlock-episode-grace-seconds`。
+3. 自动分级动作：第一次 `refreshSignal(A/B)`，第二次 `reissueDestination(stableLeader)`，超过 `health.deadlock-destroy-threshold-seconds` 后 `destroy stableLeader`。refresh/reissue 只是恢复动作，不再输出“已修复”语义。
+4. `stableLeader` 优先选择 RETURN、CREATE、depot exit/depot spawn 附近、progress index 更小、低优先级且无乘客的列车；避开 dwell、departure gate、layover ready、manual maintenance hold、接近终点的列车。
+5. destroy 后 episode 标记 `destroyAttempted`，同一 episode 不会连续销毁第二辆；RuntimeDispatchService 等 `GroupRemoveEvent -> handleTrainRemoved` 释放占用后再刷新 survivor。
+6. 若确实需要绕过红灯做物理重发，必须使用手动强制解锁入口；自动 STOP 互卡兜底不会调用 `forceRelaunchByName`。
 
 ### 手动强制解锁（`/fta health check|heal`）
 1. 手动触发时会额外执行一次“互卡优先”解锁，不等待 `progress stuck` 阈值窗口。
@@ -54,7 +55,11 @@
 - `health.progress-stuck-threshold-seconds`
 - `health.progress-stop-grace-seconds`
 - `health.deadlock-threshold-seconds`
-- `health.deadlock-destroy-threshold-seconds`（0 表示禁用最终销毁兜底）
+- `health.deadlock-destroy-enabled`
+- `health.deadlock-destroy-threshold-seconds`（0 表示禁用最终销毁兜底，默认 60 秒）
+- `health.deadlock-destroy-cooldown-seconds`
+- `health.deadlock-episode-grace-seconds`
+- `health.deadlock-min-stop-seconds`
 - `health.blocker-snapshot-max-age-seconds`
 - `health.recovery-cooldown-seconds`
 - `health.occupancy-timeout-minutes`

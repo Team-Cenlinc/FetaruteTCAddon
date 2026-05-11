@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -844,7 +845,14 @@ public final class FtaOccupancyCommand {
       Map<String, Integer> conflictEntryOrders) {
     Instant now = Instant.now();
     return new OccupancyRequest(
-        trainName, Optional.empty(), now, resources, Map.of(), conflictEntryOrders, 0);
+        trainName,
+        Optional.empty(),
+        now,
+        resources,
+        Map.of(),
+        conflictEntryOrders,
+        0,
+        AuthorizationPurpose.RUNTIME_MOVE);
   }
 
   /** 生成调试用 trainName，can 与 acquire 使用不同前缀避免误判自占用。 */

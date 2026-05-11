@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 21;
+  private static final int EXPECTED_CONFIG_VERSION = 23;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -141,7 +141,11 @@ public final class ConfigManager {
     int progressStuckThresholdSeconds = 60;
     int progressStopGraceSeconds = 180;
     int deadlockThresholdSeconds = 45;
-    int deadlockDestroyThresholdSeconds = 900;
+    int deadlockDestroyThresholdSeconds = 60;
+    boolean deadlockDestroyEnabled = true;
+    int deadlockDestroyCooldownSeconds = 120;
+    int deadlockEpisodeGraceSeconds = 10;
+    int deadlockMinStopSeconds = 20;
     int blockerSnapshotMaxAgeSeconds = 20;
     int recoveryCooldownSeconds = 10;
     int occupancyTimeoutMinutes = 10;
@@ -185,7 +189,28 @@ public final class ConfigManager {
       if (deadlockDestroyThresholdSeconds < 0) {
         logger.warning(
             "health.deadlock-destroy-threshold-seconds 配置无效: " + deadlockDestroyThresholdSeconds);
-        deadlockDestroyThresholdSeconds = 900;
+        deadlockDestroyThresholdSeconds = 60;
+      }
+      deadlockDestroyEnabled =
+          section.getBoolean("deadlock-destroy-enabled", deadlockDestroyEnabled);
+      deadlockDestroyCooldownSeconds =
+          section.getInt("deadlock-destroy-cooldown-seconds", deadlockDestroyCooldownSeconds);
+      if (deadlockDestroyCooldownSeconds < 0) {
+        logger.warning(
+            "health.deadlock-destroy-cooldown-seconds 配置无效: " + deadlockDestroyCooldownSeconds);
+        deadlockDestroyCooldownSeconds = 120;
+      }
+      deadlockEpisodeGraceSeconds =
+          section.getInt("deadlock-episode-grace-seconds", deadlockEpisodeGraceSeconds);
+      if (deadlockEpisodeGraceSeconds < 0) {
+        logger.warning(
+            "health.deadlock-episode-grace-seconds 配置无效: " + deadlockEpisodeGraceSeconds);
+        deadlockEpisodeGraceSeconds = 10;
+      }
+      deadlockMinStopSeconds = section.getInt("deadlock-min-stop-seconds", deadlockMinStopSeconds);
+      if (deadlockMinStopSeconds < 0) {
+        logger.warning("health.deadlock-min-stop-seconds 配置无效: " + deadlockMinStopSeconds);
+        deadlockMinStopSeconds = 20;
       }
       blockerSnapshotMaxAgeSeconds =
           section.getInt("blocker-snapshot-max-age-seconds", blockerSnapshotMaxAgeSeconds);
@@ -218,6 +243,10 @@ public final class ConfigManager {
         progressStopGraceSeconds,
         deadlockThresholdSeconds,
         deadlockDestroyThresholdSeconds,
+        deadlockDestroyEnabled,
+        deadlockDestroyCooldownSeconds,
+        deadlockEpisodeGraceSeconds,
+        deadlockMinStopSeconds,
         blockerSnapshotMaxAgeSeconds,
         recoveryCooldownSeconds,
         occupancyTimeoutMinutes,
@@ -828,6 +857,10 @@ public final class ConfigManager {
       int progressStopGraceSeconds,
       int deadlockThresholdSeconds,
       int deadlockDestroyThresholdSeconds,
+      boolean deadlockDestroyEnabled,
+      int deadlockDestroyCooldownSeconds,
+      int deadlockEpisodeGraceSeconds,
+      int deadlockMinStopSeconds,
       int blockerSnapshotMaxAgeSeconds,
       int recoveryCooldownSeconds,
       int occupancyTimeoutMinutes,
@@ -852,6 +885,15 @@ public final class ConfigManager {
       if (deadlockDestroyThresholdSeconds < 0) {
         throw new IllegalArgumentException("deadlockDestroyThresholdSeconds 必须为非负数");
       }
+      if (deadlockDestroyCooldownSeconds < 0) {
+        throw new IllegalArgumentException("deadlockDestroyCooldownSeconds 必须为非负数");
+      }
+      if (deadlockEpisodeGraceSeconds < 0) {
+        throw new IllegalArgumentException("deadlockEpisodeGraceSeconds 必须为非负数");
+      }
+      if (deadlockMinStopSeconds < 0) {
+        throw new IllegalArgumentException("deadlockMinStopSeconds 必须为非负数");
+      }
       if (blockerSnapshotMaxAgeSeconds <= 0) {
         throw new IllegalArgumentException("blockerSnapshotMaxAgeSeconds 必须为正数");
       }
@@ -864,7 +906,8 @@ public final class ConfigManager {
     }
 
     public static HealthSettings defaults() {
-      return new HealthSettings(true, 5, true, 30, 60, 180, 45, 900, 20, 10, 10, true, true);
+      return new HealthSettings(
+          true, 5, true, 30, 60, 180, 45, 60, true, 120, 10, 20, 20, 10, 10, true, true);
     }
   }
 

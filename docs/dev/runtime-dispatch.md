@@ -145,7 +145,11 @@
 移动授权（Movement Authority）：
 - 启用 `runtime.movement-authority-enabled` 后，运行时会用“当前制动距离 + 安全余量”与前方可用距离做实时比对。
 - 当授权不足时会把信号降级为更保守等级，并下压目标速度，防止冒进进入未清空区段。
-- `PROCEED` 且前方无硬约束（无 blocker/caution）时，不再使用“到下一节点距离”触发授权降级，避免无阻塞误红灯。
+- `PROCEED` 且前方无硬约束（无 blocker/caution）时，不再使用“到下一节点距离”触发授权降级；改用前向授权窗口末端
+  `distanceToAuthorityEnd`。只要制动距离 + 余量超过该授权末端，仍会降级或下压 MA speed cap，避免长单线 lookahead 之外的未授权资源被当成无限通行。
+- `/fta train debug` 会显示 `distanceToAuthorityEnd`、`authorityEndResource` 与 `authorizedEdgeCount`，用于确认 MA 是被 blocker/caution 触发，还是被“第一处未授权资源边界”触发。
+- 授权失败或最终 STOP 时，诊断会记录 `destinationPresentWhileBlocked`、`retainedDestination` 与 `blockedReason`。运行时不会主动清空
+  TrainCarts destination，避免目的地突然缺失带来不可预期的底层行为。
 - 安全余量参数：
   - `runtime.movement-authority-stop-margin-blocks`
   - `runtime.movement-authority-caution-margin-blocks`
@@ -171,7 +175,8 @@
   - `STALL`：`refreshSignal -> forceRelaunch`
   - `PROGRESS_STUCK`：非 STOP 时 `refreshSignal -> reissueDestination -> forceRelaunch`
   - `STOP PROGRESS_STUCK`：自动模式只执行 `refreshSignal -> reissueDestination`，不再 `forceRelaunch`，避免健康监控绕过红灯强制动车；需要强制解锁时使用手动入口。
-  - STOP 互卡：自动模式先执行 `refresh 双车 -> reissue 单车`；超过 `health.deadlock-destroy-threshold-seconds` 仍无法恢复时销毁稳定 leader，手动强制解锁才会尝试 relaunch。
+  - STOP 互卡：自动模式只在双方 STOP、同一 `CONFLICT:single`、方向已知对向、速度低于阈值且不处于 dwell/departure gate/layover/manual hold 时创建 `DeadlockEpisode`；同一 episode 先 `refresh 双车`，再 `reissue stableLeader`，超过阈值后销毁一个稳定 leader。
+  - 互卡 refresh/reissue 只是“恢复动作已执行”，不再作为“已修复”计数；真正的自动兜底由 `destroyTrainByName` 完成，并等待 `GroupRemoveEvent -> handleTrainRemoved` 释放占用后刷新 survivor。
 - 健康检查由独立定时任务驱动（每秒 tick + `health.check-interval-seconds` 间隔门控），不再依赖信号监控任务触发。
 - `STOP` 信号下的 progress stuck 允许更长宽限（`health.progress-stop-grace-seconds`），避免将正常排队误判为异常。
 - 连续修复动作之间受 `health.recovery-cooldown-seconds` 限制，降低高频场景下的抖动与过度修复。

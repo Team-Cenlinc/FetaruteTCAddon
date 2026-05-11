@@ -104,7 +104,13 @@ public final class OccupancyRequestBuilder {
     int currentIndex = state.routeProgress().currentIndex();
     // 默认优先级 0 (普通)
     return buildFromNodes(
-        state.trainName(), Optional.of(route.id()), nodes, currentIndex, requestTime, 0);
+        state.trainName(),
+        Optional.of(route.id()),
+        nodes,
+        currentIndex,
+        requestTime,
+        0,
+        AuthorizationPurpose.RUNTIME_MOVE);
   }
 
   /**
@@ -121,7 +127,24 @@ public final class OccupancyRequestBuilder {
       int currentIndex,
       Instant now,
       int priority) {
-    return buildContextFromNodes(trainName, routeId, nodes, currentIndex, now, priority)
+    return buildFromNodes(
+        trainName, routeId, nodes, currentIndex, now, priority, AuthorizationPurpose.RUNTIME_MOVE);
+  }
+
+  /**
+   * 从给定节点列表构建指定来源的占用请求。
+   *
+   * <p>调用方应按实际授权来源传入 purpose；无法区分时只能传 {@link AuthorizationPurpose#RUNTIME_MOVE}。
+   */
+  public Optional<OccupancyRequest> buildFromNodes(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
+    return buildContextFromNodes(trainName, routeId, nodes, currentIndex, now, priority, purpose)
         .map(OccupancyRequestContext::request);
   }
 
@@ -137,6 +160,24 @@ public final class OccupancyRequestBuilder {
       int currentIndex,
       Instant now,
       int priority) {
+    return buildContextFromNodes(
+        trainName, routeId, nodes, currentIndex, now, priority, AuthorizationPurpose.RUNTIME_MOVE);
+  }
+
+  /**
+   * 构建指定来源的占用请求并返回路径上下文。
+   *
+   * <p>{@link AuthorizationPurpose#CONFLICT_CLEARING} 不应由普通入口直接传入；它必须由运行时在证明 inside/exit 后再附加
+   * release hint。
+   */
+  public Optional<OccupancyRequestContext> buildContextFromNodes(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(nodes, "nodes");
@@ -192,7 +233,8 @@ public final class OccupancyRequestBuilder {
             List.copyOf(resources),
             corridorDirections,
             conflictEntryOrders,
-            priority);
+            priority,
+            purpose);
     return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
   }
 
@@ -208,6 +250,19 @@ public final class OccupancyRequestBuilder {
       int currentIndex,
       Instant now,
       int priority) {
+    return buildRearGuardRequestFromNodes(
+        trainName, routeId, nodes, currentIndex, now, priority, AuthorizationPurpose.RUNTIME_MOVE);
+  }
+
+  /** 构建指定来源的尾部保护请求。 */
+  public OccupancyRequest buildRearGuardRequestFromNodes(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(nodes, "nodes");
@@ -229,7 +284,14 @@ public final class OccupancyRequestBuilder {
     List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
     appendRearGuardResources(resources, rearExpanded, rearEdges);
     return new OccupancyRequest(
-        trainName, routeId, requestTime, List.copyOf(resources), Map.of(), Map.of(), priority);
+        trainName,
+        routeId,
+        requestTime,
+        List.copyOf(resources),
+        Map.of(),
+        Map.of(),
+        priority,
+        purpose);
   }
 
   /**
@@ -254,6 +316,25 @@ public final class OccupancyRequestBuilder {
       Optional<NodeId> targetNode,
       Instant now,
       int priority) {
+    return buildCurrentPositionRequest(
+        trainName,
+        routeId,
+        currentNode,
+        targetNode,
+        now,
+        priority,
+        AuthorizationPurpose.RUNTIME_MOVE);
+  }
+
+  /** 构建指定来源的当前位置保护请求。 */
+  public OccupancyRequest buildCurrentPositionRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(currentNode, "currentNode");
@@ -281,7 +362,8 @@ public final class OccupancyRequestBuilder {
         List.copyOf(resources),
         resolveCorridorDirections(pathNodes),
         resolveConflictEntryOrders(edges),
-        priority);
+        priority,
+        purpose);
   }
 
   /**
@@ -374,7 +456,9 @@ public final class OccupancyRequestBuilder {
         List.copyOf(merged),
         Map.copyOf(directions),
         Map.copyOf(entryOrders),
-        base.priority());
+        base.priority(),
+        base.purpose(),
+        base.conflictReleaseHints());
   }
 
   private Optional<NodeId> resolveDepotAnchor(

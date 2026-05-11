@@ -46,12 +46,18 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * @param distanceToBlocker 到阻塞点距离（blocks）
  * @param distanceToCaution 到 CAUTION 区域距离
  * @param distanceToApproach 到 approaching 节点距离
+ * @param distanceToAuthorityEnd 到授权窗口末端距离
+ * @param authorityEndResource 第一处未授权资源边界摘要
+ * @param authorizedEdgeCount 本次前向授权覆盖的实际图边数
  * @param approachNode 触发 approach 限速的节点
  * @param approachKind approach 类型：none/station/depot/stop_waypoint
  * @param approachReason approach 触发原因
  * @param currentSignal 当前信号
  * @param effectiveSignal 有效信号（考虑前瞻）
  * @param allowLaunch 是否允许发车
+ * @param destinationPresentWhileBlocked 授权失败/STOP 时 TrainCarts destination 是否仍存在
+ * @param retainedDestination 授权失败/STOP 时保留的 destination
+ * @param blockedReason 授权失败/STOP 诊断原因
  * @param signalBlockerResources 本次信号判定中的 blocker 资源摘要
  * @param requestResources 本次前向授权请求资源摘要
  * @param currentClaimsForTrain 当前列车持有的占用资源摘要
@@ -80,12 +86,18 @@ public record ControlDiagnostics(
     OptionalLong distanceToBlocker,
     OptionalLong distanceToCaution,
     OptionalLong distanceToApproach,
+    OptionalLong distanceToAuthorityEnd,
+    String authorityEndResource,
+    int authorizedEdgeCount,
     NodeId approachNode,
     String approachKind,
     String approachReason,
     SignalAspect currentSignal,
     SignalAspect effectiveSignal,
     boolean allowLaunch,
+    boolean destinationPresentWhileBlocked,
+    String retainedDestination,
+    String blockedReason,
     List<String> signalBlockerResources,
     List<String> requestResources,
     List<String> currentClaimsForTrain,
@@ -103,6 +115,12 @@ public record ControlDiagnostics(
     Objects.requireNonNull(distanceToBlocker, "distanceToBlocker");
     Objects.requireNonNull(distanceToCaution, "distanceToCaution");
     Objects.requireNonNull(distanceToApproach, "distanceToApproach");
+    Objects.requireNonNull(distanceToAuthorityEnd, "distanceToAuthorityEnd");
+    authorityEndResource =
+        authorityEndResource == null || authorityEndResource.isBlank()
+            ? "none"
+            : authorityEndResource.trim();
+    authorizedEdgeCount = Math.max(0, authorizedEdgeCount);
     approachKind = approachKind == null || approachKind.isBlank() ? "none" : approachKind.trim();
     approachReason =
         approachReason == null || approachReason.isBlank() ? "none" : approachReason.trim();
@@ -116,6 +134,12 @@ public record ControlDiagnostics(
     departureGate =
         departureGate == null || departureGate.isBlank() ? "none" : departureGate.trim();
     signalReason = signalReason == null || signalReason.isBlank() ? "none" : signalReason.trim();
+    retainedDestination =
+        retainedDestination == null || retainedDestination.isBlank()
+            ? "-"
+            : retainedDestination.trim();
+    blockedReason =
+        blockedReason == null || blockedReason.isBlank() ? "none" : blockedReason.trim();
     Objects.requireNonNull(sampledAt, "sampledAt");
   }
 
@@ -174,12 +198,18 @@ public record ControlDiagnostics(
     private OptionalLong distanceToBlocker = OptionalLong.empty();
     private OptionalLong distanceToCaution = OptionalLong.empty();
     private OptionalLong distanceToApproach = OptionalLong.empty();
+    private OptionalLong distanceToAuthorityEnd = OptionalLong.empty();
+    private String authorityEndResource = "none";
+    private int authorizedEdgeCount;
     private NodeId approachNode;
     private String approachKind = "none";
     private String approachReason = "none";
     private SignalAspect currentSignal = SignalAspect.STOP;
     private SignalAspect effectiveSignal = SignalAspect.STOP;
     private boolean allowLaunch;
+    private boolean destinationPresentWhileBlocked;
+    private String retainedDestination = "-";
+    private String blockedReason = "none";
     private List<String> signalBlockerResources = List.of();
     private List<String> requestResources = List.of();
     private List<String> currentClaimsForTrain = List.of();
@@ -322,6 +352,25 @@ public record ControlDiagnostics(
       return this;
     }
 
+    public Builder distanceToAuthorityEnd(OptionalLong distanceToAuthorityEnd) {
+      this.distanceToAuthorityEnd =
+          distanceToAuthorityEnd != null ? distanceToAuthorityEnd : OptionalLong.empty();
+      return this;
+    }
+
+    public Builder authorityEndResource(String authorityEndResource) {
+      this.authorityEndResource =
+          authorityEndResource == null || authorityEndResource.isBlank()
+              ? "none"
+              : authorityEndResource.trim();
+      return this;
+    }
+
+    public Builder authorizedEdgeCount(int authorizedEdgeCount) {
+      this.authorizedEdgeCount = Math.max(0, authorizedEdgeCount);
+      return this;
+    }
+
     public Builder approachNode(NodeId approachNode) {
       this.approachNode = approachNode;
       return this;
@@ -351,6 +400,25 @@ public record ControlDiagnostics(
 
     public Builder allowLaunch(boolean allowLaunch) {
       this.allowLaunch = allowLaunch;
+      return this;
+    }
+
+    public Builder destinationPresentWhileBlocked(boolean destinationPresentWhileBlocked) {
+      this.destinationPresentWhileBlocked = destinationPresentWhileBlocked;
+      return this;
+    }
+
+    public Builder retainedDestination(String retainedDestination) {
+      this.retainedDestination =
+          retainedDestination == null || retainedDestination.isBlank()
+              ? "-"
+              : retainedDestination.trim();
+      return this;
+    }
+
+    public Builder blockedReason(String blockedReason) {
+      this.blockedReason =
+          blockedReason == null || blockedReason.isBlank() ? "none" : blockedReason.trim();
       return this;
     }
 
@@ -400,12 +468,18 @@ public record ControlDiagnostics(
           distanceToBlocker,
           distanceToCaution,
           distanceToApproach,
+          distanceToAuthorityEnd,
+          authorityEndResource,
+          authorizedEdgeCount,
           approachNode,
           approachKind,
           approachReason,
           currentSignal,
           effectiveSignal,
           allowLaunch,
+          destinationPresentWhileBlocked,
+          retainedDestination,
+          blockedReason,
           signalBlockerResources,
           requestResources,
           currentClaimsForTrain,

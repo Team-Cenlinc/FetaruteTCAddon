@@ -18,9 +18,14 @@
 - `RailGraphCorridorInfo` 提供走廊端点与路径节点列表，方向以端点排序为准。
 - single conflict 的方向属于安全上下文：常规 lookahead、运行中当前位置保护、停站前向队列、Depot 出车 lookover 都会尽量携带方向。
   如果后续 hold 请求没有方向，占用管理器会保留已有 claim 的方向，避免长单线内列车被降级为 `UNKNOWN` 后破坏对向识别。
+- 常规进入 `CONFLICT:single` 时若方向缺失或为 `UNKNOWN`，占用层会 fail closed，返回
+  `single-conflict-direction-unknown`。已持有同一 conflict 的 hold-only 刷新不受影响，且不会用 UNKNOWN 覆盖已有已知方向。
 - Depot 出车 lookover 还会为追加的冲突补齐 entryOrder，使 gate queue 能识别“这辆车从 depot 口进入前方冲突区”的队列位置。
 - route waypoint 不是冲突方向的最小单位。构建 OccupancyRequest 和运行时前方列车扫描时，必须先把 route-defined segment 展开成实际图 edge，再解析 corridor direction 与 entryOrder；否则长单线中间 edge 会丢失方向上下文，表现为同向车被压成 CAUTION/STOP。
 - 若同一长走廊的多条 edge 共享同一个 `CONFLICT:single` key，`entryOrder` 记录的是首次进入该冲突组的展开 edge 序号，而不是每条 edge 各自覆盖一次。
+- `conflictRelease` 仅允许 `AuthorizationPurpose.CONFLICT_CLEARING` 请求触发，并且必须携带 inside/exit 证据。Depot spawn、Station departure、Layover reuse 与普通 runtime move
+  都不能直接释放冲突队列。释放最多跳过 `CONFLICT` blocker；遇到真实 `NODE`/`EDGE` blocker 时返回
+  `conflict-release-hard-blocker:<resource>`，防止未进入冲突区的列车借 deadlock release 冒进长单线。
 
 ## 运维命令
 - `/fta graph conflict list [--node "<nodeId>"] [page]`：列出冲突组与覆盖区间数量。

@@ -9,8 +9,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -71,6 +73,61 @@ public final class TrainHealthMonitor {
     }
   }
 
+  /** 一组经过确认的 STOP 互卡 episode；firstSeenAt 不随 blocker 快照抖动重置。 */
+  private static final class DeadlockEpisode {
+    private final String key;
+    private final String trainA;
+    private final String trainB;
+    private final String conflictKey;
+    private final Instant firstSeenAt;
+    private Instant lastSeenAt;
+    private int refreshCount;
+    private int reissueCount;
+    private boolean destroyAttempted;
+    private String stableLeader;
+    private Set<String> lastBlockerSnapshot = Set.of();
+
+    private DeadlockEpisode(
+        String key,
+        String trainA,
+        String trainB,
+        String conflictKey,
+        Instant firstSeenAt,
+        String stableLeader,
+        Set<String> lastBlockerSnapshot) {
+      this.key = Objects.requireNonNull(key, "key");
+      this.trainA = Objects.requireNonNull(trainA, "trainA");
+      this.trainB = Objects.requireNonNull(trainB, "trainB");
+      this.conflictKey = Objects.requireNonNull(conflictKey, "conflictKey");
+      this.firstSeenAt = Objects.requireNonNull(firstSeenAt, "firstSeenAt");
+      this.lastSeenAt = firstSeenAt;
+      this.stableLeader = stableLeader;
+      updateSnapshot(firstSeenAt, lastBlockerSnapshot);
+    }
+
+    private void updateSnapshot(Instant now, Set<String> blockerSnapshot) {
+      lastSeenAt = now == null ? Instant.now() : now;
+      lastBlockerSnapshot =
+          blockerSnapshot == null || blockerSnapshot.isEmpty()
+              ? Set.of()
+              : Set.copyOf(blockerSnapshot);
+    }
+
+    private String survivor() {
+      return stableLeader != null && stableLeader.equalsIgnoreCase(trainA) ? trainB : trainA;
+    }
+  }
+
+  /** 本轮检测到的一次 confirmed mutual deadlock。 */
+  private record DeadlockObservation(
+      String episodeKey,
+      String trainA,
+      String trainB,
+      String conflictKey,
+      Set<String> blockerSnapshot,
+      RuntimeDispatchService.DeadlockTrainContext firstContext,
+      RuntimeDispatchService.DeadlockTrainContext secondContext) {}
+
   private final RuntimeDispatchService dispatchService;
   private final DwellRegistry dwellRegistry;
   private final HealthAlertBus alertBus;
@@ -95,7 +152,19 @@ public final class TrainHealthMonitor {
   private Duration deadlockThreshold = Duration.ofSeconds(45);
 
   /** STOP 互卡最终销毁阈值：为 0 时禁用自动销毁。 */
-  private Duration deadlockDestroyThreshold = Duration.ofSeconds(900);
+  private Duration deadlockDestroyThreshold = Duration.ofSeconds(60);
+
+  /** STOP 互卡最终销毁兜底是否启用。 */
+  private boolean deadlockDestroyEnabled = true;
+
+  /** 同一互卡对销毁兜底冷却，避免新 episode 立即连续销毁第二列车。 */
+  private Duration deadlockDestroyCooldown = Duration.ofSeconds(120);
+
+  /** confirmed episode 暂时失去 blocker 快照后保留的宽限。 */
+  private Duration deadlockEpisodeGrace = Duration.ofSeconds(10);
+
+  /** STOP 互卡进入 confirmed episode 前的最短静止时间。 */
+  private Duration deadlockMinStopDuration = Duration.ofSeconds(20);
 
   /** 阻塞快照有效期：仅在最近可见的 blocker 信息上执行互卡解锁。 */
   private Duration blockerSnapshotMaxAge = Duration.ofSeconds(20);
@@ -108,6 +177,12 @@ public final class TrainHealthMonitor {
 
   /** 互卡对级别冷却：避免同一对列车在短窗口内反复执行解锁动作。 */
   private final Map<String, Instant> deadlockPairLastAttemptAt = new ConcurrentHashMap<>();
+
+  /** 互卡 episode 追踪，key=canonical(trainA, trainB, conflictKey)。 */
+  private final Map<String, DeadlockEpisode> deadlockEpisodes = new ConcurrentHashMap<>();
+
+  /** 互卡对销毁尝试冷却，key=canonical(trainA, trainB)。 */
+  private final Map<String, Instant> deadlockPairLastDestroyAt = new ConcurrentHashMap<>();
 
   public TrainHealthMonitor(
       RuntimeDispatchService dispatchService,
@@ -152,6 +227,32 @@ public final class TrainHealthMonitor {
   public void setDeadlockDestroyThreshold(Duration threshold) {
     if (threshold != null && !threshold.isNegative()) {
       this.deadlockDestroyThreshold = threshold;
+    }
+  }
+
+  /** 设置 STOP 互卡最终销毁兜底是否启用。 */
+  public void setDeadlockDestroyEnabled(boolean enabled) {
+    this.deadlockDestroyEnabled = enabled;
+  }
+
+  /** 设置同一互卡对销毁冷却时间。 */
+  public void setDeadlockDestroyCooldown(Duration cooldown) {
+    if (cooldown != null && !cooldown.isNegative()) {
+      this.deadlockDestroyCooldown = cooldown;
+    }
+  }
+
+  /** 设置互卡 episode 在 blocker 快照抖动后的保留宽限。 */
+  public void setDeadlockEpisodeGrace(Duration grace) {
+    if (grace != null && !grace.isNegative()) {
+      this.deadlockEpisodeGrace = grace;
+    }
+  }
+
+  /** 设置进入 confirmed mutual deadlock 前的最短 STOP 静止时间。 */
+  public void setDeadlockMinStopDuration(Duration minStopDuration) {
+    if (minStopDuration != null && !minStopDuration.isNegative()) {
+      this.deadlockMinStopDuration = minStopDuration;
     }
   }
 
@@ -366,32 +467,37 @@ public final class TrainHealthMonitor {
 
       // 检测：进度长时间不推进
       Duration progressDuration = Duration.between(lastProgress, now);
-      Optional<String> mutualBlocker =
+      Optional<DeadlockObservation> deadlockObservation =
           !progressed
                   && !isMoving
                   && currentSignal == SignalAspect.STOP
                   && progressDuration.compareTo(deadlockThreshold) > 0
-              ? findMutualBlocker(trainName, activeKeys)
+                  && progressDuration.compareTo(deadlockMinStopDuration) >= 0
+              ? findConfirmedMutualDeadlock(trainName, activeKeys, current, progressDuration, now)
               : Optional.empty();
-      if (mutualBlocker.isPresent()) {
-        if (!isPairLeader(trainName, mutualBlocker.get())) {
+      if (deadlockObservation.isPresent()) {
+        DeadlockObservation observation = deadlockObservation.get();
+        if (!Objects.equals(keyOf(trainName), keyOf(observation.trainA()))) {
           recovery.resetDeadlock();
           continue;
         }
+        DeadlockEpisode episode = updateDeadlockEpisode(observation, now);
         progressStuckCount++;
         boolean fixed = false;
         if (autoFixEnabled) {
           fixed =
-              tryFixMutualDeadlock(trainName, mutualBlocker.get(), progressDuration, recovery, now);
+              tryFixMutualDeadlockEpisode(episode, observation, progressDuration, recovery, now);
           if (fixed) {
             fixedCount++;
           }
         }
         String message =
             "互卡停滞: train="
-                + trainName
+                + observation.trainA()
                 + " blocker="
-                + mutualBlocker.get()
+                + observation.trainB()
+                + " conflict="
+                + observation.conflictKey()
                 + " 持续="
                 + progressDuration.toSeconds()
                 + "秒 idx="
@@ -404,7 +510,6 @@ public final class TrainHealthMonitor {
                 : HealthAlert.of(HealthAlert.AlertType.PROGRESS_STUCK, trainName, message));
         continue;
       }
-      recovery.resetDeadlock();
 
       boolean waitingOnFreshStopBlockersWithinGrace =
           currentSignal == SignalAspect.STOP
@@ -454,6 +559,7 @@ public final class TrainHealthMonitor {
       }
     }
 
+    pruneDeadlockEpisodes(activeKeys, now);
     return new CheckResult(stallCount, progressStuckCount, fixedCount);
   }
 
@@ -462,6 +568,8 @@ public final class TrainHealthMonitor {
     snapshots.clear();
     recoveryStates.clear();
     deadlockPairLastAttemptAt.clear();
+    deadlockPairLastDestroyAt.clear();
+    deadlockEpisodes.clear();
   }
 
   /** 尝试修复静止列车。 */
@@ -590,6 +698,185 @@ public final class TrainHealthMonitor {
     return Optional.empty();
   }
 
+  /** 查找满足“同一 single conflict + 已知对向方向”的 confirmed mutual deadlock。 */
+  private Optional<DeadlockObservation> findConfirmedMutualDeadlock(
+      String trainName,
+      Set<String> activeTrainKeys,
+      TrainSnapshot currentSnapshot,
+      Duration progressDuration,
+      Instant now) {
+    if (trainName == null || trainName.isBlank() || currentSnapshot == null) {
+      return Optional.empty();
+    }
+    String trainKey = keyOf(trainName);
+    if (trainKey == null) {
+      return Optional.empty();
+    }
+    RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+        recentDeadlockBlockerSnapshot(trainName);
+    if (snapshot.blockers().isEmpty()) {
+      return Optional.empty();
+    }
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      if (!isUsableSingleConflictBlocker(blocker)) {
+        continue;
+      }
+      String blockerKey = keyOf(blocker.trainName());
+      if (blockerKey == null || blockerKey.equals(trainKey)) {
+        continue;
+      }
+      if (activeTrainKeys == null || !activeTrainKeys.contains(blockerKey)) {
+        continue;
+      }
+      Optional<RuntimeDispatchService.DeadlockBlockerInfo> reverseOpt =
+          findReverseSingleConflictBlocker(blocker.trainName(), trainKey, blocker.conflictKey());
+      if (reverseOpt.isEmpty()) {
+        continue;
+      }
+      RuntimeDispatchService.DeadlockBlockerInfo reverse = reverseOpt.get();
+      if (!isKnownOpposite(blocker.direction(), reverse.direction())) {
+        continue;
+      }
+      Optional<RuntimeDispatchService.DeadlockTrainContext> firstContextOpt =
+          dispatchService.deadlockTrainContext(trainName);
+      Optional<RuntimeDispatchService.DeadlockTrainContext> secondContextOpt =
+          dispatchService.deadlockTrainContext(blocker.trainName());
+      if (firstContextOpt.isEmpty() || secondContextOpt.isEmpty()) {
+        continue;
+      }
+      RuntimeDispatchService.DeadlockTrainContext firstContext = firstContextOpt.get();
+      RuntimeDispatchService.DeadlockTrainContext secondContext = secondContextOpt.get();
+      if (!isEligibleDeadlockContext(firstContext)
+          || !isEligibleDeadlockContext(secondContext)
+          || progressDuration.compareTo(deadlockMinStopDuration) < 0) {
+        continue;
+      }
+      String firstKey = firstTrainInPair(trainKey, blockerKey);
+      boolean currentIsFirst = trainKey.equals(firstKey);
+      String canonicalTrainA = currentIsFirst ? trainName : blocker.trainName();
+      String canonicalTrainB = currentIsFirst ? blocker.trainName() : trainName;
+      RuntimeDispatchService.DeadlockTrainContext canonicalContextA =
+          currentIsFirst ? firstContext : secondContext;
+      RuntimeDispatchService.DeadlockTrainContext canonicalContextB =
+          currentIsFirst ? secondContext : firstContext;
+      String episodeKey = episodeKey(trainKey, blockerKey, blocker.conflictKey());
+      Set<String> blockerSnapshot =
+          Set.of(
+              trainName + "->" + blocker.trainName() + "@" + blocker.conflictKey(),
+              blocker.trainName() + "->" + trainName + "@" + blocker.conflictKey());
+      return Optional.of(
+          new DeadlockObservation(
+              episodeKey,
+              canonicalTrainA,
+              canonicalTrainB,
+              blocker.conflictKey(),
+              blockerSnapshot,
+              canonicalContextA,
+              canonicalContextB));
+    }
+    return Optional.empty();
+  }
+
+  private Optional<RuntimeDispatchService.DeadlockBlockerInfo> findReverseSingleConflictBlocker(
+      String blockerTrain, String targetTrainKey, String conflictKey) {
+    RuntimeDispatchService.DeadlockBlockerSnapshot reverse =
+        recentDeadlockBlockerSnapshot(blockerTrain);
+    if (reverse.blockers().isEmpty()) {
+      return Optional.empty();
+    }
+    for (RuntimeDispatchService.DeadlockBlockerInfo candidate : reverse.blockers()) {
+      if (!isUsableSingleConflictBlocker(candidate)) {
+        continue;
+      }
+      String candidateKey = keyOf(candidate.trainName());
+      if (targetTrainKey.equals(candidateKey) && conflictKey.equals(candidate.conflictKey())) {
+        return Optional.of(candidate);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private RuntimeDispatchService.DeadlockBlockerSnapshot recentDeadlockBlockerSnapshot(
+      String trainName) {
+    return Optional.ofNullable(
+            dispatchService.recentDeadlockBlockers(trainName, blockerSnapshotMaxAge))
+        .orElseGet(
+            () -> new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH));
+  }
+
+  private static boolean isUsableSingleConflictBlocker(
+      RuntimeDispatchService.DeadlockBlockerInfo blocker) {
+    return blocker != null
+        && blocker.trainName() != null
+        && !blocker.trainName().isBlank()
+        && blocker.conflictKey() != null
+        && blocker.conflictKey().startsWith("single:")
+        && !blocker.conflictKey().contains(":cycle:")
+        && blocker.direction().isPresent()
+        && blocker.direction().get() != CorridorDirection.UNKNOWN;
+  }
+
+  private static boolean isKnownOpposite(
+      Optional<CorridorDirection> first, Optional<CorridorDirection> second) {
+    return first != null
+        && second != null
+        && first.isPresent()
+        && second.isPresent()
+        && first.get() != CorridorDirection.UNKNOWN
+        && second.get() != CorridorDirection.UNKNOWN
+        && first.get().opposite() == second.get();
+  }
+
+  private boolean isEligibleDeadlockContext(RuntimeDispatchService.DeadlockTrainContext context) {
+    return context != null
+        && context.signalAspect() == SignalAspect.STOP
+        && context.speedBlocksPerTick() <= lowSpeedThresholdBpt
+        && !context.dwelling()
+        && !context.departureGateHeld()
+        && !context.layoverReady()
+        && !context.manualHold();
+  }
+
+  private DeadlockEpisode updateDeadlockEpisode(DeadlockObservation observation, Instant now) {
+    return deadlockEpisodes.compute(
+        observation.episodeKey(),
+        (key, existing) -> {
+          if (existing == null) {
+            String leader =
+                chooseStableLeader(observation.firstContext(), observation.secondContext());
+            return new DeadlockEpisode(
+                key,
+                observation.trainA(),
+                observation.trainB(),
+                observation.conflictKey(),
+                now,
+                leader,
+                observation.blockerSnapshot());
+          }
+          existing.updateSnapshot(now, observation.blockerSnapshot());
+          return existing;
+        });
+  }
+
+  private void pruneDeadlockEpisodes(Set<String> activeKeys, Instant now) {
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    deadlockEpisodes
+        .values()
+        .removeIf(
+            episode -> {
+              String firstKey = keyOf(episode.trainA);
+              String secondKey = keyOf(episode.trainB);
+              if (firstKey == null
+                  || secondKey == null
+                  || activeKeys == null
+                  || !activeKeys.contains(firstKey)
+                  || !activeKeys.contains(secondKey)) {
+                return true;
+              }
+              return effectiveNow.isAfter(episode.lastSeenAt.plus(deadlockEpisodeGrace));
+            });
+  }
+
   /**
    * 判断列车当前是否仍持有“新鲜”的 blocker 快照。
    *
@@ -607,83 +894,171 @@ public final class TrainHealthMonitor {
    *
    * <p>为避免两车同时执行恢复动作导致抖动，仅由 pair key 较小的一侧执行。
    */
-  private boolean tryFixMutualDeadlock(
-      String trainName,
-      String blockerTrain,
+  private boolean tryFixMutualDeadlockEpisode(
+      DeadlockEpisode episode,
+      DeadlockObservation observation,
       Duration progressDuration,
       RecoveryState recovery,
       Instant now) {
-    if (trainName == null || blockerTrain == null) {
+    if (episode == null || observation == null || recovery == null || now == null) {
       return false;
     }
-    String trainKey = keyOf(trainName);
-    String blockerKey = keyOf(blockerTrain);
-    if (trainKey == null || blockerKey == null) {
-      return false;
-    }
-    String pairKey = pairKey(trainKey, blockerKey);
-    // 仅由 pair key 的字典序前者执行解锁，防止双方同时“抢修”。
-    if (!trainKey.equals(firstTrainInPair(trainKey, blockerKey))) {
-      return false;
-    }
+    String pairKey = pairKey(keyOf(episode.trainA), keyOf(episode.trainB));
     Instant pairLast = deadlockPairLastAttemptAt.get(pairKey);
     if (!canAttempt(now, pairLast) || !canAttempt(now, recovery.lastDeadlockAttemptAt)) {
       return false;
     }
-    if (shouldDestroyDeadlockVictim(progressDuration, recovery)) {
-      debugLogger.accept(
-          "TrainHealthMonitor 解锁互卡(stage=destroy-leader): train="
-              + trainName
-              + " blocker="
-              + blockerTrain
-              + " duration="
-              + progressDuration.toSeconds()
-              + "s");
-      boolean fixed = dispatchService.destroyTrainByName(trainName, "health-deadlock-timeout");
-      recovery.lastDeadlockAttemptAt = now;
-      recovery.deadlockStage = fixed ? 3 : 2;
-      deadlockPairLastAttemptAt.put(pairKey, now);
-      return fixed;
-    }
-    int nextStage = Math.min(recovery.deadlockStage + 1, 2);
-    boolean fixed = false;
-    if (nextStage == 1) {
+
+    if (episode.refreshCount <= 0) {
       debugLogger.accept(
           "TrainHealthMonitor 解锁互卡(stage=refresh-pair): train="
-              + trainName
+              + episode.trainA
               + " blocker="
-              + blockerTrain);
-      dispatchService.refreshSignalByName(trainName);
-      dispatchService.refreshSignalByName(blockerTrain);
-      fixed = true;
-    } else if (nextStage == 2) {
-      debugLogger.accept(
-          "TrainHealthMonitor 解锁互卡(stage=reissue-pair): train="
-              + trainName
-              + " blocker="
-              + blockerTrain);
-      fixed = dispatchService.reissueDestinationByName(trainName);
-      if (!fixed) {
-        fixed = dispatchService.reissueDestinationByName(blockerTrain);
-      }
-      if (!fixed) {
-        dispatchService.refreshSignalByName(trainName);
-        dispatchService.refreshSignalByName(blockerTrain);
-      }
+              + episode.trainB
+              + " conflict="
+              + episode.conflictKey);
+      dispatchService.refreshSignalByName(episode.trainA);
+      dispatchService.refreshSignalByName(episode.trainB);
+      episode.refreshCount++;
+      recovery.lastDeadlockAttemptAt = now;
+      recovery.deadlockStage = Math.max(recovery.deadlockStage, 1);
+      deadlockPairLastAttemptAt.put(pairKey, now);
+      return false;
     }
+
+    if (episode.reissueCount <= 0) {
+      debugLogger.accept(
+          "TrainHealthMonitor 解锁互卡(stage=reissue-leader): train="
+              + episode.stableLeader
+              + " pair="
+              + episode.trainA
+              + "/"
+              + episode.trainB
+              + " conflict="
+              + episode.conflictKey);
+      dispatchService.reissueDestinationByName(episode.stableLeader);
+      episode.reissueCount++;
+      recovery.lastDeadlockAttemptAt = now;
+      recovery.deadlockStage = Math.max(recovery.deadlockStage, 2);
+      deadlockPairLastAttemptAt.put(pairKey, now);
+      return false;
+    }
+
+    if (!shouldDestroyDeadlockLeader(episode, progressDuration, now)) {
+      return false;
+    }
+    debugLogger.accept(
+        "TrainHealthMonitor 解锁互卡(stage=destroy-leader): train="
+            + episode.stableLeader
+            + " survivor="
+            + episode.survivor()
+            + " conflict="
+            + episode.conflictKey
+            + " episode="
+            + episode.key
+            + " blockers="
+            + episode.lastBlockerSnapshot
+            + " age="
+            + Duration.between(episode.firstSeenAt, now).toSeconds()
+            + "s");
+    dispatchService.scheduleSurvivorRefreshAfterTrainRemoved(
+        episode.stableLeader, episode.survivor());
+    boolean destroyed =
+        dispatchService.destroyTrainByName(episode.stableLeader, "health-deadlock-timeout");
+    episode.destroyAttempted = true;
     recovery.lastDeadlockAttemptAt = now;
-    recovery.deadlockStage = nextStage;
+    recovery.deadlockStage = 3;
     deadlockPairLastAttemptAt.put(pairKey, now);
-    return fixed;
+    deadlockPairLastDestroyAt.put(pairKey, now);
+    return destroyed;
   }
 
-  private boolean shouldDestroyDeadlockVictim(Duration progressDuration, RecoveryState recovery) {
-    return deadlockDestroyThreshold != null
-        && !deadlockDestroyThreshold.isZero()
-        && progressDuration != null
-        && progressDuration.compareTo(deadlockDestroyThreshold) >= 0
-        && recovery != null
-        && recovery.deadlockStage >= 2;
+  private boolean shouldDestroyDeadlockLeader(
+      DeadlockEpisode episode, Duration progressDuration, Instant now) {
+    if (!deadlockDestroyEnabled
+        || episode == null
+        || episode.destroyAttempted
+        || deadlockDestroyThreshold == null
+        || deadlockDestroyThreshold.isZero()
+        || now == null) {
+      return false;
+    }
+    Duration episodeAge = Duration.between(episode.firstSeenAt, now);
+    if (episodeAge.compareTo(deadlockDestroyThreshold) < 0) {
+      return false;
+    }
+    Duration requiredStop = minPositive(progressStopGraceThreshold, deadlockDestroyThreshold);
+    if (progressDuration == null || progressDuration.compareTo(requiredStop) < 0) {
+      return false;
+    }
+    String pairKey = pairKey(keyOf(episode.trainA), keyOf(episode.trainB));
+    Instant lastDestroy = deadlockPairLastDestroyAt.get(pairKey);
+    return lastDestroy == null || !now.isBefore(lastDestroy.plus(deadlockDestroyCooldown));
+  }
+
+  private static Duration minPositive(Duration first, Duration second) {
+    if (first == null || first.isNegative() || first.isZero()) {
+      return second == null ? Duration.ZERO : second;
+    }
+    if (second == null || second.isNegative() || second.isZero()) {
+      return first;
+    }
+    return first.compareTo(second) <= 0 ? first : second;
+  }
+
+  private static String chooseStableLeader(
+      RuntimeDispatchService.DeadlockTrainContext first,
+      RuntimeDispatchService.DeadlockTrainContext second) {
+    int firstScore = destroyScore(first);
+    int secondScore = destroyScore(second);
+    if (firstScore != secondScore) {
+      return firstScore > secondScore ? first.trainName() : second.trainName();
+    }
+    if (first.progressIndex() != second.progressIndex()) {
+      return first.progressIndex() < second.progressIndex()
+          ? first.trainName()
+          : second.trainName();
+    }
+    if (first.priority() != second.priority()) {
+      return first.priority() < second.priority() ? first.trainName() : second.trainName();
+    }
+    String firstKey = keyOf(first.trainName());
+    String secondKey = keyOf(second.trainName());
+    if (firstKey == null) {
+      return second.trainName();
+    }
+    if (secondKey == null) {
+      return first.trainName();
+    }
+    return firstKey.compareTo(secondKey) <= 0 ? first.trainName() : second.trainName();
+  }
+
+  private static int destroyScore(RuntimeDispatchService.DeadlockTrainContext context) {
+    if (context == null) {
+      return Integer.MIN_VALUE;
+    }
+    int score = 0;
+    if (context.dwelling()
+        || context.departureGateHeld()
+        || context.layoverReady()
+        || context.manualHold()) {
+      score -= 10_000;
+    }
+    if (context.nearRouteEnd()) {
+      score -= 200;
+    }
+    if (context.hasPassengers()) {
+      score -= 100;
+    }
+    if (context.operationType() == RouteOperationType.RETURN) {
+      score += 500;
+    } else if (context.operationType() == RouteOperationType.CREATE) {
+      score += 250;
+    }
+    if (context.depotRelated()) {
+      score += 100;
+    }
+    return score;
   }
 
   /**
@@ -728,6 +1103,10 @@ public final class TrainHealthMonitor {
 
   private static String pairKey(String first, String second) {
     return first.compareTo(second) <= 0 ? first + "|" + second : second + "|" + first;
+  }
+
+  private static String episodeKey(String first, String second, String conflictKey) {
+    return pairKey(first, second) + "|" + (conflictKey == null ? "unknown" : conflictKey);
   }
 
   private static String firstTrainInPair(String first, String second) {

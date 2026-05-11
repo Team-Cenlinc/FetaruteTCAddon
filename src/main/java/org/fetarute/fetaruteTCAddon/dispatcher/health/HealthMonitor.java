@@ -121,6 +121,26 @@ public final class HealthMonitor {
     trainMonitor.setDeadlockDestroyThreshold(threshold);
   }
 
+  /** 设置 STOP 互卡最终销毁兜底是否启用。 */
+  public void setDeadlockDestroyEnabled(boolean enabled) {
+    trainMonitor.setDeadlockDestroyEnabled(enabled);
+  }
+
+  /** 设置同一互卡对销毁冷却。 */
+  public void setDeadlockDestroyCooldown(Duration cooldown) {
+    trainMonitor.setDeadlockDestroyCooldown(cooldown);
+  }
+
+  /** 设置互卡 episode 快照抖动保留宽限。 */
+  public void setDeadlockEpisodeGrace(Duration grace) {
+    trainMonitor.setDeadlockEpisodeGrace(grace);
+  }
+
+  /** 设置进入 confirmed mutual deadlock 前的最短 STOP 静止时间。 */
+  public void setDeadlockMinStopDuration(Duration minStopDuration) {
+    trainMonitor.setDeadlockMinStopDuration(minStopDuration);
+  }
+
   /** 设置 blocker 快照有效期。 */
   public void setBlockerSnapshotMaxAge(Duration maxAge) {
     trainMonitor.setBlockerSnapshotMaxAge(maxAge);

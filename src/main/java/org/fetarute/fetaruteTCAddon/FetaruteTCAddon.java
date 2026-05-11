@@ -611,6 +611,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             routeProgressRegistry,
             configManager,
             occupancyManager,
+            runtimeDispatchService::resolveEffectiveWaypointsForEvent,
             loggerManager::debug);
     // 创建信号评估器
     signalEvaluator =
@@ -749,6 +750,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
         java.time.Duration.ofSeconds(settings.deadlockThresholdSeconds()));
     healthMonitor.setDeadlockDestroyThreshold(
         java.time.Duration.ofSeconds(settings.deadlockDestroyThresholdSeconds()));
+    healthMonitor.setDeadlockDestroyEnabled(settings.deadlockDestroyEnabled());
+    healthMonitor.setDeadlockDestroyCooldown(
+        java.time.Duration.ofSeconds(settings.deadlockDestroyCooldownSeconds()));
+    healthMonitor.setDeadlockEpisodeGrace(
+        java.time.Duration.ofSeconds(settings.deadlockEpisodeGraceSeconds()));
+    healthMonitor.setDeadlockMinStopDuration(
+        java.time.Duration.ofSeconds(settings.deadlockMinStopSeconds()));
     healthMonitor.setBlockerSnapshotMaxAge(
         java.time.Duration.ofSeconds(settings.blockerSnapshotMaxAgeSeconds()));
     healthMonitor.setRecoveryCooldown(

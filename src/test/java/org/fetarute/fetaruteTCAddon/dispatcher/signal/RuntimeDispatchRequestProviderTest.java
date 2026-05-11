@@ -10,7 +10,9 @@ import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -163,5 +165,27 @@ class RuntimeDispatchRequestProviderTest {
 
     List<String> result = plainProvider.trainsWaitingFor(List.of(resource));
     assertTrue(result.isEmpty());
+  }
+
+  @Test
+  void resolveWaypointsForRequestUsesRuntimeEffectiveNodes() {
+    NodeId dynamic = NodeId.of("OP:S:CENTRAL:DYNAMIC");
+    NodeId actual = NodeId.of("OP:S:CENTRAL:2");
+    NodeId next = NodeId.of("OP:S:NEXT:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(dynamic, next), Optional.empty());
+    RuntimeDispatchRequestProvider effectiveProvider =
+        new RuntimeDispatchRequestProvider(
+            railGraphService,
+            routeDefinitions,
+            progressRegistry,
+            configManager,
+            occupancyManager,
+            (trainName, ignoredRoute) -> List.of(actual, next),
+            msg -> {});
+
+    List<NodeId> resolved = effectiveProvider.resolveWaypointsForRequest("train-1", route);
+
+    assertEquals(List.of(actual, next), resolved);
   }
 }

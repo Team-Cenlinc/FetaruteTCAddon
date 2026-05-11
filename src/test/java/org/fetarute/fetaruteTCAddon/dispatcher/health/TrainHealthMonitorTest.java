@@ -9,9 +9,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -51,6 +54,69 @@ class TrainHealthMonitorTest {
         lastPassedGraphNode == null
             ? Optional.empty()
             : Optional.of(NodeId.of(lastPassedGraphNode)));
+  }
+
+  private void stubConfirmedDeadlock(String firstTrain, String secondTrain) {
+    stubConfirmedDeadlock(
+        firstTrain,
+        secondTrain,
+        "single:test:A:B",
+        CorridorDirection.A_TO_B,
+        CorridorDirection.B_TO_A,
+        context(firstTrain, 5, RouteOperationType.OPERATION, false, false),
+        context(secondTrain, 7, RouteOperationType.OPERATION, false, false));
+  }
+
+  private void stubConfirmedDeadlock(
+      String firstTrain,
+      String secondTrain,
+      String conflictKey,
+      CorridorDirection firstDirection,
+      CorridorDirection secondDirection,
+      RuntimeDispatchService.DeadlockTrainContext firstContext,
+      RuntimeDispatchService.DeadlockTrainContext secondContext) {
+    when(dispatchService.recentBlockerTrains(eq(firstTrain), any()))
+        .thenReturn(Set.of(secondTrain));
+    when(dispatchService.recentBlockerTrains(eq(secondTrain), any()))
+        .thenReturn(Set.of(firstTrain));
+    when(dispatchService.recentDeadlockBlockers(eq(firstTrain), any()))
+        .thenReturn(deadlockSnapshot(secondTrain, conflictKey, secondDirection));
+    when(dispatchService.recentDeadlockBlockers(eq(secondTrain), any()))
+        .thenReturn(deadlockSnapshot(firstTrain, conflictKey, firstDirection));
+    when(dispatchService.deadlockTrainContext(firstTrain)).thenReturn(Optional.of(firstContext));
+    when(dispatchService.deadlockTrainContext(secondTrain)).thenReturn(Optional.of(secondContext));
+  }
+
+  private RuntimeDispatchService.DeadlockBlockerSnapshot deadlockSnapshot(
+      String blockerTrain, String conflictKey, CorridorDirection direction) {
+    return new RuntimeDispatchService.DeadlockBlockerSnapshot(
+        Set.of(
+            new RuntimeDispatchService.DeadlockBlockerInfo(
+                blockerTrain, conflictKey, Optional.ofNullable(direction))),
+        Instant.now());
+  }
+
+  private RuntimeDispatchService.DeadlockTrainContext context(
+      String trainName,
+      int progressIndex,
+      RouteOperationType operationType,
+      boolean depotRelated,
+      boolean nearRouteEnd) {
+    return new RuntimeDispatchService.DeadlockTrainContext(
+        trainName,
+        progressIndex,
+        10,
+        SignalAspect.STOP,
+        0.0,
+        operationType,
+        0,
+        false,
+        false,
+        false,
+        depotRelated,
+        nearRouteEnd,
+        false,
+        false);
   }
 
   @Test
@@ -376,8 +442,7 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
-    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
-    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    stubConfirmedDeadlock("trainA", "trainB");
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
@@ -388,12 +453,13 @@ class TrainHealthMonitorTest {
         monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
 
     assertEquals(1, result.progressStuckCount(), "仅由一侧执行互卡修复");
-    assertEquals(1, result.fixedCount(), "应执行一轮成对 refresh");
+    assertEquals(0, result.fixedCount(), "refresh 只是恢复动作，不能宣称已修复");
     verify(dispatchService).refreshSignalByName("trainA");
     verify(dispatchService).refreshSignalByName("trainB");
     verify(dispatchService, never()).reissueDestinationByName(anyString());
     verify(dispatchService, never()).forceRelaunchByName(anyString());
     assertFalse(alerts.isEmpty());
+    assertFalse(alerts.get(0).autoFixed(), "未观察到恢复前不应输出“已修复”告警");
   }
 
   @Test
@@ -404,8 +470,7 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
-    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
-    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    stubConfirmedDeadlock("trainA", "trainB");
     when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
@@ -419,7 +484,8 @@ class TrainHealthMonitorTest {
 
     verify(dispatchService, atLeastOnce()).refreshSignalByName("trainA");
     verify(dispatchService, atLeastOnce()).refreshSignalByName("trainB");
-    verify(dispatchService, atLeastOnce()).reissueDestinationByName("trainA");
+    verify(dispatchService).reissueDestinationByName("trainA");
+    verify(dispatchService, never()).reissueDestinationByName("trainB");
     verify(dispatchService, never()).forceRelaunchByName(anyString());
   }
 
@@ -431,8 +497,7 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
-    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
-    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    stubConfirmedDeadlock("trainA", "trainB");
     when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
@@ -457,15 +522,17 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
-    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
-    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    stubConfirmedDeadlock("trainA", "trainB");
     when(dispatchService.reissueDestinationByName(anyString())).thenReturn(false);
     when(dispatchService.destroyTrainByName(eq("trainA"), eq("health-deadlock-timeout")))
         .thenReturn(true);
+    doNothing()
+        .when(dispatchService)
+        .scheduleSurvivorRefreshAfterTrainRemoved(eq("trainA"), eq("trainB"));
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
-    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(90));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
 
     Instant t0 = Instant.now();
     monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
@@ -475,6 +542,7 @@ class TrainHealthMonitorTest {
         monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100)); // destroy leader
 
     assertEquals(1, result.fixedCount(), "超过阈值后应销毁互卡 leader 作为最终兜底");
+    verify(dispatchService).scheduleSurvivorRefreshAfterTrainRemoved("trainA", "trainB");
     verify(dispatchService).destroyTrainByName("trainA", "health-deadlock-timeout");
     verify(dispatchService, never()).destroyTrainByName(eq("trainB"), anyString());
     verify(dispatchService, never()).forceRelaunchByName(anyString());
@@ -488,8 +556,7 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
-    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
-    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    stubConfirmedDeadlock("trainA", "trainB");
     when(dispatchService.reissueDestinationByName(anyString())).thenReturn(false);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
@@ -502,10 +569,207 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage2 reissue retry
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // stage2 reissue retry
 
-    verify(dispatchService, atLeastOnce()).reissueDestinationByName("trainA");
-    verify(dispatchService, atLeastOnce()).reissueDestinationByName("trainB");
+    verify(dispatchService).reissueDestinationByName("trainA");
+    verify(dispatchService, never()).reissueDestinationByName("trainB");
     verify(dispatchService, never()).forceRelaunchByName(anyString());
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("互卡 episode：blocker 快照短暂消失不会重置 firstSeenAt")
+  void mutualDeadlockEpisodeGracePreservesFirstSeenAcrossSnapshotJitter() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
+    when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
+    RuntimeDispatchService.DeadlockBlockerSnapshot aSnapshot =
+        deadlockSnapshot("trainB", "single:test:A:B", CorridorDirection.B_TO_A);
+    RuntimeDispatchService.DeadlockBlockerSnapshot bSnapshot =
+        deadlockSnapshot("trainA", "single:test:A:B", CorridorDirection.A_TO_B);
+    RuntimeDispatchService.DeadlockBlockerSnapshot emptySnapshot =
+        new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now());
+    AtomicBoolean snapshotsVisible = new AtomicBoolean(true);
+    when(dispatchService.recentDeadlockBlockers(eq("trainA"), any()))
+        .thenAnswer(ignored -> snapshotsVisible.get() ? aSnapshot : emptySnapshot);
+    when(dispatchService.recentDeadlockBlockers(eq("trainB"), any()))
+        .thenAnswer(ignored -> snapshotsVisible.get() ? bSnapshot : emptySnapshot);
+    when(dispatchService.deadlockTrainContext("trainA"))
+        .thenReturn(Optional.of(context("trainA", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("trainB"))
+        .thenReturn(Optional.of(context("trainB", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.destroyTrainByName(eq("trainA"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    monitor.setDeadlockEpisodeGrace(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    snapshotsVisible.set(true);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // firstSeen + refresh
+    snapshotsVisible.set(false);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // jitter, keep episode
+    snapshotsVisible.set(true);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(75)); // reissue
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // destroy by preserved firstSeen
+
+    verify(dispatchService).destroyTrainByName("trainA", "health-deadlock-timeout");
+  }
+
+  @Test
+  @DisplayName("互卡兜底：UNKNOWN direction 不进入 destroy")
+  void unknownDirectionDeadlockDoesNotDestroy() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock(
+        "trainA",
+        "trainB",
+        "single:test:A:B",
+        CorridorDirection.UNKNOWN,
+        CorridorDirection.B_TO_A,
+        context("trainA", 5, RouteOperationType.OPERATION, false, false),
+        context("trainB", 7, RouteOperationType.OPERATION, false, false));
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(1));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80));
+
+    verify(dispatchService, never()).refreshSignalByName(anyString());
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("互卡兜底：departure gate / station hold 不进入 destroy")
+  void departureGateHoldDoesNotDestroy() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    RuntimeDispatchService.DeadlockTrainContext gated =
+        new RuntimeDispatchService.DeadlockTrainContext(
+            "trainA",
+            5,
+            10,
+            SignalAspect.STOP,
+            0.0,
+            RouteOperationType.OPERATION,
+            0,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false);
+    stubConfirmedDeadlock(
+        "trainA",
+        "trainB",
+        "single:test:A:B",
+        CorridorDirection.A_TO_B,
+        CorridorDirection.B_TO_A,
+        gated,
+        context("trainB", 7, RouteOperationType.OPERATION, false, false));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80));
+
+    verify(dispatchService, never()).refreshSignalByName(anyString());
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("互卡 leader：RETURN 优先于 OPERATION 被销毁")
+  void stableLeaderPrefersReturnOverOperation() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock(
+        "trainA",
+        "trainB",
+        "single:test:A:B",
+        CorridorDirection.A_TO_B,
+        CorridorDirection.B_TO_A,
+        context("trainA", 5, RouteOperationType.OPERATION, false, false),
+        context("trainB", 7, RouteOperationType.RETURN, false, false));
+    when(dispatchService.destroyTrainByName(eq("trainB"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+
+    verify(dispatchService).destroyTrainByName("trainB", "health-deadlock-timeout");
+    verify(dispatchService, never()).destroyTrainByName(eq("trainA"), anyString());
+  }
+
+  @Test
+  @DisplayName("互卡 leader：depot exit 优先于 in-service 被销毁")
+  void stableLeaderPrefersDepotExitOverInService() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock(
+        "trainA",
+        "trainB",
+        "single:test:A:B",
+        CorridorDirection.A_TO_B,
+        CorridorDirection.B_TO_A,
+        context("trainA", 5, RouteOperationType.OPERATION, false, false),
+        context("trainB", 7, RouteOperationType.OPERATION, true, false));
+    when(dispatchService.destroyTrainByName(eq("trainB"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+
+    verify(dispatchService).destroyTrainByName("trainB", "health-deadlock-timeout");
+    verify(dispatchService, never()).destroyTrainByName(eq("trainA"), anyString());
+  }
+
+  @Test
+  @DisplayName("互卡 episode：destroyAttempted 后不会连续销毁第二辆")
+  void deadlockDestroyAttemptedPreventsSecondDestroy() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock("trainA", "trainB");
+    when(dispatchService.destroyTrainByName(eq("trainA"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(130));
+
+    verify(dispatchService, times(1))
+        .destroyTrainByName(anyString(), eq("health-deadlock-timeout"));
   }
 
   @Test

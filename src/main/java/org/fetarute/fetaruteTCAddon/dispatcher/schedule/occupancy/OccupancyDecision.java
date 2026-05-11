@@ -17,11 +17,21 @@ public record OccupancyDecision(
     Instant earliestTime,
     SignalAspect signal,
     List<OccupancyClaim> blockers,
-    boolean conflictRelease) {
+    boolean conflictRelease,
+    String reason) {
+
+  public OccupancyDecision(
+      boolean allowed,
+      Instant earliestTime,
+      SignalAspect signal,
+      List<OccupancyClaim> blockers,
+      boolean conflictRelease) {
+    this(allowed, earliestTime, signal, blockers, conflictRelease, "none");
+  }
 
   public OccupancyDecision(
       boolean allowed, Instant earliestTime, SignalAspect signal, List<OccupancyClaim> blockers) {
-    this(allowed, earliestTime, signal, blockers, false);
+    this(allowed, earliestTime, signal, blockers, false, "none");
   }
 
   public OccupancyDecision {
@@ -29,5 +39,6 @@ public record OccupancyDecision(
     Objects.requireNonNull(signal, "signal");
     Objects.requireNonNull(blockers, "blockers");
     blockers = List.copyOf(blockers);
+    reason = reason == null || reason.isBlank() ? "none" : reason.trim();
   }
 }

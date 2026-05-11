@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -21,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
@@ -57,6 +59,7 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
   private final RouteProgressRegistry progressRegistry;
   private final ConfigManager configManager;
   private final OccupancyManager occupancyManager;
+  private final BiFunction<String, RouteDefinition, List<NodeId>> effectiveWaypointsResolver;
   private final Consumer<String> debugLogger;
 
   /**
@@ -76,11 +79,39 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
       ConfigManager configManager,
       OccupancyManager occupancyManager,
       Consumer<String> debugLogger) {
+    this(
+        railGraphService,
+        routeDefinitions,
+        progressRegistry,
+        configManager,
+        occupancyManager,
+        (trainName, route) -> route == null ? List.of() : route.waypoints(),
+        debugLogger);
+  }
+
+  /**
+   * 构建请求提供者。
+   *
+   * <p>effectiveWaypointsResolver 由运行时调度服务提供，用于复用 DYNAMIC materialized node 覆盖，避免事件链路用原始 DYNAMIC
+   * placeholder 做非 STOP 预判。
+   */
+  public RuntimeDispatchRequestProvider(
+      RailGraphService railGraphService,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry progressRegistry,
+      ConfigManager configManager,
+      OccupancyManager occupancyManager,
+      BiFunction<String, RouteDefinition, List<NodeId>> effectiveWaypointsResolver,
+      Consumer<String> debugLogger) {
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.progressRegistry = Objects.requireNonNull(progressRegistry, "progressRegistry");
     this.configManager = Objects.requireNonNull(configManager, "configManager");
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
+    this.effectiveWaypointsResolver =
+        effectiveWaypointsResolver != null
+            ? effectiveWaypointsResolver
+            : (trainName, route) -> route == null ? List.of() : route.waypoints();
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
 
@@ -134,11 +165,33 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
             0,
             runtimeSettings.switcherZoneEdges(),
             debugLogger);
-    List<NodeId> waypoints = route.waypoints();
+    List<NodeId> waypoints = resolveWaypointsForRequest(trainName, route);
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
-            trainName, Optional.ofNullable(route.id()), waypoints, currentIndex, now, priority);
+            trainName,
+            Optional.ofNullable(route.id()),
+            waypoints,
+            currentIndex,
+            now,
+            priority,
+            AuthorizationPurpose.RUNTIME_MOVE);
     return contextOpt.map(OccupancyRequestContext::request);
+  }
+
+  /**
+   * 解析事件重评估使用的 waypoint 列表。
+   *
+   * <p>该方法单独暴露给同包测试，确保 provider 复用运行时 DYNAMIC effective node 覆盖，而不是回退到 route 原始 placeholder。
+   */
+  List<NodeId> resolveWaypointsForRequest(String trainName, RouteDefinition route) {
+    if (route == null) {
+      return List.of();
+    }
+    List<NodeId> waypoints = effectiveWaypointsResolver.apply(trainName, route);
+    if (waypoints == null || waypoints.isEmpty()) {
+      return route.waypoints();
+    }
+    return List.copyOf(waypoints);
   }
 
   /**

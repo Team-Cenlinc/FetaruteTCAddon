@@ -28,7 +28,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
  * <p>这个实现只负责“资源互斥 + 队列公平性 + 冲突区放行”，不承担列车控车、恢复和调度重排。若上层信号看起来不稳定， 这里优先排查的通常是队列位次、锁定边界和 claim
  * 释放粒度，而不是时刻表本身。
  *
- * <p>当冲突区两侧车辆互相占用节点而卡死时，会尝试“冲突区放行”以释放队头列车进入。
+ * <p>冲突区放行只处理已证明正在清空冲突区出口的 CONFLICT blocker；真实 NODE/EDGE 硬占用始终按 STOP 处理。
  */
 public final class SimpleOccupancyManager
     implements OccupancyManager, OccupancyQueueSupport, OccupancyPreviewSupport {
@@ -87,6 +87,11 @@ public final class SimpleOccupancyManager
       if (resource == null) {
         continue;
       }
+      Optional<OccupancyDecision> directionBlocked =
+          failClosedUnknownSingleConflictEntry(request, resource, now);
+      if (directionBlocked.isPresent()) {
+        return directionBlocked.get();
+      }
       List<OccupancyClaim> existing = claims.get(resource);
       if (existing == null || existing.isEmpty()) {
         continue;
@@ -109,6 +114,11 @@ public final class SimpleOccupancyManager
     if (!blockers.isEmpty()) {
       Set<OccupancyResource> queueTargets = resolveQueueTargets(request, blockedResources);
       enqueueWaiting(request, queueTargets, now);
+      Optional<String> hardBlockerReason = conflictReleaseHardBlockerReason(request, blockers);
+      if (hardBlockerReason.isPresent()) {
+        return new OccupancyDecision(
+            false, now, SignalAspect.STOP, List.copyOf(blockers), false, hardBlockerReason.get());
+      }
       OccupancyDecision resolved = tryResolveConflictDeadlock(request, blockers, now);
       if (resolved != null) {
         return resolved;
@@ -123,6 +133,11 @@ public final class SimpleOccupancyManager
       }
       if (findClaim(claims.get(resource), request.trainName()) != null) {
         continue;
+      }
+      Optional<OccupancyDecision> directionBlocked =
+          failClosedUnknownSingleConflictEntry(request, resource, now);
+      if (directionBlocked.isPresent()) {
+        return directionBlocked.get();
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
@@ -161,6 +176,11 @@ public final class SimpleOccupancyManager
       if (resource == null) {
         continue;
       }
+      Optional<OccupancyDecision> directionBlocked =
+          failClosedUnknownSingleConflictEntry(request, resource, now);
+      if (directionBlocked.isPresent()) {
+        return directionBlocked.get();
+      }
       List<OccupancyClaim> existing = claims.get(resource);
       if (existing == null || existing.isEmpty()) {
         continue;
@@ -180,6 +200,11 @@ public final class SimpleOccupancyManager
       }
     }
     if (!blockers.isEmpty()) {
+      Optional<String> hardBlockerReason = conflictReleaseHardBlockerReason(request, blockers);
+      if (hardBlockerReason.isPresent()) {
+        return new OccupancyDecision(
+            false, now, SignalAspect.STOP, List.copyOf(blockers), false, hardBlockerReason.get());
+      }
       OccupancyDecision resolved = tryResolveConflictDeadlockPreview(request, blockers, now);
       if (resolved != null) {
         return resolved;
@@ -194,6 +219,11 @@ public final class SimpleOccupancyManager
       }
       if (findClaim(claims.get(resource), request.trainName()) != null) {
         continue;
+      }
+      Optional<OccupancyDecision> directionBlocked =
+          failClosedUnknownSingleConflictEntry(request, resource, now);
+      if (directionBlocked.isPresent()) {
+        return directionBlocked.get();
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.get(resource);
@@ -237,6 +267,14 @@ public final class SimpleOccupancyManager
       return decision;
     }
     Instant now = request.now();
+    if (decision.conflictRelease()) {
+      Optional<String> hardBlockerReason =
+          conflictReleaseHardBlockerReason(request, decision.blockers());
+      if (hardBlockerReason.isPresent()) {
+        return new OccupancyDecision(
+            false, now, SignalAspect.STOP, decision.blockers(), false, hardBlockerReason.get());
+      }
+    }
     Set<OccupancyResource> blockedResources =
         decision.conflictRelease()
             ? resolveBlockedResourcesForPartialAcquire(decision, request.trainName())
@@ -530,6 +568,65 @@ public final class SimpleOccupancyManager
 
   // 事件反射式释放不需要“基于时间”的清理。
 
+  private Optional<OccupancyDecision> failClosedUnknownSingleConflictEntry(
+      OccupancyRequest request, OccupancyResource resource, Instant now) {
+    if (request == null || resource == null || !isSingleCorridorConflict(resource)) {
+      return Optional.empty();
+    }
+    if (hasClaimByTrain(resource, request.trainName())) {
+      return Optional.empty();
+    }
+    if (resolveCorridorDirection(request, resource).isPresent()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        new OccupancyDecision(
+            false,
+            now != null ? now : request.now(),
+            SignalAspect.STOP,
+            List.of(),
+            false,
+            "single-conflict-direction-unknown"));
+  }
+
+  private boolean hasClaimByTrain(OccupancyResource resource, String trainName) {
+    return findClaim(claims.get(resource), trainName) != null;
+  }
+
+  private Optional<String> conflictReleaseHardBlockerReason(
+      OccupancyRequest request, List<OccupancyClaim> blockers) {
+    if (request == null || request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return Optional.empty();
+    }
+    OccupancyClaim hardBlocker = firstHardBlocker(blockers, request.trainName());
+    if (hardBlocker == null || hardBlocker.resource() == null) {
+      return Optional.empty();
+    }
+    return Optional.of("conflict-release-hard-blocker:" + hardBlocker.resource());
+  }
+
+  private OccupancyClaim firstHardBlocker(List<OccupancyClaim> blockers, String trainName) {
+    if (blockers == null || blockers.isEmpty()) {
+      return null;
+    }
+    String self = trainName == null ? "" : trainName.trim().toLowerCase(Locale.ROOT);
+    for (OccupancyClaim blocker : blockers) {
+      if (blocker == null || blocker.resource() == null) {
+        continue;
+      }
+      String owner =
+          blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
+      if (!owner.isEmpty() && owner.equals(self)) {
+        continue;
+      }
+      ResourceKind kind = blocker.resource().kind();
+      if (kind == ResourceKind.NODE || kind == ResourceKind.EDGE) {
+        return blocker;
+      }
+    }
+    return null;
+  }
+
   private boolean isSameCorridorDirection(
       OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
     Optional<CorridorDirection> requestDirection = resolveCorridorDirection(request, resource);
@@ -747,11 +844,22 @@ public final class SimpleOccupancyManager
     return false;
   }
 
+  private boolean hasVerifiedConflictReleaseHint(
+      OccupancyRequest request, OccupancyResource conflict) {
+    if (request == null
+        || conflict == null
+        || request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return false;
+    }
+    ConflictReleaseHint hint = request.conflictReleaseHints().get(conflict.key());
+    return hint != null && hint.verifiedFor(conflict.key());
+  }
+
   /**
-   * 计算冲突释放时不能写入的 blocker 资源。
+   * 计算冲突释放时不能写入的 CONFLICT blocker 资源。
    *
-   * <p>冲突区释放的目的只是允许队头车进入可用的冲突窗口，而不是覆盖对向车已经持有的 NODE/EDGE claim。 因此 acquire 阶段会跳过所有由其他列车持有的 blocker
-   * 资源，避免“判定放行”变成“抢占前方占用”。
+   * <p>冲突释放只能绕过抽象 CONFLICT claim，不能绕过真实 NODE/EDGE 硬占用。硬占用会在 canEnter/acquire 阶段以 {@code
+   * conflict-release-hard-blocker:*} 拒绝。
    */
   private Set<OccupancyResource> resolveBlockedResourcesForPartialAcquire(
       OccupancyDecision decision, String trainName) {
@@ -767,6 +875,9 @@ public final class SimpleOccupancyManager
       String owner =
           blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
       if (!owner.isEmpty() && owner.equals(self)) {
+        continue;
+      }
+      if (blocker.resource().kind() != ResourceKind.CONFLICT) {
         continue;
       }
       resources.add(blocker.resource());
@@ -791,11 +902,18 @@ public final class SimpleOccupancyManager
       if (trainName != null && claim.trainName().equalsIgnoreCase(trainName)) {
         continue;
       }
-      if (!queue.contains(claim.trainName())) {
+      if (!queue.contains(claim.trainName()) && !isDirectionalConflictClaim(claim)) {
         return false;
       }
     }
     return true;
+  }
+
+  private boolean isDirectionalConflictClaim(OccupancyClaim claim) {
+    return claim != null
+        && claim.resource() != null
+        && claim.resource().kind() == ResourceKind.CONFLICT
+        && claim.corridorDirection().isPresent();
   }
 
   /**
@@ -825,6 +943,11 @@ public final class SimpleOccupancyManager
         continue;
       }
       Optional<CorridorDirection> blockerDirection = queue.directionOf(blocker.trainName());
+      if (blockerDirection.isEmpty()
+          && blocker.resource() != null
+          && blocker.resource().equals(conflict)) {
+        blockerDirection = blocker.corridorDirection();
+      }
       if (blockerDirection.isEmpty() || blockerDirection.get() == CorridorDirection.UNKNOWN) {
         return false;
       }
@@ -864,7 +987,13 @@ public final class SimpleOccupancyManager
     if (request == null || blockers == null || blockers.isEmpty()) {
       return null;
     }
-    if (containsConflictBlocker(blockers)) {
+    if (request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return null;
+    }
+    if (firstHardBlocker(blockers, request.trainName()) != null) {
+      return null;
+    }
+    if (!containsConflictBlocker(blockers)) {
       return null;
     }
     // 优先检查：列车是否持有任意冲突资源的放行锁（避免主冲突切换导致信号乒乓）
@@ -894,6 +1023,9 @@ public final class SimpleOccupancyManager
       if (!queue.isHeadAny(request.trainName())) {
         continue;
       }
+      if (!hasVerifiedConflictReleaseHint(request, conflict)) {
+        continue;
+      }
       if (!areBlockersInQueue(blockers, queue, request.trainName())) {
         continue;
       }
@@ -918,6 +1050,13 @@ public final class SimpleOccupancyManager
    */
   private OccupancyDecision tryResolveByHeldLock(
       OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
+    if (request == null || request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return null;
+    }
+    if (firstHardBlocker(blockers, request.trainName()) != null
+        || !containsConflictBlocker(blockers)) {
+      return null;
+    }
     Map<String, Integer> entryOrders = request.conflictEntryOrders();
     if (entryOrders == null || entryOrders.isEmpty()) {
       return null;
@@ -929,6 +1068,9 @@ public final class SimpleOccupancyManager
       }
       if (!lock.matches(request.trainName())) {
         // 其他车持有该冲突的锁，当前车不能被任何锁放行
+        continue;
+      }
+      if (!hasVerifiedConflictReleaseHint(request, OccupancyResource.forConflict(conflictKey))) {
         continue;
       }
       // 当前车持有该冲突的锁：直接放行。
@@ -952,7 +1094,13 @@ public final class SimpleOccupancyManager
     if (request == null || blockers == null || blockers.isEmpty()) {
       return null;
     }
-    if (containsConflictBlocker(blockers)) {
+    if (request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return null;
+    }
+    if (firstHardBlocker(blockers, request.trainName()) != null) {
+      return null;
+    }
+    if (!containsConflictBlocker(blockers)) {
       return null;
     }
     List<OccupancyResource> candidates = resolveConflictCandidates(request);
@@ -974,6 +1122,9 @@ public final class SimpleOccupancyManager
         if (!areBlockersInQueue(blockers, queue, request.trainName())) {
           continue;
         }
+        if (!hasVerifiedConflictReleaseHint(request, conflict)) {
+          continue;
+        }
         SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
         return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
       }
@@ -988,6 +1139,9 @@ public final class SimpleOccupancyManager
         continue;
       }
       if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+        continue;
+      }
+      if (!hasVerifiedConflictReleaseHint(request, conflict)) {
         continue;
       }
       if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {

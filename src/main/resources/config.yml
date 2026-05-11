@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 21
+config-version: 23
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -24,8 +24,16 @@ health:
   progress-stop-grace-seconds: 180
   # STOP 状态下“互卡解锁”触发阈值（秒）：超过后会优先尝试双车解锁
   deadlock-threshold-seconds: 45
+  # STOP 互卡最终销毁兜底是否启用；只作用于 confirmed mutual deadlock
+  deadlock-destroy-enabled: true
   # STOP 互卡最终销毁阈值（秒）：超过后仍未恢复则销毁互卡对中的稳定 leader；0 表示禁用
-  deadlock-destroy-threshold-seconds: 900
+  deadlock-destroy-threshold-seconds: 240
+  # 同一互卡对销毁兜底冷却（秒），避免连续销毁两车
+  deadlock-destroy-cooldown-seconds: 120
+  # blocker 快照短暂消失后的 episode 保留宽限（秒）
+  deadlock-episode-grace-seconds: 10
+  # 进入 confirmed mutual deadlock 前的最短 STOP 静止时间（秒）
+  deadlock-min-stop-seconds: 20
   # blocker 快照有效期（秒）：用于识别互相阻塞的列车对
   blocker-snapshot-max-age-seconds: 20
   # 自动修复动作冷却（秒）：避免每轮健康检查都重复触发恢复动作

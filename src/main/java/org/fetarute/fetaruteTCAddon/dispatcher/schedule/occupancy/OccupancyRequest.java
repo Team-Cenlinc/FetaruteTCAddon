@@ -15,6 +15,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
  * <p>corridorDirections 用于单线走廊的方向锁判定（同向跟驰、对向互斥）。
  *
  * <p>conflictEntryOrders 用于冲突区放行与死锁解除：记录列车在 lookahead 路径中“首次进入某冲突区”的边序号（越小越接近当前列车）。
+ *
+ * <p>purpose 标识请求来源；缺失来源只能退化为 {@link AuthorizationPurpose#RUNTIME_MOVE}，不得退化成 {@link
+ * AuthorizationPurpose#CONFLICT_CLEARING}。冲突区释放还必须携带 conflictReleaseHints，证明列车已经在同一冲突区内且目标是清空出口。
  */
 public record OccupancyRequest(
     String trainName,
@@ -23,7 +26,9 @@ public record OccupancyRequest(
     List<OccupancyResource> resources,
     Map<String, CorridorDirection> corridorDirections,
     Map<String, Integer> conflictEntryOrders,
-    int priority) {
+    int priority,
+    AuthorizationPurpose purpose,
+    Map<String, ConflictReleaseHint> conflictReleaseHints) {
 
   public OccupancyRequest {
     Objects.requireNonNull(trainName, "trainName");
@@ -32,12 +37,56 @@ public record OccupancyRequest(
     Objects.requireNonNull(resources, "resources");
     Objects.requireNonNull(corridorDirections, "corridorDirections");
     Objects.requireNonNull(conflictEntryOrders, "conflictEntryOrders");
+    purpose = purpose == null ? AuthorizationPurpose.RUNTIME_MOVE : purpose;
+    Objects.requireNonNull(conflictReleaseHints, "conflictReleaseHints");
     if (trainName.isBlank()) {
       throw new IllegalArgumentException("trainName 不能为空");
     }
     resources = List.copyOf(resources);
     corridorDirections = Map.copyOf(corridorDirections);
     conflictEntryOrders = Map.copyOf(conflictEntryOrders);
+    conflictReleaseHints = Map.copyOf(conflictReleaseHints);
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      Map<String, Integer> conflictEntryOrders,
+      int priority,
+      AuthorizationPurpose purpose) {
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        Map.of());
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      Map<String, Integer> conflictEntryOrders,
+      int priority) {
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        AuthorizationPurpose.RUNTIME_MOVE,
+        Map.of());
   }
 
   public OccupancyRequest(
@@ -47,7 +96,27 @@ public record OccupancyRequest(
       List<OccupancyResource> resources,
       Map<String, CorridorDirection> corridorDirections,
       int priority) {
-    this(trainName, routeId, now, resources, corridorDirections, Map.of(), priority);
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        Map.of(),
+        priority,
+        AuthorizationPurpose.RUNTIME_MOVE,
+        Map.of());
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      int priority,
+      AuthorizationPurpose purpose) {
+    this(trainName, routeId, now, resources, corridorDirections, Map.of(), priority, purpose);
   }
 
   public OccupancyRequest(
@@ -56,10 +125,48 @@ public record OccupancyRequest(
       Instant now,
       List<OccupancyResource> resources,
       Map<String, CorridorDirection> corridorDirections) {
-    this(trainName, routeId, now, resources, corridorDirections, Map.of(), 0);
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        Map.of(),
+        0,
+        AuthorizationPurpose.RUNTIME_MOVE,
+        Map.of());
   }
 
   public List<OccupancyResource> resourceList() {
     return resources;
+  }
+
+  /** 返回同一资源集合但替换请求来源后的请求。 */
+  public OccupancyRequest withPurpose(AuthorizationPurpose nextPurpose) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        nextPurpose,
+        conflictReleaseHints);
+  }
+
+  /** 返回同一资源集合但附加冲突清空证据后的请求。 */
+  public OccupancyRequest withConflictReleaseHints(
+      AuthorizationPurpose nextPurpose, Map<String, ConflictReleaseHint> hints) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        nextPurpose,
+        hints == null ? Map.of() : hints);
   }
 }

@@ -980,10 +980,10 @@ command:
       state: "  <gray>状态:</gray> index=<white><index></white> gate=<white><gate></white> reason=<white><reason></white>"
       speed: "  <gray>速度:</gray> 当前=<white><current></white> 目标=<white><target></white> 边限速=<white><edge_limit></white> 建议=<white><recommended></white> <gray>bps</gray>"
       speed-limits: "  <gray>限速链:</gray> aspect=<white><aspect_base_speed></white> caution=<white><caution_source></white> approach=<white><approach_limit></white> ma=<white><movement_authority_limit></white> edgeAhead=<white><edge_speed_lookahead></white> curve=<white><speed_curve_limit></white> final=<white><final_target></white> limiter=<white><final_limiter></white> <gray>bps</gray>"
-      lookahead: "  <gray>前瞻:</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> <gray>blocks</gray>"
+      lookahead: "  <gray>前瞻:</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> 授权末端=<white><authority_end></white> resource=<white><authority_resource></white> edges=<white><authorized_edges></white> <gray>blocks</gray>"
       approach: "  <gray>Approach:</gray> node=<white><node></white> kind=<white><kind></white> reason=<white><reason></white> distance=<white><distance></white> limit=<white><limit></white>"
       occupancy: "  <gray>占用诊断:</gray> blockers=<white><blockers></white> request=<white><request></white> claims=<white><claims></white>"
-      signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white>"
+      signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white> destBlocked=<white><destination_blocked></white> retained=<white><retained_destination></white> reason=<white><blocked_reason></white>"
       set:
         route:
           storage-not-ready: "<prefix> <red>存储尚未就绪，无法解析公司/线路层级（请先 /fta reload 或检查数据库连接）</red>"

@@ -46,10 +46,12 @@ tags:
 | `caution_source` | `none`、`config` 或 `component`，说明 CAUTION 速度来源 |
 | `approach_limit_bps` | 进站、进库或 STOP/TERM waypoint approach 限速 |
 | `movement_authority_limit_bps` | 移动授权根据前方可用距离推导的建议最大速度 |
+| `distance_to_authority_end` / `authority_end_resource` / `authorized_edge_count` | 前向授权窗口末端、第一处未授权资源与已授权实际边数；PROCEED 无 blocker 时也会参与 MA 降级/压速 |
 | `edge_speed_lookahead_min_bps` | 前方低限速边反推的当前最大速度 |
 | `speed_curve_limit_bps` | 执行层速度曲线进一步压低后的速度 |
 | `final_target_bps` | 最终写入 TrainCarts 前的目标速度 |
 | `final_limiter_source` | 最终 limiter：`edge_limit`、`config_caution`、`component_caution`、`approach_curve`、`approach`、`depot_approach`、`stop_waypoint_approach`、`movement_authority`、`edge_speed_lookahead`、`speed_curve`、`speed_command_rate_limit` 或 `stop` |
+| `destination_present_while_blocked` / `retained_destination` / `blocked_reason` | STOP/授权失败时 TrainCarts destination 是否仍存在、保留值与阻塞原因；运行时只诊断，不主动清空 TrainCarts destination |
 
 排查时先看 `final_limiter_source`：
 

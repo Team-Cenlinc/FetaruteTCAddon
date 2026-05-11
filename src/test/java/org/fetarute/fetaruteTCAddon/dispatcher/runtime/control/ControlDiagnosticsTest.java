@@ -41,6 +41,9 @@ public final class ControlDiagnosticsTest {
             .distanceToBlocker(OptionalLong.of(100))
             .distanceToCaution(OptionalLong.of(200))
             .distanceToApproach(OptionalLong.of(50))
+            .distanceToAuthorityEnd(OptionalLong.of(240))
+            .authorityEndResource("EDGE:B~C")
+            .authorizedEdgeCount(2)
             .approachNode(NodeId.of("SURN:S:StationB:1"))
             .approachKind("station")
             .approachReason("route_stop:STOP")
@@ -50,6 +53,9 @@ public final class ControlDiagnosticsTest {
             .currentSignal(SignalAspect.PROCEED)
             .effectiveSignal(SignalAspect.PROCEED_WITH_CAUTION)
             .allowLaunch(true)
+            .destinationPresentWhileBlocked(true)
+            .retainedDestination("NEXT")
+            .blockedReason("authorization-blocked")
             .sampledAt(now)
             .build();
 
@@ -75,6 +81,9 @@ public final class ControlDiagnosticsTest {
     assertEquals(100L, diag.distanceToBlocker().orElse(-1));
     assertEquals(200L, diag.distanceToCaution().orElse(-1));
     assertEquals(50L, diag.distanceToApproach().orElse(-1));
+    assertEquals(240L, diag.distanceToAuthorityEnd().orElse(-1));
+    assertEquals("EDGE:B~C", diag.authorityEndResource());
+    assertEquals(2, diag.authorizedEdgeCount());
     assertEquals("SURN:S:StationB:1", diag.approachNode().value());
     assertEquals("station", diag.approachKind());
     assertEquals("route_stop:STOP", diag.approachReason());
@@ -84,6 +93,9 @@ public final class ControlDiagnosticsTest {
     assertEquals(SignalAspect.PROCEED, diag.currentSignal());
     assertEquals(SignalAspect.PROCEED_WITH_CAUTION, diag.effectiveSignal());
     assertTrue(diag.allowLaunch());
+    assertTrue(diag.destinationPresentWhileBlocked());
+    assertEquals("NEXT", diag.retainedDestination());
+    assertEquals("authorization-blocked", diag.blockedReason());
     assertEquals(now, diag.sampledAt());
   }
 

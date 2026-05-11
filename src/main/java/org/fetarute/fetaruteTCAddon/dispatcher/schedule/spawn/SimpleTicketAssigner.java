@@ -41,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
@@ -2084,7 +2085,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                 spawnWaypoints,
                 0,
                 now,
-                100 + Math.max(0, ticket == null ? 0 : ticket.priority()));
+                100 + Math.max(0, ticket == null ? 0 : ticket.priority()),
+                AuthorizationPurpose.DEPOT_SPAWN);
     if (ctxOpt.isEmpty()) {
       return Optional.empty();
     }

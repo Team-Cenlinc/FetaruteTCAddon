@@ -74,4 +74,23 @@ class ConfigManagerTest {
     assertEquals(2, view.runtimeSettings().approachWindowEdges());
     assertEquals(1, view.runtimeSettings().approachTargetEdges());
   }
+
+  @Test
+  // health 互卡销毁兜底参数应从配置读取
+  void parseHealthDeadlockDestroySettings() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("health.deadlock-destroy-enabled", false);
+    config.set("health.deadlock-destroy-threshold-seconds", 75);
+    config.set("health.deadlock-destroy-cooldown-seconds", 180);
+    config.set("health.deadlock-episode-grace-seconds", 12);
+    config.set("health.deadlock-min-stop-seconds", 25);
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertFalse(view.healthSettings().deadlockDestroyEnabled());
+    assertEquals(75, view.healthSettings().deadlockDestroyThresholdSeconds());
+    assertEquals(180, view.healthSettings().deadlockDestroyCooldownSeconds());
+    assertEquals(12, view.healthSettings().deadlockEpisodeGraceSeconds());
+    assertEquals(25, view.healthSettings().deadlockMinStopSeconds());
+  }
 }

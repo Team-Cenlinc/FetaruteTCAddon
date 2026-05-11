@@ -706,7 +706,10 @@ public final class FtaTrainCommand {
             Map.of(
                 "blocker", formatDistance(diag.distanceToBlocker()),
                 "caution", formatDistance(diag.distanceToCaution()),
-                "approach", formatDistance(diag.distanceToApproach()))));
+                "approach", formatDistance(diag.distanceToApproach()),
+                "authority_end", formatDistance(diag.distanceToAuthorityEnd()),
+                "authority_resource", diag.authorityEndResource(),
+                "authorized_edges", String.valueOf(diag.authorizedEdgeCount()))));
     sender.sendMessage(
         locale.component(
             "command.train.debug.approach",
@@ -731,7 +734,10 @@ public final class FtaTrainCommand {
             Map.of(
                 "current", diag.currentSignal().name(),
                 "effective", diag.effectiveSignal().name(),
-                "launch", diag.allowLaunch() ? "✓" : "✗")));
+                "launch", diag.allowLaunch() ? "✓" : "✗",
+                "destination_blocked", diag.destinationPresentWhileBlocked() ? "yes" : "no",
+                "retained_destination", diag.retainedDestination(),
+                "blocked_reason", diag.blockedReason())));
     sender.sendMessage(
         Component.text("  ")
             .append(
