@@ -13,9 +13,9 @@ class RuntimeDispatchApproachSpeedTest {
     double previewBlocks = RuntimeDispatchService.APPROACH_PREVIEW_DISTANCE_BLOCKS;
 
     assertEquals(
-        0.0, RuntimeDispatchService.approachPreviewRatio(windowBlocks, previewBlocks, 160));
-    assertTrue(RuntimeDispatchService.approachPreviewRatio(windowBlocks, previewBlocks, 140) > 0.0);
-    assertEquals(1.0, RuntimeDispatchService.approachPreviewRatio(windowBlocks, previewBlocks, 96));
+        0.0, RuntimeTrainController.approachPreviewRatio(windowBlocks, previewBlocks, 160));
+    assertTrue(RuntimeTrainController.approachPreviewRatio(windowBlocks, previewBlocks, 140) > 0.0);
+    assertEquals(1.0, RuntimeTrainController.approachPreviewRatio(windowBlocks, previewBlocks, 96));
   }
 
   @Test
@@ -25,16 +25,16 @@ class RuntimeDispatchApproachSpeedTest {
     double windowBlocks = 96.0;
     double previewBlocks = RuntimeDispatchService.APPROACH_PREVIEW_DISTANCE_BLOCKS;
 
-    double farRatio = RuntimeDispatchService.approachPreviewRatio(windowBlocks, previewBlocks, 150);
-    double midRatio = RuntimeDispatchService.approachPreviewRatio(windowBlocks, previewBlocks, 128);
+    double farRatio = RuntimeTrainController.approachPreviewRatio(windowBlocks, previewBlocks, 150);
+    double midRatio = RuntimeTrainController.approachPreviewRatio(windowBlocks, previewBlocks, 128);
     double boundaryRatio =
-        RuntimeDispatchService.approachPreviewRatio(windowBlocks, previewBlocks, 96);
+        RuntimeTrainController.approachPreviewRatio(windowBlocks, previewBlocks, 96);
     double farLimit =
-        RuntimeDispatchService.approachPreviewSpeedLimit(normalSpeed, approachSpeed, farRatio);
+        RuntimeTrainController.approachPreviewSpeedLimit(normalSpeed, approachSpeed, farRatio);
     double midLimit =
-        RuntimeDispatchService.approachPreviewSpeedLimit(normalSpeed, approachSpeed, midRatio);
+        RuntimeTrainController.approachPreviewSpeedLimit(normalSpeed, approachSpeed, midRatio);
     double boundaryLimit =
-        RuntimeDispatchService.approachPreviewSpeedLimit(normalSpeed, approachSpeed, boundaryRatio);
+        RuntimeTrainController.approachPreviewSpeedLimit(normalSpeed, approachSpeed, boundaryRatio);
 
     assertTrue(farLimit < normalSpeed);
     assertTrue(farLimit > midLimit);

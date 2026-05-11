@@ -123,7 +123,7 @@ public final class RuntimeDispatchService {
   private final ConfigManager configManager;
   private final StorageManager storageManager;
   private final TrainConfigResolver trainConfigResolver;
-  private final TrainLaunchManager trainLaunchManager = new TrainLaunchManager();
+  private final RuntimeTrainController runtimeTrainController = new RuntimeTrainController();
   private final Consumer<String> debugLogger;
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
@@ -1221,15 +1221,10 @@ public final class RuntimeDispatchService {
               + decision.earliestTime()
               + " blockers="
               + summarizeBlockers(decision));
-      // 阻塞时：已到达当前节点，仍需推进进度并更新 destination，避免后续道岔回弹
+      // 阻塞时：已到达当前节点，但前方资源尚未 acquire 成功，不能写入下一跳 destination。
       progressRegistry.advance(
           trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
       invalidateTrainEta(trainName);
-      String destinationName = resolveDestinationName(nextNode);
-      if (destinationName != null && !destinationName.isBlank()) {
-        properties.clearDestinationRoute();
-        properties.setDestination(destinationName);
-      }
       // 阻塞等待期间与停站逻辑保持一致：保留当前位置/尾部保护，并持续刷新前向冲突队列位次，
       // 避免后车在当前车等待放行时先抢到更靠前的队头。
       if (occupancyManager != null) {
@@ -2297,12 +2292,8 @@ public final class RuntimeDispatchService {
     // 执行强制重发
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
     double targetBps = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
-    double targetBpt = targetBps / 20.0;
-    double accelBpt2 = config.accelBps2() / 400.0;
-    properties.setSpeedLimit(targetBpt);
-
     RuntimeTrainHandle handle = new TrainCartsRuntimeHandle(group);
-    handle.forceRelaunch(direction.get(), targetBpt, accelBpt2);
+    runtimeTrainController.forceRelaunch(handle, properties, direction.get(), targetBps, config);
 
     debugLogger.accept(
         "HealthMonitor forceRelaunch: train="
@@ -2497,7 +2488,7 @@ public final class RuntimeDispatchService {
       }
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
-      trainLaunchManager.applyControl(
+      runtimeTrainController.applyControl(
           train,
           properties,
           SignalAspect.STOP,
@@ -2508,7 +2499,7 @@ public final class RuntimeDispatchService {
           java.util.Optional.empty(),
           configManager.current().runtimeSettings());
       if (train.isMoving()) {
-        train.stop();
+        runtimeTrainController.stopNow(train);
       }
       return;
     }
@@ -2608,7 +2599,7 @@ public final class RuntimeDispatchService {
       // 若已停止，清理 destination 并注册 Layover
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
-      trainLaunchManager.applyControl(
+      runtimeTrainController.applyControl(
           train,
           properties,
           SignalAspect.STOP,
@@ -2622,7 +2613,7 @@ public final class RuntimeDispatchService {
       boolean isStopped = Math.abs(currentSpeed) < 0.001;
       if (isStopped) {
         if (train.isMoving()) {
-          train.stop(); // 确保完全停止
+          runtimeTrainController.stopNow(train); // 确保完全停止
         }
         properties.clearDestinationRoute();
         properties.setDestination("");
@@ -3303,13 +3294,19 @@ public final class RuntimeDispatchService {
     // refreshSignal 可能因为图路径问题导致 failover 而不发车
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
     double targetBps = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
-    double targetBpt = targetBps / 20.0; // blocks/s -> blocks/tick
-    double accelBpt2 = config.accelBps2() / 400.0; // blocks/s^2 -> blocks/tick^2
-    properties.setSpeedLimit(targetBpt);
     java.util.Optional<org.bukkit.block.BlockFace> fallbackDirection =
         resolveLaunchDirectionByGraph(
             graph, resolveEffectiveNode(trainName, route, startIndex), nextNode);
-    trainHandle.launchWithFallback(fallbackDirection, targetBpt, accelBpt2);
+    runtimeTrainController.applyControl(
+        trainHandle,
+        properties,
+        SignalAspect.PROCEED,
+        targetBps,
+        config,
+        true,
+        OptionalLong.empty(),
+        fallbackDirection,
+        configManager.current().runtimeSettings());
     updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
 
     debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
@@ -3700,7 +3697,7 @@ public final class RuntimeDispatchService {
           false,
           OptionalLong.empty());
     } else {
-      train.stop();
+      runtimeTrainController.stopNow(train);
     }
   }
 
@@ -3772,7 +3769,7 @@ public final class RuntimeDispatchService {
     java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection =
         resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
     TrainLaunchManager.ControlApplicationResult applicationResult =
-        trainLaunchManager.applyControl(
+        runtimeTrainController.applyControl(
             train,
             properties,
             aspect,
@@ -4091,7 +4088,7 @@ public final class RuntimeDispatchService {
       // 恢复速度限制：signal tick 遗留的 speedLimit=0 会阻止 Station.centerTrain() 的移动动作
       com.bergerkiller.bukkit.tc.properties.TrainProperties props = group.getProperties();
       if (props != null) {
-        props.setSpeedLimit(WAYPOINT_CENTER_SPEED_LIMIT);
+        runtimeTrainController.setTemporarySpeedLimit(props, WAYPOINT_CENTER_SPEED_LIMIT);
       }
 
       // 关键：强制按 group 语义执行 centerTrain，避免某些事件上下文被识别为 cart sign 后只按单车居中。
@@ -5827,12 +5824,9 @@ public final class RuntimeDispatchService {
     // 使用配置的速度参数
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
     double targetBps = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
-    double targetBpt = targetBps / 20.0;
-    double accelBpt2 = config.accelBps2() / 400.0;
-    properties.setSpeedLimit(targetBpt);
-
     // 执行强制重发（立即停车 + 立即发车，不检查 isMoving）
-    train.forceRelaunch(launchDirection.get(), targetBpt, accelBpt2);
+    runtimeTrainController.forceRelaunch(
+        train, properties, launchDirection.get(), targetBps, config);
 
     Instant now = Instant.now();
     updateSignalOrWarn(trainName, SignalAspect.PROCEED, now);
@@ -6340,7 +6334,15 @@ public final class RuntimeDispatchService {
       if (Double.isFinite(override) && override > 0.0) {
         ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
         double approachEnvelope =
-            resolveApproachSpeedEnvelope(target, override, decelBps2, overrides, runtime);
+            RuntimeTrainController.resolveApproachSpeedEnvelope(
+                target,
+                override,
+                decelBps2,
+                overrides.approachControl().distanceBlocks(),
+                overrides.approachControl().targetEdgeDistanceBlocks(),
+                overrides.approachControl().edgeCount(),
+                runtime,
+                APPROACH_PREVIEW_DISTANCE_BLOCKS);
         approachLimitBps =
             OptionalDouble.of(
                 approachLimitBps.isPresent()
@@ -6381,99 +6383,6 @@ public final class RuntimeDispatchService {
         edgeLookaheadLimit,
         target,
         limiterSource);
-  }
-
-  /**
-   * 计算进站/进库 approach 的速度包络。
-   *
-   * <p>旧逻辑在进入 approach 窗口后立即把目标速度硬切到 {@code approach-speed-bps}，会导致窗口外仍继续加速、窗口内突然降速。 这里把 approach
-   * 正式窗口前的固定距离作为 preview 区：preview 起点保持原目标速度，越接近正式窗口越接近 approach
-   * 速度。若速度曲线启用，再叠加到停靠目标的物理制动包络，最终取更低的安全上限。
-   */
-  private static double resolveApproachSpeedEnvelope(
-      double currentTargetBps,
-      double approachLimitBps,
-      double decelBps2,
-      ControlSpeedOverrides overrides,
-      ConfigManager.RuntimeSettings runtime) {
-    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
-      return 0.0;
-    }
-    if (!Double.isFinite(approachLimitBps) || approachLimitBps <= 0.0) {
-      return currentTargetBps;
-    }
-    if (runtime == null
-        || overrides == null
-        || overrides.approachControl().distanceBlocks().isEmpty()) {
-      return Math.min(currentTargetBps, approachLimitBps);
-    }
-    ApproachControl approachControl = overrides.approachControl();
-    long distanceBlocks = approachControl.distanceBlocks().getAsLong();
-    double previewRatio =
-        resolveApproachPreviewRatio(runtime, distanceBlocks, approachControl.edgeCount());
-    double previewEnvelope =
-        approachPreviewSpeedLimit(currentTargetBps, approachLimitBps, previewRatio);
-    if (!runtime.speedCurveEnabled()
-        || approachControl.targetEdgeDistanceBlocks().isEmpty()
-        || !Double.isFinite(decelBps2)
-        || decelBps2 <= 0.0) {
-      return previewEnvelope;
-    }
-    double distance =
-        Math.max(0.0, distanceBlocks - approachControl.targetEdgeDistanceBlocks().getAsLong());
-    double brakingEnvelope =
-        Math.sqrt(
-            approachLimitBps * approachLimitBps
-                + 2.0 * decelBps2 * distance * runtime.speedCurveFactor());
-    if (!Double.isFinite(brakingEnvelope) || brakingEnvelope <= 0.0) {
-      return previewEnvelope;
-    }
-    return Math.min(previewEnvelope, Math.max(approachLimitBps, brakingEnvelope));
-  }
-
-  static double approachPreviewRatio(
-      double approachWindowBlocks, double previewDistanceBlocks, long distanceBlocks) {
-    if (!Double.isFinite(approachWindowBlocks)
-        || approachWindowBlocks < 0.0
-        || !Double.isFinite(previewDistanceBlocks)
-        || previewDistanceBlocks <= 0.0
-        || distanceBlocks < 0L) {
-      return 0.0;
-    }
-    if (distanceBlocks <= approachWindowBlocks) {
-      return 1.0;
-    }
-    double distanceToBoundary = distanceBlocks - approachWindowBlocks;
-    if (distanceToBoundary >= previewDistanceBlocks) {
-      return 0.0;
-    }
-    return Math.max(0.0, Math.min(1.0, 1.0 - distanceToBoundary / previewDistanceBlocks));
-  }
-
-  static double approachPreviewSpeedLimit(
-      double currentTargetBps, double approachLimitBps, double ratio) {
-    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
-      return 0.0;
-    }
-    if (!Double.isFinite(approachLimitBps)
-        || approachLimitBps <= 0.0
-        || approachLimitBps >= currentTargetBps) {
-      return currentTargetBps;
-    }
-    double clampedRatio = Double.isFinite(ratio) ? Math.max(0.0, Math.min(1.0, ratio)) : 0.0;
-    return approachLimitBps + (currentTargetBps - approachLimitBps) * (1.0 - clampedRatio);
-  }
-
-  private static double resolveApproachPreviewRatio(
-      ConfigManager.RuntimeSettings runtime, long distanceBlocks, int edgeCount) {
-    if (runtime == null) {
-      return 0.0;
-    }
-    if (withinApproachWindow(runtime, distanceBlocks, edgeCount)) {
-      return 1.0;
-    }
-    return approachPreviewRatio(
-        runtime.approachWindowBlocks(), APPROACH_PREVIEW_DISTANCE_BLOCKS, distanceBlocks);
   }
 
   private static String resolveApproachLimiterSource(
@@ -6727,7 +6636,7 @@ public final class RuntimeDispatchService {
           1.0);
     }
     double ratio =
-        approachPreviewRatio(
+        RuntimeTrainController.approachPreviewRatio(
             runtime.approachWindowBlocks(), APPROACH_PREVIEW_DISTANCE_BLOCKS, distanceBlocks);
     if (ratio <= 0.0) {
       return ApproachWindowState.inactive(APPROACH_PREVIEW_DISTANCE_BLOCKS);

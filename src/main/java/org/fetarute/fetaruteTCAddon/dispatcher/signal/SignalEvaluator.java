@@ -182,14 +182,15 @@ public class SignalEvaluator {
   /**
    * 事件评估只负责判断是否需要触发一次更严格信号刷新，不能写入冲突队列。
    *
-   * <p>真实放行/排队由 {@code RuntimeDispatchService#handleSignalTick} 执行；这里若调用带副作用的 {@link
-   * OccupancyManager#canEnter(OccupancyRequest)}，会在没有实体申请的事件链路里留下队列项，进而造成后续异常 STOP。
+   * <p>真实放行/排队由 {@code RuntimeDispatchService#handleSignalTick} 执行；这里禁止调用带副作用的 {@link
+   * OccupancyManager#canEnter(OccupancyRequest)}，否则会在没有实体申请的事件链路里留下队列项，进而造成后续异常 STOP。 若占用管理器没有只读
+   * preview 能力，则保守返回 STOP。
    */
   private OccupancyDecision previewDecision(OccupancyRequest request) {
     if (occupancyManager instanceof OccupancyPreviewSupport preview) {
       return preview.canEnterPreview(request);
     }
-    return occupancyManager.canEnter(request);
+    return new OccupancyDecision(false, request.now(), SignalAspect.STOP, List.of());
   }
 
   /** 清除列车信号缓存（列车销毁时调用）。 */
