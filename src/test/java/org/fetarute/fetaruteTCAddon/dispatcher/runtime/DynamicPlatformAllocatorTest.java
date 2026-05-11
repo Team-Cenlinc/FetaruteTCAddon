@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Optional;
@@ -19,7 +20,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -161,6 +164,70 @@ class DynamicPlatformAllocatorTest {
     assertEquals(cand1Id, result.get().allocatedNode());
   }
 
+  @Test
+  void dynamicStopPrefersFreeReachablePlatform() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId occupiedId = NodeId.of("OP:S:DEST:1");
+    NodeId freeId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode occupied = mockNode(occupiedId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode free = mockNode(freeId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, occupied), edge(from, free));
+    mockEdges(occupiedId);
+    mockEdges(freeId);
+
+    RouteId routeId = RouteId.of("FREE-FIRST");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    OccupancyResource occupiedResource = OccupancyResource.forNode(occupiedId);
+    when(occupancyManager.isNodeOccupied(occupiedId)).thenReturn(true);
+    when(occupancyManager.getClaim(occupiedResource))
+        .thenReturn(
+            Optional.of(
+                new OccupancyClaim(
+                    occupiedResource,
+                    "other-train",
+                    Optional.empty(),
+                    java.time.Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+
+    Optional<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.tryAllocate("train-free-first", route, 0, graph, fromId);
+
+    assertTrue(result.isPresent());
+    assertEquals(freeId, result.get().allocatedNode());
+  }
+
+  @Test
+  void dynamicStopFallsBackToReachablePlatformWhenAllCandidatesOccupied() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+
+    RouteId routeId = RouteId.of("FALLBACK");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    when(occupancyManager.isNodeOccupied(secondId)).thenReturn(true);
+    mockOccupied(firstId, "first-train");
+    mockOccupied(secondId, "second-train");
+
+    Optional<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.tryAllocate("train-fallback", route, 0, graph, fromId);
+
+    assertTrue(result.isPresent());
+    assertEquals(firstId, result.get().allocatedNode());
+  }
+
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {
     RailNode node = mock(RailNode.class);
     when(node.id()).thenReturn(id);
@@ -177,5 +244,32 @@ class DynamicPlatformAllocatorTest {
 
   private void mockEdges(NodeId id, RailEdge... edges) {
     when(graph.edgesFrom(id)).thenReturn(new HashSet<>(Arrays.asList(edges)));
+  }
+
+  private void mockOccupied(NodeId nodeId, String trainName) {
+    OccupancyResource resource = OccupancyResource.forNode(nodeId);
+    when(occupancyManager.getClaim(resource))
+        .thenReturn(
+            Optional.of(
+                new OccupancyClaim(
+                    resource,
+                    trainName,
+                    Optional.empty(),
+                    java.time.Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+  }
+
+  private static RouteStop dynamicStop() {
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:2]"));
+    return stop;
+  }
+
+  private static RouteDefinition routeWithDynamicStop(RouteId routeId, NodeId fromId) {
+    RouteDefinition route = mock(RouteDefinition.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.waypoints()).thenReturn(Arrays.asList(fromId, NodeId.of("PLACEHOLDER")));
+    return route;
   }
 }

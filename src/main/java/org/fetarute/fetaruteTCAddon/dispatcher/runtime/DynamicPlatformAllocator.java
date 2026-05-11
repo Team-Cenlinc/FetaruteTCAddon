@@ -27,7 +27,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManag
 /**
  * 动态站台分配器。
  *
- * <p>在列车接近 DYNAMIC 站点时（距离 ≤5 edges），从候选轨道范围中选择一个可用站台并写入列车 destination。
+ * <p>在列车接近 DYNAMIC 站点时（距离 ≤5 edges），从候选轨道范围中选择一个可用站台，并把分配结果返回给 Dispatcher。
+ *
+ * <p>本类不直接写入 TrainCarts destination，也不申请占用资源；destination materialize 与发车授权由 {@link
+ * RuntimeDispatchService} 编排，控车落地由 {@link RuntimeTrainController} 执行。
  *
  * <p>触发条件：
  *

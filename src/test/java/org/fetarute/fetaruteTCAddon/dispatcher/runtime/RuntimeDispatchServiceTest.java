@@ -247,6 +247,137 @@ class RuntimeDispatchServiceTest {
 
     assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
     assertEquals(0, train.launchCalls);
+    verify(tags.properties(), never()).setDestination(any());
+  }
+
+  @Test
+  void handleSignalTickDoesNotWriteDynamicDestinationWhenAcquireFails() {
+    NodeId current = NodeId.of("A");
+    NodeId dynamic = NodeId.of("DYNAMIC");
+    NodeId allocated = NodeId.of("OP:S:DEST:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, dynamic), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, allocated, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, dynamic, "DYNAMIC:OP:S:DEST:[1:1]")));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    OccupancyResource allocatedResource = OccupancyResource.forNode(allocated);
+    when(occupancyManager.acquire(any()))
+        .thenAnswer(
+            inv -> {
+              OccupancyRequest request = inv.getArgument(0);
+              if (!request.resourceList().contains(allocatedResource)) {
+                return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+              }
+              OccupancyClaim blocker =
+                  new OccupancyClaim(
+                      allocatedResource,
+                      "train-2",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return new OccupancyDecision(
+                  false, request.now(), SignalAspect.STOP, List.of(blocker));
+            });
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleSignalTick(new FakeTrain(worldId, tags.properties(), false), false);
+
+    verify(tags.properties(), never()).setDestination(any());
+  }
+
+  @Test
+  void handleSignalTickWritesDynamicDestinationAfterAcquireSucceeds() {
+    NodeId current = NodeId.of("A");
+    NodeId dynamic = NodeId.of("DYNAMIC");
+    NodeId allocated = NodeId.of("OP:S:DEST:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(current, dynamic), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(current, allocated, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, dynamic, "DYNAMIC:OP:S:DEST:[1:1]")));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleSignalTick(new FakeTrain(worldId, tags.properties(), false), false);
+
+    verify(tags.properties()).setDestination(allocated.value());
   }
 
   @Test
@@ -477,6 +608,7 @@ class RuntimeDispatchServiceTest {
     assertTrue(train.stopCalls >= 1);
     SignalAspect aspect = service.snapshotProgressEntries().get("train-1").lastSignal();
     assertEquals(SignalAspect.STOP, aspect);
+    verify(tags.properties(), never()).setDestination(any());
     assertTrue(
         service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
   }
@@ -4542,6 +4674,17 @@ class RuntimeDispatchServiceTest {
         Optional.empty(),
         passType,
         Optional.empty());
+  }
+
+  private static RouteStop dynamicStop(int sequence, NodeId nodeId, String notes) {
+    return new RouteStop(
+        UUID.randomUUID(),
+        sequence,
+        Optional.empty(),
+        Optional.of(nodeId.value()),
+        Optional.empty(),
+        RouteStopPassType.STOP,
+        Optional.of(notes));
   }
 
   private RuntimeDispatchService createServiceWithHardNodeBlocker() {

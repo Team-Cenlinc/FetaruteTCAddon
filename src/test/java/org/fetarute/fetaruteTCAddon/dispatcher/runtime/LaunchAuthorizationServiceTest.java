@@ -124,6 +124,7 @@ class LaunchAuthorizationServiceTest {
     assertFalse(result.acquired());
     assertEquals(1, manager.acquireCalls);
     assertEquals(1, actions.holdCalls);
+    assertEquals(0, actions.writeDestinationCalls);
     assertEquals(0, actions.launchCalls);
   }
 

@@ -36,7 +36,7 @@
 ┌──────────────────────────┐
 │     TrainController      │
 │  订阅 SignalChangedEvent │
-│  即时下发控车指令          │
+│  更严格信号即时桥接        │
 │  调用 RuntimeDispatch    │
 └──────────────────────────┘
 ```
@@ -90,7 +90,8 @@ evaluator.start();
 
 ### TrainController
 
-控车订阅器，接收信号变化事件并立即下发控车指令。
+信号事件桥，接收信号变化事件并把可立即生效的更严格信号交给 RuntimeDispatchService。它不直接调用
+TrainCarts 控车动作，也不会把 STOP/CAUTION 提升成 PROCEED；更宽松信号仍交给周期 tick 统一授权。
 
 ```java
 TrainController controller = new TrainController(
@@ -191,7 +192,7 @@ record SignalChangedEvent(
 ## 与周期性 tick 的关系
 
 事件驱动系统作为主要信号响应机制，`RuntimeSignalMonitor` 的周期性 tick 保留作为兜底：
-- 事件驱动：资源变化时立即触发，延迟 < 1 tick
+- 事件驱动：资源变化时立即触发，延迟 < 1 tick；只允许更严格信号立即落地
 - 周期性 tick：每 N tick 执行一次，处理遗漏或边缘情况
 
 建议：生产环境可适当降低周期性 tick 频率（如从 5 tick 改为 20 tick），减少 CPU 开销。
@@ -202,9 +203,10 @@ record SignalChangedEvent(
 
 ```
 [DEBUG] SignalEvent: type=OccupancyReleasedEvent at 2026-02-05T17:00:00Z
+[DEBUG] 信号变化(事件): train=SURC-MT-L北-0261 CAUTION -> STOP
+[DEBUG] 事件信号桥接: train=SURC-MT-L北-0261 signal=STOP
 [DEBUG] 信号变化(事件): train=SURC-MT-L北-0261 STOP -> PROCEED
-[DEBUG] 控车下发: train=SURC-MT-L北-0261 signal=PROCEED unblocked=true
-[DEBUG] 事件信号下发: train=SURC-MT-L北-0261 signal=PROCEED
+[DEBUG] 信号事件忽略宽松变化: train=SURC-MT-L北-0261 signal=PROCEED
 ```
 
 ## 参见

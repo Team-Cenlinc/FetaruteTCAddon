@@ -2,15 +2,18 @@ package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -170,6 +173,40 @@ class SignalEvaluatorTest {
     assertTrue(manager.snapshotQueues().isEmpty());
   }
 
+  @Test
+  void eventEvaluationWithoutPreviewFailsClosedWithoutCallingCanEnter() {
+    NoPreviewCountingOccupancyManager manager = new NoPreviewCountingOccupancyManager();
+    mockProvider.registerTrain("train-F", SignalAspect.PROCEED);
+    SignalEvaluator noPreviewEvaluator = new SignalEvaluator(eventBus, manager, mockProvider);
+
+    noPreviewEvaluator.start();
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            "train-A",
+            List.of(OccupancyResource.forNode(NodeId.of("node-1"))),
+            List.of("train-F")));
+
+    assertEquals(0, manager.canEnterCalls());
+    assertEquals(1, receivedEvents.size());
+    assertEquals(SignalAspect.STOP, receivedEvents.get(0).newSignal());
+  }
+
+  @Test
+  void signalEvaluatorDoesNotOwnTrainControlDependencies() {
+    Set<String> controlDependencies =
+        Set.of("TrainProperties", "RuntimeTrainController", "TrainLaunchManager", "TrainCarts");
+
+    for (Field field : SignalEvaluator.class.getDeclaredFields()) {
+      String fieldType = field.getType().getSimpleName();
+      for (String dependency : controlDependencies) {
+        assertFalse(
+            fieldType.contains(dependency),
+            "SignalEvaluator must remain a pure signal evaluator: " + fieldType);
+      }
+    }
+  }
+
   // ========== Mock 实现 ==========
 
   private static final class FixedConflictRequestProvider
@@ -203,7 +240,7 @@ class SignalEvaluatorTest {
     }
   }
 
-  private static class MockOccupancyManager implements OccupancyManager {
+  private static class MockOccupancyManager implements OccupancyManager, OccupancyPreviewSupport {
     private final java.util.Map<String, OccupancyDecision> decisions =
         new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -218,6 +255,55 @@ class SignalEvaluatorTest {
       return decisions.getOrDefault(
           request.trainName().toLowerCase(),
           new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
+    }
+
+    @Override
+    public OccupancyDecision canEnterPreview(OccupancyRequest request) {
+      return canEnter(request);
+    }
+
+    @Override
+    public OccupancyDecision acquire(OccupancyRequest request) {
+      return canEnter(request);
+    }
+
+    @Override
+    public Optional<OccupancyClaim> getClaim(OccupancyResource resource) {
+      return Optional.empty();
+    }
+
+    @Override
+    public List<OccupancyClaim> snapshotClaims() {
+      return List.of();
+    }
+
+    @Override
+    public int releaseByTrain(String trainName) {
+      return 0;
+    }
+
+    @Override
+    public boolean releaseResource(OccupancyResource resource, Optional<String> trainName) {
+      return false;
+    }
+
+    @Override
+    public boolean shouldYield(OccupancyRequest request) {
+      return false;
+    }
+  }
+
+  private static final class NoPreviewCountingOccupancyManager implements OccupancyManager {
+    private int canEnterCalls;
+
+    int canEnterCalls() {
+      return canEnterCalls;
+    }
+
+    @Override
+    public OccupancyDecision canEnter(OccupancyRequest request) {
+      canEnterCalls++;
+      return new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
     }
 
     @Override

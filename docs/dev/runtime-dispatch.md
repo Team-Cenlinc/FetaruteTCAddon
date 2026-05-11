@@ -2,11 +2,20 @@
 
 ## 目标
 - 让占用/闭塞成为“真正会挡车、会放行”的运行时硬约束。
-- 推进点（waypoint/autostation/depot/switcher）负责下发下一跳 destination。
-- 信号变化实时控车（限速/停车/发车）。
+- Dispatcher 负责编排 route progress、出发/移动授权，并且只在授权成功后写普通下一跳 destination。
+- SignalSystem 只回答信号、安全约束、blocker 与距离，不直接控车。
+- RuntimeTrainController 负责把信号和速度包络落到 TrainCarts（限速/停车/发车）。
+
+## 职责边界
+- `SignalEvaluator` / SignalSystem：只产出 `SignalDecision`、`SignalAspect`、blocker、距离与原因；没有可靠只读 preview 时 fail-closed，不写 destination、不 launch、不 acquire。
+- `RuntimeTrainController`：只执行 STOP/CAUTION/PROCEED_WITH_CAUTION/PROCEED 的控车动作与 approach envelope 计算；不选择 DYNAMIC 站台，不推进 routeIndex，不拥有占用资源。
+- `RuntimeDispatchService`：作为调度编排器，负责 route progress、RouteStop action 意图、DYNAMIC materialize、Layover/Depot/Station 授权，以及授权成功后的 destination commit。
+- `RouteStopActionResolver`：只解析 CHANGE/DYNAMIC/DSTY 等 notes/action 意图，不修改 TrainCarts、routeIndex 或 occupancy。
+- `DynamicDestinationResolver` / `DynamicPlatformAllocator`：只选择 DYNAMIC effective node；不写 destination，不 launch，不 stop，不 acquire。
+- `MovementAuthorizationCoordinator`：封装普通移动授权顺序，返回授权结果；不写 destination、不控车、不推进 routeIndex。
 
 ## 运行时流程
-1) 推进点触发：解析当前节点 → 构建 OccupancyRequest → canEnter
+1) 推进点触发：解析当前节点与 RouteStop action → 构建 OccupancyRequest → preview/canEnter
 2) 允许进入且通过 hard-blocker 抑制检查：acquire → 重新评估 acquire 结果 → 写入下一跳 destination → 发车/限速；若 acquire 阶段被同 tick 竞争抢占，会立即回退 STOP，不写 destination/launch。
 3) 不允许进入：基于 lookahead 阻塞位置细分信号（PROCEED_WITH_CAUTION/CAUTION/STOP）→ 限速或停车
 4) 出站门控（站台/TERM）会额外检查优先级让行：若单线/道岔冲突队列存在更高优先级列车，则保持停站等待；若占用层返回 `allowed=true` 但没有 `conflictRelease` 标记且 blockers 中仍有其他列车的 NODE/EDGE 硬占用，则先回退 STOP，不会写入前向占用窗口。
@@ -14,14 +23,14 @@
 ## 出发授权入口
 - `LaunchAuthorizationService` 是闭塞出发授权的统一入口，顺序固定为：构建请求 → preview/canEnter → hard blocker 抑制 → acquire → 写 destination/launch/refresh 或 hold STOP。
 - 当前已接入：Station/TERM 出站门控、Layover 复用发车、Depot spawn 前 preview 与 spawn 后 acquire。
-- 仍在旧路径中逐步迁移：运行中 signal tick/progress tick 的移动授权仍由 `RuntimeDispatchService` 直接控车，但 hard blocker 判定与 acquire 失败抑制已委托同一服务语义，避免规则漂移。
+- 运行中 progress tick 的普通移动授权已由 `MovementAuthorizationCoordinator` 收敛顺序；signal tick 仍由 `RuntimeDispatchService` 编排请求与诊断，但控车落地委托 `RuntimeTrainController`。
 - 后续 Linked-Route 只能在构建 `AuthorizationPlan` 前后挂接 route 切换上下文，不应绕过本服务直接 launch；本轮未实现 Linked-Route 解析或切换。
 
 ## Waypoint 停站
 - waypoint 节点在 RouteStop 标记为 STOP/TERMINATE 时也会执行停站（PASS 则直接通过）。
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
 - 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
-- 停站期间会保持 STOP 信号，且提前写入下一跳 destination，确保发车时直接走寻路方向。
+- 停站期间会保持 STOP 信号；STOP waypoint dwell handoff 属于明确行为例外，可提前写入下一跳 destination，确保发车时直接走寻路方向，但不会在此处放行或发车。
 - 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，并同步刷新前方冲突队列位次，避免后车在等待窗口内抢占发车顺序。
 - 运行时只要检测到列车仍在 dwell 窗口，就会强制维持 STOP（不依赖当前 index 再次命中 RouteStop），避免”停站后被提前放行”。
 - 信号 tick 中门控等待、dwell 窗口、waypoint 停站三种”保持 STOP”场景统一由 `holdStopAtCurrentNode` 处理，保留当前占用 + 下发 STOP 控车。
@@ -63,7 +72,7 @@
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
 - 中间图节点（未写入 route 的 waypoint/switcher）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
 - 运行中当前位置保护会从当前图节点沿最短路取“下一段图边”并携带 `CONFLICT:single` 方向；不会再只尝试当前节点直连下一个 route waypoint，避免长单线中段丢失走廊方向。
-- 事件驱动信号下发仅接受“更严格”信号（如 STOP）；更宽松信号统一交由周期 tick 决策，避免事件链路误放行。
+- 事件驱动信号链路只作为桥接：仅接受“更严格”信号（如 STOP）立即生效；更宽松信号统一交由周期 tick 决策，避免事件链路误放行。
 - 当当前信号未知（`currentSignal=null`）时，事件链路仅允许 `STOP` 立即生效，不接受 `CAUTION/PROCEED` 的初始化放行。
 - 触发“冲突区放行锁”时，`canEnter.allowed=true` 会同时携带 `conflictRelease=true`；运行时允许该释放继续，实际 `acquire` 会跳过 blocker 已持有的 `NODE/EDGE` 资源。移动中的列车不使用该释放特权，会回退为阻塞信号。
 - 单线走廊的冲突区放行候选仅在请求列车与 blocker 的方向都能判定且互为对向时成立；方向为 `UNKNOWN` 或队列中缺少方向信息时保持 STOP，避免把同向前后车误判为会车死锁。
@@ -150,6 +159,7 @@
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
 - `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
 - approach 正式窗口外 64 blocks 内会先进入 preview 制动区，速度上限从当前目标速度线性收敛到 approaching 限速；进入正式窗口后保持 approaching 限速。若速度曲线启用，还会叠加到停靠目标的物理制动包络并取更低上限。
+- approach preview 与最终 speed envelope 的主入口为 `RuntimeTrainController.resolveApproachSpeedEnvelope`；SignalSystem 只提供信号、约束类型和距离。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
