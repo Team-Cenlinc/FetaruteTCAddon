@@ -3,18 +3,19 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteProgress;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 
 /**
  * 运行时 RouteProgress 缓存：按列车名追踪 routeId 与当前索引。
@@ -32,6 +33,12 @@ public final class RouteProgressRegistry {
   public static final String TAG_TRAIN_NAME = "FTA_TRAIN_NAME";
 
   private final ConcurrentMap<String, RouteProgressEntry> entries = new ConcurrentHashMap<>();
+  private final AtomicLong version = new AtomicLong();
+
+  /** 返回进度快照版本。每次 route index、lastPassedGraphNode 或 signal 提交都会递增。 */
+  public long version() {
+    return version.get();
+  }
 
   public Optional<RouteProgressEntry> get(String trainName) {
     String key = keyOf(trainName);
@@ -103,7 +110,11 @@ public final class RouteProgressRegistry {
                       entry.lastPassedGraphNode(),
                       entry.lastSignal(),
                       entry.lastUpdatedAt()));
-      return updated != null;
+      if (updated != null) {
+        version.incrementAndGet();
+        return true;
+      }
+      return false;
     }
     RouteProgressEntry existing = entries.remove(oldKey);
     if (existing == null) {
@@ -120,6 +131,7 @@ public final class RouteProgressRegistry {
             existing.lastSignal(),
             existing.lastUpdatedAt());
     entries.put(newKey, migrated);
+    version.incrementAndGet();
     return true;
   }
 
@@ -148,7 +160,11 @@ public final class RouteProgressRegistry {
                     entry.lastPassedGraphNode(),
                     aspect,
                     now));
-    return updated != null;
+    if (updated != null) {
+      version.incrementAndGet();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -176,7 +192,11 @@ public final class RouteProgressRegistry {
                     Optional.of(nodeId),
                     entry.lastSignal(),
                     now));
-    return updated != null;
+    if (updated != null) {
+      version.incrementAndGet();
+      return true;
+    }
+    return false;
   }
 
   public void remove(String trainName) {
@@ -184,7 +204,9 @@ public final class RouteProgressRegistry {
     if (key == null) {
       return;
     }
-    entries.remove(key);
+    if (entries.remove(key) != null) {
+      version.incrementAndGet();
+    }
   }
 
   public Map<String, RouteProgressEntry> snapshot() {
@@ -224,6 +246,7 @@ public final class RouteProgressRegistry {
         new RouteProgressEntry(
             normalizedName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);
     entries.put(key, entry);
+    version.incrementAndGet();
     return entry;
   }
 
@@ -235,14 +258,11 @@ public final class RouteProgressRegistry {
   }
 
   private static String keyOf(String trainName) {
-    if (trainName == null) {
-      return null;
-    }
-    String normalized = trainName.trim();
+    String normalized = TrainNameNormalizer.normalizeKey(trainName);
     if (normalized.isEmpty()) {
       return null;
     }
-    return normalized.toLowerCase(Locale.ROOT);
+    return normalized;
   }
 
   private Optional<UUID> parseRouteId(TrainProperties properties) {

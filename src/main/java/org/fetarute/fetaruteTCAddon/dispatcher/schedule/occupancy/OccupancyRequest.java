@@ -28,7 +28,8 @@ public record OccupancyRequest(
     Map<String, Integer> conflictEntryOrders,
     int priority,
     AuthorizationPurpose purpose,
-    Map<String, ConflictReleaseHint> conflictReleaseHints) {
+    Map<String, ConflictReleaseHint> conflictReleaseHints,
+    Map<OccupancyResource, ResourceIntent> resourceIntents) {
 
   public OccupancyRequest {
     Objects.requireNonNull(trainName, "trainName");
@@ -39,6 +40,7 @@ public record OccupancyRequest(
     Objects.requireNonNull(conflictEntryOrders, "conflictEntryOrders");
     purpose = purpose == null ? AuthorizationPurpose.RUNTIME_MOVE : purpose;
     Objects.requireNonNull(conflictReleaseHints, "conflictReleaseHints");
+    Objects.requireNonNull(resourceIntents, "resourceIntents");
     if (trainName.isBlank()) {
       throw new IllegalArgumentException("trainName 不能为空");
     }
@@ -46,6 +48,30 @@ public record OccupancyRequest(
     corridorDirections = Map.copyOf(corridorDirections);
     conflictEntryOrders = Map.copyOf(conflictEntryOrders);
     conflictReleaseHints = Map.copyOf(conflictReleaseHints);
+    resourceIntents = Map.copyOf(resourceIntents);
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      Map<String, Integer> conflictEntryOrders,
+      int priority,
+      AuthorizationPurpose purpose,
+      Map<String, ConflictReleaseHint> conflictReleaseHints) {
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        Map.of());
   }
 
   public OccupancyRequest(
@@ -141,6 +167,29 @@ public record OccupancyRequest(
     return resources;
   }
 
+  /** 返回指定资源在本请求中的用途，旧调用点默认视作前进必须资源。 */
+  public ResourceIntent intentFor(OccupancyResource resource) {
+    if (resource == null) {
+      return ResourceIntent.MOVEMENT_REQUIRED;
+    }
+    return resourceIntents.getOrDefault(resource, ResourceIntent.MOVEMENT_REQUIRED);
+  }
+
+  /** 返回指定资源 acquire 后应写入的 claim 角色。 */
+  public ClaimRole claimRoleFor(OccupancyResource resource) {
+    return ClaimRole.fromIntent(intentFor(resource));
+  }
+
+  /** 判断请求中是否包含任何前进必须资源。 */
+  public boolean hasMovementRequiredResources() {
+    for (OccupancyResource resource : resources) {
+      if (intentFor(resource).hardAuthority()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** 返回同一资源集合但替换请求来源后的请求。 */
   public OccupancyRequest withPurpose(AuthorizationPurpose nextPurpose) {
     return new OccupancyRequest(
@@ -152,7 +201,8 @@ public record OccupancyRequest(
         conflictEntryOrders,
         priority,
         nextPurpose,
-        conflictReleaseHints);
+        conflictReleaseHints,
+        resourceIntents);
   }
 
   /** 返回同一资源集合但附加冲突清空证据后的请求。 */
@@ -167,6 +217,22 @@ public record OccupancyRequest(
         conflictEntryOrders,
         priority,
         nextPurpose,
-        hints == null ? Map.of() : hints);
+        hints == null ? Map.of() : hints,
+        resourceIntents);
+  }
+
+  /** 返回同一请求但替换资源意图映射。 */
+  public OccupancyRequest withResourceIntents(Map<OccupancyResource, ResourceIntent> intents) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        intents == null ? Map.of() : intents);
   }
 }

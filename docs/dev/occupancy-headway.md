@@ -12,6 +12,13 @@
 - Queue：冲突资源的 FIFO 排队快照，用于运维诊断与顺序控制。
 - `touchQueues()`：只刷新队列位次，不会写入 claim；用于门控等待和停站等待期间保住前车队头。
 
+## ResourceIntent 与 ClaimRole
+- 每个请求资源都会携带 `ResourceIntent`：`MOVEMENT_REQUIRED`、`PROTECTIVE_RETAIN`、`QUEUE_POSITION`、`HOLD_ONLY`、`LOOKAHEAD_PREVIEW`。
+- `MOVEMENT_REQUIRED` 表示本轮前进授权必须取得的资源；`canEnter` 只对这类资源 fail-closed。
+- `PROTECTIVE_RETAIN` 与 `HOLD_ONLY` 用于当前位置、尾部保护和 STOP 保留。它们不会阻止前车的 forward movement；如果与其他列车冲突，运行时应保持本车保护、约束后车或触发 stale claim 清理。
+- `QUEUE_POSITION` 只表示冲突队列位次，适用于门控等待和停站等待期间保住排序；它不应被当作 NODE/EDGE 硬占用。
+- `ClaimRole` 是 claim 落库后的角色镜像，防止 retain/hold claim 在后续判定中被误当成前向必须资源。
+
 ## 信号许可（SignalAspect）
 - `PROCEED`：可进入。
 - `PROCEED_WITH_CAUTION`：前方两段区间内存在 stop，用于提前减速提示。
@@ -53,8 +60,9 @@
 ## 事件驱动信号系统
 - 占用变化时 `SimpleOccupancyManager` 会发布 `OccupancyAcquiredEvent` / `OccupancyReleasedEvent`。
 - `SignalEvaluator` 订阅这些事件，即时重新评估受影响列车的信号状态。
-- 信号变化时发布 `SignalChangedEvent`，由 `TrainController` 订阅并立即下发控车指令。
-- 此机制大幅降低信号响应延迟（从周期 tick 改为事件触发，延迟 < 1 tick）。
+- 信号变化时发布 `SignalChangedEvent`，由运行时桥接层默认 coalesce 为 dirty train；周期 tick 再统一做前向授权、destination commit 与控车落地。
+- STOP 可作为高优先级刷新来源，但不在 `OccupancyManager.acquire()` 同步调用栈内重入同一列车 hard STOP，避免 acquire → event → STOP → 下一 tick PROCEED 的抖动。
+- 此机制降低信号响应延迟，同时避免事件链路绕过前向授权原子提交。
 - 详见 `docs/dev/signal-event-system.md`。
 
 ## Gate Queue（排队控制）
@@ -76,7 +84,7 @@
 - 出站门控会查询单线/道岔冲突队列的更高优先级列车，必要时让行并保持停站等待（仅站台/TERM）。
 - 停站等待期间会持续刷新自身在前向冲突队列中的位次，即使尚未真正占用前方区段，也不会让后车在等待窗口内抢到队头。
 - 运行时在前车重新申请同一前向授权窗口时，会清理“同 Route 且索引更小”的后车前瞻队列条目；该清理只移除 queue，不释放 claim，也不会作用于不同 route、对向或交叉冲突列车。
-- 队列条目若超过 30 秒未刷新会自动清理（避免遗留阻塞）。
+- 队列条目若超过 `runtime.stale-queue-entry-ttl-seconds`（默认 30 秒）未刷新会自动清理，避免遗留 UNKNOWN/opposite entry 长期串行化已知同向跟驰。
 - 队列条目在方向判定更新时会从旧方向桶迁移到新方向桶；TTL 清理后也会同步回收旧 priority/entryOrder 元数据，避免重复排队或继承过期排序状态。
 - `/fta occupancy queue` 通过 `OccupancyQueueSupport` 输出队列快照（含方向、优先级与首见时间）。
 - 队列条目包含 `priority` 与 `entryOrder`，用于诊断冲突区放行与“更近者优先”的排序。

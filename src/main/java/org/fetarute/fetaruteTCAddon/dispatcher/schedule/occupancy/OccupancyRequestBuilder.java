@@ -212,17 +212,23 @@ public final class OccupancyRequestBuilder {
     List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
     List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
     Set<OccupancyResource> resources = new LinkedHashSet<>();
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
     for (NodeId node : expandedNodes) {
       if (node == null) {
         continue;
       }
-      resources.add(OccupancyResource.forNode(node));
+      addResource(
+          resources, intents, OccupancyResource.forNode(node), ResourceIntent.MOVEMENT_REQUIRED);
     }
     for (RailEdge edge : edges) {
-      resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, edge));
+      addResources(
+          resources,
+          intents,
+          OccupancyResourceResolver.resourcesForEdge(graph, edge),
+          ResourceIntent.MOVEMENT_REQUIRED);
     }
-    applySwitcherZoneConflicts(resources, expandedNodes);
-    appendRearGuardResources(resources, rearExpanded, rearEdges);
+    applySwitcherZoneConflicts(resources, intents, expandedNodes);
+    appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
     Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(expandedNodes);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
     OccupancyRequest request =
@@ -234,7 +240,9 @@ public final class OccupancyRequestBuilder {
             corridorDirections,
             conflictEntryOrders,
             priority,
-            purpose);
+            purpose,
+            Map.of(),
+            intents);
     return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
   }
 
@@ -275,23 +283,92 @@ public final class OccupancyRequestBuilder {
           "currentIndex 超出范围 index=" + currentIndex + " size=" + nodes.size());
     }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
     NodeId currentNode = nodes.get(currentIndex);
     if (currentNode != null) {
-      resources.add(OccupancyResource.forNode(currentNode));
+      addResource(
+          resources, intents, OccupancyResource.forNode(currentNode), ResourceIntent.HOLD_ONLY);
     }
     List<NodeId> rearNodes = resolveRearGuardNodes(nodes, currentIndex);
     List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
     List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
-    appendRearGuardResources(resources, rearExpanded, rearEdges);
+    appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
+    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(rearExpanded);
+    Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(rearEdges);
     return new OccupancyRequest(
         trainName,
         routeId,
         requestTime,
         List.copyOf(resources),
-        Map.of(),
-        Map.of(),
+        corridorDirections,
+        conflictEntryOrders,
         priority,
-        purpose);
+        purpose,
+        Map.of(),
+        intents);
+  }
+
+  /**
+   * 构建“当前位置保持”请求。
+   *
+   * <p>该请求用于硬 STOP/blocked 等 hold-only 场景：即使不再向前放行，也必须继续持有列车当前所在边派生出的 {@code
+   * CONFLICT:single}，否则对向列车会在窗口滑动后看不到走廊内占用。
+   */
+  public OccupancyRequest buildHoldPositionRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      List<NodeId> routeNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
+    Objects.requireNonNull(trainName, "trainName");
+    Objects.requireNonNull(routeId, "routeId");
+    Objects.requireNonNull(currentNode, "currentNode");
+    Instant requestTime = now != null ? now : Instant.now();
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
+    addResource(
+        resources, intents, OccupancyResource.forNode(currentNode), ResourceIntent.HOLD_ONLY);
+
+    List<NodeId> directionNodes = List.of();
+    List<RailEdge> directionEdges = List.of();
+    if (targetNode != null && targetNode.isPresent()) {
+      Optional<CurrentStep> stepOpt = resolveCurrentStep(currentNode, targetNode.get());
+      if (stepOpt.isPresent()) {
+        CurrentStep step = stepOpt.get();
+        directionNodes = step.nodes();
+        directionEdges = List.of(step.edge());
+        addResources(
+            resources,
+            intents,
+            OccupancyResourceResolver.resourcesForEdge(graph, step.edge()),
+            ResourceIntent.HOLD_ONLY);
+      }
+    }
+
+    if (routeNodes != null && currentIndex >= 0 && currentIndex < routeNodes.size()) {
+      List<NodeId> rearNodes = resolveRearGuardNodes(routeNodes, currentIndex);
+      List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
+      List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
+      appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
+    }
+
+    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(directionNodes);
+    Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(directionEdges);
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        requestTime,
+        List.copyOf(resources),
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        Map.of(),
+        intents);
   }
 
   /**
@@ -340,7 +417,12 @@ public final class OccupancyRequestBuilder {
     Objects.requireNonNull(currentNode, "currentNode");
     Instant requestTime = now != null ? now : Instant.now();
     Set<OccupancyResource> resources = new LinkedHashSet<>();
-    resources.add(OccupancyResource.forNode(currentNode));
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
+    addResource(
+        resources,
+        intents,
+        OccupancyResource.forNode(currentNode),
+        ResourceIntent.PROTECTIVE_RETAIN);
 
     List<NodeId> pathNodes = List.of(currentNode);
     List<RailEdge> edges = List.of();
@@ -349,7 +431,11 @@ public final class OccupancyRequestBuilder {
       Optional<CurrentStep> stepOpt = resolveCurrentStep(currentNode, target.get());
       if (stepOpt.isPresent()) {
         CurrentStep step = stepOpt.get();
-        resources.addAll(OccupancyResourceResolver.resourcesForEdge(graph, step.edge()));
+        addResources(
+            resources,
+            intents,
+            OccupancyResourceResolver.resourcesForEdge(graph, step.edge()),
+            ResourceIntent.PROTECTIVE_RETAIN);
         pathNodes = step.nodes();
         edges = List.of(step.edge());
       }
@@ -363,7 +449,9 @@ public final class OccupancyRequestBuilder {
         resolveCorridorDirections(pathNodes),
         resolveConflictEntryOrders(edges),
         priority,
-        purpose);
+        purpose,
+        Map.of(),
+        intents);
   }
 
   /**
@@ -402,6 +490,7 @@ public final class OccupancyRequestBuilder {
     List<NodeId> pathNodes = context.pathNodes();
 
     Set<OccupancyResource> merged = new LinkedHashSet<>(base.resourceList());
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>(base.resourceIntents());
     Map<String, CorridorDirection> directions = new LinkedHashMap<>(base.corridorDirections());
     Map<String, Integer> entryOrders = new LinkedHashMap<>(base.conflictEntryOrders());
     boolean updated = false;
@@ -412,7 +501,8 @@ public final class OccupancyRequestBuilder {
       int depotLookoverEdges = resolveDepotLookoverEdges(depotNodeOverride.isPresent());
       for (LookoverEdge lookover : collectDirectedEdgesWithin(depotNode, depotLookoverEdges)) {
         updated |=
-            addEdgeDerivedLookoverResources(merged, directions, entryOrders, pathNodes, lookover);
+            addEdgeDerivedLookoverResources(
+                merged, intents, directions, entryOrders, pathNodes, lookover);
       }
     }
 
@@ -437,11 +527,11 @@ public final class OccupancyRequestBuilder {
             continue;
           }
           if (tryAddDirectionalLookoverConflict(
-              merged, directions, entryOrders, pathNodes, lookover)) {
+              merged, intents, directions, entryOrders, pathNodes, lookover)) {
             updated = true;
             continue;
           }
-          updated |= merged.add(edgeResource);
+          updated |= addResource(merged, intents, edgeResource, ResourceIntent.MOVEMENT_REQUIRED);
         }
       }
     }
@@ -458,7 +548,8 @@ public final class OccupancyRequestBuilder {
         Map.copyOf(entryOrders),
         base.priority(),
         base.purpose(),
-        base.conflictReleaseHints());
+        base.conflictReleaseHints(),
+        intents);
   }
 
   private Optional<NodeId> resolveDepotAnchor(
@@ -551,7 +642,10 @@ public final class OccupancyRequestBuilder {
   }
 
   private void appendRearGuardResources(
-      Set<OccupancyResource> resources, List<NodeId> nodes, List<RailEdge> edges) {
+      Set<OccupancyResource> resources,
+      Map<OccupancyResource, ResourceIntent> intents,
+      List<NodeId> nodes,
+      List<RailEdge> edges) {
     if (resources == null) {
       return;
     }
@@ -560,7 +654,8 @@ public final class OccupancyRequestBuilder {
         if (node == null) {
           continue;
         }
-        resources.add(OccupancyResource.forNode(node));
+        addResource(
+            resources, intents, OccupancyResource.forNode(node), ResourceIntent.PROTECTIVE_RETAIN);
       }
     }
     if (edges != null) {
@@ -568,9 +663,62 @@ public final class OccupancyRequestBuilder {
         if (edge == null) {
           continue;
         }
-        resources.add(OccupancyResource.forEdge(edge.id()));
+        addResources(
+            resources,
+            intents,
+            OccupancyResourceResolver.resourcesForEdge(graph, edge),
+            ResourceIntent.PROTECTIVE_RETAIN);
       }
     }
+  }
+
+  private boolean addResource(
+      Set<OccupancyResource> resources,
+      Map<OccupancyResource, ResourceIntent> intents,
+      OccupancyResource resource,
+      ResourceIntent intent) {
+    if (resources == null || resource == null) {
+      return false;
+    }
+    boolean updated = resources.add(resource);
+    if (intents != null) {
+      intents.merge(
+          resource, intent == null ? ResourceIntent.MOVEMENT_REQUIRED : intent, this::mergeIntent);
+    }
+    return updated;
+  }
+
+  private boolean addResources(
+      Set<OccupancyResource> resources,
+      Map<OccupancyResource, ResourceIntent> intents,
+      List<OccupancyResource> additions,
+      ResourceIntent intent) {
+    boolean updated = false;
+    if (additions == null) {
+      return false;
+    }
+    for (OccupancyResource resource : additions) {
+      updated |= addResource(resources, intents, resource, intent);
+    }
+    return updated;
+  }
+
+  private ResourceIntent mergeIntent(ResourceIntent existing, ResourceIntent incoming) {
+    if (existing == ResourceIntent.MOVEMENT_REQUIRED
+        || incoming == ResourceIntent.MOVEMENT_REQUIRED) {
+      return ResourceIntent.MOVEMENT_REQUIRED;
+    }
+    if (existing == ResourceIntent.HOLD_ONLY || incoming == ResourceIntent.HOLD_ONLY) {
+      return ResourceIntent.HOLD_ONLY;
+    }
+    if (existing == ResourceIntent.PROTECTIVE_RETAIN
+        || incoming == ResourceIntent.PROTECTIVE_RETAIN) {
+      return ResourceIntent.PROTECTIVE_RETAIN;
+    }
+    if (existing == ResourceIntent.QUEUE_POSITION || incoming == ResourceIntent.QUEUE_POSITION) {
+      return ResourceIntent.QUEUE_POSITION;
+    }
+    return ResourceIntent.LOOKAHEAD_PREVIEW;
   }
 
   /**
@@ -581,6 +729,7 @@ public final class OccupancyRequestBuilder {
    */
   private boolean addEdgeDerivedLookoverResources(
       Set<OccupancyResource> resources,
+      Map<OccupancyResource, ResourceIntent> intents,
       Map<String, CorridorDirection> directions,
       Map<String, Integer> entryOrders,
       List<NodeId> pathNodes,
@@ -598,7 +747,7 @@ public final class OccupancyRequestBuilder {
       if (resource.kind() == ResourceKind.CONFLICT) {
         updated |= putConflictEntryOrder(entryOrders, resource.key(), lookover.entryOrder());
       }
-      updated |= resources.add(resource);
+      updated |= addResource(resources, intents, resource, ResourceIntent.MOVEMENT_REQUIRED);
     }
     updated |= putCorridorDirection(directions, pathNodes, lookover);
     return updated;
@@ -606,6 +755,7 @@ public final class OccupancyRequestBuilder {
 
   private boolean tryAddDirectionalLookoverConflict(
       Set<OccupancyResource> resources,
+      Map<OccupancyResource, ResourceIntent> intents,
       Map<String, CorridorDirection> directions,
       Map<String, Integer> entryOrders,
       List<NodeId> pathNodes,
@@ -621,7 +771,8 @@ public final class OccupancyRequestBuilder {
       return false;
     }
     String key = conflictKeyOpt.get();
-    resources.add(OccupancyResource.forConflict(key));
+    addResource(
+        resources, intents, OccupancyResource.forConflict(key), ResourceIntent.MOVEMENT_REQUIRED);
     putConflictEntryOrder(entryOrders, key, lookover.entryOrder());
     Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
     if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
@@ -724,7 +875,9 @@ public final class OccupancyRequestBuilder {
   }
 
   private void applySwitcherZoneConflicts(
-      Set<OccupancyResource> resources, List<NodeId> pathNodes) {
+      Set<OccupancyResource> resources,
+      Map<OccupancyResource, ResourceIntent> intents,
+      List<NodeId> pathNodes) {
     if (resources == null || pathNodes == null || switcherZoneEdges < 0) {
       return;
     }
@@ -749,9 +902,19 @@ public final class OccupancyRequestBuilder {
             resource.kind() == ResourceKind.CONFLICT
                 && resource.key().startsWith(SWITCHER_CONFLICT_PREFIX)
                 && !allowed.contains(resource.key()));
+    if (intents != null) {
+      intents
+          .keySet()
+          .removeIf(
+              resource ->
+                  resource.kind() == ResourceKind.CONFLICT
+                      && resource.key().startsWith(SWITCHER_CONFLICT_PREFIX)
+                      && !allowed.contains(resource.key()));
+    }
     // 补回前 N 段边内的道岔冲突资源。
     for (String key : allowed) {
-      resources.add(OccupancyResource.forConflict(key));
+      addResource(
+          resources, intents, OccupancyResource.forConflict(key), ResourceIntent.MOVEMENT_REQUIRED);
     }
   }
 

@@ -76,6 +76,7 @@ public class SignalEvaluator {
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
     this.requestProvider = Objects.requireNonNull(requestProvider, "requestProvider");
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
+    SignalComputationTrace.configureLogger(this.debugLogger);
   }
 
   /** 启动评估器，订阅事件。 */
@@ -152,6 +153,14 @@ public class SignalEvaluator {
     OccupancyDecision decision = previewDecision(request);
     SignalAspect newSignal = decision.signal();
     SignalAspect previous = lastSignalCache.get(trainName);
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                trainName, trainName, SignalComputationTrace.Source.EVENT, newSignal)
+            .previousAspect(previous)
+            .primaryReason("signal-evaluator-preview:" + decision.reason())
+            .request(request)
+            .decision(decision, request),
+        debugLogger);
 
     if (previous == null || previous != newSignal) {
       lastSignalCache.put(trainName, newSignal);

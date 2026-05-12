@@ -273,6 +273,10 @@ public final class FtaOccupancyCommand {
         dispatch != null
             ? dispatch.lastCleanupResult()
             : new RuntimeDispatchService.CleanupResult(Instant.EPOCH, 0, 0, 0);
+    RuntimeDispatchService.SignalRuntimeStats signalStats =
+        dispatch != null
+            ? dispatch.signalRuntimeStats()
+            : new RuntimeDispatchService.SignalRuntimeStats(0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     int spawnQueue = plugin.getSpawnManager().map(m -> m.snapshotQueue().size()).orElse(0);
     int pending =
@@ -336,6 +340,28 @@ public final class FtaOccupancyCommand {
                 String.valueOf(spawnSuccess),
                 "retry",
                 String.valueOf(spawnRetries))));
+    sender.sendMessage(
+        locale.component(
+            "command.occupancy.stats.signal",
+            Map.of(
+                "path_hit",
+                String.valueOf(signalStats.pathCacheHit()),
+                "path_miss",
+                String.valueOf(signalStats.pathCacheMiss()),
+                "direction_hit",
+                String.valueOf(signalStats.directionCacheHit()),
+                "direction_miss",
+                String.valueOf(signalStats.directionCacheMiss()),
+                "envelope_builds",
+                String.valueOf(signalStats.envelopeBuildCount()),
+                "dirty",
+                String.valueOf(signalStats.dirtyTrainCount()),
+                "coalesced",
+                String.valueOf(signalStats.coalescedEventCount()),
+                "reentrant_stop",
+                String.valueOf(signalStats.reentrantStopSuppressed()),
+                "stale_queue",
+                String.valueOf(signalStats.staleQueueCleanupCount()))));
 
     for (var entry : topSpawnErrors) {
       sender.sendMessage(

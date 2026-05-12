@@ -13,6 +13,8 @@ import org.bukkit.command.CommandSender;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlert;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService.TrainRuntimeState;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.parser.standard.IntegerParser;
 import org.incendo.cloud.parser.standard.StringParser;
@@ -262,6 +264,19 @@ public final class FtaHealthCommand {
           .ifPresentOrElse(
               dispatch -> {
                 dispatch.refreshSignalByName(train);
+                Optional<TrainRuntimeState> state = dispatch.getTrainState(train);
+                if (state.map(TrainRuntimeState::signalAspect).orElse(null) == SignalAspect.STOP) {
+                  boolean hardStopped = dispatch.reapplyHardStopByName(train, "manual-health-heal");
+                  if (hardStopped) {
+                    sender.sendMessage(
+                        Component.text("已刷新信号并复下发硬停车: " + train, NamedTextColor.GREEN));
+                  } else {
+                    sender.sendMessage(
+                        Component.text("已刷新信号，但硬停车复下发失败: " + train, NamedTextColor.YELLOW));
+                  }
+                  sender.sendMessage(healthActions());
+                  return;
+                }
                 boolean reissued = dispatch.reissueDestinationByName(train);
                 boolean relaunched = !reissued && dispatch.forceRelaunchByName(train);
                 if (reissued) {

@@ -73,6 +73,31 @@ public final class RuntimeTrainController {
         runtimeSettings);
   }
 
+  /** 按指定 STOP 模式应用一次控车命令。 */
+  public TrainLaunchManager.ControlApplicationResult applyControl(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      Optional<BlockFace> launchFallbackDirection,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode) {
+    return launchManager.applyControl(
+        train,
+        properties,
+        aspect,
+        targetBps,
+        config,
+        allowLaunch,
+        distanceOpt,
+        launchFallbackDirection,
+        runtimeSettings,
+        stopMode);
+  }
+
   /**
    * 立即保持停车。
    *
@@ -85,6 +110,16 @@ public final class RuntimeTrainController {
   public void stopNow(RuntimeTrainHandle train) {
     if (train != null) {
       train.stop();
+    }
+  }
+
+  /** 立即执行闭塞硬 STOP：不使用制动曲线，不保留 launch action。 */
+  public void stopHard(RuntimeTrainHandle train, TrainProperties properties) {
+    if (properties != null) {
+      properties.setSpeedLimit(0.0);
+    }
+    if (train != null) {
+      train.stopHard();
     }
   }
 

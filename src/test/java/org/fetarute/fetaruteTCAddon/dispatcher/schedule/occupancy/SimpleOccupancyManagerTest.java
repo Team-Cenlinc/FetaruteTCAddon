@@ -1013,6 +1013,258 @@ class SimpleOccupancyManagerTest {
     assertEquals(5, staleEntry.entryOrder());
   }
 
+  @Test
+  void sameDirectionFrontTrainNotBlockedByRearGuard_onProgressTrigger() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource rearGuardEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("M1")));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "TrainRear", Optional.empty(), now, List.of(rearGuardEdge), Map.of(), 0))
+            .allowed());
+
+    OccupancyResource forwardEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("M1"), NodeId.of("M2")));
+    OccupancyRequest frontProgressRequest =
+        new OccupancyRequest(
+            "TrainFront",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(rearGuardEdge, forwardEdge),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(
+                rearGuardEdge,
+                ResourceIntent.PROTECTIVE_RETAIN,
+                forwardEdge,
+                ResourceIntent.MOVEMENT_REQUIRED));
+
+    OccupancyDecision decision = manager.canEnter(frontProgressRequest);
+
+    assertTrue(decision.allowed());
+    assertTrue(decision.blockers().isEmpty());
+  }
+
+  @Test
+  void protectiveRetainResourceDoesNotBlockForwardMovement() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource tailNode = OccupancyResource.forNode(NodeId.of("TAIL"));
+    OccupancyRequest front =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(tailNode),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(tailNode, ResourceIntent.PROTECTIVE_RETAIN));
+
+    assertTrue(manager.canEnter(front).allowed());
+    assertTrue(manager.acquire(front).allowed());
+    assertEquals("front", manager.getClaim(tailNode).orElseThrow().trainName());
+  }
+
+  @Test
+  void sameDirectionRearTrainStopsBehindFront() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource forwardEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("M1"), NodeId.of("M2")));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "front", Optional.empty(), now, List.of(forwardEdge), Map.of()))
+            .allowed());
+
+    OccupancyDecision rear =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear", Optional.empty(), now.plusSeconds(1), List.of(forwardEdge), Map.of()));
+
+    assertFalse(rear.allowed());
+    assertEquals(SignalAspect.STOP, rear.signal());
+    assertEquals("front", rear.blockers().get(0).trainName());
+  }
+
+  @Test
+  void rawNameAndFtaNameSelfClaimsAreIgnored() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource node = OccupancyResource.forNode(NodeId.of("A"));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "train-main~a", Optional.empty(), now, List.of(node), Map.of()))
+            .allowed());
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "train-main", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of()));
+
+    assertTrue(decision.allowed());
+    assertTrue(decision.blockers().isEmpty());
+  }
+
+  @Test
+  void staleUnknownQueueEntryDoesNotBlockKnownSameDirectionAfterCleanup() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    manager.touchQueues(
+        new OccupancyRequest(
+            "stale-unknown",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0));
+
+    Map<String, CorridorDirection> forward = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "known-same",
+                Optional.empty(),
+                now.plusSeconds(31),
+                List.of(conflict),
+                forward,
+                Map.of(conflict.key(), 0),
+                0));
+
+    assertTrue(decision.allowed());
+  }
+
+  @Test
+  void sameDirectionSingleConflictDoesNotQueueSerialize() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> direction = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+
+    OccupancyRequest front =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            direction,
+            Map.of(conflict.key(), 0),
+            0);
+    assertTrue(manager.acquire(front).allowed());
+
+    OccupancyDecision rear =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict),
+                direction,
+                Map.of(conflict.key(), 0),
+                0));
+
+    assertTrue(rear.allowed());
+    assertTrue(rear.blockers().isEmpty());
+  }
+
+  @Test
+  void sameDirectionSingleConflictDoesNotQueueSerializeWithStaleRearEntry() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> direction = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+    manager.touchQueues(
+        new OccupancyRequest(
+            "stale-rear",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            direction,
+            Map.of(conflict.key(), 9),
+            0));
+
+    OccupancyDecision front =
+        manager.canEnter(
+            new OccupancyRequest(
+                "front",
+                Optional.empty(),
+                now.plusSeconds(31),
+                List.of(conflict),
+                direction,
+                Map.of(conflict.key(), 0),
+                0));
+
+    assertTrue(front.allowed());
+  }
+
+  @Test
+  void unknownDirectionSingleEntryStillFailsClosed() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    manager.touchQueues(
+        new OccupancyRequest(
+            "unknown",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0));
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "known",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict),
+                Map.of(conflict.key(), CorridorDirection.A_TO_B),
+                Map.of(conflict.key(), 1),
+                0));
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+  }
+
   private static OccupancyRequest withClearingHint(
       OccupancyRequest request, OccupancyResource conflict) {
     return request.withConflictReleaseHints(

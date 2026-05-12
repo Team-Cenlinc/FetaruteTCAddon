@@ -256,6 +256,7 @@ command:
       occupancy: "<gray>-</gray> claims=<white><claims></white> queues=<white><queues></white> entries=<white><entries></white>"
       runtime: "<gray>-</gray> progress=<white><progress></white> layover=<white><layover></white> lastHeal=<white><heal_at></white> released=<white><heal_released></white> removedProgress=<white><heal_progress></white> removedLayover=<white><heal_layover></white>"
       spawn: "<gray>-</gray> spawnQueue=<white><queue></white> pending=<white><pending></white> success=<white><success></white> retry=<white><retry></white>"
+      signal: "<gray>-</gray> pathCache=<white><path_hit></white>/<white><path_miss></white> directionCache=<white><direction_hit></white>/<white><direction_miss></white> envelopeBuilds=<white><envelope_builds></white> dirty=<white><dirty></white> coalesced=<white><coalesced></white> reentrantStop=<white><reentrant_stop></white> staleQueueCleanup=<white><stale_queue></white>"
       spawn-error: "<gray>  •</gray> <white><error></white> <gray>x</gray><white><count></white>"
     heal:
       not-ready: "<prefix> <red>运行时调度未就绪，无法自愈</red>"

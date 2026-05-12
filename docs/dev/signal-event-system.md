@@ -1,10 +1,10 @@
 # 信号事件驱动系统
 
-本文档描述 FetaruteTCAddon 的信号事件驱动架构，该架构将占用变化与信号响应解耦，实现即时信号更新。
+本文档描述 FetaruteTCAddon 的信号事件驱动架构，该架构将占用变化与信号响应解耦。事件总线本身是同步的，但运行时控车桥接默认采用 coalescing，避免在占用 acquire/release 的调用栈内重入控车。
 
 ## 概述
 
-传统周期性 tick 模式下，信号状态每隔固定时间（如 5 tick）才会刷新，导致列车在资源释放后仍需等待下一个 tick 才能响应。事件驱动模式通过发布-订阅机制，在资源状态变化时立即触发信号重评估，大幅降低响应延迟。
+传统周期性 tick 模式下，信号状态每隔固定时间（如 5 tick）才会刷新，导致列车在资源释放后仍需等待下一个 tick 才能响应。事件驱动模式通过发布-订阅机制，在资源状态变化时立即触发信号重评估；运行时只把结果标记为 dirty，再由周期 tick 或高优先级 STOP refresh 统一处理授权提交。
 
 ## 架构
 
@@ -36,8 +36,8 @@
 ┌──────────────────────────┐
 │     TrainController      │
 │  订阅 SignalChangedEvent │
-│  更严格信号即时桥接        │
-│  调用 RuntimeDispatch    │
+│  标记 dirty / STOP refresh │
+│  不在 acquire 栈内重入控车 │
 └──────────────────────────┘
 ```
 
@@ -45,7 +45,7 @@
 
 ### SignalEventBus
 
-信号事件总线，提供同步的发布-订阅机制。
+信号事件总线，提供同步的发布-订阅机制。因为发布是同步执行，订阅者不得直接绕过运行时授权链路控车；`RuntimeDispatchService` 的事件桥接默认只记录 dirty train，并用 reentrant guard 抑制同一列车在 acquire 栈内 hard STOP。
 
 ```java
 SignalEventBus bus = new SignalEventBus(debugLogger);
@@ -90,8 +90,8 @@ evaluator.start();
 
 ### TrainController
 
-信号事件桥，接收信号变化事件并把可立即生效的更严格信号交给 RuntimeDispatchService。它不直接调用
-TrainCarts 控车动作，也不会把 STOP/CAUTION 提升成 PROCEED；更宽松信号仍交给周期 tick 统一授权。
+信号事件桥，接收信号变化事件并交给 RuntimeDispatchService。它不直接调用 TrainCarts 控车动作，也不会把
+STOP/CAUTION 提升成 PROCEED；更宽松信号和 PROCEED 只由周期 tick 在 acquire + destination commit 成功后提交。默认开启 `runtime.signal-event-coalesce` 时，STOP 也只记录为高优先级 refresh，不在 occupancy acquire 的同步调用栈内重入 hard STOP。
 
 ```java
 TrainController controller = new TrainController(

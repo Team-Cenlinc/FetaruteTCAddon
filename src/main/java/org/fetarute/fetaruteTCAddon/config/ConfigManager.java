@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 23;
+  private static final int EXPECTED_CONFIG_VERSION = 24;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -58,6 +58,15 @@ public final class ConfigManager {
   private static final double DEFAULT_FAILOVER_STALL_SPEED_BPS = 0.2;
   private static final int DEFAULT_FAILOVER_STALL_TICKS = 60;
   private static final boolean DEFAULT_FAILOVER_UNREACHABLE_STOP = true;
+  private static final boolean DEFAULT_CLEAR_DESTINATION_ON_HARD_STOP = true;
+  private static final boolean DEFAULT_SIGNAL_ENVELOPE_ENABLED = true;
+  private static final boolean DEFAULT_SIGNAL_EVENT_COALESCE = true;
+  private static final int DEFAULT_SIGNAL_PROCEED_STABILITY_TICKS = 1;
+  private static final int DEFAULT_MAX_ENVELOPE_BUILDS_PER_TICK = 50;
+  private static final int DEFAULT_PATH_CACHE_MAX_SIZE = 4096;
+  private static final int DEFAULT_STALE_QUEUE_ENTRY_TTL_SECONDS = 30;
+  private static final int DEFAULT_FOLLOWING_MIN_CLEAR_BLOCKS = 2;
+  private static final int DEFAULT_FOLLOWING_STOP_MARGIN_BLOCKS = 4;
   private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
   private static final double DEFAULT_EMU_DECEL_BPS2 = 1.0;
   private static final double DEFAULT_DMU_ACCEL_BPS2 = 0.7;
@@ -139,12 +148,12 @@ public final class ConfigManager {
     boolean autoFixEnabled = true;
     int stallThresholdSeconds = 30;
     int progressStuckThresholdSeconds = 60;
-    int progressStopGraceSeconds = 180;
+    int progressStopGraceSeconds = 60;
     int deadlockThresholdSeconds = 45;
     int deadlockDestroyThresholdSeconds = 60;
     boolean deadlockDestroyEnabled = true;
     int deadlockDestroyCooldownSeconds = 120;
-    int deadlockEpisodeGraceSeconds = 10;
+    int deadlockEpisodeGraceSeconds = 15;
     int deadlockMinStopSeconds = 20;
     int blockerSnapshotMaxAgeSeconds = 20;
     int recoveryCooldownSeconds = 10;
@@ -176,7 +185,7 @@ public final class ConfigManager {
           section.getInt("progress-stop-grace-seconds", progressStopGraceSeconds);
       if (progressStopGraceSeconds <= 0) {
         logger.warning("health.progress-stop-grace-seconds 配置无效: " + progressStopGraceSeconds);
-        progressStopGraceSeconds = 180;
+        progressStopGraceSeconds = 60;
       }
       deadlockThresholdSeconds =
           section.getInt("deadlock-threshold-seconds", deadlockThresholdSeconds);
@@ -205,7 +214,7 @@ public final class ConfigManager {
       if (deadlockEpisodeGraceSeconds < 0) {
         logger.warning(
             "health.deadlock-episode-grace-seconds 配置无效: " + deadlockEpisodeGraceSeconds);
-        deadlockEpisodeGraceSeconds = 10;
+        deadlockEpisodeGraceSeconds = 15;
       }
       deadlockMinStopSeconds = section.getInt("deadlock-min-stop-seconds", deadlockMinStopSeconds);
       if (deadlockMinStopSeconds < 0) {
@@ -492,6 +501,15 @@ public final class ConfigManager {
     double failoverStallSpeed = DEFAULT_FAILOVER_STALL_SPEED_BPS;
     int failoverStallTicks = DEFAULT_FAILOVER_STALL_TICKS;
     boolean failoverUnreachableStop = DEFAULT_FAILOVER_UNREACHABLE_STOP;
+    boolean clearDestinationOnHardStop = DEFAULT_CLEAR_DESTINATION_ON_HARD_STOP;
+    boolean signalEnvelopeEnabled = DEFAULT_SIGNAL_ENVELOPE_ENABLED;
+    boolean signalEventCoalesce = DEFAULT_SIGNAL_EVENT_COALESCE;
+    int signalProceedStabilityTicks = DEFAULT_SIGNAL_PROCEED_STABILITY_TICKS;
+    int maxEnvelopeBuildsPerTick = DEFAULT_MAX_ENVELOPE_BUILDS_PER_TICK;
+    int pathCacheMaxSize = DEFAULT_PATH_CACHE_MAX_SIZE;
+    int staleQueueEntryTtlSeconds = DEFAULT_STALE_QUEUE_ENTRY_TTL_SECONDS;
+    int followingMinClearBlocks = DEFAULT_FOLLOWING_MIN_CLEAR_BLOCKS;
+    int followingStopMarginBlocks = DEFAULT_FOLLOWING_STOP_MARGIN_BLOCKS;
     if (section != null) {
       ConfigurationSection hud = section.getConfigurationSection("hud");
       if (hud != null) {
@@ -714,6 +732,46 @@ public final class ConfigManager {
       boolean configuredUnreachableStop =
           section.getBoolean("failover-unreachable-stop", failoverUnreachableStop);
       failoverUnreachableStop = configuredUnreachableStop;
+      clearDestinationOnHardStop =
+          section.getBoolean("clear-destination-on-hard-stop", clearDestinationOnHardStop);
+      signalEnvelopeEnabled = section.getBoolean("signal-envelope-enabled", signalEnvelopeEnabled);
+      signalEventCoalesce = section.getBoolean("signal-event-coalesce", signalEventCoalesce);
+      signalProceedStabilityTicks =
+          section.getInt("signal-proceed-stability-ticks", signalProceedStabilityTicks);
+      if (signalProceedStabilityTicks < 0) {
+        logger.warning(
+            "runtime.signal-proceed-stability-ticks 配置无效: " + signalProceedStabilityTicks);
+        signalProceedStabilityTicks = DEFAULT_SIGNAL_PROCEED_STABILITY_TICKS;
+      }
+      maxEnvelopeBuildsPerTick =
+          section.getInt("max-envelope-builds-per-tick", maxEnvelopeBuildsPerTick);
+      if (maxEnvelopeBuildsPerTick <= 0) {
+        logger.warning("runtime.max-envelope-builds-per-tick 配置无效: " + maxEnvelopeBuildsPerTick);
+        maxEnvelopeBuildsPerTick = DEFAULT_MAX_ENVELOPE_BUILDS_PER_TICK;
+      }
+      pathCacheMaxSize = section.getInt("path-cache-max-size", pathCacheMaxSize);
+      if (pathCacheMaxSize <= 0) {
+        logger.warning("runtime.path-cache-max-size 配置无效: " + pathCacheMaxSize);
+        pathCacheMaxSize = DEFAULT_PATH_CACHE_MAX_SIZE;
+      }
+      staleQueueEntryTtlSeconds =
+          section.getInt("stale-queue-entry-ttl-seconds", staleQueueEntryTtlSeconds);
+      if (staleQueueEntryTtlSeconds <= 0) {
+        logger.warning("runtime.stale-queue-entry-ttl-seconds 配置无效: " + staleQueueEntryTtlSeconds);
+        staleQueueEntryTtlSeconds = DEFAULT_STALE_QUEUE_ENTRY_TTL_SECONDS;
+      }
+      followingMinClearBlocks =
+          section.getInt("following-min-clear-blocks", followingMinClearBlocks);
+      if (followingMinClearBlocks < 0) {
+        logger.warning("runtime.following-min-clear-blocks 配置无效: " + followingMinClearBlocks);
+        followingMinClearBlocks = DEFAULT_FOLLOWING_MIN_CLEAR_BLOCKS;
+      }
+      followingStopMarginBlocks =
+          section.getInt("following-stop-margin-blocks", followingStopMarginBlocks);
+      if (followingStopMarginBlocks < 0) {
+        logger.warning("runtime.following-stop-margin-blocks 配置无效: " + followingStopMarginBlocks);
+        followingStopMarginBlocks = DEFAULT_FOLLOWING_STOP_MARGIN_BLOCKS;
+      }
     }
     return new RuntimeSettings(
         tickInterval,
@@ -735,6 +793,7 @@ public final class ConfigManager {
         failoverStallSpeed,
         failoverStallTicks,
         failoverUnreachableStop,
+        clearDestinationOnHardStop,
         movementAuthorityEnabled,
         movementAuthorityStopMarginBlocks,
         movementAuthorityCautionMarginBlocks,
@@ -742,6 +801,14 @@ public final class ConfigManager {
         speedCommandAccelFactor,
         speedCommandDecelFactor,
         distanceCacheRefreshSeconds,
+        signalEnvelopeEnabled,
+        signalEventCoalesce,
+        signalProceedStabilityTicks,
+        maxEnvelopeBuildsPerTick,
+        pathCacheMaxSize,
+        staleQueueEntryTtlSeconds,
+        followingMinClearBlocks,
+        followingStopMarginBlocks,
         hudBossBarEnabled,
         hudBossBarTickInterval,
         hudBossBarTemplate,
@@ -907,7 +974,7 @@ public final class ConfigManager {
 
     public static HealthSettings defaults() {
       return new HealthSettings(
-          true, 5, true, 30, 60, 180, 45, 60, true, 120, 10, 20, 20, 10, 10, true, true);
+          true, 5, true, 30, 60, 60, 45, 60, true, 120, 15, 20, 20, 10, 10, true, true);
     }
   }
 
@@ -1053,6 +1120,7 @@ public final class ConfigManager {
       double failoverStallSpeedBps,
       int failoverStallTicks,
       boolean failoverUnreachableStop,
+      boolean clearDestinationOnHardStop,
       boolean movementAuthorityEnabled,
       double movementAuthorityStopMarginBlocks,
       double movementAuthorityCautionMarginBlocks,
@@ -1060,6 +1128,14 @@ public final class ConfigManager {
       double speedCommandAccelFactor,
       double speedCommandDecelFactor,
       int distanceCacheRefreshSeconds,
+      boolean signalEnvelopeEnabled,
+      boolean signalEventCoalesce,
+      int signalProceedStabilityTicks,
+      int maxEnvelopeBuildsPerTick,
+      int pathCacheMaxSize,
+      int staleQueueEntryTtlSeconds,
+      int followingMinClearBlocks,
+      int followingStopMarginBlocks,
       boolean hudBossBarEnabled,
       int hudBossBarTickIntervalTicks,
       Optional<String> hudBossBarTemplate,
@@ -1142,6 +1218,24 @@ public final class ConfigManager {
       if (distanceCacheRefreshSeconds <= 0) {
         throw new IllegalArgumentException("distanceCacheRefreshSeconds 必须为正数");
       }
+      if (signalProceedStabilityTicks < 0) {
+        throw new IllegalArgumentException("signalProceedStabilityTicks 必须为非负数");
+      }
+      if (maxEnvelopeBuildsPerTick <= 0) {
+        throw new IllegalArgumentException("maxEnvelopeBuildsPerTick 必须为正数");
+      }
+      if (pathCacheMaxSize <= 0) {
+        throw new IllegalArgumentException("pathCacheMaxSize 必须为正数");
+      }
+      if (staleQueueEntryTtlSeconds <= 0) {
+        throw new IllegalArgumentException("staleQueueEntryTtlSeconds 必须为正数");
+      }
+      if (followingMinClearBlocks < 0) {
+        throw new IllegalArgumentException("followingMinClearBlocks 必须为非负数");
+      }
+      if (followingStopMarginBlocks < 0) {
+        throw new IllegalArgumentException("followingStopMarginBlocks 必须为非负数");
+      }
       if (hudBossBarTickIntervalTicks <= 0) {
         throw new IllegalArgumentException("hudBossBarTickIntervalTicks 必须为正数");
       }
@@ -1215,6 +1309,7 @@ public final class ConfigManager {
           failoverStallSpeedBps,
           failoverStallTicks,
           failoverUnreachableStop,
+          DEFAULT_CLEAR_DESTINATION_ON_HARD_STOP,
           movementAuthorityEnabled,
           movementAuthorityStopMarginBlocks,
           movementAuthorityCautionMarginBlocks,
@@ -1222,6 +1317,14 @@ public final class ConfigManager {
           speedCommandAccelFactor,
           speedCommandDecelFactor,
           distanceCacheRefreshSeconds,
+          DEFAULT_SIGNAL_ENVELOPE_ENABLED,
+          DEFAULT_SIGNAL_EVENT_COALESCE,
+          DEFAULT_SIGNAL_PROCEED_STABILITY_TICKS,
+          DEFAULT_MAX_ENVELOPE_BUILDS_PER_TICK,
+          DEFAULT_PATH_CACHE_MAX_SIZE,
+          DEFAULT_STALE_QUEUE_ENTRY_TTL_SECONDS,
+          DEFAULT_FOLLOWING_MIN_CLEAR_BLOCKS,
+          DEFAULT_FOLLOWING_STOP_MARGIN_BLOCKS,
           hudBossBarEnabled,
           hudBossBarTickIntervalTicks,
           hudBossBarTemplate,

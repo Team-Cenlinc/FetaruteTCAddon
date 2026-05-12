@@ -7,6 +7,7 @@ import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 
 /**
  * 普通移动授权协调器。
@@ -30,6 +31,7 @@ final class MovementAuthorizationCoordinator {
     Objects.requireNonNull(request, "request");
     OccupancyDecision previewDecision =
         request.previewDecision().orElseGet(() -> occupancyManager.canEnter(request.request()));
+    trace(request, previewDecision, request.previewScope());
     ProceedEvaluation previewEvaluation =
         request
             .evaluator()
@@ -39,6 +41,7 @@ final class MovementAuthorizationCoordinator {
     }
 
     OccupancyDecision acquired = occupancyManager.acquire(request.request());
+    trace(request, acquired, request.acquireScope());
     ProceedEvaluation acquireEvaluation =
         request
             .evaluator()
@@ -118,4 +121,30 @@ final class MovementAuthorizationCoordinator {
 
   /** 放行评估结果。 */
   record ProceedEvaluation(boolean proceedAllowed, boolean rawAllowed, boolean hardBlockerBypass) {}
+
+  private void trace(AuthorizationRequest request, OccupancyDecision decision, String scope) {
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                request.trainName(),
+                request.trainName(),
+                sourceForScope(scope),
+                decision == null ? null : decision.signal())
+            .primaryReason("movement-authorization:" + scope)
+            .request(request.request())
+            .decision(decision, request.request()),
+        debugLogger);
+  }
+
+  private static SignalComputationTrace.Source sourceForScope(String scope) {
+    if (scope != null && scope.contains("progress")) {
+      return SignalComputationTrace.Source.PROGRESS_TRIGGER;
+    }
+    if (scope != null && scope.contains("departure")) {
+      return SignalComputationTrace.Source.DEPARTURE_GATE;
+    }
+    if (scope != null && scope.contains("health")) {
+      return SignalComputationTrace.Source.HEALTH;
+    }
+    return SignalComputationTrace.Source.AUTHORIZATION;
+  }
 }

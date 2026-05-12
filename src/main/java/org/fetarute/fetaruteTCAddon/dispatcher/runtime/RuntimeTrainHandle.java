@@ -30,6 +30,16 @@ public interface RuntimeTrainHandle {
   void stop();
 
   /**
+   * 执行硬安全停车。
+   *
+   * <p>硬 STOP 用于闭塞、授权失败、互卡兜底等安全边界。实现应立即归零速度并清除 TrainCarts 已排队动作，尤其是 launch action，避免旧 destination
+   * 继续牵引列车。
+   */
+  default void stopHard() {
+    stop();
+  }
+
+  /**
    * 在列车静止时发车；实现应自行处理“正在移动时跳过”的保护。
    *
    * @param targetBlocksPerTick 目标速度（blocks/tick）

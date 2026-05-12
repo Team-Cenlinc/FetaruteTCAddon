@@ -6,6 +6,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
@@ -18,14 +19,17 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  */
 public final class ShortestPathDistanceCache {
 
-  private static final int MAX_CACHE_SIZE = 4096;
+  private static final int DEFAULT_MAX_CACHE_SIZE = 4096;
   private static final long MIN_REFRESH_MILLIS = 1_000L;
 
   private final RailGraphPathFinder pathFinder;
   private volatile long refreshAfterMillis;
+  private volatile int maxCacheSize;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<DistanceKey, CacheEntry> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<DistanceKey, Boolean> refreshing = new ConcurrentHashMap<>();
+  private final LongAdder cacheHits = new LongAdder();
+  private final LongAdder cacheMisses = new LongAdder();
 
   /**
    * @param pathFinder 最短路求解器
@@ -34,14 +38,40 @@ public final class ShortestPathDistanceCache {
    */
   public ShortestPathDistanceCache(
       RailGraphPathFinder pathFinder, Duration refreshAfter, Consumer<String> debugLogger) {
+    this(pathFinder, refreshAfter, DEFAULT_MAX_CACHE_SIZE, debugLogger);
+  }
+
+  /**
+   * @param pathFinder 最短路求解器
+   * @param refreshAfter 刷新间隔（小于 1 秒会自动提升到 1 秒）
+   * @param maxCacheSize 最大缓存项数量（小于 1 时回退默认值）
+   * @param debugLogger 调试日志（可为空）
+   */
+  public ShortestPathDistanceCache(
+      RailGraphPathFinder pathFinder,
+      Duration refreshAfter,
+      int maxCacheSize,
+      Consumer<String> debugLogger) {
     this.pathFinder = Objects.requireNonNull(pathFinder, "pathFinder");
     this.refreshAfterMillis = normalizeRefreshMillis(refreshAfter);
+    this.maxCacheSize = normalizeMaxCacheSize(maxCacheSize);
     this.debugLogger = debugLogger != null ? debugLogger : unused -> {};
   }
 
   /** 动态调整异步刷新间隔。 */
   public void setRefreshAfter(Duration refreshAfter) {
     this.refreshAfterMillis = normalizeRefreshMillis(refreshAfter);
+  }
+
+  /** 动态调整最大缓存项数量。 */
+  public void setMaxCacheSize(int maxCacheSize) {
+    this.maxCacheSize = normalizeMaxCacheSize(maxCacheSize);
+    pruneIfNeeded(System.currentTimeMillis());
+  }
+
+  /** 返回缓存命中统计。 */
+  public Stats stats() {
+    return new Stats(cacheHits.sum(), cacheMisses.sum(), cache.size(), refreshing.size());
   }
 
   /**
@@ -63,11 +93,13 @@ public final class ShortestPathDistanceCache {
     long nowMs = System.currentTimeMillis();
     CacheEntry cached = cache.get(key);
     if (cached != null) {
+      cacheHits.increment();
       if (nowMs - cached.sampledAtMs() >= refreshAfterMillis) {
         refreshAsync(key, graph, from, to);
       }
       return cached.distance();
     }
+    cacheMisses.increment();
     OptionalLong computed = computeDistance(graph, from, to);
     cache.put(key, new CacheEntry(computed, nowMs));
     pruneIfNeeded(nowMs);
@@ -105,7 +137,7 @@ public final class ShortestPathDistanceCache {
   }
 
   private void pruneIfNeeded(long nowMs) {
-    if (cache.size() <= MAX_CACHE_SIZE) {
+    if (cache.size() <= maxCacheSize) {
       return;
     }
     long expireBefore = nowMs - refreshAfterMillis * 4L;
@@ -130,4 +162,11 @@ public final class ShortestPathDistanceCache {
         refreshAfter != null && !refreshAfter.isNegative() ? refreshAfter.toMillis() : 0L;
     return Math.max(MIN_REFRESH_MILLIS, configured);
   }
+
+  private static int normalizeMaxCacheSize(int maxCacheSize) {
+    return maxCacheSize > 0 ? maxCacheSize : DEFAULT_MAX_CACHE_SIZE;
+  }
+
+  /** 缓存运行统计。 */
+  public record Stats(long hits, long misses, int size, int refreshing) {}
 }

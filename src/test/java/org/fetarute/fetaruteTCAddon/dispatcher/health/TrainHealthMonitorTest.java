@@ -340,7 +340,7 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
     when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
     when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
-    when(dispatchService.reissueDestinationByName("train1")).thenReturn(false);
+    when(dispatchService.reapplyHardStopByName(eq("train1"), anyString())).thenReturn(true);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
@@ -352,7 +352,8 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("train1"), t0.plusSeconds(55)); // stage2 retry: reissue-stop
 
     verify(dispatchService, atLeastOnce()).refreshSignalByName("train1");
-    verify(dispatchService, atLeastOnce()).reissueDestinationByName("train1");
+    verify(dispatchService, atLeastOnce()).reapplyHardStopByName(eq("train1"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName("train1");
     verify(dispatchService, never()).forceRelaunchByName("train1");
   }
 
@@ -463,7 +464,7 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("互相阻塞分级恢复：自动模式只 refresh/reissue")
+  @DisplayName("互相阻塞分级恢复：自动模式只 refresh/hard-stop")
   void mutualDeadlockEscalatesRecoveryStages() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
@@ -471,7 +472,7 @@ class TrainHealthMonitorTest {
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
     stubConfirmedDeadlock("trainA", "trainB");
-    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(true);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
@@ -484,13 +485,14 @@ class TrainHealthMonitorTest {
 
     verify(dispatchService, atLeastOnce()).refreshSignalByName("trainA");
     verify(dispatchService, atLeastOnce()).refreshSignalByName("trainB");
-    verify(dispatchService).reissueDestinationByName("trainA");
-    verify(dispatchService, never()).reissueDestinationByName("trainB");
+    verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
+    verify(dispatchService).reapplyHardStopByName(eq("trainB"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
     verify(dispatchService, never()).forceRelaunchByName(anyString());
   }
 
   @Test
-  @DisplayName("互相阻塞自动恢复在销毁阈值前不会 relaunch 或销毁列车")
+  @DisplayName("互相阻塞自动恢复在销毁阈值前不会 reissue、relaunch 或销毁列车")
   void mutualDeadlockDoesNotRelaunchOrDestroyBeforeDestroyThreshold() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
@@ -498,7 +500,7 @@ class TrainHealthMonitorTest {
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
     stubConfirmedDeadlock("trainA", "trainB");
-    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(true);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
@@ -506,10 +508,11 @@ class TrainHealthMonitorTest {
     Instant t0 = Instant.now();
     monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // stage1 refresh
-    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 reissue
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 hard-stop
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage2 retry
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // stage2 retry
 
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
     verify(dispatchService, never()).forceRelaunchByName(anyString());
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
@@ -523,7 +526,7 @@ class TrainHealthMonitorTest {
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
     stubConfirmedDeadlock("trainA", "trainB");
-    when(dispatchService.reissueDestinationByName(anyString())).thenReturn(false);
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(false);
     when(dispatchService.destroyTrainByName(eq("trainA"), eq("health-deadlock-timeout")))
         .thenReturn(true);
     doNothing()
@@ -537,7 +540,7 @@ class TrainHealthMonitorTest {
     Instant t0 = Instant.now();
     monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // stage1 refresh
-    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 reissue
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 hard-stop
     TrainHealthMonitor.CheckResult result =
         monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100)); // destroy leader
 
@@ -557,7 +560,7 @@ class TrainHealthMonitorTest {
     when(dispatchService.getTrainState("trainB"))
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
     stubConfirmedDeadlock("trainA", "trainB");
-    when(dispatchService.reissueDestinationByName(anyString())).thenReturn(false);
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(false);
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
@@ -565,12 +568,13 @@ class TrainHealthMonitorTest {
     Instant t0 = Instant.now();
     monitor.check(Set.of("trainA", "trainB"), t0); // 首次采样
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50)); // stage1 refresh
-    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 reissue 失败
-    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage2 reissue retry
-    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // stage2 reissue retry
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65)); // stage2 hard-stop 失败
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80)); // stage2 hard-stop retry
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(95)); // stage2 hard-stop retry
 
-    verify(dispatchService).reissueDestinationByName("trainA");
-    verify(dispatchService, never()).reissueDestinationByName("trainB");
+    verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
+    verify(dispatchService).reapplyHardStopByName(eq("trainB"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
     verify(dispatchService, never()).forceRelaunchByName(anyString());
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
@@ -643,7 +647,6 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("trainA", "trainB"), t0);
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80));
 
-    verify(dispatchService, never()).refreshSignalByName(anyString());
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
@@ -684,7 +687,8 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("trainA", "trainB"), t0);
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80));
 
-    verify(dispatchService, never()).refreshSignalByName(anyString());
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
@@ -773,7 +777,7 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("手动强制解锁：不等待阈值，直接升级到 reissue/relaunch")
+  @DisplayName("手动强制解锁：不等待阈值，直接复下发 hard-stop")
   void forceUnlockNowEscalatesImmediately() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
@@ -782,18 +786,17 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
     when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
     when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainA"));
-    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(false);
-    when(dispatchService.reissueDestinationByName("trainB")).thenReturn(false);
-    when(dispatchService.forceRelaunchByName("trainA")).thenReturn(true);
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(true);
 
     int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
 
     assertEquals(1, fixed, "应在单次手动解锁中完成一对互卡修复");
     verify(dispatchService).refreshSignalByName("trainA");
     verify(dispatchService).refreshSignalByName("trainB");
-    verify(dispatchService).reissueDestinationByName("trainA");
-    verify(dispatchService).reissueDestinationByName("trainB");
-    verify(dispatchService).forceRelaunchByName("trainA");
+    verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
+    verify(dispatchService).reapplyHardStopByName(eq("trainB"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
   }
 
   @Test
@@ -815,8 +818,8 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("手动强制解锁：STOP 单车阻塞时尝试 reissue")
-  void forceUnlockNowReissuesSingleBlockedStopTrain() {
+  @DisplayName("手动强制解锁：STOP 单车阻塞时复下发 hard-stop")
+  void forceUnlockNowReappliesHardStopForSingleBlockedStopTrain() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
@@ -824,18 +827,20 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.PROCEED, 0.5)));
     when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
     when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainC"));
-    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(true);
+    when(dispatchService.reapplyHardStopByName(eq("trainA"), anyString())).thenReturn(true);
 
     int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
 
-    assertEquals(1, fixed, "单车 STOP 阻塞时应尝试 reissue");
+    assertEquals(1, fixed, "单车 STOP 阻塞时应复下发 hard-stop");
     verify(dispatchService).refreshSignalByName("trainA");
-    verify(dispatchService).reissueDestinationByName("trainA");
+    verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
   }
 
   @Test
-  @DisplayName("手动强制解锁：STOP 单车阻塞时 reissue 失败后升级 relaunch")
-  void forceUnlockNowRelaunchesSingleBlockedStopTrainWhenReissueFails() {
+  @DisplayName("手动强制解锁：STOP 单车阻塞 hard-stop 失败时不升级动车")
+  void forceUnlockNowDoesNotRelaunchSingleBlockedStopTrainWhenHardStopFails() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
@@ -843,15 +848,15 @@ class TrainHealthMonitorTest {
         .thenReturn(Optional.of(state("trainB", 7, SignalAspect.PROCEED, 0.5)));
     when(dispatchService.recentBlockerTrains(eq("trainA"), any())).thenReturn(Set.of("trainB"));
     when(dispatchService.recentBlockerTrains(eq("trainB"), any())).thenReturn(Set.of("trainC"));
-    when(dispatchService.reissueDestinationByName("trainA")).thenReturn(false);
-    when(dispatchService.forceRelaunchByName("trainA")).thenReturn(true);
+    when(dispatchService.reapplyHardStopByName(eq("trainA"), anyString())).thenReturn(false);
 
     int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
 
-    assertEquals(1, fixed, "单车 STOP 阻塞时应升级到 relaunch");
+    assertEquals(0, fixed, "单车 STOP 阻塞时 hard-stop 失败也不应升级到 relaunch");
     verify(dispatchService).refreshSignalByName("trainA");
-    verify(dispatchService).reissueDestinationByName("trainA");
-    verify(dispatchService).forceRelaunchByName("trainA");
+    verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName(anyString());
+    verify(dispatchService, never()).forceRelaunchByName(anyString());
   }
 
   @Test

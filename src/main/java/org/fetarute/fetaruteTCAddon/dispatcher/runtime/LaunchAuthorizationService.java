@@ -3,7 +3,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -14,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 
 /**
  * 闭塞出发授权服务。
@@ -317,14 +317,11 @@ public final class LaunchAuthorizationService {
     if (blockers == null || blockers.isEmpty()) {
       return false;
     }
-    String self = trainName == null ? "" : trainName.trim().toLowerCase(Locale.ROOT);
     for (OccupancyClaim blocker : blockers) {
       if (blocker == null || blocker.resource() == null) {
         return true;
       }
-      String owner =
-          blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
-      if (!owner.isEmpty() && owner.equals(self)) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
         continue;
       }
       ResourceKind kind = blocker.resource().kind();

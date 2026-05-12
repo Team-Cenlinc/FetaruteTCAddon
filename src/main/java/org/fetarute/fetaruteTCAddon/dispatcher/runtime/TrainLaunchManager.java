@@ -72,6 +72,35 @@ public final class TrainLaunchManager {
       OptionalLong distanceOpt,
       java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
       ConfigManager.RuntimeSettings runtimeSettings) {
+    return applyControl(
+        train,
+        properties,
+        aspect,
+        targetBps,
+        config,
+        allowLaunch,
+        distanceOpt,
+        launchFallbackDirection,
+        runtimeSettings,
+        StopControlMode.BRAKING_TO_PLANNED_STOP);
+  }
+
+  /**
+   * 应用控车动作：限速、加减速曲线、发车/停车。
+   *
+   * @param stopMode STOP 信号的落地模式；硬 STOP 不允许速度曲线和 launch action
+   */
+  public ControlApplicationResult applyControl(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode) {
     if (properties == null || aspect == null || config == null || runtimeSettings == null) {
       return new ControlApplicationResult(
           targetBps, OptionalDouble.empty(), Math.max(0.0, targetBps), "none");
@@ -83,6 +112,16 @@ public final class TrainLaunchManager {
     }
 
     if (aspect == SignalAspect.STOP) {
+      StopControlMode resolvedStopMode =
+          stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
+      if (resolvedStopMode == StopControlMode.HARD_STOP) {
+        rememberSpeedCommand(properties, 0.0);
+        properties.setSpeedLimit(0.0);
+        if (train != null) {
+          train.stopHard();
+        }
+        return new ControlApplicationResult(targetBps, OptionalDouble.empty(), 0.0, "hard_stop");
+      }
       // STOP 是闭塞硬约束，但控车仍按剩余授权距离做制动曲线；距离缺失或已到停车点时才硬停。
       double curveSpeed =
           Math.max(0.0, resolveStopSpeed(train, config, distanceOpt, runtimeSettings));

@@ -779,7 +779,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void handleSignalTickDoesNotDowngradeProceedWithoutHardConstraint() {
+  void handleSignalTickStopsWhenAuthorityEndTooCloseEvenWithoutBlocker() {
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
@@ -830,7 +830,11 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.PROCEED, aspect);
+    assertEquals(
+        SignalAspect.STOP,
+        aspect,
+        () -> service.getDiagnostics("train-1").map(Object::toString).orElse("no diagnostics"));
+    assertEquals(1, train.hardStopCalls);
   }
 
   @Test
@@ -935,7 +939,8 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     service.handleSignalTick(train, false);
 
-    verify(occupancyManager).releaseResource(edge, Optional.of("train-1"));
+    verify(occupancyManager, org.mockito.Mockito.never())
+        .releaseResource(edge, Optional.of("train-1"));
     verify(occupancyManager, org.mockito.Mockito.never())
         .releaseResource(keepNode, Optional.of("train-1"));
     verify(occupancyManager, org.mockito.Mockito.never()).releaseByTrain("train-1");
@@ -1147,13 +1152,16 @@ class RuntimeDispatchServiceTest {
         ArgumentCaptor.forClass(OccupancyRequest.class);
     verify(occupancyManager).acquire(acquireCaptor.capture());
     assertEquals(
-        List.of(OccupancyResource.forNode(current)), acquireCaptor.getValue().resourceList());
+        List.of(
+            OccupancyResource.forNode(current),
+            OccupancyResource.forEdge(EdgeId.undirected(next, current))),
+        acquireCaptor.getValue().resourceList());
     assertTrue(
         service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
   }
 
   @Test
-  void checkDepartureAllowsMarkedConflictReleaseWithHardBlockers() {
+  void checkDepartureBlocksMarkedConflictReleaseWithHardBlockers() {
     NodeId current = NodeId.of("ST");
     NodeId next = NodeId.of("NEXT");
     RouteDefinition route =
@@ -1219,7 +1227,7 @@ class RuntimeDispatchServiceTest {
     SignNodeDefinition definition =
         new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty());
 
-    assertTrue(service.checkDeparture(train, definition));
+    assertFalse(service.checkDeparture(train, definition));
     verify(occupancyManager, atLeastOnce()).acquire(any());
     assertTrue(
         service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("opposite-train"));
@@ -1446,9 +1454,11 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     service.handleSignalTick(train, false);
 
-    verify(occupancyManager).releaseResource(edge, Optional.of("train-1"));
+    verify(occupancyManager, org.mockito.Mockito.never())
+        .releaseResource(edge, Optional.of("train-1"));
     verify(occupancyManager, org.mockito.Mockito.never())
         .releaseResource(keepNode, Optional.of("train-1"));
+    assertEquals(1, train.hardStopCalls);
   }
 
   @Test
@@ -1569,7 +1579,8 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, false);
 
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.CAUTION, aspect);
+    assertEquals(SignalAspect.STOP, aspect);
+    assertEquals(1, train.hardStopCalls);
   }
 
   @Test
@@ -3327,12 +3338,13 @@ class RuntimeDispatchServiceTest {
     ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
     verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
 
-    assertEquals(28.8 / 20.0, speedCaptor.getValue(), 1.0e-6);
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
     assertEquals(SignalAspect.PROCEED, diagnostics.currentSignal());
     assertEquals(28.8, diagnostics.edgeLimitBps(), 1.0e-6);
-    assertEquals(28.8, diagnostics.finalTargetBps(), 1.0e-6);
-    assertEquals("edge_limit", diagnostics.finalLimiterSource());
+    assertTrue(diagnostics.finalTargetBps() < 28.8);
+    assertEquals("movement_authority", diagnostics.finalLimiterSource());
+    assertTrue(diagnostics.movementAuthorityLimitBps().isPresent());
+    assertEquals(diagnostics.finalTargetBps() / 20.0, speedCaptor.getValue(), 1.0e-6);
     assertTrue(diagnostics.speedCurveLimitBps().isEmpty());
   }
 
@@ -3394,10 +3406,10 @@ class RuntimeDispatchServiceTest {
     ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
     verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
 
-    assertEquals(28.8 / 20.0, speedCaptor.getValue(), 1.0e-6);
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
     assertEquals("none", diagnostics.approachKind());
-    assertEquals("edge_limit", diagnostics.finalLimiterSource());
+    assertEquals("movement_authority", diagnostics.finalLimiterSource());
+    assertEquals(diagnostics.finalTargetBps() / 20.0, speedCaptor.getValue(), 1.0e-6);
   }
 
   @Test
@@ -3522,7 +3534,7 @@ class RuntimeDispatchServiceTest {
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
     assertEquals("none", diagnostics.approachKind());
-    assertEquals("edge_limit", diagnostics.finalLimiterSource());
+    assertEquals("movement_authority", diagnostics.finalLimiterSource());
   }
 
   @Test
@@ -3786,7 +3798,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void movementAuthorityRecommendedSpeedBecomesFinalLimiter() {
+  void movementAuthorityHardBlockerAppliesHardStopInsteadOfSpeedCurve() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     NodeId c = NodeId.of("C");
@@ -3856,11 +3868,10 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
-    assertEquals(SignalAspect.CAUTION, diagnostics.currentSignal());
-    assertTrue(diagnostics.movementAuthorityLimitBps().isPresent());
-    assertEquals(4.0, diagnostics.movementAuthorityLimitBps().getAsDouble(), 1.0e-6);
-    assertEquals(4.0, diagnostics.finalTargetBps(), 1.0e-6);
-    assertEquals("movement_authority", diagnostics.finalLimiterSource());
+    assertEquals(SignalAspect.STOP, diagnostics.currentSignal());
+    assertEquals(0.0, diagnostics.finalTargetBps(), 1.0e-6);
+    assertEquals("hard_stop", diagnostics.finalLimiterSource());
+    assertEquals(1, train.hardStopCalls);
   }
 
   @Test
@@ -4014,7 +4025,16 @@ class RuntimeDispatchServiceTest {
             "FTA_LINE_CODE=l1",
             "FTA_ROUTE_CODE=r1",
             "FTA_ROUTE_INDEX=0");
-    when(tags.properties().getDestination()).thenReturn("NEXT");
+    java.util.concurrent.atomic.AtomicReference<String> destination =
+        new java.util.concurrent.atomic.AtomicReference<>("NEXT");
+    when(tags.properties().getDestination()).thenAnswer(inv -> destination.get());
+    org.mockito.Mockito.doAnswer(
+            inv -> {
+              destination.set("");
+              return null;
+            })
+        .when(tags.properties())
+        .clearDestination();
     UUID worldId = UUID.randomUUID();
 
     ConfigManager configManager = mock(ConfigManager.class);
@@ -4067,12 +4087,17 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             null);
 
-    service.handleSignalTick(new FakeTrain(worldId, tags.properties(), false, 0.0), true);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+    service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
-    assertTrue(diagnostics.destinationPresentWhileBlocked());
-    assertEquals("NEXT", diagnostics.retainedDestination());
-    assertEquals("authorization-blocked", diagnostics.blockedReason());
+    assertFalse(diagnostics.destinationPresentWhileBlocked());
+    assertEquals("-", diagnostics.retainedDestination());
+    assertEquals("authorization_failure", diagnostics.blockedReason());
+    verify(tags.properties()).clearDestinationRoute();
+    verify(tags.properties()).clearDestination();
+    verify(tags.properties(), never()).setDestination(any());
+    assertEquals(1, train.hardStopCalls);
   }
 
   @Test
@@ -4152,6 +4177,7 @@ class RuntimeDispatchServiceTest {
     private int launchCalls = 0;
     private int destroyCalls = 0;
     private int stopCalls = 0;
+    private int hardStopCalls = 0;
 
     private FakeTrain(UUID worldId, TrainProperties properties, boolean moving) {
       this(worldId, properties, moving, 0.0);
@@ -4192,6 +4218,12 @@ class RuntimeDispatchServiceTest {
 
     @Override
     public void stop() {
+      stopCalls++;
+    }
+
+    @Override
+    public void stopHard() {
+      hardStopCalls++;
       stopCalls++;
     }
 
@@ -4606,6 +4638,328 @@ class RuntimeDispatchServiceTest {
             Duration.ZERO,
             Optional.empty());
     assertTrue((boolean) method.invoke(null, "train-1", List.of(edgeBlocker)));
+  }
+
+  @Test
+  void movementInhibitedOnlyClearsAfterTokenCommit() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+
+    java.lang.reflect.Method invalidate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "invalidateMovementAuthorization", String.class, HardStopReason.class);
+    java.lang.reflect.Method issue =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "issueMovementAuthorizationToken",
+            String.class,
+            NodeId.class,
+            NodeId.class,
+            OccupancyRequest.class,
+            SignalAspect.class,
+            Instant.class);
+    java.lang.reflect.Method activate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "activateMovementAuthorizationToken",
+            String.class,
+            MovementAuthorizationToken.class,
+            String.class);
+    invalidate.setAccessible(true);
+    issue.setAccessible(true);
+    activate.setAccessible(true);
+
+    invalidate.invoke(service, "train-1", HardStopReason.AUTHORIZATION_FAILURE);
+    MovementAuthorizationToken token =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                "train-1",
+                NodeId.of("A"),
+                NodeId.of("B"),
+                request,
+                SignalAspect.PROCEED,
+                Instant.now());
+
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertFalse(token.active());
+
+    assertTrue((boolean) activate.invoke(service, "train-1", token, "B"));
+    assertFalse(service.isMovementInhibited("train-1"));
+  }
+
+  @Test
+  void destinationCommitRequiresMatchingClaimVersion() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-1",
+            Optional.empty(),
+            Instant.now(),
+            List.of(OccupancyResource.forNode(NodeId.of("B"))),
+            Map.of());
+
+    java.lang.reflect.Method issue =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "issueMovementAuthorizationToken",
+            String.class,
+            NodeId.class,
+            NodeId.class,
+            OccupancyRequest.class,
+            SignalAspect.class,
+            Instant.class);
+    java.lang.reflect.Method activate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "activateMovementAuthorizationToken",
+            String.class,
+            MovementAuthorizationToken.class,
+            String.class);
+    issue.setAccessible(true);
+    activate.setAccessible(true);
+
+    MovementAuthorizationToken stale =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                "train-1",
+                NodeId.of("A"),
+                NodeId.of("B"),
+                request,
+                SignalAspect.PROCEED,
+                Instant.now());
+    issue.invoke(
+        service,
+        "train-1",
+        NodeId.of("A"),
+        NodeId.of("B"),
+        request,
+        SignalAspect.PROCEED,
+        Instant.now());
+
+    assertFalse((boolean) activate.invoke(service, "train-1", stale, "B"));
+  }
+
+  @Test
+  void proceedEventIgnoredUntilPeriodicCommit() {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(mock(OccupancyManager.class), debugMessages);
+
+    service.applySignalFromEvent("train-1", SignalAspect.PROCEED);
+
+    RuntimeDispatchService.SignalRuntimeStats stats = service.signalRuntimeStats();
+    assertEquals(1, stats.dirtyTrainCount());
+    assertEquals(1, stats.coalescedEventCount());
+  }
+
+  @Test
+  void hardStopToProceedRequiresAcquireCommit() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+
+    java.lang.reflect.Method issue =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "issueMovementAuthorizationToken",
+            String.class,
+            NodeId.class,
+            NodeId.class,
+            OccupancyRequest.class,
+            SignalAspect.class,
+            Instant.class);
+    java.lang.reflect.Method activate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "activateMovementAuthorizationToken",
+            String.class,
+            MovementAuthorizationToken.class,
+            String.class);
+    java.lang.reflect.Method hasValid =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasValidMovementAuthorization", String.class, NodeId.class, NodeId.class, List.class);
+    issue.setAccessible(true);
+    activate.setAccessible(true);
+    hasValid.setAccessible(true);
+
+    MovementAuthorizationToken pending =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                "train-1",
+                NodeId.of("A"),
+                NodeId.of("B"),
+                request,
+                SignalAspect.PROCEED,
+                Instant.now());
+
+    assertFalse(
+        (boolean)
+            hasValid.invoke(service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+    assertTrue((boolean) activate.invoke(service, "train-1", pending, "B"));
+    assertTrue(
+        (boolean)
+            hasValid.invoke(service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+  }
+
+  @Test
+  void acquireEventDoesNotStopSameTrainReentrantly() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+
+    java.lang.reflect.Method issue =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "issueMovementAuthorizationToken",
+            String.class,
+            NodeId.class,
+            NodeId.class,
+            OccupancyRequest.class,
+            SignalAspect.class,
+            Instant.class);
+    java.lang.reflect.Method activate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "activateMovementAuthorizationToken",
+            String.class,
+            MovementAuthorizationToken.class,
+            String.class);
+    java.lang.reflect.Method hasValid =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasValidMovementAuthorization", String.class, NodeId.class, NodeId.class, List.class);
+    issue.setAccessible(true);
+    activate.setAccessible(true);
+    hasValid.setAccessible(true);
+
+    MovementAuthorizationToken token =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                "train-1",
+                NodeId.of("A"),
+                NodeId.of("B"),
+                request,
+                SignalAspect.PROCEED,
+                Instant.now());
+    assertTrue((boolean) activate.invoke(service, "train-1", token, "B"));
+
+    service.applySignalFromEvent("train-1", SignalAspect.STOP);
+
+    RuntimeDispatchService.SignalRuntimeStats stats = service.signalRuntimeStats();
+    assertEquals(1, stats.dirtyTrainCount());
+    assertEquals(1, stats.coalescedEventCount());
+    assertTrue(
+        (boolean)
+            hasValid.invoke(service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+  }
+
+  @Test
+  void stopProceedPingPongRegression() {
+    RuntimeDispatchService service = createMinimalService();
+
+    service.applySignalFromEvent("train-1", SignalAspect.STOP);
+    service.applySignalFromEvent("train-1", SignalAspect.PROCEED);
+
+    RuntimeDispatchService.SignalRuntimeStats stats = service.signalRuntimeStats();
+    assertEquals(1, stats.dirtyTrainCount());
+    assertEquals(2, stats.coalescedEventCount());
+    assertEquals(0, stats.reentrantStopSuppressed());
+  }
+
+  @Test
+  void eventCoalescingLimitsEnvelopeBuildsPerTick() {
+    RuntimeDispatchService service = createMinimalService();
+
+    service.applySignalFromEvent("train-1", SignalAspect.STOP);
+    service.applySignalFromEvent("train-2", SignalAspect.CAUTION);
+
+    RuntimeDispatchService.SignalRuntimeStats stats = service.signalRuntimeStats();
+    assertEquals(2, stats.dirtyTrainCount());
+    assertEquals(2, stats.coalescedEventCount());
+    assertEquals(0, stats.envelopeBuildCount());
+  }
+
+  @Test
+  void signalEnvelopeLimitsFollowingTrainSpeed() {
+    ConstraintPoint point =
+        new ConstraintPoint(
+            ConstraintType.FOLLOWING_TRAIN,
+            org.fetarute
+                .fetaruteTCAddon
+                .dispatcher
+                .schedule
+                .occupancy
+                .BlockerRelation
+                .SAME_DIRECTION_FRONT,
+            OptionalLong.of(12L),
+            OptionalDouble.of(4.0),
+            Optional.of("front"),
+            Optional.of("EDGE:M1~M2"));
+
+    SignalConstraintEnvelope envelope =
+        new SignalConstraintEnvelope(
+            SignalAspect.CAUTION,
+            StopControlMode.BRAKING_TO_PLANNED_STOP,
+            List.of(point),
+            OptionalLong.empty(),
+            Optional.empty(),
+            OptionalDouble.of(4.0),
+            OptionalDouble.of(3.5),
+            false,
+            false,
+            "following-train");
+
+    assertEquals(SignalAspect.CAUTION, envelope.aspect());
+    assertEquals(4.0, envelope.targetSpeedBps().orElseThrow());
+    assertEquals(ConstraintType.FOLLOWING_TRAIN, envelope.constraints().get(0).type());
+  }
+
+  @Test
+  void authorityEndStillLimitsProceed() {
+    SignalConstraintEnvelope envelope =
+        new SignalConstraintEnvelope(
+            SignalAspect.PROCEED,
+            StopControlMode.BRAKING_TO_PLANNED_STOP,
+            List.of(
+                new ConstraintPoint(
+                    ConstraintType.AUTHORITY_END,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .dispatcher
+                        .schedule
+                        .occupancy
+                        .BlockerRelation
+                        .HARD_OCCUPANCY,
+                    OptionalLong.of(18L),
+                    OptionalDouble.empty(),
+                    Optional.empty(),
+                    Optional.of("NODE:D"))),
+            OptionalLong.of(18L),
+            Optional.of("NODE:D"),
+            OptionalDouble.of(8.0),
+            OptionalDouble.of(6.0),
+            true,
+            true,
+            "authority-end");
+
+    assertEquals(SignalAspect.PROCEED, envelope.aspect());
+    assertEquals("NODE:D", envelope.authorityEndResource().orElseThrow());
+    assertTrue(envelope.requireFreshAcquire());
+  }
+
+  @Test
+  void signalEnvelopeUsesCacheOnRepeatedTick() {
+    RuntimeDispatchService service = createMinimalService();
+
+    service.applySignalFromEvent("train-1", SignalAspect.CAUTION);
+    service.applySignalFromEvent("train-1", SignalAspect.CAUTION);
+
+    RuntimeDispatchService.SignalRuntimeStats stats = service.signalRuntimeStats();
+    assertEquals(1, stats.dirtyTrainCount());
+    assertEquals(2, stats.coalescedEventCount());
+    assertEquals(0, stats.envelopeBuildCount());
   }
 
   // ====== 异常列车清理去重测试 ======

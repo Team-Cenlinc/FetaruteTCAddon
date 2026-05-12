@@ -103,6 +103,18 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     }
   }
 
+  /** 执行闭塞硬 STOP：归零速度并清空整列 TrainCarts 动作队列。 */
+  @Override
+  public void stopHard() {
+    group.stop(true);
+    group.getActions().clear();
+    for (MinecartMember<?> member : group) {
+      if (member != null) {
+        member.getActions().clear();
+      }
+    }
+  }
+
   /**
    * 发车至目标速度。
    *

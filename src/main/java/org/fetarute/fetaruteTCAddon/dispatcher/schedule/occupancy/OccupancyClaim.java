@@ -19,7 +19,8 @@ public record OccupancyClaim(
     Optional<RouteId> routeId,
     Instant acquiredAt,
     Duration headway,
-    Optional<CorridorDirection> corridorDirection) {
+    Optional<CorridorDirection> corridorDirection,
+    ClaimRole role) {
 
   public OccupancyClaim {
     Objects.requireNonNull(resource, "resource");
@@ -28,11 +29,29 @@ public record OccupancyClaim(
     Objects.requireNonNull(acquiredAt, "acquiredAt");
     Objects.requireNonNull(headway, "headway");
     Objects.requireNonNull(corridorDirection, "corridorDirection");
+    role = role == null ? ClaimRole.MOVEMENT_REQUIRED : role;
     if (trainName.isBlank()) {
       throw new IllegalArgumentException("trainName 不能为空");
     }
     if (headway.isNegative()) {
       throw new IllegalArgumentException("headway 不能为负");
     }
+  }
+
+  public OccupancyClaim(
+      OccupancyResource resource,
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant acquiredAt,
+      Duration headway,
+      Optional<CorridorDirection> corridorDirection) {
+    this(
+        resource,
+        trainName,
+        routeId,
+        acquiredAt,
+        headway,
+        corridorDirection,
+        ClaimRole.MOVEMENT_REQUIRED);
   }
 }

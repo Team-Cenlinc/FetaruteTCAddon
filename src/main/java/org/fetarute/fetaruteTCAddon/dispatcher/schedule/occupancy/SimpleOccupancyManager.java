@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
@@ -43,6 +45,8 @@ public final class SimpleOccupancyManager
   private final SignalEventBus eventBus;
   private final Map<OccupancyResource, List<OccupancyClaim>> claims = new LinkedHashMap<>();
   private final Map<OccupancyResource, ConflictQueue> queues = new LinkedHashMap<>();
+  private final AtomicLong version = new AtomicLong();
+  private final AtomicLong staleQueueCleanupCount = new AtomicLong();
 
   /** 冲突区放行锁：key=冲突资源 key，value=被放行列车与锁定过期时间。 */
   private final Map<String, DeadlockReleaseLock> deadlockReleaseLocks = new LinkedHashMap<>();
@@ -71,6 +75,16 @@ public final class SimpleOccupancyManager
     this.eventBus = eventBus;
   }
 
+  /** 返回占用/队列快照版本。claim 或 queue 发生真实变更时递增。 */
+  public long version() {
+    return version.get();
+  }
+
+  /** 返回因 TTL 清理的 queue entry 数量。 */
+  public long staleQueueCleanupCount() {
+    return staleQueueCleanupCount.get();
+  }
+
   /**
    * 预判是否允许进入指定资源集合（不写入状态）。
    *
@@ -87,10 +101,13 @@ public final class SimpleOccupancyManager
       if (resource == null) {
         continue;
       }
-      Optional<OccupancyDecision> directionBlocked =
-          failClosedUnknownSingleConflictEntry(request, resource, now);
-      if (directionBlocked.isPresent()) {
-        return directionBlocked.get();
+      boolean hardAuthority = request.intentFor(resource).hardAuthority();
+      if (hardAuthority) {
+        Optional<OccupancyDecision> directionBlocked =
+            failClosedUnknownSingleConflictEntry(request, resource, now);
+        if (directionBlocked.isPresent()) {
+          return traceDecision("canEnter:unknown-single", request, directionBlocked.get());
+        }
       }
       List<OccupancyClaim> existing = claims.get(resource);
       if (existing == null || existing.isEmpty()) {
@@ -100,11 +117,11 @@ public final class SimpleOccupancyManager
         if (claim == null) {
           continue;
         }
-        if (claim.trainName().equalsIgnoreCase(request.trainName())) {
+        BlockerRelation relation = BlockerClassifier.classify(request, resource, claim);
+        if (relation == BlockerRelation.SELF) {
           continue;
         }
-        if (isSingleCorridorConflict(resource)
-            && isSameCorridorDirection(request, resource, claim)) {
+        if (!hardAuthority || relation == BlockerRelation.SAME_DIRECTION_FRONT) {
           continue;
         }
         blockers.add(claim);
@@ -116,19 +133,30 @@ public final class SimpleOccupancyManager
       enqueueWaiting(request, queueTargets, now);
       Optional<String> hardBlockerReason = conflictReleaseHardBlockerReason(request, blockers);
       if (hardBlockerReason.isPresent()) {
-        return new OccupancyDecision(
-            false, now, SignalAspect.STOP, List.copyOf(blockers), false, hardBlockerReason.get());
+        return traceDecision(
+            "canEnter:" + hardBlockerReason.get(),
+            request,
+            new OccupancyDecision(
+                false,
+                now,
+                SignalAspect.STOP,
+                List.copyOf(blockers),
+                false,
+                hardBlockerReason.get()));
       }
       OccupancyDecision resolved = tryResolveConflictDeadlock(request, blockers, now);
       if (resolved != null) {
-        return resolved;
+        return traceDecision("canEnter:conflict-release", request, resolved);
       }
-      return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
+      return traceDecision(
+          "canEnter:blockers",
+          request,
+          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
     }
 
     boolean queueBlocked = false;
     for (OccupancyResource resource : request.resourceList()) {
-      if (!isQueueableConflict(resource)) {
+      if (!request.intentFor(resource).hardAuthority() || !isQueueableConflict(resource)) {
         continue;
       }
       if (findClaim(claims.get(resource), request.trainName()) != null) {
@@ -137,7 +165,7 @@ public final class SimpleOccupancyManager
       Optional<OccupancyDecision> directionBlocked =
           failClosedUnknownSingleConflictEntry(request, resource, now);
       if (directionBlocked.isPresent()) {
-        return directionBlocked.get();
+        return traceDecision("canEnter:unknown-single", request, directionBlocked.get());
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
@@ -147,6 +175,7 @@ public final class SimpleOccupancyManager
           now,
           request.priority(),
           queueEntryOrderFor(request, resource));
+      version.incrementAndGet();
       if (!isQueueAllowed(request.trainName(), resource, direction, queue)) {
         queueBlocked = true;
         queue
@@ -156,10 +185,16 @@ public final class SimpleOccupancyManager
       }
     }
     if (queueBlocked) {
-      return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
+      return traceDecision(
+          "canEnter:queue-blocked",
+          request,
+          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
     }
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    return traceDecision(
+        "canEnter:allowed",
+        request,
+        new OccupancyDecision(true, now, signal, List.copyOf(blockers)));
   }
 
   /**
@@ -176,10 +211,13 @@ public final class SimpleOccupancyManager
       if (resource == null) {
         continue;
       }
-      Optional<OccupancyDecision> directionBlocked =
-          failClosedUnknownSingleConflictEntry(request, resource, now);
-      if (directionBlocked.isPresent()) {
-        return directionBlocked.get();
+      boolean hardAuthority = request.intentFor(resource).hardAuthority();
+      if (hardAuthority) {
+        Optional<OccupancyDecision> directionBlocked =
+            failClosedUnknownSingleConflictEntry(request, resource, now);
+        if (directionBlocked.isPresent()) {
+          return traceDecision("canEnterPreview:unknown-single", request, directionBlocked.get());
+        }
       }
       List<OccupancyClaim> existing = claims.get(resource);
       if (existing == null || existing.isEmpty()) {
@@ -189,11 +227,11 @@ public final class SimpleOccupancyManager
         if (claim == null) {
           continue;
         }
-        if (claim.trainName().equalsIgnoreCase(request.trainName())) {
+        BlockerRelation relation = BlockerClassifier.classify(request, resource, claim);
+        if (relation == BlockerRelation.SELF) {
           continue;
         }
-        if (isSingleCorridorConflict(resource)
-            && isSameCorridorDirection(request, resource, claim)) {
+        if (!hardAuthority || relation == BlockerRelation.SAME_DIRECTION_FRONT) {
           continue;
         }
         blockers.add(claim);
@@ -202,19 +240,30 @@ public final class SimpleOccupancyManager
     if (!blockers.isEmpty()) {
       Optional<String> hardBlockerReason = conflictReleaseHardBlockerReason(request, blockers);
       if (hardBlockerReason.isPresent()) {
-        return new OccupancyDecision(
-            false, now, SignalAspect.STOP, List.copyOf(blockers), false, hardBlockerReason.get());
+        return traceDecision(
+            "canEnterPreview:" + hardBlockerReason.get(),
+            request,
+            new OccupancyDecision(
+                false,
+                now,
+                SignalAspect.STOP,
+                List.copyOf(blockers),
+                false,
+                hardBlockerReason.get()));
       }
       OccupancyDecision resolved = tryResolveConflictDeadlockPreview(request, blockers, now);
       if (resolved != null) {
-        return resolved;
+        return traceDecision("canEnterPreview:conflict-release", request, resolved);
       }
-      return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
+      return traceDecision(
+          "canEnterPreview:blockers",
+          request,
+          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
     }
 
     boolean queueBlocked = false;
     for (OccupancyResource resource : request.resourceList()) {
-      if (!isQueueableConflict(resource)) {
+      if (!request.intentFor(resource).hardAuthority() || !isQueueableConflict(resource)) {
         continue;
       }
       if (findClaim(claims.get(resource), request.trainName()) != null) {
@@ -223,7 +272,7 @@ public final class SimpleOccupancyManager
       Optional<OccupancyDecision> directionBlocked =
           failClosedUnknownSingleConflictEntry(request, resource, now);
       if (directionBlocked.isPresent()) {
-        return directionBlocked.get();
+        return traceDecision("canEnterPreview:unknown-single", request, directionBlocked.get());
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.get(resource);
@@ -246,10 +295,16 @@ public final class SimpleOccupancyManager
       }
     }
     if (queueBlocked) {
-      return new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers));
+      return traceDecision(
+          "canEnterPreview:queue-blocked",
+          request,
+          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
     }
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
-    return new OccupancyDecision(true, now, signal, List.copyOf(blockers));
+    return traceDecision(
+        "canEnterPreview:allowed",
+        request,
+        new OccupancyDecision(true, now, signal, List.copyOf(blockers)));
   }
 
   /**
@@ -290,7 +345,18 @@ public final class SimpleOccupancyManager
       Duration headway = headwayRule.headwayFor(request.routeId(), resource);
       List<OccupancyClaim> existing = claims.computeIfAbsent(resource, unused -> new ArrayList<>());
       OccupancyClaim current = findClaim(existing, request.trainName());
+      if (current == null
+          && !request.intentFor(resource).hardAuthority()
+          && hasOtherLogicalClaim(existing, request.trainName())) {
+        continue;
+      }
+      if (current == null
+          && !request.intentFor(resource).hardAuthority()
+          && hasOtherQueueEntry(resource, request.trainName())) {
+        continue;
+      }
       Optional<CorridorDirection> direction = resolveCorridorDirection(request, resource);
+      ClaimRole role = request.claimRoleFor(resource);
       if (current != null) {
         Duration nextHeadway =
             current.headway().compareTo(headway) >= 0 ? current.headway() : headway;
@@ -304,17 +370,19 @@ public final class SimpleOccupancyManager
                 request.routeId(),
                 current.acquiredAt(),
                 nextHeadway,
-                nextDirection));
+                nextDirection,
+                role));
         acquiredResources.add(resource);
         continue;
       }
       existing.add(
           new OccupancyClaim(
-              resource, request.trainName(), request.routeId(), now, headway, direction));
+              resource, request.trainName(), request.routeId(), now, headway, direction, role));
       acquiredResources.add(resource);
     }
     if (!acquiredResources.isEmpty()) {
       removeFromQueuesForResources(request.trainName(), acquiredResources);
+      version.incrementAndGet();
     }
     // 发布占用获取事件
     publishAcquiredEvent(request, acquiredResources, now);
@@ -405,6 +473,7 @@ public final class SimpleOccupancyManager
           now,
           request.priority(),
           queueEntryOrderFor(request, resource));
+      version.incrementAndGet();
     }
   }
 
@@ -429,6 +498,7 @@ public final class SimpleOccupancyManager
       }
       queue.remove(trainName);
       removed++;
+      version.incrementAndGet();
       if (queue.isEmpty()) {
         queues.remove(resource);
       }
@@ -462,7 +532,7 @@ public final class SimpleOccupancyManager
       Iterator<OccupancyClaim> claimIterator = list.iterator();
       while (claimIterator.hasNext()) {
         OccupancyClaim claim = claimIterator.next();
-        if (claim != null && claim.trainName().equalsIgnoreCase(trainName)) {
+        if (claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
           claimIterator.remove();
           releasedResources.add(entry.getKey());
           removed++;
@@ -476,6 +546,7 @@ public final class SimpleOccupancyManager
     releaseDeadlockLocksForTrain(trainName);
     // 发布占用释放事件
     if (!releasedResources.isEmpty()) {
+      version.incrementAndGet();
       publishReleasedEvent(trainName, releasedResources, Instant.now());
     }
     return removed;
@@ -501,13 +572,17 @@ public final class SimpleOccupancyManager
     if (trainName != null && trainName.isPresent()) {
       String expected = trainName.get();
       boolean removed =
-          list.removeIf(claim -> claim != null && claim.trainName().equalsIgnoreCase(expected));
+          list.removeIf(
+              claim ->
+                  claim != null
+                      && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), expected));
       if (list.isEmpty()) {
         claims.remove(resource);
       }
       removeFromQueuesForResources(expected, List.of(resource));
       // 发布占用释放事件
       if (removed) {
+        version.incrementAndGet();
         publishReleasedEvent(expected, List.of(resource), Instant.now());
       }
       return removed;
@@ -524,6 +599,7 @@ public final class SimpleOccupancyManager
       removeFromQueuesForResources(evicted, List.of(resource));
     }
     publishReleasedEvent("*", List.of(resource), Instant.now());
+    version.incrementAndGet();
     return true;
   }
 
@@ -609,14 +685,11 @@ public final class SimpleOccupancyManager
     if (blockers == null || blockers.isEmpty()) {
       return null;
     }
-    String self = trainName == null ? "" : trainName.trim().toLowerCase(Locale.ROOT);
     for (OccupancyClaim blocker : blockers) {
       if (blocker == null || blocker.resource() == null) {
         continue;
       }
-      String owner =
-          blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
-      if (!owner.isEmpty() && owner.equals(self)) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
         continue;
       }
       ResourceKind kind = blocker.resource().kind();
@@ -625,16 +698,6 @@ public final class SimpleOccupancyManager
       }
     }
     return null;
-  }
-
-  private boolean isSameCorridorDirection(
-      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
-    Optional<CorridorDirection> requestDirection = resolveCorridorDirection(request, resource);
-    Optional<CorridorDirection> claimDirection = claim.corridorDirection();
-    if (requestDirection.isEmpty() || claimDirection.isEmpty()) {
-      return false;
-    }
-    return requestDirection.get() == claimDirection.get();
   }
 
   private Optional<CorridorDirection> resolveCorridorDirection(
@@ -866,15 +929,12 @@ public final class SimpleOccupancyManager
     if (decision == null || decision.blockers().isEmpty()) {
       return Set.of();
     }
-    String self = trainName == null ? "" : trainName.trim().toLowerCase(Locale.ROOT);
     Set<OccupancyResource> resources = new LinkedHashSet<>();
     for (OccupancyClaim blocker : decision.blockers()) {
       if (blocker == null || blocker.resource() == null) {
         continue;
       }
-      String owner =
-          blocker.trainName() == null ? "" : blocker.trainName().trim().toLowerCase(Locale.ROOT);
-      if (!owner.isEmpty() && owner.equals(self)) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
         continue;
       }
       if (blocker.resource().kind() != ResourceKind.CONFLICT) {
@@ -899,7 +959,7 @@ public final class SimpleOccupancyManager
       if (claim == null || claim.trainName() == null) {
         continue;
       }
-      if (trainName != null && claim.trainName().equalsIgnoreCase(trainName)) {
+      if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
         continue;
       }
       if (!queue.contains(claim.trainName()) && !isDirectionalConflictClaim(claim)) {
@@ -939,7 +999,7 @@ public final class SimpleOccupancyManager
       if (blocker == null || blocker.trainName() == null) {
         continue;
       }
-      if (blocker.trainName().equalsIgnoreCase(request.trainName())) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())) {
         continue;
       }
       Optional<CorridorDirection> blockerDirection = queue.directionOf(blocker.trainName());
@@ -1170,6 +1230,7 @@ public final class SimpleOccupancyManager
           now,
           request.priority(),
           queueEntryOrderFor(request, resource));
+      version.incrementAndGet();
     }
   }
 
@@ -1195,11 +1256,31 @@ public final class SimpleOccupancyManager
         iterator.remove();
         continue;
       }
-      queue.purgeExpired(now, QUEUE_ENTRY_TTL);
+      int removed = queue.purgeExpired(now, QUEUE_ENTRY_TTL);
+      if (removed > 0) {
+        staleQueueCleanupCount.addAndGet(removed);
+        version.incrementAndGet();
+      }
       if (queue.isEmpty()) {
         iterator.remove();
       }
     }
+  }
+
+  private OccupancyDecision traceDecision(
+      String reason, OccupancyRequest request, OccupancyDecision decision) {
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                request != null ? request.trainName() : "-",
+                request != null ? request.trainName() : "-",
+                SignalComputationTrace.Source.OCCUPANCY,
+                decision != null ? decision.signal() : SignalAspect.STOP)
+            .primaryReason(reason)
+            .field("occupancyVersion", version())
+            .field("staleQueueCleanupCount", staleQueueCleanupCount())
+            .request(request)
+            .decision(decision, request));
+    return decision;
   }
 
   private void removeFromQueuesForResources(String trainName, List<OccupancyResource> resources) {
@@ -1265,11 +1346,42 @@ public final class SimpleOccupancyManager
       return null;
     }
     for (OccupancyClaim claim : list) {
-      if (claim != null && claim.trainName().equalsIgnoreCase(trainName)) {
+      if (claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
         return claim;
       }
     }
     return null;
+  }
+
+  private boolean hasOtherLogicalClaim(List<OccupancyClaim> list, String trainName) {
+    if (list == null || list.isEmpty()) {
+      return false;
+    }
+    for (OccupancyClaim claim : list) {
+      if (claim == null) {
+        continue;
+      }
+      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean hasOtherQueueEntry(OccupancyResource resource, String trainName) {
+    if (resource == null || !isQueueableConflict(resource)) {
+      return false;
+    }
+    ConflictQueue queue = queues.get(resource);
+    if (queue == null || queue.isEmpty()) {
+      return false;
+    }
+    for (String queuedTrain : queue.allTrainNames()) {
+      if (!TrainNameNormalizer.sameLogicalTrain(queuedTrain, trainName)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ========== 事件发布 ==========
@@ -1334,7 +1446,7 @@ public final class SimpleOccupancyManager
     }
     // 排除自己（大小写不敏感）
     if (excludeTrain != null) {
-      affected.removeIf(name -> name.equalsIgnoreCase(excludeTrain));
+      affected.removeIf(name -> TrainNameNormalizer.sameLogicalTrain(name, excludeTrain));
     }
     return new ArrayList<>(affected);
   }
@@ -1424,7 +1536,7 @@ public final class SimpleOccupancyManager
         return false;
       }
       return headEntry(direction)
-          .map(entry -> entry.trainName().equalsIgnoreCase(trainName))
+          .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
           .orElse(false);
     }
 
@@ -1432,7 +1544,9 @@ public final class SimpleOccupancyManager
       if (trainName == null || trainName.isBlank()) {
         return false;
       }
-      return headAny().map(entry -> entry.trainName().equalsIgnoreCase(trainName)).orElse(false);
+      return headAny()
+          .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
+          .orElse(false);
     }
 
     Optional<OccupancyQueueEntry> headEntry(CorridorDirection direction) {
@@ -1489,7 +1603,7 @@ public final class SimpleOccupancyManager
       OccupancyQueueEntry candidate =
           new OccupancyQueueEntry(trainName, direction, time, time, priority, entryOrder);
       return headEntryWithCandidate(direction, candidate, priority, entryOrder)
-          .map(entry -> entry.trainName().equalsIgnoreCase(trainName))
+          .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
           .orElse(false);
     }
 
@@ -1521,7 +1635,8 @@ public final class SimpleOccupancyManager
                   direction == CorridorDirection.UNKNOWN ? candidate : null,
                   priority,
                   entryOrder));
-      return head.map(entry -> entry.trainName().equalsIgnoreCase(trainName)).orElse(false);
+      return head.map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
+          .orElse(false);
     }
 
     private int compareEntries(OccupancyQueueEntry a, OccupancyQueueEntry b) {
@@ -1659,30 +1774,36 @@ public final class SimpleOccupancyManager
       return List.copyOf(entries);
     }
 
-    void purgeExpired(Instant now, Duration ttl) {
+    int purgeExpired(Instant now, Duration ttl) {
       if (now == null || ttl == null || ttl.isNegative()) {
-        return;
+        return 0;
       }
-      purgeExpired(forward, now, ttl);
-      purgeExpired(backward, now, ttl);
-      purgeExpired(neutral, now, ttl);
+      int removed = 0;
+      removed += purgeExpired(forward, now, ttl);
+      removed += purgeExpired(backward, now, ttl);
+      removed += purgeExpired(neutral, now, ttl);
       pruneDetachedMetadata();
+      return removed;
     }
 
-    private void purgeExpired(
+    private int purgeExpired(
         LinkedHashMap<String, OccupancyQueueEntry> map, Instant now, Duration ttl) {
+      int removed = 0;
       Iterator<Map.Entry<String, OccupancyQueueEntry>> iterator = map.entrySet().iterator();
       while (iterator.hasNext()) {
         Map.Entry<String, OccupancyQueueEntry> entry = iterator.next();
         OccupancyQueueEntry value = entry.getValue();
         if (value == null) {
           iterator.remove();
+          removed++;
           continue;
         }
         if (value.lastSeen().plus(ttl).isBefore(now)) {
           iterator.remove();
+          removed++;
         }
       }
+      return removed;
     }
 
     /**
@@ -1779,7 +1900,7 @@ public final class SimpleOccupancyManager
     }
 
     boolean matches(String name) {
-      return trainName != null && trainName.equalsIgnoreCase(name);
+      return TrainNameNormalizer.sameLogicalTrain(trainName, name);
     }
   }
 }

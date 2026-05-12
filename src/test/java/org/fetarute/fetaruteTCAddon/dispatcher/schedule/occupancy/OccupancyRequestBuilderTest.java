@@ -204,6 +204,62 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void holdPositionRequestKeepsCurrentSingleCorridorConflict() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    NodeId nodeC = NodeId.of("C");
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode c =
+        new SignRailNode(
+            nodeC,
+            NodeType.WAYPOINT,
+            new Vector(20.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    EdgeId edgeBC = EdgeId.undirected(nodeB, nodeC);
+    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty());
+    RailEdge bc = new RailEdge(edgeBC, nodeB, nodeC, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(nodeA, a, nodeB, b, nodeC, c), Map.of(edgeAB, ab, edgeBC, bc), Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 1, 0);
+    String conflictKey =
+        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeBC).orElseThrow();
+
+    OccupancyRequest request =
+        builder.buildHoldPositionRequest(
+            "train",
+            Optional.of(RouteId.of("r")),
+            nodeB,
+            Optional.of(nodeC),
+            List.of(nodeA, nodeB, nodeC),
+            1,
+            Instant.parse("2026-01-01T00:00:00Z"),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE);
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeB)));
+    assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeBC)));
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflictKey)));
+    assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflictKey));
+    assertEquals(0, request.conflictEntryOrders().get(conflictKey));
+  }
+
+  @Test
   void buildReturnsEmptyWhenAtRouteEnd() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeB = NodeId.of("B");
@@ -387,6 +443,10 @@ class OccupancyRequestBuilderTest {
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeA)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeAB)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeBC)));
+    assertEquals(
+        ResourceIntent.PROTECTIVE_RETAIN, request.intentFor(OccupancyResource.forEdge(edgeAB)));
+    assertEquals(
+        ResourceIntent.MOVEMENT_REQUIRED, request.intentFor(OccupancyResource.forEdge(edgeBC)));
   }
 
   @Test
@@ -433,6 +493,9 @@ class OccupancyRequestBuilderTest {
     assertTrue(request.resourceList().contains(OccupancyResource.forNode(nodeC)));
     assertTrue(request.resourceList().contains(OccupancyResource.forEdge(edgeBC)));
     assertFalse(request.resourceList().contains(OccupancyResource.forEdge(edgeAB)));
+    assertEquals(ResourceIntent.HOLD_ONLY, request.intentFor(OccupancyResource.forNode(nodeC)));
+    assertEquals(
+        ResourceIntent.PROTECTIVE_RETAIN, request.intentFor(OccupancyResource.forEdge(edgeBC)));
   }
 
   @Test

@@ -239,6 +239,39 @@ class TrainLaunchManagerTest {
     verify(train).stop();
   }
 
+  @Test
+  void hardStopDoesNotAccelerateToEvenWhenDistancePresent() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-hard-stop",
+            "FTA_LAST_SPEED_CMD_BPS=15.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    FakeTrain train = new FakeTrain(tags.properties(), true, 15.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.STOP,
+            0.0,
+            config,
+            false,
+            OptionalLong.of(20L),
+            Optional.empty(),
+            runtime,
+            StopControlMode.HARD_STOP);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertEquals(0.0, speedCaptor.getValue(), 1.0e-6);
+    assertEquals(1, train.hardStopCalls);
+    assertEquals(0, train.accelerateCalls);
+    assertEquals("hard_stop", result.finalLimiterSource());
+  }
+
   private static ConfigManager.RuntimeSettings runtimeSettings(
       double hysteresisBps, double accelFactor, double decelFactor) {
     return new ConfigManager.RuntimeSettings(
@@ -327,6 +360,8 @@ class TrainLaunchManagerTest {
     private final TrainProperties properties;
     private final boolean moving;
     private final double speedBpt;
+    private int hardStopCalls;
+    private int accelerateCalls;
 
     private FakeTrain(TrainProperties properties, boolean moving, double speedBpt) {
       this.properties = properties;
@@ -363,7 +398,17 @@ class TrainLaunchManagerTest {
     public void stop() {}
 
     @Override
+    public void stopHard() {
+      hardStopCalls++;
+    }
+
+    @Override
     public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {}
+
+    @Override
+    public void accelerateTo(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
+      accelerateCalls++;
+    }
 
     @Override
     public void destroy() {}

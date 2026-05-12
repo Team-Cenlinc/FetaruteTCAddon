@@ -30,9 +30,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * <ul>
  *   <li>STALL：先 refreshSignal，再升级到 forceRelaunch
  *   <li>PROGRESS_STUCK：非 STOP 时先 refreshSignal，再升级到 reissueDestination，最后 forceRelaunch
- *   <li>STOP 下的长时间停滞只做 refresh/reissue，不自动 forceRelaunch，避免健康监控绕过红灯强制动车
+ *   <li>STOP 下的长时间停滞只重刷信号/重下发硬 STOP，不 reissue destination，避免健康监控绕过红灯强制动车
  *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则只在 STOP 宽限窗口内视为合法排队；超宽限后仍进入非动车恢复链，避免 blocker 持续刷新导致永久不自愈
- *   <li>互相阻塞的自动恢复先按列车对执行 refresh → reissue；超过销毁阈值且仍未恢复时，销毁 pair leader 作为最终兜底，避免永久占线
+ *   <li>互相阻塞的自动恢复先按列车对执行 refresh → hard STOP；超过销毁阈值且仍未恢复时，销毁 pair leader 作为最终兜底，避免永久占线
  *   <li>STOP 信号下的 progress stuck 允许更长宽限，避免把正常排队误判为故障
  * </ul>
  */
@@ -79,6 +79,7 @@ public final class TrainHealthMonitor {
     private final String trainA;
     private final String trainB;
     private final String conflictKey;
+    private final boolean weak;
     private final Instant firstSeenAt;
     private Instant lastSeenAt;
     private int refreshCount;
@@ -92,6 +93,7 @@ public final class TrainHealthMonitor {
         String trainA,
         String trainB,
         String conflictKey,
+        boolean weak,
         Instant firstSeenAt,
         String stableLeader,
         Set<String> lastBlockerSnapshot) {
@@ -99,6 +101,7 @@ public final class TrainHealthMonitor {
       this.trainA = Objects.requireNonNull(trainA, "trainA");
       this.trainB = Objects.requireNonNull(trainB, "trainB");
       this.conflictKey = Objects.requireNonNull(conflictKey, "conflictKey");
+      this.weak = weak;
       this.firstSeenAt = Objects.requireNonNull(firstSeenAt, "firstSeenAt");
       this.lastSeenAt = firstSeenAt;
       this.stableLeader = stableLeader;
@@ -124,6 +127,7 @@ public final class TrainHealthMonitor {
       String trainA,
       String trainB,
       String conflictKey,
+      boolean weak,
       Set<String> blockerSnapshot,
       RuntimeDispatchService.DeadlockTrainContext firstContext,
       RuntimeDispatchService.DeadlockTrainContext secondContext) {}
@@ -143,7 +147,7 @@ public final class TrainHealthMonitor {
   private Duration progressStuckThreshold = Duration.ofSeconds(60);
 
   /** STOP 信号下 progress stuck 的宽限阈值（秒）。 */
-  private Duration progressStopGraceThreshold = Duration.ofSeconds(180);
+  private Duration progressStopGraceThreshold = Duration.ofSeconds(60);
 
   /** 自动修复动作冷却，避免每轮检查都重复触发同一恢复动作。 */
   private Duration recoveryCooldown = Duration.ofSeconds(10);
@@ -161,7 +165,7 @@ public final class TrainHealthMonitor {
   private Duration deadlockDestroyCooldown = Duration.ofSeconds(120);
 
   /** confirmed episode 暂时失去 blocker 快照后保留的宽限。 */
-  private Duration deadlockEpisodeGrace = Duration.ofSeconds(10);
+  private Duration deadlockEpisodeGrace = Duration.ofSeconds(15);
 
   /** STOP 互卡进入 confirmed episode 前的最短静止时间。 */
   private Duration deadlockMinStopDuration = Duration.ofSeconds(20);
@@ -285,8 +289,8 @@ public final class TrainHealthMonitor {
   /**
    * 立即执行一次“互卡优先”的强制解锁。
    *
-   * <p>该入口用于人工介入（例如命令行触发），不等待 progress stuck 阈值，也不受恢复冷却限制。策略仍保持 “非破坏优先”：先刷新信号与重发
-   * destination，仅在必要时升级到 relaunch。
+   * <p>该入口用于人工介入（例如命令行触发），不等待 progress stuck 阈值，也不受恢复冷却限制。STOP 闭塞只会重新刷新信号并复下发硬 STOP，不会重发
+   * destination 或 relaunch，避免人工修复绕过红灯运动抑制。
    *
    * @param activeTrains 当前存活列车集合
    * @param now 当前时间（为空时使用当前时刻）
@@ -328,10 +332,7 @@ public final class TrainHealthMonitor {
         if (state.signalAspect() == SignalAspect.STOP && !blockers.isEmpty()) {
           debugLogger.accept("TrainHealthMonitor 手动解锁单车: train=" + trainName);
           dispatchService.refreshSignalByName(trainName);
-          boolean fixed = dispatchService.reissueDestinationByName(trainName);
-          if (!fixed) {
-            fixed = dispatchService.forceRelaunchByName(trainName);
-          }
+          boolean fixed = dispatchService.reapplyHardStopByName(trainName, "manual-stop-unlock");
           if (fixed) {
             fixedCount++;
           }
@@ -616,14 +617,14 @@ public final class TrainHealthMonitor {
         dispatchService.refreshSignalByName(trainName);
         fixed = true;
       } else {
-        debugLogger.accept("TrainHealthMonitor 修复停滞(stage=reissue-stop): train=" + trainName);
-        fixed = dispatchService.reissueDestinationByName(trainName);
+        debugLogger.accept("TrainHealthMonitor 修复停滞(stage=hard-stop): train=" + trainName);
+        fixed = dispatchService.reapplyHardStopByName(trainName, "health-stop-progress-stuck");
         if (!fixed) {
           dispatchService.refreshSignalByName(trainName);
         }
       }
       recovery.lastProgressAttemptAt = now;
-      // STOP 停滞下不自动 relaunch，避免健康监控绕过红灯；后续 tick 继续 refresh/reissue。
+      // STOP 停滞下不自动 relaunch/reissue，避免健康监控绕过红灯；后续 tick 继续 refresh/hard-stop。
       recovery.progressStage = nextStage;
       return fixed;
     }
@@ -770,6 +771,77 @@ public final class TrainHealthMonitor {
               canonicalTrainA,
               canonicalTrainB,
               blocker.conflictKey(),
+              false,
+              blockerSnapshot,
+              canonicalContextA,
+              canonicalContextB));
+    }
+    Optional<DeadlockObservation> weakObservation =
+        findWeakMutualDeadlock(trainName, trainKey, activeTrainKeys, snapshot, progressDuration);
+    if (weakObservation.isPresent()) {
+      return weakObservation;
+    }
+    return Optional.empty();
+  }
+
+  private Optional<DeadlockObservation> findWeakMutualDeadlock(
+      String trainName,
+      String trainKey,
+      Set<String> activeTrainKeys,
+      RuntimeDispatchService.DeadlockBlockerSnapshot snapshot,
+      Duration progressDuration) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return Optional.empty();
+    }
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      String blockerKey = keyOf(blocker.trainName());
+      if (blockerKey == null
+          || blockerKey.equals(trainKey)
+          || activeTrainKeys == null
+          || !activeTrainKeys.contains(blockerKey)) {
+        continue;
+      }
+      RuntimeDispatchService.DeadlockBlockerSnapshot reverseSnapshot =
+          recentDeadlockBlockerSnapshot(blocker.trainName());
+      boolean reverse =
+          reverseSnapshot.blockers().stream()
+              .anyMatch(
+                  info ->
+                      keyOf(info.trainName()) != null && keyOf(info.trainName()).equals(trainKey));
+      if (!reverse) {
+        continue;
+      }
+      Optional<RuntimeDispatchService.DeadlockTrainContext> firstContextOpt =
+          dispatchService.deadlockTrainContext(trainName);
+      Optional<RuntimeDispatchService.DeadlockTrainContext> secondContextOpt =
+          dispatchService.deadlockTrainContext(blocker.trainName());
+      if (firstContextOpt.isEmpty()
+          || secondContextOpt.isEmpty()
+          || !isEligibleDeadlockContext(firstContextOpt.get())
+          || !isEligibleDeadlockContext(secondContextOpt.get())
+          || progressDuration.compareTo(deadlockMinStopDuration) < 0) {
+        continue;
+      }
+      String firstKey = firstTrainInPair(trainKey, blockerKey);
+      boolean currentIsFirst = trainKey.equals(firstKey);
+      String canonicalTrainA = currentIsFirst ? trainName : blocker.trainName();
+      String canonicalTrainB = currentIsFirst ? blocker.trainName() : trainName;
+      RuntimeDispatchService.DeadlockTrainContext canonicalContextA =
+          currentIsFirst ? firstContextOpt.get() : secondContextOpt.get();
+      RuntimeDispatchService.DeadlockTrainContext canonicalContextB =
+          currentIsFirst ? secondContextOpt.get() : firstContextOpt.get();
+      String conflictKey = "weaker:" + pairKey(trainKey, blockerKey);
+      Set<String> blockerSnapshot =
+          Set.of(
+              trainName + "->" + blocker.trainName() + "@weaker",
+              blocker.trainName() + "->" + trainName + "@weaker");
+      return Optional.of(
+          new DeadlockObservation(
+              episodeKey(trainKey, blockerKey, conflictKey),
+              canonicalTrainA,
+              canonicalTrainB,
+              conflictKey,
+              true,
               blockerSnapshot,
               canonicalContextA,
               canonicalContextB));
@@ -849,6 +921,7 @@ public final class TrainHealthMonitor {
                 observation.trainA(),
                 observation.trainB(),
                 observation.conflictKey(),
+                observation.weak(),
                 now,
                 leader,
                 observation.blockerSnapshot());
@@ -928,15 +1001,14 @@ public final class TrainHealthMonitor {
 
     if (episode.reissueCount <= 0) {
       debugLogger.accept(
-          "TrainHealthMonitor 解锁互卡(stage=reissue-leader): train="
-              + episode.stableLeader
-              + " pair="
+          "TrainHealthMonitor 解锁互卡(stage=hard-stop-pair): pair="
               + episode.trainA
               + "/"
               + episode.trainB
               + " conflict="
               + episode.conflictKey);
-      dispatchService.reissueDestinationByName(episode.stableLeader);
+      dispatchService.reapplyHardStopByName(episode.trainA, "health-deadlock-confirmed");
+      dispatchService.reapplyHardStopByName(episode.trainB, "health-deadlock-confirmed");
       episode.reissueCount++;
       recovery.lastDeadlockAttemptAt = now;
       recovery.deadlockStage = Math.max(recovery.deadlockStage, 2);
@@ -965,7 +1037,9 @@ public final class TrainHealthMonitor {
         episode.stableLeader, episode.survivor());
     boolean destroyed =
         dispatchService.destroyTrainByName(episode.stableLeader, "health-deadlock-timeout");
-    episode.destroyAttempted = true;
+    if (destroyed) {
+      episode.destroyAttempted = true;
+    }
     recovery.lastDeadlockAttemptAt = now;
     recovery.deadlockStage = 3;
     deadlockPairLastAttemptAt.put(pairKey, now);
@@ -984,10 +1058,12 @@ public final class TrainHealthMonitor {
       return false;
     }
     Duration episodeAge = Duration.between(episode.firstSeenAt, now);
-    if (episodeAge.compareTo(deadlockDestroyThreshold) < 0) {
+    Duration requiredThreshold =
+        episode.weak ? deadlockDestroyThreshold.multipliedBy(2L) : deadlockDestroyThreshold;
+    if (episodeAge.compareTo(requiredThreshold) < 0) {
       return false;
     }
-    Duration requiredStop = minPositive(progressStopGraceThreshold, deadlockDestroyThreshold);
+    Duration requiredStop = minPositive(progressStopGraceThreshold, requiredThreshold);
     if (progressDuration == null || progressDuration.compareTo(requiredStop) < 0) {
       return false;
     }
@@ -1064,7 +1140,7 @@ public final class TrainHealthMonitor {
   /**
    * 手动模式下的互卡解锁。
    *
-   * <p>一次执行完整的“refresh -> reissue -> relaunch”链路，尽量在单次命令里完成解锁，不依赖下一轮阈值触发。
+   * <p>一次执行完整的“refresh -> hard-stop”链路，确保 STOP 互卡等待期间不会通过健康修复重新注入运动 destination。
    */
   private boolean forceFixMutualDeadlock(
       String trainName, String blockerTrain, RecoveryState recovery, Instant now) {
@@ -1084,16 +1160,8 @@ public final class TrainHealthMonitor {
     dispatchService.refreshSignalByName(blockerTrain);
 
     boolean fixed = false;
-    // 非破坏优先：先尝试重发 destination。
-    fixed = dispatchService.reissueDestinationByName(trainName) || fixed;
-    fixed = dispatchService.reissueDestinationByName(blockerTrain) || fixed;
-    // 仍未解开时再升级到 relaunch。
-    if (!fixed) {
-      fixed = dispatchService.forceRelaunchByName(trainName);
-    }
-    if (!fixed) {
-      fixed = dispatchService.forceRelaunchByName(blockerTrain);
-    }
+    fixed = dispatchService.reapplyHardStopByName(trainName, "manual-mutual-deadlock") || fixed;
+    fixed = dispatchService.reapplyHardStopByName(blockerTrain, "manual-mutual-deadlock") || fixed;
 
     recovery.lastDeadlockAttemptAt = now;
     recovery.deadlockStage = fixed ? 3 : 0;
