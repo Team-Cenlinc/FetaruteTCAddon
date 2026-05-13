@@ -549,6 +549,50 @@ class TrainHealthMonitorTest {
     verify(dispatchService).destroyTrainByName("trainA", "health-deadlock-timeout");
     verify(dispatchService, never()).destroyTrainByName(eq("trainB"), anyString());
     verify(dispatchService, never()).forceRelaunchByName(anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DEADLOCK_DESTROY_ATTEMPTED")
+                        && message.contains("episodeType=CONFIRMED_SINGLE")),
+        "confirmed mutual single 仍走原有 eligibility 后才进入 destroy trace");
+  }
+
+  @Test
+  @DisplayName("道岔/NODE/EDGE weak episode 不升级为 confirmed single")
+  void weakSwitcherEpisodeDoesNotBecomeConfirmedSingle() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(eq("trainA"), any()))
+        .thenReturn(deadlockSnapshot("trainB", "switcher:SW", null));
+    when(dispatchService.recentDeadlockBlockers(eq("trainB"), any()))
+        .thenReturn(deadlockSnapshot("trainA", "switcher:SW", null));
+    when(dispatchService.deadlockTrainContext("trainA"))
+        .thenReturn(Optional.of(context("trainA", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("trainB"))
+        .thenReturn(Optional.of(context("trainB", 7, RouteOperationType.OPERATION, false, false)));
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DEADLOCK_EPISODE_CREATED")
+                        && message.contains("episodeType=SWITCHER_OR_NODE_EDGE_WEAK")),
+        "switcher blocker 只形成 weak 诊断 episode");
+    assertFalse(
+        debugLogs.stream().anyMatch(message -> message.contains("episodeType=CONFIRMED_SINGLE")),
+        "switcher blocker 不应被标成 confirmed single");
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
   @Test
@@ -647,6 +691,44 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("trainA", "trainB"), t0);
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(80));
 
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertFalse(
+        debugLogs.stream().anyMatch(message -> message.contains("episodeType=CONFIRMED_SINGLE")),
+        "UNKNOWN direction single 不应成为 confirmed mutual single");
+  }
+
+  @Test
+  @DisplayName("道岔 occupant 阻塞多车只输出诊断，不直接销毁")
+  void switcherOccupantBlockingManyEmitsDiagnosticButNoPolicyDestroy() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("blockedA"))
+        .thenReturn(Optional.of(state("blockedA", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("blockedB"))
+        .thenReturn(Optional.of(state("blockedB", 4, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("occupant"))
+        .thenReturn(Optional.of(state("occupant", 5, SignalAspect.STOP, 0.0, "SW")));
+    when(dispatchService.recentDeadlockBlockers(eq("blockedA"), any()))
+        .thenReturn(deadlockSnapshot("occupant", "switcher:SW", null));
+    when(dispatchService.recentDeadlockBlockers(eq("blockedB"), any()))
+        .thenReturn(deadlockSnapshot("occupant", "switcher:SW", null));
+    when(dispatchService.recentDeadlockBlockers(eq("occupant"), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+    when(dispatchService.currentConflictClaimKeys(anyString())).thenReturn(Set.of());
+    when(dispatchService.currentConflictClaimKeys("occupant")).thenReturn(Set.of("switcher:SW"));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("blockedA", "blockedB", "occupant"), t0);
+
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SWITCHER_OCCUPANT_BLOCKING_MANY")
+                        && message.contains("blockerTrain=occupant")
+                        && message.contains("blockedCount=2")
+                        && message.contains("containsSwitcherConflict=true")
+                        && message.contains("protectedSwitcherClaimPresent=true")),
+        "occupant-to-many 模式应可观测");
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 

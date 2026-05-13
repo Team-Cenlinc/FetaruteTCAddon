@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 
 /**
  * 运行时调度请求提供者。
@@ -59,8 +60,21 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
   private final RouteProgressRegistry progressRegistry;
   private final ConfigManager configManager;
   private final OccupancyManager occupancyManager;
-  private final BiFunction<String, RouteDefinition, List<NodeId>> effectiveWaypointsResolver;
+  private final EventWaypointResolver effectiveWaypointsResolver;
   private final Consumer<String> debugLogger;
+
+  /**
+   * 事件信号请求的节点解析器。
+   *
+   * <p>EVENT 入口必须复用运行时已提交的 effective node 与 lastPassedGraphNode 视角，否则同一列车会出现 EVENT 从 route waypoint
+   * 起算、PERIODIC 从中间图节点起算的快照分裂。
+   */
+  @FunctionalInterface
+  public interface EventWaypointResolver {
+
+    List<NodeId> resolve(
+        String trainName, RouteDefinition route, int currentIndex, RailGraph graph);
+  }
 
   /**
    * 构建请求提供者。
@@ -103,6 +117,33 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
       OccupancyManager occupancyManager,
       BiFunction<String, RouteDefinition, List<NodeId>> effectiveWaypointsResolver,
       Consumer<String> debugLogger) {
+    this(
+        railGraphService,
+        routeDefinitions,
+        progressRegistry,
+        configManager,
+        occupancyManager,
+        effectiveWaypointsResolver == null
+            ? null
+            : (trainName, route, currentIndex, graph) ->
+                effectiveWaypointsResolver.apply(trainName, route),
+        debugLogger);
+  }
+
+  /**
+   * 构建请求提供者。
+   *
+   * <p>该构造器允许事件链路在构建请求时拿到 currentIndex 与 RailGraph，从而复用 periodic signal tick 的
+   * lastPassedGraphNode/current-node override 规则。
+   */
+  public RuntimeDispatchRequestProvider(
+      RailGraphService railGraphService,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry progressRegistry,
+      ConfigManager configManager,
+      OccupancyManager occupancyManager,
+      EventWaypointResolver effectiveWaypointsResolver,
+      Consumer<String> debugLogger) {
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.progressRegistry = Objects.requireNonNull(progressRegistry, "progressRegistry");
@@ -111,7 +152,8 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
     this.effectiveWaypointsResolver =
         effectiveWaypointsResolver != null
             ? effectiveWaypointsResolver
-            : (trainName, route) -> route == null ? List.of() : route.waypoints();
+            : (trainName, route, currentIndex, graph) ->
+                route == null ? List.of() : route.waypoints();
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
 
@@ -165,7 +207,7 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
             0,
             runtimeSettings.switcherZoneEdges(),
             debugLogger);
-    List<NodeId> waypoints = resolveWaypointsForRequest(trainName, route);
+    List<NodeId> waypoints = resolveWaypointsForRequest(trainName, route, currentIndex, graph);
     Optional<OccupancyRequestContext> contextOpt =
         builder.buildContextFromNodes(
             trainName,
@@ -175,7 +217,16 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
             now,
             priority,
             AuthorizationPurpose.RUNTIME_MOVE);
-    return contextOpt.map(OccupancyRequestContext::request);
+    return contextOpt.map(context -> markEventRequest(context.request()));
+  }
+
+  private OccupancyRequest markEventRequest(OccupancyRequest request) {
+    OccupancyRequest marked =
+        request.withDirectedSource(SignalComputationTrace.Source.EVENT.name());
+    if (occupancyManager instanceof SimpleOccupancyManager simple) {
+      marked = marked.withDirectedOccupancyVersion(simple.version());
+    }
+    return marked.withDirectedProgressVersion(progressRegistry.version());
   }
 
   /**
@@ -184,10 +235,17 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
    * <p>该方法单独暴露给同包测试，确保 provider 复用运行时 DYNAMIC effective node 覆盖，而不是回退到 route 原始 placeholder。
    */
   List<NodeId> resolveWaypointsForRequest(String trainName, RouteDefinition route) {
+    return resolveWaypointsForRequest(trainName, route, -1, null);
+  }
+
+  /** 解析事件重评估使用的 waypoint 列表，并允许运行时按 lastPassedGraphNode 覆盖当前节点。 */
+  List<NodeId> resolveWaypointsForRequest(
+      String trainName, RouteDefinition route, int currentIndex, RailGraph graph) {
     if (route == null) {
       return List.of();
     }
-    List<NodeId> waypoints = effectiveWaypointsResolver.apply(trainName, route);
+    List<NodeId> waypoints =
+        effectiveWaypointsResolver.resolve(trainName, route, currentIndex, graph);
     if (waypoints == null || waypoints.isEmpty()) {
       return route.waypoints();
     }

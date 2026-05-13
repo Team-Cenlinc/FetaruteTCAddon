@@ -29,7 +29,8 @@ public record OccupancyRequest(
     int priority,
     AuthorizationPurpose purpose,
     Map<String, ConflictReleaseHint> conflictReleaseHints,
-    Map<OccupancyResource, ResourceIntent> resourceIntents) {
+    Map<OccupancyResource, ResourceIntent> resourceIntents,
+    Optional<DirectedTraversalContext> directedContext) {
 
   public OccupancyRequest {
     Objects.requireNonNull(trainName, "trainName");
@@ -41,6 +42,7 @@ public record OccupancyRequest(
     purpose = purpose == null ? AuthorizationPurpose.RUNTIME_MOVE : purpose;
     Objects.requireNonNull(conflictReleaseHints, "conflictReleaseHints");
     Objects.requireNonNull(resourceIntents, "resourceIntents");
+    directedContext = directedContext == null ? Optional.empty() : directedContext;
     if (trainName.isBlank()) {
       throw new IllegalArgumentException("trainName 不能为空");
     }
@@ -49,6 +51,31 @@ public record OccupancyRequest(
     conflictEntryOrders = Map.copyOf(conflictEntryOrders);
     conflictReleaseHints = Map.copyOf(conflictReleaseHints);
     resourceIntents = Map.copyOf(resourceIntents);
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      Map<String, Integer> conflictEntryOrders,
+      int priority,
+      AuthorizationPurpose purpose,
+      Map<String, ConflictReleaseHint> conflictReleaseHints,
+      Map<OccupancyResource, ResourceIntent> resourceIntents) {
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        Optional.empty());
   }
 
   public OccupancyRequest(
@@ -190,6 +217,11 @@ public record OccupancyRequest(
     return false;
   }
 
+  /** 返回本请求携带的规范化行车计划快照。 */
+  public Optional<MovementPlanSnapshot> movementPlanSnapshot() {
+    return MovementPlanSnapshot.fromRequest(this);
+  }
+
   /** 返回同一资源集合但替换请求来源后的请求。 */
   public OccupancyRequest withPurpose(AuthorizationPurpose nextPurpose) {
     return new OccupancyRequest(
@@ -202,7 +234,8 @@ public record OccupancyRequest(
         priority,
         nextPurpose,
         conflictReleaseHints,
-        resourceIntents);
+        resourceIntents,
+        directedContext.map(context -> context.withSource(nextPurpose.name())));
   }
 
   /** 返回同一资源集合但附加冲突清空证据后的请求。 */
@@ -218,7 +251,24 @@ public record OccupancyRequest(
         priority,
         nextPurpose,
         hints == null ? Map.of() : hints,
-        resourceIntents);
+        resourceIntents,
+        directedContext.map(context -> context.withSource(nextPurpose.name())));
+  }
+
+  /** 返回同一资源集合但仅附加冲突清空证据，不改变请求来源或发布语义。 */
+  public OccupancyRequest withConflictClearingEvidence(Map<String, ConflictReleaseHint> hints) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        hints == null ? Map.of() : hints,
+        resourceIntents,
+        directedContext);
   }
 
   /** 返回同一请求但替换资源意图映射。 */
@@ -233,6 +283,49 @@ public record OccupancyRequest(
         priority,
         purpose,
         conflictReleaseHints,
-        intents == null ? Map.of() : intents);
+        intents == null ? Map.of() : intents,
+        directedContext);
+  }
+
+  /** 返回同一请求但替换有向 traversal 上下文。 */
+  public OccupancyRequest withDirectedContext(Optional<DirectedTraversalContext> context) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        context == null ? Optional.empty() : context);
+  }
+
+  /** 返回同一请求但替换有向 traversal 上下文来源标签。 */
+  public OccupancyRequest withDirectedSource(String source) {
+    if (directedContext.isEmpty()) {
+      return this;
+    }
+    return withDirectedContext(Optional.of(directedContext.get().withSource(source)));
+  }
+
+  /** 返回同一请求但替换有向 traversal 上下文中的占用版本。 */
+  public OccupancyRequest withDirectedOccupancyVersion(long occupancyVersion) {
+    if (directedContext.isEmpty()) {
+      return this;
+    }
+    return withDirectedContext(
+        Optional.of(directedContext.get().withOccupancyVersion(occupancyVersion)));
+  }
+
+  /** 返回同一请求但替换有向 traversal 上下文中的进度版本。 */
+  public OccupancyRequest withDirectedProgressVersion(long progressVersion) {
+    if (directedContext.isEmpty()) {
+      return this;
+    }
+    return withDirectedContext(
+        Optional.of(directedContext.get().withProgressVersion(progressVersion)));
   }
 }

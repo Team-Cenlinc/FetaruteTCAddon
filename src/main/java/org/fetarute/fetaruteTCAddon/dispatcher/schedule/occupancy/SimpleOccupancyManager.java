@@ -14,6 +14,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassifier;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
@@ -169,17 +171,13 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(
-          request.trainName(),
-          direction,
-          now,
-          request.priority(),
-          queueEntryOrderFor(request, resource));
+      CorridorDirection effectiveDirection =
+          touchQueueWithDirectionTrace(request, resource, queue, direction, now, "canEnter");
       version.incrementAndGet();
-      if (!isQueueAllowed(request.trainName(), resource, direction, queue)) {
+      if (!isQueueAllowed(request.trainName(), resource, effectiveDirection, queue)) {
         queueBlocked = true;
         queue
-            .blockingEntry(direction)
+            .blockingEntry(effectiveDirection)
             .map(entry -> createQueueBlocker(resource, entry))
             .ifPresent(blockers::add);
       }
@@ -206,6 +204,7 @@ public final class SimpleOccupancyManager
   public synchronized OccupancyDecision canEnterPreview(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
     Instant now = request.now();
+    purgeExpiredQueueEntries(now);
     List<OccupancyClaim> blockers = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
@@ -279,17 +278,19 @@ public final class SimpleOccupancyManager
       if (queue == null || queue.isEmpty()) {
         continue;
       }
+      CorridorDirection effectiveDirection =
+          effectiveQueueDirectionForPreview(request, resource, queue, direction);
       if (!isQueueAllowedPreview(
           request.trainName(),
           resource,
-          direction,
+          effectiveDirection,
           queue,
           request.priority(),
           queueEntryOrderFor(request, resource),
           now)) {
         queueBlocked = true;
         queue
-            .blockingEntry(direction)
+            .blockingEntry(effectiveDirection)
             .map(entry -> createQueueBlocker(resource, entry))
             .ifPresent(blockers::add);
       }
@@ -467,12 +468,7 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(
-          request.trainName(),
-          direction,
-          now,
-          request.priority(),
-          queueEntryOrderFor(request, resource));
+      touchQueueWithDirectionTrace(request, resource, queue, direction, now, "touchQueues");
       version.incrementAndGet();
     }
   }
@@ -1224,14 +1220,86 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      queue.touch(
-          request.trainName(),
-          direction,
-          now,
-          request.priority(),
-          queueEntryOrderFor(request, resource));
+      touchQueueWithDirectionTrace(request, resource, queue, direction, now, "enqueueWaiting");
       version.incrementAndGet();
     }
+  }
+
+  private CorridorDirection touchQueueWithDirectionTrace(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      ConflictQueue queue,
+      CorridorDirection requestedDirection,
+      Instant now,
+      String source) {
+    if (request == null || resource == null || queue == null) {
+      return requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+    }
+    CorridorDirection safeRequested =
+        requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+    CorridorDirection effectiveDirection = safeRequested;
+    Optional<CorridorDirection> previous = queue.directionOf(request.trainName());
+    if (previous.isPresent()
+        && previous.get() != CorridorDirection.UNKNOWN
+        && safeRequested == CorridorDirection.UNKNOWN) {
+      effectiveDirection = previous.get();
+      emitQueueDirectionTrace(
+          request, resource, previous.get(), safeRequested, effectiveDirection, source);
+    } else if (previous.isPresent() && previous.get() != safeRequested) {
+      emitQueueDirectionTrace(
+          request, resource, previous.get(), safeRequested, effectiveDirection, source);
+    }
+    queue.touch(
+        request.trainName(),
+        effectiveDirection,
+        now,
+        request.priority(),
+        queueEntryOrderFor(request, resource));
+    return effectiveDirection;
+  }
+
+  private CorridorDirection effectiveQueueDirectionForPreview(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      ConflictQueue queue,
+      CorridorDirection requestedDirection) {
+    CorridorDirection safeRequested =
+        requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+    if (request == null || resource == null || queue == null) {
+      return safeRequested;
+    }
+    Optional<CorridorDirection> previous = queue.directionOf(request.trainName());
+    if (previous.isPresent()
+        && previous.get() != CorridorDirection.UNKNOWN
+        && safeRequested == CorridorDirection.UNKNOWN) {
+      emitQueueDirectionTrace(
+          request, resource, previous.get(), safeRequested, previous.get(), "canEnterPreview");
+      return previous.get();
+    }
+    return safeRequested;
+  }
+
+  private void emitQueueDirectionTrace(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      CorridorDirection oldDirection,
+      CorridorDirection requestedDirection,
+      CorridorDirection effectiveDirection,
+      String source) {
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                request.trainName(),
+                request.trainName(),
+                SignalComputationTrace.Source.OCCUPANCY,
+                SignalAspect.STOP)
+            .primaryReason("QUEUE_DIRECTION_CHANGED")
+            .field("conflictKey", resource.key())
+            .field("oldDirection", oldDirection)
+            .field("requestedDirection", requestedDirection)
+            .field("newDirection", effectiveDirection)
+            .field("source", source)
+            .field("reason", "preserve-known-direction-before-unknown-overwrite")
+            .request(request));
   }
 
   private void purgeExpiredQueueEntries(Instant now) {
@@ -1269,18 +1337,132 @@ public final class SimpleOccupancyManager
 
   private OccupancyDecision traceDecision(
       String reason, OccupancyRequest request, OccupancyDecision decision) {
+    SignalDecisionInputType inputTypeBeforeDrainClassification =
+        SignalDecisionInputClassifier.classify(request);
+    boolean releaseHintVerified = hasAnyVerifiedConflictReleaseHint(request);
+    boolean drainAuthorityPresent =
+        request != null
+            && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING
+            && releaseHintVerified
+            && decision != null
+            && decision.conflictRelease();
+    boolean drainLeader =
+        decision != null
+            && decision.conflictRelease()
+            && request != null
+            && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING;
+    SignalDecisionInputType inputType =
+        SignalDecisionInputClassifier.classify(
+            request,
+            new SignalDecisionInputClassifier.DrainClassificationContext(
+                drainAuthorityPresent,
+                drainAuthorityPresent,
+                releaseHintVerified,
+                releaseHintVerified,
+                releaseHintVerified,
+                false,
+                hasOnlyTopologyExitHints(request)));
+    boolean drainAuthorityInconsistent =
+        drainAuthorityPresent && inputType == SignalDecisionInputType.DRAIN_THROUGH && !drainLeader;
+    SignalAspect computedSignal = decision != null ? decision.signal() : SignalAspect.STOP;
+    boolean publishSuppressed =
+        SignalDecisionInputClassifier.isProceedLike(computedSignal)
+            && !SignalDecisionInputClassifier.mayPublishProceed(
+                request,
+                drainLeader,
+                drainAuthorityPresent,
+                !drainAuthorityInconsistent,
+                false,
+                SignalComputationTrace.TokenState.NONE,
+                false);
+    SignalAspect traceSignal = publishSuppressed ? SignalAspect.STOP : computedSignal;
     SignalComputationTrace.emit(
         SignalComputationTrace.builder(
                 request != null ? request.trainName() : "-",
                 request != null ? request.trainName() : "-",
                 SignalComputationTrace.Source.OCCUPANCY,
-                decision != null ? decision.signal() : SignalAspect.STOP)
+                traceSignal)
             .primaryReason(reason)
             .field("occupancyVersion", version())
             .field("staleQueueCleanupCount", staleQueueCleanupCount())
+            .field("inputTypeBeforeDrainClassification", inputTypeBeforeDrainClassification)
+            .field("inputTypeAfterDrainClassification", inputType)
+            .field("signalDecisionInputType", inputType)
+            .field("computedAspect", computedSignal)
+            .field("publishedAspect", publishSuppressed ? "SUPPRESSED" : traceSignal.name())
+            .field("publishSuppressed", publishSuppressed)
+            .field(
+                "zoneMembership",
+                request != null && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING
+                    ? "INSIDE_ZONE"
+                    : "-")
+            .field("drainLeader", drainLeader)
+            .field("canEnterConflictRelease", decision != null && decision.conflictRelease())
+            .field("canEnterReleaseLeader", drainLeader)
+            .field("releaseHintVerified", releaseHintVerified)
+            .field("drainAuthorityActive", drainAuthorityPresent)
+            .field("drainAuthorityLeader", drainLeader)
+            .field("drainAuthorityFresh", drainAuthorityPresent)
+            .field("drainAuthorityZoneMatches", releaseHintVerified)
+            .field("drainGateApplied", inputType == SignalDecisionInputType.DRAIN_THROUGH)
+            .field(
+                "drainGateSkippedReason",
+                inputType == SignalDecisionInputType.DRAIN_THROUGH
+                    ? "-"
+                    : drainGateSkippedReason(request, drainAuthorityPresent, releaseHintVerified))
+            .field(
+                "drainAuthorityId",
+                request == null || request.conflictReleaseHints().isEmpty()
+                    ? "-"
+                    : request.conflictReleaseHints().keySet())
+            .field("incident", drainAuthorityInconsistent ? "DRAIN_AUTHORITY_INCONSISTENT" : "-")
             .request(request)
             .decision(decision, request));
     return decision;
+  }
+
+  private static boolean hasAnyVerifiedConflictReleaseHint(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint != null && hint.verifiedFor(hint.conflictKey())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean hasOnlyTopologyExitHints(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint == null || hint.kind() != ConflictClearingEvidenceKind.TOPOLOGY_EXIT_HINT) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static String drainGateSkippedReason(
+      OccupancyRequest request, boolean drainAuthorityPresent, boolean releaseHintVerified) {
+    if (request == null) {
+      return "request-missing";
+    }
+    if (request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return "not-conflict-clearing";
+    }
+    if (hasOnlyTopologyExitHints(request)) {
+      return "topology-exit-hint-only";
+    }
+    if (!releaseHintVerified) {
+      return "release-hint-unverified";
+    }
+    if (!drainAuthorityPresent) {
+      return "drain-authority-inactive";
+    }
+    return "not-drain-through";
   }
 
   private void removeFromQueuesForResources(String trainName, List<OccupancyResource> resources) {

@@ -46,7 +46,7 @@ tags:
 | `caution_source` | `none`、`config` 或 `component`，说明 CAUTION 速度来源 |
 | `approach_limit_bps` | 进站、进库或 STOP/TERM waypoint approach 限速 |
 | `movement_authority_limit_bps` | 移动授权根据前方可用距离推导的建议最大速度 |
-| `distance_to_authority_end` / `authority_end_resource` / `authorized_edge_count` | 前向授权窗口末端、第一处未授权资源与已授权实际边数；PROCEED 无 blocker 时也会参与 MA 降级/压速 |
+| `distance_to_authority_end` / `authority_end_resource` / `authorized_edge_count` | 前向授权窗口末端、第一处未授权资源与已授权实际边数；只有物理 `authorityEndReason` 可参与 MA 可见信号降级 |
 | `edge_speed_lookahead_min_bps` | 前方低限速边反推的当前最大速度 |
 | `speed_curve_limit_bps` | 执行层速度曲线进一步压低后的速度 |
 | `final_target_bps` | 最终写入 TrainCarts 前的目标速度 |
@@ -89,4 +89,4 @@ tags:
   - `runtime.speed-command-decel-factor`
 - 发车/放行时会跳过“上行限幅”，由 TrainCarts launch + WaitAcceleration 接管起步斜率，避免发车目标速度被压到极低。
 - 降低 `speedLimit` 不做降速限幅，也不受迟滞保护。边限速、前方低限速、移动授权、approach 与 STOP 这类安全上限必须立即写入；实际车辆不会瞬间减速，平滑制动由 WaitAcceleration 负责。
-- 授权距离不足时会触发移动授权降级（Movement Authority），与速度限幅协同防止冒进与急剧速度跳变。
+- 授权距离不足时会触发移动授权降级（Movement Authority），与速度限幅协同防止冒进与急剧速度跳变；`ARTIFICIAL_WINDOW_LIMIT` 属于人工窗口截断，只能触发内部扩展和诊断，不能单独发布黄灯/红灯。

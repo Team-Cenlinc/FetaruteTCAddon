@@ -46,7 +46,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -817,16 +819,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
-    Optional<OccupancyRequest> requestOpt =
-        buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
-    if (requestOpt.isEmpty()) {
+    Optional<DepotGateRequest> gateRequestOpt =
+        buildDepotSpawnGateRequest(builder, trainName, route, service, effectiveTicket, now);
+    if (gateRequestOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "occupancy-context-failed");
       return false;
     }
-    OccupancyRequest request = requestOpt.get();
+    DepotGateRequest gateRequest = gateRequestOpt.get();
+    OccupancyRequest request = gateRequest.request();
     LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
     if (!authorization.allowed()) {
+      logDepotGateBlockedTrace(
+          effectiveTicket,
+          service,
+          route,
+          trainName,
+          lineDepots,
+          gateRequest,
+          authorization,
+          spawnLease,
+          "preview");
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
       return false;
@@ -851,6 +864,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     MinecartGroup group = groupOpt.get();
     authorization = acquireSpawnGate(request);
     if (!authorization.allowed()) {
+      logDepotGateBlockedTrace(
+          effectiveTicket,
+          service,
+          route,
+          trainName,
+          lineDepots,
+          gateRequest,
+          authorization,
+          spawnLease,
+          "acquire");
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       destroySpawnedGroup(group);
@@ -1881,16 +1904,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
-    Optional<OccupancyRequest> requestOpt =
-        buildDepotSpawnRequest(builder, trainName, route, service, effectiveTicket, now);
-    if (requestOpt.isEmpty()) {
+    Optional<DepotGateRequest> gateRequestOpt =
+        buildDepotSpawnGateRequest(builder, trainName, route, service, effectiveTicket, now);
+    if (gateRequestOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "fallback-occupancy-context-failed");
       return false;
     }
-    OccupancyRequest request = requestOpt.get();
+    DepotGateRequest gateRequest = gateRequestOpt.get();
+    OccupancyRequest request = gateRequest.request();
     LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
     if (!authorization.allowed()) {
+      logDepotGateBlockedTrace(
+          effectiveTicket,
+          service,
+          route,
+          trainName,
+          lineDepots,
+          gateRequest,
+          authorization,
+          spawnLease,
+          "fallback-preview");
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
       return false;
@@ -1915,6 +1949,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     MinecartGroup group = groupOpt.get();
     authorization = acquireSpawnGate(request);
     if (!authorization.allowed()) {
+      logDepotGateBlockedTrace(
+          effectiveTicket,
+          service,
+          route,
+          trainName,
+          lineDepots,
+          gateRequest,
+          authorization,
+          spawnLease,
+          "fallback-acquire");
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       destroySpawnedGroup(group);
@@ -2064,12 +2108,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
   }
 
-  /**
-   * 构建 depot spawn 门控请求。
-   *
-   * <p>优先使用真实 depot 节点做 lookover 锚点，避免 route 首节点不是 depot 时漏检回库车占用。
-   */
-  private Optional<OccupancyRequest> buildDepotSpawnRequest(
+  private record DepotGateRequest(
+      OccupancyRequest request,
+      List<NodeId> effectiveWaypoints,
+      List<NodeId> expandedPathNodes,
+      int lookoverDepth,
+      Optional<NodeId> selectedDepotNode,
+      NodeId originalFirstWaypoint,
+      NodeId effectiveFirstWaypoint) {
+    private DepotGateRequest {
+      Objects.requireNonNull(request, "request");
+      effectiveWaypoints = effectiveWaypoints == null ? List.of() : List.copyOf(effectiveWaypoints);
+      expandedPathNodes = expandedPathNodes == null ? List.of() : List.copyOf(expandedPathNodes);
+      selectedDepotNode = selectedDepotNode == null ? Optional.empty() : selectedDepotNode;
+    }
+  }
+
+  private Optional<DepotGateRequest> buildDepotSpawnGateRequest(
       OccupancyRequestBuilder builder,
       String trainName,
       RouteDefinition route,
@@ -2096,7 +2151,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (depotNode.isEmpty()) {
       debugLogger.accept("Depot lookover 回退: 未解析到显式 depot 节点 train=" + trainName);
     }
-    return Optional.of(builder.applyDepotLookover(ctxOpt.get(), depotNode));
+    OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get(), depotNode);
+    NodeId originalFirst = route.waypoints().isEmpty() ? null : route.waypoints().get(0);
+    NodeId effectiveFirst = spawnWaypoints.isEmpty() ? null : spawnWaypoints.get(0);
+    int lookoverDepth = builder.depotLookoverDepthForDiagnostics(depotNode.isPresent());
+    return Optional.of(
+        new DepotGateRequest(
+            request,
+            spawnWaypoints,
+            ctxOpt.get().pathNodes(),
+            lookoverDepth,
+            depotNode,
+            originalFirst,
+            effectiveFirst));
   }
 
   /**
@@ -2435,6 +2502,164 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     String owner =
         claim.trainName() == null || claim.trainName().isBlank() ? "-" : claim.trainName();
     return claim.resource().kind().name() + ":" + claim.resource().key() + "@" + owner;
+  }
+
+  private void logDepotGateBlockedTrace(
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      String trainName,
+      List<SpawnDepot> candidateDepots,
+      DepotGateRequest gateRequest,
+      LaunchAuthorizationService.AuthorizationResult authorization,
+      SpawnControl.Lease lease,
+      String phase) {
+    if (gateRequest == null || authorization == null) {
+      return;
+    }
+    OccupancyRequest request = gateRequest.request();
+    debugLogger.accept(
+        "Depot gate blocked trace: phase="
+            + phase
+            + " ticket="
+            + (ticket == null ? "-" : ticket.id())
+            + " route="
+            + formatRouteForTrace(service, route)
+            + " train="
+            + (trainName == null || trainName.isBlank() ? "-" : trainName)
+            + " selectedDepotNodeId="
+            + selectedDepotForTrace(ticket, gateRequest)
+            + " candidateDepots="
+            + formatCandidateDepots(candidateDepots)
+            + " originalFirstWaypoint="
+            + formatNode(gateRequest.originalFirstWaypoint())
+            + " effectiveFirstWaypoint="
+            + formatNode(gateRequest.effectiveFirstWaypoint())
+            + " expandedPath="
+            + formatNodes(gateRequest.expandedPathNodes(), 24)
+            + " lookoverDepth="
+            + gateRequest.lookoverDepth()
+            + " resources="
+            + formatGateResources(request.resourceList(), 48)
+            + " blockers="
+            + formatGateBlockers(authorization.blockers(), 32)
+            + " spawnLease="
+            + (lease == null ? "none" : "held")
+            + " notBefore="
+            + (ticket == null ? "-" : ticket.notBefore())
+            + " lastError="
+            + (ticket == null ? "-" : ticket.lastError())
+            + " occupancyVersion="
+            + occupancyVersionForTrace());
+  }
+
+  private static String formatRouteForTrace(SpawnService service, RouteDefinition route) {
+    if (service != null) {
+      return service.operatorCode() + "/" + service.lineCode() + "/" + service.routeCode();
+    }
+    return route == null || route.id() == null ? "-" : route.id().value();
+  }
+
+  private static String selectedDepotForTrace(SpawnTicket ticket, DepotGateRequest gateRequest) {
+    if (ticket != null && ticket.selectedDepotNodeId().isPresent()) {
+      return ticket.selectedDepotNodeId().get();
+    }
+    return gateRequest.selectedDepotNode().map(NodeId::value).orElse("-");
+  }
+
+  private static String formatCandidateDepots(List<SpawnDepot> candidateDepots) {
+    if (candidateDepots == null || candidateDepots.isEmpty()) {
+      return "[]";
+    }
+    return candidateDepots.stream()
+        .filter(Objects::nonNull)
+        .map(depot -> depot.nodeId() + "(w=" + depot.weight() + ")")
+        .collect(Collectors.joining(",", "[", "]"));
+  }
+
+  private static String formatNodes(List<NodeId> nodes, int limit) {
+    if (nodes == null || nodes.isEmpty()) {
+      return "[]";
+    }
+    int max = Math.max(1, limit);
+    List<String> values =
+        nodes.stream()
+            .filter(Objects::nonNull)
+            .limit(max)
+            .map(NodeId::value)
+            .collect(Collectors.toCollection(ArrayList::new));
+    if (nodes.size() > max) {
+      values.add("+" + (nodes.size() - max));
+    }
+    return values.toString();
+  }
+
+  private static String formatNode(NodeId node) {
+    return node == null ? "-" : node.value();
+  }
+
+  private static String formatGateResources(List<OccupancyResource> resources, int limit) {
+    if (resources == null || resources.isEmpty()) {
+      return "[]";
+    }
+    int max = Math.max(1, limit);
+    List<String> values = new ArrayList<>();
+    int nodeCount = 0;
+    int edgeCount = 0;
+    int switcherCount = 0;
+    int singleCount = 0;
+    for (OccupancyResource resource : resources) {
+      if (resource == null) {
+        continue;
+      }
+      if (resource.kind() == ResourceKind.NODE) {
+        nodeCount++;
+      } else if (resource.kind() == ResourceKind.EDGE) {
+        edgeCount++;
+      } else if (resource.kind() == ResourceKind.CONFLICT
+          && resource.key().startsWith("switcher:")) {
+        switcherCount++;
+      } else if (resource.kind() == ResourceKind.CONFLICT && resource.key().startsWith("single:")) {
+        singleCount++;
+      }
+      if (values.size() < max) {
+        values.add(resource.kind() + ":" + resource.key());
+      }
+    }
+    if (resources.size() > max) {
+      values.add("+" + (resources.size() - max));
+    }
+    return "counts[node="
+        + nodeCount
+        + ",edge="
+        + edgeCount
+        + ",switcher="
+        + switcherCount
+        + ",single="
+        + singleCount
+        + "]"
+        + values;
+  }
+
+  private static String formatGateBlockers(List<OccupancyClaim> blockers, int limit) {
+    if (blockers == null || blockers.isEmpty()) {
+      return "[]";
+    }
+    int max = Math.max(1, limit);
+    List<String> values =
+        blockers.stream()
+            .filter(Objects::nonNull)
+            .limit(max)
+            .map(SimpleTicketAssigner::formatGateBlocker)
+            .collect(Collectors.toCollection(ArrayList::new));
+    if (blockers.size() > max) {
+      values.add("+" + (blockers.size() - max));
+    }
+    return values.toString();
+  }
+
+  private long occupancyVersionForTrace() {
+    return occupancyManager instanceof SimpleOccupancyManager manager ? manager.version() : -1L;
   }
 
   /**

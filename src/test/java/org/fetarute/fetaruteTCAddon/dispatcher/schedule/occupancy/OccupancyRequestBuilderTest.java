@@ -149,10 +149,76 @@ class OccupancyRequestBuilderTest {
     assertEquals(0, request.conflictEntryOrders().get(firstConflict));
     int expectedSecondEntry = firstConflict.equals(secondConflict) ? 0 : 1;
     assertEquals(expectedSecondEntry, request.conflictEntryOrders().get(secondConflict));
+    DirectedTraversalContext directed = request.directedContext().orElseThrow();
+    assertEquals(nodeA, directed.effectiveFromNode().orElseThrow());
+    assertEquals(nodeM, directed.effectiveToNode().orElseThrow());
+    assertEquals(List.of(nodeA, nodeM, nodeC), directed.expandedPathNodes());
+    assertEquals(2, directed.directedEdges().size());
+    assertEquals(CorridorDirection.A_TO_B, directed.singleConflictDirections().get(firstConflict));
+
+    OccupancyRequest eventRequest = request.withDirectedSource("EVENT");
+    OccupancyRequest periodicRequest = request.withDirectedSource("PERIODIC_TICK");
+    OccupancyRequest progressRequest = request.withDirectedSource("PROGRESS_TRIGGER");
+    assertEquals(
+        eventRequest.directedContext().orElseThrow().expandedPathNodes(),
+        periodicRequest.directedContext().orElseThrow().expandedPathNodes());
+    assertEquals(
+        eventRequest.directedContext().orElseThrow().singleConflictDirections(),
+        progressRequest.directedContext().orElseThrow().singleConflictDirections());
   }
 
   @Test
-  void currentPositionRequestUsesNextGraphEdgeDirection() {
+  void directedTraversalContextStableAcrossEventPeriodicProgress() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(Map.of(nodeA, a, nodeB, b), Map.of(edgeAB, ab), Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 0, 0);
+
+    OccupancyRequest request =
+        builder
+            .buildContextFromNodes(
+                "train",
+                Optional.of(RouteId.of("r")),
+                List.of(nodeA, nodeB),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    OccupancyRequest event = request.withDirectedSource("EVENT");
+    OccupancyRequest periodic = request.withDirectedSource("PERIODIC_TICK");
+    OccupancyRequest progress = request.withDirectedSource("PROGRESS_TRIGGER");
+    assertEquals(
+        event.directedContext().orElseThrow().expandedPathNodes(),
+        periodic.directedContext().orElseThrow().expandedPathNodes());
+    assertEquals(
+        event.directedContext().orElseThrow().directedEdges(),
+        progress.directedContext().orElseThrow().directedEdges());
+    assertEquals(
+        event.directedContext().orElseThrow().singleConflictDirections(),
+        periodic.directedContext().orElseThrow().singleConflictDirections());
+  }
+
+  @Test
+  void protectiveRetainPreservesSingleCorridorDirection() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeB = NodeId.of("B");
     NodeId nodeC = NodeId.of("C");
@@ -196,6 +262,9 @@ class OccupancyRequestBuilderTest {
     assertTrue(forward.resourceList().contains(OccupancyResource.forConflict(conflictKey)));
     assertEquals(CorridorDirection.A_TO_B, forward.corridorDirections().get(conflictKey));
     assertEquals(0, forward.conflictEntryOrders().get(conflictKey));
+    assertEquals(
+        CorridorDirection.A_TO_B,
+        forward.directedContext().orElseThrow().singleConflictDirections().get(conflictKey));
 
     OccupancyRequest reverse =
         builder.buildCurrentPositionRequest(
@@ -204,7 +273,7 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
-  void holdPositionRequestKeepsCurrentSingleCorridorConflict() {
+  void holdRetainPreservesSingleCorridorDirection() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeB = NodeId.of("B");
     NodeId nodeC = NodeId.of("C");
@@ -257,6 +326,9 @@ class OccupancyRequestBuilderTest {
     assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflictKey)));
     assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflictKey));
     assertEquals(0, request.conflictEntryOrders().get(conflictKey));
+    assertEquals(
+        CorridorDirection.A_TO_B,
+        request.directedContext().orElseThrow().singleConflictDirections().get(conflictKey));
   }
 
   @Test

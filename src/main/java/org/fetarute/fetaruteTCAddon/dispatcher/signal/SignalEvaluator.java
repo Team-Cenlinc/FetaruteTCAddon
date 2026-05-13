@@ -7,6 +7,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
@@ -151,17 +152,50 @@ public class SignalEvaluator {
     }
     OccupancyRequest request = requestOpt.get();
     OccupancyDecision decision = previewDecision(request);
-    SignalAspect newSignal = decision.signal();
+    SignalAspect computedSignal = decision.signal();
     SignalAspect previous = lastSignalCache.get(trainName);
+    SignalPublicationGate.Decision publication =
+        SignalPublicationGate.evaluate(
+            new SignalPublicationGate.Input(
+                request,
+                computedSignal,
+                false,
+                SignalComputationTrace.TokenState.NONE,
+                decision.conflictRelease(),
+                decision.conflictRelease()
+                    && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING,
+                false,
+                false,
+                false,
+                false,
+                request.movementPlanSnapshot().map(plan -> plan.routeIndex() == 0).orElse(false),
+                true,
+                true,
+                "-"));
+    boolean publishSuppressed = publication.blocked();
+    Optional<SignalAspect> publishedSignal =
+        publishSuppressed ? Optional.empty() : Optional.of(publication.visibleAspect());
+    SignalAspect traceAspect =
+        publishedSignal.orElse(previous != null ? previous : SignalAspect.STOP);
     SignalComputationTrace.emit(
         SignalComputationTrace.builder(
-                trainName, trainName, SignalComputationTrace.Source.EVENT, newSignal)
+                trainName, trainName, SignalComputationTrace.Source.EVENT, traceAspect)
             .previousAspect(previous)
             .primaryReason("signal-evaluator-preview:" + decision.reason())
+            .field("signalDecisionInputType", publication.inputType())
+            .field("computedAspect", computedSignal)
+            .field("publicationGateAspect", publication.visibleAspect())
+            .field("publicationGateReason", publication.reason())
+            .field("publishedAspect", publishedSignal.map(Enum::name).orElse("PRESERVE"))
+            .field("publishSuppressed", publishSuppressed)
             .request(request)
             .decision(decision, request),
         debugLogger);
 
+    if (publishedSignal.isEmpty()) {
+      return;
+    }
+    SignalAspect newSignal = publishedSignal.get();
     if (previous == null || previous != newSignal) {
       lastSignalCache.put(trainName, newSignal);
       SignalChangedEvent changeEvent = new SignalChangedEvent(now, trainName, previous, newSignal);

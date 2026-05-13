@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.junit.jupiter.api.Test;
 
 class SimpleOccupancyManagerTest {
@@ -158,6 +159,84 @@ class SimpleOccupancyManagerTest {
                 0));
 
     assertTrue(decision.allowed());
+  }
+
+  @Test
+  void directionUnknownDoesNotOverwriteKnownQueueEntryWithoutTrace() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+
+    manager.touchQueues(
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            forward,
+            Map.of(resource.key(), 0),
+            0));
+    manager.touchQueues(
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0));
+
+    List<OccupancyQueueSnapshot> snapshots = manager.snapshotQueues();
+    assertEquals(1, snapshots.size());
+    assertEquals(1, snapshots.get(0).entries().size());
+    assertEquals(CorridorDirection.A_TO_B, snapshots.get(0).entries().get(0).direction());
+  }
+
+  @Test
+  void sameDirectionFollowerNotBlockedByUnknownDirectionFromHoldClaim() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("single:comp:A~B");
+    Map<String, CorridorDirection> forward = Map.of(resource.key(), CorridorDirection.A_TO_B);
+
+    manager.touchQueues(
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            forward,
+            Map.of(resource.key(), 0),
+            0));
+    manager.touchQueues(
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0));
+
+    OccupancyDecision rear =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear",
+                Optional.empty(),
+                now.plusSeconds(2),
+                List.of(resource),
+                forward,
+                Map.of(resource.key(), 0),
+                0));
+
+    assertTrue(rear.allowed());
   }
 
   @Test
@@ -1014,6 +1093,75 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void canEnterPreviewAndCanEnterAgreeAfterQueueExpiry() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:SW-1");
+    manager.canEnter(
+        new OccupancyRequest(
+            "stale",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0));
+
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "requester",
+            Optional.empty(),
+            now.plusSeconds(31),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0);
+
+    OccupancyDecision preview = manager.canEnterPreview(request);
+    OccupancyDecision actual = manager.canEnter(request);
+
+    assertTrue(preview.allowed());
+    assertTrue(actual.allowed());
+    assertTrue(manager.staleQueueCleanupCount() > 0);
+  }
+
+  @Test
+  void canEnterPreviewKeepsUnexpiredUnknownDirectionEntryFailClosed() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    manager.touchQueues(
+        new OccupancyRequest(
+            "unknown",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0));
+
+    OccupancyDecision preview =
+        manager.canEnterPreview(
+            new OccupancyRequest(
+                "requester",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(conflict),
+                Map.of(conflict.key(), CorridorDirection.A_TO_B),
+                Map.of(conflict.key(), 0),
+                0));
+
+    assertFalse(preview.allowed());
+    assertEquals(SignalAspect.STOP, preview.signal());
+  }
+
+  @Test
   void sameDirectionFrontTrainNotBlockedByRearGuard_onProgressTrigger() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -1263,6 +1411,42 @@ class SimpleOccupancyManagerTest {
 
     assertFalse(decision.allowed());
     assertEquals(SignalAspect.STOP, decision.signal());
+  }
+
+  @Test
+  void conflictClearingHintWithoutReleaseLeaderDoesNotEmitDrainIncident() {
+    java.util.List<String> traces = new java.util.ArrayList<>();
+    SignalComputationTrace.configureLogger(traces::add);
+    try {
+      HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+      SimpleOccupancyManager manager =
+          new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+      Instant now = Instant.parse("2026-01-01T00:00:00Z");
+      OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+      Map<String, CorridorDirection> direction = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+      OccupancyRequest request =
+          withClearingHint(
+              new OccupancyRequest(
+                  "drain",
+                  Optional.empty(),
+                  now,
+                  List.of(conflict),
+                  direction,
+                  Map.of(conflict.key(), 0),
+                  0,
+                  AuthorizationPurpose.CONFLICT_CLEARING),
+              conflict);
+
+      OccupancyDecision decision = manager.canEnter(request);
+
+      assertTrue(decision.allowed());
+      assertFalse(decision.conflictRelease());
+      assertFalse(
+          traces.stream().anyMatch(message -> message.contains("DRAIN_AUTHORITY_INCONSISTENT")));
+    } finally {
+      SignalComputationTrace.configureLogger(message -> {});
+    }
   }
 
   private static OccupancyRequest withClearingHint(

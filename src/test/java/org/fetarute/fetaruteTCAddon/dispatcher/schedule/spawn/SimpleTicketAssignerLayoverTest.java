@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -947,6 +948,19 @@ class SimpleTicketAssignerLayoverTest {
       RouteDefinition route,
       OccupancyResource blockedResource,
       DepotSpawner depotSpawner) {
+    return createDepotGateAssigner(
+        provider, routeId, depotNode, graph, route, blockedResource, depotSpawner, message -> {});
+  }
+
+  private static SimpleTicketAssigner createDepotGateAssigner(
+      StorageProvider provider,
+      UUID routeId,
+      NodeId depotNode,
+      SimpleRailGraph graph,
+      RouteDefinition route,
+      OccupancyResource blockedResource,
+      DepotSpawner depotSpawner,
+      java.util.function.Consumer<String> debugLogger) {
     SpawnTicket ticket = buildTicket(routeId);
     SpawnManager spawnManager = mock(SpawnManager.class);
     when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
@@ -994,7 +1008,7 @@ class SimpleTicketAssignerLayoverTest {
         mockConfigManager(),
         signNodeRegistry,
         mock(LayoverRegistry.class),
-        null,
+        debugLogger,
         Duration.ofSeconds(1),
         1,
         10);
@@ -1626,6 +1640,84 @@ class SimpleTicketAssignerLayoverTest {
     assigner.tick(provider, Instant.now());
 
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void depotGateTraceIncludesSelectedDepotAndBlockers() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId switcherNode = NodeId.of("SW");
+    NodeId mainNode = NodeId.of("B");
+    EdgeId depotSwitcher = EdgeId.undirected(depotNode, switcherNode);
+    EdgeId switcherMain = EdgeId.undirected(switcherNode, mainNode);
+    RailNode depot =
+        new SignRailNode(
+            depotNode,
+            NodeType.DEPOT,
+            new Vector(-10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode switcher =
+        new SignRailNode(
+            switcherNode,
+            NodeType.SWITCHER,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode main =
+        new SignRailNode(
+            mainNode,
+            NodeType.WAYPOINT,
+            new Vector(10.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(depotNode, depot, switcherNode, switcher, mainNode, main),
+            Map.of(
+                depotSwitcher,
+                new RailEdge(
+                    depotSwitcher, depotNode, switcherNode, 10, 8.0, true, Optional.empty()),
+                switcherMain,
+                new RailEdge(
+                    switcherMain, switcherNode, mainNode, 10, 8.0, true, Optional.empty())),
+            Set.of());
+    StorageProvider provider = mockProvider(routeId, true);
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    List<String> debugMessages = new ArrayList<>();
+    SimpleTicketAssigner assigner =
+        createDepotGateAssigner(
+            provider,
+            routeId,
+            depotNode,
+            graph,
+            new RouteDefinition(
+                RouteId.of("OP:L1:R1"), List.of(depotNode, mainNode), Optional.empty()),
+            OccupancyResource.forConflict("switcher:SW"),
+            depotSpawner,
+            debugMessages::add);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+    String trace =
+        debugMessages.stream()
+            .filter(message -> message.startsWith("Depot gate blocked trace:"))
+            .findFirst()
+            .orElse("");
+    assertFalse(trace.isBlank());
+    assertTrue(trace.contains("ticket="));
+    assertTrue(trace.contains("route=OP/L1/R1"));
+    assertTrue(trace.contains("selectedDepotNodeId=" + depotNode.value()));
+    assertTrue(trace.contains("candidateDepots="));
+    assertTrue(trace.contains("originalFirstWaypoint=" + depotNode.value()));
+    assertTrue(trace.contains("effectiveFirstWaypoint=" + depotNode.value()));
+    assertTrue(trace.contains("expandedPath=[SURN:D:DEPOT:1, SW, B]"));
+    assertTrue(trace.contains("lookoverDepth="));
+    assertTrue(trace.contains("CONFLICT:switcher:SW"));
+    assertTrue(trace.contains("busy-train"));
+    assertTrue(trace.contains("spawnLease=held"));
+    assertTrue(trace.contains("occupancyVersion="));
   }
 
   @Test

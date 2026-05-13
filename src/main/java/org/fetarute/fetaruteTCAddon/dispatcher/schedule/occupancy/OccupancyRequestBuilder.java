@@ -201,6 +201,11 @@ public final class OccupancyRequestBuilder {
       debugLogger.accept("构建请求失败: expandPathNodes 返回空 (路径不连通?) nodes=" + pathNodes);
       return Optional.empty();
     }
+    List<RailEdge> fullEdges = resolveEdges(fullExpanded);
+    if (fullEdges.isEmpty()) {
+      debugLogger.accept("构建请求失败: full resolveEdges 返回空 (边未找到?) nodes=" + fullExpanded);
+      return Optional.empty();
+    }
     // 按实际边数截断：保留 effectiveLookaheadEdges 条边对应的节点（边数+1 个节点）
     List<NodeId> expandedNodes = truncateToEdgeCount(fullExpanded, effectiveLookaheadEdges);
     List<RailEdge> edges = resolveEdges(expandedNodes);
@@ -230,7 +235,19 @@ public final class OccupancyRequestBuilder {
     applySwitcherZoneConflicts(resources, intents, expandedNodes);
     appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
     Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(expandedNodes);
+    Map<String, CorridorDirection> planCorridorDirections = resolveCorridorDirections(fullExpanded);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
+    DirectedTraversalContext directedContext =
+        buildDirectedContext(
+            trainName,
+            routeId,
+            currentIndex,
+            Optional.ofNullable(nodes.get(currentIndex)),
+            fullExpanded,
+            fullEdges,
+            planCorridorDirections,
+            resources,
+            purpose.name());
     OccupancyRequest request =
         new OccupancyRequest(
             trainName,
@@ -242,8 +259,10 @@ public final class OccupancyRequestBuilder {
             priority,
             purpose,
             Map.of(),
-            intents);
-    return Optional.of(new OccupancyRequestContext(request, expandedNodes, edges));
+            intents,
+            Optional.of(directedContext));
+    return Optional.of(
+        new OccupancyRequestContext(request, expandedNodes, edges, Optional.of(directedContext)));
   }
 
   /**
@@ -295,6 +314,17 @@ public final class OccupancyRequestBuilder {
     appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
     Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(rearExpanded);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(rearEdges);
+    DirectedTraversalContext directedContext =
+        buildDirectedContext(
+            trainName,
+            routeId,
+            currentIndex,
+            Optional.ofNullable(currentNode),
+            rearExpanded,
+            rearEdges,
+            corridorDirections,
+            resources,
+            purpose.name());
     return new OccupancyRequest(
         trainName,
         routeId,
@@ -305,7 +335,8 @@ public final class OccupancyRequestBuilder {
         priority,
         purpose,
         Map.of(),
-        intents);
+        intents,
+        Optional.of(directedContext));
   }
 
   /**
@@ -358,6 +389,17 @@ public final class OccupancyRequestBuilder {
 
     Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(directionNodes);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(directionEdges);
+    DirectedTraversalContext directedContext =
+        buildDirectedContext(
+            trainName,
+            routeId,
+            currentIndex,
+            Optional.of(currentNode),
+            directionNodes,
+            directionEdges,
+            corridorDirections,
+            resources,
+            purpose.name());
     return new OccupancyRequest(
         trainName,
         routeId,
@@ -368,7 +410,8 @@ public final class OccupancyRequestBuilder {
         priority,
         purpose,
         Map.of(),
-        intents);
+        intents,
+        Optional.of(directedContext));
   }
 
   /**
@@ -441,17 +484,31 @@ public final class OccupancyRequestBuilder {
       }
     }
 
+    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(pathNodes);
+    Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
+    DirectedTraversalContext directedContext =
+        buildDirectedContext(
+            trainName,
+            routeId,
+            -1,
+            Optional.of(currentNode),
+            pathNodes,
+            edges,
+            corridorDirections,
+            resources,
+            purpose.name());
     return new OccupancyRequest(
         trainName,
         routeId,
         requestTime,
         List.copyOf(resources),
-        resolveCorridorDirections(pathNodes),
-        resolveConflictEntryOrders(edges),
+        corridorDirections,
+        conflictEntryOrders,
         priority,
         purpose,
         Map.of(),
-        intents);
+        intents,
+        Optional.of(directedContext));
   }
 
   /**
@@ -576,6 +633,11 @@ public final class OccupancyRequestBuilder {
         Math.max(effectiveLookaheadEdges, switcherZoneEdges * DEPOT_LOOKOVER_EDGE_MULTIPLIER);
     int expandedDepth = Math.max(DEPOT_LOOKOVER_MIN_EDGES, baseDepth);
     return Math.max(1, Math.min(DEPOT_LOOKOVER_MAX_EDGES, expandedDepth));
+  }
+
+  /** 返回 Depot lookover 深度，仅用于出车门控诊断输出。 */
+  public int depotLookoverDepthForDiagnostics(boolean explicitDepotAnchor) {
+    return resolveDepotLookoverEdges(explicitDepotAnchor);
   }
 
   private List<NodeId> resolveRearGuardNodes(List<NodeId> nodes, int currentIndex) {
@@ -872,6 +934,72 @@ public final class OccupancyRequestBuilder {
     }
 
     return List.copyOf(collected);
+  }
+
+  private DirectedTraversalContext buildDirectedContext(
+      String trainName,
+      Optional<RouteId> routeId,
+      int currentIndex,
+      Optional<NodeId> currentNode,
+      List<NodeId> pathNodes,
+      List<RailEdge> edges,
+      Map<String, CorridorDirection> corridorDirections,
+      Set<OccupancyResource> resources,
+      String source) {
+    List<NodeId> effectivePath = pathNodes == null ? List.of() : List.copyOf(pathNodes);
+    List<DirectedTraversalContext.DirectedEdge> directedEdges = new ArrayList<>();
+    List<RailEdge> safeEdges = edges == null ? List.of() : edges;
+    int directedCount = Math.min(safeEdges.size(), Math.max(0, effectivePath.size() - 1));
+    for (int i = 0; i < directedCount; i++) {
+      RailEdge edge = safeEdges.get(i);
+      if (edge == null || effectivePath.get(i) == null || effectivePath.get(i + 1) == null) {
+        continue;
+      }
+      directedEdges.add(
+          new DirectedTraversalContext.DirectedEdge(
+              EdgeId.undirected(edge.from(), edge.to()),
+              effectivePath.get(i),
+              effectivePath.get(i + 1)));
+    }
+    Map<String, CorridorDirection> singleDirections = new LinkedHashMap<>();
+    if (corridorDirections != null) {
+      for (Map.Entry<String, CorridorDirection> entry : corridorDirections.entrySet()) {
+        if (entry.getKey() != null && entry.getKey().startsWith("single:")) {
+          singleDirections.put(entry.getKey(), entry.getValue());
+        }
+      }
+    }
+    Map<String, DirectedTraversalContext.SwitcherPathSignature> switcherSignatures =
+        new LinkedHashMap<>();
+    if (resources != null) {
+      for (OccupancyResource resource : resources) {
+        if (resource == null
+            || resource.kind() != ResourceKind.CONFLICT
+            || !resource.key().startsWith(SWITCHER_CONFLICT_PREFIX)) {
+          continue;
+        }
+        switcherSignatures.put(
+            resource.key(),
+            new DirectedTraversalContext.SwitcherPathSignature(resource.key(), effectivePath));
+      }
+    }
+    return new DirectedTraversalContext(
+        trainName,
+        routeId,
+        currentIndex,
+        currentNode,
+        Optional.empty(),
+        effectivePath.isEmpty() ? Optional.empty() : Optional.ofNullable(effectivePath.get(0)),
+        effectivePath.size() < 2 ? Optional.empty() : Optional.ofNullable(effectivePath.get(1)),
+        effectivePath,
+        directedEdges,
+        singleDirections,
+        switcherSignatures,
+        source,
+        -1L,
+        -1L,
+        null,
+        Optional.empty());
   }
 
   private void applySwitcherZoneConflicts(

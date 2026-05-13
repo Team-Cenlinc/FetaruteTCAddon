@@ -7,11 +7,13 @@ import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -61,8 +63,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDista
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictClearingEvidenceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictReleaseHint;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.MovementPlanSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -82,6 +87,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassifier;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalPublicationGate;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -210,6 +218,10 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.atomic.LongAdder();
   private final java.util.concurrent.atomic.LongAdder reentrantStopSuppressed =
       new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.ConcurrentMap<String, String> healthTraceFingerprints =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Long> healthTraceLastAtMs =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Duration BLOCKER_SNAPSHOT_TTL = Duration.ofSeconds(20);
@@ -267,18 +279,42 @@ public final class RuntimeDispatchService {
   /**
    * 前向授权窗口末端。
    *
-   * <p>distance 表示从当前节点到“第一处未授权资源边界”的距离；resource 为第一处未授权 EDGE/NODE 的摘要，供诊断判断列车为何被 MA 压速。
+   * <p>distance 表示从当前节点到“第一处未授权资源边界”的距离；resource 为第一处未授权 EDGE/NODE 的摘要，reason 区分真实物理边界与 人工窗口截断。只有
+   * {@link AuthorityEndReason#physical()} 为 true 的末端才能影响可见信号。
    */
   private record AuthorityEnd(
-      OptionalLong distanceBlocks, String resource, int authorizedEdgeCount) {
+      OptionalLong distanceBlocks,
+      String resource,
+      int authorizedEdgeCount,
+      AuthorityEndReason reason,
+      boolean windowDerivedFromExpandedPath,
+      boolean extensionAttempted,
+      boolean extensionSucceeded) {
     private AuthorityEnd {
       distanceBlocks = distanceBlocks == null ? OptionalLong.empty() : distanceBlocks;
       resource = resource == null || resource.isBlank() ? "none" : resource.trim();
       authorizedEdgeCount = Math.max(0, authorizedEdgeCount);
+      reason = reason == null ? AuthorityEndReason.NONE : reason;
     }
 
     private static AuthorityEnd none() {
-      return new AuthorityEnd(OptionalLong.empty(), "none", 0);
+      return new AuthorityEnd(
+          OptionalLong.empty(), "none", 0, AuthorityEndReason.NONE, false, false, false);
+    }
+
+    private boolean physical() {
+      return reason.physical();
+    }
+
+    private AuthorityEnd withReason(AuthorityEndReason nextReason) {
+      return new AuthorityEnd(
+          distanceBlocks,
+          resource,
+          authorizedEdgeCount,
+          nextReason,
+          windowDerivedFromExpandedPath,
+          extensionAttempted,
+          extensionSucceeded);
     }
   }
 
@@ -654,6 +690,264 @@ public final class RuntimeDispatchService {
             destination);
   }
 
+  private SignalComputationTrace.Builder withAuthorityTraceFields(
+      SignalComputationTrace.Builder trace, AuthorityEnd authorityEnd) {
+    return withAuthorityTraceFields(
+        trace,
+        authorityEnd,
+        authorityEnd == null ? AuthorityEndReason.NONE : authorityEnd.reason());
+  }
+
+  private SignalComputationTrace.Builder withAuthorityTraceFields(
+      SignalComputationTrace.Builder trace,
+      AuthorityEnd authorityEnd,
+      AuthorityEndReason overrideReason) {
+    if (trace == null) {
+      return null;
+    }
+    AuthorityEnd end = authorityEnd == null ? AuthorityEnd.none() : authorityEnd;
+    AuthorityEndReason reason = overrideReason == null ? end.reason() : overrideReason;
+    return trace
+        .field("authorityEndReason", reason)
+        .field("authorityWindowDerivedFromExpandedPath", end.windowDerivedFromExpandedPath())
+        .field("authorityExtensionAttempted", end.extensionAttempted())
+        .field("authorityExtensionSucceeded", end.extensionSucceeded())
+        .field("authorityEndIsPhysical", reason.physical());
+  }
+
+  private SignalComputationTrace.Builder withDrainGateTraceFields(
+      SignalComputationTrace.Builder trace,
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SignalPublicationGate.Decision publication,
+      String authorizationFailureSource,
+      String destinationClearReason,
+      String tokenInvalidReason) {
+    if (trace == null) {
+      return null;
+    }
+    DrainGateContext context = resolveDrainGateContext(request, decision);
+    boolean drainGateApplied =
+        publication != null && publication.inputType() == SignalDecisionInputType.DRAIN_THROUGH;
+    return trace
+        .field("inputTypeBeforeDrainClassification", context.inputTypeBeforeDrainClassification())
+        .field("inputTypeAfterDrainClassification", context.inputType())
+        .field("canEnterConflictRelease", decision != null && decision.conflictRelease())
+        .field("canEnterReleaseLeader", context.drainAuthorityLeader())
+        .field("releaseHintVerified", context.releaseHintVerified())
+        .field("drainAuthorityActive", context.drainAuthorityActive())
+        .field("drainAuthorityLeader", context.drainAuthorityLeader())
+        .field("drainAuthorityFresh", context.drainAuthorityFresh())
+        .field("drainAuthorityZoneMatches", context.drainAuthorityZoneMatches())
+        .field("drainGateApplied", drainGateApplied)
+        .field("drainGateSkippedReason", drainGateApplied ? "-" : drainGateSkippedReason(context))
+        .field("authorizationFailureSource", authorizationFailureSource)
+        .field("destinationClearReason", destinationClearReason)
+        .field("tokenInvalidReason", tokenInvalidReason);
+  }
+
+  private static String drainGateSkippedReason(DrainGateContext context) {
+    if (context == null) {
+      return "context-missing";
+    }
+    if (context.inputType() == SignalDecisionInputType.DRAIN_THROUGH) {
+      return "-";
+    }
+    if (context.topologyExitHintOnly()) {
+      return "topology-exit-hint-only";
+    }
+    if (!context.drainAuthorityActive()) {
+      return "drain-authority-inactive";
+    }
+    if (!context.drainAuthorityFresh()) {
+      return "drain-authority-stale";
+    }
+    if (!context.drainAuthorityZoneMatches()) {
+      return "drain-authority-zone-mismatch";
+    }
+    if (context.ordinaryDeparture()) {
+      return "ordinary-departure";
+    }
+    return "not-drain-through";
+  }
+
+  private SignalPublicationGate.Decision evaluatePublicationGate(
+      String trainName,
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SignalAspect candidateAspect) {
+    DrainGateContext drainGate = resolveDrainGateContext(request, decision);
+    boolean drainLeader = decision != null && decision.conflictRelease();
+    String incident =
+        drainGate.drainAuthorityActive()
+                && drainGate.inputType() == SignalDecisionInputType.DRAIN_THROUGH
+                && !drainLeader
+            ? SignalPublicationGate.INCIDENT_DRAIN_AUTHORITY_INCONSISTENT
+            : "-";
+    return SignalPublicationGate.evaluate(
+        new SignalPublicationGate.Input(
+            request,
+            candidateAspect,
+            isMovementInhibited(trainName),
+            tokenState(trainName, movementToken(trainName).orElse(null)),
+            drainLeader,
+            drainGate.drainAuthorityActive(),
+            drainGate.drainAuthorityFresh(),
+            drainGate.drainAuthorityZoneMatches(),
+            drainGate.trainInsideMatchingSingleConflict(),
+            drainGate.pathDrainingTowardExit(),
+            drainGate.ordinaryDeparture(),
+            drainGate.topologyExitHintOnly(),
+            true,
+            incident));
+  }
+
+  private DrainGateContext resolveDrainGateContext(
+      OccupancyRequest request, OccupancyDecision decision) {
+    SignalDecisionInputType baseType = SignalDecisionInputClassifier.classify(request);
+    boolean releaseLeader =
+        decision != null
+            && decision.conflictRelease()
+            && request != null
+            && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING;
+    boolean releaseHintVerified = hasVerifiedReleaseHint(request);
+    boolean verifiedDrainAuthority = hasVerifiedDrainAuthorityHint(request);
+    boolean topologyExitHintOnly = hasOnlyTopologyExitHints(request);
+    boolean drainAuthorityActive = releaseLeader || verifiedDrainAuthority;
+    boolean drainAuthorityFresh = drainAuthorityActive && hasFreshMovementSnapshot(request);
+    boolean drainAuthorityZoneMatches =
+        drainAuthorityActive && releaseHintsMatchMovementPlanZones(request);
+    boolean trainInsideMatchingSingleConflict =
+        drainAuthorityActive && releaseHintsAlreadyInsideConflict(request);
+    boolean pathDrainingTowardExit = drainAuthorityActive && releaseHintsTargetExit(request);
+    boolean ordinaryDeparture =
+        request != null
+            && request.movementPlanSnapshot().map(plan -> plan.routeIndex() == 0).orElse(false);
+    SignalDecisionInputClassifier.DrainClassificationContext drainContext =
+        new SignalDecisionInputClassifier.DrainClassificationContext(
+            drainAuthorityActive,
+            drainAuthorityFresh,
+            drainAuthorityZoneMatches,
+            trainInsideMatchingSingleConflict,
+            pathDrainingTowardExit,
+            ordinaryDeparture,
+            topologyExitHintOnly);
+    SignalDecisionInputType finalType =
+        SignalDecisionInputClassifier.classify(request, drainContext);
+    return new DrainGateContext(
+        baseType,
+        finalType,
+        releaseHintVerified,
+        drainAuthorityActive,
+        releaseLeader,
+        drainAuthorityFresh,
+        drainAuthorityZoneMatches,
+        trainInsideMatchingSingleConflict,
+        pathDrainingTowardExit,
+        ordinaryDeparture,
+        topologyExitHintOnly);
+  }
+
+  private static boolean hasVerifiedReleaseHint(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint != null && hint.verifiedFor(hint.conflictKey())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean hasVerifiedDrainAuthorityHint(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint != null
+          && hint.kind() == ConflictClearingEvidenceKind.VERIFIED_DRAIN_AUTHORITY
+          && hint.verifiedFor(hint.conflictKey())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean hasOnlyTopologyExitHints(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint == null || hint.kind() != ConflictClearingEvidenceKind.TOPOLOGY_EXIT_HINT) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean hasFreshMovementSnapshot(OccupancyRequest request) {
+    return request != null
+        && request
+            .movementPlanSnapshot()
+            .map(plan -> plan.occupancyVersion() >= 0 && plan.progressVersion() >= 0)
+            .orElse(false);
+  }
+
+  private static boolean releaseHintsMatchMovementPlanZones(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    Optional<MovementPlanSnapshot> planOpt = request.movementPlanSnapshot();
+    if (planOpt.isEmpty() || planOpt.get().singleConflictDirections().isEmpty()) {
+      return false;
+    }
+    Set<String> planZones = planOpt.get().singleConflictDirections().keySet();
+    for (String key : request.conflictReleaseHints().keySet()) {
+      if (planZones.contains(key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean releaseHintsAlreadyInsideConflict(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint != null && hint.trainAlreadyInsideSameConflict()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean releaseHintsTargetExit(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint != null && hint.targetIsExitFromConflict()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private record DrainGateContext(
+      SignalDecisionInputType inputTypeBeforeDrainClassification,
+      SignalDecisionInputType inputType,
+      boolean releaseHintVerified,
+      boolean drainAuthorityActive,
+      boolean drainAuthorityLeader,
+      boolean drainAuthorityFresh,
+      boolean drainAuthorityZoneMatches,
+      boolean trainInsideMatchingSingleConflict,
+      boolean pathDrainingTowardExit,
+      boolean ordinaryDeparture,
+      boolean topologyExitHintOnly) {}
+
   private Optional<MovementAuthorizationToken> movementToken(String trainName) {
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {
@@ -689,6 +983,19 @@ public final class RuntimeDispatchService {
     return occupancyManager instanceof SimpleOccupancyManager manager
         ? manager.staleQueueCleanupCount()
         : -1L;
+  }
+
+  private OccupancyRequest markDirectedRequest(
+      OccupancyRequest request, SignalComputationTrace.Source source) {
+    if (request == null) {
+      return null;
+    }
+    SignalComputationTrace.Source effectiveSource =
+        source == null ? SignalComputationTrace.Source.PERIODIC_TICK : source;
+    return request
+        .withDirectedSource(effectiveSource.name())
+        .withDirectedOccupancyVersion(occupancyVersion())
+        .withDirectedProgressVersion(progressRegistry.version());
   }
 
   private SignalComputationTrace.Builder withStopFields(
@@ -815,7 +1122,9 @@ public final class RuntimeDispatchService {
                 priority,
                 AuthorizationPurpose.STATION_DEPARTURE)
             .orElse(context);
-    OccupancyRequest authorizationRequest = authorizationContext.request();
+    OccupancyRequest authorizationRequest =
+        markDirectedRequest(
+            authorizationContext.request(), SignalComputationTrace.Source.DEPARTURE_GATE);
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -823,7 +1132,11 @@ public final class RuntimeDispatchService {
     List<OccupancyResource> keepResources =
         mergeKeepResourcesWithCurrentPosition(
             authorizationRequest.resourceList(), Optional.of(definition.nodeId()), nextNode, graph);
-    releaseResourcesNotInRequest(trainName, keepResources);
+    releaseResourcesNotInRequest(
+        trainName,
+        keepResources,
+        protectedSwitcherZoneClaims(
+            trainName, route, currentIndex, definition.nodeId(), graph, "DEPARTURE_GATE"));
     releaseSpeculativeClaimsFromBehindSameRoute(
         trainName,
         route,
@@ -1387,7 +1700,11 @@ public final class RuntimeDispatchService {
       }
       context = contextOpt.get();
       OccupancyRequest request = context.request();
-      releaseResourcesNotInRequest(trainName, request.resourceList());
+      releaseResourcesNotInRequest(
+          trainName,
+          request.resourceList(),
+          protectedSwitcherZoneClaims(
+              trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"));
       releaseSpeculativeClaimsFromBehindSameRoute(
           trainName, route, currentIndex, currentNode, graph, request.resourceList());
       releaseSpeculativeQueueEntriesFromBehindSameRoute(
@@ -1406,15 +1723,21 @@ public final class RuntimeDispatchService {
                 AuthorizationPurpose.RUNTIME_MOVE)
             .orElse(context);
     OccupancyRequest request =
-        withRuntimeConflictClearingEvidence(
-            authorizationContext.request(), authorizationContext, graph);
+        markDirectedRequest(
+            withRuntimeConflictClearingEvidence(
+                authorizationContext.request(), authorizationContext, graph),
+            SignalComputationTrace.Source.PROGRESS_TRIGGER);
     List<OccupancyResource> keepResources =
         mergeKeepResourcesWithCurrentPosition(
             context.request().resourceList(),
             Optional.ofNullable(currentNode),
             Optional.of(nextNode),
             graph);
-    releaseResourcesNotInRequest(trainName, keepResources);
+    releaseResourcesNotInRequest(
+        trainName,
+        keepResources,
+        protectedSwitcherZoneClaims(
+            trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"));
     MovementAuthorizationCoordinator.AuthorizationResult authorization =
         movementAuthorizationCoordinator.authorize(
             new MovementAuthorizationCoordinator.AuthorizationRequest(
@@ -2320,12 +2643,65 @@ public final class RuntimeDispatchService {
     }
   }
 
+  /** Health/runtime 桥接解析用途。 */
+  public enum RuntimeTrainResolvePurpose {
+    DESTROY,
+    REFRESH_SIGNAL,
+    REAPPLY_HARD_STOP,
+    GET_STATE,
+    DEADLOCK_CONTEXT
+  }
+
+  /** Health/runtime 桥接列车名匹配来源。 */
+  public enum RuntimeTrainMatchKind {
+    EXACT,
+    RUNTIME_ALIAS,
+    CANONICAL_NAME,
+    ACTIVE_STATE,
+    SPLIT_ALIAS,
+    PREVIOUS_NAME,
+    FAILED
+  }
+
+  /** Health/runtime 桥接解析结果。 */
+  @SuppressFBWarnings(
+      value = {"EI_EXPOSE_REP", "EI_EXPOSE_REP2"},
+      justification =
+          "TrainProperties 是 TrainCarts 托管实体句柄；解析结果必须返回同一对象供 destroy/refresh/hard-stop 使用。")
+  public record RuntimeTrainResolution(
+      String requestedName,
+      String resolvedName,
+      TrainProperties properties,
+      RuntimeTrainMatchKind matchedBy,
+      Optional<UUID> trainPropertiesUuid,
+      Optional<UUID> entityUuid,
+      String failureReason) {
+
+    public RuntimeTrainResolution {
+      requestedName = requestedName == null ? "" : requestedName.trim();
+      resolvedName = resolvedName == null ? "" : resolvedName.trim();
+      matchedBy = matchedBy == null ? RuntimeTrainMatchKind.FAILED : matchedBy;
+      trainPropertiesUuid = trainPropertiesUuid == null ? Optional.empty() : trainPropertiesUuid;
+      entityUuid = entityUuid == null ? Optional.empty() : entityUuid;
+      failureReason =
+          failureReason == null || failureReason.isBlank() ? "NONE" : failureReason.trim();
+    }
+
+    public boolean propertiesFound() {
+      return properties != null;
+    }
+
+    public boolean resolved() {
+      return matchedBy != RuntimeTrainMatchKind.FAILED && !resolvedName.isBlank();
+    }
+  }
+
   /**
    * 互卡诊断用 blocker 条目。
    *
    * @param trainName blocker 列车名
-   * @param conflictKey 命中的 single conflict key；非冲突 blocker 为空
-   * @param direction blocker 已知的走廊方向
+   * @param conflictKey 命中的 conflict key；非冲突 blocker 为空
+   * @param direction blocker 已知的单线走廊方向
    */
   public record DeadlockBlockerInfo(
       String trainName, String conflictKey, Optional<CorridorDirection> direction) {
@@ -2387,6 +2763,36 @@ public final class RuntimeDispatchService {
     }
   }
 
+  /**
+   * HealthMonitor 在销毁兜底前查询的 drain-through 诊断。
+   *
+   * <p>该记录只描述“已有 occupant 是否能沿当前有向路径清空 single/switcher zone”，不降低互卡销毁阈值，也不把硬 blocker 升级为 confirmed
+   * deadlock。
+   */
+  public record DeadlockDrainability(
+      String episodeId,
+      String trainA,
+      String trainB,
+      String zoneId,
+      boolean drainable,
+      String drainCandidate,
+      Optional<NodeId> exitNode,
+      List<NodeId> drainPath,
+      String reason,
+      long remainingMsUntilDestroy) {
+
+    public DeadlockDrainability {
+      episodeId = episodeId == null ? "" : episodeId.trim();
+      trainA = trainA == null ? "" : trainA.trim();
+      trainB = trainB == null ? "" : trainB.trim();
+      zoneId = zoneId == null ? "" : zoneId.trim();
+      drainCandidate = drainCandidate == null ? "" : drainCandidate.trim();
+      exitNode = exitNode == null ? Optional.empty() : exitNode;
+      drainPath = drainPath == null ? List.of() : List.copyOf(drainPath);
+      reason = reason == null || reason.isBlank() ? "UNKNOWN" : reason.trim();
+    }
+  }
+
   private record BlockerSnapshot(Set<DeadlockBlockerInfo> blockers, Instant sampledAt) {
     private BlockerSnapshot {
       blockers = blockers == null ? Set.of() : Set.copyOf(blockers);
@@ -2421,22 +2827,31 @@ public final class RuntimeDispatchService {
    * @return 状态快照，若列车不存在或无进度则为空
    */
   public Optional<TrainRuntimeState> getTrainState(String trainName) {
-    if (trainName == null || trainName.isBlank()) {
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+    if (!resolution.resolved()) {
+      traceRuntimeTrainResolveFailed(RuntimeTrainResolvePurpose.GET_STATE, resolution);
       return Optional.empty();
     }
-    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt = progressRegistry.get(trainName);
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolution.resolvedName());
     if (entryOpt.isEmpty()) {
+      traceRuntimeTrainResolveFailed(
+          RuntimeTrainResolvePurpose.GET_STATE,
+          failedRuntimeTrainResolution(
+              trainName, "ACTIVE_STATE_MISSING", resolution.resolvedName()));
       return Optional.empty();
     }
     RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
     SignalAspect signal = entry.lastSignal();
     int idx = entry.currentIndex();
 
-    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    TrainProperties properties = resolution.properties();
     double speedBpt = getCurrentSpeedBlocksPerTick(properties);
 
     return Optional.of(
-        new TrainRuntimeState(trainName, idx, signal, speedBpt, entry.lastPassedGraphNode()));
+        new TrainRuntimeState(
+            entry.trainName(), idx, signal, speedBpt, entry.lastPassedGraphNode()));
   }
 
   private static double getCurrentSpeedBlocksPerTick(TrainProperties properties) {
@@ -2548,30 +2963,59 @@ public final class RuntimeDispatchService {
     return new DeadlockBlockerSnapshot(snapshot.blockers(), snapshot.sampledAt());
   }
 
+  /** 返回指定列车当前持有的 conflict claim key，用于健康诊断判定 occupant-to-many 模式。 */
+  public Set<String> currentConflictClaimKeys(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty() || occupancyManager == null) {
+      return Set.of();
+    }
+    Set<String> keys = new LinkedHashSet<>();
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null
+          || claim.trainName() == null
+          || claim.resource() == null
+          || claim.resource().kind() != ResourceKind.CONFLICT) {
+        continue;
+      }
+      if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        keys.add(claim.resource().key());
+      }
+    }
+    return Set.copyOf(keys);
+  }
+
   /**
    * 获取健康监控互卡兜底所需的列车上下文。
    *
    * <p>该接口只读运行时状态，不触发发车、占用或 destination 改写。
    */
   public Optional<DeadlockTrainContext> deadlockTrainContext(String trainName) {
-    if (trainName == null || trainName.isBlank()) {
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.DEADLOCK_CONTEXT);
+    if (!resolution.resolved()) {
+      traceRuntimeTrainResolveFailed(RuntimeTrainResolvePurpose.DEADLOCK_CONTEXT, resolution);
       return Optional.empty();
     }
-    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt = progressRegistry.get(trainName);
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolution.resolvedName());
     if (entryOpt.isEmpty()) {
+      traceRuntimeTrainResolveFailed(
+          RuntimeTrainResolvePurpose.DEADLOCK_CONTEXT,
+          failedRuntimeTrainResolution(
+              trainName, "ACTIVE_STATE_MISSING", resolution.resolvedName()));
       return Optional.empty();
     }
     RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
-    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    TrainProperties properties = resolution.properties();
     Optional<RouteDefinition> routeOpt = resolveRouteForRecovery(entry, properties);
     int routeSize = routeOpt.map(route -> route.waypoints().size()).orElse(0);
     RouteOperationType operationType =
         resolveRouteOperationTypeForRecovery(entry).orElse(RouteOperationType.OPERATION);
     int priority = resolvePriority(properties, routeOpt.orElse(null));
     boolean dwelling =
-        dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent();
-    boolean layoverReady = layoverRegistry.get(trainName).isPresent();
-    boolean departureGateHeld = hasDepartureGate(trainName);
+        dwellRegistry != null && dwellRegistry.remainingSeconds(entry.trainName()).isPresent();
+    boolean layoverReady = layoverRegistry.get(entry.trainName()).isPresent();
+    boolean departureGateHeld = hasDepartureGate(entry.trainName());
     boolean depotRelated =
         routeOpt.map(route -> isDepotRelated(entry, route, operationType)).orElse(false);
     boolean nearRouteEnd = routeSize > 0 && entry.currentIndex() >= Math.max(0, routeSize - 2);
@@ -2580,7 +3024,7 @@ public final class RuntimeDispatchService {
             || TrainTagHelper.readTagValue(properties, "FTA_MAINTENANCE_HOLD").isPresent();
     return Optional.of(
         new DeadlockTrainContext(
-            trainName,
+            entry.trainName(),
             entry.currentIndex(),
             routeSize,
             entry.lastSignal(),
@@ -2594,6 +3038,261 @@ public final class RuntimeDispatchService {
             nearRouteEnd,
             hasPassenger(properties),
             manualHold));
+  }
+
+  /**
+   * 判断互卡 episode 在销毁兜底前是否存在保守的 drain-through 候选。
+   *
+   * <p>本轮只确认 single corridor occupant 的清空路径：候选列车必须已经持有同一 {@code CONFLICT:single:*}
+   * claim，并且当前有向前方路径能走出该 conflict。switcher occupant-to-many 仅保留诊断，不在这里放宽为可销毁或可放行。
+   */
+  public Optional<DeadlockDrainability> deadlockDrainability(
+      String episodeId, String trainA, String trainB, String zoneId, long remainingMsUntilDestroy) {
+    String zone = zoneId == null ? "" : zoneId.trim();
+    if (!zone.startsWith("single:") || zone.contains(":cycle:")) {
+      return Optional.of(
+          new DeadlockDrainability(
+              episodeId,
+              trainA,
+              trainB,
+              zone,
+              false,
+              "",
+              Optional.empty(),
+              List.of(),
+              "SWITCHER_OR_NODE_EDGE_DIAGNOSTIC_ONLY",
+              remainingMsUntilDestroy));
+    }
+    Optional<DeadlockDrainability> first =
+        deadlockDrainabilityForTrain(
+            episodeId, trainA, trainA, trainB, zone, remainingMsUntilDestroy);
+    if (first.isPresent() && first.get().drainable()) {
+      return first;
+    }
+    Optional<DeadlockDrainability> second =
+        deadlockDrainabilityForTrain(
+            episodeId, trainB, trainA, trainB, zone, remainingMsUntilDestroy);
+    if (second.isPresent() && second.get().drainable()) {
+      return second;
+    }
+    return first.isPresent()
+        ? first
+        : Optional.of(
+            new DeadlockDrainability(
+                episodeId,
+                trainA,
+                trainB,
+                zone,
+                false,
+                "",
+                Optional.empty(),
+                List.of(),
+                "NO_DRAIN_CANDIDATE",
+                remainingMsUntilDestroy));
+  }
+
+  private Optional<DeadlockDrainability> deadlockDrainabilityForTrain(
+      String episodeId,
+      String candidateName,
+      String trainA,
+      String trainB,
+      String zoneId,
+      long remainingMsUntilDestroy) {
+    if (candidateName == null || candidateName.isBlank()) {
+      return Optional.empty();
+    }
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(candidateName, RuntimeTrainResolvePurpose.DEADLOCK_CONTEXT);
+    if (!resolution.resolved() || resolution.properties() == null) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              candidateName,
+              Optional.empty(),
+              List.of(),
+              "BLOCKER_NOT_RESOLVED",
+              remainingMsUntilDestroy));
+    }
+    MinecartGroup group = resolution.properties().getHolder();
+    if (group == null || !group.isValid()) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              List.of(),
+              "ENTITY_NOT_FOUND",
+              remainingMsUntilDestroy));
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolution.resolvedName());
+    if (entryOpt.isEmpty()) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              List.of(),
+              "ACTIVE_STATE_MISSING",
+              remainingMsUntilDestroy));
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    Optional<RouteDefinition> routeOpt = resolveRouteForRecovery(entry, resolution.properties());
+    Optional<RailGraph> graphOpt =
+        group.getWorld() == null
+            ? Optional.empty()
+            : resolveGraph(group.getWorld().getUID(), Instant.now());
+    if (routeOpt.isEmpty() || graphOpt.isEmpty()) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              List.of(),
+              routeOpt.isEmpty() ? "ROUTE_MISSING" : "GRAPH_MISSING",
+              remainingMsUntilDestroy));
+    }
+    RailGraph graph = graphOpt.get();
+    if (!(graph instanceof RailGraphConflictSupport support)) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              List.of(),
+              "CONFLICT_SUPPORT_MISSING",
+              remainingMsUntilDestroy));
+    }
+    RouteDefinition route = routeOpt.get();
+    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolution.resolvedName(), route);
+    Optional<OccupancyRequestContext> contextOpt =
+        buildForwardAuthorizationContext(
+            graph,
+            runtimeSettings,
+            resolution.resolvedName(),
+            route,
+            effectiveNodes,
+            entry.currentIndex(),
+            Instant.now(),
+            resolvePriority(resolution.properties(), route),
+            AuthorizationPurpose.RUNTIME_MOVE);
+    if (contextOpt.isEmpty()) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              List.of(),
+              "REQUEST_BUILD_FAILED",
+              remainingMsUntilDestroy));
+    }
+    OccupancyRequestContext context = contextOpt.get();
+    OccupancyResource zoneResource = OccupancyResource.forConflict(zoneId);
+    if (!trainAlreadyHoldsResource(resolution.resolvedName(), zoneResource)) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              context.pathNodes(),
+              "NOT_INSIDE_ZONE",
+              remainingMsUntilDestroy));
+    }
+    CorridorDirection direction = context.request().corridorDirections().get(zoneId);
+    if (direction == null || direction == CorridorDirection.UNKNOWN) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              context.pathNodes(),
+              "UNKNOWN_DIRECTION",
+              remainingMsUntilDestroy));
+    }
+    if (!pathTargetsExitFromConflict(context.edges(), support, zoneId)) {
+      return Optional.of(
+          drainabilityResult(
+              episodeId,
+              trainA,
+              trainB,
+              zoneId,
+              false,
+              resolution.resolvedName(),
+              Optional.empty(),
+              context.pathNodes(),
+              "NO_EXIT_IN_AUTHORITY_WINDOW",
+              remainingMsUntilDestroy));
+    }
+    Optional<NodeId> exitNode = conflictExitNode(context, support, zoneId);
+    return Optional.of(
+        drainabilityResult(
+            episodeId,
+            trainA,
+            trainB,
+            zoneId,
+            true,
+            resolution.resolvedName(),
+            exitNode,
+            context.pathNodes(),
+            "DRAIN_THROUGH_SAFE",
+            remainingMsUntilDestroy));
+  }
+
+  private DeadlockDrainability drainabilityResult(
+      String episodeId,
+      String trainA,
+      String trainB,
+      String zoneId,
+      boolean drainable,
+      String candidate,
+      Optional<NodeId> exitNode,
+      List<NodeId> drainPath,
+      String reason,
+      long remainingMsUntilDestroy) {
+    return new DeadlockDrainability(
+        episodeId,
+        trainA,
+        trainB,
+        zoneId,
+        drainable,
+        candidate,
+        exitNode,
+        drainPath,
+        reason,
+        remainingMsUntilDestroy);
   }
 
   /** 注册“销毁完成后刷新幸存列车”的一次性钩子。 */
@@ -2613,15 +3312,21 @@ public final class RuntimeDispatchService {
    * @param trainName 列车名
    */
   public void refreshSignalByName(String trainName) {
-    if (trainName == null || trainName.isBlank()) {
-      return;
-    }
-    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.REFRESH_SIGNAL);
+    TrainProperties properties = resolution.properties();
     if (properties == null) {
+      traceRuntimeTrainResolveFailed(RuntimeTrainResolvePurpose.REFRESH_SIGNAL, resolution);
       return;
     }
     com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
     if (group == null || !group.isValid()) {
+      traceRuntimeTrainResolveFailed(
+          RuntimeTrainResolvePurpose.REFRESH_SIGNAL,
+          failedRuntimeTrainResolution(
+              trainName,
+              group == null ? "ENTITY_NOT_FOUND" : "ALREADY_REMOVED",
+              resolution.resolvedName()));
       return;
     }
     refreshSignal(group);
@@ -2814,8 +3519,10 @@ public final class RuntimeDispatchService {
                 AuthorizationPurpose.RUNTIME_MOVE)
             .orElse(context);
     OccupancyRequest authorizationRequest =
-        withRuntimeConflictClearingEvidence(
-            authorizationContext.request(), authorizationContext, graph);
+        markDirectedRequest(
+            withRuntimeConflictClearingEvidence(
+                authorizationContext.request(), authorizationContext, graph),
+            SignalComputationTrace.Source.PERIODIC_TICK);
     AuthorityEnd authorityEnd =
         resolveAuthorityEnd(graph, effectiveNodes, currentIndex, authorizationContext);
     Optional<String> singleFailure =
@@ -3033,11 +3740,13 @@ public final class RuntimeDispatchService {
    * @return 找到列车属性并发起销毁时返回 true
    */
   public boolean destroyTrainByName(String trainName, String reason) {
-    if (trainName == null || trainName.isBlank()) {
-      return false;
-    }
-    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.DESTROY);
+    TrainProperties properties = resolution.properties();
+    traceDeadlockDestroyAttempted(resolution, reason);
     if (properties == null) {
+      traceRuntimeTrainResolveFailed(RuntimeTrainResolvePurpose.DESTROY, resolution);
+      traceDeadlockDestroyResult(resolution, reason, false, "RESOLVE_FAILED", null);
       return false;
     }
     String logicalTrainName =
@@ -3046,37 +3755,361 @@ public final class RuntimeDispatchService {
       logicalTrainName = trainName.trim();
     }
     com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
-    RuntimeTrainHandle handle =
-        group != null && group.isValid() ? new TrainCartsRuntimeHandle(group) : null;
+    if (group == null || !group.isValid()) {
+      String failure = group == null ? "ENTITY_NOT_FOUND" : "ALREADY_REMOVED";
+      traceDeadlockDestroyResult(resolution, reason, false, failure, null);
+      return false;
+    }
+    int memberCount = countMembers(group);
+    if (memberCount == 0) {
+      traceDeadlockDestroyResult(resolution, reason, false, "NO_MEMBERS", null);
+      return false;
+    }
+    RuntimeTrainHandle handle = new TrainCartsRuntimeHandle(group);
     String normalizedReason =
         reason == null || reason.isBlank() ? "health-deadlock" : reason.trim();
-    handleDestroy(handle, properties, logicalTrainName, normalizedReason);
-    return true;
+    try {
+      handleDestroy(handle, properties, logicalTrainName, normalizedReason);
+      traceDeadlockDestroyResult(resolution, reason, true, "NONE", null);
+      return true;
+    } catch (RuntimeException ex) {
+      traceDeadlockDestroyResult(resolution, reason, false, "EXCEPTION", ex);
+      return false;
+    }
   }
 
   private Optional<TrainProperties> resolveTrainPropertiesByName(String trainName) {
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+    return Optional.ofNullable(resolution.properties());
+  }
+
+  /**
+   * 统一解析 health/runtime 桥接入口使用的列车实体。
+   *
+   * <p>解析顺序保持保守：先精确 TrainCarts 名，再找运行时 active state，再找已有 canonical/tag/split
+   * 别名。这里不做包含、前缀、编辑距离等模糊匹配，避免误操作其它列车。
+   */
+  public RuntimeTrainResolution resolveRuntimeTrainForHealth(
+      String trainName, RuntimeTrainResolvePurpose purpose) {
     Optional<String> requestedOpt = normalizeTrainName(trainName);
     if (requestedOpt.isEmpty()) {
-      return Optional.empty();
+      return failedRuntimeTrainResolution(trainName, "BLANK_NAME", "");
     }
     String requested = requestedOpt.get();
     TrainProperties direct = TrainPropertiesStore.get(requested);
     if (direct != null) {
-      return Optional.of(direct);
+      return runtimeTrainResolution(requested, direct, RuntimeTrainMatchKind.EXACT);
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> activeEntry =
+        progressRegistry.get(requested);
+    if (activeEntry.isPresent()) {
+      TrainProperties properties = findTrainPropertiesByKnownAlias(activeEntry.get().trainName());
+      return runtimeTrainResolution(
+          requested, activeEntry.get().trainName(), properties, RuntimeTrainMatchKind.ACTIVE_STATE);
+    }
+    for (RouteProgressRegistry.RouteProgressEntry entry : progressRegistry.snapshot().values()) {
+      if (entry == null || entry.trainName() == null) {
+        continue;
+      }
+      String activeName = entry.trainName();
+      if (TrainNameNormalizer.sameLogicalTrain(activeName, requested)) {
+        TrainProperties properties = findTrainPropertiesByKnownAlias(activeName);
+        return runtimeTrainResolution(
+            requested, activeName, properties, RuntimeTrainMatchKind.ACTIVE_STATE);
+      }
     }
     for (TrainProperties candidate : TrainPropertiesStore.getAll()) {
       if (candidate == null) {
         continue;
       }
       String current = normalizeTrainName(candidate.getTrainName()).orElse("");
+      Optional<String> previous =
+          TrainTagHelper.readTagValue(candidate, RouteProgressRegistry.TAG_TRAIN_NAME)
+              .flatMap(RuntimeDispatchService::normalizeTrainName);
       Optional<String> tracked = resolveTrackedTrainName(candidate);
-      if (requested.equalsIgnoreCase(current)
-          || tracked.filter(name -> name.equalsIgnoreCase(requested)).isPresent()
-          || isSplitAliasName(current, requested)) {
-        return Optional.of(candidate);
+      if (requested.equalsIgnoreCase(current)) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.CANONICAL_NAME);
+      }
+      if (tracked.filter(name -> name.equalsIgnoreCase(requested)).isPresent()) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.RUNTIME_ALIAS);
+      }
+      if (previous.filter(name -> name.equalsIgnoreCase(requested)).isPresent()) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.PREVIOUS_NAME);
+      }
+      if (isSplitAliasName(current, requested)
+          || TrainNameNormalizer.sameLogicalTrain(current, requested)) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.SPLIT_ALIAS);
       }
     }
-    return Optional.empty();
+    RuntimeTrainResolution failed = failedRuntimeTrainResolution(requested, "RESOLVE_FAILED", "");
+    if (purpose != null) {
+      traceRuntimeTrainResolveFailed(purpose, failed);
+    }
+    return failed;
+  }
+
+  private TrainProperties findTrainPropertiesByKnownAlias(String trainName) {
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealthFromStoreOnly(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+    return resolution.properties();
+  }
+
+  private RuntimeTrainResolution resolveRuntimeTrainForHealthFromStoreOnly(
+      String trainName, RuntimeTrainResolvePurpose purpose) {
+    Optional<String> requestedOpt = normalizeTrainName(trainName);
+    if (requestedOpt.isEmpty()) {
+      return failedRuntimeTrainResolution(trainName, "BLANK_NAME", "");
+    }
+    String requested = requestedOpt.get();
+    TrainProperties direct = TrainPropertiesStore.get(requested);
+    if (direct != null) {
+      return runtimeTrainResolution(requested, direct, RuntimeTrainMatchKind.EXACT);
+    }
+    for (TrainProperties candidate : TrainPropertiesStore.getAll()) {
+      if (candidate == null) {
+        continue;
+      }
+      String current = normalizeTrainName(candidate.getTrainName()).orElse("");
+      Optional<String> previous =
+          TrainTagHelper.readTagValue(candidate, RouteProgressRegistry.TAG_TRAIN_NAME)
+              .flatMap(RuntimeDispatchService::normalizeTrainName);
+      Optional<String> tracked = resolveTrackedTrainName(candidate);
+      if (requested.equalsIgnoreCase(current)) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.CANONICAL_NAME);
+      }
+      if (tracked.filter(name -> name.equalsIgnoreCase(requested)).isPresent()) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.RUNTIME_ALIAS);
+      }
+      if (previous.filter(name -> name.equalsIgnoreCase(requested)).isPresent()) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.PREVIOUS_NAME);
+      }
+      if (isSplitAliasName(current, requested)
+          || TrainNameNormalizer.sameLogicalTrain(current, requested)) {
+        return runtimeTrainResolution(requested, candidate, RuntimeTrainMatchKind.SPLIT_ALIAS);
+      }
+    }
+    RuntimeTrainResolution failed = failedRuntimeTrainResolution(requested, "RESOLVE_FAILED", "");
+    if (purpose != null) {
+      traceRuntimeTrainResolveFailed(purpose, failed);
+    }
+    return failed;
+  }
+
+  private RuntimeTrainResolution runtimeTrainResolution(
+      String requestedName, TrainProperties properties, RuntimeTrainMatchKind matchedBy) {
+    String resolved =
+        resolveTrackedTrainName(properties)
+            .or(() -> normalizeTrainName(properties != null ? properties.getTrainName() : null))
+            .orElse(requestedName);
+    return runtimeTrainResolution(requestedName, resolved, properties, matchedBy);
+  }
+
+  private RuntimeTrainResolution runtimeTrainResolution(
+      String requestedName,
+      String resolvedName,
+      TrainProperties properties,
+      RuntimeTrainMatchKind matchedBy) {
+    return new RuntimeTrainResolution(
+        requestedName,
+        resolvedName,
+        properties,
+        matchedBy,
+        Optional.empty(),
+        Optional.empty(),
+        properties == null ? "NO_PROPERTIES" : "NONE");
+  }
+
+  private RuntimeTrainResolution failedRuntimeTrainResolution(
+      String requestedName, String failureReason, String resolvedName) {
+    return new RuntimeTrainResolution(
+        requestedName,
+        resolvedName,
+        null,
+        RuntimeTrainMatchKind.FAILED,
+        Optional.empty(),
+        Optional.empty(),
+        failureReason);
+  }
+
+  private void traceRuntimeTrainResolveFailed(
+      RuntimeTrainResolvePurpose purpose, RuntimeTrainResolution resolution) {
+    RuntimeTrainResolution effective =
+        resolution == null ? failedRuntimeTrainResolution("", "RESOLVE_FAILED", "") : resolution;
+    String requested = effective.requestedName();
+    traceHealthEvent(
+        "DEADLOCK_RESOLVE_FAILED",
+        "resolve:" + purpose + ":" + normalizeTrainKey(requested),
+        "requestedName="
+            + emptyDash(requested)
+            + " purpose="
+            + (purpose == null ? "UNKNOWN" : purpose.name())
+            + " resolvedName="
+            + emptyDash(effective.resolvedName())
+            + " matchedBy="
+            + effective.matchedBy()
+            + " failureReason="
+            + effective.failureReason()
+            + " runtimeNames="
+            + summarizeRuntimeTrainNames(12)
+            + " aliases="
+            + summarizeRuntimeAliases(12)
+            + " activeTrainProperties="
+            + summarizeTrainPropertiesNames(12));
+  }
+
+  private void traceDeadlockDestroyAttempted(RuntimeTrainResolution resolution, String reason) {
+    RuntimeTrainResolution effective =
+        resolution == null ? failedRuntimeTrainResolution("", "RESOLVE_FAILED", "") : resolution;
+    MinecartGroup group =
+        effective.properties() == null ? null : effective.properties().getHolder();
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_ATTEMPTED",
+        "destroy-attempt:" + normalizeTrainKey(effective.requestedName()),
+        "requestedName="
+            + emptyDash(effective.requestedName())
+            + " resolvedName="
+            + emptyDash(effective.resolvedName())
+            + " matchedBy="
+            + effective.matchedBy()
+            + " propertiesFound="
+            + effective.propertiesFound()
+            + " memberCount="
+            + countMembers(group)
+            + " entityCount="
+            + countMembers(group)
+            + " source=HEALTH_MONITOR_DEADLOCK reason="
+            + emptyDash(reason));
+  }
+
+  private void traceDeadlockDestroyResult(
+      RuntimeTrainResolution resolution,
+      String reason,
+      boolean success,
+      String failureReason,
+      RuntimeException exception) {
+    RuntimeTrainResolution effective =
+        resolution == null ? failedRuntimeTrainResolution("", "RESOLVE_FAILED", "") : resolution;
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_RESULT",
+        "destroy-result:"
+            + normalizeTrainKey(effective.requestedName())
+            + ":"
+            + success
+            + ":"
+            + failureReason,
+        "requestedName="
+            + emptyDash(effective.requestedName())
+            + " resolvedName="
+            + emptyDash(effective.resolvedName())
+            + " matchedBy="
+            + effective.matchedBy()
+            + " success="
+            + success
+            + " failureReason="
+            + (failureReason == null || failureReason.isBlank() ? "NONE" : failureReason)
+            + " source=HEALTH_MONITOR_DEADLOCK reason="
+            + emptyDash(reason)
+            + (exception == null
+                ? ""
+                : " exception="
+                    + exception.getClass().getSimpleName()
+                    + ":"
+                    + emptyDash(exception.getMessage())));
+  }
+
+  private void traceHealthEvent(String eventName, String key, String message) {
+    String event = eventName == null || eventName.isBlank() ? "HEALTH_TRACE" : eventName;
+    String traceKey = key == null || key.isBlank() ? event : key;
+    String fingerprint = event + "|" + message;
+    long nowMs = System.currentTimeMillis();
+    String previous = healthTraceFingerprints.get(traceKey);
+    Long lastAt = healthTraceLastAtMs.get(traceKey);
+    if (fingerprint.equals(previous) && lastAt != null && nowMs - lastAt < 30_000L) {
+      return;
+    }
+    healthTraceFingerprints.put(traceKey, fingerprint);
+    healthTraceLastAtMs.put(traceKey, nowMs);
+    debugLogger.accept(event + ": " + message);
+  }
+
+  private String summarizeRuntimeTrainNames(int limit) {
+    return summarizeStrings(progressRegistry.snapshot().keySet(), limit);
+  }
+
+  private String summarizeRuntimeAliases(int limit) {
+    List<String> aliases = new ArrayList<>();
+    for (TrainProperties properties : TrainPropertiesStore.getAll()) {
+      if (properties == null) {
+        continue;
+      }
+      String current = normalizeTrainName(properties.getTrainName()).orElse("");
+      TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+          .flatMap(RuntimeDispatchService::normalizeTrainName)
+          .filter(alias -> !alias.equalsIgnoreCase(current))
+          .ifPresent(alias -> aliases.add(alias + "->" + current));
+      if (aliases.size() >= Math.max(1, limit)) {
+        break;
+      }
+    }
+    return aliases.toString();
+  }
+
+  private String summarizeTrainPropertiesNames(int limit) {
+    List<String> names = new ArrayList<>();
+    for (TrainProperties properties : TrainPropertiesStore.getAll()) {
+      if (properties == null) {
+        continue;
+      }
+      normalizeTrainName(properties.getTrainName()).ifPresent(names::add);
+      if (names.size() >= Math.max(1, limit)) {
+        break;
+      }
+    }
+    return names.toString();
+  }
+
+  private static String summarizeStrings(Iterable<String> values, int limit) {
+    if (values == null) {
+      return "[]";
+    }
+    int max = Math.max(1, limit);
+    List<String> summary = new ArrayList<>();
+    int total = 0;
+    for (String value : values) {
+      if (value == null || value.isBlank()) {
+        continue;
+      }
+      total++;
+      if (summary.size() < max) {
+        summary.add(value);
+      }
+    }
+    if (total > max) {
+      summary.add("+" + (total - max));
+    }
+    return summary.toString();
+  }
+
+  private static String emptyDash(String value) {
+    return value == null || value.isBlank() ? "-" : value;
+  }
+
+  private static int countMembers(MinecartGroup group) {
+    if (group == null || !group.isValid()) {
+      return 0;
+    }
+    int count = 0;
+    try {
+      Iterator<MinecartMember<?>> iterator = group.iterator();
+      while (iterator.hasNext()) {
+        iterator.next();
+        count++;
+      }
+    } catch (RuntimeException ex) {
+      return -1;
+    }
+    return count;
   }
 
   /**
@@ -3126,6 +4159,42 @@ public final class RuntimeDispatchService {
               .get(trainName)
               .map(RouteProgressRegistry.RouteProgressEntry::lastSignal)
               .orElse(null);
+      boolean proceedLike = SignalDecisionInputClassifier.isProceedLike(signal);
+      boolean movementInhibited = movementInhibitors.containsKey(key);
+      if (proceedLike && movementInhibited) {
+        coalescedEventCount.increment();
+        SignalAspect traceAspect = previous == null ? SignalAspect.STOP : previous;
+        SignalComputationTrace.emit(
+            signalTrace(
+                    trainName,
+                    resolveTrainPropertiesByName(trainName).orElse(null),
+                    SignalComputationTrace.Source.EVENT,
+                    previous,
+                    traceAspect,
+                    "event-coalesced-suppressed")
+                .field("dirtyEventPending", false)
+                .field("computedAspect", signal)
+                .field("publishedAspect", "PRESERVE")
+                .field("physicalPublished", false)
+                .field("dirtyOnly", false)
+                .field("publishSuppressed", true)
+                .field("movementInhibited", true)
+                .field(
+                    "inhibitorReason",
+                    Optional.ofNullable(movementInhibitors.get(key)).map(Enum::name).orElse("-")));
+        debugLogger.accept(
+            "事件信号合并抑制: train="
+                + trainName
+                + " signal="
+                + signal
+                + " computedAspect="
+                + signal
+                + " publishedAspect=PRESERVE"
+                + " physicalPublished=false"
+                + " dirtyOnly=false"
+                + " reason=movement-inhibited");
+        return;
+      }
       dirtyEventSignals.put(key, signal);
       coalescedEventCount.increment();
       SignalComputationTrace.emit(
@@ -3136,8 +4205,22 @@ public final class RuntimeDispatchService {
                   previous,
                   signal,
                   "event-coalesced")
-              .field("dirtyEventPending", true));
-      debugLogger.accept("事件信号合并: train=" + trainName + " signal=" + signal + " mode=dirty");
+              .field("dirtyEventPending", true)
+              .field("computedAspect", signal)
+              .field("publishedAspect", "DIRTY_ONLY")
+              .field("physicalPublished", false)
+              .field("dirtyOnly", true));
+      debugLogger.accept(
+          "事件信号合并: train="
+              + trainName
+              + " signal="
+              + signal
+              + " computedAspect="
+              + signal
+              + " publishedAspect=DIRTY_ONLY"
+              + " physicalPublished=false"
+              + " dirtyOnly=true"
+              + " mode=dirty");
       return;
     }
     if (!applyingEventSignals.add(key)) {
@@ -3176,19 +4259,9 @@ public final class RuntimeDispatchService {
             && currentSignal == SignalAspect.STOP
             && shouldReapplyStopEvent(trainName, train, properties);
     if ((forceApply && signal == SignalAspect.STOP) || reapplyStop) {
-      applyHardStop(
-          train,
-          properties,
-          trainName,
-          HardStopReason.EVENT_STOP,
-          true,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          AuthorityEnd.none());
+      String key = normalizeTrainKey(trainName);
+      dirtyEventSignals.put(key, signal);
+      handleSignalTick(train, true);
       return;
     }
     debugLogger.accept(
@@ -3499,8 +4572,10 @@ public final class RuntimeDispatchService {
                 AuthorizationPurpose.RUNTIME_MOVE)
             .orElse(context);
     OccupancyRequest authorizationRequest =
-        withRuntimeConflictClearingEvidence(
-            authorizationContext.request(), authorizationContext, graph);
+        markDirectedRequest(
+            withRuntimeConflictClearingEvidence(
+                authorizationContext.request(), authorizationContext, graph),
+            SignalComputationTrace.Source.PERIODIC_TICK);
     AuthorityEnd authorityEnd =
         resolveAuthorityEnd(graph, effectiveNodes, currentIndex, authorizationContext);
     Optional<NodeId> nextNode =
@@ -3537,7 +4612,11 @@ public final class RuntimeDispatchService {
           authorityEnd);
       return;
     }
-    releaseResourcesNotInRequest(trainName, keepResources);
+    releaseResourcesNotInRequest(
+        trainName,
+        keepResources,
+        protectedSwitcherZoneClaims(
+            trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"));
     releaseSpeculativeClaimsFromBehindSameRoute(
         trainName,
         route,
@@ -3685,7 +4764,12 @@ public final class RuntimeDispatchService {
     // 前方列车信号调整：扫描更远范围（4 edges）检测其他列车并降级信号
     SignalAspect nextAspect =
         adjustSignalForForwardTrains(
-            trainName, route, effectiveNodes, currentIndex, graph, baseAspect);
+            trainName,
+            route,
+            currentIndex,
+            graph,
+            authorizationRequest.movementPlanSnapshot().orElse(null),
+            baseAspect);
     SignalAspect lastAspect = progressEntry.lastSignal();
     boolean stopAtNextWaypoint = false;
     if (nextNode.isPresent()) {
@@ -3693,6 +4777,9 @@ public final class RuntimeDispatchService {
       if (nextStopOpt.isPresent()) {
         stopAtNextWaypoint = shouldStopAtWaypoint(nextNode.get(), nextStopOpt.get());
       }
+    }
+    if (stopAtNextWaypoint) {
+      authorityEnd = authorityEnd.withReason(AuthorityEndReason.DWELL_OR_STATION_STOP);
     }
     if (currentNodeOpt.isEmpty() || nextNode.isEmpty()) {
       // 若已到终点且无下一目标，检查是否需要注册 Layover
@@ -3796,12 +4883,18 @@ public final class RuntimeDispatchService {
       TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
       boolean authorityFromHardConstraint =
           constraintDistanceOpt != null && constraintDistanceOpt.isPresent();
+      AuthorityEndReason authorityEndReason =
+          authorityFromHardConstraint ? AuthorityEndReason.HARD_BLOCKER : authorityEnd.reason();
       OptionalLong authorityDistance =
-          resolveMovementAuthorityDistance(constraintDistanceOpt, authorityEnd.distanceBlocks());
+          resolveMovementAuthorityDistance(
+              constraintDistanceOpt,
+              !authorityFromHardConstraint && authorityEnd.physical()
+                  ? authorityEnd.distanceBlocks()
+                  : OptionalLong.empty());
       String authoritySource =
           authorityFromHardConstraint
               ? "hard_constraint"
-              : authorityDistance.isPresent() ? "authority_end" : "none";
+              : authorityEndReason.name().toLowerCase(Locale.ROOT);
       MovementAuthorityService.MovementAuthorityDecision authorityDecision =
           movementAuthorityService.evaluate(
               new MovementAuthorityService.MovementAuthorityInput(
@@ -3814,31 +4907,34 @@ public final class RuntimeDispatchService {
       SignalAspect authorityAspect = authorityDecision.effectiveAspect();
       if (signalSeverity(authorityAspect) > signalSeverity(nextAspect)) {
         SignalComputationTrace.emit(
-            signalTrace(
-                    trainName,
-                    properties,
-                    SignalComputationTrace.Source.MOVEMENT_AUTHORITY,
-                    nextAspect,
-                    authorityAspect,
-                    "movement-authority-downgrade:" + authoritySource)
-                .nodes(currentNodeOpt.orElse(null), nextNode.orElse(null))
-                .progress(
-                    progressRegistry.version(),
-                    currentIndex,
-                    currentIndex,
-                    lastPassedBeforeTick,
-                    progressRegistry
-                        .get(trainName)
-                        .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
-                .request(authorizationRequest)
-                .decision(decision, authorizationRequest)
-                .distances(
-                    blockerDistanceOpt,
-                    lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
-                    lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach(),
-                    authorityDecision.authorityDistanceBlocks(),
-                    authorityEnd.resource(),
-                    authorityEnd.authorizedEdgeCount()));
+            withAuthorityTraceFields(
+                signalTrace(
+                        trainName,
+                        properties,
+                        SignalComputationTrace.Source.MOVEMENT_AUTHORITY,
+                        nextAspect,
+                        authorityAspect,
+                        "movement-authority-downgrade:" + authoritySource)
+                    .nodes(currentNodeOpt.orElse(null), nextNode.orElse(null))
+                    .progress(
+                        progressRegistry.version(),
+                        currentIndex,
+                        currentIndex,
+                        lastPassedBeforeTick,
+                        progressRegistry
+                            .get(trainName)
+                            .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
+                    .request(authorizationRequest)
+                    .decision(decision, authorizationRequest)
+                    .distances(
+                        blockerDistanceOpt,
+                        lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
+                        lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach(),
+                        authorityDecision.authorityDistanceBlocks(),
+                        authorityEnd.resource(),
+                        authorityEnd.authorizedEdgeCount()),
+                authorityEnd,
+                authorityEndReason));
         debugLogger.accept(
             "移动授权降级: train="
                 + trainName
@@ -3922,36 +5018,6 @@ public final class RuntimeDispatchService {
               + " blockers="
               + decision.blockers().size());
     }
-    SignalComputationTrace.emit(
-        withStopFields(
-                signalTrace(
-                    trainName,
-                    properties,
-                    SignalComputationTrace.Source.PERIODIC_TICK,
-                    previousTickAspect,
-                    nextAspect,
-                    "signal-final"),
-                stopOpt,
-                dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent(),
-                stopAtNextWaypoint)
-            .nodes(currentNodeOpt.get(), nextNode.get())
-            .progress(
-                progressRegistry.version(),
-                currentIndex,
-                currentIndex,
-                lastPassedBeforeTick,
-                progressRegistry
-                    .get(trainName)
-                    .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
-            .request(authorizationRequest)
-            .decision(decision, authorizationRequest)
-            .distances(
-                blockerDistanceOpt,
-                lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
-                lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach(),
-                authorityEnd.distanceBlocks(),
-                authorityEnd.resource(),
-                authorityEnd.authorizedEdgeCount()));
     retainRearGuardOccupancyBestEffort(
         trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
@@ -4006,6 +5072,179 @@ public final class RuntimeDispatchService {
           authorityEnd);
       return;
     }
+    SignalPublicationGate.Decision publication =
+        evaluatePublicationGate(trainName, authorizationRequest, decision, nextAspect);
+    if (publication.blocked()) {
+      if (publication.localOnlyStop()) {
+        SignalComputationTrace.emit(
+            withDrainGateTraceFields(
+                withAuthorityTraceFields(
+                    signalTrace(
+                            trainName,
+                            properties,
+                            SignalComputationTrace.Source.PERIODIC_TICK,
+                            previousTickAspect,
+                            SignalAspect.STOP,
+                            "signal-publication-gate-local-stop:" + publication.reason())
+                        .field("candidateAspect", publication.candidateAspect())
+                        .field("publicationGateAspect", publication.visibleAspect())
+                        .field("publicationGateReason", publication.reason())
+                        .field("signalDecisionInputType", publication.inputType())
+                        .nodes(currentNodeOpt.get(), nextNode.get())
+                        .progress(
+                            progressRegistry.version(),
+                            currentIndex,
+                            currentIndex,
+                            lastPassedBeforeTick,
+                            progressRegistry
+                                .get(trainName)
+                                .flatMap(
+                                    RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
+                        .request(authorizationRequest)
+                        .decision(decision, authorizationRequest)
+                        .distances(
+                            blockerDistanceOpt,
+                            lookahead == null
+                                ? OptionalLong.empty()
+                                : lookahead.distanceToCaution(),
+                            lookahead == null
+                                ? OptionalLong.empty()
+                                : lookahead.distanceToApproach(),
+                            authorityEnd.distanceBlocks(),
+                            authorityEnd.resource(),
+                            authorityEnd.authorizedEdgeCount()),
+                    authorityEnd),
+                authorizationRequest,
+                decision,
+                publication,
+                "drain-local-only",
+                "-",
+                "-"));
+        updateSignalOrWarn(trainName, SignalAspect.STOP, now);
+        TrainConfig localStopConfig =
+            trainConfigResolver.resolve(properties, configManager.current());
+        runtimeTrainController.applyControl(
+            train,
+            properties,
+            SignalAspect.STOP,
+            0.0,
+            localStopConfig,
+            false,
+            OptionalLong.empty(),
+            java.util.Optional.empty(),
+            configManager.current().runtimeSettings());
+        return;
+      }
+      rollbackMovementAuthorization(
+          trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+      OccupancyDecision blocked =
+          new OccupancyDecision(
+              false,
+              now,
+              SignalAspect.STOP,
+              decision.blockers(),
+              false,
+              "publication-gate:" + publication.reason());
+      SignalComputationTrace.emit(
+          withDrainGateTraceFields(
+              withAuthorityTraceFields(
+                  signalTrace(
+                          trainName,
+                          properties,
+                          SignalComputationTrace.Source.PERIODIC_TICK,
+                          previousTickAspect,
+                          SignalAspect.STOP,
+                          "signal-publication-gate-blocked:" + publication.reason())
+                      .field("candidateAspect", publication.candidateAspect())
+                      .field("publicationGateAspect", publication.visibleAspect())
+                      .field("publicationGateReason", publication.reason())
+                      .field("signalDecisionInputType", publication.inputType())
+                      .nodes(currentNodeOpt.get(), nextNode.get())
+                      .progress(
+                          progressRegistry.version(),
+                          currentIndex,
+                          currentIndex,
+                          lastPassedBeforeTick,
+                          progressRegistry
+                              .get(trainName)
+                              .flatMap(
+                                  RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
+                      .request(authorizationRequest)
+                      .decision(blocked, authorizationRequest)
+                      .distances(
+                          blockerDistanceOpt,
+                          lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
+                          lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach(),
+                          authorityEnd.distanceBlocks(),
+                          authorityEnd.resource(),
+                          authorityEnd.authorizedEdgeCount()),
+                  authorityEnd),
+              authorizationRequest,
+              blocked,
+              publication,
+              "publication-gate:" + publication.reason(),
+              "hard-stop:authorization_failure",
+              "rollback:authorization_failure"));
+      applyHardStop(
+          train,
+          properties,
+          trainName,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          true,
+          route,
+          currentNodeOpt.orElse(null),
+          nextNode.orElse(null),
+          graph,
+          blocked,
+          authorizationRequest,
+          authorityEnd);
+      return;
+    }
+    nextAspect = publication.visibleAspect();
+    SignalComputationTrace.emit(
+        withDrainGateTraceFields(
+            withAuthorityTraceFields(
+                withStopFields(
+                        signalTrace(
+                                trainName,
+                                properties,
+                                SignalComputationTrace.Source.PERIODIC_TICK,
+                                previousTickAspect,
+                                nextAspect,
+                                "signal-final")
+                            .field("candidateAspect", publication.candidateAspect())
+                            .field("publicationGateAspect", publication.visibleAspect())
+                            .field("publicationGateReason", publication.reason())
+                            .field("signalDecisionInputType", publication.inputType()),
+                        stopOpt,
+                        dwellRegistry != null
+                            && dwellRegistry.remainingSeconds(trainName).isPresent(),
+                        stopAtNextWaypoint)
+                    .nodes(currentNodeOpt.get(), nextNode.get())
+                    .progress(
+                        progressRegistry.version(),
+                        currentIndex,
+                        currentIndex,
+                        lastPassedBeforeTick,
+                        progressRegistry
+                            .get(trainName)
+                            .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
+                    .request(authorizationRequest)
+                    .decision(decision, authorizationRequest)
+                    .distances(
+                        blockerDistanceOpt,
+                        lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
+                        lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach(),
+                        authorityEnd.distanceBlocks(),
+                        authorityEnd.resource(),
+                        authorityEnd.authorizedEdgeCount()),
+                authorityEnd),
+            authorizationRequest,
+            decision,
+            publication,
+            "-",
+            "-",
+            "-"));
     if (allowLaunch) {
       updateSignalOrWarn(trainName, nextAspect, now);
     }
@@ -4573,36 +5812,27 @@ public final class RuntimeDispatchService {
   private SignalAspect adjustSignalForForwardTrains(
       String trainName,
       RouteDefinition route,
-      List<NodeId> effectiveNodes,
       int currentIndex,
       RailGraph graph,
+      MovementPlanSnapshot plan,
       SignalAspect baseAspect) {
     if (trainName == null
         || trainName.isBlank()
         || route == null
         || graph == null
-        || occupancyManager == null) {
+        || occupancyManager == null
+        || plan == null) {
       return baseAspect;
     }
     // 扫描前方最多 3 段边（覆盖 STOP/CAUTION/PWC 范围）
     int scanEdges = 3;
-    List<NodeId> waypoints = effectiveNodes;
-    if (waypoints == null || waypoints.isEmpty()) {
+    List<NodeId> scanNodes = plan.expandedPathNodes();
+    List<DirectedTraversalContext.DirectedEdge> scanEdgesList = plan.directedEdges();
+    if (currentIndex < 0 || scanNodes.isEmpty() || scanEdgesList.isEmpty()) {
       return baseAspect;
     }
-    if (currentIndex < 0 || currentIndex >= waypoints.size() - 1) {
-      return baseAspect;
-    }
-
-    Optional<ExpandedRoutePath> scanPathOpt =
-        expandForwardScanPath(graph, waypoints, currentIndex, scanEdges);
-    if (scanPathOpt.isEmpty()) {
-      return baseAspect;
-    }
-    ExpandedRoutePath scanPath = scanPathOpt.get();
-    List<NodeId> scanNodes = scanPath.nodes();
-    List<RailEdge> scanEdgesList = scanPath.edges();
-    for (int edgeIndex = 0; edgeIndex < scanEdgesList.size(); edgeIndex++) {
+    int edgeLimit = Math.min(scanEdges, scanEdgesList.size());
+    for (int edgeIndex = 0; edgeIndex < edgeLimit; edgeIndex++) {
       int forwardEdgeCount = edgeIndex + 1;
       NodeId toNode = edgeIndex + 1 < scanNodes.size() ? scanNodes.get(edgeIndex + 1) : null;
 
@@ -4616,9 +5846,9 @@ public final class RuntimeDispatchService {
         }
       }
 
-      RailEdge edge = scanEdgesList.get(edgeIndex);
       Optional<OccupancyClaim> edgeClaim =
-          occupancyManager.getClaim(OccupancyResource.forEdge(edge.id()));
+          occupancyManager.getClaim(
+              OccupancyResource.forEdge(scanEdgesList.get(edgeIndex).edgeId()));
       if (edgeClaim.isPresent()
           && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, edgeClaim.get())) {
         return edgeCountToSignal(forwardEdgeCount);
@@ -4973,17 +6203,23 @@ public final class RuntimeDispatchService {
 
   /** 对在线列车重新下发硬 STOP，供健康监控在 STOP 互卡等待期间使用。 */
   public boolean reapplyHardStopByName(String trainName, String reason) {
-    if (trainName == null || trainName.isBlank()) {
-      return false;
-    }
-    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.REAPPLY_HARD_STOP);
+    TrainProperties properties = resolution.properties();
     if (properties == null || !isFtaManagedTrain(properties)) {
+      traceRuntimeTrainResolveFailed(
+          RuntimeTrainResolvePurpose.REAPPLY_HARD_STOP,
+          properties == null
+              ? resolution
+              : failedRuntimeTrainResolution(
+                  trainName, "NOT_FTA_MANAGED", resolution.resolvedName()));
       return false;
     }
     MinecartGroup group = properties.getHolder();
     RuntimeTrainHandle train =
         group != null && group.isValid() ? new TrainCartsRuntimeHandle(group) : null;
-    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt = progressRegistry.get(trainName);
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolution.resolvedName());
     RouteDefinition route = null;
     NodeId currentNode = null;
     NodeId nextNode = null;
@@ -5005,10 +6241,14 @@ public final class RuntimeDispatchService {
         }
       }
     }
+    String resolvedTrainName =
+        entryOpt
+            .map(RouteProgressRegistry.RouteProgressEntry::trainName)
+            .orElse(resolution.resolvedName());
     applyHardStop(
         train,
         properties,
-        trainName,
+        resolvedTrainName,
         HardStopReason.DEADLOCK_CONFIRMED_WAITING,
         true,
         route,
@@ -5020,7 +6260,7 @@ public final class RuntimeDispatchService {
         AuthorityEnd.none());
     debugLogger.accept(
         "HealthMonitor reapplyHardStop: train="
-            + trainName
+            + resolvedTrainName
             + " reason="
             + (reason == null || reason.isBlank() ? "health" : reason));
     return true;
@@ -7400,12 +8640,82 @@ public final class RuntimeDispatchService {
       if (!pathTargetsExitFromConflict(context.edges(), support, resource.key())) {
         continue;
       }
-      hints.put(resource.key(), ConflictReleaseHint.verified(resource.key()));
+      hints.put(
+          resource.key(),
+          ConflictReleaseHint.topologyExit(resource.key(), "runtime-conflict-clearing-evidence"));
     }
     if (hints.isEmpty()) {
       return request;
     }
-    return request.withConflictReleaseHints(AuthorizationPurpose.CONFLICT_CLEARING, hints);
+    Optional<OccupancyClaim> hardBlocker = drainPathHardBlocker(request);
+    if (hardBlocker.isPresent()) {
+      OccupancyClaim blocker = hardBlocker.get();
+      debugLogger.accept(
+          "DRAIN_THROUGH_BLOCKED train="
+              + request.trainName()
+              + " zoneIds="
+              + hints.keySet()
+              + " blockerResource="
+              + blocker.resource()
+              + " blockerOwner="
+              + blocker.trainName()
+              + " reason=hard-blocker-on-drain-path"
+              + " occupancyVersion="
+              + occupancyVersion());
+      return request;
+    }
+    debugLogger.accept(
+        "DRAIN_THROUGH_AUTHORITY train="
+            + request.trainName()
+            + " zoneIds="
+            + hints.keySet()
+            + " path="
+            + context.pathNodes()
+            + " reason=topology-exit-hint-only"
+            + " occupancyVersion="
+            + occupancyVersion());
+    return request.withConflictClearingEvidence(hints);
+  }
+
+  private Optional<OccupancyClaim> drainPathHardBlocker(OccupancyRequest request) {
+    if (request == null || occupancyManager == null) {
+      return Optional.empty();
+    }
+    List<OccupancyClaim> claims = occupancyManager.snapshotClaims();
+    if (claims == null || claims.isEmpty()) {
+      return Optional.empty();
+    }
+    Set<OccupancyResource> hardPathResources = new LinkedHashSet<>();
+    for (OccupancyResource resource : request.resourceList()) {
+      if (isDrainPathHardBlockerResource(resource)) {
+        hardPathResources.add(resource);
+      }
+    }
+    if (hardPathResources.isEmpty()) {
+      return Optional.empty();
+    }
+    for (OccupancyClaim claim : claims) {
+      if (claim == null || claim.resource() == null || claim.trainName() == null) {
+        continue;
+      }
+      if (!hardPathResources.contains(claim.resource())) {
+        continue;
+      }
+      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+        return Optional.of(claim);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static boolean isDrainPathHardBlockerResource(OccupancyResource resource) {
+    if (resource == null) {
+      return false;
+    }
+    if (resource.kind() == ResourceKind.NODE || resource.kind() == ResourceKind.EDGE) {
+      return true;
+    }
+    return resource.kind() == ResourceKind.CONFLICT && resource.key().startsWith("switcher:");
   }
 
   private boolean trainAlreadyHoldsResource(String trainName, OccupancyResource resource) {
@@ -7447,6 +8757,36 @@ public final class RuntimeDispatchService {
       }
     }
     return false;
+  }
+
+  private Optional<NodeId> conflictExitNode(
+      OccupancyRequestContext context, RailGraphConflictSupport support, String conflictKey) {
+    if (context == null
+        || context.edges().isEmpty()
+        || context.pathNodes().isEmpty()
+        || support == null
+        || conflictKey == null) {
+      return Optional.empty();
+    }
+    boolean sawSameConflict = false;
+    List<RailEdge> edges = context.edges();
+    List<NodeId> nodes = context.pathNodes();
+    for (int i = 0; i < edges.size(); i++) {
+      RailEdge edge = edges.get(i);
+      if (edge == null || edge.id() == null) {
+        continue;
+      }
+      Optional<String> edgeConflict = support.conflictKeyForEdge(edge.id());
+      if (edgeConflict.isPresent() && edgeConflict.get().equals(conflictKey)) {
+        sawSameConflict = true;
+        continue;
+      }
+      if (sawSameConflict) {
+        int nodeIndex = Math.min(i, nodes.size() - 1);
+        return Optional.ofNullable(nodes.get(nodeIndex));
+      }
+    }
+    return Optional.empty();
   }
 
   private static boolean isDirectionalSingleConflict(OccupancyResource resource) {
@@ -7742,13 +9082,45 @@ public final class RuntimeDispatchService {
     List<RailEdge> authorizedEdges = authorizationContext.edges();
     int authorizedEdgeCount = authorizedEdges == null ? 0 : authorizedEdges.size();
     if (authorizedEdgeCount <= 0) {
-      return new AuthorityEnd(OptionalLong.empty(), "none", 0);
+      return AuthorityEnd.none();
     }
     long distance = 0L;
     for (RailEdge edge : authorizedEdges) {
       if (edge != null) {
         distance += Math.max(0L, edge.lengthBlocks());
       }
+    }
+    Optional<MovementPlanSnapshot> planOpt = authorizationContext.request().movementPlanSnapshot();
+    if (planOpt.isPresent()) {
+      MovementPlanSnapshot plan = planOpt.get();
+      List<DirectedTraversalContext.DirectedEdge> planEdges = plan.directedEdges();
+      if (planEdges.size() > authorizedEdgeCount) {
+        DirectedTraversalContext.DirectedEdge firstUnauthorized =
+            planEdges.get(authorizedEdgeCount);
+        String resource = OccupancyResource.forEdge(firstUnauthorized.edgeId()).toString();
+        return new AuthorityEnd(
+            OptionalLong.of(Math.max(0L, distance)),
+            resource,
+            authorizedEdgeCount,
+            AuthorityEndReason.ARTIFICIAL_WINDOW_LIMIT,
+            true,
+            true,
+            true);
+      }
+      String resource =
+          plan.expandedPathNodes().isEmpty()
+              ? "route_end"
+              : OccupancyResource.forNode(
+                      plan.expandedPathNodes().get(plan.expandedPathNodes().size() - 1))
+                  .toString();
+      return new AuthorityEnd(
+          OptionalLong.of(Math.max(0L, distance)),
+          resource,
+          authorizedEdgeCount,
+          AuthorityEndReason.ROUTE_STOP_OR_TERMINAL,
+          true,
+          false,
+          false);
     }
     Optional<ExpandedRoutePath> expandedOpt =
         expandForwardScanPath(graph, effectiveNodes, currentIndex, authorizedEdgeCount + 1);
@@ -7761,14 +9133,27 @@ public final class RuntimeDispatchService {
         }
       }
       return new AuthorityEnd(
-          OptionalLong.of(Math.max(0L, distance)), resource, authorizedEdgeCount);
+          OptionalLong.of(Math.max(0L, distance)),
+          resource,
+          authorizedEdgeCount,
+          AuthorityEndReason.ROUTE_STOP_OR_TERMINAL,
+          false,
+          false,
+          false);
     }
     RailEdge firstUnauthorizedEdge = expandedOpt.get().edges().get(authorizedEdgeCount);
     String resource =
         firstUnauthorizedEdge == null
             ? "none"
             : OccupancyResource.forEdge(firstUnauthorizedEdge.id()).toString();
-    return new AuthorityEnd(OptionalLong.of(Math.max(0L, distance)), resource, authorizedEdgeCount);
+    return new AuthorityEnd(
+        OptionalLong.of(Math.max(0L, distance)),
+        resource,
+        authorizedEdgeCount,
+        AuthorityEndReason.ARTIFICIAL_WINDOW_LIMIT,
+        false,
+        true,
+        true);
   }
 
   private Optional<String> validateSingleCorridorEntrySafety(
@@ -7798,8 +9183,89 @@ public final class RuntimeDispatchService {
           && (authorityEnd == null || authorityEnd.distanceBlocks().isEmpty())) {
         return Optional.of("authority-end-missing");
       }
+      if (graph instanceof RailGraphConflictSupport support) {
+        EntryLookaheadEvaluator.Result lookahead =
+            EntryLookaheadEvaluator.evaluate(
+                context.request().movementPlanSnapshot().orElse(null),
+                support,
+                conflict,
+                context.edges().size(),
+                context
+                    .request()
+                    .movementPlanSnapshot()
+                    .map(plan -> plan.directedEdges().size())
+                    .orElse(context.edges().size()));
+        if (lookahead.failClosed()) {
+          traceEntryLookaheadBlocked(trainName, context, conflict, lookahead);
+          if (hasOtherConflictPresence(conflict, trainName)) {
+            return Optional.of("entry-lookahead-exit-not-feasible");
+          }
+        }
+      }
     }
     return Optional.empty();
+  }
+
+  private boolean hasOtherConflictPresence(OccupancyResource conflict, String trainName) {
+    if (conflict == null || occupancyManager == null) {
+      return false;
+    }
+    Optional<OccupancyClaim> claim = occupancyManager.getClaim(conflict);
+    if (claim.isPresent()
+        && !TrainNameNormalizer.sameLogicalTrain(claim.get().trainName(), trainName)) {
+      return true;
+    }
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
+      return false;
+    }
+    for (OccupancyQueueSnapshot snapshot : queueSupport.snapshotQueues()) {
+      if (snapshot == null || !conflict.equals(snapshot.resource())) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : snapshot.entries()) {
+        if (entry != null && !TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private void traceEntryLookaheadBlocked(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      EntryLookaheadEvaluator.Result lookahead) {
+    OccupancyRequest request = context == null ? null : context.request();
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                SignalAspect.STOP,
+                "ENTRY_LOOKAHEAD_BLOCKED")
+            .field("lookaheadUsesExpandedPath", true)
+            .field(
+                "lookaheadWindowNodeCount",
+                lookahead == null ? 0 : lookahead.lookaheadWindowNodeCount())
+            .field("entryZoneId", conflict == null ? "-" : conflict.key())
+            .field("entryZoneStartIndex", lookahead == null ? -1 : lookahead.entryZoneStartIndex())
+            .field(
+                "exitIndexBeforeExtension",
+                lookahead == null ? -1 : lookahead.exitIndexBeforeExtension())
+            .field("extensionAttempted", lookahead != null && lookahead.extensionAttempted())
+            .field(
+                "exitIndexAfterExtension",
+                lookahead == null ? -1 : lookahead.exitIndexAfterExtension())
+            .field("exitFeasible", lookahead != null && lookahead.exitFeasible())
+            .field(
+                "failureReason",
+                lookahead == null ? "exit-not-visible-after-extension" : lookahead.failureReason())
+            .field("zoneId", conflict == null ? "-" : conflict.key())
+            .field("zoneMembership", "ENTERING_ZONE")
+            .field("drainLeader", false)
+            .request(request));
   }
 
   private Optional<OccupancyResource> singleConflictForEdge(RailGraph graph, RailEdge edge) {
@@ -7848,6 +9314,159 @@ public final class RuntimeDispatchService {
       }
     }
     return Set.copyOf(protectedResources);
+  }
+
+  private Set<OccupancyResource> protectedSwitcherZoneClaims(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      RailGraph graph,
+      String source) {
+    if (occupancyManager == null
+        || trainName == null
+        || trainName.isBlank()
+        || route == null
+        || currentIndex < 0
+        || currentNode == null
+        || graph == null) {
+      return Set.of();
+    }
+    Set<OccupancyResource> protectedResources = new LinkedHashSet<>();
+    Optional<NodeId> lastPassed =
+        progressRegistry
+            .get(trainName)
+            .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode);
+    Optional<NodeId> nextTarget =
+        currentIndex + 1 < route.waypoints().size()
+            ? Optional.ofNullable(resolveEffectiveNode(trainName, route, currentIndex + 1))
+            : Optional.empty();
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null
+          || claim.resource() == null
+          || claim.trainName() == null
+          || !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        continue;
+      }
+      Optional<NodeId> switcherNode = switcherNodeFromConflict(claim.resource());
+      if (switcherNode.isEmpty()) {
+        continue;
+      }
+      if (!isTrainStillInsideSwitcherZone(
+          trainName, route, currentIndex, currentNode, graph, switcherNode.get())) {
+        continue;
+      }
+      protectedResources.add(claim.resource());
+      debugLogger.accept(
+          "保护道岔占用: train="
+              + trainName
+              + " key="
+              + normalizeTrainKey(trainName)
+              + " resource=CONFLICT:"
+              + claim.resource().key()
+              + " reason=still-inside-switcher-zone"
+              + " currentNode="
+              + currentNode.value()
+              + " lastPassedGraphNode="
+              + lastPassed.map(NodeId::value).orElse("-")
+              + " nextTarget="
+              + nextTarget.map(NodeId::value).orElse("-")
+              + " currentIndex="
+              + currentIndex
+              + " source="
+              + (source == null || source.isBlank() ? "RELEASE_OUTSIDE_WINDOW" : source));
+    }
+    return Set.copyOf(protectedResources);
+  }
+
+  private boolean isTrainStillInsideSwitcherZone(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      RailGraph graph,
+      NodeId switcherNode) {
+    if (route == null
+        || currentIndex < 0
+        || currentNode == null
+        || graph == null
+        || switcherNode == null) {
+      return false;
+    }
+    if (graph.findNode(switcherNode).filter(node -> node.type() == NodeType.SWITCHER).isEmpty()) {
+      return false;
+    }
+    if (currentNode.equals(switcherNode)) {
+      return true;
+    }
+    if (currentIndex + 1 >= route.waypoints().size()) {
+      return false;
+    }
+    NodeId segmentStart = resolveEffectiveNode(trainName, route, currentIndex);
+    NodeId segmentEnd = resolveEffectiveNode(trainName, route, currentIndex + 1);
+    if (segmentStart == null || segmentEnd == null) {
+      return false;
+    }
+    Optional<RailGraphPath> pathOpt =
+        pathFinder.shortestPath(
+            graph, segmentStart, segmentEnd, RailGraphPathFinder.Options.shortestDistance());
+    if (pathOpt.isEmpty()) {
+      return false;
+    }
+    List<NodeId> pathNodes = pathOpt.get().nodes();
+    int switcherIndex = pathNodes.indexOf(switcherNode);
+    if (switcherIndex < 0) {
+      return false;
+    }
+    NodeId positionNode = currentNode;
+    int positionIndex = pathNodes.indexOf(positionNode);
+    if (positionIndex < 0) {
+      Optional<NodeId> lastPassed =
+          progressRegistry
+              .get(trainName)
+              .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode)
+              .filter(pathNodes::contains);
+      if (lastPassed.isPresent()) {
+        positionNode = lastPassed.get();
+        positionIndex = pathNodes.indexOf(positionNode);
+      }
+    }
+    if (positionIndex < 0) {
+      return false;
+    }
+    int switcherZoneEdges =
+        Math.max(0, configManager.current().runtimeSettings().switcherZoneEdges());
+    return Math.abs(positionIndex - switcherIndex) <= switcherZoneEdges;
+  }
+
+  private Optional<NodeId> switcherNodeFromConflict(OccupancyResource resource) {
+    if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
+      return Optional.empty();
+    }
+    String key = resource.key();
+    if (key == null || !key.startsWith("switcher:")) {
+      return Optional.empty();
+    }
+    String nodeId = key.substring("switcher:".length()).trim();
+    if (nodeId.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of(NodeId.of(nodeId));
+  }
+
+  private static Set<OccupancyResource> mergeProtectedResources(
+      Set<OccupancyResource> first, Set<OccupancyResource> second) {
+    if ((first == null || first.isEmpty()) && (second == null || second.isEmpty())) {
+      return Set.of();
+    }
+    Set<OccupancyResource> merged = new LinkedHashSet<>();
+    if (first != null) {
+      merged.addAll(first);
+    }
+    if (second != null) {
+      merged.addAll(second);
+    }
+    return Set.copyOf(merged);
   }
 
   private boolean isSingleCorridorResource(OccupancyResource resource) {
@@ -8749,6 +10368,24 @@ public final class RuntimeDispatchService {
     return resolveEffectiveWaypoints(trainName, route);
   }
 
+  /**
+   * 供事件驱动信号 provider 复用的 directed current-node 解析入口。
+   *
+   * <p>该方法与周期性 signal tick 使用同一套 lastPassedGraphNode 校验规则：只有当最后经过的图节点位于当前 route
+   * 段最短路上时，才把它作为当前节点写入请求快照。这样 EVENT 与 PERIODIC 会从同一个 committed progress snapshot 构建 forward
+   * request。
+   */
+  public List<NodeId> resolveEffectiveWaypointsForEvent(
+      String trainName, RouteDefinition route, int currentIndex, RailGraph graph) {
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    if (route == null || currentIndex < 0 || graph == null) {
+      return effectiveNodes;
+    }
+    NodeId currentNode =
+        resolveEffectiveCurrentNodeForSignal(trainName, route, currentIndex, graph);
+    return applyCurrentNodeOverride(effectiveNodes, currentIndex, currentNode);
+  }
+
   private List<NodeId> applyCurrentNodeOverride(
       List<NodeId> nodes, int currentIndex, NodeId currentNode) {
     if (nodes == null || nodes.isEmpty() || currentNode == null) {
@@ -8826,7 +10463,10 @@ public final class RuntimeDispatchService {
             0,
             AuthorizationPurpose.RUNTIME_MOVE);
     Set<OccupancyResource> protectedResources =
-        protectedSingleCorridorClaims(trainName, request.resourceList());
+        mergeProtectedResources(
+            protectedSingleCorridorClaims(trainName, request.resourceList()),
+            protectedSwitcherZoneClaims(
+                trainName, route, currentIndex, currentNode, graph, "STOP_HOLD"));
     releaseResourcesNotInRequest(trainName, request.resourceList(), protectedResources);
     occupancyManager.acquire(request);
     retainForwardQueuePositionAtStop(trainName, route, currentIndex, now, builder, effectiveNodes);
@@ -9354,12 +10994,11 @@ public final class RuntimeDispatchService {
       }
       String conflictKey = "";
       Optional<CorridorDirection> direction = Optional.empty();
-      if (claim.resource() != null
-          && claim.resource().kind() == ResourceKind.CONFLICT
-          && claim.resource().key().startsWith("single:")
-          && !claim.resource().key().contains(":cycle:")) {
+      if (claim.resource() != null && claim.resource().kind() == ResourceKind.CONFLICT) {
         conflictKey = claim.resource().key();
-        direction = claim.corridorDirection();
+        if (conflictKey.startsWith("single:") && !conflictKey.contains(":cycle:")) {
+          direction = claim.corridorDirection();
+        }
       }
       blockers.add(new DeadlockBlockerInfo(blocker, conflictKey, direction));
     }

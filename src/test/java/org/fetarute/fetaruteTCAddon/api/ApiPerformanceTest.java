@@ -214,37 +214,45 @@ class ApiPerformanceTest {
   @DisplayName("UUID 操作应高效")
   void uuidOperationsShouldBeEfficient() {
     final int iterations = 10000;
+    final long maxBatchMillis = 1000;
 
     // 测量 UUID 生成
-    Instant start = Instant.now();
+    long startNanos = System.nanoTime();
     List<UUID> uuids = new ArrayList<>(iterations);
     for (int i = 0; i < iterations; i++) {
       uuids.add(UUID.randomUUID());
     }
-    Duration generateTime = Duration.between(start, Instant.now());
+    Duration generateTime = Duration.ofNanos(System.nanoTime() - startNanos);
 
     // 测量 UUID 字符串转换
-    start = Instant.now();
+    startNanos = System.nanoTime();
+    int stringLengthTotal = 0;
     for (UUID uuid : uuids) {
-      String str = uuid.toString();
+      stringLengthTotal += uuid.toString().length();
     }
-    Duration toStringTime = Duration.between(start, Instant.now());
+    Duration toStringTime = Duration.ofNanos(System.nanoTime() - startNanos);
 
     // 测量 UUID 解析
     List<String> uuidStrings = uuids.stream().map(UUID::toString).toList();
-    start = Instant.now();
+    startNanos = System.nanoTime();
+    long parsedLeastBits = 0L;
     for (String str : uuidStrings) {
       UUID uuid = UUID.fromString(str);
+      parsedLeastBits ^= uuid.getLeastSignificantBits();
     }
-    Duration parseTime = Duration.between(start, Instant.now());
+    Duration parseTime = Duration.ofNanos(System.nanoTime() - startNanos);
 
     System.out.println("UUID 生成 " + iterations + " 次: " + generateTime.toMillis() + "ms");
     System.out.println("UUID toString " + iterations + " 次: " + toStringTime.toMillis() + "ms");
     System.out.println("UUID 解析 " + iterations + " 次: " + parseTime.toMillis() + "ms");
+    System.out.println("UUID 解析校验位: " + parsedLeastBits);
 
-    // 合理的性能预期
-    assertTrue(generateTime.toMillis() < 200, "UUID 生成耗时过长");
-    assertTrue(toStringTime.toMillis() < 50, "UUID toString 耗时过长");
-    assertTrue(parseTime.toMillis() < 100, "UUID 解析耗时过长");
+    assertEquals(iterations, uuids.size());
+    assertEquals(iterations * 36, stringLengthTotal);
+
+    // UUID 是 JDK 基础操作，单次墙钟会受 JIT、CPU 调度和 Gradle 并行测试影响；这里只拦截异常级退化。
+    assertTrue(generateTime.toMillis() < maxBatchMillis, "UUID 生成耗时过长");
+    assertTrue(toStringTime.toMillis() < maxBatchMillis, "UUID toString 耗时过长");
+    assertTrue(parseTime.toMillis() < maxBatchMillis, "UUID 解析耗时过长");
   }
 }

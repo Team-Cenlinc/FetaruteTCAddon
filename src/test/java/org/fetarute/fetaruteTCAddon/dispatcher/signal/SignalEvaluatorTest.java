@@ -10,12 +10,16 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
@@ -151,6 +155,143 @@ class SignalEvaluatorTest {
     assertEquals(SignalAspect.PROCEED, change.newSignal());
     assertTrue(change.isUnblocked());
     assertFalse(change.isBlocked());
+  }
+
+  @Test
+  void protectiveRetainAllowedDoesNotPublishProceed() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    mockProvider.registerRequest(
+        "train-retain", retainRequest("train-retain", now, ResourceIntent.PROTECTIVE_RETAIN, 0));
+    mockOccupancy.setDecision("train-retain", true, SignalAspect.PROCEED);
+    evaluator.updateCache("train-retain", SignalAspect.STOP);
+
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            now,
+            "owner",
+            List.of(OccupancyResource.forNode(NodeId.of("retain-node"))),
+            List.of("train-retain")));
+
+    assertTrue(receivedEvents.isEmpty());
+    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-retain").orElseThrow());
+  }
+
+  @Test
+  void holdOnlyAllowedDoesNotPublishProceed() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    mockProvider.registerRequest(
+        "train-hold", retainRequest("train-hold", now, ResourceIntent.HOLD_ONLY, 0));
+    mockOccupancy.setDecision("train-hold", true, SignalAspect.PROCEED);
+    evaluator.updateCache("train-hold", SignalAspect.STOP);
+
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            now,
+            "owner",
+            List.of(OccupancyResource.forNode(NodeId.of("hold-node"))),
+            List.of("train-hold")));
+
+    assertTrue(receivedEvents.isEmpty());
+    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-hold").orElseThrow());
+  }
+
+  @Test
+  void occupancyEventRetainAllowedDoesNotClearEntryLookaheadStop() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    mockProvider.registerRequest(
+        "train-blocked", retainRequest("train-blocked", now, ResourceIntent.PROTECTIVE_RETAIN, 0));
+    mockProvider.registerWaiting(
+        OccupancyResource.forNode(NodeId.of("blocked-node")), "train-blocked");
+    mockOccupancy.setDecision("train-blocked", true, SignalAspect.PROCEED);
+    evaluator.updateCache("train-blocked", SignalAspect.STOP);
+
+    eventBus.publish(
+        new OccupancyReleasedEvent(
+            now, "owner", List.of(OccupancyResource.forNode(NodeId.of("blocked-node")))));
+
+    assertTrue(receivedEvents.isEmpty());
+    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-blocked").orElseThrow());
+  }
+
+  @Test
+  void currentIndexMinusOneRequestCannotPublishProceed() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyRequest request =
+        movementRequest("train-invalid-index", now)
+            .withDirectedContext(
+                Optional.of(
+                    new DirectedTraversalContext(
+                        "train-invalid-index",
+                        Optional.of(RouteId.of("r")),
+                        -1,
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        List.of(),
+                        List.of(),
+                        Map.of(),
+                        Map.of(),
+                        "EVENT",
+                        1L,
+                        1L,
+                        "test",
+                        Optional.empty())));
+    mockProvider.registerRequest("train-invalid-index", request);
+    mockOccupancy.setDecision("train-invalid-index", true, SignalAspect.PROCEED);
+    evaluator.updateCache("train-invalid-index", SignalAspect.STOP);
+
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            now,
+            "owner",
+            List.of(OccupancyResource.forNode(NodeId.of("idx-node"))),
+            List.of("train-invalid-index")));
+
+    assertTrue(receivedEvents.isEmpty());
+  }
+
+  @Test
+  void movementRequiredResourcesZeroCannotPublishProceed() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    mockProvider.registerRequest(
+        "train-preview", retainRequest("train-preview", now, ResourceIntent.LOOKAHEAD_PREVIEW, 0));
+    mockOccupancy.setDecision("train-preview", true, SignalAspect.PROCEED);
+    evaluator.updateCache("train-preview", SignalAspect.STOP);
+
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            now,
+            "owner",
+            List.of(OccupancyResource.forNode(NodeId.of("preview-node"))),
+            List.of("train-preview")));
+
+    assertTrue(receivedEvents.isEmpty());
+  }
+
+  @Test
+  void fullMovementStopNotOverriddenByRetainCanEnterAllowed() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    mockProvider.registerRequest(
+        "train-stop", retainRequest("train-stop", now, ResourceIntent.HOLD_ONLY, 0));
+    mockOccupancy.setDecision("train-stop", true, SignalAspect.PROCEED);
+    evaluator.updateCache("train-stop", SignalAspect.STOP);
+
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            now,
+            "owner",
+            List.of(OccupancyResource.forNode(NodeId.of("stop-node"))),
+            List.of("train-stop")));
+
+    assertTrue(receivedEvents.isEmpty());
+    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-stop").orElseThrow());
   }
 
   @Test
@@ -340,11 +481,21 @@ class SignalEvaluatorTest {
   private static class MockRequestProvider implements SignalEvaluator.TrainRequestProvider {
     private final java.util.Map<String, SignalAspect> trains =
         new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<String, OccupancyRequest> requests =
+        new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<String, List<String>> waitingMap =
         new java.util.concurrent.ConcurrentHashMap<>();
 
     void registerTrain(String name, SignalAspect signal) {
       trains.put(name.toLowerCase(), signal);
+    }
+
+    void registerRequest(String name, OccupancyRequest request) {
+      trains.put(name.toLowerCase(), SignalAspect.PROCEED);
+      requests.put(name.toLowerCase(), request);
+      for (OccupancyResource resource : request.resourceList()) {
+        registerWaiting(resource, name);
+      }
     }
 
     void registerWaiting(OccupancyResource resource, String trainName) {
@@ -356,8 +507,11 @@ class SignalEvaluatorTest {
       if (!trains.containsKey(trainName.toLowerCase())) {
         return Optional.empty();
       }
-      return Optional.of(
-          new OccupancyRequest(trainName, Optional.empty(), now, List.of(), Map.of(), 0));
+      OccupancyRequest registered = requests.get(trainName.toLowerCase());
+      if (registered != null) {
+        return Optional.of(registered);
+      }
+      return Optional.of(movementRequest(trainName, now));
     }
 
     @Override
@@ -371,5 +525,26 @@ class SignalEvaluatorTest {
       }
       return result;
     }
+  }
+
+  private static OccupancyRequest movementRequest(String trainName, Instant now) {
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("forward-" + trainName));
+    return new OccupancyRequest(trainName, Optional.empty(), now, List.of(resource), Map.of(), 0);
+  }
+
+  private static OccupancyRequest retainRequest(
+      String trainName, Instant now, ResourceIntent intent, int currentIndex) {
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("retain-" + trainName));
+    return new OccupancyRequest(
+        trainName,
+        Optional.empty(),
+        now,
+        List.of(resource),
+        Map.of(),
+        Map.of(),
+        0,
+        AuthorizationPurpose.RUNTIME_MOVE,
+        Map.of(),
+        Map.of(resource, intent));
   }
 }

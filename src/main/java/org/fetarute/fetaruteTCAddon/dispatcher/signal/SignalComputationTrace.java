@@ -12,6 +12,8 @@ import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.BlockerClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.BlockerRelation;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictReleaseHint;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
@@ -175,6 +177,40 @@ public final class SignalComputationTrace {
       field("protectiveRetainResources", protective);
       field("queuePositionResources", queue);
       field("holdOnlyResources", hold);
+      field("conflictClearingEvidenceKind", formatEvidenceKinds(request));
+      field("conflictClearingEvidenceSource", formatEvidenceSources(request));
+      field(
+          "conflictClearingPromotedToPurpose",
+          request.purpose().name().equals("CONFLICT_CLEARING"));
+      field(
+          "conflictClearingPromotionReason",
+          request.purpose().name().equals("CONFLICT_CLEARING")
+              ? "verified-conflict-release"
+              : evidenceSkippedReason(request));
+      field("releaseHintVerified", hasVerifiedReleaseHint(request));
+      request.directedContext().ifPresent(this::directedContext);
+      return this;
+    }
+
+    public Builder directedContext(DirectedTraversalContext context) {
+      if (context == null) {
+        return this;
+      }
+      field("requestId", context.requestId());
+      field("directedSource", context.source());
+      field("directedOccupancyVersion", context.occupancyVersion());
+      field("directedProgressVersion", context.progressVersion());
+      field("routeId", context.routeId().map(Object::toString).orElse("-"));
+      field("currentIndex", context.currentIndex());
+      field("directedCurrentNode", formatNode(context.currentNode()));
+      field("lastPassedGraphNode", formatNode(context.lastPassedGraphNode()));
+      field("effectiveFromNode", formatNode(context.effectiveFromNode()));
+      field("effectiveToNode", formatNode(context.effectiveToNode()));
+      field("expandedPathNodes", formatNodeList(context.expandedPathNodes()));
+      field("directedEdges", context.directedEdges());
+      field("singleConflictDirections", context.singleConflictDirections());
+      field("switcherPathSignatures", context.switcherPathSignatures());
+      field("authorityTokenId", context.authorityTokenId().orElse("-"));
       return this;
     }
 
@@ -189,6 +225,8 @@ public final class SignalComputationTrace {
       field("decisionReason", decision.reason());
       field("decisionSignal", decision.signal());
       field("blockerCount", decision.blockers().size());
+      field("canEnterConflictRelease", decision.conflictRelease());
+      field("canEnterReleaseLeader", decision.conflictRelease());
       hasBlockers = !decision.blockers().isEmpty();
       for (OccupancyClaim claim : decision.blockers()) {
         if (claim == null || claim.resource() == null) {
@@ -282,7 +320,7 @@ public final class SignalComputationTrace {
         return this;
       }
       fields.put("aspectTransition", formatAspect(effectivePrevious) + "->" + newAspect.name());
-      fields.put("recentFlipWithin2Ticks", String.valueOf(recentFlip));
+      fields.put("debugRecentFlipWithin2Ticks", String.valueOf(recentFlip));
       fields.put("blockers", blockers.isEmpty() ? "[]" : blockers.toString());
       out.accept("SignalTrace " + formatFields(fields));
       return this;
@@ -307,6 +345,61 @@ public final class SignalComputationTrace {
 
   private static String formatNode(Optional<NodeId> node) {
     return node != null && node.isPresent() ? node.get().value() : "-";
+  }
+
+  private static String formatNodeList(List<NodeId> nodes) {
+    if (nodes == null || nodes.isEmpty()) {
+      return "[]";
+    }
+    List<String> values = new ArrayList<>();
+    for (NodeId node : nodes) {
+      values.add(node == null ? "-" : node.value());
+    }
+    return values.toString();
+  }
+
+  private static String formatEvidenceKinds(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return "-";
+    }
+    return request.conflictReleaseHints().values().stream()
+        .filter(java.util.Objects::nonNull)
+        .map(hint -> hint.conflictKey() + ":" + hint.kind())
+        .toList()
+        .toString();
+  }
+
+  private static String formatEvidenceSources(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return "-";
+    }
+    return request.conflictReleaseHints().values().stream()
+        .filter(java.util.Objects::nonNull)
+        .map(hint -> hint.conflictKey() + ":" + hint.source())
+        .toList()
+        .toString();
+  }
+
+  private static boolean hasVerifiedReleaseHint(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return false;
+    }
+    for (ConflictReleaseHint hint : request.conflictReleaseHints().values()) {
+      if (hint != null && hint.verifiedFor(hint.conflictKey())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static String evidenceSkippedReason(OccupancyRequest request) {
+    if (request == null || request.conflictReleaseHints().isEmpty()) {
+      return "-";
+    }
+    if (!hasVerifiedReleaseHint(request)) {
+      return "topology-exit-hint-only";
+    }
+    return "not-promoted";
   }
 
   private static String formatAspect(SignalAspect aspect) {

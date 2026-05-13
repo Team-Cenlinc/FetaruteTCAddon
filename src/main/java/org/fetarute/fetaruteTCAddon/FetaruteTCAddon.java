@@ -611,7 +611,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             routeProgressRegistry,
             configManager,
             occupancyManager,
-            runtimeDispatchService::resolveEffectiveWaypointsForEvent,
+            (trainName, route, currentIndex, graph) ->
+                runtimeDispatchService.resolveEffectiveWaypointsForEvent(
+                    trainName, route, currentIndex, graph),
             loggerManager::debug);
     // 创建信号评估器
     signalEvaluator =

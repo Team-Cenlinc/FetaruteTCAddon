@@ -26,12 +26,19 @@
 5. 新鲜 blocker 快照只会在 STOP 宽限窗口内抑制恢复；超过 `health.progress-stop-grace-seconds` 后，即使 blocker 仍被信号 tick 持续刷新，也会进入非动车恢复链，避免“看似合法红灯等待”永久掩盖互卡。
 
 ### STOP 互卡解锁
-1. 识别条件：两车均为 `STOP`、持续低速、双方 blocker 快照互相包含、方向已知且对向，并且优先要求命中同一个 `CONFLICT:single`。`UNKNOWN` 方向、cycle conflict、NODE/EDGE 硬 blocker 不会进入自动销毁 episode。
+1. 识别条件：两车均为 `STOP`、持续低速、双方 blocker 快照互相包含、方向已知且对向，并且优先要求命中同一个 `CONFLICT:single`。`UNKNOWN` 方向、cycle conflict、NODE/EDGE/`CONFLICT:switcher` 硬 blocker 不会进入 confirmed single 自动销毁 episode。
 2. 互卡使用 `DeadlockEpisode` 追踪，key 为 `canonical(trainA, trainB, conflictKey)`；`firstSeenAt` 不随每 tick 重置，blocker 快照短暂抖动时会保留 `health.deadlock-episode-grace-seconds`。
 3. 自动分级动作：第一次 `refreshSignal(A/B)`，第二次 `reapplyHardStop(A/B)`，超过 `health.deadlock-destroy-threshold-seconds` 后 `destroy stableLeader`。refresh/hard-stop 只是恢复动作，不再输出“已修复”语义。
 4. `stableLeader` 优先选择 RETURN、CREATE、depot exit/depot spawn 附近、progress index 更小、低优先级且无乘客的列车；避开 dwell、departure gate、layover ready、manual maintenance hold、接近终点的列车。
 5. destroy 后 episode 标记 `destroyAttempted`，同一 episode 不会连续销毁第二辆；RuntimeDispatchService 等 `GroupRemoveEvent -> handleTrainRemoved` 释放占用后再刷新 survivor。
 6. 若 confirmed 条件缺少方向或 single conflict 证据，但 blocker 快照持续互相指向，系统会进入 weaker episode；weaker episode 使用 2 倍销毁阈值，避免 UNKNOWN direction 长期抖动导致永久卡死。
+7. 一台列车停在道岔区并作为 blocker 阻塞多车时，健康监控只输出 `SWITCHER_OCCUPANT_BLOCKING_MANY` 诊断，不把该模式升级成 confirmed single，也不直接销毁 occupant。
+
+### 互卡销毁诊断
+- Health/runtime 桥接入口使用统一的 alias-aware 解析：先匹配 TrainCarts 精确名，再匹配 runtime active state、FTA 逻辑名、`FTA_TRAIN_NAME`/历史名与 split alias。解析不使用包含、前缀或编辑距离等模糊匹配。
+- `destroyTrainByName`、`refreshSignalByName`、`reapplyHardStopByName`、`getTrainState`、`deadlockTrainContext` 共用同一解析结果，避免“state 能找到但 destroy 找不到”的分裂。
+- 自动销毁链路会输出 `DEADLOCK_EPISODE_CREATED`、`DEADLOCK_DESTROY_CANDIDATE_SELECTED`、`DEADLOCK_DESTROY_ATTEMPTED`、`DEADLOCK_DESTROY_RESULT` 与 `DEADLOCK_DESTROY_SKIPPED`。若没有销毁，trace 应能区分：未形成 episode、weak 阈值未到、非同一 `CONFLICT:single`、方向 `UNKNOWN`、blocker 快照缺失/过期、解析失败、实体不存在或 TrainCarts destroy API 失败。
+- `destroyTrainByName` 只有在解析到 `TrainProperties` 且实体 holder 有效时才返回成功；实体不存在时会记录 `ENTITY_NOT_FOUND`，不会把 no-op 伪报成已修复。
 
 ### 手动强制解锁（`/fta health check|heal`）
 1. 手动触发时会额外执行一次“互卡优先”解锁，不等待 `progress stuck` 阈值窗口。

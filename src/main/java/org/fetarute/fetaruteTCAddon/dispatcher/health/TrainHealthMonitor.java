@@ -2,6 +2,10 @@ package org.fetarute.fetaruteTCAddon.dispatcher.health;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -10,6 +14,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
@@ -129,6 +134,7 @@ public final class TrainHealthMonitor {
       String conflictKey,
       boolean weak,
       Set<String> blockerSnapshot,
+      Set<String> blockerResources,
       RuntimeDispatchService.DeadlockTrainContext firstContext,
       RuntimeDispatchService.DeadlockTrainContext secondContext) {}
 
@@ -187,6 +193,11 @@ public final class TrainHealthMonitor {
 
   /** 互卡对销毁尝试冷却，key=canonical(trainA, trainB)。 */
   private final Map<String, Instant> deadlockPairLastDestroyAt = new ConcurrentHashMap<>();
+
+  /** 健康诊断 trace 限频。 */
+  private final Map<String, String> traceFingerprints = new ConcurrentHashMap<>();
+
+  private final Map<String, Instant> traceLastAt = new ConcurrentHashMap<>();
 
   public TrainHealthMonitor(
       RuntimeDispatchService dispatchService,
@@ -510,6 +521,8 @@ public final class TrainHealthMonitor {
                 ? HealthAlert.fixed(HealthAlert.AlertType.PROGRESS_STUCK, trainName, message)
                 : HealthAlert.of(HealthAlert.AlertType.PROGRESS_STUCK, trainName, message));
         continue;
+      } else if (!progressed && !isMoving && currentSignal == SignalAspect.STOP) {
+        traceDeadlockSkipped(trainName, current, progressDuration, activeKeys, now);
       }
 
       boolean waitingOnFreshStopBlockersWithinGrace =
@@ -560,6 +573,7 @@ public final class TrainHealthMonitor {
       }
     }
 
+    traceSwitcherOccupantBlockingMany(active, now);
     pruneDeadlockEpisodes(activeKeys, now);
     return new CheckResult(stallCount, progressStuckCount, fixedCount);
   }
@@ -571,6 +585,8 @@ public final class TrainHealthMonitor {
     deadlockPairLastAttemptAt.clear();
     deadlockPairLastDestroyAt.clear();
     deadlockEpisodes.clear();
+    traceFingerprints.clear();
+    traceLastAt.clear();
   }
 
   /** 尝试修复静止列车。 */
@@ -765,6 +781,7 @@ public final class TrainHealthMonitor {
           Set.of(
               trainName + "->" + blocker.trainName() + "@" + blocker.conflictKey(),
               blocker.trainName() + "->" + trainName + "@" + blocker.conflictKey());
+      Set<String> blockerResources = Set.of(blocker.conflictKey());
       return Optional.of(
           new DeadlockObservation(
               episodeKey,
@@ -773,6 +790,7 @@ public final class TrainHealthMonitor {
               blocker.conflictKey(),
               false,
               blockerSnapshot,
+              blockerResources,
               canonicalContextA,
               canonicalContextB));
     }
@@ -835,6 +853,10 @@ public final class TrainHealthMonitor {
           Set.of(
               trainName + "->" + blocker.trainName() + "@weaker",
               blocker.trainName() + "->" + trainName + "@weaker");
+      Set<String> blockerResources =
+          blocker.conflictKey() == null || blocker.conflictKey().isBlank()
+              ? Set.of()
+              : Set.of(blocker.conflictKey());
       return Optional.of(
           new DeadlockObservation(
               episodeKey(trainKey, blockerKey, conflictKey),
@@ -843,6 +865,7 @@ public final class TrainHealthMonitor {
               conflictKey,
               true,
               blockerSnapshot,
+              blockerResources,
               canonicalContextA,
               canonicalContextB));
     }
@@ -916,15 +939,18 @@ public final class TrainHealthMonitor {
           if (existing == null) {
             String leader =
                 chooseStableLeader(observation.firstContext(), observation.secondContext());
-            return new DeadlockEpisode(
-                key,
-                observation.trainA(),
-                observation.trainB(),
-                observation.conflictKey(),
-                observation.weak(),
-                now,
-                leader,
-                observation.blockerSnapshot());
+            DeadlockEpisode created =
+                new DeadlockEpisode(
+                    key,
+                    observation.trainA(),
+                    observation.trainB(),
+                    observation.conflictKey(),
+                    observation.weak(),
+                    now,
+                    leader,
+                    observation.blockerSnapshot());
+            traceDeadlockEpisodeCreated(created, observation, now);
+            return created;
           }
           existing.updateSnapshot(now, observation.blockerSnapshot());
           return existing;
@@ -960,6 +986,366 @@ public final class TrainHealthMonitor {
     return trainName != null
         && !trainName.isBlank()
         && !dispatchService.recentBlockerTrains(trainName, blockerSnapshotMaxAge).isEmpty();
+  }
+
+  private void traceDeadlockEpisodeCreated(
+      DeadlockEpisode episode, DeadlockObservation observation, Instant now) {
+    if (episode == null || observation == null) {
+      return;
+    }
+    String type = episodeType(observation);
+    long stoppedMs =
+        Math.max(
+            0L,
+            Duration.between(
+                    snapshots
+                        .getOrDefault(keyOf(episode.trainA), emptySnapshot(now))
+                        .lastProgressTime(),
+                    now)
+                .toMillis());
+    Duration required =
+        observation.weak() ? deadlockDestroyThreshold.multipliedBy(2L) : deadlockDestroyThreshold;
+    traceHealthEvent(
+        "DEADLOCK_EPISODE_CREATED",
+        "episode-created:" + episode.key,
+        "episodeId="
+            + episode.key
+            + " episodeType="
+            + type
+            + " trainA="
+            + episode.trainA
+            + " trainB="
+            + episode.trainB
+            + " blockerResources="
+            + observation.blockerResources()
+            + " commonConflictKey="
+            + episode.conflictKey
+            + " directions="
+            + directionsSummary(observation)
+            + " firstSeenTime="
+            + episode.firstSeenAt
+            + " stoppedDurationMs="
+            + stoppedMs
+            + " requiredDestroyThresholdMs="
+            + required.toMillis()
+            + " destroyEnabled="
+            + deadlockDestroyEnabled
+            + " sourceSnapshotAgeMs="
+            + snapshotAgeMs(episode.trainA, now));
+  }
+
+  private void traceDeadlockSkipped(
+      String trainName,
+      TrainSnapshot current,
+      Duration progressDuration,
+      Set<String> activeKeys,
+      Instant now) {
+    RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+        recentDeadlockBlockerSnapshot(trainName);
+    String reason = classifyDeadlockSkip(trainName, snapshot, activeKeys);
+    if ("NONE".equals(reason)) {
+      return;
+    }
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_SKIPPED",
+        "deadlock-skip:" + keyOf(trainName) + ":" + reason,
+        "reason="
+            + reason
+            + " trainA="
+            + trainName
+            + " trainB="
+            + snapshot.trainNames()
+            + " blockers="
+            + summarizeBlockers(snapshot)
+            + " lastBlockerSnapshotAgeMs="
+            + snapshotAgeMs(trainName, now)
+            + " conflictKey="
+            + conflictSummary(snapshot)
+            + " directions="
+            + directionSummary(snapshot)
+            + " stoppedDurationMs="
+            + (progressDuration == null ? 0L : progressDuration.toMillis())
+            + " signal="
+            + (current == null ? "-" : current.signal()));
+  }
+
+  private String classifyDeadlockSkip(
+      String trainName,
+      RuntimeDispatchService.DeadlockBlockerSnapshot snapshot,
+      Set<String> activeKeys) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return "BLOCKER_SNAPSHOT_MISSING";
+    }
+    boolean hasSingle = false;
+    boolean hasUnknown = false;
+    boolean hasSwitcherOrHard = false;
+    String trainKey = keyOf(trainName);
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      if (blocker == null || blocker.trainName().isBlank()) {
+        continue;
+      }
+      String blockerKey = keyOf(blocker.trainName());
+      if (blockerKey == null || blockerKey.equals(trainKey)) {
+        continue;
+      }
+      if (activeKeys != null && !activeKeys.contains(blockerKey)) {
+        continue;
+      }
+      if (blocker.conflictKey().startsWith("single:")) {
+        hasSingle = true;
+        if (blocker.direction().isEmpty()
+            || blocker.direction().get() == CorridorDirection.UNKNOWN) {
+          hasUnknown = true;
+        }
+        Optional<RuntimeDispatchService.DeadlockBlockerInfo> reverse =
+            findReverseSingleConflictBlocker(blocker.trainName(), trainKey, blocker.conflictKey());
+        if (reverse.isEmpty()) {
+          return "NOT_MUTUAL";
+        }
+        if (!isKnownOpposite(blocker.direction(), reverse.get().direction())) {
+          return "UNKNOWN_DIRECTION";
+        }
+        return "NONE";
+      }
+      hasSwitcherOrHard = true;
+    }
+    if (hasSwitcherOrHard) {
+      return "SWITCHER_OR_NODE_EDGE_NOT_CONFIRMED";
+    }
+    if (hasSingle && hasUnknown) {
+      return "UNKNOWN_DIRECTION";
+    }
+    return "NOT_SAME_SINGLE_CONFLICT";
+  }
+
+  private void traceSwitcherOccupantBlockingMany(Set<String> activeTrains, Instant now) {
+    if (activeTrains == null || activeTrains.isEmpty()) {
+      return;
+    }
+    Map<String, Set<String>> blockedByBlocker = new LinkedHashMap<>();
+    Map<String, Set<String>> resourcesByBlocker = new LinkedHashMap<>();
+    for (String blockedTrain : activeTrains) {
+      RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+          recentDeadlockBlockerSnapshot(blockedTrain);
+      for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker == null || blocker.trainName().isBlank()) {
+          continue;
+        }
+        String blockerKey = keyOf(blocker.trainName());
+        if (blockerKey == null || blockerKey.equals(keyOf(blockedTrain))) {
+          continue;
+        }
+        blockedByBlocker
+            .computeIfAbsent(blocker.trainName(), unused -> new LinkedHashSet<>())
+            .add(blockedTrain);
+        if (!blocker.conflictKey().isBlank()) {
+          resourcesByBlocker
+              .computeIfAbsent(blocker.trainName(), unused -> new LinkedHashSet<>())
+              .add(blocker.conflictKey());
+        }
+      }
+    }
+    for (Map.Entry<String, Set<String>> entry : blockedByBlocker.entrySet()) {
+      if (entry.getValue().size() < 2) {
+        continue;
+      }
+      String blockerTrain = entry.getKey();
+      TrainSnapshot blockerSnapshot = snapshots.get(keyOf(blockerTrain));
+      if (blockerSnapshot == null
+          || blockerSnapshot.signal() != SignalAspect.STOP
+          || blockerSnapshot.speedBpt() > lowSpeedThresholdBpt) {
+        continue;
+      }
+      Set<String> resources = resourcesByBlocker.getOrDefault(blockerTrain, Set.of());
+      Set<String> switcherKeys = switcherKeys(resources);
+      Set<String> ownClaims =
+          Optional.ofNullable(dispatchService.currentConflictClaimKeys(blockerTrain))
+              .orElse(Set.of());
+      boolean protectedSwitcherClaimPresent =
+          ownClaims.stream().anyMatch(key -> key != null && key.startsWith("switcher:"));
+      traceHealthEvent(
+          "SWITCHER_OCCUPANT_BLOCKING_MANY",
+          "occupant-many:" + keyOf(blockerTrain) + ":" + entry.getValue().size(),
+          "blockerTrain="
+              + blockerTrain
+              + " blockedTrains="
+              + entry.getValue()
+              + " blockedCount="
+              + entry.getValue().size()
+              + " commonResources="
+              + resources
+              + " containsSwitcherConflict="
+              + !switcherKeys.isEmpty()
+              + " switcherConflictKeys="
+              + switcherKeys
+              + " blockerStoppedDurationMs="
+              + Duration.between(blockerSnapshot.lastProgressTime(), now).toMillis()
+              + " blockerCurrentNode=-"
+              + " blockerLastPassedGraphNode="
+              + (blockerSnapshot.lastPassedGraphNodeId() == null
+                  ? "-"
+                  : blockerSnapshot.lastPassedGraphNodeId())
+              + " blockerRouteIndex="
+              + blockerSnapshot.progressIndex()
+              + " protectedSwitcherClaimPresent="
+              + protectedSwitcherClaimPresent
+              + " whyNotDestroyed="
+              + (!switcherKeys.isEmpty() ? "WEAK_ONLY" : "NOT_MUTUAL")
+              + " whetherEpisodeExists="
+              + hasEpisodeFor(blockerTrain)
+              + " remainingMsUntilWeakDestroy="
+              + remainingWeakDestroyMs(blockerTrain, now));
+    }
+  }
+
+  private String episodeType(DeadlockObservation observation) {
+    if (observation == null) {
+      return "UNKNOWN";
+    }
+    if (!observation.weak() && observation.conflictKey().startsWith("single:")) {
+      return "CONFIRMED_SINGLE";
+    }
+    if (observation.blockerResources().stream().anyMatch(key -> key.startsWith("switcher:"))) {
+      return "SWITCHER_OR_NODE_EDGE_WEAK";
+    }
+    return observation.weak() ? "WEAK_MUTUAL" : "UNKNOWN";
+  }
+
+  private String directionsSummary(DeadlockObservation observation) {
+    if (observation == null) {
+      return "[]";
+    }
+    List<String> values = new ArrayList<>();
+    RuntimeDispatchService.DeadlockBlockerSnapshot first =
+        recentDeadlockBlockerSnapshot(observation.trainA());
+    RuntimeDispatchService.DeadlockBlockerSnapshot second =
+        recentDeadlockBlockerSnapshot(observation.trainB());
+    values.addAll(directionValues(first));
+    values.addAll(directionValues(second));
+    return values.toString();
+  }
+
+  private String directionSummary(RuntimeDispatchService.DeadlockBlockerSnapshot snapshot) {
+    return directionValues(snapshot).toString();
+  }
+
+  private List<String> directionValues(RuntimeDispatchService.DeadlockBlockerSnapshot snapshot) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return List.of();
+    }
+    List<String> values = new ArrayList<>();
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      values.add(
+          blocker.trainName()
+              + "@"
+              + (blocker.conflictKey().isBlank() ? "-" : blocker.conflictKey())
+              + "="
+              + blocker.direction().map(Enum::name).orElse("UNKNOWN"));
+    }
+    return values;
+  }
+
+  private String summarizeBlockers(RuntimeDispatchService.DeadlockBlockerSnapshot snapshot) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return "[]";
+    }
+    List<String> values = new ArrayList<>();
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      values.add(
+          blocker.trainName()
+              + "@"
+              + (blocker.conflictKey().isBlank() ? "-" : blocker.conflictKey()));
+    }
+    return values.toString();
+  }
+
+  private String conflictSummary(RuntimeDispatchService.DeadlockBlockerSnapshot snapshot) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return "-";
+    }
+    Set<String> conflicts = new LinkedHashSet<>();
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      if (!blocker.conflictKey().isBlank()) {
+        conflicts.add(blocker.conflictKey());
+      }
+    }
+    return conflicts.isEmpty() ? "-" : conflicts.toString();
+  }
+
+  private long snapshotAgeMs(String trainName, Instant now) {
+    RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+        recentDeadlockBlockerSnapshot(trainName);
+    if (snapshot == null || snapshot.sampledAt().equals(Instant.EPOCH) || now == null) {
+      return -1L;
+    }
+    return Math.max(0L, Duration.between(snapshot.sampledAt(), now).toMillis());
+  }
+
+  private static Set<String> switcherKeys(Set<String> resources) {
+    if (resources == null || resources.isEmpty()) {
+      return Set.of();
+    }
+    Set<String> switchers = new LinkedHashSet<>();
+    for (String resource : resources) {
+      if (resource != null && resource.startsWith("switcher:")) {
+        switchers.add(resource);
+      }
+    }
+    return Set.copyOf(switchers);
+  }
+
+  private boolean hasEpisodeFor(String trainName) {
+    String key = keyOf(trainName);
+    if (key == null) {
+      return false;
+    }
+    return deadlockEpisodes.values().stream()
+        .anyMatch(
+            episode -> key.equals(keyOf(episode.trainA)) || key.equals(keyOf(episode.trainB)));
+  }
+
+  private long remainingWeakDestroyMs(String trainName, Instant now) {
+    String key = keyOf(trainName);
+    if (key == null || now == null) {
+      return -1L;
+    }
+    return deadlockEpisodes.values().stream()
+        .filter(
+            episode ->
+                episode.weak
+                    && (key.equals(keyOf(episode.trainA)) || key.equals(keyOf(episode.trainB))))
+        .mapToLong(
+            episode -> {
+              Duration threshold = deadlockDestroyThreshold.multipliedBy(2L);
+              long remaining =
+                  threshold.minus(Duration.between(episode.firstSeenAt, now)).toMillis();
+              return Math.max(0L, remaining);
+            })
+        .min()
+        .orElse(-1L);
+  }
+
+  private TrainSnapshot emptySnapshot(Instant now) {
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    return new TrainSnapshot(
+        0, null, SignalAspect.STOP, 0.0, effectiveNow, effectiveNow, effectiveNow);
+  }
+
+  private void traceHealthEvent(String eventName, String key, String message) {
+    String event = eventName == null || eventName.isBlank() ? "HEALTH_TRACE" : eventName;
+    String traceKey = key == null || key.isBlank() ? event : key;
+    String fingerprint = event + "|" + message;
+    Instant now = Instant.now();
+    String previous = traceFingerprints.get(traceKey);
+    Instant previousAt = traceLastAt.get(traceKey);
+    if (fingerprint.equals(previous)
+        && previousAt != null
+        && Duration.between(previousAt, now).compareTo(Duration.ofSeconds(30)) < 0) {
+      return;
+    }
+    traceFingerprints.put(traceKey, fingerprint);
+    traceLastAt.put(traceKey, now);
+    debugLogger.accept(event + ": " + message);
   }
 
   /**
@@ -1016,9 +1402,34 @@ public final class TrainHealthMonitor {
       return false;
     }
 
+    long remainingMsUntilDestroy = remainingMsUntilDestroy(episode, now);
+    Optional<RuntimeDispatchService.DeadlockDrainability> drainability =
+        dispatchService.deadlockDrainability(
+            episode.key,
+            episode.trainA,
+            episode.trainB,
+            episode.conflictKey,
+            remainingMsUntilDestroy);
+    if (drainability.isPresent()) {
+      traceDeadlockDrainability(episode, drainability.get(), now);
+      if (drainability.get().drainable()) {
+        return false;
+      }
+    }
+
     if (!shouldDestroyDeadlockLeader(episode, progressDuration, now)) {
+      traceDeadlockDestroySkipped(
+          episode,
+          observation,
+          progressDuration,
+          now,
+          destroySkipReason(episode, progressDuration, now));
       return false;
     }
+    traceDeadlockDestroyCandidateSelected(episode, observation, progressDuration, now);
+    RuntimeDispatchService.RuntimeTrainResolution resolution =
+        resolveForDestroyTrace(episode.stableLeader);
+    traceDeadlockDestroyAttempted(episode, observation, progressDuration, now, resolution);
     debugLogger.accept(
         "TrainHealthMonitor 解锁互卡(stage=destroy-leader): train="
             + episode.stableLeader
@@ -1037,6 +1448,8 @@ public final class TrainHealthMonitor {
         episode.stableLeader, episode.survivor());
     boolean destroyed =
         dispatchService.destroyTrainByName(episode.stableLeader, "health-deadlock-timeout");
+    traceDeadlockDestroyResult(
+        episode, resolution, destroyed, destroyFailureReason(resolution, destroyed), now);
     if (destroyed) {
       episode.destroyAttempted = true;
     }
@@ -1045,6 +1458,265 @@ public final class TrainHealthMonitor {
     deadlockPairLastAttemptAt.put(pairKey, now);
     deadlockPairLastDestroyAt.put(pairKey, now);
     return destroyed;
+  }
+
+  private void traceDeadlockDestroyCandidateSelected(
+      DeadlockEpisode episode,
+      DeadlockObservation observation,
+      Duration progressDuration,
+      Instant now) {
+    if (episode == null || observation == null) {
+      return;
+    }
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_CANDIDATE_SELECTED",
+        "destroy-candidate:" + episode.key,
+        "episodeId="
+            + episode.key
+            + " selectedLeader="
+            + episode.stableLeader
+            + " selectionReason=stable-leader-score"
+            + " episodeType="
+            + episodeType(observation)
+            + " episodeAgeMs="
+            + Duration.between(episode.firstSeenAt, now).toMillis()
+            + " stoppedDurationMs="
+            + (progressDuration == null ? 0L : progressDuration.toMillis())
+            + " thresholdMs="
+            + requiredDestroyThreshold(episode).toMillis()
+            + " weakEpisode="
+            + episode.weak
+            + " blockers="
+            + episode.lastBlockerSnapshot);
+  }
+
+  private void traceDeadlockDrainability(
+      DeadlockEpisode episode,
+      RuntimeDispatchService.DeadlockDrainability drainability,
+      Instant now) {
+    if (episode == null || drainability == null) {
+      return;
+    }
+    traceHealthEvent(
+        drainability.drainable() ? "DEADLOCK_DRAINABLE" : "DEADLOCK_DRAIN_FAILED",
+        "deadlock-drain:" + episode.key + ":" + drainability.reason(),
+        "episodeId="
+            + episode.key
+            + " trainA="
+            + episode.trainA
+            + " trainB="
+            + episode.trainB
+            + " zoneId="
+            + drainability.zoneId()
+            + " drainable="
+            + drainability.drainable()
+            + " drainCandidate="
+            + emptyDash(drainability.drainCandidate())
+            + " exitNode="
+            + drainability.exitNode().map(NodeId::value).orElse("-")
+            + " drainPath="
+            + drainability.drainPath()
+            + " reason="
+            + drainability.reason()
+            + " remainingMsUntilDestroy="
+            + drainability.remainingMsUntilDestroy()
+            + " episodeAgeMs="
+            + Duration.between(episode.firstSeenAt, now).toMillis());
+  }
+
+  private void traceDeadlockDestroyAttempted(
+      DeadlockEpisode episode,
+      DeadlockObservation observation,
+      Duration progressDuration,
+      Instant now,
+      RuntimeDispatchService.RuntimeTrainResolution resolution) {
+    if (episode == null) {
+      return;
+    }
+    RuntimeDispatchService.RuntimeTrainResolution effective =
+        resolution == null ? failedResolution(episode.stableLeader, "RESOLVE_FAILED") : resolution;
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_ATTEMPTED",
+        "health-destroy-attempt:" + episode.key,
+        "episodeId="
+            + episode.key
+            + " requestedName="
+            + emptyDash(episode.stableLeader)
+            + " resolvedName="
+            + emptyDash(effective.resolvedName())
+            + " matchedBy="
+            + effective.matchedBy()
+            + " propertiesFound="
+            + effective.propertiesFound()
+            + " source=HEALTH_MONITOR_DEADLOCK"
+            + " episodeType="
+            + episodeType(observation)
+            + " conflictKey="
+            + episode.conflictKey
+            + " blockerResources="
+            + (observation == null ? Set.of() : observation.blockerResources())
+            + " stoppedDurationMs="
+            + (progressDuration == null ? 0L : progressDuration.toMillis())
+            + " episodeAgeMs="
+            + Duration.between(episode.firstSeenAt, now).toMillis()
+            + " thresholdMs="
+            + requiredDestroyThreshold(episode).toMillis());
+  }
+
+  private void traceDeadlockDestroyResult(
+      DeadlockEpisode episode,
+      RuntimeDispatchService.RuntimeTrainResolution resolution,
+      boolean success,
+      String failureReason,
+      Instant now) {
+    if (episode == null) {
+      return;
+    }
+    RuntimeDispatchService.RuntimeTrainResolution effective =
+        resolution == null ? failedResolution(episode.stableLeader, "RESOLVE_FAILED") : resolution;
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_RESULT",
+        "health-destroy-result:" + episode.key + ":" + success + ":" + failureReason,
+        "episodeId="
+            + episode.key
+            + " requestedName="
+            + emptyDash(episode.stableLeader)
+            + " resolvedName="
+            + emptyDash(effective.resolvedName())
+            + " matchedBy="
+            + effective.matchedBy()
+            + " success="
+            + success
+            + " failureReason="
+            + emptyDash(failureReason)
+            + " episodeAgeMs="
+            + Duration.between(episode.firstSeenAt, now).toMillis());
+  }
+
+  private void traceDeadlockDestroySkipped(
+      DeadlockEpisode episode,
+      DeadlockObservation observation,
+      Duration progressDuration,
+      Instant now,
+      String reason) {
+    if (episode == null || reason == null || reason.isBlank() || "NONE".equals(reason)) {
+      return;
+    }
+    long remainingMs =
+        Math.max(
+            0L,
+            requiredDestroyThreshold(episode)
+                .minus(Duration.between(episode.firstSeenAt, now))
+                .toMillis());
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_SKIPPED",
+        "destroy-skip:" + episode.key + ":" + reason,
+        "episodeId="
+            + episode.key
+            + " reason="
+            + reason
+            + " trainA="
+            + episode.trainA
+            + " trainB="
+            + episode.trainB
+            + " blockers="
+            + episode.lastBlockerSnapshot
+            + " lastBlockerSnapshotAgeMs="
+            + snapshotAgeMs(episode.trainA, now)
+            + " remainingMsUntilWeakDestroy="
+            + (episode.weak ? remainingMs : -1L)
+            + " conflictKey="
+            + episode.conflictKey
+            + " directions="
+            + directionsSummary(observation)
+            + " stoppedDurationMs="
+            + (progressDuration == null ? 0L : progressDuration.toMillis()));
+  }
+
+  private RuntimeDispatchService.RuntimeTrainResolution resolveForDestroyTrace(String trainName) {
+    return dispatchService.resolveRuntimeTrainForHealth(
+        trainName, RuntimeDispatchService.RuntimeTrainResolvePurpose.DESTROY);
+  }
+
+  private String destroyFailureReason(
+      RuntimeDispatchService.RuntimeTrainResolution resolution, boolean destroyed) {
+    if (destroyed) {
+      return "NONE";
+    }
+    if (resolution == null
+        || resolution.matchedBy() == RuntimeDispatchService.RuntimeTrainMatchKind.FAILED) {
+      return "RESOLVE_FAILED";
+    }
+    if (!resolution.propertiesFound()) {
+      return "NO_PROPERTIES";
+    }
+    return "DESTROY_API_FAILED";
+  }
+
+  private String destroySkipReason(
+      DeadlockEpisode episode, Duration progressDuration, Instant now) {
+    if (episode == null) {
+      return "NOT_MUTUAL";
+    }
+    if (!deadlockDestroyEnabled
+        || deadlockDestroyThreshold == null
+        || deadlockDestroyThreshold.isZero()) {
+      return "DESTROY_DISABLED";
+    }
+    if (episode.destroyAttempted) {
+      return "DESTROY_ALREADY_ATTEMPTED";
+    }
+    Duration episodeAge = Duration.between(episode.firstSeenAt, now);
+    Duration requiredThreshold = requiredDestroyThreshold(episode);
+    if (episodeAge.compareTo(requiredThreshold) < 0) {
+      return episode.weak ? "WEAK_EPISODE_BELOW_THRESHOLD" : "BELOW_DESTROY_THRESHOLD";
+    }
+    Duration requiredStop = minPositive(progressStopGraceThreshold, requiredThreshold);
+    if (progressDuration == null || progressDuration.compareTo(requiredStop) < 0) {
+      return "NOT_STATIONARY";
+    }
+    String pairKey = pairKey(keyOf(episode.trainA), keyOf(episode.trainB));
+    Instant lastDestroy = deadlockPairLastDestroyAt.get(pairKey);
+    if (lastDestroy != null && now.isBefore(lastDestroy.plus(deadlockDestroyCooldown))) {
+      return "RECENTLY_SEEN_MOVING";
+    }
+    return "NONE";
+  }
+
+  private Duration requiredDestroyThreshold(DeadlockEpisode episode) {
+    if (deadlockDestroyThreshold == null) {
+      return Duration.ZERO;
+    }
+    return episode != null && episode.weak
+        ? deadlockDestroyThreshold.multipliedBy(2L)
+        : deadlockDestroyThreshold;
+  }
+
+  private long remainingMsUntilDestroy(DeadlockEpisode episode, Instant now) {
+    if (episode == null || now == null) {
+      return -1L;
+    }
+    long remaining =
+        requiredDestroyThreshold(episode)
+            .minus(Duration.between(episode.firstSeenAt, now))
+            .toMillis();
+    return Math.max(0L, remaining);
+  }
+
+  private static RuntimeDispatchService.RuntimeTrainResolution failedResolution(
+      String trainName, String reason) {
+    return new RuntimeDispatchService.RuntimeTrainResolution(
+        trainName,
+        "",
+        null,
+        RuntimeDispatchService.RuntimeTrainMatchKind.FAILED,
+        Optional.empty(),
+        Optional.empty(),
+        reason);
+  }
+
+  private static String emptyDash(String value) {
+    return value == null || value.isBlank() ? "-" : value;
   }
 
   private boolean shouldDestroyDeadlockLeader(
@@ -1058,8 +1730,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     Duration episodeAge = Duration.between(episode.firstSeenAt, now);
-    Duration requiredThreshold =
-        episode.weak ? deadlockDestroyThreshold.multipliedBy(2L) : deadlockDestroyThreshold;
+    Duration requiredThreshold = requiredDestroyThreshold(episode);
     if (episodeAge.compareTo(requiredThreshold) < 0) {
       return false;
     }
