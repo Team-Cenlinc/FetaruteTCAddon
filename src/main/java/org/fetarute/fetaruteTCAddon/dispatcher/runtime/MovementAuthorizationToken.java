@@ -71,4 +71,19 @@ public record MovementAuthorizationToken(
             ? Optional.empty()
             : Optional.of(destinationName.trim()));
   }
+
+  /**
+   * 保留 TrainCarts 现有 destination 作为可恢复等待证据，但不激活该 token。
+   *
+   * <p>用于 Smart Dispatcher recoverable hold：当前 hard authority 片段已释放，需要下一轮重新 acquire；但 destination
+   * 本身未损坏， 诊断与恢复链路不应把它误判为缺失。
+   */
+  public MovementAuthorizationToken retainDestination(String destinationName) {
+    Optional<String> retained =
+        destinationName == null || destinationName.isBlank()
+            ? committedDestination
+            : Optional.of(destinationName.trim());
+    return new MovementAuthorizationToken(
+        trainName, claimVersion, issuedAt, fromNode, toNode, resources, aspect, false, retained);
+  }
 }

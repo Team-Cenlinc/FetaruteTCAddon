@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -63,6 +64,9 @@ public final class DynamicPlatformAllocator {
   /** 已分配记录：trainName -> (routeId:stopSequence) -> allocatedNodeId */
   private final Map<String, Map<String, NodeId>> allocations = new ConcurrentHashMap<>();
 
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP2",
+      justification = "OccupancyManager 是运行时共享服务句柄；动态站台分配必须读取同一占用状态，不能复制。")
   public DynamicPlatformAllocator(
       RouteDefinitionCache routeDefinitions,
       OccupancyManager occupancyManager,

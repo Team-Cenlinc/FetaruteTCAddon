@@ -17,7 +17,7 @@
 - `MOVEMENT_REQUIRED` 表示本轮前进授权必须取得的资源；`canEnter` 只对这类资源 fail-closed。
 - `PROTECTIVE_RETAIN` 与 `HOLD_ONLY` 用于当前位置、尾部保护和 STOP 保留。它们不会阻止前车的 forward movement；如果与其他列车冲突，运行时应保持本车保护、约束后车或触发 stale claim 清理。
 - `QUEUE_POSITION` 只表示冲突队列位次，适用于门控等待和停站等待期间保住排序；它不应被当作 NODE/EDGE 硬占用。
-- `ClaimRole` 是 claim 落库后的角色镜像，防止 retain/hold claim 在后续判定中被误当成前向必须资源。
+- `ClaimRole` 是 claim 落库后的角色镜像，防止 retain/hold claim 在后续判定中被误当成前向必须资源。`PROTECTIVE_RETAIN` / `HOLD_ONLY` claim 会被分类为 protective-only，不进入 confirmed hard blocker；第一版只输出 release candidate 诊断，不自动释放。
 
 ## 信号许可（SignalAspect）
 - `PROCEED`：可进入。
@@ -51,6 +51,11 @@
 - `runtime.rear-guard-edges` 会保留当前节点向后 N 段边，确保长列车尾部在完全离开前不被后车侵入。
 - 默认会同时占用路径上的 NODE 资源（当前节点 + lookahead 节点），用于阻止前车未离开时后车进入同一节点。
 - `OccupancyRequestBuilder` 负责从 `TrainRuntimeState + RouteDefinition + RailGraph` 构建请求。
+- Occupancy 请求使用的是 expanded path：Route 相邻节点会先通过 `RailGraph.shortestPath` 展开成真实 graph nodes/edges，再按 lookahead edge count 截断。若现场看到“两个车很远却红灯”，优先检查远端资源是否误进入了 `MOVEMENT_REQUIRED`，而不是假设占用用了未展开的 route span。
+- 运行时信号 tick 会把 expanded path 拆成两层：`hardAuthorityWindow` 只进 `MOVEMENT_REQUIRED`；`advisoryLookaheadWindow` 只给 `SignalLookahead` / Smart Dispatcher 计算 yellow aspect 与目标速度。
+- `LOOKAHEAD_PREVIEW` 的 advisory 扫描会忽略同向 `CONFLICT:single` claim / queue entry：同向单线是否需要慢行由前方列车的真实 NODE/EDGE claim 距离决定，不由 single conflict 入口距离决定。对向或方向未知的 single claim / queue 仍然是风险，并保持 fail-closed。
+- self-owned `CONFLICT:single` claim 只有在请求方向与既有方向连续、且队列内没有对向/未知方向竞争时才允许 continuation；方向相反或缺失时仍 fail-closed。
+- `OccupancyManager#clearSelfOwnedSingleDirectionMismatches` 只供健康恢复在 STOP progress stuck 后调用：它仅清理同一逻辑列车、同一 single conflict、旧方向与当前请求方向明确相反的 claim/queue。普通 `canEnter/acquire` 不会自动释放该残留，方向未知或其他列车 blocker 仍按 STOP 处理。
 
 ## 运行时接入
 - 推进点（waypoint/autostation/depot/switcher）会构建占用请求并下发下一跳 destination。

@@ -14,8 +14,11 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -37,6 +40,68 @@ class TrainHealthMonitorTest {
     alertBus = new HealthAlertBus();
     debugLogs = new ArrayList<>();
     monitor = new TrainHealthMonitor(dispatchService, dwellRegistry, alertBus, debugLogs::add);
+    when(dispatchService.smartDispatcherMode()).thenReturn(SmartDispatcherMode.ENFORCE);
+    when(dispatchService.smartRecoveryInput(anyString(), any(), any()))
+        .thenAnswer(
+            invocation ->
+                RuntimeDispatchService.SmartRecoveryInput.fallback(
+                    invocation.getArgument(0),
+                    invocation.getArgument(1),
+                    invocation.getArgument(2)));
+    when(dispatchService.applySmartForwardUnlock(any()))
+        .thenReturn(RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate"));
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
+        .thenReturn(RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate"));
+    when(dispatchService.applySmartDrainUnlock(any()))
+        .thenReturn(RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate"));
+    stubDefaultDestroyPrecheck();
+  }
+
+  private void stubDefaultDestroyPrecheck() {
+    when(dispatchService.reviewDeadlockDestroyCandidate(
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyBoolean(),
+            anyBoolean(),
+            anyBoolean(),
+            anyBoolean(),
+            anyBoolean(),
+            anyBoolean(),
+            any(),
+            anyBoolean(),
+            anyBoolean(),
+            any(),
+            any()))
+        .thenAnswer(
+            invocation -> {
+              boolean weak = invocation.getArgument(5);
+              boolean allBlockersLiveHard = invocation.getArgument(6);
+              boolean safeDrainCandidate = invocation.getArgument(7);
+              Duration persisted = invocation.getArgument(14);
+              Duration threshold = invocation.getArgument(15);
+              if (weak) {
+                return SmartDispatcherController.DeadlockDestroyReview.rejected(
+                    "weak-blocker-diagnostic-only");
+              }
+              if (!allBlockersLiveHard) {
+                return SmartDispatcherController.DeadlockDestroyReview.rejected(
+                    "blockers-not-all-live-hard");
+              }
+              if (safeDrainCandidate) {
+                return SmartDispatcherController.DeadlockDestroyReview.rejected(
+                    "safe-drain-candidate-exists");
+              }
+              if (persisted != null && threshold != null && persisted.compareTo(threshold) < 0) {
+                return SmartDispatcherController.DeadlockDestroyReview.rejected(
+                    "threshold-not-reached");
+              }
+              return SmartDispatcherController.DeadlockDestroyReview.allowed(
+                  "confirmed-live-hard-cycle",
+                  List.of("safe-drain", "stale-release", "forward-unlock", "priority-scheduling"));
+            });
   }
 
   private RuntimeDispatchService.TrainRuntimeState state(
@@ -96,12 +161,62 @@ class TrainHealthMonitorTest {
         Instant.now());
   }
 
+  private void stubFollowerBlockedByLeader(
+      RuntimeDispatchService.SmartRecoveryInput leaderInput,
+      RuntimeDispatchService.DeadlockTrainContext leaderContext) {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("follower"))
+        .thenReturn(Optional.of(state("follower", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("leader"))
+        .thenReturn(Optional.of(state("leader", 7, SignalAspect.STOP, 0.0)));
+    RuntimeDispatchService.DeadlockBlockerInfo leaderBlocker =
+        new RuntimeDispatchService.DeadlockBlockerInfo(
+            "leader",
+            "",
+            Optional.empty(),
+            "leader",
+            "NODE:X",
+            "WAIT_FOR",
+            "TEST",
+            "NORMAL",
+            "test",
+            1L,
+            1L);
+    when(dispatchService.recentDeadlockBlockers(eq("follower"), any()))
+        .thenReturn(
+            new RuntimeDispatchService.DeadlockBlockerSnapshot(
+                Set.of(leaderBlocker), Instant.now()));
+    when(dispatchService.recentDeadlockBlockers(eq("leader"), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+    when(dispatchService.deadlockTrainContext("follower"))
+        .thenReturn(
+            Optional.of(context("follower", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("leader")).thenReturn(Optional.of(leaderContext));
+    when(dispatchService.smartRecoveryInput(eq("leader"), any(), any())).thenReturn(leaderInput);
+    when(dispatchService.smartRecoveryInput(eq("follower"), any(), any()))
+        .thenReturn(
+            smartRecoveryInput(
+                "follower", SignalComputationTrace.TokenState.PENDING, true, "waiting-for-leader"));
+  }
+
   private RuntimeDispatchService.DeadlockTrainContext context(
       String trainName,
       int progressIndex,
       RouteOperationType operationType,
       boolean depotRelated,
       boolean nearRouteEnd) {
+    return context(
+        trainName, progressIndex, operationType, depotRelated, nearRouteEnd, false, false);
+  }
+
+  private RuntimeDispatchService.DeadlockTrainContext context(
+      String trainName,
+      int progressIndex,
+      RouteOperationType operationType,
+      boolean depotRelated,
+      boolean nearRouteEnd,
+      boolean hasPassengers,
+      boolean manualHold) {
     return new RuntimeDispatchService.DeadlockTrainContext(
         trainName,
         progressIndex,
@@ -115,8 +230,59 @@ class TrainHealthMonitorTest {
         false,
         depotRelated,
         nearRouteEnd,
+        hasPassengers,
+        manualHold);
+  }
+
+  private RuntimeDispatchService.SmartRecoveryInput smartRecoveryInput(
+      String trainName, SignalAspect signal, boolean movementInhibited, String primaryReason) {
+    return new RuntimeDispatchService.SmartRecoveryInput(
+        trainName,
+        65,
+        signal,
+        movementInhibited,
+        movementInhibited
+            ? SignalComputationTrace.TokenState.PENDING
+            : SignalComputationTrace.TokenState.NONE,
         false,
-        false);
+        0,
+        Set.of(),
+        NodeId.of("A"),
+        NodeId.of("B"),
+        "route:test",
+        0,
+        "A",
+        false,
+        false,
+        false,
+        false,
+        primaryReason);
+  }
+
+  private RuntimeDispatchService.SmartRecoveryInput smartRecoveryInput(
+      String trainName,
+      SignalComputationTrace.TokenState tokenState,
+      boolean destinationPresent,
+      String primaryReason) {
+    return new RuntimeDispatchService.SmartRecoveryInput(
+        trainName,
+        90,
+        SignalAspect.STOP,
+        tokenState == SignalComputationTrace.TokenState.INVALID,
+        tokenState,
+        destinationPresent,
+        0,
+        Set.of(),
+        NodeId.of("A"),
+        NodeId.of("B"),
+        "route:test",
+        0,
+        "A",
+        false,
+        false,
+        false,
+        false,
+        primaryReason);
   }
 
   @Test
@@ -164,7 +330,9 @@ class TrainHealthMonitorTest {
     when(dispatchService.getTrainState("train1"))
         .thenReturn(Optional.of(state("train1", 0, SignalAspect.PROCEED, 0.0)));
     when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
-    doNothing().when(dispatchService).refreshSignalByName("train1");
+    doReturn(RuntimeDispatchService.SignalRefreshResult.unresolved("train1", "test"))
+        .when(dispatchService)
+        .refreshSignalByName("train1");
     when(dispatchService.forceRelaunchByName("train1")).thenReturn(true);
 
     Instant t0 = Instant.now();
@@ -248,7 +416,9 @@ class TrainHealthMonitorTest {
     when(dispatchService.getTrainState("train1"))
         .thenReturn(Optional.of(state("train1", 0, SignalAspect.PROCEED, 0.5)));
     when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
-    doNothing().when(dispatchService).refreshSignalByName("train1");
+    doReturn(RuntimeDispatchService.SignalRefreshResult.unresolved("train1", "test"))
+        .when(dispatchService)
+        .refreshSignalByName("train1");
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
 
@@ -313,6 +483,252 @@ class TrainHealthMonitorTest {
   }
 
   @Test
+  @DisplayName("OBSERVE_ONLY 下 progress stuck 只输出 trace，不执行恢复副作用")
+  void smartDispatcherObserveOnlySuppressesProgressStuckRecoveryMutations() {
+    when(dispatchService.smartDispatcherMode()).thenReturn(SmartDispatcherMode.OBSERVE_ONLY);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.PROCEED, 0.5)));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(65));
+    monitor.check(Set.of("train1"), t0.plusSeconds(80));
+    monitor.check(Set.of("train1"), t0.plusSeconds(95));
+
+    verify(dispatchService, never()).refreshSignalByName("train1");
+    verify(dispatchService, never()).reissueDestinationByName("train1");
+    verify(dispatchService, never()).forceRelaunchByName("train1");
+    verify(dispatchService, never()).reapplyHardStopByName(eq("train1"), anyString());
+    assertTrue(debugLogs.stream().anyMatch(line -> line.contains("SMART_DISPATCH_MODE")));
+    assertTrue(debugLogs.stream().anyMatch(line -> line.contains("SMART_DISPATCH_EFFECT_CLASS")));
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(line -> line.contains("SMART_DISPATCH_ACTION_SUPPRESSED_BY_MODE")));
+  }
+
+  @Test
+  @DisplayName("PROGRESS_STUCK 会桥接到 Smart recovery input trace")
+  void progressStuckBridgesIntoSmartRecoveryInputTrace() {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "signal-authority-window-exceeded");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartForwardUnlock(input))
+        .thenReturn(RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate"));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(65));
+
+    assertTrue(debugLogs.stream().anyMatch(line -> line.contains("SMART_STUCK_TRAIN_DETECTED")));
+    assertTrue(debugLogs.stream().anyMatch(line -> line.contains("SMART_RECOVERY_INPUT")));
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(line -> line.contains("primaryReason=signal-authority-window-exceeded")));
+  }
+
+  @Test
+  @DisplayName("authority-window-exceeded 且无 blocker 时优先进入 Smart forward unlock")
+  void smartForwardUnlockCandidateWhenAuthorityWindowExceededButNoBlockers() {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "signal-authority-window-exceeded");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartForwardUnlock(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_FORWARD_UNLOCK_APPLIED",
+                "authority-token-repair",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .SIGNAL_CONSTRAINT));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(65));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).applySmartForwardUnlock(input);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(line -> line.contains("recoveryDecision=SMART_FORWARD_UNLOCK_APPLIED")));
+  }
+
+  @Test
+  @DisplayName("Smart forward unlock 在 OBSERVE_ONLY 下只作为候选，不触发旧恢复副作用")
+  void smartForwardUnlockSuppressedInObserveOnly() {
+    when(dispatchService.smartDispatcherMode()).thenReturn(SmartDispatcherMode.OBSERVE_ONLY);
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "signal-authority-window-exceeded");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartForwardUnlock(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                false,
+                "SMART_FORWARD_UNLOCK_CANDIDATE",
+                "suppressed-by-mode",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .SIGNAL_CONSTRAINT));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(65));
+
+    verify(dispatchService, never()).refreshSignalByName("train1");
+    verify(dispatchService, never()).reissueDestinationByName("train1");
+    verify(dispatchService, never()).forceRelaunchByName("train1");
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(line -> line.contains("recoveryDecision=SMART_FORWARD_UNLOCK_CANDIDATE")));
+  }
+
+  @Test
+  @DisplayName("progress stuck 恢复优先释放自持 retain，不直接进入 destroy")
+  void recoveryPrefersSelfRetainReleaseBeforeDestroy() {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "self-owned-retain");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+                "released-self-owned-stale-retain",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .OCCUPANCY_MUTATION));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(65));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(input);
+    verify(dispatchService, never()).applySmartDrainUnlock(input);
+    verify(dispatchService, never()).applySmartForwardUnlock(input);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(debugLogs.stream().anyMatch(line -> line.contains("SMART_RECOVERY_ACTION_ORDER")));
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                line -> line.contains("recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN")));
+  }
+
+  @Test
+  @DisplayName("progress stuck 恢复在 forward unlock 前尝试 drain unlock")
+  void recoveryPrefersDrainUnlockBeforeForwardUnlock() {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        new RuntimeDispatchService.SmartRecoveryInput(
+            "train1",
+            65,
+            SignalAspect.STOP,
+            true,
+            SignalComputationTrace.TokenState.PENDING,
+            false,
+            0,
+            Set.of(),
+            NodeId.of("A"),
+            NodeId.of("B"),
+            "route:test",
+            0,
+            "A",
+            true,
+            false,
+            false,
+            false,
+            "self-owned-single-continuation-rejected");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartDrainUnlock(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_DRAIN_UNLOCK",
+                "drain-refresh",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .SIGNAL_CONSTRAINT));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(65));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(input);
+    verify(dispatchService).applySmartDrainUnlock(input);
+    verify(dispatchService, never()).applySmartForwardUnlock(input);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
   @DisplayName("STOP 信号下 progress stuck 在宽限内不告警")
   void stopSignalProgressStuckWithinGraceIsIgnored() {
     List<HealthAlert> alerts = new ArrayList<>();
@@ -336,6 +752,8 @@ class TrainHealthMonitorTest {
   @Test
   @DisplayName("STOP 信号下 progress stuck 超宽限后只做非动车恢复")
   void stopSignalProgressStuckDoesNotRelaunchAfterGrace() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
     when(dispatchService.getTrainState("train1"))
         .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
     when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
@@ -348,11 +766,43 @@ class TrainHealthMonitorTest {
     Instant t0 = Instant.now();
     monitor.check(Set.of("train1"), t0); // 首次采样
     monitor.check(Set.of("train1"), t0.plusSeconds(25)); // stage1: refresh-stop
-    monitor.check(Set.of("train1"), t0.plusSeconds(40)); // stage2: reissue-stop
-    monitor.check(Set.of("train1"), t0.plusSeconds(55)); // stage2 retry: reissue-stop
+    TrainHealthMonitor.CheckResult hardStop =
+        monitor.check(Set.of("train1"), t0.plusSeconds(40)); // stage2: cleanup/hard-stop
+    monitor.check(Set.of("train1"), t0.plusSeconds(55)); // stage2 retry: cleanup/hard-stop
 
+    assertEquals(0, hardStop.fixedCount(), "复下发 STOP 不代表已修复");
+    assertFalse(alerts.stream().anyMatch(HealthAlert::autoFixed), "STOP 恢复链不应输出“已修复”");
     verify(dispatchService, atLeastOnce()).refreshSignalByName("train1");
+    verify(dispatchService, atLeastOnce()).clearSelfOwnedSingleDirectionMismatchByName("train1");
     verify(dispatchService, atLeastOnce()).reapplyHardStopByName(eq("train1"), anyString());
+    verify(dispatchService, never()).reissueDestinationByName("train1");
+    verify(dispatchService, never()).forceRelaunchByName("train1");
+  }
+
+  @Test
+  @DisplayName("STOP progress stuck 第二阶段优先清理自持 single 反向残留")
+  void stopSignalProgressStuckClearsSelfOwnedSingleMismatchBeforeHardStop() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.clearSelfOwnedSingleDirectionMismatchByName("train1")).thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(25));
+    TrainHealthMonitor.CheckResult cleanup = monitor.check(Set.of("train1"), t0.plusSeconds(40));
+
+    assertEquals(0, cleanup.fixedCount(), "清理残留只触发重新判定，不直接宣布修复");
+    assertFalse(alerts.stream().anyMatch(HealthAlert::autoFixed), "STOP 恢复链不应输出“已修复”");
+    verify(dispatchService).refreshSignalByName("train1");
+    verify(dispatchService).clearSelfOwnedSingleDirectionMismatchByName("train1");
+    verify(dispatchService, never()).reapplyHardStopByName(eq("train1"), anyString());
     verify(dispatchService, never()).reissueDestinationByName("train1");
     verify(dispatchService, never()).forceRelaunchByName("train1");
   }
@@ -464,6 +914,35 @@ class TrainHealthMonitorTest {
   }
 
   @Test
+  @DisplayName("OBSERVE_ONLY 下互卡恢复只输出 trace，不执行 refresh/hard-stop/destroy")
+  void smartDispatcherObserveOnlySuppressesDeadlockRecoveryActions() {
+    when(dispatchService.smartDispatcherMode()).thenReturn(SmartDispatcherMode.OBSERVE_ONLY);
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock("trainA", "trainB");
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+
+    verify(dispatchService, never()).refreshSignalByName(anyString());
+    verify(dispatchService, never()).reapplyHardStopByName(anyString(), anyString());
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(debugLogs.stream().anyMatch(line -> line.contains("SMART_DISPATCH_MODE")));
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(line -> line.contains("SMART_DISPATCH_ACTION_SUPPRESSED_BY_MODE")));
+  }
+
+  @Test
   @DisplayName("互相阻塞分级恢复：自动模式只 refresh/hard-stop")
   void mutualDeadlockEscalatesRecoveryStages() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
@@ -559,8 +1038,52 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("道岔/NODE/EDGE weak episode 不升级为 confirmed single")
-  void weakSwitcherEpisodeDoesNotBecomeConfirmedSingle() {
+  @DisplayName("Smart destroy 前若 forward unlock 可用则跳过销毁")
+  void smartDestroySkippedWhenForwardUnlockAvailable() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock("trainA", "trainB");
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(false);
+    when(dispatchService.applySmartForwardUnlock(any()))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                false,
+                "SMART_FORWARD_UNLOCK_CANDIDATE",
+                "authority-token-repair",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .SIGNAL_CONSTRAINT));
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE")
+                        && message.contains("reason=forward-unlock-candidate")));
+  }
+
+  @Test
+  @DisplayName("道岔互相阻塞可用 live blocker cycle 进入恢复评估")
+  void switcherMutualBlockerConfirmsLiveCycleAndEntersRecovery() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
         .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
@@ -577,22 +1100,31 @@ class TrainHealthMonitorTest {
 
     monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
     monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
 
     Instant t0 = Instant.now();
     monitor.check(Set.of("trainA", "trainB"), t0);
     monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(90));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(140));
 
     assertTrue(
         debugLogs.stream()
             .anyMatch(
                 message ->
                     message.contains("DEADLOCK_EPISODE_CREATED")
-                        && message.contains("episodeType=SWITCHER_OR_NODE_EDGE_WEAK")),
-        "switcher blocker 只形成 weak 诊断 episode");
+                        && message.contains("episodeType=LIVE_MUTUAL_BLOCKER_CYCLE")),
+        "switcher blocker 应形成 live mutual blocker cycle");
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(message -> message.contains("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED")),
+        "live blocker cycle 应输出确认诊断");
+    assertTrue(
+        debugLogs.stream().anyMatch(message -> message.contains("SMART_RECOVERY_EVALUATION_ENTER")),
+        "live blocker cycle 应进入恢复评估");
     assertFalse(
         debugLogs.stream().anyMatch(message -> message.contains("episodeType=CONFIRMED_SINGLE")),
         "switcher blocker 不应被标成 confirmed single");
-    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
   @Test
@@ -859,7 +1391,288 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("手动强制解锁：不等待阈值，直接复下发 hard-stop")
+  @DisplayName("互卡销毁兜底：缺 blocker snapshot 但未过阈值时只记录 early skip")
+  void destroyFallbackDoesNotFireBeforeThresholdWhenBlockerSnapshotMissing() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(eq("train1"), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(30));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DEADLOCK_DESTROY_SKIPPED")
+                        && message.contains("reason=BLOCKER_SNAPSHOT_MISSING")
+                        && message.contains("skipPhase=EARLY")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：缺 fallback evidence 过阈值时不误报已检查 eligibility")
+  void destroyFallbackMissingEvidenceAfterThresholdDoesNotClaimEligibilityChecked() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(eq("train1"), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(50));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DEADLOCK_DESTROY_SKIPPED")
+                        && message.contains("reason=BLOCKER_SNAPSHOT_MISSING")
+                        && message.contains("skipPhase=THRESHOLD_PASSED")
+                        && message.contains("fallbackEvidenceChecked=false")
+                        && message.contains("fallbackIneligibleReason=NO_FALLBACK_EVIDENCE")));
+    assertFalse(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DEADLOCK_DESTROY_SKIPPED")
+                        && message.contains("see-smart-deadlock-destroy-eligibility")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：planner wait-for edge 持续存在时可销毁超阈值 blocker")
+  void destroyFallbackWithPersistentPlannerEdgeDestroysBlockerAfterThreshold() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader", SignalComputationTrace.TokenState.PENDING, true, "planner-wait-for-edge"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false));
+    when(dispatchService.destroyTrainByName(eq("leader"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).destroyTrainByName("leader", "health-deadlock-timeout");
+    verify(dispatchService, never()).destroyTrainByName(eq("follower"), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
+                        && message.contains("evidenceGroup=PLANNER_WAIT_FOR_EDGE_FALLBACK")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：当前停滞车无有效 authority 时先销毁当前车")
+  void destroyFallbackTargetsCurrentTrainWhenCurrentAuthorityInvalid() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader", SignalComputationTrace.TokenState.ACTIVE, true, "leader-authority-active"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false));
+    when(dispatchService.smartRecoveryInput(eq("follower"), any(), any()))
+        .thenReturn(
+            smartRecoveryInput(
+                "follower",
+                SignalComputationTrace.TokenState.INVALID,
+                false,
+                "current-authority-invalid"));
+    when(dispatchService.destroyTrainByName(eq("follower"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).destroyTrainByName("follower", "health-deadlock-timeout");
+    verify(dispatchService, never()).destroyTrainByName(eq("leader"), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
+                        && message.contains("train=follower")
+                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：stuck leader 证据优先销毁 leader 而不是 follower")
+  void destroyFallbackWithStuckLeaderEvidenceTargetsLeader() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.INVALID,
+            false,
+            "stuck-leader-invalid-token"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false));
+    when(dispatchService.destroyTrainByName(eq("leader"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    verify(dispatchService).destroyTrainByName("leader", "health-deadlock-timeout");
+    verify(dispatchService, never()).destroyTrainByName(eq("follower"), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
+                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：缺 blocker snapshot 时使用 follower stuck leader 证据销毁 leader")
+  void destroyFallbackWithFollowerStuckLeaderEvidenceTargetsLeaderWhenSnapshotMissing() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("follower"))
+        .thenReturn(Optional.of(state("follower", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("leader"))
+        .thenReturn(Optional.of(state("leader", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(anyString(), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+    when(dispatchService.deadlockTrainContext("follower"))
+        .thenReturn(
+            Optional.of(context("follower", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("leader"))
+        .thenReturn(Optional.of(context("leader", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.smartRecoveryInput(eq("leader"), any(), any()))
+        .thenReturn(
+            smartRecoveryInput(
+                "leader",
+                SignalComputationTrace.TokenState.INVALID,
+                false,
+                "stuck-leader-invalid-token"));
+    when(dispatchService.recentFollowerStuckLeaderEvidence(eq("follower"), any()))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.FollowerStuckLeaderEvidence(
+                    "follower",
+                    "leader",
+                    "CONFLICT:single:test:A~B",
+                    Instant.now().minusSeconds(20),
+                    Instant.now(),
+                    2)));
+    when(dispatchService.destroyTrainByName(eq("leader"), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).destroyTrainByName("leader", "health-deadlock-timeout");
+    verify(dispatchService, never()).destroyTrainByName(eq("follower"), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
+                        && message.contains("train=leader")
+                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：active unlock reservation 观察中不销毁")
+  void destroyFallbackBlockedByActiveUnlockReservation() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.INVALID,
+            false,
+            "stuck-leader-invalid-token"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false));
+    when(dispatchService.hasActiveSmartUnlockReservation("leader")).thenReturn(true);
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
+                        && message.contains("ineligibleReason=ACTIVE_UNLOCK_RESERVATION")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：有乘客时不销毁")
+  void destroyFallbackBlockedByPassenger() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.INVALID,
+            false,
+            "stuck-leader-invalid-token"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false, true, false));
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
+                        && message.contains("ineligibleReason=PLAYER_PASSENGER_PRESENT")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：手动控制/维护保持时不销毁")
+  void destroyFallbackBlockedByManualControl() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.INVALID,
+            false,
+            "stuck-leader-invalid-token"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false, false, true));
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
+                        && message.contains("ineligibleReason=MANUAL_CONTROL")));
+  }
+
+  @Test
+  @DisplayName("手动强制解锁：不等待阈值，直接复下发 hard-stop 但不误报已修复")
   void forceUnlockNowEscalatesImmediately() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
@@ -872,7 +1685,7 @@ class TrainHealthMonitorTest {
 
     int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
 
-    assertEquals(1, fixed, "应在单次手动解锁中完成一对互卡修复");
+    assertEquals(0, fixed, "refresh/hard-stop 只是恢复动作，不能宣称互卡已解锁");
     verify(dispatchService).refreshSignalByName("trainA");
     verify(dispatchService).refreshSignalByName("trainB");
     verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
@@ -900,7 +1713,7 @@ class TrainHealthMonitorTest {
   }
 
   @Test
-  @DisplayName("手动强制解锁：STOP 单车阻塞时复下发 hard-stop")
+  @DisplayName("手动强制解锁：STOP 单车阻塞时复下发 hard-stop 但不误报已修复")
   void forceUnlockNowReappliesHardStopForSingleBlockedStopTrain() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
     when(dispatchService.getTrainState("trainA"))
@@ -913,7 +1726,7 @@ class TrainHealthMonitorTest {
 
     int fixed = monitor.forceUnlockNow(Set.of("trainA", "trainB"), Instant.now());
 
-    assertEquals(1, fixed, "单车 STOP 阻塞时应复下发 hard-stop");
+    assertEquals(0, fixed, "单车 STOP 阻塞只复下发 hard-stop，不计入已修复");
     verify(dispatchService).refreshSignalByName("trainA");
     verify(dispatchService).reapplyHardStopByName(eq("trainA"), anyString());
     verify(dispatchService, never()).reissueDestinationByName(anyString());

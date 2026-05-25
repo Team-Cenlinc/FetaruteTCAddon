@@ -62,12 +62,27 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthority
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDistanceCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchDecision;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.ForwardSignalRiskSnapshot;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskFreshness;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskSource;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherModeGate;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartWaitForPlanner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AdvisoryRisk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.BlockerClassifier;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictClearingEvidenceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictReleaseHint;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.MovementPlanSnapshot;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyAdvisoryPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -79,6 +94,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
@@ -116,6 +132,9 @@ public final class RuntimeDispatchService {
   /** approach 正式窗口外的预制动距离（blocks），用于避免到窗口边界才突然套低速上限。 */
   static final double APPROACH_PREVIEW_DISTANCE_BLOCKS = 64.0;
 
+  /** 当前 tick 可实际授权进入的最短硬窗口。更远路径只参与 advisory/lookahead。 */
+  private static final int HARD_AUTHORITY_LOOKAHEAD_EDGES = 1;
+
   /** Waypoint 作为 STOP/TERM 时的默认停站时长（秒）。 */
   private static final int DEFAULT_WAYPOINT_DWELL_SECONDS = 20;
 
@@ -152,6 +171,7 @@ public final class RuntimeDispatchService {
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final ShortestPathDistanceCache shortestPathDistanceCache;
   private final MovementAuthorityService movementAuthorityService = new MovementAuthorityService();
+  private final SmartDispatcherController smartDispatcherController;
   private final java.util.Map<String, StallState> stallStates = new java.util.HashMap<>();
   private final java.util.Set<String> missingSignalWarned = new HashSet<>();
   private final java.util.concurrent.ConcurrentMap<String, WaypointStopState> waypointStopStates =
@@ -185,6 +205,19 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, BlockerSnapshot> blockerSnapshots =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, FollowerStuckLeaderEvidence>
+      followerStuckLeaderEvidence = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, SmartUnlockReservation>
+      smartUnlockReservationsByCycle = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, SmartUnlockReservation>
+      smartUnlockReservationsByTrain = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockNoReleaseTimeouts =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockBlockerReleaseAt =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockNoReleaseCooldowns =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private volatile String lastSmartDispatchPlannerThrottleKey = "";
   private final java.util.concurrent.ConcurrentMap<String, String> survivorRefreshAfterRemoval =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, DepartureGate> departureGates =
@@ -212,6 +245,11 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.atomic.AtomicLong();
   private final java.util.concurrent.ConcurrentMap<String, SignalAspect> dirtyEventSignals =
       new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 已实际下发到 live/physical 信号层的最近 aspect，用于避免黄灯候选只停留在 trace 中。 */
+  private final java.util.concurrent.ConcurrentMap<String, SignalAspect> publishedPhysicalSignals =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private final java.util.Set<String> applyingEventSignals =
       java.util.concurrent.ConcurrentHashMap.newKeySet();
   private final java.util.concurrent.atomic.LongAdder coalescedEventCount =
@@ -225,6 +263,7 @@ public final class RuntimeDispatchService {
 
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Duration BLOCKER_SNAPSHOT_TTL = Duration.ofSeconds(20);
+  private static final Duration SMART_UNLOCK_NO_RELEASE_COOLDOWN = Duration.ofSeconds(30);
 
   /** 节点历史缓存：记录列车最近经过的节点（用于回退检测）。 */
   private final java.util.concurrent.ConcurrentMap<String, NodeHistory> nodeHistoryCache =
@@ -273,6 +312,242 @@ public final class RuntimeDispatchService {
           AuthorityEnd.none(),
           BlockedDestinationDiagnostic.none(),
           ControlDebugResources.empty());
+    }
+  }
+
+  /** Smart Dispatcher 对当前信号 tick 的可落地修正。 */
+  private record SmartSignalDecisionResult(
+      SignalAspect aspect,
+      OptionalDouble movementAuthorityLimitBps,
+      OptionalLong distanceOpt,
+      DispatchAction action,
+      RiskSource riskSource,
+      boolean invalidatingStop,
+      String stopReason) {
+    private SmartSignalDecisionResult(
+        SignalAspect aspect, OptionalDouble movementAuthorityLimitBps, OptionalLong distanceOpt) {
+      this(
+          aspect,
+          movementAuthorityLimitBps,
+          distanceOpt,
+          DispatchAction.NO_ACTION,
+          RiskSource.NONE,
+          false,
+          "none");
+    }
+
+    private SmartSignalDecisionResult {
+      aspect = aspect == null ? SignalAspect.STOP : aspect;
+      movementAuthorityLimitBps =
+          movementAuthorityLimitBps == null ? OptionalDouble.empty() : movementAuthorityLimitBps;
+      distanceOpt = distanceOpt == null ? OptionalLong.empty() : distanceOpt;
+      action = action == null ? DispatchAction.NO_ACTION : action;
+      riskSource = riskSource == null ? RiskSource.NONE : riskSource;
+      stopReason = stopReason == null || stopReason.isBlank() ? "none" : stopReason.trim();
+      invalidatingStop = aspect == SignalAspect.STOP && invalidatingStop;
+    }
+
+    /** 是否是可重试的 STOP：释放本 tick 临时授权，但不破坏 destination/token 生命周期。 */
+    private boolean isRecoverableHold() {
+      return aspect == SignalAspect.STOP && !invalidatingStop;
+    }
+
+    /** 是否是真实物理授权边界失败，需要进入硬失效路径。 */
+    private boolean isPhysicalAuthorityFailure() {
+      return aspect == SignalAspect.STOP && invalidatingStop;
+    }
+  }
+
+  /** Advisory lookahead 的只读扫描结果。 */
+  private record AdvisoryPreviewResult(OccupancyDecision decision, List<AdvisoryRisk> risks) {
+    private AdvisoryPreviewResult {
+      risks = risks == null ? List.of() : List.copyOf(risks);
+    }
+  }
+
+  /** Phase 1.8 minimal forward unlock 的短生命周期 reservation。 */
+  private record SmartUnlockReservation(
+      String reservationId,
+      String trainName,
+      String cycleId,
+      List<OccupancyResource> resources,
+      NodeId authorityEnd,
+      String planHash,
+      long createdTick,
+      int ttlTicks,
+      List<String> expectedReleasedResources,
+      List<String> initiallyBlockedTrains,
+      String initialCurrentNode,
+      String initialLastPassedGraphNode,
+      long tokenClaimVersion,
+      boolean committed) {
+    private SmartUnlockReservation {
+      reservationId = reservationId == null || reservationId.isBlank() ? "-" : reservationId;
+      trainName = trainName == null || trainName.isBlank() ? "-" : trainName.trim();
+      cycleId = cycleId == null || cycleId.isBlank() ? "-" : cycleId.trim();
+      planHash = planHash == null || planHash.isBlank() ? "-" : planHash.trim();
+      resources = resources == null ? List.of() : List.copyOf(resources);
+      ttlTicks = Math.max(1, ttlTicks);
+      expectedReleasedResources =
+          expectedReleasedResources == null ? List.of() : List.copyOf(expectedReleasedResources);
+      initiallyBlockedTrains =
+          initiallyBlockedTrains == null ? List.of() : List.copyOf(initiallyBlockedTrains);
+      initialCurrentNode =
+          initialCurrentNode == null || initialCurrentNode.isBlank()
+              ? "-"
+              : initialCurrentNode.trim();
+      initialLastPassedGraphNode =
+          initialLastPassedGraphNode == null || initialLastPassedGraphNode.isBlank()
+              ? "-"
+              : initialLastPassedGraphNode.trim();
+      tokenClaimVersion = Math.max(-1L, tokenClaimVersion);
+    }
+
+    private boolean expired(long tick) {
+      return tick - createdTick >= ttlTicks;
+    }
+
+    private SmartUnlockReservation committed(long claimVersion) {
+      return new SmartUnlockReservation(
+          reservationId,
+          trainName,
+          cycleId,
+          resources,
+          authorityEnd,
+          planHash,
+          createdTick,
+          ttlTicks,
+          expectedReleasedResources,
+          initiallyBlockedTrains,
+          initialCurrentNode,
+          initialLastPassedGraphNode,
+          claimVersion,
+          true);
+    }
+  }
+
+  /** 当前 tick 对 live/physical 信号层的发布判定。 */
+  private record PhysicalSignalPublication(
+      SignalAspect before,
+      SignalAspect after,
+      boolean updateRequired,
+      boolean updated,
+      String skippedReason) {}
+
+  /** 信号刷新后的可观测结果。 */
+  public record SignalRefreshResult(
+      boolean resolved,
+      String trainName,
+      SignalAspect before,
+      SignalAspect after,
+      boolean physicalPublished,
+      String reason) {
+
+    public SignalRefreshResult {
+      trainName = trainName == null ? "" : trainName.trim();
+      before = before == null ? SignalAspect.STOP : before;
+      after = after == null ? before : after;
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+    }
+
+    public static SignalRefreshResult unresolved(String trainName, String reason) {
+      return new SignalRefreshResult(
+          false, trainName, SignalAspect.STOP, SignalAspect.STOP, false, reason);
+    }
+  }
+
+  private record SingleZoneAdmissionState(
+      boolean hasOtherPresence,
+      boolean sameDirectionLeader,
+      boolean oppositeOrUnknownPresence,
+      boolean oppositeDirectionPresent,
+      boolean unknownDirectionPresent,
+      boolean leaderStalled,
+      boolean leaderProgressFresh,
+      boolean leaderWillTerminalOrDwell,
+      boolean followerSafeHoldPoint,
+      String leaderTrain,
+      CorridorDirection leaderDirection,
+      String blockerReason,
+      List<String> occupantTrains,
+      List<String> occupantDirections) {
+    private SingleZoneAdmissionState {
+      occupantTrains = occupantTrains == null ? List.of() : List.copyOf(occupantTrains);
+      occupantDirections = occupantDirections == null ? List.of() : List.copyOf(occupantDirections);
+    }
+  }
+
+  /** Smart traffic control 对 single/controlled region 入口的判定。 */
+  private enum SmartAdmissionDecision {
+    ALLOW_ENTER,
+    ALLOW_ALREADY_INSIDE_CONTINUE,
+    HOLD_AT_ENTRY,
+    HOLD_AT_DEPOT,
+    HOLD_AT_STATION,
+    REJECT_OPPOSITE_DIRECTION,
+    REJECT_UNKNOWN_DIRECTION,
+    REJECT_LEADER_STALLED,
+    REJECT_LEADER_EXIT_NOT_VISIBLE,
+    REJECT_REGION_OCCUPIED_UNSAFE,
+    REJECT_DOWNSTREAM_BLOCKED
+  }
+
+  /** Smart admission 的触发上下文，用于区分 depot/station/entry 的 local-only hold。 */
+  private record SmartAdmissionContext(boolean atDepot, boolean atStation, String source) {
+    private SmartAdmissionContext {
+      source = source == null || source.isBlank() ? "smart-admission" : source.trim();
+    }
+
+    private static SmartAdmissionContext entry(String source) {
+      return new SmartAdmissionContext(false, false, source);
+    }
+
+    private static SmartAdmissionContext depot(String source) {
+      return new SmartAdmissionContext(true, false, source);
+    }
+
+    private static SmartAdmissionContext station(String source) {
+      return new SmartAdmissionContext(false, true, source);
+    }
+  }
+
+  /** Smart admission 的只读计算结果；执行侧仍必须经过 mode/effect gate。 */
+  private record SmartAdmissionResult(
+      boolean applies,
+      boolean allowed,
+      SmartAdmissionDecision decision,
+      DispatchEffectClass effectClass,
+      String reason,
+      OccupancyResource region,
+      CorridorDirection requestedDirection,
+      boolean alreadyInside,
+      boolean localOnlyHold,
+      SmartAdmissionContext context,
+      SingleZoneAdmissionState state,
+      EntryLookaheadEvaluator.Result lookahead) {
+    private SmartAdmissionResult {
+      decision = decision == null ? SmartAdmissionDecision.ALLOW_ENTER : decision;
+      effectClass = effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass;
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+      requestedDirection =
+          requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+      context = context == null ? SmartAdmissionContext.entry("smart-admission") : context;
+    }
+
+    private static SmartAdmissionResult notApplicable(SmartAdmissionContext context) {
+      return new SmartAdmissionResult(
+          false,
+          true,
+          SmartAdmissionDecision.ALLOW_ENTER,
+          DispatchEffectClass.DIAGNOSTIC_ONLY,
+          "not-single-region-entry",
+          null,
+          CorridorDirection.UNKNOWN,
+          false,
+          false,
+          context,
+          null,
+          null);
     }
   }
 
@@ -516,6 +791,10 @@ public final class RuntimeDispatchService {
     this.trainConfigResolver = Objects.requireNonNull(trainConfigResolver, "trainConfigResolver");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     SignalComputationTrace.configureLogger(this.debugLogger);
+    if (occupancyManager instanceof SimpleOccupancyManager simpleOccupancyManager) {
+      simpleOccupancyManager.setLiveBlockerSnapshotListener(this::updateLiveBlockerSnapshot);
+    }
+    this.smartDispatcherController = new SmartDispatcherController(this.debugLogger);
     this.launchAuthorizationService =
         new LaunchAuthorizationService(
             occupancyManager,
@@ -557,6 +836,23 @@ public final class RuntimeDispatchService {
       // 启动早期配置尚未可用时回退默认值
     }
     return 4096;
+  }
+
+  /**
+   * 当前 Smart Dispatcher / Traffic Control Supervisor 模式。
+   *
+   * <p>配置尚未加载或读取失败时一律回退到 OBSERVE_ONLY，保证启动早期不会意外执行智能调度副作用。
+   */
+  public SmartDispatcherMode smartDispatcherMode() {
+    try {
+      ConfigManager.ConfigView view = configManager.current();
+      if (view != null && view.smartDispatcherSettings() != null) {
+        return view.smartDispatcherSettings().mode();
+      }
+    } catch (RuntimeException ignored) {
+      // 启动早期配置尚未可用时回退为只观察模式
+    }
+    return SmartDispatcherMode.OBSERVE_ONLY;
   }
 
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
@@ -659,6 +955,1052 @@ public final class RuntimeDispatchService {
         coalescedEventCount.sum(),
         reentrantStopSuppressed.sum(),
         0);
+  }
+
+  /**
+   * 构建并输出 Smart Dispatcher 全局快照。
+   *
+   * <p>该快照在每轮巡检开始时生成，只做全局状态归纳与 trace，不直接写 destination、占用或 TrainCarts 控车命令。 后续每列车局部 tick
+   * 会继续把同一轮的风险与决策写入更细的 trace。
+   *
+   * @param activeTrainNames 本轮巡检确认仍存在的 FTA 逻辑列车名
+   * @param now 快照时间
+   */
+  public void traceSmartDispatchGlobalSnapshot(Set<String> activeTrainNames, Instant now) {
+    Set<String> active = activeTrainNames == null ? Set.of() : Set.copyOf(activeTrainNames);
+    Map<String, RouteProgressRegistry.RouteProgressEntry> progress = progressRegistry.snapshot();
+    List<String> trainIds = new ArrayList<>();
+    trainIds.addAll(active);
+    for (String trainName : progress.keySet()) {
+      if (trainName != null && !trainName.isBlank() && !trainIds.contains(trainName)) {
+        trainIds.add(trainName);
+      }
+    }
+    int queueCount =
+        occupancyManager instanceof OccupancyQueueSupport queueSupport
+            ? queueSupport.snapshotQueues().size()
+            : 0;
+    int claimCount = occupancyManager == null ? 0 : occupancyManager.snapshotClaims().size();
+    SmartDispatcherController.GlobalRailwayStateSnapshot snapshot =
+        new SmartDispatcherController.GlobalRailwayStateSnapshot(
+            now == null ? Instant.now() : now,
+            trainIds.size(),
+            active.size(),
+            progress.size(),
+            claimCount,
+            queueCount,
+            blockerSnapshots.size(),
+            movementAuthorizationTokens.size(),
+            movementInhibitors.size(),
+            occupancyVersion(),
+            progressRegistry.version(),
+            0,
+            0,
+            trainIds);
+    smartDispatcherController.traceGlobalSnapshot(snapshot);
+    traceSmartMinimalForwardPlanner(active, progress, now == null ? Instant.now() : now);
+  }
+
+  private void traceSmartMinimalForwardPlanner(
+      Set<String> activeTrainNames,
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      Instant now) {
+    ConfigManager.SmartDispatcherPlannerSettings config = smartDispatcherPlannerSettings();
+    if (!config.enabled()
+        || config.mode() == SmartDispatcherPlannerMode.OFF
+        || smartDispatcherMode() == SmartDispatcherMode.OFF) {
+      return;
+    }
+    observeSmartUnlockReservations(now);
+    SmartWaitForPlanner.PlannerInput input =
+        new SmartWaitForPlanner.PlannerInput(
+            now,
+            new SmartWaitForPlanner.PlannerSettings(
+                config.enabled(),
+                config.mode(),
+                config.maxReservationResources(),
+                config.reservationTtlTicks(),
+                config.blockerSnapshotTtlMs(),
+                config.requireSameDirection(),
+                config.allowReverse(),
+                config.allowTurnbackBeforeBoundary(),
+                config.oneActiveReservationPerCycle()),
+            smartPlannerInputEdges(progress, activeTrainNames, now),
+            smartPlannerTrainStates(progress, activeTrainNames, now),
+            smartUnlockReservationsByCycle.keySet());
+    SmartWaitForPlanner.PlanResult result =
+        smartDispatcherController.planMinimalForwardUnlock(input);
+    if (result.traceLines().isEmpty()) {
+      return;
+    }
+    if (result.throttleKey().equals(lastSmartDispatchPlannerThrottleKey)) {
+      debugLogger.accept(
+          "SMART_DISPATCH_PLAN_UNCHANGED_SUPPRESSED graphHash="
+              + result.graphHash()
+              + " selectedPlanHash="
+              + result.selectedPlanHash()
+              + " throttleKey="
+              + result.throttleKey());
+      return;
+    }
+    lastSmartDispatchPlannerThrottleKey = result.throttleKey();
+    smartDispatcherController.traceMinimalForwardPlan(result);
+    if (config.mode() == SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD) {
+      result.selectedPlan().ifPresent(plan -> executeSmartUnlockReservation(plan, config, now));
+    }
+  }
+
+  private ConfigManager.SmartDispatcherPlannerSettings smartDispatcherPlannerSettings() {
+    try {
+      ConfigManager.ConfigView view = configManager.current();
+      if (view != null
+          && view.smartDispatcherSettings() != null
+          && view.smartDispatcherSettings().plannerSettings() != null) {
+        return view.smartDispatcherSettings().plannerSettings();
+      }
+    } catch (RuntimeException ignored) {
+      // 启动早期配置不可用时使用只观察默认值
+    }
+    return ConfigManager.SmartDispatcherPlannerSettings.defaults();
+  }
+
+  private List<SmartWaitForPlanner.InputEdge> smartPlannerInputEdges(
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      Set<String> activeTrainNames,
+      Instant now) {
+    List<SmartWaitForPlanner.InputEdge> edges = new ArrayList<>();
+    for (Map.Entry<String, BlockerSnapshot> entry : blockerSnapshots.entrySet()) {
+      BlockerSnapshot snapshot = entry.getValue();
+      if (snapshot == null) {
+        continue;
+      }
+      long ageMs = Duration.between(snapshot.sampledAt(), now).toMillis();
+      String blockedTrain = displayTrainNameForKey(entry.getKey(), progress, activeTrainNames);
+      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker == null) {
+          continue;
+        }
+        String resource = blocker.resourceKey();
+        String resourceKind = resourceKindName(resource);
+        edges.add(
+            new SmartWaitForPlanner.InputEdge(
+                blockedTrain,
+                blocker.trainName(),
+                resource,
+                resourceKind,
+                blocker.relation(),
+                blocker.intent(),
+                blocker.role(),
+                blocker.source(),
+                blocker.direction().orElse(CorridorDirection.UNKNOWN),
+                ageMs,
+                smartPlannerEdgeActiveForNormalAdmission(blocker)));
+      }
+    }
+    return List.copyOf(edges);
+  }
+
+  private Map<String, SmartWaitForPlanner.TrainState> smartPlannerTrainStates(
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      Set<String> activeTrainNames,
+      Instant now) {
+    Set<String> names = new LinkedHashSet<>();
+    if (activeTrainNames != null) {
+      names.addAll(activeTrainNames);
+    }
+    if (progress != null) {
+      names.addAll(progress.keySet());
+    }
+    for (BlockerSnapshot snapshot : blockerSnapshots.values()) {
+      if (snapshot == null) {
+        continue;
+      }
+      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker != null && !blocker.trainName().isBlank()) {
+          names.add(blocker.trainName());
+        }
+      }
+    }
+    Map<String, SmartWaitForPlanner.TrainState> states = new LinkedHashMap<>();
+    for (String trainName : names) {
+      if (trainName == null || trainName.isBlank()) {
+        continue;
+      }
+      SmartRecoveryInput input = smartRecoveryInput(trainName, Duration.ZERO, SignalAspect.STOP);
+      CorridorDirection inferredDirection = smartPlannerForwardDirection(input);
+      states.put(
+          input.train(),
+          new SmartWaitForPlanner.TrainState(
+              input.train(),
+              input.routeId(),
+              input.currentIndex(),
+              nodeText(input.currentNode()),
+              nodeText(input.nextNode()),
+              input.lastPassedGraphNode(),
+              inferredDirection,
+              inferredDirection == CorridorDirection.UNKNOWN ? "UNKNOWN" : "RUNTIME_ROUTE_CONTEXT",
+              inferredDirection == CorridorDirection.UNKNOWN
+                  ? smartPlannerDirectionFailureReason(input)
+                  : "-",
+              input.stuckDurationSeconds(),
+              input.signal() == SignalAspect.STOP,
+              false,
+              false,
+              false,
+              input.oppositeSingleConflictPresent(),
+              false,
+              input.movementTokenState().name()));
+    }
+    return Map.copyOf(states);
+  }
+
+  private boolean smartPlannerEdgeActiveForNormalAdmission(DeadlockBlockerInfo blocker) {
+    if (blocker == null) {
+      return false;
+    }
+    String intent = blocker.intent() == null ? "" : blocker.intent();
+    String role = blocker.role() == null ? "" : blocker.role();
+    String relation = blocker.relation() == null ? "" : blocker.relation();
+    return !intent.equals("LOOKAHEAD_PREVIEW")
+        && !role.equals("LOOKAHEAD_PREVIEW")
+        && !relation.equals("STALE_PROTECTIVE_CLAIM");
+  }
+
+  private static CorridorDirection smartPlannerForwardDirection(SmartRecoveryInput input) {
+    if (input == null) {
+      return CorridorDirection.UNKNOWN;
+    }
+    if (input.currentNode() != null
+        && input.nextNode() != null
+        && !input.currentNode().equals(input.nextNode())) {
+      return CorridorDirection.A_TO_B;
+    }
+    if (!input.lastPassedGraphNode().equals("-") && input.nextNode() != null) {
+      return CorridorDirection.A_TO_B;
+    }
+    return CorridorDirection.UNKNOWN;
+  }
+
+  private static String smartPlannerDirectionFailureReason(SmartRecoveryInput input) {
+    if (input == null || input.train().isBlank()) {
+      return "ACTIVE_STATE_MISSING";
+    }
+    if (input.currentNode() == null && input.lastPassedGraphNode().equals("-")) {
+      return "CURRENT_ROUTE_NODE_MISSING";
+    }
+    if (input.nextNode() == null) {
+      return "NEXT_ROUTE_NODE_MISSING";
+    }
+    return "INSUFFICIENT_DIRECTION_EVIDENCE";
+  }
+
+  private String displayTrainNameForKey(
+      String key,
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      Set<String> activeTrainNames) {
+    if (progress != null) {
+      for (String candidate : progress.keySet()) {
+        if (normalizeTrainKey(candidate).equals(key)) {
+          return candidate;
+        }
+      }
+    }
+    if (activeTrainNames != null) {
+      for (String candidate : activeTrainNames) {
+        if (normalizeTrainKey(candidate).equals(key)) {
+          return candidate;
+        }
+      }
+    }
+    return key == null || key.isBlank() ? "-" : key;
+  }
+
+  private static String resourceKindName(String resource) {
+    if (resource == null || resource.isBlank() || !resource.contains(":")) {
+      return "UNKNOWN";
+    }
+    return resource.substring(0, resource.indexOf(':')).toUpperCase(Locale.ROOT);
+  }
+
+  private static String nodeText(NodeId node) {
+    return node == null ? "-" : node.value();
+  }
+
+  private void executeSmartUnlockReservation(
+      SmartWaitForPlanner.UnlockCandidate plan,
+      ConfigManager.SmartDispatcherPlannerSettings config,
+      Instant now) {
+    traceSmartDispatchExecutorBridge(plan, config);
+    if (plan == null || !plan.accepted()) {
+      traceSmartDispatchExecutorSkipped(plan, "PLAN_NOT_ACCEPTED");
+      return;
+    }
+    if (smartUnlockNoReleaseCooldownActive(plan, now)) {
+      traceSmartDispatchExecutorSkipped(plan, "NO_RELEASE_COOLDOWN");
+      return;
+    }
+    if (config.oneActiveReservationPerCycle()
+        && smartUnlockReservationsByCycle.containsKey(plan.cycleId())) {
+      debugLogger.accept(
+          "SMART_UNLOCK_RESERVATION_REJECTED train="
+              + plan.train()
+              + " cycleId="
+              + plan.cycleId()
+              + " reason=one-active-reservation-per-cycle");
+      traceSmartDispatchExecutorSkipped(plan, "ACTIVE_RESERVATION_EXISTS");
+      return;
+    }
+    if (plan.direction() == CorridorDirection.UNKNOWN || config.allowReverse()) {
+      String reason =
+          plan.direction() == CorridorDirection.UNKNOWN
+              ? "INSUFFICIENT_DIRECTION_EVIDENCE"
+              : "SAME_DIRECTION_FAILED";
+      debugLogger.accept(
+          "SMART_DIRECTION_INVARIANT_BLOCKED train="
+              + plan.train()
+              + " cycleId="
+              + plan.cycleId()
+              + " reason="
+              + (plan.direction() == CorridorDirection.UNKNOWN
+                  ? "INSUFFICIENT_DIRECTION_EVIDENCE"
+                  : "allow-reverse-misconfigured"));
+      traceSmartDispatchExecutorSkipped(plan, reason);
+      return;
+    }
+    List<OccupancyResource> planResources = parsePlannerResources(plan.resources());
+    if (planResources.isEmpty()) {
+      debugLogger.accept(
+          "SMART_UNLOCK_RESERVATION_REJECTED train="
+              + plan.train()
+              + " cycleId="
+              + plan.cycleId()
+              + " reason=no-reservation-resources");
+      traceSmartDispatchExecutorSkipped(plan, "RESOURCE_WINDOW_INVALID");
+      return;
+    }
+    if (planResources.size() > config.maxReservationResources()) {
+      debugLogger.accept(
+          "SMART_RESERVATION_RESOURCE_LIMIT_EXCEEDED train="
+              + plan.train()
+              + " reservationResourceCount="
+              + planResources.size()
+              + " limit="
+              + config.maxReservationResources());
+      traceSmartDispatchExecutorSkipped(plan, "RESERVATION_RESOURCE_LIMIT_EXCEEDED");
+      return;
+    }
+    NodeId authorityEnd = plannerNode(plan.authorityEnd()).orElse(null);
+    if (authorityEnd == null) {
+      debugLogger.accept(
+          "SMART_UNLOCK_AUTHORITY_REJECTED train="
+              + plan.train()
+              + " reason=authority-end-missing");
+      traceSmartDispatchExecutorSkipped(plan, "AUTHORITY_BOUNDARY_MISSING");
+      return;
+    }
+    long tick = currentSignalTraceTick();
+    String reservationId = "unlock-" + Long.toUnsignedString(tick) + "-" + plan.planHash();
+    List<String> initiallyBlockedTrains = initiallyBlockedTrains(plan.train(), plan.resources());
+    SmartUnlockReservation reservation =
+        new SmartUnlockReservation(
+            reservationId,
+            plan.train(),
+            plan.cycleId(),
+            planResources,
+            authorityEnd,
+            plan.planHash(),
+            tick,
+            config.reservationTtlTicks(),
+            plan.resources(),
+            initiallyBlockedTrains,
+            plan.currentNode(),
+            plan.currentNode(),
+            -1L,
+            false);
+    smartUnlockReservationsByCycle.put(plan.cycleId(), reservation);
+    smartUnlockReservationsByTrain.put(normalizeTrainKey(plan.train()), reservation);
+    debugLogger.accept(
+        "SMART_UNLOCK_RESERVATION_CREATED reservationId="
+            + reservationId
+            + " train="
+            + plan.train()
+            + " cycleId="
+            + plan.cycleId()
+            + " resources="
+            + planResources
+            + " authorityEnd="
+            + authorityEnd.value()
+            + " createdTick="
+            + tick
+            + " ttl="
+            + config.reservationTtlTicks()
+            + " expectedReleasedResources="
+            + plan.resources());
+    commitSmartUnlockReservation(reservation, plan, now);
+  }
+
+  private void traceSmartDispatchExecutorBridge(
+      SmartWaitForPlanner.UnlockCandidate plan,
+      ConfigManager.SmartDispatcherPlannerSettings config) {
+    String reasonIfNot = smartDispatchExecutorSkipReason(plan, config);
+    MovementAuthorizationToken token =
+        plan == null ? null : movementToken(plan.train()).orElse(null);
+    String destination = token == null ? "-" : token.committedDestination().orElse("-");
+    debugLogger.accept(
+        "SMART_DISPATCH_EXECUTOR_BRIDGE planId="
+            + (plan == null ? "-" : plan.planHash())
+            + " cycleId="
+            + (plan == null ? "-" : plan.cycleId())
+            + " tick="
+            + currentSignalTraceTick()
+            + " train="
+            + (plan == null ? "-" : plan.train())
+            + " globalMode="
+            + smartDispatcherMode()
+            + " plannerMode="
+            + (config == null ? SmartDispatcherPlannerMode.OFF : config.mode())
+            + " willCreateReservation="
+            + "-".equals(reasonIfNot)
+            + " reasonIfNot="
+            + reasonIfNot
+            + " reservationResources="
+            + (plan == null ? List.of() : plan.resources())
+            + " releaseResources="
+            + (plan == null ? List.of() : plan.releaseResources())
+            + " authorityBoundary="
+            + (plan == null ? "-" : plan.authorityEnd())
+            + " currentTokenState="
+            + tokenState(plan == null ? "-" : plan.train(), token)
+            + " destinationPresent="
+            + (token != null && token.committedDestination().isPresent())
+            + " destination="
+            + destination
+            + " currentNode="
+            + (plan == null ? "-" : plan.currentNode())
+            + " nextNode="
+            + (plan == null ? "-" : plan.nextNode()));
+  }
+
+  private String smartDispatchExecutorSkipReason(
+      SmartWaitForPlanner.UnlockCandidate plan,
+      ConfigManager.SmartDispatcherPlannerSettings config) {
+    if (plan == null || !plan.accepted()) {
+      return "PLAN_NOT_ACCEPTED";
+    }
+    ConfigManager.SmartDispatcherPlannerSettings settings =
+        config == null ? ConfigManager.SmartDispatcherPlannerSettings.defaults() : config;
+    if (settings.mode() != SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD) {
+      return "CONFIG_NOT_EXECUTING_PLANNER";
+    }
+    if (smartUnlockNoReleaseCooldownActive(plan, Instant.now())) {
+      return "NO_RELEASE_COOLDOWN";
+    }
+    if (settings.oneActiveReservationPerCycle()
+        && smartUnlockReservationsByCycle.containsKey(plan.cycleId())) {
+      return "ACTIVE_RESERVATION_EXISTS";
+    }
+    if (plan.direction() == CorridorDirection.UNKNOWN) {
+      return "INSUFFICIENT_DIRECTION_EVIDENCE";
+    }
+    if (settings.allowReverse()) {
+      return "SAME_DIRECTION_FAILED";
+    }
+    List<OccupancyResource> resources = parsePlannerResources(plan.resources());
+    if (resources.isEmpty()) {
+      return "RESOURCE_WINDOW_INVALID";
+    }
+    if (resources.size() > settings.maxReservationResources()) {
+      return "RESERVATION_RESOURCE_LIMIT_EXCEEDED";
+    }
+    if (plannerNode(plan.authorityEnd()).isEmpty()) {
+      return "AUTHORITY_BOUNDARY_MISSING";
+    }
+    return "-";
+  }
+
+  private boolean smartUnlockNoReleaseCooldownActive(
+      SmartWaitForPlanner.UnlockCandidate plan, Instant now) {
+    if (plan == null) {
+      return false;
+    }
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant until =
+        firstActiveSmartUnlockCooldown(
+            effectiveNow,
+            smartUnlockCooldownKey(plan.cycleId(), plan.planHash()),
+            smartUnlockTrainCycleCooldownKey(plan.train(), plan.cycleId()));
+    return until != null;
+  }
+
+  private Instant firstActiveSmartUnlockCooldown(Instant now, String... keys) {
+    if (keys == null || keys.length == 0) {
+      return null;
+    }
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    for (String key : keys) {
+      if (key == null || key.isBlank()) {
+        continue;
+      }
+      Instant until = smartUnlockNoReleaseCooldowns.get(key);
+      if (until == null) {
+        continue;
+      }
+      if (!effectiveNow.isBefore(until)) {
+        smartUnlockNoReleaseCooldowns.remove(key, until);
+        continue;
+      }
+      return until;
+    }
+    return null;
+  }
+
+  private static String smartUnlockCooldownKey(String cycleId, String planHash) {
+    String cycle = cycleId == null || cycleId.isBlank() ? "-" : cycleId.trim();
+    String hash = planHash == null || planHash.isBlank() ? "-" : planHash.trim();
+    return "plan:" + cycle + ":" + hash;
+  }
+
+  private static String smartUnlockTrainCycleCooldownKey(String trainName, String cycleId) {
+    String trainKey = normalizeTrainKey(trainName);
+    String cycle = cycleId == null || cycleId.isBlank() ? "-" : cycleId.trim();
+    return "train-cycle:" + (trainKey.isEmpty() ? "-" : trainKey) + ":" + cycle;
+  }
+
+  private void traceSmartDispatchExecutorSkipped(
+      SmartWaitForPlanner.UnlockCandidate plan, String reason) {
+    debugLogger.accept(
+        "SMART_DISPATCH_EXECUTOR_SKIPPED planId="
+            + (plan == null ? "-" : plan.planHash())
+            + " cycleId="
+            + (plan == null ? "-" : plan.cycleId())
+            + " train="
+            + (plan == null ? "-" : plan.train())
+            + " reason="
+            + (reason == null || reason.isBlank() ? "UNKNOWN_BUG" : reason));
+  }
+
+  private void commitSmartUnlockReservation(
+      SmartUnlockReservation reservation, SmartWaitForPlanner.UnlockCandidate plan, Instant now) {
+    List<OccupancyResource> claimResources =
+        reservation.resources().stream()
+            .filter(resource -> !hasSelfClaim(resource, reservation.trainName()))
+            .toList();
+    OccupancyRequest request =
+        smartUnlockReservationRequest(
+            reservation.trainName(),
+            claimResources,
+            plan.direction(),
+            now == null ? Instant.now() : now);
+    if (!claimResources.isEmpty()) {
+      if (!(occupancyManager instanceof OccupancyPreviewSupport previewSupport)) {
+        debugLogger.accept(
+            "SMART_UNLOCK_RESERVATION_REJECTED reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " reason=preview-support-missing");
+        traceSmartUnlockAuthorityRejected(reservation, "preview-support-missing");
+        rollbackSmartUnlockReservation(reservation, "preview-support-missing", false);
+        return;
+      }
+      OccupancyDecision preview = previewSupport.canEnterPreview(request);
+      if (!preview.allowed()) {
+        debugLogger.accept(
+            "SMART_UNLOCK_RESERVATION_REJECTED reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " reason=resources-not-available blockers="
+                + preview.blockers().size());
+        traceSmartUnlockAuthorityRejected(reservation, "resources-not-available");
+        rollbackSmartUnlockReservation(reservation, "commit-preview-rejected", false);
+        return;
+      }
+      OccupancyDecision acquired = occupancyManager.acquire(request);
+      if (!acquired.allowed()) {
+        debugLogger.accept(
+            "SMART_UNLOCK_RESERVATION_REJECTED reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " reason=commit-acquire-rejected blockers="
+                + acquired.blockers().size());
+        traceSmartUnlockAuthorityRejected(reservation, "commit-acquire-rejected");
+        rollbackSmartUnlockReservation(reservation, "commit-acquire-rejected", false);
+        return;
+      }
+    } else {
+      debugLogger.accept(
+          "SMART_SPECULATIVE_CLAIM_NOT_BLOCKING_NORMAL_ADMISSION reservationId="
+              + reservation.reservationId()
+              + " train="
+              + reservation.trainName()
+              + " reason=selected-train-already-holds-window");
+    }
+    MovementAuthorizationToken token =
+        issueMovementAuthorizationToken(
+            reservation.trainName(),
+            plannerNode(plan.currentNode()).orElse(null),
+            reservation.authorityEnd(),
+            smartUnlockReservationRequest(
+                reservation.trainName(),
+                reservation.resources(),
+                plan.direction(),
+                now == null ? Instant.now() : now),
+            SignalAspect.PROCEED,
+            now == null ? Instant.now() : now);
+    String destination = resolveDestinationName(reservation.authorityEnd());
+    if (destination == null || destination.isBlank()) {
+      debugLogger.accept(
+          "SMART_UNLOCK_AUTHORITY_REJECTED train="
+              + reservation.trainName()
+              + " reservationId="
+              + reservation.reservationId()
+              + " reason=destination-boundary-unavailable");
+      traceSmartUnlockAuthorityRejected(reservation, "destination-boundary-unavailable");
+      rollbackSmartUnlockReservation(reservation, "authority-destination-unavailable", true);
+      return;
+    }
+    if (!plan.nextNode().equals("-")
+        && !plan.nextNode().equals(reservation.authorityEnd().value())) {
+      debugLogger.accept(
+          "SMART_AUTHORITY_WINDOW_DESTINATION_MISMATCH train="
+              + reservation.trainName()
+              + " action=clamp-to-valid-boundary requested="
+              + plan.nextNode()
+              + " authorityEnd="
+              + reservation.authorityEnd().value());
+    }
+    if (!activateMovementAuthorizationToken(reservation.trainName(), token, destination)) {
+      debugLogger.accept(
+          "SMART_UNLOCK_AUTHORITY_REJECTED train="
+              + reservation.trainName()
+              + " reservationId="
+              + reservation.reservationId()
+              + " reason=token-activation-failed");
+      traceSmartUnlockAuthorityRejected(reservation, "token-activation-failed");
+      rollbackSmartUnlockReservation(reservation, "token-activation-failed", true);
+      return;
+    }
+    SmartUnlockReservation committed = reservation.committed(token.claimVersion());
+    smartUnlockReservationsByCycle.put(committed.cycleId(), committed);
+    smartUnlockReservationsByTrain.put(normalizeTrainKey(committed.trainName()), committed);
+    debugLogger.accept(
+        "SMART_UNLOCK_RESERVATION_COMMITTED reservationId="
+            + committed.reservationId()
+            + " train="
+            + committed.trainName()
+            + " cycleId="
+            + committed.cycleId()
+            + " resourceCount="
+            + committed.resources().size());
+    debugLogger.accept(
+        "SMART_UNLOCK_AUTHORITY_ISSUED train="
+            + committed.trainName()
+            + " reservationId="
+            + committed.reservationId()
+            + " authorityEnd="
+            + committed.authorityEnd().value()
+            + " resourceCount="
+            + committed.resources().size());
+  }
+
+  private OccupancyRequest smartUnlockReservationRequest(
+      String trainName,
+      List<OccupancyResource> resources,
+      CorridorDirection direction,
+      Instant now) {
+    Map<String, CorridorDirection> directions = new LinkedHashMap<>();
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
+    for (OccupancyResource resource : resources) {
+      if (resource == null) {
+        continue;
+      }
+      intents.put(resource, ResourceIntent.UNLOCK_RESERVATION);
+      if (resource.kind() == ResourceKind.CONFLICT && direction != CorridorDirection.UNKNOWN) {
+        directions.put(resource.key(), direction);
+      }
+    }
+    return new OccupancyRequest(
+        trainName,
+        Optional.empty(),
+        now,
+        resources,
+        directions,
+        Map.of(),
+        0,
+        AuthorizationPurpose.UNLOCK_RESERVATION,
+        Map.of(),
+        intents);
+  }
+
+  private void observeSmartUnlockReservations(Instant now) {
+    if (smartUnlockReservationsByCycle.isEmpty()) {
+      return;
+    }
+    long tick = currentSignalTraceTick();
+    List<SmartUnlockReservation> reservations =
+        List.copyOf(smartUnlockReservationsByCycle.values());
+    for (SmartUnlockReservation reservation : reservations) {
+      if (reservation == null) {
+        continue;
+      }
+      SmartRecoveryInput state =
+          smartRecoveryInput(reservation.trainName(), Duration.ZERO, SignalAspect.STOP);
+      boolean nodeChanged = !nodeText(state.currentNode()).equals(reservation.initialCurrentNode());
+      boolean lastPassedChanged =
+          !state.lastPassedGraphNode().equals(reservation.initialLastPassedGraphNode());
+      boolean blockersReleased = expectedSmartUnlockBlockersReleased(reservation, now);
+      boolean tokenInvalid =
+          state.movementTokenState() == SignalComputationTrace.TokenState.INVALID;
+      debugLogger.accept(
+          "SMART_UNLOCK_PROGRESS_OBSERVED reservationId="
+              + reservation.reservationId()
+              + " train="
+              + reservation.trainName()
+              + " currentNodeChanged="
+              + nodeChanged
+              + " lastPassedGraphNodeChanged="
+              + lastPassedChanged
+              + " blockerResourceReleased="
+              + blockersReleased
+              + " movementTokenState="
+              + state.movementTokenState());
+      if (reservation.committed() && tokenInvalid) {
+        debugLogger.accept(
+            "SMART_UNLOCK_AUTHORITY_INVALID_NO_RELEASE reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " blockerResourceReleased="
+                + blockersReleased
+                + " currentNodeChanged="
+                + nodeChanged
+                + " lastPassedGraphNodeChanged="
+                + lastPassedChanged);
+        rememberSmartUnlockNoReleaseTimeout(reservation, now);
+        rollbackSmartUnlockReservation(reservation, "authority-invalid-no-release", true);
+        continue;
+      }
+      if (reservation.committed() && blockersReleased) {
+        int released =
+            occupancyManager.releaseResourcesByTrainAndRole(
+                reservation.trainName(), reservation.resources(), ClaimRole.UNLOCK_RESERVATION);
+        smartUnlockReservationsByCycle.remove(reservation.cycleId(), reservation);
+        smartUnlockReservationsByTrain.remove(
+            normalizeTrainKey(reservation.trainName()), reservation);
+        rememberSmartUnlockBlockerRelease(reservation, now);
+        debugLogger.accept(
+            "SMART_UNLOCK_SUCCESS reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " releasedReservationClaims="
+                + released
+                + " cycleBroken="
+                + blockersReleased);
+        debugLogger.accept(
+            "SMART_UNLOCK_RESERVATION_SUCCESS reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " releasedReservationClaims="
+                + released
+                + " cycleBroken="
+                + blockersReleased);
+        continue;
+      }
+      if (reservation.committed() && (nodeChanged || lastPassedChanged)) {
+        debugLogger.accept(
+            "SMART_UNLOCK_PROGRESS_NO_RELEASE reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " currentNodeChanged="
+                + nodeChanged
+                + " lastPassedGraphNodeChanged="
+                + lastPassedChanged
+                + " blockerResourceReleased=false"
+                + " movementTokenState="
+                + state.movementTokenState());
+      }
+      if (reservation.expired(tick)) {
+        debugLogger.accept(
+            "SMART_UNLOCK_RESERVATION_EXPIRED reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " ttl="
+                + reservation.ttlTicks());
+        debugLogger.accept(
+            "SMART_UNLOCK_FAILED reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " reason=ttl-expired sameBlockersRemain="
+                + !blockersReleased);
+        if (!blockersReleased) {
+          debugLogger.accept(
+              "SMART_UNLOCK_RESERVATION_NO_RELEASE_TIMEOUT reservationId="
+                  + reservation.reservationId()
+                  + " train="
+                  + reservation.trainName()
+                  + " cycleId="
+                  + reservation.cycleId()
+                  + " selectedPlanHash="
+                  + reservation.planHash()
+                  + " blockerResourceReleased=false"
+                  + " currentNodeChanged="
+                  + nodeChanged
+                  + " lastPassedGraphNodeChanged="
+                  + lastPassedChanged);
+          rememberSmartUnlockNoReleaseTimeout(reservation, now);
+          rollbackSmartUnlockReservation(reservation, "no-release-timeout", true);
+        } else {
+          rollbackSmartUnlockReservation(reservation, "ttl-expired", true);
+        }
+      }
+    }
+  }
+
+  private void rememberSmartUnlockBlockerRelease(SmartUnlockReservation reservation, Instant now) {
+    if (reservation == null) {
+      return;
+    }
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    rememberTrainInstant(smartUnlockBlockerReleaseAt, reservation.trainName(), effectiveNow);
+    for (String blockedTrain : reservation.initiallyBlockedTrains()) {
+      rememberTrainInstant(smartUnlockBlockerReleaseAt, blockedTrain, effectiveNow);
+    }
+  }
+
+  private void rememberSmartUnlockNoReleaseTimeout(
+      SmartUnlockReservation reservation, Instant now) {
+    if (reservation == null) {
+      return;
+    }
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    rememberTrainInstant(smartUnlockNoReleaseTimeouts, reservation.trainName(), effectiveNow);
+    Instant until = effectiveNow.plus(SMART_UNLOCK_NO_RELEASE_COOLDOWN);
+    smartUnlockNoReleaseCooldowns.put(
+        smartUnlockCooldownKey(reservation.cycleId(), reservation.planHash()), until);
+    smartUnlockNoReleaseCooldowns.put(
+        smartUnlockTrainCycleCooldownKey(reservation.trainName(), reservation.cycleId()), until);
+  }
+
+  private static void rememberTrainInstant(
+      java.util.concurrent.ConcurrentMap<String, Instant> target, String trainName, Instant at) {
+    if (target == null || trainName == null || trainName.isBlank() || at == null) {
+      return;
+    }
+    String key = normalizeTrainKey(trainName);
+    if (!key.isEmpty()) {
+      target.put(key, at);
+    }
+  }
+
+  private boolean expectedSmartUnlockBlockersReleased(
+      SmartUnlockReservation reservation, Instant now) {
+    if (reservation.initiallyBlockedTrains().isEmpty()) {
+      return false;
+    }
+    Set<String> expectedResources = new LinkedHashSet<>(reservation.expectedReleasedResources());
+    if (expectedResources.isEmpty()) {
+      traceSmartUnlockReleaseEvidenceUnknown(reservation, "-", "EXPECTED_RESOURCES_MISSING", now);
+      return false;
+    }
+    String trainKey = normalizeTrainKey(reservation.trainName());
+    for (String blockedTrain : reservation.initiallyBlockedTrains()) {
+      String blockedKey = normalizeTrainKey(blockedTrain);
+      BlockerSnapshot snapshot = blockerSnapshots.get(blockedKey);
+      if (snapshot == null) {
+        traceSmartUnlockReleaseEvidenceUnknown(
+            reservation, blockedTrain, "BLOCKER_SNAPSHOT_MISSING", now);
+        return false;
+      }
+      Instant effectiveNow = now == null ? Instant.now() : now;
+      if (snapshot.sampledAt().isBefore(effectiveNow.minus(BLOCKER_SNAPSHOT_TTL))) {
+        blockerSnapshots.remove(blockedKey, snapshot);
+        traceSmartUnlockReleaseEvidenceUnknown(
+            reservation, blockedTrain, "BLOCKER_SNAPSHOT_STALE", now);
+        return false;
+      }
+      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker == null) {
+          continue;
+        }
+        boolean sameBlocker = normalizeTrainKey(blocker.trainName()).equals(trainKey);
+        if (sameBlocker && (blocker.resourceKey().isBlank() || "-".equals(blocker.resourceKey()))) {
+          traceSmartUnlockReleaseEvidenceUnknown(
+              reservation, blockedTrain, "BLOCKER_RESOURCE_UNKNOWN", now);
+          return false;
+        }
+        if (sameBlocker && expectedResources.contains(blocker.resourceKey())) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private void traceSmartUnlockReleaseEvidenceUnknown(
+      SmartUnlockReservation reservation, String blockedTrain, String reason, Instant now) {
+    if (reservation == null) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_UNLOCK_RELEASE_EVIDENCE_UNKNOWN reservationId="
+            + reservation.reservationId()
+            + " train="
+            + reservation.trainName()
+            + " blockedTrain="
+            + (blockedTrain == null || blockedTrain.isBlank() ? "-" : blockedTrain)
+            + " cycleId="
+            + reservation.cycleId()
+            + " selectedPlanHash="
+            + reservation.planHash()
+            + " reason="
+            + (reason == null || reason.isBlank() ? "UNKNOWN" : reason)
+            + " sampledAt="
+            + (now == null ? Instant.now() : now));
+  }
+
+  private void rollbackSmartUnlockReservation(
+      SmartUnlockReservation reservation, String reason, boolean clearToken) {
+    if (reservation == null) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_UNLOCK_ROLLBACK_STARTED reservationId="
+            + reservation.reservationId()
+            + " train="
+            + reservation.trainName()
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason));
+    int released =
+        occupancyManager.releaseResourcesByTrainAndRole(
+            reservation.trainName(), reservation.resources(), ClaimRole.UNLOCK_RESERVATION);
+    if (clearToken && reservation.tokenClaimVersion() >= 0L) {
+      String key = normalizeTrainKey(reservation.trainName());
+      MovementAuthorizationToken current = movementAuthorizationTokens.get(key);
+      if (current != null && current.claimVersion() == reservation.tokenClaimVersion()) {
+        movementAuthorizationTokens.remove(key, current);
+      }
+    }
+    smartUnlockReservationsByCycle.remove(reservation.cycleId(), reservation);
+    smartUnlockReservationsByTrain.remove(normalizeTrainKey(reservation.trainName()), reservation);
+    debugLogger.accept(
+        "SMART_UNLOCK_RESERVATION_ROLLED_BACK reservationId="
+            + reservation.reservationId()
+            + " train="
+            + reservation.trainName()
+            + " releasedReservationClaims="
+            + released);
+    debugLogger.accept(
+        "SMART_UNLOCK_RESERVATION_ROLLBACK reservationId="
+            + reservation.reservationId()
+            + " train="
+            + reservation.trainName()
+            + " releasedReservationClaims="
+            + released
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason));
+    debugLogger.accept(
+        "SMART_UNLOCK_ROLLBACK_DONE reservationId="
+            + reservation.reservationId()
+            + " train="
+            + reservation.trainName());
+  }
+
+  private void traceSmartUnlockAuthorityRejected(
+      SmartUnlockReservation reservation, String reason) {
+    if (reservation == null) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_UNLOCK_AUTHORITY_REJECTED train="
+            + reservation.trainName()
+            + " reservationId="
+            + reservation.reservationId()
+            + " reason="
+            + (reason == null || reason.isBlank() ? "UNKNOWN_BUG" : reason)
+            + " authorityEnd="
+            + (reservation.authorityEnd() == null ? "-" : reservation.authorityEnd().value())
+            + " resourceCount="
+            + reservation.resources().size());
+  }
+
+  private List<OccupancyResource> parsePlannerResources(List<String> resources) {
+    if (resources == null || resources.isEmpty()) {
+      return List.of();
+    }
+    List<OccupancyResource> parsed = new ArrayList<>();
+    for (String resource : resources) {
+      parsePlannerResource(resource).ifPresent(parsed::add);
+    }
+    return List.copyOf(parsed);
+  }
+
+  private Optional<OccupancyResource> parsePlannerResource(String value) {
+    if (value == null || value.isBlank() || !value.contains(":")) {
+      return Optional.empty();
+    }
+    String kind = value.substring(0, value.indexOf(':')).trim();
+    String key = value.substring(value.indexOf(':') + 1).trim();
+    if (key.isBlank()) {
+      return Optional.empty();
+    }
+    try {
+      ResourceKind resourceKind = ResourceKind.valueOf(kind.toUpperCase(Locale.ROOT));
+      return Optional.of(new OccupancyResource(resourceKind, key));
+    } catch (IllegalArgumentException ignored) {
+      return Optional.empty();
+    }
+  }
+
+  private Optional<NodeId> plannerNode(String raw) {
+    if (raw == null || raw.isBlank() || "-".equals(raw.trim())) {
+      return Optional.empty();
+    }
+    return Optional.of(NodeId.of(raw.trim()));
+  }
+
+  private boolean hasSelfClaim(OccupancyResource resource, String trainName) {
+    if (resource == null || trainName == null || trainName.isBlank() || occupancyManager == null) {
+      return false;
+    }
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (claim.resource().equals(resource)
+          && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private List<String> initiallyBlockedTrains(String blockerTrain, List<String> resources) {
+    Set<String> result = new LinkedHashSet<>();
+    Set<String> expectedResources = new LinkedHashSet<>(resources == null ? List.of() : resources);
+    String blockerKey = normalizeTrainKey(blockerTrain);
+    for (Map.Entry<String, BlockerSnapshot> entry : blockerSnapshots.entrySet()) {
+      BlockerSnapshot snapshot = entry.getValue();
+      if (snapshot == null) {
+        continue;
+      }
+      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker == null) {
+          continue;
+        }
+        if (normalizeTrainKey(blocker.trainName()).equals(blockerKey)
+            && expectedResources.contains(blocker.resourceKey())) {
+          result.add(entry.getKey());
+        }
+      }
+    }
+    return List.copyOf(result);
   }
 
   private SignalComputationTrace.Builder signalTrace(
@@ -1110,21 +2452,35 @@ public final class RuntimeDispatchService {
     }
 
     OccupancyRequestContext context = contextOpt.get();
-    OccupancyRequestContext authorizationContext =
-        buildForwardAuthorizationContext(
-                graph,
-                runtimeSettings,
-                trainName,
-                route,
-                effectiveNodes,
-                currentIndex,
-                now,
-                priority,
-                AuthorizationPurpose.STATION_DEPARTURE)
-            .orElse(context);
+    // 发车门控是 admission gate，需要保留完整前瞻与 depot lookover；1-edge hard authority
+    // 只用于信号 aspect staging，不能替代发车授权窗口；尾部保护资源仍由 retain 流程持有，不随发车 acquire 覆盖。
     OccupancyRequest authorizationRequest =
         markDirectedRequest(
-            authorizationContext.request(), SignalComputationTrace.Source.DEPARTURE_GATE);
+            movementRequiredAdmissionRequest(context.request()),
+            SignalComputationTrace.Source.DEPARTURE_GATE);
+    OccupancyRequestContext stationAdmissionContext =
+        new OccupancyRequestContext(
+            authorizationRequest, context.pathNodes(), context.edges(), context.directedContext());
+    AuthorityEnd stationAdmissionAuthorityEnd =
+        resolveAuthorityEnd(graph, context.pathNodes(), currentIndex, stationAdmissionContext);
+    SmartAdmissionResult stationAdmission =
+        evaluateSmartSingleCorridorAdmission(
+            trainName,
+            graph,
+            stationAdmissionContext,
+            stationAdmissionAuthorityEnd,
+            true,
+            SmartAdmissionContext.station("station-departure-smart-admission"));
+    if (smartAdmissionShouldBlock(trainName, stationAdmission)) {
+      retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
+      debugLogger.accept(
+          "SMART_STATION_DEPARTURE_HELD train="
+              + trainName
+              + " reason="
+              + stationAdmission.reason()
+              + " localOnlyHold=true destinationMutated=false tokenInvalidated=false");
+      return false;
+    }
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -1151,6 +2507,7 @@ public final class RuntimeDispatchService {
         definition.nodeId(),
         graph,
         authorizationRequest.resourceList());
+    maybeRecoverSelfOwnedStaleRetainPreview(authorizationRequest, "departure-self-owned-retain");
     String departureTrainName = trainName;
     LaunchAuthorizationService.AuthorizationResult authorization =
         launchAuthorizationService.authorize(
@@ -1217,6 +2574,36 @@ public final class RuntimeDispatchService {
     retainRearGuardOccupancyBestEffort(
         trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
     return true;
+  }
+
+  private OccupancyRequest movementRequiredAdmissionRequest(OccupancyRequest request) {
+    if (request == null) {
+      return null;
+    }
+    List<OccupancyResource> resources = new ArrayList<>();
+    Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
+    for (OccupancyResource resource : request.resourceList()) {
+      if (resource == null || !request.intentFor(resource).hardAuthority()) {
+        continue;
+      }
+      resources.add(resource);
+      intents.put(resource, ResourceIntent.MOVEMENT_REQUIRED);
+    }
+    if (resources.size() == request.resourceList().size()) {
+      return request;
+    }
+    return new OccupancyRequest(
+        request.trainName(),
+        request.routeId(),
+        request.now(),
+        resources,
+        request.corridorDirections(),
+        request.conflictEntryOrders(),
+        request.priority(),
+        request.purpose(),
+        request.conflictReleaseHints(),
+        intents,
+        request.directedContext());
   }
 
   /**
@@ -1711,7 +3098,7 @@ public final class RuntimeDispatchService {
           trainName, route, currentIndex, currentNode, graph, request.resourceList());
     }
     OccupancyRequestContext authorizationContext =
-        buildForwardAuthorizationContext(
+        buildHardAuthorityContext(
                 graph,
                 runtimeSettings,
                 trainName,
@@ -2649,7 +4036,8 @@ public final class RuntimeDispatchService {
     REFRESH_SIGNAL,
     REAPPLY_HARD_STOP,
     GET_STATE,
-    DEADLOCK_CONTEXT
+    DEADLOCK_CONTEXT,
+    CLEAR_SELF_OWNED_CONFLICT
   }
 
   /** Health/runtime 桥接列车名匹配来源。 */
@@ -2702,14 +4090,57 @@ public final class RuntimeDispatchService {
    * @param trainName blocker 列车名
    * @param conflictKey 命中的 conflict key；非冲突 blocker 为空
    * @param direction blocker 已知的单线走廊方向
+   * @param ownerCanonical blocker 规范化列车名
+   * @param resourceKey 原始资源键，包含资源类型
+   * @param relation blocker 与当前请求的关系
+   * @param intent 当前请求对该资源的意图
+   * @param role blocker claim 角色
+   * @param source 产生该 blocker 的 OCCUPANCY 判定来源
+   * @param tick 近似服务端 tick
+   * @param occupancyVersion 占用管理器版本
    */
   public record DeadlockBlockerInfo(
-      String trainName, String conflictKey, Optional<CorridorDirection> direction) {
+      String trainName,
+      String conflictKey,
+      Optional<CorridorDirection> direction,
+      String ownerCanonical,
+      String resourceKey,
+      String relation,
+      String intent,
+      String role,
+      String source,
+      long tick,
+      long occupancyVersion) {
 
     public DeadlockBlockerInfo {
       trainName = trainName == null ? "" : trainName.trim();
       conflictKey = conflictKey == null ? "" : conflictKey.trim();
       direction = direction == null ? Optional.empty() : direction;
+      ownerCanonical =
+          ownerCanonical == null || ownerCanonical.isBlank()
+              ? TrainNameNormalizer.normalizeKey(trainName)
+              : ownerCanonical.trim();
+      resourceKey = resourceKey == null || resourceKey.isBlank() ? conflictKey : resourceKey.trim();
+      relation = relation == null || relation.isBlank() ? "UNKNOWN" : relation.trim();
+      intent = intent == null || intent.isBlank() ? "UNKNOWN" : intent.trim();
+      role = role == null || role.isBlank() ? "UNKNOWN" : role.trim();
+      source = source == null || source.isBlank() ? "unknown" : source.trim();
+    }
+
+    public DeadlockBlockerInfo(
+        String trainName, String conflictKey, Optional<CorridorDirection> direction) {
+      this(
+          trainName,
+          conflictKey,
+          direction,
+          TrainNameNormalizer.normalizeKey(trainName),
+          conflictKey,
+          "UNKNOWN",
+          "UNKNOWN",
+          "UNKNOWN",
+          "legacy",
+          -1L,
+          -1L);
     }
   }
 
@@ -2732,6 +4163,35 @@ public final class RuntimeDispatchService {
         }
       }
       return Set.copyOf(names);
+    }
+  }
+
+  /**
+   * 同向 follower 因 leader 停滞而无法进入 single zone 的低频证据。
+   *
+   * <p>该证据只供健康监控在 destroy 阈值之后做兜底目标选择，不参与 admission 放行，也不改变 physical signal 策略。
+   */
+  public record FollowerStuckLeaderEvidence(
+      String followerTrain,
+      String leaderTrain,
+      String resource,
+      Instant firstSeenAt,
+      Instant sampledAt,
+      int samples) {
+
+    public FollowerStuckLeaderEvidence {
+      followerTrain = followerTrain == null ? "" : followerTrain.trim();
+      leaderTrain = leaderTrain == null ? "" : leaderTrain.trim();
+      resource = resource == null || resource.isBlank() ? "-" : resource.trim();
+      firstSeenAt = firstSeenAt == null ? Instant.EPOCH : firstSeenAt;
+      sampledAt = sampledAt == null ? firstSeenAt : sampledAt;
+      samples = Math.max(0, samples);
+    }
+
+    private FollowerStuckLeaderEvidence seen(Instant now) {
+      Instant sampled = now == null ? Instant.now() : now;
+      return new FollowerStuckLeaderEvidence(
+          followerTrain, leaderTrain, resource, firstSeenAt, sampled, samples + 1);
     }
   }
 
@@ -2790,6 +4250,158 @@ public final class RuntimeDispatchService {
       exitNode = exitNode == null ? Optional.empty() : exitNode;
       drainPath = drainPath == null ? List.of() : List.copyOf(drainPath);
       reason = reason == null || reason.isBlank() ? "UNKNOWN" : reason.trim();
+    }
+  }
+
+  /**
+   * HealthMonitor 传入 Smart recovery pipeline 的只读输入。
+   *
+   * <p>该快照只汇总 stuck 判定、信号、movement token、destination 与 blocker 状态；构造本身不执行任何控车、
+   * destination、occupancy 或 destroy 副作用。
+   */
+  public record SmartRecoveryInput(
+      String train,
+      long stuckDurationSeconds,
+      SignalAspect signal,
+      boolean movementInhibited,
+      SignalComputationTrace.TokenState movementTokenState,
+      boolean destinationPresent,
+      int blockerCount,
+      Set<String> hardBlockers,
+      NodeId currentNode,
+      NodeId nextNode,
+      String routeId,
+      int currentIndex,
+      String lastPassedGraphNode,
+      boolean insideSingleRegion,
+      boolean insideSwitcherRegion,
+      boolean oppositeSingleConflictPresent,
+      boolean downstreamBlocked,
+      String primaryReason) {
+
+    public SmartRecoveryInput {
+      train = train == null ? "" : train.trim();
+      stuckDurationSeconds = Math.max(0L, stuckDurationSeconds);
+      signal = signal == null ? SignalAspect.STOP : signal;
+      movementTokenState =
+          movementTokenState == null ? SignalComputationTrace.TokenState.NONE : movementTokenState;
+      blockerCount = Math.max(0, blockerCount);
+      hardBlockers = hardBlockers == null ? Set.of() : Set.copyOf(hardBlockers);
+      routeId = routeId == null || routeId.isBlank() ? "-" : routeId.trim();
+      currentIndex = Math.max(-1, currentIndex);
+      lastPassedGraphNode =
+          lastPassedGraphNode == null || lastPassedGraphNode.isBlank()
+              ? "-"
+              : lastPassedGraphNode.trim();
+      primaryReason =
+          primaryReason == null || primaryReason.isBlank() ? "none" : primaryReason.trim();
+    }
+
+    public static SmartRecoveryInput fallback(
+        String trainName, Duration stuckDuration, SignalAspect signal) {
+      return new SmartRecoveryInput(
+          trainName,
+          stuckDuration == null ? 0L : stuckDuration.toSeconds(),
+          signal,
+          false,
+          SignalComputationTrace.TokenState.NONE,
+          false,
+          0,
+          Set.of(),
+          null,
+          null,
+          "-",
+          -1,
+          "-",
+          false,
+          false,
+          false,
+          false,
+          "health-progress-stuck");
+    }
+  }
+
+  /** Smart recovery 动作尝试结果。 */
+  public record SmartRecoveryActionResult(
+      boolean candidate,
+      boolean applied,
+      String decision,
+      String reason,
+      DispatchEffectClass effectClass,
+      SmartRecoveryEffectiveness effectiveness) {
+
+    public SmartRecoveryActionResult {
+      decision = decision == null || decision.isBlank() ? "SMART_RECOVERY_SKIPPED" : decision;
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+      effectClass = effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass;
+      effectiveness =
+          effectiveness == null
+              ? SmartRecoveryEffectiveness.defaultFor(applied, decision, "-")
+              : effectiveness;
+    }
+
+    public SmartRecoveryActionResult(
+        boolean candidate,
+        boolean applied,
+        String decision,
+        String reason,
+        DispatchEffectClass effectClass) {
+      this(
+          candidate,
+          applied,
+          decision,
+          reason,
+          effectClass,
+          SmartRecoveryEffectiveness.defaultFor(applied, decision, "-"));
+    }
+
+    public static SmartRecoveryActionResult skipped(String reason) {
+      return new SmartRecoveryActionResult(
+          false, false, "SMART_RECOVERY_SKIPPED", reason, DispatchEffectClass.DIAGNOSTIC_ONLY);
+    }
+  }
+
+  /** Smart recovery 执行后的有效性核验摘要。 */
+  public record SmartRecoveryEffectiveness(
+      String action,
+      String conflictKey,
+      boolean effective,
+      SignalAspect finalAspect,
+      boolean destinationBefore,
+      boolean destinationAfter,
+      SignalComputationTrace.TokenState tokenBefore,
+      SignalComputationTrace.TokenState tokenAfter,
+      boolean movementInhibitedBefore,
+      boolean movementInhibitedAfter,
+      boolean candidateReappeared,
+      boolean sameStopReason,
+      String reason) {
+
+    public SmartRecoveryEffectiveness {
+      action = action == null || action.isBlank() ? "SMART_RECOVERY_SKIPPED" : action.trim();
+      conflictKey = conflictKey == null || conflictKey.isBlank() ? "-" : conflictKey.trim();
+      finalAspect = finalAspect == null ? SignalAspect.STOP : finalAspect;
+      tokenBefore = tokenBefore == null ? SignalComputationTrace.TokenState.NONE : tokenBefore;
+      tokenAfter = tokenAfter == null ? SignalComputationTrace.TokenState.NONE : tokenAfter;
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+    }
+
+    private static SmartRecoveryEffectiveness defaultFor(
+        boolean applied, String action, String conflictKey) {
+      return new SmartRecoveryEffectiveness(
+          action,
+          conflictKey,
+          applied,
+          SignalAspect.STOP,
+          false,
+          false,
+          SignalComputationTrace.TokenState.NONE,
+          SignalComputationTrace.TokenState.NONE,
+          false,
+          false,
+          false,
+          false,
+          applied ? "legacy-result-assumed-effective" : "not-applied");
     }
   }
 
@@ -2951,6 +4563,8 @@ public final class RuntimeDispatchService {
     }
     BlockerSnapshot snapshot = blockerSnapshots.get(key);
     if (snapshot == null) {
+      debugLogger.accept(
+          "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED train=" + trainName + " reason=missing ageMs=-1");
       return new DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH);
     }
     Duration ttl =
@@ -2958,9 +4572,80 @@ public final class RuntimeDispatchService {
     Instant cutoff = Instant.now().minus(ttl);
     if (snapshot.sampledAt().isBefore(cutoff)) {
       blockerSnapshots.remove(key, snapshot);
+      debugLogger.accept(
+          "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED train="
+              + trainName
+              + " reason=expired ageMs="
+              + Duration.between(snapshot.sampledAt(), Instant.now()).toMillis());
       return new DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH);
     }
+    long ageMs = Duration.between(snapshot.sampledAt(), Instant.now()).toMillis();
+    for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      if (blocker == null) {
+        continue;
+      }
+      debugLogger.accept(
+          "SMART_LIVE_BLOCKER_SNAPSHOT_USED train="
+              + trainName
+              + " blockerTrain="
+              + blocker.trainName()
+              + " resource="
+              + blocker.resourceKey()
+              + " ageMs="
+              + ageMs);
+    }
     return new DeadlockBlockerSnapshot(snapshot.blockers(), snapshot.sampledAt());
+  }
+
+  /**
+   * 获取 follower 被同向 stuck leader 阻塞的近期证据。
+   *
+   * <p>返回值按 TTL 过滤；过期证据会被清理，避免 health fallback 使用旧 admission 结论。
+   *
+   * @param trainName follower 列车名
+   * @param maxAge 最大证据年龄
+   * @return 仍在有效期内的 stuck leader 证据
+   */
+  public Optional<FollowerStuckLeaderEvidence> recentFollowerStuckLeaderEvidence(
+      String trainName, Duration maxAge) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return Optional.empty();
+    }
+    FollowerStuckLeaderEvidence evidence = followerStuckLeaderEvidence.get(key);
+    if (evidence == null) {
+      return Optional.empty();
+    }
+    Duration ttl =
+        maxAge == null || maxAge.isNegative() || maxAge.isZero() ? BLOCKER_SNAPSHOT_TTL : maxAge;
+    Instant cutoff = Instant.now().minus(ttl);
+    if (evidence.sampledAt().isBefore(cutoff)) {
+      followerStuckLeaderEvidence.remove(key, evidence);
+      return Optional.empty();
+    }
+    return Optional.of(evidence);
+  }
+
+  private void rememberFollowerStuckLeaderEvidence(
+      String followerTrain, String leaderTrain, String resource, Instant now) {
+    String followerKey = normalizeTrainKey(followerTrain);
+    String leaderKey = normalizeTrainKey(leaderTrain);
+    if (followerKey.isEmpty() || leaderKey.isEmpty() || followerKey.equals(leaderKey)) {
+      return;
+    }
+    Instant sampled = now == null ? Instant.now() : now;
+    String resourceKey = resource == null || resource.isBlank() ? "-" : resource.trim();
+    followerStuckLeaderEvidence.compute(
+        followerKey,
+        (unused, existing) -> {
+          if (existing == null
+              || !TrainNameNormalizer.sameLogicalTrain(existing.leaderTrain(), leaderTrain)
+              || !existing.resource().equals(resourceKey)) {
+            return new FollowerStuckLeaderEvidence(
+                followerTrain, leaderTrain, resourceKey, sampled, sampled, 1);
+          }
+          return existing.seen(sampled);
+        });
   }
 
   /** 返回指定列车当前持有的 conflict claim key，用于健康诊断判定 occupant-to-many 模式。 */
@@ -2982,6 +4667,1143 @@ public final class RuntimeDispatchService {
       }
     }
     return Set.copyOf(keys);
+  }
+
+  /** HealthMonitor 在 destroy 前查询列车是否仍处于 Phase 1.8 unlock reservation 观察期。 */
+  public boolean hasActiveSmartUnlockReservation(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    return !key.isEmpty() && smartUnlockReservationsByTrain.containsKey(key);
+  }
+
+  /** 查询近期是否已有 unlock reservation 真实释放 blocker，避免 destroy 抢在成功恢复后执行。 */
+  public boolean recentSmartUnlockBlockerRelease(String trainName, Duration maxAge) {
+    return recentSmartUnlockEvent(smartUnlockBlockerReleaseAt, trainName, maxAge);
+  }
+
+  /** 查询近期是否出现过 unlock reservation 无释放超时，用作 destroy 兜底证据。 */
+  public boolean recentSmartUnlockNoReleaseTimeout(String trainName, Duration maxAge) {
+    return recentSmartUnlockEvent(smartUnlockNoReleaseTimeouts, trainName, maxAge);
+  }
+
+  private static boolean recentSmartUnlockEvent(
+      java.util.concurrent.ConcurrentMap<String, Instant> events,
+      String trainName,
+      Duration maxAge) {
+    if (events == null) {
+      return false;
+    }
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return false;
+    }
+    Instant at = events.get(key);
+    if (at == null) {
+      return false;
+    }
+    Duration ttl =
+        maxAge == null || maxAge.isNegative() || maxAge.isZero()
+            ? SMART_UNLOCK_NO_RELEASE_COOLDOWN
+            : maxAge;
+    if (Instant.now().isAfter(at.plus(ttl))) {
+      events.remove(key, at);
+      return false;
+    }
+    return true;
+  }
+
+  /** 构建 Smart recovery 的只读输入快照。 */
+  public SmartRecoveryInput smartRecoveryInput(
+      String trainName, Duration stuckDuration, SignalAspect fallbackSignal) {
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+    String resolvedName = resolution.resolved() ? resolution.resolvedName() : trainName;
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolvedName);
+    if (entryOpt.isEmpty() && trainName != null && !trainName.equals(resolvedName)) {
+      entryOpt = progressRegistry.get(trainName);
+    }
+    Optional<ControlDiagnostics> diagnosticsOpt = getDiagnostics(resolvedName);
+    if (diagnosticsOpt.isEmpty() && trainName != null && !trainName.equals(resolvedName)) {
+      diagnosticsOpt = getDiagnostics(trainName);
+    }
+    TrainProperties properties = resolution.properties();
+    if (properties == null) {
+      properties = resolveTrainPropertiesByName(resolvedName).orElse(null);
+    }
+    MovementAuthorizationToken token =
+        movementToken(resolvedName).or(() -> movementToken(trainName)).orElse(null);
+    boolean movementInhibited = isMovementInhibited(resolvedName) || isMovementInhibited(trainName);
+    SignalComputationTrace.TokenState tokenState = tokenState(resolvedName, token);
+    if (tokenState == SignalComputationTrace.TokenState.NONE && trainName != null) {
+      tokenState = tokenState(trainName, token);
+    }
+    boolean destinationPresent =
+        (properties != null && !readDestination(properties).isBlank())
+            || diagnosticsOpt.map(ControlDiagnostics::destinationPresentWhileBlocked).orElse(false);
+    Set<String> blockers = recentBlockerTrains(resolvedName, BLOCKER_SNAPSHOT_TTL);
+    if (blockers.isEmpty() && trainName != null && !trainName.equals(resolvedName)) {
+      blockers = recentBlockerTrains(trainName, BLOCKER_SNAPSHOT_TTL);
+    }
+    Set<String> conflictClaims = currentConflictClaimKeys(resolvedName);
+    if (conflictClaims.isEmpty() && trainName != null && !trainName.equals(resolvedName)) {
+      conflictClaims = currentConflictClaimKeys(trainName);
+    }
+    boolean insideSingle =
+        conflictClaims.stream().anyMatch(key -> key != null && key.startsWith("single:"));
+    boolean insideSwitcher =
+        conflictClaims.stream().anyMatch(key -> key != null && key.startsWith("switcher:"));
+    boolean oppositeSingleConflict =
+        recentDeadlockBlockers(resolvedName, BLOCKER_SNAPSHOT_TTL).blockers().stream()
+            .anyMatch(
+                blocker ->
+                    blocker != null
+                        && blocker.conflictKey().startsWith("single:")
+                        && blocker.direction().isPresent()
+                        && blocker.direction().get() != CorridorDirection.UNKNOWN);
+    ControlDiagnostics diagnostics = diagnosticsOpt.orElse(null);
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.orElse(null);
+    NodeId currentNode = diagnostics == null ? null : diagnostics.currentNode();
+    NodeId nextNode =
+        diagnostics != null && diagnostics.nextNode() != null
+            ? diagnostics.nextNode()
+            : entry == null ? null : entry.nextTarget().orElse(null);
+    String routeId =
+        diagnostics != null && diagnostics.routeId() != null
+            ? diagnostics.routeId().toString()
+            : entry == null ? "-" : entry.routeId().toString();
+    int currentIndex =
+        diagnostics != null
+            ? diagnostics.currentIndex()
+            : entry == null ? -1 : entry.currentIndex();
+    String lastPassed =
+        entry == null ? "-" : entry.lastPassedGraphNode().map(NodeId::value).orElse("-");
+    SignalAspect signal =
+        fallbackSignal != null
+            ? fallbackSignal
+            : diagnostics != null
+                ? diagnostics.currentSignal()
+                : entry == null ? SignalAspect.STOP : entry.lastSignal();
+    String primaryReason = recoveryPrimaryReason(diagnostics);
+    boolean downstreamBlocked =
+        !blockers.isEmpty()
+            || (diagnostics != null
+                && diagnostics.signalBlockerResources() != null
+                && !diagnostics.signalBlockerResources().isEmpty());
+    return new SmartRecoveryInput(
+        resolvedName,
+        stuckDuration == null ? 0L : stuckDuration.toSeconds(),
+        signal,
+        movementInhibited,
+        tokenState,
+        destinationPresent,
+        blockers.size(),
+        blockers,
+        currentNode,
+        nextNode,
+        routeId,
+        currentIndex,
+        lastPassed,
+        insideSingle,
+        insideSwitcher,
+        oppositeSingleConflict,
+        downstreamBlocked,
+        primaryReason);
+  }
+
+  /** 兼容测试与调用方省略当前信号时的恢复输入构造。 */
+  public SmartRecoveryInput smartRecoveryInput(String trainName, Duration stuckDuration) {
+    return smartRecoveryInput(trainName, stuckDuration, null);
+  }
+
+  /**
+   * 执行 Smart self-owned stale retain release。
+   *
+   * <p>该入口只释放占用层已识别的自持 stale/protective CONFLICT retain。它不会清理 destination、不会 invalidate movement
+   * token，也不会释放车体 NODE/EDGE claim；真实 mutation 必须先通过 OCCUPANCY_MUTATION effect gate。
+   */
+  public SmartRecoveryActionResult applySmartSelfOwnedStaleRetainRelease(SmartRecoveryInput input) {
+    if (input == null || input.train().isBlank()) {
+      return SmartRecoveryActionResult.skipped("missing-input");
+    }
+    if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
+      return SmartRecoveryActionResult.skipped("occupancy-manager-does-not-support-self-retain");
+    }
+    Optional<BoundedSelfOwnedRetainCandidate> boundedCandidateOpt =
+        boundedSelfOwnedRetainCandidate(manager, input);
+    if (boundedCandidateOpt.isEmpty()) {
+      debugLogger.accept(
+          "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+              + input.train()
+              + " reason=self-owned-stale-retain-not-found");
+      return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+    }
+    BoundedSelfOwnedRetainCandidate boundedCandidate = boundedCandidateOpt.get();
+    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = boundedCandidate.candidate();
+    DispatchEffectClass effectClass = DispatchEffectClass.OCCUPANCY_MUTATION;
+    debugLogger.accept(
+        "SMART_STALE_SELF_RETAIN_RELEASE_CANDIDATE train="
+            + input.train()
+            + " resource="
+            + candidate.resource()
+            + " claimRole="
+            + candidate.claimRole()
+            + " requestIntent="
+            + candidate.requestIntent()
+            + " heldDirection="
+            + candidate.heldDirection()
+            + " requestedDirection="
+            + candidate.requestedDirection()
+            + " reason="
+            + candidate.reason()
+            + " effectClass="
+            + effectClass);
+    debugLogger.accept(
+        "SMART_UNLOCK_ATTEMPTED train="
+            + input.train()
+            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+            + " effectClass="
+            + effectClass);
+    if (!smartTrafficControlActionAllowed(
+        input.train(),
+        "health-progress-stuck",
+        "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+        effectClass)) {
+      if (smartDispatcherMode() == SmartDispatcherMode.OBSERVE_ONLY) {
+        debugLogger.accept(
+            "SMART_STALE_SELF_RETAIN_WOULD_RELEASE train="
+                + input.train()
+                + " resource="
+                + candidate.resource()
+                + " mode="
+                + smartDispatcherMode()
+                + " effectClass="
+                + effectClass
+                + " occupancyMutated=false");
+      } else {
+        debugLogger.accept(
+            "SMART_STALE_SELF_RETAIN_RELEASE_SUPPRESSED_BY_MODE train="
+                + input.train()
+                + " mode="
+                + smartDispatcherMode()
+                + " effectClass="
+                + effectClass);
+      }
+      debugLogger.accept(
+          "SMART_RECOVERY_SUPPRESSED_BY_MODE train="
+              + input.train()
+              + " mode="
+              + smartDispatcherMode()
+              + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+              + " effectClass="
+              + effectClass);
+      return new SmartRecoveryActionResult(
+          true, false, "SMART_RELEASE_SELF_OWNED_STALE_RETAIN", "suppressed-by-mode", effectClass);
+    }
+    debugLogger.accept(
+        "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
+            + input.train()
+            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+            + " effectClass="
+            + effectClass
+            + " mode="
+            + smartDispatcherMode());
+    SimpleOccupancyManager.SelfOwnedStaleRetainReleaseResult release =
+        manager.releaseSelfOwnedStaleRetain(input.train(), candidate);
+    if (!release.released()) {
+      debugLogger.accept(
+          "SMART_UNLOCK_SKIPPED train="
+              + input.train()
+              + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+              + " reason="
+              + release.reason());
+      debugLogger.accept(
+          "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+              + input.train()
+              + " reason="
+              + release.reason());
+      return new SmartRecoveryActionResult(
+          true, false, "SMART_RELEASE_SELF_OWNED_STALE_RETAIN", release.reason(), effectClass);
+    }
+    debugLogger.accept(
+        "SMART_STALE_SELF_RETAIN_RELEASE_APPLIED train="
+            + input.train()
+            + " releasedResources="
+            + release.releasedResources()
+            + " destinationMutated=false"
+            + " tokenInvalidated=false"
+            + " occupancyMutated=true"
+            + " destroy=false");
+    debugLogger.accept(
+        "SMART_STALE_SELF_RETAIN_RELEASE_VERIFY train="
+            + input.train()
+            + " remainingCandidate="
+            + manager.selfOwnedStaleRetainReleaseCandidate(input.train()).isPresent()
+            + " releasedResources="
+            + release.releasedResources());
+    OccupancyDecision verified = manager.canEnterPreview(boundedCandidate.request());
+    debugLogger.accept(
+        "SMART_STALE_SELF_RETAIN_RELEASE_REEVALUATED train="
+            + input.train()
+            + " result="
+            + (verified.allowed() ? "ALLOW" : "STILL_BLOCKED")
+            + " reason="
+            + verified.reason()
+            + " blockers="
+            + summarizeBlockers(verified));
+    boolean candidateReappeared =
+        manager.selfOwnedStaleRetainReleaseCandidate(input.train()).isPresent();
+    SmartRecoveryEffectiveness effectiveness =
+        verifySmartRecoveryEffect(
+            "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+            input,
+            input.train(),
+            candidate.resource().key(),
+            candidateReappeared,
+            null);
+    debugLogger.accept(
+        "SMART_UNLOCK_APPLIED train="
+            + input.train()
+            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+            + " reason="
+            + release.reason());
+    return new SmartRecoveryActionResult(
+        true,
+        true,
+        "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+        release.reason(),
+        effectClass,
+        effectiveness);
+  }
+
+  /** 自持 stale retain 在占用判定链中的一次收敛尝试。 */
+  private record SelfOwnedRetainDecisionRecovery(OccupancyDecision decision, boolean applied) {
+    private SelfOwnedRetainDecisionRecovery {
+      Objects.requireNonNull(decision, "decision");
+    }
+
+    private static SelfOwnedRetainDecisionRecovery noChange(OccupancyDecision decision) {
+      return new SelfOwnedRetainDecisionRecovery(decision, false);
+    }
+  }
+
+  /** 已通过 P0 边界校验的自持 retain 候选和对应只读复核请求。 */
+  private record BoundedSelfOwnedRetainCandidate(
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate) {}
+
+  private Optional<BoundedSelfOwnedRetainCandidate> boundedSelfOwnedRetainCandidate(
+      SimpleOccupancyManager manager, SmartRecoveryInput input) {
+    if (manager == null || input == null || input.train().isBlank()) {
+      return Optional.empty();
+    }
+    Optional<SimpleOccupancyManager.SelfOwnedStaleRetainCandidate> candidateOpt =
+        manager.selfOwnedStaleRetainReleaseCandidate(input.train());
+    if (candidateOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = candidateOpt.get();
+    Set<String> currentConflictClaims = currentConflictClaimKeys(input.train());
+    if (!input.insideSingleRegion()
+        || candidate.resource().kind() != ResourceKind.CONFLICT
+        || !candidate.resource().key().startsWith("single:")
+        || !currentConflictClaims.contains(candidate.resource().key())) {
+      debugLogger.accept(
+          "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+              + input.train()
+              + " resource="
+              + candidate.resource()
+              + " currentConflictClaims="
+              + currentConflictClaims
+              + " insideSingleRegion="
+              + input.insideSingleRegion()
+              + " reason=outside-current-single-region");
+      return Optional.empty();
+    }
+    OccupancyRequest request =
+        selfOwnedRetainValidationRequest(input.train(), candidate, Instant.now());
+    OccupancyDecision decision = selfOwnedRetainValidationDecision(request, candidate);
+    Optional<SimpleOccupancyManager.SelfOwnedStaleRetainCandidate> previewCandidate =
+        manager.previewSelfOwnedStaleRetainReleaseCandidate(request);
+    if (previewCandidate.isEmpty()
+        || !sameSelfOwnedRetainCandidate(candidate, previewCandidate.get())
+        || !isBoundedSelfOwnedProtectiveRetainCandidate(request, decision, candidate)) {
+      debugLogger.accept(
+          "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+              + input.train()
+              + " resource="
+              + candidate.resource()
+              + " claimRole="
+              + candidate.claimRole()
+              + " heldDirection="
+              + candidate.heldDirection()
+              + " requestedDirection="
+              + candidate.requestedDirection()
+              + " reason=outside-p0-boundary");
+      return Optional.empty();
+    }
+    return Optional.of(new BoundedSelfOwnedRetainCandidate(request, decision, candidate));
+  }
+
+  /**
+   * 将 self-owned opposite-direction PROTECTIVE_RETAIN 从诊断候选推进到真实占用 mutation。
+   *
+   * <p>该方法只服务发车/信号授权链上的 recoverable blocker：OFF 与 OBSERVE_ONLY 均不改变状态；ENFORCE
+   * 也只释放同一逻辑列车、同一冲突资源、相反方向的 {@link ClaimRole#PROTECTIVE_RETAIN}。释放后必须立即重新判定占用，调用方只使用重新判定结果继续
+   * acquire 或 fail-safe STOP。
+   */
+  private SelfOwnedRetainDecisionRecovery maybeRecoverSelfOwnedStaleRetainPreview(
+      OccupancyRequest request, String source) {
+    OccupancyDecision noChange =
+        new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "none");
+    if (request == null || !(occupancyManager instanceof SimpleOccupancyManager manager)) {
+      return SelfOwnedRetainDecisionRecovery.noChange(noChange);
+    }
+    Optional<SimpleOccupancyManager.SelfOwnedStaleRetainCandidate> candidateOpt =
+        manager.previewSelfOwnedStaleRetainReleaseCandidate(request);
+    if (candidateOpt.isEmpty()) {
+      return SelfOwnedRetainDecisionRecovery.noChange(noChange);
+    }
+    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = candidateOpt.get();
+    OccupancyDecision decision = selfOwnedRetainValidationDecision(request, candidate);
+    return maybeRecoverSelfOwnedStaleRetain(request, decision, candidate, source);
+  }
+
+  private SelfOwnedRetainDecisionRecovery maybeRecoverSelfOwnedStaleRetain(
+      OccupancyRequest request, OccupancyDecision decision, String source) {
+    if (decision == null) {
+      return new SelfOwnedRetainDecisionRecovery(
+          new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "none"),
+          false);
+    }
+    if (request == null || decision.allowed()) {
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+    if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+    Optional<SimpleOccupancyManager.SelfOwnedStaleRetainCandidate> candidateOpt =
+        manager.selfOwnedStaleRetainReleaseCandidate(request.trainName());
+    if (candidateOpt.isEmpty()) {
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = candidateOpt.get();
+    return maybeRecoverSelfOwnedStaleRetain(request, decision, candidate, source);
+  }
+
+  private SelfOwnedRetainDecisionRecovery maybeRecoverSelfOwnedStaleRetain(
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate,
+      String source) {
+    if (decision == null) {
+      return new SelfOwnedRetainDecisionRecovery(
+          new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "none"),
+          false);
+    }
+    if (request == null || decision.allowed()) {
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+    if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+    if (!isBoundedSelfOwnedProtectiveRetainCandidate(request, decision, candidate)) {
+      debugLogger.accept(
+          "SMART_SELF_RETAIN_RELEASE_REJECTED train="
+              + request.trainName()
+              + " source="
+              + normalizeSource(source)
+              + " resource="
+              + candidate.resource()
+              + " claimRole="
+              + candidate.claimRole()
+              + " heldDirection="
+              + candidate.heldDirection()
+              + " requestedDirection="
+              + candidate.requestedDirection()
+              + " reason=outside-p0-boundary");
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+
+    DispatchEffectClass effectClass = DispatchEffectClass.OCCUPANCY_MUTATION;
+    String action = "RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN";
+    String normalizedSource = normalizeSource(source);
+    debugLogger.accept(
+        "SMART_SELF_RETAIN_RECOVERABLE_BLOCKER train="
+            + request.trainName()
+            + " source="
+            + normalizedSource
+            + " resource="
+            + candidate.resource()
+            + " heldDirection="
+            + candidate.heldDirection()
+            + " requestedDirection="
+            + candidate.requestedDirection()
+            + " claimRole="
+            + candidate.claimRole()
+            + " reason="
+            + candidate.reason()
+            + " effectClass="
+            + effectClass);
+    if (!smartTrafficControlActionAllowed(
+        request.trainName(), normalizedSource, action, effectClass)) {
+      if (smartDispatcherMode() == SmartDispatcherMode.OBSERVE_ONLY) {
+        debugLogger.accept(
+            "SMART_SELF_RETAIN_RELEASE_WOULD_APPLY train="
+                + request.trainName()
+                + " source="
+                + normalizedSource
+                + " resource="
+                + candidate.resource()
+                + " mode="
+                + smartDispatcherMode()
+                + " destinationMutated=false tokenInvalidated=false occupancyMutated=false");
+      } else {
+        debugLogger.accept(
+            "SMART_SELF_RETAIN_RELEASE_SUPPRESSED train="
+                + request.trainName()
+                + " source="
+                + normalizedSource
+                + " resource="
+                + candidate.resource()
+                + " mode="
+                + smartDispatcherMode());
+      }
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+
+    long versionBefore = manager.version();
+    SimpleOccupancyManager.SelfOwnedStaleRetainReleaseResult release =
+        manager.releaseSelfOwnedStaleRetain(request.trainName(), candidate);
+    if (!release.released()) {
+      debugLogger.accept(
+          "SMART_SELF_RETAIN_RELEASE_VERIFY_FAILED train="
+              + request.trainName()
+              + " source="
+              + normalizedSource
+              + " resource="
+              + candidate.resource()
+              + " result=NOT_RELEASED"
+              + " reason="
+              + release.reason()
+              + " occupancyVersionBefore="
+              + versionBefore
+              + " occupancyVersionAfter="
+              + manager.version());
+      return SelfOwnedRetainDecisionRecovery.noChange(decision);
+    }
+    debugLogger.accept(
+        "SMART_SELF_RETAIN_RELEASE_APPLIED train="
+            + request.trainName()
+            + " source="
+            + normalizedSource
+            + " resource="
+            + candidate.resource()
+            + " claimVersion="
+            + versionBefore
+            + " occupancyVersionBefore="
+            + versionBefore
+            + " occupancyVersionAfter="
+            + manager.version()
+            + " releasedResources="
+            + release.releasedResources()
+            + " destinationMutated=false tokenInvalidated=false occupancyMutated=true");
+
+    OccupancyDecision verified = occupancyManager.canEnter(request);
+    boolean allow = verified.allowed();
+    debugLogger.accept(
+        "SMART_SELF_RETAIN_RELEASE_VERIFY train="
+            + request.trainName()
+            + " source="
+            + normalizedSource
+            + " resource="
+            + candidate.resource()
+            + " result="
+            + (allow ? "ALLOW" : "STILL_BLOCKED")
+            + " reason="
+            + verified.reason()
+            + " blockers="
+            + summarizeBlockers(verified));
+    if (!allow) {
+      debugLogger.accept(
+          "SMART_SELF_RETAIN_RELEASE_VERIFY_FAILED train="
+              + request.trainName()
+              + " source="
+              + normalizedSource
+              + " resource="
+              + candidate.resource()
+              + " result=STILL_BLOCKED"
+              + " reason="
+              + verified.reason());
+    }
+    return new SelfOwnedRetainDecisionRecovery(verified, true);
+  }
+
+  private static OccupancyRequest selfOwnedRetainValidationRequest(
+      String trainName,
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate,
+      Instant now) {
+    if (candidate == null) {
+      return null;
+    }
+    Map<String, CorridorDirection> directions =
+        Map.of(candidate.resource().key(), candidate.requestedDirection());
+    Map<String, Integer> entryOrders = Map.of(candidate.resource().key(), 0);
+    return new OccupancyRequest(
+        trainName == null || trainName.isBlank() ? candidate.trainName() : trainName,
+        Optional.empty(),
+        now == null ? Instant.now() : now,
+        List.of(candidate.resource()),
+        directions,
+        entryOrders,
+        0,
+        AuthorizationPurpose.RUNTIME_MOVE);
+  }
+
+  private static OccupancyDecision selfOwnedRetainValidationDecision(
+      OccupancyRequest request, SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate) {
+    if (request == null || candidate == null) {
+      return new OccupancyDecision(
+          false, Instant.now(), SignalAspect.STOP, List.of(), false, "none");
+    }
+    OccupancyClaim blocker =
+        new OccupancyClaim(
+            candidate.resource(),
+            candidate.trainName(),
+            Optional.empty(),
+            candidate.sampledAt(),
+            Duration.ZERO,
+            Optional.of(candidate.heldDirection()),
+            candidate.claimRole());
+    return new OccupancyDecision(
+        false,
+        request.now(),
+        SignalAspect.STOP,
+        List.of(blocker),
+        false,
+        "self-owned-single-opposite-direction");
+  }
+
+  private static boolean sameSelfOwnedRetainCandidate(
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate expected,
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate actual) {
+    return expected != null
+        && actual != null
+        && TrainNameNormalizer.sameLogicalTrain(expected.trainName(), actual.trainName())
+        && expected.resource().equals(actual.resource())
+        && expected.claimRole() == actual.claimRole()
+        && expected.heldDirection() == actual.heldDirection()
+        && expected.requestedDirection() == actual.requestedDirection();
+  }
+
+  private boolean isBoundedSelfOwnedProtectiveRetainCandidate(
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate) {
+    if (request == null || decision == null || candidate == null) {
+      return false;
+    }
+    if (!TrainNameNormalizer.sameLogicalTrain(candidate.trainName(), request.trainName())) {
+      return false;
+    }
+    if (candidate.resource().kind() != ResourceKind.CONFLICT
+        || !request.resourceList().contains(candidate.resource())) {
+      return false;
+    }
+    if (candidate.claimRole() != ClaimRole.PROTECTIVE_RETAIN) {
+      return false;
+    }
+    if (request.intentFor(candidate.resource()) != ResourceIntent.MOVEMENT_REQUIRED) {
+      return false;
+    }
+    if (candidate.heldDirection() == CorridorDirection.UNKNOWN
+        || candidate.requestedDirection() == CorridorDirection.UNKNOWN
+        || candidate.heldDirection() == candidate.requestedDirection()) {
+      return false;
+    }
+    if (!"self-owned-single-opposite-direction".equals(decision.reason())) {
+      return false;
+    }
+    CorridorDirection requestDirection = requestDirectionFor(request, candidate.resource());
+    if (requestDirection == CorridorDirection.UNKNOWN
+        || requestDirection != candidate.requestedDirection()) {
+      return false;
+    }
+    if (decision.blockers().isEmpty()) {
+      return false;
+    }
+    for (OccupancyClaim blocker : decision.blockers()) {
+      if (blocker == null
+          || !TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())
+          || !candidate.resource().equals(blocker.resource())
+          || blocker.role() != ClaimRole.PROTECTIVE_RETAIN) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static CorridorDirection requestDirectionFor(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return CorridorDirection.UNKNOWN;
+    }
+    CorridorDirection direction = request.corridorDirections().get(resource.key());
+    if (direction != null && direction != CorridorDirection.UNKNOWN) {
+      return direction;
+    }
+    return request
+        .directedContext()
+        .map(context -> context.singleConflictDirections().get(resource.key()))
+        .filter(value -> value != null && value != CorridorDirection.UNKNOWN)
+        .orElse(CorridorDirection.UNKNOWN);
+  }
+
+  private static String normalizeSource(String source) {
+    return source == null || source.isBlank() ? "runtime" : source.trim();
+  }
+
+  /**
+   * 执行 Smart drain unlock。
+   *
+   * <p>该动作只解除本车因 Smart 控制留下的本地 inhibitor 并触发重新判定；它不会创建 DRAIN_THROUGH，也不会把 TOPOLOGY_EXIT_HINT 当成
+   * VERIFIED_DRAIN_AUTHORITY。
+   */
+  public SmartRecoveryActionResult applySmartDrainUnlock(SmartRecoveryInput input) {
+    if (input == null || input.train().isBlank()) {
+      return SmartRecoveryActionResult.skipped("missing-input");
+    }
+    if (!input.hardBlockers().isEmpty() || input.blockerCount() > 0) {
+      debugLogger.accept(
+          "SMART_DRAIN_UNLOCK_BLOCKED_BY_EXTERNAL_OWNER train="
+              + input.train()
+              + " hardBlockers="
+              + input.hardBlockers()
+              + " blockerCount="
+              + input.blockerCount());
+      return new SmartRecoveryActionResult(
+          false,
+          false,
+          "SMART_DRAIN_UNLOCK_BLOCKED_BY_EXTERNAL_OWNER",
+          "external-owner-present",
+          DispatchEffectClass.DIAGNOSTIC_ONLY);
+    }
+    if (input.oppositeSingleConflictPresent()) {
+      debugLogger.accept(
+          "SMART_DRAIN_UNLOCK_BLOCKED_BY_EXTERNAL_OWNER train="
+              + input.train()
+              + " reason=opposite-single-conflict");
+      return new SmartRecoveryActionResult(
+          false,
+          false,
+          "SMART_DRAIN_UNLOCK_BLOCKED_BY_EXTERNAL_OWNER",
+          "opposite-single-conflict",
+          DispatchEffectClass.DIAGNOSTIC_ONLY);
+    }
+    if (!input.insideSingleRegion() && !input.insideSwitcherRegion()) {
+      return SmartRecoveryActionResult.skipped("not-inside-controlled-region");
+    }
+    DispatchEffectClass effectClass = DispatchEffectClass.SIGNAL_CONSTRAINT;
+    debugLogger.accept(
+        "SMART_DRAIN_UNLOCK_CANDIDATE train="
+            + input.train()
+            + " insideSingleRegion="
+            + input.insideSingleRegion()
+            + " insideSwitcherRegion="
+            + input.insideSwitcherRegion()
+            + " drainThroughAuthorityCreated=false"
+            + " topologyExitHintPromoted=false"
+            + " effectClass="
+            + effectClass);
+    debugLogger.accept(
+        "SMART_UNLOCK_ATTEMPTED train="
+            + input.train()
+            + " recoveryDecision=SMART_DRAIN_UNLOCK"
+            + " effectClass="
+            + effectClass);
+    if (!smartTrafficControlActionAllowed(
+        input.train(), "health-progress-stuck", "SMART_DRAIN_UNLOCK", effectClass)) {
+      debugLogger.accept(
+          "SMART_DRAIN_UNLOCK_SUPPRESSED_BY_MODE train="
+              + input.train()
+              + " mode="
+              + smartDispatcherMode()
+              + " effectClass="
+              + effectClass);
+      debugLogger.accept(
+          "SMART_RECOVERY_SUPPRESSED_BY_MODE train="
+              + input.train()
+              + " mode="
+              + smartDispatcherMode()
+              + " recoveryDecision=SMART_DRAIN_UNLOCK"
+              + " effectClass="
+              + effectClass);
+      return new SmartRecoveryActionResult(
+          true, false, "SMART_DRAIN_UNLOCK", "suppressed-by-mode", effectClass);
+    }
+    debugLogger.accept(
+        "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
+            + input.train()
+            + " recoveryDecision=SMART_DRAIN_UNLOCK"
+            + " effectClass="
+            + effectClass
+            + " mode="
+            + smartDispatcherMode());
+    String key = normalizeTrainKey(input.train());
+    boolean inhibitorCleared = !key.isEmpty() && movementInhibitors.remove(key) != null;
+    SignalRefreshResult refresh = refreshSignalByName(input.train());
+    debugLogger.accept(
+        "SMART_DRAIN_UNLOCK_APPLIED train="
+            + input.train()
+            + " inhibitorCleared="
+            + inhibitorCleared
+            + " drainThroughAuthorityCreated=false"
+            + " topologyExitHintPromoted=false"
+            + " destinationMutated=false"
+            + " tokenInvalidated=false"
+            + " occupancyMutated=false"
+            + " destroy=false");
+    debugLogger.accept(
+        "SMART_DRAIN_UNLOCK_VERIFY train="
+            + input.train()
+            + " movementInhibited="
+            + isMovementInhibited(input.train())
+            + " drainThroughAuthorityCreated=false");
+    debugLogger.accept(
+        "SMART_UNLOCK_APPLIED train="
+            + input.train()
+            + " recoveryDecision=SMART_DRAIN_UNLOCK"
+            + " reason=drain-refresh");
+    SmartRecoveryEffectiveness effectiveness =
+        verifySmartRecoveryEffect(
+            "SMART_DRAIN_UNLOCK",
+            input,
+            refresh.resolved() ? refresh.trainName() : input.train(),
+            primaryRecoveryConflictKey(input),
+            false,
+            refresh);
+    return new SmartRecoveryActionResult(
+        true, true, "SMART_DRAIN_UNLOCK", "drain-refresh", effectClass, effectiveness);
+  }
+
+  /**
+   * 执行 Smart forward unlock / authority-token repair。
+   *
+   * <p>该入口只处理“授权窗口/移动 token 卡住但没有可见硬 blocker”的 stuck case；所有真实副作用必须先经过 {@link
+   * SmartDispatcherModeGate}。
+   */
+  public SmartRecoveryActionResult applySmartForwardUnlock(SmartRecoveryInput input) {
+    if (input == null || input.train().isBlank()) {
+      return SmartRecoveryActionResult.skipped("missing-input");
+    }
+    if (!input.hardBlockers().isEmpty() || input.blockerCount() > 0) {
+      debugLogger.accept(
+          "SMART_FORWARD_UNLOCK_BLOCKED_BY_HARD_BLOCKER train="
+              + input.train()
+              + " hardBlockers="
+              + input.hardBlockers()
+              + " blockerCount="
+              + input.blockerCount());
+      return new SmartRecoveryActionResult(
+          false,
+          false,
+          "SMART_FORWARD_UNLOCK_BLOCKED_BY_HARD_BLOCKER",
+          "hard-blocker-present",
+          DispatchEffectClass.DIAGNOSTIC_ONLY);
+    }
+    if (input.oppositeSingleConflictPresent()) {
+      debugLogger.accept(
+          "SMART_FORWARD_UNLOCK_BLOCKED_BY_SINGLE_CONFLICT train="
+              + input.train()
+              + " reason=opposite-single-conflict");
+      return new SmartRecoveryActionResult(
+          false,
+          false,
+          "SMART_FORWARD_UNLOCK_BLOCKED_BY_SINGLE_CONFLICT",
+          "opposite-single-conflict",
+          DispatchEffectClass.DIAGNOSTIC_ONLY);
+    }
+    if (!isSmartForwardUnlockCandidate(input)) {
+      return SmartRecoveryActionResult.skipped("forward-unlock-conditions-not-met");
+    }
+    DispatchEffectClass effectClass = DispatchEffectClass.SIGNAL_CONSTRAINT;
+    debugLogger.accept(
+        "SMART_FORWARD_UNLOCK_CANDIDATE train="
+            + input.train()
+            + " reason="
+            + input.primaryReason()
+            + " movementInhibited="
+            + input.movementInhibited()
+            + " movementTokenState="
+            + input.movementTokenState()
+            + " destinationPresent="
+            + input.destinationPresent()
+            + " blockers="
+            + input.hardBlockers());
+    if (!smartTrafficControlActionAllowed(
+        input.train(), "health-progress-stuck", "SMART_FORWARD_UNLOCK_CANDIDATE", effectClass)) {
+      debugLogger.accept(
+          "SMART_FORWARD_UNLOCK_SUPPRESSED_BY_MODE train="
+              + input.train()
+              + " mode="
+              + smartDispatcherMode()
+              + " effectClass="
+              + effectClass);
+      debugLogger.accept(
+          "SMART_RECOVERY_SUPPRESSED_BY_MODE train="
+              + input.train()
+              + " mode="
+              + smartDispatcherMode()
+              + " recoveryDecision=SMART_FORWARD_UNLOCK_CANDIDATE"
+              + " effectClass="
+              + effectClass);
+      return new SmartRecoveryActionResult(
+          true, false, "SMART_FORWARD_UNLOCK_CANDIDATE", "suppressed-by-mode", effectClass);
+    }
+    debugLogger.accept(
+        "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
+            + input.train()
+            + " recoveryDecision=SMART_FORWARD_UNLOCK_CANDIDATE"
+            + " effectClass="
+            + effectClass
+            + " mode="
+            + smartDispatcherMode());
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(input.train(), RuntimeTrainResolvePurpose.REFRESH_SIGNAL);
+    if (!resolution.resolved()) {
+      debugLogger.accept(
+          "SMART_RECOVERY_SKIPPED train="
+              + input.train()
+              + " recoveryDecision=SMART_FORWARD_UNLOCK_CANDIDATE"
+              + " reason=runtime-train-not-resolved");
+      return new SmartRecoveryActionResult(
+          true, false, "SMART_FORWARD_UNLOCK_CANDIDATE", "runtime-train-not-resolved", effectClass);
+    }
+    String resolvedName = resolution.resolvedName();
+    String key = normalizeTrainKey(resolvedName);
+    boolean inhibitorCleared = false;
+    if (!key.isEmpty()) {
+      inhibitorCleared = movementInhibitors.remove(key) != null;
+    }
+    String requestedKey = normalizeTrainKey(input.train());
+    if (!requestedKey.isEmpty() && !requestedKey.equals(key)) {
+      inhibitorCleared = movementInhibitors.remove(requestedKey) != null || inhibitorCleared;
+    }
+    SignalRefreshResult refresh = refreshSignalByName(resolvedName);
+    debugLogger.accept(
+        "SMART_FORWARD_UNLOCK_APPLIED train="
+            + resolvedName
+            + " inhibitorCleared="
+            + inhibitorCleared
+            + " destinationPresentBefore="
+            + input.destinationPresent()
+            + " tokenInvalidated=false"
+            + " occupancyMutated=false"
+            + " destroy=false");
+    debugLogger.accept(
+        "SMART_FORWARD_UNLOCK_VERIFY train="
+            + resolvedName
+            + " movementInhibited="
+            + isMovementInhibited(resolvedName)
+            + " movementTokenState="
+            + tokenState(resolvedName, movementToken(resolvedName).orElse(null))
+            + " destinationPresentBefore="
+            + input.destinationPresent());
+    SmartRecoveryEffectiveness effectiveness =
+        verifySmartRecoveryEffect(
+            "SMART_FORWARD_UNLOCK",
+            input,
+            resolvedName,
+            primaryRecoveryConflictKey(input),
+            false,
+            refresh);
+    return new SmartRecoveryActionResult(
+        true,
+        true,
+        "SMART_FORWARD_UNLOCK_APPLIED",
+        "authority-token-repair",
+        effectClass,
+        effectiveness);
+  }
+
+  private SmartRecoveryEffectiveness verifySmartRecoveryEffect(
+      String action,
+      SmartRecoveryInput before,
+      String trainName,
+      String conflictKey,
+      boolean candidateReappeared,
+      SignalRefreshResult refresh) {
+    SmartRecoveryInput safeBefore =
+        before == null
+            ? SmartRecoveryInput.fallback(trainName, Duration.ZERO, SignalAspect.STOP)
+            : before;
+    String resolvedTrain =
+        trainName == null || trainName.isBlank() ? safeBefore.train() : trainName.trim();
+    SmartRecoveryInput after =
+        smartRecoveryInput(
+            resolvedTrain,
+            Duration.ofSeconds(safeBefore.stuckDurationSeconds()),
+            safeBefore.signal());
+    SignalAspect finalAspect =
+        refresh != null && refresh.resolved() ? refresh.after() : after.signal();
+    boolean sameStopReason =
+        safeBefore.signal() == SignalAspect.STOP
+            && after.signal() == SignalAspect.STOP
+            && Objects.equals(safeBefore.primaryReason(), after.primaryReason());
+    boolean destinationChanged = safeBefore.destinationPresent() != after.destinationPresent();
+    boolean tokenBecameActive =
+        safeBefore.movementTokenState() != SignalComputationTrace.TokenState.ACTIVE
+            && after.movementTokenState() == SignalComputationTrace.TokenState.ACTIVE;
+    boolean inhibitorCleared = safeBefore.movementInhibited() && !after.movementInhibited();
+    boolean effective =
+        !candidateReappeared
+            && !sameStopReason
+            && (finalAspect != SignalAspect.STOP
+                || destinationChanged
+                || tokenBecameActive
+                || (inhibitorCleared && finalAspect != SignalAspect.STOP));
+    String reason =
+        effective
+            ? "verified-runtime-input-changed"
+            : recoveryIneffectiveReason(
+                candidateReappeared,
+                sameStopReason,
+                destinationChanged,
+                tokenBecameActive,
+                inhibitorCleared,
+                finalAspect);
+    SmartRecoveryEffectiveness effectiveness =
+        new SmartRecoveryEffectiveness(
+            action,
+            conflictKey,
+            effective,
+            finalAspect,
+            safeBefore.destinationPresent(),
+            after.destinationPresent(),
+            safeBefore.movementTokenState(),
+            after.movementTokenState(),
+            safeBefore.movementInhibited(),
+            after.movementInhibited(),
+            candidateReappeared,
+            sameStopReason,
+            reason);
+    debugLogger.accept(
+        "SMART_RECOVERY_EFFECT_VERIFY action="
+            + effectiveness.action()
+            + " train="
+            + resolvedTrain
+            + " effective="
+            + effectiveness.effective()
+            + " finalAspect="
+            + effectiveness.finalAspect()
+            + " destinationBefore="
+            + effectiveness.destinationBefore()
+            + " destinationAfter="
+            + effectiveness.destinationAfter()
+            + " tokenBefore="
+            + effectiveness.tokenBefore()
+            + " tokenAfter="
+            + effectiveness.tokenAfter()
+            + " movementInhibitedBefore="
+            + effectiveness.movementInhibitedBefore()
+            + " movementInhibitedAfter="
+            + effectiveness.movementInhibitedAfter()
+            + " candidateReappeared="
+            + effectiveness.candidateReappeared()
+            + " sameStopReason="
+            + effectiveness.sameStopReason()
+            + " conflictKey="
+            + effectiveness.conflictKey());
+    if (!effectiveness.effective()) {
+      debugLogger.accept(
+          "SMART_RECOVERY_SAFE_CANDIDATE_INEFFECTIVE action="
+              + effectiveness.action()
+              + " train="
+              + resolvedTrain
+              + " reason="
+              + effectiveness.reason()
+              + " conflictKey="
+              + effectiveness.conflictKey());
+    }
+    return effectiveness;
+  }
+
+  private static String recoveryIneffectiveReason(
+      boolean candidateReappeared,
+      boolean sameStopReason,
+      boolean destinationChanged,
+      boolean tokenBecameActive,
+      boolean inhibitorCleared,
+      SignalAspect finalAspect) {
+    if (candidateReappeared) {
+      return "candidate-reappeared";
+    }
+    if (sameStopReason) {
+      return "same-stop-reason";
+    }
+    if (finalAspect == SignalAspect.STOP
+        && !destinationChanged
+        && !tokenBecameActive
+        && !inhibitorCleared) {
+      return "no-runtime-input-changed";
+    }
+    if (finalAspect == SignalAspect.STOP) {
+      return "final-aspect-still-stop";
+    }
+    return "unknown";
+  }
+
+  private static String primaryRecoveryConflictKey(SmartRecoveryInput input) {
+    if (input == null) {
+      return "-";
+    }
+    return input.hardBlockers().stream()
+        .filter(Objects::nonNull)
+        .filter(resource -> resource.startsWith("single:") || resource.startsWith("switcher:"))
+        .sorted()
+        .findFirst()
+        .orElse(
+            input.insideSingleRegion()
+                ? "single:*"
+                : input.insideSwitcherRegion() ? "switcher:*" : "-");
+  }
+
+  private static String recoveryPrimaryReason(ControlDiagnostics diagnostics) {
+    if (diagnostics == null) {
+      return "none";
+    }
+    if (diagnostics.blockedReason() != null
+        && !diagnostics.blockedReason().isBlank()
+        && !"none".equals(diagnostics.blockedReason())) {
+      return diagnostics.blockedReason();
+    }
+    if (diagnostics.signalReason() != null && !diagnostics.signalReason().isBlank()) {
+      return diagnostics.signalReason();
+    }
+    return "none";
+  }
+
+  private static boolean isSmartForwardUnlockCandidate(SmartRecoveryInput input) {
+    if (input == null) {
+      return false;
+    }
+    boolean authorityWindow = isForwardUnlockAuthorityReason(input.primaryReason());
+    boolean tokenBlocked =
+        input.movementInhibited()
+            || input.movementTokenState() == SignalComputationTrace.TokenState.PENDING
+            || input.movementTokenState() == SignalComputationTrace.TokenState.INVALID;
+    return authorityWindow && tokenBlocked && !input.downstreamBlocked();
+  }
+
+  private static boolean isForwardUnlockAuthorityReason(String reason) {
+    if (reason == null || reason.isBlank()) {
+      return false;
+    }
+    String normalized = reason.toLowerCase(Locale.ROOT);
+    return normalized.contains("authority-window")
+        || normalized.contains("movement-authority")
+        || normalized.contains("movement-token")
+        || normalized.contains("authorization");
   }
 
   /**
@@ -3311,14 +6133,16 @@ public final class RuntimeDispatchService {
    *
    * @param trainName 列车名
    */
-  public void refreshSignalByName(String trainName) {
+  public SignalRefreshResult refreshSignalByName(String trainName) {
     RuntimeTrainResolution resolution =
         resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.REFRESH_SIGNAL);
     TrainProperties properties = resolution.properties();
     if (properties == null) {
       traceRuntimeTrainResolveFailed(RuntimeTrainResolvePurpose.REFRESH_SIGNAL, resolution);
-      return;
+      return SignalRefreshResult.unresolved(trainName, "properties-not-found");
     }
+    String resolvedName = resolution.resolvedName();
+    SignalAspect before = currentPhysicalAspect(resolvedName, SignalAspect.STOP);
     com.bergerkiller.bukkit.tc.controller.MinecartGroup group = properties.getHolder();
     if (group == null || !group.isValid()) {
       traceRuntimeTrainResolveFailed(
@@ -3327,9 +6151,17 @@ public final class RuntimeDispatchService {
               trainName,
               group == null ? "ENTITY_NOT_FOUND" : "ALREADY_REMOVED",
               resolution.resolvedName()));
-      return;
+      return new SignalRefreshResult(
+          false,
+          resolvedName,
+          before,
+          before,
+          false,
+          group == null ? "entity-not-found" : "already-removed");
     }
     refreshSignal(group);
+    SignalAspect after = currentPhysicalAspect(resolvedName, before);
+    return new SignalRefreshResult(true, resolvedName, before, after, before != after, "refreshed");
   }
 
   /**
@@ -3437,6 +6269,148 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 清理健康恢复场景中的自持 single 反向残留。
+   *
+   * <p>该入口只在列车当前仍处于 STOP，且只读预览确认 blocker 是同一逻辑列车持有的 single conflict 旧方向时生效。它不会重发 destination 或
+   * relaunch；清理完成后仅触发一次正常信号刷新，让运行时按常规授权链路重新判定。
+   *
+   * @param trainName 列车名或运行时别名
+   * @return true 表示已清理至少一个残留 claim/queue 条目
+   */
+  public boolean clearSelfOwnedSingleDirectionMismatchByName(String trainName) {
+    if (trainName == null || trainName.isBlank() || occupancyManager == null) {
+      return false;
+    }
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(
+            trainName, RuntimeTrainResolvePurpose.CLEAR_SELF_OWNED_CONFLICT);
+    TrainProperties properties = resolution.properties();
+    if (properties == null || !isFtaManagedTrain(properties)) {
+      traceRuntimeTrainResolveFailed(
+          RuntimeTrainResolvePurpose.CLEAR_SELF_OWNED_CONFLICT,
+          properties == null
+              ? resolution
+              : failedRuntimeTrainResolution(
+                  trainName, "NOT_FTA_MANAGED", resolution.resolvedName()));
+      return false;
+    }
+    MinecartGroup group = properties.getHolder();
+    if (group == null || !group.isValid()) {
+      traceRuntimeTrainResolveFailed(
+          RuntimeTrainResolvePurpose.CLEAR_SELF_OWNED_CONFLICT,
+          failedRuntimeTrainResolution(
+              trainName,
+              group == null ? "ENTITY_NOT_FOUND" : "ALREADY_REMOVED",
+              resolution.resolvedName()));
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolution.resolvedName()).or(() -> progressRegistry.get(trainName));
+    if (entryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    if (entry.lastSignal() != SignalAspect.STOP) {
+      return false;
+    }
+    Optional<RouteDefinition> routeOpt = resolveRouteForRecovery(entry, properties);
+    if (routeOpt.isEmpty()) {
+      return false;
+    }
+    RouteDefinition route = routeOpt.get();
+    int currentIndex = entry.currentIndex();
+    if (currentIndex < 0 || currentIndex >= route.waypoints().size() - 1) {
+      return false;
+    }
+    Optional<RailGraph> graphOpt = resolveGraphByGroup(group);
+    if (graphOpt.isEmpty()) {
+      return false;
+    }
+    RailGraph graph = graphOpt.get();
+    String resolvedTrainName = entry.trainName();
+    ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolvedTrainName, route);
+    Optional<OccupancyRequestContext> contextOpt =
+        buildHardAuthorityContext(
+            graph,
+            runtimeSettings,
+            resolvedTrainName,
+            route,
+            effectiveNodes,
+            currentIndex,
+            Instant.now(),
+            resolvePriority(properties, route),
+            AuthorizationPurpose.RUNTIME_MOVE);
+    if (contextOpt.isEmpty()) {
+      return false;
+    }
+    OccupancyRequestContext context = contextOpt.get();
+    OccupancyRequest request =
+        markDirectedRequest(
+            withRuntimeConflictClearingEvidence(context.request(), context, graph),
+            SignalComputationTrace.Source.PERIODIC_TICK);
+    OccupancyDecision preview = previewOccupancyDecision(request);
+    if (!isSelfOwnedSingleDirectionMismatch(preview, request)) {
+      return false;
+    }
+    int removed = occupancyManager.clearSelfOwnedSingleDirectionMismatches(request);
+    if (removed <= 0) {
+      return false;
+    }
+    debugLogger.accept(
+        "HealthMonitor 清理自持 single 方向残留: train="
+            + resolvedTrainName
+            + " removed="
+            + removed
+            + " reason="
+            + preview.reason());
+    refreshSignalByName(resolvedTrainName);
+    return true;
+  }
+
+  private boolean isSelfOwnedSingleDirectionMismatch(
+      OccupancyDecision decision, OccupancyRequest request) {
+    if (decision == null
+        || request == null
+        || decision.allowed()
+        || !"self-owned-single-opposite-direction".equals(decision.reason())
+        || decision.blockers().isEmpty()) {
+      return false;
+    }
+    for (OccupancyClaim blocker : decision.blockers()) {
+      if (!isSelfOwnedSingleConflictBlocker(blocker, request)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean isSelfOwnedSingleConflictBlocker(
+      OccupancyClaim blocker, OccupancyRequest request) {
+    if (blocker == null || blocker.resource() == null || request == null) {
+      return false;
+    }
+    OccupancyResource resource = blocker.resource();
+    if (resource.kind() != ResourceKind.CONFLICT || !resource.key().startsWith("single:")) {
+      return false;
+    }
+    if (!TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())) {
+      return false;
+    }
+    CorridorDirection requested = request.corridorDirections().get(resource.key());
+    Optional<CorridorDirection> held = blocker.corridorDirection();
+    return isKnownDirection(requested) && isKnownDirection(held) && held.get() != requested;
+  }
+
+  private static boolean isKnownDirection(CorridorDirection direction) {
+    return direction != null && direction != CorridorDirection.UNKNOWN;
+  }
+
+  private static boolean isKnownDirection(Optional<CorridorDirection> direction) {
+    return direction.isPresent() && isKnownDirection(direction.get());
+  }
+
+  /**
    * 通过列车名重下发“下一跳 destination”（不强制重发）。
    *
    * <p>用于健康检查修复：当 routeIndex 长时间不推进、但列车实体仍在线时，先尝试把 destination 恢复为当前索引的下一节点，避免直接 force relaunch
@@ -3507,7 +6481,7 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequestContext context = contextOpt.get();
     OccupancyRequestContext authorizationContext =
-        buildForwardAuthorizationContext(
+        buildHardAuthorityContext(
                 graph,
                 runtimeSettings,
                 trainName,
@@ -3525,15 +6499,20 @@ public final class RuntimeDispatchService {
             SignalComputationTrace.Source.PERIODIC_TICK);
     AuthorityEnd authorityEnd =
         resolveAuthorityEnd(graph, effectiveNodes, currentIndex, authorizationContext);
-    Optional<String> singleFailure =
-        validateSingleCorridorEntrySafety(
-            trainName, graph, authorizationContext, authorityEnd, true);
-    if (singleFailure.isPresent()) {
+    SmartAdmissionResult reissueAdmission =
+        evaluateSmartSingleCorridorAdmission(
+            trainName,
+            graph,
+            authorizationContext,
+            authorityEnd,
+            true,
+            SmartAdmissionContext.entry("health-reissue-smart-admission"));
+    if (smartAdmissionShouldBlock(trainName, reissueAdmission)) {
       debugLogger.accept(
           "HealthMonitor reissueDestination blocked: train="
               + trainName
               + " reason="
-              + singleFailure.get());
+              + reissueAdmission.reason());
       return false;
     }
     if (occupancyManager == null) {
@@ -3771,11 +6750,198 @@ public final class RuntimeDispatchService {
     try {
       handleDestroy(handle, properties, logicalTrainName, normalizedReason);
       traceDeadlockDestroyResult(resolution, reason, true, "NONE", null);
+      scheduleDestroyPostVerification(logicalTrainName, normalizedReason);
       return true;
     } catch (RuntimeException ex) {
       traceDeadlockDestroyResult(resolution, reason, false, "EXCEPTION", ex);
       return false;
     }
+  }
+
+  /**
+   * Smart Dispatcher 对 deadlock destroy 的最终前置审查。
+   *
+   * <p>HealthMonitor 可以发现 stuck/deadlock，但 destroy 必须经过这里重新解释为 confirmed live hard cycle。
+   * weak/missing/stale/protective-only blocker 只能作为诊断或重新取证来源，不允许直接销毁。
+   */
+  public SmartDispatcherController.DeadlockDestroyReview reviewDeadlockDestroyCandidate(
+      String episodeId,
+      String trainA,
+      String trainB,
+      String targetTrain,
+      String conflictKey,
+      boolean weak,
+      boolean allBlockersLiveHard,
+      boolean safeDrainCandidate,
+      boolean staleReleaseCandidate,
+      boolean forwardUnlockCandidate,
+      boolean prioritySchedulingCandidate,
+      RuntimeTrainResolution resolution,
+      boolean targetRecentlyProgressed,
+      boolean targetFtaManagedOrConfirmedOrphan,
+      Duration persisted,
+      Duration threshold) {
+    boolean resolved =
+        resolution != null
+            && resolution.resolved()
+            && resolution.properties() != null
+            && resolution.properties().getHolder() != null
+            && resolution.properties().getHolder().isValid();
+    return smartDispatcherController.reviewDestroyCandidate(
+        new SmartDispatcherController.DeadlockDestroyInput(
+            episodeId,
+            trainA,
+            trainB,
+            targetTrain,
+            conflictKey,
+            weak,
+            allBlockersLiveHard,
+            safeDrainCandidate,
+            staleReleaseCandidate,
+            forwardUnlockCandidate,
+            prioritySchedulingCandidate,
+            resolved,
+            targetRecentlyProgressed,
+            targetFtaManagedOrConfirmedOrphan,
+            persisted,
+            threshold));
+  }
+
+  /**
+   * destroy 发起后的延迟验证。
+   *
+   * <p>TrainCarts 实体销毁通常在下一 tick 执行；因此这里延迟数 tick 后检查 runtime group 是否真的消失。
+   * 只有实体已消失时才执行占用/队列/缓存兜底清理，避免旧实体还在轨道上时释放资源导致后车抢占。
+   */
+  private void scheduleDestroyPostVerification(String trainName, String reason) {
+    JavaPlugin plugin = resolveSchedulerPlugin();
+    if (plugin == null || !plugin.isEnabled()) {
+      verifyDestroyedTrainState(trainName, reason, false);
+      return;
+    }
+    new org.bukkit.scheduler.BukkitRunnable() {
+      @Override
+      public void run() {
+        verifyDestroyedTrainState(trainName, reason, true);
+      }
+    }.runTaskLater(plugin, 4L);
+  }
+
+  private void verifyDestroyedTrainState(String trainName, String reason, boolean delayed) {
+    if (trainName == null || trainName.isBlank()) {
+      return;
+    }
+    RuntimeTrainResolution resolution =
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+    MinecartGroup group =
+        resolution.properties() == null ? null : resolution.properties().getHolder();
+    boolean runtimeGroupGone = group == null || !group.isValid() || countMembers(group) == 0;
+    if (runtimeGroupGone) {
+      cleanupDestroyedTrainState(trainName);
+    }
+    boolean managedStateGone =
+        progressRegistry.get(trainName).isEmpty() && layoverRegistry.get(trainName).isEmpty();
+    boolean occupancyGone = !occupancyReferencesTrain(trainName);
+    boolean queueGone = !queueReferencesTrain(trainName);
+    boolean switcherClaimsGone = !switcherClaimReferencesTrain(trainName);
+    boolean deadlockGraphGone = !blockerGraphReferencesTrain(trainName);
+    boolean healthEpisodeClosed = reason != null && reason.startsWith("health-");
+    smartDispatcherController.traceDestroyVerification(
+        new SmartDispatcherController.DestroyVerificationResult(
+            trainName,
+            runtimeGroupGone,
+            managedStateGone,
+            occupancyGone,
+            queueGone,
+            switcherClaimsGone,
+            deadlockGraphGone,
+            healthEpisodeClosed));
+    debugLogger.accept(
+        "DEADLOCK_DESTROY_POST_CLEANUP train="
+            + trainName
+            + " delayed="
+            + delayed
+            + " runtimeGroupGone="
+            + runtimeGroupGone
+            + " reason="
+            + reason);
+  }
+
+  private void cleanupDestroyedTrainState(String trainName) {
+    layoverRegistry.unregister(trainName);
+    if (occupancyManager != null) {
+      occupancyManager.releaseByTrain(trainName);
+    }
+    progressRegistry.remove(trainName);
+    clearRuntimeCachesForTrain(trainName);
+  }
+
+  private boolean occupancyReferencesTrain(String trainName) {
+    if (occupancyManager == null) {
+      return false;
+    }
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean queueReferencesTrain(String trainName) {
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
+      return false;
+    }
+    for (OccupancyQueueSnapshot queue : queueSupport.snapshotQueues()) {
+      if (queue == null || queue.entries() == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry != null && TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private boolean switcherClaimReferencesTrain(String trainName) {
+    if (occupancyManager == null) {
+      return false;
+    }
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (claim.resource().kind() == ResourceKind.CONFLICT
+          && claim.resource().key().startsWith("switcher:")
+          && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean blockerGraphReferencesTrain(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return false;
+    }
+    if (blockerSnapshots.containsKey(key)) {
+      return true;
+    }
+    for (BlockerSnapshot snapshot : blockerSnapshots.values()) {
+      if (snapshot == null) {
+        continue;
+      }
+      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker != null
+            && TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private Optional<TrainProperties> resolveTrainPropertiesByName(String trainName) {
@@ -3910,6 +7076,7 @@ public final class RuntimeDispatchService {
       String resolvedName,
       TrainProperties properties,
       RuntimeTrainMatchKind matchedBy) {
+    traceRuntimeTrainMatched(requestedName, resolvedName, matchedBy);
     return new RuntimeTrainResolution(
         requestedName,
         resolvedName,
@@ -3918,6 +7085,24 @@ public final class RuntimeDispatchService {
         Optional.empty(),
         Optional.empty(),
         properties == null ? "NO_PROPERTIES" : "NONE");
+  }
+
+  private void traceRuntimeTrainMatched(
+      String requestedName, String resolvedName, RuntimeTrainMatchKind matchedBy) {
+    if (matchedBy == null
+        || matchedBy == RuntimeTrainMatchKind.EXACT
+        || matchedBy == RuntimeTrainMatchKind.CANONICAL_NAME) {
+      return;
+    }
+    traceHealthEvent(
+        "DEADLOCK_RESOLVE_MATCHED_RUNTIME",
+        "resolve-match:" + normalizeTrainKey(requestedName),
+        "requestedName="
+            + emptyDash(requestedName)
+            + " resolvedName="
+            + emptyDash(resolvedName)
+            + " matchedBy="
+            + matchedBy);
   }
 
   private RuntimeTrainResolution failedRuntimeTrainResolution(
@@ -3937,6 +7122,18 @@ public final class RuntimeDispatchService {
     RuntimeTrainResolution effective =
         resolution == null ? failedRuntimeTrainResolution("", "RESOLVE_FAILED", "") : resolution;
     String requested = effective.requestedName();
+    if (effective.failureReason().equals("RESOLVE_FAILED")
+        || effective.failureReason().equals("ACTIVE_STATE_MISSING")) {
+      traceHealthEvent(
+          "DEADLOCK_RESOLVE_SKIPPED_NON_FTA",
+          "resolve-non-fta:" + normalizeTrainKey(requested),
+          "trainPropertiesName="
+              + emptyDash(requested)
+              + " purpose="
+              + (purpose == null ? "UNKNOWN" : purpose.name())
+              + " failureReason="
+              + effective.failureReason());
+    }
     traceHealthEvent(
         "DEADLOCK_RESOLVE_FAILED",
         "resolve:" + purpose + ":" + normalizeTrainKey(requested),
@@ -4026,6 +7223,14 @@ public final class RuntimeDispatchService {
     String previous = healthTraceFingerprints.get(traceKey);
     Long lastAt = healthTraceLastAtMs.get(traceKey);
     if (fingerprint.equals(previous) && lastAt != null && nowMs - lastAt < 30_000L) {
+      if (event.startsWith("DEADLOCK_RESOLVE")) {
+        String suppressedKey = "suppressed:" + traceKey;
+        Long lastSuppressedAt = healthTraceLastAtMs.get(suppressedKey);
+        if (lastSuppressedAt == null || nowMs - lastSuppressedAt >= 30_000L) {
+          healthTraceLastAtMs.put(suppressedKey, nowMs);
+          debugLogger.accept("DEADLOCK_RESOLVE_COOLDOWN_SUPPRESSED requestedName=" + traceKey);
+        }
+      }
       return;
     }
     healthTraceFingerprints.put(traceKey, fingerprint);
@@ -4558,9 +7763,10 @@ public final class RuntimeDispatchService {
       return;
     }
     OccupancyRequestContext context = contextOpt.get();
-    OccupancyRequest request = context.request();
+    OccupancyRequestContext advisoryContext = toAdvisoryLookaheadContext(context);
+    OccupancyRequest request = advisoryContext.request();
     OccupancyRequestContext authorizationContext =
-        buildForwardAuthorizationContext(
+        buildHardAuthorityContext(
                 graph,
                 runtimeSettings,
                 trainName,
@@ -4588,35 +7794,7 @@ public final class RuntimeDispatchService {
             : Optional.empty();
     List<OccupancyResource> keepResources =
         mergeKeepResourcesWithCurrentPosition(
-            request.resourceList(), currentNodeOpt, nextNode, graph);
-    Optional<String> singleSafetyFailure =
-        validateSingleCorridorEntrySafety(
-            trainName, graph, authorizationContext, authorityEnd, true);
-    if (singleSafetyFailure.isPresent()) {
-      OccupancyDecision blocked =
-          new OccupancyDecision(
-              false, now, SignalAspect.STOP, List.of(), false, singleSafetyFailure.get());
-      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
-      applyHardStop(
-          train,
-          properties,
-          trainName,
-          HardStopReason.SINGLE_CORRIDOR_FAIL_CLOSED,
-          true,
-          route,
-          currentNodeOpt.orElse(null),
-          nextNode.orElse(null),
-          graph,
-          blocked,
-          authorizationRequest,
-          authorityEnd);
-      return;
-    }
-    releaseResourcesNotInRequest(
-        trainName,
-        keepResources,
-        protectedSwitcherZoneClaims(
-            trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"));
+            authorizationRequest.resourceList(), currentNodeOpt, nextNode, graph);
     releaseSpeculativeClaimsFromBehindSameRoute(
         trainName,
         route,
@@ -4631,8 +7809,42 @@ public final class RuntimeDispatchService {
         currentNodeForSignal,
         graph,
         authorizationRequest.resourceList());
+    SmartAdmissionResult singleSafety =
+        evaluateSmartSingleCorridorAdmission(
+            trainName,
+            graph,
+            authorizationContext,
+            authorityEnd,
+            true,
+            SmartAdmissionContext.entry("signal-entry-smart-admission"));
+    if (smartAdmissionShouldBlock(trainName, singleSafety)) {
+      OccupancyDecision blocked =
+          singleZoneBlockedDecision(authorizationRequest, singleSafety.reason(), now);
+      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          "WAITING_FOR_SINGLE_ZONE",
+          route,
+          currentNodeOpt.orElse(null),
+          nextNode.orElse(null),
+          graph,
+          blocked,
+          authorizationRequest,
+          authorityEnd);
+      return;
+    }
+    releaseResourcesNotInRequest(
+        trainName,
+        keepResources,
+        protectedSwitcherZoneClaims(
+            trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"));
     retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
     OccupancyDecision decision = occupancyManager.canEnter(authorizationRequest);
+    decision =
+        maybeRecoverSelfOwnedStaleRetain(authorizationRequest, decision, "signal-canenter")
+            .decision();
     ProceedDecision proceedDecision = evaluateProceedDecision(trainName, decision, now, "signal");
     boolean proceedAllowed = proceedDecision.proceedAllowed();
     if (!proceedAllowed) {
@@ -4663,12 +7875,22 @@ public final class RuntimeDispatchService {
                   authorityEnd.resource(),
                   authorizationContext.edges().size()));
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
-      applyHardStop(
+      if (isProtectiveOnlyStop(decision)) {
+        applyProtectiveOnlyStop(
+            train,
+            properties,
+            trainName,
+            route,
+            currentNodeOpt.orElse(null),
+            nextNode.orElse(null),
+            decision);
+        return;
+      }
+      applyNonInvalidatingBlockedStop(
           train,
           properties,
           trainName,
-          HardStopReason.AUTHORIZATION_FAILURE,
-          true,
+          "BLOCKED_BY_OCCUPANCY",
           route,
           currentNodeOpt.orElse(null),
           nextNode.orElse(null),
@@ -4697,6 +7919,13 @@ public final class RuntimeDispatchService {
       return;
     }
     OccupancyDecision acquired = occupancyManager.acquire(authorizationRequest);
+    SelfOwnedRetainDecisionRecovery acquiredRecovery =
+        maybeRecoverSelfOwnedStaleRetain(authorizationRequest, acquired, "signal-acquire");
+    if (acquiredRecovery.applied() && acquiredRecovery.decision().allowed()) {
+      acquired = occupancyManager.acquire(authorizationRequest);
+    } else {
+      acquired = acquiredRecovery.decision();
+    }
     ProceedDecision acquiredProceed =
         evaluateProceedDecision(trainName, acquired, now, "signal-acquire");
     if (!acquiredProceed.proceedAllowed()) {
@@ -4727,6 +7956,17 @@ public final class RuntimeDispatchService {
                   authorityEnd.resource(),
                   authorizationContext.edges().size()));
       retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+      if (isProtectiveOnlyStop(acquired)) {
+        applyProtectiveOnlyStop(
+            train,
+            properties,
+            trainName,
+            route,
+            currentNodeOpt.orElse(null),
+            nextNode.orElse(null),
+            acquired);
+        return;
+      }
       debugLogger.accept(
           "信号Tick acquire 阻塞: train="
               + trainName
@@ -4736,12 +7976,11 @@ public final class RuntimeDispatchService {
               + acquired.signal()
               + " blockers="
               + summarizeBlockers(acquired));
-      applyHardStop(
+      applyNonInvalidatingBlockedStop(
           train,
           properties,
           trainName,
-          HardStopReason.ACQUIRE_FAILED,
-          true,
+          "BLOCKED_BY_OCCUPANCY",
           route,
           currentNodeOpt.orElse(null),
           nextNode.orElse(null),
@@ -4762,14 +8001,15 @@ public final class RuntimeDispatchService {
             now);
     SignalAspect baseAspect = decision.signal();
     // 前方列车信号调整：扫描更远范围（4 edges）检测其他列车并降级信号
+    MovementPlanSnapshot forwardScanPlan =
+        advisoryContext
+            .request()
+            .movementPlanSnapshot()
+            .or(() -> context.request().movementPlanSnapshot())
+            .orElse(null);
     SignalAspect nextAspect =
         adjustSignalForForwardTrains(
-            trainName,
-            route,
-            currentIndex,
-            graph,
-            authorizationRequest.movementPlanSnapshot().orElse(null),
-            baseAspect);
+            trainName, route, currentIndex, graph, forwardScanPlan, baseAspect);
     SignalAspect lastAspect = progressEntry.lastSignal();
     boolean stopAtNextWaypoint = false;
     if (nextNode.isPresent()) {
@@ -4781,6 +8021,8 @@ public final class RuntimeDispatchService {
     if (stopAtNextWaypoint) {
       authorityEnd = authorityEnd.withReason(AuthorityEndReason.DWELL_OR_STATION_STOP);
     }
+    AdvisoryPreviewResult advisoryPreview = previewAdvisoryLookaheadReadOnly(request, decision);
+    OccupancyDecision advisoryDecision = advisoryPreview.decision();
     if (currentNodeOpt.isEmpty() || nextNode.isEmpty()) {
       // 若已到终点且无下一目标，检查是否需要注册 Layover
       boolean allowLaunch = forceApply || lastAspect != nextAspect;
@@ -4847,19 +8089,22 @@ public final class RuntimeDispatchService {
             createEdgeSpeedResolver(worldIdForLookahead);
         lookahead =
             SignalLookahead.computeWithEdgeSpeed(
-                decision,
-                authorizationContext,
+                advisoryDecision,
+                advisoryContext,
                 nextAspect,
                 approachControl::activeFor,
                 edgeSpeedResolver);
       } else {
         lookahead =
             SignalLookahead.compute(
-                decision, authorizationContext, nextAspect, approachControl::activeFor);
+                advisoryDecision, advisoryContext, nextAspect, approachControl::activeFor);
       }
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
     }
+    nextAspect =
+        stageSignalAspectForAuthorityAndAdvisory(
+            trainName, nextAspect, decision, advisoryDecision, advisoryPreview.risks());
     if (runtimeSettings.speedCurveEnabled()) {
       if (stopAtNextWaypoint) {
         // STOP/TERM waypoint：不使用到下一节点距离，避免提前刹停在牌子前。
@@ -4956,7 +8201,160 @@ public final class RuntimeDispatchService {
         distanceOpt = minOptionalLong(distanceOpt, authorityDecision.authorityDistanceBlocks());
       }
     }
+    traceAuthorityWindowSplit(
+        trainName, authorizationRequest, request, decision, advisoryDecision, lookahead);
+    SmartSignalDecisionResult smartDecision =
+        applySmartForwardSignalDecision(
+            trainName,
+            train,
+            properties,
+            advisoryDecision,
+            lookahead,
+            authorityEnd,
+            nextAspect,
+            distanceOpt,
+            movementAuthorityLimitBps,
+            stopAtNextWaypoint);
+    nextAspect = smartDecision.aspect();
+    movementAuthorityLimitBps = smartDecision.movementAuthorityLimitBps();
+    distanceOpt = smartDecision.distanceOpt();
     if (nextAspect == SignalAspect.STOP && !stopAtNextWaypoint) {
+      if (shouldInvalidateForAuthorityFailure(authorityEnd, smartDecision)) {
+        debugLogger.accept(
+            "SMART_AUTHORITY_WINDOW_EXCEEDED_REAL train="
+                + trainName
+                + " destination="
+                + nextNode.get().value()
+                + " authorityEnd="
+                + authorityEnd.resource()
+                + " currentNode="
+                + currentNodeOpt.get().value()
+                + " action="
+                + smartDecision.action()
+                + " riskSource="
+                + smartDecision.riskSource()
+                + " stopReason="
+                + smartDecision.stopReason());
+        traceAdmissionAuthorityConsistency(
+            trainName,
+            "PERIODIC_TICK",
+            singleSafety,
+            previousTickAspect,
+            nextAspect,
+            false,
+            tokenState(trainName, token),
+            destinationPresent(trainName),
+            currentDestination(trainName),
+            authorityEnd,
+            currentNodeOpt.get(),
+            nextNode.get(),
+            "false",
+            "authority_window_exceeded",
+            nextAspect,
+            currentPhysicalAspect(trainName, previousTickAspect),
+            singleSafety.applies() && singleSafety.allowed());
+        SignalComputationTrace.emit(
+            signalTrace(
+                    trainName,
+                    properties,
+                    SignalComputationTrace.Source.PERIODIC_TICK,
+                    previousTickAspect,
+                    nextAspect,
+                    "signal-authority-window-exceeded")
+                .field("smartDispatchAction", smartDecision.action())
+                .field("riskSource", smartDecision.riskSource())
+                .field("invalidatingStop", true)
+                .field("stopReason", smartDecision.stopReason())
+                .nodes(currentNodeOpt.get(), nextNode.get())
+                .progress(
+                    progressRegistry.version(),
+                    currentIndex,
+                    currentIndex,
+                    lastPassedBeforeTick,
+                    progressRegistry
+                        .get(trainName)
+                        .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
+                .request(authorizationRequest)
+                .decision(decision, authorizationRequest)
+                .distances(
+                    blockerDistanceOpt,
+                    lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
+                    lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach(),
+                    authorityEnd.distanceBlocks(),
+                    authorityEnd.resource(),
+                    authorityEnd.authorizedEdgeCount()));
+        rollbackMovementAuthorization(
+            trainName, token, authorizationRequest, HardStopReason.AUTHORITY_WINDOW_EXCEEDED);
+        applyHardStop(
+            train,
+            properties,
+            trainName,
+            HardStopReason.AUTHORITY_WINDOW_EXCEEDED,
+            true,
+            route,
+            currentNodeOpt.get(),
+            nextNode.get(),
+            graph,
+            decision,
+            authorizationRequest,
+            authorityEnd);
+        traceSmartSignalFinalDecision(
+            trainName,
+            "PERIODIC_TICK",
+            singleSafety,
+            smartDecision,
+            nextAspect,
+            SignalComputationTrace.TokenState.INVALID,
+            false,
+            authorityEnd,
+            "false",
+            "authority_window_exceeded",
+            false,
+            true,
+            true,
+            true,
+            true);
+        return;
+      }
+      String retainedDestination = readDestination(properties);
+      String holdReason =
+          smartDecision.isRecoverableHold()
+              ? smartDecision.stopReason()
+              : "non-physical-authority-stop";
+      debugLogger.accept(
+          "SMART_DISPATCH_RECOVERABLE_HOLD train="
+              + trainName
+              + " action="
+              + smartDecision.action()
+              + " riskSource="
+              + smartDecision.riskSource()
+              + " authorityEndReason="
+              + authorityEnd.reason()
+              + " authorityEnd="
+              + authorityEnd.resource()
+              + " stopReason="
+              + holdReason
+              + " destinationPresent="
+              + !retainedDestination.isBlank()
+              + " replanTriggered=true");
+      traceAdmissionAuthorityConsistency(
+          trainName,
+          "PERIODIC_TICK",
+          singleSafety,
+          previousTickAspect,
+          nextAspect,
+          false,
+          tokenState(trainName, token),
+          !retainedDestination.isBlank(),
+          retainedDestination.isBlank() ? "-" : retainedDestination,
+          authorityEnd,
+          currentNodeOpt.get(),
+          nextNode.get(),
+          "recoverable",
+          "recoverable_hold:" + holdReason,
+          nextAspect,
+          currentPhysicalAspect(trainName, previousTickAspect),
+          singleSafety.applies() && singleSafety.allowed());
       SignalComputationTrace.emit(
           signalTrace(
                   trainName,
@@ -4964,7 +8362,14 @@ public final class RuntimeDispatchService {
                   SignalComputationTrace.Source.PERIODIC_TICK,
                   previousTickAspect,
                   nextAspect,
-                  "signal-authority-window-exceeded")
+                  "smart-dispatch-recoverable-hold")
+              .field("smartDispatchAction", smartDecision.action())
+              .field("riskSource", smartDecision.riskSource())
+              .field("invalidatingStop", false)
+              .field("stopReason", holdReason)
+              .field("tokenInvalidReason", "-")
+              .field("destinationClearReason", "-")
+              .field("replanTriggered", true)
               .nodes(currentNodeOpt.get(), nextNode.get())
               .progress(
                   progressRegistry.version(),
@@ -4975,7 +8380,7 @@ public final class RuntimeDispatchService {
                       .get(trainName)
                       .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
               .request(authorizationRequest)
-              .decision(decision, authorizationRequest)
+              .decision(advisoryDecision, authorizationRequest)
               .distances(
                   blockerDistanceOpt,
                   lookahead == null ? OptionalLong.empty() : lookahead.distanceToCaution(),
@@ -4983,19 +8388,35 @@ public final class RuntimeDispatchService {
                   authorityEnd.distanceBlocks(),
                   authorityEnd.resource(),
                   authorityEnd.authorizedEdgeCount()));
-      rollbackMovementAuthorization(
-          trainName, token, authorizationRequest, HardStopReason.AUTHORITY_WINDOW_EXCEEDED);
-      applyHardStop(
+      markRecoverableHoldForRetry(trainName);
+      retainRecoverableMovementDestination(trainName, token, retainedDestination);
+      rollbackMovementAuthorizationWithoutInhibitor(trainName, token, authorizationRequest);
+      traceSmartSignalFinalDecision(
+          trainName,
+          "PERIODIC_TICK",
+          singleSafety,
+          smartDecision,
+          nextAspect,
+          tokenState(trainName, token),
+          !retainedDestination.isBlank(),
+          authorityEnd,
+          "recoverable",
+          "recoverable_hold:" + holdReason,
+          true,
+          false,
+          false,
+          false,
+          true);
+      applyNonInvalidatingBlockedStop(
           train,
           properties,
           trainName,
-          HardStopReason.AUTHORITY_WINDOW_EXCEEDED,
-          true,
+          "SMART_DISPATCH_RECOVERABLE_HOLD",
           route,
           currentNodeOpt.get(),
           nextNode.get(),
           graph,
-          decision,
+          advisoryDecision != null ? advisoryDecision : decision,
           authorizationRequest,
           authorityEnd);
       return;
@@ -5022,6 +8443,26 @@ public final class RuntimeDispatchService {
         trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
     if (nextAspect != SignalAspect.STOP && nextNode.isPresent()) {
+      Optional<NodeId> authorityBoundaryNode =
+          authorityBoundaryNode(authorizationRequest, authorityEnd);
+      if (authorityBoundaryNode.isPresent()
+          && !authorityBoundaryNode.get().equals(nextNode.get())) {
+        debugLogger.accept(
+            "SMART_AUTHORITY_WINDOW_DESTINATION_MISMATCH train="
+                + trainName
+                + " destination="
+                + nextNode.get().value()
+                + " authorityEnd="
+                + authorityBoundaryNode.get().value()
+                + " action=segment-authority");
+      }
+      debugLogger.accept(
+          "SMART_AUTHORITY_WINDOW_VALID train="
+              + trainName
+              + " destination="
+              + nextNode.get().value()
+              + " authorityEnd="
+              + authorityEnd.resource());
       Optional<String> committedDestination =
           commitAuthorizedDestination(
               properties, trainName, route, currentIndex + 1, nextNode.get());
@@ -5201,6 +8642,45 @@ public final class RuntimeDispatchService {
       return;
     }
     nextAspect = publication.visibleAspect();
+    PhysicalSignalPublication physicalPublication =
+        publishPhysicalSignalIfRequired(trainName, nextAspect, lastAspect, now);
+    long finalTick = currentSignalTraceTick();
+    String finalRequestId = requestIdOf(authorizationRequest);
+    traceSmartSignalFinal(
+        trainName,
+        "PERIODIC_TICK",
+        publication.candidateAspect(),
+        publication.visibleAspect(),
+        nextAspect,
+        physicalPublication.updated(),
+        !physicalPublication.updateRequired(),
+        physicalPublication.before(),
+        publication.reason() + ":" + physicalPublication.skippedReason(),
+        tokenState(trainName, movementToken(trainName).orElse(null)),
+        destinationPresent(trainName),
+        "true",
+        "-",
+        DispatchEffectClass.SIGNAL_CONSTRAINT,
+        finalTick,
+        finalRequestId);
+    traceAdmissionAuthorityConsistency(
+        trainName,
+        "PERIODIC_TICK",
+        singleSafety,
+        previousTickAspect,
+        nextAspect,
+        physicalPublication.updated(),
+        tokenState(trainName, movementToken(trainName).orElse(null)),
+        destinationPresent(trainName),
+        currentDestination(trainName),
+        authorityEnd,
+        currentNodeOpt.orElse(null),
+        nextNode.orElse(null),
+        "true",
+        "-",
+        nextAspect,
+        physicalPublication.after(),
+        false);
     SignalComputationTrace.emit(
         withDrainGateTraceFields(
             withAuthorityTraceFields(
@@ -5214,6 +8694,18 @@ public final class RuntimeDispatchService {
                                 "signal-final")
                             .field("candidateAspect", publication.candidateAspect())
                             .field("publicationGateAspect", publication.visibleAspect())
+                            .field("finalPublishedAspect", nextAspect)
+                            .field("publicationAuthority", "RUNTIME_PHYSICAL")
+                            .field("physicalPublished", physicalPublication.updated())
+                            .field("finalAspect", nextAspect)
+                            .field("updateReason", physicalPublication.skippedReason())
+                            .field("dispatchCycleId", finalTick)
+                            .field("currentPhysicalAspectBefore", physicalPublication.before())
+                            .field("currentPhysicalAspectAfter", physicalPublication.after())
+                            .field("physicalUpdateRequired", physicalPublication.updateRequired())
+                            .field("physicalUpdateApplied", physicalPublication.updated())
+                            .field(
+                                "physicalUpdateSkippedReason", physicalPublication.skippedReason())
                             .field("publicationGateReason", publication.reason())
                             .field("signalDecisionInputType", publication.inputType()),
                         stopOpt,
@@ -5245,9 +8737,6 @@ public final class RuntimeDispatchService {
             "-",
             "-",
             "-"));
-    if (allowLaunch) {
-      updateSignalOrWarn(trainName, nextAspect, now);
-    }
 
     if (stopAtNextWaypoint
         && shouldLogStopWaypoint(trainName, currentIndex, nextNode.orElse(null), nextAspect)) {
@@ -5961,19 +9450,315 @@ public final class RuntimeDispatchService {
   }
 
   /** 更新信号并在 entry 缺失时给出一次性告警，避免静默漂移。 */
-  private void updateSignalOrWarn(String trainName, SignalAspect aspect, Instant now) {
+  private boolean updateSignalOrWarn(String trainName, SignalAspect aspect, Instant now) {
     if (trainName == null || trainName.isBlank() || aspect == null) {
-      return;
+      return false;
     }
+    SignalAspect previous = currentPhysicalAspect(trainName, SignalAspect.STOP);
     boolean updated = progressRegistry.updateSignal(trainName, aspect, now);
     String key = trainName.toLowerCase(Locale.ROOT);
     if (updated) {
       missingSignalWarned.remove(key);
-      return;
+      publishedPhysicalSignals.put(normalizeTrainKey(trainName), aspect);
+      traceSmartSignalFinal(
+          trainName,
+          "DIRECT_SIGNAL_UPDATE",
+          aspect,
+          aspect,
+          aspect,
+          true,
+          false,
+          previous,
+          "updateSignalOrWarn",
+          tokenState(trainName, movementToken(trainName).orElse(null)),
+          destinationPresent(trainName),
+          "UNKNOWN",
+          "updateSignalOrWarn",
+          DispatchEffectClass.SIGNAL_CONSTRAINT,
+          currentSignalTraceTick(),
+          "-");
+      return true;
     }
     if (missingSignalWarned.add(key)) {
       debugLogger.accept("信号更新失败: entry 缺失 train=" + trainName + " aspect=" + aspect.name());
     }
+    return false;
+  }
+
+  private boolean destinationPresent(String trainName) {
+    return movementToken(trainName)
+        .flatMap(MovementAuthorizationToken::committedDestination)
+        .filter(value -> !value.isBlank())
+        .isPresent();
+  }
+
+  private String currentDestination(String trainName) {
+    return movementToken(trainName)
+        .flatMap(MovementAuthorizationToken::committedDestination)
+        .filter(value -> !value.isBlank())
+        .orElse("-");
+  }
+
+  private void traceAdmissionAuthorityConsistency(
+      String trainName,
+      String source,
+      SmartAdmissionResult admission,
+      SignalAspect signalAspectBefore,
+      SignalAspect signalAspectAfter,
+      boolean physicalPublished,
+      SignalComputationTrace.TokenState movementTokenState,
+      boolean destinationPresent,
+      String destination,
+      AuthorityEnd authorityEnd,
+      NodeId currentNode,
+      NodeId nextNode,
+      String authorityWindowValid,
+      String authorityWindowFailureReason,
+      SignalAspect finalEffectiveAspect,
+      SignalAspect finalPhysicalPublishedAspect,
+      boolean contradictionDetected) {
+    debugLogger.accept(
+        "SMART_ADMISSION_AUTHORITY_CONSISTENCY train="
+            + (trainName == null || trainName.isBlank() ? "-" : trainName)
+            + " tick="
+            + currentSignalTraceTick()
+            + " source="
+            + (source == null || source.isBlank() ? "UNKNOWN" : source)
+            + " admissionDecision="
+            + admissionDecisionText(admission)
+            + " admissionReason="
+            + admissionReasonText(admission)
+            + " signalAspectBefore="
+            + (signalAspectBefore == null ? SignalAspect.STOP : signalAspectBefore)
+            + " signalAspectAfter="
+            + (signalAspectAfter == null ? SignalAspect.STOP : signalAspectAfter)
+            + " physicalPublished="
+            + physicalPublished
+            + " movementTokenState="
+            + (movementTokenState == null
+                ? SignalComputationTrace.TokenState.NONE
+                : movementTokenState)
+            + " destinationPresent="
+            + destinationPresent
+            + " destination="
+            + (destination == null || destination.isBlank() ? "-" : destination)
+            + " authorityEndResource="
+            + (authorityEnd == null ? "-" : authorityEnd.resource())
+            + " currentNode="
+            + (currentNode == null ? "-" : currentNode.value())
+            + " nextNode="
+            + (nextNode == null ? "-" : nextNode.value())
+            + " authorizedEdgeCount="
+            + (authorityEnd == null ? 0 : authorityEnd.authorizedEdgeCount())
+            + " authorityWindowValid="
+            + (authorityWindowValid == null || authorityWindowValid.isBlank()
+                ? "UNKNOWN"
+                : authorityWindowValid)
+            + " authorityWindowFailureReason="
+            + (authorityWindowFailureReason == null || authorityWindowFailureReason.isBlank()
+                ? "-"
+                : authorityWindowFailureReason)
+            + " finalEffectiveAspect="
+            + (finalEffectiveAspect == null ? SignalAspect.STOP : finalEffectiveAspect)
+            + " finalPhysicalPublishedAspect="
+            + (finalPhysicalPublishedAspect == null
+                ? SignalAspect.STOP
+                : finalPhysicalPublishedAspect)
+            + " contradictionDetected="
+            + contradictionDetected);
+  }
+
+  private static String admissionDecisionText(SmartAdmissionResult admission) {
+    if (admission == null || !admission.applies()) {
+      return "NOT_APPLIED";
+    }
+    return admission.decision().name();
+  }
+
+  private static String admissionReasonText(SmartAdmissionResult admission) {
+    if (admission == null || !admission.applies()) {
+      return "-";
+    }
+    return admission.reason();
+  }
+
+  private void traceSmartSignalFinal(
+      String trainName,
+      String source,
+      SignalAspect requestedAspect,
+      SignalAspect computedAspect,
+      SignalAspect finalAspect,
+      boolean physicalPublished,
+      boolean publishSuppressed,
+      SignalAspect previousPhysicalAspect,
+      String reason,
+      SignalComputationTrace.TokenState authorityTokenState,
+      boolean destinationPresent,
+      String authorityWindowValid,
+      String dispatcherAction,
+      DispatchEffectClass effectClass,
+      long tick,
+      String requestId) {
+    debugLogger.accept(
+        "SMART_SIGNAL_FINAL train="
+            + (trainName == null || trainName.isBlank() ? "-" : trainName)
+            + " tick="
+            + tick
+            + " source="
+            + (source == null || source.isBlank() ? "UNKNOWN" : source)
+            + " requestedAspect="
+            + (requestedAspect == null ? SignalAspect.STOP : requestedAspect)
+            + " computedAspect="
+            + (computedAspect == null ? SignalAspect.STOP : computedAspect)
+            + " finalAspect="
+            + (finalAspect == null ? SignalAspect.STOP : finalAspect)
+            + " physicalPublished="
+            + physicalPublished
+            + " publishSuppressed="
+            + publishSuppressed
+            + " previousPhysicalAspect="
+            + (previousPhysicalAspect == null ? SignalAspect.STOP : previousPhysicalAspect)
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason)
+            + " authorityTokenState="
+            + (authorityTokenState == null
+                ? SignalComputationTrace.TokenState.NONE
+                : authorityTokenState)
+            + " destinationPresent="
+            + destinationPresent
+            + " authorityWindowValid="
+            + (authorityWindowValid == null || authorityWindowValid.isBlank()
+                ? "UNKNOWN"
+                : authorityWindowValid)
+            + " dispatcherAction="
+            + (dispatcherAction == null || dispatcherAction.isBlank() ? "-" : dispatcherAction)
+            + " effectClass="
+            + (effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass)
+            + " requestId="
+            + (requestId == null || requestId.isBlank() ? "-" : requestId));
+  }
+
+  private void traceSmartSignalFinalDecision(
+      String trainName,
+      String source,
+      SmartAdmissionResult admission,
+      SmartSignalDecisionResult smartDecision,
+      SignalAspect finalAspect,
+      SignalComputationTrace.TokenState movementTokenState,
+      boolean destinationPresent,
+      AuthorityEnd authorityEnd,
+      String authorityWindowValid,
+      String authorityWindowFailureReason,
+      boolean recoverableHold,
+      boolean hardInvalid,
+      boolean physicalBoundaryFailure,
+      boolean destinationCleared,
+      boolean replanTriggered) {
+    debugLogger.accept(
+        "SMART_SIGNAL_FINAL_DECISION train="
+            + (trainName == null || trainName.isBlank() ? "-" : trainName)
+            + " tick="
+            + currentSignalTraceTick()
+            + " decisionVersion="
+            + progressRegistry.version()
+            + " source="
+            + (source == null || source.isBlank() ? "UNKNOWN" : source)
+            + " admission="
+            + admissionDecisionText(admission)
+            + " admissionReason="
+            + admissionReasonText(admission)
+            + " action="
+            + (smartDecision == null ? DispatchAction.HOLD_AT_SIGNAL : smartDecision.action())
+            + " riskSource="
+            + (smartDecision == null ? RiskSource.NONE : smartDecision.riskSource())
+            + " finalAspect="
+            + (finalAspect == null ? SignalAspect.STOP : finalAspect)
+            + " movementTokenState="
+            + (movementTokenState == null
+                ? SignalComputationTrace.TokenState.NONE
+                : movementTokenState)
+            + " destinationPresent="
+            + destinationPresent
+            + " recoverableHold="
+            + recoverableHold
+            + " hardInvalid="
+            + hardInvalid
+            + " physicalBoundaryFailure="
+            + physicalBoundaryFailure
+            + " destinationCleared="
+            + destinationCleared
+            + " authorityEndReason="
+            + (authorityEnd == null ? "-" : authorityEnd.reason())
+            + " authorityEnd="
+            + (authorityEnd == null ? "-" : authorityEnd.resource())
+            + " authorityWindowValid="
+            + (authorityWindowValid == null || authorityWindowValid.isBlank()
+                ? "UNKNOWN"
+                : authorityWindowValid)
+            + " authorityWindowFailureReason="
+            + (authorityWindowFailureReason == null || authorityWindowFailureReason.isBlank()
+                ? "-"
+                : authorityWindowFailureReason)
+            + " replanTriggered="
+            + replanTriggered);
+  }
+
+  private SignalAspect currentPhysicalAspect(String trainName, SignalAspect fallback) {
+    String key = normalizeTrainKey(trainName);
+    if (!key.isEmpty()) {
+      SignalAspect published = publishedPhysicalSignals.get(key);
+      if (published != null) {
+        return published;
+      }
+    }
+    SignalAspect registryAspect =
+        progressRegistry
+            .get(trainName)
+            .map(RouteProgressRegistry.RouteProgressEntry::lastSignal)
+            .orElse(null);
+    if (registryAspect != null) {
+      return registryAspect;
+    }
+    return fallback == null ? SignalAspect.STOP : fallback;
+  }
+
+  private static long currentSignalTraceTick() {
+    return System.currentTimeMillis() / 50L;
+  }
+
+  private static String requestIdOf(OccupancyRequest request) {
+    return request == null
+        ? "-"
+        : request.directedContext().map(DirectedTraversalContext::requestId).orElse("-");
+  }
+
+  private PhysicalSignalPublication publishPhysicalSignalIfRequired(
+      String trainName, SignalAspect finalPublishedAspect, SignalAspect fallback, Instant now) {
+    SignalAspect before = currentPhysicalAspect(trainName, fallback);
+    boolean updateRequired = before != finalPublishedAspect;
+    if (!updateRequired) {
+      return new PhysicalSignalPublication(
+          before, before, false, false, "already-current-physical-aspect");
+    }
+    boolean updated = updateSignalOrWarn(trainName, finalPublishedAspect, now);
+    SignalAspect after = currentPhysicalAspect(trainName, before);
+    return new PhysicalSignalPublication(
+        before, after, true, updated, updated ? "-" : "progress-entry-missing");
+  }
+
+  private boolean updateSignalOrWarnPreservingPublishedCaution(
+      String trainName, SignalAspect aspect, Instant now, String reason) {
+    if (aspect == SignalAspect.STOP
+        && currentPhysicalAspect(trainName, SignalAspect.STOP)
+            == SignalAspect.PROCEED_WITH_CAUTION) {
+      debugLogger.accept(
+          "SIGNAL_CAUTION_PUBLISHED train="
+              + trainName
+              + " preserve=true suppressedStopReason="
+              + (reason == null || reason.isBlank() ? "-" : reason));
+      return false;
+    }
+    return updateSignalOrWarn(trainName, aspect, now);
   }
 
   /** 无条件清理列车发车许可锁。 */
@@ -6095,8 +9880,7 @@ public final class RuntimeDispatchService {
     }
     Instant stoppedAt = Instant.now();
     invalidateMovementAuthorization(trainName, reason);
-    if (clearDestination
-        && configManager.current().runtimeSettings().clearDestinationOnHardStop()) {
+    if (shouldClearDestinationOnHardStop(reason, clearDestination)) {
       properties.clearDestinationRoute();
       properties.clearDestination();
     }
@@ -6199,6 +9983,115 @@ public final class RuntimeDispatchService {
             blockedDestination,
             debugResources),
         StopControlMode.HARD_STOP);
+  }
+
+  private boolean shouldClearDestinationOnHardStop(HardStopReason reason, boolean requested) {
+    if (!requested || !configManager.current().runtimeSettings().clearDestinationOnHardStop()) {
+      return false;
+    }
+    return reason == HardStopReason.AUTHORIZATION_FAILURE
+        || reason == HardStopReason.UNREACHABLE_FAILOVER
+        || reason == HardStopReason.AUTHORITY_WINDOW_EXCEEDED;
+  }
+
+  /**
+   * 普通占用等待 STOP。
+   *
+   * <p>这类 STOP 代表“当前不能继续取得 hard authority”，不是 destination/token 自身损坏；因此只更新 STOP 信号与控车诊断，不清
+   * TrainCarts destination，也不写入 movement inhibitor。
+   */
+  private void applyNonInvalidatingBlockedStop(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      String waitReason,
+      RouteDefinition route,
+      NodeId currentNode,
+      NodeId nextNode,
+      RailGraph graph,
+      OccupancyDecision decision,
+      OccupancyRequest request,
+      AuthorityEnd authorityEnd) {
+    Instant stoppedAt = Instant.now();
+    updateBlockerSnapshot(trainName, decision, stoppedAt);
+    updateSignalOrWarn(trainName, SignalAspect.STOP, stoppedAt);
+    BlockedDestinationDiagnostic blockedDestination =
+        resolveBlockedDestinationDiagnostic(properties, SignalAspect.STOP, false, decision);
+    String reason =
+        waitReason == null || waitReason.isBlank() ? "BLOCKED_BY_OCCUPANCY" : waitReason;
+    blockedDestination =
+        new BlockedDestinationDiagnostic(
+            blockedDestination.destinationPresentWhileBlocked(),
+            blockedDestination.retainedDestination(),
+            reason);
+    ControlDebugResources debugResources =
+        new ControlDebugResources(
+            summarizeClaims(
+                decision != null ? decision.blockers() : List.of(),
+                trainName,
+                route,
+                Math.max(
+                    0,
+                    progressRegistry
+                        .get(trainName)
+                        .map(RouteProgressRegistry.RouteProgressEntry::currentIndex)
+                        .orElse(0)),
+                request != null ? Set.copyOf(request.resourceList()) : Set.of()),
+            request != null ? summarizeResources(request.resourceList(), 12) : List.of(),
+            summarizeTrainClaims(
+                trainName,
+                route,
+                Math.max(
+                    0,
+                    progressRegistry
+                        .get(trainName)
+                        .map(RouteProgressRegistry.RouteProgressEntry::currentIndex)
+                        .orElse(0)),
+                request != null ? Set.copyOf(request.resourceList()) : Set.of(),
+                12));
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                properties,
+                SignalComputationTrace.Source.PERIODIC_TICK,
+                progressRegistry
+                    .get(trainName)
+                    .map(RouteProgressRegistry.RouteProgressEntry::lastSignal)
+                    .orElse(null),
+                SignalAspect.STOP,
+                "blocked-stop:" + reason)
+            .field("stopDoesNotInvalidateReason", reason)
+            .field("tokenInvalidReason", "-")
+            .field("destinationClearReason", "-")
+            .field("authorizationFailureSource", "-")
+            .nodes(currentNode, nextNode)
+            .request(request)
+            .decision(decision, request)
+            .distances(
+                OptionalLong.empty(),
+                OptionalLong.empty(),
+                OptionalLong.empty(),
+                authorityEnd.distanceBlocks(),
+                authorityEnd.resource(),
+                authorityEnd.authorizedEdgeCount()));
+    applyControl(
+        train,
+        properties,
+        SignalAspect.STOP,
+        route,
+        currentNode,
+        nextNode,
+        graph,
+        false,
+        OptionalLong.empty(),
+        null,
+        new ControlSpeedOverrides(
+            OptionalDouble.empty(),
+            OptionalDouble.empty(),
+            ApproachControl.none(),
+            authorityEnd,
+            blockedDestination,
+            debugResources));
   }
 
   /** 对在线列车重新下发硬 STOP，供健康监控在 STOP 互卡等待期间使用。 */
@@ -6317,14 +10210,54 @@ public final class RuntimeDispatchService {
         movementAuthorizationTokens.remove(key);
       }
     }
-    if (occupancyManager != null && request != null) {
-      for (OccupancyResource resource : request.resourceList()) {
-        if (resource != null && request.intentFor(resource).hardAuthority()) {
-          occupancyManager.releaseResource(resource, Optional.of(trainName));
-        }
+    releaseMovementAuthorityResources(trainName, request);
+    invalidateMovementAuthorization(trainName, reason);
+  }
+
+  /**
+   * 释放本 tick acquire 到的 hard authority，但不写入 movement inhibitor。
+   *
+   * <p>Smart Dispatcher 的 recoverable hold 只是要求当前授权片段重试/重算，不代表 TrainCarts destination 或整列车运动授权永久损坏。
+   * 因此这里保留 pending token 作为可恢复状态证据，避免把后续诊断误导成 {@code INVALID}。
+   */
+  private void rollbackMovementAuthorizationWithoutInhibitor(
+      String trainName, MovementAuthorizationToken token, OccupancyRequest request) {
+    releaseMovementAuthorityResources(trainName, request);
+  }
+
+  private void retainRecoverableMovementDestination(
+      String trainName, MovementAuthorizationToken token, String destinationName) {
+    if (token == null || destinationName == null || destinationName.isBlank()) {
+      return;
+    }
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    movementAuthorizationTokens.computeIfPresent(
+        key,
+        (ignored, current) ->
+            current != null && current.claimVersion() == token.claimVersion()
+                ? current.retainDestination(destinationName)
+                : current);
+  }
+
+  private void releaseMovementAuthorityResources(String trainName, OccupancyRequest request) {
+    if (occupancyManager == null || request == null) {
+      return;
+    }
+    for (OccupancyResource resource : request.resourceList()) {
+      if (resource != null && request.intentFor(resource).hardAuthority()) {
+        occupancyManager.releaseResource(resource, Optional.of(trainName));
       }
     }
-    invalidateMovementAuthorization(trainName, reason);
+  }
+
+  private void markRecoverableHoldForRetry(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (!key.isEmpty()) {
+      dirtyEventSignals.put(key, SignalAspect.STOP);
+    }
   }
 
   private void invalidateMovementAuthorization(String trainName, HardStopReason reason) {
@@ -6883,6 +10816,63 @@ public final class RuntimeDispatchService {
               + nodeId.value()
               + " error="
               + ex.getClass().getSimpleName());
+    }
+  }
+
+  private boolean isProtectiveOnlyStop(OccupancyDecision decision) {
+    if (decision == null || decision.allowed() || decision.blockers().isEmpty()) {
+      return false;
+    }
+    for (OccupancyClaim blocker : decision.blockers()) {
+      if (blocker == null) {
+        continue;
+      }
+      if (blocker.role() != ClaimRole.PROTECTIVE_RETAIN && blocker.role() != ClaimRole.HOLD_ONLY) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * protective-only blocker 的保守停车。
+   *
+   * <p>这类 blocker 需要在后续 tick 重新评估或进入 stale release 候选，但它不是 token/destination 本身失效；因此这里只发布 STOP
+   * 与控车，不清 destination，也不把 movement token 标记为 INVALID。
+   */
+  private void applyProtectiveOnlyStop(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      NodeId currentNode,
+      NodeId nextNode,
+      OccupancyDecision decision) {
+    Instant now = Instant.now();
+    updateBlockerSnapshot(trainName, decision, now);
+    debugLogger.accept(
+        "STALE_PROTECTIVE_RETAIN_CANDIDATE train="
+            + trainName
+            + " blockerHardness=PROTECTIVE_ONLY releaseCandidate=true"
+            + " releaseBlockedReason=not-yet-mutating blockers="
+            + summarizeBlockers(decision));
+    updateSignalOrWarnPreservingPublishedCaution(
+        trainName, SignalAspect.STOP, now, "protective-only-stop");
+    if (train != null
+        && properties != null
+        && route != null
+        && currentNode != null
+        && nextNode != null) {
+      applyControl(
+          train,
+          properties,
+          SignalAspect.STOP,
+          route,
+          currentNode,
+          nextNode,
+          null,
+          false,
+          OptionalLong.empty());
     }
   }
 
@@ -7930,6 +11920,119 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 只读前瞻判定。
+   *
+   * <p>advisory lookahead 不能把列车写入远端冲突队列；如果当前占用实现没有提供 preview 接口，调用方继续使用已经完成的硬授权结果作为兜底， 而不是退化为带副作用的
+   * {@code canEnter}。
+   */
+  private OccupancyDecision previewOccupancyDecisionReadOnly(
+      OccupancyRequest request, OccupancyDecision fallback) {
+    if (occupancyManager instanceof OccupancyPreviewSupport preview) {
+      return preview.canEnterPreview(request);
+    }
+    return fallback != null
+        ? fallback
+        : new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+  }
+
+  private OccupancyDecision singleZoneBlockedDecision(
+      OccupancyRequest request, String reason, Instant now) {
+    OccupancyDecision fallback =
+        new OccupancyDecision(
+            false, now == null ? Instant.now() : now, SignalAspect.STOP, List.of(), false, reason);
+    OccupancyDecision preview = previewOccupancyDecisionReadOnly(request, fallback);
+    if (preview == null || preview.blockers().isEmpty()) {
+      return fallback;
+    }
+    return new OccupancyDecision(
+        false,
+        request == null ? fallback.earliestTime() : request.now(),
+        SignalAspect.STOP,
+        preview.blockers(),
+        false,
+        reason);
+  }
+
+  /**
+   * 将完整前瞻窗口改写为 advisory 语义。
+   *
+   * <p>该请求仍保留 expanded path、方向与入口序号，供距离和风险定位使用；但所有资源均标记为 {@link
+   * ResourceIntent#LOOKAHEAD_PREVIEW}，因此不得参与 hard blocker、acquire 或 queue 写入。
+   */
+  private OccupancyRequestContext toAdvisoryLookaheadContext(OccupancyRequestContext context) {
+    if (context == null || context.request() == null) {
+      return context;
+    }
+    OccupancyRequest request = toAdvisoryLookaheadRequest(context.request());
+    return new OccupancyRequestContext(request, context.pathNodes(), context.edges());
+  }
+
+  private OccupancyRequest toAdvisoryLookaheadRequest(OccupancyRequest request) {
+    if (request == null) {
+      return null;
+    }
+    OccupancyRequest advisory = request.asLookaheadPreview();
+    debugLogger.accept(
+        "LOOKAHEAD_PREVIEW_REQUEST train="
+            + request.trainName()
+            + " resourceCount="
+            + advisory.resourceList().size());
+    for (OccupancyResource resource : advisory.resourceList()) {
+      debugLogger.accept(
+          "ADVISORY_LOOKAHEAD_RESOURCE train=" + request.trainName() + " resource=" + resource);
+    }
+    return advisory;
+  }
+
+  private AdvisoryPreviewResult previewAdvisoryLookaheadReadOnly(
+      OccupancyRequest advisoryRequest, OccupancyDecision fallback) {
+    if (advisoryRequest == null) {
+      return new AdvisoryPreviewResult(
+          fallback != null
+              ? fallback
+              : new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()),
+          List.of());
+    }
+    if (occupancyManager instanceof OccupancyAdvisoryPreviewSupport advisoryPreview) {
+      List<AdvisoryRisk> risks = advisoryPreview.scanAdvisoryRisks(advisoryRequest);
+      if (!risks.isEmpty()) {
+        List<OccupancyClaim> blockers =
+            risks.stream().map(AdvisoryRisk::claim).filter(Objects::nonNull).toList();
+        return new AdvisoryPreviewResult(
+            new OccupancyDecision(
+                true,
+                advisoryRequest.now(),
+                SignalAspect.PROCEED_WITH_CAUTION,
+                blockers,
+                false,
+                "advisory-risk"),
+            risks);
+      }
+      debugLogger.accept(
+          "ADVISORY_CAUTION_SKIPPED train="
+              + advisoryRequest.trainName()
+              + " reason=no-advisory-risk");
+      return new AdvisoryPreviewResult(
+          new OccupancyDecision(
+              true, advisoryRequest.now(), SignalAspect.PROCEED, List.of(), false, "none"),
+          List.of());
+    }
+    OccupancyDecision decision = previewOccupancyDecisionReadOnly(advisoryRequest, fallback);
+    if (decision != null && !decision.allowed() && !decision.blockers().isEmpty()) {
+      return new AdvisoryPreviewResult(
+          new OccupancyDecision(
+              true,
+              advisoryRequest.now(),
+              SignalAspect.PROCEED_WITH_CAUTION,
+              decision.blockers(),
+              false,
+              "advisory-risk"),
+          List.of());
+    }
+    return new AdvisoryPreviewResult(decision, List.of());
+  }
+
+  /**
    * 按方向选择最佳候选站台。
    *
    * <p>优选规则：
@@ -8615,6 +12718,43 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 构建“硬授权窗口”占用请求。
+   *
+   * <p>硬窗口只覆盖当前 tick 真实允许进入的下一段物理进路。更远的 expanded path 仍由普通前向上下文保留，用于 advisory lookahead、黄灯和速度曲线；
+   * 但它不能直接进入 {@code canEnter/acquire} 的 hard authority，否则远端 blocker 会把当前可走区段提前打成红灯。
+   */
+  private Optional<OccupancyRequestContext> buildHardAuthorityContext(
+      RailGraph graph,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      String trainName,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
+    if (graph == null || runtimeSettings == null || route == null) {
+      return Optional.empty();
+    }
+    OccupancyRequestBuilder authorizationBuilder =
+        new OccupancyRequestBuilder(
+            graph,
+            HARD_AUTHORITY_LOOKAHEAD_EDGES,
+            0,
+            0,
+            runtimeSettings.switcherZoneEdges(),
+            debugLogger);
+    return authorizationBuilder.buildContextFromNodes(
+        trainName,
+        Optional.ofNullable(route.id()),
+        effectiveNodes,
+        currentIndex,
+        now,
+        priority,
+        purpose);
+  }
+
+  /**
    * 将普通运行请求升级为“冲突区清空”请求。
    *
    * <p>升级必须同时满足两条证据：列车已经持有同一个 single conflict claim，且当前前向路径正在离开该 conflict。若任一证据缺失，保持 {@link
@@ -9156,79 +13296,970 @@ public final class RuntimeDispatchService {
         true);
   }
 
-  private Optional<String> validateSingleCorridorEntrySafety(
+  private static Optional<NodeId> authorityBoundaryNode(
+      OccupancyRequest request, AuthorityEnd authorityEnd) {
+    if (request == null || authorityEnd == null || authorityEnd.authorizedEdgeCount() <= 0) {
+      return Optional.empty();
+    }
+    Optional<MovementPlanSnapshot> planOpt = request.movementPlanSnapshot();
+    if (planOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    List<NodeId> nodes = planOpt.get().expandedPathNodes();
+    int boundaryIndex = authorityEnd.authorizedEdgeCount();
+    if (nodes == null || boundaryIndex < 0 || boundaryIndex >= nodes.size()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(nodes.get(boundaryIndex));
+  }
+
+  private SmartAdmissionResult evaluateSmartSingleCorridorAdmission(
       String trainName,
       RailGraph graph,
       OccupancyRequestContext context,
       AuthorityEnd authorityEnd,
-      boolean requireAuthorityEnd) {
+      boolean requireAuthorityEnd,
+      SmartAdmissionContext admissionContext) {
+    SmartAdmissionContext safeContext =
+        admissionContext == null
+            ? SmartAdmissionContext.entry("smart-admission")
+            : admissionContext;
+    SmartDispatcherMode mode = smartDispatcherMode();
+    traceSmartTrafficControlGate(
+        trainName, mode, safeContext.source(), DispatchEffectClass.SIGNAL_CONSTRAINT);
+    if (mode == SmartDispatcherMode.OFF) {
+      debugLogger.accept(
+          "SMART_DISPATCH_DISABLED train="
+              + trainName
+              + " source="
+              + safeContext.source()
+              + " mode="
+              + mode);
+      return SmartAdmissionResult.notApplicable(safeContext);
+    }
     if (graph == null || context == null || context.edges().isEmpty()) {
-      return Optional.empty();
+      traceSmartRegionDataUnknown(
+          trainName, context, null, safeContext, "graph-or-context-missing");
+      return SmartAdmissionResult.notApplicable(safeContext);
     }
     Optional<OccupancyResource> firstSingle = singleConflictForEdge(graph, context.edges().get(0));
     if (firstSingle.isEmpty()) {
-      return Optional.empty();
+      return SmartAdmissionResult.notApplicable(safeContext);
     }
     OccupancyResource conflict = firstSingle.get();
     OccupancyRequest request = context.request();
     if (request == null || !request.resourceList().contains(conflict)) {
-      return Optional.of("single-conflict-missing");
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              CorridorDirection.UNKNOWN,
+              null,
+              null,
+              safeContext,
+              SmartAdmissionDecision.REJECT_REGION_OCCUPIED_UNSAFE,
+              "single-conflict-missing",
+              false);
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
     }
-    if (!hasClaimByTrain(conflict, trainName)) {
-      CorridorDirection direction = request.corridorDirections().get(conflict.key());
-      if (direction == null || direction == CorridorDirection.UNKNOWN) {
-        return Optional.of("single-conflict-direction-unknown");
-      }
-      if (requireAuthorityEnd
-          && (authorityEnd == null || authorityEnd.distanceBlocks().isEmpty())) {
-        return Optional.of("authority-end-missing");
-      }
-      if (graph instanceof RailGraphConflictSupport support) {
-        EntryLookaheadEvaluator.Result lookahead =
-            EntryLookaheadEvaluator.evaluate(
-                context.request().movementPlanSnapshot().orElse(null),
-                support,
+    CorridorDirection direction = request.corridorDirections().get(conflict.key());
+    if (hasClaimByTrain(conflict, trainName)) {
+      SmartAdmissionResult result =
+          smartAdmissionAllowed(
+              context,
+              conflict,
+              direction,
+              null,
+              null,
+              safeContext,
+              SmartAdmissionDecision.ALLOW_ALREADY_INSIDE_CONTINUE,
+              "already-inside-single-region",
+              true);
+      traceSmartAdmissionResult(trainName, context, result);
+      debugLogger.accept(
+          "SMART_ALREADY_INSIDE_REGION_BYPASS_ENTRY_GATE train="
+              + trainName
+              + " regionId="
+              + conflict.key()
+              + " source="
+              + safeContext.source());
+      return result;
+    }
+    if (direction == null || direction == CorridorDirection.UNKNOWN) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              CorridorDirection.UNKNOWN,
+              null,
+              null,
+              safeContext,
+              SmartAdmissionDecision.REJECT_UNKNOWN_DIRECTION,
+              "single-conflict-direction-unknown",
+              false);
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (requireAuthorityEnd && (authorityEnd == null || authorityEnd.distanceBlocks().isEmpty())) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              null,
+              null,
+              safeContext,
+              SmartAdmissionDecision.REJECT_LEADER_EXIT_NOT_VISIBLE,
+              "authority-end-missing",
+              false);
+      traceSmartRegionDataUnknown(
+          trainName, context, conflict, safeContext, "authority-end-missing");
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (!(graph instanceof RailGraphConflictSupport support)) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              null,
+              null,
+              safeContext,
+              SmartAdmissionDecision.REJECT_REGION_OCCUPIED_UNSAFE,
+              "conflict-support-missing",
+              false);
+      traceSmartRegionDataUnknown(
+          trainName, context, conflict, safeContext, "conflict-support-missing");
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    EntryLookaheadEvaluator.Result lookahead =
+        EntryLookaheadEvaluator.evaluate(
+            context.request().movementPlanSnapshot().orElse(null),
+            support,
+            conflict,
+            context.edges().size(),
+            context
+                .request()
+                .movementPlanSnapshot()
+                .map(plan -> plan.directedEdges().size())
+                .orElse(context.edges().size()));
+    traceSingleZoneAdmissionCheck(trainName, context, conflict, direction, lookahead);
+    traceSmartRegionView(trainName, context, conflict, direction, lookahead, safeContext);
+    SingleZoneAdmissionState admission =
+        singleZoneAdmissionState(conflict, trainName, direction, authorityEnd);
+    if (lookahead.failClosed()) {
+      traceEntryLookaheadBlocked(trainName, context, conflict, lookahead);
+      if (admission.hasOtherPresence()
+          && !admission.oppositeOrUnknownPresence()
+          && !admission.leaderStalled()) {
+        SmartAdmissionResult result =
+            smartAdmissionBlocked(
+                trainName,
+                context,
                 conflict,
-                context.edges().size(),
-                context
-                    .request()
-                    .movementPlanSnapshot()
-                    .map(plan -> plan.directedEdges().size())
-                    .orElse(context.edges().size()));
-        if (lookahead.failClosed()) {
-          traceEntryLookaheadBlocked(trainName, context, conflict, lookahead);
-          if (hasOtherConflictPresence(conflict, trainName)) {
-            return Optional.of("entry-lookahead-exit-not-feasible");
+                direction,
+                lookahead,
+                admission,
+                safeContext,
+                SmartAdmissionDecision.REJECT_LEADER_EXIT_NOT_VISIBLE,
+                "entry-lookahead-exit-not-feasible",
+                false);
+        traceSingleZoneAdmissionDecision(
+            trainName,
+            context,
+            conflict,
+            direction,
+            lookahead,
+            admission,
+            false,
+            "exit-not-visible");
+        traceSmartAdmissionResult(trainName, context, result);
+        return result;
+      }
+      traceSingleZoneAdmissionDecision(
+          trainName, context, conflict, direction, lookahead, admission, true, "zone-empty");
+    }
+    if (admission.unknownDirectionPresent()) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_UNKNOWN_DIRECTION,
+              admission.blockerReason(),
+              false);
+      traceSingleZoneAdmissionDecision(
+          trainName,
+          context,
+          conflict,
+          direction,
+          lookahead,
+          admission,
+          false,
+          admission.blockerReason());
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (admission.oppositeDirectionPresent()) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_OPPOSITE_DIRECTION,
+              admission.blockerReason(),
+              false);
+      traceSingleZoneAdmissionDecision(
+          trainName,
+          context,
+          conflict,
+          direction,
+          lookahead,
+          admission,
+          false,
+          admission.blockerReason());
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (admission.leaderStalled()
+        || (admission.sameDirectionLeader() && !admission.leaderProgressFresh())) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_LEADER_STALLED,
+              admission.leaderStalled()
+                  ? admission.blockerReason()
+                  : "same-direction-leader-progress-stale",
+              false);
+      traceSingleZoneAdmissionDecision(
+          trainName, context, conflict, direction, lookahead, admission, false, result.reason());
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (admission.sameDirectionLeader() && admission.leaderWillTerminalOrDwell()) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_DOWNSTREAM_BLOCKED,
+              "same-direction-leader-terminal-or-dwell",
+              false);
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (admission.sameDirectionLeader() && !lookahead.exitFeasible()) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_LEADER_EXIT_NOT_VISIBLE,
+              "same-direction-leader-exit-not-visible",
+              false);
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    if (admission.hasOtherPresence() && !admission.followerSafeHoldPoint()) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_REGION_OCCUPIED_UNSAFE,
+              "follower-hold-point-missing",
+              false);
+      traceSingleZoneAdmissionDecision(
+          trainName,
+          context,
+          conflict,
+          direction,
+          lookahead,
+          admission,
+          false,
+          "follower-hold-point-missing");
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    SmartAdmissionResult result =
+        smartAdmissionAllowed(
+            context,
+            conflict,
+            direction,
+            lookahead,
+            admission,
+            safeContext,
+            SmartAdmissionDecision.ALLOW_ENTER,
+            admission.hasOtherPresence() ? "same-direction-leader-safe" : "zone-empty",
+            false);
+    traceSingleZoneAdmissionDecision(
+        trainName, context, conflict, direction, lookahead, admission, true, result.reason());
+    traceSmartAdmissionResult(trainName, context, result);
+    return result;
+  }
+
+  private SmartAdmissionResult smartAdmissionAllowed(
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      EntryLookaheadEvaluator.Result lookahead,
+      SingleZoneAdmissionState admission,
+      SmartAdmissionContext admissionContext,
+      SmartAdmissionDecision decision,
+      String reason,
+      boolean alreadyInside) {
+    return new SmartAdmissionResult(
+        true,
+        true,
+        decision,
+        DispatchEffectClass.DIAGNOSTIC_ONLY,
+        reason,
+        conflict,
+        direction,
+        alreadyInside,
+        false,
+        admissionContext,
+        admission,
+        lookahead);
+  }
+
+  private SmartAdmissionResult smartAdmissionBlocked(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      EntryLookaheadEvaluator.Result lookahead,
+      SingleZoneAdmissionState admission,
+      SmartAdmissionContext admissionContext,
+      SmartAdmissionDecision decision,
+      String reason,
+      boolean alreadyInside) {
+    traceSmartDownstreamCongestion(trainName, context, conflict, admission, decision, reason);
+    return new SmartAdmissionResult(
+        true,
+        false,
+        smartHoldDecisionForContext(admissionContext, decision),
+        DispatchEffectClass.SIGNAL_CONSTRAINT,
+        reason,
+        conflict,
+        direction,
+        alreadyInside,
+        true,
+        admissionContext,
+        admission,
+        lookahead);
+  }
+
+  private SmartAdmissionDecision smartHoldDecisionForContext(
+      SmartAdmissionContext context, SmartAdmissionDecision fallback) {
+    if (context != null && context.atDepot()) {
+      return SmartAdmissionDecision.HOLD_AT_DEPOT;
+    }
+    if (context != null && context.atStation()) {
+      return SmartAdmissionDecision.HOLD_AT_STATION;
+    }
+    if (fallback == SmartAdmissionDecision.REJECT_DOWNSTREAM_BLOCKED
+        || fallback == SmartAdmissionDecision.REJECT_LEADER_STALLED
+        || fallback == SmartAdmissionDecision.REJECT_LEADER_EXIT_NOT_VISIBLE
+        || fallback == SmartAdmissionDecision.REJECT_REGION_OCCUPIED_UNSAFE
+        || fallback == SmartAdmissionDecision.REJECT_OPPOSITE_DIRECTION
+        || fallback == SmartAdmissionDecision.REJECT_UNKNOWN_DIRECTION) {
+      return fallback;
+    }
+    return SmartAdmissionDecision.HOLD_AT_ENTRY;
+  }
+
+  private boolean smartAdmissionShouldBlock(String trainName, SmartAdmissionResult result) {
+    if (result == null || !result.applies() || result.allowed()) {
+      return false;
+    }
+    return smartTrafficControlActionAllowed(
+        trainName, result.context().source(), result.decision().name(), result.effectClass());
+  }
+
+  /**
+   * Depot pre-spawn Smart admission gate.
+   *
+   * <p>该方法只决定“是否允许继续进入已有 depot spawn 流程”。OBSERVE_ONLY/OFF 永远不落地副作用；ENFORCE 下只在 SIGNAL_CONSTRAINT
+   * gate 允许时返回 false，从而让调用方保持 local-only hold：不 spawn、不写 destination、不释放既有占用、不清 token。
+   */
+  public boolean smartDepotAdmissionAllowsSpawn(
+      String trainName, RailGraph graph, OccupancyRequestContext context) {
+    AuthorityEnd authorityEnd =
+        resolveAuthorityEnd(graph, context == null ? List.of() : context.pathNodes(), 0, context);
+    SmartAdmissionResult result =
+        evaluateSmartSingleCorridorAdmission(
+            trainName,
+            graph,
+            context,
+            authorityEnd,
+            true,
+            SmartAdmissionContext.depot("depot-spawn-smart-admission"));
+    return !smartAdmissionShouldBlock(trainName, result);
+  }
+
+  private boolean smartTrafficControlActionAllowed(
+      String trainName, String source, String action, DispatchEffectClass effectClass) {
+    SmartDispatcherMode mode = smartDispatcherMode();
+    traceSmartTrafficControlGate(trainName, mode, source, effectClass);
+    if (mode == SmartDispatcherMode.OFF) {
+      debugLogger.accept(
+          "SMART_DISPATCH_DISABLED train=" + trainName + " source=" + source + " mode=" + mode);
+      traceSmartDispatcherActionSuppressed(
+          trainName, mode, action, effectClass, "smart-dispatcher-off");
+      return false;
+    }
+    SmartDispatcherModeGate.EffectPermissions permissions =
+        SmartDispatcherModeGate.permissions(mode, effectClass);
+    boolean allowed =
+        switch (effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass) {
+          case SIGNAL_ADVISORY, SIGNAL_CONSTRAINT -> permissions.canChangeAspect()
+              || permissions.canChangeTargetSpeed();
+          case OCCUPANCY_MUTATION -> permissions.canMutateOccupancy();
+          case DESTROY_ACTION -> permissions.canDestroy();
+          default -> false;
+        };
+    if (allowed) {
+      debugLogger.accept(
+          "SMART_ACTION_ALLOWED_BY_EFFECT_GATE train="
+              + trainName
+              + " mode="
+              + mode
+              + " action="
+              + action
+              + " effectClass="
+              + effectClass
+              + " source="
+              + source);
+      return true;
+    }
+    traceSmartDispatcherActionSuppressed(
+        trainName,
+        mode,
+        action,
+        effectClass,
+        mode == SmartDispatcherMode.OBSERVE_ONLY
+            ? "observe-only-no-side-effects"
+            : "effect-class-not-enabled");
+    return false;
+  }
+
+  private void traceSmartDispatcherActionSuppressed(
+      String trainName,
+      SmartDispatcherMode mode,
+      String action,
+      DispatchEffectClass effectClass,
+      String reason) {
+    debugLogger.accept(
+        "SMART_ACTION_SUPPRESSED_BY_MODE train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass
+            + " reason="
+            + (reason == null || reason.isBlank() ? "mode-gate" : reason));
+    debugLogger.accept(
+        "SMART_DISPATCH_ACTION_SUPPRESSED_BY_MODE train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass
+            + " reason="
+            + (reason == null || reason.isBlank() ? "mode-gate" : reason));
+  }
+
+  private SingleZoneAdmissionState singleZoneAdmissionState(
+      OccupancyResource conflict,
+      String trainName,
+      CorridorDirection direction,
+      AuthorityEnd authorityEnd) {
+    boolean hasPresence = false;
+    boolean sameDirectionLeader = false;
+    boolean oppositeOrUnknown = false;
+    boolean oppositeDirectionPresent = false;
+    boolean unknownDirectionPresent = false;
+    boolean leaderStalled = false;
+    boolean leaderProgressFresh = false;
+    boolean leaderWillTerminalOrDwell = false;
+    String leaderTrain = "-";
+    CorridorDirection leaderDirection = CorridorDirection.UNKNOWN;
+    String blockerReason = "-";
+    List<String> occupantTrains = new ArrayList<>();
+    List<String> occupantDirections = new ArrayList<>();
+    if (conflict != null && occupancyManager != null) {
+      for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+        if (claim == null
+            || !conflict.equals(claim.resource())
+            || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+          continue;
+        }
+        hasPresence = true;
+        leaderTrain = claim.trainName();
+        occupantTrains.add(claim.trainName());
+        CorridorDirection claimDirection =
+            claim.corridorDirection().orElse(CorridorDirection.UNKNOWN);
+        leaderDirection = claimDirection;
+        occupantDirections.add(claimDirection.name());
+        if (claimDirection == CorridorDirection.UNKNOWN) {
+          oppositeOrUnknown = true;
+          unknownDirectionPresent = true;
+          blockerReason = "opposite-or-unknown-claim";
+        } else if (claimDirection != direction) {
+          oppositeOrUnknown = true;
+          oppositeDirectionPresent = true;
+          blockerReason = "opposite-direction-claim";
+        } else {
+          sameDirectionLeader = true;
+          leaderProgressFresh |= hasFreshLeaderProgress(claim.trainName(), Instant.now());
+          leaderWillTerminalOrDwell |= leaderWillTerminalOrDwell(claim.trainName());
+          if (isMovementInhibited(claim.trainName())) {
+            leaderStalled = true;
+            blockerReason = "same-direction-leader-stalled";
+          }
+        }
+      }
+      if (occupancyManager instanceof OccupancyQueueSupport queueSupport) {
+        for (OccupancyQueueSnapshot snapshot : queueSupport.snapshotQueues()) {
+          if (snapshot == null || !conflict.equals(snapshot.resource())) {
+            continue;
+          }
+          for (OccupancyQueueEntry entry : snapshot.entries()) {
+            if (entry == null
+                || TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName)) {
+              continue;
+            }
+            hasPresence = true;
+            leaderTrain = entry.trainName();
+            occupantTrains.add(entry.trainName());
+            CorridorDirection entryDirection =
+                entry.direction() == null ? CorridorDirection.UNKNOWN : entry.direction();
+            leaderDirection = entryDirection;
+            occupantDirections.add(entryDirection.name());
+            if (entryDirection == CorridorDirection.UNKNOWN) {
+              oppositeOrUnknown = true;
+              unknownDirectionPresent = true;
+              blockerReason = "opposite-or-unknown-queue";
+            } else if (entryDirection != direction) {
+              oppositeOrUnknown = true;
+              oppositeDirectionPresent = true;
+              blockerReason = "opposite-direction-queue";
+            } else {
+              sameDirectionLeader = true;
+              leaderProgressFresh |= hasFreshLeaderProgress(entry.trainName(), Instant.now());
+              leaderWillTerminalOrDwell |= leaderWillTerminalOrDwell(entry.trainName());
+              if (isMovementInhibited(entry.trainName())) {
+                leaderStalled = true;
+                blockerReason = "same-direction-queued-leader-stalled";
+              }
+            }
           }
         }
       }
     }
-    return Optional.empty();
+    boolean safeHoldPoint =
+        authorityEnd != null
+            && authorityEnd.distanceBlocks().isPresent()
+            && authorityEnd.distanceBlocks().getAsLong() >= 0L;
+    return new SingleZoneAdmissionState(
+        hasPresence,
+        sameDirectionLeader,
+        oppositeOrUnknown,
+        oppositeDirectionPresent,
+        unknownDirectionPresent,
+        leaderStalled,
+        !sameDirectionLeader || leaderProgressFresh,
+        leaderWillTerminalOrDwell,
+        safeHoldPoint,
+        leaderTrain,
+        leaderDirection,
+        blockerReason,
+        occupantTrains,
+        occupantDirections);
   }
 
-  private boolean hasOtherConflictPresence(OccupancyResource conflict, String trainName) {
-    if (conflict == null || occupancyManager == null) {
+  private boolean hasFreshLeaderProgress(String leaderTrain, Instant now) {
+    if (leaderTrain == null || leaderTrain.isBlank() || progressRegistry == null || now == null) {
       return false;
     }
-    Optional<OccupancyClaim> claim = occupancyManager.getClaim(conflict);
-    if (claim.isPresent()
-        && !TrainNameNormalizer.sameLogicalTrain(claim.get().trainName(), trainName)) {
-      return true;
-    }
-    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
+    return progressRegistry
+        .get(leaderTrain)
+        .map(RouteProgressRegistry.RouteProgressEntry::lastUpdatedAt)
+        .filter(Objects::nonNull)
+        .map(lastUpdated -> !lastUpdated.isBefore(now.minusSeconds(30)))
+        .orElse(false);
+  }
+
+  private boolean leaderWillTerminalOrDwell(String leaderTrain) {
+    if (leaderTrain == null || leaderTrain.isBlank()) {
       return false;
     }
-    for (OccupancyQueueSnapshot snapshot : queueSupport.snapshotQueues()) {
-      if (snapshot == null || !conflict.equals(snapshot.resource())) {
-        continue;
+    boolean terminal =
+        progressRegistry != null
+            && progressRegistry
+                .get(leaderTrain)
+                .map(RouteProgressRegistry.RouteProgressEntry::nextTarget)
+                .map(Optional::isEmpty)
+                .orElse(false);
+    boolean dwelling =
+        dwellRegistry != null && dwellRegistry.remainingSeconds(leaderTrain).isPresent();
+    return terminal || dwelling;
+  }
+
+  private void traceSmartTrafficControlGate(
+      String trainName, SmartDispatcherMode mode, String source, DispatchEffectClass effectClass) {
+    debugLogger.accept(
+        "SMART_TRAFFIC_CONTROL_GATE train="
+            + trainName
+            + " mode="
+            + (mode == null ? SmartDispatcherMode.OBSERVE_ONLY : mode)
+            + " source="
+            + (source == null || source.isBlank() ? "smart-traffic-control" : source)
+            + " effectClass="
+            + (effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass));
+  }
+
+  private void traceSmartRegionDataUnknown(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      SmartAdmissionContext admissionContext,
+      String reason) {
+    debugLogger.accept(
+        "SMART_REGION_DATA_UNKNOWN train="
+            + trainName
+            + " regionId="
+            + (conflict == null ? "-" : conflict.key())
+            + " source="
+            + (admissionContext == null ? "smart-admission" : admissionContext.source())
+            + " reason="
+            + (reason == null || reason.isBlank() ? "unknown" : reason));
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                SignalAspect.STOP,
+                "SMART_REGION_DATA_UNKNOWN")
+            .field("regionId", conflict == null ? "-" : conflict.key())
+            .field("reason", reason == null || reason.isBlank() ? "unknown" : reason)
+            .request(context == null ? null : context.request()));
+  }
+
+  private void traceSmartRegionView(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      EntryLookaheadEvaluator.Result lookahead,
+      SmartAdmissionContext admissionContext) {
+    String reason = admissionContext == null ? "smart-admission" : admissionContext.source();
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                SignalAspect.STOP,
+                "SMART_REGION_VIEW")
+            .field("regionId", conflict == null ? "-" : conflict.key())
+            .field("singleConflictId", conflict == null ? "-" : conflict.key())
+            .field("entryDirection", direction == null ? CorridorDirection.UNKNOWN : direction)
+            .field("leaderExitVisible", lookahead != null && lookahead.exitFeasible())
+            .field("source", reason)
+            .request(context == null ? null : context.request()));
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                SignalAspect.STOP,
+                "SMART_LONG_SINGLE_VIEW")
+            .field("regionId", conflict == null ? "-" : conflict.key())
+            .field("leaderExitVisible", lookahead != null && lookahead.exitFeasible())
+            .field(
+                "lookaheadWindowNodeCount",
+                lookahead == null ? 0 : lookahead.lookaheadWindowNodeCount())
+            .request(context == null ? null : context.request()));
+    if (admissionContext != null && admissionContext.atDepot()) {
+      SignalComputationTrace.emit(
+          signalTrace(
+                  trainName,
+                  null,
+                  SignalComputationTrace.Source.AUTHORIZATION,
+                  null,
+                  SignalAspect.STOP,
+                  "SMART_DEPOT_EXIT_VIEW")
+              .field("regionId", conflict == null ? "-" : conflict.key())
+              .field("depotExitIntoLongSingle", true)
+              .field("leaderExitVisible", lookahead != null && lookahead.exitFeasible())
+              .request(context == null ? null : context.request()));
+    }
+  }
+
+  private void traceSmartAdmissionResult(
+      String trainName, OccupancyRequestContext context, SmartAdmissionResult result) {
+    if (result == null || !result.applies()) {
+      return;
+    }
+    SingleZoneAdmissionState admission = result.state();
+    String event = result.allowed() ? "SMART_ADMISSION_ALLOWED" : "SMART_ADMISSION_BLOCKED";
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                result.allowed() ? SignalAspect.PROCEED : SignalAspect.STOP,
+                "SMART_ADMISSION_CHECK")
+            .field("trainId", trainName)
+            .field("regionId", result.region() == null ? "-" : result.region().key())
+            .field("singleConflictId", result.region() == null ? "-" : result.region().key())
+            .field("entryNode", firstContextNode(context))
+            .field("intendedExitNode", lastContextNode(context))
+            .field("occupantTrains", admission == null ? List.of() : admission.occupantTrains())
+            .field(
+                "occupantDirections",
+                admission == null ? List.of() : admission.occupantDirections())
+            .field("leaderTrain", admission == null ? "-" : admission.leaderTrain())
+            .field("leaderProgressFreshness", admission == null || admission.leaderProgressFresh())
+            .field(
+                "leaderExitVisible",
+                result.lookahead() != null && result.lookahead().exitFeasible())
+            .field(
+                "oppositeDirectionPresent",
+                admission != null && admission.oppositeDirectionPresent())
+            .field(
+                "unknownDirectionPresent", admission != null && admission.unknownDirectionPresent())
+            .field("alreadyInside", result.alreadyInside())
+            .field("atDepot", result.context().atDepot())
+            .field("atStation", result.context().atStation())
+            .field("localOnlyHold", result.localOnlyHold())
+            .field("destinationMutated", false)
+            .field("tokenInvalidated", false)
+            .request(context == null ? null : context.request()));
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                result.allowed() ? SignalAspect.PROCEED : SignalAspect.STOP,
+                event)
+            .field("admissionDecision", result.decision())
+            .field("SMART_ADMISSION_REASON", result.reason())
+            .field("regionId", result.region() == null ? "-" : result.region().key())
+            .field("localOnlyHold", result.localOnlyHold())
+            .field("destinationMutated", false)
+            .field("tokenInvalidated", false)
+            .request(context == null ? null : context.request()));
+    if (!result.allowed()) {
+      debugLogger.accept(
+          "SMART_ADMISSION_REASON train="
+              + trainName
+              + " decision="
+              + result.decision()
+              + " reason="
+              + result.reason()
+              + " regionId="
+              + (result.region() == null ? "-" : result.region().key())
+              + " localOnlyHold=true destinationMutated=false tokenInvalidated=false");
+      if (result.context().atDepot()) {
+        debugLogger.accept(
+            "SMART_DEPOT_LONG_SINGLE_HELD train="
+                + trainName
+                + " regionId="
+                + (result.region() == null ? "-" : result.region().key())
+                + " reason="
+                + result.reason()
+                + " localOnlyHold=true destinationMutated=false tokenInvalidated=false");
       }
-      for (OccupancyQueueEntry entry : snapshot.entries()) {
-        if (entry != null && !TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName)) {
-          return true;
-        }
+      if (result.context().atStation()) {
+        debugLogger.accept(
+            "SMART_STATION_DEPARTURE_HELD train="
+                + trainName
+                + " regionId="
+                + (result.region() == null ? "-" : result.region().key())
+                + " reason="
+                + result.reason()
+                + " localOnlyHold=true destinationMutated=false tokenInvalidated=false");
       }
     }
-    return false;
+  }
+
+  private void traceSmartDownstreamCongestion(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      SingleZoneAdmissionState admission,
+      SmartAdmissionDecision decision,
+      String reason) {
+    debugLogger.accept(
+        "SMART_DOWNSTREAM_CONGESTION_CHECK train="
+            + trainName
+            + " regionId="
+            + (conflict == null ? "-" : conflict.key())
+            + " leaderTrain="
+            + (admission == null ? "-" : admission.leaderTrain())
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason));
+    if (admission == null || !admission.sameDirectionLeader()) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_DOWNSTREAM_CONGESTION_DETECTED train="
+            + trainName
+            + " leaderTrain="
+            + admission.leaderTrain()
+            + " regionId="
+            + (conflict == null ? "-" : conflict.key())
+            + " decision="
+            + decision
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason));
+    if (decision == SmartAdmissionDecision.HOLD_AT_STATION) {
+      debugLogger.accept("SMART_FOLLOWER_DEPARTURE_HELD train=" + trainName + " location=station");
+    } else if (decision == SmartAdmissionDecision.HOLD_AT_DEPOT) {
+      debugLogger.accept("SMART_FOLLOWER_DEPARTURE_HELD train=" + trainName + " location=depot");
+    } else {
+      debugLogger.accept(
+          "SMART_FOLLOWER_ENTRY_BLOCKED_BY_STUCK_LEADER train="
+              + trainName
+              + " leaderTrain="
+              + admission.leaderTrain());
+      rememberFollowerStuckLeaderEvidence(
+          trainName,
+          admission.leaderTrain(),
+          conflict == null ? "-" : "CONFLICT:" + conflict.key(),
+          Instant.now());
+    }
+    if (context != null && context.request() != null) {
+      debugLogger.accept(
+          "SMART_FOLLOWER_DESTINATION_NOT_ISSUED train="
+              + trainName
+              + " regionId="
+              + (conflict == null ? "-" : conflict.key()));
+    }
+  }
+
+  private String firstContextNode(OccupancyRequestContext context) {
+    if (context == null || context.pathNodes().isEmpty() || context.pathNodes().get(0) == null) {
+      return "-";
+    }
+    return context.pathNodes().get(0).value();
+  }
+
+  private String lastContextNode(OccupancyRequestContext context) {
+    if (context == null || context.pathNodes().isEmpty()) {
+      return "-";
+    }
+    NodeId node = context.pathNodes().get(context.pathNodes().size() - 1);
+    return node == null ? "-" : node.value();
+  }
+
+  private void traceSingleZoneAdmissionCheck(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      EntryLookaheadEvaluator.Result lookahead) {
+    OccupancyRequest request = context == null ? null : context.request();
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                SignalAspect.STOP,
+                "SINGLE_ZONE_ADMISSION_CHECK")
+            .field("zoneId", conflict == null ? "-" : conflict.key())
+            .field("entryDirection", direction == null ? CorridorDirection.UNKNOWN : direction)
+            .field("zoneExitVisible", lookahead != null && lookahead.exitFeasible())
+            .field("leaderExitVisible", lookahead != null && lookahead.exitFeasible())
+            .field("alreadyInsideSingleZone", false)
+            .request(request));
+  }
+
+  private void traceSingleZoneAdmissionDecision(
+      String trainName,
+      OccupancyRequestContext context,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      EntryLookaheadEvaluator.Result lookahead,
+      SingleZoneAdmissionState admission,
+      boolean allowed,
+      String reason) {
+    OccupancyRequest request = context == null ? null : context.request();
+    boolean sameDirectionButUnsafe =
+        admission != null
+            && admission.sameDirectionLeader()
+            && (admission.leaderStalled() || !admission.followerSafeHoldPoint());
+    SignalComputationTrace.emit(
+        signalTrace(
+                trainName,
+                null,
+                SignalComputationTrace.Source.AUTHORIZATION,
+                null,
+                allowed ? SignalAspect.PROCEED : SignalAspect.STOP,
+                allowed ? "SINGLE_ZONE_ADMISSION_ALLOWED" : "SINGLE_ZONE_ADMISSION_BLOCKED")
+            .field("zoneId", conflict == null ? "-" : conflict.key())
+            .field("entryDirection", direction == null ? CorridorDirection.UNKNOWN : direction)
+            .field("sameDirectionButUnsafe", sameDirectionButUnsafe)
+            .field("leaderExitVisible", lookahead != null && lookahead.exitFeasible())
+            .field("leaderWillReverse", admission != null && admission.oppositeOrUnknownPresence())
+            .field("leaderWillDwellOrStop", admission != null && admission.leaderStalled())
+            .field("leaderStalled", admission != null && admission.leaderStalled())
+            .field("followerSafeHoldPoint", admission != null && admission.followerSafeHoldPoint())
+            .field(
+                "followerWouldOverrunEntry",
+                admission != null && !admission.followerSafeHoldPoint())
+            .field("zoneExitVisible", lookahead != null && lookahead.exitFeasible())
+            .field("leaderTrain", admission == null ? "-" : admission.leaderTrain())
+            .field(
+                "leaderDirection",
+                admission == null ? CorridorDirection.UNKNOWN : admission.leaderDirection())
+            .field("failureReason", reason == null || reason.isBlank() ? "-" : reason)
+            .request(request));
   }
 
   private void traceEntryLookaheadBlocked(
@@ -9288,7 +14319,7 @@ public final class RuntimeDispatchService {
                 claim != null
                     && resource.equals(claim.resource())
                     && claim.trainName() != null
-                    && claim.trainName().equalsIgnoreCase(trainName));
+                    && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName));
   }
 
   private Set<OccupancyResource> protectedSingleCorridorClaims(
@@ -9520,6 +14551,577 @@ public final class RuntimeDispatchService {
       case CAUTION -> 2;
       case STOP -> 3;
     };
+  }
+
+  private SignalAspect stageSignalAspectForAuthorityAndAdvisory(
+      String trainName,
+      SignalAspect currentAspect,
+      OccupancyDecision hardDecision,
+      OccupancyDecision advisoryDecision,
+      List<AdvisoryRisk> advisoryRisks) {
+    SignalAspect safeAspect = currentAspect == null ? SignalAspect.STOP : currentAspect;
+    boolean hardBlocked = hardDecision != null && !hardDecision.allowed();
+    boolean advisoryRisk =
+        advisoryDecision != null
+            && advisoryDecision.allowed()
+            && SignalDecisionInputClassifier.isProceedLike(advisoryDecision.signal())
+            && advisoryDecision.signal() == SignalAspect.PROCEED_WITH_CAUTION
+            && advisoryDecision.blockers() != null
+            && !advisoryDecision.blockers().isEmpty();
+    if (hardBlocked) {
+      debugLogger.accept(
+          "SIGNAL_ASPECT_STAGING train="
+              + trainName
+              + " result=STOP reason=HARD_AUTHORITY_BLOCKED");
+      return SignalAspect.STOP;
+    }
+    if (advisoryRisk) {
+      String resource =
+          advisoryRisks == null || advisoryRisks.isEmpty()
+              ? nearestBlockerResource(advisoryDecision)
+              : String.valueOf(advisoryRisks.get(0).resource());
+      debugLogger.accept(
+          "SIGNAL_ASPECT_STAGING train="
+              + trainName
+              + " result=PROCEED_WITH_CAUTION reason=ADVISORY_CAUTION_SELECTED"
+              + " advisoryRiskResource="
+              + resource);
+      debugLogger.accept(
+          "ADVISORY_RISK_TO_CAUTION train=" + trainName + " advisoryRiskResource=" + resource);
+      return signalSeverity(SignalAspect.PROCEED_WITH_CAUTION) > signalSeverity(safeAspect)
+          ? SignalAspect.PROCEED_WITH_CAUTION
+          : safeAspect;
+    }
+    debugLogger.accept(
+        "SIGNAL_ASPECT_STAGING train="
+            + trainName
+            + " result="
+            + safeAspect
+            + " reason=ADVISORY_CAUTION_SKIPPED");
+    return safeAspect;
+  }
+
+  /**
+   * 运行 Smart Dispatcher 的前方风险与制动预判。
+   *
+   * <p>该方法只允许把可见的前方风险提前压成 CAUTION/限速；不会把 stale/unknown/protective-only 风险升级成 hard STOP，也不会绕过后续
+   * {@link SignalPublicationGate} 最终安全检查。
+   */
+  private void traceAuthorityWindowSplit(
+      String trainName,
+      OccupancyRequest hardRequest,
+      OccupancyRequest advisoryRequest,
+      OccupancyDecision hardDecision,
+      OccupancyDecision advisoryDecision,
+      SignalLookahead.LookaheadResult advisoryLookahead) {
+    debugLogger.accept(
+        "SIGNAL_CAUTION_REASON train="
+            + trainName
+            + " hardAuthorityWindowResourceCount="
+            + (hardRequest == null ? 0 : hardRequest.resourceList().size())
+            + " advisoryLookaheadWindowResourceCount="
+            + (advisoryRequest == null ? 0 : advisoryRequest.resourceList().size())
+            + " nearestAdvisoryRisk="
+            + formatOptionalLong(
+                advisoryLookahead == null
+                    ? OptionalLong.empty()
+                    : advisoryLookahead.distanceToBlocker())
+            + " nearestHardAuthorityBlocker="
+            + nearestBlockerResource(hardDecision)
+            + " advisoryBlocker="
+            + nearestBlockerResource(advisoryDecision));
+  }
+
+  private static String nearestBlockerResource(OccupancyDecision decision) {
+    OccupancyClaim blocker = primaryBlocker(decision);
+    if (blocker == null || blocker.resource() == null) {
+      return "-";
+    }
+    return blocker.resource().toString();
+  }
+
+  private SmartSignalDecisionResult applySmartForwardSignalDecision(
+      String trainName,
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      OccupancyDecision decision,
+      SignalLookahead.LookaheadResult lookahead,
+      AuthorityEnd authorityEnd,
+      SignalAspect currentAspect,
+      OptionalLong distanceOpt,
+      OptionalDouble movementAuthorityLimitBps,
+      boolean stopAtNextWaypoint) {
+    SignalAspect safeAspect = currentAspect == null ? SignalAspect.STOP : currentAspect;
+    OptionalDouble safeAuthorityLimit =
+        movementAuthorityLimitBps == null ? OptionalDouble.empty() : movementAuthorityLimitBps;
+    OptionalLong safeDistance = distanceOpt == null ? OptionalLong.empty() : distanceOpt;
+    SmartDispatcherMode mode = smartDispatcherMode();
+    traceSmartDispatcherMode(trainName, mode, "forward-signal");
+    if (mode == SmartDispatcherMode.OFF) {
+      debugLogger.accept(
+          "SMART_DISPATCH_DISABLED train=" + trainName + " source=forward-signal mode=" + mode);
+      return new SmartSignalDecisionResult(safeAspect, safeAuthorityLimit, safeDistance);
+    }
+    ForwardSignalRiskSnapshot risk =
+        buildForwardSignalRiskSnapshot(
+            trainName, decision, lookahead, authorityEnd, stopAtNextWaypoint);
+    TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
+    double edgeLimit = 0.0;
+    if (train != null && train.isValid()) {
+      edgeLimit = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
+    }
+    double cautionSpeed =
+        resolveCautionSpeedDecision(train == null ? null : train.worldId(), null).speedBps();
+    SmartDispatcherController.ForwardDecisionInput input =
+        new SmartDispatcherController.ForwardDecisionInput(
+            trainName,
+            risk,
+            safeAspect,
+            train == null ? 0.0 : train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+            edgeLimit,
+            cautionSpeed,
+            trainConfig.decelBps2(),
+            Math.max(1L, configManager.current().runtimeSettings().lookaheadEdges()) * 64L,
+            configManager.current().runtimeSettings().movementAuthorityStopMarginBlocks(),
+            configManager.current().runtimeSettings().movementAuthorityCautionMarginBlocks(),
+            false,
+            "none",
+            authorityEnd == null ? AuthorityEndReason.NONE.name() : authorityEnd.reason().name());
+    DispatchDecision dispatchDecision = smartDispatcherController.decideForwardSignal(input);
+    traceSmartDispatcherActionObserved(trainName, mode, dispatchDecision);
+    if (mode == SmartDispatcherMode.OBSERVE_ONLY) {
+      traceSmartDispatcherActionSuppressed(
+          trainName, mode, dispatchDecision, "observe-only-no-side-effects");
+      return new SmartSignalDecisionResult(
+          safeAspect,
+          safeAuthorityLimit,
+          safeDistance,
+          dispatchDecision.action(),
+          dispatchDecision.riskSource(),
+          false,
+          smartStopReason(dispatchDecision));
+    }
+    if (safeAspect == SignalAspect.STOP) {
+      return new SmartSignalDecisionResult(
+          safeAspect,
+          safeAuthorityLimit,
+          safeDistance,
+          dispatchDecision.action(),
+          dispatchDecision.riskSource(),
+          invalidatingAuthorityStop(authorityEnd, dispatchDecision),
+          smartStopReason(dispatchDecision));
+    }
+    if (dispatchDecision.action() == DispatchAction.PROCEED_WITH_CAUTION
+        || dispatchDecision.action() == DispatchAction.CAUTION_SPEED_LIMIT) {
+      SmartDispatcherModeGate.EffectPermissions permissions =
+          SmartDispatcherModeGate.permissions(mode, dispatchDecision.effectClass());
+      if (!permissions.canChangeAspect() && !permissions.canChangeTargetSpeed()) {
+        traceSmartDispatcherActionSuppressed(
+            trainName, mode, dispatchDecision, "effect-class-not-enabled");
+        return new SmartSignalDecisionResult(
+            safeAspect,
+            safeAuthorityLimit,
+            safeDistance,
+            dispatchDecision.action(),
+            dispatchDecision.riskSource(),
+            false,
+            smartStopReason(dispatchDecision));
+      }
+      debugLogger.accept(
+          "SMART_ACTION_ALLOWED_BY_EFFECT_GATE train="
+              + trainName
+              + " mode="
+              + mode
+              + " action="
+              + dispatchDecision.action()
+              + " effectClass="
+              + dispatchDecision.effectClass()
+              + " source=forward-signal");
+      if (!shouldApplySmartRuntimeOverride(dispatchDecision.riskSource())) {
+        debugLogger.accept(
+            "SMART_DISPATCH_ACTION_REJECTED train="
+                + trainName
+                + " action="
+                + dispatchDecision.action()
+                + " reason=handled-by-runtime-speed-envelope source="
+                + dispatchDecision.riskSource());
+        return new SmartSignalDecisionResult(
+            safeAspect,
+            safeAuthorityLimit,
+            safeDistance,
+            dispatchDecision.action(),
+            dispatchDecision.riskSource(),
+            false,
+            smartStopReason(dispatchDecision));
+      }
+      SignalAspect nextAspect =
+          signalSeverity(dispatchDecision.targetAspect()) > signalSeverity(safeAspect)
+              ? dispatchDecision.targetAspect()
+              : safeAspect;
+      OptionalDouble nextLimit = safeAuthorityLimit;
+      if (nextLimit.isEmpty() && dispatchDecision.targetSpeedBps() > 0.0) {
+        nextLimit = OptionalDouble.of(dispatchDecision.targetSpeedBps());
+      }
+      OptionalLong nextDistance =
+          minOptionalLong(
+              minOptionalLong(safeDistance, dispatchDecision.distanceToCaution()),
+              dispatchDecision.distanceToStop());
+      debugLogger.accept(
+          "SMART_DISPATCH_ENFORCED train="
+              + trainName
+              + " mode="
+              + mode
+              + " action="
+              + dispatchDecision.action()
+              + " effectClass="
+              + dispatchDecision.effectClass()
+              + " targetAspect="
+              + nextAspect
+              + " targetSpeed="
+              + (nextLimit.isPresent() ? nextLimit.getAsDouble() : "-"));
+      return new SmartSignalDecisionResult(
+          nextAspect,
+          nextLimit,
+          nextDistance,
+          dispatchDecision.action(),
+          dispatchDecision.riskSource(),
+          false,
+          smartStopReason(dispatchDecision));
+    }
+    if (SmartDispatcherModeGate.suppresses(mode, dispatchDecision.effectClass())
+        && dispatchDecision.effectClass() != DispatchEffectClass.DIAGNOSTIC_ONLY) {
+      traceSmartDispatcherActionSuppressed(
+          trainName, mode, dispatchDecision, "effect-class-not-enabled");
+    }
+    return new SmartSignalDecisionResult(
+        safeAspect,
+        safeAuthorityLimit,
+        safeDistance,
+        dispatchDecision.action(),
+        dispatchDecision.riskSource(),
+        false,
+        smartStopReason(dispatchDecision));
+  }
+
+  private static boolean invalidatingAuthorityStop(
+      AuthorityEnd authorityEnd, DispatchDecision decision) {
+    AuthorityEnd safeEnd = authorityEnd == null ? AuthorityEnd.none() : authorityEnd;
+    if (!safeEnd.physical()) {
+      return false;
+    }
+    RiskSource source = decision == null ? RiskSource.NONE : decision.riskSource();
+    if (source == RiskSource.ARTIFICIAL_WINDOW_LIMIT || recoverableSmartHoldRisk(source)) {
+      return false;
+    }
+    return true;
+  }
+
+  private static boolean shouldInvalidateForAuthorityFailure(
+      AuthorityEnd authorityEnd, SmartSignalDecisionResult smartDecision) {
+    AuthorityEnd safeEnd = authorityEnd == null ? AuthorityEnd.none() : authorityEnd;
+    return smartDecision != null
+        && smartDecision.isPhysicalAuthorityFailure()
+        && safeEnd.physical();
+  }
+
+  private static boolean recoverableSmartHoldRisk(RiskSource source) {
+    return switch (source == null ? RiskSource.NONE : source) {
+      case ACTIVE_OPPOSITE_CONFLICT,
+          STALE_RETAIN,
+          STALE_QUEUE,
+          PROTECTIVE_ONLY_CLAIM,
+          SWITCHER_NOT_VERIFIED,
+          ROUTE_STOP_OR_TERMINAL,
+          ARTIFICIAL_WINDOW_LIMIT -> true;
+      default -> false;
+    };
+  }
+
+  private static String smartStopReason(DispatchDecision decision) {
+    if (decision == null) {
+      return "smart-dispatch:none";
+    }
+    return decision.action().name().toLowerCase(Locale.ROOT)
+        + ":"
+        + decision.riskSource().name().toLowerCase(Locale.ROOT)
+        + ":"
+        + decision.safetyReason();
+  }
+
+  private void traceSmartDispatcherMode(String trainName, SmartDispatcherMode mode, String source) {
+    debugLogger.accept(
+        "SMART_DISPATCH_MODE train="
+            + trainName
+            + " mode="
+            + (mode == null ? SmartDispatcherMode.OBSERVE_ONLY : mode)
+            + " source="
+            + source);
+  }
+
+  private void traceSmartDispatcherActionObserved(
+      String trainName, SmartDispatcherMode mode, DispatchDecision decision) {
+    if (decision == null) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_DISPATCH_ACTION_OBSERVED train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + decision.action()
+            + " effectClass="
+            + decision.effectClass());
+  }
+
+  private void traceSmartDispatcherActionSuppressed(
+      String trainName, SmartDispatcherMode mode, DispatchDecision decision, String reason) {
+    if (decision == null) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_DISPATCH_ACTION_SUPPRESSED_BY_MODE train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + decision.action()
+            + " effectClass="
+            + decision.effectClass()
+            + " reason="
+            + (reason == null || reason.isBlank() ? "mode-gate" : reason));
+  }
+
+  private static boolean shouldApplySmartRuntimeOverride(RiskSource source) {
+    if (source == null) {
+      return false;
+    }
+    return switch (source) {
+      case EDGE_SPEED_DROP, STATION_STOP -> false;
+      default -> true;
+    };
+  }
+
+  private ForwardSignalRiskSnapshot buildForwardSignalRiskSnapshot(
+      String trainName,
+      OccupancyDecision decision,
+      SignalLookahead.LookaheadResult lookahead,
+      AuthorityEnd authorityEnd,
+      boolean stopAtNextWaypoint) {
+    OptionalLong blockerDistance =
+        lookahead == null ? OptionalLong.empty() : lookahead.distanceToBlocker();
+    OptionalLong approachDistance =
+        lookahead == null ? OptionalLong.empty() : lookahead.distanceToApproach();
+    OptionalLong speedDropDistance = nearestEdgeSpeedDropDistance(lookahead);
+    OccupancyClaim blocker = primaryBlocker(decision);
+    if (blocker != null) {
+      RiskFreshness freshness = freshnessForClaim(blocker);
+      RiskSource source = riskSourceForBlocker(blocker);
+      return new ForwardSignalRiskSnapshot(
+          trainName,
+          freshness == RiskFreshness.LIVE ? blockerDistance : OptionalLong.empty(),
+          freshness == RiskFreshness.LIVE ? blockerDistance : OptionalLong.empty(),
+          freshness == RiskFreshness.LIVE ? blockerDistance : OptionalLong.empty(),
+          speedDropDistance,
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          isSingleConflict(blocker) ? blockerDistance : OptionalLong.empty(),
+          isSwitcherConflict(blocker) ? blockerDistance : OptionalLong.empty(),
+          OptionalLong.empty(),
+          source,
+          freshness,
+          blocker.trainName(),
+          blocker.resource() == null ? "-" : blocker.resource().key(),
+          decision != null && decision.conflictRelease(),
+          freshness != RiskFreshness.LIVE,
+          true,
+          freshness != RiskFreshness.LIVE,
+          false);
+    }
+    AuthorityEnd safeEnd = authorityEnd == null ? AuthorityEnd.none() : authorityEnd;
+    if (safeEnd.reason() == AuthorityEndReason.ARTIFICIAL_WINDOW_LIMIT) {
+      return new ForwardSignalRiskSnapshot(
+          trainName,
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          speedDropDistance,
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          safeEnd.distanceBlocks(),
+          RiskSource.ARTIFICIAL_WINDOW_LIMIT,
+          RiskFreshness.UNKNOWN,
+          "-",
+          safeEnd.resource(),
+          false,
+          false,
+          true,
+          false,
+          false);
+    }
+    if (safeEnd.physical() && safeEnd.distanceBlocks().isPresent()) {
+      RiskSource source = riskSourceForAuthorityEnd(safeEnd.reason());
+      return new ForwardSignalRiskSnapshot(
+          trainName,
+          OptionalLong.empty(),
+          safeEnd.distanceBlocks(),
+          safeEnd.distanceBlocks(),
+          speedDropDistance,
+          stopAtNextWaypoint ? approachDistance : OptionalLong.empty(),
+          source == RiskSource.TERMINAL_STOP ? safeEnd.distanceBlocks() : OptionalLong.empty(),
+          source == RiskSource.SINGLE_EXIT_NOT_VERIFIED
+              ? safeEnd.distanceBlocks()
+              : OptionalLong.empty(),
+          OptionalLong.empty(),
+          safeEnd.distanceBlocks(),
+          source,
+          RiskFreshness.LIVE,
+          "-",
+          safeEnd.resource(),
+          false,
+          false,
+          true,
+          false,
+          false);
+    }
+    if (speedDropDistance.isPresent()) {
+      return new ForwardSignalRiskSnapshot(
+          trainName,
+          OptionalLong.empty(),
+          speedDropDistance,
+          OptionalLong.empty(),
+          speedDropDistance,
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          RiskSource.EDGE_SPEED_DROP,
+          RiskFreshness.LIVE,
+          "-",
+          "-",
+          false,
+          false,
+          true,
+          false,
+          false);
+    }
+    if (stopAtNextWaypoint && approachDistance.isPresent()) {
+      return new ForwardSignalRiskSnapshot(
+          trainName,
+          OptionalLong.empty(),
+          approachDistance,
+          approachDistance,
+          OptionalLong.empty(),
+          approachDistance,
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          OptionalLong.empty(),
+          RiskSource.STATION_STOP,
+          RiskFreshness.LIVE,
+          "-",
+          "-",
+          false,
+          false,
+          true,
+          false,
+          false);
+    }
+    return ForwardSignalRiskSnapshot.none(trainName);
+  }
+
+  private static OccupancyClaim primaryBlocker(OccupancyDecision decision) {
+    if (decision == null || decision.blockers().isEmpty()) {
+      return null;
+    }
+    return decision.blockers().stream()
+        .filter(Objects::nonNull)
+        .sorted(
+            java.util.Comparator.comparing(
+                    (OccupancyClaim claim) ->
+                        claim.resource() == null ? "" : claim.resource().kind().name())
+                .thenComparing(claim -> claim.resource() == null ? "" : claim.resource().key())
+                .thenComparing(OccupancyClaim::trainName, String.CASE_INSENSITIVE_ORDER))
+        .findFirst()
+        .orElse(null);
+  }
+
+  private static RiskFreshness freshnessForClaim(OccupancyClaim claim) {
+    if (claim == null || claim.role() == null) {
+      return RiskFreshness.UNKNOWN;
+    }
+    if (claim.role() == ClaimRole.MOVEMENT_REQUIRED) {
+      return RiskFreshness.LIVE;
+    }
+    if (claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY) {
+      return RiskFreshness.PROTECTIVE_ONLY;
+    }
+    return RiskFreshness.STALE;
+  }
+
+  private static RiskSource riskSourceForBlocker(OccupancyClaim claim) {
+    if (claim == null || claim.resource() == null) {
+      return RiskSource.HARD_BLOCKER;
+    }
+    if (freshnessForClaim(claim) == RiskFreshness.PROTECTIVE_ONLY) {
+      return RiskSource.PROTECTIVE_ONLY_CLAIM;
+    }
+    if (claim.role() == ClaimRole.QUEUE_POSITION) {
+      return RiskSource.STALE_QUEUE;
+    }
+    if (isSingleConflict(claim)) {
+      return RiskSource.ACTIVE_OPPOSITE_CONFLICT;
+    }
+    if (isSwitcherConflict(claim)) {
+      return RiskSource.SWITCHER_NOT_VERIFIED;
+    }
+    return RiskSource.HARD_BLOCKER;
+  }
+
+  private static RiskSource riskSourceForAuthorityEnd(AuthorityEndReason reason) {
+    if (reason == null) {
+      return RiskSource.NONE;
+    }
+    return switch (reason) {
+      case HARD_BLOCKER -> RiskSource.HARD_BLOCKER;
+      case ROUTE_STOP_OR_TERMINAL -> RiskSource.ROUTE_STOP_OR_TERMINAL;
+      case DWELL_OR_STATION_STOP -> RiskSource.DWELL_STOP;
+      case SINGLE_EXIT_NOT_VERIFIED -> RiskSource.SINGLE_EXIT_NOT_VERIFIED;
+      case MAX_AUTHORITY_CAP_REACHED -> RiskSource.MAX_AUTHORITY_CAP_REACHED;
+      case ARTIFICIAL_WINDOW_LIMIT -> RiskSource.ARTIFICIAL_WINDOW_LIMIT;
+      case NONE -> RiskSource.NONE;
+    };
+  }
+
+  private static boolean isSingleConflict(OccupancyClaim claim) {
+    return claim != null
+        && claim.resource() != null
+        && claim.resource().kind() == ResourceKind.CONFLICT
+        && claim.resource().key().startsWith("single:");
+  }
+
+  private static boolean isSwitcherConflict(OccupancyClaim claim) {
+    return claim != null
+        && claim.resource() != null
+        && claim.resource().kind() == ResourceKind.CONFLICT
+        && claim.resource().key().startsWith("switcher:");
+  }
+
+  private static OptionalLong nearestEdgeSpeedDropDistance(
+      SignalLookahead.LookaheadResult lookahead) {
+    if (lookahead == null || lookahead.edgeSpeedConstraints().isEmpty()) {
+      return OptionalLong.empty();
+    }
+    long best = Long.MAX_VALUE;
+    for (SignalLookahead.EdgeSpeedConstraint constraint : lookahead.edgeSpeedConstraints()) {
+      if (constraint != null && constraint.distanceBlocks() > 0L) {
+        best = Math.min(best, constraint.distanceBlocks());
+      }
+    }
+    return best == Long.MAX_VALUE ? OptionalLong.empty() : OptionalLong.of(best);
   }
 
   /**
@@ -10974,7 +16576,82 @@ public final class RuntimeDispatchService {
     return "forward";
   }
 
+  private void updateLiveBlockerSnapshot(
+      String trainName,
+      OccupancyDecision decision,
+      OccupancyRequest request,
+      Instant now,
+      String source) {
+    if (!liveBlockerSnapshotProgressFresh(trainName, request)) {
+      return;
+    }
+    updateBlockerSnapshot(trainName, decision, request, now, source);
+  }
+
+  private boolean liveBlockerSnapshotProgressFresh(String trainName, OccupancyRequest request) {
+    if (request == null || request.directedContext().isEmpty()) {
+      return true;
+    }
+    DirectedTraversalContext context = request.directedContext().get();
+    String resolvedTrain =
+        trainName == null || trainName.isBlank() ? request.trainName() : trainName;
+    Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
+        progressRegistry.get(resolvedTrain);
+    if (entryOpt.isEmpty()) {
+      traceLiveBlockerSnapshotRejected(resolvedTrain, context, "PROGRESS_CONTEXT_MISSING", -1L, -1);
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
+    long currentProgressVersion = progressRegistry.version();
+    boolean indexBehind =
+        context.currentIndex() >= 0 && context.currentIndex() < entry.currentIndex();
+    boolean staleVersionWithDifferentIndex =
+        context.progressVersion() >= 0
+            && context.progressVersion() < currentProgressVersion
+            && context.currentIndex() != entry.currentIndex();
+    if (!indexBehind && !staleVersionWithDifferentIndex) {
+      return true;
+    }
+    traceLiveBlockerSnapshotRejected(
+        resolvedTrain,
+        context,
+        "STALE_PROGRESS_CONTEXT",
+        currentProgressVersion,
+        entry.currentIndex());
+    return false;
+  }
+
+  private void traceLiveBlockerSnapshotRejected(
+      String trainName,
+      DirectedTraversalContext context,
+      String reason,
+      long currentProgressVersion,
+      int currentIndex) {
+    debugLogger.accept(
+        "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED reason="
+            + (reason == null || reason.isBlank() ? "UNKNOWN" : reason)
+            + " train="
+            + (trainName == null || trainName.isBlank() ? "-" : trainName)
+            + " requestProgressVersion="
+            + (context == null ? -1L : context.progressVersion())
+            + " currentProgressVersion="
+            + currentProgressVersion
+            + " requestCurrentIndex="
+            + (context == null ? -1 : context.currentIndex())
+            + " currentIndex="
+            + currentIndex);
+  }
+
   private void updateBlockerSnapshot(String trainName, OccupancyDecision decision, Instant now) {
+    updateBlockerSnapshot(trainName, decision, null, now, "runtime");
+  }
+
+  private void updateBlockerSnapshot(
+      String trainName,
+      OccupancyDecision decision,
+      OccupancyRequest request,
+      Instant now,
+      String source) {
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {
       return;
@@ -10989,18 +16666,50 @@ public final class RuntimeDispatchService {
         continue;
       }
       String blocker = claim.trainName().trim();
-      if (blocker.equalsIgnoreCase(trainName)) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker, trainName)) {
         continue;
       }
-      String conflictKey = "";
-      Optional<CorridorDirection> direction = Optional.empty();
-      if (claim.resource() != null && claim.resource().kind() == ResourceKind.CONFLICT) {
-        conflictKey = claim.resource().key();
-        if (conflictKey.startsWith("single:") && !conflictKey.contains(":cycle:")) {
-          direction = claim.corridorDirection();
-        }
-      }
-      blockers.add(new DeadlockBlockerInfo(blocker, conflictKey, direction));
+      OccupancyResource resource = claim.resource();
+      String conflictKey = blockerConflictKey(resource);
+      String resourceKey = snapshotResourceKey(resource);
+      Optional<CorridorDirection> direction = claim.corridorDirection();
+      String relation = snapshotRelation(request, resource, claim);
+      String intent = snapshotIntent(request, resource);
+      String role = claim.role() == null ? "UNKNOWN" : claim.role().name();
+      String ownerCanonical = TrainNameNormalizer.normalizeKey(blocker);
+      DeadlockBlockerInfo info =
+          new DeadlockBlockerInfo(
+              blocker,
+              conflictKey,
+              direction,
+              ownerCanonical,
+              resourceKey,
+              relation,
+              intent,
+              role,
+              source,
+              currentSignalTraceTick(),
+              occupancyVersion());
+      blockers.add(info);
+      debugLogger.accept(
+          "SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED train="
+              + trainName
+              + " blockerTrain="
+              + blocker
+              + " blockerCanonical="
+              + ownerCanonical
+              + " resource="
+              + resourceKey
+              + " relation="
+              + relation
+              + " intent="
+              + intent
+              + " role="
+              + role
+              + " direction="
+              + direction.map(Enum::name).orElse("UNKNOWN")
+              + " source="
+              + info.source());
     }
     if (blockers.isEmpty()) {
       blockerSnapshots.remove(key);
@@ -11008,6 +16717,30 @@ public final class RuntimeDispatchService {
     }
     Instant sampledAt = now == null ? Instant.now() : now;
     blockerSnapshots.put(key, new BlockerSnapshot(blockers, sampledAt));
+  }
+
+  private static String blockerConflictKey(OccupancyResource resource) {
+    return resource != null && resource.kind() == ResourceKind.CONFLICT ? resource.key() : "";
+  }
+
+  private static String snapshotResourceKey(OccupancyResource resource) {
+    if (resource == null) {
+      return "-";
+    }
+    return resource.kind() + ":" + resource.key();
+  }
+
+  private static String snapshotRelation(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
+    return BlockerClassifier.classify(request, resource, claim).name();
+  }
+
+  private static String snapshotIntent(OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return "UNKNOWN";
+    }
+    ResourceIntent intent = request.intentFor(resource);
+    return intent == null ? "UNKNOWN" : intent.name();
   }
 
   private String diagnoseBuildFailure(

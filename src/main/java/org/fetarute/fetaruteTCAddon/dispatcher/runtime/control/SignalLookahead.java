@@ -313,6 +313,14 @@ public final class SignalLookahead {
         distance += Math.max(0, edge.lengthBlocks());
       }
     }
+    java.util.Map<String, Integer> conflictEntryOrders = context.request().conflictEntryOrders();
+    for (java.util.Map.Entry<String, Integer> entry : conflictEntryOrders.entrySet()) {
+      int edgeOrder = entry.getValue() == null ? -1 : entry.getValue();
+      if (edgeOrder < 0 || edgeOrder >= nodeDistances.size()) {
+        continue;
+      }
+      resourceDistances.putIfAbsent(entry.getKey(), nodeDistances.get(edgeOrder));
+    }
 
     long best = Long.MAX_VALUE;
     for (OccupancyClaim claim : decision.blockers()) {

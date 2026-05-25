@@ -287,6 +287,17 @@ public record OccupancyRequest(
         directedContext);
   }
 
+  /** 返回同一资源窗口的 advisory lookahead 只读请求。 */
+  public OccupancyRequest asLookaheadPreview() {
+    java.util.Map<OccupancyResource, ResourceIntent> intents = new java.util.LinkedHashMap<>();
+    for (OccupancyResource resource : resources) {
+      if (resource != null) {
+        intents.put(resource, ResourceIntent.LOOKAHEAD_PREVIEW);
+      }
+    }
+    return withResourceIntents(intents).withDirectedSource("LOOKAHEAD_PREVIEW");
+  }
+
   /** 返回同一请求但替换有向 traversal 上下文。 */
   public OccupancyRequest withDirectedContext(Optional<DirectedTraversalContext> context) {
     return new OccupancyRequest(

@@ -19,6 +19,12 @@ public final class BlockerClassifier {
     if (TrainNameNormalizer.sameLogicalTrain(request.trainName(), claim.trainName())) {
       return BlockerRelation.SELF;
     }
+    if (claim.role() == ClaimRole.UNLOCK_RESERVATION) {
+      return BlockerRelation.STALE_PROTECTIVE_CLAIM;
+    }
+    if (claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY) {
+      return BlockerRelation.STALE_PROTECTIVE_CLAIM;
+    }
     ResourceIntent intent = request.intentFor(resource);
     if (!intent.hardAuthority()) {
       return BlockerRelation.STALE_PROTECTIVE_CLAIM;

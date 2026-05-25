@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 24
+config-version: 26
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -7,6 +7,22 @@ locale: zh_CN
 debug:
   # 是否启用插件调试日志
   enabled: false
+
+# Smart Dispatcher / Traffic Control Supervisor 安全隔离
+smart-dispatcher:
+  # OFF = 不调用智能调度决策器；OBSERVE_ONLY = 只输出 trace；ENFORCE = 允许通过 effect class gate 的动作执行
+  mode: OBSERVE_ONLY
+  # Phase 1.8 minimal forward planner。默认只观察，不创建 reservation。
+  planner:
+    enabled: true
+    mode: OBSERVE_ONLY
+    max-reservation-resources: 4
+    reservation-ttl-ticks: 60
+    blocker-snapshot-ttl-ms: 10000
+    require-same-direction: true
+    allow-reverse: false
+    allow-turnback-before-boundary: false
+    one-active-reservation-per-cycle: true
 
 # 健康检查与自动修复
 health:

@@ -161,7 +161,7 @@ public final class SignalComputationTrace {
       int hold = 0;
       for (OccupancyResource resource : request.resourceList()) {
         ResourceIntent intent = request.intentFor(resource);
-        if (intent == ResourceIntent.MOVEMENT_REQUIRED) {
+        if (intent.hardAuthority()) {
           movement++;
         } else if (intent == ResourceIntent.PROTECTIVE_RETAIN) {
           protective++;

@@ -17,8 +17,13 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherModeGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 
 /**
  * 列车健康监控器：检测列车运行异常并尝试自动修复。
@@ -35,13 +40,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * <ul>
  *   <li>STALL：先 refreshSignal，再升级到 forceRelaunch
  *   <li>PROGRESS_STUCK：非 STOP 时先 refreshSignal，再升级到 reissueDestination，最后 forceRelaunch
- *   <li>STOP 下的长时间停滞只重刷信号/重下发硬 STOP，不 reissue destination，避免健康监控绕过红灯强制动车
+ *   <li>STOP 下的长时间停滞先重刷信号，再清理可证明的自持 single 反向残留，最后重下发硬 STOP；不 reissue destination，避免健康监控绕过红灯强制动车
  *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则只在 STOP 宽限窗口内视为合法排队；超宽限后仍进入非动车恢复链，避免 blocker 持续刷新导致永久不自愈
  *   <li>互相阻塞的自动恢复先按列车对执行 refresh → hard STOP；超过销毁阈值且仍未恢复时，销毁 pair leader 作为最终兜底，避免永久占线
  *   <li>STOP 信号下的 progress stuck 允许更长宽限，避免把正常排队误判为故障
  * </ul>
  */
 public final class TrainHealthMonitor {
+
+  /** 同一 safe recovery 候选连续无效达到该次数后，允许后续恢复阶段继续评估。 */
+  private static final int SAFE_CANDIDATE_FAILURE_THRESHOLD = 2;
 
   /** 列车状态快照。 */
   private record TrainSnapshot(
@@ -126,6 +134,31 @@ public final class TrainHealthMonitor {
     }
   }
 
+  /** 单向 wait-for / stuck-leader 兜底证据，要求跨多次 health sample 持续存在。 */
+  private static final class DeadlockFallbackEvidence {
+    private final String key;
+    private final String followerTrain;
+    private final String blockerTrain;
+    private final String resource;
+    private Instant lastSeenAt;
+    private int samples;
+
+    private DeadlockFallbackEvidence(
+        String key, String followerTrain, String blockerTrain, String resource, Instant now) {
+      this.key = Objects.requireNonNull(key, "key");
+      this.followerTrain = Objects.requireNonNull(followerTrain, "followerTrain");
+      this.blockerTrain = Objects.requireNonNull(blockerTrain, "blockerTrain");
+      this.resource = resource == null || resource.isBlank() ? "-" : resource.trim();
+      this.lastSeenAt = Objects.requireNonNull(now, "now");
+      this.samples = 1;
+    }
+
+    private void seen(Instant now) {
+      lastSeenAt = now == null ? Instant.now() : now;
+      samples++;
+    }
+  }
+
   /** 本轮检测到的一次 confirmed mutual deadlock。 */
   private record DeadlockObservation(
       String episodeKey,
@@ -136,7 +169,16 @@ public final class TrainHealthMonitor {
       Set<String> blockerSnapshot,
       Set<String> blockerResources,
       RuntimeDispatchService.DeadlockTrainContext firstContext,
-      RuntimeDispatchService.DeadlockTrainContext secondContext) {}
+      RuntimeDispatchService.DeadlockTrainContext secondContext,
+      String blockerSnapshotSource) {
+
+    DeadlockObservation {
+      blockerSnapshotSource =
+          blockerSnapshotSource == null || blockerSnapshotSource.isBlank()
+              ? "stored"
+              : blockerSnapshotSource.trim();
+    }
+  }
 
   private final RuntimeDispatchService dispatchService;
   private final DwellRegistry dwellRegistry;
@@ -194,10 +236,20 @@ public final class TrainHealthMonitor {
   /** 互卡对销毁尝试冷却，key=canonical(trainA, trainB)。 */
   private final Map<String, Instant> deadlockPairLastDestroyAt = new ConcurrentHashMap<>();
 
+  /** 全局 destroy 冷却，避免一个 health 窗口内连续销毁多列车。 */
+  private volatile Instant lastDeadlockDestroyAt = Instant.EPOCH;
+
+  /** 单向 wait-for / stuck-leader destroy 兜底证据。 */
+  private final Map<String, DeadlockFallbackEvidence> deadlockFallbackEvidence =
+      new ConcurrentHashMap<>();
+
   /** 健康诊断 trace 限频。 */
   private final Map<String, String> traceFingerprints = new ConcurrentHashMap<>();
 
   private final Map<String, Instant> traceLastAt = new ConcurrentHashMap<>();
+
+  /** safe recovery 候选有效性失败计数，key=train/action/conflict。 */
+  private final Map<String, Integer> safeCandidateFailureCounts = new ConcurrentHashMap<>();
 
   public TrainHealthMonitor(
       RuntimeDispatchService dispatchService,
@@ -341,12 +393,9 @@ public final class TrainHealthMonitor {
       Optional<String> mutualBlocker = findMutualBlocker(trainName, activeKeys);
       if (mutualBlocker.isEmpty()) {
         if (state.signalAspect() == SignalAspect.STOP && !blockers.isEmpty()) {
-          debugLogger.accept("TrainHealthMonitor 手动解锁单车: train=" + trainName);
+          debugLogger.accept("TrainHealthMonitor 手动恢复单车 STOP: train=" + trainName);
           dispatchService.refreshSignalByName(trainName);
-          boolean fixed = dispatchService.reapplyHardStopByName(trainName, "manual-stop-unlock");
-          if (fixed) {
-            fixedCount++;
-          }
+          dispatchService.reapplyHardStopByName(trainName, "manual-stop-unlock");
         }
         continue;
       }
@@ -496,6 +545,8 @@ public final class TrainHealthMonitor {
         DeadlockEpisode episode = updateDeadlockEpisode(observation, now);
         progressStuckCount++;
         boolean fixed = false;
+        traceSmartProgressStuckBridge(
+            observation.trainA(), currentSignal, progressDuration, "confirmed-deadlock");
         if (autoFixEnabled) {
           fixed =
               tryFixMutualDeadlockEpisode(episode, observation, progressDuration, recovery, now);
@@ -523,6 +574,11 @@ public final class TrainHealthMonitor {
         continue;
       } else if (!progressed && !isMoving && currentSignal == SignalAspect.STOP) {
         traceDeadlockSkipped(trainName, current, progressDuration, activeKeys, now);
+        if (autoFixEnabled
+            && tryDestroyDeadlockFallback(trainName, current, progressDuration, activeKeys, now)) {
+          fixedCount++;
+          continue;
+        }
       }
 
       boolean waitingOnFreshStopBlockersWithinGrace =
@@ -542,8 +598,13 @@ public final class TrainHealthMonitor {
       if (allowProgressStuckCheck) {
         progressStuckCount++;
         boolean fixed = false;
+        RuntimeDispatchService.SmartRecoveryInput smartRecoveryInput =
+            traceSmartProgressStuckBridge(
+                trainName, currentSignal, progressDuration, "progress-stuck");
         if (autoFixEnabled) {
-          fixed = tryFixProgressStuck(trainName, currentSignal, progressDuration, recovery, now);
+          fixed =
+              tryFixProgressStuck(
+                  trainName, currentSignal, progressDuration, recovery, now, smartRecoveryInput);
           if (fixed) {
             fixedCount++;
           }
@@ -575,6 +636,7 @@ public final class TrainHealthMonitor {
 
     traceSwitcherOccupantBlockingMany(active, now);
     pruneDeadlockEpisodes(activeKeys, now);
+    pruneDeadlockFallbackEvidence(activeKeys, now);
     return new CheckResult(stallCount, progressStuckCount, fixedCount);
   }
 
@@ -584,9 +646,12 @@ public final class TrainHealthMonitor {
     recoveryStates.clear();
     deadlockPairLastAttemptAt.clear();
     deadlockPairLastDestroyAt.clear();
+    lastDeadlockDestroyAt = Instant.EPOCH;
     deadlockEpisodes.clear();
+    deadlockFallbackEvidence.clear();
     traceFingerprints.clear();
     traceLastAt.clear();
+    safeCandidateFailureCounts.clear();
   }
 
   /** 尝试修复静止列车。 */
@@ -594,11 +659,17 @@ public final class TrainHealthMonitor {
     if (!canAttempt(now, recovery.lastStallAttemptAt)) {
       return false;
     }
+    if (!smartDispatcherAllowsHealthMutation(
+        trainName, "STALL_RECOVERY", DispatchEffectClass.SIGNAL_CONSTRAINT, "health-stall")) {
+      return false;
+    }
+    traceSmartRecoveryDecision(trainName, "SMART_FORWARD_UNLOCK_CANDIDATE", "stall");
     int nextStage = Math.min(recovery.stallStage + 1, 2);
     boolean fixed = false;
     if (nextStage == 1) {
       debugLogger.accept("TrainHealthMonitor 修复静止(stage=refresh): train=" + trainName);
       dispatchService.refreshSignalByName(trainName);
+      traceSmartRecoveryDecision(trainName, "SMART_FORWARD_UNLOCK_APPLIED", "refresh-signal");
       fixed = true;
     } else {
       debugLogger.accept("TrainHealthMonitor 修复静止(stage=relaunch): train=" + trainName);
@@ -606,6 +677,7 @@ public final class TrainHealthMonitor {
       if (!fixed) {
         dispatchService.refreshSignalByName(trainName);
       }
+      traceSmartRecoveryDecision(trainName, "SMART_FORWARD_UNLOCK_APPLIED", "relaunch");
     }
     recovery.lastStallAttemptAt = now;
     recovery.stallStage = fixed ? nextStage : 0;
@@ -618,31 +690,113 @@ public final class TrainHealthMonitor {
       SignalAspect currentSignal,
       Duration progressDuration,
       RecoveryState recovery,
-      Instant now) {
+      Instant now,
+      RuntimeDispatchService.SmartRecoveryInput smartRecoveryInput) {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput != null
+            ? smartRecoveryInput
+            : RuntimeDispatchService.SmartRecoveryInput.fallback(
+                trainName, progressDuration, currentSignal);
     if (!canAttempt(now, recovery.lastProgressAttemptAt)) {
+      traceSmartRecoveryDecision(trainName, "SMART_RECOVERY_SKIPPED", "recovery-cooldown");
+      return false;
+    }
+    debugLogger.accept(
+        "SMART_RECOVERY_ACTION_ORDER train="
+            + trainName
+            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
+            + "SMART_FORWARD_UNLOCK,SMART_PURGE_STALE_QUEUE,SMART_HOLD_FOLLOWERS,"
+            + "SMART_DESTROY_CANDIDATE");
+    RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
+        safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(input));
+    if (selfRetainRelease.candidate()) {
+      debugLogger.accept(
+          "SMART_RECOVERY_DECISION train="
+              + trainName
+              + " recoveryDecision="
+              + selfRetainRelease.decision()
+              + " reason="
+              + selfRetainRelease.reason()
+              + " effectClass="
+              + selfRetainRelease.effectClass()
+              + " applied="
+              + selfRetainRelease.applied());
+      if (shouldHoldForSafeCandidate(trainName, null, selfRetainRelease, false)) {
+        recovery.lastProgressAttemptAt = now;
+        return selfRetainRelease.applied() && selfRetainRelease.effectiveness().effective();
+      }
+    }
+    RuntimeDispatchService.SmartRecoveryActionResult drainUnlock =
+        safeSmartRecoveryResult(dispatchService.applySmartDrainUnlock(input));
+    if (drainUnlock.candidate()) {
+      debugLogger.accept(
+          "SMART_RECOVERY_DECISION train="
+              + trainName
+              + " recoveryDecision="
+              + drainUnlock.decision()
+              + " reason="
+              + drainUnlock.reason()
+              + " effectClass="
+              + drainUnlock.effectClass()
+              + " applied="
+              + drainUnlock.applied());
+      if (shouldHoldForSafeCandidate(trainName, null, drainUnlock, false)) {
+        recovery.lastProgressAttemptAt = now;
+        return drainUnlock.applied() && drainUnlock.effectiveness().effective();
+      }
+    }
+    RuntimeDispatchService.SmartRecoveryActionResult forwardUnlock =
+        safeSmartRecoveryResult(dispatchService.applySmartForwardUnlock(input));
+    if (forwardUnlock.candidate()) {
+      debugLogger.accept(
+          "SMART_RECOVERY_DECISION train="
+              + trainName
+              + " recoveryDecision="
+              + forwardUnlock.decision()
+              + " reason="
+              + forwardUnlock.reason()
+              + " effectClass="
+              + forwardUnlock.effectClass()
+              + " applied="
+              + forwardUnlock.applied());
+      if (shouldHoldForSafeCandidate(trainName, null, forwardUnlock, false)) {
+        recovery.lastProgressAttemptAt = now;
+        return forwardUnlock.applied() && forwardUnlock.effectiveness().effective();
+      }
+    }
+    if (!smartDispatcherAllowsHealthMutation(
+        trainName,
+        "PROGRESS_STUCK_RECOVERY",
+        DispatchEffectClass.SIGNAL_CONSTRAINT,
+        "health-progress-stuck")) {
       return false;
     }
     if (currentSignal == SignalAspect.STOP) {
       if (progressDuration.compareTo(progressStopGraceThreshold) <= 0) {
+        traceSmartRecoveryDecision(trainName, "SMART_RECOVERY_SKIPPED", "stop-grace");
         return false;
       }
       int nextStage = Math.min(recovery.progressStage + 1, 2);
-      boolean fixed;
       if (nextStage == 1) {
-        debugLogger.accept("TrainHealthMonitor 修复停滞(stage=refresh-stop): train=" + trainName);
+        debugLogger.accept("TrainHealthMonitor 恢复停滞(stage=refresh-stop): train=" + trainName);
         dispatchService.refreshSignalByName(trainName);
-        fixed = true;
       } else {
-        debugLogger.accept("TrainHealthMonitor 修复停滞(stage=hard-stop): train=" + trainName);
-        fixed = dispatchService.reapplyHardStopByName(trainName, "health-stop-progress-stuck");
-        if (!fixed) {
-          dispatchService.refreshSignalByName(trainName);
+        debugLogger.accept(
+            "TrainHealthMonitor 恢复停滞(stage=self-owned-single-cleanup): train=" + trainName);
+        boolean cleaned = dispatchService.clearSelfOwnedSingleDirectionMismatchByName(trainName);
+        if (!cleaned) {
+          debugLogger.accept("TrainHealthMonitor 恢复停滞(stage=hard-stop): train=" + trainName);
+          boolean applied =
+              dispatchService.reapplyHardStopByName(trainName, "health-stop-progress-stuck");
+          if (!applied) {
+            dispatchService.refreshSignalByName(trainName);
+          }
         }
       }
       recovery.lastProgressAttemptAt = now;
-      // STOP 停滞下不自动 relaunch/reissue，避免健康监控绕过红灯；后续 tick 继续 refresh/hard-stop。
+      // STOP 停滞下不自动 relaunch/reissue，避免健康监控绕过红灯；后续 tick 继续 refresh/cleanup/hard-stop。
       recovery.progressStage = nextStage;
-      return fixed;
+      return false;
     }
 
     int nextStage = Math.min(recovery.progressStage + 1, 3);
@@ -792,12 +946,104 @@ public final class TrainHealthMonitor {
               blockerSnapshot,
               blockerResources,
               canonicalContextA,
-              canonicalContextB));
+              canonicalContextB,
+              "stored"));
+    }
+    Optional<DeadlockObservation> liveCycle =
+        findLiveMutualBlockerCycle(
+            trainName, trainKey, activeTrainKeys, snapshot, progressDuration);
+    if (liveCycle.isPresent()) {
+      return liveCycle;
     }
     Optional<DeadlockObservation> weakObservation =
         findWeakMutualDeadlock(trainName, trainKey, activeTrainKeys, snapshot, progressDuration);
     if (weakObservation.isPresent()) {
       return weakObservation;
+    }
+    return Optional.empty();
+  }
+
+  private Optional<DeadlockObservation> findLiveMutualBlockerCycle(
+      String trainName,
+      String trainKey,
+      Set<String> activeTrainKeys,
+      RuntimeDispatchService.DeadlockBlockerSnapshot snapshot,
+      Duration progressDuration) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return Optional.empty();
+    }
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      if (!isLiveCycleBlockerResource(blocker)) {
+        continue;
+      }
+      String blockerKey = keyOf(blocker.trainName());
+      if (blockerKey == null
+          || blockerKey.equals(trainKey)
+          || activeTrainKeys == null
+          || !activeTrainKeys.contains(blockerKey)) {
+        continue;
+      }
+      RuntimeDispatchService.DeadlockBlockerSnapshot reverseSnapshot =
+          recentDeadlockBlockerSnapshot(blocker.trainName());
+      Optional<RuntimeDispatchService.DeadlockBlockerInfo> reverseOpt =
+          reverseSnapshot.blockers().stream()
+              .filter(candidate -> trainKey.equals(keyOf(candidate.trainName())))
+              .filter(this::isLiveCycleBlockerResource)
+              .findFirst();
+      if (reverseOpt.isEmpty()) {
+        continue;
+      }
+      Optional<RuntimeDispatchService.DeadlockTrainContext> firstContextOpt =
+          dispatchService.deadlockTrainContext(trainName);
+      Optional<RuntimeDispatchService.DeadlockTrainContext> secondContextOpt =
+          dispatchService.deadlockTrainContext(blocker.trainName());
+      if (firstContextOpt.isEmpty()
+          || secondContextOpt.isEmpty()
+          || !isEligibleDeadlockContext(firstContextOpt.get())
+          || !isEligibleDeadlockContext(secondContextOpt.get())
+          || progressDuration.compareTo(deadlockMinStopDuration) < 0) {
+        continue;
+      }
+      RuntimeDispatchService.DeadlockBlockerInfo reverse = reverseOpt.get();
+      String firstKey = firstTrainInPair(trainKey, blockerKey);
+      boolean currentIsFirst = trainKey.equals(firstKey);
+      String canonicalTrainA = currentIsFirst ? trainName : blocker.trainName();
+      String canonicalTrainB = currentIsFirst ? blocker.trainName() : trainName;
+      RuntimeDispatchService.DeadlockTrainContext canonicalContextA =
+          currentIsFirst ? firstContextOpt.get() : secondContextOpt.get();
+      RuntimeDispatchService.DeadlockTrainContext canonicalContextB =
+          currentIsFirst ? secondContextOpt.get() : firstContextOpt.get();
+      String resourceA = liveCycleResourceKey(blocker);
+      String resourceB = liveCycleResourceKey(reverse);
+      String conflictKey = "live:" + pairKey(trainKey, blockerKey);
+      Set<String> blockerSnapshot =
+          Set.of(
+              trainName + "->" + blocker.trainName() + "@" + resourceA,
+              blocker.trainName() + "->" + trainName + "@" + resourceB);
+      Set<String> blockerResources = new LinkedHashSet<>();
+      blockerResources.add(resourceA);
+      blockerResources.add(resourceB);
+      debugLogger.accept(
+          "SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED trainA="
+              + canonicalTrainA
+              + " trainB="
+              + canonicalTrainB
+              + " resourceA="
+              + resourceA
+              + " resourceB="
+              + resourceB);
+      return Optional.of(
+          new DeadlockObservation(
+              episodeKey(trainKey, blockerKey, conflictKey),
+              canonicalTrainA,
+              canonicalTrainB,
+              conflictKey,
+              false,
+              blockerSnapshot,
+              blockerResources,
+              canonicalContextA,
+              canonicalContextB,
+              "live"));
     }
     return Optional.empty();
   }
@@ -867,9 +1113,34 @@ public final class TrainHealthMonitor {
               blockerSnapshot,
               blockerResources,
               canonicalContextA,
-              canonicalContextB));
+              canonicalContextB,
+              "stored"));
     }
     return Optional.empty();
+  }
+
+  private boolean isLiveCycleBlockerResource(RuntimeDispatchService.DeadlockBlockerInfo blocker) {
+    if (blocker == null || blocker.trainName() == null || blocker.trainName().isBlank()) {
+      return false;
+    }
+    String resource = liveCycleResourceKey(blocker);
+    return resource.startsWith("switcher:") || resource.startsWith("single:");
+  }
+
+  private static String liveCycleResourceKey(RuntimeDispatchService.DeadlockBlockerInfo blocker) {
+    if (blocker == null) {
+      return "-";
+    }
+    if (blocker.conflictKey() != null && !blocker.conflictKey().isBlank()) {
+      return blocker.conflictKey();
+    }
+    String resourceKey = blocker.resourceKey();
+    if (resourceKey == null || resourceKey.isBlank()) {
+      return "-";
+    }
+    return resourceKey.startsWith("CONFLICT:")
+        ? resourceKey.substring("CONFLICT:".length())
+        : resourceKey;
   }
 
   private Optional<RuntimeDispatchService.DeadlockBlockerInfo> findReverseSingleConflictBlocker(
@@ -976,6 +1247,20 @@ public final class TrainHealthMonitor {
             });
   }
 
+  private void closeDeadlockEpisodeAfterDestroy(DeadlockEpisode episode, Instant now) {
+    if (episode == null) {
+      return;
+    }
+    deadlockEpisodes.remove(episode.key);
+    debugLogger.accept(
+        "HEALTH_EPISODE_CLOSED episode="
+            + episode.key
+            + " train="
+            + episode.stableLeader
+            + " reason=destroyed at="
+            + (now == null ? Instant.now() : now));
+  }
+
   /**
    * 判断列车当前是否仍持有“新鲜”的 blocker 快照。
    *
@@ -1003,8 +1288,7 @@ public final class TrainHealthMonitor {
                         .lastProgressTime(),
                     now)
                 .toMillis());
-    Duration required =
-        observation.weak() ? deadlockDestroyThreshold.multipliedBy(2L) : deadlockDestroyThreshold;
+    Duration required = observation.weak() ? Duration.ZERO : deadlockDestroyThreshold;
     traceHealthEvent(
         "DEADLOCK_EPISODE_CREATED",
         "episode-created:" + episode.key,
@@ -1028,8 +1312,12 @@ public final class TrainHealthMonitor {
             + stoppedMs
             + " requiredDestroyThresholdMs="
             + required.toMillis()
+            + " destroyPolicy="
+            + (observation.weak() ? "diagnostic-only" : "confirmed-live-hard-cycle")
             + " destroyEnabled="
             + deadlockDestroyEnabled
+            + " blockerSnapshotSource="
+            + observation.blockerSnapshotSource()
             + " sourceSnapshotAgeMs="
             + snapshotAgeMs(episode.trainA, now));
   }
@@ -1046,6 +1334,10 @@ public final class TrainHealthMonitor {
     if ("NONE".equals(reason)) {
       return;
     }
+    boolean thresholdPassed =
+        progressDuration != null && progressDuration.compareTo(requiredDestroyThreshold(null)) >= 0;
+    String fallbackIneligibleReason =
+        thresholdPassed ? fallbackPrecheckIneligibleReason(reason, snapshot) : "below-threshold";
     traceHealthEvent(
         "DEADLOCK_DESTROY_SKIPPED",
         "deadlock-skip:" + keyOf(trainName) + ":" + reason,
@@ -1066,7 +1358,26 @@ public final class TrainHealthMonitor {
             + " stoppedDurationMs="
             + (progressDuration == null ? 0L : progressDuration.toMillis())
             + " signal="
-            + (current == null ? "-" : current.signal()));
+            + (current == null ? "-" : current.signal())
+            + " skipPhase="
+            + (thresholdPassed ? "THRESHOLD_PASSED" : "EARLY")
+            + " thresholdPassed="
+            + thresholdPassed
+            + " fallbackEvidenceChecked="
+            + false
+            + " fallbackIneligibleReason="
+            + fallbackIneligibleReason);
+  }
+
+  private String fallbackPrecheckIneligibleReason(
+      String skipReason, RuntimeDispatchService.DeadlockBlockerSnapshot snapshot) {
+    if (snapshot == null || snapshot.blockers().isEmpty()) {
+      return "NO_FALLBACK_EVIDENCE";
+    }
+    if (skipReason == null || skipReason.isBlank()) {
+      return "FALLBACK_ELIGIBILITY_NOT_CHECKED";
+    }
+    return "fallback-not-yet-checked:" + skipReason;
   }
 
   private String classifyDeadlockSkip(
@@ -1116,6 +1427,617 @@ public final class TrainHealthMonitor {
       return "UNKNOWN_DIRECTION";
     }
     return "NOT_SAME_SINGLE_CONFLICT";
+  }
+
+  private boolean tryDestroyDeadlockFallback(
+      String trainName,
+      TrainSnapshot current,
+      Duration progressDuration,
+      Set<String> activeKeys,
+      Instant now) {
+    if (trainName == null
+        || trainName.isBlank()
+        || current == null
+        || progressDuration == null
+        || current.signal() != SignalAspect.STOP) {
+      return false;
+    }
+    RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+        recentDeadlockBlockerSnapshot(trainName);
+    boolean destroyed = false;
+    for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
+      if (blocker == null || blocker.trainName().isBlank()) {
+        continue;
+      }
+      String blockerKey = keyOf(blocker.trainName());
+      if (blockerKey == null
+          || blockerKey.equals(keyOf(trainName))
+          || activeKeys == null
+          || !activeKeys.contains(blockerKey)) {
+        continue;
+      }
+      String resource = fallbackResourceKey(blocker);
+      DeadlockFallbackEvidence evidence =
+          rememberDeadlockFallbackEvidence(trainName, blocker.trainName(), resource, now);
+      if (currentTrainIsStuckDestroyTarget(trainName, current, progressDuration)) {
+        if (evaluateDeadlockDestroyFallback(
+            evidence,
+            "STUCK_LEADER_FALLBACK",
+            blocker.trainName(),
+            trainName,
+            resource,
+            progressDuration,
+            now)) {
+          destroyed = true;
+          break;
+        }
+      }
+      if (evaluateDeadlockDestroyFallback(
+          evidence,
+          "PLANNER_WAIT_FOR_EDGE_FALLBACK",
+          trainName,
+          blocker.trainName(),
+          resource,
+          progressDuration,
+          now)) {
+        destroyed = true;
+        break;
+      }
+    }
+    if (!destroyed
+        && tryDestroyFollowerStuckLeaderFallback(
+            trainName, current, progressDuration, activeKeys, now)) {
+      destroyed = true;
+    }
+    if (!destroyed
+        && dispatchService.recentSmartUnlockNoReleaseTimeout(trainName, deadlockDestroyCooldown)) {
+      DeadlockFallbackEvidence evidence =
+          rememberDeadlockFallbackEvidence(trainName, trainName, "unlock-no-release-timeout", now);
+      destroyed =
+          evaluateDeadlockDestroyFallback(
+              evidence,
+              "UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK",
+              trainName,
+              trainName,
+              "unlock-no-release-timeout",
+              progressDuration,
+              now);
+    }
+    return destroyed;
+  }
+
+  /**
+   * blocker snapshot 缺失时使用 admission 侧“follower 被 stuck leader 阻塞”证据做 destroy 兜底。
+   *
+   * <p>这里仍复用 {@link #evaluateDeadlockDestroyFallback} 的所有硬安全门：阈值、无进度、STOP、无 active
+   * unlock、无乘客、无手动控制和 cooldown。
+   */
+  private boolean tryDestroyFollowerStuckLeaderFallback(
+      String trainName,
+      TrainSnapshot current,
+      Duration progressDuration,
+      Set<String> activeKeys,
+      Instant now) {
+    if (trainName == null
+        || trainName.isBlank()
+        || current == null
+        || current.signal() != SignalAspect.STOP
+        || progressDuration == null
+        || progressDuration.compareTo(requiredDestroyThreshold(null)) < 0) {
+      return false;
+    }
+    Optional<RuntimeDispatchService.FollowerStuckLeaderEvidence> evidenceOpt =
+        dispatchService.recentFollowerStuckLeaderEvidence(trainName, deadlockDestroyCooldown);
+    if (evidenceOpt == null || evidenceOpt.isEmpty()) {
+      return false;
+    }
+    RuntimeDispatchService.FollowerStuckLeaderEvidence runtimeEvidence = evidenceOpt.get();
+    if (runtimeEvidence.samples() < 2) {
+      return false;
+    }
+    String leaderKey = keyOf(runtimeEvidence.leaderTrain());
+    if (leaderKey == null || activeKeys == null || !activeKeys.contains(leaderKey)) {
+      return false;
+    }
+    DeadlockFallbackEvidence evidence =
+        rememberDeadlockFallbackEvidence(
+            runtimeEvidence.followerTrain(),
+            runtimeEvidence.leaderTrain(),
+            runtimeEvidence.resource(),
+            now);
+    return evaluateDeadlockDestroyFallback(
+        evidence,
+        "STUCK_LEADER_FALLBACK",
+        runtimeEvidence.followerTrain(),
+        runtimeEvidence.leaderTrain(),
+        runtimeEvidence.resource(),
+        progressDuration,
+        now);
+  }
+
+  private boolean currentTrainIsStuckDestroyTarget(
+      String trainName, TrainSnapshot current, Duration progressDuration) {
+    if (trainName == null
+        || trainName.isBlank()
+        || current == null
+        || current.signal() != SignalAspect.STOP
+        || progressDuration == null
+        || progressDuration.compareTo(requiredDestroyThreshold(null)) < 0
+        || progressDuration.compareTo(deadlockMinStopDuration) < 0) {
+      return false;
+    }
+    RuntimeDispatchService.SmartRecoveryInput input =
+        dispatchService.smartRecoveryInput(trainName, progressDuration, current.signal());
+    return input.movementTokenState() == SignalComputationTrace.TokenState.INVALID
+        || !input.destinationPresent();
+  }
+
+  private DeadlockFallbackEvidence rememberDeadlockFallbackEvidence(
+      String followerTrain, String blockerTrain, String resource, Instant now) {
+    String key =
+        keyOf(followerTrain)
+            + "->"
+            + keyOf(blockerTrain)
+            + "@"
+            + (resource == null || resource.isBlank() ? "-" : resource.trim());
+    return deadlockFallbackEvidence.compute(
+        key,
+        (unused, existing) -> {
+          if (existing == null) {
+            return new DeadlockFallbackEvidence(
+                key, followerTrain.trim(), blockerTrain.trim(), resource, now);
+          }
+          existing.seen(now);
+          return existing;
+        });
+  }
+
+  private boolean evaluateDeadlockDestroyFallback(
+      DeadlockFallbackEvidence evidence,
+      String requestedEvidenceGroup,
+      String followerTrain,
+      String targetTrain,
+      String resource,
+      Duration followerProgressDuration,
+      Instant now) {
+    String targetKey = keyOf(targetTrain);
+    TrainSnapshot targetSnapshot = targetKey == null ? null : snapshots.get(targetKey);
+    Duration targetNoProgress =
+        targetSnapshot == null
+            ? Duration.ZERO
+            : Duration.between(targetSnapshot.lastProgressTime(), now);
+    RuntimeDispatchService.SmartRecoveryInput targetInput =
+        dispatchService.smartRecoveryInput(
+            targetTrain,
+            targetNoProgress,
+            targetSnapshot == null ? SignalAspect.STOP : targetSnapshot.signal());
+    RuntimeDispatchService.DeadlockTrainContext targetContext =
+        dispatchService.deadlockTrainContext(targetTrain).orElse(null);
+    boolean stuckLeaderEvidence =
+        targetInput.movementTokenState() == SignalComputationTrace.TokenState.INVALID
+            || !targetInput.destinationPresent();
+    String evidenceGroup =
+        "UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK".equals(requestedEvidenceGroup)
+            ? requestedEvidenceGroup
+            : stuckLeaderEvidence ? "STUCK_LEADER_FALLBACK" : "PLANNER_WAIT_FOR_EDGE_FALLBACK";
+    boolean repeatedEvidence =
+        evidenceGroup.equals("UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK")
+            || (evidence != null && evidence.samples >= 2);
+    boolean plannerWaitForEdgePresent =
+        evidence != null && evidence.samples >= 2 && !evidence.resource.isBlank();
+    boolean unlockNoReleaseTimeoutPresent =
+        dispatchService.recentSmartUnlockNoReleaseTimeout(targetTrain, deadlockDestroyCooldown)
+            || dispatchService.recentSmartUnlockNoReleaseTimeout(
+                followerTrain, deadlockDestroyCooldown);
+    boolean activeUnlock =
+        dispatchService.hasActiveSmartUnlockReservation(targetTrain)
+            || dispatchService.hasActiveSmartUnlockReservation(followerTrain);
+    boolean recentlyReleased =
+        dispatchService.recentSmartUnlockBlockerRelease(targetTrain, deadlockDestroyCooldown)
+            || dispatchService.recentSmartUnlockBlockerRelease(
+                followerTrain, deadlockDestroyCooldown);
+    RuntimeDispatchService.DeadlockBlockerSnapshot targetBlockerSnapshot =
+        recentDeadlockBlockerSnapshot(targetTrain);
+    boolean blockerSnapshotPresent = !targetBlockerSnapshot.blockers().isEmpty();
+    long cooldownRemainingMs = destroyCooldownRemainingMs(followerTrain, targetTrain, now);
+    int passengerCount = targetContext != null && targetContext.hasPassengers() ? 1 : 0;
+    boolean manualControl = targetContext != null && targetContext.manualHold();
+    String ineligibleReason =
+        fallbackDestroyIneligibleReason(
+            targetSnapshot,
+            targetNoProgress,
+            targetInput,
+            targetContext,
+            repeatedEvidence,
+            activeUnlock,
+            recentlyReleased,
+            cooldownRemainingMs,
+            passengerCount,
+            manualControl,
+            evidenceGroup);
+    boolean eligible = "NONE".equals(ineligibleReason);
+    traceDeadlockDestroyEligibility(
+        targetTrain,
+        followerTrain,
+        targetSnapshot,
+        targetNoProgress,
+        targetInput,
+        activeUnlock,
+        passengerCount,
+        manualControl,
+        blockerSnapshotPresent,
+        plannerWaitForEdgePresent,
+        stuckLeaderEvidence && repeatedEvidence,
+        unlockNoReleaseTimeoutPresent,
+        resource,
+        evidenceGroup,
+        eligible,
+        ineligibleReason,
+        cooldownRemainingMs,
+        now);
+    if (!eligible) {
+      traceFallbackDeadlockDestroySkipped(
+          targetTrain,
+          followerTrain,
+          resource,
+          evidenceGroup,
+          ineligibleReason,
+          followerProgressDuration,
+          now);
+      return false;
+    }
+    RuntimeDispatchService.RuntimeTrainResolution resolution = resolveForDestroyTrace(targetTrain);
+    SmartDispatcherController.DeadlockDestroyReview review =
+        dispatchService.reviewDeadlockDestroyCandidate(
+            "fallback:" + (evidence == null ? keyOf(targetTrain) : evidence.key),
+            followerTrain,
+            targetTrain,
+            targetTrain,
+            resource,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            resolution,
+            false,
+            true,
+            targetNoProgress,
+            requiredDestroyThreshold(null));
+    if (!review.allowed()) {
+      traceFallbackDeadlockDestroySkipped(
+          targetTrain,
+          followerTrain,
+          resource,
+          evidenceGroup,
+          review.reason(),
+          followerProgressDuration,
+          now);
+      return false;
+    }
+    if (!smartDispatcherAllowsHealthMutation(
+        targetTrain,
+        "SMART_DEADLOCK_DESTROY_FALLBACK",
+        DispatchEffectClass.DESTROY_ACTION,
+        "health-deadlock-destroy-fallback")) {
+      traceFallbackDeadlockDestroySkipped(
+          targetTrain,
+          followerTrain,
+          resource,
+          evidenceGroup,
+          "destroy-action-disabled-by-mode",
+          followerProgressDuration,
+          now);
+      return false;
+    }
+    dispatchService.scheduleSurvivorRefreshAfterTrainRemoved(targetTrain, followerTrain);
+    boolean destroyed = dispatchService.destroyTrainByName(targetTrain, "health-deadlock-timeout");
+    traceSmartDeadlockDestroyExecuted(
+        targetTrain,
+        followerTrain,
+        resource,
+        evidenceGroup,
+        destroyed ? evidenceGroup : destroyFailureReason(resolution, false),
+        targetNoProgress,
+        targetInput,
+        passengerCount,
+        now);
+    if (destroyed) {
+      rememberDeadlockDestroy(followerTrain, targetTrain, now);
+    }
+    return destroyed;
+  }
+
+  private String fallbackDestroyIneligibleReason(
+      TrainSnapshot targetSnapshot,
+      Duration targetNoProgress,
+      RuntimeDispatchService.SmartRecoveryInput targetInput,
+      RuntimeDispatchService.DeadlockTrainContext targetContext,
+      boolean repeatedEvidence,
+      boolean activeUnlock,
+      boolean recentlyReleased,
+      long cooldownRemainingMs,
+      int passengerCount,
+      boolean manualControl,
+      String evidenceGroup) {
+    if (!deadlockDestroyEnabled
+        || deadlockDestroyThreshold == null
+        || deadlockDestroyThreshold.isZero()) {
+      return "DESTROY_DISABLED";
+    }
+    if (targetSnapshot == null || targetContext == null) {
+      return "TARGET_STATE_MISSING";
+    }
+    if (targetNoProgress.compareTo(requiredDestroyThreshold(null)) < 0) {
+      return "BELOW_DESTROY_THRESHOLD";
+    }
+    if (targetNoProgress.compareTo(deadlockMinStopDuration) < 0) {
+      return "PROGRESS_RECENT";
+    }
+    if (targetSnapshot.signal() != SignalAspect.STOP) {
+      return "TARGET_NOT_STOPPED";
+    }
+    if (targetContext.signalAspect() != SignalAspect.STOP
+        || targetContext.speedBlocksPerTick() > lowSpeedThresholdBpt
+        || targetContext.dwelling()
+        || targetContext.departureGateHeld()
+        || targetContext.layoverReady()) {
+      return "TARGET_CONTEXT_NOT_ELIGIBLE";
+    }
+    if (activeUnlock) {
+      return "ACTIVE_UNLOCK_RESERVATION";
+    }
+    if (recentlyReleased) {
+      return "RECENT_UNLOCK_RELEASE";
+    }
+    if (passengerCount > 0) {
+      return "PLAYER_PASSENGER_PRESENT";
+    }
+    if (manualControl) {
+      return "MANUAL_CONTROL";
+    }
+    if (cooldownRemainingMs > 0L) {
+      return "DESTROY_COOLDOWN_ACTIVE";
+    }
+    if (!repeatedEvidence) {
+      return "EVIDENCE_NOT_REPEATED";
+    }
+    if (!"UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK".equals(evidenceGroup)
+        && targetInput.movementTokenState() == SignalComputationTrace.TokenState.ACTIVE
+        && targetInput.destinationPresent()) {
+      return "TARGET_AUTHORITY_ACTIVE";
+    }
+    return "NONE";
+  }
+
+  private void traceDeadlockDestroyEligibility(
+      String trainName,
+      String blockerTrain,
+      TrainSnapshot snapshot,
+      Duration noProgressDuration,
+      RuntimeDispatchService.SmartRecoveryInput input,
+      boolean activeUnlock,
+      int passengerCount,
+      boolean manualControl,
+      boolean blockerSnapshotPresent,
+      boolean plannerWaitForEdgePresent,
+      boolean followerStuckLeaderEvidencePresent,
+      boolean unlockNoReleaseTimeoutPresent,
+      String resource,
+      String evidenceGroup,
+      boolean eligible,
+      String ineligibleReason,
+      long cooldownRemainingMs,
+      Instant now) {
+    RuntimeDispatchService.SmartRecoveryInput safeInput =
+        input == null
+            ? RuntimeDispatchService.SmartRecoveryInput.fallback(
+                trainName,
+                noProgressDuration,
+                snapshot == null ? SignalAspect.STOP : snapshot.signal())
+            : input;
+    traceHealthEvent(
+        "SMART_DEADLOCK_DESTROY_ELIGIBILITY",
+        "destroy-eligibility:" + keyOf(trainName) + ":" + evidenceGroup + ":" + eligible,
+        "train="
+            + emptyDash(trainName)
+            + " canonicalTrain="
+            + emptyDash(keyOf(trainName))
+            + " tick="
+            + (now == null ? Instant.now() : now).toEpochMilli()
+            + " destroyEnabled="
+            + deadlockDestroyEnabled
+            + " thresholdSeconds="
+            + requiredDestroyThreshold(null).toSeconds()
+            + " cooldownRemainingMs="
+            + cooldownRemainingMs
+            + " stoppedDurationMs="
+            + (noProgressDuration == null ? 0L : noProgressDuration.toMillis())
+            + " noProgressDurationMs="
+            + (noProgressDuration == null ? 0L : noProgressDuration.toMillis())
+            + " signal="
+            + (snapshot == null ? "-" : snapshot.signal())
+            + " finalPhysicalAspect="
+            + (snapshot == null ? "-" : snapshot.signal())
+            + " movementTokenState="
+            + safeInput.movementTokenState()
+            + " destinationPresent="
+            + safeInput.destinationPresent()
+            + " activeUnlockReservation="
+            + activeUnlock
+            + " playerPassengerCount="
+            + passengerCount
+            + " manualControl="
+            + manualControl
+            + " blockerSnapshotPresent="
+            + blockerSnapshotPresent
+            + " plannerWaitForEdgePresent="
+            + plannerWaitForEdgePresent
+            + " followerStuckLeaderEvidencePresent="
+            + followerStuckLeaderEvidencePresent
+            + " unlockNoReleaseTimeoutPresent="
+            + unlockNoReleaseTimeoutPresent
+            + " blockerTrain="
+            + emptyDash(blockerTrain)
+            + " resource="
+            + emptyDash(resource)
+            + " conflictKey="
+            + emptyDash(resource)
+            + " evidenceGroup="
+            + emptyDash(evidenceGroup)
+            + " eligible="
+            + eligible
+            + " ineligibleReason="
+            + emptyDash(ineligibleReason));
+  }
+
+  private void traceFallbackDeadlockDestroySkipped(
+      String trainName,
+      String blockerTrain,
+      String resource,
+      String evidenceGroup,
+      String reason,
+      Duration progressDuration,
+      Instant now) {
+    boolean thresholdPassed =
+        progressDuration != null && progressDuration.compareTo(requiredDestroyThreshold(null)) >= 0;
+    traceHealthEvent(
+        "DEADLOCK_DESTROY_SKIPPED",
+        "fallback-destroy-skip:" + keyOf(trainName) + ":" + reason,
+        "reason="
+            + emptyDash(reason)
+            + " trainA="
+            + emptyDash(trainName)
+            + " trainB="
+            + emptyDash(blockerTrain)
+            + " blockers=["
+            + emptyDash(resource)
+            + "] lastBlockerSnapshotAgeMs="
+            + snapshotAgeMs(trainName, now)
+            + " conflictKey="
+            + emptyDash(resource)
+            + " stoppedDurationMs="
+            + (progressDuration == null ? 0L : progressDuration.toMillis())
+            + " skipPhase="
+            + (thresholdPassed ? "THRESHOLD_PASSED" : "EARLY")
+            + " thresholdPassed="
+            + thresholdPassed
+            + " fallbackEvidenceChecked=true"
+            + " fallbackIneligibleReason="
+            + emptyDash(reason)
+            + " evidenceGroup="
+            + emptyDash(evidenceGroup));
+  }
+
+  private void traceSmartDeadlockDestroyExecuted(
+      String trainName,
+      String blockerTrain,
+      String resource,
+      String evidenceGroup,
+      String reason,
+      Duration noProgressDuration,
+      RuntimeDispatchService.SmartRecoveryInput input,
+      int passengerCount,
+      Instant now) {
+    RuntimeDispatchService.SmartRecoveryInput safeInput =
+        input == null
+            ? RuntimeDispatchService.SmartRecoveryInput.fallback(
+                trainName, noProgressDuration, SignalAspect.STOP)
+            : input;
+    traceHealthEvent(
+        "SMART_DEADLOCK_DESTROY_EXECUTED",
+        "smart-destroy-executed:" + keyOf(trainName) + ":" + evidenceGroup,
+        "train="
+            + emptyDash(trainName)
+            + " canonicalTrain="
+            + emptyDash(keyOf(trainName))
+            + " reason="
+            + emptyDash(reason)
+            + " evidenceGroup="
+            + emptyDash(evidenceGroup)
+            + " stoppedDurationMs="
+            + (noProgressDuration == null ? 0L : noProgressDuration.toMillis())
+            + " noProgressDurationMs="
+            + (noProgressDuration == null ? 0L : noProgressDuration.toMillis())
+            + " blockerTrain="
+            + emptyDash(blockerTrain)
+            + " resource="
+            + emptyDash(resource)
+            + " movementTokenState="
+            + safeInput.movementTokenState()
+            + " destinationPresent="
+            + safeInput.destinationPresent()
+            + " activeUnlockReservation=false"
+            + " playerPassengerCount="
+            + passengerCount
+            + " carsDestroyed=-1"
+            + " cleanupClaims=deferred"
+            + " cooldownUntil="
+            + (now == null ? Instant.now() : now).plus(deadlockDestroyCooldown).toEpochMilli());
+  }
+
+  private String fallbackResourceKey(RuntimeDispatchService.DeadlockBlockerInfo blocker) {
+    if (blocker == null) {
+      return "-";
+    }
+    String resource = liveCycleResourceKey(blocker);
+    if (resource == null || resource.isBlank() || "-".equals(resource)) {
+      resource = blocker.resourceKey();
+    }
+    return resource == null || resource.isBlank() ? "-" : resource;
+  }
+
+  private long destroyCooldownRemainingMs(String firstTrain, String secondTrain, Instant now) {
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    long globalRemaining =
+        Math.max(
+            0L,
+            Duration.between(effectiveNow, lastDeadlockDestroyAt.plus(deadlockDestroyCooldown))
+                .toMillis());
+    String pairKey = pairKey(safeTrainKey(firstTrain), safeTrainKey(secondTrain));
+    Instant pairLast = deadlockPairLastDestroyAt.get(pairKey);
+    long pairRemaining =
+        pairLast == null
+            ? 0L
+            : Math.max(
+                0L,
+                Duration.between(effectiveNow, pairLast.plus(deadlockDestroyCooldown)).toMillis());
+    return Math.max(globalRemaining, pairRemaining);
+  }
+
+  private void rememberDeadlockDestroy(String firstTrain, String secondTrain, Instant now) {
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    lastDeadlockDestroyAt = effectiveNow;
+    deadlockPairLastDestroyAt.put(
+        pairKey(safeTrainKey(firstTrain), safeTrainKey(secondTrain)), effectiveNow);
+  }
+
+  private static String safeTrainKey(String trainName) {
+    String key = keyOf(trainName);
+    return key == null ? "-" : key;
+  }
+
+  private void pruneDeadlockFallbackEvidence(Set<String> activeKeys, Instant now) {
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    deadlockFallbackEvidence
+        .values()
+        .removeIf(
+            evidence -> {
+              if (evidence == null) {
+                return true;
+              }
+              String followerKey = keyOf(evidence.followerTrain);
+              String blockerKey = keyOf(evidence.blockerTrain);
+              if (activeKeys == null
+                  || followerKey == null
+                  || blockerKey == null
+                  || !activeKeys.contains(followerKey)
+                  || !activeKeys.contains(blockerKey)) {
+                return true;
+              }
+              return effectiveNow.isAfter(evidence.lastSeenAt.plus(deadlockEpisodeGrace));
+            });
   }
 
   private void traceSwitcherOccupantBlockingMany(Set<String> activeTrains, Instant now) {
@@ -1190,11 +2112,11 @@ public final class TrainHealthMonitor {
               + " protectedSwitcherClaimPresent="
               + protectedSwitcherClaimPresent
               + " whyNotDestroyed="
-              + (!switcherKeys.isEmpty() ? "WEAK_ONLY" : "NOT_MUTUAL")
+              + (!switcherKeys.isEmpty() ? "WEAK_DIAGNOSTIC_ONLY" : "NOT_MUTUAL")
               + " whetherEpisodeExists="
               + hasEpisodeFor(blockerTrain)
               + " remainingMsUntilWeakDestroy="
-              + remainingWeakDestroyMs(blockerTrain, now));
+              + -1L);
     }
   }
 
@@ -1204,6 +2126,9 @@ public final class TrainHealthMonitor {
     }
     if (!observation.weak() && observation.conflictKey().startsWith("single:")) {
       return "CONFIRMED_SINGLE";
+    }
+    if (!observation.weak() && "live".equals(observation.blockerSnapshotSource())) {
+      return "LIVE_MUTUAL_BLOCKER_CYCLE";
     }
     if (observation.blockerResources().stream().anyMatch(key -> key.startsWith("switcher:"))) {
       return "SWITCHER_OR_NODE_EDGE_WEAK";
@@ -1304,27 +2229,6 @@ public final class TrainHealthMonitor {
             episode -> key.equals(keyOf(episode.trainA)) || key.equals(keyOf(episode.trainB)));
   }
 
-  private long remainingWeakDestroyMs(String trainName, Instant now) {
-    String key = keyOf(trainName);
-    if (key == null || now == null) {
-      return -1L;
-    }
-    return deadlockEpisodes.values().stream()
-        .filter(
-            episode ->
-                episode.weak
-                    && (key.equals(keyOf(episode.trainA)) || key.equals(keyOf(episode.trainB))))
-        .mapToLong(
-            episode -> {
-              Duration threshold = deadlockDestroyThreshold.multipliedBy(2L);
-              long remaining =
-                  threshold.minus(Duration.between(episode.firstSeenAt, now)).toMillis();
-              return Math.max(0L, remaining);
-            })
-        .min()
-        .orElse(-1L);
-  }
-
   private TrainSnapshot emptySnapshot(Instant now) {
     Instant effectiveNow = now == null ? Instant.now() : now;
     return new TrainSnapshot(
@@ -1348,6 +2252,368 @@ public final class TrainHealthMonitor {
     debugLogger.accept(event + ": " + message);
   }
 
+  private SmartDispatcherMode smartDispatcherMode() {
+    SmartDispatcherMode mode = dispatchService.smartDispatcherMode();
+    return mode == null ? SmartDispatcherMode.OBSERVE_ONLY : mode;
+  }
+
+  private void traceSmartDispatcherMode(String trainName, SmartDispatcherMode mode, String source) {
+    debugLogger.accept(
+        "SMART_DISPATCH_MODE train=" + trainName + " mode=" + mode + " source=" + source);
+  }
+
+  private void traceSmartDispatcherActionSuppressed(
+      String trainName,
+      SmartDispatcherMode mode,
+      String action,
+      DispatchEffectClass effectClass,
+      String reason) {
+    debugLogger.accept(
+        "SMART_DISPATCH_ACTION_OBSERVED train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass);
+    debugLogger.accept(
+        "SMART_DISPATCH_EFFECT_CLASS train="
+            + trainName
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass);
+    debugLogger.accept(
+        "SMART_DISPATCH_ACTION_SUPPRESSED_BY_MODE train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass
+            + " reason="
+            + (reason == null || reason.isBlank() ? "mode-gate" : reason));
+    debugLogger.accept(
+        "SMART_ACTION_SUPPRESSED_BY_MODE train="
+            + trainName
+            + " mode="
+            + mode
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass
+            + " reason="
+            + (reason == null || reason.isBlank() ? "mode-gate" : reason));
+  }
+
+  private boolean smartDispatcherAllowsHealthMutation(
+      String trainName, String action, DispatchEffectClass effectClass, String source) {
+    SmartDispatcherMode mode = smartDispatcherMode();
+    traceSmartDispatcherMode(trainName, mode, source);
+    if (action == null || !action.startsWith("SMART_")) {
+      traceLegacyRecoveryDeprecated(trainName, action, source, effectClass);
+    }
+    SmartDispatcherModeGate.EffectPermissions permissions =
+        SmartDispatcherModeGate.permissions(mode, effectClass);
+    boolean allowed =
+        switch (effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass) {
+          case SIGNAL_ADVISORY, SIGNAL_CONSTRAINT -> permissions.canChangeAspect()
+              || permissions.canChangeTargetSpeed();
+          case OCCUPANCY_MUTATION -> permissions.canMutateOccupancy();
+          case DESTROY_ACTION -> permissions.canDestroy();
+          default -> false;
+        };
+    if (allowed) {
+      debugLogger.accept(
+          "SMART_ACTION_ALLOWED_BY_EFFECT_GATE train="
+              + trainName
+              + " mode="
+              + mode
+              + " action="
+              + action
+              + " effectClass="
+              + effectClass
+              + " source="
+              + source);
+      debugLogger.accept(
+          "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
+              + trainName
+              + " recoveryDecision="
+              + action
+              + " effectClass="
+              + effectClass
+              + " source="
+              + source
+              + " mode="
+              + mode);
+      debugLogger.accept(
+          "SMART_RECOVERY_PATH_SELECTED train="
+              + trainName
+              + " action="
+              + action
+              + " effectClass="
+              + effectClass
+              + " source="
+              + source);
+      return true;
+    }
+    if (mode == SmartDispatcherMode.OFF) {
+      debugLogger.accept(
+          "SMART_DISPATCH_DISABLED train=" + trainName + " source=" + source + " mode=" + mode);
+    }
+    debugLogger.accept(
+        "LEGACY_RECOVERY_SKIPPED_FOR_SMART_CONTROL train="
+            + trainName
+            + " action="
+            + action
+            + " mode="
+            + mode
+            + " effectClass="
+            + effectClass
+            + " source="
+            + source);
+    traceSmartDispatcherActionSuppressed(
+        trainName,
+        mode,
+        action,
+        effectClass,
+        mode == SmartDispatcherMode.OFF ? "smart-dispatcher-off" : "observe-only-no-side-effects");
+    debugLogger.accept(
+        "SMART_RECOVERY_SUPPRESSED_BY_MODE train="
+            + trainName
+            + " mode="
+            + mode
+            + " recoveryDecision="
+            + action
+            + " effectClass="
+            + effectClass
+            + " source="
+            + source);
+    return false;
+  }
+
+  private void traceLegacyRecoveryDeprecated(
+      String trainName, String action, String source, DispatchEffectClass effectClass) {
+    debugLogger.accept(
+        "LEGACY_RECOVERY_DEPRECATED train="
+            + trainName
+            + " action="
+            + action
+            + " effectClass="
+            + effectClass
+            + " source="
+            + source
+            + " replacement=smart-traffic-control");
+  }
+
+  private void traceSmartRecoveryDecision(String trainName, String event, String reason) {
+    debugLogger.accept(
+        event
+            + " train="
+            + trainName
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason));
+    debugLogger.accept(
+        "SMART_RECOVERY_DECISION train="
+            + trainName
+            + " decision="
+            + event
+            + " reason="
+            + (reason == null || reason.isBlank() ? "-" : reason));
+  }
+
+  private void traceRecoveryCandidateSelected(String trainName, String action, String conflictKey) {
+    debugLogger.accept(
+        "SMART_RECOVERY_CANDIDATE_SELECTED train="
+            + trainName
+            + " action="
+            + (action == null || action.isBlank() ? "-" : action)
+            + " conflictKey="
+            + (conflictKey == null || conflictKey.isBlank() ? "-" : conflictKey));
+  }
+
+  private RuntimeDispatchService.SmartRecoveryActionResult safeSmartRecoveryResult(
+      RuntimeDispatchService.SmartRecoveryActionResult result) {
+    return result != null
+        ? result
+        : RuntimeDispatchService.SmartRecoveryActionResult.skipped("smart-action-not-available");
+  }
+
+  private boolean shouldHoldForSafeCandidate(
+      String trainName,
+      String conflictKey,
+      RuntimeDispatchService.SmartRecoveryActionResult result,
+      boolean destroyContext) {
+    if (result == null || !result.candidate()) {
+      return false;
+    }
+    if (!result.applied()) {
+      return true;
+    }
+    RuntimeDispatchService.SmartRecoveryEffectiveness effectiveness = result.effectiveness();
+    String resolvedConflict = safeConflictKey(conflictKey, effectiveness);
+    String key = safeCandidateFailureKey(trainName, result.decision(), resolvedConflict);
+    if (effectiveness.effective()) {
+      safeCandidateFailureCounts.remove(key);
+      if (destroyContext) {
+        debugLogger.accept(
+            "SMART_DESTROY_NOT_REACHED_SAFE_UNLOCK_EFFECTIVE train="
+                + trainName
+                + " action="
+                + result.decision()
+                + " conflictKey="
+                + resolvedConflict);
+      }
+      return true;
+    }
+    int count =
+        safeCandidateFailureCounts.merge(
+            key,
+            1,
+            (oldValue, increment) ->
+                Math.min(SAFE_CANDIDATE_FAILURE_THRESHOLD, oldValue + increment));
+    debugLogger.accept(
+        "SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT train="
+            + trainName
+            + " action="
+            + result.decision()
+            + " conflictKey="
+            + resolvedConflict
+            + " count="
+            + count);
+    if (destroyContext) {
+      debugLogger.accept(
+          "SMART_DESTROY_NOT_REACHED_SAFE_UNLOCK_INEFFECTIVE_CONTINUING train="
+              + trainName
+              + " action="
+              + result.decision()
+              + " conflictKey="
+              + resolvedConflict
+              + " count="
+              + count);
+    }
+    if (count < SAFE_CANDIDATE_FAILURE_THRESHOLD) {
+      return true;
+    }
+    if (destroyContext) {
+      debugLogger.accept(
+          "SMART_DESTROY_SAFE_ALTERNATIVE_BYPASSED_AFTER_INEFFECTIVE train="
+              + trainName
+              + " conflictKey="
+              + resolvedConflict
+              + " failedAction="
+              + result.decision()
+              + " count="
+              + count);
+    }
+    return false;
+  }
+
+  private static String safeConflictKey(
+      String conflictKey, RuntimeDispatchService.SmartRecoveryEffectiveness effectiveness) {
+    if (conflictKey != null && !conflictKey.isBlank() && !"-".equals(conflictKey)) {
+      return conflictKey.trim();
+    }
+    if (effectiveness != null
+        && effectiveness.conflictKey() != null
+        && !effectiveness.conflictKey().isBlank()) {
+      return effectiveness.conflictKey();
+    }
+    return "-";
+  }
+
+  private static String safeCandidateFailureKey(
+      String trainName, String action, String conflictKey) {
+    String trainKey = keyOf(trainName);
+    return (trainKey == null ? "-" : trainKey)
+        + "|"
+        + (action == null || action.isBlank() ? "-" : action.trim())
+        + "|"
+        + (conflictKey == null || conflictKey.isBlank() ? "-" : conflictKey.trim());
+  }
+
+  private RuntimeDispatchService.SmartRecoveryInput traceSmartProgressStuckBridge(
+      String trainName, SignalAspect currentSignal, Duration progressDuration, String source) {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        dispatchService.smartRecoveryInput(trainName, progressDuration, currentSignal);
+    debugLogger.accept(
+        "SMART_STUCK_TRAIN_DETECTED train="
+            + input.train()
+            + " stuckDurationSeconds="
+            + input.stuckDurationSeconds()
+            + " signal="
+            + input.signal()
+            + " movementInhibited="
+            + input.movementInhibited()
+            + " movementTokenState="
+            + input.movementTokenState()
+            + " destinationPresent="
+            + input.destinationPresent()
+            + " blockerCount="
+            + input.blockerCount()
+            + " hardBlockers="
+            + input.hardBlockers()
+            + " currentNode="
+            + nodeText(input.currentNode())
+            + " nextNode="
+            + nodeText(input.nextNode())
+            + " routeId="
+            + input.routeId()
+            + " currentIndex="
+            + input.currentIndex()
+            + " lastPassedGraphNode="
+            + input.lastPassedGraphNode()
+            + " insideSingleRegion="
+            + input.insideSingleRegion()
+            + " insideSwitcherRegion="
+            + input.insideSwitcherRegion()
+            + " source="
+            + source);
+    debugLogger.accept(
+        "SMART_RECOVERY_INPUT train="
+            + input.train()
+            + " stuckDurationSeconds="
+            + input.stuckDurationSeconds()
+            + " signal="
+            + input.signal()
+            + " movementInhibited="
+            + input.movementInhibited()
+            + " movementTokenState="
+            + input.movementTokenState()
+            + " destinationPresent="
+            + input.destinationPresent()
+            + " blockerCount="
+            + input.blockerCount()
+            + " hardBlockers="
+            + input.hardBlockers()
+            + " currentNode="
+            + nodeText(input.currentNode())
+            + " nextNode="
+            + nodeText(input.nextNode())
+            + " routeId="
+            + input.routeId()
+            + " currentIndex="
+            + input.currentIndex()
+            + " lastPassedGraphNode="
+            + input.lastPassedGraphNode()
+            + " insideSingleRegion="
+            + input.insideSingleRegion()
+            + " insideSwitcherRegion="
+            + input.insideSwitcherRegion()
+            + " recoveryDecision=pending"
+            + " primaryReason="
+            + input.primaryReason()
+            + " source="
+            + source);
+    return input;
+  }
+
+  private static String nodeText(NodeId node) {
+    return node == null ? "-" : node.value();
+  }
+
   /**
    * 互卡解锁：优先轻量恢复，超过销毁阈值且多轮恢复无效时销毁 pair leader。
    *
@@ -1367,8 +2633,28 @@ public final class TrainHealthMonitor {
     if (!canAttempt(now, pairLast) || !canAttempt(now, recovery.lastDeadlockAttemptAt)) {
       return false;
     }
+    SmartDispatcherMode mode = smartDispatcherMode();
+    traceSmartDispatcherMode(episode.trainA, mode, "health-deadlock");
+    if (!smartDispatcherAllowsHealthMutation(
+        episode.trainA,
+        "DEADLOCK_RECOVERY",
+        DispatchEffectClass.SIGNAL_CONSTRAINT,
+        "health-deadlock")) {
+      traceDeadlockDestroySkipped(
+          episode, observation, progressDuration, now, "smart-dispatcher-" + mode.name());
+      return false;
+    }
+    boolean liveBlockerCycle = "live".equals(observation.blockerSnapshotSource());
+    if (liveBlockerCycle) {
+      debugLogger.accept(
+          "SMART_RECOVERY_EVALUATION_ENTER train="
+              + episode.stableLeader
+              + " reason=live-blocker-cycle blockerSnapshotSource="
+              + observation.blockerSnapshotSource());
+    }
 
-    if (episode.refreshCount <= 0) {
+    if (!liveBlockerCycle && episode.refreshCount <= 0) {
+      traceSmartRecoveryDecision(episode.trainA, "SMART_HOLD_AND_BLOCK_FOLLOWERS", "refresh-pair");
       debugLogger.accept(
           "TrainHealthMonitor 解锁互卡(stage=refresh-pair): train="
               + episode.trainA
@@ -1378,6 +2664,13 @@ public final class TrainHealthMonitor {
               + episode.conflictKey);
       dispatchService.refreshSignalByName(episode.trainA);
       dispatchService.refreshSignalByName(episode.trainB);
+      debugLogger.accept(
+          "SMART_FOLLOWERS_BLOCKED_BEHIND_STUCK_TRAIN train="
+              + episode.trainA
+              + " blocker="
+              + episode.trainB
+              + " conflict="
+              + episode.conflictKey);
       episode.refreshCount++;
       recovery.lastDeadlockAttemptAt = now;
       recovery.deadlockStage = Math.max(recovery.deadlockStage, 1);
@@ -1385,7 +2678,8 @@ public final class TrainHealthMonitor {
       return false;
     }
 
-    if (episode.reissueCount <= 0) {
+    if (!liveBlockerCycle && episode.reissueCount <= 0) {
+      traceSmartRecoveryDecision(episode.trainA, "LEGACY_RECOVERY_DEPRECATED", "hard-stop-pair");
       debugLogger.accept(
           "TrainHealthMonitor 解锁互卡(stage=hard-stop-pair): pair="
               + episode.trainA
@@ -1410,25 +2704,212 @@ public final class TrainHealthMonitor {
             episode.trainB,
             episode.conflictKey,
             remainingMsUntilDestroy);
+    boolean drainabilityBlocksDestroy =
+        drainability.map(RuntimeDispatchService.DeadlockDrainability::drainable).orElse(false);
     if (drainability.isPresent()) {
+      traceSmartRecoveryDecision(
+          episode.stableLeader, "SMART_DRAIN_UNLOCK_CANDIDATE", drainability.get().reason());
       traceDeadlockDrainability(episode, drainability.get(), now);
       if (drainability.get().drainable()) {
-        return false;
+        traceSmartRecoveryDecision(
+            episode.stableLeader, "SMART_DRAIN_UNLOCK_APPLIED", drainability.get().reason());
+        traceRecoveryCandidateSelected(
+            episode.stableLeader, "SMART_DRAIN_UNLOCK", episode.conflictKey);
+        RuntimeDispatchService.SmartRecoveryActionResult drainabilityOnly =
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_DRAIN_UNLOCK",
+                drainability.get().reason(),
+                DispatchEffectClass.SIGNAL_CONSTRAINT,
+                new RuntimeDispatchService.SmartRecoveryEffectiveness(
+                    "SMART_DRAIN_UNLOCK",
+                    episode.conflictKey,
+                    false,
+                    SignalAspect.STOP,
+                    false,
+                    false,
+                    SignalComputationTrace.TokenState.NONE,
+                    SignalComputationTrace.TokenState.NONE,
+                    false,
+                    false,
+                    false,
+                    true,
+                    "drainability-candidate-only"));
+        if (shouldHoldForSafeCandidate(
+            episode.stableLeader, episode.conflictKey, drainabilityOnly, true)) {
+          return false;
+        }
+        drainabilityBlocksDestroy = false;
       }
     }
 
+    RuntimeDispatchService.SmartRecoveryInput smartInput =
+        dispatchService.smartRecoveryInput(
+            episode.stableLeader, Duration.between(episode.firstSeenAt, now), SignalAspect.STOP);
+    RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
+        safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(smartInput));
+    if (selfRetainRelease.candidate()) {
+      traceRecoveryCandidateSelected(
+          episode.stableLeader, selfRetainRelease.decision(), episode.conflictKey);
+      debugLogger.accept(
+          "SMART_DESTROY_NOT_REACHED_SAFE_UNLOCK_AVAILABLE train="
+              + episode.stableLeader
+              + " recoveryDecision="
+              + selfRetainRelease.decision()
+              + " conflict="
+              + episode.conflictKey);
+      if (shouldHoldForSafeCandidate(
+          episode.stableLeader, episode.conflictKey, selfRetainRelease, true)) {
+        traceDeadlockDestroySkipped(
+            episode, observation, progressDuration, now, "self-owned-stale-retain-release");
+        recovery.lastDeadlockAttemptAt = now;
+        deadlockPairLastAttemptAt.put(pairKey, now);
+        return selfRetainRelease.applied() && selfRetainRelease.effectiveness().effective();
+      }
+    }
+    RuntimeDispatchService.SmartRecoveryActionResult smartDrainUnlock =
+        safeSmartRecoveryResult(dispatchService.applySmartDrainUnlock(smartInput));
+    if (smartDrainUnlock.candidate()) {
+      traceRecoveryCandidateSelected(
+          episode.stableLeader, smartDrainUnlock.decision(), episode.conflictKey);
+      debugLogger.accept(
+          "SMART_DESTROY_NOT_REACHED_SAFE_UNLOCK_AVAILABLE train="
+              + episode.stableLeader
+              + " recoveryDecision="
+              + smartDrainUnlock.decision()
+              + " conflict="
+              + episode.conflictKey);
+      if (shouldHoldForSafeCandidate(
+          episode.stableLeader, episode.conflictKey, smartDrainUnlock, true)) {
+        traceDeadlockDestroySkipped(episode, observation, progressDuration, now, "drain-unlock");
+        recovery.lastDeadlockAttemptAt = now;
+        deadlockPairLastAttemptAt.put(pairKey, now);
+        return smartDrainUnlock.applied() && smartDrainUnlock.effectiveness().effective();
+      }
+    }
+    RuntimeDispatchService.SmartRecoveryActionResult forwardUnlock =
+        safeSmartRecoveryResult(dispatchService.applySmartForwardUnlock(smartInput));
+    boolean forwardUnlockBlocksDestroy = false;
+    if (forwardUnlock.candidate()) {
+      traceRecoveryCandidateSelected(
+          episode.stableLeader, forwardUnlock.decision(), episode.conflictKey);
+      debugLogger.accept(
+          "SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE train="
+              + episode.stableLeader
+              + " reason=forward-unlock-candidate"
+              + " conflict="
+              + episode.conflictKey);
+      if (shouldHoldForSafeCandidate(
+          episode.stableLeader, episode.conflictKey, forwardUnlock, true)) {
+        forwardUnlockBlocksDestroy = true;
+        traceDeadlockDestroySkipped(
+            episode, observation, progressDuration, now, "forward-unlock-candidate");
+        recovery.lastDeadlockAttemptAt = now;
+        deadlockPairLastAttemptAt.put(pairKey, now);
+        return forwardUnlock.applied() && forwardUnlock.effectiveness().effective();
+      }
+    }
+    debugLogger.accept(
+        "SMART_RECOVERY_NO_SAFE_CANDIDATE train="
+            + episode.stableLeader
+            + " reason=no-effective-self-retain-drain-forward"
+            + " conflictKey="
+            + episode.conflictKey);
+
     if (!shouldDestroyDeadlockLeader(episode, progressDuration, now)) {
-      traceDeadlockDestroySkipped(
-          episode,
-          observation,
-          progressDuration,
-          now,
-          destroySkipReason(episode, progressDuration, now));
+      String skipReason = destroySkipReason(episode, progressDuration, now);
+      if (episode.weak) {
+        RuntimeDispatchService.RuntimeTrainResolution weakResolution =
+            resolveForDestroyTrace(episode.stableLeader);
+        SmartDispatcherController.DeadlockDestroyReview weakReview =
+            dispatchService.reviewDeadlockDestroyCandidate(
+                episode.key,
+                episode.trainA,
+                episode.trainB,
+                episode.stableLeader,
+                episode.conflictKey,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                weakResolution,
+                false,
+                true,
+                Duration.between(episode.firstSeenAt, now),
+                Duration.ZERO);
+        skipReason = weakReview.reason();
+      }
+      debugLogger.accept(
+          "SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE train="
+              + episode.stableLeader
+              + " reason="
+              + skipReason
+              + " conflict="
+              + episode.conflictKey);
+      traceDeadlockDestroySkipped(episode, observation, progressDuration, now, skipReason);
       return false;
     }
-    traceDeadlockDestroyCandidateSelected(episode, observation, progressDuration, now);
     RuntimeDispatchService.RuntimeTrainResolution resolution =
         resolveForDestroyTrace(episode.stableLeader);
+    SmartDispatcherController.DeadlockDestroyReview destroyReview =
+        dispatchService.reviewDeadlockDestroyCandidate(
+            episode.key,
+            episode.trainA,
+            episode.trainB,
+            episode.stableLeader,
+            episode.conflictKey,
+            episode.weak,
+            allBlockersLiveHard(episode),
+            drainabilityBlocksDestroy,
+            false,
+            forwardUnlockBlocksDestroy,
+            false,
+            resolution,
+            false,
+            true,
+            Duration.between(episode.firstSeenAt, now),
+            requiredDestroyThreshold(episode));
+    if (!destroyReview.allowed()) {
+      debugLogger.accept(
+          "SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE train="
+              + episode.stableLeader
+              + " reason="
+              + destroyReview.reason()
+              + " conflict="
+              + episode.conflictKey);
+      traceDeadlockDestroySkipped(
+          episode, observation, progressDuration, now, destroyReview.reason());
+      return false;
+    }
+    traceSmartRecoveryDecision(
+        episode.stableLeader, "SMART_DESTROY_CANDIDATE", destroyReview.reason());
+    if (!smartDispatcherAllowsHealthMutation(
+        episode.stableLeader,
+        "SMART_DESTROY_CANDIDATE",
+        DispatchEffectClass.DESTROY_ACTION,
+        "health-deadlock-destroy")) {
+      debugLogger.accept(
+          "SMART_DESTROY_SUPPRESSED_BY_MODE train="
+              + episode.stableLeader
+              + " mode="
+              + smartDispatcherMode()
+              + " effectClass="
+              + DispatchEffectClass.DESTROY_ACTION);
+      traceDeadlockDestroySkipped(
+          episode, observation, progressDuration, now, "destroy-action-disabled-by-mode");
+      return false;
+    }
+    debugLogger.accept(
+        "SMART_DESTROY_CANDIDATE train="
+            + episode.stableLeader
+            + " conflict="
+            + episode.conflictKey
+            + " episode="
+            + episode.key);
+    traceDeadlockDestroyCandidateSelected(episode, observation, progressDuration, now);
     traceDeadlockDestroyAttempted(episode, observation, progressDuration, now, resolution);
     debugLogger.accept(
         "TrainHealthMonitor 解锁互卡(stage=destroy-leader): train="
@@ -1448,15 +2929,46 @@ public final class TrainHealthMonitor {
         episode.stableLeader, episode.survivor());
     boolean destroyed =
         dispatchService.destroyTrainByName(episode.stableLeader, "health-deadlock-timeout");
+    debugLogger.accept(
+        "SMART_DESTROY_EXECUTED train="
+            + episode.stableLeader
+            + " destroyed="
+            + destroyed
+            + " conflict="
+            + episode.conflictKey);
+    debugLogger.accept(
+        "SMART_DESTROY_VERIFY train="
+            + episode.stableLeader
+            + " destroyed="
+            + destroyed
+            + " survivor="
+            + episode.survivor());
     traceDeadlockDestroyResult(
         episode, resolution, destroyed, destroyFailureReason(resolution, destroyed), now);
+    RuntimeDispatchService.SmartRecoveryInput destroyInput =
+        dispatchService.smartRecoveryInput(
+            episode.stableLeader, progressDuration, SignalAspect.STOP);
+    traceSmartDeadlockDestroyExecuted(
+        episode.stableLeader,
+        episode.survivor(),
+        episode.conflictKey,
+        episodeType(observation),
+        destroyed ? "CONFIRMED_DEADLOCK_TIMEOUT" : destroyFailureReason(resolution, false),
+        progressDuration,
+        destroyInput,
+        dispatchService
+            .deadlockTrainContext(episode.stableLeader)
+            .map(context -> context.hasPassengers() ? 1 : 0)
+            .orElse(0),
+        now);
     if (destroyed) {
       episode.destroyAttempted = true;
+      closeDeadlockEpisodeAfterDestroy(episode, now);
     }
     recovery.lastDeadlockAttemptAt = now;
     recovery.deadlockStage = 3;
     deadlockPairLastAttemptAt.put(pairKey, now);
-    deadlockPairLastDestroyAt.put(pairKey, now);
+    rememberDeadlockDestroy(episode.trainA, episode.trainB, now);
     return destroyed;
   }
 
@@ -1608,6 +3120,7 @@ public final class TrainHealthMonitor {
             requiredDestroyThreshold(episode)
                 .minus(Duration.between(episode.firstSeenAt, now))
                 .toMillis());
+    boolean thresholdPassed = remainingMs <= 0L;
     traceHealthEvent(
         "DEADLOCK_DESTROY_SKIPPED",
         "destroy-skip:" + episode.key + ":" + reason,
@@ -1623,14 +3136,21 @@ public final class TrainHealthMonitor {
             + episode.lastBlockerSnapshot
             + " lastBlockerSnapshotAgeMs="
             + snapshotAgeMs(episode.trainA, now)
-            + " remainingMsUntilWeakDestroy="
-            + (episode.weak ? remainingMs : -1L)
+            + " remainingMsUntilDestroyCandidate="
+            + (episode.weak ? -1L : remainingMs)
             + " conflictKey="
             + episode.conflictKey
             + " directions="
             + directionsSummary(observation)
             + " stoppedDurationMs="
-            + (progressDuration == null ? 0L : progressDuration.toMillis()));
+            + (progressDuration == null ? 0L : progressDuration.toMillis())
+            + " skipPhase="
+            + (thresholdPassed ? "THRESHOLD_PASSED" : "EARLY")
+            + " thresholdPassed="
+            + thresholdPassed
+            + " fallbackEvidenceChecked=false"
+            + " fallbackIneligibleReason="
+            + emptyDash(reason));
   }
 
   private RuntimeDispatchService.RuntimeTrainResolution resolveForDestroyTrace(String trainName) {
@@ -1666,19 +3186,44 @@ public final class TrainHealthMonitor {
     if (episode.destroyAttempted) {
       return "DESTROY_ALREADY_ATTEMPTED";
     }
+    if (episode.weak) {
+      return "WEAK_EPISODE_DIAGNOSTIC_ONLY";
+    }
     Duration episodeAge = Duration.between(episode.firstSeenAt, now);
     Duration requiredThreshold = requiredDestroyThreshold(episode);
     if (episodeAge.compareTo(requiredThreshold) < 0) {
-      return episode.weak ? "WEAK_EPISODE_BELOW_THRESHOLD" : "BELOW_DESTROY_THRESHOLD";
+      return "BELOW_DESTROY_THRESHOLD";
     }
     Duration requiredStop = minPositive(progressStopGraceThreshold, requiredThreshold);
     if (progressDuration == null || progressDuration.compareTo(requiredStop) < 0) {
       return "NOT_STATIONARY";
     }
+    if (dispatchService.hasActiveSmartUnlockReservation(episode.stableLeader)
+        || dispatchService.hasActiveSmartUnlockReservation(episode.trainA)
+        || dispatchService.hasActiveSmartUnlockReservation(episode.trainB)) {
+      return "ACTIVE_UNLOCK_RESERVATION";
+    }
+    RuntimeDispatchService.DeadlockTrainContext targetContext =
+        dispatchService.deadlockTrainContext(episode.stableLeader).orElse(null);
+    if (targetContext == null) {
+      return "TARGET_STATE_MISSING";
+    }
+    if (!isEligibleDeadlockContext(targetContext)) {
+      return "TARGET_CONTEXT_NOT_ELIGIBLE";
+    }
+    if (targetContext.hasPassengers()) {
+      return "PLAYER_PASSENGER_PRESENT";
+    }
+    if (targetContext.manualHold()) {
+      return "MANUAL_CONTROL";
+    }
     String pairKey = pairKey(keyOf(episode.trainA), keyOf(episode.trainB));
     Instant lastDestroy = deadlockPairLastDestroyAt.get(pairKey);
     if (lastDestroy != null && now.isBefore(lastDestroy.plus(deadlockDestroyCooldown))) {
-      return "RECENTLY_SEEN_MOVING";
+      return "DESTROY_COOLDOWN_ACTIVE";
+    }
+    if (now.isBefore(lastDeadlockDestroyAt.plus(deadlockDestroyCooldown))) {
+      return "DESTROY_COOLDOWN_ACTIVE";
     }
     return "NONE";
   }
@@ -1687,9 +3232,13 @@ public final class TrainHealthMonitor {
     if (deadlockDestroyThreshold == null) {
       return Duration.ZERO;
     }
-    return episode != null && episode.weak
-        ? deadlockDestroyThreshold.multipliedBy(2L)
-        : deadlockDestroyThreshold;
+    return episode != null && episode.weak ? Duration.ZERO : deadlockDestroyThreshold;
+  }
+
+  private static boolean allBlockersLiveHard(DeadlockEpisode episode) {
+    return episode != null
+        && !episode.weak
+        && (episode.conflictKey.startsWith("single:") || episode.conflictKey.startsWith("live:"));
   }
 
   private long remainingMsUntilDestroy(DeadlockEpisode episode, Instant now) {
@@ -1724,6 +3273,7 @@ public final class TrainHealthMonitor {
     if (!deadlockDestroyEnabled
         || episode == null
         || episode.destroyAttempted
+        || episode.weak
         || deadlockDestroyThreshold == null
         || deadlockDestroyThreshold.isZero()
         || now == null) {
@@ -1738,9 +3288,25 @@ public final class TrainHealthMonitor {
     if (progressDuration == null || progressDuration.compareTo(requiredStop) < 0) {
       return false;
     }
+    if (dispatchService.hasActiveSmartUnlockReservation(episode.stableLeader)
+        || dispatchService.hasActiveSmartUnlockReservation(episode.trainA)
+        || dispatchService.hasActiveSmartUnlockReservation(episode.trainB)) {
+      return false;
+    }
+    RuntimeDispatchService.DeadlockTrainContext targetContext =
+        dispatchService.deadlockTrainContext(episode.stableLeader).orElse(null);
+    if (targetContext == null
+        || !isEligibleDeadlockContext(targetContext)
+        || targetContext.hasPassengers()
+        || targetContext.manualHold()) {
+      return false;
+    }
     String pairKey = pairKey(keyOf(episode.trainA), keyOf(episode.trainB));
     Instant lastDestroy = deadlockPairLastDestroyAt.get(pairKey);
-    return lastDestroy == null || !now.isBefore(lastDestroy.plus(deadlockDestroyCooldown));
+    boolean pairReady =
+        lastDestroy == null || !now.isBefore(lastDestroy.plus(deadlockDestroyCooldown));
+    boolean globalReady = !now.isBefore(lastDeadlockDestroyAt.plus(deadlockDestroyCooldown));
+    return pairReady && globalReady;
   }
 
   private static Duration minPositive(Duration first, Duration second) {
@@ -1830,14 +3396,15 @@ public final class TrainHealthMonitor {
     dispatchService.refreshSignalByName(trainName);
     dispatchService.refreshSignalByName(blockerTrain);
 
-    boolean fixed = false;
-    fixed = dispatchService.reapplyHardStopByName(trainName, "manual-mutual-deadlock") || fixed;
-    fixed = dispatchService.reapplyHardStopByName(blockerTrain, "manual-mutual-deadlock") || fixed;
+    boolean applied = false;
+    applied = dispatchService.reapplyHardStopByName(trainName, "manual-mutual-deadlock") || applied;
+    applied =
+        dispatchService.reapplyHardStopByName(blockerTrain, "manual-mutual-deadlock") || applied;
 
     recovery.lastDeadlockAttemptAt = now;
-    recovery.deadlockStage = fixed ? 3 : 0;
+    recovery.deadlockStage = applied ? 3 : 0;
     deadlockPairLastAttemptAt.put(pairKey, now);
-    return fixed;
+    return false;
   }
 
   private static String pairKey(String first, String second) {

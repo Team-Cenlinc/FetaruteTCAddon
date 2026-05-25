@@ -20,5 +20,8 @@ public enum AuthorizationPurpose {
   RUNTIME_MOVE,
 
   /** 已证明列车在冲突区内，目标是清空同一冲突区出口。 */
-  CONFLICT_CLEARING
+  CONFLICT_CLEARING,
+
+  /** Smart Dispatcher minimal forward unlock 的短窗口 reservation。 */
+  UNLOCK_RESERVATION
 }

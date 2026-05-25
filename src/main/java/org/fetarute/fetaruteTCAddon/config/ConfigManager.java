@@ -1,12 +1,17 @@
 package org.fetarute.fetaruteTCAddon.config;
 
+import java.io.File;
+import java.io.InputStream;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Properties;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
 
 /**
  * 负责读取并缓存 config.yml，统一暴露调试开关、调度图相关配置与存储后端配置。
@@ -15,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 24;
+  private static final int EXPECTED_CONFIG_VERSION = 26;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -67,6 +72,20 @@ public final class ConfigManager {
   private static final int DEFAULT_STALE_QUEUE_ENTRY_TTL_SECONDS = 30;
   private static final int DEFAULT_FOLLOWING_MIN_CLEAR_BLOCKS = 2;
   private static final int DEFAULT_FOLLOWING_STOP_MARGIN_BLOCKS = 4;
+  private static final SmartDispatcherMode DEFAULT_SMART_DISPATCHER_MODE =
+      SmartDispatcherMode.OBSERVE_ONLY;
+  private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ENABLED = true;
+  private static final SmartDispatcherPlannerMode DEFAULT_SMART_DISPATCHER_PLANNER_MODE =
+      SmartDispatcherPlannerMode.OBSERVE_ONLY;
+  private static final int DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES = 4;
+  private static final int DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS = 60;
+  private static final long DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS = 10_000L;
+  private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_REQUIRE_SAME_DIRECTION = true;
+  private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_REVERSE = false;
+  private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_TURNBACK_BEFORE_BOUNDARY =
+      false;
+  private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ONE_ACTIVE_RESERVATION_PER_CYCLE =
+      true;
   private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
   private static final double DEFAULT_EMU_DECEL_BPS2 = 1.0;
   private static final double DEFAULT_DMU_ACCEL_BPS2 = 0.7;
@@ -89,9 +108,18 @@ public final class ConfigManager {
 
   /** 重新读取磁盘配置，更新缓存。 */
   public void reload() {
+    SmartDispatcherMode previousMode =
+        current == null || current.smartDispatcherSettings() == null
+            ? null
+            : current.smartDispatcherSettings().mode();
     plugin.reloadConfig();
     FileConfiguration config = plugin.getConfig();
     current = parse(config, logger);
+    traceSmartDispatcherConfig(
+        config,
+        previousMode,
+        current.smartDispatcherSettings().mode(),
+        current.smartDispatcherSettings().plannerSettings());
   }
 
   /**
@@ -126,6 +154,7 @@ public final class ConfigManager {
     ReclaimSettings reclaimSettings = parseReclaim(reclaimSection, logger);
     ConfigurationSection healthSection = config.getConfigurationSection("health");
     HealthSettings healthSettings = parseHealth(healthSection, logger);
+    SmartDispatcherSettings smartDispatcherSettings = parseSmartDispatcher(config, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -137,7 +166,322 @@ public final class ConfigManager {
         spawnSettings,
         trainConfigSettings,
         reclaimSettings,
+        smartDispatcherSettings,
         healthSettings);
+  }
+
+  /** 解析 Smart Dispatcher / Traffic Control Supervisor 配置段。 */
+  private static SmartDispatcherSettings parseSmartDispatcher(
+      FileConfiguration config, java.util.logging.Logger logger) {
+    SmartDispatcherMode mode = DEFAULT_SMART_DISPATCHER_MODE;
+    String rawMode = config == null ? null : config.getString("smart-dispatcher.mode", null);
+    if (rawMode != null) {
+      mode =
+          SmartDispatcherMode.parse(rawMode)
+              .orElseGet(
+                  () -> {
+                    logger.warning("smart-dispatcher.mode 配置无效: " + rawMode + "，已回退为 OBSERVE_ONLY");
+                    return DEFAULT_SMART_DISPATCHER_MODE;
+                  });
+    }
+    ConfigurationSection plannerSection =
+        config == null ? null : config.getConfigurationSection("smart-dispatcher.planner");
+    SmartDispatcherPlannerSettings plannerSettings =
+        parseSmartDispatcherPlanner(plannerSection, logger);
+    return new SmartDispatcherSettings(mode, plannerSettings);
+  }
+
+  /** 解析 Smart Dispatcher planner 配置段。 */
+  private static SmartDispatcherPlannerSettings parseSmartDispatcherPlanner(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    boolean enabled = DEFAULT_SMART_DISPATCHER_PLANNER_ENABLED;
+    SmartDispatcherPlannerMode mode = DEFAULT_SMART_DISPATCHER_PLANNER_MODE;
+    int maxReservationResources = DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES;
+    int reservationTtlTicks = DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS;
+    long blockerSnapshotTtlMs = DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS;
+    boolean requireSameDirection = DEFAULT_SMART_DISPATCHER_PLANNER_REQUIRE_SAME_DIRECTION;
+    boolean allowReverse = DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_REVERSE;
+    boolean allowTurnbackBeforeBoundary =
+        DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_TURNBACK_BEFORE_BOUNDARY;
+    boolean oneActiveReservationPerCycle =
+        DEFAULT_SMART_DISPATCHER_PLANNER_ONE_ACTIVE_RESERVATION_PER_CYCLE;
+    if (section != null) {
+      enabled = section.getBoolean("enabled", enabled);
+      String rawPlannerMode = section.getString("mode", null);
+      if (rawPlannerMode != null) {
+        mode =
+            SmartDispatcherPlannerMode.parse(rawPlannerMode)
+                .orElseGet(
+                    () -> {
+                      logger.warning(
+                          "smart-dispatcher.planner.mode 配置无效: "
+                              + rawPlannerMode
+                              + "，已回退为 OBSERVE_ONLY");
+                      return DEFAULT_SMART_DISPATCHER_PLANNER_MODE;
+                    });
+      }
+      maxReservationResources =
+          section.getInt("max-reservation-resources", maxReservationResources);
+      reservationTtlTicks = section.getInt("reservation-ttl-ticks", reservationTtlTicks);
+      blockerSnapshotTtlMs = section.getLong("blocker-snapshot-ttl-ms", blockerSnapshotTtlMs);
+      requireSameDirection = section.getBoolean("require-same-direction", requireSameDirection);
+      allowReverse = section.getBoolean("allow-reverse", allowReverse);
+      allowTurnbackBeforeBoundary =
+          section.getBoolean("allow-turnback-before-boundary", allowTurnbackBeforeBoundary);
+      oneActiveReservationPerCycle =
+          section.getBoolean("one-active-reservation-per-cycle", oneActiveReservationPerCycle);
+    }
+    if (maxReservationResources <= 0) {
+      logger.warning(
+          "smart-dispatcher.planner.max-reservation-resources 配置无效: "
+              + maxReservationResources
+              + "，已回退为 "
+              + DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES);
+      maxReservationResources = DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES;
+    }
+    if (reservationTtlTicks <= 0) {
+      logger.warning(
+          "smart-dispatcher.planner.reservation-ttl-ticks 配置无效: "
+              + reservationTtlTicks
+              + "，已回退为 "
+              + DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS);
+      reservationTtlTicks = DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS;
+    }
+    if (blockerSnapshotTtlMs <= 0) {
+      logger.warning(
+          "smart-dispatcher.planner.blocker-snapshot-ttl-ms 配置无效: "
+              + blockerSnapshotTtlMs
+              + "，已回退为 "
+              + DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS);
+      blockerSnapshotTtlMs = DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS;
+    }
+    return new SmartDispatcherPlannerSettings(
+        enabled,
+        mode,
+        maxReservationResources,
+        reservationTtlTicks,
+        blockerSnapshotTtlMs,
+        requireSameDirection,
+        allowReverse,
+        allowTurnbackBeforeBoundary,
+        oneActiveReservationPerCycle);
+  }
+
+  private void traceSmartDispatcherConfig(
+      FileConfiguration config,
+      SmartDispatcherMode previousMode,
+      SmartDispatcherMode effectiveMode,
+      SmartDispatcherPlannerSettings plannerSettings) {
+    String rawMode = config == null ? null : config.getString("smart-dispatcher.mode", null);
+    boolean defaultUsed = rawMode == null || SmartDispatcherMode.parse(rawMode).isEmpty();
+    String sourceFile = new File(plugin.getDataFolder(), "config.yml").getAbsolutePath();
+    String raw = rawMode == null || rawMode.isBlank() ? "<missing>" : rawMode.trim();
+    SmartDispatcherMode mode =
+        effectiveMode == null ? DEFAULT_SMART_DISPATCHER_MODE : effectiveMode;
+    logger.info(
+        "SMART_DISPATCHER_CONFIG_LOADED rawConfigValue="
+            + raw
+            + " effectiveMode="
+            + mode
+            + " configPath=smart-dispatcher.mode sourceFile="
+            + sourceFile
+            + " defaultUsed="
+            + defaultUsed);
+    logger.info(
+        "SMART_DISPATCHER_MODE_EFFECTIVE rawConfigValue="
+            + raw
+            + " effectiveMode="
+            + mode
+            + " configPath=smart-dispatcher.mode sourceFile="
+            + sourceFile
+            + " defaultUsed="
+            + defaultUsed);
+    if (previousMode != null && previousMode != mode) {
+      logger.info(
+          "SMART_DISPATCHER_MODE_CHANGED previousMode="
+              + previousMode
+              + " effectiveMode="
+              + mode
+              + " rawConfigValue="
+              + raw
+              + " configPath=smart-dispatcher.mode sourceFile="
+              + sourceFile
+              + " defaultUsed="
+              + defaultUsed);
+    }
+    logger.info(
+        smartDispatcherBuildFingerprintTrace(
+            plugin.getDescription().getVersion(),
+            buildInfoProperty("gitCommit"),
+            buildInfoProperty("buildTime").or(() -> buildInfoProperty("buildId")),
+            pluginJarPath(),
+            sourceFile,
+            mode,
+            plannerSettings,
+            "file",
+            smartDispatcherDefaultUsedFlags(config)));
+    logger.info(
+        smartRuntimeBuildFingerprintTrace(
+            plugin.getDescription().getVersion(),
+            buildInfoProperty("gitCommit"),
+            buildInfoProperty("buildTime").or(() -> buildInfoProperty("buildId"))));
+    logger.info(smartDispatcherPlannerConfigTrace(plannerSettings));
+  }
+
+  static String smartDispatcherBuildFingerprintTrace(
+      String pluginVersion,
+      Optional<String> gitCommit,
+      Optional<String> buildTime,
+      String jarPath,
+      String configPath,
+      SmartDispatcherMode smartDispatcherMode,
+      SmartDispatcherPlannerSettings plannerSettings,
+      String configSource,
+      String defaultUsedFlags) {
+    SmartDispatcherPlannerSettings planner =
+        plannerSettings == null ? SmartDispatcherPlannerSettings.defaults() : plannerSettings;
+    SmartDispatcherMode mode =
+        smartDispatcherMode == null ? DEFAULT_SMART_DISPATCHER_MODE : smartDispatcherMode;
+    return "SMART_DISPATCH_BUILD_FINGERPRINT pluginVersion="
+        + safeTraceValue(pluginVersion, "unknown")
+        + " gitCommit="
+        + gitCommit.filter(value -> !value.isBlank()).orElse("unknown")
+        + " buildTime="
+        + buildTime.filter(value -> !value.isBlank()).orElse("unknown")
+        + " jarPath="
+        + safeTraceValue(jarPath, "unknown")
+        + " configPath="
+        + safeTraceValue(configPath, "unknown")
+        + " smartDispatcherMode="
+        + mode
+        + " plannerEnabled="
+        + planner.enabled()
+        + " plannerMode="
+        + planner.mode()
+        + " blockerSnapshotTtlMs="
+        + planner.blockerSnapshotTtlMs()
+        + " maxReservationResources="
+        + planner.maxReservationResources()
+        + " requireSameDirection="
+        + planner.requireSameDirection()
+        + " allowReverse="
+        + planner.allowReverse()
+        + " allowTurnbackBeforeBoundary="
+        + planner.allowTurnbackBeforeBoundary()
+        + " oneActiveReservationPerCycle="
+        + planner.oneActiveReservationPerCycle()
+        + " configSource="
+        + safeTraceValue(configSource, "unknown")
+        + " defaultUsedFlags="
+        + safeTraceValue(defaultUsedFlags, "-");
+  }
+
+  /**
+   * 输出运行时补丁级别指纹，便于现场日志证明正在运行的 jar 已包含关键状态机修复。
+   *
+   * <p>该 trace 独立于 planner 配置：它描述的是本 jar 编译进来的运行时语义，避免把“配置已开启”误读成“代码已部署”。
+   */
+  static String smartRuntimeBuildFingerprintTrace(
+      String pluginVersion, Optional<String> gitCommit, Optional<String> buildTime) {
+    return "SMART_RUNTIME_BUILD_FINGERPRINT pluginVersion="
+        + safeTraceValue(pluginVersion, "unknown")
+        + " gitCommit="
+        + gitCommit.filter(value -> !value.isBlank()).orElse("unknown")
+        + " buildTime="
+        + buildTime.filter(value -> !value.isBlank()).orElse("unknown")
+        + " dispatcherPatchLevel=P0_SIGNAL_RETAIN_DISPATCHER"
+        + " recoverableHoldContainsRouteStopOrTerminal=true";
+  }
+
+  private Optional<String> buildInfoProperty(String key) {
+    try (InputStream in = plugin.getResource("build-info.properties")) {
+      if (in == null) {
+        return Optional.empty();
+      }
+      Properties properties = new Properties();
+      properties.load(in);
+      return Optional.ofNullable(properties.getProperty(key)).map(String::trim);
+    } catch (RuntimeException | java.io.IOException ignored) {
+      return Optional.empty();
+    }
+  }
+
+  private String pluginJarPath() {
+    try {
+      if (plugin.getClass().getProtectionDomain() == null
+          || plugin.getClass().getProtectionDomain().getCodeSource() == null
+          || plugin.getClass().getProtectionDomain().getCodeSource().getLocation() == null) {
+        return "unknown";
+      }
+      return plugin.getClass().getProtectionDomain().getCodeSource().getLocation().toExternalForm();
+    } catch (RuntimeException ignored) {
+      return "unknown";
+    }
+  }
+
+  private static String smartDispatcherDefaultUsedFlags(FileConfiguration config) {
+    return "mode="
+        + missingOrInvalidSmartDispatcherMode(config)
+        + ",planner.enabled="
+        + !containsPath(config, "smart-dispatcher.planner.enabled")
+        + ",planner.mode="
+        + missingOrInvalidPlannerMode(config)
+        + ",planner.blocker-snapshot-ttl-ms="
+        + !containsPath(config, "smart-dispatcher.planner.blocker-snapshot-ttl-ms")
+        + ",planner.max-reservation-resources="
+        + !containsPath(config, "smart-dispatcher.planner.max-reservation-resources")
+        + ",planner.require-same-direction="
+        + !containsPath(config, "smart-dispatcher.planner.require-same-direction")
+        + ",planner.allow-reverse="
+        + !containsPath(config, "smart-dispatcher.planner.allow-reverse")
+        + ",planner.allow-turnback-before-boundary="
+        + !containsPath(config, "smart-dispatcher.planner.allow-turnback-before-boundary")
+        + ",planner.one-active-reservation-per-cycle="
+        + !containsPath(config, "smart-dispatcher.planner.one-active-reservation-per-cycle");
+  }
+
+  private static boolean missingOrInvalidSmartDispatcherMode(FileConfiguration config) {
+    String raw = config == null ? null : config.getString("smart-dispatcher.mode", null);
+    return raw == null || SmartDispatcherMode.parse(raw).isEmpty();
+  }
+
+  private static boolean missingOrInvalidPlannerMode(FileConfiguration config) {
+    String raw = config == null ? null : config.getString("smart-dispatcher.planner.mode", null);
+    return raw == null || SmartDispatcherPlannerMode.parse(raw).isEmpty();
+  }
+
+  private static boolean containsPath(FileConfiguration config, String path) {
+    return config != null && config.contains(path);
+  }
+
+  private static String safeTraceValue(String value, String fallback) {
+    if (value == null || value.isBlank()) {
+      return fallback;
+    }
+    return value.trim().replace(' ', '_');
+  }
+
+  static String smartDispatcherPlannerConfigTrace(SmartDispatcherPlannerSettings plannerSettings) {
+    SmartDispatcherPlannerSettings planner =
+        plannerSettings == null ? SmartDispatcherPlannerSettings.defaults() : plannerSettings;
+    return "SMART_DISPATCH_PLANNER_CONFIG_LOADED enabled="
+        + planner.enabled()
+        + " mode="
+        + planner.mode()
+        + " maxReservationResources="
+        + planner.maxReservationResources()
+        + " ttlTicks="
+        + planner.reservationTtlTicks()
+        + " blockerSnapshotTtlMs="
+        + planner.blockerSnapshotTtlMs()
+        + " requireSameDirection="
+        + planner.requireSameDirection()
+        + " allowReverse="
+        + planner.allowReverse()
+        + " allowTurnbackBeforeBoundary="
+        + planner.allowTurnbackBeforeBoundary()
+        + " oneActiveReservationPerCycle="
+        + planner.oneActiveReservationPerCycle();
   }
 
   /** 解析 health 配置段。 */
@@ -912,7 +1256,98 @@ public final class ConfigManager {
       SpawnSettings spawnSettings,
       TrainConfigSettings trainConfigSettings,
       ReclaimSettings reclaimSettings,
-      HealthSettings healthSettings) {}
+      SmartDispatcherSettings smartDispatcherSettings,
+      HealthSettings healthSettings) {
+    public ConfigView {
+      smartDispatcherSettings =
+          smartDispatcherSettings == null
+              ? new SmartDispatcherSettings(DEFAULT_SMART_DISPATCHER_MODE)
+              : smartDispatcherSettings;
+    }
+
+    /** 兼容仍按旧参数列表构造配置快照的测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        HealthSettings healthSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          new SmartDispatcherSettings(DEFAULT_SMART_DISPATCHER_MODE),
+          healthSettings);
+    }
+  }
+
+  /** Smart Dispatcher / Traffic Control Supervisor 的隔离配置。 */
+  public record SmartDispatcherSettings(
+      SmartDispatcherMode mode, SmartDispatcherPlannerSettings plannerSettings) {
+    public SmartDispatcherSettings {
+      mode = mode == null ? DEFAULT_SMART_DISPATCHER_MODE : mode;
+      plannerSettings =
+          plannerSettings == null ? SmartDispatcherPlannerSettings.defaults() : plannerSettings;
+    }
+
+    public SmartDispatcherSettings(SmartDispatcherMode mode) {
+      this(mode, SmartDispatcherPlannerSettings.defaults());
+    }
+  }
+
+  /** Smart Dispatcher minimal forward planner 配置。 */
+  public record SmartDispatcherPlannerSettings(
+      boolean enabled,
+      SmartDispatcherPlannerMode mode,
+      int maxReservationResources,
+      int reservationTtlTicks,
+      long blockerSnapshotTtlMs,
+      boolean requireSameDirection,
+      boolean allowReverse,
+      boolean allowTurnbackBeforeBoundary,
+      boolean oneActiveReservationPerCycle) {
+    public SmartDispatcherPlannerSettings {
+      mode = mode == null ? DEFAULT_SMART_DISPATCHER_PLANNER_MODE : mode;
+      maxReservationResources =
+          maxReservationResources <= 0
+              ? DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES
+              : maxReservationResources;
+      reservationTtlTicks =
+          reservationTtlTicks <= 0
+              ? DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS
+              : reservationTtlTicks;
+      blockerSnapshotTtlMs =
+          blockerSnapshotTtlMs <= 0
+              ? DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS
+              : blockerSnapshotTtlMs;
+    }
+
+    public static SmartDispatcherPlannerSettings defaults() {
+      return new SmartDispatcherPlannerSettings(
+          DEFAULT_SMART_DISPATCHER_PLANNER_ENABLED,
+          DEFAULT_SMART_DISPATCHER_PLANNER_MODE,
+          DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES,
+          DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS,
+          DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS,
+          DEFAULT_SMART_DISPATCHER_PLANNER_REQUIRE_SAME_DIRECTION,
+          DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_REVERSE,
+          DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_TURNBACK_BEFORE_BOUNDARY,
+          DEFAULT_SMART_DISPATCHER_PLANNER_ONE_ACTIVE_RESERVATION_PER_CYCLE);
+    }
+  }
 
   /** 健康检查与自动修复配置。 */
   public record HealthSettings(

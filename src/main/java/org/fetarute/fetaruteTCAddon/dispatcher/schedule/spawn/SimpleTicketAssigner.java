@@ -46,6 +46,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
@@ -507,6 +508,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     int fallbackTriggered = 0;
     int hardExpired = 0;
     Duration hardMaxAge = resolvePendingLayoverMaxAge();
+    Map<String, Integer> fallbackSelectedThisTick = new HashMap<>();
 
     for (var entry : pendingLayoverTickets.entrySet()) {
       java.util.UUID ticketId = entry.getKey();
@@ -550,7 +552,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                   + waitSeconds
                   + "s ticketId="
                   + ticketId);
-          tryFallbackSpawnForPending(provider, ticket, now, waitSeconds);
+          tryFallbackSpawnForPending(provider, ticket, now, waitSeconds, fallbackSelectedThisTick);
         } else {
           refreshedEntries.put(ticketId, pendingEntry.refreshedAt(now));
           refreshed++;
@@ -647,7 +649,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private void tryFallbackSpawnForPending(
-      StorageProvider provider, SpawnTicket ticket, Instant now, long waitSeconds) {
+      StorageProvider provider,
+      SpawnTicket ticket,
+      Instant now,
+      long waitSeconds,
+      Map<String, Integer> selectedThisTick) {
     if (provider == null || ticket == null || ticket.service() == null) {
       return;
     }
@@ -675,7 +681,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + waitSeconds
             + "s ticket="
             + ticket.id());
-    trySpawnFromDepot(provider, ticket, service, routeOpt.get(), lineOpt.get(), now);
+    trySpawnFromDepot(
+        provider, ticket, service, routeOpt.get(), lineOpt.get(), now, selectedThisTick);
   }
 
   private boolean trySpawn(StorageProvider provider, Instant now, SpawnTicket ticket) {
@@ -718,7 +725,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                       + "s (超时="
                       + fallbackTimeoutSeconds.getAsLong()
                       + "s) 尝试从 depot 补发");
-              return trySpawnFromDepot(provider, ticket, service, route, line, now);
+              return trySpawnFromDepot(
+                  provider, ticket, service, route, line, now, new HashMap<>());
             }
             debugLogger.accept(
                 "Layover 降级跳过: route="
@@ -814,7 +822,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graphOpt.get(),
-            runtime.lookaheadEdges(),
+            depotSpawnLookaheadEdges(runtime),
             runtime.minClearEdges(),
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
@@ -828,6 +836,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     DepotGateRequest gateRequest = gateRequestOpt.get();
     OccupancyRequest request = gateRequest.request();
+    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
+        trainName, graphOpt.get(), gateRequest.context())) {
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, "smart-depot-long-single-held");
+      return false;
+    }
     LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
     if (!authorization.allowed()) {
       logDepotGateBlockedTrace(
@@ -1819,6 +1833,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * @param route 路线定义
    * @param line 线路
    * @param now 当前时间
+   * @param selectedThisTick 本 tick 已选 depot 计数，用于避免 fallback 连续压到同一短股道
    * @return 是否成功发车
    */
   private boolean trySpawnFromDepot(
@@ -1827,7 +1842,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnService service,
       RouteDefinition route,
       Line line,
-      Instant now) {
+      Instant now,
+      Map<String, Integer> selectedThisTick) {
 
     Route routeEntity = provider.routes().findById(service.routeId()).orElse(null);
     if (routeEntity == null) {
@@ -1852,11 +1868,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
+    Map<String, Integer> depotSelections =
+        selectedThisTick == null ? new HashMap<>() : selectedThisTick;
     Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
     if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
       LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
       selectedDepotOpt =
-          selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot, Map.of(), now);
+          selectBalancedDepot(
+              provider, line.id(), lineDepots, runtimeSnapshot, depotSelections, now);
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
@@ -1866,7 +1885,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             service,
             effectiveTicket,
             LineRuntimeSnapshot.capture(runtimeDispatchService),
-            Map.of(),
+            depotSelections,
             now);
 
     String destCode =
@@ -1899,7 +1918,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graphOpt.get(),
-            runtime.lookaheadEdges(),
+            depotSpawnLookaheadEdges(runtime),
             runtime.minClearEdges(),
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
@@ -1913,6 +1932,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     DepotGateRequest gateRequest = gateRequestOpt.get();
     OccupancyRequest request = gateRequest.request();
+    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
+        trainName, graphOpt.get(), gateRequest.context())) {
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, "fallback-smart-depot-long-single-held");
+      return false;
+    }
     LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
     if (!authorization.allowed()) {
       logDepotGateBlockedTrace(
@@ -2110,6 +2135,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private record DepotGateRequest(
       OccupancyRequest request,
+      OccupancyRequestContext context,
       List<NodeId> effectiveWaypoints,
       List<NodeId> expandedPathNodes,
       int lookoverDepth,
@@ -2118,6 +2144,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       NodeId effectiveFirstWaypoint) {
     private DepotGateRequest {
       Objects.requireNonNull(request, "request");
+      Objects.requireNonNull(context, "context");
       effectiveWaypoints = effectiveWaypoints == null ? List.of() : List.copyOf(effectiveWaypoints);
       expandedPathNodes = expandedPathNodes == null ? List.of() : List.copyOf(expandedPathNodes);
       selectedDepotNode = selectedDepotNode == null ? Optional.empty() : selectedDepotNode;
@@ -2152,18 +2179,48 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       debugLogger.accept("Depot lookover 回退: 未解析到显式 depot 节点 train=" + trainName);
     }
     OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get(), depotNode);
+    OccupancyRequestContext requestContext =
+        new OccupancyRequestContext(
+            request,
+            ctxOpt.get().pathNodes(),
+            ctxOpt.get().edges(),
+            ctxOpt.get().directedContext());
     NodeId originalFirst = route.waypoints().isEmpty() ? null : route.waypoints().get(0);
     NodeId effectiveFirst = spawnWaypoints.isEmpty() ? null : spawnWaypoints.get(0);
     int lookoverDepth = builder.depotLookoverDepthForDiagnostics(depotNode.isPresent());
+    debugLogger.accept(
+        "SMART_DEPOT_SPAWN_AUTHORITY_WINDOW train="
+            + trainName
+            + " route="
+            + formatRouteForTrace(service, route)
+            + " firstNode="
+            + formatNode(effectiveFirst)
+            + " authorityEnd="
+            + (ctxOpt.get().pathNodes().isEmpty()
+                ? "-"
+                : formatNode(ctxOpt.get().pathNodes().get(ctxOpt.get().pathNodes().size() - 1)))
+            + " resourceCount="
+            + request.resourceList().size()
+            + " lookoverDepth="
+            + lookoverDepth);
     return Optional.of(
         new DepotGateRequest(
             request,
+            requestContext,
             spawnWaypoints,
             ctxOpt.get().pathNodes(),
             lookoverDepth,
             depotNode,
             originalFirst,
             effectiveFirst));
+  }
+
+  private static int depotSpawnLookaheadEdges(ConfigManager.RuntimeSettings runtime) {
+    if (runtime == null) {
+      return 1;
+    }
+    int localExitWindow = Math.max(1, runtime.switcherZoneEdges() + 1);
+    return Math.max(1, Math.min(runtime.lookaheadEdges(), localExitWindow));
   }
 
   /**
@@ -2551,6 +2608,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + (ticket == null ? "-" : ticket.lastError())
             + " occupancyVersion="
             + occupancyVersionForTrace());
+    for (OccupancyClaim blocker : authorization.blockers()) {
+      if (blocker == null || blocker.resource() == null) {
+        continue;
+      }
+      debugLogger.accept(
+          "SMART_DEPOT_SPAWN_LOCAL_BLOCKER train="
+              + trainName
+              + " blocker="
+              + formatGateBlocker(blocker)
+              + " authorityEnd="
+              + (gateRequest.expandedPathNodes().isEmpty()
+                  ? "-"
+                  : formatNode(
+                      gateRequest
+                          .expandedPathNodes()
+                          .get(gateRequest.expandedPathNodes().size() - 1)))
+              + " action=blocked");
+    }
   }
 
   private static String formatRouteForTrace(SpawnService service, RouteDefinition route) {
