@@ -89,6 +89,61 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void forwardRiskUsesAdvisoryWindowNotMovementRequiredResources() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    NodeId nodeC = NodeId.of("C");
+    NodeId nodeD = NodeId.of("D");
+    RailNode a = waypoint(nodeA, 0.0);
+    RailNode b = waypoint(nodeB, 10.0);
+    RailNode c = waypoint(nodeC, 20.0);
+    RailNode d = waypoint(nodeD, 30.0);
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    EdgeId edgeBC = EdgeId.undirected(nodeB, nodeC);
+    EdgeId edgeCD = EdgeId.undirected(nodeC, nodeD);
+    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty());
+    RailEdge bc = new RailEdge(edgeBC, nodeB, nodeC, 10, 8.0, true, Optional.empty());
+    RailEdge cd = new RailEdge(edgeCD, nodeC, nodeD, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(nodeA, a, nodeB, b, nodeC, c, nodeD, d),
+            Map.of(edgeAB, ab, edgeBC, bc, edgeCD, cd),
+            Set.of());
+    List<NodeId> nodes = List.of(nodeA, nodeB, nodeC, nodeD);
+
+    OccupancyRequestContext hard =
+        new OccupancyRequestBuilder(graph, 1, 0, 0, 0)
+            .buildContextFromNodes(
+                "Train-1",
+                Optional.of(RouteId.of("OP:LINE:ROUTE")),
+                nodes,
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow();
+    OccupancyRequestContext advisory =
+        new OccupancyRequestBuilder(graph, 3, 0, 0, 0)
+            .buildContextFromNodes(
+                "Train-1",
+                Optional.of(RouteId.of("OP:LINE:ROUTE")),
+                nodes,
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow();
+
+    assertFalse(hard.request().resourceList().contains(OccupancyResource.forNode(nodeC)));
+    assertFalse(hard.request().resourceList().contains(OccupancyResource.forEdge(edgeBC)));
+    assertTrue(advisory.pathNodes().contains(nodeC));
+    assertTrue(advisory.request().resourceList().contains(OccupancyResource.forNode(nodeC)));
+    assertEquals(
+        ResourceIntent.MOVEMENT_REQUIRED,
+        hard.request().intentFor(OccupancyResource.forEdge(edgeAB)));
+  }
+
+  @Test
   void buildExpandsRouteSegmentBeforeResolvingDirectionAndEntryOrder() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeM = NodeId.of("M");
@@ -718,6 +773,12 @@ class OccupancyRequestBuilderTest {
     assertEquals(0, anchoredRequest.conflictEntryOrders().get(depotConflict));
     assertFalse(fallbackRequest.resourceList().contains(deepEdgeResource));
     assertTrue(anchoredRequest.resourceList().contains(deepEdgeResource));
+    assertEquals(
+        ctxOpt.get().request().directedContext().orElseThrow().expandedPathNodes(),
+        anchoredRequest.directedContext().orElseThrow().expandedPathNodes());
+    assertEquals(
+        ctxOpt.get().request().directedContext().orElseThrow().directedEdges(),
+        anchoredRequest.directedContext().orElseThrow().directedEdges());
   }
 
   @Test
@@ -790,6 +851,53 @@ class OccupancyRequestBuilderTest {
     assertTrue(request.resourceList().contains(OccupancyResource.forConflict(branchConflict)));
     assertFalse(request.corridorDirections().containsKey(branchConflict));
     assertEquals(0, request.conflictEntryOrders().get(branchConflict));
+  }
+
+  @Test
+  void repeatedOppositeEdgeTraversalSplitsContinuousMovementRequest() {
+    NodeId nodeA = NodeId.of("SURC:D:HHU:3");
+    NodeId nodeWsd = NodeId.of("SURC:WSD:1");
+    NodeId nodeJbs = NodeId.of("SURC:S:JBS:1");
+    NodeId nodeC = NodeId.of("SURC:AFTER:JBS");
+    EdgeId edgeAWsd = EdgeId.undirected(nodeA, nodeWsd);
+    EdgeId edgeWsdJbs = EdgeId.undirected(nodeWsd, nodeJbs);
+    EdgeId edgeWsdC = EdgeId.undirected(nodeWsd, nodeC);
+    RailEdge aWsd = new RailEdge(edgeAWsd, nodeA, nodeWsd, 10, 8.0, true, Optional.empty());
+    RailEdge wsdJbs = new RailEdge(edgeWsdJbs, nodeWsd, nodeJbs, 10, 8.0, true, Optional.empty());
+    RailEdge wsdC = new RailEdge(edgeWsdC, nodeWsd, nodeC, 10, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                nodeA, waypoint(nodeA, 0.0),
+                nodeWsd, waypoint(nodeWsd, 10.0),
+                nodeJbs, waypoint(nodeJbs, 20.0),
+                nodeC, waypoint(nodeC, 30.0)),
+            Map.of(edgeAWsd, aWsd, edgeWsdJbs, wsdJbs, edgeWsdC, wsdC),
+            Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 8, 0, 0, 0);
+    List<NodeId> routeNodes = List.of(nodeA, nodeWsd, nodeJbs, nodeWsd, nodeC);
+
+    OccupancyRequestContext context =
+        builder
+            .buildContextFromNodes(
+                "SURC-DS-LW-4660",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_Full")),
+                routeNodes,
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow();
+
+    assertEquals(List.of(nodeA, nodeWsd, nodeJbs), context.pathNodes());
+    assertEquals(2, context.edges().size());
+    assertTrue(context.request().resourceList().contains(OccupancyResource.forEdge(edgeWsdJbs)));
+    assertEquals(1, context.pathNodes().stream().filter(nodeWsd::equals).count());
+  }
+
+  private static RailNode waypoint(NodeId nodeId, double x) {
+    return new SignRailNode(
+        nodeId, NodeType.WAYPOINT, new Vector(x, 64.0, 0.0), Optional.empty(), Optional.empty());
   }
 
   private static final class CorridorInfoOverrideGraph

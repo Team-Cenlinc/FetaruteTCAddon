@@ -1,0 +1,26 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor;
+
+/**
+ * 智能调度层识别的前方风险来源。
+ *
+ * <p>该枚举只描述“为什么需要提前规划”，不直接等价于可见信号。特别是 {@link #ARTIFICIAL_WINDOW_LIMIT} 仅用于 trace，不能单独把可见信号降级为
+ * CAUTION 或 STOP。
+ */
+public enum RiskSource {
+  NONE,
+  HARD_BLOCKER,
+  ACTIVE_OPPOSITE_CONFLICT,
+  SINGLE_EXIT_NOT_VERIFIED,
+  SWITCHER_NOT_VERIFIED,
+  EDGE_SPEED_DROP,
+  STATION_STOP,
+  TERMINAL_STOP,
+  DWELL_STOP,
+  ROUTE_STOP_OR_TERMINAL,
+  MOVEMENT_AUTHORITY_PHYSICAL_END,
+  STALE_RETAIN,
+  STALE_QUEUE,
+  PROTECTIVE_ONLY_CLAIM,
+  MAX_AUTHORITY_CAP_REACHED,
+  ARTIFICIAL_WINDOW_LIMIT
+}

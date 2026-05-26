@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
 import org.junit.jupiter.api.Test;
 
 class ConfigManagerTest {
@@ -92,5 +94,161 @@ class ConfigManagerTest {
     assertEquals(180, view.healthSettings().deadlockDestroyCooldownSeconds());
     assertEquals(12, view.healthSettings().deadlockEpisodeGraceSeconds());
     assertEquals(25, view.healthSettings().deadlockMinStopSeconds());
+  }
+
+  @Test
+  // Smart Dispatcher 默认只观察，避免升级配置后自动启用新动作副作用。
+  void parseSmartDispatcherModeDefaultsToObserveOnly() {
+    YamlConfiguration config = new YamlConfiguration();
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(SmartDispatcherMode.OBSERVE_ONLY, view.smartDispatcherSettings().mode());
+  }
+
+  @Test
+  // Smart Dispatcher mode 支持显式切换到 ENFORCE。
+  void parseSmartDispatcherModeFromConfig() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("smart-dispatcher.mode", "enforce");
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(SmartDispatcherMode.ENFORCE, view.smartDispatcherSettings().mode());
+  }
+
+  @Test
+  // YAML 嵌套 smart-dispatcher: mode: 与 Bukkit path smart-dispatcher.mode 必须解析到同一配置项。
+  void parseSmartDispatcherModeFromNestedYaml() throws Exception {
+    YamlConfiguration config = new YamlConfiguration();
+    config.loadFromString("smart-dispatcher:\n  mode: ENFORCE\n");
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(SmartDispatcherMode.ENFORCE, view.smartDispatcherSettings().mode());
+  }
+
+  @Test
+  // Planner 默认启用只观察模式，避免升级配置后直接创建 unlock reservation。
+  void parseSmartDispatcherPlannerDefaultsToObserveOnly() {
+    YamlConfiguration config = new YamlConfiguration();
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertTrue(view.smartDispatcherSettings().plannerSettings().enabled());
+    assertEquals(
+        SmartDispatcherPlannerMode.OBSERVE_ONLY,
+        view.smartDispatcherSettings().plannerSettings().mode());
+    assertFalse(view.smartDispatcherSettings().plannerSettings().allowReverse());
+    assertEquals(10_000L, view.smartDispatcherSettings().plannerSettings().blockerSnapshotTtlMs());
+  }
+
+  @Test
+  // Planner 支持显式切换到 minimal forward enforcement。
+  void parseSmartDispatcherPlannerFromConfig() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("smart-dispatcher.planner.mode", "ENFORCE_MINIMAL_FORWARD");
+    config.set("smart-dispatcher.planner.max-reservation-resources", 2);
+    config.set("smart-dispatcher.planner.reservation-ttl-ticks", 20);
+    config.set("smart-dispatcher.planner.blocker-snapshot-ttl-ms", 5000L);
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(
+        SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD,
+        view.smartDispatcherSettings().plannerSettings().mode());
+    assertEquals(2, view.smartDispatcherSettings().plannerSettings().maxReservationResources());
+    assertEquals(20, view.smartDispatcherSettings().plannerSettings().reservationTtlTicks());
+    assertEquals(5000L, view.smartDispatcherSettings().plannerSettings().blockerSnapshotTtlMs());
+  }
+
+  @Test
+  // Startup/reload 日志必须同时暴露 planner 的有效模式与安全边界。
+  void smartDispatcherPlannerConfigTraceIncludesEffectiveMode() {
+    ConfigManager.SmartDispatcherPlannerSettings settings =
+        new ConfigManager.SmartDispatcherPlannerSettings(
+            true,
+            SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD,
+            2,
+            20,
+            5000L,
+            true,
+            false,
+            false,
+            true);
+
+    String trace = ConfigManager.smartDispatcherPlannerConfigTrace(settings);
+
+    assertTrue(trace.contains("SMART_DISPATCH_PLANNER_CONFIG_LOADED"));
+    assertTrue(trace.contains("enabled=true"));
+    assertTrue(trace.contains("mode=ENFORCE_MINIMAL_FORWARD"));
+    assertTrue(trace.contains("maxReservationResources=2"));
+    assertTrue(trace.contains("ttlTicks=20"));
+    assertTrue(trace.contains("blockerSnapshotTtlMs=5000"));
+    assertTrue(trace.contains("requireSameDirection=true"));
+    assertTrue(trace.contains("allowReverse=false"));
+    assertTrue(trace.contains("allowTurnbackBeforeBoundary=false"));
+    assertTrue(trace.contains("oneActiveReservationPerCycle=true"));
+  }
+
+  @Test
+  // Phase 1.8F 启动指纹必须能独立证明当前 jar 与 planner 执行配置。
+  void smartDispatcherBuildFingerprintTraceIncludesPlannerExecutionBoundary() {
+    ConfigManager.SmartDispatcherPlannerSettings settings =
+        new ConfigManager.SmartDispatcherPlannerSettings(
+            true,
+            SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD,
+            2,
+            20,
+            5000L,
+            true,
+            false,
+            false,
+            true);
+
+    String trace =
+        ConfigManager.smartDispatcherBuildFingerprintTrace(
+            "0.0.2",
+            java.util.Optional.of("abc1234"),
+            java.util.Optional.of("build-abc1234-260520"),
+            "file:/plugins/FetaruteTCAddon.jar",
+            "/server/plugins/FetaruteTCAddon/config.yml",
+            SmartDispatcherMode.ENFORCE,
+            settings,
+            "file",
+            "mode=false,planner.mode=false");
+
+    assertTrue(trace.contains("SMART_DISPATCH_BUILD_FINGERPRINT"));
+    assertTrue(trace.contains("pluginVersion=0.0.2"));
+    assertTrue(trace.contains("gitCommit=abc1234"));
+    assertTrue(trace.contains("buildTime=build-abc1234-260520"));
+    assertTrue(trace.contains("smartDispatcherMode=ENFORCE"));
+    assertTrue(trace.contains("plannerEnabled=true"));
+    assertTrue(trace.contains("plannerMode=ENFORCE_MINIMAL_FORWARD"));
+    assertTrue(trace.contains("blockerSnapshotTtlMs=5000"));
+    assertTrue(trace.contains("maxReservationResources=2"));
+    assertTrue(trace.contains("requireSameDirection=true"));
+    assertTrue(trace.contains("allowReverse=false"));
+    assertTrue(trace.contains("allowTurnbackBeforeBoundary=false"));
+    assertTrue(trace.contains("oneActiveReservationPerCycle=true"));
+    assertTrue(trace.contains("configSource=file"));
+    assertTrue(trace.contains("defaultUsedFlags=mode=false,planner.mode=false"));
+  }
+
+  @Test
+  // P0 stabilization 指纹必须证明现场 jar 已包含 recoverable hold 与 retain lifecycle 修复。
+  void smartRuntimeBuildFingerprintTraceIncludesPatchLevel() {
+    String trace =
+        ConfigManager.smartRuntimeBuildFingerprintTrace(
+            "0.0.2",
+            java.util.Optional.of("e56dd0e"),
+            java.util.Optional.of("build-e56dd0e-260525"));
+
+    assertTrue(trace.contains("SMART_RUNTIME_BUILD_FINGERPRINT"));
+    assertTrue(trace.contains("pluginVersion=0.0.2"));
+    assertTrue(trace.contains("gitCommit=e56dd0e"));
+    assertTrue(trace.contains("buildTime=build-e56dd0e-260525"));
+    assertTrue(trace.contains("dispatcherPatchLevel=P0_SIGNAL_RETAIN_DISPATCHER"));
+    assertTrue(trace.contains("recoverableHoldContainsRouteStopOrTerminal=true"));
   }
 }

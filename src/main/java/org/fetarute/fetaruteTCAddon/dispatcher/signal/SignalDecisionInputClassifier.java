@@ -26,7 +26,7 @@ public final class SignalDecisionInputClassifier {
         && request.directedContext().get().currentIndex() < 0) {
       return SignalDecisionInputType.UNKNOWN;
     }
-    int movement = countIntent(request, ResourceIntent.MOVEMENT_REQUIRED);
+    int movement = countHardAuthorityIntent(request);
     int protective = countIntent(request, ResourceIntent.PROTECTIVE_RETAIN);
     int hold = countIntent(request, ResourceIntent.HOLD_ONLY);
     if (movement <= 0) {
@@ -88,7 +88,7 @@ public final class SignalDecisionInputClassifier {
 
   /** 是否包含前向行车必须资源。 */
   public static boolean hasMovementRequiredResources(OccupancyRequest request) {
-    return countIntent(request, ResourceIntent.MOVEMENT_REQUIRED) > 0;
+    return countHardAuthorityIntent(request) > 0;
   }
 
   /** DRAIN_THROUGH 分类所需的已认证上下文。 */
@@ -124,6 +124,20 @@ public final class SignalDecisionInputClassifier {
     int count = 0;
     for (OccupancyResource resource : request.resourceList()) {
       if (resource != null && request.intentFor(resource) == intent) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** 统计会形成硬授权边界的资源数量。 */
+  public static int countHardAuthorityIntent(OccupancyRequest request) {
+    if (request == null) {
+      return 0;
+    }
+    int count = 0;
+    for (OccupancyResource resource : request.resourceList()) {
+      if (resource != null && request.intentFor(resource).hardAuthority()) {
         count++;
       }
     }

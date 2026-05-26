@@ -16,7 +16,9 @@ public enum ResourceIntent {
   /** 停车/等待期间保留已有 claim 的资源。 */
   HOLD_ONLY,
   /** 只用于预览距离或诊断，不参与硬授权。 */
-  LOOKAHEAD_PREVIEW;
+  LOOKAHEAD_PREVIEW,
+  /** Smart Dispatcher minimal forward unlock 的短窗口 reservation；不得阻塞正常行车 admission。 */
+  UNLOCK_RESERVATION;
 
   /** 是否代表本次运动授权的硬边界。 */
   public boolean hardAuthority() {

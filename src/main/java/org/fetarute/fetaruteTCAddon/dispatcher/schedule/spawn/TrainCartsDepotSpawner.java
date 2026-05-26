@@ -8,6 +8,7 @@ import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup;
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnLocationList;
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnMode;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -69,6 +70,9 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
    *
    * @param manager 占用管理器（可为 null）
    */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP2",
+      justification = "OccupancyManager 是调度层共享服务句柄；Depot 选线需要读取同一运行时占用状态，不能复制。")
   public void setOccupancyManager(
       org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager manager) {
     this.occupancyManager = manager;

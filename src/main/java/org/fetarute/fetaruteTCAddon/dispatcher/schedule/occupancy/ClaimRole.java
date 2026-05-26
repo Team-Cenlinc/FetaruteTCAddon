@@ -11,7 +11,8 @@ public enum ClaimRole {
   PROTECTIVE_RETAIN,
   QUEUE_POSITION,
   HOLD_ONLY,
-  LOOKAHEAD_PREVIEW;
+  LOOKAHEAD_PREVIEW,
+  UNLOCK_RESERVATION;
 
   public static ClaimRole fromIntent(ResourceIntent intent) {
     if (intent == null) {
@@ -23,6 +24,7 @@ public enum ClaimRole {
       case QUEUE_POSITION -> QUEUE_POSITION;
       case HOLD_ONLY -> HOLD_ONLY;
       case LOOKAHEAD_PREVIEW -> LOOKAHEAD_PREVIEW;
+      case UNLOCK_RESERVATION -> UNLOCK_RESERVATION;
     };
   }
 }

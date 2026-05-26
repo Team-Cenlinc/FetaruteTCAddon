@@ -29,6 +29,29 @@ public interface OccupancyManager {
   boolean releaseResource(OccupancyResource resource, Optional<String> trainName);
 
   /**
+   * 只释放指定角色的短生命周期 claim。
+   *
+   * <p>默认实现不支持角色级释放。Smart Dispatcher rollback 必须使用支持该接口的实现，避免误清物理占用或保护性 retain。
+   */
+  default int releaseResourcesByTrainAndRole(
+      String trainName, List<OccupancyResource> resources, ClaimRole role) {
+    return 0;
+  }
+
+  /**
+   * 清理当前请求中同一列车持有的 single conflict 反向残留。
+   *
+   * <p>默认实现不做任何操作。该入口只供健康恢复在确认列车已因 STOP 进度停滞后使用，用来丢弃“旧方向 claim/queue 阻塞当前方向”的陈旧状态；普通进路授权必须继续通过
+   * {@link #canEnter(OccupancyRequest)} 或 {@link #acquire(OccupancyRequest)} 判定，不应把此方法当作放行机制。
+   *
+   * @param request 当前准备重新判定的运行请求
+   * @return 实际清理的 claim/queue 条目数量
+   */
+  default int clearSelfOwnedSingleDirectionMismatches(OccupancyRequest request) {
+    return 0;
+  }
+
+  /**
    * 检查节点是否被占用。
    *
    * @param nodeId 节点 ID

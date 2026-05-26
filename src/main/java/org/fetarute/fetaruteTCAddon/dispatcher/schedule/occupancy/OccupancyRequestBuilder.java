@@ -201,6 +201,9 @@ public final class OccupancyRequestBuilder {
       debugLogger.accept("构建请求失败: expandPathNodes 返回空 (路径不连通?) nodes=" + pathNodes);
       return Optional.empty();
     }
+    fullExpanded =
+        splitAtRepeatedOppositeTraversal(
+            trainName, routeId.map(RouteId::value).orElse("-"), purpose, fullExpanded);
     List<RailEdge> fullEdges = resolveEdges(fullExpanded);
     if (fullEdges.isEmpty()) {
       debugLogger.accept("构建请求失败: full resolveEdges 返回空 (边未找到?) nodes=" + fullExpanded);
@@ -606,7 +609,8 @@ public final class OccupancyRequestBuilder {
         base.priority(),
         base.purpose(),
         base.conflictReleaseHints(),
-        intents);
+        intents,
+        base.directedContext());
   }
 
   private Optional<NodeId> resolveDepotAnchor(
@@ -1094,6 +1098,78 @@ public final class OccupancyRequestBuilder {
       }
     }
     return List.copyOf(expanded);
+  }
+
+  private List<NodeId> splitAtRepeatedOppositeTraversal(
+      String trainName,
+      String route,
+      AuthorizationPurpose purpose,
+      List<NodeId> expandedPathNodes) {
+    if (expandedPathNodes == null || expandedPathNodes.size() < 3) {
+      return expandedPathNodes == null ? List.of() : expandedPathNodes;
+    }
+    Map<EdgeId, DirectedTraversalContext.DirectedEdge> seen = new LinkedHashMap<>();
+    for (int i = 0; i < expandedPathNodes.size() - 1; i++) {
+      NodeId from = expandedPathNodes.get(i);
+      NodeId to = expandedPathNodes.get(i + 1);
+      if (from == null || to == null) {
+        continue;
+      }
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      DirectedTraversalContext.DirectedEdge current =
+          new DirectedTraversalContext.DirectedEdge(edgeId, from, to);
+      DirectedTraversalContext.DirectedEdge previous = seen.get(edgeId);
+      if (previous == null) {
+        seen.put(edgeId, current);
+        continue;
+      }
+      boolean opposite =
+          previous.fromNode().equals(current.toNode())
+              && previous.toNode().equals(current.fromNode());
+      if (!opposite) {
+        continue;
+      }
+      NodeId boundary = from;
+      List<NodeId> segment = List.copyOf(expandedPathNodes.subList(0, i + 1));
+      debugLogger.accept(
+          "SMART_ROUTE_REPEATED_EDGE_DIRECTION_CHANGE route="
+              + route
+              + " edge="
+              + edgeId
+              + " firstDirection="
+              + previous.fromNode().value()
+              + "->"
+              + previous.toNode().value()
+              + " secondDirection="
+              + current.fromNode().value()
+              + "->"
+              + current.toNode().value()
+              + " purpose="
+              + purpose);
+      debugLogger.accept(
+          "SMART_ROUTE_TURNBACK_BOUNDARY_DETECTED route=" + route + " station=" + boundary.value());
+      debugLogger.accept(
+          "SMART_ROUTE_SEGMENT_SPLIT_AT_TURNBACK train="
+              + trainName
+              + " station="
+              + boundary.value()
+              + " segmentAEnd="
+              + boundary.value()
+              + " segmentBStart="
+              + current.toNode().value());
+      debugLogger.accept(
+          "SMART_JBS_SEGMENT_AUTHORITY train="
+              + trainName
+              + " segment=A"
+              + " from="
+              + segment.get(0).value()
+              + " to="
+              + boundary.value()
+              + " resourceCount="
+              + Math.max(0, segment.size() - 1));
+      return segment;
+    }
+    return expandedPathNodes;
   }
 
   /**

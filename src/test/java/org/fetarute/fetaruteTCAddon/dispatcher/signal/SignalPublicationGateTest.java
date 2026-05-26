@@ -91,6 +91,22 @@ class SignalPublicationGateTest {
   }
 
   @Test
+  void cautionPassesThroughPublicationGate() {
+    OccupancyRequest request = movementRequest("train", 0);
+
+    SignalPublicationGate.Decision decision =
+        SignalPublicationGate.evaluate(
+            input(
+                request,
+                SignalAspect.PROCEED_WITH_CAUTION,
+                false,
+                SignalComputationTrace.TokenState.ACTIVE));
+
+    assertFalse(decision.blocked());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.visibleAspect());
+  }
+
+  @Test
   void conflictClearingPurposeDoesNotImplyDrainThrough() {
     OccupancyRequest request =
         request(

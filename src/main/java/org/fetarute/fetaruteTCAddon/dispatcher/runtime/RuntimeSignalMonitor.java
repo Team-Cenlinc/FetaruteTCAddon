@@ -104,14 +104,21 @@ public final class RuntimeSignalMonitor implements Runnable {
     Set<MinecartGroup> duplicateGroups = cleanupDuplicateLogicalTrains(groupsByLogicalName);
     Set<String> activeTrainNames = new HashSet<>();
     for (GroupTickTarget candidate : candidates) {
-      MinecartGroup group = candidate.group();
-      if (duplicateGroups.contains(group)) {
+      if (duplicateGroups.contains(candidate.group())) {
         continue;
       }
       String trainName = candidate.trainName();
       if (trainName != null && !trainName.isBlank()) {
         activeTrainNames.add(trainName);
       }
+    }
+    dispatchService.traceSmartDispatchGlobalSnapshot(activeTrainNames, now);
+    for (GroupTickTarget candidate : candidates) {
+      MinecartGroup group = candidate.group();
+      if (duplicateGroups.contains(group)) {
+        continue;
+      }
+      String trainName = candidate.trainName();
       dispatchService.handleSignalTick(group);
       // 检测"脱管"列车：有 FTA tag 但 route 无法解析，连续多 tick 后视为异常并清理
       if (trainName != null && !trainName.isBlank()) {

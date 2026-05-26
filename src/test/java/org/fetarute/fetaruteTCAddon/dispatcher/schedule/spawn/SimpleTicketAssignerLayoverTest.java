@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -37,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
@@ -57,6 +59,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecis
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -117,7 +120,8 @@ class SimpleTicketAssignerLayoverTest {
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
         .thenReturn(true);
 
@@ -207,7 +211,8 @@ class SimpleTicketAssignerLayoverTest {
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.snapshotProgressEntries())
         .thenReturn(congestedProgressEntries(routeId, "OP:L1:R1"));
 
@@ -287,7 +292,8 @@ class SimpleTicketAssignerLayoverTest {
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     when(layoverRegistry.findCandidates("A")).thenReturn(List.of(first, second));
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.dispatchLayover(eq(first), any(ServiceTicket.class)))
         .thenReturn(false);
     when(runtimeDispatchService.dispatchLayover(eq(second), any(ServiceTicket.class)))
@@ -994,9 +1000,8 @@ class SimpleTicketAssignerLayoverTest {
                   false, request.now(), SignalAspect.STOP, List.of(blocker));
             });
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
-    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
-    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
 
     return new SimpleTicketAssigner(
         spawnManager,
@@ -1012,6 +1017,16 @@ class SimpleTicketAssignerLayoverTest {
         Duration.ofSeconds(1),
         1,
         10);
+  }
+
+  private static RuntimeDispatchService mockRuntimeDispatchServiceAllowingSmartAdmission() {
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
+    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    when(runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
+            anyString(), any(RailGraph.class), any(OccupancyRequestContext.class)))
+        .thenReturn(true);
+    return runtimeDispatchService;
   }
 
   private static SimpleRailGraph graphWithTwoDepotStarts(
@@ -1226,7 +1241,8 @@ class SimpleTicketAssignerLayoverTest {
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
         .thenReturn(false);
 
@@ -1392,7 +1408,8 @@ class SimpleTicketAssignerLayoverTest {
     when(signNodeRegistry.snapshotInfos()).thenReturn(Map.of("depot", depotInfo));
 
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
 
     SimpleTicketAssigner assigner =
@@ -1509,9 +1526,8 @@ class SimpleTicketAssignerLayoverTest {
     when(occupancyManager.canEnter(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
-    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
-    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:L1:R1"), List.of(depotOne, nodeA, nodeB), Optional.empty());
@@ -1756,7 +1772,8 @@ class SimpleTicketAssignerLayoverTest {
     when(occupancyManager.canEnter(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     RouteProgressRegistry.RouteProgressEntry activeAtDepotOne =
         new RouteProgressRegistry.RouteProgressEntry(
             "active-d1",
@@ -1843,9 +1860,8 @@ class SimpleTicketAssignerLayoverTest {
 
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     when(depotSpawner.spawn(eq(provider), any(), any(), eq(now))).thenReturn(Optional.empty());
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
-    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
-    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
 
     RouteDefinition routeOne =
         new RouteDefinition(
@@ -1914,9 +1930,8 @@ class SimpleTicketAssignerLayoverTest {
 
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     when(depotSpawner.spawn(eq(provider), any(), any(), eq(now))).thenReturn(Optional.empty());
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
-    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
-    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:L1:R1"), List.of(depotNode, stationNode), Optional.empty());
@@ -2022,7 +2037,7 @@ class SimpleTicketAssignerLayoverTest {
             occupancyManager,
             railGraphService,
             mockRouteDefinitions(Map.of(operationRouteId, route)),
-            mock(RuntimeDispatchService.class),
+            mockRuntimeDispatchServiceAllowingSmartAdmission(),
             mockConfigManager(),
             signNodeRegistry,
             layoverRegistry,
@@ -2077,9 +2092,8 @@ class SimpleTicketAssignerLayoverTest {
 
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     when(depotSpawner.spawn(any(), any(), any(), any())).thenReturn(Optional.empty());
-    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
-    when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
-    when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
