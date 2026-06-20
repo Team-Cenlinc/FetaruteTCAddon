@@ -45,4 +45,27 @@ class MovementAuthorityServiceTest {
     assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.effectiveAspect());
     assertTrue(decision.restricted());
   }
+
+  @Test
+  void movementAuthorityHardConstraintOutsideStopMarginDoesNotStop() {
+    MovementAuthorityService.MovementAuthorityDecision decision =
+        service.evaluate(
+            new MovementAuthorityService.MovementAuthorityInput(
+                SignalAspect.CAUTION, 6.0, 1.0, OptionalLong.of(24L), 2.0, 8.0));
+
+    assertEquals(SignalAspect.CAUTION, decision.effectiveAspect());
+    assertFalse(decision.restricted());
+    assertTrue(decision.recommendedMaxSpeedBps().isPresent());
+  }
+
+  @Test
+  void movementAuthorityHardConstraintInsideStopMarginStops() {
+    MovementAuthorityService.MovementAuthorityDecision decision =
+        service.evaluate(
+            new MovementAuthorityService.MovementAuthorityInput(
+                SignalAspect.CAUTION, 10.0, 1.0, OptionalLong.of(20L), 2.0, 8.0));
+
+    assertEquals(SignalAspect.STOP, decision.effectiveAspect());
+    assertTrue(decision.restricted());
+  }
 }

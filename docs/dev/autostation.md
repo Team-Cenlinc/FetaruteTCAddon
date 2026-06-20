@@ -65,4 +65,5 @@ pitch: 1.2
 1. 居中对齐并停稳（与 `[train] station` 相同的 center 逻辑）。
 2. 停稳后延迟 10 tick 开门。
 3. 从开门开始计时，等待 dwell 时间（默认 20s）。
-4. 关门动画并放行列车。
+4. 停站门控持有期间只推进 routeIndex 与动态站台选择，不提前写下一跳 TrainCarts destination，避免静止停站时被 TrainCarts 按出口方向反向。
+5. 关门动画结束且出站门控放行后，由下一次 signal tick 提交 destination 并发车。

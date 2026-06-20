@@ -11,8 +11,10 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -53,6 +55,50 @@ class OccupancyResourceResolverTest {
     String conflictKey =
         ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeId).orElseThrow();
     assertTrue(resources.contains(OccupancyResource.forConflict(conflictKey)));
+    assertTrue(((RailGraphSectionSupport) graph).sectionInfoForEdge(edgeId).isEmpty());
+  }
+
+  @Test
+  void resourcesForLinearEdgeAddsSectionConflict() {
+    NodeId nodeA = NodeId.of("A");
+    NodeId switcherId = NodeId.of("S");
+    NodeId nodeB = NodeId.of("B");
+    RailNode a =
+        new SignRailNode(
+            nodeA,
+            NodeType.WAYPOINT,
+            new Vector(0.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode switcher =
+        new SignRailNode(
+            switcherId,
+            NodeType.SWITCHER,
+            new Vector(1.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    RailNode b =
+        new SignRailNode(
+            nodeB,
+            NodeType.WAYPOINT,
+            new Vector(2.0, 64.0, 0.0),
+            Optional.empty(),
+            Optional.empty());
+    EdgeId edgeAS = EdgeId.undirected(nodeA, switcherId);
+    EdgeId edgeSB = EdgeId.undirected(switcherId, nodeB);
+    RailEdge as = new RailEdge(edgeAS, nodeA, switcherId, 20, 8.0, true, Optional.empty());
+    RailEdge sb = new RailEdge(edgeSB, switcherId, nodeB, 20, 8.0, true, Optional.empty());
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(nodeA, a, switcherId, switcher, nodeB, b),
+            Map.of(edgeAS, as, edgeSB, sb),
+            Set.of());
+
+    List<OccupancyResource> resources = OccupancyResourceResolver.resourcesForEdge(graph, as);
+
+    SingleLineSectionInfo section =
+        ((RailGraphSectionSupport) graph).sectionInfoForEdge(edgeAS).orElseThrow();
+    assertTrue(resources.contains(OccupancyResource.forConflict(section.key())));
   }
 
   @Test

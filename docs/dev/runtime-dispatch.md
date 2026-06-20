@@ -42,6 +42,7 @@
 
 ## AutoStation PASS
 - AutoStation 的 STOP/TERMINATE 仍由停稳后的 `handleStationArrival` 推进，避免提前推进导致列车跳站。
+- AutoStation 持有 `DepartureGate` 的中间站只推进 routeIndex 与 DYNAMIC effective node，不在 dwell/WaitState 窗口提前写下一跳 TrainCarts destination；下一跳 destination 由门控释放后的 signal tick 在最终授权通过时提交，避免静止停站期间被 TrainCarts 按出口方向反向。
 - AutoStation 的 PASS 不会进入停站/开门流程，因此运行时监听器会在牌子触发时确认当前 RouteStop 为 PASS，并立即执行普通推进，避免列车 destination 卡在被通过的站台。
 - `[train]` AutoStation 使用 `GROUP_ENTER` 推进 PASS；`[cart]` AutoStation 仅处理车头 `MEMBER_ENTER`，避免长编组重复推进。
 
@@ -54,16 +55,18 @@
 - `RuntimeSignalMonitor` 只负责巡检、异常清理与 ETA 采样，实际信号控制仍由 `RuntimeDispatchService.handleSignalTick(...)` 完成。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
 - 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
+- 信号未变化但列车在 proceed-like 信号下物理静止（速度不超过 `failover-stall-speed-bps`）时，仍会补发 launch：上一次 launch 可能被冷却窗口或停车竞态吞掉，不补发就要等 stall failover 或健康监控兜底（实测表现为前车驶离后，后车以 PROCEED 静止数分钟）。停站 dwell、发车门控、movement inhibitor 与 layover 中的静止是计划行为，不在补发范围内；launch 节流仍然生效。
 - 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
 - 降低 `speedLimit` 属于安全上限，执行层不会再用速度命令限幅延迟它；列车仍在运动且目标速度下降时，会补发一次 TrainCarts launch 控速动作，让 approach/限速按加减速度平滑收敛。若 `/fta train debug` 显示 `edge_limit`、`edge_speed_lookahead`、`movement_authority` 或 approach limiter，写入的 cap 应立即反映该限制。
 - 闭塞 STOP、authorization failure、hard blocker、acquire failure、authority window exceeded、single corridor fail-closed 都属于 hard STOP：运行时会清空 destination route/destination、下发 speedLimit=0、清动作队列、调用 TrainCarts hard stop，并使旧 destination 不再具备运动授权。protective-only retain 阻塞是例外：第一版只输出 stale/release candidate 诊断并保持 STOP 控车，不把 destination 或 movement token 立即作废。
 - STOP waypoint dwell handoff 与计划进站 approach 不走 hard STOP；它们可以继续使用 planned-stop 减速曲线，但 movement token 与 hard STOP 抑制状态会隔离闭塞红灯和计划停站语义。
 - Movement Authority 的 `authorityEnd` 会标记来源原因：`HARD_BLOCKER`、`ROUTE_STOP_OR_TERMINAL`、`DWELL_OR_STATION_STOP`、`SINGLE_EXIT_NOT_VERIFIED`、`MAX_AUTHORITY_CAP_REACHED` 属于物理边界；`ARTIFICIAL_WINDOW_LIMIT` 只表示当前 lookahead/授权窗口被截断。人工窗口边界只用于内部扩展与诊断，不得单独把可见信号降级为 PROCEED_WITH_CAUTION/STOP。
 - 信号 tick 会为同一列车/routeIndex 构建 canonical `MovementPlanSnapshot`：包含 effective from/to、完整 expanded path、有向边、single conflict 方向、switcher path signature，以及 occupancy/progress 版本。Entry lookahead、canEnterPreview、Movement Authority 与最终发布门都必须复用该快照；硬授权与黄灯前瞻从同一快照派生，不能各自重新猜测路径。
-- AutoStation 在 WaitState 期间会向运行时申请 `DepartureGate`（会话锁），信号 tick 会强制维持 STOP；仅在门控放行且会话匹配时释放，避免“停站后被信号 tick 提前发车”。
+- AutoStation 在 WaitState 期间会向运行时申请 `DepartureGate`（会话锁），信号 tick 会强制维持 STOP；仅在门控放行且会话匹配时释放，避免“停站后被信号 tick 提前发车”。中间站持锁期间不会提前写下一跳 destination，防止 TrainCarts 在静止停站窗口提前重算朝向。
 - 出站门控、推进点、destination reissue 与周期信号 tick 统一采用“两层前瞻”：
   - `hardAuthorityWindow` 只覆盖当前 tick 真正要进入的短窗口，只有这里的 live hard blocker 才能直接 STOP 或触发 acquire failure。
   - `advisoryLookaheadWindow` 使用同一个 expanded path 的更远前瞻，只用于 station stop、真实 NODE/EDGE blocker、active opposite single conflict、switcher throat 等风险的 CAUTION / target speed 计算；其资源不得进入 `MOVEMENT_REQUIRED`。
+- 周期信号 tick 与推进点的 `hardAuthorityWindow` 会在列车移动时按“当前制动距离 + 跟驰/authority 安全余量”扩展，最多保留 8 条展开图边。这样短咽喉、站前折返与 PWC 前的小段不会因为固定 1-edge 授权而漏看可制动距离内的真实冲突；静止和健康恢复重发路径仍保持单边硬窗口，避免把远端 advisory blocker 提前升级为物理 STOP。
 - 前向授权请求中只有下一跳 NODE/EDGE/必要冲突资源标记为 `MOVEMENT_REQUIRED`，当前位置、尾部保护与 hold-only single claim 只作为 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 保留。前向授权不得把 rear guard 或 advisory blocker 混入 fail-closed 请求。
 - 发车门控是 admission gate：它保留完整前向 lookahead / depot lookover 来判断是否允许出发，但正式 acquire 只写 `MOVEMENT_REQUIRED` 资源，不覆盖 rear guard 或 hold retain claim。
 - `canEnter` 的 hard-blocker fail-closed 只作用于 `MOVEMENT_REQUIRED`；保护性资源冲突不会阻止前车继续前进，只会保留本车保护窗口、约束后车，或作为 stale protective claim 的清理候选。
@@ -71,6 +74,16 @@
 - 前方列车信号调整会按调度图展开后的 edge 扫描，而不是按 route waypoint 段计数。长单线中 `A -> D` 这种 route-defined segment 会先展开为 `A -> M1 -> M2 -> ... -> D`，再按实际 edge 数切分 hard authority 与 advisory horizon，避免把远端站点或远端列车作为当前 hard movement resource 直接打红灯。
 - 前方列车 edge-count 跟驰扫描必须使用完整 advisory / expanded path，而不是 1-edge hard authority window；hard window 只决定当前 tick 是否能进入下一段，不能替代“前方几条 edge 内是否有列车”的黄灯/慢行判断。
 - 同向单线的 `CONFLICT:single` claim 只表示走廊方向与入队/授权关系，不代表前车物理位置。跟驰距离必须来自前车真实 `NODE` / `EDGE` claim；否则 conflict entry 会被映射到单线入口距离 0，导致后车即使离前车很远也被误判为 STOP。
+- 对向单线准入使用 section 级 `CONFLICT:single:section:<component>:<endA>~<endB>` token：section 已被某方向占用/预留时，反向请求在入口前 STOP 并进入队列；同向请求不被 section token 串行化，仍由真实 `NODE` / `EDGE` claim、headway 与速度约束控制。section 方向缺失时按 `UNKNOWN` fail closed，不能绕过真实 hard blocker。
+- section token 与旧 per-micro `CONFLICT:single:*` 迁移期并存时，未知方向不得单独制造 phantom STOP；只有同一 single/section 资源上存在外部占用或队列预留，且不能证明同向时才 fail closed。
+- section claim 方向会从 committed movement plan 的等价微段 token 补齐：只有同 component、同 axis 且方向唯一时才把方向写入
+  `CONFLICT:single:section:*` claim；否则仍保持 `UNKNOWN` 并按 fail-closed 处理。
+- section 索引只给轴线成员边生成 token；道岔分叉处 off-axis 支线不得挂在主线 section 下，保证任一 `sectionInfoForEdge(edge)` 返回的 edge 两端都出现在该 section 的有序轴线节点里。
+- 同向 section 内的 `CONFLICT:switcher` 只作为咽喉路径诊断与对向/未知方向保护，不再额外串行化跟驰列车；如果 follower 与 leader 在同一个 `CONFLICT:single:section:*` 上方向一致，switcher claim、switcher queue 和 advisory switcher risk 都不会单独把 follower 压成 STOP/CAUTION。真实站台 `NODE`、咽喉 `EDGE` 和前车车体占用仍按 hard blocker 处理。
+- 同向跟驰时，前车真实 `NODE` / `EDGE` footprint 不能被后车 acquire，但也不能作为“本车自持 single claim 不可 continuation”的二次拒绝理由。self-owned single continuation 只应被对向/未知 single、非同向硬 blocker 或路径不连续拦截；同向前车距离继续由 advisory lookahead、movement authority 与速度曲线处理。
+- 同向前车最终停在死端 Station/Depot 时，不再天然要求后车等待前车完全出清；只要前车路径与本车 single window 重合、方向一致、出口/边界可见且后车有安全 hold point，仍按移动闭塞式跟驰放行。边界单边段、无安全 hold point 或对向/未知占用仍保持 STOP。
+- 已经持有同一 single claim 的列车继续前进时，仍必须检查同向外部 leader 是否正停在终端/停站/折返陷阱中；若 leader 不能证明会真正排空本区间，`ALLOW_ALREADY_INSIDE_CONTINUE` 会被收紧为 local-only hold，并输出 `SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER`。该守卫只允许对“可证明在本车前方”的 leader 生效；若顺序不可证明，则使用稳定 train key 只指定一侧让行；若发现候选 leader 也正在等本车，则跳过守卫，避免同向列车互相把对方焊成 STOP。
+- 自持 single continuation 被外部 owner 阻断时，拒绝结果会把外部 same-single claim 一并放入 blockers。这样 health monitor 的 live blocker cycle 可以看到真实 wait-for 边，而不是只看到 self claim 后退化为 snapshot missing / timeout destroy。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。
 - spawn/layover 发车成功后，运行时会按本次占用资源主动刷新受影响列车（claim + queue），降低“新车占用已生效但他车未及时红灯”的风险。
@@ -85,13 +98,19 @@
 - 运行中当前位置保护会从当前图节点沿最短路取“下一段图边”并携带 `CONFLICT:single` 方向；不会再只尝试当前节点直连下一个 route waypoint，避免长单线中段丢失走廊方向。
 - 事件驱动信号链路只作为桥接：默认启用 `runtime.signal-event-coalesce`，Occupancy acquire/release 事件只标记受影响列车 dirty，周期 tick 统一做授权提交；更宽松信号不会通过事件链路放行。STOP 可作为高优先级刷新来源，但不会在 `OccupancyManager.acquire()` 的同步调用栈内重入同一列车 hard STOP。
 - 当当前信号未知（`currentSignal=null`）时，事件链路仅允许 `STOP` 立即生效，不接受 `CAUTION/PROCEED` 的初始化放行。
+- 事件重评估请求与周期 tick 共用同一组窗口参数（lookahead / min-clear / rear-guard / switcher-zone）、同一 `DispatchPriorityResolver` 与同一 effective waypoint 解析，确保 release 后的 preview 与周期路径基于同构请求上下文，trace 中的资源计数可直接对照。
 - STOP 事件即使与当前信号相同，只要列车仍在运动、destination 仍存在，或存在有效 movement token / hard-stop inhibitor，也会重新下发 hard STOP。
 - Movement token 分为 pending 与 active：acquire 成功后只创建 pending token；只有 destination commit 成功且 claimVersion 匹配时才激活 token 并解除 `movementInhibited`。commit 失败会回滚 token 与本轮前向 claim，并保持 STOP。
 - 触发“冲突区放行锁”时，`canEnter.allowed=true` 会同时携带 `conflictRelease=true`；该释放只能跳过抽象 `CONFLICT` 资源，不允许跳过真实 `NODE/EDGE` 硬占用。Depot spawn、station departure、layover reuse 不使用 conflictRelease。
 - `withRuntimeConflictClearingEvidence()` 只能附加 `TOPOLOGY_EXIT_HINT` 诊断证据，不改变 `requestPurpose`，也不能让普通 `RUNTIME_MOVE` 被发布层分类为 `DRAIN_THROUGH`。`DRAIN_THROUGH` 只允许在真实 drain authority 新鲜、zone 与 `MovementPlanSnapshot.singleConflictDirections` 匹配、列车位于对应 single conflict 内且正在清空出口时成立；普通 routeIndex=0 发车即使持有 single claim，也仍按 `FORWARD_MOVEMENT` 发布。
+- Smart recovery 的 drain/forward unlock 仍默认尊重对向或未知方向 single barrier；只有当当前占用快照证明本车已持有 contested
+  section、方向已知、下一跳朝出口前进、出口 edge/node 没有外部 claim，且 hard blocker 只对应同一 section 时，才允许进入最终 signal
+  refresh 复判。该分支只输出 `SMART_*_UNLOCK_DRAIN_OUT_ALLOWED` 并触发既有复判，不创建 DRAIN_THROUGH authority、不 force-green、不改
+  destination/token。
 - `drain-authority-without-leader` / `DRAIN_AUTHORITY_INCONSISTENT` 只对真实 `DRAIN_THROUGH` candidate 生效；对 `FORWARD_MOVEMENT` 或普通 `CONFLICT_CLEARING` 来说只能作为 trace 诊断，不得清 destination、invalid token 或升级为 `authorization_failure` hard STOP。
 - 单线走廊的冲突区放行候选仅在请求列车与 blocker 的方向都能判定且互为对向时成立；方向为 `UNKNOWN` 或队列中缺少方向信息时保持 STOP，避免把同向前后车误判为会车死锁。
 - 已有 single conflict claim 的方向不会被后续“无方向的当前位置 hold”覆盖；如果 hold 请求只用于保留当前位置，管理器会沿用原 claim 方向，保证互卡恢复仍能识别对向列车。
+- 自持 single claim 的 zone 不在本次 `MovementPlanSnapshot` 穿越路径上、且请求对该 zone 不要求 hard authority 时，该 claim 仅视为车尾/区域保护，不否决本车继续移动（trace `SMART_SELF_OWNED_CONTINUATION_ALLOWED reason=tail-protection-zone-not-on-plan`）。claim 与方向原样保留，外部对向/未知方向列车仍由 single-region barrier 拦截；对该 zone 仍要求 hard authority 的请求保持 fail-closed。这样折返后真正的 `self-owned-single-opposite-direction` 拒绝不会被车尾保护 zone 的 `direction-unknown` 拒绝掩盖，健康监控的 `clearSelfOwnedSingleDirectionMismatch` 才能识别并清理同 zone 反向残留；该恢复入口的方向解析与占用层一致（`corridorDirections` 缺失时回退 movement plan 的 `singleConflictDirections`）。
 - 发车门控和周期信号 tick 在正式 `canEnter()` 前会清理同 Route 后方列车留在当前授权资源上的前瞻 queue entry；该步骤不释放 claim，且不同 route、未知进度、索引不在后方的列车仍会作为真实冲突阻塞。
 - 同 Route 同 index 的跟驰列车会继续比较 `lastPassedGraphNode` 在当前 route 段最短路上的顺序；当前车已经通过更靠前的中间节点时，可清理后车留在当前授权窗口里的前瞻 claim/queue，避免同向追驰互相红灯。
 - 单线 `CONFLICT:single` 队列只在存在对向/未知方向竞争时串行化；队列中全是同向列车时，跟驰距离交给 NODE/EDGE 硬占用控制，不再由 conflict 队列额外互斥。
@@ -164,6 +183,7 @@
 - 当授权不足时会把信号降级为更保守等级，并下压目标速度，防止冒进进入未清空区段。
 - `PROCEED` 且前方无硬约束（无 blocker/caution）时，不再使用“到下一节点距离”触发授权降级。只有物理 `authorityEndReason` 才能参与可见信号降级；`ARTIFICIAL_WINDOW_LIMIT` 会尝试基于 canonical expanded path 延展授权窗口，不能直接变成黄灯/红灯。
 - `/fta train debug` 会显示 `distanceToAuthorityEnd`、`authorityEndResource` 与 `authorizedEdgeCount`；SignalTrace 还会输出 `authorityEndReason`、`authorityWindowDerivedFromExpandedPath`、`authorityExtensionAttempted`、`authorityExtensionSucceeded` 与 `authorityEndIsPhysical`。
+- 高频诊断 trace 会按“trace 类型 + 列车 + 去除 tick/requestId/version 后的稳定内容”去重；物理信号已经处于目标 aspect 且 `publishSuppressed=true` 的 no-op SignalTrace 不再输出。若需要确认长期卡住状态，优先看首次 blocker/authority trace 与后续内容变化行，而不是按 per-tick 行数判断。
 - Entry lookahead 进入 single zone 且当前窗口看不到出口时，会先在 canonical expanded path 中扩展到 single exit；只有扩展后仍不可见出口，才允许产生 `ENTRY_LOOKAHEAD_BLOCKED`。相关 trace 字段包括 `lookaheadUsesExpandedPath`、`lookaheadWindowNodeCount`、`entryZoneId`、`entryZoneStartIndex`、`exitIndexBeforeExtension`、`extensionAttempted`、`exitIndexAfterExtension`、`exitFeasible` 与 `failureReason`。
 - 授权失败或最终 STOP 时，诊断会记录 `destinationPresentWhileBlocked`、`retainedDestination` 与 `blockedReason`。运行时不会主动清空
   TrainCarts destination，避免目的地突然缺失带来不可预期的底层行为。
@@ -193,6 +213,12 @@
   - `PROGRESS_STUCK`：非 STOP 时 `refreshSignal -> reissueDestination -> forceRelaunch`
   - `STOP PROGRESS_STUCK`：自动模式只执行 `refreshSignal -> clearSelfOwnedSingleDirectionMismatch -> reapplyHardStop`，不再 `forceRelaunch`；清理入口仅处理同车 single 旧方向残留，不会重新写 destination 或绕过红灯强制动车。
   - STOP 互卡：自动模式只在双方 STOP、同一 `CONFLICT:single`、方向已知对向、速度低于阈值且不处于 dwell/departure gate/layover/manual hold 时创建 confirmed `DeadlockEpisode`；同一 episode 先 `refresh 双车`，再 `reapplyHardStop 双车`，超过阈值后提交 Smart Dispatcher destroy precheck。
+  - 同线级联互卡会优先尝试释放下游链头，而不是让高分的中间 bottleneck 候选反复获得 unlock reservation。候选日志会带 `sameLineCascade=true`，用于确认本轮选择来自级联链头裁决。
+  - 当同线级联链头被对向列车顶住时，Smart planner 可产生 `YIELD_TO_HEAD_ON` 候选；执行侧只释放让路车在相关资源上的 `UNLOCK_RESERVATION` / `LOOKAHEAD_PREVIEW` / `QUEUE_POSITION`，不会释放物理占用、不会写 destination、不会签发 movement authority。成功日志为 `SMART_HEAD_ON_YIELD_APPLIED`。
+  - 若 Smart planner 或 recovery 只得到 `INSUFFICIENT_DIRECTION_EVIDENCE` / `NEED_DIRECTION_AUDIT` /
+    `WOULD_CREATE_OPPOSITE_DIRECTION_CLAIM`，该证据会作为 destroy blocker 传入最终 precheck：普通快速 destroy 被拒绝，并触发一次有界
+    direction re-audit（刷新双方信号，优先让 section token 方向补齐链路重新生效）。只有 re-audit 后、等待更长 last-resort
+    阈值且仍能证明阻塞活跃交通时，才允许更高门槛的安全移除。
   - 互卡 refresh/hard-stop 只是“恢复动作已执行”，不再作为“已修复”计数；真正的自动兜底由 `SmartDispatcherController -> alias-aware destroyTrainByName -> post cleanup/verification` 完成。
 - 每个 signal monitor tick 会先输出 `SMART_DISPATCH_GLOBAL_SNAPSHOT`，随后单车信号评估把 canonical `MovementPlanSnapshot` / `ExpandedPathPlan` 转换为 `ForwardSignalRiskSnapshot`，用于提前 CAUTION 和限速。
 - 健康检查由独立定时任务驱动（每秒 tick + `health.check-interval-seconds` 间隔门控），不再依赖信号监控任务触发。
@@ -230,6 +256,8 @@
 - `runtime.switcher-zone-edges` 控制道岔联合锁闭范围（向前 N 段边）。
 - 单线走廊冲突采用方向锁：同向可跟驰，对向需等待走廊清空。
 - 道岔/单线冲突会进入 FIFO Gate Queue，避免抢占导致的顺序漂移。
+- Smart admission 在只有 queue entry、没有真实外部 claim 时，会用只读队列预览选出队头；队头继续进入正式占用判定，输家保持本地 HOLD。关键日志为 `SMART_QUEUE_ARBITRATION_ADMISSION`。
+- Gate Queue 优先级默认按 `OPERATION > depot exit/CREATE > RETURN` 分类；`FTA_PRIORITY` 仍可人工覆盖。Depot spawn gate 不再固定加 `100`，其实际 priority 会出现在 `SMART_DEPOT_SPAWN_AUTHORITY_WINDOW`。
 
 ## 已知限制
 - 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。

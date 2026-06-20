@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
@@ -73,6 +74,11 @@ class TrainHealthMonitorTest {
             any(),
             anyBoolean(),
             anyBoolean(),
+            anyBoolean(),
+            anyString(),
+            anyBoolean(),
+            anyBoolean(),
+            anyBoolean(),
             any(),
             any()))
         .thenAnswer(
@@ -80,8 +86,10 @@ class TrainHealthMonitorTest {
               boolean weak = invocation.getArgument(5);
               boolean allBlockersLiveHard = invocation.getArgument(6);
               boolean safeDrainCandidate = invocation.getArgument(7);
-              Duration persisted = invocation.getArgument(14);
-              Duration threshold = invocation.getArgument(15);
+              boolean directionAuditRequired = invocation.getArgument(14);
+              boolean lastResortDestroy = invocation.getArgument(17);
+              Duration persisted = invocation.getArgument(19);
+              Duration threshold = invocation.getArgument(20);
               if (weak) {
                 return SmartDispatcherController.DeadlockDestroyReview.rejected(
                     "weak-blocker-diagnostic-only");
@@ -97,6 +105,10 @@ class TrainHealthMonitorTest {
               if (persisted != null && threshold != null && persisted.compareTo(threshold) < 0) {
                 return SmartDispatcherController.DeadlockDestroyReview.rejected(
                     "threshold-not-reached");
+              }
+              if (directionAuditRequired && !lastResortDestroy) {
+                return SmartDispatcherController.DeadlockDestroyReview.rejected(
+                    "direction-audit-required");
               }
               return SmartDispatcherController.DeadlockDestroyReview.allowed(
                   "confirmed-live-hard-cycle",
@@ -1082,6 +1094,44 @@ class TrainHealthMonitorTest {
   }
 
   @Test
+  @DisplayName("方向证据不足时互卡快速 destroy 被拒绝并触发复审")
+  void directionAuditBlocksFastDestroyAndTriggersReaudit() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock("trainA", "trainB");
+    when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(false);
+    when(dispatchService.recentDirectionAuditReason(eq("trainA"), any()))
+        .thenReturn(Optional.of("INSUFFICIENT_DIRECTION_EVIDENCE"));
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(65));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DIRECTION_REAUDIT_REQUESTED")
+                        && message.contains("reason=INSUFFICIENT_DIRECTION_EVIDENCE")));
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE")
+                        && message.contains("reason=direction-audit-required")));
+  }
+
+  @Test
   @DisplayName("道岔互相阻塞可用 live blocker cycle 进入恢复评估")
   void switcherMutualBlockerConfirmsLiveCycleAndEntersRecovery() {
     when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
@@ -1456,6 +1506,8 @@ class TrainHealthMonitorTest {
         .thenReturn(true);
 
     monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
     Instant t0 = Instant.now();
     monitor.check(Set.of("follower", "leader"), t0);
     monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
@@ -1491,6 +1543,8 @@ class TrainHealthMonitorTest {
         .thenReturn(true);
 
     monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
     Instant t0 = Instant.now();
     monitor.check(Set.of("follower", "leader"), t0);
     monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
@@ -1576,9 +1630,8 @@ class TrainHealthMonitorTest {
     monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
     Instant t0 = Instant.now();
     monitor.check(Set.of("follower", "leader"), t0);
-    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
     TrainHealthMonitor.CheckResult result =
-        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
 
     assertEquals(1, result.fixedCount());
     verify(dispatchService).destroyTrainByName("leader", "health-deadlock-timeout");
@@ -1590,6 +1643,124 @@ class TrainHealthMonitorTest {
                     message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
                         && message.contains("train=leader")
                         && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：follower stuck leader 证据先尝试安全恢复再考虑销毁")
+  void followerStuckLeaderFallbackTriesSafeRecoveryBeforeDestroy() {
+    RuntimeDispatchService.SmartRecoveryInput leaderInput =
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.ACTIVE,
+            true,
+            "leader-authority-active-but-terminal-mutex");
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("follower"))
+        .thenReturn(Optional.of(state("follower", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("leader"))
+        .thenReturn(Optional.of(state("leader", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(anyString(), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+    when(dispatchService.deadlockTrainContext("follower"))
+        .thenReturn(
+            Optional.of(context("follower", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("leader"))
+        .thenReturn(Optional.of(context("leader", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.smartRecoveryInput(eq("leader"), any(), any())).thenReturn(leaderInput);
+    when(dispatchService.recentFollowerStuckLeaderEvidence(eq("follower"), any()))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.FollowerStuckLeaderEvidence(
+                    "follower",
+                    "leader",
+                    "CONFLICT:single:test:A~B",
+                    Instant.now().minusSeconds(20),
+                    Instant.now(),
+                    2)));
+    when(dispatchService.applySmartForwardUnlock(leaderInput))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_FORWARD_UNLOCK",
+                "authority-token-repair",
+                DispatchEffectClass.SIGNAL_CONSTRAINT));
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+
+    assertEquals(1, result.fixedCount());
+    verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(leaderInput);
+    verify(dispatchService).applySmartDrainUnlock(leaderInput);
+    verify(dispatchService).applySmartForwardUnlock(leaderInput);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE")
+                        && message.contains("recoveryDecision=SMART_FORWARD_UNLOCK")
+                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+  }
+
+  @Test
+  @DisplayName("互卡销毁兜底：active authority 的 stuck leader 无安全恢复时不销毁")
+  void followerStuckLeaderFallbackDoesNotDestroyActiveAuthorityLeaderWithoutSafeRecovery() {
+    RuntimeDispatchService.SmartRecoveryInput leaderInput =
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.ACTIVE,
+            true,
+            "leader-authority-active-but-terminal-mutex");
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("follower"))
+        .thenReturn(Optional.of(state("follower", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("leader"))
+        .thenReturn(Optional.of(state("leader", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(anyString(), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+    when(dispatchService.deadlockTrainContext("follower"))
+        .thenReturn(
+            Optional.of(context("follower", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("leader"))
+        .thenReturn(Optional.of(context("leader", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.smartRecoveryInput(eq("leader"), any(), any())).thenReturn(leaderInput);
+    when(dispatchService.recentFollowerStuckLeaderEvidence(eq("follower"), any()))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.FollowerStuckLeaderEvidence(
+                    "follower",
+                    "leader",
+                    "CONFLICT:single:test:A~B",
+                    Instant.now().minusSeconds(20),
+                    Instant.now(),
+                    2)));
+
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+
+    assertEquals(0, result.fixedCount());
+    verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(leaderInput);
+    verify(dispatchService).applySmartDrainUnlock(leaderInput);
+    verify(dispatchService).applySmartForwardUnlock(leaderInput);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
+                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")
+                        && message.contains("ineligibleReason=TARGET_AUTHORITY_ACTIVE")));
   }
 
   @Test

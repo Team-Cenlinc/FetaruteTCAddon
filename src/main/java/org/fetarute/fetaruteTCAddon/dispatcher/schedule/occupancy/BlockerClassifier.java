@@ -22,7 +22,8 @@ public final class BlockerClassifier {
     if (claim.role() == ClaimRole.UNLOCK_RESERVATION) {
       return BlockerRelation.STALE_PROTECTIVE_CLAIM;
     }
-    if (claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY) {
+    if ((claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY)
+        && !isPhysicalOccupancyResource(resource)) {
       return BlockerRelation.STALE_PROTECTIVE_CLAIM;
     }
     ResourceIntent intent = request.intentFor(resource);
@@ -68,5 +69,9 @@ public final class BlockerClassifier {
     return resource.kind() == ResourceKind.CONFLICT
         && resource.key().startsWith("single:")
         && !resource.key().contains(":cycle:");
+  }
+
+  private static boolean isPhysicalOccupancyResource(OccupancyResource resource) {
+    return resource.kind() == ResourceKind.NODE || resource.kind() == ResourceKind.EDGE;
   }
 }

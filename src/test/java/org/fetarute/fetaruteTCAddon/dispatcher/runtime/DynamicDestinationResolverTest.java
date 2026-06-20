@@ -85,6 +85,52 @@ class DynamicDestinationResolverTest {
   }
 
   @Test
+  void resolverDoesNotSelectOccupiedPlatformWhenAllCandidatesOccupied() {
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    RailGraph graph = mock(RailGraph.class);
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    railGraphService.putSnapshot(world, graph, Instant.parse("2026-01-01T00:00:00Z"));
+
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(graph, fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(graph, firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(graph, secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(graph, fromId, edge(from, first), edge(from, second));
+    mockEdges(graph, firstId);
+    mockEdges(graph, secondId);
+    when(graph.nodes()).thenReturn(List.of(from, first, second));
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    when(occupancyManager.isNodeOccupied(secondId)).thenReturn(true);
+
+    RouteId routeId = RouteId.of("DYNAMIC-ALL-OCCUPIED");
+    RouteDefinition route = mock(RouteDefinition.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.waypoints()).thenReturn(Arrays.asList(fromId, NodeId.of("PLACEHOLDER")));
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:2]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    DynamicDestinationResolver resolver =
+        new DynamicDestinationResolver(
+            new DynamicPlatformAllocator(routeDefinitions, occupancyManager, message -> {}),
+            railGraphService,
+            message -> {});
+
+    Optional<DynamicDestinationResolver.ResolvedDynamicDestination> result =
+        resolver.resolveSignalTickDestination(
+            "train-dynamic", route, 0, worldId, fromId, Optional.empty());
+
+    assertFalse(result.isPresent());
+    verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
+  }
+
+  @Test
   void resolverHonorsEdgeOverridesWhenCheckingReachability() {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     OccupancyManager occupancyManager = mock(OccupancyManager.class);

@@ -6,6 +6,7 @@ import java.util.Objects;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
@@ -33,6 +34,11 @@ public final class OccupancyResourceResolver {
         conflictSupport
             .conflictKeyForEdge(edge.id())
             .ifPresent(key -> resources.add(OccupancyResource.forConflict(key)));
+      }
+      if (graph instanceof RailGraphSectionSupport sectionSupport) {
+        sectionSupport
+            .sectionInfoForEdge(edge.id())
+            .ifPresent(info -> resources.add(OccupancyResource.forConflict(info.key())));
       }
     }
     return List.copyOf(resources);

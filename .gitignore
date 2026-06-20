@@ -34,5 +34,7 @@ Icon?
 
 # JDBC test artifacts
 test/data/**/*.sqlite
+test/data/
 
 AGENTS.md
+CLAUDE.md

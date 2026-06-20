@@ -452,8 +452,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             dispatch ->
                 dispatch.acquireDepartureGate(trainName, stopSessionId, "autostation_dwell"));
     ExitOffsetState exitOffsetState = new ExitOffsetState(properties);
-    // 注意：不在这里添加 WaitState，因为 handleStationArrival 会设置 destination 导致 TC 尝试移动
-    // WaitState 会在 handleStationArrival 之后添加
+    // 注意：先推进运行时到站状态，再添加 WaitState。常规中间站会在 departure gate 持有期间延迟写入
+    // TrainCarts destination；终点/DSTY 等非延迟路径仍需要后续 stop + WaitState 兜住物理动作。
     if (timedOut) {
       debug(
           "AutoStation 停站超时: nodeId="
@@ -471,11 +471,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + " @ "
               + locationText(info));
     }
-    // 停车后推进 routeIndex 并设置下一站 destination
+    // 停车后推进 routeIndex；中间站下一跳 destination 由离站授权 tick 提交
     plugin
         .getRuntimeDispatchService()
         .ifPresent(dispatch -> dispatch.handleStationArrival(group, definition));
-    // 设置 destination 后，TC 可能尝试移动列车；通过 stop() 强制停止并添加 WaitState
+    // 非延迟路径可能已经改写 destination；通过 stop() 强制停止并添加 WaitState
     group.stop();
     var finalWaitState = group.getActions().addActionWaitState();
     long dwellTicks = Math.max(0L, dwellSeconds * 20L);

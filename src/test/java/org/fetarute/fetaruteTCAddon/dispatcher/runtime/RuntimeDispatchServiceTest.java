@@ -55,6 +55,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartWaitForPlanner;
@@ -86,6 +87,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalPublicationGate;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -191,8 +193,17 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, false);
     assertTrue(train.launchCalls == 1);
 
+    // 绿灯下仍然物理静止的列车需要补发 launch（上一次 launch 可能被冷却或停车竞态吞掉），
+    // 否则只能等 stall failover / 健康监控兜底。清掉冷却 tag 模拟冷却窗口已过。
+    tags.removeTagKey("FTA_LAST_LAUNCH_AT");
     service.handleSignalTick(train, false);
-    assertTrue(train.launchCalls == 1);
+    assertTrue(train.launchCalls == 2);
+
+    // 已在移动的列车信号未变化时不重复 launch。
+    tags.removeTagKey("FTA_LAST_LAUNCH_AT");
+    FakeTrain movingTrain = new FakeTrain(worldId, tags.properties(), true, 1.0);
+    service.handleSignalTick(movingTrain, false);
+    assertEquals(0, movingTrain.launchCalls);
   }
 
   @Test
@@ -915,11 +926,75 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             null);
 
-    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.5);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.0);
     service.handleSignalTick(train, true);
 
     assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
     assertEquals(0, train.hardStopCalls);
+  }
+
+  @Test
+  void hardAuthorityWindowExtendsToBrakingDistanceWhenTrainIsMoving() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId d = NodeId.of("D");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, c, d), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithLinearPath(List.of(a, b, c, d), 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.5);
+    service.handleSignalTick(train, true);
+
+    OccupancyResource secondEdge = OccupancyResource.forEdge(EdgeId.undirected(b, c));
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager, atLeastOnce()).acquire(requestCaptor.capture());
+    assertTrue(
+        requestCaptor.getAllValues().stream()
+            .anyMatch(request -> request.resourceList().contains(secondEdge)),
+        () -> "hard authority requests=" + requestCaptor.getAllValues());
   }
 
   @Test
@@ -1006,7 +1081,7 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             debugMessages::add);
 
-    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.5);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.0);
     service.handleSignalTick(train, true);
 
     assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
@@ -1028,6 +1103,155 @@ class RuntimeDispatchServiceTest {
     assertFalse(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_AUTHORITY_WINDOW_EXCEEDED_REAL")));
+  }
+
+  @Test
+  void recoverableNoActionSwitcherRiskDoesNotApplyStopWhenHardAuthorityAllowed() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, c), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(20.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(OccupancyAdvisoryPreviewSupport.class));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    OccupancyAdvisoryPreviewSupport advisorySupport =
+        (OccupancyAdvisoryPreviewSupport) occupancyManager;
+    when(advisorySupport.scanAdvisoryRisks(any()))
+        .thenAnswer(
+            inv -> {
+              OccupancyRequest request = inv.getArgument(0);
+              OccupancyResource resource = OccupancyResource.forConflict("switcher:SW");
+              OccupancyClaim claim =
+                  new OccupancyClaim(
+                      resource,
+                      "front-train",
+                      Optional.of(route.id()),
+                      request.now(),
+                      Duration.ZERO,
+                      Optional.empty());
+              return List.of(
+                  new AdvisoryRisk(
+                      resource,
+                      claim,
+                      AdvisoryRiskSource.ACTIVE_SWITCHER_CONFLICT,
+                      "switcher-risk"));
+            });
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+    service.handleSignalTick(train, true);
+
+    assertEquals(
+        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(0, train.hardStopCalls);
+    assertFalse(
+        service
+            .getDiagnostics("train-1")
+            .map(ControlDiagnostics::destinationPresentWhileBlocked)
+            .orElse(false));
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_DISPATCH_RECOVERABLE_HOLD")));
+    verify(tags.properties(), never()).clearDestination();
+  }
+
+  @Test
+  void forwardRiskSourceTreatsProvenSameDirectionSwitcherAsTraceOnly() throws Exception {
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    RuntimeDispatchService service = createMinimalService(occupancyManager, new ArrayList<>());
+    OccupancyResource section = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyResource switcher = OccupancyResource.forConflict("switcher:SWITCHER:test");
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "follower",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(section, switcher),
+            Map.of(section.key(), CorridorDirection.A_TO_B),
+            Map.of(section.key(), 0, switcher.key(), 1),
+            0);
+    OccupancyClaim blocker =
+        new OccupancyClaim(
+            switcher,
+            "leader",
+            Optional.empty(),
+            request.now(),
+            Duration.ZERO,
+            Optional.of(CorridorDirection.A_TO_B));
+    when(occupancyManager.isProvenSameDirectionFollower(request, switcher, "leader"))
+        .thenReturn(true);
+
+    RiskSource source = invokeRiskSourceForBlocker(service, request, blocker);
+
+    assertEquals(RiskSource.SAME_DIRECTION_FOLLOW, source);
+  }
+
+  @Test
+  void forwardRiskSourceKeepsPhysicalNodeAsHardBlocker() throws Exception {
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    RuntimeDispatchService service = createMinimalService(occupancyManager, new ArrayList<>());
+    OccupancyResource node = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "follower",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(node),
+            Map.of());
+    OccupancyClaim blocker =
+        new OccupancyClaim(
+            node, "leader", Optional.empty(), request.now(), Duration.ZERO, Optional.empty());
+    when(occupancyManager.isProvenSameDirectionFollower(request, node, "leader")).thenReturn(true);
+
+    RiskSource source = invokeRiskSourceForBlocker(service, request, blocker);
+
+    assertEquals(RiskSource.HARD_BLOCKER, source);
+    verify(occupancyManager, never()).isProvenSameDirectionFollower(request, node, "leader");
   }
 
   @Test
@@ -1172,7 +1396,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void forwardTrainEdgeCountUsesFullAdvisoryPathBeyondHardAuthorityWindow() {
+  void forwardTrainDistanceUsesFullAdvisoryPathBeyondHardAuthorityWindow() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     NodeId c = NodeId.of("C");
@@ -1240,7 +1464,8 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
     service.handleSignalTick(train, true);
 
-    assertEquals(SignalAspect.CAUTION, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(
+        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
     assertEquals(0, train.hardStopCalls);
   }
 
@@ -1484,6 +1709,25 @@ class RuntimeDispatchServiceTest {
 
     assertTrue(service.releaseDepartureGate("train-1", "sid-new"));
     assertFalse(service.hasDepartureGate("train-1"));
+  }
+
+  @Test
+  void stationArrivalDestinationDefersOnlyForHeldMiddleStationGate() {
+    RuntimeDispatchService service = createMinimalService();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"),
+            List.of(NodeId.of("A"), NodeId.of("STATION"), NodeId.of("NEXT")),
+            Optional.empty());
+
+    assertFalse(service.shouldDeferStationDepartureDestination("train-1", route, 1));
+
+    service.acquireDepartureGate("train-1", "sid-1", "autostation_dwell");
+
+    assertTrue(service.shouldDeferStationDepartureDestination("train-1", route, 1));
+    assertFalse(service.shouldDeferStationDepartureDestination("train-1", route, 2));
+    assertFalse(service.shouldDeferStationDepartureDestination("other-train", route, 1));
+    assertFalse(service.shouldDeferStationDepartureDestination("train-1", route, -1));
   }
 
   @Test
@@ -2023,7 +2267,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
+                    graphWithTwoEdges(a, b, c, 10, 2), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(1000.0);
 
@@ -2514,7 +2758,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
+                    graphWithTwoEdges(a, b, c, 10, 2), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(1000.0);
 
@@ -2826,7 +3070,7 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, false);
 
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.PROCEED, aspect);
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, aspect);
   }
 
   @Test
@@ -3136,6 +3380,16 @@ class RuntimeDispatchServiceTest {
     };
   }
 
+  private static RiskSource invokeRiskSourceForBlocker(
+      RuntimeDispatchService service, OccupancyRequest request, OccupancyClaim blocker)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "riskSourceForBlocker", OccupancyRequest.class, OccupancyClaim.class);
+    method.setAccessible(true);
+    return (RiskSource) method.invoke(service, request, blocker);
+  }
+
   private static RailGraph graphWithSingleEdge(NodeId a, NodeId b, int lengthBlocks) {
     RailEdge edge =
         new RailEdge(EdgeId.undirected(a, b), a, b, lengthBlocks, -1.0, true, Optional.empty());
@@ -3322,6 +3576,178 @@ class RuntimeDispatchServiceTest {
         return Optional.of(firstEdgeConflictKey);
       }
       return Optional.empty();
+    }
+  }
+
+  private static final class ParallelConflictExitGraph
+      implements RailGraph, RailGraphConflictSupport {
+    private final Map<NodeId, RailNode> nodes;
+    private final Map<EdgeId, RailEdge> edges;
+    private final Set<EdgeId> conflictEdges;
+    private final String conflictKey;
+
+    private ParallelConflictExitGraph(
+        List<RailEdge> graphEdges, Set<EdgeId> conflictEdges, String conflictKey) {
+      Map<NodeId, RailNode> nextNodes = new LinkedHashMap<>();
+      Map<EdgeId, RailEdge> nextEdges = new LinkedHashMap<>();
+      for (RailEdge edge : graphEdges) {
+        nextNodes.putIfAbsent(edge.from(), new RailNodeTest(edge.from()));
+        nextNodes.putIfAbsent(edge.to(), new RailNodeTest(edge.to()));
+        nextEdges.put(edge.id(), edge);
+      }
+      this.nodes = Map.copyOf(nextNodes);
+      this.edges = Map.copyOf(nextEdges);
+      this.conflictEdges = Set.copyOf(conflictEdges);
+      this.conflictKey = conflictKey;
+    }
+
+    @Override
+    public java.util.Collection<RailNode> nodes() {
+      return nodes.values();
+    }
+
+    @Override
+    public java.util.Collection<RailEdge> edges() {
+      return edges.values();
+    }
+
+    @Override
+    public Optional<RailNode> findNode(NodeId id) {
+      return Optional.ofNullable(nodes.get(id));
+    }
+
+    @Override
+    public Set<RailEdge> edgesFrom(NodeId id) {
+      Set<RailEdge> result = new java.util.LinkedHashSet<>();
+      for (RailEdge edge : edges.values()) {
+        if (edge.from().equals(id) || edge.to().equals(id)) {
+          result.add(edge);
+        }
+      }
+      return result;
+    }
+
+    @Override
+    public boolean isBlocked(EdgeId id) {
+      return false;
+    }
+
+    @Override
+    public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+      return conflictEdges.contains(edgeId) ? Optional.of(conflictKey) : Optional.empty();
+    }
+  }
+
+  private static final class DeadEndStationConflictGraph
+      implements RailGraph, RailGraphConflictSupport {
+    private final Map<NodeId, RailNode> nodes;
+    private final Map<EdgeId, RailEdge> edges;
+    private final EdgeId conflictEdge;
+    private final String conflictKey;
+
+    private DeadEndStationConflictGraph(
+        List<RailEdge> graphEdges, NodeId stationNode, EdgeId conflictEdge, String conflictKey) {
+      Map<NodeId, RailNode> nextNodes = new LinkedHashMap<>();
+      Map<EdgeId, RailEdge> nextEdges = new LinkedHashMap<>();
+      for (RailEdge edge : graphEdges) {
+        nextNodes.putIfAbsent(edge.from(), new RailNodeTest(edge.from()));
+        nextNodes.putIfAbsent(edge.to(), new RailNodeTest(edge.to()));
+        nextEdges.put(edge.id(), edge);
+      }
+      nextNodes.put(stationNode, new RailNodeTest(stationNode, NodeType.STATION, Optional.empty()));
+      this.nodes = Map.copyOf(nextNodes);
+      this.edges = Map.copyOf(nextEdges);
+      this.conflictEdge = conflictEdge;
+      this.conflictKey = conflictKey;
+    }
+
+    @Override
+    public java.util.Collection<RailNode> nodes() {
+      return nodes.values();
+    }
+
+    @Override
+    public java.util.Collection<RailEdge> edges() {
+      return edges.values();
+    }
+
+    @Override
+    public Optional<RailNode> findNode(NodeId id) {
+      return Optional.ofNullable(nodes.get(id));
+    }
+
+    @Override
+    public Set<RailEdge> edgesFrom(NodeId id) {
+      Set<RailEdge> result = new java.util.LinkedHashSet<>();
+      for (RailEdge edge : edges.values()) {
+        if (edge.from().equals(id) || edge.to().equals(id)) {
+          result.add(edge);
+        }
+      }
+      return result;
+    }
+
+    @Override
+    public boolean isBlocked(EdgeId id) {
+      return false;
+    }
+
+    @Override
+    public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+      return conflictEdge.equals(edgeId) ? Optional.of(conflictKey) : Optional.empty();
+    }
+  }
+
+  private static final class ConflictBoundaryGraph implements RailGraph, RailGraphConflictSupport {
+    private final NodeId from;
+    private final NodeId to;
+    private final RailEdge edge;
+    private final String conflictKey;
+
+    private ConflictBoundaryGraph(NodeId from, NodeId to, RailEdge edge, String conflictKey) {
+      this.from = from;
+      this.to = to;
+      this.edge = edge;
+      this.conflictKey = conflictKey;
+    }
+
+    @Override
+    public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
+      return List.of(new RailNodeTest(from), new RailNodeTest(to));
+    }
+
+    @Override
+    public java.util.Collection<RailEdge> edges() {
+      return List.of(edge);
+    }
+
+    @Override
+    public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+      if (from.equals(id)) {
+        return Optional.of(new RailNodeTest(from));
+      }
+      if (to.equals(id)) {
+        return Optional.of(new RailNodeTest(to));
+      }
+      return Optional.empty();
+    }
+
+    @Override
+    public Set<RailEdge> edgesFrom(NodeId id) {
+      if (from.equals(id) || to.equals(id)) {
+        return Set.of(edge);
+      }
+      return Set.of();
+    }
+
+    @Override
+    public boolean isBlocked(EdgeId id) {
+      return false;
+    }
+
+    @Override
+    public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+      return edge.id().equals(edgeId) ? Optional.of(conflictKey) : Optional.empty();
     }
   }
 
@@ -3663,6 +4089,11 @@ class RuntimeDispatchServiceTest {
 
     private TrainProperties properties() {
       return properties;
+    }
+
+    private void removeTagKey(String key) {
+      String prefix = key + "=";
+      tags.removeIf(tag -> tag != null && (tag.equals(key) || tag.startsWith(prefix)));
     }
   }
 
@@ -4718,7 +5149,7 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             null);
 
-    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.25);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
     service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
@@ -4911,7 +5342,7 @@ class RuntimeDispatchServiceTest {
             Instant.class);
     java.lang.reflect.Method activate =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "activateMovementAuthorizationToken",
+            "activateMovementAuthorizationTokenRetainingInhibitor",
             String.class,
             MovementAuthorizationToken.class,
             String.class);
@@ -5526,7 +5957,7 @@ class RuntimeDispatchServiceTest {
             Instant.class);
     java.lang.reflect.Method activate =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "activateMovementAuthorizationToken",
+            "activateMovementAuthorizationTokenRetainingInhibitor",
             String.class,
             MovementAuthorizationToken.class,
             String.class);
@@ -5550,7 +5981,11 @@ class RuntimeDispatchServiceTest {
     assertFalse(token.active());
 
     assertTrue((boolean) activate.invoke(service, "train-1", token, "B"));
-    assertFalse(service.isMovementInhibited("train-1"));
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertFalse(
+        (boolean)
+            validMovementAuthorization(
+                service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
   }
 
   @Test
@@ -5575,7 +6010,7 @@ class RuntimeDispatchServiceTest {
             Instant.class);
     java.lang.reflect.Method activate =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "activateMovementAuthorizationToken",
+            "activateMovementAuthorizationTokenRetainingInhibitor",
             String.class,
             MovementAuthorizationToken.class,
             String.class);
@@ -5723,6 +6158,88 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void smartAdmissionAllowsQueueHeadWhenOnlyOppositeQueueExists() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("DEPOT");
+    NodeId b = NodeId.of("SINGLE");
+    NodeId c = NodeId.of("EXIT");
+    String conflictKey = "single:test:DEPOT~EXIT";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .canEnter(singleConflictRequest("winner", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertFalse(
+        manager
+            .canEnter(singleConflictRequest("loser", conflict, CorridorDirection.B_TO_A))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    long versionBefore = manager.version();
+    int queuesBefore = manager.snapshotQueues().size();
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "winner",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "winner", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertEquals(versionBefore, manager.version());
+    assertEquals(queuesBefore, manager.snapshotQueues().size());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("reason=queue-head-arbitration")));
+  }
+
+  @Test
+  void smartAdmissionHoldsQueueLoserWhenOnlyOppositeQueueExists() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("DEPOT");
+    NodeId b = NodeId.of("SINGLE");
+    NodeId c = NodeId.of("EXIT");
+    String conflictKey = "single:test:DEPOT~EXIT";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .canEnter(singleConflictRequest("winner", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertFalse(
+        manager
+            .canEnter(singleConflictRequest("loser", conflict, CorridorDirection.B_TO_A))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    long versionBefore = manager.version();
+    int queuesBefore = manager.snapshotQueues().size();
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "loser",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "loser", conflict, CorridorDirection.B_TO_A, edgeAb, edgeBc, a, b, c));
+
+    assertFalse(allowed);
+    assertEquals(versionBefore, manager.version());
+    assertEquals(queuesBefore, manager.snapshotQueues().size());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("reason=queue-arbitration-wait")));
+  }
+
+  @Test
   void smartLongSingleObserveOnlyDoesNotBlockButTraces() {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("DEPOT");
@@ -5751,7 +6268,7 @@ class RuntimeDispatchServiceTest {
             singleConflictContext(
                 "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
 
-    assertTrue(allowed);
+    assertTrue(allowed, debugMessages.toString());
     assertTrue(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_ACTION_SUPPRESSED_BY_MODE")));
@@ -5790,6 +6307,1051 @@ class RuntimeDispatchServiceTest {
     assertTrue(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_DOWNSTREAM_CONGESTION_DETECTED")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_FOLLOW_THROUGH_PREVIEW")));
+  }
+
+  @Test
+  void followThroughPreviewDoesNotChangeAdmissionOutcome() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "leader",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_FOLLOW_THROUGH_PREVIEW")
+                        && message.contains("wouldMutate=false")
+                        && message.contains("didMutate=false")));
+  }
+
+  @Test
+  void followThroughPreviewLogsWouldAllowButDoesNotMutate() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    registry.initFromTags(
+        "leader",
+        new TagStore(
+                "leader",
+                "FTA_ROUTE_ID=" + routeUuid,
+                "FTA_TRAIN_NAME=leader",
+                "FTA_OPERATOR_CODE=op",
+                "FTA_LINE_CODE=l1",
+                "FTA_ROUTE_CODE=follow",
+                "FTA_ROUTE_INDEX=0")
+            .properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RouteDefinitionCache routeDefinitions = routeDefinitionCacheWith(route, routeUuid);
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager, routeDefinitions, registry, debugMessages, SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
+            .activate("C"));
+    long versionBefore = manager.version();
+    int claimsBefore = manager.snapshotClaims().size();
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertEquals(versionBefore, manager.version());
+    assertEquals(claimsBefore, manager.snapshotClaims().size());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_FOLLOW_THROUGH_PREVIEW")
+                        && message.contains("decision=WOULD_ALLOW_FOLLOW_THROUGH")
+                        && message.contains("wouldMutate=false")
+                        && message.contains("didMutate=false")));
+  }
+
+  @Test
+  void sameDirectionLeaderWithVisibleSharedExitAllowsFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~B";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
+            .activate("C"));
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("drainProven=true")
+                        && message.contains("same-direction-leader-drain-predicted")));
+  }
+
+  @Test
+  void sameDirectionLeaderOnParallelBranchDoesNotProveFollowerDrain() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId followerA = NodeId.of("FOLLOWER-A");
+    NodeId followerB = NodeId.of("FOLLOWER-B");
+    NodeId followerC = NodeId.of("FOLLOWER-C");
+    NodeId leaderA = NodeId.of("LEADER-A");
+    NodeId leaderB = NodeId.of("LEADER-B");
+    NodeId leaderC = NodeId.of("LEADER-C");
+    String conflictKey = "single:test:shared-key";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge followerConflictEdge =
+        new RailEdge(
+            EdgeId.undirected(followerA, followerB),
+            followerA,
+            followerB,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge followerExitEdge =
+        new RailEdge(
+            EdgeId.undirected(followerB, followerC),
+            followerB,
+            followerC,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge leaderConflictEdge =
+        new RailEdge(
+            EdgeId.undirected(leaderA, leaderB),
+            leaderA,
+            leaderB,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge leaderExitEdge =
+        new RailEdge(
+            EdgeId.undirected(leaderB, leaderC),
+            leaderB,
+            leaderC,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("parallel-leader"), List.of(leaderA, leaderB, leaderC), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", leaderA, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader",
+                1L,
+                Instant.now(),
+                leaderA,
+                leaderC,
+                List.of(conflict),
+                SignalAspect.PROCEED)
+            .activate("LEADER-C"));
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ParallelConflictExitGraph(
+                List.of(followerConflictEdge, followerExitEdge, leaderConflictEdge, leaderExitEdge),
+                Set.of(followerConflictEdge.id(), leaderConflictEdge.id()),
+                conflictKey),
+            singleConflictContext(
+                "follower",
+                conflict,
+                CorridorDirection.A_TO_B,
+                followerConflictEdge,
+                followerExitEdge,
+                followerA,
+                followerB,
+                followerC));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("routeOverlap=false")
+                        && message.contains("same-direction-leader-route-window-not-overlapping")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void sameDirectionLeaderEndingAtDeadEndStationAllowsFollowerWithSafeHoldPoint() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId station = NodeId.of("OP:S:CHT:3");
+    String conflictKey = "single:test:terminal-approach";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailEdge edgeCs =
+        new RailEdge(EdgeId.undirected(c, station), c, station, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("terminal"), List.of(a, b, c, station), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader", 1L, Instant.now(), a, station, List.of(conflict), SignalAspect.PROCEED)
+            .activate("OP:S:CHT:3"));
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new DeadEndStationConflictGraph(
+                List.of(edgeAb, edgeBc, edgeCs), station, edgeAb.id(), conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("drainProven=true")
+                        && message.contains("same-direction-leader-terminal-follow-through")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void alreadyInsideTerminalLeaderBlocksSameDirectionFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId station = NodeId.of("OP:S:PPK:1");
+    String conflictKey = "single:test:terminal-inside";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailEdge edgeCs =
+        new RailEdge(EdgeId.undirected(c, station), c, station, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("follower", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("terminal"), List.of(a, b, c, station), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "follower",
+        new TagStore("follower", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.initFromTags(
+        "leader",
+        new TagStore(
+                "leader",
+                "FTA_ROUTE_ID=" + routeUuid,
+                "FTA_ROUTE_INDEX=" + (route.waypoints().size() - 1))
+            .properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", station, Instant.now());
+    registry.updateSignal("leader", SignalAspect.STOP, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new DeadEndStationConflictGraph(
+                List.of(edgeAb, edgeBc, edgeCs), station, edgeAb.id(), conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertFalse(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER")
+                        && message.contains("leader=leader")
+                        && message.contains("same-direction-leader-terminal-or-dwell")
+                        && message.contains("leaderOrder=LEADER_AHEAD")),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DOWNSTREAM_CONGESTION_DETECTED")
+                        && message.contains("decision=REJECT_LEADER_OCCUPYING")),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("decision=HOLD_AT_DEPOT")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void alreadyInsideSameDirectionUnknownOrderDoesNotMutuallyHold() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:unknown-order";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("alpha", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("bravo", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    RailGraph graph = new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey);
+
+    boolean alphaAllowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "alpha",
+            graph,
+            singleConflictContext(
+                "alpha", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+    boolean bravoAllowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "bravo",
+            graph,
+            singleConflictContext(
+                "bravo", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(alphaAllowed || bravoAllowed, debugMessages.toString());
+    assertFalse(alphaAllowed && bravoAllowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ALREADY_INSIDE_LEADER_GUARD_SKIPPED")
+                        && message.contains("leader-order-unknown-deterministic-pass")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void sameDirectionLeaderWithoutRouteProofBlocksFollowerInEnforce() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~B";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader", new TagStore("leader", "FTA_ROUTE_INDEX=0").properties(), route);
+    registry.updateLastPassedGraphNode("leader", b, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
+            .activate("C"));
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("drainProven=false")
+                        && message.contains("same-direction-leader-route-missing")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("reason=same-direction-leader-route-missing")));
+  }
+
+  @Test
+  void sameDirectionLeaderBoundaryOnlyDoesNotAdmitFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    NodeId station = NodeId.of("OP:S:BOUNDARY:1");
+    String conflictKey = "single:test:SW~BOUNDARY";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edge =
+        new RailEdge(
+            EdgeId.undirected(switcher, station),
+            switcher,
+            station,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("boundary"), List.of(switcher, station), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", switcher, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader",
+                1L,
+                Instant.now(),
+                switcher,
+                station,
+                List.of(conflict),
+                SignalAspect.PROCEED)
+            .activate("BOUNDARY"));
+    long versionBefore = manager.version();
+    int claimsBefore = manager.snapshotClaims().size();
+    int tokensBefore = movementTokenCount(service);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictBoundaryGraph(switcher, station, edge, conflictKey),
+            singleConflictBoundaryContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edge, switcher, station));
+
+    assertFalse(allowed);
+    assertEquals(versionBefore, manager.version());
+    assertEquals(claimsBefore, manager.snapshotClaims().size());
+    assertEquals(tokensBefore, movementTokenCount(service));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("boundaryOnly=true")
+                        && message.contains("same-direction-leader-boundary-only")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void sameDirectionLeaderWithoutVisibleExitDoesNotConvergeFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    NodeId plainEnd = NodeId.of("PLAIN-END");
+    String conflictKey = "single:test:SW~PLAIN";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edge =
+        new RailEdge(
+            EdgeId.undirected(switcher, plainEnd),
+            switcher,
+            plainEnd,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("plain-end"), List.of(switcher, plainEnd), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", switcher, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader",
+                1L,
+                Instant.now(),
+                switcher,
+                plainEnd,
+                List.of(conflict),
+                SignalAspect.PROCEED)
+            .activate("PLAIN-END"));
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictBoundaryGraph(switcher, plainEnd, edge, conflictKey),
+            singleConflictBoundaryContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edge, switcher, plainEnd));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("boundaryOnly=false")
+                        && message.contains("same-direction-leader-exit-not-visible")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void followThroughPreviewDoesNotChangeOccupancyVersion() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
+    long versionBefore = manager.version();
+    int claimCountBefore = manager.snapshotClaims().size();
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed);
+    assertEquals(versionBefore, manager.version());
+    assertEquals(claimCountBefore, manager.snapshotClaims().size());
+  }
+
+  @Test
+  void followThroughPreviewObserveOnlyDoesNotChangeAdmissionOutcome() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.OBSERVE_ONLY, false);
+
+    assertTrue(snapshot.admissionAllowed());
+    assertTrue(hasFollowThroughPreviewLog(snapshot.debugMessages()));
+  }
+
+  @Test
+  void followThroughPreviewObserveOnlyDoesNotChangeSignalOutcome() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.OBSERVE_ONLY, false);
+
+    assertEquals(
+        snapshot.followerSignalBefore(),
+        snapshot.registry().get("follower").orElseThrow().lastSignal());
+    assertEquals(
+        snapshot.leaderSignalBefore(),
+        snapshot.registry().get("leader").orElseThrow().lastSignal());
+  }
+
+  @Test
+  void followThroughPreviewObserveOnlyDoesNotChangeOccupancyVersion() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.OBSERVE_ONLY, false);
+
+    assertEquals(snapshot.occupancyVersionBefore(), snapshot.manager().version());
+  }
+
+  @Test
+  void followThroughPreviewGlobalEnforceStillDoesNotMutate() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.ENFORCE, true);
+
+    assertEquals(snapshot.occupancyVersionBefore(), snapshot.manager().version());
+    assertEquals(snapshot.claimsBefore(), snapshot.manager().snapshotClaims().size());
+    assertEquals(snapshot.queuesBefore(), snapshot.manager().snapshotQueues().size());
+    assertEquals(snapshot.tokensBefore(), movementTokenCount(snapshot.service()));
+  }
+
+  @Test
+  void followThroughPreviewGlobalEnforceStillDoesNotChangeAdmissionOutcome() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.ENFORCE, true);
+
+    assertTrue(snapshot.admissionAllowed());
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_FOLLOW_THROUGH_PREVIEW")
+                        && message.contains("decision=WOULD_ALLOW_FOLLOW_THROUGH")));
+  }
+
+  @Test
+  void followThroughPreviewGlobalEnforceStillDoesNotCreateClaims() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.ENFORCE, true);
+
+    assertEquals(snapshot.claimsBefore(), snapshot.manager().snapshotClaims().size());
+  }
+
+  @Test
+  void followThroughPreviewGlobalEnforceStillDoesNotIssueMovementToken() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.ENFORCE, true);
+
+    assertEquals(snapshot.tokensBefore(), movementTokenCount(snapshot.service()));
+  }
+
+  @Test
+  void finalSignalRemainsStopWhenOppositeSingleRegionHardBarrierExists() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "opposite",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.B_TO_A, edgeAb, edgeBc, c, b, a));
+
+    assertFalse(allowed);
+    assertTrue(hasHardBarrierLog(debugMessages));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("ROUTE_UNLOCK_POTENTIAL_PREVIEW")));
+    assertFalse(debugMessages.stream().anyMatch(message -> message.contains("FORCE_PROCEED")));
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SAME_DIRECTION_FOLLOW_THROUGH_ALLOW")));
+  }
+
+  @Test
+  void alreadyInsideDrainOutAllowedOnlyForSameLogicalTrain() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "follower",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed);
+    assertFalse(hasHardBarrierLog(debugMessages));
+  }
+
+  @Test
+  void alreadyInsideSameLogicalTrainMayDrainOutToBoundaryStation() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    NodeId station = NodeId.of("OP:S:BOUNDARY:1");
+    String conflictKey = "single:test:SW~BOUNDARY";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edge =
+        new RailEdge(
+            EdgeId.undirected(switcher, station),
+            switcher,
+            station,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "follower",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictBoundaryGraph(switcher, station, edge, conflictKey),
+            singleConflictBoundaryContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edge, switcher, station));
+
+    assertTrue(allowed);
+    assertFalse(hasHardBarrierLog(debugMessages));
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message -> message.contains("SMART_ALREADY_INSIDE_REGION_BYPASS_ENTRY_GATE")));
+  }
+
+  @Test
+  void healthDestroyMayRunButDoesNotConvertHardBarrierIntoDispatcherAllow() {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartForwardUnlock(
+            singleRegionHardBarrierRecoveryInput("train-1", true, "opposite-single-conflict"));
+
+    assertFalse(result.applied());
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, result.reason());
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_ACTION_ALLOWED_BY_EFFECT_GATE")));
+    assertFalse(debugMessages.stream().anyMatch(message -> message.contains("DESTROY_TRAIN")));
+  }
+
+  @Test
+  void smartDrainUnlockAllowsProvenSingleRegionDrainOut() {
+    List<String> debugMessages = new ArrayList<>();
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "train-1",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z")),
+                singleConflictClaim(
+                    conflict,
+                    "train-2",
+                    CorridorDirection.B_TO_A,
+                    Instant.parse("2026-01-01T00:00:01Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartDrainUnlock(
+            singleRegionHardBarrierRecoveryInput("train-1", true, "opposite-single-conflict"));
+
+    assertTrue(result.candidate());
+    assertTrue(result.applied());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DRAIN_UNLOCK_DRAIN_OUT_ALLOWED")
+                        && message.contains("occupancyDecreasing=true")
+                        && message.contains("externalTrain=train-2")));
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DRAIN_UNLOCK_BLOCKED_BY_SINGLE_REGION_HARD_BARRIER")));
+  }
+
+  @Test
+  void smartForwardUnlockAllowsProvenSingleRegionDrainOutToFinalRefresh() {
+    List<String> debugMessages = new ArrayList<>();
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "train-1",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z")),
+                singleConflictClaim(
+                    conflict, "train-2", null, Instant.parse("2026-01-01T00:00:01Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartForwardUnlock(
+            singleRegionHardBarrierRecoveryInput(
+                "train-1",
+                true,
+                Set.of("CONFLICT:single:test:A~B"),
+                "movement-authority-window-opposite-single-conflict"));
+
+    assertTrue(result.candidate());
+    assertFalse(result.applied());
+    assertEquals("runtime-train-not-resolved", result.reason());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_FORWARD_UNLOCK_DRAIN_OUT_ALLOWED")
+                        && message.contains("externalDirection=UNKNOWN")));
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains(
+                        "SMART_FORWARD_UNLOCK_BLOCKED_BY_SINGLE_REGION_HARD_BARRIER")));
+  }
+
+  @Test
+  void smartDrainUnlockDrainOutProofDoesNotCoverUnrelatedHardBlocker() {
+    List<String> debugMessages = new ArrayList<>();
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                singleConflictClaim(
+                    conflict,
+                    "train-1",
+                    CorridorDirection.A_TO_B,
+                    Instant.parse("2026-01-01T00:00:00Z")),
+                singleConflictClaim(
+                    conflict,
+                    "train-2",
+                    CorridorDirection.B_TO_A,
+                    Instant.parse("2026-01-01T00:00:01Z"))));
+    RuntimeDispatchService service =
+        createMinimalService(occupancyManager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartDrainUnlock(
+            singleRegionHardBarrierRecoveryInput(
+                "train-1", true, Set.of("NODE:B"), "opposite-single-conflict"));
+
+    assertFalse(result.candidate());
+    assertFalse(result.applied());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DRAIN_UNLOCK_DRAIN_OUT_DENIED")
+                        && message.contains("hard-blocker-not-covered-by-drain-out")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DRAIN_UNLOCK_BLOCKED_BY_SINGLE_REGION_HARD_BARRIER")));
   }
 
   @Test
@@ -5881,7 +7443,9 @@ class RuntimeDispatchServiceTest {
     assertTrue(
         debugMessages.stream()
             .anyMatch(
-                message -> message.contains("SMART_FORWARD_UNLOCK_BLOCKED_BY_SINGLE_CONFLICT")));
+                message ->
+                    message.contains(
+                        "SMART_FORWARD_UNLOCK_BLOCKED_BY_SINGLE_REGION_HARD_BARRIER")));
   }
 
   @Test
@@ -5900,6 +7464,188 @@ class RuntimeDispatchServiceTest {
         debugMessages.stream().anyMatch(message -> message.contains("tokenInvalidated=true")));
     assertFalse(
         debugMessages.stream().anyMatch(message -> message.contains("destinationMutated=true")));
+  }
+
+  @Test
+  void signalAdvisoryDoesNotOverrideFinalRed() {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    service.applySmartForwardUnlock(smartForwardUnlockInput("train-1", Set.of(), false, true));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertFalse(debugMessages.stream().anyMatch(message -> message.contains("signal=PROCEED")));
+  }
+
+  @Test
+  void signalAdvisoryDoesNotForceGreen() {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    service.applySmartDrainUnlock(smartDrainUnlockInput("train-1", Set.of(), false));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertFalse(debugMessages.stream().anyMatch(message -> message.contains("signal=PROCEED")));
+  }
+
+  @Test
+  void signalAdvisoryCannotClearInhibitorWhenLiveBarrierAppearsAfterSnapshot() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "train-1");
+    installSmartUnlockBlockerSnapshot(
+        service, "train-1", "external", "CONFLICT:single:test:A~B", Instant.now());
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartDrainUnlock(smartDrainUnlockInput("train-1", Set.of(), false));
+
+    assertTrue(result.candidate());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("event=SIGNAL_ADVISORY_SUPPRESSED")
+                        && message.contains("SIGNAL_ADVISORY_SUPPRESSED_BY_HARD_BARRIER")
+                        && message.contains("didMutate=false")));
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("inhibitorCleared=true")));
+  }
+
+  @Test
+  void observeOnlySignalAdvisoryDoesNotClearMovementInhibitor() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
+    installMovementInhibitor(service, "train-1");
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartDrainUnlock(smartDrainUnlockInput("train-1", Set.of(), false));
+
+    assertTrue(result.candidate());
+    assertFalse(result.applied());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("inhibitorCleared=true")));
+  }
+
+  @Test
+  void observeOnlySignalAdvisoryDoesNotChangeSignalOutcome() {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.OBSERVE_ONLY);
+
+    service.applySmartForwardUnlock(smartForwardUnlockInput("train-1", Set.of(), false, true));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_FORWARD_UNLOCK_SUPPRESSED_BY_MODE")));
+  }
+
+  @Test
+  void signalAdvisoryRequiresFinalReevaluateBeforeProceed() {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartForwardUnlock(smartForwardUnlockInput("train-1", Set.of(), false, true));
+
+    assertTrue(result.candidate());
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_FORWARD_UNLOCK_VERIFY")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_RECOVERY_EFFECT_VERIFY")));
+  }
+
+  @Test
+  void oppositeDirectionSingleRegionBlocksSignalAdvisory() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "train-1");
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartForwardUnlock(
+            singleRegionHardBarrierRecoveryInput("train-1", true, "opposite-single-conflict"));
+
+    assertFalse(result.applied());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, result.reason());
+    assertTrue(hasHardBarrierLog(debugMessages));
+    assertFalse(debugMessages.stream().anyMatch(message -> message.contains("FORCE_PROCEED")));
+    assertFalse(debugMessages.stream().anyMatch(message -> message.contains("DESTROY_TRAIN")));
+  }
+
+  @Test
+  void unknownDirectionSingleRegionBlocksSignalAdvisory() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "train-1");
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartDrainUnlock(
+            singleRegionHardBarrierRecoveryInput(
+                "train-1", false, "single-conflict-direction-unknown"));
+
+    assertFalse(result.applied());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, result.reason());
+    assertTrue(hasHardBarrierLog(debugMessages));
+  }
+
+  @Test
+  void oppositeDirectionSingleRegionBlocksMovementInhibitorClear() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "train-1");
+
+    service.applySmartForwardUnlock(
+        singleRegionHardBarrierRecoveryInput("train-1", true, "opposite-single-conflict"));
+
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("inhibitorCleared=true")));
   }
 
   @Test
@@ -5926,12 +7672,14 @@ class RuntimeDispatchServiceTest {
     SimpleOccupancyManager manager = simpleOccupancyManagerWithSelfRetainCandidate();
     RuntimeDispatchService service =
         createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    long versionBefore = manager.version();
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartSelfOwnedStaleRetainRelease(smartSelfRetainInput("train-1"));
 
     assertTrue(result.candidate());
     assertTrue(result.applied());
+    assertEquals(versionBefore + 1, manager.version());
     assertTrue(manager.snapshotClaims().isEmpty());
     assertTrue(
         debugMessages.stream()
@@ -5992,6 +7740,41 @@ class RuntimeDispatchServiceTest {
         debugMessages.stream().anyMatch(message -> message.contains("destinationMutated=true")));
     assertFalse(
         debugMessages.stream().anyMatch(message -> message.contains("tokenInvalidated=true")));
+  }
+
+  @Test
+  void decisionChainRecoveryVerifyDoesNotMutateOccupancy() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    String trainName = "train-1";
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyRequest retain =
+        singleConflictRequest(trainName, conflict, CorridorDirection.A_TO_B)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+    OccupancyRequest request = singleConflictRequest(trainName, conflict, CorridorDirection.B_TO_A);
+    OccupancyDecision blocked = manager.canEnter(request);
+    assertFalse(blocked.allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    long versionBeforeRecovery = manager.version();
+    List<OccupancyQueueSnapshot> queuesBeforeRecovery = manager.snapshotQueues();
+
+    OccupancyDecision recovered =
+        recoverSelfOwnedStaleRetainDecision(service, request, blocked, "signal-canenter");
+
+    assertTrue(recovered.allowed());
+    assertEquals(versionBeforeRecovery + 1, manager.version());
+    assertTrue(manager.snapshotClaims().isEmpty());
+    assertTrue(manager.snapshotQueues().size() <= queuesBeforeRecovery.size());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SELF_RETAIN_RELEASE_VERIFY")
+                        && message.contains("result=ALLOW")));
   }
 
   @Test
@@ -6183,7 +7966,9 @@ class RuntimeDispatchServiceTest {
     assertFalse(result.applied());
     assertTrue(
         debugMessages.stream()
-            .anyMatch(message -> message.contains("SMART_DRAIN_UNLOCK_BLOCKED_BY_EXTERNAL_OWNER")));
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DRAIN_UNLOCK_BLOCKED_BY_SINGLE_REGION_HARD_BARRIER")));
   }
 
   @Test
@@ -6361,7 +8146,7 @@ class RuntimeDispatchServiceTest {
             Instant.class);
     java.lang.reflect.Method activate =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "activateMovementAuthorizationToken",
+            "activateMovementAuthorizationTokenRetainingInhibitor",
             String.class,
             MovementAuthorizationToken.class,
             String.class);
@@ -6411,7 +8196,7 @@ class RuntimeDispatchServiceTest {
             Instant.class);
     java.lang.reflect.Method activate =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "activateMovementAuthorizationToken",
+            "activateMovementAuthorizationTokenRetainingInhibitor",
             String.class,
             MovementAuthorizationToken.class,
             String.class);
@@ -6458,7 +8243,169 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void cautionCandidateForcesPhysicalUpdateFromProceed() throws Exception {
+  void directSignalUpdateCannotPublishProceedWithoutFinalDecision() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("final-authorization-missing")
+                        && message.contains("didMutate=false")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("event=SIGNAL_FINAL_DECISION")
+                        && message.contains("physicalPublished=false")
+                        && message.contains("didMutate=false")));
+  }
+
+  @Test
+  void directSignalUpdateCannotPublishProceedAcrossHardBarrier() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("external", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    OccupancyRequest request = singleConflictRequest("train-1", conflict, CorridorDirection.B_TO_A);
+    OccupancyDecision decision =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            request, decision, publication, NodeId.of("A"), NodeId.of("B"), true);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, authorization));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(hasHardBarrierLog(debugMessages));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("single-region-hard-barrier")
+                        && message.contains("didMutate=false")));
+  }
+
+  @Test
+  void staleSignalDecisionFailsSafeStop() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        staleProgressRequest(
+            "train-1", RouteId.of("signal-test"), 0, registry.version(), List.of(resource));
+    OccupancyDecision decision =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            request,
+            decision,
+            publication,
+            NodeId.of("A"),
+            NodeId.of("B"),
+            SignalComputationTrace.TokenState.NONE,
+            true);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, authorization));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("stale-final-snapshot")
+                        && message.contains("snapshotStale=true")));
+  }
+
+  @Test
+  void signalProceedRequiresActiveToken() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        staleProgressRequest(
+            "train-1", RouteId.of("signal-test"), 0, registry.version(), List.of(resource));
+    OccupancyDecision decision =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            request,
+            decision,
+            publication,
+            NodeId.of("A"),
+            NodeId.of("B"),
+            SignalComputationTrace.TokenState.NONE,
+            true);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, authorization));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("movement-token-not-active")));
+  }
+
+  @Test
+  void directCautionUpdateCannotBypassFinalAuthorization() throws Exception {
     RouteProgressRegistry registry = new RouteProgressRegistry();
     TagStore tags =
         new TagStore(
@@ -6479,20 +8426,9 @@ class RuntimeDispatchServiceTest {
             registry,
             new ArrayList<>());
 
-    java.lang.reflect.Method publish =
-        RuntimeDispatchService.class.getDeclaredMethod(
-            "publishPhysicalSignalIfRequired",
-            String.class,
-            SignalAspect.class,
-            SignalAspect.class,
-            Instant.class);
-    publish.setAccessible(true);
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED_WITH_CAUTION));
 
-    publish.invoke(
-        service, "train-1", SignalAspect.PROCEED_WITH_CAUTION, SignalAspect.PROCEED, Instant.now());
-
-    assertEquals(
-        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
   }
 
   @Test
@@ -6515,13 +8451,6 @@ class RuntimeDispatchServiceTest {
             mock(RouteDefinitionCache.class),
             registry,
             new ArrayList<>());
-    java.lang.reflect.Method publish =
-        RuntimeDispatchService.class.getDeclaredMethod(
-            "publishPhysicalSignalIfRequired",
-            String.class,
-            SignalAspect.class,
-            SignalAspect.class,
-            Instant.class);
     java.lang.reflect.Method preserve =
         RuntimeDispatchService.class.getDeclaredMethod(
             "updateSignalOrWarnPreservingPublishedCaution",
@@ -6529,11 +8458,10 @@ class RuntimeDispatchServiceTest {
             SignalAspect.class,
             Instant.class,
             String.class);
-    publish.setAccessible(true);
     preserve.setAccessible(true);
 
-    publish.invoke(
-        service, "train-1", SignalAspect.PROCEED_WITH_CAUTION, SignalAspect.STOP, Instant.now());
+    installPublishedPhysicalSignal(service, "train-1", SignalAspect.PROCEED_WITH_CAUTION);
+    registry.updateSignal("train-1", SignalAspect.PROCEED_WITH_CAUTION, Instant.now());
     preserve.invoke(service, "train-1", SignalAspect.STOP, Instant.now(), "retain-only");
 
     assertEquals(
@@ -6852,6 +8780,258 @@ class RuntimeDispatchServiceTest {
   // ====== Smart unlock reservation observation 测试 ======
 
   @Test
+  void globalObserveOnlyPlannerEnforceDoesNotMutateOccupancy() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.OBSERVE_ONLY);
+
+    assertEquals(snapshot.occupancyVersionBefore(), snapshot.manager().version());
+    assertEquals(snapshot.claimsBefore(), snapshot.manager().snapshotClaims().size());
+    assertEquals(snapshot.queuesBefore(), snapshot.manager().snapshotQueues().size());
+    assertFalse(snapshot.service().hasActiveSmartUnlockReservation("train-1"));
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_WOULD_CREATE")));
+    assertFalse(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_COMMITTED")));
+  }
+
+  @Test
+  void globalObserveOnlyPlannerEnforceDoesNotCreateUnlockReservation() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.OBSERVE_ONLY);
+
+    assertFalse(snapshot.service().hasActiveSmartUnlockReservation("train-1"));
+    assertFalse(hasUnlockReservationClaim(snapshot.manager()));
+  }
+
+  @Test
+  void globalObserveOnlyPlannerEnforceDoesNotIssueToken() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.OBSERVE_ONLY);
+
+    assertEquals(0, movementTokenCount(snapshot.service()));
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_AUTHORITY_ISSUED")));
+  }
+
+  @Test
+  void observeOnlyDoesNotIssueUnlockAuthority() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.OBSERVE_ONLY);
+
+    assertEquals(0, movementTokenCount(snapshot.service()));
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_WOULD_CREATE")));
+    assertFalse(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_AUTHORITY_ISSUED")));
+  }
+
+  @Test
+  void globalOffPlannerDoesNotMutateOccupancy() throws Exception {
+    PlannerExecutionSnapshot snapshot = executePlannerReservationForMode(SmartDispatcherMode.OFF);
+
+    assertEquals(snapshot.occupancyVersionBefore(), snapshot.manager().version());
+    assertEquals(snapshot.claimsBefore(), snapshot.manager().snapshotClaims().size());
+    assertEquals(snapshot.queuesBefore(), snapshot.manager().snapshotQueues().size());
+    assertFalse(snapshot.service().hasActiveSmartUnlockReservation("train-1"));
+  }
+
+  @Test
+  void globalEnforcePlannerMutationRequiresEffectGate() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService observeOnly =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            debugMessages,
+            SmartDispatcherMode.OBSERVE_ONLY);
+    ConfigManager.SmartDispatcherPlannerSettings settings = enforcePlannerSettings();
+
+    assertEquals(
+        "GLOBAL_MODE_NOT_ENFORCE",
+        smartDispatchExecutorSkipReason(observeOnly, smartUnlockCandidate(), settings));
+
+    RuntimeDispatchService enforce =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    assertEquals("-", smartDispatchExecutorSkipReason(enforce, smartUnlockCandidate(), settings));
+  }
+
+  @Test
+  void unlockAuthorityRequiresGlobalEnforceAndEffectGate() throws Exception {
+    RuntimeDispatchService observeOnly =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.OBSERVE_ONLY);
+    RuntimeDispatchService enforce =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.ENFORCE);
+
+    assertEquals(
+        "GLOBAL_MODE_NOT_ENFORCE",
+        smartDispatchExecutorSkipReason(
+            observeOnly, smartUnlockCandidate(), enforcePlannerSettings()));
+    assertEquals(
+        "-",
+        smartDispatchExecutorSkipReason(enforce, smartUnlockCandidate(), enforcePlannerSettings()));
+  }
+
+  @Test
+  void unlockAuthorityDoesNotClearDestination() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.ENFORCE);
+
+    assertTrue(
+        movementTokens(snapshot.service()).stream()
+            .anyMatch(token -> token.committedDestination().isPresent()));
+    assertFalse(
+        snapshot.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("destinationMutated=true")
+                        || message.contains("CLEAR_DESTINATION")));
+  }
+
+  @Test
+  void unlockAuthorityDoesNotInvalidateExistingToken() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    MovementAuthorizationToken existing =
+        new MovementAuthorizationToken(
+                "train-1",
+                99L,
+                Instant.now(),
+                NodeId.of("A"),
+                NodeId.of("B"),
+                List.of(resource),
+                SignalAspect.PROCEED)
+            .activate("B");
+    installMovementToken(service, existing);
+
+    executeSmartUnlockReservation(service, smartUnlockCandidate(), enforcePlannerSettings());
+
+    assertEquals(1, movementTokenCount(service));
+    assertTrue(
+        movementTokens(service).stream()
+            .allMatch(token -> token.committedDestination().isPresent()));
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("tokenInvalidated=true")));
+  }
+
+  @Test
+  void unlockAuthorityDoesNotForceGreen() throws Exception {
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.ENFORCE, registry);
+
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_AUTHORITY_ISSUED")));
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_UNLOCK_PLAN_APPLY")
+                        && message.contains("applyPhase=authority-issued")
+                        && message.contains("applyResult=authority-issued")));
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+  }
+
+  @Test
+  void headOnYieldReleasesOnlyNonPhysicalYieldState() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyResource physicalNode = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyRequest lookahead =
+        singleConflictRequest("yield-train", conflict, CorridorDirection.B_TO_A)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.LOOKAHEAD_PREVIEW));
+    OccupancyRequest physical =
+        new OccupancyRequest(
+                "yield-train",
+                Optional.empty(),
+                Instant.now(),
+                List.of(physicalNode),
+                Map.of(),
+                Map.of(),
+                0)
+            .withResourceIntents(Map.of(physicalNode, ResourceIntent.MOVEMENT_REQUIRED));
+    assertTrue(manager.acquire(lookahead).allowed());
+    assertTrue(manager.acquire(physical).allowed());
+    manager.touchQueues(
+        singleConflictRequest("yield-train", conflict, CorridorDirection.B_TO_A)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.QUEUE_POSITION)));
+
+    executeSmartUnlockReservation(
+        service, headOnYieldCandidate(conflict, physicalNode), enforcePlannerSettings());
+
+    assertTrue(manager.getClaim(conflict).isEmpty());
+    assertTrue(manager.getClaim(physicalNode).isPresent());
+    assertEquals(0, movementTokenCount(service));
+    assertTrue(
+        manager.snapshotQueues().stream()
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .noneMatch(entry -> entry.trainName().equals("yield-train")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_HEAD_ON_YIELD_APPLIED")
+                        && message.contains("physicalClaimsReleased=0")
+                        && message.contains("movementAuthorityIssued=false")));
+  }
+
+  @Test
+  void oppositeDirectionSingleRegionBlocksUnlockAuthority() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executeSingleRegionPlannerReservationWithExternalOccupant(CorridorDirection.B_TO_A);
+
+    assertEquals(snapshot.occupancyVersionBefore(), snapshot.manager().version());
+    assertFalse(hasUnlockReservationClaim(snapshot.manager()));
+    assertEquals(0, movementTokenCount(snapshot.service()));
+    assertTrue(hasHardBarrierLog(snapshot.debugMessages()));
+    assertFalse(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_AUTHORITY_ISSUED")));
+    assertEquals(1, snapshot.manager().snapshotClaims().size());
+    assertEquals("external", snapshot.manager().snapshotClaims().get(0).trainName());
+  }
+
+  @Test
+  void unknownDirectionSingleRegionBlocksUnlockAuthority() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executeSingleRegionPlannerReservationWithExternalOccupant(CorridorDirection.UNKNOWN);
+
+    assertFalse(hasUnlockReservationClaim(snapshot.manager()));
+    assertEquals(0, movementTokenCount(snapshot.service()));
+    assertTrue(hasHardBarrierLog(snapshot.debugMessages()));
+    assertFalse(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_AUTHORITY_ISSUED")));
+  }
+
+  @Test
   void smartUnlockProgressWithoutReleaseDoesNotLogSuccess() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
@@ -6872,6 +9052,13 @@ class RuntimeDispatchServiceTest {
     assertTrue(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_UNLOCK_PROGRESS_NO_RELEASE")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_UNLOCK_PLAN_APPLY")
+                        && message.contains("applyPhase=progress-check")
+                        && message.contains("applyResult=no-progress")));
     assertFalse(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_SUCCESS")));
@@ -6999,6 +9186,14 @@ class RuntimeDispatchServiceTest {
     assertTrue(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_ROLLBACK")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_UNLOCK_PLAN_APPLY")
+                        && message.contains("applyPhase=rollback")
+                        && message.contains("applyResult=rolled-back")
+                        && message.contains("failureReason=no-release-timeout")));
     assertFalse(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_SUCCESS")));
@@ -7073,6 +9268,65 @@ class RuntimeDispatchServiceTest {
                         && message.contains("reason=STALE_PROGRESS_CONTEXT")
                         && message.contains("requestCurrentIndex=2")
                         && message.contains("currentIndex=3")));
+  }
+
+  @Test
+  void selfOwnedContinuationBlockerSnapshotKeepsExternalSingleOwner() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("continuation-live-blocker"),
+            List.of(NodeId.of("A"), NodeId.of("B")),
+            Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "train-1", new TagStore("train-1", "FTA_ROUTE_INDEX=0").properties(), route);
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyRequest retain =
+        singleConflictRequest("train-1", conflict, CorridorDirection.A_TO_B)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    OccupancyRequest request = singleConflictRequestWithoutPlanDirection("train-1", conflict);
+    OccupancyDecision decision = manager.canEnter(request);
+    assertFalse(decision.allowed());
+    assertTrue(
+        decision.blockers().stream().anyMatch(claim -> claim.trainName().equals("leader")),
+        () -> "blockers=" + decision.blockers());
+
+    updateLiveBlockerSnapshot(service, "train-1", decision, request, Instant.now());
+
+    RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+        service.recentDeadlockBlockers("train-1", Duration.ofSeconds(30));
+    assertTrue(
+        snapshot.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    blocker.trainName().equals("leader")
+                        && blocker.conflictKey().equals("single:test:A~B")
+                        && blocker.direction().orElse(CorridorDirection.UNKNOWN)
+                            == CorridorDirection.A_TO_B),
+        () -> "snapshot=" + snapshot.blockers());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED")
+                        && message.contains("blockerTrain=leader")),
+        debugMessages.toString());
   }
 
   // ====== recentBlockerTrains 测试 ======
@@ -7191,6 +9445,73 @@ class RuntimeDispatchServiceTest {
       assertEquals("logic-main", context.orElseThrow().trainName());
       assertEquals(2, context.orElseThrow().routeSize());
     }
+  }
+
+  @Test
+  void forceRelaunchCannotBypassOppositeSingleRegionHardBarrier() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-1", tags.properties(), route);
+    registry.updateSignal("train-1", SignalAspect.PROCEED, Instant.now());
+    RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
+    when(routes.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RuntimeDispatchService service =
+        createMinimalService(mock(OccupancyManager.class), routes, registry, debugMessages);
+    installSmartUnlockBlockerSnapshot(
+        service, "train-1", "external", "CONFLICT:single:test:A~B", Instant.now());
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.get("train-1")).thenReturn(tags.properties());
+      store.when(TrainPropertiesStore::getAll).thenReturn(List.of(tags.properties()));
+
+      assertFalse(service.forceRelaunchByName("train-1"));
+    }
+
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(debugMessages.stream().noneMatch(message -> message.contains("relaunch delegated")));
+    verify(tags.properties(), never()).setDestination(any());
+  }
+
+  @Test
+  void forceRelaunchRequiresActiveTokenOrFreshAuthority() {
+    List<String> debugMessages = new ArrayList<>();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-1", tags.properties(), route);
+    registry.updateSignal("train-1", SignalAspect.PROCEED, Instant.now());
+    RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
+    when(routes.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RuntimeDispatchService service =
+        createMinimalService(mock(OccupancyManager.class), routes, registry, debugMessages);
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.get("train-1")).thenReturn(tags.properties());
+      store.when(TrainPropertiesStore::getAll).thenReturn(List.of(tags.properties()));
+
+      assertFalse(service.forceRelaunchByName("train-1"));
+    }
+
+    assertTrue(debugMessages.stream().noneMatch(message -> message.contains("relaunch delegated")));
+    verify(tags.properties(), never()).setDestination(any());
   }
 
   @Test
@@ -7421,19 +9742,31 @@ class RuntimeDispatchServiceTest {
   }
 
   private SmartWaitForPlanner.UnlockCandidate smartUnlockCandidate(int score) {
+    return smartUnlockCandidate("NODE:B", CorridorDirection.A_TO_B, score);
+  }
+
+  private SmartWaitForPlanner.UnlockCandidate smartUnlockCandidate(
+      String resource, CorridorDirection direction) {
+    return smartUnlockCandidate(resource, direction, 100);
+  }
+
+  private SmartWaitForPlanner.UnlockCandidate smartUnlockCandidate(
+      String resource, CorridorDirection direction, int score) {
     SmartWaitForPlanner.GraphOnlySimulation simulation =
         new SmartWaitForPlanner.GraphOnlySimulation(
             1, 0, true, 1, 0, 1, SmartWaitForPlanner.Confidence.HIGH, "test");
+    String safeResource = resource == null || resource.isBlank() ? "NODE:B" : resource;
+    CorridorDirection safeDirection = direction == null ? CorridorDirection.UNKNOWN : direction;
     return new SmartWaitForPlanner.UnlockCandidate(
         "train-1",
         "cycle-1",
         SmartWaitForPlanner.CandidateKind.FORWARD_TO_RELEASE_BLOCKER,
-        List.of("NODE:B"),
-        List.of("NODE:B"),
+        List.of(safeResource),
+        List.of(safeResource),
         "B",
         "A",
         "B",
-        CorridorDirection.A_TO_B,
+        safeDirection,
         1,
         1,
         4,
@@ -7446,6 +9779,366 @@ class RuntimeDispatchServiceTest {
         true,
         60);
   }
+
+  private SmartWaitForPlanner.UnlockCandidate headOnYieldCandidate(
+      OccupancyResource conflict, OccupancyResource physicalNode) {
+    SmartWaitForPlanner.GraphOnlySimulation simulation =
+        new SmartWaitForPlanner.GraphOnlySimulation(
+            3, 1, true, 2, 0, 2, SmartWaitForPlanner.Confidence.HIGH, "test");
+    return new SmartWaitForPlanner.UnlockCandidate(
+        "yield-train",
+        "cycle-yield",
+        SmartWaitForPlanner.CandidateKind.YIELD_TO_HEAD_ON,
+        List.of(conflict.toString(), physicalNode.toString()),
+        List.of(conflict.toString(), physicalNode.toString()),
+        "A",
+        "A",
+        "B",
+        CorridorDirection.B_TO_A,
+        2,
+        0,
+        4,
+        1200,
+        true,
+        "-",
+        "HEAD_ON_YIELD",
+        simulation,
+        false,
+        true,
+        60);
+  }
+
+  private PlannerExecutionSnapshot executePlannerReservationForMode(SmartDispatcherMode mode)
+      throws Exception {
+    return executePlannerReservationForMode(mode, new RouteProgressRegistry());
+  }
+
+  private PlannerExecutionSnapshot executePlannerReservationForMode(
+      SmartDispatcherMode mode, RouteProgressRegistry registry) throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager, mock(RouteDefinitionCache.class), registry, debugMessages, mode);
+    long versionBefore = manager.version();
+    int claimsBefore = manager.snapshotClaims().size();
+    int queuesBefore = manager.snapshotQueues().size();
+
+    executeSmartUnlockReservation(service, smartUnlockCandidate(), enforcePlannerSettings());
+
+    return new PlannerExecutionSnapshot(
+        service, manager, debugMessages, versionBefore, claimsBefore, queuesBefore);
+  }
+
+  private PlannerExecutionSnapshot executeSingleRegionPlannerReservationWithExternalOccupant(
+      CorridorDirection requestedDirection) throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("external", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    long versionBefore = manager.version();
+    int claimsBefore = manager.snapshotClaims().size();
+    int queuesBefore = manager.snapshotQueues().size();
+
+    executeSmartUnlockReservation(
+        service,
+        smartUnlockCandidate("CONFLICT:single:test:A~B", requestedDirection),
+        enforcePlannerSettings());
+
+    return new PlannerExecutionSnapshot(
+        service, manager, debugMessages, versionBefore, claimsBefore, queuesBefore);
+  }
+
+  private FollowThroughPreviewSnapshot runFollowThroughPreview(
+      SmartDispatcherMode mode, boolean installLeaderToken) throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.initFromTags(
+        "follower", new TagStore("follower", "FTA_ROUTE_INDEX=0").properties(), route);
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    registry.updateSignal("follower", SignalAspect.STOP, Instant.now());
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    RouteDefinitionCache routeDefinitions = routeDefinitionCacheWith(route, routeUuid);
+    RuntimeDispatchService service =
+        createMinimalService(manager, routeDefinitions, registry, debugMessages, mode);
+    if (installLeaderToken) {
+      installMovementToken(
+          service,
+          new MovementAuthorizationToken(
+                  "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
+              .activate("C"));
+    }
+    long versionBefore = manager.version();
+    int claimsBefore = manager.snapshotClaims().size();
+    int queuesBefore = manager.snapshotQueues().size();
+    int tokensBefore = movementTokenCount(service);
+    SignalAspect followerSignalBefore = registry.get("follower").orElseThrow().lastSignal();
+    SignalAspect leaderSignalBefore = registry.get("leader").orElseThrow().lastSignal();
+
+    boolean admissionAllowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    return new FollowThroughPreviewSnapshot(
+        service,
+        manager,
+        registry,
+        debugMessages,
+        versionBefore,
+        claimsBefore,
+        queuesBefore,
+        tokensBefore,
+        followerSignalBefore,
+        leaderSignalBefore,
+        admissionAllowed);
+  }
+
+  private static boolean hasFollowThroughPreviewLog(List<String> debugMessages) {
+    return debugMessages.stream()
+        .anyMatch(
+            message ->
+                message.contains("SMART_FOLLOW_THROUGH_PREVIEW")
+                    && message.contains("wouldMutate=false")
+                    && message.contains("didMutate=false"));
+  }
+
+  private static boolean hasHardBarrierLog(List<String> debugMessages) {
+    return debugMessages.stream()
+        .anyMatch(
+            message ->
+                message.contains(
+                    SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER));
+  }
+
+  private static RouteProgressRegistry signalRegistryForTrain(
+      String trainName, SignalAspect initialSignal) {
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("signal-test"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    registry.initFromTags(
+        trainName, new TagStore(trainName, "FTA_ROUTE_INDEX=0").properties(), route);
+    registry.updateSignal(trainName, initialSignal, Instant.now());
+    return registry;
+  }
+
+  private static ConfigManager.SmartDispatcherPlannerSettings enforcePlannerSettings() {
+    return new ConfigManager.SmartDispatcherPlannerSettings(
+        true,
+        SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD,
+        4,
+        100,
+        1000L,
+        true,
+        false,
+        false,
+        true);
+  }
+
+  private static boolean hasUnlockReservationClaim(SimpleOccupancyManager manager) {
+    return manager.snapshotClaims().stream()
+        .anyMatch(claim -> claim.role() == ClaimRole.UNLOCK_RESERVATION);
+  }
+
+  private static int movementTokenCount(RuntimeDispatchService service) throws Exception {
+    return movementTokens(service).size();
+  }
+
+  private static List<MovementAuthorizationToken> movementTokens(RuntimeDispatchService service)
+      throws Exception {
+    java.lang.reflect.Field field =
+        RuntimeDispatchService.class.getDeclaredField("movementAuthorizationTokens");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, MovementAuthorizationToken> tokens =
+        (java.util.concurrent.ConcurrentMap<String, MovementAuthorizationToken>) field.get(service);
+    return List.copyOf(tokens.values());
+  }
+
+  private static void installMovementToken(
+      RuntimeDispatchService service, MovementAuthorizationToken token) throws Exception {
+    java.lang.reflect.Field field =
+        RuntimeDispatchService.class.getDeclaredField("movementAuthorizationTokens");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, MovementAuthorizationToken> tokens =
+        (java.util.concurrent.ConcurrentMap<String, MovementAuthorizationToken>) field.get(service);
+    tokens.put(token.trainName().toLowerCase(java.util.Locale.ROOT), token);
+  }
+
+  private static boolean validMovementAuthorization(
+      RuntimeDispatchService service,
+      String trainName,
+      NodeId currentNode,
+      NodeId nextNode,
+      List<OccupancyResource> resources)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "hasValidMovementAuthorization", String.class, NodeId.class, NodeId.class, List.class);
+    method.setAccessible(true);
+    return (boolean) method.invoke(service, trainName, currentNode, nextNode, resources);
+  }
+
+  private static boolean invokeSignalUpdate(
+      RuntimeDispatchService service, String trainName, SignalAspect aspect) throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "updateSignalOrWarn", String.class, SignalAspect.class, Instant.class);
+    method.setAccessible(true);
+    return (boolean) method.invoke(service, trainName, aspect, Instant.now());
+  }
+
+  private static boolean invokeSignalUpdate(
+      RuntimeDispatchService service, String trainName, SignalAspect aspect, Object authorization)
+      throws Exception {
+    Class<?> authorizationClass =
+        Class.forName(
+            "org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService$FinalSignalAuthorization");
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "updateSignalOrWarn",
+            String.class,
+            SignalAspect.class,
+            Instant.class,
+            authorizationClass);
+    method.setAccessible(true);
+    return (boolean) method.invoke(service, trainName, aspect, Instant.now(), authorization);
+  }
+
+  private static Object finalSignalAuthorization(
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SignalPublicationGate.Decision publication,
+      NodeId currentNode,
+      NodeId nextNode,
+      boolean destinationPresent)
+      throws Exception {
+    return finalSignalAuthorization(
+        request,
+        decision,
+        publication,
+        currentNode,
+        nextNode,
+        SignalComputationTrace.TokenState.ACTIVE,
+        destinationPresent);
+  }
+
+  private static Object finalSignalAuthorization(
+      OccupancyRequest request,
+      OccupancyDecision decision,
+      SignalPublicationGate.Decision publication,
+      NodeId currentNode,
+      NodeId nextNode,
+      SignalComputationTrace.TokenState tokenState,
+      boolean destinationPresent)
+      throws Exception {
+    Class<?> authorizationClass =
+        Class.forName(
+            "org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService$FinalSignalAuthorization");
+    java.lang.reflect.Constructor<?> constructor =
+        authorizationClass.getDeclaredConstructor(
+            String.class,
+            OccupancyRequest.class,
+            OccupancyDecision.class,
+            SignalPublicationGate.Decision.class,
+            NodeId.class,
+            NodeId.class,
+            SignalComputationTrace.TokenState.class,
+            boolean.class,
+            boolean.class);
+    constructor.setAccessible(true);
+    return constructor.newInstance(
+        "TEST",
+        request,
+        decision,
+        publication,
+        currentNode,
+        nextNode,
+        tokenState,
+        destinationPresent,
+        false);
+  }
+
+  private static void installPublishedPhysicalSignal(
+      RuntimeDispatchService service, String trainName, SignalAspect aspect) throws Exception {
+    java.lang.reflect.Field field =
+        RuntimeDispatchService.class.getDeclaredField("publishedPhysicalSignals");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, SignalAspect> published =
+        (java.util.concurrent.ConcurrentMap<String, SignalAspect>) field.get(service);
+    published.put(trainName.toLowerCase(java.util.Locale.ROOT), aspect);
+  }
+
+  private void executeSmartUnlockReservation(
+      RuntimeDispatchService service,
+      SmartWaitForPlanner.UnlockCandidate candidate,
+      ConfigManager.SmartDispatcherPlannerSettings settings)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "executeSmartUnlockReservation",
+            SmartWaitForPlanner.UnlockCandidate.class,
+            ConfigManager.SmartDispatcherPlannerSettings.class,
+            Instant.class);
+    method.setAccessible(true);
+    method.invoke(service, candidate, settings, Instant.now());
+  }
+
+  private record PlannerExecutionSnapshot(
+      RuntimeDispatchService service,
+      SimpleOccupancyManager manager,
+      List<String> debugMessages,
+      long occupancyVersionBefore,
+      int claimsBefore,
+      int queuesBefore) {}
+
+  private record FollowThroughPreviewSnapshot(
+      RuntimeDispatchService service,
+      SimpleOccupancyManager manager,
+      RouteProgressRegistry registry,
+      List<String> debugMessages,
+      long occupancyVersionBefore,
+      int claimsBefore,
+      int queuesBefore,
+      int tokensBefore,
+      SignalAspect followerSignalBefore,
+      SignalAspect leaderSignalBefore,
+      boolean admissionAllowed) {}
 
   private OccupancyRequest staleProgressRequest(
       String trainName,
@@ -7504,6 +10197,7 @@ class RuntimeDispatchServiceTest {
             String.class,
             String.class,
             String.class,
+            String.class,
             List.class,
             NodeId.class,
             String.class,
@@ -7521,6 +10215,7 @@ class RuntimeDispatchServiceTest {
             "unlock-test",
             candidate.train(),
             candidate.cycleId(),
+            candidate.kind().name(),
             resources,
             NodeId.of(candidate.authorityEnd()),
             candidate.planHash(),
@@ -7783,6 +10478,14 @@ class RuntimeDispatchServiceTest {
         debugMessages::add);
   }
 
+  private static RouteDefinitionCache routeDefinitionCacheWith(
+      RouteDefinition route, UUID routeUuid) {
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
+    when(routeDefinitions.snapshot()).thenReturn(Map.of(routeUuid, route));
+    return routeDefinitions;
+  }
+
   private static ConfigManager.ConfigView withSmartDispatcherMode(
       ConfigManager.ConfigView base, SmartDispatcherMode mode) {
     return new ConfigManager.ConfigView(
@@ -7836,6 +10539,38 @@ class RuntimeDispatchServiceTest {
         oppositeSingleConflict,
         hardBlockers != null && !hardBlockers.isEmpty(),
         "signal-authority-window-exceeded");
+  }
+
+  private static RuntimeDispatchService.SmartRecoveryInput singleRegionHardBarrierRecoveryInput(
+      String trainName, boolean oppositeSingleConflict, String primaryReason) {
+    return singleRegionHardBarrierRecoveryInput(
+        trainName, oppositeSingleConflict, Set.of(), primaryReason);
+  }
+
+  private static RuntimeDispatchService.SmartRecoveryInput singleRegionHardBarrierRecoveryInput(
+      String trainName,
+      boolean oppositeSingleConflict,
+      Set<String> hardBlockers,
+      String primaryReason) {
+    return new RuntimeDispatchService.SmartRecoveryInput(
+        trainName,
+        4000,
+        SignalAspect.STOP,
+        true,
+        SignalComputationTrace.TokenState.PENDING,
+        true,
+        hardBlockers == null ? 0 : hardBlockers.size(),
+        hardBlockers == null ? Set.of() : hardBlockers,
+        NodeId.of("A"),
+        NodeId.of("B"),
+        "route:test",
+        0,
+        "A",
+        true,
+        false,
+        oppositeSingleConflict,
+        false,
+        primaryReason);
   }
 
   private static RuntimeDispatchService.SmartRecoveryInput smartSelfRetainInput(String trainName) {
@@ -7936,6 +10671,42 @@ class RuntimeDispatchServiceTest {
                 Optional.empty())));
   }
 
+  private static OccupancyRequest singleConflictRequestWithoutPlanDirection(
+      String trainName, OccupancyResource conflict) {
+    NodeId from = NodeId.of("A");
+    NodeId to = NodeId.of("B");
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0);
+    return request.withDirectedContext(
+        Optional.of(
+            new DirectedTraversalContext(
+                trainName,
+                Optional.empty(),
+                0,
+                Optional.of(from),
+                Optional.empty(),
+                Optional.of(from),
+                Optional.of(to),
+                List.of(from, to),
+                List.of(
+                    new DirectedTraversalContext.DirectedEdge(
+                        EdgeId.undirected(from, to), from, to)),
+                Map.of(),
+                Map.of(),
+                "TEST",
+                -1L,
+                -1L,
+                "test-empty-single-conflict-direction",
+                Optional.empty())));
+  }
+
   private static void stubSmartRecoveryNoCandidate(RuntimeDispatchService dispatchService) {
     when(dispatchService.smartRecoveryInput(anyString(), any(), any()))
         .thenAnswer(
@@ -7961,6 +10732,26 @@ class RuntimeDispatchServiceTest {
       NodeId firstNode,
       NodeId middleNode,
       NodeId lastNode) {
+    DirectedTraversalContext directedContext =
+        new DirectedTraversalContext(
+            trainName,
+            Optional.empty(),
+            0,
+            Optional.of(firstNode),
+            Optional.of(firstNode),
+            Optional.of(firstNode),
+            Optional.of(middleNode),
+            List.of(firstNode, middleNode, lastNode),
+            List.of(
+                new DirectedTraversalContext.DirectedEdge(first.id(), firstNode, middleNode),
+                new DirectedTraversalContext.DirectedEdge(second.id(), middleNode, lastNode)),
+            Map.of(conflict.key(), direction),
+            Map.of(),
+            AuthorizationPurpose.DEPOT_SPAWN.name(),
+            0L,
+            0L,
+            "test-single-conflict",
+            Optional.empty());
     OccupancyRequest request =
         new OccupancyRequest(
             trainName,
@@ -7970,9 +10761,53 @@ class RuntimeDispatchServiceTest {
             Map.of(conflict.key(), direction),
             Map.of(conflict.key(), 0),
             0,
-            AuthorizationPurpose.DEPOT_SPAWN);
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(),
+            Optional.of(directedContext));
     return new OccupancyRequestContext(
         request, List.of(firstNode, middleNode, lastNode), List.of(first, second));
+  }
+
+  private static OccupancyRequestContext singleConflictBoundaryContext(
+      String trainName,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      RailEdge edge,
+      NodeId firstNode,
+      NodeId lastNode) {
+    DirectedTraversalContext directedContext =
+        new DirectedTraversalContext(
+            trainName,
+            Optional.empty(),
+            0,
+            Optional.of(firstNode),
+            Optional.of(firstNode),
+            Optional.of(firstNode),
+            Optional.of(lastNode),
+            List.of(firstNode, lastNode),
+            List.of(new DirectedTraversalContext.DirectedEdge(edge.id(), firstNode, lastNode)),
+            Map.of(conflict.key(), direction),
+            Map.of(),
+            AuthorizationPurpose.DEPOT_SPAWN.name(),
+            0L,
+            0L,
+            "test-single-conflict-boundary",
+            Optional.empty());
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:01Z"),
+            List.of(conflict),
+            Map.of(conflict.key(), direction),
+            Map.of(conflict.key(), 0),
+            0,
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(),
+            Optional.of(directedContext));
+    return new OccupancyRequestContext(request, List.of(firstNode, lastNode), List.of(edge));
   }
 
   private static RouteStop routeStop(int sequence, NodeId nodeId, RouteStopPassType passType) {

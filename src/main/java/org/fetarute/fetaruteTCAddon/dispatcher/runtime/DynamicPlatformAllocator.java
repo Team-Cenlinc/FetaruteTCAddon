@@ -46,7 +46,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManag
  * <ul>
  *   <li>遍历 [fromTrack, toTrack] 范围内的所有候选站台
  *   <li>优先选择未被占用的站台
- *   <li>若所有站台都被占用，选择第一个候选（排队等待）
+ *   <li>若所有站台都被占用，不生成 materialized destination，由运行时保持在入口等待
  * </ul>
  */
 public final class DynamicPlatformAllocator {
@@ -295,7 +295,9 @@ public final class DynamicPlatformAllocator {
         continue;
       }
 
-      boolean free = occupancyManager == null || !occupancyManager.isNodeOccupied(candidate);
+      boolean physicallyFree =
+          occupancyManager == null || !occupancyManager.isNodeOccupied(candidate);
+      boolean free = physicallyFree && !isReservedByOtherTrain(candidate, trainName);
       candidates.add(new ApproachCandidate(candidate, free, pathOpt.get().nodes()));
     }
 
@@ -303,16 +305,34 @@ public final class DynamicPlatformAllocator {
       return Optional.empty();
     }
 
-    // Pass 1: free first
     List<ApproachCandidate> freeCandidates =
         candidates.stream().filter(ApproachCandidate::free).toList();
+    if (freeCandidates.isEmpty()) {
+      debugLogger.accept(
+          "DYNAMIC 分配阻塞: 候选站台均被占用 train=" + trainName + ", spec=" + formatSpec(spec));
+      return Optional.empty();
+    }
     ApproachCandidate chosen =
-        freeCandidates.isEmpty()
-            ? selectBestCandidateByDirection(trainName, currentNode, travelDir, candidates, graph)
-            : selectBestCandidateByDirection(
-                trainName, currentNode, travelDir, freeCandidates, graph);
+        selectBestCandidateByDirection(trainName, currentNode, travelDir, freeCandidates, graph);
 
     return Optional.ofNullable(chosen != null ? chosen.nodeId : null);
+  }
+
+  private boolean isReservedByOtherTrain(NodeId candidate, String trainName) {
+    if (candidate == null) {
+      return false;
+    }
+    String currentTrainKey = trainName == null ? "" : trainName.toLowerCase(Locale.ROOT);
+    for (Map.Entry<String, Map<String, NodeId>> entry : allocations.entrySet()) {
+      if (entry == null || entry.getKey() == null || entry.getKey().equals(currentTrainKey)) {
+        continue;
+      }
+      Map<String, NodeId> trainAllocations = entry.getValue();
+      if (trainAllocations != null && trainAllocations.containsValue(candidate)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private record ApproachCandidate(NodeId nodeId, boolean free, List<NodeId> pathNodes) {

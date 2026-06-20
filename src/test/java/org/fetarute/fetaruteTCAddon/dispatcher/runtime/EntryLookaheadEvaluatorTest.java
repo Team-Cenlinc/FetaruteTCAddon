@@ -73,6 +73,49 @@ class EntryLookaheadEvaluatorTest {
     assertEquals("exit-not-visible-after-extension", result.failureReason());
   }
 
+  @Test
+  void entryLookaheadTreatsStationTargetAsSingleRegionBoundaryExit() {
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    NodeId station = NodeId.of("OP:S:BOUNDARY:1");
+    EdgeId edgeId = EdgeId.undirected(switcher, station);
+    String zone = "single:test";
+    MovementPlanSnapshot plan =
+        plan(
+            List.of(switcher, station),
+            List.of(edge(edgeId, switcher, station)),
+            Map.of(zone, CorridorDirection.A_TO_B));
+
+    EntryLookaheadEvaluator.Result result =
+        EntryLookaheadEvaluator.evaluate(
+            plan, support(Map.of(edgeId, zone)), OccupancyResource.forConflict(zone), 1, 1);
+
+    assertTrue(result.extensionAttempted());
+    assertEquals(1, result.exitIndexAfterExtension());
+    assertTrue(result.exitFeasible());
+    assertFalse(result.failClosed());
+    assertEquals("exit-is-target-boundary", result.failureReason());
+  }
+
+  @Test
+  void entryLookaheadWithoutExitProofStillFailsClosed() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    EdgeId edgeId = EdgeId.undirected(a, b);
+    String zone = "single:test";
+    MovementPlanSnapshot plan =
+        plan(List.of(a, b), List.of(edge(edgeId, a, b)), Map.of(zone, CorridorDirection.A_TO_B));
+
+    EntryLookaheadEvaluator.Result result =
+        EntryLookaheadEvaluator.evaluate(
+            plan, support(Map.of(edgeId, zone)), OccupancyResource.forConflict(zone), 1, 1);
+
+    assertTrue(result.extensionAttempted());
+    assertEquals(-1, result.exitIndexAfterExtension());
+    assertFalse(result.exitFeasible());
+    assertTrue(result.failClosed());
+    assertEquals("exit-not-visible-after-extension", result.failureReason());
+  }
+
   private static MovementPlanSnapshot plan(
       List<NodeId> nodes,
       List<DirectedTraversalContext.DirectedEdge> edges,

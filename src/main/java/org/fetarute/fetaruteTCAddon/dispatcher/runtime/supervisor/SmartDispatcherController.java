@@ -147,6 +147,11 @@ public final class SmartDispatcherController {
       boolean targetResolvedToRuntimeGroup,
       boolean targetRecentlyProgressed,
       boolean targetFtaManagedOrConfirmedOrphan,
+      boolean directionAuditRequired,
+      String directionAuditReason,
+      boolean directionReauditAttempted,
+      boolean lastResortDestroy,
+      boolean blockingActiveTraffic,
       Duration persisted,
       Duration threshold) {
 
@@ -156,6 +161,7 @@ public final class SmartDispatcherController {
       trainB = normalize(trainB, "-");
       targetTrain = normalize(targetTrain, "-");
       conflictKey = normalize(conflictKey, "-");
+      directionAuditReason = normalize(directionAuditReason, "-");
       persisted = persisted == null || persisted.isNegative() ? Duration.ZERO : persisted;
       threshold = threshold == null || threshold.isNegative() ? Duration.ZERO : threshold;
     }
@@ -286,6 +292,19 @@ public final class SmartDispatcherController {
       traceLogger.accept(
           "SIGNAL_CAUTION_REASON train=" + risk.trainId() + " reason=artificial-window-trace-only");
       return noAction(input, risk, "artificial-window-trace-only");
+    }
+    if (risk.riskSource() == RiskSource.SAME_DIRECTION_FOLLOW) {
+      traceLogger.accept(
+          "SIGNAL_CAUTION_SKIPPED train="
+              + risk.trainId()
+              + " cautionSource="
+              + risk.riskSource()
+              + " reason=same-direction-follow-trace-only");
+      traceLogger.accept(
+          "SIGNAL_CAUTION_REASON train="
+              + risk.trainId()
+              + " reason=same-direction-follow-trace-only");
+      return noAction(input, risk, "same-direction-follow-trace-only");
     }
 
     BrakingProfile braking = buildBrakingProfile(input, risk);
@@ -598,6 +617,10 @@ public final class SmartDispatcherController {
             + input.conflictKey()
             + " allBlockersLiveHard="
             + input.allBlockersLiveHard()
+            + " directionAuditRequired="
+            + input.directionAuditRequired()
+            + " directionAuditReason="
+            + input.directionAuditReason()
             + " weak="
             + input.weak());
     traceLogger.accept(
@@ -631,7 +654,14 @@ public final class SmartDispatcherController {
             + input.persisted().toSeconds()
             + "s threshold="
             + input.threshold().toSeconds()
-            + "s");
+            + "s directionAuditRequired="
+            + input.directionAuditRequired()
+            + " directionReauditAttempted="
+            + input.directionReauditAttempted()
+            + " lastResortDestroy="
+            + input.lastResortDestroy()
+            + " blockingActiveTraffic="
+            + input.blockingActiveTraffic());
     if (input.weak() || input.conflictKey().startsWith("weaker:")) {
       traceLogger.accept(
           "DEADLOCK_CYCLE_REJECTED episode="
@@ -652,6 +682,40 @@ public final class SmartDispatcherController {
     }
     if (input.persisted().compareTo(input.threshold()) < 0) {
       return traceDestroyReview(DeadlockDestroyReview.rejected("threshold-not-reached"));
+    }
+    if (input.directionAuditRequired() && !input.directionReauditAttempted()) {
+      traceLogger.accept(
+          "DEADLOCK_DIRECTION_AUDIT_REQUIRED episode="
+              + input.episodeId()
+              + " target="
+              + input.targetTrain()
+              + " reason="
+              + input.directionAuditReason()
+              + " reAuditAttempted=false");
+      return traceDestroyReview(DeadlockDestroyReview.rejected("direction-reaudit-required"));
+    }
+    if (input.directionAuditRequired() && !input.lastResortDestroy()) {
+      traceLogger.accept(
+          "DEADLOCK_DIRECTION_AUDIT_REQUIRED episode="
+              + input.episodeId()
+              + " target="
+              + input.targetTrain()
+              + " reason="
+              + input.directionAuditReason()
+              + " lastResortDestroy=false");
+      return traceDestroyReview(DeadlockDestroyReview.rejected("direction-audit-required"));
+    }
+    if (input.directionAuditRequired() && !input.blockingActiveTraffic()) {
+      traceLogger.accept(
+          "DEADLOCK_DIRECTION_AUDIT_REQUIRED episode="
+              + input.episodeId()
+              + " target="
+              + input.targetTrain()
+              + " reason="
+              + input.directionAuditReason()
+              + " blockingActiveTraffic=false");
+      return traceDestroyReview(
+          DeadlockDestroyReview.rejected("direction-audit-active-traffic-not-proven"));
     }
     if (input.safeDrainCandidate()) {
       return traceDestroyReview(DeadlockDestroyReview.rejected("safe-drain-candidate-exists"));
@@ -690,8 +754,17 @@ public final class SmartDispatcherController {
             + input.targetTrain());
     return traceDestroyReview(
         DeadlockDestroyReview.allowed(
-            "confirmed-live-hard-cycle",
-            List.of("safe-drain", "stale-release", "forward-unlock", "priority-scheduling")));
+            input.directionAuditRequired()
+                ? "confirmed-live-hard-cycle-last-resort-direction-audit"
+                : "confirmed-live-hard-cycle",
+            input.directionAuditRequired()
+                ? List.of(
+                    "direction-reaudit",
+                    "safe-drain",
+                    "stale-release",
+                    "forward-unlock",
+                    "priority-scheduling")
+                : List.of("safe-drain", "stale-release", "forward-unlock", "priority-scheduling")));
   }
 
   /** 记录 destroy 后验证结果。 */

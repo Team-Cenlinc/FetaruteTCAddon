@@ -94,7 +94,7 @@ public final class MovementAuthorityService {
     if (availableBlocks + 1.0e-6 < stopRequiredBlocks) {
       degraded = SignalAspect.STOP;
     } else if (availableBlocks + 1.0e-6 < cautionRequiredBlocks) {
-      degraded = degradeOneStep(requested);
+      degraded = degradeForCaution(requested);
     }
 
     SignalAspect effective = strictest(requested, degraded);
@@ -102,14 +102,13 @@ public final class MovementAuthorityService {
     return new MovementAuthorityDecision(effective, constraintDistance, recommendedOpt, restricted);
   }
 
-  private static SignalAspect degradeOneStep(SignalAspect aspect) {
+  private static SignalAspect degradeForCaution(SignalAspect aspect) {
     if (aspect == null) {
       return SignalAspect.STOP;
     }
     return switch (aspect) {
       case PROCEED -> SignalAspect.PROCEED_WITH_CAUTION;
-      case PROCEED_WITH_CAUTION -> SignalAspect.CAUTION;
-      case CAUTION -> SignalAspect.STOP;
+      case PROCEED_WITH_CAUTION, CAUTION -> SignalAspect.CAUTION;
       case STOP -> SignalAspect.STOP;
     };
   }

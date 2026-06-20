@@ -10,8 +10,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchPriorityPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.junit.jupiter.api.Test;
 
@@ -76,6 +78,59 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void switcherClaimLifecycleTraceCoversAcquireBlockerReadAndRelease() {
+    List<String> traces = new java.util.ArrayList<>();
+    SignalComputationTrace.configureLogger(traces::add);
+    try {
+      SimpleOccupancyManager manager =
+          new SimpleOccupancyManager(
+              (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+      Instant now = Instant.parse("2026-01-01T00:00:00Z");
+      OccupancyResource switcher =
+          OccupancyResource.forConflict("switcher:SWITCHER:Towny:545:74:1014");
+
+      assertTrue(
+          manager
+              .acquire(
+                  new OccupancyRequest(
+                      "train-A", Optional.empty(), now, List.of(switcher), Map.of()))
+              .allowed());
+      OccupancyDecision blocked =
+          manager.canEnter(
+              new OccupancyRequest(
+                  "train-B", Optional.empty(), now.plusSeconds(1), List.of(switcher), Map.of()));
+      assertFalse(blocked.allowed());
+
+      manager.releaseByTrain("train-A");
+
+      assertTrue(
+          traces.stream()
+              .anyMatch(
+                  message ->
+                      message.contains("SMART_SWITCHER_CLAIM_LIFECYCLE")
+                          && message.contains("event=acquire")
+                          && message.contains("owner=train-A")));
+      assertTrue(
+          traces.stream()
+              .anyMatch(
+                  message ->
+                      message.contains("SMART_SWITCHER_CLAIM_LIFECYCLE")
+                          && message.contains("event=blocker-read")
+                          && message.contains("train=train-B")
+                          && message.contains("owner=train-A")));
+      assertTrue(
+          traces.stream()
+              .anyMatch(
+                  message ->
+                      message.contains("SMART_SWITCHER_CLAIM_LIFECYCLE")
+                          && message.contains("event=release")
+                          && message.contains("owner=train-A")));
+    } finally {
+      SignalComputationTrace.configureLogger(null);
+    }
+  }
+
+  @Test
   void releaseByTrainClearsClaims() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -115,6 +170,114 @@ class SimpleOccupancyManagerTest {
         manager.canEnter(
             new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), forward));
     assertTrue(second.allowed());
+  }
+
+  @Test
+  void sectionTokenBlocksOppositeDirectionBeforeMicroSegmentOverlap() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource localSegmentA = OccupancyResource.forConflict("single:comp:A~S");
+    OccupancyResource localSegmentB = OccupancyResource.forConflict("single:comp:S~B");
+    Map<String, CorridorDirection> forward =
+        Map.of(
+            section.key(), CorridorDirection.A_TO_B, localSegmentA.key(), CorridorDirection.A_TO_B);
+    Map<String, CorridorDirection> reverse =
+        Map.of(
+            section.key(), CorridorDirection.B_TO_A, localSegmentB.key(), CorridorDirection.B_TO_A);
+
+    OccupancyDecision first =
+        manager.acquire(
+            new OccupancyRequest(
+                "front", Optional.empty(), now, List.of(section, localSegmentA), forward));
+    assertTrue(first.allowed());
+
+    OccupancyDecision opposite =
+        manager.canEnter(
+            new OccupancyRequest(
+                "opposite",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(section, localSegmentB),
+                reverse));
+    assertFalse(opposite.allowed());
+    assertEquals(SignalAspect.STOP, opposite.signal());
+
+    OccupancyDecision follower =
+        manager.canEnter(
+            new OccupancyRequest(
+                "follower",
+                Optional.empty(),
+                now.plusSeconds(2),
+                List.of(section, localSegmentB),
+                Map.of(
+                    section.key(),
+                    CorridorDirection.A_TO_B,
+                    localSegmentB.key(),
+                    CorridorDirection.A_TO_B)));
+    assertTrue(follower.allowed());
+  }
+
+  @Test
+  void unknownSectionDirectionWithoutOtherPresenceDoesNotCreatePhantomStop() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section =
+        OccupancyResource.forConflict("single:section:comp:SURC:S:WSD:2~SURC:S:WSD:3");
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "follower",
+            Optional.empty(),
+            now,
+            List.of(section),
+            Map.of(),
+            Map.of(section.key(), 0),
+            0);
+
+    OccupancyDecision decision = manager.canEnterPreview(request);
+
+    assertTrue(decision.allowed(), decision.toString());
+  }
+
+  @Test
+  void unknownSectionDirectionWithOtherPresenceStillFailsClosed() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section =
+        OccupancyResource.forConflict("single:section:comp:SURC:S:WSD:2~SURC:S:WSD:3");
+    OccupancyRequest leader =
+        new OccupancyRequest(
+            "leader",
+            Optional.empty(),
+            now,
+            List.of(section),
+            Map.of(),
+            Map.of(section.key(), 0),
+            0);
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "follower",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(section),
+            Map.of(),
+            Map.of(section.key(), 0),
+            0);
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnterPreview(request);
+
+    assertFalse(decision.allowed());
+    assertEquals("single-conflict-direction-unknown", decision.reason());
   }
 
   @Test
@@ -315,6 +478,812 @@ class SimpleOccupancyManagerTest {
         manager.canEnter(
             new OccupancyRequest("t2", Optional.empty(), now, List.of(resource), Map.of()));
     assertFalse(second.allowed());
+  }
+
+  @Test
+  void jbsStyleSwitcherConflictAdmitsExactlyOneTrain() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:JBS");
+    OccupancyRequest firstRequest =
+        new OccupancyRequest("JBS-DS", Optional.empty(), now, List.of(resource), Map.of(), 0);
+    OccupancyRequest secondRequest =
+        new OccupancyRequest(
+            "JBS-MT", Optional.empty(), now.plusMillis(1), List.of(resource), Map.of(), 0);
+
+    OccupancyDecision first = manager.acquire(firstRequest);
+    OccupancyDecision second = manager.acquire(secondRequest);
+
+    assertTrue(first.allowed());
+    assertFalse(second.allowed());
+    assertEquals(1, manager.snapshotClaims().size());
+    assertEquals("JBS-DS", manager.snapshotClaims().get(0).trainName());
+  }
+
+  @Test
+  void disjointSwitcherPathSignaturesDoNotBlockEachOther() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-569:77:1181");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest jbsRoute =
+        switcherRequest(
+            "SURC-MT-LO-8935",
+            now,
+            resource,
+            List.of(NodeId.of("SURC:SPB:JBS:2:002"), switcher, NodeId.of("SURC:SPB:JBS:2:003")));
+    OccupancyRequest wsdRoute =
+        switcherRequest(
+            "SURC-MT-LH-0296",
+            now.plusMillis(1),
+            resource,
+            List.of(switcher, NodeId.of("SWITCHER:Towny:-557:77:1193")));
+
+    assertTrue(manager.acquire(jbsRoute).allowed());
+    OccupancyDecision decision = manager.canEnter(wsdRoute);
+
+    assertTrue(decision.allowed(), decision.toString());
+    assertTrue(manager.acquire(wsdRoute).allowed());
+    assertEquals(2, manager.snapshotClaims().size());
+  }
+
+  @Test
+  void sharedSwitcherPathSignatureStillBlocksOtherTrain() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-569:77:1181");
+    NodeId sharedExit = NodeId.of("SURC:SPB:JBS:2:003");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest first =
+        switcherRequest(
+            "first", now, resource, List.of(NodeId.of("SURC:SPB:JBS:2:002"), switcher, sharedExit));
+    OccupancyRequest second =
+        switcherRequest(
+            "second",
+            now.plusMillis(1),
+            resource,
+            List.of(NodeId.of("SURC:SPB:ALT:2:001"), switcher, sharedExit));
+
+    assertTrue(manager.acquire(first).allowed());
+    OccupancyDecision blocked = manager.acquire(second);
+
+    assertFalse(blocked.allowed());
+    assertEquals("first", blocked.blockers().get(0).trainName());
+  }
+
+  @Test
+  void sameDirectionSectionLetsFollowerShareSwitcherConflict() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId switcher = NodeId.of("SWITCHER:PPK");
+    NodeId exit = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, exit));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, exit));
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertTrue(decision.allowed(), decision.toString());
+  }
+
+  @Test
+  void sameDirectionSectionDoesNotShareTerminalStationThroatSwitcher() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("SURC:PPK:RVS:2:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-583:65:630");
+    NodeId platform = NodeId.of("SURC:S:PPK:2");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:PPK~RVS");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform));
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+    assertTrue(
+        decision.blockers().stream()
+            .anyMatch(blocker -> blocker.resource().equals(switcherConflict)));
+  }
+
+  @Test
+  void oppositeSectionStillBlocksSwitcherFollowThrough() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId nodeA = NodeId.of("A");
+    NodeId switcher = NodeId.of("SWITCHER:PPK");
+    NodeId nodeB = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(nodeA, switcher, nodeB));
+    OccupancyRequest opposite =
+        switcherSectionRequest(
+            "opposite",
+            now.plusSeconds(1),
+            section,
+            switcherConflict,
+            CorridorDirection.B_TO_A,
+            List.of(nodeB, switcher, nodeA));
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(opposite);
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+  }
+
+  @Test
+  void sameDirectionSectionDoesNotBypassNodeHardBlocker() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId switcher = NodeId.of("SWITCHER:PPK");
+    NodeId platform = NodeId.of("SURC:S:PPK:1");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource node = OccupancyResource.forNode(platform);
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform),
+            List.of(node));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform),
+            List.of(node));
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertFalse(decision.allowed());
+    assertTrue(decision.blockers().stream().anyMatch(blocker -> blocker.resource().equals(node)));
+  }
+
+  @Test
+  void sameDirectionFrontHardBlockerDoesNotRejectSelfOwnedSectionContinuation() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId switcher = NodeId.of("SWITCHER:PPK");
+    NodeId frontNode = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource node = OccupancyResource.forNode(frontNode);
+    OccupancyResource edge = OccupancyResource.forEdge(EdgeId.undirected(switcher, frontNode));
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, frontNode),
+            List.of(node, edge));
+    OccupancyRequest followerInitial =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, frontNode));
+    OccupancyRequest followerWithFrontBlocker =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(2),
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, frontNode),
+            List.of(node, edge));
+
+    assertTrue(manager.acquire(leader).allowed());
+    assertTrue(manager.acquire(followerInitial).allowed());
+    OccupancyDecision decision = manager.canEnter(followerWithFrontBlocker);
+
+    assertFalse(decision.allowed());
+    assertEquals("none", decision.reason());
+    assertTrue(
+        decision.blockers().stream()
+            .anyMatch(
+                blocker -> blocker.resource().equals(node) || blocker.resource().equals(edge)));
+  }
+
+  @Test
+  void sameDirectionSectionQueueDoesNotSerializeSwitcherQueue() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId switcher = NodeId.of("SWITCHER:PPK");
+    NodeId exit = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest waitingLeader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, exit));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, exit));
+
+    manager.touchQueues(waitingLeader);
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertTrue(decision.allowed(), decision.toString());
+  }
+
+  @Test
+  void sameDirectionSectionSwitcherClaimIsNotAdvisoryStopPoint() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId switcher = NodeId.of("SWITCHER:PPK");
+    NodeId exit = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            section,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, exit));
+    OccupancyRequest advisory =
+        switcherSectionRequest(
+                "follower",
+                now.plusSeconds(1),
+                section,
+                switcherConflict,
+                CorridorDirection.A_TO_B,
+                List.of(entry, switcher, exit))
+            .asLookaheadPreview();
+
+    assertTrue(manager.acquire(leader).allowed());
+    List<AdvisoryRisk> risks = manager.scanAdvisoryRisks(advisory);
+
+    assertTrue(risks.isEmpty(), "同向 section 内的 switcher claim 不能继续作为前车停车点");
+  }
+
+  @Test
+  void sameDirectionSwitcherCorridorLetsFollowerShareSwitcherConflict() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
+    NodeId switcherA = NodeId.of("SWITCHER:Towny:-555:77:1196");
+    NodeId switcherB = NodeId.of("SWITCHER:Towny:-557:77:1193");
+    NodeId sharedSwitcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    OccupancyResource corridor =
+        OccupancyResource.forConflict(
+            "single:SURC:CGL:WYB:1:001:"
+                + "SWITCHER:Towny:-566:77:1179~SWITCHER:Towny:-579:65:650");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + sharedSwitcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcherA, switcherB, sharedSwitcher, exit));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcherA, switcherB, sharedSwitcher, exit));
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertTrue(decision.allowed(), decision.toString());
+  }
+
+  @Test
+  void sameDirectionFollowerProofAcceptsSwitcherCorridorConflict() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
+    NodeId switcherA = NodeId.of("SWITCHER:Towny:-555:77:1196");
+    NodeId switcherB = NodeId.of("SWITCHER:Towny:-557:77:1193");
+    NodeId sharedSwitcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    OccupancyResource corridor =
+        OccupancyResource.forConflict(
+            "single:SURC:CGL:WYB:1:001:"
+                + "SWITCHER:Towny:-566:77:1179~SWITCHER:Towny:-579:65:650");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + sharedSwitcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcherA, switcherB, sharedSwitcher, exit));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcherA, switcherB, sharedSwitcher, exit));
+
+    assertTrue(manager.acquire(leader).allowed());
+
+    assertTrue(
+        manager.isProvenSameDirectionFollower(follower, switcherConflict, "leader"),
+        "运行时风险层应能复用同向 switcher-to-switcher corridor 证明");
+  }
+
+  @Test
+  void sameDirectionSwitcherCorridorQueueIsNotAdvisoryStopPoint() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
+    NodeId switcherA = NodeId.of("SWITCHER:Towny:-555:77:1196");
+    NodeId switcherB = NodeId.of("SWITCHER:Towny:-557:77:1193");
+    NodeId sharedSwitcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    OccupancyResource corridor =
+        OccupancyResource.forConflict(
+            "single:SURC:CGL:WYB:1:001:"
+                + "SWITCHER:Towny:-566:77:1179~SWITCHER:Towny:-579:65:650");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + sharedSwitcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcherA, switcherB, sharedSwitcher, exit));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcherA, switcherB, sharedSwitcher, exit));
+
+    manager.touchQueues(follower);
+    List<AdvisoryRisk> risks = manager.scanAdvisoryRisks(leader.asLookaheadPreview());
+
+    assertTrue(risks.isEmpty(), "同向 switcher-to-switcher single 队列不能变成前车停车点");
+  }
+
+  @Test
+  void sameDirectionFollowerProofRejectsPhysicalNode() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource node = OccupancyResource.forNode(NodeId.of("SURC:S:PPK:1"));
+    assertTrue(
+        manager
+            .acquire(new OccupancyRequest("leader", Optional.empty(), now, List.of(node), Map.of()))
+            .allowed());
+    OccupancyRequest follower =
+        new OccupancyRequest(
+            "follower", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of());
+
+    assertFalse(manager.isProvenSameDirectionFollower(follower, node, "leader"));
+  }
+
+  @Test
+  void sameDirectionSwitcherCorridorDoesNotShareTerminalStationThroatSwitcher() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("SURC:PPK:RVS:2:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-583:65:630");
+    NodeId platform = NodeId.of("SURC:S:PPK:2");
+    OccupancyResource corridor =
+        OccupancyResource.forConflict(
+            "single:SURC:CGL:WYB:1:001:" + "SWITCHER:Towny:-583:65:630~SWITCHER:Towny:-583:65:650");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform));
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+    assertTrue(
+        decision.blockers().stream()
+            .anyMatch(blocker -> blocker.resource().equals(switcherConflict)));
+  }
+
+  @Test
+  void sameDirectionFollowerProofRejectsTerminalStationThroatSwitcher() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("SURC:PPK:RVS:2:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-583:65:630");
+    NodeId platform = NodeId.of("SURC:S:PPK:2");
+    OccupancyResource corridor =
+        OccupancyResource.forConflict(
+            "single:SURC:CGL:WYB:1:001:" + "SWITCHER:Towny:-583:65:630~SWITCHER:Towny:-583:65:650");
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest leader =
+        switcherSectionRequest(
+            "leader",
+            now,
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform));
+    OccupancyRequest follower =
+        switcherSectionRequest(
+            "follower",
+            now.plusSeconds(1),
+            corridor,
+            switcherConflict,
+            CorridorDirection.A_TO_B,
+            List.of(entry, switcher, platform));
+
+    assertTrue(manager.acquire(leader).allowed());
+
+    assertFalse(
+        manager.isProvenSameDirectionFollower(follower, switcherConflict, "leader"),
+        "终端站台相邻 switcher 必须继续由咽喉互斥保护");
+  }
+
+  @Test
+  void disjointSwitcherPendingWinnerDoesNotBlockOtherPath() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-569:77:1181");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest first =
+        switcherRequest(
+            "SURC-MT-LH-0296",
+            now,
+            resource,
+            List.of(switcher, NodeId.of("SWITCHER:Towny:-557:77:1193")));
+    OccupancyRequest second =
+        switcherRequest(
+            "SURC-MT-LO-8935",
+            now.plusMillis(1),
+            resource,
+            List.of(NodeId.of("SURC:SPB:JBS:2:002"), switcher, NodeId.of("SURC:SPB:JBS:2:003")));
+
+    assertTrue(manager.acquire(first).allowed());
+    assertTrue(
+        manager.releaseResourceRetainingQueuePosition(
+            resource, Optional.of(first.trainName()), first));
+
+    OccupancyDecision decision = manager.canEnterPreview(second);
+
+    assertTrue(decision.allowed(), decision.toString());
+  }
+
+  @Test
+  void disjointSwitcherSignatureDoesNotBypassTerminalStationThroatMutex() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-583:65:630");
+    NodeId exit = NodeId.of("SWITCHER:Towny:-583:65:650");
+    NodeId oppositeEntry = NodeId.of("SWITCHER:Towny:-581:65:637");
+    NodeId platform = NodeId.of("SURC:S:PPK:2");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest outbound = switcherRequest("outbound", now, resource, List.of(switcher, exit));
+    OccupancyRequest terminalApproach =
+        switcherRequest(
+            "terminal-approach",
+            now.plusMillis(1),
+            resource,
+            List.of(oppositeEntry, switcher, platform));
+
+    assertTrue(manager.acquire(outbound).allowed());
+    OccupancyDecision decision = manager.canEnterPreview(terminalApproach);
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+  }
+
+  @Test
+  void recoverableReleaseRetainsQueueWinnerAgainstLowerPriorityProtectiveUpgrade() {
+    List<String> traces = new java.util.ArrayList<>();
+    SignalComputationTrace.configureLogger(traces::add);
+    try {
+      HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+      SimpleOccupancyManager manager =
+          new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+      Instant now = Instant.parse("2026-01-01T00:00:00Z");
+      OccupancyResource resource = OccupancyResource.forConflict("switcher:JBS");
+      OccupancyRequest dsRequest =
+          new OccupancyRequest(
+              "JBS-DS",
+              Optional.empty(),
+              now,
+              List.of(resource),
+              Map.of(),
+              Map.of(resource.key(), 0),
+              10);
+      OccupancyRequest mtRetain =
+          new OccupancyRequest(
+                  "JBS-MT",
+                  Optional.empty(),
+                  now.plusMillis(1),
+                  List.of(resource),
+                  Map.of(),
+                  Map.of(resource.key(), 0),
+                  -10)
+              .withResourceIntents(Map.of(resource, ResourceIntent.PROTECTIVE_RETAIN));
+      OccupancyRequest mtMove =
+          new OccupancyRequest(
+              "JBS-MT",
+              Optional.empty(),
+              now.plusMillis(2),
+              List.of(resource),
+              Map.of(),
+              Map.of(resource.key(), 0),
+              -10);
+
+      assertTrue(manager.acquire(dsRequest).allowed());
+      assertTrue(
+          manager.releaseResourceRetainingQueuePosition(
+              resource, Optional.of("JBS-DS"), dsRequest));
+      assertEquals("JBS-DS", manager.snapshotQueues().get(0).entries().get(0).trainName());
+      assertTrue(manager.acquire(mtRetain).allowed());
+
+      OccupancyDecision mtBlocked = manager.canEnter(mtMove);
+
+      assertFalse(mtBlocked.allowed());
+      assertEquals("JBS-DS", mtBlocked.blockers().get(0).trainName());
+      assertEquals(ClaimRole.MOVEMENT_REQUIRED, mtBlocked.blockers().get(0).role());
+      assertTrue(
+          traces.stream()
+              .anyMatch(
+                  message ->
+                      message.contains("SMART_PENDING_WINNER_ARBITRATION")
+                          && message.contains("requesterTrain=JBS-MT")
+                          && message.contains("pendingWinnerTrain=JBS-DS")
+                          && message.contains("decision=hold-lower-priority")));
+
+      assertTrue(manager.acquire(dsRequest).allowed());
+      assertTrue(
+          manager.snapshotClaims().stream()
+              .anyMatch(
+                  claim ->
+                      claim.resource().equals(resource)
+                          && claim.trainName().equals("JBS-DS")
+                          && claim.role() == ClaimRole.MOVEMENT_REQUIRED));
+      assertFalse(
+          manager.snapshotClaims().stream()
+              .anyMatch(
+                  claim ->
+                      claim.resource().equals(resource)
+                          && claim.trainName().equals("JBS-MT")
+                          && claim.role() == ClaimRole.MOVEMENT_REQUIRED));
+    } finally {
+      SignalComputationTrace.configureLogger(null);
+    }
+  }
+
+  @Test
+  void plainReleaseDoesNotRetainQueueWinner() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:JBS");
+    OccupancyRequest dsRequest =
+        new OccupancyRequest(
+            "JBS-DS",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            10);
+    OccupancyRequest mtRequest =
+        new OccupancyRequest(
+            "JBS-MT",
+            Optional.empty(),
+            now.plusMillis(1),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            -10);
+
+    assertTrue(manager.acquire(dsRequest).allowed());
+    assertTrue(manager.releaseResource(resource, Optional.of("JBS-DS")));
+
+    OccupancyDecision mtDecision = manager.acquire(mtRequest);
+
+    assertTrue(mtDecision.allowed());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(resource)
+                        && claim.trainName().equals("JBS-MT")
+                        && claim.role() == ClaimRole.MOVEMENT_REQUIRED));
+    assertFalse(
+        manager.snapshotQueues().stream()
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .anyMatch(entry -> entry.trainName().equals("JBS-DS")));
+  }
+
+  @Test
+  void hhuStyleCreatePriorityStaysAheadOfReturnWhenBothWaitForMainlineCutIn() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forConflict("switcher:HHU-mainline-cut");
+    int createPriority = DispatchPriorityPolicy.runtimePriority(0, RouteOperationType.CREATE, true);
+    int returnPriority =
+        DispatchPriorityPolicy.runtimePriority(0, RouteOperationType.RETURN, false);
+    OccupancyRequest returnRequest =
+        new OccupancyRequest(
+            "HHU-return",
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            returnPriority);
+    OccupancyRequest createRequest =
+        new OccupancyRequest(
+            "HHU-create",
+            Optional.empty(),
+            now.plusMillis(1),
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            createPriority);
+    manager.touchQueues(returnRequest);
+    manager.touchQueues(createRequest);
+
+    assertTrue(manager.canEnter(createRequest).allowed());
+    assertFalse(manager.canEnter(returnRequest).allowed());
   }
 
   @Test
@@ -654,8 +1623,10 @@ class SimpleOccupancyManagerTest {
                     AuthorizationPurpose.CONFLICT_CLEARING),
                 conflict));
 
-    assertTrue(decision.allowed());
-    assertTrue(decision.conflictRelease());
+    assertFalse(decision.allowed());
+    assertFalse(decision.conflictRelease());
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, decision.reason());
     assertFalse(
         manager.snapshotClaims().stream()
             .anyMatch(
@@ -794,7 +1765,7 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void unknownDirectionSingleCorridorEntryFailsClosed() {
+  void unknownDirectionSingleCorridorEntryWithoutPresenceDoesNotFailClosed() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -813,8 +1784,7 @@ class SimpleOccupancyManagerTest {
                 Map.of(conflict.key(), 0),
                 0));
 
-    assertFalse(decision.allowed());
-    assertEquals("single-conflict-direction-unknown", decision.reason());
+    assertTrue(decision.allowed(), decision.toString());
   }
 
   @Test
@@ -1128,7 +2098,7 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void canEnterPreviewAndCanEnterAgreeAfterQueueExpiry() {
+  void canEnterPreviewDoesNotPurgeQueue() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -1155,12 +2125,54 @@ class SimpleOccupancyManagerTest {
             Map.of(resource.key(), 0),
             0);
 
-    OccupancyDecision preview = manager.canEnterPreview(request);
+    long versionBefore = manager.version();
+    List<OccupancyQueueSnapshot> queuesBefore = manager.snapshotQueues();
+
+    manager.canEnterPreview(request);
+
+    assertEquals(versionBefore, manager.version());
+    assertEquals(queuesBefore, manager.snapshotQueues());
+    assertEquals(0, manager.staleQueueCleanupCount());
+
     OccupancyDecision actual = manager.canEnter(request);
 
-    assertTrue(preview.allowed());
     assertTrue(actual.allowed());
     assertTrue(manager.staleQueueCleanupCount() > 0);
+  }
+
+  @Test
+  void canEnterPreviewDoesNotChangeOccupancyVersion() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:preview:A~B");
+    Map<String, CorridorDirection> direction = Map.of(conflict.key(), CorridorDirection.A_TO_B);
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "leader",
+                    Optional.empty(),
+                    now,
+                    List.of(conflict),
+                    direction,
+                    Map.of(conflict.key(), 0),
+                    0))
+            .allowed());
+    long versionBefore = manager.version();
+
+    manager.canEnterPreview(
+        new OccupancyRequest(
+            "follower",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(conflict),
+            direction,
+            Map.of(conflict.key(), 0),
+            0));
+
+    assertEquals(versionBefore, manager.version());
   }
 
   @Test
@@ -1219,6 +2231,69 @@ class SimpleOccupancyManagerTest {
     assertEquals(SignalAspect.PROCEED, preview.signal());
     assertEquals(1, risks.size());
     assertEquals(AdvisoryRiskSource.OCCUPIED_NODE, risks.get(0).source());
+  }
+
+  @Test
+  void physicalHoldOnlyClaimRemainsAdvisoryVisible() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource node = OccupancyResource.forNode(NodeId.of("SURC:S:HHU:1"));
+    OccupancyRequest hold =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(node),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(node, ResourceIntent.HOLD_ONLY));
+    assertTrue(manager.acquire(hold).allowed());
+    OccupancyRequest advisory =
+        new OccupancyRequest("rear", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of())
+            .asLookaheadPreview();
+
+    List<AdvisoryRisk> risks = manager.scanAdvisoryRisks(advisory);
+
+    assertEquals(1, risks.size());
+    assertEquals(AdvisoryRiskSource.OCCUPIED_NODE, risks.get(0).source());
+    assertEquals(ClaimRole.HOLD_ONLY, risks.get(0).claim().role());
+  }
+
+  @Test
+  void conflictHoldOnlyClaimDoesNotBecomeAdvisoryRisk() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-03-15T10:00:00Z");
+    OccupancyResource switcher = OccupancyResource.forConflict("switcher:SWITCHER:HHU:502");
+    OccupancyRequest hold =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(switcher),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(switcher, ResourceIntent.HOLD_ONLY));
+    assertTrue(manager.acquire(hold).allowed());
+    OccupancyRequest advisory =
+        new OccupancyRequest(
+                "rear", Optional.empty(), now.plusSeconds(1), List.of(switcher), Map.of())
+            .asLookaheadPreview();
+
+    List<AdvisoryRisk> risks = manager.scanAdvisoryRisks(advisory);
+
+    assertTrue(risks.isEmpty(), "抽象 conflict 上的 hold claim 仍只表达区段保护，不应变成前方物理停车点");
   }
 
   @Test
@@ -1447,6 +2522,48 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void acquirePersistsSectionDirectionFromCommittedCorridorToken() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyRequest request =
+        sectionRequestWithPlanDirections(
+            "train",
+            now,
+            section,
+            Map.of(section.key(), CorridorDirection.UNKNOWN),
+            Map.of("single:comp:A~B", CorridorDirection.A_TO_B));
+
+    assertTrue(manager.acquire(request).allowed());
+    assertEquals(
+        Optional.of(CorridorDirection.A_TO_B),
+        manager.getClaim(section).orElseThrow().corridorDirection());
+  }
+
+  @Test
+  void acquireKeepsUnknownWhenCommittedSectionTokenComponentDiffers() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyRequest request =
+        sectionRequestWithPlanDirections(
+            "train",
+            now,
+            section,
+            Map.of(section.key(), CorridorDirection.UNKNOWN),
+            Map.of("single:other:A~B", CorridorDirection.A_TO_B));
+
+    assertTrue(manager.acquire(request).allowed());
+    assertTrue(manager.getClaim(section).orElseThrow().corridorDirection().isEmpty());
+  }
+
+  @Test
   void smartAlreadyInsideSingleBlockedOnlyByExternalHardBlocker() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -1538,6 +2655,52 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void selfOwnedTailProtectionZoneNotOnPlanDoesNotReject() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyRequest retain =
+        singleConflictRequest("train", now, conflict, CorridorDirection.B_TO_A)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+
+    // 折返后的 movement plan 不再穿越该 zone：请求仍携带该资源做车尾保护（非 hard、方向未知）。
+    OccupancyRequest continuation =
+        singleConflictRequestWithSnapshotDirection(
+                "train", now.plusSeconds(1), conflict, Map.of(), Map.of(), Map.of())
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    OccupancyDecision decision = manager.canEnter(continuation);
+
+    assertTrue(decision.allowed(), "不在计划路径上的自持保护 claim 不应否决本车移动");
+    assertTrue(manager.selfOwnedStaleRetainReleaseCandidate("train").isEmpty());
+  }
+
+  @Test
+  void selfOwnedTailProtectionZoneNotOnPlanStillFailClosedForHardAuthority() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyRequest retain =
+        singleConflictRequest("train", now, conflict, CorridorDirection.B_TO_A)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+
+    // 同样不在计划路径上，但请求声明 hard authority：方向无法证明时保持 fail-closed。
+    OccupancyRequest continuation =
+        singleConflictRequestWithSnapshotDirection(
+            "train", now.plusSeconds(1), conflict, Map.of(), Map.of(), Map.of());
+    OccupancyDecision decision = manager.canEnter(continuation);
+
+    assertFalse(decision.allowed(), "hard authority 请求在方向未知时不得借车尾保护绕过 fail-closed");
+  }
+
+  @Test
   void selfOwnedContinuationAllowsSameDirectionExternalSinglePresence() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -1562,6 +2725,40 @@ class SimpleOccupancyManagerTest {
 
     assertTrue(decision.allowed());
     assertTrue(manager.selfOwnedStaleRetainReleaseCandidate("train").isEmpty());
+  }
+
+  @Test
+  void selfOwnedContinuationRejectIncludesExternalSingleOwner() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyRequest retain =
+        singleConflictRequest("train", now, conflict, CorridorDirection.A_TO_B)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+    assertTrue(
+        manager
+            .acquire(
+                singleConflictRequest(
+                    "leader", now.plusMillis(1), conflict, CorridorDirection.A_TO_B))
+            .allowed());
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            singleConflictRequestWithSnapshotDirection(
+                "train", now.plusSeconds(1), conflict, Map.of(), Map.of(), Map.of()));
+
+    assertFalse(decision.allowed());
+    assertEquals("self-owned-single-continuation-rejected", decision.reason());
+    assertTrue(
+        decision.blockers().stream().anyMatch(claim -> claim.trainName().equals("train")),
+        () -> "blockers=" + decision.blockers());
+    assertTrue(
+        decision.blockers().stream().anyMatch(claim -> claim.trainName().equals("leader")),
+        () -> "blockers=" + decision.blockers());
   }
 
   @Test
@@ -1725,12 +2922,12 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void unlockReservationIntentIsNotHardAuthority() {
+  void unlockReservationIsNotHardAuthorityBlocker() {
     assertFalse(ResourceIntent.UNLOCK_RESERVATION.hardAuthority());
   }
 
   @Test
-  void unlockReservationClaimDoesNotBlockUnrelatedNormalMovement() {
+  void normalAdmissionIgnoresSpeculativeUnlockReservation() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -1752,7 +2949,79 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void unlockReservationClaimIsClassifiedAsNonHardBlocker() {
+  void outsideTrainCannotEnterOccupiedOppositeSingleRegion() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("inside", now, conflict, CorridorDirection.A_TO_B))
+            .allowed());
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            singleConflictRequest(
+                "outside", now.plusSeconds(1), conflict, CorridorDirection.B_TO_A));
+
+    assertFalse(decision.allowed());
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, decision.reason());
+  }
+
+  @Test
+  void speculativeUnlockDoesNotReserveExternalOppositeSingleRegion() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("inside", now, conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    OccupancyRequest reservation =
+        singleConflictRequest("planner", now.plusSeconds(1), conflict, CorridorDirection.B_TO_A)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.UNLOCK_RESERVATION));
+
+    OccupancyDecision decision = manager.acquire(reservation);
+
+    assertFalse(decision.allowed());
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, decision.reason());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .noneMatch(claim -> claim.role() == ClaimRole.UNLOCK_RESERVATION));
+  }
+
+  @Test
+  void unlockReservationNonBlockingDoesNotDemoteRealExternalOppositeOccupancy() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("inside", now, conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    OccupancyRequest normal =
+        singleConflictRequest("normal", now.plusSeconds(1), conflict, CorridorDirection.B_TO_A);
+
+    OccupancyDecision decision = manager.canEnterPreview(normal);
+
+    assertFalse(decision.allowed());
+    assertEquals(
+        SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, decision.reason());
+    assertEquals("inside", decision.blockers().get(0).trainName());
+  }
+
+  @Test
+  void blockerClassifierDemotesUnlockReservation() {
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
     OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
     OccupancyRequest request =
@@ -1829,7 +3098,7 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void protectiveRetainClaimDoesNotBecomeHardBlocker() {
+  void physicalProtectiveRetainClaimBlocksMovementRequiredEntry() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -1855,7 +3124,61 @@ class SimpleOccupancyManagerTest {
             new OccupancyRequest(
                 "rear", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of()));
 
-    assertTrue(decision.allowed());
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+    assertEquals("front", decision.blockers().get(0).trainName());
+  }
+
+  @Test
+  void physicalHoldOnlyClaimBlocksMovementRequiredEntry() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource node = OccupancyResource.forNode(NodeId.of("SURC:S:HHU:1"));
+    OccupancyRequest hold =
+        new OccupancyRequest(
+            "front",
+            Optional.empty(),
+            now,
+            List.of(node),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(node, ResourceIntent.HOLD_ONLY));
+    assertTrue(manager.acquire(hold).allowed());
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            new OccupancyRequest(
+                "rear", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of()));
+
+    assertFalse(decision.allowed());
+    assertEquals(SignalAspect.STOP, decision.signal());
+    assertEquals("front", decision.blockers().get(0).trainName());
+  }
+
+  @Test
+  void conflictProtectiveRetainClaimDoesNotBecomeHardBlocker() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyRequest retain =
+        singleConflictRequest("front", now, conflict, CorridorDirection.A_TO_B)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            singleConflictRequest("rear", now.plusSeconds(1), conflict, CorridorDirection.A_TO_B));
+
+    assertTrue(decision.allowed(), decision.toString());
     assertTrue(decision.blockers().isEmpty());
   }
 
@@ -1921,6 +3244,46 @@ class SimpleOccupancyManagerTest {
                 Optional.empty())));
   }
 
+  private static OccupancyRequest sectionRequestWithPlanDirections(
+      String trainName,
+      Instant now,
+      OccupancyResource section,
+      Map<String, CorridorDirection> requestDirections,
+      Map<String, CorridorDirection> planDirections) {
+    NodeId from = NodeId.of("A");
+    NodeId to = NodeId.of("B");
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            now,
+            List.of(section),
+            requestDirections,
+            Map.of(section.key(), 0),
+            0);
+    return request.withDirectedContext(
+        Optional.of(
+            new DirectedTraversalContext(
+                trainName,
+                Optional.empty(),
+                0,
+                Optional.of(from),
+                Optional.empty(),
+                Optional.of(from),
+                Optional.of(to),
+                List.of(from, to),
+                List.of(
+                    new DirectedTraversalContext.DirectedEdge(
+                        EdgeId.undirected(from, to), from, to)),
+                planDirections,
+                Map.of(),
+                "TEST",
+                -1L,
+                -1L,
+                "test-section-token",
+                Optional.empty())));
+  }
+
   private static OccupancyRequest singleConflictRequestWithSnapshotDirection(
       String trainName,
       Instant now,
@@ -1959,6 +3322,105 @@ class SimpleOccupancyManagerTest {
                         EdgeId.undirected(from, to), from, to)),
                 snapshotDirections,
                 switcherSignatures,
+                "TEST",
+                -1L,
+                -1L,
+                "test",
+                Optional.empty())));
+  }
+
+  private static OccupancyRequest switcherRequest(
+      String trainName, Instant now, OccupancyResource resource, List<NodeId> pathNodes) {
+    List<DirectedTraversalContext.DirectedEdge> edges = new java.util.ArrayList<>();
+    for (int i = 0; i < pathNodes.size() - 1; i++) {
+      NodeId from = pathNodes.get(i);
+      NodeId to = pathNodes.get(i + 1);
+      edges.add(new DirectedTraversalContext.DirectedEdge(EdgeId.undirected(from, to), from, to));
+    }
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(resource.key(), 0),
+            0);
+    return request.withDirectedContext(
+        Optional.of(
+            new DirectedTraversalContext(
+                trainName,
+                Optional.empty(),
+                0,
+                Optional.of(pathNodes.get(0)),
+                Optional.empty(),
+                Optional.of(pathNodes.get(0)),
+                pathNodes.size() < 2 ? Optional.empty() : Optional.of(pathNodes.get(1)),
+                pathNodes,
+                edges,
+                Map.of(),
+                Map.of(
+                    resource.key(),
+                    new DirectedTraversalContext.SwitcherPathSignature(resource.key(), pathNodes)),
+                "TEST",
+                -1L,
+                -1L,
+                "test",
+                Optional.empty())));
+  }
+
+  private static OccupancyRequest switcherSectionRequest(
+      String trainName,
+      Instant now,
+      OccupancyResource section,
+      OccupancyResource switcher,
+      CorridorDirection direction,
+      List<NodeId> pathNodes) {
+    return switcherSectionRequest(
+        trainName, now, section, switcher, direction, pathNodes, List.of());
+  }
+
+  private static OccupancyRequest switcherSectionRequest(
+      String trainName,
+      Instant now,
+      OccupancyResource section,
+      OccupancyResource switcher,
+      CorridorDirection direction,
+      List<NodeId> pathNodes,
+      List<OccupancyResource> extraResources) {
+    List<DirectedTraversalContext.DirectedEdge> edges = new java.util.ArrayList<>();
+    for (int i = 0; i < pathNodes.size() - 1; i++) {
+      NodeId from = pathNodes.get(i);
+      NodeId to = pathNodes.get(i + 1);
+      edges.add(new DirectedTraversalContext.DirectedEdge(EdgeId.undirected(from, to), from, to));
+    }
+    List<OccupancyResource> resources = new java.util.ArrayList<>();
+    resources.add(section);
+    resources.add(switcher);
+    resources.addAll(extraResources);
+    Map<String, CorridorDirection> directions = Map.of(section.key(), direction);
+    Map<String, Integer> entryOrders = new java.util.LinkedHashMap<>();
+    entryOrders.put(section.key(), 0);
+    entryOrders.put(switcher.key(), 1);
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName, Optional.empty(), now, resources, directions, entryOrders, 0);
+    return request.withDirectedContext(
+        Optional.of(
+            new DirectedTraversalContext(
+                trainName,
+                Optional.empty(),
+                0,
+                Optional.of(pathNodes.get(0)),
+                Optional.empty(),
+                Optional.of(pathNodes.get(0)),
+                pathNodes.size() < 2 ? Optional.empty() : Optional.of(pathNodes.get(1)),
+                pathNodes,
+                edges,
+                directions,
+                Map.of(
+                    switcher.key(),
+                    new DirectedTraversalContext.SwitcherPathSignature(switcher.key(), pathNodes)),
                 "TEST",
                 -1L,
                 -1L,

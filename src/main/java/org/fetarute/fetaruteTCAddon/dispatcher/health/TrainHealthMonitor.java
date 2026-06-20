@@ -61,6 +61,17 @@ public final class TrainHealthMonitor {
       Instant lastMoveTime,
       Instant lastProgressTime) {}
 
+  /** 销毁兜底前的安全恢复尝试结果。 */
+  private record FallbackRecoveryAttempt(boolean held, boolean fixed) {
+    private static FallbackRecoveryAttempt none() {
+      return new FallbackRecoveryAttempt(false, false);
+    }
+
+    private static FallbackRecoveryAttempt held(boolean fixed) {
+      return new FallbackRecoveryAttempt(true, fixed);
+    }
+  }
+
   /** 每列车恢复状态：记录分级进度与最近一次恢复时间。 */
   private static final class RecoveryState {
     private Instant lastStallAttemptAt = Instant.EPOCH;
@@ -83,6 +94,21 @@ public final class TrainHealthMonitor {
     private void resetDeadlock() {
       deadlockStage = 0;
       lastDeadlockAttemptAt = Instant.EPOCH;
+    }
+  }
+
+  /** destroy 前方向证据审计结果。 */
+  private record DirectionDestroyAudit(boolean required, String reason) {
+    private DirectionDestroyAudit {
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+    }
+
+    private static DirectionDestroyAudit none() {
+      return new DirectionDestroyAudit(false, "-");
+    }
+
+    private static DirectionDestroyAudit required(String reason) {
+      return new DirectionDestroyAudit(true, reason);
     }
   }
 
@@ -145,17 +171,27 @@ public final class TrainHealthMonitor {
 
     private DeadlockFallbackEvidence(
         String key, String followerTrain, String blockerTrain, String resource, Instant now) {
+      this(key, followerTrain, blockerTrain, resource, now, 1);
+    }
+
+    private DeadlockFallbackEvidence(
+        String key,
+        String followerTrain,
+        String blockerTrain,
+        String resource,
+        Instant now,
+        int samples) {
       this.key = Objects.requireNonNull(key, "key");
       this.followerTrain = Objects.requireNonNull(followerTrain, "followerTrain");
       this.blockerTrain = Objects.requireNonNull(blockerTrain, "blockerTrain");
       this.resource = resource == null || resource.isBlank() ? "-" : resource.trim();
       this.lastSeenAt = Objects.requireNonNull(now, "now");
-      this.samples = 1;
+      this.samples = Math.max(1, samples);
     }
 
-    private void seen(Instant now) {
+    private void seenAtLeast(Instant now, int observedSamples) {
       lastSeenAt = now == null ? Instant.now() : now;
-      samples++;
+      samples = Math.max(samples + 1, Math.max(1, observedSamples));
     }
   }
 
@@ -220,6 +256,9 @@ public final class TrainHealthMonitor {
 
   /** 阻塞快照有效期：仅在最近可见的 blocker 信息上执行互卡解锁。 */
   private Duration blockerSnapshotMaxAge = Duration.ofSeconds(20);
+
+  /** 方向证据不足时，last-resort destroy 必须等待更长时间。 */
+  private static final int DIRECTION_AUDIT_LAST_RESORT_THRESHOLD_MULTIPLIER = 3;
 
   /** 是否启用自动修复。 */
   private boolean autoFixEnabled = true;
@@ -813,6 +852,10 @@ public final class TrainHealthMonitor {
       }
     } else {
       debugLogger.accept("TrainHealthMonitor 修复停滞(stage=relaunch): train=" + trainName);
+      debugLogger.accept(
+          "HEALTH_LEGACY_DIAGNOSTIC action=FORCE_RELAUNCH train="
+              + trainName
+              + " source=health-progress-stuck dispatcherAction=false");
       fixed = dispatchService.forceRelaunchByName(trainName);
       if (!fixed) {
         fixed = dispatchService.reissueDestinationByName(trainName);
@@ -1544,7 +1587,8 @@ public final class TrainHealthMonitor {
             runtimeEvidence.followerTrain(),
             runtimeEvidence.leaderTrain(),
             runtimeEvidence.resource(),
-            now);
+            now,
+            runtimeEvidence.samples());
     return evaluateDeadlockDestroyFallback(
         evidence,
         "STUCK_LEADER_FALLBACK",
@@ -1574,6 +1618,15 @@ public final class TrainHealthMonitor {
 
   private DeadlockFallbackEvidence rememberDeadlockFallbackEvidence(
       String followerTrain, String blockerTrain, String resource, Instant now) {
+    return rememberDeadlockFallbackEvidence(followerTrain, blockerTrain, resource, now, 1);
+  }
+
+  private DeadlockFallbackEvidence rememberDeadlockFallbackEvidence(
+      String followerTrain,
+      String blockerTrain,
+      String resource,
+      Instant now,
+      int observedSamples) {
     String key =
         keyOf(followerTrain)
             + "->"
@@ -1585,9 +1638,9 @@ public final class TrainHealthMonitor {
         (unused, existing) -> {
           if (existing == null) {
             return new DeadlockFallbackEvidence(
-                key, followerTrain.trim(), blockerTrain.trim(), resource, now);
+                key, followerTrain.trim(), blockerTrain.trim(), resource, now, observedSamples);
           }
-          existing.seen(now);
+          existing.seenAtLeast(now, observedSamples);
           return existing;
         });
   }
@@ -1613,13 +1666,16 @@ public final class TrainHealthMonitor {
             targetSnapshot == null ? SignalAspect.STOP : targetSnapshot.signal());
     RuntimeDispatchService.DeadlockTrainContext targetContext =
         dispatchService.deadlockTrainContext(targetTrain).orElse(null);
+    boolean requestedStuckLeaderEvidence = "STUCK_LEADER_FALLBACK".equals(requestedEvidenceGroup);
     boolean stuckLeaderEvidence =
         targetInput.movementTokenState() == SignalComputationTrace.TokenState.INVALID
             || !targetInput.destinationPresent();
     String evidenceGroup =
         "UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK".equals(requestedEvidenceGroup)
             ? requestedEvidenceGroup
-            : stuckLeaderEvidence ? "STUCK_LEADER_FALLBACK" : "PLANNER_WAIT_FOR_EDGE_FALLBACK";
+            : requestedStuckLeaderEvidence || stuckLeaderEvidence
+                ? "STUCK_LEADER_FALLBACK"
+                : "PLANNER_WAIT_FOR_EDGE_FALLBACK";
     boolean repeatedEvidence =
         evidenceGroup.equals("UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK")
             || (evidence != null && evidence.samples >= 2);
@@ -1642,6 +1698,26 @@ public final class TrainHealthMonitor {
     long cooldownRemainingMs = destroyCooldownRemainingMs(followerTrain, targetTrain, now);
     int passengerCount = targetContext != null && targetContext.hasPassengers() ? 1 : 0;
     boolean manualControl = targetContext != null && targetContext.manualHold();
+    FallbackRecoveryAttempt fallbackRecovery =
+        trySafeFallbackRecoveryBeforeDestroy(
+            targetTrain,
+            followerTrain,
+            resource,
+            evidenceGroup,
+            targetInput,
+            targetSnapshot,
+            targetNoProgress,
+            targetContext,
+            repeatedEvidence,
+            activeUnlock,
+            recentlyReleased,
+            passengerCount,
+            manualControl,
+            followerProgressDuration,
+            now);
+    if (fallbackRecovery.held()) {
+      return fallbackRecovery.fixed();
+    }
     String ineligibleReason =
         fallbackDestroyIneligibleReason(
             targetSnapshot,
@@ -1667,7 +1743,7 @@ public final class TrainHealthMonitor {
         manualControl,
         blockerSnapshotPresent,
         plannerWaitForEdgePresent,
-        stuckLeaderEvidence && repeatedEvidence,
+        (requestedStuckLeaderEvidence || stuckLeaderEvidence) && repeatedEvidence,
         unlockNoReleaseTimeoutPresent,
         resource,
         evidenceGroup,
@@ -1703,6 +1779,11 @@ public final class TrainHealthMonitor {
             resolution,
             false,
             true,
+            false,
+            "-",
+            false,
+            false,
+            false,
             targetNoProgress,
             requiredDestroyThreshold(null));
     if (!review.allowed()) {
@@ -1731,6 +1812,10 @@ public final class TrainHealthMonitor {
           now);
       return false;
     }
+    debugLogger.accept(
+        "HEALTH_LEGACY_DIAGNOSTIC action=DESTROY_TRAIN train="
+            + targetTrain
+            + " source=health-deadlock-destroy-fallback dispatcherAction=false");
     dispatchService.scheduleSurvivorRefreshAfterTrainRemoved(targetTrain, followerTrain);
     boolean destroyed = dispatchService.destroyTrainByName(targetTrain, "health-deadlock-timeout");
     traceSmartDeadlockDestroyExecuted(
@@ -1747,6 +1832,136 @@ public final class TrainHealthMonitor {
       rememberDeadlockDestroy(followerTrain, targetTrain, now);
     }
     return destroyed;
+  }
+
+  /**
+   * 销毁兜底前复用 Smart Dispatcher 的安全恢复动作。
+   *
+   * <p>该路径只尝试已经由运行时实现安全门的恢复动作，不直接动车、不清外部占用，也不绕过 active unlock / 乘客 /
+   * 手动保持等硬约束。若安全候选需要继续观察，则本轮销毁被跳过；只有恢复已应用且核验有效时才上报 fixed。
+   */
+  private FallbackRecoveryAttempt trySafeFallbackRecoveryBeforeDestroy(
+      String targetTrain,
+      String followerTrain,
+      String resource,
+      String evidenceGroup,
+      RuntimeDispatchService.SmartRecoveryInput targetInput,
+      TrainSnapshot targetSnapshot,
+      Duration targetNoProgress,
+      RuntimeDispatchService.DeadlockTrainContext targetContext,
+      boolean repeatedEvidence,
+      boolean activeUnlock,
+      boolean recentlyReleased,
+      int passengerCount,
+      boolean manualControl,
+      Duration followerProgressDuration,
+      Instant now) {
+    if (!repeatedEvidence
+        || targetTrain == null
+        || targetTrain.isBlank()
+        || targetSnapshot == null
+        || targetContext == null
+        || targetNoProgress == null
+        || targetNoProgress.compareTo(requiredDestroyThreshold(null)) < 0
+        || targetNoProgress.compareTo(deadlockMinStopDuration) < 0
+        || targetSnapshot.signal() != SignalAspect.STOP
+        || targetContext.signalAspect() != SignalAspect.STOP
+        || targetContext.speedBlocksPerTick() > lowSpeedThresholdBpt
+        || targetContext.dwelling()
+        || targetContext.departureGateHeld()
+        || targetContext.layoverReady()
+        || activeUnlock
+        || recentlyReleased
+        || passengerCount > 0
+        || manualControl) {
+      return FallbackRecoveryAttempt.none();
+    }
+    RuntimeDispatchService.SmartRecoveryInput input =
+        targetInput == null
+            ? RuntimeDispatchService.SmartRecoveryInput.fallback(
+                targetTrain, targetNoProgress, targetSnapshot.signal())
+            : targetInput;
+    debugLogger.accept(
+        "SMART_FALLBACK_RECOVERY_ACTION_ORDER train="
+            + targetTrain
+            + " blockerTrain="
+            + emptyDash(followerTrain)
+            + " evidenceGroup="
+            + emptyDash(evidenceGroup)
+            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
+            + "SMART_FORWARD_UNLOCK");
+
+    FallbackRecoveryAttempt selfRetainRelease =
+        fallbackRecoveryCandidate(
+            targetTrain,
+            followerTrain,
+            resource,
+            evidenceGroup,
+            safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(input)),
+            followerProgressDuration,
+            now);
+    if (selfRetainRelease.held()) {
+      return selfRetainRelease;
+    }
+
+    FallbackRecoveryAttempt drainUnlock =
+        fallbackRecoveryCandidate(
+            targetTrain,
+            followerTrain,
+            resource,
+            evidenceGroup,
+            safeSmartRecoveryResult(dispatchService.applySmartDrainUnlock(input)),
+            followerProgressDuration,
+            now);
+    if (drainUnlock.held()) {
+      return drainUnlock;
+    }
+
+    return fallbackRecoveryCandidate(
+        targetTrain,
+        followerTrain,
+        resource,
+        evidenceGroup,
+        safeSmartRecoveryResult(dispatchService.applySmartForwardUnlock(input)),
+        followerProgressDuration,
+        now);
+  }
+
+  private FallbackRecoveryAttempt fallbackRecoveryCandidate(
+      String targetTrain,
+      String followerTrain,
+      String resource,
+      String evidenceGroup,
+      RuntimeDispatchService.SmartRecoveryActionResult result,
+      Duration followerProgressDuration,
+      Instant now) {
+    if (result == null || !result.candidate()) {
+      return FallbackRecoveryAttempt.none();
+    }
+    String conflictKey = safeConflictKey(resource, result.effectiveness());
+    traceRecoveryCandidateSelected(targetTrain, result.decision(), conflictKey);
+    debugLogger.accept(
+        "SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE train="
+            + targetTrain
+            + " reason=fallback-safe-recovery-candidate"
+            + " recoveryDecision="
+            + result.decision()
+            + " conflict="
+            + conflictKey
+            + " evidenceGroup="
+            + emptyDash(evidenceGroup));
+    if (!shouldHoldForSafeCandidate(targetTrain, conflictKey, result, true)) {
+      return FallbackRecoveryAttempt.none();
+    }
+    traceFallbackDeadlockDestroySkipped(
+        targetTrain,
+        followerTrain,
+        resource,
+        evidenceGroup,
+        result.reason(),
+        followerProgressDuration,
+        now);
+    return FallbackRecoveryAttempt.held(result.applied() && result.effectiveness().effective());
   }
 
   private String fallbackDestroyIneligibleReason(
@@ -2441,6 +2656,101 @@ public final class TrainHealthMonitor {
         : RuntimeDispatchService.SmartRecoveryActionResult.skipped("smart-action-not-available");
   }
 
+  private DirectionDestroyAudit directionDestroyAudit(
+      DeadlockEpisode episode,
+      RuntimeDispatchService.SmartRecoveryInput input,
+      RuntimeDispatchService.SmartRecoveryActionResult... recoveryResults) {
+    Optional<String> plannerReason = recentPlannerDirectionAuditReason(episode);
+    if (plannerReason.isPresent()) {
+      return DirectionDestroyAudit.required(plannerReason.get());
+    }
+    if (input != null && directionDestroyAuditReason(input.primaryReason())) {
+      return DirectionDestroyAudit.required(input.primaryReason());
+    }
+    if (recoveryResults != null) {
+      for (RuntimeDispatchService.SmartRecoveryActionResult result : recoveryResults) {
+        if (result != null && directionDestroyAuditReason(result.reason())) {
+          return DirectionDestroyAudit.required(result.reason());
+        }
+      }
+    }
+    return DirectionDestroyAudit.none();
+  }
+
+  private Optional<String> recentPlannerDirectionAuditReason(DeadlockEpisode episode) {
+    if (episode == null) {
+      return Optional.empty();
+    }
+    for (String trainName : List.of(episode.stableLeader, episode.trainA, episode.trainB)) {
+      if (trainName == null || trainName.isBlank()) {
+        continue;
+      }
+      try {
+        Optional<String> candidate =
+            dispatchService.recentDirectionAuditReason(trainName, blockerSnapshotMaxAge);
+        if (candidate != null
+            && candidate.isPresent()
+            && directionDestroyAuditReason(candidate.get())) {
+          return candidate;
+        }
+      } catch (RuntimeException ignored) {
+        // 运行时 mock 或启动早期状态不可用时忽略，destroy review 会继续 fail closed。
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static boolean directionDestroyAuditReason(String reason) {
+    if (reason == null || reason.isBlank()) {
+      return false;
+    }
+    String normalized = reason.trim().toUpperCase(Locale.ROOT);
+    return normalized.equals("INSUFFICIENT_DIRECTION_EVIDENCE")
+        || normalized.equals("NEED_DIRECTION_AUDIT")
+        || normalized.equals("WOULD_CREATE_OPPOSITE_DIRECTION_CLAIM")
+        || normalized.contains("SINGLE-CONFLICT-DIRECTION-UNKNOWN")
+        || normalized.contains("UNKNOWN-DIRECTION");
+  }
+
+  private boolean triggerDirectionReaudit(
+      DeadlockEpisode episode, DirectionDestroyAudit audit, Instant now) {
+    if (episode == null || audit == null || !audit.required()) {
+      return false;
+    }
+    debugLogger.accept(
+        "SMART_DIRECTION_REAUDIT_REQUESTED episode="
+            + episode.key
+            + " train="
+            + episode.stableLeader
+            + " peer="
+            + episode.survivor()
+            + " conflict="
+            + episode.conflictKey
+            + " reason="
+            + audit.reason()
+            + " lastResortEligible="
+            + directionAuditLastResortDestroyAllowed(episode, now));
+    dispatchService.refreshSignalByName(episode.trainA);
+    dispatchService.refreshSignalByName(episode.trainB);
+    return true;
+  }
+
+  private boolean directionAuditLastResortDestroyAllowed(DeadlockEpisode episode, Instant now) {
+    if (episode == null || now == null || !allBlockersLiveHard(episode)) {
+      return false;
+    }
+    Duration threshold = directionAuditLastResortThreshold(episode);
+    return Duration.between(episode.firstSeenAt, now).compareTo(threshold) >= 0;
+  }
+
+  private Duration directionAuditLastResortThreshold(DeadlockEpisode episode) {
+    Duration base = requiredDestroyThreshold(episode);
+    if (base.isZero() || base.isNegative()) {
+      return base;
+    }
+    return base.multipliedBy(DIRECTION_AUDIT_LAST_RESORT_THRESHOLD_MULTIPLIER);
+  }
+
   private boolean shouldHoldForSafeCandidate(
       String trainName,
       String conflictKey,
@@ -2816,6 +3126,13 @@ public final class TrainHealthMonitor {
             + " reason=no-effective-self-retain-drain-forward"
             + " conflictKey="
             + episode.conflictKey);
+    DirectionDestroyAudit directionAudit =
+        directionDestroyAudit(
+            episode, smartInput, selfRetainRelease, smartDrainUnlock, forwardUnlock);
+    boolean directionReauditAttempted = triggerDirectionReaudit(episode, directionAudit, now);
+    boolean directionLastResortDestroy =
+        directionAudit.required() && directionAuditLastResortDestroyAllowed(episode, now);
+    boolean directionBlockingActiveTraffic = liveBlockerCycle && allBlockersLiveHard(episode);
 
     if (!shouldDestroyDeadlockLeader(episode, progressDuration, now)) {
       String skipReason = destroySkipReason(episode, progressDuration, now);
@@ -2838,6 +3155,11 @@ public final class TrainHealthMonitor {
                 weakResolution,
                 false,
                 true,
+                false,
+                "-",
+                false,
+                false,
+                false,
                 Duration.between(episode.firstSeenAt, now),
                 Duration.ZERO);
         skipReason = weakReview.reason();
@@ -2870,6 +3192,11 @@ public final class TrainHealthMonitor {
             resolution,
             false,
             true,
+            directionAudit.required(),
+            directionAudit.reason(),
+            directionReauditAttempted,
+            directionLastResortDestroy,
+            directionBlockingActiveTraffic,
             Duration.between(episode.firstSeenAt, now),
             requiredDestroyThreshold(episode));
     if (!destroyReview.allowed()) {
@@ -2902,6 +3229,10 @@ public final class TrainHealthMonitor {
           episode, observation, progressDuration, now, "destroy-action-disabled-by-mode");
       return false;
     }
+    debugLogger.accept(
+        "HEALTH_LEGACY_DIAGNOSTIC action=DESTROY_TRAIN train="
+            + episode.stableLeader
+            + " source=health-deadlock-destroy dispatcherAction=false");
     debugLogger.accept(
         "SMART_DESTROY_CANDIDATE train="
             + episode.stableLeader

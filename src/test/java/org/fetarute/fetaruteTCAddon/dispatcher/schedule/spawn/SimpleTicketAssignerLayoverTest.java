@@ -978,9 +978,9 @@ class SimpleTicketAssignerLayoverTest {
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
     SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
-    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
         .thenAnswer(
             inv -> {
               OccupancyRequest request = inv.getArgument(0);
@@ -1394,10 +1394,10 @@ class SimpleTicketAssignerLayoverTest {
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.canEnter(requestCaptor.capture()))
+    when(occupancyManager.canEnterPreview(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
@@ -1520,10 +1520,10 @@ class SimpleTicketAssignerLayoverTest {
     when(signNodeRegistry.snapshotInfos())
         .thenReturn(Map.of("depot-1", depotOneInfo, "depot-2", depotTwoInfo));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.canEnter(requestCaptor.capture()))
+    when(occupancyManager.canEnterPreview(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     RuntimeDispatchService runtimeDispatchService =
@@ -1766,10 +1766,10 @@ class SimpleTicketAssignerLayoverTest {
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
 
     SignNodeRegistry signNodeRegistry = registryWithDepots(worldId, depotOne, depotTwo);
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.canEnter(requestCaptor.capture()))
+    when(occupancyManager.canEnterPreview(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     RuntimeDispatchService runtimeDispatchService =
@@ -2022,8 +2022,8 @@ class SimpleTicketAssignerLayoverTest {
             0);
     when(signNodeRegistry.snapshotInfos()).thenReturn(Map.of("depot", depotInfo));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
-    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     when(layoverRegistry.findCandidates(any())).thenReturn(List.of());
@@ -2048,7 +2048,7 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, Instant.now());
 
-    verify(occupancyManager).canEnter(any(OccupancyRequest.class));
+    verify(occupancyManager).canEnterPreview(any(OccupancyRequest.class));
     assertEquals(
         0,
         assigner.snapshotPendingTickets().size(),

@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -32,6 +33,8 @@ public final class SignalComputationTrace {
   private static final long TICK_MILLIS = 50L;
   private static final long FLIP_WINDOW_TICKS = 2L;
   private static final ConcurrentMap<String, LastSignal> LAST_SIGNALS = new ConcurrentHashMap<>();
+  private static final ConcurrentMap<String, Boolean> EMITTED_STABLE_TRACES =
+      new ConcurrentHashMap<>();
   private static volatile Consumer<String> globalLogger = message -> {};
 
   private SignalComputationTrace() {}
@@ -60,6 +63,8 @@ public final class SignalComputationTrace {
   /** 设置全局诊断 logger，供没有实例 logger 的占用层使用。 */
   public static void configureLogger(Consumer<String> logger) {
     globalLogger = logger != null ? logger : message -> {};
+    LAST_SIGNALS.clear();
+    EMITTED_STABLE_TRACES.clear();
   }
 
   /** 创建一条 trace。 */
@@ -79,6 +84,22 @@ public final class SignalComputationTrace {
   /** 用全局 logger 输出。 */
   public static void emit(Builder builder) {
     emit(builder, globalLogger);
+  }
+
+  /** 通过全局 logger 输出一条不参与信号转移缓存的原始诊断行。 */
+  public static void emitRaw(String message) {
+    emitRaw(message, globalLogger);
+  }
+
+  /** 通过指定 logger 输出一条不参与信号转移缓存的原始诊断行。 */
+  public static void emitRaw(String message, Consumer<String> logger) {
+    if (message == null || message.isBlank()) {
+      return;
+    }
+    Consumer<String> out = logger != null ? logger : globalLogger;
+    if (markStableTraceEmitted(stableRawTraceKey(message))) {
+      out.accept(message);
+    }
   }
 
   /** trace builder。 */
@@ -316,14 +337,31 @@ public final class SignalComputationTrace {
       if (canonicalName != null && !canonicalName.isBlank()) {
         LAST_SIGNALS.put(canonicalName, new LastSignal(newAspect, tick));
       }
+      if (isSuppressedPhysicalNoOp(effectivePrevious, recentFlip)) {
+        return this;
+      }
       if (!shouldEmit) {
         return this;
       }
       fields.put("aspectTransition", formatAspect(effectivePrevious) + "->" + newAspect.name());
       fields.put("debugRecentFlipWithin2Ticks", String.valueOf(recentFlip));
       fields.put("blockers", blockers.isEmpty() ? "[]" : blockers.toString());
-      out.accept("SignalTrace " + formatFields(fields));
+      String formattedFields = formatFields(fields);
+      if (markStableTraceEmitted(stableSignalTraceKey(canonicalName, formattedFields, fields))) {
+        out.accept("SignalTrace " + formattedFields);
+      }
       return this;
+    }
+
+    private boolean isSuppressedPhysicalNoOp(SignalAspect effectivePrevious, boolean recentFlip) {
+      if (recentFlip || effectivePrevious != newAspect) {
+        return false;
+      }
+      String publishSuppressed = fields.get("publishSuppressed");
+      String reason = fields.get("primaryReason");
+      return "true".equalsIgnoreCase(publishSuppressed)
+          && reason != null
+          && reason.contains("already-current-physical-aspect");
     }
   }
 
@@ -417,6 +455,115 @@ public final class SignalComputationTrace {
       first = false;
     }
     return builder.toString();
+  }
+
+  private static boolean markStableTraceEmitted(String stableKey) {
+    return EMITTED_STABLE_TRACES.putIfAbsent(stableKey, Boolean.TRUE) == null;
+  }
+
+  private static String stableSignalTraceKey(
+      String canonicalName, String formattedFields, Map<String, String> fields) {
+    return "SignalTrace|train="
+        + sanitizeKey(canonicalName)
+        + "|source="
+        + sanitizeKey(fields.get("source"))
+        + "|reason="
+        + sanitizeKey(fields.get("primaryReason"))
+        + "|stable="
+        + stableFieldSignature(fields, formattedFields);
+  }
+
+  private static String stableFieldSignature(Map<String, String> fields, String fallback) {
+    if (fields == null || fields.isEmpty()) {
+      return fallback == null ? "-" : fallback;
+    }
+    StringBuilder builder = new StringBuilder();
+    for (Map.Entry<String, String> entry : fields.entrySet()) {
+      if (isVolatileTraceField(entry.getKey())) {
+        continue;
+      }
+      if (!builder.isEmpty()) {
+        builder.append('|');
+      }
+      builder.append(entry.getKey()).append('=').append(sanitize(entry.getValue()));
+    }
+    return builder.toString();
+  }
+
+  private static String stableRawTraceKey(String message) {
+    return rawTraceFamily(message)
+        + "|train="
+        + sanitizeKey(firstRawField(message, "train", "trainName", "requesterTrain"))
+        + "|stable="
+        + stableRawSignature(message);
+  }
+
+  private static String stableRawSignature(String message) {
+    StringBuilder builder = new StringBuilder();
+    for (String token : message.trim().split("\\s+")) {
+      int equals = token.indexOf('=');
+      if (equals > 0 && isVolatileTraceField(token.substring(0, equals))) {
+        continue;
+      }
+      if (!builder.isEmpty()) {
+        builder.append(' ');
+      }
+      builder.append(token);
+    }
+    return builder.toString();
+  }
+
+  private static String rawTraceFamily(String message) {
+    String trimmed = message == null ? "" : message.trim();
+    int space = trimmed.indexOf(' ');
+    return space < 0 ? sanitizeKey(trimmed) : sanitizeKey(trimmed.substring(0, space));
+  }
+
+  private static String firstRawField(String message, String... fieldNames) {
+    if (message == null || fieldNames == null) {
+      return "-";
+    }
+    for (String fieldName : fieldNames) {
+      String value = rawField(message, fieldName);
+      if (value != null && !value.isBlank()) {
+        return value;
+      }
+    }
+    return "-";
+  }
+
+  private static String rawField(String message, String fieldName) {
+    if (fieldName == null || fieldName.isBlank()) {
+      return null;
+    }
+    String needle = fieldName + "=";
+    int index = message.indexOf(needle);
+    while (index >= 0) {
+      if (index == 0 || message.charAt(index - 1) == ' ') {
+        int valueStart = index + needle.length();
+        int valueEnd = message.indexOf(' ', valueStart);
+        return valueEnd < 0
+            ? message.substring(valueStart)
+            : message.substring(valueStart, valueEnd);
+      }
+      index = message.indexOf(needle, index + needle.length());
+    }
+    return null;
+  }
+
+  private static boolean isVolatileTraceField(String fieldName) {
+    if (fieldName == null || fieldName.isBlank()) {
+      return false;
+    }
+    String normalized = fieldName.toLowerCase(Locale.ROOT);
+    return "tick".equals(normalized)
+        || "requestid".equals(normalized)
+        || "sampletick".equals(normalized)
+        || normalized.endsWith("version");
+  }
+
+  private static String sanitizeKey(String value) {
+    return sanitize(value).toLowerCase(Locale.ROOT);
   }
 
   private static String sanitize(String value) {

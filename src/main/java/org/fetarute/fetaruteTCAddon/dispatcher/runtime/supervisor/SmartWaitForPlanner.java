@@ -139,7 +139,8 @@ public final class SmartWaitForPlanner {
   public enum CandidateKind {
     FORWARD_TO_AUTHORITY_BOUNDARY,
     FORWARD_TO_RELEASE_BLOCKER,
-    FORWARD_TO_SAFE_HOLD_POINT
+    FORWARD_TO_SAFE_HOLD_POINT,
+    YIELD_TO_HEAD_ON
   }
 
   /** shadow simulation 置信度。 */
@@ -435,6 +436,23 @@ public final class SmartWaitForPlanner {
           patternTraces.addAll(invariantTraces(candidate));
         }
       }
+      if ("SAME_LINE_CASCADE".equals(pattern.type())) {
+        List<UnlockCandidate> yieldCandidates =
+            headOnYieldCandidates(input, edges, pattern, patternTraces);
+        candidates.addAll(yieldCandidates);
+        if (!yieldCandidates.isEmpty()) {
+          generatedForPattern = true;
+          if (yieldCandidates.stream().anyMatch(UnlockCandidate::accepted)) {
+            acceptedForPattern = true;
+          }
+          if (decisionCandidate == null
+              || (!decisionCandidate.accepted()
+                  && yieldCandidates.stream().anyMatch(UnlockCandidate::accepted))) {
+            decisionCandidate =
+                yieldCandidates.stream().filter(UnlockCandidate::accepted).findFirst().orElse(null);
+          }
+        }
+      }
       traces.add(candidateDecisionTrace(input, pattern, decisionCandidate, generatedForPattern));
       traces.addAll(patternTraces);
       if (!generatedForPattern || !acceptedForPattern) {
@@ -442,6 +460,113 @@ public final class SmartWaitForPlanner {
       }
     }
     return List.copyOf(candidates);
+  }
+
+  private static List<UnlockCandidate> headOnYieldCandidates(
+      PlannerInput input, List<Edge> graphEdges, Pattern pattern, List<String> traces) {
+    if (input == null || pattern == null || pattern.blockers().isEmpty()) {
+      return List.of();
+    }
+    List<UnlockCandidate> candidates = new ArrayList<>();
+    for (String chainHead : pattern.blockers()) {
+      TrainState headState = input.trainStates().getOrDefault(chainHead, defaultState(chainHead));
+      CorridorDirection headDirection = headState.inferredDirection();
+      if (headDirection == CorridorDirection.UNKNOWN) {
+        continue;
+      }
+      Map<String, List<Edge>> directBlockers = new TreeMap<>(TEXT_ORDER);
+      for (Edge edge : graphEdges) {
+        if (!chainHead.equals(edge.blocked())) {
+          continue;
+        }
+        TrainState blockerState =
+            input.trainStates().getOrDefault(edge.blocker(), defaultState(edge.blocker()));
+        if (headState.routeFamily().equals(blockerState.routeFamily())) {
+          continue;
+        }
+        CorridorDirection blockerDirection = edge.input().direction();
+        if (blockerDirection == CorridorDirection.UNKNOWN || blockerDirection == headDirection) {
+          continue;
+        }
+        directBlockers.computeIfAbsent(edge.blocker(), unused -> new ArrayList<>()).add(edge);
+      }
+      for (Map.Entry<String, List<Edge>> entry : directBlockers.entrySet()) {
+        TrainState yieldState =
+            input.trainStates().getOrDefault(entry.getKey(), defaultState(entry.getKey()));
+        UnlockCandidate candidate =
+            yieldCandidateForHeadOn(
+                input.settings(), graphEdges, entry.getValue(), pattern, yieldState);
+        candidates.add(candidate);
+        traces.add(
+            "SMART_DISPATCH_HEAD_ON_YIELD_DETECTED chainHead="
+                + chainHead
+                + " yieldTrain="
+                + candidate.train()
+                + " resources="
+                + candidate.resources()
+                + " headDirection="
+                + headDirection
+                + " yieldDirection="
+                + candidate.direction());
+        traces.add(candidateTrace(candidate));
+        traces.add(simulationTrace(candidate));
+      }
+    }
+    return List.copyOf(candidates);
+  }
+
+  private static UnlockCandidate yieldCandidateForHeadOn(
+      PlannerSettings settings,
+      List<Edge> graphEdges,
+      List<Edge> releaseEdges,
+      Pattern pattern,
+      TrainState state) {
+    List<Edge> effectiveReleaseEdges = releaseEdges == null ? List.of() : releaseEdges;
+    List<String> resources =
+        effectiveReleaseEdges.stream().map(Edge::resource).distinct().sorted(TEXT_ORDER).toList();
+    List<String> reservationResources =
+        resources.stream().limit(settings.maxReservationResources()).toList();
+    DirectionResolution direction = resolveDirection(effectiveReleaseEdges, state);
+    GraphOnlySimulation simulation =
+        simulate(
+            graphEdges,
+            state.trainName(),
+            reservationResources,
+            pattern.id(),
+            direction.direction(),
+            state);
+    boolean accepted = direction.known() && !reservationResources.isEmpty();
+    String rejectReason =
+        accepted
+            ? "-"
+            : direction.known()
+                ? "NO_RELEASABLE_BLOCKER_RESOURCE"
+                : "INSUFFICIENT_DIRECTION_EVIDENCE";
+    int score =
+        accepted
+            ? score(simulation, false, true, state) + 500 + (simulation.cycleBroken() ? 500 : 0)
+            : Integer.MIN_VALUE;
+    return new UnlockCandidate(
+        state.trainName(),
+        pattern.id(),
+        CandidateKind.YIELD_TO_HEAD_ON,
+        resources,
+        reservationResources,
+        state.currentNode(),
+        state.currentNode(),
+        state.nextNode(),
+        direction.direction(),
+        resources.size(),
+        0,
+        settings.maxReservationResources(),
+        score,
+        accepted,
+        rejectReason,
+        accepted ? "HEAD_ON_YIELD" : "NEED_DIRECTION_AUDIT",
+        simulation,
+        false,
+        true,
+        state.stuckDurationSeconds());
   }
 
   private static UnlockCandidate candidateForTrain(
@@ -603,8 +728,11 @@ public final class SmartWaitForPlanner {
     return candidates.stream()
         .filter(UnlockCandidate::accepted)
         .sorted(
-            Comparator.comparingInt(UnlockCandidate::score)
-                .reversed()
+            Comparator.comparingInt(
+                    (UnlockCandidate candidate) -> candidate.improvesSameLineCascade() ? 0 : 1)
+                .thenComparingInt(
+                    candidate -> candidate.kind() == CandidateKind.YIELD_TO_HEAD_ON ? 0 : 1)
+                .thenComparing(Comparator.comparingInt(UnlockCandidate::score).reversed())
                 .thenComparingInt(UnlockCandidate::reservationResourceCount)
                 .thenComparing(UnlockCandidate::stuckDurationSeconds, Comparator.reverseOrder())
                 .thenComparing(UnlockCandidate::train, TEXT_ORDER))
@@ -914,6 +1042,8 @@ public final class SmartWaitForPlanner {
         + candidate.reservationResourceCount()
         + " fullRouteResourceCount="
         + candidate.fullRouteResourceCount()
+        + " sameLineCascade="
+        + candidate.improvesSameLineCascade()
         + " score="
         + candidate.score();
   }

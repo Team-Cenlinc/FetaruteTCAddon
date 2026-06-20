@@ -1737,7 +1737,8 @@ public final class EtaService {
                 if (occupancyManager instanceof OccupancyPreviewSupport preview) {
                   return preview.canEnterPreview(request);
                 }
-                return occupancyManager.canEnter(request);
+                return new OccupancyDecision(
+                    false, now, SignalAspect.STOP, List.of(), false, "preview-support-missing");
               })
           .orElse(new OccupancyDecision(true, now, SignalAspect.PROCEED, List.of()));
     } catch (Throwable t) {

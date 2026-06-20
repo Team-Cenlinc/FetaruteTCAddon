@@ -315,6 +315,28 @@ class SignalEvaluatorTest {
   }
 
   @Test
+  void releasedEventPreviewPreservesRequestPriority() {
+    evaluator.start();
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("priority-node"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-priority",
+            Optional.of(RouteId.of("OP:L1:R1")),
+            now,
+            List.of(resource),
+            Map.of(),
+            Map.of(),
+            37);
+    mockProvider.registerRequest("train-priority", request);
+    mockOccupancy.setDecision("train-priority", true, SignalAspect.PROCEED);
+
+    eventBus.publish(new OccupancyReleasedEvent(now, "owner", List.of(resource)));
+
+    assertEquals(37, mockOccupancy.lastPreviewRequest().orElseThrow().priority());
+  }
+
+  @Test
   void eventEvaluationWithoutPreviewFailsClosedWithoutCallingCanEnter() {
     NoPreviewCountingOccupancyManager manager = new NoPreviewCountingOccupancyManager();
     mockProvider.registerTrain("train-F", SignalAspect.PROCEED);
@@ -384,6 +406,7 @@ class SignalEvaluatorTest {
   private static class MockOccupancyManager implements OccupancyManager, OccupancyPreviewSupport {
     private final java.util.Map<String, OccupancyDecision> decisions =
         new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile OccupancyRequest lastPreviewRequest;
 
     void setDecision(String trainName, boolean allowed, SignalAspect signal) {
       decisions.put(
@@ -400,7 +423,12 @@ class SignalEvaluatorTest {
 
     @Override
     public OccupancyDecision canEnterPreview(OccupancyRequest request) {
+      lastPreviewRequest = request;
       return canEnter(request);
+    }
+
+    Optional<OccupancyRequest> lastPreviewRequest() {
+      return Optional.ofNullable(lastPreviewRequest);
     }
 
     @Override

@@ -495,7 +495,7 @@ public final class ConfigManager {
     int progressStopGraceSeconds = 60;
     int deadlockThresholdSeconds = 45;
     int deadlockDestroyThresholdSeconds = 60;
-    boolean deadlockDestroyEnabled = true;
+    boolean deadlockDestroyEnabled = false;
     int deadlockDestroyCooldownSeconds = 120;
     int deadlockEpisodeGraceSeconds = 15;
     int deadlockMinStopSeconds = 20;

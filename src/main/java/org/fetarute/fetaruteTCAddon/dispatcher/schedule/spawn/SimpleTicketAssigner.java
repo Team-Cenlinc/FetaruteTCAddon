@@ -32,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchPriorityPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LaunchAuthorizationService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
@@ -828,7 +829,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.switcherZoneEdges(),
             debugLogger);
     Optional<DepotGateRequest> gateRequestOpt =
-        buildDepotSpawnGateRequest(builder, trainName, route, service, effectiveTicket, now);
+        buildDepotSpawnGateRequest(
+            builder, trainName, route, service, effectiveTicket, routeEntity.operationType(), now);
     if (gateRequestOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "occupancy-context-failed");
@@ -1924,7 +1926,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.switcherZoneEdges(),
             debugLogger);
     Optional<DepotGateRequest> gateRequestOpt =
-        buildDepotSpawnGateRequest(builder, trainName, route, service, effectiveTicket, now);
+        buildDepotSpawnGateRequest(
+            builder, trainName, route, service, effectiveTicket, routeEntity.operationType(), now);
     if (gateRequestOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "fallback-occupancy-context-failed");
@@ -2157,8 +2160,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       RouteDefinition route,
       SpawnService service,
       SpawnTicket ticket,
+      RouteOperationType operationType,
       Instant now) {
     List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, ticket);
+    int priority =
+        DispatchPriorityPolicy.depotSpawnPriority(
+            operationType, ticket == null ? 0 : ticket.priority());
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
         ctxOpt =
             builder.buildContextFromNodes(
@@ -2167,7 +2174,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                 spawnWaypoints,
                 0,
                 now,
-                100 + Math.max(0, ticket == null ? 0 : ticket.priority()),
+                priority,
                 AuthorizationPurpose.DEPOT_SPAWN);
     if (ctxOpt.isEmpty()) {
       return Optional.empty();
@@ -2193,6 +2200,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + trainName
             + " route="
             + formatRouteForTrace(service, route)
+            + " operation="
+            + (operationType == null ? "-" : operationType)
+            + " priority="
+            + priority
             + " firstNode="
             + formatNode(effectiveFirst)
             + " authorityEnd="

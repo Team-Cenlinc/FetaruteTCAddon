@@ -304,7 +304,14 @@ public final class LaunchAuthorizationService {
     if (occupancyManager instanceof OccupancyPreviewSupport preview) {
       return preview.canEnterPreview(request);
     }
-    return occupancyManager.canEnter(request);
+    Instant now = request == null ? Instant.now() : request.now();
+    return new OccupancyDecision(
+        false,
+        now,
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect.STOP,
+        java.util.List.of(),
+        false,
+        "preview-support-missing");
   }
 
   /**

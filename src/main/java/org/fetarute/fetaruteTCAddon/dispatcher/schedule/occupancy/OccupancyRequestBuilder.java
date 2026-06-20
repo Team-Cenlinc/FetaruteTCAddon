@@ -19,6 +19,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -49,6 +51,8 @@ public final class OccupancyRequestBuilder {
   private final int switcherZoneEdges;
   private final int rearGuardEdges;
   private final int effectiveLookaheadEdges;
+  private final long minLookaheadDistanceBlocks;
+  private final int maxLookaheadEdges;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
   private final java.util.function.Consumer<String> debugLogger;
@@ -69,6 +73,26 @@ public final class OccupancyRequestBuilder {
       int rearGuardEdges,
       int switcherZoneEdges,
       java.util.function.Consumer<String> debugLogger) {
+    this(
+        graph,
+        lookaheadEdges,
+        minClearEdges,
+        rearGuardEdges,
+        switcherZoneEdges,
+        0L,
+        0,
+        debugLogger);
+  }
+
+  public OccupancyRequestBuilder(
+      RailGraph graph,
+      int lookaheadEdges,
+      int minClearEdges,
+      int rearGuardEdges,
+      int switcherZoneEdges,
+      long minLookaheadDistanceBlocks,
+      int maxLookaheadEdges,
+      java.util.function.Consumer<String> debugLogger) {
     this.graph = Objects.requireNonNull(graph, "graph");
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     if (lookaheadEdges <= 0) {
@@ -83,9 +107,17 @@ public final class OccupancyRequestBuilder {
     if (switcherZoneEdges < 0) {
       throw new IllegalArgumentException("switcherZoneEdges 必须为非负数");
     }
+    if (minLookaheadDistanceBlocks < 0L) {
+      throw new IllegalArgumentException("minLookaheadDistanceBlocks 必须为非负数");
+    }
     this.switcherZoneEdges = switcherZoneEdges;
     this.rearGuardEdges = rearGuardEdges;
     this.effectiveLookaheadEdges = Math.max(lookaheadEdges, minClearEdges);
+    this.minLookaheadDistanceBlocks = minLookaheadDistanceBlocks;
+    this.maxLookaheadEdges =
+        maxLookaheadEdges <= 0
+            ? this.effectiveLookaheadEdges
+            : Math.max(this.effectiveLookaheadEdges, maxLookaheadEdges);
   }
 
   /**
@@ -209,8 +241,8 @@ public final class OccupancyRequestBuilder {
       debugLogger.accept("构建请求失败: full resolveEdges 返回空 (边未找到?) nodes=" + fullExpanded);
       return Optional.empty();
     }
-    // 按实际边数截断：保留 effectiveLookaheadEdges 条边对应的节点（边数+1 个节点）
-    List<NodeId> expandedNodes = truncateToEdgeCount(fullExpanded, effectiveLookaheadEdges);
+    // 按实际图边截断：至少覆盖 edge 下限和距离下限，同时受 maxLookaheadEdges 硬上限约束。
+    List<NodeId> expandedNodes = truncateLookahead(fullExpanded, fullEdges);
     List<RailEdge> edges = resolveEdges(expandedNodes);
     if (edges.isEmpty()) {
       debugLogger.accept("构建请求失败: resolveEdges 返回空 (边未找到?) nodes=" + expandedNodes);
@@ -829,31 +861,44 @@ public final class OccupancyRequestBuilder {
     if (resources == null || directions == null || entryOrders == null || lookover == null) {
       return false;
     }
-    if (!(graph instanceof RailGraphCorridorSupport support)) {
-      return false;
+    boolean updated = false;
+    if (graph instanceof RailGraphCorridorSupport support) {
+      Optional<String> conflictKeyOpt = support.conflictKeyForEdge(lookover.edge().id());
+      if (conflictKeyOpt.isPresent()) {
+        String key = conflictKeyOpt.get();
+        addResource(
+            resources,
+            intents,
+            OccupancyResource.forConflict(key),
+            ResourceIntent.MOVEMENT_REQUIRED);
+        putConflictEntryOrder(entryOrders, key, lookover.entryOrder());
+        Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
+        if (infoOpt.isPresent() && infoOpt.get().directional() && !directions.containsKey(key)) {
+          resolveCorridorDirection(infoOpt.get(), pathNodes, lookover.from(), lookover.to())
+              .ifPresent(direction -> directions.put(key, direction));
+        }
+        updated = true;
+      }
     }
-    Optional<String> conflictKeyOpt = support.conflictKeyForEdge(lookover.edge().id());
-    if (conflictKeyOpt.isEmpty()) {
-      return false;
+    if (graph instanceof RailGraphSectionSupport sectionSupport) {
+      Optional<SingleLineSectionInfo> sectionOpt =
+          sectionSupport.sectionInfoForEdge(lookover.edge().id());
+      if (sectionOpt.isPresent()) {
+        SingleLineSectionInfo section = sectionOpt.get();
+        addResource(
+            resources,
+            intents,
+            OccupancyResource.forConflict(section.key()),
+            ResourceIntent.MOVEMENT_REQUIRED);
+        putConflictEntryOrder(entryOrders, section.key(), lookover.entryOrder());
+        if (section.directional() && !directions.containsKey(section.key())) {
+          resolveSectionDirection(section, pathNodes, lookover.from(), lookover.to())
+              .ifPresent(direction -> directions.put(section.key(), direction));
+        }
+        updated = true;
+      }
     }
-    String key = conflictKeyOpt.get();
-    addResource(
-        resources, intents, OccupancyResource.forConflict(key), ResourceIntent.MOVEMENT_REQUIRED);
-    putConflictEntryOrder(entryOrders, key, lookover.entryOrder());
-    Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
-    if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
-      return true;
-    }
-    Optional<CorridorDirection> directionOpt =
-        resolveCorridorDirection(infoOpt.get(), pathNodes, lookover.from(), lookover.to());
-    if (directionOpt.isEmpty()) {
-      // 方向不可判定时回退为“全方向冲突”资源，避免只占 edge 导致道岔放行过宽。
-      return true;
-    }
-    if (!directions.containsKey(key)) {
-      directions.put(key, directionOpt.get());
-    }
-    return true;
+    return updated;
   }
 
   private boolean putCorridorDirection(
@@ -861,24 +906,37 @@ public final class OccupancyRequestBuilder {
     if (directions == null || lookover == null) {
       return false;
     }
-    if (!(graph instanceof RailGraphCorridorSupport support)) {
-      return false;
+    boolean updated = false;
+    if (graph instanceof RailGraphCorridorSupport support) {
+      Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
+      if (infoOpt.isPresent() && infoOpt.get().directional()) {
+        RailGraphCorridorInfo info = infoOpt.get();
+        if (!directions.containsKey(info.key())) {
+          Optional<CorridorDirection> directionOpt =
+              resolveCorridorDirection(info, pathNodes, lookover.from(), lookover.to());
+          if (directionOpt.isPresent()) {
+            directions.put(info.key(), directionOpt.get());
+            updated = true;
+          }
+        }
+      }
     }
-    Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
-    if (infoOpt.isEmpty() || !infoOpt.get().directional()) {
-      return false;
+    if (graph instanceof RailGraphSectionSupport sectionSupport) {
+      Optional<SingleLineSectionInfo> sectionOpt =
+          sectionSupport.sectionInfoForEdge(lookover.edge().id());
+      if (sectionOpt.isPresent() && sectionOpt.get().directional()) {
+        SingleLineSectionInfo section = sectionOpt.get();
+        if (!directions.containsKey(section.key())) {
+          Optional<CorridorDirection> directionOpt =
+              resolveSectionDirection(section, pathNodes, lookover.from(), lookover.to());
+          if (directionOpt.isPresent()) {
+            directions.put(section.key(), directionOpt.get());
+            updated = true;
+          }
+        }
+      }
     }
-    RailGraphCorridorInfo info = infoOpt.get();
-    if (directions.containsKey(info.key())) {
-      return false;
-    }
-    Optional<CorridorDirection> directionOpt =
-        resolveCorridorDirection(info, pathNodes, lookover.from(), lookover.to());
-    if (directionOpt.isEmpty()) {
-      return false;
-    }
-    directions.put(info.key(), directionOpt.get());
-    return true;
+    return updated;
   }
 
   private boolean putConflictEntryOrder(
@@ -1193,6 +1251,38 @@ public final class OccupancyRequestBuilder {
     return nodes.subList(0, keepNodes);
   }
 
+  /**
+   * 截断前向 lookahead。
+   *
+   * <p>普通运行窗口既不能只看边数，也不能只看距离：短边密集区必须继续扩展到最小距离，长边区仍至少保留配置的边数下限；同时用 {@code maxLookaheadEdges}
+   * 作为硬上限，避免资源集无界膨胀。
+   */
+  private List<NodeId> truncateLookahead(List<NodeId> nodes, List<RailEdge> edges) {
+    if (nodes == null || nodes.isEmpty()) {
+      return List.of();
+    }
+    if (edges == null || edges.isEmpty()) {
+      return List.of(nodes.get(0));
+    }
+    if (minLookaheadDistanceBlocks <= 0L) {
+      return truncateToEdgeCount(nodes, effectiveLookaheadEdges);
+    }
+    int edgeLimit = Math.min(edges.size(), maxLookaheadEdges);
+    int includedEdges = 0;
+    long coveredDistance = 0L;
+    while (includedEdges < edgeLimit
+        && (includedEdges < effectiveLookaheadEdges
+            || coveredDistance < minLookaheadDistanceBlocks)) {
+      RailEdge edge = edges.get(includedEdges);
+      if (edge != null) {
+        coveredDistance += Math.max(0L, edge.lengthBlocks());
+      }
+      includedEdges++;
+    }
+    int keepNodes = Math.min(nodes.size(), includedEdges + 1);
+    return nodes.subList(0, keepNodes);
+  }
+
   private Optional<RailEdge> findEdge(NodeId from, NodeId to) {
     for (RailEdge edge : graph.edgesFrom(from)) {
       if (edge.from().equals(from) && edge.to().equals(to)) {
@@ -1264,6 +1354,34 @@ public final class OccupancyRequestBuilder {
                               .collect(java.util.stream.Collectors.joining(",")));
                 }
               });
+      if (graph instanceof RailGraphSectionSupport sectionSupport) {
+        sectionSupport
+            .sectionInfoForEdge(edgeId)
+            .filter(SingleLineSectionInfo::directional)
+            .ifPresent(
+                info -> {
+                  if (directions.containsKey(info.key())) {
+                    return;
+                  }
+                  Optional<CorridorDirection> dirOpt =
+                      resolveSectionDirection(info, pathNodes, from, to);
+                  if (dirOpt.isPresent()) {
+                    directions.put(info.key(), dirOpt.get());
+                  } else {
+                    debugLogger.accept(
+                        "section 方向判定失败: key="
+                            + info.key()
+                            + " from="
+                            + from.value()
+                            + " to="
+                            + to.value()
+                            + " sectionNodes="
+                            + info.nodes().stream()
+                                .map(NodeId::value)
+                                .collect(java.util.stream.Collectors.joining(",")));
+                  }
+                });
+      }
     }
     return Map.copyOf(directions);
   }
@@ -1290,26 +1408,46 @@ public final class OccupancyRequestBuilder {
 
   private Optional<CorridorDirection> resolveCorridorDirection(
       RailGraphCorridorInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
-    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(info, from, to);
+    if (info == null) {
+      return Optional.empty();
+    }
+    return resolveDirectionalConflict(info.left(), info.right(), info.nodes(), pathNodes, from, to);
+  }
+
+  private Optional<CorridorDirection> resolveSectionDirection(
+      SingleLineSectionInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
+    if (info == null) {
+      return Optional.empty();
+    }
+    return resolveDirectionalConflict(info.left(), info.right(), info.nodes(), pathNodes, from, to);
+  }
+
+  private Optional<CorridorDirection> resolveDirectionalConflict(
+      NodeId left,
+      NodeId right,
+      List<NodeId> orderedNodes,
+      List<NodeId> pathNodes,
+      NodeId from,
+      NodeId to) {
+    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (byCorridor != CorridorDirection.UNKNOWN) {
       return Optional.of(byCorridor);
     }
-    int leftIndex = indexOfNode(pathNodes, info.left());
-    int rightIndex = indexOfNode(pathNodes, info.right());
+    int leftIndex = indexOfNode(pathNodes, left);
+    int rightIndex = indexOfNode(pathNodes, right);
     if (leftIndex >= 0 && rightIndex >= 0 && leftIndex != rightIndex) {
       return Optional.of(
           leftIndex < rightIndex ? CorridorDirection.A_TO_B : CorridorDirection.B_TO_A);
     }
-    CorridorDirection byDistance = resolveDirectionByDistance(from, to, info.left(), info.right());
+    CorridorDirection byDistance = resolveDirectionByDistance(from, to, left, right);
     return byDistance == CorridorDirection.UNKNOWN ? Optional.empty() : Optional.of(byDistance);
   }
 
   private CorridorDirection resolveDirectionByCorridorNodes(
-      RailGraphCorridorInfo info, NodeId from, NodeId to) {
-    if (info == null || from == null || to == null) {
+      List<NodeId> corridorNodes, NodeId from, NodeId to) {
+    if (corridorNodes == null || from == null || to == null) {
       return CorridorDirection.UNKNOWN;
     }
-    List<NodeId> corridorNodes = info.nodes();
     int fromIndex = indexOfNode(corridorNodes, from);
     int toIndex = indexOfNode(corridorNodes, to);
     if (fromIndex < 0 || toIndex < 0 || fromIndex == toIndex) {

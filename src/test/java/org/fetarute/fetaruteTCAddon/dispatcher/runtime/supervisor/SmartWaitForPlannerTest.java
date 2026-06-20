@@ -112,6 +112,63 @@ class SmartWaitForPlannerTest {
   }
 
   @Test
+  void sameLineCascadeHeadWinsOverHigherScoringBottleneckCandidate() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("tail", "middle", "CONFLICT:single:line-a", CorridorDirection.A_TO_B),
+                    edge("middle", "head", "CONFLICT:single:line-b", CorridorDirection.A_TO_B),
+                    edge("other-1", "middle", "CONFLICT:switcher:x1", CorridorDirection.A_TO_B),
+                    edge("other-2", "middle", "CONFLICT:switcher:x2", CorridorDirection.A_TO_B)),
+                Map.of(
+                    "tail", state("tail", "COMP:OP:LINE:1F", 5),
+                    "middle", state("middle", "COMP:OP:LINE:1F", 10),
+                    "head", state("head", "COMP:OP:LINE:1F", 20),
+                    "other-1", state("other-1", "COMP:OP:OTHER:1", 5),
+                    "other-2", state("other-2", "COMP:OP:OTHER:2", 5))));
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertEquals("head", result.selectedPlan().get().train());
+    assertTrue(result.selectedPlan().get().improvesSameLineCascade());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_UNLOCK_CANDIDATE train=head")
+                        && line.contains("sameLineCascade=true")));
+  }
+
+  @Test
+  void headOnBlockerYieldsWhenCascadeHeadCannotDrainForward() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("tail", "middle", "CONFLICT:single:line-a", CorridorDirection.A_TO_B),
+                    edge("middle", "head", "CONFLICT:single:line-b", CorridorDirection.A_TO_B),
+                    edge("head", "opposite", "CONFLICT:single:line-c", CorridorDirection.B_TO_A)),
+                Map.of(
+                    "tail", state("tail", "COMP:OP:LINE:1F", 5),
+                    "middle", state("middle", "COMP:OP:LINE:1F", 10),
+                    "head", state("head", "COMP:OP:LINE:1F", 20),
+                    "opposite", state("opposite", "COMP:OP:OTHER:1", 30))));
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertEquals("opposite", result.selectedPlan().get().train());
+    assertEquals(
+        SmartWaitForPlanner.CandidateKind.YIELD_TO_HEAD_ON, result.selectedPlan().get().kind());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_HEAD_ON_YIELD_DETECTED")
+                        && line.contains("yieldTrain=opposite")));
+  }
+
+  @Test
   void reverseCandidateIsRejected() {
     SmartWaitForPlanner.TrainState reverse = state("WS-B", 10, true, false, false, false, false);
     SmartWaitForPlanner.PlanResult result =

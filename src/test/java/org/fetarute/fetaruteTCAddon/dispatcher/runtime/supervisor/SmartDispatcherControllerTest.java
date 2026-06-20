@@ -52,6 +52,42 @@ class SmartDispatcherControllerTest {
   }
 
   @Test
+  @DisplayName("SAME_DIRECTION_FOLLOW 只输出诊断，不降级可见信号")
+  void sameDirectionFollowRiskDoesNotProduceCaution() {
+    List<String> traces = new ArrayList<>();
+    SmartDispatcherController controller = new SmartDispatcherController(traces::add);
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.empty(),
+            OptionalLong.of(32),
+            OptionalLong.of(32),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.of(32),
+            OptionalLong.empty(),
+            RiskSource.SAME_DIRECTION_FOLLOW,
+            RiskFreshness.LIVE,
+            "train-B",
+            "switcher:SWITCHER:Towny:-566:77:1179",
+            false,
+            false,
+            true,
+            false,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(input("train-A", risk));
+
+    assertEquals(DispatchAction.NO_ACTION, decision.action());
+    assertEquals(SignalAspect.PROCEED, decision.targetAspect());
+    assertEquals(RiskSource.SAME_DIRECTION_FOLLOW, decision.riskSource());
+    assertTrue(
+        traces.stream().anyMatch(line -> line.contains("reason=same-direction-follow-trace-only")));
+  }
+
+  @Test
   @DisplayName("规划窗口内的真实风险提前输出 PROCEED_WITH_CAUTION")
   void advisoryBlockerProducesCautionNotStop() {
     SmartDispatcherController controller = new SmartDispatcherController(message -> {});
@@ -260,11 +296,118 @@ class SmartDispatcherControllerTest {
                 true,
                 false,
                 true,
+                false,
+                "-",
+                false,
+                false,
+                false,
                 Duration.ofMinutes(10),
                 Duration.ofSeconds(60)));
 
     assertFalse(review.allowed());
     assertEquals("weak-blocker-diagnostic-only", review.reason());
+  }
+
+  @Test
+  @DisplayName("方向证据不足时拒绝快速 destroy")
+  void directionAuditBlocksFastDestroyReview() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.DeadlockDestroyReview review =
+        controller.reviewDestroyCandidate(
+            new SmartDispatcherController.DeadlockDestroyInput(
+                "episode",
+                "train-A",
+                "train-B",
+                "train-A",
+                "single:test:A~B",
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                true,
+                "INSUFFICIENT_DIRECTION_EVIDENCE",
+                true,
+                false,
+                true,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(60)));
+
+    assertFalse(review.allowed());
+    assertEquals("direction-audit-required", review.reason());
+  }
+
+  @Test
+  @DisplayName("方向复审后 last-resort destroy 仍要求活跃交通阻塞证明")
+  void directionAuditLastResortDestroyRequiresActiveTrafficProof() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.DeadlockDestroyReview review =
+        controller.reviewDestroyCandidate(
+            new SmartDispatcherController.DeadlockDestroyInput(
+                "episode",
+                "train-A",
+                "train-B",
+                "train-A",
+                "single:test:A~B",
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                true,
+                "NEED_DIRECTION_AUDIT",
+                true,
+                true,
+                false,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(60)));
+
+    assertFalse(review.allowed());
+    assertEquals("direction-audit-active-traffic-not-proven", review.reason());
+  }
+
+  @Test
+  @DisplayName("方向复审后 last-resort destroy 可通过最终审查")
+  void directionAuditLastResortDestroyCanPassWithActiveTrafficProof() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.DeadlockDestroyReview review =
+        controller.reviewDestroyCandidate(
+            new SmartDispatcherController.DeadlockDestroyInput(
+                "episode",
+                "train-A",
+                "train-B",
+                "train-A",
+                "single:test:A~B",
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                true,
+                "NEED_DIRECTION_AUDIT",
+                true,
+                true,
+                true,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(60)));
+
+    assertTrue(review.allowed());
+    assertEquals("confirmed-live-hard-cycle-last-resort-direction-audit", review.reason());
   }
 
   private static SmartDispatcherController.ForwardDecisionInput input(

@@ -11,13 +11,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
 /** 线程安全的不可变调度图快照实现。 */
-public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSupport {
+public final class SimpleRailGraph implements RailGraph, RailGraphSectionSupport {
 
   private final Map<NodeId, RailNode> nodesById;
   private final Map<EdgeId, RailEdge> edgesById;
   private final Map<NodeId, Set<RailEdge>> edgesFrom;
   private final Set<EdgeId> blockedEdges;
   private volatile RailGraphConflictIndex conflictIndex;
+  private volatile SingleLineSectionIndex sectionIndex;
 
   public SimpleRailGraph(
       Map<NodeId, RailNode> nodesById, Map<EdgeId, RailEdge> edgesById, Set<EdgeId> blockedEdges) {
@@ -109,6 +110,29 @@ public final class SimpleRailGraph implements RailGraph, RailGraphCorridorSuppor
       }
     }
     return index.corridorInfoForEdge(edgeId);
+  }
+
+  /**
+   * 查询指定边所属的单线 section 信息。
+   *
+   * <p>section 索引是 {@link RailGraphConflictIndex} 的叠加层，只归并会让点之间的微段，不改变既有 corridor/switcher 诊断 key。
+   */
+  @Override
+  public Optional<SingleLineSectionInfo> sectionInfoForEdge(EdgeId edgeId) {
+    if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
+      return Optional.empty();
+    }
+    SingleLineSectionIndex index = sectionIndex;
+    if (index == null) {
+      synchronized (this) {
+        index = sectionIndex;
+        if (index == null) {
+          index = SingleLineSectionIndex.fromGraph(this);
+          sectionIndex = index;
+        }
+      }
+    }
+    return index.sectionInfoForEdge(edgeId);
   }
 
   /** 构建邻接表（无向图）。 */

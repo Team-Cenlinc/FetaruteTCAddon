@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -201,7 +202,7 @@ class DynamicPlatformAllocatorTest {
   }
 
   @Test
-  void dynamicStopFallsBackToReachablePlatformWhenAllCandidatesOccupied() {
+  void dynamicStopDoesNotAllocateOccupiedPlatformWhenAllCandidatesOccupied() {
     NodeId fromId = NodeId.of("OP:W:FROM:1:0");
     NodeId firstId = NodeId.of("OP:S:DEST:1");
     NodeId secondId = NodeId.of("OP:S:DEST:2");
@@ -224,8 +225,71 @@ class DynamicPlatformAllocatorTest {
     Optional<DynamicPlatformAllocator.AllocationResult> result =
         allocator.tryAllocate("train-fallback", route, 0, graph, fromId);
 
-    assertTrue(result.isPresent());
-    assertEquals(firstId, result.get().allocatedNode());
+    assertFalse(result.isPresent());
+  }
+
+  @Test
+  void dynamicStopSkipsPlatformsReservedByOtherTrains() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+
+    RouteId routeId = RouteId.of("RESERVATION");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    Optional<DynamicPlatformAllocator.AllocationResult> firstResult =
+        allocator.tryAllocate("train-first", route, 0, graph, fromId);
+    Optional<DynamicPlatformAllocator.AllocationResult> secondResult =
+        allocator.tryAllocate("train-second", route, 0, graph, fromId);
+    Optional<DynamicPlatformAllocator.AllocationResult> thirdResult =
+        allocator.tryAllocate("train-third", route, 0, graph, fromId);
+
+    assertTrue(firstResult.isPresent());
+    assertEquals(firstId, firstResult.get().allocatedNode());
+    assertTrue(secondResult.isPresent());
+    assertEquals(secondId, secondResult.get().allocatedNode());
+    assertFalse(thirdResult.isPresent(), "两个站台都已被他车预订时必须 fail-closed");
+  }
+
+  @Test
+  void clearAllocationsReleasesPlatformReservation() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+
+    RouteId routeId = RouteId.of("RESERVATION-CLEAR");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    Optional<DynamicPlatformAllocator.AllocationResult> firstResult =
+        allocator.tryAllocate("train-first", route, 0, graph, fromId);
+    Optional<DynamicPlatformAllocator.AllocationResult> secondResult =
+        allocator.tryAllocate("train-second", route, 0, graph, fromId);
+    allocator.clearAllocations("train-first");
+    Optional<DynamicPlatformAllocator.AllocationResult> thirdResult =
+        allocator.tryAllocate("train-third", route, 0, graph, fromId);
+
+    assertTrue(firstResult.isPresent());
+    assertEquals(firstId, firstResult.get().allocatedNode());
+    assertTrue(secondResult.isPresent());
+    assertEquals(secondId, secondResult.get().allocatedNode());
+    assertTrue(thirdResult.isPresent());
+    assertEquals(firstId, thirdResult.get().allocatedNode());
   }
 
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {

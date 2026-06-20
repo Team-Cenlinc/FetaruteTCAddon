@@ -143,6 +143,55 @@ class SmartDispatcherModeGateTest {
             SmartDispatcherMode.OBSERVE_ONLY, DispatchEffectClass.OCCUPANCY_MUTATION));
   }
 
+  @Test
+  void allDispatcherMutationsHaveRegisteredAction() {
+    assertTrue(
+        DispatchAction.RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN.executableDispatcherAction());
+    assertTrue(DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION.executableDispatcherAction());
+    assertTrue(DispatchAction.RELEASE_SPECULATIVE_UNLOCK_RESERVATION.executableDispatcherAction());
+    assertTrue(DispatchAction.ISSUE_UNLOCK_AUTHORITY.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_HEAD_ON_YIELD.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_DRAIN_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_FORWARD_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
+  }
+
+  @Test
+  void forbiddenDispatcherActionsAreNotExecutable() {
+    assertFalse(DispatchAction.FORCE_PROCEED.executableDispatcherAction());
+    assertFalse(DispatchAction.DESTROY_TRAIN.executableDispatcherAction());
+    assertFalse(DispatchAction.CLEAR_EXTERNAL_OCCUPANCY.executableDispatcherAction());
+    assertFalse(DispatchAction.CLEAR_DESTINATION.executableDispatcherAction());
+    assertFalse(DispatchAction.INVALIDATE_MOVEMENT_TOKEN.executableDispatcherAction());
+    assertFalse(DispatchAction.ALLOW_OPPOSITE_DIRECTION_BYPASS.executableDispatcherAction());
+    assertFalse(DispatchAction.ALLOW_TURNBACK_BYPASS.executableDispatcherAction());
+    assertFalse(DispatchAction.SAME_DIRECTION_FOLLOW_THROUGH_ALLOW.executableDispatcherAction());
+  }
+
+  @Test
+  void observeOnlySuppressesEveryRegisteredMutationAction() {
+    for (DispatchAction action : DispatchAction.values()) {
+      if (!action.executableDispatcherAction()) {
+        continue;
+      }
+      assertTrue(
+          SmartDispatcherModeGate.suppresses(
+              SmartDispatcherMode.OBSERVE_ONLY, action.effectClass()));
+    }
+  }
+
+  @Test
+  void enforceAllowsOnlyWhitelistedMutationActions() {
+    for (DispatchAction action : DispatchAction.values()) {
+      if (action.forbiddenDispatcherAction()) {
+        assertFalse(action.executableDispatcherAction());
+        continue;
+      }
+      if (action.dispatcherMutation()) {
+        assertTrue(action.executableDispatcherAction());
+      }
+    }
+  }
+
   private static DispatchDecision signalAdvisoryDecision() {
     return new DispatchDecision(
         "train",

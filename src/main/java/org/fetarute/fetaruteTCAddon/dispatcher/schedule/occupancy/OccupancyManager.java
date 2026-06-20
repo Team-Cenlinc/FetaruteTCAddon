@@ -29,6 +29,20 @@ public interface OccupancyManager {
   boolean releaseResource(OccupancyResource resource, Optional<String> trainName);
 
   /**
+   * 释放单个资源占用，同时保留调用方给出的冲突队列位次。
+   *
+   * <p>用于 recoverable STOP 回滚：运行时可以释放已经不再可执行的 movement authority，但必须在发布资源释放事件前保留本轮 winner 的排队语义，
+   * 避免低优先级竞争者在重评估事件中抢先升级为 hard owner。
+   *
+   * @return 是否成功保留队列位次；不支持该事务语义的实现只执行普通释放并返回 {@code false}
+   */
+  default boolean releaseResourceRetainingQueuePosition(
+      OccupancyResource resource, Optional<String> trainName, OccupancyRequest queueRequest) {
+    releaseResource(resource, trainName);
+    return false;
+  }
+
+  /**
    * 只释放指定角色的短生命周期 claim。
    *
    * <p>默认实现不支持角色级释放。Smart Dispatcher rollback 必须使用支持该接口的实现，避免误清物理占用或保护性 retain。
@@ -49,6 +63,21 @@ public interface OccupancyManager {
    */
   default int clearSelfOwnedSingleDirectionMismatches(OccupancyRequest request) {
     return 0;
+  }
+
+  /**
+   * 判断某个抽象冲突 blocker 是否已被占用层证明为同向跟驰关系。
+   *
+   * <p>该入口只提供证据查询，不会修改 claim、queue 或 signal 状态。默认实现 fail-closed，避免不支持方向证明的实现被运行时层误判为可跟驰。
+   *
+   * @param request 当前列车的占用请求
+   * @param blockerResource 触发风险的 blocker 资源
+   * @param blockerTrainName blocker 所属列车
+   * @return 仅当实现能证明双方在共享单线走廊上方向一致，且该 blocker 不需要终端咽喉互斥时返回 {@code true}
+   */
+  default boolean isProvenSameDirectionFollower(
+      OccupancyRequest request, OccupancyResource blockerResource, String blockerTrainName) {
+    return false;
   }
 
   /**
