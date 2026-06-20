@@ -6907,6 +6907,96 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void crossRouteSameDirectionLeaderBehindDoesNotBlockPhysicalFrontTrain() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId d = NodeId.of("D");
+    NodeId e = NodeId.of("E");
+    String conflictKey = "single:test:cross-route-order";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailEdge edgeCd = new RailEdge(EdgeId.undirected(c, d), c, d, 10, -1.0, true, Optional.empty());
+    RailEdge edgeDe = new RailEdge(EdgeId.undirected(d, e), d, e, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("alpha", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("zulu", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition rearRoute =
+        new RouteDefinition(RouteId.of("rear"), List.of(a, b, c, d, e), Optional.empty());
+    RouteDefinition frontRoute =
+        new RouteDefinition(RouteId.of("front"), List.of(c, d, e), Optional.empty());
+    UUID rearRouteUuid = UUID.randomUUID();
+    UUID frontRouteUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "alpha",
+        new TagStore("alpha", "FTA_ROUTE_ID=" + rearRouteUuid, "FTA_ROUTE_INDEX=0").properties(),
+        rearRoute);
+    registry.updateLastPassedGraphNode("alpha", a, Instant.now());
+    registry.updateSignal("alpha", SignalAspect.STOP, Instant.now());
+    registry.initFromTags(
+        "zulu",
+        new TagStore("zulu", "FTA_ROUTE_ID=" + frontRouteUuid, "FTA_ROUTE_INDEX=0").properties(),
+        frontRoute);
+    registry.updateLastPassedGraphNode("zulu", c, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(Map.of(rearRouteUuid, rearRoute, frontRouteUuid, frontRoute)),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    RailGraph graph =
+        new ParallelConflictExitGraph(
+            List.of(edgeAb, edgeBc, edgeCd, edgeDe), Set.of(edgeCd.id()), conflictKey);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "zulu",
+            graph,
+            singleConflictContext(
+                "zulu", conflict, CorridorDirection.A_TO_B, edgeCd, edgeDe, c, d, e));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DISTANCE_ORDER")
+                        && message.contains("train=zulu")
+                        && message.contains("leader=alpha")
+                        && message.contains("result=TRAIN_AHEAD")),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ALREADY_INSIDE_LEADER_GUARD_SKIPPED")
+                        && message.contains("train=zulu")
+                        && message.contains("leader=alpha")
+                        && message.contains("candidate-leader-not-ahead")),
+        debugMessages.toString());
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER")
+                        && message.contains("train=zulu")
+                        && message.contains("leader=alpha")),
+        debugMessages.toString());
+  }
+
+  @Test
   void sameDirectionLeaderWithoutRouteProofBlocksFollowerInEnforce() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");

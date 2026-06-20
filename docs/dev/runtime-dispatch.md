@@ -82,7 +82,7 @@
 - 同向 section 内的 `CONFLICT:switcher` 只作为咽喉路径诊断与对向/未知方向保护，不再额外串行化跟驰列车；如果 follower 与 leader 在同一个 `CONFLICT:single:section:*` 上方向一致，switcher claim、switcher queue 和 advisory switcher risk 都不会单独把 follower 压成 STOP/CAUTION。真实 `MOVEMENT_REQUIRED` 的 `NODE` / `EDGE` 仍按 hard blocker 处理。
 - 同向跟驰时，前车的 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 物理 `NODE` / `EDGE` 不再直接把后车 hard STOP；只有当同一 single-corridor 方向可证明一致，且该物理资源不触碰 Station/Depot 边界时，才降级为跟驰约束。前车距离继续由真实 `NODE` / `EDGE` claim、advisory lookahead、movement authority 与速度曲线控制；`MOVEMENT_REQUIRED` claim 仍不可共享。
 - 同向前车最终停在死端 Station/Depot 时，不再天然要求后车等待前车完全出清；只要前车路径与本车 single window 重合、方向一致、出口/边界可见且后车有安全 hold point，仍按移动闭塞式跟驰放行。边界单边段、无安全 hold point 或对向/未知占用仍保持 STOP。
-- 已经持有同一 single claim 的列车继续前进时，仍必须检查同向外部 leader 是否正停在终端/停站/折返陷阱中；若 leader 不能证明会真正排空本区间，`ALLOW_ALREADY_INSIDE_CONTINUE` 会被收紧为 local-only hold，并输出 `SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER`。该守卫只允许对“可证明在本车前方”的 leader 生效；若顺序不可证明，则使用稳定 train key 只指定一侧让行；若发现候选 leader 也正在等本车，则跳过守卫，避免同向列车互相把对方焊成 STOP。
+- 已经持有同一 single claim 的列车继续前进时，仍必须检查同向外部 leader 是否正停在终端/停站/折返陷阱中；若 leader 不能证明会真正排空本区间，`ALLOW_ALREADY_INSIDE_CONTINUE` 会被收紧为 local-only hold，并输出 `SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER`。该守卫只允许对“可证明在本车前方”的 leader 生效：优先比较同 route index，跨 route 时用本轮展开路径的共同下游锚点剩余图距离定序，只有两者都无法证明时才使用稳定 train key 指定一侧让行；若发现候选 leader 也正在等本车，则跳过守卫，避免同向列车互相把对方焊成 STOP。
 - 自持 single continuation 被外部 owner 阻断时，拒绝结果会把外部 same-single claim 一并放入 blockers。这样 health monitor 的 live blocker cycle 可以看到真实 wait-for 边，而不是只看到 self claim 后退化为 snapshot missing / timeout destroy。
 - 占用采用事件反射式：推进点会释放窗口外资源；列车卸载/移除事件会主动释放占用；信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
 - TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；列车改名依赖信号 tick 清理旧缓存。

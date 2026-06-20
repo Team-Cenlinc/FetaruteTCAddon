@@ -15739,7 +15739,7 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     SameDirectionLeaderOrder leaderOrder =
-        sameDirectionLeaderOrder(trainName, leaderTrain, context);
+        sameDirectionLeaderOrder(trainName, leaderTrain, context, graph);
     if (leaderOrder == SameDirectionLeaderOrder.TRAIN_AHEAD) {
       traceAlreadyInsideLeaderGuardSkipped(
           trainName, leaderTrain, conflict, "candidate-leader-not-ahead");
@@ -15809,11 +15809,11 @@ public final class RuntimeDispatchService {
   /**
    * 判断 same-direction guard 里的候选 leader 是否确实位于本车前方。
    *
-   * <p>优先使用同一 route 的 {@code currentIndex} 建立严格顺序；缺少同 route 证据时，退回到 leader 最近经过节点在本车本轮 movement
-   * path 中的位置。只有 {@link SameDirectionLeaderOrder#LEADER_AHEAD} 才能直接触发 already-inside hold。
+   * <p>优先使用同一 route 的 {@code currentIndex} 建立严格顺序；缺少同 route 证据时，再用本车本轮可见下游锚点比较两车剩余图距离，覆盖跨 route
+   * 但共用同一物理走廊的跟驰关系。只有 {@link SameDirectionLeaderOrder#LEADER_AHEAD} 才能直接触发 already-inside hold。
    */
   private SameDirectionLeaderOrder sameDirectionLeaderOrder(
-      String trainName, String leaderTrain, OccupancyRequestContext context) {
+      String trainName, String leaderTrain, OccupancyRequestContext context, RailGraph graph) {
     if (TrainNameNormalizer.sameLogicalTrain(trainName, leaderTrain)) {
       return SameDirectionLeaderOrder.UNKNOWN;
     }
@@ -15833,6 +15833,17 @@ public final class RuntimeDispatchService {
         return SameDirectionLeaderOrder.TRAIN_AHEAD;
       }
     }
+    SameDirectionLeaderOrder visiblePathOrder =
+        sameDirectionLeaderOrderByVisiblePath(trainEntry, leaderEntry, context);
+    if (visiblePathOrder != SameDirectionLeaderOrder.UNKNOWN) {
+      return visiblePathOrder;
+    }
+    SameDirectionLeaderOrder anchorDistanceOrder =
+        sameDirectionLeaderOrderBySharedAnchor(
+            trainName, leaderTrain, trainEntry, leaderEntry, context, graph);
+    if (anchorDistanceOrder != SameDirectionLeaderOrder.UNKNOWN) {
+      return anchorDistanceOrder;
+    }
     Optional<NodeId> leaderNode =
         leaderEntry.flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode);
     if (leaderNode.isPresent() && context != null && context.pathNodes() != null) {
@@ -15848,10 +15859,123 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 用本车可见路径中的节点顺序判断同向 leader 前后。
+   *
+   * <p>该路径来自本轮占用请求，天然带有从当前车向下游走的方向；只有两车最近经过节点都落在这条路径上时才给出结论。
+   */
+  private SameDirectionLeaderOrder sameDirectionLeaderOrderByVisiblePath(
+      Optional<RouteProgressRegistry.RouteProgressEntry> trainEntry,
+      Optional<RouteProgressRegistry.RouteProgressEntry> leaderEntry,
+      OccupancyRequestContext context) {
+    if (context == null || context.pathNodes() == null || context.pathNodes().isEmpty()) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    Optional<NodeId> trainNode = sameDirectionOrderTrainNode(trainEntry, context, true);
+    Optional<NodeId> leaderNode = sameDirectionOrderTrainNode(leaderEntry, context, false);
+    if (trainNode.isEmpty() || leaderNode.isEmpty()) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    int trainIndex = context.pathNodes().indexOf(trainNode.get());
+    int leaderIndex = context.pathNodes().indexOf(leaderNode.get());
+    if (trainIndex < 0 || leaderIndex < 0 || trainIndex == leaderIndex) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    return leaderIndex > trainIndex
+        ? SameDirectionLeaderOrder.LEADER_AHEAD
+        : SameDirectionLeaderOrder.TRAIN_AHEAD;
+  }
+
+  /**
+   * 用两车到同一个下游可见锚点的剩余图距离判断前后。
+   *
+   * <p>跨 route 跟驰时，route index 不可比较；leader
+   * 的节点也可能已经在本车当前路径窗口后方，导致可见路径索引无法证明“本车在前”。此处只在两车都能到达本车本轮展开路径末端时生效，距离锚点更近的一方视为物理队列前方。
+   */
+  private SameDirectionLeaderOrder sameDirectionLeaderOrderBySharedAnchor(
+      String trainName,
+      String leaderTrain,
+      Optional<RouteProgressRegistry.RouteProgressEntry> trainEntry,
+      Optional<RouteProgressRegistry.RouteProgressEntry> leaderEntry,
+      OccupancyRequestContext context,
+      RailGraph graph) {
+    if (graph == null || context == null) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    Optional<NodeId> anchor = sameDirectionOrderAnchor(context);
+    Optional<NodeId> trainNode = sameDirectionOrderTrainNode(trainEntry, context, true);
+    Optional<NodeId> leaderNode = sameDirectionOrderTrainNode(leaderEntry, context, false);
+    if (anchor.isEmpty()
+        || trainNode.isEmpty()
+        || leaderNode.isEmpty()
+        || trainNode.get().equals(leaderNode.get())) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    OptionalLong trainDistance = resolveShortestDistance(graph, trainNode.get(), anchor.get());
+    OptionalLong leaderDistance = resolveShortestDistance(graph, leaderNode.get(), anchor.get());
+    if (trainDistance.isEmpty()
+        || leaderDistance.isEmpty()
+        || trainDistance.getAsLong() == leaderDistance.getAsLong()) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    SameDirectionLeaderOrder order =
+        leaderDistance.getAsLong() < trainDistance.getAsLong()
+            ? SameDirectionLeaderOrder.LEADER_AHEAD
+            : SameDirectionLeaderOrder.TRAIN_AHEAD;
+    debugLogger.accept(
+        "SMART_SAME_DIRECTION_LEADER_DISTANCE_ORDER train="
+            + trainName
+            + " leader="
+            + leaderTrain
+            + " trainNode="
+            + trainNode.get().value()
+            + " leaderNode="
+            + leaderNode.get().value()
+            + " anchor="
+            + anchor.get().value()
+            + " trainDistance="
+            + trainDistance.getAsLong()
+            + " leaderDistance="
+            + leaderDistance.getAsLong()
+            + " result="
+            + order);
+    return order;
+  }
+
+  private Optional<NodeId> sameDirectionOrderAnchor(OccupancyRequestContext context) {
+    if (context == null) {
+      return Optional.empty();
+    }
+    if (context.pathNodes() != null && !context.pathNodes().isEmpty()) {
+      return Optional.ofNullable(context.pathNodes().get(context.pathNodes().size() - 1));
+    }
+    return context.request().directedContext().flatMap(DirectedTraversalContext::effectiveToNode);
+  }
+
+  private Optional<NodeId> sameDirectionOrderTrainNode(
+      Optional<RouteProgressRegistry.RouteProgressEntry> entry,
+      OccupancyRequestContext context,
+      boolean useRequestFallback) {
+    Optional<NodeId> progressNode =
+        entry == null
+            ? Optional.empty()
+            : entry.flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode);
+    if (progressNode.isPresent() || !useRequestFallback || context == null) {
+      return progressNode;
+    }
+    return context
+        .request()
+        .directedContext()
+        .flatMap(DirectedTraversalContext::lastPassedGraphNode)
+        .or(
+            () ->
+                context.request().directedContext().flatMap(DirectedTraversalContext::currentNode));
+  }
+
+  /**
    * 在缺少可证明拓扑顺序时给同向 already-inside 守卫提供稳定让行侧。
    *
    * <p>该结果只用于“不可定序”的兜底，不能替代 {@link #sameDirectionLeaderOrder(String, String,
-   * OccupancyRequestContext)} 的严格领先证明。稳定排序保证两辆车最多只有一辆被本守卫 hold，避免 A 等 B、B 又等 A 的对称死锁。
+   * OccupancyRequestContext, RailGraph)} 的严格领先证明。稳定排序保证两辆车最多只有一辆被本守卫 hold，避免 A 等 B、B 又等 A 的对称死锁。
    */
   private boolean deterministicSameDirectionYield(String trainName, String leaderTrain) {
     String trainKey = normalizeTrainKey(trainName);
