@@ -18733,7 +18733,83 @@ public final class RuntimeDispatchService {
         && claim != null
         && isSameDirectionFollowConflict(claim.resource())
         && occupancyManager.isProvenSameDirectionFollower(
-            request, claim.resource(), claim.trainName());
+            request,
+            claim.resource(),
+            claim.trainName(),
+            provenSameRouteLeader(request, claim.trainName()));
+  }
+
+  /**
+   * 用运行时 route 进度证明 blocker 是同一交路上的前车。
+   *
+   * <p>该证明只作为抽象 single/switcher 冲突的同向跟驰证据，不直接放行物理 NODE/EDGE。缺少任一进度、不同 route、blocker
+   * 未在前方，或当前路径/route 定义存在折返不确定性时均 fail-closed。
+   */
+  private boolean provenSameRouteLeader(OccupancyRequest request, String blockerTrain) {
+    if (request == null) {
+      return false;
+    }
+    if (request.directedContext().map(RuntimeDispatchService::hasTurnback).orElse(false)) {
+      return false;
+    }
+    return provenSameRouteLeader(request.trainName(), blockerTrain);
+  }
+
+  private boolean provenSameRouteLeader(String requesterTrain, String blockerTrain) {
+    if (requesterTrain == null
+        || requesterTrain.isBlank()
+        || blockerTrain == null
+        || blockerTrain.isBlank()
+        || TrainNameNormalizer.sameLogicalTrain(requesterTrain, blockerTrain)
+        || progressRegistry == null) {
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> requesterEntryOpt =
+        progressRegistry.get(requesterTrain);
+    Optional<RouteProgressRegistry.RouteProgressEntry> blockerEntryOpt =
+        progressRegistry.get(blockerTrain);
+    if (requesterEntryOpt.isEmpty() || blockerEntryOpt.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry requesterEntry = requesterEntryOpt.get();
+    RouteProgressRegistry.RouteProgressEntry blockerEntry = blockerEntryOpt.get();
+    if (requesterEntry.routeId() == null
+        || blockerEntry.routeId() == null
+        || !requesterEntry.routeId().equals(blockerEntry.routeId())
+        || blockerEntry.currentIndex() <= requesterEntry.currentIndex()) {
+      return false;
+    }
+    Optional<RouteDefinition> route = routeDefinitionForProgress(requesterEntry);
+    return route.isPresent() && !routeContainsTurnbackBoundary(route.get());
+  }
+
+  private static boolean hasTurnback(DirectedTraversalContext context) {
+    if (context == null || context.directedEdges().isEmpty()) {
+      return false;
+    }
+    List<DirectedTraversalContext.DirectedEdge> edges = context.directedEdges();
+    for (int i = 1; i < edges.size(); i++) {
+      DirectedTraversalContext.DirectedEdge previous = edges.get(i - 1);
+      DirectedTraversalContext.DirectedEdge current = edges.get(i);
+      if (previous.fromNode().equals(current.toNode())
+          && previous.toNode().equals(current.fromNode())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean routeContainsTurnbackBoundary(RouteDefinition route) {
+    if (route == null || route.waypoints().isEmpty()) {
+      return true;
+    }
+    Set<NodeId> seen = new HashSet<>();
+    for (NodeId waypoint : route.waypoints()) {
+      if (waypoint == null || !seen.add(waypoint)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static boolean isSameDirectionFollowConflict(OccupancyResource resource) {

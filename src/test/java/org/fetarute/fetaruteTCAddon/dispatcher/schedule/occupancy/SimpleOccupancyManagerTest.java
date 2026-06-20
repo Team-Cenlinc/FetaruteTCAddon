@@ -714,6 +714,110 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void sameDirectionSectionBypassesPhysicalProtectiveRetain() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId exit = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource edge = OccupancyResource.forEdge(EdgeId.undirected(entry, exit));
+    OccupancyRequest leader =
+        sectionPhysicalRequest(
+            "leader",
+            now,
+            section,
+            CorridorDirection.A_TO_B,
+            edge,
+            ResourceIntent.PROTECTIVE_RETAIN);
+    OccupancyRequest follower =
+        sectionPhysicalRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            CorridorDirection.A_TO_B,
+            edge,
+            ResourceIntent.MOVEMENT_REQUIRED);
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertTrue(decision.allowed(), decision.toString());
+  }
+
+  @Test
+  void sameDirectionSectionDoesNotBypassPhysicalMovementRequired() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId entry = NodeId.of("A");
+    NodeId exit = NodeId.of("B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource edge = OccupancyResource.forEdge(EdgeId.undirected(entry, exit));
+    OccupancyRequest leader =
+        sectionPhysicalRequest(
+            "leader",
+            now,
+            section,
+            CorridorDirection.A_TO_B,
+            edge,
+            ResourceIntent.MOVEMENT_REQUIRED);
+    OccupancyRequest follower =
+        sectionPhysicalRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            CorridorDirection.A_TO_B,
+            edge,
+            ResourceIntent.MOVEMENT_REQUIRED);
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertFalse(decision.allowed());
+    assertTrue(decision.blockers().stream().anyMatch(blocker -> blocker.resource().equals(edge)));
+  }
+
+  @Test
+  void sameDirectionSectionDoesNotBypassStationBoundaryProtectiveRetain() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId station = NodeId.of("SURC:S:SPB:1");
+    NodeId throat = NodeId.of("SURC:SPB:JBS:1:001");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:JBS~SPB");
+    OccupancyResource edge = OccupancyResource.forEdge(EdgeId.undirected(station, throat));
+    OccupancyRequest leader =
+        sectionPhysicalRequest(
+            "leader",
+            now,
+            section,
+            CorridorDirection.A_TO_B,
+            edge,
+            ResourceIntent.PROTECTIVE_RETAIN);
+    OccupancyRequest follower =
+        sectionPhysicalRequest(
+            "follower",
+            now.plusSeconds(1),
+            section,
+            CorridorDirection.A_TO_B,
+            edge,
+            ResourceIntent.MOVEMENT_REQUIRED);
+
+    assertTrue(manager.acquire(leader).allowed());
+    OccupancyDecision decision = manager.canEnter(follower);
+
+    assertFalse(decision.allowed());
+    assertTrue(decision.blockers().stream().anyMatch(blocker -> blocker.resource().equals(edge)));
+  }
+
+  @Test
   void sameDirectionFrontHardBlockerDoesNotRejectSelfOwnedSectionContinuation() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -981,6 +1085,49 @@ class SimpleOccupancyManagerTest {
             "follower", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of());
 
     assertFalse(manager.isProvenSameDirectionFollower(follower, node, "leader"));
+    assertFalse(manager.isProvenSameDirectionFollower(follower, node, "leader", true));
+  }
+
+  @Test
+  void sameDirectionFollowerProofAcceptsKnownRouteLeaderWithoutSharedSectionClaim() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyRequest follower =
+        new OccupancyRequest("follower", Optional.empty(), now, List.of(section), Map.of());
+
+    assertFalse(manager.isProvenSameDirectionFollower(follower, section, "leader"));
+    assertTrue(
+        manager.isProvenSameDirectionFollower(follower, section, "leader", true),
+        "RouteProgressRegistry 已证明同 route 前车时，不再要求双方 claim 落在同一 section 实例");
+  }
+
+  @Test
+  void sameDirectionFollowerProofAcceptsKnownRouteLeaderSwitcherWithoutSharedSectionClaim() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource switcher =
+        OccupancyResource.forConflict("switcher:SWITCHER:Towny:-555:77:1196");
+    OccupancyRequest follower =
+        switcherRequest(
+            "follower",
+            now,
+            switcher,
+            List.of(
+                NodeId.of("SURC:SPB:JBS:1:003"),
+                NodeId.of("SWITCHER:Towny:-555:77:1196"),
+                NodeId.of("SWITCHER:Towny:-557:77:1193")));
+
+    assertFalse(manager.isProvenSameDirectionFollower(follower, switcher, "leader"));
+    assertTrue(
+        manager.isProvenSameDirectionFollower(follower, switcher, "leader", true),
+        "非终端 switcher 可复用 runtime 同 route 前车证明");
   }
 
   @Test
@@ -1062,6 +1209,9 @@ class SimpleOccupancyManagerTest {
     assertFalse(
         manager.isProvenSameDirectionFollower(follower, switcherConflict, "leader"),
         "终端站台相邻 switcher 必须继续由咽喉互斥保护");
+    assertFalse(
+        manager.isProvenSameDirectionFollower(follower, switcherConflict, "leader", true),
+        "即使 runtime 已证明同 route 前车，终端站台相邻 switcher 仍必须互斥");
   }
 
   @Test
@@ -3367,6 +3517,26 @@ class SimpleOccupancyManagerTest {
                 -1L,
                 "test",
                 Optional.empty())));
+  }
+
+  private static OccupancyRequest sectionPhysicalRequest(
+      String trainName,
+      Instant now,
+      OccupancyResource section,
+      CorridorDirection direction,
+      OccupancyResource physicalResource,
+      ResourceIntent physicalIntent) {
+    return new OccupancyRequest(
+        trainName,
+        Optional.empty(),
+        now,
+        List.of(section, physicalResource),
+        Map.of(section.key(), direction),
+        Map.of(section.key(), 0),
+        0,
+        AuthorizationPurpose.RUNTIME_MOVE,
+        Map.of(),
+        Map.of(section, ResourceIntent.MOVEMENT_REQUIRED, physicalResource, physicalIntent));
   }
 
   private static OccupancyRequest switcherSectionRequest(

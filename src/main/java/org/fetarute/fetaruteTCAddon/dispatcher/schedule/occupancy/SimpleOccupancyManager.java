@@ -34,7 +34,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
  * <p>这个实现只负责“资源互斥 + 队列公平性 + 冲突区放行”，不承担列车控车、恢复和调度重排。若上层信号看起来不稳定， 这里优先排查的通常是队列位次、锁定边界和 claim
  * 释放粒度，而不是时刻表本身。
  *
- * <p>冲突区放行只处理已证明正在清空冲突区出口的 CONFLICT blocker；真实 NODE/EDGE 硬占用始终按 STOP 处理。
+ * <p>冲突区放行只处理已证明正在清空冲突区出口的 CONFLICT blocker；真实 {@code MOVEMENT_REQUIRED} NODE/EDGE 硬占用始终按 STOP
+ * 处理。外部列车的 {@code PROTECTIVE_RETAIN}/{@code HOLD_ONLY} NODE/EDGE 只有在同一 single-corridor
+ * 方向已证明一致，且资源不触碰 Station/Depot 边界时，才允许降级为同向跟驰约束。
  */
 public final class SimpleOccupancyManager
     implements OccupancyManager,
@@ -288,6 +290,10 @@ public final class SimpleOccupancyManager
         if (relation == BlockerRelation.STALE_PROTECTIVE_CLAIM) {
           continue;
         }
+        if (sameDirectionPhysicalProtectiveClaimAllowsFollow(
+            request, resource, claim, "canEnter")) {
+          continue;
+        }
         if (relation == BlockerRelation.SWITCHER_CONFLICT
             && switcherPathSignaturesCompatible(request, resource, claim, "canEnter")) {
           continue;
@@ -458,6 +464,10 @@ public final class SimpleOccupancyManager
           continue;
         }
         if (relation == BlockerRelation.STALE_PROTECTIVE_CLAIM) {
+          continue;
+        }
+        if (sameDirectionPhysicalProtectiveClaimAllowsFollow(
+            request, resource, claim, "canEnterPreview")) {
           continue;
         }
         if (relation == BlockerRelation.SWITCHER_CONFLICT
@@ -942,7 +952,30 @@ public final class SimpleOccupancyManager
       return false;
     }
     return sameDirectionSectionAllowsSwitcherTrain(
-        request, resource, claim.trainName(), source, "claim");
+        request, resource, claim.trainName(), source, "claim", false);
+  }
+
+  private boolean sameDirectionPhysicalProtectiveClaimAllowsFollow(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim, String source) {
+    if (request == null
+        || resource == null
+        || claim == null
+        || !isPhysicalOccupancyResource(resource)
+        || physicalResourceTouchesStationOrDepotBoundary(resource)
+        || !request.intentFor(resource).hardAuthority()
+        || TrainNameNormalizer.sameLogicalTrain(request.trainName(), claim.trainName())) {
+      return false;
+    }
+    if (claim.role() != ClaimRole.PROTECTIVE_RETAIN && claim.role() != ClaimRole.HOLD_ONLY) {
+      return false;
+    }
+    Optional<SectionDirectionMatch> match = sameDirectionSectionMatch(request, claim.trainName());
+    if (match.isEmpty()) {
+      return false;
+    }
+    tracePhysicalProtectiveSameDirectionFollowThrough(
+        source, request, resource, claim, match.get());
+    return true;
   }
 
   private boolean sameDirectionSectionAllowsSwitcherTrain(
@@ -950,7 +983,8 @@ public final class SimpleOccupancyManager
       OccupancyResource switcherResource,
       String otherTrain,
       String source,
-      String relationSource) {
+      String relationSource,
+      boolean knownSameRouteLeader) {
     if (!isSwitcherConflictResource(switcherResource)
         || request == null
         || otherTrain == null
@@ -969,11 +1003,18 @@ public final class SimpleOccupancyManager
       return false;
     }
     Optional<SectionDirectionMatch> match = sameDirectionSectionMatch(request, otherTrain);
-    if (match.isEmpty()) {
+    if (match.isEmpty() && !knownSameRouteLeader) {
       return false;
     }
     traceSwitcherSameDirectionSectionFollowThrough(
-        source, request, switcherResource, otherTrain, relationSource, match.get());
+        source,
+        request,
+        switcherResource,
+        otherTrain,
+        relationSource,
+        match.orElse(
+            new SectionDirectionMatch(
+                switcherResource, CorridorDirection.UNKNOWN, "same-route-progress")));
     return true;
   }
 
@@ -1036,6 +1077,36 @@ public final class SimpleOccupancyManager
             + " evidence="
             + safeLifecycleValue(match.evidence())
             + " decision=same-section-same-direction");
+  }
+
+  private void tracePhysicalProtectiveSameDirectionFollowThrough(
+      String source,
+      OccupancyRequest request,
+      OccupancyResource resource,
+      OccupancyClaim claim,
+      SectionDirectionMatch match) {
+    if (request == null || resource == null || claim == null || match == null) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        "SMART_PHYSICAL_PROTECTIVE_SAME_DIRECTION_FOLLOW_THROUGH train="
+            + safeLifecycleValue(request.trainName())
+            + " otherTrain="
+            + safeLifecycleValue(claim.trainName())
+            + " resource="
+            + resource
+            + " section="
+            + match.section()
+            + " direction="
+            + match.direction()
+            + " source="
+            + safeLifecycleValue(source)
+            + " relationSource=claim"
+            + " role="
+            + roleText(claim.role())
+            + " evidence="
+            + safeLifecycleValue(match.evidence())
+            + " decision=allow-follow-through");
   }
 
   private boolean switcherQueueAllowsEntry(
@@ -1115,7 +1186,7 @@ public final class SimpleOccupancyManager
       return true;
     }
     if (sameDirectionSectionAllowsSwitcherTrain(
-        request, resource, entry.trainName(), "queue", "queue")) {
+        request, resource, entry.trainName(), "queue", "queue", false)) {
       return false;
     }
     Optional<DirectedTraversalContext.SwitcherPathSignature> requested =
@@ -1233,10 +1304,33 @@ public final class SimpleOccupancyManager
   }
 
   private boolean isStationOrDepotBoundaryNode(NodeId node) {
-    if (node == null || node.value().isBlank()) {
+    return node != null && isStationOrDepotBoundaryNodeValue(node.value());
+  }
+
+  private boolean physicalResourceTouchesStationOrDepotBoundary(OccupancyResource resource) {
+    if (resource == null || !isPhysicalOccupancyResource(resource)) {
       return false;
     }
-    String[] parts = node.value().split(":");
+    if (resource.kind() == ResourceKind.NODE) {
+      return isStationOrDepotBoundaryNodeValue(resource.key());
+    }
+    if (resource.kind() != ResourceKind.EDGE) {
+      return false;
+    }
+    String[] nodes = resource.key().split("~", -1);
+    for (String node : nodes) {
+      if (isStationOrDepotBoundaryNodeValue(node)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean isStationOrDepotBoundaryNodeValue(String value) {
+    if (value == null || value.isBlank()) {
+      return false;
+    }
+    String[] parts = value.split(":");
     return parts.length == 4 && ("S".equals(parts[1]) || "D".equals(parts[1]));
   }
 
@@ -1499,7 +1593,10 @@ public final class SimpleOccupancyManager
 
   @Override
   public synchronized boolean isProvenSameDirectionFollower(
-      OccupancyRequest request, OccupancyResource blockerResource, String blockerTrainName) {
+      OccupancyRequest request,
+      OccupancyResource blockerResource,
+      String blockerTrainName,
+      boolean knownSameRouteLeader) {
     if (request == null
         || blockerResource == null
         || blockerTrainName == null
@@ -1511,10 +1608,16 @@ public final class SimpleOccupancyManager
       String relationSource =
           findClaim(claims.get(blockerResource), blockerTrainName) == null ? "queue" : "claim";
       return sameDirectionSectionAllowsSwitcherTrain(
-          request, blockerResource, blockerTrainName, "forward-risk", relationSource);
+          request,
+          blockerResource,
+          blockerTrainName,
+          "forward-risk",
+          relationSource,
+          knownSameRouteLeader);
     }
     if (isSingleCorridorConflict(blockerResource)) {
-      return sameDirectionSectionMatch(request, blockerTrainName).isPresent();
+      return knownSameRouteLeader
+          || sameDirectionSectionMatch(request, blockerTrainName).isPresent();
     }
     return false;
   }
@@ -2227,7 +2330,7 @@ public final class SimpleOccupancyManager
         entry.direction() == null ? CorridorDirection.UNKNOWN : entry.direction();
     if (isSwitcherConflictResource(resource)
         && sameDirectionSectionAllowsSwitcherTrain(
-            request, resource, entry.trainName(), "advisory-queue", "queue")) {
+            request, resource, entry.trainName(), "advisory-queue", "queue", false)) {
       return false;
     }
     return !isSameDirectionSinglePresence(request, resource, Optional.of(direction));

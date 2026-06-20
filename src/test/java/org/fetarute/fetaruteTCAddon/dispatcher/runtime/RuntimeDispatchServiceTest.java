@@ -1223,12 +1223,126 @@ class RuntimeDispatchServiceTest {
             request.now(),
             Duration.ZERO,
             Optional.of(CorridorDirection.A_TO_B));
-    when(occupancyManager.isProvenSameDirectionFollower(request, switcher, "leader"))
+    when(occupancyManager.isProvenSameDirectionFollower(request, switcher, "leader", false))
         .thenReturn(true);
 
     RiskSource source = invokeRiskSourceForBlocker(service, request, blocker);
 
     assertEquals(RiskSource.SAME_DIRECTION_FOLLOW, source);
+  }
+
+  @Test
+  void forwardRiskSourceUsesProgressRegistryWhenClaimRouteIsMissing() throws Exception {
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    UUID routeUuid = UUID.randomUUID();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("same-route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C")),
+            Optional.empty());
+    registry.initFromTags(
+        "follower",
+        new TagStore("follower", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        route);
+    RuntimeDispatchService service =
+        createMinimalService(
+            occupancyManager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            new ArrayList<>());
+    OccupancyResource switcher = OccupancyResource.forConflict("switcher:SWITCHER:test");
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "follower",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(switcher),
+            Map.of());
+    OccupancyClaim blocker =
+        new OccupancyClaim(
+            switcher, "leader", Optional.empty(), request.now(), Duration.ZERO, Optional.empty());
+
+    RiskSource source = invokeRiskSourceForBlocker(service, request, blocker);
+
+    assertEquals(RiskSource.SAME_DIRECTION_FOLLOW, source);
+  }
+
+  @Test
+  void provenSameRouteLeaderRequiresSameRouteAheadProgressAndNonTurnbackRoute() throws Exception {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("same-route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C"), NodeId.of("D")),
+            Optional.empty());
+    RouteDefinition otherRoute =
+        new RouteDefinition(
+            RouteId.of("other-route"),
+            List.of(NodeId.of("A"), NodeId.of("X"), NodeId.of("Y")),
+            Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    UUID otherRouteUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "follower",
+        new TagStore("follower", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        route);
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=2").properties(),
+        route);
+    registry.initFromTags(
+        "behind",
+        new TagStore("behind", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.initFromTags(
+        "other",
+        new TagStore("other", "FTA_ROUTE_ID=" + otherRouteUuid, "FTA_ROUTE_INDEX=2").properties(),
+        otherRoute);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            routeDefinitionCacheWith(Map.of(routeUuid, route, otherRouteUuid, otherRoute)),
+            registry,
+            new ArrayList<>());
+
+    assertTrue(invokeProvenSameRouteLeader(service, "follower", "leader"));
+    assertFalse(invokeProvenSameRouteLeader(service, "follower", "behind"));
+    assertFalse(invokeProvenSameRouteLeader(service, "follower", "other"));
+    assertFalse(invokeProvenSameRouteLeader(service, "follower", "missing"));
+  }
+
+  @Test
+  void provenSameRouteLeaderFailsClosedForRouteWithTurnbackBoundary() throws Exception {
+    RouteDefinition turnbackRoute =
+        new RouteDefinition(
+            RouteId.of("turnback-route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("A")),
+            Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "follower",
+        new TagStore("follower", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        turnbackRoute);
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        turnbackRoute);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mock(OccupancyManager.class),
+            routeDefinitionCacheWith(turnbackRoute, routeUuid),
+            registry,
+            new ArrayList<>());
+
+    assertFalse(invokeProvenSameRouteLeader(service, "follower", "leader"));
   }
 
   @Test
@@ -1246,12 +1360,13 @@ class RuntimeDispatchServiceTest {
     OccupancyClaim blocker =
         new OccupancyClaim(
             node, "leader", Optional.empty(), request.now(), Duration.ZERO, Optional.empty());
-    when(occupancyManager.isProvenSameDirectionFollower(request, node, "leader")).thenReturn(true);
+    when(occupancyManager.isProvenSameDirectionFollower(request, node, "leader", false))
+        .thenReturn(true);
 
     RiskSource source = invokeRiskSourceForBlocker(service, request, blocker);
 
     assertEquals(RiskSource.HARD_BLOCKER, source);
-    verify(occupancyManager, never()).isProvenSameDirectionFollower(request, node, "leader");
+    verify(occupancyManager, never()).isProvenSameDirectionFollower(request, node, "leader", false);
   }
 
   @Test
@@ -3388,6 +3503,15 @@ class RuntimeDispatchServiceTest {
             "riskSourceForBlocker", OccupancyRequest.class, OccupancyClaim.class);
     method.setAccessible(true);
     return (RiskSource) method.invoke(service, request, blocker);
+  }
+
+  private static boolean invokeProvenSameRouteLeader(
+      RuntimeDispatchService service, String requesterTrain, String blockerTrain) throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "provenSameRouteLeader", String.class, String.class);
+    method.setAccessible(true);
+    return (boolean) method.invoke(service, requesterTrain, blockerTrain);
   }
 
   private static RailGraph graphWithSingleEdge(NodeId a, NodeId b, int lengthBlocks) {
@@ -10480,9 +10604,16 @@ class RuntimeDispatchServiceTest {
 
   private static RouteDefinitionCache routeDefinitionCacheWith(
       RouteDefinition route, UUID routeUuid) {
+    return routeDefinitionCacheWith(Map.of(routeUuid, route));
+  }
+
+  private static RouteDefinitionCache routeDefinitionCacheWith(Map<UUID, RouteDefinition> routes) {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
-    when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
-    when(routeDefinitions.snapshot()).thenReturn(Map.of(routeUuid, route));
+    Map<UUID, RouteDefinition> safeRoutes = Map.copyOf(routes);
+    for (Map.Entry<UUID, RouteDefinition> entry : safeRoutes.entrySet()) {
+      when(routeDefinitions.findById(entry.getKey())).thenReturn(Optional.of(entry.getValue()));
+    }
+    when(routeDefinitions.snapshot()).thenReturn(safeRoutes);
     return routeDefinitions;
   }
 
