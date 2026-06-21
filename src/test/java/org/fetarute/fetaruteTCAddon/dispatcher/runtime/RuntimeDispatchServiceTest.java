@@ -7056,6 +7056,76 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void alreadyInsideTerminalFollowThroughPredictionAllowsFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId station = NodeId.of("OP:S:CHT:3");
+    String conflictKey = "single:test:already-inside-terminal-follow-through";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailEdge edgeCs =
+        new RailEdge(EdgeId.undirected(c, station), c, station, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("follower", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("terminal"), List.of(a, b, c, station), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "follower",
+        new TagStore("follower", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        route);
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new DeadEndStationConflictGraph(
+                List.of(edgeBc, edgeCs), station, edgeBc.id(), conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeBc, edgeCs, b, c, station));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("drainProven=true")
+                        && message.contains("same-direction-leader-terminal-follow-through")),
+        debugMessages.toString());
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER")
+                        && message.contains("same-direction-leader-terminal-station-mutex")),
+        debugMessages.toString());
+  }
+
+  @Test
   void alreadyInsideTerminalLeaderBlocksSameDirectionFollower() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");
@@ -9874,6 +9944,232 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void stopRetainUsesNextLegOriginLastPassedAndReleasesStaleThroatFootprint() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    String trainName = "SURC-MT-LH-8023";
+    NodeId hhuDepot = NodeId.of("SURC:D:HHU:3");
+    NodeId hhuSwitcher = NodeId.of("SWITCHER:Towny:502:74:996");
+    NodeId ppkStation = NodeId.of("SURC:S:PPK:1");
+    NodeId ppkToRvs = NodeId.of("SURC:PPK:RVS:2:001");
+    RailEdge hhuThroatEdge =
+        new RailEdge(
+            EdgeId.undirected(hhuDepot, hhuSwitcher),
+            hhuDepot,
+            hhuSwitcher,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge switcherToRvs =
+        new RailEdge(
+            EdgeId.undirected(hhuSwitcher, ppkToRvs),
+            hhuSwitcher,
+            ppkToRvs,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge ppkToRvsEdge =
+        new RailEdge(
+            EdgeId.undirected(ppkStation, ppkToRvs),
+            ppkStation,
+            ppkToRvs,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                hhuDepot,
+                    new RailNodeTest(
+                        hhuDepot,
+                        NodeType.DEPOT,
+                        Optional.of(WaypointMetadata.depot("SURC", "HHU", 3))),
+                hhuSwitcher, new RailNodeTest(hhuSwitcher, NodeType.SWITCHER, Optional.empty()),
+                ppkStation,
+                    new RailNodeTest(
+                        ppkStation,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("SURC", "PPK", 1))),
+                ppkToRvs,
+                    new RailNodeTest(
+                        ppkToRvs,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.interval("SURC", "PPK", "RVS", 2, "001")))),
+            Map.of(
+                hhuThroatEdge.id(),
+                hhuThroatEdge,
+                switcherToRvs.id(),
+                switcherToRvs,
+                ppkToRvsEdge.id(),
+                ppkToRvsEdge),
+            Set.of());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("MT-2O_ShortD"), List.of(hhuDepot, ppkToRvs), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        trainName,
+        new TagStore(trainName, "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode(trainName, ppkStation, Instant.now());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource staleEdge = OccupancyResource.forEdge(hhuThroatEdge.id());
+    OccupancyResource staleSingle =
+        OccupancyResource.forConflict(
+            "single:SURC:CGL:WYB:1:001:SURC:D:HHU:3~SWITCHER:Towny:502:74:996");
+    OccupancyRequest staleFootprint =
+        new OccupancyRequest(
+                trainName,
+                Optional.of(route.id()),
+                Instant.now(),
+                List.of(staleEdge, staleSingle),
+                Map.of(staleSingle.key(), CorridorDirection.A_TO_B),
+                Map.of(staleSingle.key(), 0),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .withResourceIntents(
+                Map.of(
+                    staleEdge,
+                    ResourceIntent.PROTECTIVE_RETAIN,
+                    staleSingle,
+                    ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(staleFootprint).allowed());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    invokeRetainStopOccupancy(service, trainName, route, 0, hhuDepot, graph, Instant.now());
+
+    assertTrue(manager.getClaim(staleEdge).isEmpty(), debugMessages.toString());
+    assertTrue(manager.getClaim(staleSingle).isEmpty(), debugMessages.toString());
+    assertTrue(
+        manager.getClaim(OccupancyResource.forNode(ppkStation)).isPresent(),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_STOP_RETAIN_CURRENT_NODE_OVERRIDDEN")
+                        && message.contains("effectiveNode=SURC:S:PPK:1")
+                        && message.contains("reason=last-passed-next-leg-origin")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void stopRetainDoesNotUseLastPassedWhenNextLegOriginDiffers() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    String trainName = "SURC-MT-LH-8023";
+    NodeId hhuDepot = NodeId.of("SURC:D:HHU:3");
+    NodeId hhuSwitcher = NodeId.of("SWITCHER:Towny:502:74:996");
+    NodeId ppkStation = NodeId.of("SURC:S:PPK:1");
+    NodeId lymToRvs = NodeId.of("SURC:LYM:RVS:2:001");
+    RailEdge hhuThroatEdge =
+        new RailEdge(
+            EdgeId.undirected(hhuDepot, hhuSwitcher),
+            hhuDepot,
+            hhuSwitcher,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge switcherToRvs =
+        new RailEdge(
+            EdgeId.undirected(hhuSwitcher, lymToRvs),
+            hhuSwitcher,
+            lymToRvs,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge ppkToRvsEdge =
+        new RailEdge(
+            EdgeId.undirected(ppkStation, lymToRvs),
+            ppkStation,
+            lymToRvs,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                hhuDepot,
+                    new RailNodeTest(
+                        hhuDepot,
+                        NodeType.DEPOT,
+                        Optional.of(WaypointMetadata.depot("SURC", "HHU", 3))),
+                hhuSwitcher, new RailNodeTest(hhuSwitcher, NodeType.SWITCHER, Optional.empty()),
+                ppkStation,
+                    new RailNodeTest(
+                        ppkStation,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("SURC", "PPK", 1))),
+                lymToRvs,
+                    new RailNodeTest(
+                        lymToRvs,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.interval("SURC", "LYM", "RVS", 2, "001")))),
+            Map.of(
+                hhuThroatEdge.id(),
+                hhuThroatEdge,
+                switcherToRvs.id(),
+                switcherToRvs,
+                ppkToRvsEdge.id(),
+                ppkToRvsEdge),
+            Set.of());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("MT-2O_ShortD"), List.of(hhuDepot, lymToRvs), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        trainName,
+        new TagStore(trainName, "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode(trainName, ppkStation, Instant.now());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource staleEdge = OccupancyResource.forEdge(hhuThroatEdge.id());
+    OccupancyRequest staleFootprint =
+        new OccupancyRequest(
+                trainName,
+                Optional.of(route.id()),
+                Instant.now(),
+                List.of(staleEdge),
+                Map.of(),
+                Map.of(),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .withResourceIntents(Map.of(staleEdge, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(staleFootprint).allowed());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+
+    invokeRetainStopOccupancy(service, trainName, route, 0, hhuDepot, graph, Instant.now());
+
+    assertTrue(manager.getClaim(staleEdge).isPresent(), debugMessages.toString());
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_STOP_RETAIN_CURRENT_NODE_OVERRIDDEN")),
+        debugMessages.toString());
+  }
+
+  @Test
   void oppositeDirectionSingleRegionBlocksUnlockAuthority() throws Exception {
     PlannerExecutionSnapshot snapshot =
         executeSingleRegionPlannerReservationWithExternalOccupant(CorridorDirection.B_TO_A);
@@ -11325,6 +11621,28 @@ class RuntimeDispatchServiceTest {
     method.setAccessible(true);
     return (Set<OccupancyResource>)
         method.invoke(service, effectiveNodes, currentIndex, oldSelfClaims, request);
+  }
+
+  private void invokeRetainStopOccupancy(
+      RuntimeDispatchService service,
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      RailGraph graph,
+      Instant now)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "retainStopOccupancy",
+            String.class,
+            RouteDefinition.class,
+            int.class,
+            NodeId.class,
+            RailGraph.class,
+            Instant.class);
+    method.setAccessible(true);
+    method.invoke(service, trainName, route, currentIndex, currentNode, graph, now);
   }
 
   private boolean smartUnlockNoReleaseCooldownActive(

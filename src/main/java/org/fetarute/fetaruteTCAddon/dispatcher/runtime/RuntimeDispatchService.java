@@ -15780,7 +15780,7 @@ public final class RuntimeDispatchService {
     }
     if (!corridorPriority.selfIsCorridorPriority()
         && admission.sameDirectionLeader()
-        && admission.leaderWillTerminalOrDwell()) {
+        && sameDirectionLeaderTerminalOrDwellShouldBlock(admission, leaderDrainPrediction)) {
       SmartAdmissionResult result =
           smartAdmissionBlocked(
               trainName,
@@ -16184,20 +16184,16 @@ public final class RuntimeDispatchService {
       reason = admission.blockerReason();
     } else if (!admission.leaderProgressFresh()) {
       reason = "same-direction-leader-progress-stale";
-    } else if (admission.leaderWillTerminalOrDwell()) {
-      reason = "same-direction-leader-terminal-or-dwell";
     } else {
       SameDirectionLeaderDrainPrediction leaderDrainPrediction =
           predictSameDirectionLeaderDrain(
               trainName, graph, support, conflict, safeDirection, admission, context);
       traceSameDirectionLeaderDrainPrediction(
           trainName, context, conflict, safeDirection, admission, leaderDrainPrediction);
-      if (leaderDrainPrediction.applicable() && !leaderDrainPrediction.drainProven()) {
+      if (sameDirectionLeaderTerminalOrDwellShouldBlock(admission, leaderDrainPrediction)) {
+        reason = "same-direction-leader-terminal-or-dwell";
+      } else if (leaderDrainPrediction.applicable() && !leaderDrainPrediction.drainProven()) {
         reason = leaderDrainPrediction.reason();
-      } else if (leaderDrainPrediction.applicable()
-          && "same-direction-leader-terminal-follow-through"
-              .equals(leaderDrainPrediction.reason())) {
-        reason = "same-direction-leader-terminal-station-mutex";
       }
     }
     if (reason == null || reason.isBlank()) {
@@ -17406,6 +17402,31 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 判定同向前车的终端/停站粗判是否仍应阻挡本车。
+   *
+   * <p>CBTC 风格的 prior train prediction 要求把“前车未来可穿出”作为更强证据：若 route window 已证明前车会从同一 conflict
+   * 向前排空，则不能再用终端边界的粗略状态把它降级成互斥。真正仍在 dwell 的前车保留硬阻挡，因为它代表行为层正在占用安全停车点。
+   */
+  private boolean sameDirectionLeaderTerminalOrDwellShouldBlock(
+      SingleZoneAdmissionState admission, SameDirectionLeaderDrainPrediction prediction) {
+    if (admission == null || !admission.sameDirectionLeader()) {
+      return false;
+    }
+    if (!admission.leaderWillTerminalOrDwell()) {
+      return false;
+    }
+    if (leaderCurrentlyDwelling(admission.leaderTrain())) {
+      return true;
+    }
+    return !sameDirectionLeaderDrainProven(prediction);
+  }
+
+  private static boolean sameDirectionLeaderDrainProven(
+      SameDirectionLeaderDrainPrediction prediction) {
+    return prediction != null && prediction.applicable() && prediction.drainProven();
+  }
+
+  /**
    * 校验前车未来路径是否确实与本车的 single-region 窗口重合。
    *
    * <p>同一个 conflict key 可以覆盖折返口、长单线、车库切入等多个物理分支。只有两列车未来展开路径在该 key 下共享至少一条 {@link
@@ -17564,9 +17585,14 @@ public final class RuntimeDispatchService {
                 .map(RouteProgressRegistry.RouteProgressEntry::nextTarget)
                 .map(Optional::isEmpty)
                 .orElse(false);
-    boolean dwelling =
-        dwellRegistry != null && dwellRegistry.remainingSeconds(leaderTrain).isPresent();
-    return terminal || dwelling;
+    return terminal || leaderCurrentlyDwelling(leaderTrain);
+  }
+
+  private boolean leaderCurrentlyDwelling(String leaderTrain) {
+    return leaderTrain != null
+        && !leaderTrain.isBlank()
+        && dwellRegistry != null
+        && dwellRegistry.remainingSeconds(leaderTrain).isPresent();
   }
 
   private void traceSmartTrafficControlGate(
@@ -20387,7 +20413,10 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     OccupancyRequestBuilder builder =
         runtimeLookaheadBuilder(graph, runtimeSettings, runtimeSettings.rearGuardEdges());
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    currentNode = resolveStopRetainCurrentNode(trainName, route, currentIndex, currentNode, graph);
+    List<NodeId> effectiveNodes =
+        applyCurrentNodeOverride(
+            resolveEffectiveWaypoints(trainName, route), currentIndex, currentNode);
     Optional<NodeId> targetNode =
         currentIndex + 1 < effectiveNodes.size()
             ? Optional.ofNullable(effectiveNodes.get(currentIndex + 1))
@@ -20479,6 +20508,122 @@ public final class RuntimeDispatchService {
         releasedResources);
     occupancyManager.acquire(request);
     retainForwardQueuePositionAtStop(trainName, route, currentIndex, now, builder, effectiveNodes);
+  }
+
+  /**
+   * 解析停站 retain 的实际当前位置。
+   *
+   * <p>普通信号请求已经会用 {@code lastPassedGraphNode} 修正当前位置，但 stop-retain 过去仍直接使用 route index 节点。折返复用时
+   * route index 可能重新落在段起点，而列车已经经过下一段 interval 的起点站；此时继续按旧段起点构造 HOLD_ONLY footprint 会把身后的咽喉 single
+   * 误当作“当前车体”保住。这里只在 last-passed 安全停车点确认为下一 leg 的 origin boundary，且它能到达下一目标时才纠偏。
+   */
+  private NodeId resolveStopRetainCurrentNode(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      RailGraph graph) {
+    if (currentNode == null || route == null || graph == null || currentIndex < 0) {
+      return currentNode;
+    }
+    NodeId routeNode = resolveEffectiveNode(trainName, route, currentIndex);
+    if (routeNode == null || !routeNode.equals(currentNode)) {
+      return currentNode;
+    }
+    NodeId signalNode = resolveEffectiveCurrentNodeForSignal(trainName, route, currentIndex, graph);
+    if (signalNode != null && !signalNode.equals(routeNode)) {
+      traceStopRetainCurrentNodeOverride(
+          trainName,
+          routeNode,
+          signalNode,
+          nextRouteNode(trainName, route, currentIndex),
+          "signal-path");
+      return signalNode;
+    }
+    Optional<NodeId> lastPassedOpt =
+        progressRegistry
+            .get(trainName)
+            .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode);
+    if (lastPassedOpt.isEmpty()) {
+      return currentNode;
+    }
+    NodeId lastPassed = lastPassedOpt.get();
+    if (lastPassed.equals(routeNode)) {
+      return currentNode;
+    }
+    Optional<NodeId> nextNodeOpt = nextRouteNode(trainName, route, currentIndex);
+    if (nextNodeOpt.isEmpty()) {
+      return currentNode;
+    }
+    NodeId nextNode = nextNodeOpt.get();
+    if (!lastPassedStartsNextLeg(lastPassed, nextNode, graph)) {
+      return currentNode;
+    }
+    if (pathFinder
+        .shortestPath(graph, lastPassed, nextNode, RailGraphPathFinder.Options.shortestDistance())
+        .isEmpty()) {
+      return currentNode;
+    }
+    traceStopRetainCurrentNodeOverride(
+        trainName, routeNode, lastPassed, Optional.of(nextNode), "last-passed-next-leg-origin");
+    return lastPassed;
+  }
+
+  private Optional<NodeId> nextRouteNode(
+      String trainName, RouteDefinition route, int currentIndex) {
+    if (route == null || currentIndex + 1 >= route.waypoints().size()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(resolveEffectiveNode(trainName, route, currentIndex + 1));
+  }
+
+  private boolean lastPassedStartsNextLeg(NodeId lastPassed, NodeId nextNode, RailGraph graph) {
+    Optional<WaypointMetadata> lastMetadata = resolveWaypointMetadata(graph, lastPassed);
+    Optional<WaypointMetadata> nextMetadata = resolveWaypointMetadata(graph, nextNode);
+    if (lastMetadata.isEmpty() || nextMetadata.isEmpty()) {
+      return false;
+    }
+    WaypointMetadata last = lastMetadata.get();
+    WaypointMetadata next = nextMetadata.get();
+    if (!sameText(last.operator(), next.operator())) {
+      return false;
+    }
+    if (last.kind() != WaypointKind.STATION && last.kind() != WaypointKind.DEPOT) {
+      return false;
+    }
+    if (next.kind() == WaypointKind.INTERVAL) {
+      return sameText(last.originStation(), next.originStation());
+    }
+    if (last.kind() == WaypointKind.STATION && next.kind() == WaypointKind.STATION_THROAT) {
+      return sameText(last.originStation(), next.originStation());
+    }
+    if (last.kind() == WaypointKind.DEPOT && next.kind() == WaypointKind.DEPOT_THROAT) {
+      return sameText(last.originStation(), next.originStation());
+    }
+    return false;
+  }
+
+  private static boolean sameText(String first, String second) {
+    return first != null && second != null && first.equalsIgnoreCase(second);
+  }
+
+  private void traceStopRetainCurrentNodeOverride(
+      String trainName,
+      NodeId routeNode,
+      NodeId effectiveNode,
+      Optional<NodeId> nextNode,
+      String reason) {
+    debugLogger.accept(
+        "SMART_STOP_RETAIN_CURRENT_NODE_OVERRIDDEN train="
+            + safeTraceValue(trainName)
+            + " routeNode="
+            + (routeNode == null ? "-" : routeNode.value())
+            + " effectiveNode="
+            + (effectiveNode == null ? "-" : effectiveNode.value())
+            + " nextTarget="
+            + nextNode.map(NodeId::value).orElse("-")
+            + " reason="
+            + safeTraceValue(reason));
   }
 
   /**
