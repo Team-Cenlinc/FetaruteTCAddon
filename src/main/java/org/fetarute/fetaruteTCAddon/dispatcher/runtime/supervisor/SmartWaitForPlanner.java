@@ -453,6 +453,26 @@ public final class SmartWaitForPlanner {
           }
         }
       }
+      if ("MUTUAL".equals(pattern.type())) {
+        List<UnlockCandidate> mutualYieldCandidates =
+            mutualHeadOnYieldCandidates(input, edges, pattern, patternTraces);
+        candidates.addAll(mutualYieldCandidates);
+        if (!mutualYieldCandidates.isEmpty()) {
+          generatedForPattern = true;
+          if (mutualYieldCandidates.stream().anyMatch(UnlockCandidate::accepted)) {
+            acceptedForPattern = true;
+          }
+          if (decisionCandidate == null
+              || (!decisionCandidate.accepted()
+                  && mutualYieldCandidates.stream().anyMatch(UnlockCandidate::accepted))) {
+            decisionCandidate =
+                mutualYieldCandidates.stream()
+                    .filter(UnlockCandidate::accepted)
+                    .findFirst()
+                    .orElse(null);
+          }
+        }
+      }
       traces.add(candidateDecisionTrace(input, pattern, decisionCandidate, generatedForPattern));
       traces.addAll(patternTraces);
       if (!generatedForPattern || !acceptedForPattern) {
@@ -495,7 +515,7 @@ public final class SmartWaitForPlanner {
             input.trainStates().getOrDefault(entry.getKey(), defaultState(entry.getKey()));
         UnlockCandidate candidate =
             yieldCandidateForHeadOn(
-                input.settings(), graphEdges, entry.getValue(), pattern, yieldState);
+                input.settings(), graphEdges, entry.getValue(), pattern, yieldState, true);
         candidates.add(candidate);
         traces.add(
             "SMART_DISPATCH_HEAD_ON_YIELD_DETECTED chainHead="
@@ -515,12 +535,96 @@ public final class SmartWaitForPlanner {
     return List.copyOf(candidates);
   }
 
+  /**
+   * 为方向已知且相反的 mutual wait-for 环生成让行候选。
+   *
+   * <p>该候选只让执行层释放让行车在相关资源上的非物理 claim/队列；它不释放车体 NODE/EDGE，也不签发新的移动授权。
+   */
+  private static List<UnlockCandidate> mutualHeadOnYieldCandidates(
+      PlannerInput input, List<Edge> graphEdges, Pattern pattern, List<String> traces) {
+    if (input == null || pattern == null || !"MUTUAL".equals(pattern.type())) {
+      return List.of();
+    }
+    List<Edge> patternEdges =
+        graphEdges.stream()
+            .filter(
+                edge ->
+                    pattern.trains().contains(edge.blocked())
+                        && pattern.trains().contains(edge.blocker()))
+            .toList();
+    List<UnlockCandidate> candidates = new ArrayList<>();
+    Set<String> seenPairs = new LinkedHashSet<>();
+    for (Edge edge : patternEdges) {
+      Edge reciprocal =
+          patternEdges.stream()
+              .filter(
+                  candidate ->
+                      candidate.blocked().equals(edge.blocker())
+                          && candidate.blocker().equals(edge.blocked()))
+              .findFirst()
+              .orElse(null);
+      if (reciprocal == null) {
+        continue;
+      }
+      String pairKey = String.join("|", sortedSet(Set.of(edge.blocked(), edge.blocker())));
+      if (!seenPairs.add(pairKey)) {
+        continue;
+      }
+      CorridorDirection firstDirection = edge.input().direction();
+      CorridorDirection secondDirection = reciprocal.input().direction();
+      if (firstDirection == CorridorDirection.UNKNOWN
+          || secondDirection == CorridorDirection.UNKNOWN
+          || firstDirection == secondDirection) {
+        continue;
+      }
+      candidates.add(
+          mutualHeadOnYieldCandidate(
+              input, graphEdges, pattern, traces, edge, secondDirection, firstDirection));
+      candidates.add(
+          mutualHeadOnYieldCandidate(
+              input, graphEdges, pattern, traces, reciprocal, firstDirection, secondDirection));
+    }
+    return List.copyOf(candidates);
+  }
+
+  private static UnlockCandidate mutualHeadOnYieldCandidate(
+      PlannerInput input,
+      List<Edge> graphEdges,
+      Pattern pattern,
+      List<String> traces,
+      Edge releaseEdge,
+      CorridorDirection blockedDirection,
+      CorridorDirection yieldDirection) {
+    TrainState yieldState =
+        input
+            .trainStates()
+            .getOrDefault(releaseEdge.blocker(), defaultState(releaseEdge.blocker()));
+    UnlockCandidate candidate =
+        yieldCandidateForHeadOn(
+            input.settings(), graphEdges, List.of(releaseEdge), pattern, yieldState, false);
+    traces.add(
+        "SMART_DISPATCH_MUTUAL_HEAD_ON_YIELD_DETECTED blockedTrain="
+            + releaseEdge.blocked()
+            + " yieldTrain="
+            + candidate.train()
+            + " resources="
+            + candidate.resources()
+            + " blockedDirection="
+            + blockedDirection
+            + " yieldDirection="
+            + yieldDirection);
+    traces.add(candidateTrace(candidate));
+    traces.add(simulationTrace(candidate));
+    return candidate;
+  }
+
   private static UnlockCandidate yieldCandidateForHeadOn(
       PlannerSettings settings,
       List<Edge> graphEdges,
       List<Edge> releaseEdges,
       Pattern pattern,
-      TrainState state) {
+      TrainState state,
+      boolean improvesSameLineCascade) {
     List<Edge> effectiveReleaseEdges = releaseEdges == null ? List.of() : releaseEdges;
     List<String> resources =
         effectiveReleaseEdges.stream().map(Edge::resource).distinct().sorted(TEXT_ORDER).toList();
@@ -544,7 +648,9 @@ public final class SmartWaitForPlanner {
                 : "INSUFFICIENT_DIRECTION_EVIDENCE";
     int score =
         accepted
-            ? score(simulation, false, true, state) + 500 + (simulation.cycleBroken() ? 500 : 0)
+            ? score(simulation, false, improvesSameLineCascade, state)
+                + 500
+                + (simulation.cycleBroken() ? 500 : 0)
             : Integer.MIN_VALUE;
     return new UnlockCandidate(
         state.trainName(),
@@ -565,7 +671,7 @@ public final class SmartWaitForPlanner {
         accepted ? "HEAD_ON_YIELD" : "NEED_DIRECTION_AUDIT",
         simulation,
         false,
-        true,
+        improvesSameLineCascade,
         state.stuckDurationSeconds());
   }
 

@@ -569,6 +569,23 @@ public final class RuntimeDispatchService {
     }
   }
 
+  /** 同向入口准入在缺少明确前后序时的单侧放行裁决。 */
+  private record SameDirectionCorridorPriority(
+      boolean applicable,
+      SameDirectionLeaderOrder leaderOrder,
+      boolean selfIsCorridorPriority,
+      String reason) {
+    private SameDirectionCorridorPriority {
+      leaderOrder = leaderOrder == null ? SameDirectionLeaderOrder.UNKNOWN : leaderOrder;
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+    }
+
+    private static SameDirectionCorridorPriority notApplicable(String reason) {
+      return new SameDirectionCorridorPriority(
+          false, SameDirectionLeaderOrder.UNKNOWN, false, reason);
+    }
+  }
+
   /**
    * 外部同向前车的 drain 预测。
    *
@@ -678,7 +695,8 @@ public final class RuntimeDispatchService {
     REJECT_LEADER_OCCUPYING,
     REJECT_LEADER_EXIT_NOT_VISIBLE,
     REJECT_REGION_OCCUPIED_UNSAFE,
-    REJECT_DOWNSTREAM_BLOCKED
+    REJECT_DOWNSTREAM_BLOCKED,
+    REJECT_THROAT_SECTION_BUSY
   }
 
   /** already-inside 同向 leader 与本车的可证明顺序。 */
@@ -725,6 +743,101 @@ public final class RuntimeDispatchService {
       proofSource = proofSource == null || proofSource.isBlank() ? "-" : proofSource.trim();
       noReleaseReason =
           noReleaseReason == null || noReleaseReason.isBlank() ? "-" : noReleaseReason.trim();
+    }
+  }
+
+  /** 咽喉整段原子准入的只读判定结果。 */
+  private record ThroatSectionAtomicCheck(
+      boolean applicable,
+      boolean clear,
+      String reason,
+      String throatEntry,
+      String throatExitSafePoint,
+      String occupiedResource,
+      List<OccupancyResource> resources) {
+    private ThroatSectionAtomicCheck {
+      reason = reason == null || reason.isBlank() ? "-" : reason.trim();
+      throatEntry = throatEntry == null || throatEntry.isBlank() ? "-" : throatEntry.trim();
+      throatExitSafePoint =
+          throatExitSafePoint == null || throatExitSafePoint.isBlank()
+              ? "-"
+              : throatExitSafePoint.trim();
+      occupiedResource =
+          occupiedResource == null || occupiedResource.isBlank() ? "-" : occupiedResource.trim();
+      resources = resources == null ? List.of() : List.copyOf(resources);
+    }
+
+    private static ThroatSectionAtomicCheck notApplicable(String reason) {
+      return new ThroatSectionAtomicCheck(false, true, reason, "-", "-", "-", List.of());
+    }
+
+    private static ThroatSectionAtomicCheck clear(
+        NodeId entry, NodeId exit, Collection<OccupancyResource> resources) {
+      return new ThroatSectionAtomicCheck(
+          true,
+          true,
+          "throat-section-clear",
+          nodeValue(entry),
+          nodeValue(exit),
+          "-",
+          resources == null ? List.of() : List.copyOf(resources));
+    }
+
+    private static ThroatSectionAtomicCheck blocked(
+        String reason,
+        NodeId entry,
+        NodeId exit,
+        String occupiedResource,
+        Collection<OccupancyResource> resources) {
+      return new ThroatSectionAtomicCheck(
+          true,
+          false,
+          reason,
+          nodeValue(entry),
+          nodeValue(exit),
+          occupiedResource,
+          resources == null ? List.of() : List.copyOf(resources));
+    }
+
+    private static String nodeValue(NodeId node) {
+      return node == null || node.value() == null ? "-" : node.value();
+    }
+  }
+
+  /** admission 内部使用的有向路径视图，优先来自 MovementPlanSnapshot。 */
+  private record ThroatAtomicPath(
+      List<NodeId> nodes, List<DirectedTraversalContext.DirectedEdge> edges) {
+    private ThroatAtomicPath {
+      nodes = nodes == null ? List.of() : List.copyOf(nodes);
+      edges = edges == null ? List.of() : List.copyOf(edges);
+    }
+
+    private static ThroatAtomicPath from(OccupancyRequestContext context) {
+      if (context == null || context.request() == null) {
+        return new ThroatAtomicPath(List.of(), List.of());
+      }
+      Optional<MovementPlanSnapshot> plan = context.request().movementPlanSnapshot();
+      if (plan.isPresent()
+          && plan.get().expandedPathNodes().size() >= 2
+          && !plan.get().directedEdges().isEmpty()) {
+        return new ThroatAtomicPath(plan.get().expandedPathNodes(), plan.get().directedEdges());
+      }
+      List<NodeId> nodes = context.pathNodes();
+      List<RailEdge> railEdges = context.edges();
+      if (nodes == null || railEdges == null || nodes.size() < 2 || railEdges.isEmpty()) {
+        return new ThroatAtomicPath(List.of(), List.of());
+      }
+      List<DirectedTraversalContext.DirectedEdge> directedEdges = new ArrayList<>();
+      int edgeCount = Math.min(railEdges.size(), nodes.size() - 1);
+      for (int i = 0; i < edgeCount; i++) {
+        RailEdge edge = railEdges.get(i);
+        if (edge == null) {
+          continue;
+        }
+        directedEdges.add(
+            new DirectedTraversalContext.DirectedEdge(edge.id(), nodes.get(i), nodes.get(i + 1)));
+      }
+      return new ThroatAtomicPath(nodes, directedEdges);
     }
   }
 
@@ -15485,6 +15598,41 @@ public final class RuntimeDispatchService {
     Optional<SmartAdmissionResult> queueOnlyAdmission =
         evaluateQueueOnlySmartAdmission(
             trainName, context, conflict, direction, lookahead, admission, safeContext);
+    if (queueOnlyAdmission.isPresent() && !queueOnlyAdmission.get().allowed()) {
+      SmartAdmissionResult result = queueOnlyAdmission.get();
+      traceSingleZoneAdmissionDecision(
+          trainName,
+          context,
+          conflict,
+          direction,
+          lookahead,
+          admission,
+          result.allowed(),
+          result.reason());
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
+    ThroatSectionAtomicCheck throatSection =
+        throatSectionAtomicClear(conflict, context, trainName, graph, support);
+    traceThroatSectionAtomic(trainName, conflict, throatSection);
+    if (throatSection.applicable() && !throatSection.clear()) {
+      SmartAdmissionResult result =
+          smartAdmissionBlocked(
+              trainName,
+              context,
+              conflict,
+              direction,
+              lookahead,
+              admission,
+              safeContext,
+              SmartAdmissionDecision.REJECT_THROAT_SECTION_BUSY,
+              "throat-section-not-atomically-clear",
+              false);
+      traceSingleZoneAdmissionDecision(
+          trainName, context, conflict, direction, lookahead, admission, false, result.reason());
+      traceSmartAdmissionResult(trainName, context, result);
+      return result;
+    }
     if (queueOnlyAdmission.isPresent()) {
       SmartAdmissionResult result = queueOnlyAdmission.get();
       traceSingleZoneAdmissionDecision(
@@ -15604,8 +15752,13 @@ public final class RuntimeDispatchService {
       traceSmartAdmissionResult(trainName, context, result);
       return result;
     }
-    if (admission.leaderStalled()
-        || (admission.sameDirectionLeader() && !admission.leaderProgressFresh())) {
+    SameDirectionCorridorPriority corridorPriority =
+        sameDirectionCorridorPriority(trainName, graph, context, admission);
+    traceSameDirectionCorridorPriority(
+        trainName, conflict, admission, corridorPriority, "can-enter");
+    if (!corridorPriority.selfIsCorridorPriority()
+        && (admission.leaderStalled()
+            || (admission.sameDirectionLeader() && !admission.leaderProgressFresh()))) {
       SmartAdmissionResult result =
           smartAdmissionBlocked(
               trainName,
@@ -15625,7 +15778,9 @@ public final class RuntimeDispatchService {
       traceSmartAdmissionResult(trainName, context, result);
       return result;
     }
-    if (admission.sameDirectionLeader() && admission.leaderWillTerminalOrDwell()) {
+    if (!corridorPriority.selfIsCorridorPriority()
+        && admission.sameDirectionLeader()
+        && admission.leaderWillTerminalOrDwell()) {
       SmartAdmissionResult result =
           smartAdmissionBlocked(
               trainName,
@@ -15641,7 +15796,8 @@ public final class RuntimeDispatchService {
       traceSmartAdmissionResult(trainName, context, result);
       return result;
     }
-    if (admission.sameDirectionLeader()
+    if (!corridorPriority.selfIsCorridorPriority()
+        && admission.sameDirectionLeader()
         && leaderDrainPrediction.applicable()
         && !leaderDrainPrediction.drainProven()) {
       SmartAdmissionResult result =
@@ -15661,7 +15817,9 @@ public final class RuntimeDispatchService {
       traceSmartAdmissionResult(trainName, context, result);
       return result;
     }
-    if (admission.sameDirectionLeader() && !lookahead.exitFeasible()) {
+    if (!corridorPriority.selfIsCorridorPriority()
+        && admission.sameDirectionLeader()
+        && !lookahead.exitFeasible()) {
       SmartAdmissionResult result =
           smartAdmissionBlocked(
               trainName,
@@ -15717,6 +15875,275 @@ public final class RuntimeDispatchService {
         trainName, context, conflict, direction, lookahead, admission, true, result.reason());
     traceSmartAdmissionResult(trainName, context, result);
     return result;
+  }
+
+  /**
+   * 咽喉区间整段原子准入。
+   *
+   * <p>STATION/DEPOT 是安全停车点；STATION_THROAT、DEPOT_THROAT 与 SWITCHER 组成不可中停咽喉。列车从安全点进入咽喉前，
+   * 必须能沿本轮展开路径看到下一个安全停车点，并确认入口之后到出口安全点之间所有 NODE/EDGE/CONFLICT 资源未被他车占用或排队。
+   */
+  private ThroatSectionAtomicCheck throatSectionAtomicClear(
+      OccupancyResource conflict,
+      OccupancyRequestContext context,
+      String trainName,
+      RailGraph graph,
+      RailGraphConflictSupport support) {
+    if (conflict == null || context == null || graph == null || support == null) {
+      return ThroatSectionAtomicCheck.notApplicable("missing-input");
+    }
+    ThroatAtomicPath path = ThroatAtomicPath.from(context);
+    if (path.nodes().size() < 2 || path.edges().isEmpty()) {
+      return ThroatSectionAtomicCheck.notApplicable("path-missing");
+    }
+    int entryEdgeIndex = throatEntryEdgeIndex(path, conflict, support);
+    if (entryEdgeIndex < 0) {
+      return ThroatSectionAtomicCheck.notApplicable("conflict-not-on-expanded-path");
+    }
+    if (entryEdgeIndex + 1 >= path.nodes().size()) {
+      return ThroatSectionAtomicCheck.blocked(
+          "throat-topology-unresolvable", path.nodes().get(entryEdgeIndex), null, "-", List.of());
+    }
+    NodeId entry = path.nodes().get(entryEdgeIndex);
+    NodeId firstInside = path.nodes().get(entryEdgeIndex + 1);
+    if (!isThroatAtomicNode(graph, firstInside)) {
+      return ThroatSectionAtomicCheck.notApplicable("not-throat-section");
+    }
+    int exitIndex = throatExitSafePointIndex(path.nodes(), entryEdgeIndex + 1, graph);
+    if (exitIndex < 0 || exitIndex > path.edges().size()) {
+      return ThroatSectionAtomicCheck.blocked(
+          "throat-topology-unresolvable", entry, null, "-", List.of());
+    }
+    NodeId exit = path.nodes().get(exitIndex);
+    LinkedHashSet<OccupancyResource> resources =
+        throatSectionResources(path, entryEdgeIndex, exitIndex, support);
+    if (resources.isEmpty()) {
+      return ThroatSectionAtomicCheck.blocked(
+          "throat-topology-unresolvable", entry, exit, "-", resources);
+    }
+    Optional<String> occupiedResource =
+        firstExternalThroatSectionClaim(resources, trainName)
+            .or(() -> firstExternalThroatSectionQueue(resources, trainName, conflict));
+    if (occupiedResource.isPresent()) {
+      return ThroatSectionAtomicCheck.blocked(
+          "throat-section-resource-occupied", entry, exit, occupiedResource.get(), resources);
+    }
+    return ThroatSectionAtomicCheck.clear(entry, exit, resources);
+  }
+
+  private int throatEntryEdgeIndex(
+      ThroatAtomicPath path, OccupancyResource conflict, RailGraphConflictSupport support) {
+    if (path == null || conflict == null || support == null) {
+      return -1;
+    }
+    for (int i = 0; i < path.edges().size(); i++) {
+      DirectedTraversalContext.DirectedEdge edge = path.edges().get(i);
+      if (edge != null
+          && support.conflictKeyForEdge(edge.edgeId()).filter(conflict.key()::equals).isPresent()) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private int throatExitSafePointIndex(List<NodeId> nodes, int firstInsideIndex, RailGraph graph) {
+    if (nodes == null || firstInsideIndex < 0 || firstInsideIndex >= nodes.size()) {
+      return -1;
+    }
+    for (int i = firstInsideIndex; i < nodes.size(); i++) {
+      NodeId node = nodes.get(i);
+      if (isThroatSafeStopNode(graph, node)) {
+        return i;
+      }
+      if (!isThroatAtomicNode(graph, node)) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+
+  private LinkedHashSet<OccupancyResource> throatSectionResources(
+      ThroatAtomicPath path,
+      int entryEdgeIndex,
+      int exitSafePointIndex,
+      RailGraphConflictSupport support) {
+    LinkedHashSet<OccupancyResource> resources = new LinkedHashSet<>();
+    if (path == null || support == null || entryEdgeIndex < 0 || exitSafePointIndex < 0) {
+      return resources;
+    }
+    for (int i = entryEdgeIndex; i < exitSafePointIndex && i < path.edges().size(); i++) {
+      DirectedTraversalContext.DirectedEdge edge = path.edges().get(i);
+      if (edge == null) {
+        continue;
+      }
+      resources.add(OccupancyResource.forEdge(edge.edgeId()));
+      support
+          .conflictKeyForEdge(edge.edgeId())
+          .map(OccupancyResource::forConflict)
+          .ifPresent(resources::add);
+    }
+    for (int i = entryEdgeIndex + 1; i <= exitSafePointIndex && i < path.nodes().size(); i++) {
+      NodeId node = path.nodes().get(i);
+      if (node != null) {
+        resources.add(OccupancyResource.forNode(node));
+      }
+    }
+    return resources;
+  }
+
+  private Optional<String> firstExternalThroatSectionClaim(
+      Collection<OccupancyResource> resources, String trainName) {
+    if (resources == null || resources.isEmpty()) {
+      return Optional.empty();
+    }
+    List<OccupancyClaim> claims =
+        occupancyManager == null ? null : occupancyManager.snapshotClaims();
+    if (claims == null) {
+      return Optional.of("occupancy-snapshot-unavailable");
+    }
+    Set<OccupancyResource> resourceSet = Set.copyOf(resources);
+    for (OccupancyClaim claim : claims) {
+      if (claim == null
+          || claim.resource() == null
+          || !resourceSet.contains(claim.resource())
+          || TrainNameNormalizer.sameLogicalTrain(trainName, claim.trainName())) {
+        continue;
+      }
+      return Optional.of(claim.resource() + "@claim:" + claim.trainName());
+    }
+    return Optional.empty();
+  }
+
+  private Optional<String> firstExternalThroatSectionQueue(
+      Collection<OccupancyResource> resources, String trainName, OccupancyResource entryConflict) {
+    if (resources == null || resources.isEmpty()) {
+      return Optional.empty();
+    }
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
+      return Optional.empty();
+    }
+    List<OccupancyQueueSnapshot> snapshots = queueSupport.snapshotQueues();
+    if (snapshots == null) {
+      return Optional.of("occupancy-queue-snapshot-unavailable");
+    }
+    Set<OccupancyResource> resourceSet = Set.copyOf(resources);
+    for (OccupancyQueueSnapshot snapshot : snapshots) {
+      if (snapshot == null
+          || snapshot.resource() == null
+          || !resourceSet.contains(snapshot.resource())) {
+        continue;
+      }
+      if (snapshot.resource().equals(entryConflict)
+          && throatQueueHeadIsTrain(snapshot, trainName)) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : snapshot.entries()) {
+        if (entry != null && !TrainNameNormalizer.sameLogicalTrain(trainName, entry.trainName())) {
+          return Optional.of(snapshot.resource() + "@queue:" + entry.trainName());
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static boolean throatQueueHeadIsTrain(OccupancyQueueSnapshot snapshot, String trainName) {
+    if (snapshot == null || snapshot.entries().isEmpty()) {
+      return false;
+    }
+    for (OccupancyQueueEntry entry : snapshot.entries()) {
+      if (entry == null) {
+        continue;
+      }
+      return TrainNameNormalizer.sameLogicalTrain(trainName, entry.trainName());
+    }
+    return false;
+  }
+
+  private boolean isThroatAtomicNode(RailGraph graph, NodeId nodeId) {
+    if (nodeId == null) {
+      return false;
+    }
+    if (isSwitcherNode(graph, nodeId)) {
+      return true;
+    }
+    return resolveWaypointMetadata(graph, nodeId)
+        .map(
+            metadata ->
+                metadata.kind() == WaypointKind.STATION_THROAT
+                    || metadata.kind() == WaypointKind.DEPOT_THROAT
+                    || metadata.kind() == WaypointKind.SWITCHER)
+        .orElse(false);
+  }
+
+  private boolean isThroatSafeStopNode(RailGraph graph, NodeId nodeId) {
+    return isStationOrDepotBehaviorNode(nodeId, graph);
+  }
+
+  /**
+   * 判断同向入口准入是否应由本车作为 corridor 优先侧继续走后续物理闭塞检查。
+   *
+   * <p>该裁决只在没有对向/未知方向占用时生效，且只跳过同向 leader 的软阻塞；真实 {@code NODE}/{@code EDGE} 硬占用仍由后续 {@code
+   * OccupancyManager.canEnter()} 判定。
+   */
+  private SameDirectionCorridorPriority sameDirectionCorridorPriority(
+      String trainName,
+      RailGraph graph,
+      OccupancyRequestContext context,
+      SingleZoneAdmissionState admission) {
+    if (admission == null || !admission.sameDirectionLeader()) {
+      return SameDirectionCorridorPriority.notApplicable("not-same-direction-leader");
+    }
+    if (admission.oppositeDirectionPresent()
+        || admission.unknownDirectionPresent()
+        || admission.oppositeOrUnknownPresence()) {
+      return SameDirectionCorridorPriority.notApplicable("opposite-or-unknown-present");
+    }
+    SameDirectionLeaderOrder leaderOrder =
+        sameDirectionCorridorPriorityOrder(trainName, admission.leaderTrain(), context, graph);
+    boolean selfPriority =
+        leaderOrder == SameDirectionLeaderOrder.TRAIN_AHEAD
+            || (leaderOrder == SameDirectionLeaderOrder.UNKNOWN
+                && admission.leaderStalled()
+                && !deterministicSameDirectionYield(trainName, admission.leaderTrain()));
+    String reason =
+        switch (leaderOrder) {
+          case TRAIN_AHEAD -> "candidate-train-ahead";
+          case LEADER_AHEAD -> "leader-ahead";
+          case UNKNOWN -> selfPriority
+              ? "leader-order-unknown-deterministic-pass"
+              : "leader-order-unknown-deterministic-yield";
+        };
+    return new SameDirectionCorridorPriority(true, leaderOrder, selfPriority, reason);
+  }
+
+  private SameDirectionLeaderOrder sameDirectionCorridorPriorityOrder(
+      String trainName, String leaderTrain, OccupancyRequestContext context, RailGraph graph) {
+    if (TrainNameNormalizer.sameLogicalTrain(trainName, leaderTrain)) {
+      return SameDirectionLeaderOrder.UNKNOWN;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> trainEntry =
+        progressRegistry == null ? Optional.empty() : progressRegistry.get(trainName);
+    Optional<RouteProgressRegistry.RouteProgressEntry> leaderEntry =
+        progressRegistry == null ? Optional.empty() : progressRegistry.get(leaderTrain);
+    if (trainEntry.isPresent()
+        && leaderEntry.isPresent()
+        && trainEntry.get().routeId().equals(leaderEntry.get().routeId())) {
+      int trainIndex = trainEntry.get().currentIndex();
+      int leaderIndex = leaderEntry.get().currentIndex();
+      if (leaderIndex > trainIndex) {
+        return SameDirectionLeaderOrder.LEADER_AHEAD;
+      }
+      if (leaderIndex < trainIndex) {
+        return SameDirectionLeaderOrder.TRAIN_AHEAD;
+      }
+    }
+    SameDirectionLeaderOrder visiblePathOrder =
+        sameDirectionLeaderOrderByVisiblePath(trainEntry, leaderEntry, context);
+    if (visiblePathOrder != SameDirectionLeaderOrder.UNKNOWN) {
+      return visiblePathOrder;
+    }
+    return sameDirectionLeaderOrderBySharedAnchor(
+        trainName, leaderTrain, trainEntry, leaderEntry, context, graph);
   }
 
   private Optional<SmartAdmissionResult> evaluateAlreadyInsideSameDirectionLeaderBlock(
@@ -16036,6 +16463,36 @@ public final class RuntimeDispatchService {
             + (reason == null || reason.isBlank() ? "-" : reason));
   }
 
+  private void traceSameDirectionCorridorPriority(
+      String trainName,
+      OccupancyResource conflict,
+      SingleZoneAdmissionState admission,
+      SameDirectionCorridorPriority priority,
+      String source) {
+    if (priority == null || !priority.applicable()) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_SAME_DIRECTION_CORRIDOR_PRIORITY train="
+            + trainName
+            + " leader="
+            + (admission == null
+                    || admission.leaderTrain() == null
+                    || admission.leaderTrain().isBlank()
+                ? "-"
+                : admission.leaderTrain())
+            + " regionId="
+            + (conflict == null ? "-" : conflict.key())
+            + " corridorOrder="
+            + priority.leaderOrder()
+            + " selfIsCorridorPriority="
+            + priority.selfIsCorridorPriority()
+            + " reason="
+            + priority.reason()
+            + " source="
+            + (source == null || source.isBlank() ? "-" : source));
+  }
+
   private SmartAdmissionResult smartAdmissionAllowed(
       OccupancyRequestContext context,
       OccupancyResource conflict,
@@ -16186,7 +16643,8 @@ public final class RuntimeDispatchService {
         || fallback == SmartAdmissionDecision.REJECT_LEADER_EXIT_NOT_VISIBLE
         || fallback == SmartAdmissionDecision.REJECT_REGION_OCCUPIED_UNSAFE
         || fallback == SmartAdmissionDecision.REJECT_OPPOSITE_DIRECTION
-        || fallback == SmartAdmissionDecision.REJECT_UNKNOWN_DIRECTION) {
+        || fallback == SmartAdmissionDecision.REJECT_UNKNOWN_DIRECTION
+        || fallback == SmartAdmissionDecision.REJECT_THROAT_SECTION_BUSY) {
       return fallback;
     }
     return SmartAdmissionDecision.HOLD_AT_ENTRY;
@@ -17531,6 +17989,30 @@ public final class RuntimeDispatchService {
         .filter(Objects::nonNull)
         .map(Object::toString)
         .toList();
+  }
+
+  private void traceThroatSectionAtomic(
+      String trainName, OccupancyResource conflict, ThroatSectionAtomicCheck check) {
+    if (check == null || !check.applicable()) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_THROAT_SECTION_ATOMIC train="
+            + (trainName == null || trainName.isBlank() ? "-" : trainName)
+            + " conflict="
+            + (conflict == null ? "-" : conflict.key())
+            + " throatEntry="
+            + check.throatEntry()
+            + " throatExitSafePoint="
+            + check.throatExitSafePoint()
+            + " occupiedResource="
+            + check.occupiedResource()
+            + " clear="
+            + check.clear()
+            + " reason="
+            + check.reason()
+            + " resourceCount="
+            + check.resources().size());
   }
 
   private static String routeUnlockPotentialReason(
@@ -19950,6 +20432,10 @@ public final class RuntimeDispatchService {
                 priorityResolution),
             protectedSwitcherZoneClaims(
                 trainName, route, currentIndex, currentNode, graph, "STOP_HOLD"));
+    protectedResources =
+        removeStopRetainBehindReleaseResources(
+            protectedResources,
+            stopRetainBehindReleaseResources(effectiveNodes, currentIndex, oldSelfClaims, request));
     List<OccupancyResource> releaseEligibleResources =
         resourcesEligibleForRelease(trainName, request.resourceList(), protectedResources);
     traceStopRetainResourceShrink(
@@ -19993,6 +20479,55 @@ public final class RuntimeDispatchService {
         releasedResources);
     occupancyManager.acquire(request);
     retainForwardQueuePositionAtStop(trainName, route, currentIndex, now, builder, effectiveNodes);
+  }
+
+  /**
+   * 计算停站 retain 时可安全释放的旧 single corridor claim。
+   *
+   * <p>该释放只处理本车旧 {@link ClaimRole#MOVEMENT_REQUIRED} single claim；资源必须不在当前 hold request 中，并且 route
+   * 进度能证明它只触及当前索引之前的节点。这样可以清掉 layover/停站后残留在身后的旧方向证据，同时不会释放当前车体位置或外部列车占用。
+   */
+  private Set<OccupancyResource> stopRetainBehindReleaseResources(
+      List<NodeId> effectiveNodes,
+      int currentIndex,
+      List<OccupancyClaim> oldSelfClaims,
+      OccupancyRequest request) {
+    if (oldSelfClaims == null || oldSelfClaims.isEmpty()) {
+      return Set.of();
+    }
+    Set<OccupancyResource> releaseResources = new LinkedHashSet<>();
+    for (OccupancyClaim claim : oldSelfClaims) {
+      if (claim == null
+          || claim.resource() == null
+          || !isSingleCorridorResource(claim.resource())) {
+        continue;
+      }
+      StopRetainBehindReleaseProof proof =
+          evaluateStopRetainBehindReleaseDryRun(effectiveNodes, currentIndex, claim, request);
+      if (proof.wouldReleaseIfBehaviorPatchExisted()) {
+        releaseResources.add(claim.resource());
+      }
+    }
+    return Set.copyOf(releaseResources);
+  }
+
+  /**
+   * 从保护集中移除已由 route 进度证明落在身后的旧 single 资源。
+   *
+   * <p>真正的释放仍由 {@link #releaseResourcesNotInRequest(String, List, Set)} 执行，因此当前 request
+   * 覆盖的资源不会被释放；这里仅撤销旧保守保护，避免旧方向 claim 长期阻塞对向准入。
+   */
+  private static Set<OccupancyResource> removeStopRetainBehindReleaseResources(
+      Set<OccupancyResource> protectedResources, Set<OccupancyResource> releaseResources) {
+    if (protectedResources == null || protectedResources.isEmpty()) {
+      return Set.of();
+    }
+    if (releaseResources == null || releaseResources.isEmpty()) {
+      return protectedResources;
+    }
+    Set<OccupancyResource> result = new LinkedHashSet<>(protectedResources);
+    result.removeAll(releaseResources);
+    return Set.copyOf(result);
   }
 
   private List<OccupancyClaim> snapshotSelfClaims(String trainName) {

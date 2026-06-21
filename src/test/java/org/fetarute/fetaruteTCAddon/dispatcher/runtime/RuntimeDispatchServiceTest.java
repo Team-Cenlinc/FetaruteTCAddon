@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -82,6 +83,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
@@ -3703,6 +3705,59 @@ class RuntimeDispatchServiceTest {
     }
   }
 
+  private static final class ThroatConflictGraph implements RailGraph, RailGraphConflictSupport {
+    private final Map<NodeId, RailNode> nodes;
+    private final Map<EdgeId, RailEdge> edges;
+    private final Map<EdgeId, String> conflicts;
+
+    private ThroatConflictGraph(
+        Map<NodeId, RailNode> nodes, List<RailEdge> edges, Map<EdgeId, String> conflicts) {
+      this.nodes = Map.copyOf(nodes);
+      Map<EdgeId, RailEdge> nextEdges = new LinkedHashMap<>();
+      for (RailEdge edge : edges) {
+        nextEdges.put(edge.id(), edge);
+      }
+      this.edges = Map.copyOf(nextEdges);
+      this.conflicts = Map.copyOf(conflicts);
+    }
+
+    @Override
+    public java.util.Collection<RailNode> nodes() {
+      return nodes.values();
+    }
+
+    @Override
+    public java.util.Collection<RailEdge> edges() {
+      return edges.values();
+    }
+
+    @Override
+    public Optional<RailNode> findNode(NodeId id) {
+      return Optional.ofNullable(nodes.get(id));
+    }
+
+    @Override
+    public Set<RailEdge> edgesFrom(NodeId id) {
+      Set<RailEdge> result = new LinkedHashSet<>();
+      for (RailEdge edge : edges.values()) {
+        if (edge.from().equals(id) || edge.to().equals(id)) {
+          result.add(edge);
+        }
+      }
+      return result;
+    }
+
+    @Override
+    public boolean isBlocked(EdgeId id) {
+      return false;
+    }
+
+    @Override
+    public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+      return Optional.ofNullable(conflicts.get(edgeId));
+    }
+  }
+
   private static final class ParallelConflictExitGraph
       implements RailGraph, RailGraphConflictSupport {
     private final Map<NodeId, RailNode> nodes;
@@ -6364,6 +6419,233 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void throatSectionFullyClearAllowsAtomicEntry() {
+    List<String> debugMessages = new ArrayList<>();
+    ThroatFixture throat = ppkThroatFixture();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LP-2387",
+            throat.graph(),
+            throat.context("SURC-MT-LP-2387", CorridorDirection.A_TO_B, false));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("clear=true")
+                        && message.contains("throatEntry=OP:S:PPK:1")
+                        && message.contains("throatExitSafePoint=OP:S:PPK:2")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void throatSectionExitOccupiedHoldsAtEntrySafePoint() {
+    List<String> debugMessages = new ArrayList<>();
+    ThroatFixture throat = ppkThroatFixture();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "SURC-MT-LP-0888",
+                    Optional.empty(),
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    List.of(OccupancyResource.forNode(throat.exit())),
+                    Map.of()))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LP-2387",
+            throat.graph(),
+            throat.context("SURC-MT-LP-2387", CorridorDirection.A_TO_B, false));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("clear=false")
+                        && message.contains(
+                            "occupiedResource=NODE:OP:S:PPK:2@claim:SURC-MT-LP-0888")),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=throat-section-not-atomically-clear")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void twoTrainsCannotEachHoldHalfThroat() {
+    List<String> debugMessages = new ArrayList<>();
+    ThroatFixture throat = ppkThroatFixture();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean outboundAllowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LP-2387",
+            throat.graph(),
+            throat.context("SURC-MT-LP-2387", CorridorDirection.A_TO_B, false));
+    assertTrue(outboundAllowed, debugMessages.toString());
+    assertTrue(
+        manager
+            .acquire(throat.atomicRequest("SURC-MT-LP-2387", CorridorDirection.A_TO_B))
+            .allowed());
+
+    boolean turnbackAllowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LP-0888",
+            throat.graph(),
+            throat.context("SURC-MT-LP-0888", CorridorDirection.B_TO_A, true));
+
+    assertFalse(turnbackAllowed, debugMessages.toString());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .allMatch(claim -> !"SURC-MT-LP-0888".equals(claim.trainName())));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("train=SURC-MT-LP-0888")
+                        && message.contains("clear=false")
+                        && message.contains("throat-section-resource-occupied")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void plainSingleCorridorFollowUnaffected() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:plain-corridor";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("plain-follow"), List.of(a, b, c), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
+            .activate("C"));
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("SMART_THROAT_SECTION_ATOMIC")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void throatTopologyUnresolvableFailsClosed() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId station = NodeId.of("OP:S:PPK:1");
+    NodeId throat = NodeId.of("OP:S:PPK:1:001");
+    NodeId plain = NodeId.of("PLAIN-NON-STOP");
+    String conflictKey = "single:test:ppk-broken-throat";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(station, throat), station, throat, 10, -1.0, true, Optional.empty());
+    RailEdge brokenEdge =
+        new RailEdge(
+            EdgeId.undirected(throat, plain), throat, plain, 10, -1.0, true, Optional.empty());
+    ThroatConflictGraph graph =
+        new ThroatConflictGraph(
+            Map.of(
+                station,
+                    new RailNodeTest(
+                        station,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("OP", "PPK", 1))),
+                throat,
+                    new RailNodeTest(
+                        throat,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.stationThroat("OP", "PPK", 1, "001"))),
+                plain, new RailNodeTest(plain)),
+            List.of(entryEdge, brokenEdge),
+            Map.of(entryEdge.id(), conflictKey, brokenEdge.id(), conflictKey));
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LP-2387",
+            graph,
+            singleConflictPathContext(
+                "SURC-MT-LP-2387",
+                conflict,
+                CorridorDirection.A_TO_B,
+                List.of(station, throat, plain),
+                List.of(entryEdge, brokenEdge),
+                List.of(conflict)));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("clear=false")
+                        && message.contains("reason=throat-topology-unresolvable")),
+        debugMessages.toString());
+  }
+
+  @Test
   void smartLongSingleObserveOnlyDoesNotBlockButTraces() {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("DEPOT");
@@ -6904,6 +7186,335 @@ class RuntimeDispatchServiceTest {
                     message.contains("SMART_ALREADY_INSIDE_LEADER_GUARD_SKIPPED")
                         && message.contains("leader-order-unknown-deterministic-pass")),
         debugMessages.toString());
+  }
+
+  @Test
+  void depotSameOriginSymmetricStallSelectsSingleDeterministicWinner() throws Exception {
+    NodeId a = NodeId.of("D:HHU:3");
+    NodeId b = NodeId.of("CGL:WYB:1:001");
+    NodeId c = NodeId.of("OP:S:PPK:1");
+    String conflictKey = "single:test:HHU~PPK";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailGraph graph = new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey);
+    String firstTrain = "SURC-DS-1W-6949";
+    String secondTrain = "SURC-DS-1W-8862";
+
+    AdmissionView firstView =
+        sameDirectionAdmissionView(
+            firstTrain,
+            secondTrain,
+            conflict,
+            CorridorDirection.A_TO_B,
+            CorridorDirection.A_TO_B,
+            edgeAb,
+            edgeBc,
+            a,
+            b,
+            c);
+    AdmissionView secondView =
+        sameDirectionAdmissionView(
+            secondTrain,
+            firstTrain,
+            conflict,
+            CorridorDirection.A_TO_B,
+            CorridorDirection.A_TO_B,
+            edgeAb,
+            edgeBc,
+            a,
+            b,
+            c);
+    boolean firstAllowed =
+        firstView.service().smartDepotAdmissionAllowsSpawn(firstTrain, graph, firstView.context());
+    boolean secondAllowed =
+        secondView
+            .service()
+            .smartDepotAdmissionAllowsSpawn(secondTrain, graph, secondView.context());
+
+    assertTrue(
+        firstAllowed || secondAllowed,
+        firstView.debugMessages() + "\n" + secondView.debugMessages());
+    assertFalse(
+        firstAllowed && secondAllowed,
+        firstView.debugMessages() + "\n" + secondView.debugMessages());
+    List<String> winnerLogs = firstAllowed ? firstView.debugMessages() : secondView.debugMessages();
+    List<String> loserLogs = firstAllowed ? secondView.debugMessages() : firstView.debugMessages();
+    assertTrue(
+        winnerLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_CORRIDOR_PRIORITY")
+                        && message.contains("corridorOrder=UNKNOWN")
+                        && message.contains("selfIsCorridorPriority=true")),
+        winnerLogs.toString());
+    assertTrue(
+        loserLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=same-direction-leader-stalled")),
+        loserLogs.toString());
+  }
+
+  @Test
+  void corridorLeaderAheadFollowerHeldNoOvertake() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId d = NodeId.of("D");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("same-route"), List.of(a, b, c, d), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "follower",
+        new TagStore("follower", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        route);
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "leader");
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertFalse(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_CORRIDOR_PRIORITY")
+                        && message.contains("corridorOrder=LEADER_AHEAD")
+                        && message.contains("selfIsCorridorPriority=false")),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=same-direction-leader-stalled")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void corridorTrainAheadBypassesStalledRearLeader() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId d = NodeId.of("D");
+    String conflictKey = "single:test:B~D";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailEdge edgeCd = new RailEdge(EdgeId.undirected(c, d), c, d, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("rear", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("same-route"), List.of(a, b, c, d), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "front",
+        new TagStore("front", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        route);
+    registry.initFromTags(
+        "rear",
+        new TagStore("rear", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "rear");
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "front",
+            new ConflictExitGraph(b, c, d, edgeBc, edgeCd, conflictKey),
+            singleConflictContext(
+                "front", conflict, CorridorDirection.A_TO_B, edgeBc, edgeCd, b, c, d));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_CORRIDOR_PRIORITY")
+                        && message.contains("corridorOrder=TRAIN_AHEAD")
+                        && message.contains("selfIsCorridorPriority=true")),
+        debugMessages.toString());
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=same-direction-leader-stalled")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void corridorPriorityStillBlockedByPhysicalNode() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId d = NodeId.of("D");
+    String conflictKey = "single:test:B~D";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    OccupancyResource physicalNode = OccupancyResource.forNode(c);
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailEdge edgeCd = new RailEdge(EdgeId.undirected(c, d), c, d, 10, -1.0, true, Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("rear", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "physical-blocker",
+                    Optional.empty(),
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    List.of(physicalNode),
+                    Map.of()))
+            .allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("same-route"), List.of(a, b, c, d), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "front",
+        new TagStore("front", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=1").properties(),
+        route);
+    registry.initFromTags(
+        "rear",
+        new TagStore("rear", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, "rear");
+    OccupancyRequestContext context =
+        singleConflictContextWithResources(
+            "front",
+            conflict,
+            CorridorDirection.A_TO_B,
+            edgeBc,
+            edgeCd,
+            b,
+            c,
+            d,
+            List.of(conflict, physicalNode));
+
+    boolean admissionAllowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "front", new ConflictExitGraph(b, c, d, edgeBc, edgeCd, conflictKey), context);
+    OccupancyDecision physicalDecision = manager.canEnter(context.request());
+
+    assertTrue(admissionAllowed, debugMessages.toString());
+    assertFalse(physicalDecision.allowed());
+    assertTrue(
+        physicalDecision.blockers().stream()
+            .anyMatch(claim -> physicalNode.equals(claim.resource())));
+  }
+
+  @Test
+  void oppositeDirectionUnaffectedStillBlocksBoth() throws Exception {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~C";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    RailGraph eastGraph = new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey);
+    RailGraph westGraph = new ConflictExitGraph(c, b, a, edgeBc, edgeAb, conflictKey);
+
+    AdmissionView aView =
+        sameDirectionAdmissionView(
+            "east",
+            "west",
+            conflict,
+            CorridorDirection.A_TO_B,
+            CorridorDirection.B_TO_A,
+            edgeAb,
+            edgeBc,
+            a,
+            b,
+            c);
+    AdmissionView bView =
+        sameDirectionAdmissionView(
+            "west",
+            "east",
+            conflict,
+            CorridorDirection.B_TO_A,
+            CorridorDirection.A_TO_B,
+            edgeBc,
+            edgeAb,
+            c,
+            b,
+            a);
+    boolean eastAllowed =
+        aView.service().smartDepotAdmissionAllowsSpawn("east", eastGraph, aView.context());
+    boolean westAllowed =
+        bView.service().smartDepotAdmissionAllowsSpawn("west", westGraph, bView.context());
+
+    assertFalse(eastAllowed, aView.debugMessages().toString());
+    assertFalse(westAllowed, bView.debugMessages().toString());
+    assertTrue(
+        aView.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=opposite-direction-claim")),
+        aView.debugMessages().toString());
+    assertTrue(
+        bView.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=opposite-direction-claim")),
+        bView.debugMessages().toString());
   }
 
   @Test
@@ -9217,6 +9828,52 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void stopRetainBehindSingleClaimBecomesReleaseEligibleOnlyWhenRouteProvesBehind()
+      throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    RouteId routeId = RouteId.of("retain");
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    OccupancyResource behind = OccupancyResource.forConflict("single:line:A~B");
+    OccupancyResource currentOrAhead = OccupancyResource.forConflict("single:line:B~C");
+    OccupancyRequest holdAtC =
+        new OccupancyRequest(
+            "train-1",
+            Optional.of(routeId),
+            Instant.now(),
+            List.of(OccupancyResource.forNode(c)),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE);
+    List<OccupancyClaim> oldSelfClaims =
+        List.of(
+            new OccupancyClaim(
+                behind,
+                "train-1",
+                Optional.of(routeId),
+                Instant.now(),
+                Duration.ZERO,
+                Optional.of(CorridorDirection.A_TO_B),
+                ClaimRole.MOVEMENT_REQUIRED),
+            new OccupancyClaim(
+                currentOrAhead,
+                "train-1",
+                Optional.of(routeId),
+                Instant.now(),
+                Duration.ZERO,
+                Optional.of(CorridorDirection.A_TO_B),
+                ClaimRole.MOVEMENT_REQUIRED));
+
+    Set<OccupancyResource> releaseResources =
+        invokeStopRetainBehindReleaseResources(
+            service, List.of(a, b, c), 2, oldSelfClaims, holdAtC);
+
+    assertTrue(releaseResources.contains(behind));
+    assertFalse(releaseResources.contains(currentOrAhead));
+  }
+
+  @Test
   void oppositeDirectionSingleRegionBlocksUnlockAuthority() throws Exception {
     PlannerExecutionSnapshot snapshot =
         executeSingleRegionPlannerReservationWithExternalOccupant(CorridorDirection.B_TO_A);
@@ -10140,6 +10797,36 @@ class RuntimeDispatchServiceTest {
         admissionAllowed);
   }
 
+  private AdmissionView sameDirectionAdmissionView(
+      String trainName,
+      String externalTrain,
+      OccupancyResource conflict,
+      CorridorDirection requestDirection,
+      CorridorDirection externalDirection,
+      RailEdge first,
+      RailEdge second,
+      NodeId firstNode,
+      NodeId middleNode,
+      NodeId lastNode)
+      throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest(externalTrain, conflict, externalDirection))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    installMovementInhibitor(service, externalTrain);
+    return new AdmissionView(
+        service,
+        singleConflictContext(
+            trainName, conflict, requestDirection, first, second, firstNode, middleNode, lastNode),
+        debugMessages);
+  }
+
   private static boolean hasFollowThroughPreviewLog(List<String> debugMessages) {
     return debugMessages.stream()
         .anyMatch(
@@ -10354,6 +11041,113 @@ class RuntimeDispatchServiceTest {
       SignalAspect leaderSignalBefore,
       boolean admissionAllowed) {}
 
+  private record AdmissionView(
+      RuntimeDispatchService service,
+      OccupancyRequestContext context,
+      List<String> debugMessages) {}
+
+  private record ThroatFixture(
+      NodeId entry,
+      NodeId throat,
+      NodeId switcher,
+      NodeId exit,
+      RailEdge entryEdge,
+      RailEdge switcherEdge,
+      RailEdge exitEdge,
+      OccupancyResource conflict,
+      ThroatConflictGraph graph) {
+
+    private OccupancyRequestContext context(
+        String trainName, CorridorDirection direction, boolean reverse) {
+      if (reverse) {
+        return singleConflictPathContext(
+            trainName,
+            conflict,
+            direction,
+            List.of(exit, switcher, throat, entry),
+            List.of(exitEdge, switcherEdge, entryEdge),
+            List.of(conflict));
+      }
+      return singleConflictPathContext(
+          trainName,
+          conflict,
+          direction,
+          List.of(entry, throat, switcher, exit),
+          List.of(entryEdge, switcherEdge, exitEdge),
+          List.of(conflict));
+    }
+
+    private OccupancyRequest atomicRequest(String trainName, CorridorDirection direction) {
+      return singleConflictPathContext(
+              trainName,
+              conflict,
+              direction,
+              List.of(entry, throat, switcher, exit),
+              List.of(entryEdge, switcherEdge, exitEdge),
+              atomicResources())
+          .request();
+    }
+
+    private List<OccupancyResource> atomicResources() {
+      LinkedHashSet<OccupancyResource> resources = new LinkedHashSet<>();
+      resources.add(conflict);
+      resources.add(OccupancyResource.forEdge(entryEdge.id()));
+      resources.add(OccupancyResource.forEdge(switcherEdge.id()));
+      resources.add(OccupancyResource.forEdge(exitEdge.id()));
+      resources.add(OccupancyResource.forNode(throat));
+      resources.add(OccupancyResource.forNode(switcher));
+      resources.add(OccupancyResource.forNode(exit));
+      return List.copyOf(resources);
+    }
+  }
+
+  private static ThroatFixture ppkThroatFixture() {
+    NodeId entry = NodeId.of("OP:S:PPK:1");
+    NodeId throat = NodeId.of("OP:S:PPK:1:001");
+    NodeId switcher = NodeId.of("SWITCHER:-583:65:650");
+    NodeId exit = NodeId.of("OP:S:PPK:2");
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(entry, throat), entry, throat, 8, -1.0, true, Optional.empty());
+    RailEdge switcherEdge =
+        new RailEdge(
+            EdgeId.undirected(throat, switcher), throat, switcher, 6, -1.0, true, Optional.empty());
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 8, -1.0, true, Optional.empty());
+    String conflictKey = "single:test:ppk-throat";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    ThroatConflictGraph graph =
+        new ThroatConflictGraph(
+            Map.of(
+                entry,
+                    new RailNodeTest(
+                        entry,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("OP", "PPK", 1))),
+                throat,
+                    new RailNodeTest(
+                        throat,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.stationThroat("OP", "PPK", 1, "001"))),
+                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+                exit,
+                    new RailNodeTest(
+                        exit,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("OP", "PPK", 2)))),
+            List.of(entryEdge, switcherEdge, exitEdge),
+            Map.of(
+                entryEdge.id(),
+                conflictKey,
+                switcherEdge.id(),
+                conflictKey,
+                exitEdge.id(),
+                conflictKey));
+    return new ThroatFixture(
+        entry, throat, switcher, exit, entryEdge, switcherEdge, exitEdge, conflict, graph);
+  }
+
   private OccupancyRequest staleProgressRequest(
       String trainName,
       RouteId routeId,
@@ -10500,7 +11294,8 @@ class RuntimeDispatchServiceTest {
     @SuppressWarnings("unchecked")
     java.util.concurrent.ConcurrentMap<String, HardStopReason> inhibitors =
         (java.util.concurrent.ConcurrentMap<String, HardStopReason>) field.get(service);
-    inhibitors.put(trainName, HardStopReason.AUTHORIZATION_FAILURE);
+    inhibitors.put(
+        TrainNameNormalizer.normalizeKey(trainName), HardStopReason.AUTHORIZATION_FAILURE);
   }
 
   private void observeSmartUnlockReservations(RuntimeDispatchService service, Instant now)
@@ -10510,6 +11305,26 @@ class RuntimeDispatchServiceTest {
             "observeSmartUnlockReservations", Instant.class);
     method.setAccessible(true);
     method.invoke(service, now);
+  }
+
+  @SuppressWarnings("unchecked")
+  private Set<OccupancyResource> invokeStopRetainBehindReleaseResources(
+      RuntimeDispatchService service,
+      List<NodeId> effectiveNodes,
+      int currentIndex,
+      List<OccupancyClaim> oldSelfClaims,
+      OccupancyRequest request)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "stopRetainBehindReleaseResources",
+            List.class,
+            int.class,
+            List.class,
+            OccupancyRequest.class);
+    method.setAccessible(true);
+    return (Set<OccupancyResource>)
+        method.invoke(service, effectiveNodes, currentIndex, oldSelfClaims, request);
   }
 
   private boolean smartUnlockNoReleaseCooldownActive(
@@ -10988,6 +11803,109 @@ class RuntimeDispatchServiceTest {
             Optional.of(directedContext));
     return new OccupancyRequestContext(
         request, List.of(firstNode, middleNode, lastNode), List.of(first, second));
+  }
+
+  private static OccupancyRequestContext singleConflictContextWithResources(
+      String trainName,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      RailEdge first,
+      RailEdge second,
+      NodeId firstNode,
+      NodeId middleNode,
+      NodeId lastNode,
+      List<OccupancyResource> resources) {
+    DirectedTraversalContext directedContext =
+        new DirectedTraversalContext(
+            trainName,
+            Optional.empty(),
+            0,
+            Optional.of(firstNode),
+            Optional.of(firstNode),
+            Optional.of(firstNode),
+            Optional.of(middleNode),
+            List.of(firstNode, middleNode, lastNode),
+            List.of(
+                new DirectedTraversalContext.DirectedEdge(first.id(), firstNode, middleNode),
+                new DirectedTraversalContext.DirectedEdge(second.id(), middleNode, lastNode)),
+            Map.of(conflict.key(), direction),
+            Map.of(),
+            AuthorizationPurpose.DEPOT_SPAWN.name(),
+            0L,
+            0L,
+            "test-single-conflict-with-resources",
+            Optional.empty());
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:01Z"),
+            resources == null ? List.of(conflict) : List.copyOf(resources),
+            Map.of(conflict.key(), direction),
+            Map.of(conflict.key(), 0),
+            0,
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(),
+            Optional.of(directedContext));
+    return new OccupancyRequestContext(
+        request, List.of(firstNode, middleNode, lastNode), List.of(first, second));
+  }
+
+  private static OccupancyRequestContext singleConflictPathContext(
+      String trainName,
+      OccupancyResource conflict,
+      CorridorDirection direction,
+      List<NodeId> nodes,
+      List<RailEdge> edges,
+      List<OccupancyResource> resources) {
+    if (nodes == null || nodes.size() < 2 || edges == null || edges.isEmpty()) {
+      throw new IllegalArgumentException("single conflict path must include nodes and edges");
+    }
+    List<DirectedTraversalContext.DirectedEdge> directedEdges = new ArrayList<>();
+    int edgeCount = Math.min(edges.size(), nodes.size() - 1);
+    for (int i = 0; i < edgeCount; i++) {
+      directedEdges.add(
+          new DirectedTraversalContext.DirectedEdge(
+              edges.get(i).id(), nodes.get(i), nodes.get(i + 1)));
+    }
+    LinkedHashSet<OccupancyResource> resourceSet = new LinkedHashSet<>();
+    resourceSet.add(conflict);
+    if (resources != null) {
+      resourceSet.addAll(resources);
+    }
+    DirectedTraversalContext directedContext =
+        new DirectedTraversalContext(
+            trainName,
+            Optional.empty(),
+            0,
+            Optional.of(nodes.get(0)),
+            Optional.of(nodes.get(0)),
+            Optional.of(nodes.get(0)),
+            Optional.of(nodes.get(1)),
+            nodes,
+            directedEdges,
+            Map.of(conflict.key(), direction),
+            Map.of(),
+            AuthorizationPurpose.DEPOT_SPAWN.name(),
+            0L,
+            0L,
+            "test-single-conflict-path",
+            Optional.empty());
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:01Z"),
+            List.copyOf(resourceSet),
+            Map.of(conflict.key(), direction),
+            Map.of(conflict.key(), 0),
+            0,
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(),
+            Optional.of(directedContext));
+    return new OccupancyRequestContext(request, nodes, edges);
   }
 
   private static OccupancyRequestContext singleConflictBoundaryContext(

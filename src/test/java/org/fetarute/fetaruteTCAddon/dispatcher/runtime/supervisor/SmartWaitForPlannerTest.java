@@ -51,6 +51,54 @@ class SmartWaitForPlannerTest {
   }
 
   @Test
+  void mutualHeadOnCycleSelectsYieldCandidate() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("mainline", "depot", "CONFLICT:switcher:LWN", CorridorDirection.B_TO_A),
+                    edge("depot", "mainline", "CONFLICT:switcher:LWN", CorridorDirection.A_TO_B)),
+                Map.of(
+                    "mainline", state("mainline", "COMP:OP:WS:main", 20),
+                    "depot", state("depot", "COMP:OP:WS:depot", 5))));
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertEquals(
+        SmartWaitForPlanner.CandidateKind.YIELD_TO_HEAD_ON, result.selectedPlan().get().kind());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_MUTUAL_HEAD_ON_YIELD_DETECTED")
+                        && line.contains("yieldTrain=")));
+  }
+
+  @Test
+  void sameDirectionMutualCycleDoesNotSelectYieldCandidate() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("mainline", "depot", "CONFLICT:switcher:LWN", CorridorDirection.A_TO_B),
+                    edge("depot", "mainline", "CONFLICT:switcher:LWN", CorridorDirection.A_TO_B)),
+                Map.of(
+                    "mainline", state("mainline", "COMP:OP:WS:main", 20),
+                    "depot", state("depot", "COMP:OP:WS:depot", 5))));
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertFalse(
+        result
+            .selectedPlan()
+            .filter(plan -> plan.kind() == SmartWaitForPlanner.CandidateKind.YIELD_TO_HEAD_ON)
+            .isPresent());
+    assertFalse(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_DISPATCH_MUTUAL_HEAD_ON_YIELD_DETECTED")));
+  }
+
+  @Test
   void bottleneckTrainBlockingMultipleOthersScoresHigher() {
     SmartWaitForPlanner.PlanResult result =
         planner.plan(
