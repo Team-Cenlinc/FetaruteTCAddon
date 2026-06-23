@@ -6447,6 +6447,34 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void throatSectionIntervalExitAllowsStationDeparture() {
+    List<String> debugMessages = new ArrayList<>();
+    ThroatFixture throat = ppkOutboundIntervalThroatFixture();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LH-7938",
+            throat.graph(),
+            throat.context("SURC-MT-LH-7938", CorridorDirection.A_TO_B, false));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("clear=true")
+                        && message.contains("throatEntry=OP:S:PPK:2")
+                        && message.contains("throatExitSafePoint=OP:PPK:RVS:2:001")),
+        debugMessages.toString());
+  }
+
+  @Test
   void throatSectionExitOccupiedHoldsAtEntrySafePoint() {
     List<String> debugMessages = new ArrayList<>();
     ThroatFixture throat = ppkThroatFixture();
@@ -6481,6 +6509,51 @@ class RuntimeDispatchServiceTest {
                         && message.contains("clear=false")
                         && message.contains(
                             "occupiedResource=NODE:OP:S:PPK:2@claim:SURC-MT-LP-0888")),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("reason=throat-section-not-atomically-clear")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void throatSectionIntervalExitOccupiedHoldsAtEntrySafePoint() {
+    List<String> debugMessages = new ArrayList<>();
+    ThroatFixture throat = ppkOutboundIntervalThroatFixture();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "SURC-MT-LP-0888",
+                    Optional.empty(),
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    List.of(OccupancyResource.forNode(throat.exit())),
+                    Map.of()))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LH-7938",
+            throat.graph(),
+            throat.context("SURC-MT-LH-7938", CorridorDirection.A_TO_B, false));
+
+    assertFalse(allowed);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("clear=false")
+                        && message.contains(
+                            "occupiedResource=NODE:OP:PPK:RVS:2:001@claim:SURC-MT-LP-0888")),
         debugMessages.toString());
     assertTrue(
         debugMessages.stream()
@@ -7961,6 +8034,30 @@ class RuntimeDispatchServiceTest {
         runFollowThroughPreview(SmartDispatcherMode.ENFORCE, true);
 
     assertTrue(snapshot.admissionAllowed());
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_FOLLOW_THROUGH_PREVIEW")
+                        && message.contains("decision=WOULD_ALLOW_FOLLOW_THROUGH")));
+  }
+
+  @Test
+  void followThroughPreviewAllowDoesNotEmitStopTrace() throws Exception {
+    FollowThroughPreviewSnapshot snapshot =
+        runFollowThroughPreview(SmartDispatcherMode.ENFORCE, true);
+
+    assertTrue(snapshot.admissionAllowed());
+    assertFalse(
+        snapshot.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.startsWith("SignalTrace ")
+                        && message.contains("newAspect=STOP")
+                        && (message.contains("primaryReason=SMART_FOLLOW_THROUGH_PREVIEW")
+                            || message.contains("primaryReason=SMART_REGION_VIEW")
+                            || message.contains("primaryReason=SMART_LONG_SINGLE_VIEW"))),
+        snapshot.debugMessages().toString());
     assertTrue(
         snapshot.debugMessages().stream()
             .anyMatch(
@@ -11432,6 +11529,53 @@ class RuntimeDispatchServiceTest {
                         exit,
                         NodeType.STATION,
                         Optional.of(WaypointMetadata.station("OP", "PPK", 2)))),
+            List.of(entryEdge, switcherEdge, exitEdge),
+            Map.of(
+                entryEdge.id(),
+                conflictKey,
+                switcherEdge.id(),
+                conflictKey,
+                exitEdge.id(),
+                conflictKey));
+    return new ThroatFixture(
+        entry, throat, switcher, exit, entryEdge, switcherEdge, exitEdge, conflict, graph);
+  }
+
+  private static ThroatFixture ppkOutboundIntervalThroatFixture() {
+    NodeId entry = NodeId.of("OP:S:PPK:2");
+    NodeId throat = NodeId.of("OP:S:PPK:2:001");
+    NodeId switcher = NodeId.of("SWITCHER:-583:65:650");
+    NodeId exit = NodeId.of("OP:PPK:RVS:2:001");
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(entry, throat), entry, throat, 8, -1.0, true, Optional.empty());
+    RailEdge switcherEdge =
+        new RailEdge(
+            EdgeId.undirected(throat, switcher), throat, switcher, 6, -1.0, true, Optional.empty());
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 8, -1.0, true, Optional.empty());
+    String conflictKey = "single:test:ppk-outbound-throat";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    ThroatConflictGraph graph =
+        new ThroatConflictGraph(
+            Map.of(
+                entry,
+                    new RailNodeTest(
+                        entry,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("OP", "PPK", 2))),
+                throat,
+                    new RailNodeTest(
+                        throat,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.stationThroat("OP", "PPK", 2, "001"))),
+                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+                exit,
+                    new RailNodeTest(
+                        exit,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.interval("OP", "PPK", "RVS", 2, "001")))),
             List.of(entryEdge, switcherEdge, exitEdge),
             Map.of(
                 entryEdge.id(),

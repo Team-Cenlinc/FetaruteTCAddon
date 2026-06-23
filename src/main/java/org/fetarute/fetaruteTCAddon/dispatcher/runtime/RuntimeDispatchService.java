@@ -15881,7 +15881,10 @@ public final class RuntimeDispatchService {
    * 咽喉区间整段原子准入。
    *
    * <p>STATION/DEPOT 是安全停车点；STATION_THROAT、DEPOT_THROAT 与 SWITCHER 组成不可中停咽喉。列车从安全点进入咽喉前，
-   * 必须能沿本轮展开路径看到下一个安全停车点，并确认入口之后到出口安全点之间所有 NODE/EDGE/CONFLICT 资源未被他车占用或排队。
+   * 必须能沿本轮展开路径看到咽喉清出点，并确认入口之后到清出点之间所有 NODE/EDGE/CONFLICT 资源未被他车占用或排队。
+   *
+   * <p>清出点可以是下一个 STATION/DEPOT，也可以是紧随道岔群之后的 INTERVAL 节点。后者覆盖“车站 -> 道岔群 -> 开放区间”的出站拓扑，
+   * 避免把整段站间区间错误并入咽喉原子段。
    */
   private ThroatSectionAtomicCheck throatSectionAtomicClear(
       OccupancyResource conflict,
@@ -15909,7 +15912,7 @@ public final class RuntimeDispatchService {
     if (!isThroatAtomicNode(graph, firstInside)) {
       return ThroatSectionAtomicCheck.notApplicable("not-throat-section");
     }
-    int exitIndex = throatExitSafePointIndex(path.nodes(), entryEdgeIndex + 1, graph);
+    int exitIndex = throatExitPointIndex(path.nodes(), entryEdgeIndex + 1, graph);
     if (exitIndex < 0 || exitIndex > path.edges().size()) {
       return ThroatSectionAtomicCheck.blocked(
           "throat-topology-unresolvable", entry, null, "-", List.of());
@@ -15946,13 +15949,13 @@ public final class RuntimeDispatchService {
     return -1;
   }
 
-  private int throatExitSafePointIndex(List<NodeId> nodes, int firstInsideIndex, RailGraph graph) {
+  private int throatExitPointIndex(List<NodeId> nodes, int firstInsideIndex, RailGraph graph) {
     if (nodes == null || firstInsideIndex < 0 || firstInsideIndex >= nodes.size()) {
       return -1;
     }
     for (int i = firstInsideIndex; i < nodes.size(); i++) {
       NodeId node = nodes.get(i);
-      if (isThroatSafeStopNode(graph, node)) {
+      if (isThroatSafeStopNode(graph, node) || isThroatClearanceExitNode(graph, node)) {
         return i;
       }
       if (!isThroatAtomicNode(graph, node)) {
@@ -16077,6 +16080,12 @@ public final class RuntimeDispatchService {
 
   private boolean isThroatSafeStopNode(RailGraph graph, NodeId nodeId) {
     return isStationOrDepotBehaviorNode(nodeId, graph);
+  }
+
+  private boolean isThroatClearanceExitNode(RailGraph graph, NodeId nodeId) {
+    return resolveWaypointMetadata(graph, nodeId)
+        .map(metadata -> metadata.kind() == WaypointKind.INTERVAL)
+        .orElse(false);
   }
 
   /**
@@ -17644,13 +17653,14 @@ public final class RuntimeDispatchService {
       EntryLookaheadEvaluator.Result lookahead,
       SmartAdmissionContext admissionContext) {
     String reason = admissionContext == null ? "smart-admission" : admissionContext.source();
+    SignalAspect traceAspect = smartRegionViewTraceAspect(lookahead);
     SignalComputationTrace.emit(
         signalTrace(
                 trainName,
                 null,
                 SignalComputationTrace.Source.AUTHORIZATION,
                 null,
-                SignalAspect.STOP,
+                traceAspect,
                 "SMART_REGION_VIEW")
             .field("regionId", conflict == null ? "-" : conflict.key())
             .field("singleConflictId", conflict == null ? "-" : conflict.key())
@@ -17664,7 +17674,7 @@ public final class RuntimeDispatchService {
                 null,
                 SignalComputationTrace.Source.AUTHORIZATION,
                 null,
-                SignalAspect.STOP,
+                traceAspect,
                 "SMART_LONG_SINGLE_VIEW")
             .field("regionId", conflict == null ? "-" : conflict.key())
             .field("leaderExitVisible", lookahead != null && lookahead.exitFeasible())
@@ -17679,7 +17689,7 @@ public final class RuntimeDispatchService {
                   null,
                   SignalComputationTrace.Source.AUTHORIZATION,
                   null,
-                  SignalAspect.STOP,
+                  traceAspect,
                   "SMART_DEPOT_EXIT_VIEW")
               .field("regionId", conflict == null ? "-" : conflict.key())
               .field("depotExitIntoLongSingle", true)
@@ -17871,7 +17881,7 @@ public final class RuntimeDispatchService {
                 null,
                 SignalComputationTrace.Source.AUTHORIZATION,
                 null,
-                SignalAspect.STOP,
+                sameDirectionFollowThroughTraceAspect(decision),
                 "SMART_FOLLOW_THROUGH_PREVIEW")
             .field("mode", snapshot.mode())
             .field("action", snapshot.actionCandidate())
@@ -18070,6 +18080,17 @@ public final class RuntimeDispatchService {
                   : snapshot != null && snapshot.turnback() ? "turnback" : "unsafe-gap";
       case UNKNOWN_FAIL_SAFE -> "missing-or-stale-safety-evidence";
     };
+  }
+
+  private static SignalAspect smartRegionViewTraceAspect(EntryLookaheadEvaluator.Result lookahead) {
+    return lookahead != null && lookahead.exitFeasible() ? SignalAspect.PROCEED : SignalAspect.STOP;
+  }
+
+  private static SignalAspect sameDirectionFollowThroughTraceAspect(
+      SameDirectionFollowThroughDecision decision) {
+    return decision == SameDirectionFollowThroughDecision.WOULD_ALLOW_FOLLOW_THROUGH
+        ? SignalAspect.PROCEED
+        : SignalAspect.STOP;
   }
 
   private static String leaderPredictedExitResource(
