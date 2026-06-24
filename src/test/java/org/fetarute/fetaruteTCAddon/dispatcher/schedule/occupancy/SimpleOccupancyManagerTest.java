@@ -2829,7 +2829,7 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void selfOwnedTailProtectionZoneNotOnPlanStillFailClosedForHardAuthority() {
+  void selfOwnedUnknownDirectionHardAuthorityWithoutExternalPresenceDoesNotReject() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -2841,13 +2841,15 @@ class SimpleOccupancyManagerTest {
             .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
     assertTrue(manager.acquire(retain).allowed());
 
-    // 同样不在计划路径上，但请求声明 hard authority：方向无法证明时保持 fail-closed。
+    // 分叉/车库口可能无法给出语义方向；没有外部 single 或硬阻塞时不应把自持 claim
+    // 当成真实对向车，否则列车会在自己的出库保留上永久自锁。
     OccupancyRequest continuation =
         singleConflictRequestWithSnapshotDirection(
             "train", now.plusSeconds(1), conflict, Map.of(), Map.of(), Map.of());
     OccupancyDecision decision = manager.canEnter(continuation);
 
-    assertFalse(decision.allowed(), "hard authority 请求在方向未知时不得借车尾保护绕过 fail-closed");
+    assertTrue(decision.allowed(), () -> "零外部存在的自有 UNKNOWN 续行不应套用跨车 fail-closed: " + decision);
+    assertTrue(manager.selfOwnedStaleRetainReleaseCandidate("train").isEmpty());
   }
 
   @Test
@@ -2912,7 +2914,7 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void unrelatedMovementSnapshotDirectionIsNotUsedForDifferentConflict() {
+  void unrelatedMovementSnapshotDirectionDoesNotCreateOppositeSelfBlock() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
@@ -2935,8 +2937,8 @@ class SimpleOccupancyManagerTest {
             Map.of());
     OccupancyDecision decision = manager.canEnter(request);
 
-    assertFalse(decision.allowed());
-    assertEquals("self-owned-single-continuation-rejected", decision.reason());
+    assertTrue(decision.allowed());
+    assertTrue(manager.selfOwnedStaleRetainReleaseCandidate("train").isEmpty());
   }
 
   @Test

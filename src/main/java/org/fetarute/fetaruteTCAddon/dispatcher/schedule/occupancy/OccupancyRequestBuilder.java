@@ -54,6 +54,7 @@ public final class OccupancyRequestBuilder {
   private final long minLookaheadDistanceBlocks;
   private final int maxLookaheadEdges;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+  private final SemanticCorridorDirectionResolver semanticDirectionResolver;
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
   private final java.util.function.Consumer<String> debugLogger;
 
@@ -94,6 +95,7 @@ public final class OccupancyRequestBuilder {
       int maxLookaheadEdges,
       java.util.function.Consumer<String> debugLogger) {
     this.graph = Objects.requireNonNull(graph, "graph");
+    this.semanticDirectionResolver = new SemanticCorridorDirectionResolver(this.graph);
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     if (lookaheadEdges <= 0) {
       throw new IllegalArgumentException("lookaheadEdges 必须大于 0");
@@ -1411,7 +1413,8 @@ public final class OccupancyRequestBuilder {
     if (info == null) {
       return Optional.empty();
     }
-    return resolveDirectionalConflict(info.left(), info.right(), info.nodes(), pathNodes, from, to);
+    return resolveDirectionalConflict(
+        info.left(), info.right(), info.nodes(), List.of(), pathNodes, from, to);
   }
 
   private Optional<CorridorDirection> resolveSectionDirection(
@@ -1419,16 +1422,27 @@ public final class OccupancyRequestBuilder {
     if (info == null) {
       return Optional.empty();
     }
-    return resolveDirectionalConflict(info.left(), info.right(), info.nodes(), pathNodes, from, to);
+    return resolveDirectionalConflict(
+        info.left(), info.right(), info.nodes(), info.boundaries(), pathNodes, from, to);
   }
 
   private Optional<CorridorDirection> resolveDirectionalConflict(
       NodeId left,
       NodeId right,
       List<NodeId> orderedNodes,
+      List<NodeId> boundaryNodes,
       List<NodeId> pathNodes,
       NodeId from,
       NodeId to) {
+    SemanticCorridorDirectionResolver.Result semantic =
+        semanticDirectionResolver.resolve(
+            semanticResourceNodes(left, right, orderedNodes, boundaryNodes), pathNodes, from, to);
+    if (semantic.resolved()) {
+      return Optional.of(semantic.direction());
+    }
+    if (semantic.blocksLegacyFallback()) {
+      return Optional.empty();
+    }
     CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (byCorridor != CorridorDirection.UNKNOWN) {
       return Optional.of(byCorridor);
@@ -1441,6 +1455,32 @@ public final class OccupancyRequestBuilder {
     }
     CorridorDirection byDistance = resolveDirectionByDistance(from, to, left, right);
     return byDistance == CorridorDirection.UNKNOWN ? Optional.empty() : Optional.of(byDistance);
+  }
+
+  private List<NodeId> semanticResourceNodes(
+      NodeId left, NodeId right, List<NodeId> orderedNodes, List<NodeId> boundaryNodes) {
+    LinkedHashSet<NodeId> nodes = new LinkedHashSet<>();
+    if (left != null) {
+      nodes.add(left);
+    }
+    if (right != null) {
+      nodes.add(right);
+    }
+    if (orderedNodes != null) {
+      for (NodeId node : orderedNodes) {
+        if (node != null) {
+          nodes.add(node);
+        }
+      }
+    }
+    if (boundaryNodes != null) {
+      for (NodeId node : boundaryNodes) {
+        if (node != null) {
+          nodes.add(node);
+        }
+      }
+    }
+    return List.copyOf(nodes);
   }
 
   private CorridorDirection resolveDirectionByCorridorNodes(

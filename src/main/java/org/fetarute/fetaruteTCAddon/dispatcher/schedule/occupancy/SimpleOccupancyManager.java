@@ -2630,7 +2630,12 @@ public final class SimpleOccupancyManager
       return queue.isHeadAny(request.trainName());
     }
     CorridorDirection active = activeDirection.get();
-    if (direction == CorridorDirection.UNKNOWN || direction != active) {
+    if (direction == CorridorDirection.UNKNOWN) {
+      // 车库口/分叉区可能无法解析语义方向；只有无外部等待时才允许同车 claim 绕过队列自锁。
+      return hasClaimByTrain(resource, request.trainName())
+          && !queue.hasAnyOtherTrain(request.trainName());
+    }
+    if (direction != active) {
       return false;
     }
     if (!queue.hasEntriesOutside(active)) {
@@ -2678,7 +2683,11 @@ public final class SimpleOccupancyManager
       return queue.wouldBeHeadAny(trainName, direction, priority, entryOrder, now);
     }
     CorridorDirection active = activeDirection.get();
-    if (direction == CorridorDirection.UNKNOWN || direction != active) {
+    if (direction == CorridorDirection.UNKNOWN) {
+      // 预览路径保持与可写路径一致：UNKNOWN 只绕过零外部存在的同车队列自锁。
+      return hasClaimByTrain(resource, trainName) && !queue.hasAnyOtherTrain(trainName);
+    }
+    if (direction != active) {
       return false;
     }
     if (!queue.hasEntriesOutside(active)) {
@@ -2825,6 +2834,43 @@ public final class SimpleOccupancyManager
               .field("selfOwnedDirectionMatches", false)
               .field("selfOwnedPathExitsZone", true)
               .field("selfOwnedExternalBlockerAhead", false)
+              .request(request));
+      traceSelfOwnedBlockerFiltered(
+          request, resource, selfClaim, "SELF_OWNED_RETAIN_IGNORED_FOR_CONTINUATION");
+      return Optional.empty();
+    }
+    if (!directionsKnown
+        && !externalBlockerAhead
+        && !externalSinglePresence
+        && !oppositeSingleAhead) {
+      traceSmartSelfOwnedContinuation(
+          request,
+          resource,
+          "SMART_SELF_OWNED_CONTINUATION_ALLOWED",
+          SignalAspect.PROCEED,
+          "unknown-direction-self-owned-no-external-presence",
+          held.orElse(CorridorDirection.UNKNOWN),
+          requested.orElse(CorridorDirection.UNKNOWN),
+          false,
+          pathExitsZone,
+          false);
+      SignalComputationTrace.emit(
+          SignalComputationTrace.builder(
+                  request.trainName(),
+                  request.trainName(),
+                  SignalComputationTrace.Source.OCCUPANCY,
+                  SignalAspect.PROCEED)
+              .primaryReason("SELF_OWNED_SINGLE_BLOCKER_IGNORED")
+              .field("conflictKey", resource.key())
+              .field("heldDirection", held.orElse(CorridorDirection.UNKNOWN))
+              .field("requestedDirection", requested.orElse(CorridorDirection.UNKNOWN))
+              .field("source", source)
+              .field("reason", "unknown-direction-self-owned-no-external-presence")
+              .field("selfOwnedDirectionMatches", false)
+              .field("selfOwnedPathExitsZone", pathExitsZone)
+              .field("selfOwnedExternalBlockerAhead", false)
+              .field("selfOwnedExternalSinglePresence", false)
+              .field("selfOwnedOppositeSingleAhead", false)
               .request(request));
       traceSelfOwnedBlockerFiltered(
           request, resource, selfClaim, "SELF_OWNED_RETAIN_IGNORED_FOR_CONTINUATION");

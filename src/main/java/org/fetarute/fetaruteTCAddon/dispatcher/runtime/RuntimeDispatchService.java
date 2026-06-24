@@ -1581,17 +1581,8 @@ public final class RuntimeDispatchService {
   }
 
   private static CorridorDirection smartPlannerForwardDirection(SmartRecoveryInput input) {
-    if (input == null) {
-      return CorridorDirection.UNKNOWN;
-    }
-    if (input.currentNode() != null
-        && input.nextNode() != null
-        && !input.currentNode().equals(input.nextNode())) {
-      return CorridorDirection.A_TO_B;
-    }
-    if (!input.lastPassedGraphNode().equals("-") && input.nextNode() != null) {
-      return CorridorDirection.A_TO_B;
-    }
+    // 单线方向必须来自 OccupancyRequest/MovementPlanSnapshot 的语义资源方向。
+    // route current/next 只能证明列车仍有前方目标，不能证明它在某个 single conflict 内的 A/B 方向。
     return CorridorDirection.UNKNOWN;
   }
 
