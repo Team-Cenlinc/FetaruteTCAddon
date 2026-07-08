@@ -2805,6 +2805,34 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void selfOwnedContinuationUsesRequestDirectionWhenSnapshotMissesExactKey() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("train", now, conflict, CorridorDirection.A_TO_B))
+            .allowed());
+
+    OccupancyRequest continuation =
+        singleConflictRequestWithSnapshotDirection(
+            "train",
+            now.plusSeconds(1),
+            conflict,
+            Map.of(conflict.key(), CorridorDirection.A_TO_B),
+            Map.of(),
+            Map.of());
+    OccupancyDecision decision = manager.canEnter(continuation);
+
+    assertTrue(
+        decision.allowed(), () -> "请求方向已知且同向时，不应因 movement snapshot 缺 exact key 自锁: " + decision);
+    assertTrue(manager.selfOwnedStaleRetainReleaseCandidate("train").isEmpty());
+  }
+
+  @Test
   void selfOwnedTailProtectionZoneNotOnPlanDoesNotReject() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -3121,6 +3149,28 @@ class SimpleOccupancyManagerTest {
     assertFalse(decision.allowed());
     assertEquals(
         SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER, decision.reason());
+  }
+
+  @Test
+  void outsideTrainCannotEnterOccupiedUnknownDirectionSingleRegion() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("inside", now, conflict, CorridorDirection.A_TO_B))
+            .allowed());
+
+    OccupancyDecision decision =
+        manager.canEnter(
+            singleConflictRequest(
+                "outside", now.plusSeconds(1), conflict, CorridorDirection.UNKNOWN));
+
+    assertFalse(decision.allowed());
+    assertEquals("single-conflict-direction-unknown", decision.reason());
   }
 
   @Test

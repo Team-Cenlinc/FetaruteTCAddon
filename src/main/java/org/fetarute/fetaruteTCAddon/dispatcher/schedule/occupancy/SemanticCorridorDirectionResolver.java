@@ -20,8 +20,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
  * 基于 Waypoint 语义解析单线资源方向。
  *
  * <p>冲突资源 key 仍然需要稳定归一化，但列车方向不能依赖 key 两端的字典序。这个解析器把资源附近的 {@link WaypointKind#INTERVAL}
- * 元数据当作物理方向轴，例如 {@code PPK -> RVS}。方向优先从当前 movement path 上的局部锚点解析，
- * 避免站咽喉、库线、支线等旁路元数据污染当前列车实际路径；若当前路径或资源邻域出现多个不可比较的站间轴， 则拒绝给出方向，让占用层按 UNKNOWN fail-closed 处理。
+ * 元数据当作物理方向轴，例如 {@code PPK -> RVS}。方向优先从当前 movement path 上覆盖待判定边的连续线性锚点段解析， 避免远端
+ * hub、站咽喉、库线、支线等旁路元数据污染当前列车实际路径；若当前边正落在本地分叉 gap， 则拒绝给出方向，让占用层按 UNKNOWN fail-closed 处理。
  */
 final class SemanticCorridorDirectionResolver {
 
@@ -32,7 +32,8 @@ final class SemanticCorridorDirectionResolver {
   }
 
   Result resolve(List<NodeId> resourceNodes, List<NodeId> pathNodes, NodeId from, NodeId to) {
-    Result pathResult = resolveWithAxis(resolvePathAxis(pathNodes), pathNodes, from, to);
+    PathAxisResolution pathAxis = resolvePathAxis(pathNodes, from, to);
+    Result pathResult = resolveWithAxis(pathAxis.axisResolution(), pathAxis.pathNodes(), from, to);
     if (pathResult.status() != Status.NO_AXIS) {
       return pathResult;
     }
@@ -55,19 +56,115 @@ final class SemanticCorridorDirectionResolver {
     return axis.directionOf(flow.get()).map(Result::resolved).orElseGet(Result::ambiguous);
   }
 
-  private AxisResolution resolvePathAxis(List<NodeId> pathNodes) {
+  private PathAxisResolution resolvePathAxis(List<NodeId> pathNodes, NodeId from, NodeId to) {
     if (pathNodes == null || pathNodes.isEmpty()) {
-      return AxisResolution.noAxis();
+      return PathAxisResolution.noAxis(List.of());
     }
-    List<DirectedStationPair> pairs = new ArrayList<>();
-    for (NodeId node : pathNodes) {
+    int edgeIndex = edgeIndex(pathNodes, from, to);
+    if (edgeIndex < 0) {
+      return PathAxisResolution.noAxis(pathNodes);
+    }
+    List<IndexedDirectedStationPair> anchors = indexedDirectedPairs(pathNodes);
+    if (anchors.isEmpty()) {
+      return PathAxisResolution.noAxis(pathNodes);
+    }
+    List<PathAxisSegment> segments = pathAxisSegments(pathNodes, anchors);
+    for (PathAxisSegment segment : segments) {
+      if (segment.containsEdge(edgeIndex)) {
+        return PathAxisResolution.of(segment.axisResolution(), segment.pathNodes());
+      }
+    }
+    if (isPathAxisBranchGap(segments, edgeIndex)) {
+      return PathAxisResolution.ambiguous(pathNodes);
+    }
+    return PathAxisResolution.noAxis(pathNodes);
+  }
+
+  private List<IndexedDirectedStationPair> indexedDirectedPairs(List<NodeId> pathNodes) {
+    List<IndexedDirectedStationPair> pairs = new ArrayList<>();
+    for (int i = 0; i < pathNodes.size(); i++) {
+      int index = i;
+      NodeId node = pathNodes.get(i);
       Optional<WaypointMetadata> metadata = metadata(node);
       if (metadata.isEmpty() || metadata.get().kind() != WaypointKind.INTERVAL) {
         continue;
       }
-      DirectedStationPair.from(metadata.get()).ifPresent(pairs::add);
+      DirectedStationPair.from(metadata.get())
+          .ifPresent(pair -> pairs.add(new IndexedDirectedStationPair(index, pair)));
     }
-    return resolveAxisFromPairs(pairs);
+    return pairs;
+  }
+
+  private List<PathAxisSegment> pathAxisSegments(
+      List<NodeId> pathNodes, List<IndexedDirectedStationPair> anchors) {
+    List<RawPathAxisSegment> rawSegments = new ArrayList<>();
+    List<IndexedDirectedStationPair> current = new ArrayList<>();
+    boolean startsAfterBranch = false;
+    for (IndexedDirectedStationPair anchor : anchors) {
+      if (current.isEmpty()) {
+        current.add(anchor);
+        continue;
+      }
+      List<DirectedStationPair> trialPairs = directionsOf(current);
+      trialPairs.add(anchor.direction());
+      AxisResolution trial = resolveAxisFromPairs(trialPairs);
+      if (trial.status() == Status.RESOLVED) {
+        current.add(anchor);
+        continue;
+      }
+      rawSegments.add(RawPathAxisSegment.from(current, startsAfterBranch));
+      current = new ArrayList<>();
+      current.add(anchor);
+      startsAfterBranch = true;
+    }
+    if (!current.isEmpty()) {
+      rawSegments.add(RawPathAxisSegment.from(current, startsAfterBranch));
+    }
+
+    List<PathAxisSegment> segments = new ArrayList<>();
+    int lastEdgeIndex = pathNodes.size() - 2;
+    for (int i = 0; i < rawSegments.size(); i++) {
+      RawPathAxisSegment raw = rawSegments.get(i);
+      int startEdge = raw.startsAfterBranch() ? raw.firstAnchorIndex() : 0;
+      if (i > 0 && !raw.startsAfterBranch()) {
+        startEdge = raw.firstAnchorIndex() - 1;
+      }
+      int endEdge =
+          i + 1 < rawSegments.size() && rawSegments.get(i + 1).startsAfterBranch()
+              ? raw.lastAnchorIndex()
+              : lastEdgeIndex;
+      int fromIndex = Math.max(0, startEdge);
+      int toIndex = Math.min(pathNodes.size(), endEdge + 2);
+      segments.add(
+          new PathAxisSegment(
+              startEdge,
+              endEdge,
+              pathNodes.subList(fromIndex, toIndex),
+              resolveAxisFromPairs(raw.directions()),
+              raw.startsAfterBranch()));
+    }
+    return segments;
+  }
+
+  private boolean isPathAxisBranchGap(List<PathAxisSegment> segments, int edgeIndex) {
+    for (int i = 0; i + 1 < segments.size(); i++) {
+      PathAxisSegment left = segments.get(i);
+      PathAxisSegment right = segments.get(i + 1);
+      if (right.startsAfterBranch()
+          && edgeIndex > left.endEdgeInclusive()
+          && edgeIndex < right.startEdgeInclusive()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private List<DirectedStationPair> directionsOf(List<IndexedDirectedStationPair> pairs) {
+    List<DirectedStationPair> directions = new ArrayList<>();
+    for (IndexedDirectedStationPair pair : pairs) {
+      directions.add(pair.direction());
+    }
+    return directions;
   }
 
   private AxisResolution resolveAxis(List<NodeId> resourceNodes) {
@@ -395,6 +492,89 @@ final class SemanticCorridorDirectionResolver {
 
     static AxisResolution ambiguous() {
       return new AxisResolution(Status.AMBIGUOUS, Optional.empty());
+    }
+  }
+
+  /**
+   * 针对当前待判定边裁剪后的路径轴结果。
+   *
+   * <p>当路径跨越多个不连续站间轴时，只把覆盖当前边的线性段交给方向解析，避免远端 hub 或支线锚点污染当前边。
+   */
+  private record PathAxisResolution(AxisResolution axisResolution, List<NodeId> pathNodes) {
+    private PathAxisResolution {
+      Objects.requireNonNull(axisResolution, "axisResolution");
+      pathNodes = pathNodes == null ? List.of() : List.copyOf(pathNodes);
+    }
+
+    static PathAxisResolution of(AxisResolution axisResolution, List<NodeId> pathNodes) {
+      return new PathAxisResolution(axisResolution, pathNodes);
+    }
+
+    static PathAxisResolution noAxis(List<NodeId> pathNodes) {
+      return new PathAxisResolution(AxisResolution.noAxis(), pathNodes);
+    }
+
+    static PathAxisResolution ambiguous(List<NodeId> pathNodes) {
+      return new PathAxisResolution(AxisResolution.ambiguous(), pathNodes);
+    }
+  }
+
+  /** 带路径下标的站间方向锚点，用于把同一条 movement path 切成局部语义段。 */
+  private record IndexedDirectedStationPair(int index, DirectedStationPair direction) {
+    private IndexedDirectedStationPair {
+      Objects.requireNonNull(direction, "direction");
+    }
+  }
+
+  /**
+   * 尚未换算成 edge 范围的语义方向段。
+   *
+   * <p>{@code startsAfterBranch} 标记该段前方出现过不可合并的方向轴，后续会据此把段前 gap 视为 UNKNOWN。
+   */
+  private record RawPathAxisSegment(
+      int firstAnchorIndex,
+      int lastAnchorIndex,
+      List<DirectedStationPair> directions,
+      boolean startsAfterBranch) {
+    private RawPathAxisSegment {
+      Objects.requireNonNull(directions, "directions");
+      directions = List.copyOf(directions);
+    }
+
+    static RawPathAxisSegment from(
+        List<IndexedDirectedStationPair> pairs, boolean startsAfterBranch) {
+      if (pairs == null || pairs.isEmpty()) {
+        throw new IllegalArgumentException("语义方向段至少需要一个锚点");
+      }
+      int firstIndex = pairs.get(0).index();
+      int lastIndex = pairs.get(pairs.size() - 1).index();
+      List<DirectedStationPair> directions = new ArrayList<>();
+      for (IndexedDirectedStationPair pair : pairs) {
+        directions.add(pair.direction());
+      }
+      return new RawPathAxisSegment(firstIndex, lastIndex, directions, startsAfterBranch);
+    }
+  }
+
+  /**
+   * 可直接匹配待判定 edge 的局部语义段。
+   *
+   * <p>只有 {@code containsEdge} 命中的段可以参与当前边方向判定；落在两个段之间的 edge 保持 ambiguous。
+   */
+  private record PathAxisSegment(
+      int startEdgeInclusive,
+      int endEdgeInclusive,
+      List<NodeId> pathNodes,
+      AxisResolution axisResolution,
+      boolean startsAfterBranch) {
+    private PathAxisSegment {
+      Objects.requireNonNull(pathNodes, "pathNodes");
+      Objects.requireNonNull(axisResolution, "axisResolution");
+      pathNodes = List.copyOf(pathNodes);
+    }
+
+    boolean containsEdge(int edgeIndex) {
+      return edgeIndex >= startEdgeInclusive && edgeIndex <= endEdgeInclusive;
     }
   }
 

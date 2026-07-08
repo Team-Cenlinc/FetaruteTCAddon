@@ -3090,13 +3090,29 @@ public final class SimpleOccupancyManager
     claims.add(claim);
   }
 
+  /**
+   * 判断同车旧 single claim 是否仍位于本次 hard-authority 计划内。
+   *
+   * <p>调度窗口可能短于完整 route plan，导致 movement snapshot 没有当前 single key；此时只要该资源仍是本次 {@link
+   * ResourceIntent#MOVEMENT_REQUIRED} 且请求自身能解析出明确方向，就应视为同向继续运行，而不是把本车旧 claim 当成阻塞。
+   */
   private boolean selfOwnedPathExitsOrContinuesZone(
       OccupancyRequest request, OccupancyResource resource) {
     if (request == null || resource == null || !request.resourceList().contains(resource)) {
       return false;
     }
+    if (!request.intentFor(resource).hardAuthority()) {
+      return false;
+    }
     Optional<MovementPlanSnapshot> plan = request.movementPlanSnapshot();
-    return plan.isPresent() && plan.get().singleConflictDirections().containsKey(resource.key());
+    if (plan.isEmpty()) {
+      return false;
+    }
+    if (plan.get().singleConflictDirections().containsKey(resource.key())) {
+      return true;
+    }
+    return plan.get().movementRequiredResources().contains(resource)
+        && resolveCorridorDirectionWithSource(request, resource).direction().isPresent();
   }
 
   private boolean hasExternalHardBlockerAhead(OccupancyRequest request) {

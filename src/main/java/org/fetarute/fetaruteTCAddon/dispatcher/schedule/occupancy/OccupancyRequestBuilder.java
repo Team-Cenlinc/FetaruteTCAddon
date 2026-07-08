@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -271,8 +272,12 @@ public final class OccupancyRequestBuilder {
     }
     applySwitcherZoneConflicts(resources, intents, expandedNodes);
     appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
-    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(expandedNodes);
-    Map<String, CorridorDirection> planCorridorDirections = resolveCorridorDirections(fullExpanded);
+    CorridorDirectionResolution windowDirections =
+        resolveCorridorDirectionResolution(expandedNodes);
+    CorridorDirectionResolution planDirections = resolveCorridorDirectionResolution(fullExpanded);
+    Map<String, CorridorDirection> corridorDirections =
+        requestCorridorDirections(resources, windowDirections, planDirections);
+    Map<String, CorridorDirection> planCorridorDirections = planDirections.directions();
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
     DirectedTraversalContext directedContext =
         buildDirectedContext(
@@ -877,6 +882,7 @@ public final class OccupancyRequestBuilder {
         Optional<RailGraphCorridorInfo> infoOpt = support.corridorInfoForEdge(lookover.edge().id());
         if (infoOpt.isPresent() && infoOpt.get().directional() && !directions.containsKey(key)) {
           resolveCorridorDirection(infoOpt.get(), pathNodes, lookover.from(), lookover.to())
+              .direction()
               .ifPresent(direction -> directions.put(key, direction));
         }
         updated = true;
@@ -895,6 +901,7 @@ public final class OccupancyRequestBuilder {
         putConflictEntryOrder(entryOrders, section.key(), lookover.entryOrder());
         if (section.directional() && !directions.containsKey(section.key())) {
           resolveSectionDirection(section, pathNodes, lookover.from(), lookover.to())
+              .direction()
               .ifPresent(direction -> directions.put(section.key(), direction));
         }
         updated = true;
@@ -914,10 +921,10 @@ public final class OccupancyRequestBuilder {
       if (infoOpt.isPresent() && infoOpt.get().directional()) {
         RailGraphCorridorInfo info = infoOpt.get();
         if (!directions.containsKey(info.key())) {
-          Optional<CorridorDirection> directionOpt =
+          DirectionResolution direction =
               resolveCorridorDirection(info, pathNodes, lookover.from(), lookover.to());
-          if (directionOpt.isPresent()) {
-            directions.put(info.key(), directionOpt.get());
+          if (direction.direction().isPresent()) {
+            directions.put(info.key(), direction.direction().get());
             updated = true;
           }
         }
@@ -929,10 +936,10 @@ public final class OccupancyRequestBuilder {
       if (sectionOpt.isPresent() && sectionOpt.get().directional()) {
         SingleLineSectionInfo section = sectionOpt.get();
         if (!directions.containsKey(section.key())) {
-          Optional<CorridorDirection> directionOpt =
+          DirectionResolution direction =
               resolveSectionDirection(section, pathNodes, lookover.from(), lookover.to());
-          if (directionOpt.isPresent()) {
-            directions.put(section.key(), directionOpt.get());
+          if (direction.direction().isPresent()) {
+            directions.put(section.key(), direction.direction().get());
             updated = true;
           }
         }
@@ -1316,13 +1323,23 @@ public final class OccupancyRequestBuilder {
   }
 
   private Map<String, CorridorDirection> resolveCorridorDirections(List<NodeId> pathNodes) {
+    return resolveCorridorDirectionResolution(pathNodes).directions();
+  }
+
+  /**
+   * 解析路径中每个单线冲突资源的方向，并记录必须拒绝 legacy fallback 的资源。
+   *
+   * <p>语义方向解析器在 hub gap 等场景会明确要求 fail-closed；此时不能让后续字典序、距离或端点索引 fallback 重新给出看似确定但实际不安全的方向。
+   */
+  private CorridorDirectionResolution resolveCorridorDirectionResolution(List<NodeId> pathNodes) {
     if (!(graph instanceof RailGraphCorridorSupport support)) {
-      return Map.of();
+      return CorridorDirectionResolution.empty();
     }
     if (pathNodes == null || pathNodes.size() < 2) {
-      return Map.of();
+      return CorridorDirectionResolution.empty();
     }
     Map<String, CorridorDirection> directions = new LinkedHashMap<>();
+    Set<String> blockedDirectionKeys = new HashSet<>();
     for (int i = 0; i < pathNodes.size() - 1; i++) {
       NodeId from = pathNodes.get(i);
       NodeId to = pathNodes.get(i + 1);
@@ -1335,14 +1352,14 @@ public final class OccupancyRequestBuilder {
           .filter(RailGraphCorridorInfo::directional)
           .ifPresent(
               info -> {
-                if (directions.containsKey(info.key())) {
+                if (blockedDirectionKeys.contains(info.key())) {
                   return;
                 }
-                Optional<CorridorDirection> dirOpt =
+                DirectionResolution resolution =
                     resolveCorridorDirection(info, pathNodes, from, to);
-                if (dirOpt.isPresent()) {
-                  directions.put(info.key(), dirOpt.get());
-                } else {
+                if (resolution.blocksDirection()) {
+                  directions.remove(info.key());
+                  blockedDirectionKeys.add(info.key());
                   debugLogger.accept(
                       "方向判定失败: key="
                           + info.key()
@@ -1354,7 +1371,26 @@ public final class OccupancyRequestBuilder {
                           + info.nodes().stream()
                               .map(NodeId::value)
                               .collect(java.util.stream.Collectors.joining(",")));
+                  return;
                 }
+                if (directions.containsKey(info.key())) {
+                  return;
+                }
+                if (resolution.direction().isPresent()) {
+                  directions.put(info.key(), resolution.direction().get());
+                  return;
+                }
+                debugLogger.accept(
+                    "方向判定失败: key="
+                        + info.key()
+                        + " from="
+                        + from.value()
+                        + " to="
+                        + to.value()
+                        + " corridorNodes="
+                        + info.nodes().stream()
+                            .map(NodeId::value)
+                            .collect(java.util.stream.Collectors.joining(",")));
               });
       if (graph instanceof RailGraphSectionSupport sectionSupport) {
         sectionSupport
@@ -1362,14 +1398,14 @@ public final class OccupancyRequestBuilder {
             .filter(SingleLineSectionInfo::directional)
             .ifPresent(
                 info -> {
-                  if (directions.containsKey(info.key())) {
+                  if (blockedDirectionKeys.contains(info.key())) {
                     return;
                   }
-                  Optional<CorridorDirection> dirOpt =
+                  DirectionResolution resolution =
                       resolveSectionDirection(info, pathNodes, from, to);
-                  if (dirOpt.isPresent()) {
-                    directions.put(info.key(), dirOpt.get());
-                  } else {
+                  if (resolution.blocksDirection()) {
+                    directions.remove(info.key());
+                    blockedDirectionKeys.add(info.key());
                     debugLogger.accept(
                         "section 方向判定失败: key="
                             + info.key()
@@ -1381,11 +1417,61 @@ public final class OccupancyRequestBuilder {
                             + info.nodes().stream()
                                 .map(NodeId::value)
                                 .collect(java.util.stream.Collectors.joining(",")));
+                    return;
                   }
+                  if (directions.containsKey(info.key())) {
+                    return;
+                  }
+                  if (resolution.direction().isPresent()) {
+                    directions.put(info.key(), resolution.direction().get());
+                    return;
+                  }
+                  debugLogger.accept(
+                      "section 方向判定失败: key="
+                          + info.key()
+                          + " from="
+                          + from.value()
+                          + " to="
+                          + to.value()
+                          + " sectionNodes="
+                          + info.nodes().stream()
+                              .map(NodeId::value)
+                              .collect(java.util.stream.Collectors.joining(",")));
                 });
       }
     }
-    return Map.copyOf(directions);
+    return new CorridorDirectionResolution(directions, blockedDirectionKeys);
+  }
+
+  private Map<String, CorridorDirection> requestCorridorDirections(
+      Collection<OccupancyResource> resources,
+      CorridorDirectionResolution windowDirections,
+      CorridorDirectionResolution planDirections) {
+    if (resources == null || resources.isEmpty()) {
+      return Map.of();
+    }
+    CorridorDirectionResolution window =
+        windowDirections == null ? CorridorDirectionResolution.empty() : windowDirections;
+    CorridorDirectionResolution plan =
+        planDirections == null ? CorridorDirectionResolution.empty() : planDirections;
+    Map<String, CorridorDirection> merged = new LinkedHashMap<>();
+    for (OccupancyResource resource : resources) {
+      if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
+        continue;
+      }
+      String key = resource.key();
+      if (key == null || plan.blockedKeys().contains(key)) {
+        continue;
+      }
+      CorridorDirection direction = plan.directions().get(key);
+      if (direction == null && !window.blockedKeys().contains(key)) {
+        direction = window.directions().get(key);
+      }
+      if (direction != null) {
+        merged.putIfAbsent(key, direction);
+      }
+    }
+    return Map.copyOf(merged);
   }
 
   private Map<String, Integer> resolveConflictEntryOrders(List<RailEdge> edges) {
@@ -1408,25 +1494,25 @@ public final class OccupancyRequestBuilder {
     return Map.copyOf(orders);
   }
 
-  private Optional<CorridorDirection> resolveCorridorDirection(
+  private DirectionResolution resolveCorridorDirection(
       RailGraphCorridorInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
     if (info == null) {
-      return Optional.empty();
+      return DirectionResolution.unresolved();
     }
     return resolveDirectionalConflict(
         info.left(), info.right(), info.nodes(), List.of(), pathNodes, from, to);
   }
 
-  private Optional<CorridorDirection> resolveSectionDirection(
+  private DirectionResolution resolveSectionDirection(
       SingleLineSectionInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
     if (info == null) {
-      return Optional.empty();
+      return DirectionResolution.unresolved();
     }
     return resolveDirectionalConflict(
         info.left(), info.right(), info.nodes(), info.boundaries(), pathNodes, from, to);
   }
 
-  private Optional<CorridorDirection> resolveDirectionalConflict(
+  private DirectionResolution resolveDirectionalConflict(
       NodeId left,
       NodeId right,
       List<NodeId> orderedNodes,
@@ -1438,23 +1524,67 @@ public final class OccupancyRequestBuilder {
         semanticDirectionResolver.resolve(
             semanticResourceNodes(left, right, orderedNodes, boundaryNodes), pathNodes, from, to);
     if (semantic.resolved()) {
-      return Optional.of(semantic.direction());
+      return DirectionResolution.resolved(semantic.direction());
     }
     if (semantic.blocksLegacyFallback()) {
-      return Optional.empty();
+      return DirectionResolution.blocked();
     }
     CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (byCorridor != CorridorDirection.UNKNOWN) {
-      return Optional.of(byCorridor);
+      return DirectionResolution.resolved(byCorridor);
     }
     int leftIndex = indexOfNode(pathNodes, left);
     int rightIndex = indexOfNode(pathNodes, right);
     if (leftIndex >= 0 && rightIndex >= 0 && leftIndex != rightIndex) {
-      return Optional.of(
+      return DirectionResolution.resolved(
           leftIndex < rightIndex ? CorridorDirection.A_TO_B : CorridorDirection.B_TO_A);
     }
     CorridorDirection byDistance = resolveDirectionByDistance(from, to, left, right);
-    return byDistance == CorridorDirection.UNKNOWN ? Optional.empty() : Optional.of(byDistance);
+    return byDistance == CorridorDirection.UNKNOWN
+        ? DirectionResolution.unresolved()
+        : DirectionResolution.resolved(byDistance);
+  }
+
+  /**
+   * 单次方向解析结果。
+   *
+   * <p>{@code unresolved} 表示当前证据不足但可继续 fallback；{@code blocked} 表示语义解析已发现本地分叉 gap 等不安全场景，调用方必须保留
+   * UNKNOWN。
+   */
+  private record DirectionResolution(
+      Optional<CorridorDirection> direction, boolean blocksDirection) {
+    private DirectionResolution {
+      direction = direction == null ? Optional.empty() : direction;
+    }
+
+    static DirectionResolution resolved(CorridorDirection direction) {
+      return new DirectionResolution(Optional.of(direction), false);
+    }
+
+    static DirectionResolution unresolved() {
+      return new DirectionResolution(Optional.empty(), false);
+    }
+
+    static DirectionResolution blocked() {
+      return new DirectionResolution(Optional.empty(), true);
+    }
+  }
+
+  /**
+   * 一条路径上的方向解析快照。
+   *
+   * <p>{@code directions} 保存已证明方向；{@code blockedKeys} 保存已被语义解析明确拒绝 fallback 的资源 key。
+   */
+  private record CorridorDirectionResolution(
+      Map<String, CorridorDirection> directions, Set<String> blockedKeys) {
+    private CorridorDirectionResolution {
+      directions = directions == null ? Map.of() : Map.copyOf(directions);
+      blockedKeys = blockedKeys == null ? Set.of() : Set.copyOf(blockedKeys);
+    }
+
+    static CorridorDirectionResolution empty() {
+      return new CorridorDirectionResolution(Map.of(), Set.of());
+    }
   }
 
   private List<NodeId> semanticResourceNodes(

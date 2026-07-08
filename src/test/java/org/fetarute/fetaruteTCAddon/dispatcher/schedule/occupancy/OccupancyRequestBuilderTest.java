@@ -69,7 +69,7 @@ class OccupancyRequestBuilderTest {
             Map.of(nodeA, stationA, nodeB, stationB, nodeC, stationC),
             Map.of(edgeAB, ab, edgeBC, bc),
             Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 0);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 6, 0, 0, 0);
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB, nodeC), Optional.empty());
@@ -267,7 +267,7 @@ class OccupancyRequestBuilderTest {
     SimpleRailGraph graph =
         new SimpleRailGraph(
             Map.of(nodeA, a, nodeM, m, nodeC, c), Map.of(edgeAM, am, edgeMC, mc), Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 0);
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 6, 0, 0, 0);
     RouteDefinition route =
         new RouteDefinition(RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeC), Optional.empty());
 
@@ -1146,6 +1146,291 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void semanticDirectionScopesPathAxisBeforeRemoteHubBranch() {
+    NodeId sw128 = NodeId.of("SWITCHER:Towny:128:74:1014");
+    NodeId zkwHhu2 = NodeId.of("SURC:ZKW:HHU:1:002");
+    NodeId zkwHhu1 = NodeId.of("SURC:ZKW:HHU:1:001");
+    NodeId zkw = NodeId.of("SURC:S:ZKW:1");
+    NodeId sccZkw3 = NodeId.of("SURC:SCC:ZKW:1:003");
+    NodeId sccZkw2 = NodeId.of("SURC:SCC:ZKW:1:002");
+    NodeId sccZkw1 = NodeId.of("SURC:SCC:ZKW:1:001");
+    NodeId scc = NodeId.of("SURC:S:SCC:1");
+    NodeId wsdScc2 = NodeId.of("SURC:WSD:SCC:1:002");
+    NodeId wsdScc1 = NodeId.of("SURC:WSD:SCC:1:001");
+    NodeId sw262 = NodeId.of("SWITCHER:Towny:-262:74:1117");
+    NodeId wsd = NodeId.of("SURC:S:WSD:2");
+    NodeId spbWsd2 = NodeId.of("SURC:SPB:WSD:2:002");
+    NodeId spbWsd1 = NodeId.of("SURC:SPB:WSD:2:001");
+    NodeId spb = NodeId.of("SURC:S:SPB:2");
+    NodeId hub = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId spbJbs1 = NodeId.of("SURC:SPB:JBS:1:001");
+    NodeId jbs = NodeId.of("SURC:S:JBS:1");
+    EdgeId edgeStart = EdgeId.undirected(sw128, zkwHhu2);
+    EdgeId edgeZkwHhu = EdgeId.undirected(zkwHhu2, zkwHhu1);
+    EdgeId edgeZkwStation = EdgeId.undirected(zkwHhu1, zkw);
+    EdgeId edgeSccZkw3 = EdgeId.undirected(zkw, sccZkw3);
+    EdgeId edgeSccZkw2 = EdgeId.undirected(sccZkw3, sccZkw2);
+    EdgeId edgeSccZkw1 = EdgeId.undirected(sccZkw2, sccZkw1);
+    EdgeId edgeSccStation = EdgeId.undirected(sccZkw1, scc);
+    EdgeId edgeWsdScc2 = EdgeId.undirected(scc, wsdScc2);
+    EdgeId edgeWsdScc1 = EdgeId.undirected(wsdScc2, wsdScc1);
+    EdgeId edgeSw262 = EdgeId.undirected(wsdScc1, sw262);
+    EdgeId edgeWsd = EdgeId.undirected(sw262, wsd);
+    EdgeId edgeSpbWsd2 = EdgeId.undirected(wsd, spbWsd2);
+    EdgeId edgeSpbWsd1 = EdgeId.undirected(spbWsd2, spbWsd1);
+    EdgeId edgeSpb = EdgeId.undirected(spbWsd1, spb);
+    EdgeId edgeHub = EdgeId.undirected(spb, hub);
+    EdgeId edgeSpbJbs = EdgeId.undirected(hub, spbJbs1);
+    EdgeId edgeJbs = EdgeId.undirected(spbJbs1, jbs);
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.ofEntries(
+                Map.entry(sw128, switcher(sw128, 0.0)),
+                Map.entry(zkwHhu2, interval(zkwHhu2, "ZKW", "HHU", 1, "002", 10.0)),
+                Map.entry(zkwHhu1, interval(zkwHhu1, "ZKW", "HHU", 1, "001", 20.0)),
+                Map.entry(zkw, station(zkw, "ZKW", 1, 30.0)),
+                Map.entry(sccZkw3, interval(sccZkw3, "SCC", "ZKW", 1, "003", 40.0)),
+                Map.entry(sccZkw2, interval(sccZkw2, "SCC", "ZKW", 1, "002", 50.0)),
+                Map.entry(sccZkw1, interval(sccZkw1, "SCC", "ZKW", 1, "001", 60.0)),
+                Map.entry(scc, station(scc, "SCC", 1, 70.0)),
+                Map.entry(wsdScc2, interval(wsdScc2, "WSD", "SCC", 1, "002", 80.0)),
+                Map.entry(wsdScc1, interval(wsdScc1, "WSD", "SCC", 1, "001", 90.0)),
+                Map.entry(sw262, switcher(sw262, 100.0)),
+                Map.entry(wsd, station(wsd, "WSD", 2, 110.0)),
+                Map.entry(spbWsd2, interval(spbWsd2, "SPB", "WSD", 2, "002", 120.0)),
+                Map.entry(spbWsd1, interval(spbWsd1, "SPB", "WSD", 2, "001", 130.0)),
+                Map.entry(spb, station(spb, "SPB", 2, 140.0)),
+                Map.entry(hub, switcher(hub, 150.0)),
+                Map.entry(spbJbs1, interval(spbJbs1, "SPB", "JBS", 1, "001", 160.0)),
+                Map.entry(jbs, station(jbs, "JBS", 1, 170.0))),
+            Map.ofEntries(
+                Map.entry(edgeStart, edge(sw128, zkwHhu2, edgeStart)),
+                Map.entry(edgeZkwHhu, edge(zkwHhu2, zkwHhu1, edgeZkwHhu)),
+                Map.entry(edgeZkwStation, edge(zkwHhu1, zkw, edgeZkwStation)),
+                Map.entry(edgeSccZkw3, edge(zkw, sccZkw3, edgeSccZkw3)),
+                Map.entry(edgeSccZkw2, edge(sccZkw3, sccZkw2, edgeSccZkw2)),
+                Map.entry(edgeSccZkw1, edge(sccZkw2, sccZkw1, edgeSccZkw1)),
+                Map.entry(edgeSccStation, edge(sccZkw1, scc, edgeSccStation)),
+                Map.entry(edgeWsdScc2, edge(scc, wsdScc2, edgeWsdScc2)),
+                Map.entry(edgeWsdScc1, edge(wsdScc2, wsdScc1, edgeWsdScc1)),
+                Map.entry(edgeSw262, edge(wsdScc1, sw262, edgeSw262)),
+                Map.entry(edgeWsd, edge(sw262, wsd, edgeWsd)),
+                Map.entry(edgeSpbWsd2, edge(wsd, spbWsd2, edgeSpbWsd2)),
+                Map.entry(edgeSpbWsd1, edge(spbWsd2, spbWsd1, edgeSpbWsd1)),
+                Map.entry(edgeSpb, edge(spbWsd1, spb, edgeSpb)),
+                Map.entry(edgeHub, edge(spb, hub, edgeHub)),
+                Map.entry(edgeSpbJbs, edge(hub, spbJbs1, edgeSpbJbs)),
+                Map.entry(edgeJbs, edge(spbJbs1, jbs, edgeJbs))),
+            Set.of());
+    String conflict = delegate.conflictKeyForEdge(edgeStart).orElseThrow();
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeStart,
+                new RailGraphCorridorInfo(
+                    conflict,
+                    sw262,
+                    sw128,
+                    List.of(
+                        sw262, wsdScc1, wsdScc2, scc, sccZkw1, sccZkw2, sccZkw3, zkw, zkwHhu1,
+                        zkwHhu2, sw128),
+                    false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 20, 0, 0, 0);
+
+    OccupancyRequest request =
+        builder
+            .buildContextFromNodes(
+                "SURC-MT-LP-9160",
+                Optional.of(RouteId.of("SURC:MT:MT-2F_FULL")),
+                List.of(sw128, jbs),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
+    assertEquals(CorridorDirection.B_TO_A, request.corridorDirections().get(conflict));
+  }
+
+  @Test
+  void semanticDirectionKeepsHubBranchGapUnknown() {
+    NodeId wsd = NodeId.of("SURC:S:WSD:2");
+    NodeId spbWsd = NodeId.of("SURC:SPB:WSD:2:001");
+    NodeId spb = NodeId.of("SURC:S:SPB:2");
+    NodeId hub = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId spbJbs = NodeId.of("SURC:SPB:JBS:1:001");
+    NodeId jbs = NodeId.of("SURC:S:JBS:1");
+    EdgeId edgeWsdInterval = EdgeId.undirected(wsd, spbWsd);
+    EdgeId edgeSpbWsd = EdgeId.undirected(spbWsd, spb);
+    EdgeId edgeHub = EdgeId.undirected(spb, hub);
+    EdgeId edgeSpbJbs = EdgeId.undirected(hub, spbJbs);
+    EdgeId edgeJbs = EdgeId.undirected(spbJbs, jbs);
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.of(
+                wsd, station(wsd, "WSD", 2, 0.0),
+                spbWsd, interval(spbWsd, "SPB", "WSD", 2, "001", 10.0),
+                spb, station(spb, "SPB", 2, 20.0),
+                hub, switcher(hub, 30.0),
+                spbJbs, interval(spbJbs, "SPB", "JBS", 1, "001", 40.0),
+                jbs, station(jbs, "JBS", 1, 50.0)),
+            Map.of(
+                edgeWsdInterval, edge(wsd, spbWsd, edgeWsdInterval),
+                edgeSpbWsd, edge(spbWsd, spb, edgeSpbWsd),
+                edgeHub, edge(spb, hub, edgeHub),
+                edgeSpbJbs, edge(hub, spbJbs, edgeSpbJbs),
+                edgeJbs, edge(spbJbs, jbs, edgeJbs)),
+            Set.of());
+    String conflict = "single:hub:SPB~SWITCHER";
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeHub, new RailGraphCorridorInfo(conflict, spb, hub, List.of(spb, hub), false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 6, 0, 0, 0);
+
+    OccupancyRequest request =
+        builder
+            .buildContextFromNodes(
+                "SURC-MT-LP-9160",
+                Optional.of(RouteId.of("SURC:MT:WSD_JBS")),
+                List.of(wsd, jbs),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
+    assertFalse(request.corridorDirections().containsKey(conflict));
+  }
+
+  @Test
+  void semanticDirectionKeepsSharedHubRegionUnknownAfterEarlierLinearEdge() {
+    NodeId wsd = NodeId.of("SURC:S:WSD:2");
+    NodeId spbWsd = NodeId.of("SURC:SPB:WSD:2:001");
+    NodeId spb = NodeId.of("SURC:S:SPB:2");
+    NodeId hub = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId spbJbs = NodeId.of("SURC:SPB:JBS:1:001");
+    NodeId jbs = NodeId.of("SURC:S:JBS:1");
+    EdgeId edgeWsdInterval = EdgeId.undirected(wsd, spbWsd);
+    EdgeId edgeSpbWsd = EdgeId.undirected(spbWsd, spb);
+    EdgeId edgeHub = EdgeId.undirected(spb, hub);
+    EdgeId edgeSpbJbs = EdgeId.undirected(hub, spbJbs);
+    EdgeId edgeJbs = EdgeId.undirected(spbJbs, jbs);
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.of(
+                wsd, station(wsd, "WSD", 2, 0.0),
+                spbWsd, interval(spbWsd, "SPB", "WSD", 2, "001", 10.0),
+                spb, station(spb, "SPB", 2, 20.0),
+                hub, switcher(hub, 30.0),
+                spbJbs, interval(spbJbs, "SPB", "JBS", 1, "001", 40.0),
+                jbs, station(jbs, "JBS", 1, 50.0)),
+            Map.of(
+                edgeWsdInterval, edge(wsd, spbWsd, edgeWsdInterval),
+                edgeSpbWsd, edge(spbWsd, spb, edgeSpbWsd),
+                edgeHub, edge(spb, hub, edgeHub),
+                edgeSpbJbs, edge(hub, spbJbs, edgeSpbJbs),
+                edgeJbs, edge(spbJbs, jbs, edgeJbs)),
+            Set.of());
+    String conflict = "single:hub:WSD~JBS";
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeSpbWsd,
+                new RailGraphCorridorInfo(
+                    conflict, wsd, jbs, List.of(wsd, spbWsd, spb, hub, spbJbs, jbs), false),
+                edgeHub,
+                new RailGraphCorridorInfo(
+                    conflict, wsd, jbs, List.of(wsd, spbWsd, spb, hub, spbJbs, jbs), false),
+                edgeSpbJbs,
+                new RailGraphCorridorInfo(
+                    conflict, wsd, jbs, List.of(wsd, spbWsd, spb, hub, spbJbs, jbs), false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 0);
+
+    OccupancyRequest request =
+        builder
+            .buildContextFromNodes(
+                "SURC-MT-LP-9160",
+                Optional.of(RouteId.of("SURC:MT:WSD_JBS")),
+                List.of(wsd, jbs),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
+    assertFalse(request.corridorDirections().containsKey(conflict));
+  }
+
+  @Test
+  void semanticDirectionScopesPathAxisAfterRemoteHubBranch() {
+    NodeId wsd = NodeId.of("SURC:S:WSD:2");
+    NodeId spbWsd = NodeId.of("SURC:SPB:WSD:2:001");
+    NodeId spb = NodeId.of("SURC:S:SPB:2");
+    NodeId hub = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId spbJbs = NodeId.of("SURC:SPB:JBS:1:001");
+    NodeId jbs = NodeId.of("SURC:S:JBS:1");
+    NodeId jbsCsb = NodeId.of("SURC:JBS:CSB:1:001");
+    NodeId csb = NodeId.of("SURC:S:CSB:1");
+    EdgeId edgeWsdInterval = EdgeId.undirected(wsd, spbWsd);
+    EdgeId edgeSpbWsd = EdgeId.undirected(spbWsd, spb);
+    EdgeId edgeHub = EdgeId.undirected(spb, hub);
+    EdgeId edgeSpbJbs = EdgeId.undirected(hub, spbJbs);
+    EdgeId edgeJbs = EdgeId.undirected(spbJbs, jbs);
+    EdgeId edgeJbsCsb = EdgeId.undirected(jbs, jbsCsb);
+    EdgeId edgeCsb = EdgeId.undirected(jbsCsb, csb);
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.of(
+                wsd, station(wsd, "WSD", 2, 0.0),
+                spbWsd, interval(spbWsd, "SPB", "WSD", 2, "001", 10.0),
+                spb, station(spb, "SPB", 2, 20.0),
+                hub, switcher(hub, 30.0),
+                spbJbs, interval(spbJbs, "SPB", "JBS", 1, "001", 40.0),
+                jbs, station(jbs, "JBS", 1, 50.0),
+                jbsCsb, interval(jbsCsb, "JBS", "CSB", 1, "001", 60.0),
+                csb, station(csb, "CSB", 1, 70.0)),
+            Map.of(
+                edgeWsdInterval, edge(wsd, spbWsd, edgeWsdInterval),
+                edgeSpbWsd, edge(spbWsd, spb, edgeSpbWsd),
+                edgeHub, edge(spb, hub, edgeHub),
+                edgeSpbJbs, edge(hub, spbJbs, edgeSpbJbs),
+                edgeJbs, edge(spbJbs, jbs, edgeJbs),
+                edgeJbsCsb, edge(jbs, jbsCsb, edgeJbsCsb),
+                edgeCsb, edge(jbsCsb, csb, edgeCsb)),
+            Set.of());
+    String conflict = "single:downstream:JBS~CSB";
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeJbsCsb,
+                new RailGraphCorridorInfo(conflict, jbs, csb, List.of(jbs, jbsCsb, csb), false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 8, 0, 0, 0);
+
+    OccupancyRequest request =
+        builder
+            .buildContextFromNodes(
+                "SURC-MT-LP-9160",
+                Optional.of(RouteId.of("SURC:MT:WSD_CSB")),
+                List.of(wsd, csb),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
+    assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflict));
+  }
+
+  @Test
   void semanticDirectionUsesPathLocalAxisWhenResourceNeighborhoodBranches() {
     NodeId spbJbsBefore = NodeId.of("SURC:SPB:JBS:1:002");
     NodeId switcher = NodeId.of("SWITCHER:Towny:-557:77:1193");
@@ -1307,6 +1592,69 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void requestDirectionsUseFullPlanWhenAdmissionWindowIsTooShortForSemanticAnchors() {
+    NodeId jbs = NodeId.of("SURC:S:JBS:1");
+    NodeId throat = NodeId.of("SURC:S:JBS:1:001");
+    NodeId switcherA = NodeId.of("SWITCHER:Towny:-520:77:1390");
+    NodeId switcherB = NodeId.of("SWITCHER:Towny:-520:77:1410");
+    NodeId switcherC = NodeId.of("SWITCHER:Towny:-520:77:1430");
+    NodeId jbsCsb = NodeId.of("SURC:JBS:CSB:2:001");
+    NodeId csb = NodeId.of("SURC:S:CSB:2");
+    EdgeId edgeStationThroat = EdgeId.undirected(jbs, throat);
+    EdgeId edgeThroatA = EdgeId.undirected(throat, switcherA);
+    EdgeId edgeAB = EdgeId.undirected(switcherA, switcherB);
+    EdgeId edgeBC = EdgeId.undirected(switcherB, switcherC);
+    EdgeId edgeCInterval = EdgeId.undirected(switcherC, jbsCsb);
+    EdgeId edgeIntervalStation = EdgeId.undirected(jbsCsb, csb);
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.of(
+                jbs, station(jbs, "JBS", 1, 0.0),
+                throat, stationThroat(throat, "JBS", 1, "001", 10.0),
+                switcherA, switcher(switcherA, 20.0),
+                switcherB, switcher(switcherB, 30.0),
+                switcherC, switcher(switcherC, 40.0),
+                jbsCsb, interval(jbsCsb, "JBS", "CSB", 2, "001", 50.0),
+                csb, station(csb, "CSB", 2, 60.0)),
+            Map.of(
+                edgeStationThroat, edge(jbs, throat, edgeStationThroat),
+                edgeThroatA, edge(throat, switcherA, edgeThroatA),
+                edgeAB, edge(switcherA, switcherB, edgeAB),
+                edgeBC, edge(switcherB, switcherC, edgeBC),
+                edgeCInterval, edge(switcherC, jbsCsb, edgeCInterval),
+                edgeIntervalStation, edge(jbsCsb, csb, edgeIntervalStation)),
+            Set.of());
+    String conflict = "single:SURC:JBS:CSB:throat";
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeStationThroat,
+                new RailGraphCorridorInfo(
+                    conflict, switcherA, switcherB, List.of(switcherA, switcherB), false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 0, 0);
+
+    OccupancyRequestContext context =
+        builder
+            .buildContextFromNodes(
+                "SURC-DS-LW-0996",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_Full")),
+                List.of(jbs, csb),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow();
+    OccupancyRequest request = context.request();
+
+    assertEquals(List.of(jbs, throat), context.pathNodes());
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
+    assertEquals(
+        CorridorDirection.A_TO_B,
+        request.directedContext().orElseThrow().singleConflictDirections().get(conflict));
+    assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflict));
+  }
+
+  @Test
   void repeatedOppositeEdgeTraversalSplitsContinuousMovementRequest() {
     NodeId nodeA = NodeId.of("SURC:D:HHU:3");
     NodeId nodeWsd = NodeId.of("SURC:WSD:1");
@@ -1360,6 +1708,16 @@ class OccupancyRequestBuilderTest {
         new Vector(x, 64.0, 0.0),
         Optional.empty(),
         Optional.of(WaypointMetadata.station("SURC", station, track)));
+  }
+
+  private static RailNode stationThroat(
+      NodeId nodeId, String station, int track, String sequence, double x) {
+    return new SignRailNode(
+        nodeId,
+        NodeType.WAYPOINT,
+        new Vector(x, 64.0, 0.0),
+        Optional.empty(),
+        Optional.of(WaypointMetadata.stationThroat("SURC", station, track, sequence)));
   }
 
   private static RailNode interval(
@@ -1439,6 +1797,10 @@ class OccupancyRequestBuilderTest {
 
     @Override
     public Optional<String> conflictKeyForEdge(EdgeId edgeId) {
+      Optional<RailGraphCorridorInfo> override = overrideFor(edgeId);
+      if (override.isPresent()) {
+        return override.map(RailGraphCorridorInfo::key);
+      }
       return delegate.conflictKeyForEdge(edgeId);
     }
 
@@ -1447,14 +1809,18 @@ class OccupancyRequestBuilderTest {
       if (edgeId == null) {
         return Optional.empty();
       }
+      return overrideFor(edgeId).or(() -> delegate.corridorInfoForEdge(edgeId));
+    }
+
+    private Optional<RailGraphCorridorInfo> overrideFor(EdgeId edgeId) {
+      if (edgeId == null) {
+        return Optional.empty();
+      }
       RailGraphCorridorInfo info = overrides.get(edgeId);
       if (info == null) {
         info = overrides.get(EdgeId.undirected(edgeId.a(), edgeId.b()));
       }
-      if (info != null) {
-        return Optional.of(info);
-      }
-      return delegate.corridorInfoForEdge(edgeId);
+      return Optional.ofNullable(info);
     }
   }
 
