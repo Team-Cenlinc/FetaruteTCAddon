@@ -26,6 +26,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
@@ -323,7 +325,7 @@ public final class OccupancyRequestBuilder {
         trainName, routeId, nodes, currentIndex, now, priority, AuthorizationPurpose.RUNTIME_MOVE);
   }
 
-  /** 构建指定来源的尾部保护请求。 */
+  /** 构建指定来源的尾部保护请求；未提供规范计划时只保留物理资源，不自行建立 single 方向。 */
   public OccupancyRequest buildRearGuardRequestFromNodes(
       String trainName,
       Optional<RouteId> routeId,
@@ -332,6 +334,54 @@ public final class OccupancyRequestBuilder {
       Instant now,
       int priority,
       AuthorizationPurpose purpose) {
+    return buildRearGuardRequestFromNodes(
+        trainName, routeId, nodes, currentIndex, now, priority, purpose, Optional.empty());
+  }
+
+  /**
+   * 从本周期规范行车计划派生尾部保护请求。
+   *
+   * <p>资源窗口仍只覆盖当前节点后方的 configured rear-guard edges；single 方向与有向上下文完全继承 {@code movementPlan}。
+   *
+   * @param trainName 列车名
+   * @param routeId 线路 route id
+   * @param nodes 当前有效 route 节点
+   * @param currentIndex 当前 route index
+   * @param now 请求时间
+   * @param priority 队列优先级
+   * @param purpose 授权来源
+   * @param movementPlan 本周期规范行车计划
+   * @return 与规范计划方向一致的尾部保护请求
+   */
+  public OccupancyRequest buildRearGuardRequestFromPlan(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      MovementPlanSnapshot movementPlan) {
+    return buildRearGuardRequestFromNodes(
+        trainName,
+        routeId,
+        nodes,
+        currentIndex,
+        now,
+        priority,
+        purpose,
+        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")));
+  }
+
+  private OccupancyRequest buildRearGuardRequestFromNodes(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      Optional<MovementPlanSnapshot> movementPlan) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(nodes, "nodes");
@@ -354,19 +404,21 @@ public final class OccupancyRequestBuilder {
     List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
     List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
     appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
-    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(rearExpanded);
+    Map<String, CorridorDirection> corridorDirections =
+        resolveProtectiveCorridorDirections(resources, movementPlan);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(rearEdges);
     DirectedTraversalContext directedContext =
-        buildDirectedContext(
+        buildProtectiveDirectedContext(
             trainName,
             routeId,
             currentIndex,
-            Optional.ofNullable(currentNode),
+            currentNode,
             rearExpanded,
             rearEdges,
             corridorDirections,
             resources,
-            purpose.name());
+            purpose.name(),
+            movementPlan);
     return new OccupancyRequest(
         trainName,
         routeId,
@@ -385,7 +437,7 @@ public final class OccupancyRequestBuilder {
    * 构建“当前位置保持”请求。
    *
    * <p>该请求用于硬 STOP/blocked 等 hold-only 场景：即使不再向前放行，也必须继续持有列车当前所在边派生出的 {@code
-   * CONFLICT:single}，否则对向列车会在窗口滑动后看不到走廊内占用。
+   * CONFLICT:single}，否则对向列车会在窗口滑动后看不到走廊内占用。该兼容入口没有规范计划，因此不会从局部路径建立 single 方向。
    */
   public OccupancyRequest buildHoldPositionRequest(
       String trainName,
@@ -397,6 +449,71 @@ public final class OccupancyRequestBuilder {
       Instant now,
       int priority,
       AuthorizationPurpose purpose) {
+    return buildHoldPositionRequest(
+        trainName,
+        routeId,
+        currentNode,
+        targetNode,
+        routeNodes,
+        currentIndex,
+        now,
+        priority,
+        purpose,
+        Optional.empty());
+  }
+
+  /**
+   * 从本周期规范行车计划派生当前位置等待请求。
+   *
+   * <p>请求只保留当前位置、当前边与尾部保护资源；single 方向、完整展开路径与道岔签名由 {@code movementPlan} 提供。
+   *
+   * @param trainName 列车名
+   * @param routeId 线路 route id
+   * @param currentNode 当前图节点
+   * @param targetNode 下一目标节点
+   * @param routeNodes 当前有效 route 节点
+   * @param currentIndex 当前 route index
+   * @param now 请求时间
+   * @param priority 队列优先级
+   * @param purpose 授权来源
+   * @param movementPlan 本周期规范行车计划
+   * @return 与规范计划方向一致的等待请求
+   */
+  public OccupancyRequest buildHoldPositionRequestFromPlan(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      List<NodeId> routeNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      MovementPlanSnapshot movementPlan) {
+    return buildHoldPositionRequest(
+        trainName,
+        routeId,
+        currentNode,
+        targetNode,
+        routeNodes,
+        currentIndex,
+        now,
+        priority,
+        purpose,
+        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")));
+  }
+
+  private OccupancyRequest buildHoldPositionRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      List<NodeId> routeNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      Optional<MovementPlanSnapshot> movementPlan) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(currentNode, "currentNode");
@@ -429,19 +546,21 @@ public final class OccupancyRequestBuilder {
       appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
     }
 
-    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(directionNodes);
+    Map<String, CorridorDirection> corridorDirections =
+        resolveProtectiveCorridorDirections(resources, movementPlan);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(directionEdges);
     DirectedTraversalContext directedContext =
-        buildDirectedContext(
+        buildProtectiveDirectedContext(
             trainName,
             routeId,
             currentIndex,
-            Optional.of(currentNode),
+            currentNode,
             directionNodes,
             directionEdges,
             corridorDirections,
             resources,
-            purpose.name());
+            purpose.name(),
+            movementPlan);
     return new OccupancyRequest(
         trainName,
         routeId,
@@ -460,8 +579,8 @@ public final class OccupancyRequestBuilder {
    * 构建列车当前位置保护请求。
    *
    * <p>当前位置保护用于运行中持续占住“车头所在节点 + 朝目标方向的下一段图边”。当 {@code targetNode}
-   * 不是相邻图节点时，会先走一次最短路，只取当前节点后的第一段边。这样长单线内的中间节点也能继续持有正确的 single conflict
-   * claim，并携带走廊方向，避免后续信号把对向/同向列车判错。
+   * 不是相邻图节点时，会先走一次最短路，只取当前节点后的第一段边。这样长单线内的中间节点仍能保留正确的物理资源；由于该兼容入口没有规范计划，single 方向保持未知，调用方应优先使用
+   * {@link #buildCurrentPositionRequestFromPlan}。
    *
    * @param trainName 列车名
    * @param routeId 线路 route id
@@ -497,6 +616,54 @@ public final class OccupancyRequestBuilder {
       Instant now,
       int priority,
       AuthorizationPurpose purpose) {
+    return buildCurrentPositionRequest(
+        trainName, routeId, currentNode, targetNode, now, priority, purpose, Optional.empty());
+  }
+
+  /**
+   * 从本周期规范行车计划派生当前位置保护请求。
+   *
+   * <p>当前位置窗口只保留当前节点与第一条实际图边，但与规范计划重叠的 single conflict 必须继承其方向，不能因短路径缺少远端语义锚点而重新解释 traversal。
+   *
+   * @param trainName 列车名
+   * @param routeId 线路 route id
+   * @param currentNode 当前图节点
+   * @param targetNode 下一目标节点
+   * @param now 请求时间
+   * @param priority 队列优先级
+   * @param purpose 授权来源
+   * @param movementPlan 本周期已确认的规范行车计划
+   * @return 与规范计划方向一致的当前位置保护请求
+   */
+  public OccupancyRequest buildCurrentPositionRequestFromPlan(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      MovementPlanSnapshot movementPlan) {
+    return buildCurrentPositionRequest(
+        trainName,
+        routeId,
+        currentNode,
+        targetNode,
+        now,
+        priority,
+        purpose,
+        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")));
+  }
+
+  private OccupancyRequest buildCurrentPositionRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      NodeId currentNode,
+      Optional<NodeId> targetNode,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      Optional<MovementPlanSnapshot> movementPlan) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(currentNode, "currentNode");
@@ -526,19 +693,21 @@ public final class OccupancyRequestBuilder {
       }
     }
 
-    Map<String, CorridorDirection> corridorDirections = resolveCorridorDirections(pathNodes);
+    Map<String, CorridorDirection> corridorDirections =
+        resolveProtectiveCorridorDirections(resources, movementPlan);
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
     DirectedTraversalContext directedContext =
-        buildDirectedContext(
+        buildProtectiveDirectedContext(
             trainName,
             routeId,
             -1,
-            Optional.of(currentNode),
+            currentNode,
             pathNodes,
             edges,
             corridorDirections,
             resources,
-            purpose.name());
+            purpose.name(),
+            movementPlan);
     return new OccupancyRequest(
         trainName,
         routeId,
@@ -551,6 +720,81 @@ public final class OccupancyRequestBuilder {
         Map.of(),
         intents,
         Optional.of(directedContext));
+  }
+
+  private DirectedTraversalContext buildProtectiveDirectedContext(
+      String trainName,
+      Optional<RouteId> routeId,
+      int localCurrentIndex,
+      NodeId currentNode,
+      List<NodeId> localPathNodes,
+      List<RailEdge> localEdges,
+      Map<String, CorridorDirection> localDirections,
+      Set<OccupancyResource> resources,
+      String source,
+      Optional<MovementPlanSnapshot> movementPlan) {
+    if (movementPlan.isEmpty()) {
+      return buildDirectedContext(
+          trainName,
+          routeId,
+          localCurrentIndex,
+          Optional.ofNullable(currentNode),
+          localPathNodes,
+          localEdges,
+          localDirections,
+          resources,
+          source);
+    }
+    MovementPlanSnapshot plan = movementPlan.get();
+    return new DirectedTraversalContext(
+        trainName,
+        plan.routeId(),
+        plan.routeIndex(),
+        Optional.ofNullable(currentNode),
+        plan.lastPassedGraphNode(),
+        plan.effectiveFromNode(),
+        plan.effectiveToNode(),
+        plan.expandedPathNodes(),
+        plan.directedEdges(),
+        plan.singleConflictDirections(),
+        plan.switcherPathSignatures(),
+        source,
+        plan.occupancyVersion(),
+        plan.progressVersion(),
+        plan.requestId(),
+        Optional.empty());
+  }
+
+  /**
+   * 为保护资源筛出规范计划已经证明的 single 方向。
+   *
+   * <p>保护窗口自己的短路径只决定需要保留哪些物理资源，不能成为新的方向证据；未提供计划或计划方向未知时返回空映射。
+   */
+  private Map<String, CorridorDirection> resolveProtectiveCorridorDirections(
+      Set<OccupancyResource> resources, Optional<MovementPlanSnapshot> movementPlan) {
+    Set<String> requiredSingleConflicts = new LinkedHashSet<>();
+    for (OccupancyResource resource : resources) {
+      if (resource != null
+          && resource.kind() == ResourceKind.CONFLICT
+          && resource.key().startsWith("single:")) {
+        requiredSingleConflicts.add(resource.key());
+      }
+    }
+    if (requiredSingleConflicts.isEmpty()) {
+      return Map.of();
+    }
+
+    Map<String, CorridorDirection> inherited = new LinkedHashMap<>();
+    movementPlan.ifPresent(
+        plan -> {
+          for (String conflictKey : requiredSingleConflicts) {
+            CorridorDirection direction = plan.singleConflictDirections().get(conflictKey);
+            if (direction != null && direction != CorridorDirection.UNKNOWN) {
+              inherited.put(conflictKey, direction);
+            }
+          }
+        });
+    return Map.copyOf(inherited);
   }
 
   /**
@@ -1322,10 +1566,6 @@ public final class OccupancyRequestBuilder {
     return edge.map(railEdge -> new CurrentStep(List.of(currentNode, nextNode), railEdge));
   }
 
-  private Map<String, CorridorDirection> resolveCorridorDirections(List<NodeId> pathNodes) {
-    return resolveCorridorDirectionResolution(pathNodes).directions();
-  }
-
   /**
    * 解析路径中每个单线冲突资源的方向，并记录必须拒绝 legacy fallback 的资源。
    *
@@ -1526,10 +1766,14 @@ public final class OccupancyRequestBuilder {
     if (semantic.resolved()) {
       return DirectionResolution.resolved(semantic.direction());
     }
+    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (semantic.blocksLegacyFallback()) {
+      if (byCorridor != CorridorDirection.UNKNOWN
+          && canUseOrderedCorridorFallbackAfterSemanticBlock(semantic, from, to)) {
+        return DirectionResolution.resolved(byCorridor);
+      }
       return DirectionResolution.blocked();
     }
-    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (byCorridor != CorridorDirection.UNKNOWN) {
       return DirectionResolution.resolved(byCorridor);
     }
@@ -1546,10 +1790,38 @@ public final class OccupancyRequestBuilder {
   }
 
   /**
+   * 判断语义轴阻断后是否还能使用冲突索引的有序路径兜底。
+   *
+   * <p>普通 hub gap 的 {@code AMBIGUOUS} 必须继续 fail-closed；但 Station/Depot throat 边是线路模型里显式的终端过渡节点。
+   * 当待判定边已经在同一个 ordered corridor/section 中可直接排序时，使用该顺序比保留 UNKNOWN 更能保持同一列车前向授权与运行中请求的方向一致。
+   */
+  private boolean canUseOrderedCorridorFallbackAfterSemanticBlock(
+      SemanticCorridorDirectionResolver.Result semantic, NodeId from, NodeId to) {
+    return semantic.status() == SemanticCorridorDirectionResolver.Status.AMBIGUOUS
+        && touchesTerminalThroat(from, to);
+  }
+
+  private boolean touchesTerminalThroat(NodeId from, NodeId to) {
+    return isTerminalThroat(from) || isTerminalThroat(to);
+  }
+
+  private boolean isTerminalThroat(NodeId node) {
+    if (node == null) {
+      return false;
+    }
+    return graph
+        .findNode(node)
+        .flatMap(railNode -> railNode.waypointMetadata())
+        .map(WaypointMetadata::kind)
+        .filter(kind -> kind == WaypointKind.STATION_THROAT || kind == WaypointKind.DEPOT_THROAT)
+        .isPresent();
+  }
+
+  /**
    * 单次方向解析结果。
    *
    * <p>{@code unresolved} 表示当前证据不足但可继续 fallback；{@code blocked} 表示语义解析已发现本地分叉 gap 等不安全场景，调用方必须保留
-   * UNKNOWN。
+   * UNKNOWN。唯一例外是待判定边明确触碰 Station/Depot throat，且同一 ordered corridor/section 已能直接证明顺序。
    */
   private record DirectionResolution(
       Optional<CorridorDirection> direction, boolean blocksDirection) {
@@ -1573,7 +1845,8 @@ public final class OccupancyRequestBuilder {
   /**
    * 一条路径上的方向解析快照。
    *
-   * <p>{@code directions} 保存已证明方向；{@code blockedKeys} 保存已被语义解析明确拒绝 fallback 的资源 key。
+   * <p>{@code directions} 保存已证明方向；{@code blockedKeys} 保存语义解析明确拒绝 fallback、且不满足 terminal throat
+   * 有序路径例外的资源 key。
    */
   private record CorridorDirectionResolution(
       Map<String, CorridorDirection> directions, Set<String> blockedKeys) {

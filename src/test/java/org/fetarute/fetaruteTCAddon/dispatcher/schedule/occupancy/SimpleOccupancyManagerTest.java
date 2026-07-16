@@ -9,15 +9,77 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchPriorityPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 import org.junit.jupiter.api.Test;
 
 class SimpleOccupancyManagerTest {
+
+  @Test
+  void identicalClaimRefreshDoesNotAdvanceVersionOrPublishAcquireEvent() {
+    SignalEventBus eventBus = new SignalEventBus();
+    AtomicInteger acquiredEvents = new AtomicInteger();
+    eventBus.subscribe(OccupancyAcquiredEvent.class, event -> acquiredEvents.incrementAndGet());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("A"));
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-A",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(resource),
+            Map.of());
+
+    assertTrue(manager.acquire(request).allowed());
+    long versionAfterAcquire = manager.version();
+    assertEquals(1, acquiredEvents.get());
+
+    assertTrue(manager.acquire(request).allowed());
+
+    assertEquals(versionAfterAcquire, manager.version());
+    assertEquals(1, acquiredEvents.get());
+  }
+
+  @Test
+  void queueHeartbeatUpdatesLastSeenWithoutAdvancingVersion() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:SW-1");
+    OccupancyRequest request =
+        new OccupancyRequest(
+            "train-A",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0);
+
+    manager.touchQueues(request);
+    long versionAfterInsert = manager.version();
+    OccupancyQueueEntry first = manager.snapshotQueues().get(0).entries().get(0);
+
+    manager.touchQueues(request.withSchedulingMetadata(now.plusSeconds(1), 0));
+
+    OccupancyQueueEntry refreshed = manager.snapshotQueues().get(0).entries().get(0);
+    assertEquals(versionAfterInsert, manager.version());
+    assertEquals(first.firstSeen(), refreshed.firstSeen());
+    assertEquals(now.plusSeconds(1), refreshed.lastSeen());
+
+    manager.touchQueues(request.withSchedulingMetadata(now.plusSeconds(2), 1));
+    assertEquals(versionAfterInsert + 1, manager.version());
+  }
 
   @Test
   void acquireBlocksOtherTrainsUntilRelease() {
@@ -2775,6 +2837,35 @@ class SimpleOccupancyManagerTest {
     assertFalse(decision.allowed());
     assertEquals(SignalAspect.STOP, decision.signal());
     assertEquals("self-owned-single-opposite-direction", decision.reason());
+  }
+
+  @Test
+  void protectiveRefreshCannotReverseOrDowngradeMovementAuthorityClaim() {
+    SignalEventBus eventBus = new SignalEventBus();
+    AtomicInteger acquiredEvents = new AtomicInteger();
+    eventBus.subscribe(OccupancyAcquiredEvent.class, event -> acquiredEvents.incrementAndGet());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:comp:A~B");
+    OccupancyRequest authority =
+        singleConflictRequest("train", now, conflict, CorridorDirection.A_TO_B);
+    OccupancyRequest protective =
+        singleConflictRequest("train", now.plusSeconds(1), conflict, CorridorDirection.B_TO_A)
+            .withResourceIntents(Map.of(conflict, ResourceIntent.PROTECTIVE_RETAIN));
+
+    assertTrue(manager.acquire(authority).allowed());
+    long authorityVersion = manager.version();
+    int authorityEvents = acquiredEvents.get();
+
+    assertTrue(manager.acquire(protective).allowed());
+
+    OccupancyClaim claim = manager.getClaim(conflict).orElseThrow();
+    assertEquals(ClaimRole.MOVEMENT_REQUIRED, claim.role());
+    assertEquals(Optional.of(CorridorDirection.A_TO_B), claim.corridorDirection());
+    assertEquals(authorityVersion, manager.version());
+    assertEquals(authorityEvents, acquiredEvents.get());
   }
 
   @Test

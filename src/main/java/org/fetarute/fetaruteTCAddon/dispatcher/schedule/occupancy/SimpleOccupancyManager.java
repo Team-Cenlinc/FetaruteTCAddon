@@ -371,9 +371,12 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      CorridorDirection effectiveDirection =
+      QueueTouchResult queueTouch =
           touchQueueWithDirectionTrace(request, resource, queue, direction, now, "canEnter");
-      version.incrementAndGet();
+      CorridorDirection effectiveDirection = queueTouch.direction();
+      if (queueTouch.stateChanged()) {
+        version.incrementAndGet();
+      }
       if (!isQueueAllowed(request, resource, effectiveDirection, queue)) {
         Optional<OccupancyQueueEntry> blockingEntry = queue.blockingEntry(effectiveDirection);
         Optional<OccupancyQueueEntry> forcedBlocker = Optional.empty();
@@ -675,7 +678,7 @@ public final class SimpleOccupancyManager
    *
    * <p>若不可进入则返回拒绝决策，并写入排队快照供诊断使用。
    *
-   * <p>成功获取后会发布 {@link OccupancyAcquiredEvent}，通知订阅者重新评估信号。
+   * <p>只有 claim、道岔签名或关联队列实际变化时才发布 {@link OccupancyAcquiredEvent}；同值心跳刷新不会推进版本或触发信号重评估。
    */
   @Override
   public synchronized OccupancyDecision acquire(OccupancyRequest request) {
@@ -697,7 +700,8 @@ public final class SimpleOccupancyManager
         decision.conflictRelease()
             ? resolveBlockedResourcesForPartialAcquire(decision, request.trainName())
             : Set.of();
-    List<OccupancyResource> acquiredResources = new ArrayList<>();
+    List<OccupancyResource> admittedResources = new ArrayList<>();
+    List<OccupancyResource> changedResources = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
@@ -719,14 +723,11 @@ public final class SimpleOccupancyManager
         continue;
       }
       Optional<CorridorDirection> direction = resolveCorridorDirection(request, resource);
-      ClaimRole role = request.claimRoleFor(resource);
+      ClaimRole requestedRole = request.claimRoleFor(resource);
       if (current != null) {
         Duration nextHeadway =
             current.headway().compareTo(headway) >= 0 ? current.headway() : headway;
-        Optional<CorridorDirection> nextDirection =
-            direction.isPresent() ? direction : current.corridorDirection();
-        traceOccupancyClaimMerge(request, current, role, direction, nextDirection);
-        existing.remove(current);
+        ClaimRefresh refresh = resolveClaimRefresh(current, requestedRole, direction);
         OccupancyClaim updated =
             new OccupancyClaim(
                 resource,
@@ -734,36 +735,89 @@ public final class SimpleOccupancyManager
                 request.routeId(),
                 current.acquiredAt(),
                 nextHeadway,
-                nextDirection,
-                role);
-        existing.add(updated);
-        rememberSwitcherClaimSignature(request, resource);
-        String lifecycleEvent = role == ClaimRole.MOVEMENT_REQUIRED ? "merge" : "retain";
-        traceSwitcherClaimLifecycle(
+                refresh.direction(),
+                refresh.role());
+        boolean claimChanged = !updated.equals(current);
+        if (claimChanged) {
+          existing.remove(current);
+          existing.add(updated);
+        }
+        boolean signatureChanged = rememberSwitcherClaimSignature(request, resource);
+        boolean stateChanged = claimChanged || signatureChanged;
+        traceOccupancyClaimMerge(
             request,
-            resource,
             current,
-            updated,
-            lifecycleEvent,
-            "same-owner-resource-claim-refresh");
-        acquiredResources.add(resource);
+            requestedRole,
+            refresh.role(),
+            direction,
+            refresh.direction(),
+            stateChanged,
+            refresh.reason());
+        String lifecycleEvent =
+            !stateChanged
+                ? "refresh-noop"
+                : refresh.role() == ClaimRole.MOVEMENT_REQUIRED ? "merge" : "retain";
+        traceSwitcherClaimLifecycle(
+            request, resource, current, updated, lifecycleEvent, refresh.reason());
+        admittedResources.add(resource);
+        if (stateChanged) {
+          changedResources.add(resource);
+        }
         continue;
       }
       OccupancyClaim created =
           new OccupancyClaim(
-              resource, request.trainName(), request.routeId(), now, headway, direction, role);
+              resource,
+              request.trainName(),
+              request.routeId(),
+              now,
+              headway,
+              direction,
+              requestedRole);
       existing.add(created);
       rememberSwitcherClaimSignature(request, resource);
       traceSwitcherClaimLifecycle(request, resource, null, created, "acquire", "new-claim");
-      acquiredResources.add(resource);
+      admittedResources.add(resource);
+      changedResources.add(resource);
     }
-    if (!acquiredResources.isEmpty()) {
-      removeFromQueuesForResources(request.trainName(), acquiredResources);
+    int removedQueueEntries =
+        admittedResources.isEmpty()
+            ? 0
+            : removeFromQueuesForResources(request.trainName(), admittedResources);
+    if (!changedResources.isEmpty() || removedQueueEntries > 0) {
       version.incrementAndGet();
     }
     // 发布占用获取事件
-    publishAcquiredEvent(request, acquiredResources, now);
+    List<OccupancyResource> eventResources =
+        removedQueueEntries > 0 ? List.copyOf(admittedResources) : changedResources;
+    publishAcquiredEvent(request, eventResources, now);
     return decision;
+  }
+
+  /**
+   * 解析同一列车对同一资源的 claim 刷新。
+   *
+   * <p>前进授权是当前 traversal 的方向所有者。任何 refresh 都只能在方向缺失时补全证据，不能反向改写已有已知方向；保护或等待请求也不能把已经取得的前进授权降级为短生命周期
+   * claim。换向必须先显式释放旧 claim，再创建新的硬授权。
+   */
+  private ClaimRefresh resolveClaimRefresh(
+      OccupancyClaim current,
+      ClaimRole requestedRole,
+      Optional<CorridorDirection> requestedDirection) {
+    Optional<CorridorDirection> safeRequestedDirection =
+        requestedDirection == null ? Optional.empty() : requestedDirection;
+    Optional<CorridorDirection> finalDirection =
+        current.corridorDirection().or(() -> safeRequestedDirection);
+    boolean hardAuthorityRefresh = requestedRole == ClaimRole.MOVEMENT_REQUIRED;
+    ClaimRole finalRole =
+        current.role() == ClaimRole.MOVEMENT_REQUIRED && !hardAuthorityRefresh
+            ? ClaimRole.MOVEMENT_REQUIRED
+            : requestedRole;
+    String reason =
+        finalRole != requestedRole || !finalDirection.equals(safeRequestedDirection)
+            ? "movement-authority-preserved"
+            : "same-owner-resource-claim-refresh";
+    return new ClaimRefresh(finalDirection, finalRole, reason);
   }
 
   /**
@@ -774,9 +828,12 @@ public final class SimpleOccupancyManager
   private void traceOccupancyClaimMerge(
       OccupancyRequest request,
       OccupancyClaim current,
-      ClaimRole newRole,
+      ClaimRole requestedRole,
+      ClaimRole finalRole,
       Optional<CorridorDirection> requestedDirection,
-      Optional<CorridorDirection> finalDirection) {
+      Optional<CorridorDirection> finalDirection,
+      boolean stateChanged,
+      String reason) {
     if (request == null || current == null || current.resource() == null) {
       return;
     }
@@ -792,9 +849,9 @@ public final class SimpleOccupancyManager
             + " operationType=- oldRole="
             + current.role()
             + " newRole="
-            + newRole
+            + requestedRole
             + " finalRole="
-            + newRole
+            + finalRole
             + " oldDirection="
             + current.corridorDirection().orElse(CorridorDirection.UNKNOWN)
             + " newDirection="
@@ -805,7 +862,10 @@ public final class SimpleOccupancyManager
             + (finalDirection == null
                 ? CorridorDirection.UNKNOWN
                 : finalDirection.orElse(CorridorDirection.UNKNOWN))
-            + " action=updated reason=same-owner-resource-claim-refresh");
+            + " action="
+            + (stateChanged ? "updated" : "preserved")
+            + " reason="
+            + reason);
   }
 
   /**
@@ -1414,28 +1474,36 @@ public final class SimpleOccupancyManager
             + " wouldMutate=false didMutate=false");
   }
 
-  private void rememberSwitcherClaimSignature(
+  private boolean rememberSwitcherClaimSignature(
       OccupancyRequest request, OccupancyResource resource) {
     if (!isSwitcherConflictResource(resource) || request == null) {
-      return;
+      return false;
     }
-    switcherSignatureFor(request, resource)
-        .ifPresent(
-            signature ->
-                switcherClaimSignatures.put(
-                    new SwitcherClaimKey(resource, request.trainName()), signature));
+    Optional<DirectedTraversalContext.SwitcherPathSignature> signature =
+        switcherSignatureFor(request, resource);
+    if (signature.isEmpty()) {
+      return false;
+    }
+    DirectedTraversalContext.SwitcherPathSignature previous =
+        switcherClaimSignatures.put(
+            new SwitcherClaimKey(resource, request.trainName()), signature.get());
+    return !Objects.equals(previous, signature.get());
   }
 
-  private void rememberSwitcherQueueSignature(
+  private boolean rememberSwitcherQueueSignature(
       OccupancyRequest request, OccupancyResource resource) {
     if (!isSwitcherConflictResource(resource) || request == null) {
-      return;
+      return false;
     }
-    switcherSignatureFor(request, resource)
-        .ifPresent(
-            signature ->
-                switcherQueueSignatures.put(
-                    new SwitcherClaimKey(resource, request.trainName()), signature));
+    Optional<DirectedTraversalContext.SwitcherPathSignature> signature =
+        switcherSignatureFor(request, resource);
+    if (signature.isEmpty()) {
+      return false;
+    }
+    DirectedTraversalContext.SwitcherPathSignature previous =
+        switcherQueueSignatures.put(
+            new SwitcherClaimKey(resource, request.trainName()), signature.get());
+    return !Objects.equals(previous, signature.get());
   }
 
   private void forgetSwitcherClaimSignature(OccupancyResource resource, String trainName) {
@@ -1796,7 +1864,8 @@ public final class SimpleOccupancyManager
   /**
    * 仅刷新冲突队列中的排队位次，不真正获取占用。
    *
-   * <p>用于停站/门控场景：列车还停在当前位置，但需要持续保留自己在前方冲突区的排队顺序，避免后车先抢到队头。
+   * <p>用于停站/门控场景：列车还停在当前位置，但需要持续保留自己在前方冲突区的排队顺序，避免后车先抢到队头。 lastSeen 心跳始终更新；只有方向、优先级、稳定 entryOrder
+   * 或道岔路径签名变化时才推进 occupancy version。
    */
   @Override
   public synchronized void touchQueues(OccupancyRequest request) {
@@ -1814,8 +1883,11 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      touchQueueWithDirectionTrace(request, resource, queue, direction, now, "touchQueues");
-      version.incrementAndGet();
+      QueueTouchResult queueTouch =
+          touchQueueWithDirectionTrace(request, resource, queue, direction, now, "touchQueues");
+      if (queueTouch.stateChanged()) {
+        version.incrementAndGet();
+      }
     }
   }
 
@@ -3859,8 +3931,11 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      touchQueueWithDirectionTrace(request, resource, queue, direction, now, "enqueueWaiting");
-      version.incrementAndGet();
+      QueueTouchResult queueTouch =
+          touchQueueWithDirectionTrace(request, resource, queue, direction, now, "enqueueWaiting");
+      if (queueTouch.stateChanged()) {
+        version.incrementAndGet();
+      }
     }
   }
 
@@ -3887,7 +3962,7 @@ public final class SimpleOccupancyManager
     return true;
   }
 
-  private CorridorDirection touchQueueWithDirectionTrace(
+  private QueueTouchResult touchQueueWithDirectionTrace(
       OccupancyRequest request,
       OccupancyResource resource,
       ConflictQueue queue,
@@ -3895,7 +3970,8 @@ public final class SimpleOccupancyManager
       Instant now,
       String source) {
     if (request == null || resource == null || queue == null) {
-      return requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+      return new QueueTouchResult(
+          requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection, false);
     }
     CorridorDirection safeRequested =
         requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
@@ -3911,14 +3987,15 @@ public final class SimpleOccupancyManager
       emitQueueDirectionTrace(
           request, resource, previous.get(), safeRequested, effectiveDirection, source);
     }
-    queue.touch(
-        request.trainName(),
-        effectiveDirection,
-        now,
-        request.priority(),
-        queueEntryOrderFor(request, resource));
-    rememberSwitcherQueueSignature(request, resource);
-    return effectiveDirection;
+    boolean queueChanged =
+        queue.touch(
+            request.trainName(),
+            effectiveDirection,
+            now,
+            request.priority(),
+            queueEntryOrderFor(request, resource));
+    boolean signatureChanged = rememberSwitcherQueueSignature(request, resource);
+    return new QueueTouchResult(effectiveDirection, queueChanged || signatureChanged);
   }
 
   private CorridorDirection effectiveQueueDirectionForPreview(
@@ -4156,25 +4233,29 @@ public final class SimpleOccupancyManager
     return "not-drain-through";
   }
 
-  private void removeFromQueuesForResources(String trainName, List<OccupancyResource> resources) {
+  private int removeFromQueuesForResources(String trainName, List<OccupancyResource> resources) {
     if (trainName == null || trainName.isBlank()) {
-      return;
+      return 0;
     }
     if (resources == null || resources.isEmpty()) {
       removeFromQueuesForTrain(trainName);
-      return;
+      return 0;
     }
+    int removed = 0;
     for (OccupancyResource resource : resources) {
       ConflictQueue queue = queues.get(resource);
       if (queue == null) {
         continue;
       }
-      queue.remove(trainName);
+      if (queue.remove(trainName)) {
+        removed++;
+      }
       forgetSwitcherQueueSignature(resource, trainName);
       if (queue.isEmpty()) {
         queues.remove(resource);
       }
     }
+    return removed;
   }
 
   private void removeFromQueuesForTrain(String trainName) {
@@ -4334,38 +4415,61 @@ public final class SimpleOccupancyManager
     private final Map<String, Integer> priorities = new java.util.HashMap<>();
     private final Map<String, Integer> entryOrders = new java.util.HashMap<>();
 
-    void touch(
+    boolean touch(
         String trainName, CorridorDirection direction, Instant now, int priority, int entryOrder) {
       if (trainName == null || trainName.isBlank() || now == null) {
-        return;
+        return false;
       }
       String key = normalize(trainName);
-      priorities.put(key, priority);
-      OccupancyQueueEntry existing = detachEntry(key);
+      CorridorDirection safeDirection = direction;
+      if (safeDirection == null) {
+        safeDirection = CorridorDirection.UNKNOWN;
+      }
+      LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(safeDirection);
+      OccupancyQueueEntry existing = null;
+      boolean bucketChanged = false;
+      List<LinkedHashMap<String, OccupancyQueueEntry>> directionBuckets =
+          List.of(forward, backward, neutral);
+      for (LinkedHashMap<String, OccupancyQueueEntry> entries : directionBuckets) {
+        OccupancyQueueEntry candidate = entries.get(key);
+        existing = pickOlder(existing, candidate);
+        if (candidate != null && entries != target) {
+          entries.remove(key);
+          bucketChanged = true;
+        }
+      }
       int stableEntryOrder = resolveStableEntryOrder(existing, entryOrder);
+      boolean schedulingChanged =
+          existing == null
+              || bucketChanged
+              || existing.direction() != safeDirection
+              || existing.priority() != priority
+              || existing.entryOrder() != stableEntryOrder;
+      priorities.put(key, priority);
       entryOrders.put(key, stableEntryOrder);
-      LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       target.put(
           key,
           new OccupancyQueueEntry(
               existing != null ? existing.trainName() : trainName,
-              direction,
+              safeDirection,
               existing != null ? existing.firstSeen() : now,
               now,
               priority,
               stableEntryOrder));
+      return schedulingChanged;
     }
 
-    void remove(String trainName) {
+    boolean remove(String trainName) {
       if (trainName == null || trainName.isBlank()) {
-        return;
+        return false;
       }
       String key = normalize(trainName);
-      forward.remove(key);
-      backward.remove(key);
-      neutral.remove(key);
-      priorities.remove(key);
-      entryOrders.remove(key);
+      boolean removed = forward.remove(key) != null;
+      removed |= backward.remove(key) != null;
+      removed |= neutral.remove(key) != null;
+      removed |= priorities.remove(key) != null;
+      removed |= entryOrders.remove(key) != null;
+      return removed;
     }
 
     boolean contains(String trainName) {
@@ -4746,26 +4850,6 @@ public final class SimpleOccupancyManager
       return removed;
     }
 
-    /**
-     * 从所有方向队列中摘除旧条目，并保留最早 firstSeen。
-     *
-     * <p>用于处理方向更新时的“中立队列 -> 定向队列”迁移，避免同一列车在多个方向桶中重复存在。
-     */
-    private OccupancyQueueEntry detachEntry(String key) {
-      if (key == null || key.isBlank()) {
-        return null;
-      }
-      OccupancyQueueEntry existing = removeEntry(forward, key);
-      existing = pickOlder(existing, removeEntry(backward, key));
-      existing = pickOlder(existing, removeEntry(neutral, key));
-      return existing;
-    }
-
-    private static OccupancyQueueEntry removeEntry(
-        LinkedHashMap<String, OccupancyQueueEntry> map, String key) {
-      return map == null || key == null ? null : map.remove(key);
-    }
-
     private static OccupancyQueueEntry pickOlder(
         OccupancyQueueEntry current, OccupancyQueueEntry candidate) {
       if (candidate == null) {
@@ -4830,6 +4914,13 @@ public final class SimpleOccupancyManager
 
   private record SectionDirectionMatch(
       OccupancyResource section, CorridorDirection direction, String evidence) {}
+
+  /** 队列刷新结果：区分调度语义变化与只更新 lastSeen 的心跳。 */
+  private record QueueTouchResult(CorridorDirection direction, boolean stateChanged) {}
+
+  /** 同一列车刷新既有 claim 后最终保留的方向、角色与诊断原因。 */
+  private record ClaimRefresh(
+      Optional<CorridorDirection> direction, ClaimRole role, String reason) {}
 
   /**
    * 冲突区放行锁：记录被放行的列车与锁定过期时间。

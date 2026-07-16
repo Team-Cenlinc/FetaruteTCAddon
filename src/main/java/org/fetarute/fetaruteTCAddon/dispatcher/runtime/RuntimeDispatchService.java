@@ -3498,7 +3498,14 @@ public final class RuntimeDispatchService {
             true,
             SmartAdmissionContext.station("station-departure-smart-admission"));
     if (smartAdmissionShouldBlock(trainName, stationAdmission)) {
-      retainStopOccupancy(trainName, route, currentIndex, definition.nodeId(), graph, now);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          definition.nodeId(),
+          Optional.of(authorizationRequest),
+          graph,
+          now);
       debugLogger.accept(
           "SMART_STATION_DEPARTURE_HELD train="
               + trainName
@@ -3548,7 +3555,13 @@ public final class RuntimeDispatchService {
                   @Override
                   public void holdStop(LaunchAuthorizationService.AuthorizationResult result) {
                     retainStopOccupancy(
-                        departureTrainName, route, currentIndex, definition.nodeId(), graph, now);
+                        departureTrainName,
+                        route,
+                        currentIndex,
+                        definition.nodeId(),
+                        Optional.of(authorizationRequest),
+                        graph,
+                        now);
                   }
                 }));
     if (!authorization.allowed()) {
@@ -3598,7 +3611,14 @@ public final class RuntimeDispatchService {
       return false;
     }
     retainRearGuardOccupancyBestEffort(
-        trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
+        trainName,
+        route,
+        currentIndex,
+        effectiveNodes,
+        authorizationRequest.movementPlanSnapshot(),
+        graph,
+        runtimeSettings,
+        now);
     return true;
   }
 
@@ -4252,7 +4272,8 @@ public final class RuntimeDispatchService {
       // 阻塞等待期间与停站逻辑保持一致：保留当前位置/尾部保护，并持续刷新前向冲突队列位次，
       // 避免后车在当前车等待放行时先抢到更靠前的队头。
       if (occupancyManager != null) {
-        retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
+        retainStopOccupancy(
+            trainName, route, currentIndex, currentNode, Optional.of(request), graph, now);
       }
       applyHardStop(
           train,
@@ -4276,7 +4297,14 @@ public final class RuntimeDispatchService {
         issueMovementAuthorizationToken(
             trainName, currentNode, nextNode, request, SignalAspect.PROCEED, now);
     retainRearGuardOccupancyBestEffort(
-        trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
+        trainName,
+        route,
+        currentIndex,
+        effectiveNodes,
+        request.movementPlanSnapshot(),
+        graph,
+        runtimeSettings,
+        now);
     request = markDirectedRequest(request, SignalComputationTrace.Source.PROGRESS_TRIGGER);
 
     Optional<String> destinationName =
@@ -7840,7 +7868,14 @@ public final class RuntimeDispatchService {
             acquired.signal(),
             Instant.now());
     retainRearGuardOccupancyBestEffort(
-        trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, Instant.now());
+        trainName,
+        route,
+        currentIndex,
+        effectiveNodes,
+        authorizationRequest.movementPlanSnapshot(),
+        graph,
+        runtimeSettings,
+        Instant.now());
     Optional<String> destinationName =
         commitAuthorizedDestination(properties, trainName, route, currentIndex + 1, nextNode);
     if (destinationName.isEmpty()
@@ -9128,7 +9163,14 @@ public final class RuntimeDispatchService {
     if (smartAdmissionShouldBlock(trainName, singleSafety)) {
       OccupancyDecision blocked =
           singleZoneBlockedDecision(authorizationRequest, singleSafety.reason(), now);
-      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          Optional.of(authorizationRequest),
+          graph,
+          now);
       applyNonInvalidatingBlockedStop(
           train,
           properties,
@@ -9148,7 +9190,14 @@ public final class RuntimeDispatchService {
         keepResources,
         protectedSwitcherZoneClaims(
             trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"));
-    retainCurrentPositionOccupancy(trainName, route.id(), currentNodeOpt, nextNode, graph, now);
+    retainCurrentPositionOccupancy(
+        trainName,
+        route.id(),
+        currentNodeOpt,
+        nextNode,
+        authorizationRequest.movementPlanSnapshot(),
+        graph,
+        now);
     dirtyEventSignals.remove(normalizeTrainKey(trainName));
     OccupancyDecision decision = occupancyManager.canEnter(authorizationRequest);
     decision =
@@ -9183,7 +9232,14 @@ public final class RuntimeDispatchService {
                   authorityEnd.distanceBlocks(),
                   authorityEnd.resource(),
                   authorizationContext.edges().size()));
-      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          Optional.of(authorizationRequest),
+          graph,
+          now);
       if (isProtectiveOnlyStop(decision)) {
         applyProtectiveOnlyStop(
             train,
@@ -9211,7 +9267,14 @@ public final class RuntimeDispatchService {
     }
     boolean deadlockRelease = decision.conflictRelease();
     if (deadlockRelease && train.isMoving()) {
-      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          Optional.of(authorizationRequest),
+          graph,
+          now);
       applyHardStop(
           train,
           properties,
@@ -9264,7 +9327,14 @@ public final class RuntimeDispatchService {
                   authorityEnd.distanceBlocks(),
                   authorityEnd.resource(),
                   authorizationContext.edges().size()));
-      retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          Optional.of(authorizationRequest),
+          graph,
+          now);
       if (isProtectiveOnlyStop(acquired)) {
         applyProtectiveOnlyStop(
             train,
@@ -9369,7 +9439,14 @@ public final class RuntimeDispatchService {
         OccupancyDecision blocked =
             new OccupancyDecision(
                 false, now, SignalAspect.STOP, List.of(), false, "unreachable-failover");
-        retainStopOccupancy(trainName, route, currentIndex, currentNodeForSignal, graph, now);
+        retainStopOccupancy(
+            trainName,
+            route,
+            currentIndex,
+            currentNodeForSignal,
+            Optional.of(authorizationRequest),
+            graph,
+            now);
         rollbackMovementAuthorization(
             trainName, token, authorizationRequest, HardStopReason.UNREACHABLE_FAILOVER);
         applyHardStop(
@@ -9843,7 +9920,14 @@ public final class RuntimeDispatchService {
               + decision.blockers().size());
     }
     retainRearGuardOccupancyBestEffort(
-        trainName, route, currentIndex, effectiveNodes, graph, runtimeSettings, now);
+        trainName,
+        route,
+        currentIndex,
+        effectiveNodes,
+        authorizationRequest.movementPlanSnapshot(),
+        graph,
+        runtimeSettings,
+        now);
     authorizationRequest =
         markDirectedRequest(authorizationRequest, SignalComputationTrace.Source.PERIODIC_TICK);
     boolean allowLaunch =
@@ -12845,11 +12929,17 @@ public final class RuntimeDispatchService {
       OccupancyDecision decision) {
     Instant now = Instant.now();
     updateBlockerSnapshot(trainName, decision, now);
+    boolean releaseCandidate =
+        occupancyManager instanceof SimpleOccupancyManager manager
+            && manager.selfOwnedStaleRetainReleaseCandidate(trainName).isPresent();
     debugLogger.accept(
         "STALE_PROTECTIVE_RETAIN_CANDIDATE train="
             + trainName
-            + " blockerHardness=PROTECTIVE_ONLY releaseCandidate=true"
-            + " releaseBlockedReason=not-yet-mutating blockers="
+            + " blockerHardness=PROTECTIVE_ONLY releaseCandidate="
+            + releaseCandidate
+            + " releaseBlockedReason="
+            + (releaseCandidate ? "not-yet-mutating" : "no-self-retain-candidate")
+            + " blockers="
             + summarizeBlockers(decision));
     updateSignalOrWarnPreservingPublishedCaution(
         trainName, SignalAspect.STOP, now, "protective-only-stop");
@@ -14611,6 +14701,7 @@ public final class RuntimeDispatchService {
       RouteId routeId,
       Optional<NodeId> currentNodeOpt,
       Optional<NodeId> nextNodeOpt,
+      Optional<MovementPlanSnapshot> movementPlan,
       RailGraph graph,
       Instant now) {
     if (occupancyManager == null
@@ -14633,15 +14724,31 @@ public final class RuntimeDispatchService {
               AuthorizationPurpose.RUNTIME_MOVE);
     } else {
       OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 0, 0, debugLogger);
+      Optional<MovementPlanSnapshot> canonicalPlan =
+          movementPlan == null ? Optional.empty() : movementPlan;
       request =
-          builder.buildCurrentPositionRequest(
-              trainName,
-              Optional.ofNullable(routeId),
-              currentNode,
-              nextNodeOpt != null ? nextNodeOpt : Optional.empty(),
-              now,
-              0,
-              AuthorizationPurpose.RUNTIME_MOVE);
+          canonicalPlan
+              .map(
+                  plan ->
+                      builder.buildCurrentPositionRequestFromPlan(
+                          trainName,
+                          Optional.ofNullable(routeId),
+                          currentNode,
+                          nextNodeOpt != null ? nextNodeOpt : Optional.empty(),
+                          now,
+                          0,
+                          AuthorizationPurpose.RUNTIME_MOVE,
+                          plan))
+              .orElseGet(
+                  () ->
+                      builder.buildCurrentPositionRequest(
+                          trainName,
+                          Optional.ofNullable(routeId),
+                          currentNode,
+                          nextNodeOpt != null ? nextNodeOpt : Optional.empty(),
+                          now,
+                          0,
+                          AuthorizationPurpose.RUNTIME_MOVE));
     }
     occupancyManager.acquire(request);
   }
@@ -15205,6 +15312,7 @@ public final class RuntimeDispatchService {
       RouteDefinition route,
       int currentIndex,
       List<NodeId> effectiveNodes,
+      Optional<MovementPlanSnapshot> movementPlan,
       RailGraph graph,
       ConfigManager.RuntimeSettings runtimeSettings,
       Instant now) {
@@ -15225,14 +15333,28 @@ public final class RuntimeDispatchService {
             runtimeSettings.switcherZoneEdges(),
             debugLogger);
     OccupancyRequest rearGuardRequest =
-        rearGuardBuilder.buildRearGuardRequestFromNodes(
-            trainName,
-            Optional.ofNullable(route.id()),
-            effectiveNodes,
-            currentIndex,
-            now,
-            0,
-            AuthorizationPurpose.RUNTIME_MOVE);
+        movementPlan
+            .map(
+                plan ->
+                    rearGuardBuilder.buildRearGuardRequestFromPlan(
+                        trainName,
+                        Optional.ofNullable(route.id()),
+                        effectiveNodes,
+                        currentIndex,
+                        now,
+                        0,
+                        AuthorizationPurpose.RUNTIME_MOVE,
+                        plan))
+            .orElseGet(
+                () ->
+                    rearGuardBuilder.buildRearGuardRequestFromNodes(
+                        trainName,
+                        Optional.ofNullable(route.id()),
+                        effectiveNodes,
+                        currentIndex,
+                        now,
+                        0,
+                        AuthorizationPurpose.RUNTIME_MOVE));
     occupancyManager.acquire(rearGuardRequest);
   }
 
@@ -20400,6 +20522,17 @@ public final class RuntimeDispatchService {
       NodeId currentNode,
       RailGraph graph,
       Instant now) {
+    retainStopOccupancy(trainName, route, currentIndex, currentNode, Optional.empty(), graph, now);
+  }
+
+  private void retainStopOccupancy(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      Optional<OccupancyRequest> movementRequest,
+      RailGraph graph,
+      Instant now) {
     if (occupancyManager == null || trainName == null || trainName.isBlank()) {
       return;
     }
@@ -20433,21 +20566,55 @@ public final class RuntimeDispatchService {
         currentIndex + 1 < effectiveNodes.size()
             ? Optional.ofNullable(effectiveNodes.get(currentIndex + 1))
             : Optional.empty();
-    OccupancyRequest request =
-        builder.buildHoldPositionRequest(
-            trainName,
-            Optional.ofNullable(route.id()),
-            currentNode,
-            targetNode,
-            effectiveNodes,
-            currentIndex,
-            now,
-            0,
-            AuthorizationPurpose.RUNTIME_MOVE);
     TrainProperties properties = TrainPropertiesStore.get(trainName);
     DispatchPriorityResolution priorityResolution =
         dispatchPriorityResolver.resolve(
             "stop-retain", trainName, properties, route, progressRegistry.get(trainName));
+    int priority = priorityResolution.priority();
+    Optional<OccupancyRequest> safeMovementRequest =
+        movementRequest == null ? Optional.empty() : movementRequest;
+    Optional<OccupancyRequest> canonicalRequest =
+        safeMovementRequest.isPresent()
+            ? safeMovementRequest
+            : builder
+                .buildContextFromNodes(
+                    trainName,
+                    Optional.ofNullable(route.id()),
+                    effectiveNodes,
+                    currentIndex,
+                    now,
+                    priority,
+                    AuthorizationPurpose.RUNTIME_MOVE)
+                .map(OccupancyRequestContext::request);
+    Optional<MovementPlanSnapshot> canonicalPlan =
+        canonicalRequest.flatMap(OccupancyRequest::movementPlanSnapshot);
+    OccupancyRequest request;
+    if (canonicalPlan.isPresent()) {
+      request =
+          builder.buildHoldPositionRequestFromPlan(
+              trainName,
+              Optional.ofNullable(route.id()),
+              currentNode,
+              targetNode,
+              effectiveNodes,
+              currentIndex,
+              now,
+              priority,
+              AuthorizationPurpose.RUNTIME_MOVE,
+              canonicalPlan.get());
+    } else {
+      request =
+          builder.buildHoldPositionRequest(
+              trainName,
+              Optional.ofNullable(route.id()),
+              currentNode,
+              targetNode,
+              effectiveNodes,
+              currentIndex,
+              now,
+              priority,
+              AuthorizationPurpose.RUNTIME_MOVE);
+    }
     List<OccupancyClaim> oldSelfClaims = snapshotSelfClaims(trainName);
     traceSignalAuthorityLifecycle(
         "stop-retain",
@@ -20519,7 +20686,7 @@ public final class RuntimeDispatchService {
         resourcesEligibleForRelease(trainName, request.resourceList(), protectedResources),
         releasedResources);
     occupancyManager.acquire(request);
-    retainForwardQueuePositionAtStop(trainName, route, currentIndex, now, builder, effectiveNodes);
+    retainForwardQueuePositionAtStop(canonicalRequest, now, priority);
   }
 
   /**
@@ -21126,34 +21293,15 @@ public final class RuntimeDispatchService {
    * <p>列车在门控等待时虽然不会立即占用前方区段，但应持续保留自己在冲突队列中的先后顺序；否则后车可能在等待窗口内先触发一次前向判定， 反而抢到更靠前的队头，造成前车被后车卡住。
    */
   private void retainForwardQueuePositionAtStop(
-      String trainName,
-      RouteDefinition route,
-      int currentIndex,
-      Instant now,
-      OccupancyRequestBuilder builder,
-      List<NodeId> effectiveNodes) {
+      Optional<OccupancyRequest> canonicalRequest, Instant now, int priority) {
     if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)
-        || trainName == null
-        || trainName.isBlank()
-        || route == null
+        || canonicalRequest == null
+        || canonicalRequest.isEmpty()
         || now == null
-        || builder == null
-        || effectiveNodes == null) {
+        || canonicalRequest.get().resourceList().isEmpty()) {
       return;
     }
-    TrainProperties properties = TrainPropertiesStore.get(trainName);
-    int priority = resolvePriority(properties, route);
-    builder
-        .buildContextFromNodes(
-            trainName,
-            Optional.ofNullable(route.id()),
-            effectiveNodes,
-            currentIndex,
-            now,
-            priority,
-            AuthorizationPurpose.RUNTIME_MOVE)
-        .map(OccupancyRequestContext::request)
-        .ifPresent(queueSupport::touchQueues);
+    queueSupport.touchQueues(canonicalRequest.get().withSchedulingMetadata(now, priority));
   }
 
   /**

@@ -287,6 +287,22 @@ public record OccupancyRequest(
         directedContext);
   }
 
+  /** 返回同一行车计划与资源窗口，但使用新的刷新时间和调度优先级。 */
+  public OccupancyRequest withSchedulingMetadata(Instant requestTime, int nextPriority) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        Objects.requireNonNull(requestTime, "requestTime"),
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        nextPriority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        directedContext);
+  }
+
   /** 返回同一资源窗口的 advisory lookahead 只读请求。 */
   public OccupancyRequest asLookaheadPreview() {
     java.util.Map<OccupancyResource, ResourceIntent> intents = new java.util.LinkedHashMap<>();

@@ -95,7 +95,8 @@
 - 每次异常清理都会输出 warning 级诊断日志，包含原因、逻辑列车名/raw TrainCarts 名、head/tail 位置、车厢数量，以及可用的 route/progress 信息；split 日志还会附带被拆出车厢的位置与源/目标编组名，便于排查 unexpected split。
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
 - 中间图节点（未写入 route 的 waypoint/switcher）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
-- 运行中当前位置保护会从当前图节点沿最短路取“下一段图边”并携带 `CONFLICT:single` 方向；不会再只尝试当前节点直连下一个 route waypoint，避免长单线中段丢失走廊方向。
+- 运行中当前位置保护只截取当前图节点与下一段实际图边作为资源窗口，但方向、完整 expanded path 与 switcher path signature 继承同一周期的 canonical `MovementPlanSnapshot`。缺少规范计划的兼容路径仍可沿最短路定位物理资源，但 single 方向保持未知，避免短路径反向解释出库授权。
+- 成功授权后的 rear guard 与 STOP hold 使用相同的 canonical 计划派生保护资源；计划中的 single 方向缺失或为 `UNKNOWN` 时不做局部方向兜底。没有现成计划的独立停站入口只构建一次完整 effective route 请求，并让 hold claim 与前向队列刷新复用同一个计划快照。
 - 事件驱动信号链路只作为桥接：默认启用 `runtime.signal-event-coalesce`，Occupancy acquire/release 事件只标记受影响列车 dirty，周期 tick 统一做授权提交；更宽松信号不会通过事件链路放行。STOP 可作为高优先级刷新来源，但不会在 `OccupancyManager.acquire()` 的同步调用栈内重入同一列车 hard STOP。
 - 当当前信号未知（`currentSignal=null`）时，事件链路仅允许 `STOP` 立即生效，不接受 `CAUTION/PROCEED` 的初始化放行。
 - 事件重评估请求与周期 tick 共用同一组窗口参数（lookahead / min-clear / rear-guard / switcher-zone）、同一 `DispatchPriorityResolver` 与同一 effective waypoint 解析，确保 release 后的 preview 与周期路径基于同构请求上下文，trace 中的资源计数可直接对照。
@@ -109,7 +110,7 @@
   destination/token。
 - `drain-authority-without-leader` / `DRAIN_AUTHORITY_INCONSISTENT` 只对真实 `DRAIN_THROUGH` candidate 生效；对 `FORWARD_MOVEMENT` 或普通 `CONFLICT_CLEARING` 来说只能作为 trace 诊断，不得清 destination、invalid token 或升级为 `authorization_failure` hard STOP。
 - 单线走廊的冲突区放行候选仅在请求列车与 blocker 的方向都能判定且互为对向时成立；方向为 `UNKNOWN` 或队列中缺少方向信息时保持 STOP，避免把同向前后车误判为会车死锁。
-- 已有 single conflict claim 的方向不会被后续“无方向的当前位置 hold”覆盖；如果 hold 请求只用于保留当前位置，管理器会沿用原 claim 方向，保证互卡恢复仍能识别对向列车。
+- 已有 single conflict claim 的方向不会被后续当前位置 retain/hold 覆盖，无论后续请求是无方向还是给出了相反方向；已有 `MOVEMENT_REQUIRED` 角色也不会被保护请求降级。管理器沿用原 claim 方向，直到旧授权显式释放并由新前进授权重新申请。
 - 自持 single claim 的 zone 不在本次 `MovementPlanSnapshot` 穿越路径上、且请求对该 zone 不要求 hard authority 时，该 claim 仅视为车尾/区域保护，不否决本车继续移动（trace `SMART_SELF_OWNED_CONTINUATION_ALLOWED reason=tail-protection-zone-not-on-plan`）。claim 与方向原样保留，外部对向/未知方向列车仍由 single-region barrier 拦截；对该 zone 仍要求 hard authority 的请求保持 fail-closed。这样折返后真正的 `self-owned-single-opposite-direction` 拒绝不会被车尾保护 zone 的 `direction-unknown` 拒绝掩盖，健康监控的 `clearSelfOwnedSingleDirectionMismatch` 才能识别并清理同 zone 反向残留；该恢复入口的方向解析与占用层一致（`corridorDirections` 缺失时回退 movement plan 的 `singleConflictDirections`）。
 - 发车门控和周期信号 tick 在正式 `canEnter()` 前会清理同 Route 后方列车留在当前授权资源上的前瞻 queue entry；该步骤不释放 claim，且不同 route、未知进度、索引不在后方的列车仍会作为真实冲突阻塞。
 - 同 Route 同 index 的跟驰列车会继续比较 `lastPassedGraphNode` 在当前 route 段最短路上的顺序；当前车已经通过更靠前的中间节点时，可清理后车留在当前授权窗口里的前瞻 claim/queue，避免同向追驰互相红灯。

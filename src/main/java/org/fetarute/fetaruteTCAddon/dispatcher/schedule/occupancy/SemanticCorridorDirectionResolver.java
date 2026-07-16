@@ -33,15 +33,22 @@ final class SemanticCorridorDirectionResolver {
 
   Result resolve(List<NodeId> resourceNodes, List<NodeId> pathNodes, NodeId from, NodeId to) {
     PathAxisResolution pathAxis = resolvePathAxis(pathNodes, from, to);
-    Result pathResult = resolveWithAxis(pathAxis.axisResolution(), pathAxis.pathNodes(), from, to);
+    Result pathResult =
+        resolveWithAxis(
+            pathAxis.axisResolution(), pathAxis.pathNodes(), from, to, AnchorMode.PATH_LOCAL);
     if (pathResult.status() != Status.NO_AXIS) {
       return pathResult;
     }
-    return resolveWithAxis(resolveAxis(resourceNodes), pathNodes, from, to);
+    return resolveWithAxis(
+        resolveAxis(resourceNodes), pathNodes, from, to, AnchorMode.RESOURCE_FALLBACK);
   }
 
   private Result resolveWithAxis(
-      AxisResolution axisResolution, List<NodeId> pathNodes, NodeId from, NodeId to) {
+      AxisResolution axisResolution,
+      List<NodeId> pathNodes,
+      NodeId from,
+      NodeId to,
+      AnchorMode anchorMode) {
     if (axisResolution.status() == Status.NO_AXIS) {
       return Result.noAxis();
     }
@@ -49,7 +56,7 @@ final class SemanticCorridorDirectionResolver {
       return Result.ambiguous();
     }
     SemanticAxis axis = axisResolution.axis().orElseThrow();
-    Optional<DirectedStationPair> flow = resolveFlow(axis, pathNodes, from, to);
+    Optional<DirectedStationPair> flow = resolveFlow(axis, pathNodes, from, to, anchorMode);
     if (flow.isEmpty()) {
       return Result.unresolved();
     }
@@ -224,7 +231,7 @@ final class SemanticCorridorDirectionResolver {
   }
 
   private Optional<DirectedStationPair> resolveFlow(
-      SemanticAxis axis, List<NodeId> pathNodes, NodeId from, NodeId to) {
+      SemanticAxis axis, List<NodeId> pathNodes, NodeId from, NodeId to, AnchorMode anchorMode) {
     if (axis == null || pathNodes == null || pathNodes.size() < 2 || from == null || to == null) {
       return Optional.empty();
     }
@@ -232,7 +239,7 @@ final class SemanticCorridorDirectionResolver {
     if (edgeIndex < 0) {
       return Optional.empty();
     }
-    List<IndexedPathAnchor> anchors = indexedAnchors(axis, pathNodes);
+    List<IndexedPathAnchor> anchors = indexedAnchors(axis, pathNodes, anchorMode);
     if (anchors.isEmpty()) {
       return Optional.empty();
     }
@@ -345,13 +352,14 @@ final class SemanticCorridorDirectionResolver {
     return Optional.empty();
   }
 
-  private List<IndexedPathAnchor> indexedAnchors(SemanticAxis axis, List<NodeId> pathNodes) {
+  private List<IndexedPathAnchor> indexedAnchors(
+      SemanticAxis axis, List<NodeId> pathNodes, AnchorMode anchorMode) {
     List<IndexedPathAnchor> anchors = new ArrayList<>();
     if (pathNodes == null) {
       return anchors;
     }
     for (int i = 0; i < pathNodes.size(); i++) {
-      Optional<PathAnchor> anchor = anchorFor(axis, pathNodes.get(i));
+      Optional<PathAnchor> anchor = anchorFor(axis, pathNodes.get(i), anchorMode);
       if (anchor.isPresent()) {
         anchors.add(new IndexedPathAnchor(i, anchor.get()));
       }
@@ -403,7 +411,14 @@ final class SemanticCorridorDirectionResolver {
     return Optional.empty();
   }
 
-  private Optional<PathAnchor> anchorFor(SemanticAxis axis, NodeId node) {
+  /**
+   * 把图节点转换为语义方向锚点。
+   *
+   * <p>路径本身已有 interval anchor 时只认真实 {@link WaypointKind#STATION}，避免 Depot 或 throat 的 {@code
+   * originStation} 覆盖区间序列证据，导致 depot 授权与运行中请求对同一 single conflict 给出相反方向。只有在路径没有本地区间轴、需要回退到资源邻域轴时，
+   * 才允许 Depot/throat 作为终端锚点推断进库/出库方向。
+   */
+  private Optional<PathAnchor> anchorFor(SemanticAxis axis, NodeId node, AnchorMode anchorMode) {
     Optional<WaypointMetadata> metadata = metadata(node);
     if (metadata.isEmpty()) {
       return Optional.empty();
@@ -416,10 +431,21 @@ final class SemanticCorridorDirectionResolver {
       }
       return Optional.of(new PathAnchor(Optional.empty(), Optional.of(IntervalAnchor.from(value))));
     }
-    if (axis.containsStation(value.originStation())) {
+    if (isStationAnchorKind(value.kind(), anchorMode)
+        && axis.containsStation(value.originStation())) {
       return Optional.of(new PathAnchor(Optional.of(value.originStation()), Optional.empty()));
     }
     return Optional.empty();
+  }
+
+  private boolean isStationAnchorKind(WaypointKind kind, AnchorMode anchorMode) {
+    if (kind == WaypointKind.STATION) {
+      return true;
+    }
+    return anchorMode == AnchorMode.RESOURCE_FALLBACK
+        && (kind == WaypointKind.STATION_THROAT
+            || kind == WaypointKind.DEPOT
+            || kind == WaypointKind.DEPOT_THROAT);
   }
 
   private Optional<WaypointMetadata> metadata(NodeId node) {
@@ -443,6 +469,11 @@ final class SemanticCorridorDirectionResolver {
     NO_AXIS,
     AMBIGUOUS,
     UNRESOLVED
+  }
+
+  private enum AnchorMode {
+    PATH_LOCAL,
+    RESOURCE_FALLBACK
   }
 
   record Result(Status status, CorridorDirection direction) {

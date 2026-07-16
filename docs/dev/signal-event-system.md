@@ -84,6 +84,7 @@ evaluator.start();
 
 职责：
 - 订阅 `OccupancyAcquiredEvent` 和 `OccupancyReleasedEvent`
+- 同一列车对同一 claim 的完全相同 refresh 不发布 `OccupancyAcquiredEvent`，也不推进 occupancy version，避免当前位置保护 tick 形成无效事件风暴
 - 根据事件中的受影响列车列表，重新评估信号状态
 - 若信号变化，发布 `SignalChangedEvent`
 - 维护列车信号缓存，检测变化

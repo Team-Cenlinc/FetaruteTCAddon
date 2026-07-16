@@ -68,6 +68,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictCleari
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.MovementPlanSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyAdvisoryPreviewSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -1812,7 +1813,14 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     service.handleSignalTick(train, false);
 
-    verify(queueSupport).touchQueues(any());
+    ArgumentCaptor<OccupancyRequest> holdCaptor = ArgumentCaptor.forClass(OccupancyRequest.class);
+    ArgumentCaptor<OccupancyRequest> queueCaptor = ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager).acquire(holdCaptor.capture());
+    verify(queueSupport).touchQueues(queueCaptor.capture());
+    MovementPlanSnapshot holdPlan = holdCaptor.getValue().movementPlanSnapshot().orElseThrow();
+    MovementPlanSnapshot queuePlan = queueCaptor.getValue().movementPlanSnapshot().orElseThrow();
+    assertEquals(queuePlan.requestId(), holdPlan.requestId());
+    assertEquals(queuePlan.expandedPathNodes(), holdPlan.expandedPathNodes());
   }
 
   @Test
@@ -5568,7 +5576,11 @@ class RuntimeDispatchServiceTest {
     assertTrue((boolean) valid.invoke(service, "train-1", a, b, List.of(resource)));
     assertTrue(
         debugMessages.stream()
-            .anyMatch(message -> message.contains("STALE_PROTECTIVE_RETAIN_CANDIDATE")));
+            .anyMatch(
+                message ->
+                    message.contains("STALE_PROTECTIVE_RETAIN_CANDIDATE")
+                        && message.contains("releaseCandidate=false")
+                        && message.contains("releaseBlockedReason=no-self-retain-candidate")));
     verify(tags.properties(), never()).clearDestinationRoute();
     verify(tags.properties(), never()).clearDestination();
     verify(tags.properties(), never()).setDestination(any());

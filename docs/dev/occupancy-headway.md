@@ -18,6 +18,10 @@
 - `PROTECTIVE_RETAIN` 与 `HOLD_ONLY` 用于当前位置、尾部保护和 STOP 保留。它们不会阻止前车的 forward movement；如果与其他列车冲突，运行时应保持本车保护、约束后车或触发 stale claim 清理。
 - `QUEUE_POSITION` 只表示冲突队列位次，适用于门控等待和停站等待期间保住排序；它不应被当作 NODE/EDGE 硬占用。
 - `ClaimRole` 是 claim 落库后的角色镜像，防止 retain/hold claim 在后续判定中被误当成前向必须资源。`PROTECTIVE_RETAIN` / `HOLD_ONLY` claim 会被分类为 protective-only，不进入 confirmed hard blocker；第一版只输出 release candidate 诊断，不自动释放。
+- 同一列车刷新同一资源时遵循授权单调性：已有 `MOVEMENT_REQUIRED` 不会被 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 降级；旧方向缺失时也只能用同一 canonical `MovementPlanSnapshot` 的已知方向补全，非硬请求不能自行建立方向或覆盖已有方向。合法换向必须先释放旧 claim，再由新的前进授权建立方向。
+- 当前位置、尾部保护与 STOP hold 在存在 canonical `MovementPlanSnapshot` 时只继承计划方向；计划缺少对应 single key 或方向为 `UNKNOWN` 时保持无方向，不回退到保护窗口的局部路径推导。
+- claim、方向、角色、headway、route 与道岔路径签名均未变化的 refresh 是 no-op，不推进 occupancy version，也不发布 `OccupancyAcquiredEvent`。
+- 冲突队列 refresh 仍会更新 `lastSeen` 防止活跃列车过期，但方向、优先级、稳定 entry order 与道岔路径签名都未变化时不推进 occupancy version；只有排队语义变化才触发版本更新。
 
 ## 信号许可（SignalAspect）
 - `PROCEED`：可进入。
