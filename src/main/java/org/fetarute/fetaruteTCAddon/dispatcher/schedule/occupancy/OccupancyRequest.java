@@ -222,6 +222,22 @@ public record OccupancyRequest(
     return MovementPlanSnapshot.fromRequest(this);
   }
 
+  /** 返回同一授权窗口但使用新列车身份的请求。 */
+  public OccupancyRequest withTrainName(String nextTrainName) {
+    return new OccupancyRequest(
+        nextTrainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        directedContext.map(context -> context.withTrainKey(nextTrainName)));
+  }
+
   /** 返回同一资源集合但替换请求来源后的请求。 */
   public OccupancyRequest withPurpose(AuthorizationPurpose nextPurpose) {
     return new OccupancyRequest(

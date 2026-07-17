@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -569,7 +570,7 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
-  void switcherZoneBlocksLateSwitcherConflict() {
+  void switcherZoneBlocksLateSwitcherConflictBeyondSafeStop() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeB = NodeId.of("B");
     NodeId nodeS = NodeId.of("S");
@@ -584,7 +585,7 @@ class OccupancyRequestBuilderTest {
     RailNode b =
         new SignRailNode(
             nodeB,
-            NodeType.WAYPOINT,
+            NodeType.STATION,
             new Vector(10.0, 64.0, 0.0),
             Optional.empty(),
             Optional.empty());
@@ -903,231 +904,70 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
-  void depotLookoverAddsDirectionalConflictForBranch() {
-    NodeId nodeA = NodeId.of("A");
-    NodeId nodeB = NodeId.of("B");
-    NodeId nodeC = NodeId.of("C");
-    NodeId nodeS = NodeId.of("S");
-    RailNode a =
-        new SignRailNode(
-            nodeA,
-            NodeType.WAYPOINT,
-            new Vector(0.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode s =
-        new SignRailNode(
-            nodeS,
-            NodeType.SWITCHER,
-            new Vector(10.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode b =
-        new SignRailNode(
-            nodeB,
-            NodeType.WAYPOINT,
-            new Vector(20.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode c =
-        new SignRailNode(
-            nodeC,
-            NodeType.WAYPOINT,
-            new Vector(10.0, 64.0, 10.0),
-            Optional.empty(),
-            Optional.empty());
-    EdgeId edgeAS = EdgeId.undirected(nodeA, nodeS);
-    EdgeId edgeSB = EdgeId.undirected(nodeS, nodeB);
-    EdgeId edgeSC = EdgeId.undirected(nodeS, nodeC);
-    RailEdge as = new RailEdge(edgeAS, nodeA, nodeS, 10, 8.0, true, Optional.empty());
-    RailEdge sb = new RailEdge(edgeSB, nodeS, nodeB, 10, 8.0, true, Optional.empty());
-    RailEdge sc = new RailEdge(edgeSC, nodeS, nodeC, 10, 8.0, true, Optional.empty());
+  void depotSpawnAuthorityFollowsSelectedPathThroughClearanceOnly() {
+    NodeId depot = NodeId.of("SURC:D:HHU:3");
+    NodeId throat = NodeId.of("SWITCHER:Towny:502:74:996");
+    NodeId clearance = NodeId.of("SURC:ZKW:HHU:1:006");
+    NodeId remote = NodeId.of("SURC:ZKW:HHU:1:005");
+    NodeId branch = NodeId.of("SURC:HHU:LWN:1:001");
+    EdgeId depotThroat = EdgeId.undirected(depot, throat);
+    EdgeId throatClearance = EdgeId.undirected(throat, clearance);
+    EdgeId clearanceRemote = EdgeId.undirected(clearance, remote);
+    EdgeId throatBranch = EdgeId.undirected(throat, branch);
     SimpleRailGraph graph =
         new SimpleRailGraph(
-            Map.of(nodeA, a, nodeS, s, nodeB, b, nodeC, c),
-            Map.of(edgeAS, as, edgeSB, sb, edgeSC, sc),
-            Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 1);
-    RouteDefinition route =
-        new RouteDefinition(
-            RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeS, nodeB), Optional.empty());
-    TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 0));
-
-    Optional<OccupancyRequestContext> ctxOpt =
-        builder.buildContextFromNodes(
-            state.trainName(), Optional.of(route.id()), route.waypoints(), 0, Instant.now(), 0);
-    assertTrue(ctxOpt.isPresent());
-    OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get());
-
-    OccupancyResource branchEdge = OccupancyResource.forEdge(edgeSC);
-    assertFalse(request.resourceList().contains(branchEdge));
-    String branchConflict =
-        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeSC).orElseThrow();
-    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(branchConflict)));
-    assertTrue(request.corridorDirections().containsKey(branchConflict));
-    assertEquals(0, request.conflictEntryOrders().get(branchConflict));
-  }
-
-  @Test
-  void depotLookoverUsesExplicitDepotAnchorWhenRouteStartIsNotDepot() {
-    NodeId nodeDepot = NodeId.of("DEPOT");
-    NodeId nodeThroat = NodeId.of("THROAT");
-    NodeId nodeA = NodeId.of("A");
-    NodeId nodeB = NodeId.of("B");
-    NodeId nodeC = NodeId.of("C");
-    RailNode depot =
-        new SignRailNode(
-            nodeDepot,
-            NodeType.DEPOT,
-            new Vector(-10.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode throat =
-        new SignRailNode(
-            nodeThroat,
-            NodeType.SWITCHER,
-            new Vector(0.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode a =
-        new SignRailNode(
-            nodeA,
-            NodeType.WAYPOINT,
-            new Vector(10.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode b =
-        new SignRailNode(
-            nodeB,
-            NodeType.WAYPOINT,
-            new Vector(20.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode c =
-        new SignRailNode(
-            nodeC,
-            NodeType.WAYPOINT,
-            new Vector(30.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    EdgeId edgeDepotThroat = EdgeId.undirected(nodeDepot, nodeThroat);
-    EdgeId edgeThroatA = EdgeId.undirected(nodeThroat, nodeA);
-    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
-    EdgeId edgeBC = EdgeId.undirected(nodeB, nodeC);
-    RailEdge depotThroat =
-        new RailEdge(edgeDepotThroat, nodeDepot, nodeThroat, 10, 8.0, true, Optional.empty());
-    RailEdge throatA =
-        new RailEdge(edgeThroatA, nodeThroat, nodeA, 10, 8.0, true, Optional.empty());
-    RailEdge ab = new RailEdge(edgeAB, nodeA, nodeB, 10, 8.0, true, Optional.empty());
-    RailEdge bc = new RailEdge(edgeBC, nodeB, nodeC, 10, 8.0, true, Optional.empty());
-    SimpleRailGraph graph =
-        new SimpleRailGraph(
-            Map.of(nodeDepot, depot, nodeThroat, throat, nodeA, a, nodeB, b, nodeC, c),
-            Map.of(edgeDepotThroat, depotThroat, edgeThroatA, throatA, edgeAB, ab, edgeBC, bc),
-            Set.of());
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 1);
-    RouteDefinition route =
-        new RouteDefinition(RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeB), Optional.empty());
-    TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 0));
-
-    Optional<OccupancyRequestContext> ctxOpt =
-        builder.buildContextFromNodes(
-            state.trainName(), Optional.of(route.id()), route.waypoints(), 0, Instant.now(), 0);
-    assertTrue(ctxOpt.isPresent());
-    OccupancyRequest fallbackRequest = builder.applyDepotLookover(ctxOpt.get());
-    OccupancyRequest anchoredRequest =
-        builder.applyDepotLookover(ctxOpt.get(), Optional.of(nodeDepot));
-
-    OccupancyResource depotEdgeResource = OccupancyResource.forEdge(edgeDepotThroat);
-    OccupancyResource deepEdgeResource = OccupancyResource.forEdge(edgeBC);
-    String depotConflict =
-        ((RailGraphConflictSupport) graph).conflictKeyForEdge(edgeDepotThroat).orElseThrow();
-    assertFalse(fallbackRequest.resourceList().contains(depotEdgeResource));
-    assertTrue(anchoredRequest.resourceList().contains(depotEdgeResource));
-    assertTrue(
-        anchoredRequest.resourceList().contains(OccupancyResource.forConflict(depotConflict)));
-    assertEquals(CorridorDirection.A_TO_B, anchoredRequest.corridorDirections().get(depotConflict));
-    assertEquals(0, anchoredRequest.conflictEntryOrders().get(depotConflict));
-    assertFalse(fallbackRequest.resourceList().contains(deepEdgeResource));
-    assertTrue(anchoredRequest.resourceList().contains(deepEdgeResource));
-    assertEquals(
-        ctxOpt.get().request().directedContext().orElseThrow().expandedPathNodes(),
-        anchoredRequest.directedContext().orElseThrow().expandedPathNodes());
-    assertEquals(
-        ctxOpt.get().request().directedContext().orElseThrow().directedEdges(),
-        anchoredRequest.directedContext().orElseThrow().directedEdges());
-  }
-
-  @Test
-  void depotLookoverFallsBackToAllDirectionConflictWhenDirectionUnavailable() {
-    NodeId nodeA = NodeId.of("A");
-    NodeId nodeB = NodeId.of("B");
-    NodeId nodeC = NodeId.of("C");
-    NodeId nodeS = NodeId.of("S");
-    RailNode a =
-        new SignRailNode(
-            nodeA,
-            NodeType.WAYPOINT,
-            new Vector(0.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode s =
-        new SignRailNode(
-            nodeS,
-            NodeType.SWITCHER,
-            new Vector(10.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode b =
-        new SignRailNode(
-            nodeB,
-            NodeType.WAYPOINT,
-            new Vector(20.0, 64.0, 0.0),
-            Optional.empty(),
-            Optional.empty());
-    RailNode c =
-        new SignRailNode(
-            nodeC,
-            NodeType.WAYPOINT,
-            new Vector(10.0, 64.0, 10.0),
-            Optional.empty(),
-            Optional.empty());
-    EdgeId edgeAS = EdgeId.undirected(nodeA, nodeS);
-    EdgeId edgeSB = EdgeId.undirected(nodeS, nodeB);
-    EdgeId edgeSC = EdgeId.undirected(nodeS, nodeC);
-    RailEdge as = new RailEdge(edgeAS, nodeA, nodeS, 10, 8.0, true, Optional.empty());
-    RailEdge sb = new RailEdge(edgeSB, nodeS, nodeB, 10, 8.0, true, Optional.empty());
-    RailEdge sc = new RailEdge(edgeSC, nodeS, nodeC, 10, 8.0, true, Optional.empty());
-    SimpleRailGraph delegate =
-        new SimpleRailGraph(
-            Map.of(nodeA, a, nodeS, s, nodeB, b, nodeC, c),
-            Map.of(edgeAS, as, edgeSB, sb, edgeSC, sc),
-            Set.of());
-    String branchConflict =
-        ((RailGraphConflictSupport) delegate).conflictKeyForEdge(edgeSC).orElseThrow();
-    RailGraph graph =
-        new CorridorInfoOverrideGraph(
-            delegate,
             Map.of(
-                edgeSC,
-                new RailGraphCorridorInfo(branchConflict, nodeA, nodeB, List.of(nodeS), false)));
-    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 2, 0, 0, 1);
-    RouteDefinition route =
-        new RouteDefinition(
-            RouteId.of("OP:LINE:ROUTE"), List.of(nodeA, nodeS, nodeB), Optional.empty());
-    TrainRuntimeState state = new StubState("Train-1", new StubProgress(route.id(), 0));
+                depot, depot(depot, "HHU", 3, 0.0),
+                throat, switcher(throat, 10.0),
+                clearance, interval(clearance, "ZKW", "HHU", 1, "006", 20.0),
+                remote, interval(remote, "ZKW", "HHU", 1, "005", 30.0),
+                branch, interval(branch, "HHU", "LWN", 1, "001", 20.0)),
+            Map.of(
+                depotThroat, edge(depot, throat, depotThroat),
+                throatClearance, edge(throat, clearance, throatClearance),
+                clearanceRemote, edge(clearance, remote, clearanceRemote),
+                throatBranch, edge(throat, branch, throatBranch)),
+            Set.of());
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 0, 0);
+    OccupancyRequestContext context =
+        builder
+            .buildContextFromNodes(
+                "SURC-DS-LW-1181",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_Full")),
+                List.of(depot, remote),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                10,
+                AuthorizationPurpose.DEPOT_SPAWN)
+            .orElseThrow();
 
-    Optional<OccupancyRequestContext> ctxOpt =
-        builder.buildContextFromNodes(
-            state.trainName(), Optional.of(route.id()), route.waypoints(), 0, Instant.now(), 0);
-    assertTrue(ctxOpt.isPresent());
-    OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get());
+    assertEquals(List.of(depot, throat, clearance), context.pathNodes());
+    assertTrue(context.request().resourceList().contains(OccupancyResource.forEdge(depotThroat)));
+    assertTrue(
+        context.request().resourceList().contains(OccupancyResource.forEdge(throatClearance)));
+    assertFalse(
+        context.request().resourceList().contains(OccupancyResource.forEdge(clearanceRemote)));
+    assertFalse(context.request().resourceList().contains(OccupancyResource.forEdge(throatBranch)));
+    OccupancyResource sharedSwitcher = OccupancyResource.forConflict("switcher:" + throat.value());
+    assertTrue(context.request().resourceList().contains(sharedSwitcher));
 
-    OccupancyResource branchEdge = OccupancyResource.forEdge(edgeSC);
-    assertFalse(request.resourceList().contains(branchEdge));
-    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(branchConflict)));
-    assertFalse(request.corridorDirections().containsKey(branchConflict));
-    assertEquals(0, request.conflictEntryOrders().get(branchConflict));
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> java.time.Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyRequest returningBranch =
+        new OccupancyRequest(
+            "SURC-DS-LW-1582",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(sharedSwitcher),
+            Map.of());
+    assertTrue(manager.acquire(returningBranch).allowed());
+
+    OccupancyDecision spawnDecision = manager.canEnterPreview(context.request());
+    assertFalse(spawnDecision.allowed());
+    assertTrue(
+        spawnDecision.blockers().stream()
+            .anyMatch(blocker -> sharedSwitcher.equals(blocker.resource())));
   }
 
   @Test
@@ -1502,6 +1342,69 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void semanticDirectionUsesOrderedAxisAtCanonicalHubToIntervalBoundary() {
+    NodeId wsd = NodeId.of("SURC:S:WSD:2");
+    NodeId spbWsd = NodeId.of("SURC:SPB:WSD:2:001");
+    NodeId spb = NodeId.of("SURC:S:SPB:2");
+    NodeId entryHub = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId spbJbs1 = NodeId.of("SURC:SPB:JBS:1:001");
+    NodeId spbJbs2 = NodeId.of("SURC:SPB:JBS:1:002");
+    NodeId exitHub = NodeId.of("SWITCHER:Towny:-579:77:1214");
+    EdgeId edgeWsdInterval = EdgeId.undirected(wsd, spbWsd);
+    EdgeId edgeSpbWsd = EdgeId.undirected(spbWsd, spb);
+    EdgeId edgeEntryHub = EdgeId.undirected(spb, entryHub);
+    EdgeId edgeConflictEntry = EdgeId.undirected(entryHub, spbJbs1);
+    EdgeId edgeConflictMiddle = EdgeId.undirected(spbJbs1, spbJbs2);
+    EdgeId edgeConflictExit = EdgeId.undirected(spbJbs2, exitHub);
+    SimpleRailGraph delegate =
+        new SimpleRailGraph(
+            Map.of(
+                wsd, station(wsd, "WSD", 2, 0.0),
+                spbWsd, interval(spbWsd, "SPB", "WSD", 2, "001", 10.0),
+                spb, station(spb, "SPB", 2, 20.0),
+                entryHub, switcher(entryHub, 30.0),
+                spbJbs1, interval(spbJbs1, "SPB", "JBS", 1, "001", 40.0),
+                spbJbs2, interval(spbJbs2, "SPB", "JBS", 1, "002", 50.0),
+                exitHub, switcher(exitHub, 60.0)),
+            Map.of(
+                edgeWsdInterval, edge(wsd, spbWsd, edgeWsdInterval),
+                edgeSpbWsd, edge(spbWsd, spb, edgeSpbWsd),
+                edgeEntryHub, edge(spb, entryHub, edgeEntryHub),
+                edgeConflictEntry, edge(entryHub, spbJbs1, edgeConflictEntry),
+                edgeConflictMiddle, edge(spbJbs1, spbJbs2, edgeConflictMiddle),
+                edgeConflictExit, edge(spbJbs2, exitHub, edgeConflictExit)),
+            Set.of());
+    String conflict = "single:mt:" + entryHub.value() + "~" + exitHub.value();
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            delegate,
+            Map.of(
+                edgeConflictEntry,
+                new RailGraphCorridorInfo(
+                    conflict,
+                    entryHub,
+                    exitHub,
+                    List.of(entryHub, spbJbs1, spbJbs2, exitHub),
+                    false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 8, 0, 0, 0);
+
+    OccupancyRequest request =
+        builder
+            .buildContextFromNodes(
+                "SURC-MT-LP-9914",
+                Optional.of(RouteId.of("SURC:MT:WSD_JBS")),
+                List.of(wsd, exitHub),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
+    assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflict));
+  }
+
+  @Test
   void semanticDirectionScopesPathAxisAfterRemoteHubBranch() {
     NodeId wsd = NodeId.of("SURC:S:WSD:2");
     NodeId spbWsd = NodeId.of("SURC:SPB:WSD:2:001");
@@ -1779,7 +1682,8 @@ class OccupancyRequestBuilderTest {
             .orElseThrow();
     OccupancyRequest request = context.request();
 
-    assertEquals(List.of(jbs, throat), context.pathNodes());
+    assertEquals(
+        List.of(jbs, throat, switcherA, switcherB, switcherC, jbsCsb), context.pathNodes());
     assertTrue(request.resourceList().contains(OccupancyResource.forConflict(conflict)));
     assertEquals(
         CorridorDirection.A_TO_B,
@@ -1930,6 +1834,75 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void terminalSectionDirectionStaysStableAfterApproachAnchorFallsBehind() {
+    NodeId cgl = NodeId.of("SURC:S:CGL:2");
+    NodeId interval = NodeId.of("SURC:CGL:WYB:2:007");
+    NodeId current = NodeId.of("SWITCHER:Towny:-520:77:4131");
+    NodeId innerOne = NodeId.of("SWITCHER:Towny:-518:77:4138");
+    NodeId innerTwo = NodeId.of("SWITCHER:Towny:-518:77:4145");
+    NodeId terminalSwitcher = NodeId.of("SWITCHER:Towny:-516:77:4152");
+    NodeId wyb = NodeId.of("SURC:S:WYB:1");
+    List<NodeId> physicalPath =
+        List.of(cgl, interval, current, innerOne, innerTwo, terminalSwitcher, wyb);
+    Map<NodeId, RailNode> nodes =
+        Map.of(
+            cgl, station(cgl, "CGL", 2, 0.0),
+            interval, interval(interval, "CGL", "WYB", 2, "007", 10.0),
+            current, switcher(current, 20.0),
+            innerOne, switcher(innerOne, 30.0),
+            innerTwo, switcher(innerTwo, 40.0),
+            terminalSwitcher, switcher(terminalSwitcher, 50.0),
+            wyb, station(wyb, "WYB", 1, 60.0));
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    for (int index = 0; index + 1 < physicalPath.size(); index++) {
+      NodeId from = physicalPath.get(index);
+      NodeId to = physicalPath.get(index + 1);
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.put(edgeId, edge(from, to, edgeId));
+    }
+    String conflict = "single:SURC:CGL:WYB:2:007:SWITCHER:Towny:-516:77:4152~SURC:S:WYB:1";
+    EdgeId terminalEdge = EdgeId.undirected(terminalSwitcher, wyb);
+    RailGraph graph =
+        new CorridorInfoOverrideGraph(
+            new SimpleRailGraph(nodes, edges, Set.of()),
+            Map.of(
+                terminalEdge,
+                new RailGraphCorridorInfo(
+                    conflict, wyb, terminalSwitcher, List.of(wyb, terminalSwitcher), false)));
+    OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 12, 0, 0, 0);
+
+    OccupancyRequest canonical =
+        builder
+            .buildContextFromNodes(
+                "SURC-DS-LW-8443",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_Full")),
+                List.of(cgl, wyb),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+    OccupancyRequest liveSuffix =
+        builder
+            .buildContextFromNodesWithDirectionContext(
+                "SURC-DS-LW-8443",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_Full")),
+                List.of(current, wyb),
+                List.of(cgl, wyb),
+                0,
+                Instant.parse("2026-01-01T00:00:01Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow()
+            .request();
+
+    assertEquals(CorridorDirection.A_TO_B, canonical.corridorDirections().get(conflict));
+    assertEquals(
+        canonical.corridorDirections().get(conflict),
+        liveSuffix.corridorDirections().get(conflict));
+  }
+
+  @Test
   void currentPositionRetainCannotReverseExistingSpawnAuthorityClaim() {
     NodeId depot = NodeId.of("SURC:D:HHU:3");
     NodeId switcher = NodeId.of("SWITCHER:Towny:502:74:996");
@@ -2068,6 +2041,172 @@ class OccupancyRequestBuilderTest {
     assertEquals(2, context.edges().size());
     assertTrue(context.request().resourceList().contains(OccupancyResource.forEdge(edgeWsdJbs)));
     assertEquals(1, context.pathNodes().stream().filter(nodeWsd::equals).count());
+  }
+
+  @Test
+  void shortLookaheadPromotesSelectedThroatPathThroughClearanceExit() {
+    NodeId station = NodeId.of("SURC:S:TERM:1");
+    NodeId throat = NodeId.of("SURC:S:TERM:1:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    NodeId clearance = NodeId.of("SURC:TERM:NEXT:1:001");
+    NodeId nextStation = NodeId.of("SURC:S:NEXT:1");
+    Map<NodeId, RailNode> nodes =
+        Map.of(
+            station, station(station, "TERM", 1, 0.0),
+            throat, stationThroat(throat, "TERM", 1, "001", 1.0),
+            switcher, switcher(switcher, 2.0),
+            clearance, interval(clearance, "TERM", "NEXT", 1, "001", 3.0),
+            nextStation, station(nextStation, "NEXT", 1, 4.0));
+    EdgeId stationThroat = EdgeId.undirected(station, throat);
+    EdgeId throatSwitcher = EdgeId.undirected(throat, switcher);
+    EdgeId switcherClearance = EdgeId.undirected(switcher, clearance);
+    EdgeId clearanceStation = EdgeId.undirected(clearance, nextStation);
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            nodes,
+            Map.of(
+                stationThroat, edge(station, throat, stationThroat),
+                throatSwitcher, edge(throat, switcher, throatSwitcher),
+                switcherClearance, edge(switcher, clearance, switcherClearance),
+                clearanceStation, edge(clearance, nextStation, clearanceStation)),
+            Set.of());
+
+    OccupancyRequestContext context =
+        new OccupancyRequestBuilder(graph, 1, 0, 0, 0)
+            .buildContextFromNodes(
+                "Train-1",
+                Optional.of(RouteId.of("SURC:LINE:OUTBOUND")),
+                List.of(station, nextStation),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.STATION_DEPARTURE)
+            .orElseThrow();
+
+    assertEquals(List.of(station, throat, switcher, clearance), context.pathNodes());
+    assertTrue(
+        context.request().resourceList().contains(OccupancyResource.forEdge(throatSwitcher)));
+    assertTrue(
+        context.request().resourceList().contains(OccupancyResource.forEdge(switcherClearance)));
+    assertEquals(
+        ResourceIntent.MOVEMENT_REQUIRED,
+        context.request().intentFor(OccupancyResource.forNode(clearance)));
+    assertFalse(context.request().resourceList().contains(OccupancyResource.forNode(nextStation)));
+  }
+
+  @Test
+  void remoteInterlockingDoesNotExpandBeyondConfiguredHardLookahead() {
+    NodeId station = NodeId.of("SURC:S:SCC:1");
+    NodeId approachTwo = NodeId.of("SURC:WSD:SCC:1:002");
+    NodeId approachOne = NodeId.of("SURC:WSD:SCC:1:001");
+    NodeId crossing = NodeId.of("SWITCHER:Towny:-262:74:1117");
+    NodeId clearance = NodeId.of("SURC:WSD:SCC:1:000");
+    NodeId nextStation = NodeId.of("SURC:S:WSD:2");
+    Map<NodeId, RailNode> nodes =
+        Map.of(
+            station, station(station, "SCC", 1, 0.0),
+            approachTwo, interval(approachTwo, "WSD", "SCC", 1, "002", 1.0),
+            approachOne, interval(approachOne, "WSD", "SCC", 1, "001", 2.0),
+            crossing, switcher(crossing, 3.0),
+            clearance, interval(clearance, "WSD", "SCC", 1, "000", 4.0),
+            nextStation, station(nextStation, "WSD", 2, 5.0));
+    List<NodeId> path =
+        List.of(station, approachTwo, approachOne, crossing, clearance, nextStation);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    for (int index = 0; index + 1 < path.size(); index++) {
+      NodeId from = path.get(index);
+      NodeId to = path.get(index + 1);
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.put(edgeId, edge(from, to, edgeId));
+    }
+    SimpleRailGraph graph = new SimpleRailGraph(nodes, edges, Set.of());
+
+    OccupancyRequestContext context =
+        new OccupancyRequestBuilder(graph, 1, 0, 0, 0)
+            .buildContextFromNodes(
+                "Train-1",
+                Optional.of(RouteId.of("SURC:MT:TURNBACK")),
+                List.of(station, nextStation),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.LAYOVER_REUSE)
+            .orElseThrow();
+
+    assertEquals(List.of(station, approachTwo), context.pathNodes());
+    assertFalse(context.request().resourceList().contains(OccupancyResource.forNode(crossing)));
+    assertFalse(context.request().resourceList().contains(OccupancyResource.forNode(clearance)));
+  }
+
+  @Test
+  void approachingTrainReservesSwitcherThroughNextGraphBoundary() {
+    NodeId approach = NodeId.of("SURC:WSD:SCC:1:001");
+    NodeId crossing = NodeId.of("SWITCHER:Towny:-262:74:1117");
+    NodeId clearance = NodeId.of("SURC:WSD:SCC:1:000");
+    NodeId station = NodeId.of("SURC:S:WSD:2");
+    List<NodeId> path = List.of(approach, crossing, clearance, station);
+    Map<NodeId, RailNode> nodes =
+        Map.of(
+            approach, interval(approach, "WSD", "SCC", 1, "001", 0.0),
+            crossing, switcher(crossing, 1.0),
+            clearance, interval(clearance, "WSD", "SCC", 1, "000", 2.0),
+            station, station(station, "WSD", 2, 3.0));
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    for (int index = 0; index + 1 < path.size(); index++) {
+      NodeId from = path.get(index);
+      NodeId to = path.get(index + 1);
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.put(edgeId, edge(from, to, edgeId));
+    }
+
+    OccupancyRequestContext context =
+        new OccupancyRequestBuilder(new SimpleRailGraph(nodes, edges, Set.of()), 1, 0, 0, 0)
+            .buildContextFromNodes(
+                "Train-2",
+                Optional.of(RouteId.of("SURC:DS:APPROACH")),
+                List.of(approach, station),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow();
+
+    assertEquals(List.of(approach, crossing, clearance), context.pathNodes());
+    assertEquals(
+        ResourceIntent.MOVEMENT_REQUIRED,
+        context.request().intentFor(OccupancyResource.forNode(clearance)));
+  }
+
+  @Test
+  void throatWithoutVisibleClearanceExitFailsClosed() {
+    NodeId station = NodeId.of("SURC:S:TERM:1");
+    NodeId throat = NodeId.of("SURC:S:TERM:1:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    EdgeId stationThroat = EdgeId.undirected(station, throat);
+    EdgeId throatSwitcher = EdgeId.undirected(throat, switcher);
+    SimpleRailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                station, station(station, "TERM", 1, 0.0),
+                throat, stationThroat(throat, "TERM", 1, "001", 1.0),
+                switcher, switcher(switcher, 2.0)),
+            Map.of(
+                stationThroat, edge(station, throat, stationThroat),
+                throatSwitcher, edge(throat, switcher, throatSwitcher)),
+            Set.of());
+
+    Optional<OccupancyRequestContext> context =
+        new OccupancyRequestBuilder(graph, 1, 0, 0, 0)
+            .buildContextFromNodes(
+                "Train-1",
+                Optional.of(RouteId.of("SURC:LINE:BROKEN")),
+                List.of(station, switcher),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.STATION_DEPARTURE);
+
+    assertTrue(context.isEmpty());
   }
 
   private static RailNode waypoint(NodeId nodeId, double x) {

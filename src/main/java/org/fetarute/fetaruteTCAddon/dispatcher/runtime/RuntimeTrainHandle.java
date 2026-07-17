@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.UUID;
 
 /** 运行时控车抽象：隔离 TrainCarts 具体实现，便于单测与后续扩展。 */
@@ -21,6 +22,15 @@ public interface RuntimeTrainHandle {
 
   /** 获取 TrainCarts 属性对象，用于读写 tags/速度/目的地等。 */
   TrainProperties properties();
+
+  /**
+   * 返回用于列尾清空判定的保守列车长度估计（blocks）。
+   *
+   * <p>默认不猜测长度。调用方在结果缺失、非有限或非正数时必须 fail-retain，不能退回车数、节点数或时间窗口提前释放旧进路。
+   */
+  default OptionalDouble estimatedTrainLengthBlocks() {
+    return OptionalDouble.empty();
+  }
 
   /**
    * 执行紧急停车（不包含目的地/进度处理）。
@@ -61,6 +71,22 @@ public interface RuntimeTrainHandle {
       double targetBlocksPerTick,
       double accelBlocksPerTickSquared) {
     launch(targetBlocksPerTick, accelBlocksPerTickSquared);
+  }
+
+  /**
+   * 请求执行一次带方向兜底的发车，并报告底层是否接受命令。
+   *
+   * <p>默认实现用于测试句柄与兼容实现：调用既有 {@link #launchWithFallback(Optional, double, double)} 后视为已接受。TrainCarts
+   * 实现必须以列车已经移动、已有有效 launch action 或成功新增 action 作为成功证据。
+   *
+   * @return 发车命令是否已由底层接受
+   */
+  default boolean requestLaunchWithFallback(
+      Optional<org.bukkit.block.BlockFace> fallbackDirection,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
+    launchWithFallback(fallbackDirection, targetBlocksPerTick, accelBlocksPerTickSquared);
+    return true;
   }
 
   /**

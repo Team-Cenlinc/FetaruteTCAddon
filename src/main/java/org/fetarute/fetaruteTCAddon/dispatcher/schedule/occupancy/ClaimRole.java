@@ -3,11 +3,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 /**
  * 已写入占用层的 claim 角色。
  *
- * <p>ClaimRole 从 ResourceIntent 派生，用于后续 blocker 分类与诊断。它不会改变资源 key 本身的互斥模型，只说明该 claim
- * 是前向授权、保护保留还是队列/hold 语义。
+ * <p>通常由 ResourceIntent 派生，用于后续 blocker 分类与诊断。{@link #PHYSICAL_FOOTPRINT} 是 Authority Handoff
+ * 在旧进路尚未取得列尾清空证据时写入的内部角色，不对应新的请求意图。它不会改变资源 key 本身的互斥模型，只说明该 claim 是前向授权、物理占用、保护保留还是队列/hold 语义。
  */
 public enum ClaimRole {
   MOVEMENT_REQUIRED,
+  PHYSICAL_FOOTPRINT,
   PROTECTIVE_RETAIN,
   QUEUE_POSITION,
   HOLD_ONLY,

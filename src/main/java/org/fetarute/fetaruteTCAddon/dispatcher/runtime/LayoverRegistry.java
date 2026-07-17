@@ -39,13 +39,15 @@ public final class LayoverRegistry {
   /**
    * 注册一列可复用的待命列车。
    *
+   * <p>同名候选若已经被票据认领，只刷新位置、就绪时间与 tag 快照，不清除其 dispatch attempt；周期性 READY 注册不能打断正在提交的折返事务。
+   *
    * @param trainName 列车名
    * @param terminalKey 终到站标识（用于分组匹配，建议使用 {@link TerminalKeyResolver#toTerminalKey(NodeId)} 生成）
    * @param locationNodeId 当前所在节点 ID（站台或 Siding）
    * @param readyAt 就绪时间（关门完成时间）
    * @param tags 列车当前的 tag 快照（用于后续恢复/属性判断）
    */
-  public void register(
+  public synchronized void register(
       String trainName,
       String terminalKey,
       NodeId locationNodeId,
@@ -57,9 +59,16 @@ public final class LayoverRegistry {
     Objects.requireNonNull(readyAt, "readyAt");
     Objects.requireNonNull(tags, "tags");
 
-    candidates.put(
+    candidates.compute(
         trainName,
-        new LayoverCandidate(trainName, terminalKey, locationNodeId, readyAt, Map.copyOf(tags)));
+        (unused, existing) ->
+            new LayoverCandidate(
+                trainName,
+                terminalKey,
+                locationNodeId,
+                readyAt,
+                Map.copyOf(tags),
+                existing == null ? Optional.empty() : existing.dispatchAttempt()));
   }
 
   /**
@@ -67,10 +76,147 @@ public final class LayoverRegistry {
    *
    * @param trainName 列车名
    */
-  public void unregister(String trainName) {
+  public synchronized void unregister(String trainName) {
     if (trainName != null) {
       candidates.remove(trainName);
     }
+  }
+
+  /**
+   * 在折返提交期间迁移候选列车名。
+   *
+   * <p>候选会保留原来的终到位置、readyAt 与 tags；目标名称已存在时拒绝且恢复旧条目，避免授权 owner 已迁移但重试池仍指向不存在的 TrainCarts 名称。
+   *
+   * @param currentTrainName 当前列车名
+   * @param nextTrainName 新列车名
+   * @return 成功迁移，或两个名称相同时返回 {@code true}
+   */
+  public synchronized boolean rename(String currentTrainName, String nextTrainName) {
+    if (currentTrainName == null
+        || currentTrainName.isBlank()
+        || nextTrainName == null
+        || nextTrainName.isBlank()) {
+      return false;
+    }
+    if (currentTrainName.equals(nextTrainName)) {
+      return true;
+    }
+    LayoverCandidate candidate = candidates.remove(currentTrainName);
+    if (candidate == null) {
+      return false;
+    }
+    LayoverCandidate migrated =
+        new LayoverCandidate(
+            nextTrainName,
+            candidate.terminalKey(),
+            candidate.locationNodeId(),
+            candidate.readyAt(),
+            candidate.tags(),
+            candidate.dispatchAttempt());
+    LayoverCandidate collision = candidates.putIfAbsent(nextTrainName, migrated);
+    if (collision != null) {
+      candidates.put(currentTrainName, candidate);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 为一张票据原子认领待命列车，并固定本次折返的目标列车名。
+   *
+   * <p>同一票据重试会返回原 attempt，因而不会反复生成 UUID 或在失败路径持续改名；另一张票据不能抢占已经进入 handoff 事务的候选。认领本身不代表授权已提交，若
+   * handoff 在修改任何占用前被拒绝，调用方可用 {@link #releaseDispatchAttempt(String, String)} 释放认领。
+   *
+   * @return 当前票据拥有的稳定 attempt；列车不存在或已被另一票据认领时返回 empty
+   */
+  public synchronized Optional<DispatchAttempt> claimDispatch(
+      String trainName, String ticketId, String targetTrainName) {
+    if (trainName == null
+        || trainName.isBlank()
+        || ticketId == null
+        || ticketId.isBlank()
+        || targetTrainName == null
+        || targetTrainName.isBlank()) {
+      return Optional.empty();
+    }
+    Optional<LayoverCandidate> attemptOwner = findDispatchAttemptOwnerInternal(ticketId);
+    if (attemptOwner.isPresent()) {
+      LayoverCandidate owner = attemptOwner.get();
+      if (!owner.trainName().equals(trainName)) {
+        return Optional.empty();
+      }
+      return owner.dispatchAttempt();
+    }
+    LayoverCandidate candidate = candidates.get(trainName);
+    if (candidate == null) {
+      return Optional.empty();
+    }
+    if (candidate.dispatchAttempt().isPresent()) {
+      DispatchAttempt existing = candidate.dispatchAttempt().get();
+      return existing.ticketId().equals(ticketId) ? Optional.of(existing) : Optional.empty();
+    }
+    DispatchAttempt attempt = new DispatchAttempt(ticketId, targetTrainName);
+    candidates.put(trainName, candidate.withDispatchAttempt(Optional.of(attempt)));
+    return Optional.of(attempt);
+  }
+
+  /**
+   * 查找已认领指定票据的唯一候选列车。
+   *
+   * <p>票据认领在注册表内全局唯一，调用方应优先重试这里返回的 owner，而不是继续按 FIFO 尝试其他候选。查询按稳定 ticketId 进行，因此候选在 TrainCarts
+   * 改名后仍可被定位。
+   *
+   * @param ticketId 稳定票据 ID
+   * @return 持有该票据 dispatch attempt 的候选；尚未认领时返回 empty
+   */
+  public synchronized Optional<LayoverCandidate> findDispatchAttemptOwner(String ticketId) {
+    if (ticketId == null || ticketId.isBlank()) {
+      return Optional.empty();
+    }
+    return findDispatchAttemptOwnerInternal(ticketId);
+  }
+
+  /** 仅在 handoff 尚未改变占用事实时释放票据认领。 */
+  public synchronized boolean releaseDispatchAttempt(String trainName, String ticketId) {
+    if (trainName == null || ticketId == null) {
+      return false;
+    }
+    LayoverCandidate candidate = candidates.get(trainName);
+    if (candidate == null || candidate.dispatchAttempt().isEmpty()) {
+      return false;
+    }
+    if (!candidate.dispatchAttempt().get().ticketId().equals(ticketId)) {
+      return false;
+    }
+    candidates.put(trainName, candidate.withDispatchAttempt(Optional.empty()));
+    return true;
+  }
+
+  /**
+   * 判断指定票据是否已进入不可由普通清理路径打断的折返提交事务。
+   *
+   * <p>查询遍历候选值而不是依赖列车名，因此候选在 TrainCarts 改名后仍能按稳定 ticketId 找到。该状态只表示 handoff 已被认领；只有显式释放 attempt
+   * 或成功提交后注销候选，调用方才可以清理对应 pending 票据。
+   *
+   * @param ticketId 稳定票据 ID
+   * @return 任一候选持有该票据的 dispatch attempt 时返回 {@code true}
+   */
+  public synchronized boolean hasDispatchAttemptForTicket(String ticketId) {
+    if (ticketId == null || ticketId.isBlank()) {
+      return false;
+    }
+    return findDispatchAttemptOwnerInternal(ticketId).isPresent();
+  }
+
+  private Optional<LayoverCandidate> findDispatchAttemptOwnerInternal(String ticketId) {
+    return candidates.values().stream()
+        .filter(
+            candidate ->
+                candidate
+                    .dispatchAttempt()
+                    .filter(attempt -> attempt.ticketId().equals(ticketId))
+                    .isPresent())
+        .findFirst();
   }
 
   /**
@@ -123,19 +269,47 @@ public final class LayoverRegistry {
    * @param locationNodeId 当前所在节点 ID
    * @param readyAt 就绪时间
    * @param tags 列车 tag 快照
+   * @param dispatchAttempt 已认领的折返事务；READY 候选为空
    */
   public record LayoverCandidate(
       String trainName,
       String terminalKey,
       NodeId locationNodeId,
       Instant readyAt,
-      Map<String, String> tags) {
+      Map<String, String> tags,
+      Optional<DispatchAttempt> dispatchAttempt) {
+
+    public LayoverCandidate(
+        String trainName,
+        String terminalKey,
+        NodeId locationNodeId,
+        Instant readyAt,
+        Map<String, String> tags) {
+      this(trainName, terminalKey, locationNodeId, readyAt, tags, Optional.empty());
+    }
+
     public LayoverCandidate {
       Objects.requireNonNull(trainName, "trainName");
       Objects.requireNonNull(terminalKey, "terminalKey");
       Objects.requireNonNull(locationNodeId, "locationNodeId");
       Objects.requireNonNull(readyAt, "readyAt");
       tags = tags == null ? Map.of() : Map.copyOf(tags);
+      dispatchAttempt = dispatchAttempt == null ? Optional.empty() : dispatchAttempt;
+    }
+
+    private LayoverCandidate withDispatchAttempt(Optional<DispatchAttempt> attempt) {
+      return new LayoverCandidate(trainName, terminalKey, locationNodeId, readyAt, tags, attempt);
+    }
+  }
+
+  /** 一次折返事务的稳定身份。 */
+  public record DispatchAttempt(String ticketId, String targetTrainName) {
+    public DispatchAttempt {
+      Objects.requireNonNull(ticketId, "ticketId");
+      Objects.requireNonNull(targetTrainName, "targetTrainName");
+      if (ticketId.isBlank() || targetTrainName.isBlank()) {
+        throw new IllegalArgumentException("ticketId 与 targetTrainName 不能为空");
+      }
     }
   }
 }

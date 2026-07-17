@@ -10,7 +10,6 @@ import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnLocat
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnMode;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -36,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -148,7 +148,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (group.getProperties() != null) {
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
-      group.getProperties().setTrainName(trainName);
+      initializeSpawnOwner(group.getProperties(), trainName);
       addTags(group.getProperties(), ticket.id(), service, depotId, pattern, route, provider, now);
       TrainTagHelper.writeTag(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX, "0");
       TrainTagHelper.writeTag(
@@ -173,6 +173,22 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
             10L);
 
     return Optional.of(group);
+  }
+
+  /**
+   * 初始化新生成列车的运行时 owner。
+   *
+   * <p>此操作发生在上层用正式列车名提交发车授权之前；TrainCarts 名称与 FTA owner tag 必须作为同一个初始化边界写入，避免 spawn pattern 中继承的旧
+   * tag 被首个信号 tick 误判为手动改名。
+   */
+  static void initializeSpawnOwner(
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties, String trainName) {
+    Objects.requireNonNull(properties, "properties");
+    if (trainName == null || trainName.isBlank()) {
+      throw new IllegalArgumentException("trainName 不能为空");
+    }
+    String owner = trainName.trim();
+    TrainSpawnTagInitializer.initializeOwner(properties, owner);
   }
 
   private static Optional<SignNodeRegistry.SignNodeInfo> findDepotNode(
@@ -387,8 +403,11 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     tags.put("FTA_OPERATOR_CODE", service.operatorCode());
     tags.put("FTA_PATTERN", route.patternType().name());
     tags.put("FTA_DEPOT_ID", depotId != null ? depotId.value() : "");
+    tags.put(TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "true");
     tags.put("FTA_SPAWN_PATTERN", spawnPattern);
     tags.put("FTA_RUN_AT", String.valueOf(ts.toEpochMilli()));
+    tags.put("FTA_DEST_CODE", "");
+    tags.put("FTA_DEST_NAME", "");
 
     RouteDestinationResolver.resolve(provider, route)
         .ifPresent(
@@ -397,29 +416,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
               tags.put("FTA_DEST_NAME", dest.name());
             });
 
-    List<String> out = new ArrayList<>();
-    for (Map.Entry<String, String> entry : tags.entrySet()) {
-      String value = sanitizeTagValue(entry.getValue());
-      if (value.isEmpty()) {
-        continue;
-      }
-      out.add(entry.getKey() + "=" + value);
-    }
-    if (!out.isEmpty()) {
-      properties.addTags(out.toArray(new String[0]));
-    }
-  }
-
-  private static String sanitizeTagValue(String raw) {
-    if (raw == null) {
-      return "";
-    }
-    String trimmed = raw.trim();
-    if (trimmed.isEmpty()) {
-      return "";
-    }
-    String normalized = trimmed.replace('=', '-').replace('|', '-');
-    return normalized.replaceAll("\\s+", "_");
+    TrainSpawnTagInitializer.replaceLifecycleTags(properties, tags);
   }
 
   /**

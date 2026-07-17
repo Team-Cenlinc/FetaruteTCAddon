@@ -1,21 +1,23 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
-import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.bukkit.Bukkit;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
-import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -63,6 +65,10 @@ public class ReclaimManager {
   private final ConfigManager configManager;
   private final Consumer<String> debugLogger;
   private final java.util.function.IntSupplier activeTrainCountSupplier;
+
+  /** 仅保存已进入 handoff attempt 的本管理器 RETURN 票据，以 ticketId 作为不可变事务身份。 */
+  private final Map<String, ServiceTicket> stableReturnTickets = new HashMap<>();
+
   private BukkitTask task;
 
   public ReclaimManager(
@@ -77,7 +83,7 @@ public class ReclaimManager {
         ticketAssigner,
         configManager,
         debugLogger,
-        () -> TrainPropertiesStore.getAll().size());
+        ReclaimManager::countActiveGroupsFromStore);
   }
 
   public ReclaimManager(
@@ -132,6 +138,7 @@ public class ReclaimManager {
     long maxIdleSec = settings.maxIdleSeconds();
 
     List<LayoverRegistry.LayoverCandidate> candidates = layoverRegistry.snapshot();
+    pruneStableReturnTickets(candidates);
     Map<String, Integer> pendingDemandByDirection = buildPendingDemandByDirection();
     Map<String, Integer> layoverSupplyByDirection = buildLayoverSupplyByDirection(candidates);
 
@@ -274,7 +281,8 @@ public class ReclaimManager {
   /**
    * 为待回收列车分配 RETURN 票据。
    *
-   * <p>该方法只负责票据分配，不直接销毁列车。若找不到匹配的 RETURN 线路或 TicketAssigner 拒绝 分配，则返回 false，交由下一轮扫描重试。
+   * <p>该方法只负责票据分配，不直接销毁列车。纯预检拒绝且没有建立 dispatch attempt 时会继续尝试下一条匹配 RETURN route；一旦进入 handoff
+   * 事务，则固定保留同一 route/ticket 供下一轮重试，避免同时产生两个折返事务。
    */
   private boolean assignReturnTicket(
       LayoverRegistry.LayoverCandidate candidate, Optional<StorageProvider> providerOpt) {
@@ -290,13 +298,7 @@ public class ReclaimManager {
       return false;
     }
 
-    Optional<Operator> operatorOpt = Optional.empty();
-    for (Company company : provider.companies().listAll()) {
-      operatorOpt = provider.operators().findByCompanyAndCode(company.id(), opCode);
-      if (operatorOpt.isPresent()) {
-        break;
-      }
-    }
+    Optional<Operator> operatorOpt = resolveCandidateOperator(provider, candidate, opCode);
 
     if (operatorOpt.isEmpty()) {
       debugLogger.accept("回收失败: 找不到 Operator " + opCode + " train=" + candidate.trainName());
@@ -341,25 +343,27 @@ public class ReclaimManager {
       }
 
       if (match) {
-        ServiceTicket ticket =
-            new ServiceTicket(
-                UUID.randomUUID().toString(),
-                Instant.now(),
-                route.id(),
-                candidate.terminalKey(),
-                -10,
-                ServiceTicket.TicketMode.RETURN);
+        Optional<ServiceTicket> ticketOpt = stableReturnTicket(candidate, route.id());
+        if (ticketOpt.isEmpty()) {
+          debugLogger.accept("回收跳过: 候选已由其他 dispatch 事务认领 train=" + candidate.trainName());
+          continue;
+        }
+        ServiceTicket ticket = ticketOpt.get();
 
         debugLogger.accept(
             "尝试回收: 分配 RETURN ticket route=" + route.code() + " train=" + candidate.trainName());
 
         boolean success = ticketAssigner.forceAssign(provider, candidate.trainName(), ticket);
         if (success) {
+          stableReturnTickets.remove(ticket.ticketId());
           debugLogger.accept("回收成功: 已分配 RETURN ticket train=" + candidate.trainName());
-        } else {
-          debugLogger.accept("回收失败: TicketAssigner 拒绝分配 train=" + candidate.trainName());
+          return true;
         }
-        return success;
+        debugLogger.accept("回收失败: TicketAssigner 拒绝分配 train=" + candidate.trainName());
+        if (layoverRegistry.findDispatchAttemptOwner(ticket.ticketId()).isPresent()) {
+          return false;
+        }
+        stableReturnTickets.remove(ticket.ticketId());
       }
     }
     debugLogger.accept(
@@ -368,6 +372,121 @@ public class ReclaimManager {
             + " 的 RETURN 线路 train="
             + candidate.trainName());
     return false;
+  }
+
+  /**
+   * 解析候选列车所属运营商。
+   *
+   * <p>Operator code 只在公司内唯一，不能遍历公司后取第一个同名对象。优先沿本次列车的 {@code FTA_ROUTE_ID -> Line -> Operator}
+   * 精确回溯；旧数据缺少 route UUID 时，仅在全库恰好一个同 code 运营商时允许回退。
+   */
+  private Optional<Operator> resolveCandidateOperator(
+      StorageProvider provider, LayoverRegistry.LayoverCandidate candidate, String operatorCode) {
+    Optional<UUID> routeId = parseUuidTag(candidate.tags(), RouteProgressRegistry.TAG_ROUTE_ID);
+    if (routeId.isPresent()) {
+      Optional<Operator> byRoute =
+          provider
+              .routes()
+              .findById(routeId.get())
+              .flatMap(route -> provider.lines().findById(route.lineId()))
+              .flatMap(line -> provider.operators().findById(line.operatorId()));
+      if (byRoute.isPresent()) {
+        if (byRoute.get().code().equalsIgnoreCase(operatorCode)) {
+          return byRoute;
+        }
+        debugLogger.accept(
+            "回收失败: FTA_ROUTE_ID 与 FTA_OPERATOR_CODE 不一致 train="
+                + candidate.trainName()
+                + " routeId="
+                + routeId.get()
+                + " operator="
+                + operatorCode);
+        return Optional.empty();
+      }
+    }
+
+    List<Operator> matches =
+        provider.companies().listAll().stream()
+            .filter(Objects::nonNull)
+            .map(company -> provider.operators().findByCompanyAndCode(company.id(), operatorCode))
+            .flatMap(Optional::stream)
+            .toList();
+    if (matches.size() == 1) {
+      return Optional.of(matches.get(0));
+    }
+    if (matches.size() > 1) {
+      debugLogger.accept(
+          "回收失败: Operator code 跨公司歧义 train="
+              + candidate.trainName()
+              + " operator="
+              + operatorCode
+              + " matches="
+              + matches.size());
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 返回当前回库事务的稳定票据。
+   *
+   * <p>Layover 的终端、位置、readyAt 与列车名在 handoff/周期刷新中都可能改变，不能作为事务身份。已有 dispatch attempt 只按其不可变 ticketId
+   * 找回本管理器保存的 RETURN 票据，并校验 route；其他折返事务的 attempt 不得被回收流程接管。
+   */
+  private Optional<ServiceTicket> stableReturnTicket(
+      LayoverRegistry.LayoverCandidate candidate, UUID routeId) {
+    Optional<LayoverRegistry.DispatchAttempt> attempt = candidate.dispatchAttempt();
+    if (attempt.isPresent()) {
+      ServiceTicket current = stableReturnTickets.get(attempt.get().ticketId());
+      return current != null && routeId.equals(current.routeId())
+          ? Optional.of(current)
+          : Optional.empty();
+    }
+    ServiceTicket created =
+        new ServiceTicket(
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            routeId,
+            candidate.terminalKey(),
+            -10,
+            ServiceTicket.TicketMode.RETURN);
+    stableReturnTickets.put(created.ticketId(), created);
+    return Optional.of(created);
+  }
+
+  private static int countActiveGroupsFromStore() {
+    return countActiveGroups(MinecartGroupStore.getGroups());
+  }
+
+  /**
+   * 统计当前已加载且有效的 TrainCarts group。
+   *
+   * <p>{@code TrainPropertiesStore#getAll()} 包含持久化的离线属性，不代表 Minecraft 世界中的活跃实体；回收压力只能使用真实 group。
+   */
+  static int countActiveGroups(Collection<MinecartGroup> groups) {
+    if (groups == null || groups.isEmpty()) {
+      return 0;
+    }
+    int active = 0;
+    for (MinecartGroup group : groups) {
+      if (group != null && group.isValid()) {
+        active++;
+      }
+    }
+    return active;
+  }
+
+  /** 仅保留仍由 LayoverRegistry 中 active attempt 引用的稳定回库票据。 */
+  private void pruneStableReturnTickets(List<LayoverRegistry.LayoverCandidate> candidates) {
+    Set<String> activeTicketIds =
+        candidates == null
+            ? Set.of()
+            : candidates.stream()
+                .filter(Objects::nonNull)
+                .map(LayoverRegistry.LayoverCandidate::dispatchAttempt)
+                .flatMap(Optional::stream)
+                .map(LayoverRegistry.DispatchAttempt::ticketId)
+                .collect(Collectors.toSet());
+    stableReturnTickets.keySet().removeIf(ticketId -> !activeTicketIds.contains(ticketId));
   }
 
   private static int readPositiveIntTag(Map<String, String> tags, String key) {
@@ -393,5 +512,26 @@ public class ReclaimManager {
       }
     }
     return 0;
+  }
+
+  private static Optional<UUID> parseUuidTag(Map<String, String> tags, String key) {
+    if (tags == null || tags.isEmpty() || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    for (Map.Entry<String, String> entry : tags.entrySet()) {
+      if (entry == null
+          || entry.getKey() == null
+          || !entry.getKey().equalsIgnoreCase(key)
+          || entry.getValue() == null
+          || entry.getValue().isBlank()) {
+        continue;
+      }
+      try {
+        return Optional.of(UUID.fromString(entry.getValue().trim()));
+      } catch (IllegalArgumentException ignored) {
+        return Optional.empty();
+      }
+    }
+    return Optional.empty();
   }
 }

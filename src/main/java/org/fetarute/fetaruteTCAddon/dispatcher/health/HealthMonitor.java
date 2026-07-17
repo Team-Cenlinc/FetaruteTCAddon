@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.health;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
@@ -11,7 +12,9 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 
 /**
@@ -326,17 +329,53 @@ public final class HealthMonitor {
       if (group == null || !group.isValid()) {
         continue;
       }
-      if (group.getProperties() != null) {
-        String name =
-            dispatchService
-                .resolveTrackedTrainName(group.getProperties())
-                .orElse(group.getProperties().getTrainName());
-        if (name != null && !name.isBlank()) {
-          names.add(name);
-        }
+      TrainProperties properties = group.getProperties();
+      if (properties == null) {
+        continue;
       }
+      names.addAll(
+          runtimeOwnerNames(
+              properties.getTrainName(),
+              dispatchService.resolveTrackedTrainName(properties),
+              TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)));
     }
     return names;
+  }
+
+  /**
+   * 加入健康清理必须保留的运行时 owner 名称。
+   *
+   * <p>TrainCarts 当前名与 {@code FTA_TRAIN_NAME} 在 owner 原子迁移失败时会暂时不同：实体已经使用新名称，但硬授权与 Layover
+   * 候选会故意保留在旧 owner。两者都必须视为存活，直到后续信号 tick 完成迁移或显式移除列车。
+   */
+  private static void addActiveTrainName(Set<String> names, String trainName) {
+    if (names == null || trainName == null || trainName.isBlank()) {
+      return;
+    }
+    names.add(trainName.trim());
+  }
+
+  /**
+   * 汇总同一 TrainCarts 实体在 owner 迁移窗口中必须同时视为存活的名称。
+   *
+   * @param currentTrainName TrainCarts 当前实体名
+   * @param resolvedTrainName 调度运行时解析出的 owner
+   * @param taggedTrainName {@code FTA_TRAIN_NAME} 中尚未迁移完成的 owner
+   * @return 去空白、去重后的名称集合
+   */
+  static Set<String> runtimeOwnerNames(
+      String currentTrainName,
+      java.util.Optional<String> resolvedTrainName,
+      java.util.Optional<String> taggedTrainName) {
+    Set<String> names = new HashSet<>();
+    addActiveTrainName(names, currentTrainName);
+    if (resolvedTrainName != null) {
+      resolvedTrainName.ifPresent(name -> addActiveTrainName(names, name));
+    }
+    if (taggedTrainName != null) {
+      taggedTrainName.ifPresent(name -> addActiveTrainName(names, name));
+    }
+    return Set.copyOf(names);
   }
 
   private void logAlert(HealthAlert alert) {

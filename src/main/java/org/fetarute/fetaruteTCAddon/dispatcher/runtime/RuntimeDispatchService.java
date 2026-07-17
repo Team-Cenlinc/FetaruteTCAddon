@@ -80,6 +80,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartWaitForPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AdvisoryRisk;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorityHandoffSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.BlockerClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
@@ -100,11 +101,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
@@ -256,8 +259,18 @@ public final class RuntimeDispatchService {
    * 占用请求构建将优先使用覆盖值。
    */
   private final java.util.concurrent.ConcurrentMap<
-          String, java.util.concurrent.ConcurrentMap<Integer, NodeId>>
+          String, java.util.concurrent.ConcurrentMap<Integer, EffectiveNodeOverride>>
       effectiveNodeOverrides = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 仅用于需要跨两个列车 key 原子迁移有效节点覆盖的复合操作。 */
+  private final Object effectiveNodeOverridesLock = new Object();
+
+  /** 串行化 TrainCarts 改名触发的跨注册表 owner 迁移。 */
+  private final Object runtimeOwnerMigrationLock = new Object();
+
+  /** 折返交接后等待真实列尾推进证据的旧进路保护。 */
+  private final TurnbackFootprintGuardRegistry turnbackFootprintGuards =
+      new TurnbackFootprintGuardRegistry();
 
   /** 最近一次 fresh acquire 生成的运动授权；旧 destination 不具备运动授权。 */
   private final java.util.concurrent.ConcurrentMap<String, MovementAuthorizationToken>
@@ -1490,6 +1503,11 @@ public final class RuntimeDispatchService {
       }
       long ageMs = Duration.between(snapshot.sampledAt(), now).toMillis();
       String blockedTrain = displayTrainNameForKey(entry.getKey(), progress, activeTrainNames);
+      if (!blockerSnapshotProgressCurrent(blockedTrain, snapshot)) {
+        blockerSnapshots.remove(entry.getKey(), snapshot);
+        traceBlockerSnapshotProgressMoved(blockedTrain, snapshot.progressWindow());
+        continue;
+      }
       for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
         if (blocker == null) {
           continue;
@@ -3432,6 +3450,7 @@ public final class RuntimeDispatchService {
     if (currentIndex < 0) {
       return true;
     }
+    observePhysicalNodeForSpawnOrigin(properties, definition.nodeId(), currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, definition.nodeId());
     pruneEffectiveNodeOverrides(trainName, currentIndex);
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
@@ -3478,7 +3497,7 @@ public final class RuntimeDispatchService {
     }
 
     OccupancyRequestContext context = contextOpt.get();
-    // 发车门控是 admission gate，需要保留完整前瞻与 depot lookover；1-edge hard authority
+    // 发车门控是 admission gate，需要保留选定前向路径与必要的原子联锁窗口；1-edge hard authority
     // 只用于信号 aspect staging，不能替代发车授权窗口；尾部保护资源仍由 retain 流程持有，不随发车 acquire 覆盖。
     OccupancyRequest authorizationRequest =
         markDirectedRequest(
@@ -3717,8 +3736,10 @@ public final class RuntimeDispatchService {
       return;
     }
     NodeId currentNode = definition.nodeId();
+    observePhysicalNodeForSpawnOrigin(properties, currentNode, currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneEffectiveNodeOverrides(trainName, currentIndex);
+    observeTurnbackFootprintProgress(trainName, currentNode);
     Instant now = Instant.now();
     // 处理 DSTY 销毁
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
@@ -3895,6 +3916,8 @@ public final class RuntimeDispatchService {
     }
     Instant now = Instant.now();
     progressRegistry.updateLastPassedGraphNode(trainName, nodeId, now);
+    observePhysicalNodeForSpawnOrigin(properties, nodeId, -1);
+    observeTurnbackFootprintProgress(trainName, nodeId);
   }
 
   /**
@@ -3964,6 +3987,7 @@ public final class RuntimeDispatchService {
     // 记录节点历史（用于后续回退检测）
     recordNodeHistory(trainName, currentNode);
 
+    observePhysicalNodeForSpawnOrigin(properties, currentNode, currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneEffectiveNodeOverrides(trainName, currentIndex);
     Instant now = Instant.now();
@@ -3972,6 +3996,7 @@ public final class RuntimeDispatchService {
     if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
       return;
     }
+    observeTurnbackFootprintProgress(trainName, currentNode);
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     boolean stopAtWaypoint = false;
     int waypointDwellSeconds = 0;
@@ -4139,19 +4164,24 @@ public final class RuntimeDispatchService {
               priority,
               AuthorizationPurpose.RUNTIME_MOVE);
       if (contextOpt.isEmpty()) {
-        debugLogger.accept(
-            "调度推进失败: 构建占用请求失败 train="
-                + trainName
-                + " node="
-                + definition.nodeId().value()
-                + " route="
-                + route.id().value()
-                + " reason="
-                + diagnoseBuildFailure(
-                    graph,
-                    route,
-                    currentIndex,
-                    Math.max(runtimeSettings.lookaheadEdges(), runtimeSettings.minClearEdges())));
+        String buildFailure =
+            diagnoseBuildFailure(
+                graph,
+                route,
+                currentIndex,
+                Math.max(runtimeSettings.lookaheadEdges(), runtimeSettings.minClearEdges()));
+        applyUnresolvableMovementPlanStop(
+            train,
+            properties,
+            trainName,
+            route,
+            currentIndex,
+            currentNode,
+            nextNode,
+            graph,
+            now,
+            "progress-trigger",
+            buildFailure);
         return;
       }
       context = contextOpt.get();
@@ -4776,6 +4806,7 @@ public final class RuntimeDispatchService {
     blockerSnapshots.remove(key);
     movementAuthorizationTokens.remove(key);
     movementInhibitors.remove(key);
+    turnbackFootprintGuards.clear(trainName);
   }
 
   /**
@@ -5633,10 +5664,16 @@ public final class RuntimeDispatchService {
     }
   }
 
-  private record BlockerSnapshot(Set<DeadlockBlockerInfo> blockers, Instant sampledAt) {
+  private record BlockerSnapshot(
+      Set<DeadlockBlockerInfo> blockers, Instant sampledAt, BlockerProgressWindow progressWindow) {
     private BlockerSnapshot {
       blockers = blockers == null ? Set.of() : Set.copyOf(blockers);
       sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
+      progressWindow = progressWindow == null ? BlockerProgressWindow.unknown() : progressWindow;
+    }
+
+    private BlockerSnapshot(Set<DeadlockBlockerInfo> blockers, Instant sampledAt) {
+      this(blockers, sampledAt, BlockerProgressWindow.unknown());
     }
 
     private Set<String> blockerTrainNames() {
@@ -5647,6 +5684,23 @@ public final class RuntimeDispatchService {
         }
       }
       return Set.copyOf(names);
+    }
+  }
+
+  /** blocker 快照产生时的线路进度窗口；未知窗口仅保留旧 TTL 行为。 */
+  private record BlockerProgressWindow(String routeId, int currentIndex, String lastPassedNode) {
+    private BlockerProgressWindow {
+      routeId = routeId == null || routeId.isBlank() ? "-" : routeId.trim();
+      lastPassedNode =
+          lastPassedNode == null || lastPassedNode.isBlank() ? "-" : lastPassedNode.trim();
+    }
+
+    private static BlockerProgressWindow unknown() {
+      return new BlockerProgressWindow("-", -1, "-");
+    }
+
+    private boolean known() {
+      return currentIndex >= 0 || !routeId.equals("-") || !lastPassedNode.equals("-");
     }
   }
 
@@ -5764,7 +5818,66 @@ public final class RuntimeDispatchService {
       blockerSnapshots.remove(key, snapshot);
       return Set.of();
     }
+    if (!blockerSnapshotProgressCurrent(trainName, snapshot)) {
+      blockerSnapshots.remove(key, snapshot);
+      traceBlockerSnapshotProgressMoved(trainName, snapshot.progressWindow());
+      return Set.of();
+    }
     return snapshot.blockerTrainNames();
+  }
+
+  private BlockerProgressWindow captureBlockerProgressWindow(String trainName) {
+    return progressRegistry
+        .get(trainName)
+        .map(
+            entry ->
+                new BlockerProgressWindow(
+                    entry.routeId().value(),
+                    entry.currentIndex(),
+                    entry.lastPassedGraphNode().map(NodeId::value).orElse("-")))
+        .orElseGet(BlockerProgressWindow::unknown);
+  }
+
+  private boolean blockerSnapshotProgressCurrent(String trainName, BlockerSnapshot snapshot) {
+    if (snapshot == null || !snapshot.progressWindow().known()) {
+      return true;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
+    if (current.isEmpty()) {
+      return false;
+    }
+    BlockerProgressWindow expected = snapshot.progressWindow();
+    RouteProgressRegistry.RouteProgressEntry entry = current.get();
+    String currentLastPassed = entry.lastPassedGraphNode().map(NodeId::value).orElse("-");
+    return (expected.routeId().equals("-") || expected.routeId().equals(entry.routeId().value()))
+        && (expected.currentIndex() < 0 || expected.currentIndex() == entry.currentIndex())
+        && (expected.lastPassedNode().equals("-")
+            || expected.lastPassedNode().equals(currentLastPassed));
+  }
+
+  private void traceBlockerSnapshotProgressMoved(
+      String trainName, BlockerProgressWindow snapshotWindow) {
+    BlockerProgressWindow expected =
+        snapshotWindow == null ? BlockerProgressWindow.unknown() : snapshotWindow;
+    Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
+    debugLogger.accept(
+        "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED train="
+            + trainName
+            + " reason=PROGRESS_WINDOW_MOVED snapshotRouteId="
+            + expected.routeId()
+            + " currentRouteId="
+            + current.map(entry -> entry.routeId().value()).orElse("-")
+            + " snapshotCurrentIndex="
+            + expected.currentIndex()
+            + " currentIndex="
+            + current.map(RouteProgressRegistry.RouteProgressEntry::currentIndex).orElse(-1)
+            + " snapshotLastPassed="
+            + expected.lastPassedNode()
+            + " currentLastPassed="
+            + current
+                .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode)
+                .map(NodeId::value)
+                .orElse("-"));
   }
 
   /**
@@ -5798,6 +5911,11 @@ public final class RuntimeDispatchService {
               + trainName
               + " reason=expired ageMs="
               + Duration.between(snapshot.sampledAt(), Instant.now()).toMillis());
+      return new DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH);
+    }
+    if (!blockerSnapshotProgressCurrent(trainName, snapshot)) {
+      blockerSnapshots.remove(key, snapshot);
+      traceBlockerSnapshotProgressMoved(trainName, snapshot.progressWindow());
       return new DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH);
     }
     long ageMs = Duration.between(snapshot.sampledAt(), Instant.now()).toMillis();
@@ -7297,20 +7415,6 @@ public final class RuntimeDispatchService {
               remainingMsUntilDestroy));
     }
     RailGraph graph = graphOpt.get();
-    if (!(graph instanceof RailGraphConflictSupport support)) {
-      return Optional.of(
-          drainabilityResult(
-              episodeId,
-              trainA,
-              trainB,
-              zoneId,
-              false,
-              resolution.resolvedName(),
-              Optional.empty(),
-              List.of(),
-              "CONFLICT_SUPPORT_MISSING",
-              remainingMsUntilDestroy));
-    }
     RouteDefinition route = routeOpt.get();
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolution.resolvedName(), route);
@@ -7341,6 +7445,7 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequestContext context = contextOpt.get();
     OccupancyResource zoneResource = OccupancyResource.forConflict(zoneId);
+    RailGraphConflictSupport support = singleConflictMembershipSupport(graph, zoneResource);
     if (!trainAlreadyHoldsResource(resolution.resolvedName(), zoneResource)) {
       return Optional.of(
           drainabilityResult(
@@ -7659,6 +7764,14 @@ public final class RuntimeDispatchService {
     if (!isSelfOwnedSingleDirectionMismatch(preview, request)) {
       return false;
     }
+    if (hasTurnbackProtectedBlocker(resolvedTrainName, preview)) {
+      debugLogger.accept(
+          "HealthMonitor 拒绝清理折返 footprint 中的 single 方向: train="
+              + resolvedTrainName
+              + " blockers="
+              + summarizeBlockers(preview));
+      return false;
+    }
     int removed = occupancyManager.clearSelfOwnedSingleDirectionMismatches(request);
     if (removed <= 0) {
       return false;
@@ -7672,6 +7785,23 @@ public final class RuntimeDispatchService {
             + preview.reason());
     refreshSignalByName(resolvedTrainName);
     return true;
+  }
+
+  /** 折返 sidecar 的共享 movement claim 也必须等待 rear-clear，不能被 single 方向自愈旁路删除。 */
+  boolean hasTurnbackProtectedBlocker(String trainName, OccupancyDecision decision) {
+    if (decision == null || decision.blockers().isEmpty()) {
+      return false;
+    }
+    Set<OccupancyResource> protectedResources =
+        turnbackFootprintGuards.protectedResources(trainName);
+    if (protectedResources.isEmpty()) {
+      return false;
+    }
+    return decision.blockers().stream()
+        .filter(Objects::nonNull)
+        .map(OccupancyClaim::resource)
+        .filter(Objects::nonNull)
+        .anyMatch(protectedResources::contains);
   }
 
   private boolean isSelfOwnedSingleDirectionMismatch(
@@ -8905,25 +9035,15 @@ public final class RuntimeDispatchService {
     trainName = handleRenameIfNeeded(properties);
     if (layoverRegistry.get(trainName).isPresent()) {
       clearDepartureGate(trainName);
-      // Layover 状态：保留当前位置节点的占用，防止后车"反向占用"导致死锁
-      // 只释放前方 lookahead 资源，不释放当前节点
       LayoverCandidate candidate = layoverRegistry.get(trainName).orElse(null);
-      if (occupancyManager != null && candidate != null) {
-        NodeId locationNode = candidate.locationNodeId();
-        OccupancyResource keepResource = OccupancyResource.forNode(locationNode);
-        // 只保留当前位置节点占用，释放其他所有资源
-        releaseResourcesNotInRequest(trainName, List.of(keepResource));
-        // 确保当前位置占用存在（可能在之前被错误释放）
-        OccupancyRequest locationRequest =
-            new OccupancyRequest(
-                trainName,
-                Optional.empty(),
-                now,
-                List.of(keepResource),
-                java.util.Map.of(),
-                0,
-                AuthorizationPurpose.LAYOVER_REUSE);
-        occupancyManager.acquire(locationRequest);
+      if (occupancyManager != null && candidate != null && candidate.dispatchAttempt().isEmpty()) {
+        retainLayoverReadyOccupancy(train, properties, trainName, candidate, now);
+      } else if (candidate != null && candidate.dispatchAttempt().isPresent()) {
+        debugLogger.accept(
+            "Layover 提交中保持完整进路: train="
+                + trainName
+                + " ticket="
+                + candidate.dispatchAttempt().get().ticketId());
       }
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
       TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
@@ -8943,15 +9063,13 @@ public final class RuntimeDispatchService {
       return;
     }
     if (TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX).isEmpty()) {
-      clearDepartureGate(trainName);
       if (progressRegistry.get(trainName).isPresent()) {
         if (occupancyManager != null) {
           occupancyManager.releaseByTrain(trainName);
         }
         progressRegistry.remove(trainName);
       }
-      stallStates.remove(trainName.toLowerCase(java.util.Locale.ROOT));
-      missingSignalWarned.remove(trainName.toLowerCase(java.util.Locale.ROOT));
+      clearRuntimeCachesForTrain(trainName);
       return;
     }
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
@@ -8976,21 +9094,7 @@ public final class RuntimeDispatchService {
             ? currentIndex
             : Math.max(0, route.waypoints().size() - 1);
 
-    // 首站位置初始化：从 FTA_DEPOT_ID tag 读取实际 spawn 位置（DYNAMIC depot 支持）
-    // 注：只在首次处理时执行，避免每 tick 重复打印
-    if (boundedIndex == 0 && readEffectiveNode(trainName, 0).isEmpty()) {
-      Optional<String> depotIdOpt = TrainTagHelper.readTagValue(properties, "FTA_DEPOT_ID");
-      if (depotIdOpt.isPresent() && !depotIdOpt.get().isBlank()) {
-        NodeId actualStartNode = NodeId.of(depotIdOpt.get());
-        NodeId declared = route.waypoints().get(0);
-        // 只有当实际起点与声明不同时才打印日志
-        if (!actualStartNode.equals(declared)) {
-          debugLogger.accept("首站位置初始化: train=" + trainName + " depotId=" + actualStartNode.value());
-        }
-        // 无论是否与声明相同，都强制写入覆盖表以防止重复检查
-        forceRecordEffectiveNode(trainName, 0, actualStartNode);
-      }
-    }
+    restoreSpawnOriginOverrideIfNeeded(trainName, route, boundedIndex, properties);
 
     NodeId currentNode = resolveEffectiveNode(trainName, route, boundedIndex);
     if (hasDepartureGate(trainName)) {
@@ -9083,36 +9187,54 @@ public final class RuntimeDispatchService {
         runtimeLookaheadBuilder(graph, runtimeSettings, runtimeSettings.rearGuardEdges());
     NodeId currentNodeForSignal =
         resolveEffectiveCurrentNodeForSignal(trainName, route, currentIndex, graph);
+    List<NodeId> directionContextNodes = resolveEffectiveWaypoints(trainName, route);
     List<NodeId> effectiveNodes =
-        applyCurrentNodeOverride(
-            resolveEffectiveWaypoints(trainName, route), currentIndex, currentNodeForSignal);
+        applyCurrentNodeOverride(directionContextNodes, currentIndex, currentNodeForSignal);
     DispatchPriorityResolution priorityResolution =
         dispatchPriorityResolver.resolve(
             "periodic-signal-tick", trainName, properties, route, Optional.of(progressEntry));
     traceDispatchRequestContext(
         "periodic-signal-tick", trainName, route, currentIndex, priorityResolution);
     Optional<OccupancyRequestContext> contextOpt =
-        builder.buildContextFromNodes(
+        builder.buildContextFromNodesWithDirectionContext(
             trainName,
             Optional.ofNullable(route.id()),
             effectiveNodes,
+            directionContextNodes,
             currentIndex,
             now,
             priorityResolution.priority(),
             AuthorizationPurpose.RUNTIME_MOVE);
     if (contextOpt.isEmpty()) {
+      applyUnresolvableMovementPlanStop(
+          train,
+          properties,
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          resolveEffectiveNode(trainName, route, currentIndex + 1),
+          graph,
+          now,
+          "periodic-signal-tick",
+          diagnoseBuildFailure(
+              graph,
+              route,
+              currentIndex,
+              Math.max(runtimeSettings.lookaheadEdges(), runtimeSettings.minClearEdges())));
       return;
     }
     OccupancyRequestContext context = contextOpt.get();
     OccupancyRequestContext advisoryContext = toAdvisoryLookaheadContext(context);
     OccupancyRequest request = advisoryContext.request();
     OccupancyRequestContext authorizationContext =
-        buildHardAuthorityContext(
+        buildHardAuthorityContextWithDirectionContext(
                 graph,
                 runtimeSettings,
                 trainName,
                 route,
                 effectiveNodes,
+                directionContextNodes,
                 currentIndex,
                 now,
                 priorityResolution.priority(),
@@ -10557,24 +10679,30 @@ public final class RuntimeDispatchService {
    *
    * @param candidate 待命列车候选对象
    * @param ticket 分配的任务票据
-   * @return 是否成功发车（若占用失败或列车无效则返回 false）
+   * @return 折返事务结果；调用方必须使用其中的 committed trainName 更新生命周期标签
    */
-  public boolean dispatchLayover(LayoverCandidate candidate, ServiceTicket ticket) {
+  public LayoverDispatchResult dispatchLayover(LayoverCandidate candidate, ServiceTicket ticket) {
     if (candidate == null || ticket == null) {
-      return false;
+      return LayoverDispatchResult.failed("missing-candidate-or-ticket");
     }
     String trainName = candidate.trainName();
     TrainProperties properties = TrainPropertiesStore.get(trainName);
     if (properties == null || properties.getHolder() == null) {
       debugLogger.accept("Layover 发车失败: 列车未找到 " + trainName);
       layoverRegistry.unregister(trainName);
-      return false;
+      return LayoverDispatchResult.failed(trainName, "train-not-found");
     }
     RuntimeTrainHandle trainHandle = new TrainCartsRuntimeHandle(properties.getHolder());
     if (!trainHandle.isValid()) {
       debugLogger.accept("Layover 发车失败: 列车无效 " + trainName);
       layoverRegistry.unregister(trainName);
-      return false;
+      return LayoverDispatchResult.failed(trainName, "train-invalid");
+    }
+    Instant now = Instant.now();
+    Optional<String> readinessBlocker = layoverReadinessBlocker(candidate, trainHandle, now);
+    if (readinessBlocker.isPresent()) {
+      debugLogger.accept("Layover 发车等待: train=" + trainName + " reason=" + readinessBlocker.get());
+      return LayoverDispatchResult.failed(trainName, readinessBlocker.get());
     }
     // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
@@ -10583,11 +10711,14 @@ public final class RuntimeDispatchService {
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
     if (routeOpt.isEmpty()) {
       debugLogger.accept("Layover 发车失败: Route 未找到 " + ticket.routeId());
-      return false;
+      return LayoverDispatchResult.failed(trainName, "route-not-found");
     }
     RouteDefinition route = routeOpt.get();
     NodeId startNode = candidate.locationNodeId();
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
+    String regeneratedTrainName =
+        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::name).orElse(null));
 
     // 首站匹配：支持 TerminalKey 匹配和 DYNAMIC 匹配
     NodeId routeFirstNode = route.waypoints().get(0);
@@ -10613,7 +10744,7 @@ public final class RuntimeDispatchService {
               + startNode.value()
               + " routeFirst="
               + routeFirstNode.value());
-      return false;
+      return LayoverDispatchResult.failed(trainName, "terminal-mismatch");
     }
 
     // 使用 DYNAMIC 匹配确定 startIndex
@@ -10634,16 +10765,16 @@ public final class RuntimeDispatchService {
 
     if (startIndex + 1 >= route.waypoints().size()) {
       debugLogger.accept("Layover 发车失败: 线路无下一站 train=" + trainName);
-      return false;
+      return LayoverDispatchResult.failed(trainName, "route-has-no-next-node");
     }
+    observePhysicalNodeForSpawnOrigin(properties, startNode, startIndex);
     recordEffectiveNode(trainName, route, startIndex, startNode);
     pruneEffectiveNodeOverrides(trainName, startIndex);
 
-    Instant now = Instant.now();
     Optional<RailGraph> graphOpt = resolveGraph(trainHandle.worldId(), now);
     if (graphOpt.isEmpty()) {
       debugLogger.accept("Layover 发车失败: 图快照缺失 train=" + trainName);
-      return false;
+      return LayoverDispatchResult.failed(trainName, "graph-missing");
     }
     RailGraph graph = graphOpt.get();
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
@@ -10667,6 +10798,7 @@ public final class RuntimeDispatchService {
     if (dynamicSelectionOpt.isPresent()) {
       DynamicSelection selection = dynamicSelectionOpt.get();
       recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
+      effectiveNodes = resolveEffectiveWaypoints(trainName, route);
       ctx = selection.context();
     } else {
       Optional<OccupancyRequestContext> ctxOpt =
@@ -10680,16 +10812,31 @@ public final class RuntimeDispatchService {
               AuthorizationPurpose.LAYOVER_REUSE);
       if (ctxOpt.isEmpty()) {
         debugLogger.accept("Layover 发车失败: 无法构建占用请求 train=" + trainName);
-        return false;
+        return LayoverDispatchResult.failed(trainName, "occupancy-request-unresolvable");
       }
       ctx = ctxOpt.get();
     }
     OccupancyRequest request = ctx.request();
+    Optional<LayoverRegistry.DispatchAttempt> dispatchAttempt =
+        layoverRegistry.claimDispatch(
+            trainName,
+            ticket.ticketId(),
+            regeneratedTrainName == null || regeneratedTrainName.isBlank()
+                ? trainName
+                : regeneratedTrainName);
+    if (dispatchAttempt.isEmpty()) {
+      debugLogger.accept(
+          "Layover 发车失败: 候选已被其他票据认领 train=" + trainName + " ticket=" + ticket.ticketId());
+      return LayoverDispatchResult.failed(trainName, "candidate-claimed-by-other-ticket");
+    }
+    regeneratedTrainName = dispatchAttempt.get().targetTrainName();
+    Set<OccupancyResource> turnbackFootprintBeforeHandoff =
+        snapshotTurnbackFootprintResources(trainName);
     LaunchAuthorizationService.AuthorizationResult authorization =
-        launchAuthorizationService.authorize(
+        launchAuthorizationService.authorizeHandoff(
             new LaunchAuthorizationService.AuthorizationPlan(
                 request,
-                "layover",
+                "layover-turnback",
                 false,
                 true,
                 false,
@@ -10703,12 +10850,113 @@ public final class RuntimeDispatchService {
               + authorization.signal()
               + " blockers="
               + summarizeBlockers(authorization.effectiveDecision()));
-      return false;
+      layoverRegistry.releaseDispatchAttempt(trainName, ticket.ticketId());
+      return LayoverDispatchResult.failed(trainName, "authority-handoff-blocked");
     }
 
-    releaseResourcesNotInRequest(trainName, request.resourceList());
-    refreshSignalsForResources(request.resourceList(), trainName);
-    layoverRegistry.unregister(trainName);
+    registerTurnbackFootprintGuard(
+        trainHandle,
+        trainName,
+        candidate.locationNodeId(),
+        turnbackFootprintBeforeHandoff,
+        resolveTurnbackForwardPath(graph, ctx, effectiveNodes, startIndex),
+        configManager.current().runtimeSettings().rearGuardEdges());
+
+    String previousTrainName = trainName;
+    if (regeneratedTrainName != null && !regeneratedTrainName.equals(previousTrainName)) {
+      if (!(occupancyManager instanceof AuthorityHandoffSupport handoffSupport)) {
+        debugLogger.accept("Layover 发车失败: 占用实现不支持 owner 迁移 train=" + previousTrainName);
+        holdLayoverAuthorityAfterFailedCommit(
+            trainHandle, properties, previousTrainName, null, "owner-migration-support-missing");
+        return LayoverDispatchResult.failed(previousTrainName, "owner-migration-support-missing");
+      }
+      if (!layoverRegistry.rename(previousTrainName, regeneratedTrainName)) {
+        debugLogger.accept(
+            "Layover 发车失败: 待命候选名称迁移被拒绝 train="
+                + previousTrainName
+                + " target="
+                + regeneratedTrainName);
+        holdLayoverAuthorityAfterFailedCommit(
+            trainHandle, properties, previousTrainName, null, "layover-candidate-rename-rejected");
+        return LayoverDispatchResult.failed(previousTrainName, "candidate-rename-rejected");
+      }
+      if (!migrateEffectiveNodeOverrides(previousTrainName, regeneratedTrainName)) {
+        layoverRegistry.rename(regeneratedTrainName, previousTrainName);
+        debugLogger.accept(
+            "Layover 发车失败: 有效节点覆盖迁移被拒绝 train="
+                + previousTrainName
+                + " target="
+                + regeneratedTrainName);
+        holdLayoverAuthorityAfterFailedCommit(
+            trainHandle, properties, previousTrainName, null, "effective-node-rename-rejected");
+        return LayoverDispatchResult.failed(previousTrainName, "effective-node-rename-rejected");
+      }
+      if (!turnbackFootprintGuards.rename(previousTrainName, regeneratedTrainName)) {
+        migrateEffectiveNodeOverrides(regeneratedTrainName, previousTrainName);
+        layoverRegistry.rename(regeneratedTrainName, previousTrainName);
+        debugLogger.accept(
+            "Layover 发车失败: 折返防护迁移被拒绝 train="
+                + previousTrainName
+                + " target="
+                + regeneratedTrainName);
+        holdLayoverAuthorityAfterFailedCommit(
+            trainHandle, properties, previousTrainName, null, "footprint-guard-rename-rejected");
+        return LayoverDispatchResult.failed(previousTrainName, "footprint-guard-rename-rejected");
+      }
+      try {
+        properties.setTrainName(regeneratedTrainName);
+      } catch (RuntimeException exception) {
+        turnbackFootprintGuards.rename(regeneratedTrainName, previousTrainName);
+        migrateEffectiveNodeOverrides(regeneratedTrainName, previousTrainName);
+        layoverRegistry.rename(regeneratedTrainName, previousTrainName);
+        holdLayoverAuthorityAfterFailedCommit(
+            trainHandle, properties, previousTrainName, null, "traincarts-rename-rejected");
+        debugLogger.accept(
+            "Layover 发车失败: TrainCarts 重命名异常 train="
+                + previousTrainName
+                + " target="
+                + regeneratedTrainName
+                + " error="
+                + exception.getClass().getSimpleName());
+        return LayoverDispatchResult.failed(previousTrainName, "traincarts-rename-rejected");
+      }
+      if (!handoffSupport.migrateAuthorityOwner(previousTrainName, regeneratedTrainName)) {
+        turnbackFootprintGuards.rename(regeneratedTrainName, previousTrainName);
+        migrateEffectiveNodeOverrides(regeneratedTrainName, previousTrainName);
+        layoverRegistry.rename(regeneratedTrainName, previousTrainName);
+        tryRestoreTrainCartsName(properties, regeneratedTrainName, previousTrainName);
+        debugLogger.accept(
+            "Layover 发车失败: owner 迁移被拒绝 train="
+                + previousTrainName
+                + " target="
+                + regeneratedTrainName);
+        holdLayoverAuthorityAfterFailedCommit(
+            trainHandle, properties, previousTrainName, null, "authority-owner-rename-rejected");
+        return LayoverDispatchResult.failed(previousTrainName, "authority-owner-rename-rejected");
+      }
+      trainName = regeneratedTrainName;
+      request = request.withTrainName(trainName);
+      debugLogger.accept("Layover 复用: trainName 更新为 " + trainName);
+    }
+    if (!(occupancyManager instanceof AuthorityHandoffSupport handoffSupport)
+        || !handoffSupport.holdsHardAuthority(request)) {
+      if (!previousTrainName.equals(trainName)
+          && occupancyManager instanceof AuthorityHandoffSupport rollbackSupport
+          && rollbackSupport.migrateAuthorityOwner(trainName, previousTrainName)) {
+        turnbackFootprintGuards.rename(trainName, previousTrainName);
+        migrateEffectiveNodeOverrides(trainName, previousTrainName);
+        layoverRegistry.rename(trainName, previousTrainName);
+        tryRestoreTrainCartsName(properties, trainName, previousTrainName);
+        trainName = previousTrainName;
+      }
+      debugLogger.accept("Layover 发车失败: 原子交接后硬授权不完整 train=" + trainName);
+      holdLayoverAuthorityAfterFailedCommit(
+          trainHandle, properties, trainName, null, "hard-authority-verification-failed");
+      return LayoverDispatchResult.failed(trainName, "hard-authority-verification-failed");
+    }
+    if (!previousTrainName.equals(trainName)) {
+      progressRegistry.remove(previousTrainName);
+    }
 
     TrainTagHelper.writeTag(
         properties, RouteProgressRegistry.TAG_ROUTE_ID, ticket.routeId().toString());
@@ -10729,24 +10977,13 @@ public final class RuntimeDispatchService {
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_CODE);
     }
     // 更新终点站 tags（从 End of Operation 解析）
-    Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
     destInfoOpt.ifPresent(
         dest -> {
           TrainTagHelper.writeTag(properties, "FTA_DEST_NAME", dest.name());
           TrainTagHelper.writeTag(properties, "FTA_DEST_CODE", dest.code());
         });
-    // 重新生成 trainName（使用新的 destination）
-    String newTrainName =
-        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::name).orElse(null));
-    if (newTrainName != null && !newTrainName.equals(trainName)) {
-      // 迁移注册：先取消旧 trainName 的注册，再用新 trainName 重新注册
-      layoverRegistry.unregister(trainName); // 已在前面 unregister 过，这里是确保
-      occupancyManager.releaseByTrain(trainName);
-      progressRegistry.remove(trainName);
-      properties.setTrainName(newTrainName);
-      trainName = newTrainName;
-      debugLogger.accept("Layover 复用: trainName 更新为 " + newTrainName);
-    }
+    // 折返 ticket 已经建立新的交路位置语义；即使折返点恰好与原 Depot 同名，也不得再恢复旧 spawn origin。
+    TrainTagHelper.writeTag(properties, TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "false");
     TrainTagHelper.writeTag(properties, "FTA_TICKET_ID", ticket.ticketId());
     progressRegistry.advance(trainName, ticket.routeId(), route, startIndex, properties, now);
     invalidateTrainEta(trainName);
@@ -10765,9 +11002,9 @@ public final class RuntimeDispatchService {
     properties.clearDestinationRoute();
     trainHandle.setDestination(destinationName);
     if (!activateMovementAuthorizationTokenRetainingInhibitor(trainName, token, destinationName)) {
-      rollbackMovementAuthorization(
-          trainName, token, request, HardStopReason.AUTHORIZATION_FAILURE);
-      return false;
+      holdLayoverAuthorityAfterFailedCommit(
+          trainHandle, properties, trainName, token, "movement-token-activation-rejected");
+      return LayoverDispatchResult.failed(trainName, "movement-token-activation-rejected");
     }
     OccupancyDecision effectiveDecision = authorization.effectiveDecision();
     SignalPublicationGate.Decision publication =
@@ -10792,8 +11029,8 @@ public final class RuntimeDispatchService {
     FinalSignalValidation validation =
         validateFinalSignalAuthorization(trainName, SignalAspect.PROCEED, finalAuthorization, true);
     if (!validation.allowed()) {
-      rollbackMovementAuthorization(
-          trainName, token, request, HardStopReason.AUTHORIZATION_FAILURE);
+      holdLayoverAuthorityAfterFailedCommit(
+          trainHandle, properties, trainName, token, "final-authorization:" + validation.reason());
       traceStructuredSignalFinalDecision(
           trainName,
           finalAuthorization,
@@ -10801,13 +11038,13 @@ public final class RuntimeDispatchService {
           false,
           false,
           "layover-final-authorization:" + validation.reason());
-      return false;
+      return LayoverDispatchResult.failed(trainName, "final-authorization:" + validation.reason());
     }
     if (!clearMovementInhibitorAfterFinalAuthorization(
         trainName, finalAuthorization, SignalAspect.PROCEED)) {
-      rollbackMovementAuthorization(
-          trainName, token, request, HardStopReason.AUTHORIZATION_FAILURE);
-      return false;
+      holdLayoverAuthorityAfterFailedCommit(
+          trainHandle, properties, trainName, token, "movement-inhibitor-clear-rejected");
+      return LayoverDispatchResult.failed(trainName, "movement-inhibitor-clear-rejected");
     }
 
     // 直接触发发车，不依赖 refreshSignal 的复杂逻辑
@@ -10818,21 +11055,114 @@ public final class RuntimeDispatchService {
         resolveLaunchDirectionByGraph(
             graph, resolveEffectiveNode(trainName, route, startIndex), nextNode);
     updateSignalOrWarn(trainName, SignalAspect.PROCEED, now, finalAuthorization);
+    TrainLaunchManager.ControlApplicationResult controlResult =
+        runtimeTrainController.applyControl(
+            trainHandle,
+            properties,
+            SignalAspect.PROCEED,
+            targetBps,
+            config,
+            true,
+            OptionalLong.empty(),
+            fallbackDirection,
+            configManager.current().runtimeSettings());
+    if (!controlResult.launchCommandAccepted()) {
+      holdLayoverAuthorityAfterFailedCommit(
+          trainHandle, properties, trainName, token, "traincarts-launch-action-rejected");
+      traceStructuredSignalFinalDecision(
+          trainName,
+          finalAuthorization,
+          SignalAspect.STOP,
+          false,
+          false,
+          "layover-launch-action-rejected");
+      return LayoverDispatchResult.failed(trainName, "traincarts-launch-action-rejected");
+    }
     traceStructuredSignalFinalDecision(
         trainName, finalAuthorization, SignalAspect.PROCEED, true, true, "layover-final");
-    runtimeTrainController.applyControl(
-        trainHandle,
-        properties,
-        SignalAspect.PROCEED,
-        targetBps,
-        config,
-        true,
-        OptionalLong.empty(),
-        fallbackDirection,
-        configManager.current().runtimeSettings());
+    layoverRegistry.unregister(trainName);
+    refreshSignalsForResources(request.resourceList(), trainName);
 
     debugLogger.accept("Layover 发车成功: train=" + trainName + " route=" + route.id().value());
-    return true;
+    return LayoverDispatchResult.success(trainName);
+  }
+
+  /**
+   * 以运行时真实停车状态校验折返候选，而不是只相信候选登记时推算的 {@code readyAt}。
+   *
+   * <p>Waypoint TERM 在列车触牌时登记候选，随后才执行居中并启动 dwell；因此 {@code readyAt} 可能比实际关停流程早。只要居中状态或 {@link
+   * DwellRegistry} 仍然存在，就必须保持旧方向授权，不能提前占用折返后的站外咽喉/平交资源。AutoStation 在正常关门后可能仍持有 departure gate，故这里不以
+   * gate 本身作为阻塞证据。
+   */
+  Optional<String> layoverReadinessBlocker(
+      LayoverCandidate candidate, RuntimeTrainHandle train, Instant now) {
+    if (candidate == null || train == null || now == null) {
+      return Optional.of("readiness-state-missing");
+    }
+    if (candidate.readyAt().isAfter(now)) {
+      return Optional.of("dwell-not-ready");
+    }
+    if (resolveWaypointStopState(candidate.trainName(), candidate.locationNodeId()).isPresent()) {
+      return Optional.of("waypoint-centering-active");
+    }
+    if (dwellRegistry != null
+        && dwellRegistry.remainingSeconds(candidate.trainName()).isPresent()) {
+      return Optional.of("dwell-active");
+    }
+    if (train.isMoving()) {
+      return Optional.of("train-still-moving");
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 折返提交失败时保持新旧进路的保守占用，并撤销一切可运动状态。
+   *
+   * <p>此路径不能调用普通 {@link #rollbackMovementAuthorization}：折返交接已经原子替换了方向授权，若在 TrainCarts 接受 launch
+   * action 前释放新请求的 hard authority，会让仍压在站内进路上的列车失去防护。候选与占用都保留，后续调度 tick
+   * 可在同一事实状态上重试；只有列车推进/移除事件才能释放残余防护。
+   */
+  private void holdLayoverAuthorityAfterFailedCommit(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      MovementAuthorizationToken token,
+      String failureReason) {
+    String key = normalizeTrainKey(trainName);
+    if (!key.isEmpty() && token != null) {
+      MovementAuthorizationToken current = movementAuthorizationTokens.get(key);
+      if (current != null && current.claimVersion() == token.claimVersion()) {
+        movementAuthorizationTokens.remove(key);
+      }
+    }
+    invalidateMovementAuthorization(trainName, HardStopReason.AUTHORIZATION_FAILURE);
+    properties.clearDestinationRoute();
+    properties.clearDestination();
+    runtimeTrainController.stopHard(train, properties);
+    updateSignalOrWarn(trainName, SignalAspect.STOP, Instant.now());
+    debugLogger.accept(
+        "Layover 发车提交失败并保留进路: train="
+            + trainName
+            + " reason="
+            + (failureReason == null || failureReason.isBlank() ? "unknown" : failureReason));
+  }
+
+  /** TrainCarts 拒绝回滚改名时保留占用事实并记录；不得让异常跳出折返事务后丢失硬停车。 */
+  private boolean tryRestoreTrainCartsName(
+      TrainProperties properties, String currentTrainName, String previousTrainName) {
+    try {
+      properties.setTrainName(previousTrainName);
+      return true;
+    } catch (RuntimeException exception) {
+      debugLogger.accept(
+          "Layover 改名回滚失败并保留旧 owner 授权: current="
+              + currentTrainName
+              + " previous="
+              + previousTrainName
+              + " error="
+              + exception.getClass().getSimpleName());
+      return false;
+    }
   }
 
   /**
@@ -11708,8 +12038,6 @@ public final class RuntimeDispatchService {
         if (currentNode != null) {
           RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
           retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now);
-        } else {
-          occupancyManager.releaseByTrain(trainName);
         }
       }
       updateSignalOrWarn(trainName, SignalAspect.STOP, now);
@@ -11731,8 +12059,9 @@ public final class RuntimeDispatchService {
   /**
    * 落地闭塞硬 STOP。
    *
-   * <p>硬 STOP 是运行时安全边界：撤销 TrainCarts destination/route、清空运动授权，并用 {@link StopControlMode#HARD_STOP}
-   * 绕过速度曲线、launch cooldown 与信号 no-op。计划停站/居中流程不得调用该方法。
+   * <p>硬 STOP 是运行时安全边界：始终撤销运动授权并安装 movement inhibitor；TrainCarts destination/route
+   * 是否清理由失败原因、调用意图与运行时配置共同决定。物理控车使用 {@link StopControlMode#HARD_STOP} 绕过速度曲线、launch cooldown 与信号
+   * no-op。计划停站/居中流程不得调用该方法。
    */
   private void applyHardStop(
       RuntimeTrainHandle train,
@@ -11855,6 +12184,69 @@ public final class RuntimeDispatchService {
             blockedDestination,
             debugResources),
         StopControlMode.HARD_STOP);
+  }
+
+  /**
+   * 当当前移动计划无法形成完整安全进路时立即 fail-closed。
+   *
+   * <p>请求构造失败通常意味着已进入联锁窗口却找不到清出点，或图快照无法证明下一段进路完整。此时不能保留上一周期的 PROCEED/destination
+   * 控车状态；先尽力保留当前位置和列尾防护，再撤销移动授权并落地硬 STOP。该方法不清 destination， 因为路径证据缺失可能只是临时图状态；重新获得完整授权前 movement
+   * inhibitor 会阻止继续动车。
+   *
+   * @param source 触发 fail-closed 的运行时入口
+   * @param buildFailure 请求构造失败诊断
+   */
+  private void applyUnresolvableMovementPlanStop(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      NodeId nextNode,
+      RailGraph graph,
+      Instant now,
+      String source,
+      String buildFailure) {
+    String resolvedSource = source == null || source.isBlank() ? "unknown" : source;
+    String resolvedFailure =
+        buildFailure == null || buildFailure.isBlank() ? "unknown" : buildFailure;
+    debugLogger.accept(
+        "调度 fail-closed: 构建占用请求失败 train="
+            + trainName
+            + " source="
+            + resolvedSource
+            + " node="
+            + (currentNode == null ? "-" : currentNode.value())
+            + " route="
+            + (route == null ? "-" : route.id().value())
+            + " reason="
+            + resolvedFailure);
+    if (occupancyManager != null && currentNode != null) {
+      retainStopOccupancy(
+          trainName, route, currentIndex, currentNode, graph, now == null ? Instant.now() : now);
+    }
+    OccupancyDecision blocked =
+        new OccupancyDecision(
+            false,
+            now == null ? Instant.now() : now,
+            SignalAspect.STOP,
+            List.of(),
+            false,
+            "movement-plan-unresolvable:" + resolvedFailure);
+    applyHardStop(
+        train,
+        properties,
+        trainName,
+        HardStopReason.SINGLE_CORRIDOR_FAIL_CLOSED,
+        false,
+        route,
+        currentNode,
+        nextNode,
+        graph,
+        blocked,
+        null,
+        AuthorityEnd.none());
   }
 
   private boolean shouldClearDestinationOnHardStop(HardStopReason reason, boolean requested) {
@@ -12172,8 +12564,12 @@ public final class RuntimeDispatchService {
     if (occupancyManager == null || request == null) {
       return;
     }
+    Set<OccupancyResource> protectedFootprint =
+        turnbackFootprintGuards.protectedResources(trainName);
     for (OccupancyResource resource : request.resourceList()) {
-      if (resource != null && request.intentFor(resource).hardAuthority()) {
+      if (resource != null
+          && request.intentFor(resource).hardAuthority()
+          && !protectedFootprint.contains(resource)) {
         occupancyManager.releaseResource(resource, Optional.of(trainName));
       }
     }
@@ -12195,8 +12591,13 @@ public final class RuntimeDispatchService {
         destinationPresent
             && (tokenState == SignalComputationTrace.TokenState.PENDING
                 || tokenState == SignalComputationTrace.TokenState.ACTIVE);
+    Set<OccupancyResource> protectedFootprint =
+        turnbackFootprintGuards.protectedResources(trainName);
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null || !request.intentFor(resource).hardAuthority()) {
+        continue;
+      }
+      if (protectedFootprint.contains(resource)) {
         continue;
       }
       ClaimRole claimRoleBeforeRelease = claimRoleForTrain(resource, trainName).orElse(null);
@@ -14390,18 +14791,182 @@ public final class RuntimeDispatchService {
     if (previousOpt.isPresent()) {
       String previous = previousOpt.get();
       if (!previous.equalsIgnoreCase(current) && !isSplitAliasName(current, previous)) {
-        progressRegistry.rename(previous, current);
-        moveDepartureGate(previous, current);
-        if (occupancyManager != null) {
-          occupancyManager.releaseByTrain(previous);
+        if (hasUnmigratableStopState(previous)) {
+          debugLogger.accept(
+              "列车改名 owner 迁移延后: 停站/居中状态仍由旧 owner 持有 previous=" + previous + " current=" + current);
+          resolved = previous;
+        } else if (migrateRuntimeOwner(previous, current)) {
+          resolved = current;
+        } else {
+          holdRenameMigrationFailure(properties, previous, current);
+          resolved = previous;
         }
-        resolved = current;
       } else {
         resolved = previous;
       }
     }
     TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_TRAIN_NAME, resolved);
     return resolved;
+  }
+
+  /**
+   * 判断旧 owner 是否仍被异步停站流程捕获。
+   *
+   * <p>Waypoint 居中调度器和 dwell 计时都以启动时列车名为 key；在流程中途迁移其它注册表会让新 owner 看不到 STOP
+   * 事实。这里延后通用手动改名，等异步流程自行清理后再于后续 signal tick 完成原子 owner 迁移。
+   */
+  private boolean hasUnmigratableStopState(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return false;
+    }
+    if (waypointStopStates.containsKey(key)) {
+      return true;
+    }
+    return dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent();
+  }
+
+  /**
+   * 把 TrainCarts 改名同步为运行时 owner 迁移，而不是释放旧 owner 的行车授权。
+   *
+   * <p>目标 key 已有任一关键状态时先拒绝；所有注册表迁移完成后才迁移占用账本。这样失败路径可以无损回滚，且不会出现改名瞬间的无保护窗口。
+   */
+  private boolean migrateRuntimeOwner(String previousTrainName, String currentTrainName) {
+    String previousKey = normalizeTrainKey(previousTrainName);
+    String currentKey = normalizeTrainKey(currentTrainName);
+    if (previousKey.isEmpty() || currentKey.isEmpty()) {
+      return false;
+    }
+    if (previousKey.equals(currentKey)) {
+      return true;
+    }
+    synchronized (runtimeOwnerMigrationLock) {
+      boolean progressPresent = progressRegistry.get(previousTrainName).isPresent();
+      boolean layoverPresent = layoverRegistry.get(previousTrainName).isPresent();
+      boolean overridesPresent = effectiveNodeOverrides.containsKey(previousKey);
+      boolean guardPresent = turnbackFootprintGuards.contains(previousTrainName);
+      boolean departureGatePresent = departureGates.containsKey(previousKey);
+      if ((progressPresent && progressRegistry.get(currentTrainName).isPresent())
+          || (layoverPresent && layoverRegistry.get(currentTrainName).isPresent())
+          || (overridesPresent && effectiveNodeOverrides.containsKey(currentKey))
+          || (guardPresent && turnbackFootprintGuards.contains(currentTrainName))
+          || (departureGatePresent && departureGates.containsKey(currentKey))) {
+        return false;
+      }
+
+      boolean progressMoved =
+          !progressPresent || progressRegistry.rename(previousTrainName, currentTrainName);
+      boolean layoverMoved =
+          !layoverPresent || layoverRegistry.rename(previousTrainName, currentTrainName);
+      boolean overridesMoved =
+          !overridesPresent || migrateEffectiveNodeOverrides(previousTrainName, currentTrainName);
+      boolean guardMoved =
+          !guardPresent || turnbackFootprintGuards.rename(previousTrainName, currentTrainName);
+      if (!progressMoved || !layoverMoved || !overridesMoved || !guardMoved) {
+        rollbackRuntimeOwnerRegistries(
+            previousTrainName,
+            currentTrainName,
+            progressPresent && progressMoved,
+            layoverPresent && layoverMoved,
+            overridesPresent && overridesMoved,
+            guardPresent && guardMoved,
+            false);
+        return false;
+      }
+      if (departureGatePresent) {
+        moveDepartureGate(previousTrainName, currentTrainName);
+      }
+
+      boolean authorityMoved = true;
+      if (occupancyManager instanceof AuthorityHandoffSupport handoffSupport) {
+        authorityMoved = handoffSupport.migrateAuthorityOwner(previousTrainName, currentTrainName);
+      } else if (hasOccupancyOwnerState(previousTrainName)) {
+        authorityMoved = false;
+      }
+      if (!authorityMoved) {
+        rollbackRuntimeOwnerRegistries(
+            previousTrainName,
+            currentTrainName,
+            progressPresent,
+            layoverPresent,
+            overridesPresent,
+            guardPresent,
+            departureGatePresent);
+        return false;
+      }
+
+      movementAuthorizationTokens.remove(previousKey);
+      movementAuthorizationTokens.remove(currentKey);
+      movementInhibitors.remove(previousKey);
+      movementInhibitors.put(currentKey, HardStopReason.AUTHORIZATION_FAILURE);
+      return true;
+    }
+  }
+
+  private void rollbackRuntimeOwnerRegistries(
+      String previousTrainName,
+      String currentTrainName,
+      boolean progressMoved,
+      boolean layoverMoved,
+      boolean overridesMoved,
+      boolean guardMoved,
+      boolean departureGateMoved) {
+    if (departureGateMoved) {
+      moveDepartureGate(currentTrainName, previousTrainName);
+    }
+    if (guardMoved) {
+      turnbackFootprintGuards.rename(currentTrainName, previousTrainName);
+    }
+    if (overridesMoved) {
+      migrateEffectiveNodeOverrides(currentTrainName, previousTrainName);
+    }
+    if (layoverMoved) {
+      layoverRegistry.rename(currentTrainName, previousTrainName);
+    }
+    if (progressMoved) {
+      progressRegistry.rename(currentTrainName, previousTrainName);
+    }
+  }
+
+  private boolean hasOccupancyOwnerState(String trainName) {
+    if (occupancyManager == null) {
+      return false;
+    }
+    List<OccupancyClaim> claims = occupancyManager.snapshotClaims();
+    if (claims != null
+        && claims.stream()
+            .filter(Objects::nonNull)
+            .anyMatch(
+                claim -> TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName))) {
+      return true;
+    }
+    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
+      return false;
+    }
+    List<OccupancyQueueSnapshot> queues = queueSupport.snapshotQueues();
+    return queues != null
+        && queues.stream()
+            .filter(Objects::nonNull)
+            .flatMap(queue -> queue.entries().stream())
+            .filter(Objects::nonNull)
+            .anyMatch(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName));
+  }
+
+  private void holdRenameMigrationFailure(
+      TrainProperties properties, String previousTrainName, String currentTrainName) {
+    invalidateMovementAuthorization(previousTrainName, HardStopReason.AUTHORIZATION_FAILURE);
+    invalidateMovementAuthorization(currentTrainName, HardStopReason.AUTHORIZATION_FAILURE);
+    properties.clearDestinationRoute();
+    properties.clearDestination();
+    if (properties.getHolder() != null) {
+      RuntimeTrainHandle train = new TrainCartsRuntimeHandle(properties.getHolder());
+      if (train.isValid()) {
+        runtimeTrainController.stopHard(train, properties);
+      }
+    }
+    updateSignalOrWarn(previousTrainName, SignalAspect.STOP, Instant.now());
+    debugLogger.accept(
+        "列车改名 owner 迁移失败并保持旧授权: previous=" + previousTrainName + " current=" + currentTrainName);
   }
 
   private static Optional<String> normalizeTrainName(String trainName) {
@@ -14612,12 +15177,7 @@ public final class RuntimeDispatchService {
    *
    * <p>用于事件反射式占用：列车推进后即时释放窗口外资源，不再等待“基于时间”的过期。
    */
-  private List<OccupancyResource> releaseResourcesNotInRequest(
-      String trainName, List<OccupancyResource> keepResources) {
-    return releaseResourcesNotInRequest(trainName, keepResources, Set.of());
-  }
-
-  private List<OccupancyResource> releaseResourcesNotInRequest(
+  List<OccupancyResource> releaseResourcesNotInRequest(
       String trainName,
       List<OccupancyResource> keepResources,
       Set<OccupancyResource> protectedResources) {
@@ -14626,8 +15186,11 @@ public final class RuntimeDispatchService {
     }
     java.util.Set<OccupancyResource> keep =
         keepResources == null ? java.util.Set.of() : java.util.Set.copyOf(keepResources);
-    java.util.Set<OccupancyResource> protectedSet =
-        protectedResources == null ? java.util.Set.of() : Set.copyOf(protectedResources);
+    java.util.Set<OccupancyResource> protectedSet = new LinkedHashSet<>();
+    if (protectedResources != null) {
+      protectedSet.addAll(protectedResources);
+    }
+    protectedSet.addAll(turnbackFootprintGuards.protectedResources(trainName));
     List<OccupancyResource> released = new ArrayList<>();
     for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
       if (claim == null || claim.resource() == null) {
@@ -14866,6 +15429,39 @@ public final class RuntimeDispatchService {
       AuthorizationPurpose purpose,
       double currentSpeedBps,
       double decelBps2) {
+    return buildHardAuthorityContextWithDirectionContext(
+        graph,
+        runtimeSettings,
+        trainName,
+        route,
+        effectiveNodes,
+        effectiveNodes,
+        currentIndex,
+        now,
+        priority,
+        purpose,
+        currentSpeedBps,
+        decelBps2);
+  }
+
+  /**
+   * 构建物理窗口从实时节点起算、但单线方向继承 canonical route leg 的硬授权。
+   *
+   * <p>{@code directionContextNodes} 只参与方向解析，不会扩大本 tick 的 NODE/EDGE/CONFLICT 资源。
+   */
+  private Optional<OccupancyRequestContext> buildHardAuthorityContextWithDirectionContext(
+      RailGraph graph,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      String trainName,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      List<NodeId> directionContextNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      double currentSpeedBps,
+      double decelBps2) {
     if (graph == null || runtimeSettings == null || route == null) {
       return Optional.empty();
     }
@@ -14879,10 +15475,11 @@ public final class RuntimeDispatchService {
             hardAuthorityMinDistanceBlocks(runtimeSettings, currentSpeedBps, decelBps2),
             HARD_AUTHORITY_DISTANCE_MAX_EDGES,
             debugLogger);
-    return authorizationBuilder.buildContextFromNodes(
+    return authorizationBuilder.buildContextFromNodesWithDirectionContext(
         trainName,
         Optional.ofNullable(route.id()),
         effectiveNodes,
+        directionContextNodes,
         currentIndex,
         now,
         priority,
@@ -14920,8 +15517,7 @@ public final class RuntimeDispatchService {
     if (request == null
         || context == null
         || graph == null
-        || request.purpose() != AuthorizationPurpose.RUNTIME_MOVE
-        || !(graph instanceof RailGraphConflictSupport support)) {
+        || request.purpose() != AuthorizationPurpose.RUNTIME_MOVE) {
       return request;
     }
     Map<String, ConflictReleaseHint> hints = new LinkedHashMap<>();
@@ -14932,6 +15528,7 @@ public final class RuntimeDispatchService {
       if (!trainAlreadyHoldsResource(request.trainName(), resource)) {
         continue;
       }
+      RailGraphConflictSupport support = singleConflictMembershipSupport(graph, resource);
       if (!pathTargetsExitFromConflict(context.edges(), support, resource.key())) {
         continue;
       }
@@ -15209,6 +15806,13 @@ public final class RuntimeDispatchService {
         || claim.trainName() == null
         || claim.trainName().equalsIgnoreCase(trainName)
         || !authorityResources.contains(claim.resource())) {
+      return false;
+    }
+    if (claim.role() != ClaimRole.MOVEMENT_REQUIRED
+        && claim.role() != ClaimRole.LOOKAHEAD_PREVIEW) {
+      return false;
+    }
+    if (turnbackFootprintGuards.protectedResources(claim.trainName()).contains(claim.resource())) {
       return false;
     }
     if (claim.routeId().isEmpty() || !claim.routeId().get().equals(route.id())) {
@@ -15534,6 +16138,7 @@ public final class RuntimeDispatchService {
       traceSmartAdmissionResult(trainName, context, result);
       return result;
     }
+    RailGraphConflictSupport support = singleConflictMembershipSupport(graph, conflict);
     CorridorDirection direction = request.corridorDirections().get(conflict.key());
     if (hasClaimByTrain(conflict, trainName)) {
       if (singleRegionOppositeOrUnknownExternalBarrier(trainName, List.of(conflict), direction)) {
@@ -15554,22 +16159,6 @@ public final class RuntimeDispatchService {
             DispatchAction.SAME_DIRECTION_FOLLOW_THROUGH_PREVIEW,
             safeContext.source(),
             List.of(conflict));
-        traceSmartAdmissionResult(trainName, context, result);
-        return result;
-      }
-      if (!(graph instanceof RailGraphConflictSupport support)) {
-        SmartAdmissionResult result =
-            smartAdmissionBlocked(
-                trainName,
-                context,
-                conflict,
-                direction == null ? CorridorDirection.UNKNOWN : direction,
-                null,
-                null,
-                safeContext,
-                SmartAdmissionDecision.REJECT_LEADER_EXIT_NOT_VISIBLE,
-                "ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF",
-                false);
         traceSmartAdmissionResult(trainName, context, result);
         return result;
       }
@@ -15672,24 +16261,6 @@ public final class RuntimeDispatchService {
               false);
       traceSmartRegionDataUnknown(
           trainName, context, conflict, safeContext, "authority-end-missing");
-      traceSmartAdmissionResult(trainName, context, result);
-      return result;
-    }
-    if (!(graph instanceof RailGraphConflictSupport support)) {
-      SmartAdmissionResult result =
-          smartAdmissionBlocked(
-              trainName,
-              context,
-              conflict,
-              direction,
-              null,
-              null,
-              safeContext,
-              SmartAdmissionDecision.REJECT_REGION_OCCUPIED_UNSAFE,
-              "conflict-support-missing",
-              false);
-      traceSmartRegionDataUnknown(
-          trainName, context, conflict, safeContext, "conflict-support-missing");
       traceSmartAdmissionResult(trainName, context, result);
       return result;
     }
@@ -15994,7 +16565,8 @@ public final class RuntimeDispatchService {
    * 咽喉区间整段原子准入。
    *
    * <p>STATION/DEPOT 是安全停车点；STATION_THROAT、DEPOT_THROAT 与 SWITCHER 组成不可中停咽喉。列车从安全点进入咽喉前，
-   * 必须能沿本轮展开路径看到咽喉清出点，并确认入口之后到清出点之间所有 NODE/EDGE/CONFLICT 资源未被他车占用或排队。
+   * 必须能沿本轮展开路径看到咽喉清出点，并确认入口之后到清出点之间所有 NODE/EDGE/CONFLICT 资源未被他车真实占用。排队只表示仲裁位次， 由完整原子请求的 Gate Queue
+   * preview/正式 canEnter 统一选出赢家，不能在这里再次当成物理占用。
    *
    * <p>清出点可以是下一个 STATION/DEPOT，也可以是紧随道岔群之后的 INTERVAL 节点。后者覆盖“车站 -> 道岔群 -> 开放区间”的出站拓扑，
    * 避免把整段站间区间错误并入咽喉原子段。
@@ -16032,14 +16604,12 @@ public final class RuntimeDispatchService {
     }
     NodeId exit = path.nodes().get(exitIndex);
     LinkedHashSet<OccupancyResource> resources =
-        throatSectionResources(path, entryEdgeIndex, exitIndex, support);
+        throatSectionResources(path, entryEdgeIndex, exitIndex, graph);
     if (resources.isEmpty()) {
       return ThroatSectionAtomicCheck.blocked(
           "throat-topology-unresolvable", entry, exit, "-", resources);
     }
-    Optional<String> occupiedResource =
-        firstExternalThroatSectionClaim(resources, trainName)
-            .or(() -> firstExternalThroatSectionQueue(resources, trainName, conflict));
+    Optional<String> occupiedResource = firstExternalThroatSectionClaim(resources, trainName);
     if (occupiedResource.isPresent()) {
       return ThroatSectionAtomicCheck.blocked(
           "throat-section-resource-occupied", entry, exit, occupiedResource.get(), resources);
@@ -16079,12 +16649,9 @@ public final class RuntimeDispatchService {
   }
 
   private LinkedHashSet<OccupancyResource> throatSectionResources(
-      ThroatAtomicPath path,
-      int entryEdgeIndex,
-      int exitSafePointIndex,
-      RailGraphConflictSupport support) {
+      ThroatAtomicPath path, int entryEdgeIndex, int exitSafePointIndex, RailGraph graph) {
     LinkedHashSet<OccupancyResource> resources = new LinkedHashSet<>();
-    if (path == null || support == null || entryEdgeIndex < 0 || exitSafePointIndex < 0) {
+    if (path == null || graph == null || entryEdgeIndex < 0 || exitSafePointIndex < 0) {
       return resources;
     }
     for (int i = entryEdgeIndex; i < exitSafePointIndex && i < path.edges().size(); i++) {
@@ -16092,16 +16659,18 @@ public final class RuntimeDispatchService {
       if (edge == null) {
         continue;
       }
-      resources.add(OccupancyResource.forEdge(edge.edgeId()));
-      support
-          .conflictKeyForEdge(edge.edgeId())
-          .map(OccupancyResource::forConflict)
-          .ifPresent(resources::add);
+      findGraphEdge(graph, edge.edgeId())
+          .map(found -> OccupancyResourceResolver.resourcesForEdge(graph, found))
+          .ifPresent(resources::addAll);
     }
     for (int i = entryEdgeIndex + 1; i <= exitSafePointIndex && i < path.nodes().size(); i++) {
       NodeId node = path.nodes().get(i);
       if (node != null) {
-        resources.add(OccupancyResource.forNode(node));
+        graph
+            .findNode(node)
+            .map(OccupancyResourceResolver::resourcesForNode)
+            .ifPresentOrElse(
+                resources::addAll, () -> resources.add(OccupancyResource.forNode(node)));
       }
     }
     return resources;
@@ -16128,51 +16697,6 @@ public final class RuntimeDispatchService {
       return Optional.of(claim.resource() + "@claim:" + claim.trainName());
     }
     return Optional.empty();
-  }
-
-  private Optional<String> firstExternalThroatSectionQueue(
-      Collection<OccupancyResource> resources, String trainName, OccupancyResource entryConflict) {
-    if (resources == null || resources.isEmpty()) {
-      return Optional.empty();
-    }
-    if (!(occupancyManager instanceof OccupancyQueueSupport queueSupport)) {
-      return Optional.empty();
-    }
-    List<OccupancyQueueSnapshot> snapshots = queueSupport.snapshotQueues();
-    if (snapshots == null) {
-      return Optional.of("occupancy-queue-snapshot-unavailable");
-    }
-    Set<OccupancyResource> resourceSet = Set.copyOf(resources);
-    for (OccupancyQueueSnapshot snapshot : snapshots) {
-      if (snapshot == null
-          || snapshot.resource() == null
-          || !resourceSet.contains(snapshot.resource())) {
-        continue;
-      }
-      if (snapshot.resource().equals(entryConflict)
-          && throatQueueHeadIsTrain(snapshot, trainName)) {
-        continue;
-      }
-      for (OccupancyQueueEntry entry : snapshot.entries()) {
-        if (entry != null && !TrainNameNormalizer.sameLogicalTrain(trainName, entry.trainName())) {
-          return Optional.of(snapshot.resource() + "@queue:" + entry.trainName());
-        }
-      }
-    }
-    return Optional.empty();
-  }
-
-  private static boolean throatQueueHeadIsTrain(OccupancyQueueSnapshot snapshot, String trainName) {
-    if (snapshot == null || snapshot.entries().isEmpty()) {
-      return false;
-    }
-    for (OccupancyQueueEntry entry : snapshot.entries()) {
-      if (entry == null) {
-        continue;
-      }
-      return TrainNameNormalizer.sameLogicalTrain(trainName, entry.trainName());
-    }
-    return false;
   }
 
   private boolean isThroatAtomicNode(RailGraph graph, NodeId nodeId) {
@@ -17363,19 +17887,19 @@ public final class RuntimeDispatchService {
     }
     NodeId leaderCurrentNode =
         resolveEffectiveCurrentNodeForSignal(leaderTrain, leaderRoute, leaderCurrentIndex, graph);
+    List<NodeId> leaderDirectionContextNodes = resolveEffectiveWaypoints(leaderTrain, leaderRoute);
     List<NodeId> effectiveNodes =
         applyCurrentNodeOverride(
-            resolveEffectiveWaypoints(leaderTrain, leaderRoute),
-            leaderCurrentIndex,
-            leaderCurrentNode);
+            leaderDirectionContextNodes, leaderCurrentIndex, leaderCurrentNode);
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
     OccupancyRequestBuilder builder =
         runtimeLookaheadBuilder(graph, runtimeSettings, runtimeSettings.rearGuardEdges());
     Optional<OccupancyRequestContext> contextOpt =
-        builder.buildContextFromNodes(
+        builder.buildContextFromNodesWithDirectionContext(
             leaderTrain,
             Optional.ofNullable(leaderRoute.id()),
             effectiveNodes,
+            leaderDirectionContextNodes,
             leaderCurrentIndex,
             Instant.now(),
             0,
@@ -17527,7 +18051,8 @@ public final class RuntimeDispatchService {
    * 判定同向前车的终端/停站粗判是否仍应阻挡本车。
    *
    * <p>CBTC 风格的 prior train prediction 要求把“前车未来可穿出”作为更强证据：若 route window 已证明前车会从同一 conflict
-   * 向前排空，则不能再用终端边界的粗略状态把它降级成互斥。真正仍在 dwell 的前车保留硬阻挡，因为它代表行为层正在占用安全停车点。
+   * 向前排空，则不能再用终端边界或 dwell 的粗略状态把它降级成互斥。dwell 只描述前车当前暂时停车；真正的安全边界仍由前车的有向 Movement
+   * Plan、出口可见性和后车安全停车点共同证明。无法证明排空时继续 fail-closed。
    */
   private boolean sameDirectionLeaderTerminalOrDwellShouldBlock(
       SingleZoneAdmissionState admission, SameDirectionLeaderDrainPrediction prediction) {
@@ -17536,9 +18061,6 @@ public final class RuntimeDispatchService {
     }
     if (!admission.leaderWillTerminalOrDwell()) {
       return false;
-    }
-    if (leaderCurrentlyDwelling(admission.leaderTrain())) {
-      return true;
     }
     return !sameDirectionLeaderDrainProven(prediction);
   }
@@ -18503,13 +19025,44 @@ public final class RuntimeDispatchService {
   }
 
   private Optional<OccupancyResource> singleConflictForEdge(RailGraph graph, RailEdge edge) {
-    if (graph == null || edge == null || !(graph instanceof RailGraphConflictSupport support)) {
+    if (graph == null || edge == null) {
       return Optional.empty();
     }
-    return support
-        .conflictKeyForEdge(edge.id())
-        .filter(key -> key.startsWith("single:") && !key.contains(":cycle:"))
-        .map(OccupancyResource::forConflict);
+    return OccupancyResourceResolver.resourcesForEdge(graph, edge).stream()
+        .filter(this::isSingleCorridorResource)
+        .findFirst();
+  }
+
+  /**
+   * 为已选 single 资源生成 edge membership 视图。
+   *
+   * <p>legacy corridor 与 bridge section 都经 {@link OccupancyResourceResolver}
+   * 进入请求；运行时的出口、重合与排空判断必须读取同一资源边界， 不能绕过 resolver 再从原始 micro corridor 索引重建一个不同的区域。
+   */
+  private RailGraphConflictSupport singleConflictMembershipSupport(
+      RailGraph graph, OccupancyResource conflict) {
+    return edgeId ->
+        findGraphEdge(graph, edgeId)
+            .filter(
+                edge -> OccupancyResourceResolver.resourcesForEdge(graph, edge).contains(conflict))
+            .map(ignored -> conflict.key());
+  }
+
+  private Optional<RailEdge> findGraphEdge(RailGraph graph, EdgeId edgeId) {
+    if (graph == null || edgeId == null || edgeId.a() == null || edgeId.b() == null) {
+      return Optional.empty();
+    }
+    EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
+    Collection<RailEdge> adjacent = graph.edgesFrom(edgeId.a());
+    if (adjacent == null || adjacent.isEmpty()) {
+      return Optional.empty();
+    }
+    for (RailEdge edge : adjacent) {
+      if (edge != null && normalized.equals(EdgeId.undirected(edge.from(), edge.to()))) {
+        return Optional.of(edge);
+      }
+    }
+    return Optional.empty();
   }
 
   private boolean hasClaimByTrain(OccupancyResource resource, String trainName) {
@@ -19420,6 +19973,9 @@ public final class RuntimeDispatchService {
   }
 
   private static String claimPhysicalFootprintText(ClaimRole role) {
+    if (role == ClaimRole.PHYSICAL_FOOTPRINT) {
+      return "true";
+    }
     if (role == ClaimRole.UNLOCK_RESERVATION
         || role == ClaimRole.QUEUE_POSITION
         || role == ClaimRole.LOOKAHEAD_PREVIEW) {
@@ -19458,7 +20014,8 @@ public final class RuntimeDispatchService {
     if (claim == null || claim.role() == null) {
       return RiskFreshness.UNKNOWN;
     }
-    if (claim.role() == ClaimRole.MOVEMENT_REQUIRED) {
+    if (claim.role() == ClaimRole.MOVEMENT_REQUIRED
+        || claim.role() == ClaimRole.PHYSICAL_FOOTPRINT) {
       return RiskFreshness.LIVE;
     }
     if (claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY) {
@@ -19469,6 +20026,9 @@ public final class RuntimeDispatchService {
 
   private static RiskSource riskSourceForBlocker(OccupancyClaim claim) {
     if (claim == null || claim.resource() == null) {
+      return RiskSource.HARD_BLOCKER;
+    }
+    if (claim.role() == ClaimRole.PHYSICAL_FOOTPRINT) {
       return RiskSource.HARD_BLOCKER;
     }
     if (freshnessForClaim(claim) == RiskFreshness.PROTECTIVE_ONLY) {
@@ -20241,6 +20801,177 @@ public final class RuntimeDispatchService {
     return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
   }
 
+  /**
+   * 迁移 DYNAMIC/同站异台的真实节点覆盖。
+   *
+   * <p>无覆盖是合法 no-op；只有目标列车已经持有另一份覆盖时才拒绝，避免把两列车的 materialized platform 状态合并。
+   */
+  private boolean migrateEffectiveNodeOverrides(String currentTrainName, String nextTrainName) {
+    String currentKey = normalizeTrainKey(currentTrainName);
+    String nextKey = normalizeTrainKey(nextTrainName);
+    if (currentKey.isEmpty() || nextKey.isEmpty()) {
+      return false;
+    }
+    if (currentKey.equals(nextKey)) {
+      return true;
+    }
+    synchronized (effectiveNodeOverridesLock) {
+      java.util.concurrent.ConcurrentMap<Integer, EffectiveNodeOverride> current =
+          effectiveNodeOverrides.remove(currentKey);
+      if (current == null) {
+        return true;
+      }
+      java.util.concurrent.ConcurrentMap<Integer, EffectiveNodeOverride> collision =
+          effectiveNodeOverrides.putIfAbsent(nextKey, current);
+      if (collision == null) {
+        return true;
+      }
+      effectiveNodeOverrides.putIfAbsent(currentKey, current);
+      return false;
+    }
+  }
+
+  /**
+   * 在 handoff 前拍摄当前列车的可保留物理 footprint。
+   *
+   * <p>必须在原子替换前取样：与新窗口重叠的旧资源会在账本中变为 {@link ClaimRole#MOVEMENT_REQUIRED}。已有 {@link
+   * ClaimRole#PHYSICAL_FOOTPRINT} 已由先前 guard epoch 负责，不能再次装入新 epoch；否则后一次证据缺失会反向污染本可独立清界的旧资源。
+   */
+  Set<OccupancyResource> snapshotTurnbackFootprintResources(String trainName) {
+    if (occupancyManager == null || trainName == null || trainName.isBlank()) {
+      return Set.of();
+    }
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+      if (claim == null
+          || claim.resource() == null
+          || !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)
+          || !isRetainableTurnbackFootprintRole(claim.role())) {
+        continue;
+      }
+      resources.add(claim.resource());
+    }
+    return Set.copyOf(resources);
+  }
+
+  private static boolean isRetainableTurnbackFootprintRole(ClaimRole role) {
+    return role == ClaimRole.MOVEMENT_REQUIRED
+        || role == ClaimRole.PROTECTIVE_RETAIN
+        || role == ClaimRole.HOLD_ONLY;
+  }
+
+  /** 把 handoff 前拍摄的旧车体占用登记为只允许由真实推进释放的保护。 */
+  void registerTurnbackFootprintGuard(
+      RuntimeTrainHandle train,
+      String trainName,
+      NodeId handoffNode,
+      Set<OccupancyResource> retainedFootprint,
+      List<TurnbackFootprintGuardRegistry.ForwardPathEdge> forwardPath,
+      int rearGuardEdges) {
+    if (occupancyManager == null || train == null || retainedFootprint == null) {
+      return;
+    }
+    turnbackFootprintGuards.register(
+        trainName,
+        handoffNode,
+        retainedFootprint,
+        forwardPath == null ? List.of() : List.copyOf(forwardPath),
+        train.estimatedTrainLengthBlocks(),
+        rearGuardEdges);
+  }
+
+  /**
+   * 展开折返后的真实前进路径，供列尾清空按方块距离取证。
+   *
+   * <p>先采用本次授权已经选定的路径，再沿后续 route waypoint 逐段追加最短路。授权窗口本身可能只到站外清出点，若直接拿它估算长编组列尾，安全实现只能永久
+   * retain；追加后续路线可在列车真正前进足够距离后正常释放旧进路。
+   */
+  List<TurnbackFootprintGuardRegistry.ForwardPathEdge> resolveTurnbackForwardPath(
+      RailGraph graph,
+      OccupancyRequestContext context,
+      List<NodeId> effectiveNodes,
+      int startIndex) {
+    if (graph == null || context == null || context.pathNodes().size() < 2) {
+      return List.of();
+    }
+    List<TurnbackFootprintGuardRegistry.ForwardPathEdge> result = new ArrayList<>();
+    List<NodeId> authorityNodes = context.pathNodes();
+    appendTurnbackPathEdges(graph, authorityNodes, result);
+    NodeId cursor = authorityNodes.get(authorityNodes.size() - 1);
+    if (effectiveNodes == null || startIndex < 0 || startIndex >= effectiveNodes.size()) {
+      return List.copyOf(result);
+    }
+    int nextRouteIndex = startIndex + 1;
+    for (NodeId authorityNode : authorityNodes) {
+      if (nextRouteIndex < effectiveNodes.size()
+          && Objects.equals(authorityNode, effectiveNodes.get(nextRouteIndex))) {
+        nextRouteIndex++;
+      }
+    }
+    for (int routeIndex = nextRouteIndex; routeIndex < effectiveNodes.size(); routeIndex++) {
+      NodeId target = effectiveNodes.get(routeIndex);
+      if (target == null || target.equals(cursor)) {
+        continue;
+      }
+      Optional<RailGraphPath> path =
+          pathFinder.shortestPath(
+              graph, cursor, target, RailGraphPathFinder.Options.shortestDistance());
+      if (path.isEmpty() || path.get().nodes().size() < 2) {
+        break;
+      }
+      appendTurnbackPathEdges(graph, path.get().nodes(), result);
+      cursor = target;
+    }
+    return List.copyOf(result);
+  }
+
+  private void appendTurnbackPathEdges(
+      RailGraph graph,
+      List<NodeId> nodes,
+      List<TurnbackFootprintGuardRegistry.ForwardPathEdge> target) {
+    if (graph == null || nodes == null || target == null || nodes.size() < 2) {
+      return;
+    }
+    for (int index = 0; index + 1 < nodes.size(); index++) {
+      NodeId from = nodes.get(index);
+      NodeId to = nodes.get(index + 1);
+      if (from == null || to == null) {
+        return;
+      }
+      Optional<RailEdge> edge = findEdge(graph, from, to);
+      if (edge.isEmpty()) {
+        return;
+      }
+      target.add(
+          new TurnbackFootprintGuardRegistry.ForwardPathEdge(
+              from, to, Math.max(1, edge.get().lengthBlocks())));
+    }
+  }
+
+  /** 只在真实节点事件跨过列尾保护窗口后，按物理 footprint 角色释放折返旧进路。 */
+  void observeTurnbackFootprintProgress(String trainName, NodeId observedNode) {
+    if (occupancyManager == null) {
+      return;
+    }
+    turnbackFootprintGuards
+        .observeProgress(trainName, observedNode)
+        .ifPresent(
+            release -> {
+              int released =
+                  occupancyManager.releaseResourcesByTrainAndRole(
+                      trainName, List.copyOf(release.resources()), ClaimRole.PHYSICAL_FOOTPRINT);
+              debugLogger.accept(
+                  "Layover 折返列尾已离开旧进路: train="
+                      + trainName
+                      + " node="
+                      + observedNode.value()
+                      + " resources="
+                      + release.resources().size()
+                      + " released="
+                      + released);
+            });
+  }
+
   private void recordEffectiveNode(
       String trainName, RouteDefinition route, int index, NodeId effectiveNode) {
     if (trainName == null
@@ -20252,25 +20983,136 @@ public final class RuntimeDispatchService {
       return;
     }
     NodeId declared = route.waypoints().get(index);
-    if (effectiveNode.equals(declared)) {
-      return;
-    }
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {
       return;
     }
-    effectiveNodeOverrides
-        .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
-        .put(index, effectiveNode);
+    EffectiveNodeOverride previous =
+        effectiveNodeOverrides
+            .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
+            .put(index, createEffectiveNodeOverride(route, index, effectiveNode));
+    if (effectiveNode.equals(declared) && previous != null && !previous.node().equals(declared)) {
+      debugLogger.accept(
+          "SMART_EFFECTIVE_NODE_OVERRIDE_CLEARED train="
+              + trainName
+              + " index="
+              + index
+              + " staleNode="
+              + previous.node().value()
+              + " declaredNode="
+              + declared.value()
+              + " replacement=observed-declared-marker");
+    }
   }
 
   /**
-   * 强制写入有效节点覆盖（即使与声明相同也写入）。
+   * 仅在尚未提交任何 route 进度的 CRET 新车上，从持久 tag 恢复实际 Depot 股道。
    *
-   * <p>用于"首站位置初始化"场景：即使 spawn 位置与 route 第 0 站相同，也需要写入覆盖表以标记"已处理"，避免每 tick 重复检查和打印日志。
+   * <p>{@code FTA_DEPOT_ID} 描述的是列车最初生成位置，不是跨交路持久有效的当前位置。折返 handoff 会把 route index 重新置为 0； 若只凭
+   * index=0 重放该 tag，插件重载后就会把终点站列车重新锚定到旧车库，并生成横跨整条旧运行腿的虚假 Movement Authority。因此这里必须同时要求首个 RouteStop
+   * 带有 CRET 证据，且 spawn-origin lifecycle marker 仍为 pending。正常新车会显式写入 marker；兼容旧版本时，仅当 {@code
+   * FTA_RUN_AT} 与首个 route 更新时间属于同一生成时刻、且还没有折返 ticket 时才视为 pending。
    */
-  private void forceRecordEffectiveNode(String trainName, int index, NodeId effectiveNode) {
-    if (trainName == null || trainName.isBlank() || effectiveNode == null || index < 0) {
+  private void restoreSpawnOriginOverrideIfNeeded(
+      String trainName, RouteDefinition route, int boundedIndex, TrainProperties properties) {
+    if (route == null
+        || properties == null
+        || route.waypoints().isEmpty()
+        || boundedIndex != 0
+        || readEffectiveNode(trainName, route, 0).isPresent()
+        || !hasPendingSpawnOrigin(properties)) {
+      return;
+    }
+    Optional<RouteStop> firstStop = routeDefinitions.findStop(route.id(), 0);
+    if (firstStop
+        .flatMap(stop -> SpawnDirectiveParser.findDirectiveTarget(stop, "CRET"))
+        .isEmpty()) {
+      return;
+    }
+    Optional<String> depotIdOpt = TrainTagHelper.readTagValue(properties, "FTA_DEPOT_ID");
+    if (depotIdOpt.isEmpty() || depotIdOpt.get().isBlank()) {
+      return;
+    }
+    NodeId actualStartNode = NodeId.of(depotIdOpt.get());
+    NodeId declared = route.waypoints().get(0);
+    if (!actualStartNode.equals(declared)) {
+      debugLogger.accept(
+          "首站位置初始化: train="
+              + trainName
+              + " depotId="
+              + actualStartNode.value()
+              + " reason=cret-spawn-origin");
+    }
+    // 即使等于声明节点也记录已恢复标记，避免每 tick 重复解析 CRET/tag。
+    forceRecordEffectiveNode(trainName, route, 0, actualStartNode);
+  }
+
+  /**
+   * 判断实际 Depot tag 是否仍属于“新车尚未驶离”的位置恢复阶段。
+   *
+   * <p>显式 marker 优先。旧版本没有 marker 时，仅接受 spawn/run 时间与首个 route 更新时间相差不超过 5 秒且不存在折返 ticket
+   * 的列车；这既兼容服务器在新车刚生成后重启，也不会把长期运行或站内折返列车重新送回旧 Depot。
+   */
+  private boolean hasPendingSpawnOrigin(TrainProperties properties) {
+    Optional<String> marker =
+        TrainTagHelper.readTagValue(properties, TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING);
+    if (marker.isPresent()) {
+      return Boolean.parseBoolean(marker.get());
+    }
+    if (TrainTagHelper.readTagValue(properties, "FTA_TICKET_ID").isPresent()) {
+      return false;
+    }
+    Optional<Long> runAt = TrainTagHelper.readLongTag(properties, "FTA_RUN_AT");
+    Optional<Long> routeUpdatedAt =
+        TrainTagHelper.readLongTag(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
+    if (runAt.isEmpty() || routeUpdatedAt.isEmpty()) {
+      return false;
+    }
+    long difference;
+    try {
+      difference = Math.abs(Math.subtractExact(runAt.get(), routeUpdatedAt.get()));
+    } catch (ArithmeticException exception) {
+      return false;
+    }
+    return difference <= 5_000L;
+  }
+
+  /**
+   * 用真实图节点观测结束 spawn-origin bootstrap。
+   *
+   * <p>列车仍位于实际 Depot 且 route index 为 0 时保留 pending，保证此时服务器重启仍能恢复 DYNAMIC 股道；一旦抵达其它节点、推进到后续
+   * index，或已经携带折返 ticket，就持久写入 false。该 marker 只控制历史 Depot tag 的解释权，不改变 route progress。
+   */
+  private void observePhysicalNodeForSpawnOrigin(
+      TrainProperties properties, NodeId observedNode, int currentIndex) {
+    if (properties == null || observedNode == null) {
+      return;
+    }
+    Optional<String> depotId = TrainTagHelper.readTagValue(properties, "FTA_DEPOT_ID");
+    boolean stillAtSpawnOrigin =
+        currentIndex == 0
+            && depotId.map(value -> value.equals(observedNode.value())).orElse(false)
+            && TrainTagHelper.readTagValue(properties, "FTA_TICKET_ID").isEmpty();
+    if (stillAtSpawnOrigin) {
+      return;
+    }
+    TrainTagHelper.writeTag(properties, TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "false");
+  }
+
+  /**
+   * 强制写入与 route 定义证据绑定的有效节点覆盖（即使与声明相同也写入）。
+   *
+   * <p>用于首站 spawn bootstrap。routeId、声明节点与对应 RouteStop 都会成为覆盖证据：同一列车在折返 handoff 后可能重新回到 index 0，同一
+   * routeId 也可能在 reload 时更新 DYNAMIC 规则，旧动态股道或 Depot 位置不得跨定义复用。
+   */
+  private void forceRecordEffectiveNode(
+      String trainName, RouteDefinition route, int index, NodeId effectiveNode) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || effectiveNode == null
+        || index < 0
+        || index >= route.waypoints().size()) {
       return;
     }
     String key = normalizeTrainKey(trainName);
@@ -20279,22 +21121,109 @@ public final class RuntimeDispatchService {
     }
     effectiveNodeOverrides
         .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
-        .put(index, effectiveNode);
+        .put(index, createEffectiveNodeOverride(route, index, effectiveNode));
   }
 
-  private Optional<NodeId> readEffectiveNode(String trainName, int index) {
-    if (trainName == null || trainName.isBlank() || index < 0) {
+  /**
+   * 读取当前 route 定义证据下的有效节点覆盖。
+   *
+   * <p>若列车已经切换 route，或同一 routeId 的声明节点/RouteStop 已经刷新，读取动作会立即丢弃旧覆盖。这样 {@code /fta reload} 无需重建整个
+   * RuntimeDispatchService，也不会让 reload 前遗留的位置覆盖污染新定义。
+   */
+  private Optional<NodeId> readEffectiveNode(String trainName, RouteDefinition route, int index) {
+    if (trainName == null || trainName.isBlank() || route == null || index < 0) {
       return Optional.empty();
     }
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {
       return Optional.empty();
     }
-    java.util.concurrent.ConcurrentMap<Integer, NodeId> overrides = effectiveNodeOverrides.get(key);
+    java.util.concurrent.ConcurrentMap<Integer, EffectiveNodeOverride> overrides =
+        effectiveNodeOverrides.get(key);
     if (overrides == null) {
       return Optional.empty();
     }
-    return Optional.ofNullable(overrides.get(index));
+    EffectiveNodeOverride override = overrides.get(index);
+    if (override == null) {
+      return Optional.empty();
+    }
+    if (effectiveNodeOverrideMatches(override, route, index)) {
+      return Optional.of(override.node());
+    }
+    if (overrides.remove(index, override)) {
+      if (overrides.isEmpty()) {
+        effectiveNodeOverrides.remove(key, overrides);
+      }
+      traceEffectiveNodeOverrideRejected(trainName, index, override, route);
+    }
+    return Optional.empty();
+  }
+
+  private EffectiveNodeOverride createEffectiveNodeOverride(
+      RouteDefinition route, int index, NodeId effectiveNode) {
+    return new EffectiveNodeOverride(
+        route.id(),
+        route.waypoints().get(index),
+        routeDefinitions == null ? Optional.empty() : routeDefinitions.findStop(route.id(), index),
+        effectiveNode);
+  }
+
+  private boolean effectiveNodeOverrideMatches(
+      EffectiveNodeOverride override, RouteDefinition route, int index) {
+    if (override == null
+        || route == null
+        || index < 0
+        || index >= route.waypoints().size()
+        || !override.routeId().equals(route.id())
+        || !override.declaredNode().equals(route.waypoints().get(index))) {
+      return false;
+    }
+    Optional<RouteStop> currentStop =
+        routeDefinitions == null ? Optional.empty() : routeDefinitions.findStop(route.id(), index);
+    return override.declaredStop().equals(currentStop);
+  }
+
+  private void traceEffectiveNodeOverrideRejected(
+      String trainName, int index, EffectiveNodeOverride override, RouteDefinition currentRoute) {
+    boolean routeChanged = !override.routeId().equals(currentRoute.id());
+    NodeId currentDeclared =
+        index >= 0 && index < currentRoute.waypoints().size()
+            ? currentRoute.waypoints().get(index)
+            : null;
+    debugLogger.accept(
+        (routeChanged
+                ? "SMART_EFFECTIVE_NODE_OVERRIDE_ROUTE_REJECTED"
+                : "SMART_EFFECTIVE_NODE_OVERRIDE_DEFINITION_REJECTED")
+            + " train="
+            + trainName
+            + " index="
+            + index
+            + " staleRoute="
+            + override.routeId().value()
+            + " currentRoute="
+            + currentRoute.id().value()
+            + " staleDeclared="
+            + override.declaredNode().value()
+            + " currentDeclared="
+            + (currentDeclared == null ? "-" : currentDeclared.value())
+            + " staleNode="
+            + override.node().value());
+  }
+
+  /**
+   * 与 route 定义证据绑定的 materialized/observed 节点事实。
+   *
+   * <p>RouteId 本身不是定义版本：热刷新可在同一个 ID 下改变 waypoint 或 DYNAMIC stop 规则。覆盖必须同时绑定该索引的声明节点与
+   * RouteStop，否则旧站台/Depot 会穿透 reload 进入新定义。
+   */
+  private record EffectiveNodeOverride(
+      RouteId routeId, NodeId declaredNode, Optional<RouteStop> declaredStop, NodeId node) {
+    private EffectiveNodeOverride {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(declaredNode, "declaredNode");
+      declaredStop = declaredStop == null ? Optional.empty() : declaredStop;
+      Objects.requireNonNull(node, "node");
+    }
   }
 
   /**
@@ -20388,7 +21317,7 @@ public final class RuntimeDispatchService {
     if (index < 0 || index >= route.waypoints().size()) {
       return null;
     }
-    return readEffectiveNode(trainName, index).orElse(route.waypoints().get(index));
+    return readEffectiveNode(trainName, route, index).orElse(route.waypoints().get(index));
   }
 
   /**
@@ -20445,7 +21374,7 @@ public final class RuntimeDispatchService {
       return base;
     }
     String key = normalizeTrainKey(trainName);
-    java.util.concurrent.ConcurrentMap<Integer, NodeId> overrides =
+    java.util.concurrent.ConcurrentMap<Integer, EffectiveNodeOverride> overrides =
         key.isEmpty() ? null : effectiveNodeOverrides.get(key);
     if (overrides == null || overrides.isEmpty()) {
       return base;
@@ -20453,14 +21382,22 @@ public final class RuntimeDispatchService {
     List<NodeId> copy = new java.util.ArrayList<>(base);
     for (var entry : overrides.entrySet()) {
       Integer idx = entry.getKey();
-      NodeId node = entry.getValue();
-      if (idx == null || node == null) {
+      EffectiveNodeOverride override = entry.getValue();
+      if (idx == null || override == null) {
         continue;
       }
       if (idx < 0 || idx >= copy.size()) {
         continue;
       }
-      copy.set(idx, node);
+      if (!effectiveNodeOverrideMatches(override, route, idx)) {
+        overrides.remove(idx, override);
+        traceEffectiveNodeOverrideRejected(trainName, idx, override, route);
+        continue;
+      }
+      copy.set(idx, override.node());
+    }
+    if (overrides.isEmpty()) {
+      effectiveNodeOverrides.remove(key, overrides);
     }
     return copy;
   }
@@ -20472,6 +21409,17 @@ public final class RuntimeDispatchService {
    * placeholder，导致 preview 与周期 tick 的授权窗口不一致。
    */
   public List<NodeId> resolveEffectiveWaypointsForEvent(String trainName, RouteDefinition route) {
+    return resolveEffectiveWaypoints(trainName, route);
+  }
+
+  /**
+   * 供事件信号 provider 解析单线方向的 canonical route leg。
+   *
+   * <p>与 movement waypoint 不同，这里刻意不应用 lastPassedGraphNode current-node override。DYNAMIC
+   * materialization 仍会保留，但 route 当前段的上游语义锚点不会因列车进入中间图节点而消失。
+   */
+  public List<NodeId> resolveDirectionContextWaypointsForEvent(
+      String trainName, RouteDefinition route) {
     return resolveEffectiveWaypoints(trainName, route);
   }
 
@@ -20511,9 +21459,48 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 保留尚未被票据认领的终点待命列车所覆盖的完整站内进路。
+   *
+   * <p>列车进入 READY 后仍可能有列尾压在站咽喉、道岔或平交道口上，因此不能把占用缩成单个站台 NODE。图与原 route
+   * 均可用时复用正常停站的尾部保护窗口；任一证据暂时缺失时仅补齐当前位置 NODE，并 fail-retain 既有 claims。
+   */
+  private void retainLayoverReadyOccupancy(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      LayoverCandidate candidate,
+      Instant now) {
+    NodeId locationNode = candidate.locationNodeId();
+    Optional<RouteDefinition> route = resolveRouteDefinition(properties);
+    Optional<RailGraph> graph = resolveGraph(train.worldId(), now);
+    if (route.isPresent() && graph.isPresent() && !route.get().waypoints().isEmpty()) {
+      retainStopOccupancy(
+          trainName,
+          route.get(),
+          route.get().waypoints().size() - 1,
+          locationNode,
+          graph.get(),
+          now);
+      return;
+    }
+    OccupancyResource locationResource = OccupancyResource.forNode(locationNode);
+    OccupancyRequest locationRequest =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            now,
+            List.of(locationResource),
+            Map.of(),
+            0,
+            AuthorizationPurpose.LAYOVER_REUSE);
+    occupancyManager.acquire(locationRequest);
+    debugLogger.accept("Layover READY 缺少完整 route/graph 证据，fail-retain 既有进路: train=" + trainName);
+  }
+
+  /**
    * 停站期间保留“当前节点 + 尾部保护边”的占用，避免后车提前释放后互卡。
    *
-   * <p>当调度图不可用时退化为“仅当前节点占用”。
+   * <p>当调度图或当前位置证据不可用时采用 fail-retain：不缩减既有占用，只在当前位置已知时补齐节点占用。临时图快照缺失不能成为释放站内进路或列尾防护的证据。
    */
   private void retainStopOccupancy(
       String trainName,
@@ -20537,12 +21524,10 @@ public final class RuntimeDispatchService {
       return;
     }
     if (currentNode == null) {
-      occupancyManager.releaseByTrain(trainName);
       return;
     }
     if (graph == null || route == null) {
       OccupancyResource keepResource = OccupancyResource.forNode(currentNode);
-      releaseResourcesNotInRequest(trainName, List.of(keepResource));
       OccupancyRequest locationRequest =
           new OccupancyRequest(
               trainName,
@@ -21341,7 +22326,8 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return;
     }
-    java.util.concurrent.ConcurrentMap<Integer, NodeId> overrides = effectiveNodeOverrides.get(key);
+    java.util.concurrent.ConcurrentMap<Integer, EffectiveNodeOverride> overrides =
+        effectiveNodeOverrides.get(key);
     if (overrides == null || overrides.isEmpty()) {
       return;
     }
@@ -21774,26 +22760,30 @@ public final class RuntimeDispatchService {
     Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
         progressRegistry.get(resolvedTrain);
     if (entryOpt.isEmpty()) {
-      traceLiveBlockerSnapshotRejected(resolvedTrain, context, "PROGRESS_CONTEXT_MISSING", -1L, -1);
+      traceLiveBlockerSnapshotRejected(
+          resolvedTrain, context, "PROGRESS_CONTEXT_MISSING", -1L, null);
       return false;
     }
     RouteProgressRegistry.RouteProgressEntry entry = entryOpt.get();
     long currentProgressVersion = progressRegistry.version();
-    boolean indexBehind =
-        context.currentIndex() >= 0 && context.currentIndex() < entry.currentIndex();
-    boolean staleVersionWithDifferentIndex =
-        context.progressVersion() >= 0
-            && context.progressVersion() < currentProgressVersion
-            && context.currentIndex() != entry.currentIndex();
-    if (!indexBehind && !staleVersionWithDifferentIndex) {
+    // 异步占用结果只能写回产生它的同一进度窗口；Route index 不变时，中间图节点推进同样会使旧判定失效。
+    boolean routeMoved =
+        context.routeId().isPresent() && !context.routeId().get().equals(entry.routeId());
+    boolean indexMoved =
+        context.currentIndex() >= 0 && context.currentIndex() != entry.currentIndex();
+    Optional<NodeId> requestProgressNode =
+        context.lastPassedGraphNode().isPresent()
+            ? context.lastPassedGraphNode()
+            : context.currentNode();
+    boolean graphNodeMoved =
+        requestProgressNode.isPresent()
+            && entry.lastPassedGraphNode().isPresent()
+            && !requestProgressNode.get().equals(entry.lastPassedGraphNode().get());
+    if (!routeMoved && !indexMoved && !graphNodeMoved) {
       return true;
     }
     traceLiveBlockerSnapshotRejected(
-        resolvedTrain,
-        context,
-        "STALE_PROGRESS_CONTEXT",
-        currentProgressVersion,
-        entry.currentIndex());
+        resolvedTrain, context, "STALE_PROGRESS_CONTEXT", currentProgressVersion, entry);
     return false;
   }
 
@@ -21802,7 +22792,7 @@ public final class RuntimeDispatchService {
       DirectedTraversalContext context,
       String reason,
       long currentProgressVersion,
-      int currentIndex) {
+      RouteProgressRegistry.RouteProgressEntry currentEntry) {
     debugLogger.accept(
         "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED reason="
             + (reason == null || reason.isBlank() ? "UNKNOWN" : reason)
@@ -21815,7 +22805,23 @@ public final class RuntimeDispatchService {
             + " requestCurrentIndex="
             + (context == null ? -1 : context.currentIndex())
             + " currentIndex="
-            + currentIndex);
+            + (currentEntry == null ? -1 : currentEntry.currentIndex())
+            + " requestRouteId="
+            + (context == null ? "-" : context.routeId().map(RouteId::value).orElse("-"))
+            + " currentRouteId="
+            + (currentEntry == null ? "-" : currentEntry.routeId().value())
+            + " requestLastPassed="
+            + (context == null
+                ? "-"
+                : context
+                    .lastPassedGraphNode()
+                    .or(context::currentNode)
+                    .map(NodeId::value)
+                    .orElse("-"))
+            + " currentLastPassed="
+            + (currentEntry == null
+                ? "-"
+                : currentEntry.lastPassedGraphNode().map(NodeId::value).orElse("-")));
   }
 
   private void updateBlockerSnapshot(String trainName, OccupancyDecision decision, Instant now) {
@@ -21893,7 +22899,8 @@ public final class RuntimeDispatchService {
       return;
     }
     Instant sampledAt = now == null ? Instant.now() : now;
-    blockerSnapshots.put(key, new BlockerSnapshot(blockers, sampledAt));
+    blockerSnapshots.put(
+        key, new BlockerSnapshot(blockers, sampledAt, captureBlockerProgressWindow(trainName)));
   }
 
   private static String blockerConflictKey(OccupancyResource resource) {

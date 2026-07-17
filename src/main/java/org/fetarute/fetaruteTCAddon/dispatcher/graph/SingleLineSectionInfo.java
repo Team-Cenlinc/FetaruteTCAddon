@@ -5,18 +5,19 @@ import java.util.Objects;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
- * 单线 section 信息：表示两个可会让边界之间的一整段单线互斥区。
+ * 单线 section 信息：表示两个桥链边界之间的一整段方向性单线区。
  *
  * <p>section 是叠加在既有 corridor 微段之上的占用粒度。既有 {@link RailGraphConflictIndex} 仍负责提供微段 {@code
  * single:<component>:<endA>~<endB>}；section 用于在进入单线前持有更粗的方向 token，避免对向列车从两端各自进入不同微段。
  *
- * @param key section 级冲突资源 key
+ * @param key section 级冲突资源 key；桥链使用固定 {@code bridge} 命名空间与归一化边界端点，避免图快照新增旁支节点时因 componentKey 漂移而换
+ *     key
  * @param left 归一化参考端点；用于稳定 key 与旧图方向回退，不等同于业务方向 A
  * @param right 归一化参考端点；用于稳定 key 与旧图方向回退，不等同于业务方向 B
- * @param nodes 从 left 到 right 的参考路径节点；复杂分叉 section 可能只保存主轴路径
- * @param boundaries section 内可识别的会让/端点边界
+ * @param nodes 从 left 到 right 的完整桥链节点
+ * @param boundaries 桥链两端的会让点、分支或线路端点
  * @param corridorKeys section 覆盖的既有 corridor 微段 key
- * @param directional 是否可尝试解析方向；优先使用站间语义轴，缺少元数据时才使用参考端点回退
+ * @param directional 是否可尝试解析方向；桥链 section 当前恒为 true，保留字段用于接口兼容
  */
 public record SingleLineSectionInfo(
     String key,

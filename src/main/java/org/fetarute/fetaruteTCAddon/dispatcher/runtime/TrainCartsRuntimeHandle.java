@@ -7,9 +7,11 @@ import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.Bukkit;
@@ -31,6 +33,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
   private static final String ACTION_TAG_LAUNCH = "fta_launch";
   private static final int PATH_NODE_SEARCH_DISTANCE = 64;
+  private static final double MIN_LENGTH_PER_MEMBER_BLOCKS = 2.0;
+  private static final double END_FOOTPRINT_PADDING_BLOCKS = 2.0;
+  private static final double CURVE_PADDING_PER_GAP_BLOCKS = 0.25;
 
   private final MinecartGroup group;
 
@@ -93,6 +98,78 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     return group.getProperties();
   }
 
+  /**
+   * 根据当前每节车的位置与编组数量估算列车总长。
+   *
+   * <p>相邻 member
+   * 中心点距离之和提供实时编组跨度；额外加入两端车体余量、每个连接处的曲线弦长余量，并以每节两格的数量下界托底。任一实体位置缺失、跨世界或坐标异常时返回缺失，让列尾防护保持占用，而不是用可能偏小的值放行。
+   */
+  @Override
+  @SuppressFBWarnings(
+      value = "BC_UNCONFIRMED_CAST_OF_RETURN_VALUE",
+      justification = "TrainCarts 的 MinecartMember#getEntity 泛型契约保证返回该成员对应的 CommonMinecart")
+  public OptionalDouble estimatedTrainLengthBlocks() {
+    if (!group.isValid()) {
+      return OptionalDouble.empty();
+    }
+    UUID expectedWorldId = null;
+    double previousX = 0.0;
+    double previousY = 0.0;
+    double previousZ = 0.0;
+    double observedPathSpan = 0.0;
+    int memberCount = 0;
+    for (MinecartMember<?> member : group) {
+      if (member == null || member.getEntity() == null) {
+        return OptionalDouble.empty();
+      }
+      org.bukkit.entity.Entity entity = member.getEntity().getEntity();
+      if (entity == null || !entity.isValid()) {
+        return OptionalDouble.empty();
+      }
+      UUID memberWorldId = entity.getWorld().getUID();
+      if (expectedWorldId == null) {
+        expectedWorldId = memberWorldId;
+      } else if (!expectedWorldId.equals(memberWorldId)) {
+        return OptionalDouble.empty();
+      }
+      org.bukkit.Location location = entity.getLocation();
+      double x = location.getX();
+      double y = location.getY();
+      double z = location.getZ();
+      if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+        return OptionalDouble.empty();
+      }
+      if (memberCount > 0) {
+        // Minecraft 轨道以方块轴线和坡道为主，L1 距离会对曲线/坡道保持偏大，适合安全释放阈值。
+        double gapLength =
+            Math.abs(x - previousX) + Math.abs(y - previousY) + Math.abs(z - previousZ);
+        if (!Double.isFinite(gapLength)) {
+          return OptionalDouble.empty();
+        }
+        observedPathSpan += gapLength;
+        if (!Double.isFinite(observedPathSpan)) {
+          return OptionalDouble.empty();
+        }
+      }
+      previousX = x;
+      previousY = y;
+      previousZ = z;
+      memberCount++;
+    }
+    if (memberCount <= 0) {
+      return OptionalDouble.empty();
+    }
+    double positionEstimate =
+        observedPathSpan
+            + END_FOOTPRINT_PADDING_BLOCKS
+            + Math.max(0, memberCount - 1) * CURVE_PADDING_PER_GAP_BLOCKS;
+    double countFloor = memberCount * MIN_LENGTH_PER_MEMBER_BLOCKS;
+    double conservativeEstimate = Math.max(positionEstimate, countFloor);
+    return Double.isFinite(conservativeEstimate) && conservativeEstimate > 0.0
+        ? OptionalDouble.of(conservativeEstimate)
+        : OptionalDouble.empty();
+  }
+
   /** 执行紧急停车（不触发目的地逻辑）。 */
   @Override
   public void stop() {
@@ -122,7 +199,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
    */
   @Override
   public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
-    launchWithFallback(Optional.empty(), targetBlocksPerTick, accelBlocksPerTickSquared);
+    requestLaunchWithFallback(Optional.empty(), targetBlocksPerTick, accelBlocksPerTickSquared);
   }
 
   @Override
@@ -130,15 +207,23 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       Optional<BlockFace> fallbackDirection,
       double targetBlocksPerTick,
       double accelBlocksPerTickSquared) {
+    requestLaunchWithFallback(fallbackDirection, targetBlocksPerTick, accelBlocksPerTickSquared);
+  }
+
+  @Override
+  public boolean requestLaunchWithFallback(
+      Optional<BlockFace> fallbackDirection,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
     if (group.isMoving()) {
-      return;
+      return true;
     }
     MinecartMember<?> head = group.head();
     if (head == null) {
-      return;
+      return false;
     }
     if (head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
-      return;
+      return true;
     }
     group.getActions().launchReset();
     LauncherConfig launchConfig = LauncherConfig.createDefault();
@@ -180,12 +265,13 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       if (action != null) {
         action.addTag(ACTION_TAG_LAUNCH);
       }
-      return;
+      return action != null;
     }
     var action = head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
     if (action != null) {
       action.addTag(ACTION_TAG_LAUNCH);
     }
+    return action != null;
   }
 
   /**

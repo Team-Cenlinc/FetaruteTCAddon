@@ -74,6 +74,27 @@ public record DirectedTraversalContext(
         authorityTokenId);
   }
 
+  /** 返回同一路径但迁移到新列车身份后的上下文。 */
+  public DirectedTraversalContext withTrainKey(String nextTrainKey) {
+    return new DirectedTraversalContext(
+        nextTrainKey,
+        routeId,
+        currentIndex,
+        currentNode,
+        lastPassedGraphNode,
+        effectiveFromNode,
+        effectiveToNode,
+        expandedPathNodes,
+        directedEdges,
+        singleConflictDirections,
+        switcherPathSignatures,
+        source,
+        occupancyVersion,
+        progressVersion,
+        requestId,
+        authorityTokenId);
+  }
+
   /** 返回同一路径但替换占用快照版本后的上下文。 */
   public DirectedTraversalContext withOccupancyVersion(long nextOccupancyVersion) {
     return new DirectedTraversalContext(

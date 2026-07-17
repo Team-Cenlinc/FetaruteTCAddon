@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorityHandoffSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -216,6 +217,58 @@ public final class LaunchAuthorizationService {
       }
     }
 
+    plan.actions().writeDestination(result);
+    plan.actions().launchOrProceed(result);
+    plan.actions().refreshRelated(result);
+    return result;
+  }
+
+  /**
+   * 执行停车折返的原子授权交接。
+   *
+   * <p>该入口与普通 {@link #authorize(AuthorizationPlan)} 共用 hard-blocker、clean-window 与动作顺序，但把普通 acquire
+   * 替换为 {@link AuthorityHandoffSupport#handoffAuthority(OccupancyRequest)}。不支持原子交接的占用实现必须
+   * fail-closed。
+   *
+   * @param plan 折返授权计划；request 中列车名必须仍为当前 TrainCarts 名称
+   * @return 原子交接及统一门控后的结果
+   */
+  public AuthorizationResult authorizeHandoff(AuthorizationPlan plan) {
+    Objects.requireNonNull(plan, "plan");
+    OccupancyRequest request = plan.request();
+    if (plan.checkYield() && occupancyManager.shouldYield(request)) {
+      AuthorizationResult result =
+          new AuthorizationResult(
+              false, false, false, false, true, false, false, null, null, plan.scope());
+      plan.actions().holdStop(result);
+      return result;
+    }
+    OccupancyDecision decision;
+    if (occupancyManager instanceof AuthorityHandoffSupport handoffSupport) {
+      decision = handoffSupport.handoffAuthority(request);
+    } else {
+      decision =
+          new OccupancyDecision(
+              false,
+              request.now(),
+              SignalAspect.STOP,
+              List.of(),
+              false,
+              "authority-handoff-support-missing");
+    }
+    AuthorizationResult result =
+        evaluateDecision(
+            request.trainName(),
+            decision,
+            request.now(),
+            plan.scope() + "-handoff",
+            plan.requireCleanBlockers(),
+            true,
+            decision.allowed());
+    if (!result.allowed()) {
+      plan.actions().holdStop(result);
+      return result;
+    }
     plan.actions().writeDestination(result);
     plan.actions().launchOrProceed(result);
     plan.actions().refreshRelated(result);

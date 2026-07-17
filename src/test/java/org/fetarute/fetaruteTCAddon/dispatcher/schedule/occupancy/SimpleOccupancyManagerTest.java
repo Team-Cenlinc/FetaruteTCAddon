@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -9,6 +10,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -214,6 +216,31 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void releaseByTrainAdvancesVersionWhenOnlyQueueEntryChanges() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:terminal-throat");
+    OccupancyRequest waiting =
+        new OccupancyRequest(
+            "waiting-train",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0);
+    manager.touchQueues(waiting);
+    long queuedVersion = manager.version();
+
+    assertEquals(0, manager.releaseByTrain("waiting-train"));
+
+    assertTrue(manager.snapshotQueues().isEmpty());
+    assertEquals(queuedVersion + 1, manager.version());
+  }
+
+  @Test
   void singleCorridorAllowsSameDirection() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -241,7 +268,7 @@ class SimpleOccupancyManagerTest {
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
 
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:bridge:A~B");
     OccupancyResource localSegmentA = OccupancyResource.forConflict("single:comp:A~S");
     OccupancyResource localSegmentB = OccupancyResource.forConflict("single:comp:S~B");
     Map<String, CorridorDirection> forward =
@@ -776,37 +803,36 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
-  void sameDirectionSectionBypassesPhysicalProtectiveRetain() {
+  void sameDirectionSectionDoesNotBypassPhysicalProtectiveClaims() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
-    SimpleOccupancyManager manager =
-        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
-
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
     NodeId entry = NodeId.of("A");
     NodeId exit = NodeId.of("B");
     OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
     OccupancyResource edge = OccupancyResource.forEdge(EdgeId.undirected(entry, exit));
-    OccupancyRequest leader =
-        sectionPhysicalRequest(
-            "leader",
-            now,
-            section,
-            CorridorDirection.A_TO_B,
-            edge,
-            ResourceIntent.PROTECTIVE_RETAIN);
-    OccupancyRequest follower =
-        sectionPhysicalRequest(
-            "follower",
-            now.plusSeconds(1),
-            section,
-            CorridorDirection.A_TO_B,
-            edge,
-            ResourceIntent.MOVEMENT_REQUIRED);
+    List<ResourceIntent> protectiveIntents =
+        List.of(ResourceIntent.PROTECTIVE_RETAIN, ResourceIntent.HOLD_ONLY);
+    for (ResourceIntent protectiveIntent : protectiveIntents) {
+      SimpleOccupancyManager manager =
+          new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+      OccupancyRequest leader =
+          sectionPhysicalRequest(
+              "leader", now, section, CorridorDirection.A_TO_B, edge, protectiveIntent);
+      OccupancyRequest follower =
+          sectionPhysicalRequest(
+              "follower",
+              now.plusSeconds(1),
+              section,
+              CorridorDirection.A_TO_B,
+              edge,
+              ResourceIntent.MOVEMENT_REQUIRED);
 
-    assertTrue(manager.acquire(leader).allowed());
-    OccupancyDecision decision = manager.canEnter(follower);
+      assertTrue(manager.acquire(leader).allowed());
+      OccupancyDecision decision = manager.canEnter(follower);
 
-    assertTrue(decision.allowed(), decision.toString());
+      assertFalse(decision.allowed(), protectiveIntent + ": " + decision);
+      assertTrue(decision.blockers().stream().anyMatch(blocker -> blocker.resource().equals(edge)));
+    }
   }
 
   @Test
@@ -1801,6 +1827,82 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void conflictReleaseTreatsPhysicalConflictFootprintAsHardBlocker() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource crossing = OccupancyResource.forConflict("switcher:terminal-crossing");
+    OccupancyRequest clearing =
+        new OccupancyRequest(
+            "requester",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(crossing),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.CONFLICT_CLEARING);
+    OccupancyClaim footprint =
+        new OccupancyClaim(
+            crossing,
+            "turning-train",
+            Optional.empty(),
+            now,
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.PHYSICAL_FOOTPRINT);
+    Optional<String> reason =
+        manager.conflictReleaseHardBlockerReason(clearing, List.of(footprint));
+
+    assertEquals(Optional.of("conflict-release-hard-blocker:" + crossing), reason);
+  }
+
+  @Test
+  void strictCycleProtectiveClaimBlocksMovementAndConflictRelease() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource cycle = OccupancyResource.forConflict("single:component:cycle:LOOP");
+    OccupancyRequest retainedCycle =
+        new OccupancyRequest(
+            "incumbent",
+            Optional.empty(),
+            now,
+            List.of(cycle),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(cycle, ResourceIntent.HOLD_ONLY));
+    OccupancyRequest movement =
+        new OccupancyRequest(
+            "requester", Optional.empty(), now.plusSeconds(1), List.of(cycle), Map.of());
+
+    assertTrue(manager.acquire(retainedCycle).allowed());
+    OccupancyClaim incumbent = manager.getClaim(cycle).orElseThrow();
+    assertEquals(ClaimRole.HOLD_ONLY, incumbent.role());
+    assertFalse(manager.canEnter(movement).allowed());
+
+    OccupancyRequest clearing =
+        new OccupancyRequest(
+            "requester",
+            Optional.empty(),
+            now.plusSeconds(2),
+            List.of(cycle),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.CONFLICT_CLEARING);
+
+    assertEquals(
+        Optional.of("conflict-release-hard-blocker:" + cycle),
+        manager.conflictReleaseHardBlockerReason(clearing, List.of(incumbent)));
+  }
+
+  @Test
   void conflictReleaseAcquireSkipsOnlyConflictBlocker() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -1895,6 +1997,25 @@ class SimpleOccupancyManagerTest {
 
     assertFalse(decision.allowed());
     assertFalse(decision.conflictRelease());
+  }
+
+  @Test
+  void deadlockReleaseLockCreationAndExpiryAdvanceVersion() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    long initialVersion = manager.version();
+
+    manager.rememberDeadlockReleaseLock("switcher:versioned-release", "winner", now.plusSeconds(8));
+
+    assertEquals(initialVersion + 1, manager.version());
+    long lockedVersion = manager.version();
+
+    OccupancyRequest purgeProbe =
+        new OccupancyRequest("probe", Optional.empty(), now.plusSeconds(10), List.of(), Map.of());
+    assertTrue(manager.canEnter(purgeProbe).allowed());
+    assertEquals(lockedVersion + 1, manager.version());
   }
 
   @Test
@@ -2740,19 +2861,45 @@ class SimpleOccupancyManagerTest {
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
 
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    OccupancyResource section = OccupancyResource.forConflict("single:section:comp:A~B");
+    String axis = "SURC:S:SCC:1~SURC:S:WSD:1";
+    OccupancyResource section = OccupancyResource.forConflict("single:section:bridge:" + axis);
     OccupancyRequest request =
         sectionRequestWithPlanDirections(
             "train",
             now,
             section,
             Map.of(section.key(), CorridorDirection.UNKNOWN),
-            Map.of("single:comp:A~B", CorridorDirection.A_TO_B));
+            Map.of("single:SURC:CGL:WYB:1:001:" + axis, CorridorDirection.A_TO_B));
 
     assertTrue(manager.acquire(request).allowed());
     assertEquals(
         Optional.of(CorridorDirection.A_TO_B),
         manager.getClaim(section).orElseThrow().corridorDirection());
+  }
+
+  @Test
+  void bridgeSectionDirectionStaysUnknownWhenCommittedMicroTokensConflict() {
+    HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    String axis = "SURC:S:SCC:1~SURC:S:WSD:1";
+    OccupancyResource section = OccupancyResource.forConflict("single:section:bridge:" + axis);
+    OccupancyRequest request =
+        sectionRequestWithPlanDirections(
+            "train",
+            now,
+            section,
+            Map.of(section.key(), CorridorDirection.UNKNOWN),
+            Map.of(
+                "single:SURC:CGL:WYB:1:001:" + axis,
+                CorridorDirection.A_TO_B,
+                "single:SURC:OTHER:COMPONENT:001:" + axis,
+                CorridorDirection.B_TO_A));
+
+    assertTrue(manager.acquire(request).allowed());
+    assertTrue(manager.getClaim(section).orElseThrow().corridorDirection().isEmpty());
   }
 
   @Test
@@ -2999,6 +3146,324 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void protectiveRetainInheritsCommittedDirectionForSameDirectionProof() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource section = OccupancyResource.forConflict("single:section:terminal:A~B");
+
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("turning", now, section, CorridorDirection.A_TO_B))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                singleConflictRequest(
+                    "leader", now.plusMillis(1), section, CorridorDirection.A_TO_B))
+            .allowed());
+    OccupancyRequest rearGuard =
+        singleConflictRequestWithSnapshotDirection(
+                "turning", now.plusSeconds(1), section, Map.of(), Map.of(), Map.of())
+            .withResourceIntents(Map.of(section, ResourceIntent.PROTECTIVE_RETAIN));
+
+    assertTrue(
+        manager.isProvenSameDirectionFollower(rearGuard, section, "leader", false),
+        "尾部保护请求应继承本车已提交的单线方向，不能退化为 UNKNOWN");
+  }
+
+  @Test
+  void terminalTurnbackAtomicallyReplacesDirectionAndMigratesOwner() {
+    SignalEventBus eventBus = new SignalEventBus();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+    AuthorityHandoffSupport handoff = assertInstanceOf(AuthorityHandoffSupport.class, manager);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource terminal = OccupancyResource.forNode(NodeId.of("TERMINAL"));
+    OccupancyResource oldApproach =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("APPROACH"), NodeId.of("TERMINAL")));
+    OccupancyResource section = OccupancyResource.forConflict("single:section:turnback:A~B");
+    OccupancyRequest inbound =
+        new OccupancyRequest(
+            "turning-inbound",
+            Optional.empty(),
+            now,
+            List.of(terminal, oldApproach, section),
+            Map.of(section.key(), CorridorDirection.A_TO_B));
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+                "turning-inbound",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(terminal, oldApproach, section),
+                Map.of(section.key(), CorridorDirection.B_TO_A))
+            .withResourceIntents(Map.of(oldApproach, ResourceIntent.LOOKAHEAD_PREVIEW));
+
+    assertTrue(manager.acquire(inbound).allowed());
+    assertFalse(manager.canEnter(outbound).allowed(), "普通 acquire 仍必须拒绝直接翻转方向");
+    AtomicReference<Boolean> releaseObservedContinuousGuard = new AtomicReference<>(false);
+    AtomicInteger releasedEvents = new AtomicInteger();
+    eventBus.subscribe(
+        org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent.class,
+        event -> {
+          releasedEvents.incrementAndGet();
+          releaseObservedContinuousGuard.set(
+              manager.getClaim(terminal).isPresent()
+                  && manager.getClaim(section).isPresent()
+                  && manager
+                          .getClaim(section)
+                          .flatMap(OccupancyClaim::corridorDirection)
+                          .orElse(CorridorDirection.UNKNOWN)
+                      == CorridorDirection.B_TO_A);
+        });
+
+    OccupancyDecision decision = handoff.handoffAuthority(outbound);
+
+    assertTrue(decision.allowed(), decision.toString());
+    assertFalse(releaseObservedContinuousGuard.get(), "连续占用的资源不应伪装成已释放事件");
+    assertEquals(0, releasedEvents.get());
+    OccupancyClaim retainedApproach = manager.getClaim(oldApproach).orElseThrow();
+    assertEquals(ClaimRole.PHYSICAL_FOOTPRINT, retainedApproach.role());
+    assertFalse(
+        manager
+            .canEnter(
+                new OccupancyRequest(
+                    "crossing-train",
+                    Optional.empty(),
+                    now.plusSeconds(2),
+                    List.of(oldApproach),
+                    Map.of()))
+            .allowed(),
+        "没有 rear-clear 证据前，静止长编组仍必须保护进站咽喉/道口 footprint");
+    assertEquals(
+        CorridorDirection.B_TO_A,
+        manager
+            .getClaim(section)
+            .flatMap(OccupancyClaim::corridorDirection)
+            .orElse(CorridorDirection.UNKNOWN));
+    assertTrue(handoff.migrateAuthorityOwner("turning-inbound", "turning-outbound"));
+    OccupancyRequest renamed = outbound.withTrainName("turning-outbound");
+    assertTrue(handoff.holdsHardAuthority(renamed));
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .allMatch(claim -> claim.trainName().equals("turning-outbound")));
+  }
+
+  @Test
+  void periodicProtectiveRefreshCannotDowngradeTurnbackPhysicalFootprint() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    AuthorityHandoffSupport handoff = assertInstanceOf(AuthorityHandoffSupport.class, manager);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource terminal = OccupancyResource.forNode(NodeId.of("TERMINAL"));
+    OccupancyResource oldApproach =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("APPROACH"), NodeId.of("TERMINAL")));
+    OccupancyRequest inbound =
+        new OccupancyRequest(
+            "turning", Optional.empty(), now, List.of(terminal, oldApproach), Map.of());
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+                "turning",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(terminal, oldApproach),
+                Map.of())
+            .withResourceIntents(Map.of(oldApproach, ResourceIntent.LOOKAHEAD_PREVIEW));
+
+    assertTrue(manager.acquire(inbound).allowed());
+    assertTrue(handoff.handoffAuthority(outbound).allowed());
+    assertEquals(ClaimRole.PHYSICAL_FOOTPRINT, manager.getClaim(oldApproach).orElseThrow().role());
+
+    OccupancyRequest periodicRearGuard =
+        new OccupancyRequest(
+                "turning", Optional.empty(), now.plusSeconds(2), List.of(oldApproach), Map.of())
+            .withResourceIntents(Map.of(oldApproach, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(periodicRearGuard).allowed());
+
+    assertEquals(
+        ClaimRole.PHYSICAL_FOOTPRINT,
+        manager.getClaim(oldApproach).orElseThrow().role(),
+        "周期 rear-guard refresh 不能在真实列尾清空前把硬 footprint 降为软保护");
+    assertFalse(
+        manager
+            .canEnter(
+                new OccupancyRequest(
+                    "crossing-train",
+                    Optional.empty(),
+                    now.plusSeconds(3),
+                    List.of(oldApproach),
+                    Map.of()))
+            .allowed());
+  }
+
+  @Test
+  void blockedTerminalTurnbackRestoresInboundAuthorityWithoutPublishingRelease() {
+    SignalEventBus eventBus = new SignalEventBus();
+    AtomicInteger releasedEvents = new AtomicInteger();
+    eventBus.subscribe(
+        org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent.class,
+        event -> releasedEvents.incrementAndGet());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+    AuthorityHandoffSupport handoff = assertInstanceOf(AuthorityHandoffSupport.class, manager);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource terminal = OccupancyResource.forNode(NodeId.of("TERMINAL"));
+    OccupancyResource section = OccupancyResource.forConflict("single:section:turnback:A~B");
+    OccupancyResource outboundEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("TERMINAL"), NodeId.of("CROSSING")));
+    OccupancyRequest inbound =
+        new OccupancyRequest(
+            "turning",
+            Optional.empty(),
+            now,
+            List.of(terminal, section),
+            Map.of(section.key(), CorridorDirection.A_TO_B));
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+            "turning",
+            Optional.empty(),
+            now.plusSeconds(2),
+            List.of(terminal, section, outboundEdge),
+            Map.of(section.key(), CorridorDirection.B_TO_A));
+
+    assertTrue(manager.acquire(inbound).allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "crossing-train",
+                    Optional.empty(),
+                    now.plusSeconds(1),
+                    List.of(outboundEdge),
+                    Map.of()))
+            .allowed());
+    List<OccupancyClaim> before = manager.snapshotClaims();
+
+    OccupancyDecision decision = handoff.handoffAuthority(outbound);
+
+    assertFalse(decision.allowed());
+    assertEquals(Set.copyOf(before), Set.copyOf(manager.snapshotClaims()));
+    assertEquals(0, releasedEvents.get());
+    assertEquals(
+        CorridorDirection.A_TO_B,
+        manager
+            .getClaim(section)
+            .flatMap(OccupancyClaim::corridorDirection)
+            .orElse(CorridorDirection.UNKNOWN));
+  }
+
+  @Test
+  void terminalTurnbackKeepsIncumbentAheadOfWaiterQueuedByItsOldClaim() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    AuthorityHandoffSupport handoff = assertInstanceOf(AuthorityHandoffSupport.class, manager);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource cycle =
+        OccupancyResource.forConflict("single:component:cycle:TERMINAL-TURNBACK");
+    OccupancyRequest inbound =
+        new OccupancyRequest("turning", Optional.empty(), now, List.of(cycle), Map.of());
+    OccupancyRequest waiting =
+        new OccupancyRequest(
+            "waiting-crossing", Optional.empty(), now.plusSeconds(1), List.of(cycle), Map.of());
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+            "turning", Optional.empty(), now.plusSeconds(2), List.of(cycle), Map.of());
+
+    assertTrue(manager.acquire(inbound).allowed());
+    assertFalse(manager.canEnter(waiting).allowed());
+    assertTrue(
+        manager.snapshotQueues().stream()
+            .flatMap(queue -> queue.entries().stream())
+            .anyMatch(entry -> entry.trainName().equals("waiting-crossing")));
+
+    OccupancyDecision decision = handoff.handoffAuthority(outbound);
+
+    assertTrue(decision.allowed(), decision.toString());
+    OccupancyClaim claim = manager.getClaim(cycle).orElseThrow();
+    assertEquals("turning", claim.trainName());
+    assertEquals(ClaimRole.MOVEMENT_REQUIRED, claim.role());
+    assertTrue(
+        manager.snapshotQueues().stream()
+            .flatMap(queue -> queue.entries().stream())
+            .anyMatch(entry -> entry.trainName().equals("waiting-crossing")),
+        "handoff 只能保留 incumbent 的清界权，不能吞掉外车原有队列位次");
+  }
+
+  @Test
+  void terminalTurnbackRetainsOnlyPhysicalFootprintRoles() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    AuthorityHandoffSupport handoff = assertInstanceOf(AuthorityHandoffSupport.class, manager);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource terminal = OccupancyResource.forNode(NodeId.of("TERMINAL"));
+    OccupancyResource outboundEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("TERMINAL"), NodeId.of("OUT")));
+    OccupancyResource retainedConflict =
+        OccupancyResource.forConflict("switcher:terminal-footprint");
+    OccupancyResource lookahead = OccupancyResource.forNode(NodeId.of("LOOKAHEAD"));
+    OccupancyResource queuePosition = OccupancyResource.forConflict("switcher:queue-position");
+    OccupancyResource unlockReservation =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("UNLOCK-A"), NodeId.of("UNLOCK-B")));
+    OccupancyRequest inbound =
+        new OccupancyRequest(
+                "turning",
+                Optional.empty(),
+                now,
+                List.of(terminal, retainedConflict, lookahead, queuePosition, unlockReservation),
+                Map.of())
+            .withResourceIntents(
+                Map.of(
+                    retainedConflict,
+                    ResourceIntent.PROTECTIVE_RETAIN,
+                    lookahead,
+                    ResourceIntent.LOOKAHEAD_PREVIEW,
+                    queuePosition,
+                    ResourceIntent.QUEUE_POSITION,
+                    unlockReservation,
+                    ResourceIntent.UNLOCK_RESERVATION));
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+            "turning",
+            Optional.empty(),
+            now.plusSeconds(1),
+            List.of(terminal, outboundEdge),
+            Map.of());
+
+    assertTrue(manager.acquire(inbound).allowed());
+    assertEquals(5, manager.snapshotClaims().size());
+
+    OccupancyDecision decision = handoff.handoffAuthority(outbound);
+
+    assertTrue(decision.allowed(), decision.toString());
+    assertEquals(
+        ClaimRole.PHYSICAL_FOOTPRINT,
+        manager.getClaim(retainedConflict).orElseThrow().role(),
+        "旧 hard/protective CONFLICT 仍代表车体 footprint，必须防止区段被抢入");
+    OccupancyDecision crossingEntry =
+        manager.canEnter(
+            new OccupancyRequest(
+                "crossing-train",
+                Optional.empty(),
+                now.plusSeconds(2),
+                List.of(retainedConflict),
+                Map.of()));
+    assertFalse(crossingEntry.allowed(), "折返列尾未清空前，抽象 crossing conflict 也必须保持硬闭锁");
+    Set<OccupancyResource> retainedResources =
+        manager.snapshotClaims().stream()
+            .map(OccupancyClaim::resource)
+            .collect(java.util.stream.Collectors.toSet());
+    assertFalse(retainedResources.contains(lookahead));
+    assertFalse(retainedResources.contains(queuePosition));
+    assertFalse(retainedResources.contains(unlockReservation));
+  }
+
+  @Test
   void selfOwnedContinuationRejectIncludesExternalSingleOwner() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
     SimpleOccupancyManager manager =
@@ -3111,6 +3576,36 @@ class SimpleOccupancyManagerTest {
     assertEquals(1, manager.clearSelfOwnedSingleDirectionMismatches(reversed));
     assertTrue(manager.canEnterPreview(reversed).allowed());
     assertEquals(0, manager.clearSelfOwnedSingleDirectionMismatches(reversed));
+  }
+
+  @Test
+  void clearSelfOwnedSingleDirectionMismatchCannotReleasePhysicalFootprint() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    AuthorityHandoffSupport handoff = assertInstanceOf(AuthorityHandoffSupport.class, manager);
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource terminal = OccupancyResource.forNode(NodeId.of("TERMINAL"));
+    OccupancyResource section = OccupancyResource.forConflict("single:terminal:A~B");
+    OccupancyRequest inbound =
+        new OccupancyRequest(
+            "turning",
+            Optional.empty(),
+            now,
+            List.of(terminal, section),
+            Map.of(section.key(), CorridorDirection.A_TO_B));
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+            "turning", Optional.empty(), now.plusSeconds(1), List.of(terminal), Map.of());
+    assertTrue(manager.acquire(inbound).allowed());
+    assertTrue(handoff.handoffAuthority(outbound).allowed());
+    assertEquals(ClaimRole.PHYSICAL_FOOTPRINT, manager.getClaim(section).orElseThrow().role());
+
+    OccupancyRequest reversed =
+        singleConflictRequest("turning", now.plusSeconds(2), section, CorridorDirection.B_TO_A);
+
+    assertEquals(0, manager.clearSelfOwnedSingleDirectionMismatches(reversed));
+    assertEquals(ClaimRole.PHYSICAL_FOOTPRINT, manager.getClaim(section).orElseThrow().role());
   }
 
   @Test

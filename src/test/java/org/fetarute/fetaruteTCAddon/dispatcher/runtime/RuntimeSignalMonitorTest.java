@@ -69,6 +69,17 @@ class RuntimeSignalMonitorTest {
   }
 
   @Test
+  @DisplayName("改名迁移失败时旧 owner 与当前实体名都必须视为存活")
+  void activeRuntimeOwnerNamesPreserveTaggedOwnerDuringRenameFailure() {
+    assertEquals(
+        Set.of("new-train", "old-train"),
+        RuntimeSignalMonitor.activeRuntimeOwnerNames("new-train", "old-train"));
+    assertEquals(
+        Set.of("same-train"),
+        RuntimeSignalMonitor.activeRuntimeOwnerNames("same-train", "same-train"));
+  }
+
+  @Test
   @DisplayName("空 groupCounts 应返回空集合")
   void findDuplicateLogicalTrainNamesEmptyInput() {
     assertEquals(Set.of(), RuntimeSignalMonitor.findDuplicateLogicalTrainNames(Map.of()));

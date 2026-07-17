@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
@@ -158,6 +160,55 @@ class TrainLaunchManagerTest {
     TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
     ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
 
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    double appliedBpt = speedCaptor.getValue();
+    assertTrue(appliedBpt >= 0.39, "发车场景应下发接近目标速度，避免起步龟速");
+    assertTrue(result.launchCommandAccepted());
+  }
+
+  @Test
+  void applyControlReportsRejectedLaunchRequest() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-rejected");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return false;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
     manager.applyControl(
         train,
         tags.properties(),
@@ -169,10 +220,32 @@ class TrainLaunchManagerTest {
         Optional.empty(),
         runtime);
 
-    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
-    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
-    double appliedBpt = speedCaptor.getValue();
-    assertTrue(appliedBpt >= 0.39, "发车场景应下发接近目标速度，避免起步龟速");
+    assertFalse(result.launchCommandAccepted());
+    assertEquals(2, attempts.get(), "被 TrainCarts 拒绝的动作不应消耗 launch cooldown");
+    assertFalse(TrainTagHelper.readTagValue(tags.properties(), "FTA_LAST_LAUNCH_AT").isPresent());
+  }
+
+  @Test
+  void applyControlTreatsAlreadyMovingTrainAsAcceptedLaunch() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-already-moving");
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 4.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    assertTrue(result.launchCommandAccepted());
   }
 
   @Test
@@ -356,7 +429,7 @@ class TrainLaunchManagerTest {
     }
   }
 
-  private static final class FakeTrain implements RuntimeTrainHandle {
+  private static class FakeTrain implements RuntimeTrainHandle {
     private final TrainProperties properties;
     private final boolean moving;
     private final double speedBpt;

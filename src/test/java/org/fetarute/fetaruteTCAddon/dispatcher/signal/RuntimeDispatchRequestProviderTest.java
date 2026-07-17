@@ -234,6 +234,33 @@ class RuntimeDispatchRequestProviderTest {
   }
 
   @Test
+  void eventRequestKeepsCanonicalDirectionContextSeparateFromLiveCurrentNode() {
+    NodeId routeStart = NodeId.of("OP:S:CGL:2");
+    NodeId liveCurrent = NodeId.of("SWITCHER:Towny:-520:77:4131");
+    NodeId terminal = NodeId.of("OP:S:WYB:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(routeStart, terminal), Optional.empty());
+    RuntimeDispatchRequestProvider effectiveProvider =
+        new RuntimeDispatchRequestProvider(
+            railGraphService,
+            routeDefinitions,
+            progressRegistry,
+            configManager,
+            occupancyManager,
+            (trainName, ignoredRoute, currentIndex, graph) -> List.of(liveCurrent, terminal),
+            (trainName, ignoredRoute, currentIndex, graph) -> List.of(routeStart, terminal),
+            null,
+            msg -> {});
+
+    assertEquals(
+        List.of(liveCurrent, terminal),
+        effectiveProvider.resolveWaypointsForRequest("train-1", route, 0, null));
+    assertEquals(
+        List.of(routeStart, terminal),
+        effectiveProvider.resolveDirectionContextWaypointsForRequest("train-1", route, 0, null));
+  }
+
+  @Test
   void buildRequestUsesInjectedPriorityResolver() {
     NodeId current = NodeId.of("OP:S:A:1");
     NodeId next = NodeId.of("OP:S:B:1");

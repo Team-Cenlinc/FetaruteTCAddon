@@ -72,6 +72,7 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
   private final ConfigManager configManager;
   private final OccupancyManager occupancyManager;
   private final EventWaypointResolver effectiveWaypointsResolver;
+  private final EventWaypointResolver directionContextWaypointsResolver;
   private final DispatchPriorityResolver dispatchPriorityResolver;
   private final Consumer<String> debugLogger;
 
@@ -183,6 +184,34 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
       EventWaypointResolver effectiveWaypointsResolver,
       DispatchPriorityResolver dispatchPriorityResolver,
       Consumer<String> debugLogger) {
+    this(
+        railGraphService,
+        routeDefinitions,
+        progressRegistry,
+        configManager,
+        occupancyManager,
+        effectiveWaypointsResolver,
+        effectiveWaypointsResolver,
+        dispatchPriorityResolver,
+        debugLogger);
+  }
+
+  /**
+   * 构建请求提供者，并将实时物理节点与 canonical 方向上下文分别注入。
+   *
+   * <p>movement resolver 可以把 current index 替换为 lastPassedGraphNode；direction resolver 则保留该 route
+   * leg 的原始起点。后者只参与单线方向解析，不会扩大 EVENT 请求的物理资源窗口。
+   */
+  public RuntimeDispatchRequestProvider(
+      RailGraphService railGraphService,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry progressRegistry,
+      ConfigManager configManager,
+      OccupancyManager occupancyManager,
+      EventWaypointResolver effectiveWaypointsResolver,
+      EventWaypointResolver directionContextWaypointsResolver,
+      DispatchPriorityResolver dispatchPriorityResolver,
+      Consumer<String> debugLogger) {
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.progressRegistry = Objects.requireNonNull(progressRegistry, "progressRegistry");
@@ -193,6 +222,10 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
             ? effectiveWaypointsResolver
             : (trainName, route, currentIndex, graph) ->
                 route == null ? List.of() : route.waypoints();
+    this.directionContextWaypointsResolver =
+        directionContextWaypointsResolver != null
+            ? directionContextWaypointsResolver
+            : this.effectiveWaypointsResolver;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     this.dispatchPriorityResolver =
         dispatchPriorityResolver != null
@@ -274,11 +307,14 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
             runtimeLookaheadMaxEdges(runtimeSettings),
             debugLogger);
     List<NodeId> waypoints = resolveWaypointsForRequest(trainName, route, currentIndex, graph);
+    List<NodeId> directionContextWaypoints =
+        resolveDirectionContextWaypointsForRequest(trainName, route, currentIndex, graph);
     Optional<OccupancyRequestContext> contextOpt =
-        builder.buildContextFromNodes(
+        builder.buildContextFromNodesWithDirectionContext(
             trainName,
             Optional.ofNullable(route.id()),
             waypoints,
+            directionContextWaypoints,
             currentIndex,
             now,
             priority,
@@ -326,6 +362,25 @@ public class RuntimeDispatchRequestProvider implements SignalEvaluator.TrainRequ
     }
     List<NodeId> waypoints =
         effectiveWaypointsResolver.resolve(trainName, route, currentIndex, graph);
+    if (waypoints == null || waypoints.isEmpty()) {
+      return route.waypoints();
+    }
+    return List.copyOf(waypoints);
+  }
+
+  /**
+   * 解析事件重评估的 canonical route leg。
+   *
+   * <p>该列表只参与方向证明；resolver 缺失或返回空时回退 route waypoints，不使用实时 movement 列表补位，以免 lastPassed override
+   * 再次裁掉上游语义锚点。
+   */
+  List<NodeId> resolveDirectionContextWaypointsForRequest(
+      String trainName, RouteDefinition route, int currentIndex, RailGraph graph) {
+    if (route == null) {
+      return List.of();
+    }
+    List<NodeId> waypoints =
+        directionContextWaypointsResolver.resolve(trainName, route, currentIndex, graph);
     if (waypoints == null || waypoints.isEmpty()) {
       return route.waypoints();
     }

@@ -614,6 +614,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
             (trainName, route, currentIndex, graph) ->
                 runtimeDispatchService.resolveEffectiveWaypointsForEvent(
                     trainName, route, currentIndex, graph),
+            (trainName, route, currentIndex, graph) ->
+                runtimeDispatchService.resolveDirectionContextWaypointsForEvent(trainName, route),
             runtimeDispatchService.dispatchPriorityResolver(),
             loggerManager::debug);
     // 创建信号评估器

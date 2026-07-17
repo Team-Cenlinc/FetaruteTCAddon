@@ -134,10 +134,30 @@ if (!TerminalKeyResolver.matches(startTerminalKey, routeFirstTerminalKey)) {
   return false; // 位置与首站不匹配
 }
 
+if (candidate.readyAt().isAfter(now)
+    || dwellRegistry.remainingSeconds(trainName).isPresent()
+    || waypointCenteringActive(trainName)
+    || trainHandle.isMoving()) {
+  return false; // 真实 dwell/居中/停车事实未完成，继续保留 Layover 候选
+}
+
 // 同站不同站台：从索引 0 开始
 int startIndex = RouteIndexResolver.resolveCurrentIndex(route, OptionalInt.empty(), startNode);
 if (startIndex < 0) {
   startIndex = 0; // fallback
+}
+
+// 停稳后以反向 Movement Plan 原子替换旧方向授权；外部 blocker 存在时旧授权原样保留。
+authorizationService.authorizeHandoff(plan);
+
+// TrainCarts 改名后迁移同一份 claim/queue/lock owner，不得 releaseByTrain(oldName)。
+authorityHandoffSupport.migrateAuthorityOwner(oldName, newName);
+
+// 只有底层已接受/已有 launch action 或列车已移动才完成提交；否则保留候选与进路并硬停重试。
+ControlApplicationResult result = runtimeTrainController.applyControl(...);
+if (!result.launchCommandAccepted()) {
+  holdLayoverAuthorityAfterFailedCommit(...);
+  return false;
 }
 ```
 

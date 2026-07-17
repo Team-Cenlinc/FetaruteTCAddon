@@ -39,12 +39,23 @@ public final class TrainLaunchManager {
    * @param speedCurveLimitBps 执行层速度曲线限制后的速度；未触发时为空
    * @param finalTargetBps 最终写入 TrainCarts 前的速度
    * @param finalLimiterSource 执行层最终限制来源
+   * @param launchCommandAccepted 允许发车时，底层已接受 launch action、已有待执行 action 或列车已经移动；非发车控制为 {@code
+   *     false}
    */
   public record ControlApplicationResult(
       double requestedTargetBps,
       OptionalDouble speedCurveLimitBps,
       double finalTargetBps,
-      String finalLimiterSource) {
+      String finalLimiterSource,
+      boolean launchCommandAccepted) {
+    public ControlApplicationResult(
+        double requestedTargetBps,
+        OptionalDouble speedCurveLimitBps,
+        double finalTargetBps,
+        String finalLimiterSource) {
+      this(requestedTargetBps, speedCurveLimitBps, finalTargetBps, finalLimiterSource, false);
+    }
+
     public ControlApplicationResult {
       speedCurveLimitBps = speedCurveLimitBps == null ? OptionalDouble.empty() : speedCurveLimitBps;
       finalLimiterSource =
@@ -161,14 +172,22 @@ public final class TrainLaunchManager {
             allowLaunch);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
+    boolean launchCommandAccepted = false;
     // 非 STOP 信号：允许发车或对运动中列车补充能量
     if (train != null) {
       if (!train.isMoving()) {
         // 静止时需要发车：受 allowLaunch 和冷却时间限制
         if (allowLaunch && canIssueLaunch(properties, runtimeSettings)) {
-          train.launchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
+          launchCommandAccepted =
+              train.requestLaunchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
+          if (launchCommandAccepted) {
+            markLaunchIssued(properties, runtimeSettings);
+          }
         }
       } else {
+        if (allowLaunch) {
+          launchCommandAccepted = true;
+        }
         boolean needsMovingControl = shouldIssueMovingControl(train, targetBpt);
         if (allowLaunch || needsMovingControl) {
           double controlAcceleration = needsMovingControl ? decelBpt2 : accelBpt2;
@@ -184,7 +203,8 @@ public final class TrainLaunchManager {
     } else if (speedCurveLimit.isPresent()) {
       limiterSource = "speed_curve";
     }
-    return new ControlApplicationResult(targetBps, speedCurveLimit, adjustedBps, limiterSource);
+    return new ControlApplicationResult(
+        targetBps, speedCurveLimit, adjustedBps, limiterSource, launchCommandAccepted);
   }
 
   /** 判断运动中列车是否需要补发控速动作。 */
@@ -198,7 +218,7 @@ public final class TrainLaunchManager {
         && current > targetBlocksPerTick + MOVING_CONTROL_EPSILON_BPT;
   }
 
-  /** 节流：同一列车在 cooldown 窗口内最多下发一次 launch/加速动作。 */
+  /** 只读检查同一列车是否已离开 launch cooldown 窗口。 */
   private boolean canIssueLaunch(
       TrainProperties properties, ConfigManager.RuntimeSettings runtimeSettings) {
     if (properties == null || runtimeSettings == null) {
@@ -213,8 +233,23 @@ public final class TrainLaunchManager {
     if (last > 0L && now - last < cooldownTicks * TICK_MILLIS) {
       return false;
     }
-    TrainTagHelper.writeTag(properties, TAG_LAST_LAUNCH_AT, String.valueOf(now));
     return true;
+  }
+
+  /**
+   * 在 TrainCarts 明确接受 launch 动作后记录冷却起点。
+   *
+   * <p>被底层拒绝的动作不能消耗 cooldown，否则列车会在最需要重试的静止窗口被调度层自行抑制。
+   */
+  private void markLaunchIssued(
+      TrainProperties properties, ConfigManager.RuntimeSettings runtimeSettings) {
+    if (properties == null
+        || runtimeSettings == null
+        || runtimeSettings.launchCooldownTicks() <= 0) {
+      return;
+    }
+    TrainTagHelper.writeTag(
+        properties, TAG_LAST_LAUNCH_AT, String.valueOf(System.currentTimeMillis()));
   }
 
   /**

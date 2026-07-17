@@ -151,10 +151,11 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 
 `TicketAssigner` 在实际 spawn 前会先经过 `SpawnControl`，再构建一次“gate 占用请求”。占用门控统一走 `LaunchAuthorizationService`，分为 spawn 前只读 preview 与 spawn 后真实 acquire：
 
-- spawn 前 preview 必须允许且没有 blocker；若 depot throat、长单线 conflict、lookover 分支或入库/出库混行资源被占住，会 requeue/hold，不会强行生成列车。
+- spawn 前 preview 必须允许且没有 blocker；若所选路径上的 depot throat、长单线 conflict，或入库/出库共享联锁资源被占住，会 requeue/hold，不会强行生成列车。仅位于非选定分支的远端物理边不会扩大本车 Movement Authority。
 - spawn 后 acquire 再次确认并写入真实占用；若 acquire 阶段发现 blocker，会释放 SpawnControl 租约、释放该 train 的占用、销毁刚生成的 TrainCarts group，并延迟重试。
 - gate 阻塞会记录具体 blocker 资源（如 `NODE:...@train`、`EDGE:...@train`、`CONFLICT:...@train`），并对实际 selected depot 写入短暂 backoff。单股道 depot 若没有其它候选，会在队列诊断中持续显示阻塞资源；若同线路还有其它 depot，后续选择会避开当前 backoff depot。
 - 允许：生成列车，写入 `FTA_*` tags 与 `FTA_ROUTE_INDEX=0`，下发下一跳 destination，并触发一次 `RuntimeDispatchService.refreshSignal(...)`。
+- TrainCarts spawn pattern 可能继承模板列车 tags；生成后会原子覆盖本次 owner、run/route/line/operator/depot/destination 等插件自有 key，删除本次缺失的可选 destination，并清除模板遗留的 launch/speed 冷却。禁止用 `addTags` 追加同名状态，否则读取顺序可能让新车沿用旧 depot 或旧 route 控车。
 - 允许：生成列车后还会基于本次 `acquire` 的资源集合，主动刷新同资源上的其他列车信号（含冲突队列等待列车），缩短“新车出库后他车仍维持旧信号”的窗口。
 - 不允许/失败：若 spawn 失败会释放已占用资源，票据按 `spawn.retry-delay-ticks` 延迟后重试。
 - 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
@@ -185,13 +186,12 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 ### 出库区块加载
 - Depot 出车前会加载 depot 周边区块，并持有约 10 秒的 plugin chunk ticket，避免刚加载即卸载导致 spawn 失败。
 
-### Depot lookover
-- Depot 出车会对起步段的道岔执行“lookover”：把道岔分支边一并占用，避免刚出库即被其他列车抢占分支。
-- lookover 优先追加“走廊冲突 + 方向”资源以允许同向放行；方向无法判定时回退为“全方向冲突”资源（而不是仅 EDGE），避免道岔门控放宽。
-- `TicketAssigner` 会优先以“实际 depot 节点”（`selectedDepotNodeId`/`depotNodeId`）作为 gate 路径起点和 lookover 锚点，而不是盲目使用 `route.waypoints()[0]`。
-- 当 route 首节点不是 depot 时，lookover 仍会覆盖 depot 周边道岔区，并使用加深窗口（`max(6, max(lookahead, switcherZone*3))`，上限 24 边）用于拦截“回库车已进道岔区但未离开”场景。
-- depot 周边 lookover 会同时加入 edge 派生的 `CONFLICT` 资源，并为这些冲突补齐走廊方向与 entryOrder；长单线入库线共享同一冲突组时，出库车会看到已在走廊内的回库车并延迟生成。
-- 回归覆盖：route 首节点不是实际 depot、depot 前方长单线有车、depot 前方 switcher 分支有车时，spawn 前 gate 均应阻止生成，不允许“先出库再发现 conflict”。
+### Depot Movement Authority
+- `TicketAssigner` 会先把本次实际选择的 depot（`selectedDepotNodeId`/`depotNodeId`）写入 route 第 0 个节点，再从这条有向选定路径构建 spawn gate；预览、spawn 后 acquire 与首次 signal refresh 使用同一份路径上下文。
+- 若出库路径进入 `SWITCHER` 或显式咽喉，授权会原子覆盖从 depot 到首个可证明清出点的 NODE、EDGE 与所选路径内全部道岔 `CONFLICT`。找不到清出点时 fail-closed，不生成列车。
+- 调度图是无向拓扑，但 Movement Authority 不是无向半径：不得把 depot 周边 BFS 扫到的分支或远端物理 EDGE 提升为本车硬授权。否则无关支线会扩大锁闭，甚至因无法证明方向而让所有出库请求永久 STOP。
+- 回库车或交叉进路通过双方选定路径共享的 `switcher:*`、单线 section/corridor 等冲突令牌阻止出库；仅占用不在本次授权内的远端物理 EDGE 不应阻止生成。
+- 回归覆盖：实际 depot 覆盖 route 原始首节点、短 lookahead 仍完整持有到道岔清出点、分支回库车持有共享 switcher 时阻止生成，以及远端非授权 EDGE 不扩大出库锁闭。
 
 > 当前版本已实现两条执行路径：
 > - 停靠表首行为 `CRET`：从 Depot 生成列车。

@@ -17,9 +17,10 @@
 - `MOVEMENT_REQUIRED` 表示本轮前进授权必须取得的资源；`canEnter` 只对这类资源 fail-closed。
 - `PROTECTIVE_RETAIN` 与 `HOLD_ONLY` 用于当前位置、尾部保护和 STOP 保留。它们不会阻止前车的 forward movement；如果与其他列车冲突，运行时应保持本车保护、约束后车或触发 stale claim 清理。
 - `QUEUE_POSITION` 只表示冲突队列位次，适用于门控等待和停站等待期间保住排序；它不应被当作 NODE/EDGE 硬占用。
-- `ClaimRole` 是 claim 落库后的角色镜像，防止 retain/hold claim 在后续判定中被误当成前向必须资源。`PROTECTIVE_RETAIN` / `HOLD_ONLY` claim 会被分类为 protective-only，不进入 confirmed hard blocker；第一版只输出 release candidate 诊断，不自动释放。
-- 同一列车刷新同一资源时遵循授权单调性：已有 `MOVEMENT_REQUIRED` 不会被 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 降级；旧方向缺失时也只能用同一 canonical `MovementPlanSnapshot` 的已知方向补全，非硬请求不能自行建立方向或覆盖已有方向。合法换向必须先释放旧 claim，再由新的前进授权建立方向。
-- 当前位置、尾部保护与 STOP hold 在存在 canonical `MovementPlanSnapshot` 时只继承计划方向；计划缺少对应 single key 或方向为 `UNKNOWN` 时保持无方向，不回退到保护窗口的局部路径推导。
+- `ClaimRole` 是 claim 写入占用账本后的角色镜像，防止 retain/hold claim 被误当成本车新的前向授权。外车的 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 如果落在本车申请的同一物理 EDGE/NODE 上，仍是硬 blocker；只有不代表同一物理窗口的保护性 CONFLICT 才可进入 stale/release candidate 诊断。`PHYSICAL_FOOTPRINT` 只由 Authority Handoff 产生，不对应新的 `ResourceIntent`；它表示尚未取得列尾清空证明的真实车体足迹，对 EDGE/NODE/CONFLICT 都保持硬闭锁。
+- 同一列车刷新同一资源时遵循授权单调性：已有 `MOVEMENT_REQUIRED` 或 `PHYSICAL_FOOTPRINT` 不会被 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 等非硬请求降级；新的 `MOVEMENT_REQUIRED` 可以接管与其重叠的旧 footprint。非硬请求不能自行建立方向或覆盖已有方向。合法换向必须通过 `AuthorityHandoffSupport` 原子结束旧授权并建立新授权，普通 `acquire` 继续拒绝反向覆盖。
+- 当前位置、尾部保护与 STOP hold 优先继承 canonical `MovementPlanSnapshot` 的方向。资源已经滑出当前前向计划时，非硬请求可继承同车在该资源上由上一份硬授权提交的已知方向；若两者都没有证据则保持 `UNKNOWN`，绝不回退到保护窗口的局部路径推导。
+- Authority Handoff 预检只暂时隐藏自身 claim/queue，外部 blocker 与 Gate Queue 仍按原规则判定；拒绝完整恢复且不发布 release。成功时重叠资源写入反向硬 claim，旧窗口独有且代表车体足迹的 EDGE/NODE/CONFLICT 在没有 rear-clear 证据前转为 `PHYSICAL_FOOTPRINT`。运行时 sidecar 从 handoff 前快照保护完整旧 footprint，不让周期 shrink 或授权回滚提前删除重叠的反向 movement claim；只有同一 traversal epoch 的真实相邻图节点沿登记有向路径连续推进，累计距离达到“保守列车长度 + `rear-guard-edges` 对应边长”后才解除保护并按角色安全收缩。跳点、路径外观测、连续折返换向或长度/路径证据缺失时 fail-retain，倒退则回退净清界进度。列车改名通过 owner migration 同步迁移 claim、queue、switcher signature 与 deadlock lock，最终 destination commit 前还会复核全部 `MOVEMENT_REQUIRED` 资源仍由新名字持有。
 - claim、方向、角色、headway、route 与道岔路径签名均未变化的 refresh 是 no-op，不推进 occupancy version，也不发布 `OccupancyAcquiredEvent`。
 - 冲突队列 refresh 仍会更新 `lastSeen` 防止活跃列车过期，但方向、优先级、稳定 entry order 与道岔路径签名都未变化时不推进 occupancy version；只有排队语义变化才触发版本更新。
 
@@ -32,7 +33,9 @@
 ## 最小可用版本资源解析规则
 - edge 必占用自身资源：`EDGE:<from~to>`。
 - edge 若连接 `SWITCHER` 节点，额外占用冲突资源：`CONFLICT:switcher:<nodeId>`。
-- edge 若处于单线走廊，会关联冲突资源：`CONFLICT:single:<component>:<endA>~<endB>`（对向互斥，同向可跟驰）。
+- edge 若属于无替代路径的桥链，会叠加 `CONFLICT:single:section:*` 方向资源及其兼容 micro key（对向互斥，同向可跟驰）。
+- 非桥网格不再叠加整片网格冲突资源；规范 `MovementPlan` 中实际选定的 EDGE、NODE 与 switcher 共同定义进路边界。两条进路完全不相交时可以并行，实际共享任一硬资源时仍 fail-closed。
+- 无任何安全边界的纯闭环继续附加 `CONFLICT:single:*:cycle:*` 严格互斥资源；这类拓扑不能用“进路暂不相交”证明两列车最终可以会让。
 - node 占用使用 `NODE:<nodeId>`（switcher 同样补冲突资源）。
 
 ## Headway 规则
@@ -48,6 +51,7 @@
 
 ## Lookahead 占用
 - 运行时可按“当前节点 + N 段边”申请占用，降低咽喉/道岔前的卡死。
+- 对实际选定路径，只有首个 `SWITCHER` 或显式咽喉已经进入普通 hard lookahead 时，构建器才会把从当前安全边界、经过该冲突点、直到首个正常图边界/出清站点的 NODE、EDGE 与 CONFLICT 一次性提升为 `MOVEMENT_REQUIRED`。远端联锁仍只存在于完整 Movement Plan/advisory 中，不能提前扩大当前硬授权；一旦开始提升却无法证明冲突区出口，请求为空并 fail-closed，避免列车只拿到道口入口就停在冲突区内。
 - **重要**：lookahead 边数基于 **RailGraph 展开后的实际边**，而非 Route 定义中的节点跨度。
   - Route 节点 A→B 之间如果在 RailGraph 中有多个中间 Waypoint，会先展开再按边数截断。
   - 这确保了 `lookahead-edges=2` 始终代表 2 条实际轨道边（约 60-100 blocks），而非 2 个站间区间。

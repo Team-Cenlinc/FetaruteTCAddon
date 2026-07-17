@@ -115,7 +115,8 @@ public final class SimpleRailGraph implements RailGraph, RailGraphSectionSupport
   /**
    * 查询指定边所属的单线 section 信息。
    *
-   * <p>section 索引是 {@link RailGraphConflictIndex} 的叠加层，只归并会让点之间的微段，不改变既有 corridor/switcher 诊断 key。
+   * <p>section 索引是 {@link RailGraphConflictIndex} 的叠加层，只归并能够由桥证明不存在替代路径的连续链，不改变既有 corridor/switcher
+   * 诊断 key。
    */
   @Override
   public Optional<SingleLineSectionInfo> sectionInfoForEdge(EdgeId edgeId) {

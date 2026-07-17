@@ -48,6 +48,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExporter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ScheduleWindow;
@@ -253,7 +254,7 @@ public final class FtaDepotCommand {
                   if (properties != null) {
                     properties.clearDestinationRoute();
                     properties.clearDestination();
-                    properties.setTrainName(trainName);
+                    TrainSpawnTagInitializer.initializeOwner(properties, trainName);
                     addTags(properties, runId, resolved, depotId, pattern, destInfo);
                     initializeRouteIndex(
                         properties, provider, resolved.route(), depotId, sender, locale);
@@ -1076,21 +1077,12 @@ public final class FtaDepotCommand {
     tags.put("FTA_OPERATOR_CODE", resolved.operator().code());
     tags.put("FTA_PATTERN", resolved.route().patternType().name());
     tags.put("FTA_DEPOT_ID", depotId != null ? depotId.value() : "");
+    tags.put(TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "true");
     tags.put("FTA_SPAWN_PATTERN", spawnPattern);
     tags.put("FTA_DEST_CODE", destInfo.code());
     tags.put("FTA_DEST_NAME", destInfo.name());
     tags.put("FTA_RUN_AT", String.valueOf(now.toEpochMilli()));
-    List<String> out = new ArrayList<>();
-    for (Map.Entry<String, String> entry : tags.entrySet()) {
-      String value = sanitizeTagValue(entry.getValue());
-      if (value.isEmpty()) {
-        continue;
-      }
-      out.add(entry.getKey() + "=" + value);
-    }
-    if (!out.isEmpty()) {
-      properties.addTags(out.toArray(new String[0]));
-    }
+    TrainSpawnTagInitializer.replaceLifecycleTags(properties, tags);
   }
 
   private void initializeRouteIndex(
@@ -1179,18 +1171,6 @@ public final class FtaDepotCommand {
         && (text.length() == word.length()
             || Character.isWhitespace(text.charAt(word.length()))
             || text.charAt(word.length()) == ':');
-  }
-
-  private static String sanitizeTagValue(String raw) {
-    if (raw == null) {
-      return "";
-    }
-    String trimmed = raw.trim();
-    if (trimmed.isEmpty()) {
-      return "";
-    }
-    String normalized = trimmed.replace('=', '-').replace('|', '-');
-    return normalized.replaceAll("\\s+", "_");
   }
 
   /**

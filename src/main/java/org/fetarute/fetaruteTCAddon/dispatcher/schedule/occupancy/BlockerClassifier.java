@@ -19,8 +19,15 @@ public final class BlockerClassifier {
     if (TrainNameNormalizer.sameLogicalTrain(request.trainName(), claim.trainName())) {
       return BlockerRelation.SELF;
     }
+    if (claim.role() == ClaimRole.PHYSICAL_FOOTPRINT) {
+      return BlockerRelation.HARD_OCCUPANCY;
+    }
     if (claim.role() == ClaimRole.UNLOCK_RESERVATION) {
       return BlockerRelation.STALE_PROTECTIVE_CLAIM;
+    }
+    if ((claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY)
+        && isStrictConflictResource(resource)) {
+      return BlockerRelation.HARD_OCCUPANCY;
     }
     if ((claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY)
         && !isPhysicalOccupancyResource(resource)) {
@@ -54,6 +61,22 @@ public final class BlockerClassifier {
         || relation == BlockerRelation.UNKNOWN_SINGLE_CONFLICT
         || relation == BlockerRelation.SWITCHER_CONFLICT
         || relation == BlockerRelation.SAME_DIRECTION_FRONT;
+  }
+
+  /**
+   * 判断冲突资源是否必须保持无方向严格互斥。
+   *
+   * <p>无边界闭环没有可证明的会让边界，不能使用同向跟驰或 stale-protective 放宽；即使 claim 仅来自 rear guard，它仍可能是唯一的物理清界凭证。
+   *
+   * @param resource 待判断的占用资源
+   * @return 资源是否属于严格互斥冲突
+   */
+  static boolean isStrictConflictResource(OccupancyResource resource) {
+    if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
+      return false;
+    }
+    String key = resource.key();
+    return key.startsWith("single:") && key.contains(":cycle:");
   }
 
   private static Optional<CorridorDirection> requestDirection(

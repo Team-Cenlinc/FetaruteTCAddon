@@ -108,9 +108,12 @@ public final class RuntimeSignalMonitor implements Runnable {
         continue;
       }
       String trainName = candidate.trainName();
-      if (trainName != null && !trainName.isBlank()) {
-        activeTrainNames.add(trainName);
-      }
+      activeTrainNames.addAll(
+          activeRuntimeOwnerNames(
+              trainName,
+              TrainTagHelper.readTagValue(
+                      candidate.group().getProperties(), RouteProgressRegistry.TAG_TRAIN_NAME)
+                  .orElse(null)));
     }
     dispatchService.traceSmartDispatchGlobalSnapshot(activeTrainNames, now);
     for (GroupTickTarget candidate : candidates) {
@@ -120,14 +123,17 @@ public final class RuntimeSignalMonitor implements Runnable {
       }
       String trainName = candidate.trainName();
       dispatchService.handleSignalTick(group);
+      String runtimeOwnerName = resolvePersistedRuntimeOwnerName(group, trainName);
       // 检测"脱管"列车：有 FTA tag 但 route 无法解析，连续多 tick 后视为异常并清理
-      if (trainName != null && !trainName.isBlank()) {
-        detectStaleFtaTrain(group, trainName);
+      if (runtimeOwnerName != null && !runtimeOwnerName.isBlank()) {
+        detectStaleFtaTrain(group, runtimeOwnerName);
       }
-      if (etaSampler != null && trainName != null && !trainName.isBlank()) {
+      if (etaSampler != null && runtimeOwnerName != null && !runtimeOwnerName.isBlank()) {
         Optional<Integer> dwellRemainingSec =
-            dwellRegistry != null ? dwellRegistry.remainingSeconds(trainName) : Optional.empty();
-        NodeSampleInfo nodeInfo = resolveNodeInfo(trainName);
+            dwellRegistry != null
+                ? dwellRegistry.remainingSeconds(runtimeOwnerName)
+                : Optional.empty();
+        NodeSampleInfo nodeInfo = resolveNodeInfo(runtimeOwnerName);
         etaSampler.sample(
             group,
             tick,
@@ -399,6 +405,34 @@ public final class RuntimeSignalMonitor implements Runnable {
     }
     String trainName = group.getProperties().getTrainName();
     return trainName == null || trainName.isBlank() ? null : trainName.trim();
+  }
+
+  /**
+   * 收集本轮必须视为存活的运行时 owner。
+   *
+   * <p>真实 TrainCarts 改名发生在巡检取样之后；若 owner 原子迁移失败，调度层会故意保留 tag 中的旧 owner 与全部硬授权。orphan cleanup
+   * 因而必须同时看见当前解析名和持久化 tag，不能在同一轮把旧方向/折返 footprint 当成幽灵占用释放。
+   */
+  static Set<String> activeRuntimeOwnerNames(String resolvedName, String taggedName) {
+    Set<String> names = new HashSet<>();
+    if (resolvedName != null && !resolvedName.isBlank()) {
+      names.add(resolvedName.trim());
+    }
+    if (taggedName != null && !taggedName.isBlank()) {
+      names.add(taggedName.trim());
+    }
+    return Set.copyOf(names);
+  }
+
+  /** handleSignalTick 完成后以实际写回的 owner tag 驱动 stale/ETA，迁移成功时该值就是新名称。 */
+  private static String resolvePersistedRuntimeOwnerName(MinecartGroup group, String fallbackName) {
+    if (group == null || group.getProperties() == null) {
+      return fallbackName;
+    }
+    return TrainTagHelper.readTagValue(group.getProperties(), RouteProgressRegistry.TAG_TRAIN_NAME)
+        .filter(name -> !name.isBlank())
+        .map(String::trim)
+        .orElse(fallbackName);
   }
 
   /** 判断当前列车名是否只是另一逻辑列车名的 split 别名。 */
