@@ -19,6 +19,8 @@
 2) 允许进入且通过 hard-blocker 抑制检查：acquire 前向必须资源 → 重新评估 acquire 结果 → 生成 pending movement authorization token → 提交下一跳 destination → 激活 token → 发车/限速；若 acquire 或 destination commit 阶段被同 tick 竞争抢占，会释放本轮前向资源并硬 STOP。
 3) 不允许进入：保留当前位置保护资源 → 对 confirmed hard blocker 清空 TrainCarts destination route/destination → speedLimit=0 + hard stop → 清除 movement token；仅非物理 CONFLICT 的 protective-only retain 可进入同向/过期诊断，外车占用同一 EDGE/NODE 时仍按硬 blocker 处理
 4) 出站门控（站台/TERM）会额外检查优先级让行：若单线/道岔冲突队列存在更高优先级列车，则保持停站等待；若占用层返回 `allowed=true` 但没有 `conflictRelease` 标记且 blockers 中仍有其他列车的 NODE/EDGE 硬占用，则先回退 STOP，不会写入前向占用窗口。
+5) DYNAMIC 目标解析采用 `NOT_APPLICABLE / SELECTED / BLOCKED` 三态结果。`BLOCKED` 表示已经声明 DYNAMIC，但当前无法安全 materialize（例如容量耗尽、定义无效，或图、当前位置、占用证据缺失）：运行中列车保持 STOP、清除占位 destination，并撤回当前全部纯 queue entry；不得让声明占位节点进入可写的 `canEnter/acquire/queue` 链路。
+6) 所有运行时可写授权请求与 Depot spawn gate 共用 DYNAMIC materialization boundary：已选定的首个 DYNAMIC 目标是本轮授权终点；更远处尚未解析的 DYNAMIC 会在占位节点前截断；紧邻目标尚未解析时直接 fail-closed。普通 lookahead 与原子联锁扩展都不得越过该边界，spawn 成功后的首个 destination 也必须来自同一份实际节点序列。
 
 ## 出发授权入口
 - `LaunchAuthorizationService` 是闭塞出发授权的统一入口，顺序固定为：构建请求 → preview/canEnter → hard blocker 抑制 → acquire → 写 destination/launch/refresh 或 hold STOP。
@@ -43,6 +45,7 @@
 ## AutoStation PASS
 - AutoStation 的 STOP/TERMINATE 仍由停稳后的 `handleStationArrival` 推进，避免提前推进导致列车跳站。
 - AutoStation 持有 `DepartureGate` 的中间站只推进 routeIndex 与 DYNAMIC effective node，不在 dwell/WaitState 窗口提前写下一跳 TrainCarts destination；下一跳 destination 由门控释放后的 signal tick 在最终授权通过时提交，避免静止停站期间被 TrainCarts 按出口方向反向。
+- DYNAMIC 尽头站优先把空闲站台分配给进站列车；站台全满时，等待列车撤回投机性前向排队，让已停靠列车优先取得出站进路。容量等待不会新建前向 claim；当前位置缺少保护时只补 `NODE/HOLD_ONLY`，已有 NODE、EDGE、CONFLICT、PHYSICAL_FOOTPRINT 等真实 claim 原样保留。
 - AutoStation 的 PASS 不会进入停站/开门流程，因此运行时监听器会在牌子触发时确认当前 RouteStop 为 PASS，并立即执行普通推进，避免列车 destination 卡在被通过的站台。
 - `[train]` AutoStation 使用 `GROUP_ENTER` 推进 PASS；`[cart]` AutoStation 仅处理车头 `MEMBER_ENTER`，避免长编组重复推进。
 
@@ -104,7 +107,10 @@
 - STOP 事件即使与当前信号相同，只要列车仍在运动、destination 仍存在，或存在有效 movement token / hard-stop inhibitor，也会重新下发 hard STOP。
 - Movement token 分为 pending 与 active：acquire 成功后只创建 pending token；只有 destination commit 成功且 claimVersion 匹配时才激活 token 并解除 `movementInhibited`。commit 失败会回滚 token 与本轮前向 claim，并保持 STOP。
 - 触发“冲突区放行锁”时，`canEnter.allowed=true` 会同时携带 `conflictRelease=true`；该释放只能跳过抽象 `CONFLICT` 资源，不允许跳过真实 `NODE/EDGE` 硬占用。Depot spawn、station departure、layover reuse 不使用 conflictRelease。
-- `withRuntimeConflictClearingEvidence()` 只能附加 `TOPOLOGY_EXIT_HINT` 诊断证据，不改变 `requestPurpose`，也不能让普通 `RUNTIME_MOVE` 被发布层分类为 `DRAIN_THROUGH`。`DRAIN_THROUGH` 只允许在真实 drain authority 新鲜、zone 与 `MovementPlanSnapshot.singleConflictDirections` 匹配、列车位于对应 single conflict 内且正在清空出口时成立；普通 routeIndex=0 发车即使持有 single claim，也仍按 `FORWARD_MOVEMENT` 发布。
+- `withRuntimeConflictClearingEvidence()` 对 single conflict 仍只能附加 `TOPOLOGY_EXIT_HINT` 诊断证据，不改变 `requestPurpose`。普通 routeIndex=0 发车即使持有 single claim，也仍按 `FORWARD_MOVEMENT` 发布。
+- switcher 有且只有“实体已在道岔节点内”的清空例外：运行时先给 builder 请求写入当前 occupancy/progress version，再计算证据；`MovementPlanSnapshot.currentNode/effectiveFromNode` 必须精确等于 switcher，路径签名与首条有向边必须证明下一段正在离开该节点，本车必须已持有 switcher NODE，且出口路径不得存在任何外车 NODE/EDGE、物理 footprint 或其他 switcher claim。该证明不要求竞争车已经在同一快照中写入 switcher claim，避免竞争 claim 在 Movement Plan 形成后、最终信号发布前才出现时把实体占用者重新压成零距离 STOP。满足后请求升级为带已验证 release hint 的 `CONFLICT_CLEARING`；Gate Queue 只给该道岔内列车写入 release lock，入口外列车继续被其 NODE/EDGE 硬占用保持 STOP。
+- switcher 清空请求只有在占用判定实际返回 `conflictRelease=true` 时才成为 drain leader；发布门会用 `MovementPlanSnapshot.switcherPathSignatures` 校验 zone。即使 routeIndex=0，只要列车已经真实经过首段中间 switcher，也按清空处理而非普通首发；普通站台/车库出发仍因缺少实体 switcher NODE 证明而不能冒充 drain。
+- drain leader 的完整 advisory lookahead 只忽略“本次已获 release，或在 hard decision 前已验证实体 occupant 的同 key switcher”抽象 claim/queue risk，覆盖竞争 claim 在 `canEnter` 之后才写入的竞态，避免它在 SignalLookahead 中以 0 距离再次把 Movement Authority 压成 STOP。NODE、EDGE、single 与其他 switcher 风险全部保留；无真实 blocker 的普通通过也不会伪造 `DRAIN_THROUGH` 或触发 `DRAIN_AUTHORITY_INCONSISTENT`。
 - Smart recovery 的 drain/forward unlock 仍默认尊重对向或未知方向 single barrier；只有当当前占用快照证明本车已持有 contested
   section、方向已知、下一跳朝出口前进、出口 edge/node 没有外部 claim，且 hard blocker 只对应同一 section 时，才允许进入最终 signal
   refresh 复判。该分支只输出 `SMART_*_UNLOCK_DRAIN_OUT_ALLOWED` 并触发既有复判，不创建 DRAIN_THROUGH authority、不 force-green、不改
@@ -163,6 +169,7 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 - 若 `TERM` 后仍有定义节点（回库/折返段），运行时会继续推进，不会在 TERM 站台永久拦停。
 - Layover 注册时会触发一次即时复用尝试（不必等待下一轮 spawn tick）。
 - 即时复用只有在 `readyAt` 已到、TrainCarts 句柄确认列车停稳、Waypoint 居中状态已结束且 `DwellRegistry` 不再有真实停站窗口时才进入折返授权；否则保留 Layover 候选，等待后续 spawn tick 重试。Waypoint TERM 的候选会在触牌时登记，实际 dwell 在居中完成后才启动，因此不能只相信预估的 `readyAt`。
+- 下一条交路的 DYNAMIC 站台没有空闲容量时，Layover 不领取 ticket、不执行 authority handoff，也不申请前向进路；候选保持可重试，待站台容量释放后再派发。
 - 同一 `ticketId` 在 `LayoverRegistry` 内最多只有一个 dispatch attempt owner。handoff 前被拒绝会释放 attempt，分配器仍可尝试下一辆 READY 候选；一旦 handoff 留下 attempt，当前 tick 与后续 tick 都只重试该 owner，不能把同一票据同时交给第二辆折返车。pending 的超时、fallback 与人工清理也不能删除 active attempt 对应票据。
 - Layover 出站不再执行“旧方向普通 acquire 后按旧名字全量 release”。运行时通过原子 Authority Handoff 检查外部 blocker、一次性换向，并把尚未证实清界的旧进站 footprint 以内部 `PHYSICAL_FOOTPRINT` 硬角色留作车尾保护；TrainCarts 改名时同时迁移占用 owner、DYNAMIC effective node 与带稳定 ticket attempt 的 Layover 重试候选。
 - handoff 前的完整旧 footprint 由 transient guard 并入通用占用 shrink 与授权回滚的保护集，不使用 TTL；这同时覆盖“旧窗口独有、已转为 `PHYSICAL_FOOTPRINT`”和“与新窗口重叠、已成为反向 `MOVEMENT_REQUIRED`”的资源。释放阈值为“TrainCarts 编组几何得到的保守列车长度 + 从折返节点起至少 `max(1, rear-guard-edges)` 条边的实际方块距离”；只有列车真实图节点事件沿登记的折返后路径逐段连续推进并达到阈值，才解除 sidecar 保护并立即释放仍为 `PHYSICAL_FOOTPRINT` 的旧 claim，重叠 movement claim 随后由正常窗口收缩。重复节点不改变证据，倒退会回退净清界距离；跳点、路径外观测、周期 signal tick、静止重试和 TPS 波动都不能推进证据，列车长度或连续前向路径不足时 fail-retain。

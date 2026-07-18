@@ -292,6 +292,356 @@ class DynamicPlatformAllocatorTest {
     assertEquals(firstId, thirdResult.get().allocatedNode());
   }
 
+  @Test
+  void completedDynamicStopReleasesReservationForFollowingTrain() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("RESERVATION-COMPLETED");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    assertTrue(allocator.tryAllocate("train-first", route, 0, graph, fromId).isPresent());
+    assertFalse(allocator.tryAllocate("train-second", route, 0, graph, fromId).isPresent());
+
+    allocator.releaseCompletedAllocations("train-first", routeId, 2);
+
+    Optional<DynamicPlatformAllocator.AllocationResult> following =
+        allocator.tryAllocate("train-second", route, 0, graph, fromId);
+    assertEquals(platformId, following.orElseThrow().allocatedNode());
+  }
+
+  @Test
+  void renamedOwnerCanReleaseReservationUnderNewName() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("RESERVATION-RENAME");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    assertTrue(allocator.tryAllocate("train-old", route, 0, graph, fromId).isPresent());
+    assertTrue(allocator.migrateAllocations("train-old", "train-new"));
+    assertEquals(Optional.empty(), allocator.getAllocation("train-old", routeId, 0));
+    assertEquals(Optional.of(platformId), allocator.getAllocation("train-new", routeId, 0));
+
+    allocator.releaseCompletedAllocations("train-new", routeId, 2);
+
+    assertEquals(
+        platformId,
+        allocator
+            .tryAllocate("train-following", route, 0, graph, fromId)
+            .orElseThrow()
+            .allocatedNode());
+  }
+
+  @Test
+  void cachedDynamicAllocationReselectsWhenExternalClaimAppears() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+
+    RouteId routeId = RouteId.of("CACHE-REVALIDATE");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    DynamicPlatformAllocator.AllocationResult initial =
+        allocator.tryAllocate("train-cache", route, 0, graph, fromId).orElseThrow();
+    assertEquals(firstId, initial.allocatedNode());
+
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    mockOccupied(firstId, "external-train");
+
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> revalidated =
+        allocator.resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty());
+
+    assertTrue(revalidated.isSelected());
+    assertEquals(secondId, revalidated.selected().orElseThrow().allocatedNode());
+    assertEquals(Optional.of(secondId), allocator.getAllocation("train-cache", routeId, 0));
+  }
+
+  @Test
+  void cachedDynamicAllocationBlocksWhenExternalClaimLeavesNoCandidate() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("CACHE-BLOCKED");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    assertTrue(allocator.tryAllocate("train-cache", route, 0, graph, fromId).isPresent());
+
+    when(occupancyManager.isNodeOccupied(platformId)).thenReturn(true);
+    mockOccupied(platformId, "external-train");
+
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> revalidated =
+        allocator.resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty());
+
+    assertTrue(revalidated.isBlocked());
+    assertEquals("no-available-platform", revalidated.reason());
+    assertEquals(Optional.empty(), allocator.getAllocation("train-cache", routeId, 0));
+  }
+
+  @Test
+  void cachedDynamicAllocationRevalidatesCurrentSpec() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+
+    RouteId routeId = RouteId.of("CACHE-SPEC");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop initialStop = mock(RouteStop.class);
+    when(initialStop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    RouteStop refreshedStop = mock(RouteStop.class);
+    when(refreshedStop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[2:2]"));
+    java.util.concurrent.atomic.AtomicReference<Optional<RouteStop>> currentStop =
+        new java.util.concurrent.atomic.AtomicReference<>(Optional.of(initialStop));
+    when(routeDefinitions.findStop(routeId, 1)).thenAnswer(invocation -> currentStop.get());
+
+    assertEquals(
+        firstId,
+        allocator
+            .tryAllocate("train-cache", route, 0, graph, fromId)
+            .orElseThrow()
+            .allocatedNode());
+    currentStop.set(Optional.of(refreshedStop));
+
+    assertEquals(
+        secondId,
+        allocator
+            .resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty())
+            .selected()
+            .orElseThrow()
+            .allocatedNode());
+  }
+
+  @Test
+  void removedDynamicDefinitionReleasesCachedReservation() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("CACHE-REMOVED");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    java.util.concurrent.atomic.AtomicReference<Optional<RouteStop>> currentStop =
+        new java.util.concurrent.atomic.AtomicReference<>(Optional.of(stop));
+    when(routeDefinitions.findStop(routeId, 1)).thenAnswer(invocation -> currentStop.get());
+
+    assertTrue(allocator.tryAllocate("train-stale", route, 0, graph, fromId).isPresent());
+    currentStop.set(Optional.empty());
+    assertFalse(
+        allocator
+            .resolveAllocation("train-stale", route, 0, graph, fromId, Optional.empty())
+            .isSelected());
+    assertEquals(Optional.empty(), allocator.getAllocation("train-stale", routeId, 0));
+
+    currentStop.set(Optional.of(stop));
+    assertEquals(
+        platformId,
+        allocator
+            .tryAllocate("train-following", route, 0, graph, fromId)
+            .orElseThrow()
+            .allocatedNode());
+  }
+
+  @Test
+  void shortenedRouteReleasesCachedReservationBeforeIndexValidation() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("CACHE-SHORTENED");
+    RouteDefinition originalRoute = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    assertTrue(allocator.tryAllocate("train-stale", originalRoute, 0, graph, fromId).isPresent());
+
+    RouteDefinition shortenedRoute = mock(RouteDefinition.class);
+    when(shortenedRoute.id()).thenReturn(routeId);
+    when(shortenedRoute.waypoints()).thenReturn(java.util.List.of(fromId));
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.resolveAllocation(
+            "train-stale", shortenedRoute, 1, graph, fromId, Optional.empty());
+
+    assertFalse(result.isSelected());
+    assertEquals(Optional.empty(), allocator.getAllocation("train-stale", routeId, 0));
+  }
+
+  @Test
+  void changedStopSequenceReplacesCachedReservationKey() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("CACHE-SEQUENCE");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop initialStop = mock(RouteStop.class);
+    when(initialStop.sequence()).thenReturn(1);
+    when(initialStop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    RouteStop refreshedStop = mock(RouteStop.class);
+    when(refreshedStop.sequence()).thenReturn(2);
+    when(refreshedStop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    java.util.concurrent.atomic.AtomicReference<Optional<RouteStop>> currentStop =
+        new java.util.concurrent.atomic.AtomicReference<>(Optional.of(initialStop));
+    when(routeDefinitions.findStop(routeId, 1)).thenAnswer(invocation -> currentStop.get());
+
+    assertTrue(allocator.tryAllocate("train-cache", route, 0, graph, fromId).isPresent());
+    assertEquals(Optional.of(platformId), allocator.getAllocation("train-cache", routeId, 1));
+    currentStop.set(Optional.of(refreshedStop));
+
+    assertTrue(
+        allocator
+            .resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty())
+            .isSelected());
+    assertEquals(Optional.empty(), allocator.getAllocation("train-cache", routeId, 1));
+    assertEquals(Optional.of(platformId), allocator.getAllocation("train-cache", routeId, 2));
+  }
+
+  @Test
+  void cachedDynamicAllocationDetectsExternalClaimBehindSelfClaim() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+
+    RouteId routeId = RouteId.of("CACHE-ALL-CLAIMS");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    assertEquals(
+        firstId,
+        allocator
+            .tryAllocate("train-cache", route, 0, graph, fromId)
+            .orElseThrow()
+            .allocatedNode());
+    OccupancyResource firstResource = OccupancyResource.forNode(firstId);
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            java.util.List.of(
+                claim(firstResource, "train-cache"), claim(firstResource, "external-train")));
+
+    assertEquals(
+        secondId,
+        allocator
+            .resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty())
+            .selected()
+            .orElseThrow()
+            .allocatedNode());
+  }
+
+  @Test
+  void dynamicAllocationIgnoresClaimOwnedBySameLogicalTrain() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("SELF-CLAIM");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    when(occupancyManager.isNodeOccupied(platformId)).thenReturn(true);
+    mockOccupied(platformId, "Train-Self~A");
+
+    Optional<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.tryAllocate("train-self", route, 0, graph, fromId);
+
+    assertTrue(result.isPresent());
+    assertEquals(platformId, result.orElseThrow().allocatedNode());
+  }
+
+  @Test
+  void dynamicAllocationSharesReservationAcrossSplitAliases() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId platformId = NodeId.of("OP:S:DEST:1");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode platform = mockNode(platformId, new Vector(10, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, platform));
+    mockEdges(platformId);
+
+    RouteId routeId = RouteId.of("SPLIT-RESERVATION");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    Optional<DynamicPlatformAllocator.AllocationResult> splitResult =
+        allocator.tryAllocate("Train-Self~A", route, 0, graph, fromId);
+    Optional<DynamicPlatformAllocator.AllocationResult> rootResult =
+        allocator.tryAllocate("train-self", route, 0, graph, fromId);
+
+    assertEquals(platformId, splitResult.orElseThrow().allocatedNode());
+    assertEquals(platformId, rootResult.orElseThrow().allocatedNode());
+    allocator.clearAllocations("TRAIN-SELF~B");
+    assertEquals(Optional.empty(), allocator.getAllocation("train-self", routeId, 0));
+  }
+
+  @Test
+  void invalidDeclaredDynamicSpecBlocksInsteadOfFallingBackToPlaceholder() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    RouteId routeId = RouteId.of("INVALID-DYNAMIC");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[invalid]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.resolveAllocation("train-invalid", route, 0, graph, fromId, Optional.empty());
+
+    assertTrue(result.isBlocked());
+    assertEquals("invalid-dynamic-spec", result.reason());
+  }
+
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {
     RailNode node = mock(RailNode.class);
     when(node.id()).thenReturn(id);
@@ -312,16 +662,17 @@ class DynamicPlatformAllocatorTest {
 
   private void mockOccupied(NodeId nodeId, String trainName) {
     OccupancyResource resource = OccupancyResource.forNode(nodeId);
-    when(occupancyManager.getClaim(resource))
-        .thenReturn(
-            Optional.of(
-                new OccupancyClaim(
-                    resource,
-                    trainName,
-                    Optional.empty(),
-                    java.time.Instant.EPOCH,
-                    Duration.ZERO,
-                    Optional.empty())));
+    when(occupancyManager.getClaim(resource)).thenReturn(Optional.of(claim(resource, trainName)));
+  }
+
+  private static OccupancyClaim claim(OccupancyResource resource, String trainName) {
+    return new OccupancyClaim(
+        resource,
+        trainName,
+        Optional.empty(),
+        java.time.Instant.EPOCH,
+        Duration.ZERO,
+        Optional.empty());
   }
 
   private static RouteStop dynamicStop() {

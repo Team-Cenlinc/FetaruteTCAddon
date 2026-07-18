@@ -1308,6 +1308,14 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
     when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
     when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            anyString(),
+            any(RouteDefinition.class),
+            any(),
+            any(RailGraph.class),
+            any(Instant.class)))
+        .thenAnswer(
+            invocation -> Optional.of(List.copyOf(invocation.<List<NodeId>>getArgument(2))));
     when(runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
             anyString(), any(RailGraph.class), any(OccupancyRequestContext.class)))
         .thenReturn(true);
@@ -1760,6 +1768,140 @@ class SimpleTicketAssignerLayoverTest {
     OccupancyRequest captured = requestCaptor.getValue();
     assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotThroat)));
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void tickFailsClosedBeforeGateWhenDepotDynamicAuthorityCannotBePrepared() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId actualPlatform = NodeId.of("SURN:S:PPK:1");
+    NodeId dynamicPlaceholder = NodeId.of("DYNAMIC:SURN:PPK:[1:2]");
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    SimpleRailGraph graph = graphWithSingleEdge(depotNode, actualPlatform);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
+
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            anyString(), any(RouteDefinition.class), any(), eq(graph), any(Instant.class)))
+        .thenReturn(Optional.empty());
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R1"), List.of(depotNode, dynamicPlaceholder), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(routeId, route)),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(runtimeDispatchService)
+        .prepareDepotSpawnDynamicAuthority(
+            anyString(), eq(route), eq(route.waypoints()), eq(graph), any(Instant.class));
+    verify(runtimeDispatchService).cancelPreparedDepotSpawnDynamicAuthority(anyString());
+    verify(occupancyManager, never()).canEnterPreview(any(OccupancyRequest.class));
+    verify(occupancyManager, never()).canEnter(any(OccupancyRequest.class));
+    verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+    verify(spawnManager).requeue(any(SpawnTicket.class));
+  }
+
+  @Test
+  void tickUsesPreparedDynamicPlatformForDepotGateAndDestination() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId actualPlatform = NodeId.of("SURN:S:PPK:2");
+    NodeId dynamicPlaceholder = NodeId.of("DYNAMIC:SURN:PPK:[1:2]");
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    Instant now = Instant.parse("2026-07-17T08:00:00Z");
+    UUID worldId = UUID.randomUUID();
+    SimpleRailGraph graph = graphWithSingleEdge(depotNode, actualPlatform);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, now)));
+    SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
+
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            anyString(), any(RouteDefinition.class), any(), eq(graph), eq(now)))
+        .thenReturn(Optional.of(List.of(depotNode, actualPlatform)));
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), any(), anyString(), eq(now)))
+        .thenReturn(Optional.empty());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R1"), List.of(depotNode, dynamicPlaceholder), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(routeId, route)),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, now);
+
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager).canEnterPreview(requestCaptor.capture());
+    OccupancyRequest gateRequest = requestCaptor.getValue();
+    assertTrue(
+        gateRequest
+            .resourceList()
+            .contains(OccupancyResource.forEdge(EdgeId.undirected(depotNode, actualPlatform))));
+    assertTrue(gateRequest.resourceList().contains(OccupancyResource.forNode(actualPlatform)));
+    assertFalse(gateRequest.resourceList().contains(OccupancyResource.forNode(dynamicPlaceholder)));
+    TrainProperties properties = mock(TrainProperties.class);
+    assertTrue(
+        SimpleTicketAssigner.applyPreparedSpawnDestination(
+            properties, List.of(depotNode, actualPlatform)));
+    verify(properties).setDestination(actualPlatform.value());
+    verify(properties, never()).setDestination(dynamicPlaceholder.value());
   }
 
   @Test

@@ -848,6 +848,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       requeue(effectiveTicket, now, "graph-missing");
       return false;
     }
+    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
+    Optional<List<NodeId>> preparedWaypointsOpt =
+        runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            trainName, route, spawnWaypoints, graphOpt.get(), now);
+    if (preparedWaypointsOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, "dynamic-authority-unavailable");
+      return false;
+    }
+    List<NodeId> preparedWaypoints = preparedWaypointsOpt.get();
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
@@ -859,8 +870,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             debugLogger);
     Optional<DepotGateRequest> gateRequestOpt =
         buildDepotSpawnGateRequest(
-            builder, trainName, route, service, effectiveTicket, routeEntity.operationType(), now);
+            builder,
+            trainName,
+            route,
+            preparedWaypoints,
+            service,
+            effectiveTicket,
+            routeEntity.operationType(),
+            now);
     if (gateRequestOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "occupancy-context-failed");
       return false;
@@ -869,6 +888,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     OccupancyRequest request = gateRequest.request();
     if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
         trainName, graphOpt.get(), gateRequest.context())) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "smart-depot-long-single-held");
       return false;
@@ -885,6 +905,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           authorization,
           spawnLease,
           "preview");
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
       return false;
@@ -894,6 +915,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     try {
       groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
     } catch (Exception e) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
@@ -901,6 +923,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     if (groupOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       requeue(effectiveTicket, now, "spawn-failed");
@@ -919,18 +942,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           authorization,
           spawnLease,
           "acquire");
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       destroySpawnedGroup(group);
       requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
       return false;
     }
-    if (group.getProperties() != null && route.waypoints().size() >= 2) {
-      group.getProperties().clearDestinationRoute();
-      group.getProperties().clearDestination();
-      group.getProperties().setDestination(route.waypoints().get(1).value());
+    TrainProperties properties = group.getProperties();
+    if (applyPreparedSpawnDestination(properties, gateRequest.effectiveWaypoints())) {
       applySpawnLifecycleTags(
-          Optional.of(provider), group.getProperties(), service, routeEntity.operationType());
+          Optional.of(provider), properties, service, routeEntity.operationType());
     }
     runtimeDispatchService.refreshSignal(group);
     runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
@@ -2003,6 +2025,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       requeue(effectiveTicket, now, "fallback-graph-missing");
       return false;
     }
+    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
+    Optional<List<NodeId>> preparedWaypointsOpt =
+        runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            trainName, route, spawnWaypoints, graphOpt.get(), now);
+    if (preparedWaypointsOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, "fallback-dynamic-authority-unavailable");
+      return false;
+    }
+    List<NodeId> preparedWaypoints = preparedWaypointsOpt.get();
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
@@ -2014,8 +2047,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             debugLogger);
     Optional<DepotGateRequest> gateRequestOpt =
         buildDepotSpawnGateRequest(
-            builder, trainName, route, service, effectiveTicket, routeEntity.operationType(), now);
+            builder,
+            trainName,
+            route,
+            preparedWaypoints,
+            service,
+            effectiveTicket,
+            routeEntity.operationType(),
+            now);
     if (gateRequestOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "fallback-occupancy-context-failed");
       return false;
@@ -2024,6 +2065,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     OccupancyRequest request = gateRequest.request();
     if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
         trainName, graphOpt.get(), gateRequest.context())) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "fallback-smart-depot-long-single-held");
       return false;
@@ -2040,6 +2082,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           authorization,
           spawnLease,
           "fallback-preview");
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
       return false;
@@ -2049,6 +2092,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     try {
       groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
     } catch (Exception e) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       debugLogger.accept("Layover 降级发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
@@ -2056,6 +2100,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     if (groupOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       requeue(effectiveTicket, now, "fallback-spawn-failed");
@@ -2074,18 +2119,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           authorization,
           spawnLease,
           "fallback-acquire");
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
       occupancyManager.releaseByTrain(trainName);
       destroySpawnedGroup(group);
       requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
       return false;
     }
-    if (group.getProperties() != null && route.waypoints().size() >= 2) {
-      group.getProperties().clearDestinationRoute();
-      group.getProperties().clearDestination();
-      group.getProperties().setDestination(route.waypoints().get(1).value());
+    TrainProperties properties = group.getProperties();
+    if (applyPreparedSpawnDestination(properties, gateRequest.effectiveWaypoints())) {
       applySpawnLifecycleTags(
-          Optional.of(provider), group.getProperties(), service, routeEntity.operationType());
+          Optional.of(provider), properties, service, routeEntity.operationType());
     }
     runtimeDispatchService.refreshSignal(group);
     runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
@@ -2248,11 +2292,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       OccupancyRequestBuilder builder,
       String trainName,
       RouteDefinition route,
+      List<NodeId> spawnWaypoints,
       SpawnService service,
       SpawnTicket ticket,
       RouteOperationType operationType,
       Instant now) {
-    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, ticket);
     int priority =
         DispatchPriorityPolicy.depotSpawnPriority(
             operationType, ticket == null ? 0 : ticket.priority());
@@ -2313,6 +2357,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     int localExitWindow = Math.max(1, runtime.switcherZoneEdges() + 1);
     return Math.max(1, Math.min(runtime.lookaheadEdges(), localExitWindow));
+  }
+
+  /**
+   * 将已通过 Depot gate 的安全节点序列写入 TrainCarts。
+   *
+   * <p>第二个节点必须来自 DYNAMIC materialization 后的 {@link DepotGateRequest#effectiveWaypoints()}，不能回读
+   * route 原始占位节点，否则列车生成成功后会把 destination 写回不可寻路的 DYNAMIC 声明。
+   *
+   * @param properties 已生成列车的属性
+   * @param effectiveWaypoints 本次 gate 实际使用的安全节点序列
+   * @return 已写入首个 destination 时返回 {@code true}
+   */
+  static boolean applyPreparedSpawnDestination(
+      TrainProperties properties, List<NodeId> effectiveWaypoints) {
+    if (properties == null || effectiveWaypoints == null || effectiveWaypoints.size() < 2) {
+      return false;
+    }
+    properties.clearDestinationRoute();
+    properties.clearDestination();
+    properties.setDestination(effectiveWaypoints.get(1).value());
+    return true;
   }
 
   /**

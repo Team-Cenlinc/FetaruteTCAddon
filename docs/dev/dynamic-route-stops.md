@@ -107,12 +107,28 @@ CRET DYNAMIC:SURN:D:DEPOT:[1:3]    # CRET + DYNAMIC 简写
 
 ### 选择规则
 
-1. **Pass 1**：优先选择空闲且可达的轨道（按轨道号升序）
+1. **候选筛选**：优先选择空闲且可达的轨道（按轨道号升序）
    - 检查节点是否存在于调度图
    - 检查节点是否被其他列车占用
    - 检查从当前位置是否可达
 
-2. **Pass 2**：若无空闲轨道，回退到任意可达轨道
+2. **安全背压**：已经声明 DYNAMIC、但当前无法安全 materialize 时返回 `BLOCKED`
+   - 典型原因包括没有空闲且可达的轨道、DYNAMIC 定义无效、图快照缺失、当前位置缺失或占用服务不可用
+   - 不回退到 Route 中仅用于声明的占位 NodeId
+   - 不把已占用站台当成可选目标
+   - 信号 tick / 推进点保持停车，并撤回本车当前全部纯排队位次
+   - Layover 在换向和领取 ticket 前停止本轮派发，等待站台容量恢复
+
+对于尽头站，空闲站台仍然具有最高停靠优先级；站台全满时，进站列车撤回当前全部纯
+queue entry，让已经停靠的列车能够先取得出站进路。已取得的 NODE、EDGE、
+CONFLICT claim 以及列车实际占用的轨道不会因此释放或绕过。
+
+若站台空闲且可达，只是咽喉、单线或道岔暂时繁忙，选择器仍会 materialize 该站台，
+随后由普通授权链进入 FIFO queue；此时不得误报为容量耗尽并反复撤队。授权请求只能到达
+首个已 materialize 的 DYNAMIC 目标，不能借由 lookahead 或原子联锁越过后续声明占位节点。
+Depot spawn gate 同样遵守此边界：若紧邻出库点的是 DYNAMIC，必须先选出实际站台再生成列车；
+若无法选台则在 preview、spawn 与可写 acquire 之前重试，不得用 `fromTrack` 占位节点申请进路或写入
+TrainCarts destination。
 
 ### 占用检查
 
@@ -168,8 +184,8 @@ debug:
 日志示例：
 
 ```
-DYNAMIC 回退: 无空闲站台，选择可达站台 train=Train-001 from=SURN:S:PPK:1 target=SURN:S:END:2
-DYNAMIC 失败: 未找到可达站台 train=Train-001 from=SURN:S:PPK:1 operator=SURN type=S name=END range=1:3
+DYNAMIC 分配失败: 无可用站台 (train=Train-001, spec=SURN:S:END:[1:3])
+DYNAMIC 容量等待: train=Train-001 route=<routeId> index=2 reason=no-available-platform withdrawnQueueEntries=3
 ```
 
 ## DYNAMIC 节点匹配

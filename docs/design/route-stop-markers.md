@@ -25,8 +25,12 @@ ACTION:PAYLOAD[:MORE]
   - Range 省略时默认使用受限候选范围，避免“全站扫描”带来的不可控与卡顿风险；多站台建议显式给范围。
 - 行为（运行时选择顺序，满足“先空闲后可达”语义）：
   - 先筛选“空闲站台”：对应 NODE 资源未被其他列车占用（占用系统快照）。
-  - 再检查可达性 + 占用许可：对每个候选站台构建一次 lookahead 请求并调用 `canEnter()` 验证（含走廊方向/冲突组），选出第一个可进入者。
-  - 若无任何“空闲且可进入”候选，会回退为“可进入的第一个站台”（并输出 debug 日志），用于避免全占用时完全无法选站台。
+  - 再做只读可达性检查；选择器不申请占用、不写 destination。
+  - 已声明 DYNAMIC、但当前无法安全 materialize 时返回明确的 `BLOCKED`；容量耗尽、定义无效以及图/当前位置/占用证据缺失均属于该状态。禁止回退到 Route 占位节点或已占用站台。
+  - 信号 tick / 推进点收到 `BLOCKED` 后保持停车，并撤回本车当前全部纯 queue entry；Layover 则在领取 ticket、换向与进路申请前终止本轮派发。
+  - 站台全满时不会释放或绕过 NODE、EDGE、CONFLICT 等真实 claim；尽头站由已停靠列车优先出站，容量释放后进站列车再重新选择。
+  - 若存在空闲且可达站台、只是咽喉或道岔暂时繁忙，仍先 materialize 站台，再由普通授权链保留 FIFO queue；不得把进路繁忙误判为容量耗尽。
+  - 可写授权窗口与 Depot spawn gate 都到首个已 materialize 的 DYNAMIC 目标为止；更远处未解析的 DYNAMIC 在占位节点前截断，紧邻目标未解析时 fail-closed，原子联锁不得越界扩展，首个 TrainCarts destination 也不得使用 `fromTrack` 占位节点。
   - 选定后只覆盖该 stop 的“有效 NodeId”；普通 TrainCarts destination 必须等 Dispatcher 完成 `canEnter/acquire` 且无 hard blocker 后才写入。
   - DYNAMIC resolver / allocator 不控车、不 launch、不 stop、不 acquire。
   - TODO：将选定站台写回 MetaTag/事件（供 HUD/PIDS 精确显示）。

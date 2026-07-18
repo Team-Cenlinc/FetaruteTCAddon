@@ -84,6 +84,48 @@ class SimpleOccupancyManagerTest {
   }
 
   @Test
+  void removingCapacityBlockedArrivalQueueLetsTerminalDepartureProceedWithoutReleasingClaims() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource throat = OccupancyResource.forConflict("switcher:PPK-THROAT");
+    OccupancyResource arrivalFootprint =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("PPK-A"), NodeId.of("PPK-B")));
+    OccupancyRequest physicalArrival =
+        new OccupancyRequest(
+            "incoming-train", Optional.empty(), now, List.of(arrivalFootprint), Map.of());
+    OccupancyRequest incomingQueue =
+        new OccupancyRequest(
+            "incoming-train",
+            Optional.empty(),
+            now,
+            List.of(throat),
+            Map.of(throat.key(), CorridorDirection.B_TO_A),
+            Map.of(throat.key(), 0),
+            0);
+    OccupancyRequest terminalDeparture =
+        new OccupancyRequest(
+            "turning-train",
+            Optional.empty(),
+            now,
+            List.of(throat),
+            Map.of(throat.key(), CorridorDirection.A_TO_B),
+            Map.of(throat.key(), 0),
+            0);
+
+    assertTrue(manager.acquire(physicalArrival).allowed());
+    manager.touchQueues(incomingQueue);
+    manager.touchQueues(terminalDeparture);
+    assertFalse(manager.canEnterPreview(terminalDeparture).allowed());
+
+    assertEquals(1, manager.removeQueueEntries("incoming-train", List.of(throat)));
+
+    assertTrue(manager.canEnterPreview(terminalDeparture).allowed());
+    assertEquals("incoming-train", manager.getClaim(arrivalFootprint).orElseThrow().trainName());
+  }
+
+  @Test
   void acquireBlocksOtherTrainsUntilRelease() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ofSeconds(10);
     SimpleOccupancyManager manager =
@@ -647,6 +689,104 @@ class SimpleOccupancyManagerTest {
 
     assertFalse(blocked.allowed());
     assertEquals("first", blocked.blockers().get(0).trainName());
+  }
+
+  @Test
+  void switcherConflictReleaseRejectsUnsignedIncumbentClaim() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyRequest unsignedOwner =
+        new OccupancyRequest(
+            "entrant",
+            Optional.empty(),
+            now,
+            List.of(conflict),
+            Map.of(),
+            Map.of(conflict.key(), 0),
+            0);
+    OccupancyRequest clearing =
+        switcherRequest("inside", now.plusSeconds(1), conflict, List.of(switcher, exit))
+            .withConflictReleaseHints(
+                AuthorizationPurpose.CONFLICT_CLEARING,
+                Map.of(conflict.key(), ConflictReleaseHint.verified(conflict.key())));
+
+    assertTrue(manager.acquire(unsignedOwner).allowed());
+    OccupancyDecision decision = manager.canEnter(clearing);
+
+    assertFalse(decision.allowed());
+    assertFalse(decision.conflictRelease());
+    assertEquals("entrant", decision.blockers().get(0).trainName());
+  }
+
+  @Test
+  void switcherReleaseLockCannotBypassLaterSwitcherConflict() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId firstSwitcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId secondSwitcher = NodeId.of("SWITCHER:Towny:-557:77:1193");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    OccupancyResource firstConflict =
+        OccupancyResource.forConflict("switcher:" + firstSwitcher.value());
+    OccupancyResource secondConflict =
+        OccupancyResource.forConflict("switcher:" + secondSwitcher.value());
+    OccupancyRequest firstOwner =
+        switcherRequest("first-owner", now, firstConflict, List.of(firstSwitcher, exit));
+    OccupancyRequest secondOwner =
+        switcherRequest(
+            "second-owner", now.plusMillis(1), secondConflict, List.of(secondSwitcher, exit));
+    OccupancyRequest firstClearing =
+        switcherRequest("inside", now.plusSeconds(1), firstConflict, List.of(firstSwitcher, exit))
+            .withConflictReleaseHints(
+                AuthorizationPurpose.CONFLICT_CLEARING,
+                Map.of(
+                    firstConflict.key(),
+                    ConflictReleaseHint.verifiedSwitcherOccupant(
+                        firstConflict.key(), "test-switcher-occupant")));
+
+    assertTrue(manager.acquire(firstOwner).allowed());
+    OccupancyDecision firstRelease = manager.canEnter(firstClearing);
+    assertTrue(firstRelease.allowed(), firstRelease.toString());
+    assertTrue(firstRelease.conflictRelease());
+    assertTrue(manager.acquire(secondOwner).allowed());
+
+    OccupancyRequest chainedRequest =
+        new OccupancyRequest(
+            "inside",
+            Optional.empty(),
+            now.plusSeconds(2),
+            List.of(firstConflict, secondConflict),
+            Map.of(),
+            Map.of(firstConflict.key(), 0, secondConflict.key(), 1),
+            0,
+            AuthorizationPurpose.CONFLICT_CLEARING,
+            firstClearing.conflictReleaseHints(),
+            Map.of(),
+            firstClearing.directedContext());
+    OccupancyDecision preview = manager.canEnterPreview(chainedRequest);
+    OccupancyDecision decision = manager.acquire(chainedRequest);
+
+    assertFalse(preview.allowed(), preview.toString());
+    assertFalse(preview.conflictRelease());
+    assertFalse(decision.allowed(), decision.toString());
+    assertFalse(decision.conflictRelease());
+    assertTrue(
+        decision.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    secondConflict.equals(blocker.resource())
+                        && blocker.trainName().equals("second-owner")));
+    assertFalse(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    secondConflict.equals(claim.resource()) && claim.trainName().equals("inside")));
   }
 
   @Test

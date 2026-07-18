@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -74,13 +73,13 @@ class DynamicDestinationResolverTest {
             railGraphService,
             message -> {});
 
-    Optional<DynamicDestinationResolver.ResolvedDynamicDestination> result =
+    DynamicResolution<DynamicDestinationResolver.ResolvedDynamicDestination> result =
         resolver.resolveSignalTickDestination(
             "train-dynamic", route, 0, worldId, fromId, Optional.empty());
 
-    assertTrue(result.isPresent());
-    assertEquals(1, result.get().stopIndex());
-    assertEquals(freeId, result.get().node());
+    assertTrue(result.isSelected());
+    assertEquals(1, result.selected().orElseThrow().stopIndex());
+    assertEquals(freeId, result.selected().orElseThrow().node());
     verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
   }
 
@@ -122,11 +121,12 @@ class DynamicDestinationResolverTest {
             railGraphService,
             message -> {});
 
-    Optional<DynamicDestinationResolver.ResolvedDynamicDestination> result =
+    DynamicResolution<DynamicDestinationResolver.ResolvedDynamicDestination> result =
         resolver.resolveSignalTickDestination(
             "train-dynamic", route, 0, worldId, fromId, Optional.empty());
 
-    assertFalse(result.isPresent());
+    assertTrue(result.isBlocked());
+    assertEquals("no-available-platform", result.reason());
     verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
   }
 
@@ -174,7 +174,7 @@ class DynamicDestinationResolverTest {
             railGraphService,
             message -> {});
 
-    Optional<DynamicDestinationResolver.ResolvedDynamicDestination> result =
+    DynamicResolution<DynamicDestinationResolver.ResolvedDynamicDestination> result =
         resolver.resolveSignalTickDestination(
             "train-dynamic",
             route,
@@ -184,8 +184,36 @@ class DynamicDestinationResolverTest {
             Optional.empty(),
             Instant.parse("2026-01-01T00:00:00Z"));
 
-    assertFalse(result.isPresent());
+    assertTrue(result.isBlocked());
     verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
+  }
+
+  @Test
+  void resolverBlocksDeclaredDynamicStopWhenGraphSnapshotIsMissing() {
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    RouteId routeId = RouteId.of("DYNAMIC-GRAPH-MISSING");
+    RouteDefinition route = mock(RouteDefinition.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.waypoints()).thenReturn(Arrays.asList(fromId, NodeId.of("PLACEHOLDER")));
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:2]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    DynamicDestinationResolver resolver =
+        new DynamicDestinationResolver(
+            new DynamicPlatformAllocator(
+                routeDefinitions, mock(OccupancyManager.class), message -> {}),
+            railGraphService,
+            message -> {});
+
+    DynamicResolution<DynamicDestinationResolver.ResolvedDynamicDestination> result =
+        resolver.resolveSignalTickDestination(
+            "train-dynamic", route, 0, UUID.randomUUID(), fromId, Optional.empty());
+
+    assertTrue(result.isBlocked());
+    assertEquals("graph-snapshot-missing", result.reason());
   }
 
   private static RailNode mockNode(RailGraph graph, NodeId id, Vector pos, NodeType type) {

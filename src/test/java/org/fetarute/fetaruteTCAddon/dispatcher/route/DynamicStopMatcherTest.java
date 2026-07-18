@@ -127,9 +127,23 @@ class DynamicStopMatcherTest {
   }
 
   @Test
+  void isDynamicStop_withBareInvalidDirective() {
+    RouteStop stop = createStop("DYNAMIC:");
+    assertTrue(DynamicStopMatcher.isDynamicStop(stop));
+    assertTrue(DynamicStopMatcher.parseDynamicSpec(stop).isEmpty());
+  }
+
+  @Test
   void isDynamicStop_withoutDynamic() {
     RouteStop stop = createStop("STOP dwell=30");
     assertFalse(DynamicStopMatcher.isDynamicStop(stop));
+  }
+
+  @Test
+  void isDynamicStop_doesNotTreatNodeSegmentAsDirective() {
+    RouteStop stop = createStop("CHANGE:OP:DYNAMIC");
+    assertFalse(DynamicStopMatcher.isDynamicStop(stop));
+    assertTrue(DynamicStopMatcher.parseDynamicSpec(stop).isEmpty());
   }
 
   @Test

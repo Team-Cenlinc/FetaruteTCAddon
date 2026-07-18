@@ -705,10 +705,21 @@ public final class SimpleOccupancyManager
         return new OccupancyDecision(
             false, now, SignalAspect.STOP, decision.blockers(), false, hardBlockerReason.get());
       }
+      Optional<OccupancyClaim> unscopedBlocker =
+          firstConflictBlockerOutsideActiveRelease(request, decision.blockers(), now);
+      if (unscopedBlocker.isPresent()) {
+        return new OccupancyDecision(
+            false,
+            now,
+            SignalAspect.STOP,
+            decision.blockers(),
+            false,
+            "conflict-release-unscoped-blocker:" + unscopedBlocker.get().resource());
+      }
     }
     Set<OccupancyResource> blockedResources =
         decision.conflictRelease()
-            ? resolveBlockedResourcesForPartialAcquire(decision, request.trainName())
+            ? resolveBlockedResourcesForPartialAcquire(request, decision, now)
             : Set.of();
     List<OccupancyResource> admittedResources = new ArrayList<>();
     List<OccupancyResource> changedResources = new ArrayList<>();
@@ -4088,15 +4099,25 @@ public final class SimpleOccupancyManager
     return hint != null && hint.verifiedFor(conflict.key());
   }
 
+  private boolean hasVerifiedSwitcherOccupantHint(
+      OccupancyRequest request, OccupancyResource conflict) {
+    if (request == null || conflict == null || !isSwitcherConflictResource(conflict)) {
+      return false;
+    }
+    ConflictReleaseHint hint = request.conflictReleaseHints().get(conflict.key());
+    return hint != null
+        && hint.kind() == ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT
+        && hint.verifiedFor(conflict.key());
+  }
+
   /**
-   * 计算冲突释放时不能写入的 CONFLICT blocker 资源。
+   * 计算冲突释放时不能写入的、且被本车有效 release lock 精确覆盖的 CONFLICT 资源。
    *
-   * <p>冲突释放只能绕过抽象 CONFLICT claim，不能绕过真实 NODE/EDGE 硬占用。硬占用会在 canEnter/acquire 阶段以 {@code
-   * conflict-release-hard-blocker:*} 拒绝。
+   * <p>即使一个请求同时包含多个冲突资源，也只能跳过“hint、release lock 与 blocker key 三者完全一致”的资源。这样前一道岔的短期锁不会顺带绕过后续新出现的道岔。
    */
   private Set<OccupancyResource> resolveBlockedResourcesForPartialAcquire(
-      OccupancyDecision decision, String trainName) {
-    if (decision == null || decision.blockers().isEmpty()) {
+      OccupancyRequest request, OccupancyDecision decision, Instant now) {
+    if (request == null || decision == null || decision.blockers().isEmpty()) {
       return Set.of();
     }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
@@ -4104,10 +4125,10 @@ public final class SimpleOccupancyManager
       if (blocker == null || blocker.resource() == null) {
         continue;
       }
-      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())) {
         continue;
       }
-      if (blocker.resource().kind() != ResourceKind.CONFLICT) {
+      if (!activeReleaseCoversConflict(request, blocker.resource(), now)) {
         continue;
       }
       resources.add(blocker.resource());
@@ -4116,12 +4137,54 @@ public final class SimpleOccupancyManager
   }
 
   /**
+   * 查找未被当前 release lock 精确覆盖的外部冲突 blocker。
+   *
+   * <p>这是 acquire 前的防御性复核：canEnter 的 winner 选择即使未来发生回归，也不能把同一次 {@code conflictRelease} 扩张到另一个
+   * conflict key。
+   */
+  private Optional<OccupancyClaim> firstConflictBlockerOutsideActiveRelease(
+      OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
+    if (request == null || blockers == null || blockers.isEmpty()) {
+      return Optional.empty();
+    }
+    for (OccupancyClaim blocker : blockers) {
+      if (blocker == null
+          || blocker.resource() == null
+          || blocker.resource().kind() != ResourceKind.CONFLICT
+          || TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())) {
+        continue;
+      }
+      if (!activeReleaseCoversConflict(request, blocker.resource(), now)) {
+        return Optional.of(blocker);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 判断指定冲突是否同时具备本请求的已验证 hint 与本车尚未过期的同 key release lock。 */
+  private boolean activeReleaseCoversConflict(
+      OccupancyRequest request, OccupancyResource conflict, Instant now) {
+    if (request == null
+        || conflict == null
+        || conflict.kind() != ResourceKind.CONFLICT
+        || !hasVerifiedConflictReleaseHint(request, conflict)) {
+      return false;
+    }
+    DeadlockReleaseLock lock = deadlockReleaseLocks.get(conflict.key());
+    return lock != null && !lock.isExpired(now) && lock.matches(request.trainName());
+  }
+
+  /**
    * 校验阻塞列车是否都在同一冲突队列内。
    *
-   * <p>用于死锁放行锁生效时的安全校验：允许跳过“队头判断”，但仍需确保阻塞来源来自同一冲突队列。
+   * <p>用于死锁放行锁生效时的安全校验：允许跳过“队头判断”，但仍需确保阻塞来源来自同一冲突队列。switcher 当前 owner 在成功 acquire 后会离开等待队列，因此同一个
+   * switcher resource 上仍保有路径签名的 claim 也属于该冲突；该例外不适用于无方向 single claim。
    */
   private boolean areBlockersInQueue(
-      List<OccupancyClaim> blockers, ConflictQueue queue, String trainName) {
+      List<OccupancyClaim> blockers,
+      ConflictQueue queue,
+      String trainName,
+      OccupancyResource conflict) {
     if (blockers == null || blockers.isEmpty() || queue == null) {
       return false;
     }
@@ -4132,11 +4195,25 @@ public final class SimpleOccupancyManager
       if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
         continue;
       }
-      if (!queue.contains(claim.trainName()) && !isDirectionalConflictClaim(claim)) {
+      if (!conflict.equals(claim.resource())) {
+        return false;
+      }
+      if (!queue.contains(claim.trainName())
+          && !isDirectionalConflictClaim(claim)
+          && !isSignedSwitcherClaimForConflict(claim, conflict)) {
         return false;
       }
     }
     return true;
+  }
+
+  private boolean isSignedSwitcherClaimForConflict(
+      OccupancyClaim claim, OccupancyResource conflict) {
+    return claim != null
+        && conflict != null
+        && isSwitcherConflictResource(conflict)
+        && conflict.equals(claim.resource())
+        && switcherClaimSignature(conflict, claim.trainName()).isPresent();
   }
 
   private boolean isDirectionalConflictClaim(OccupancyClaim claim) {
@@ -4226,7 +4303,7 @@ public final class SimpleOccupancyManager
     if (!containsConflictBlocker(blockers)) {
       return null;
     }
-    // 优先检查：列车是否持有任意冲突资源的放行锁（避免主冲突切换导致信号乒乓）
+    // 优先检查：列车是否持有当前 blocker 所属冲突的放行锁（避免主冲突切换导致信号乒乓）
     OccupancyDecision heldLockDecision = tryResolveByHeldLock(request, blockers, now);
     if (heldLockDecision != null) {
       return heldLockDecision;
@@ -4249,14 +4326,15 @@ public final class SimpleOccupancyManager
         }
         // 当前车持有锁（已在 tryResolveByHeldLock 处理，理论上不会到这里）
       }
-      // 单侧放行优先：必须是全局队头才能触发冲突放行
-      if (!queue.isHeadAny(request.trainName())) {
+      // 普通候选必须是全局队头；已认证的 switcher 实体 occupant 优先清空道口。
+      if (!queue.isHeadAny(request.trainName())
+          && !hasVerifiedSwitcherOccupantHint(request, conflict)) {
         continue;
       }
       if (!hasVerifiedConflictReleaseHint(request, conflict)) {
         continue;
       }
-      if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      if (!areBlockersInQueue(blockers, queue, request.trainName(), conflict)) {
         continue;
       }
       if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
@@ -4281,10 +4359,10 @@ public final class SimpleOccupancyManager
   }
 
   /**
-   * 检查列车是否持有任意冲突资源的有效放行锁。
+   * 检查列车是否持有当前外部 blocker 所属冲突的有效放行锁。
    *
-   * <p>当列车请求多个冲突资源时，每次 tick 的"主冲突"可能因 blockers 变化而切换。 此方法在确定主冲突之前先扫描所有请求的冲突资源，
-   * 若列车持有任意一个有效锁，则直接放行，避免因主冲突切换导致的信号乒乓。
+   * <p>当列车请求多个冲突资源时，每次 tick 的“主冲突”可能因 blockers 变化而切换。此方法在确定主冲突之前扫描请求中的 release lock，但只有 hint、lock
+   * 与全部外部 blocker 都精确指向同一个 conflict key 时才续用；前一道岔的锁不能放行后一道岔。
    */
   private OccupancyDecision tryResolveByHeldLock(
       OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
@@ -4311,11 +4389,13 @@ public final class SimpleOccupancyManager
       if (!hasVerifiedConflictReleaseHint(request, OccupancyResource.forConflict(conflictKey))) {
         continue;
       }
-      // 当前车持有该冲突的锁：直接放行。
-      // 注意：不再检查 areBlockersInQueue，因为：
-      // 1. 锁在创建时已验证过阻塞来源
-      // 2. 锁有效期内阻塞列车可能已离开队列（如推进到下一站），但锁本身就是放行依据
-      // 3. 过度校验会导致持锁列车因 blocker 变化而被拒绝，产生信号乒乓
+      ConflictQueue queue = queues.get(OccupancyResource.forConflict(conflictKey));
+      if (!areBlockersInQueue(
+          blockers, queue, request.trainName(), OccupancyResource.forConflict(conflictKey))) {
+        continue;
+      }
+      // 当前车持有该冲突的锁，且所有 blocker 仍严格属于同一个冲突区；同 key 内的 owner
+      // 可凭方向或 switcher 路径签名在离开等待队列后继续被识别。
       SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
       return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
     }
@@ -4357,7 +4437,7 @@ public final class SimpleOccupancyManager
           continue;
         }
         // 当前车持有锁：跳过队头判断，但仍需确保阻塞来源在同一队列中。
-        if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+        if (!areBlockersInQueue(blockers, queue, request.trainName(), conflict)) {
           continue;
         }
         if (!hasVerifiedConflictReleaseHint(request, conflict)) {
@@ -4366,17 +4446,18 @@ public final class SimpleOccupancyManager
         SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
         return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
       }
-      // 单侧放行优先：必须是全局队头才能触发冲突放行
+      // 普通候选必须是全局队头；已认证的 switcher 实体 occupant 优先清空道口。
       CorridorDirection direction = queueDirectionFor(request, conflict);
       if (!queue.wouldBeHeadAny(
-          request.trainName(),
-          direction,
-          request.priority(),
-          queueEntryOrderFor(request, conflict),
-          now)) {
+              request.trainName(),
+              direction,
+              request.priority(),
+              queueEntryOrderFor(request, conflict),
+              now)
+          && !hasVerifiedSwitcherOccupantHint(request, conflict)) {
         continue;
       }
-      if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      if (!areBlockersInQueue(blockers, queue, request.trainName(), conflict)) {
         continue;
       }
       if (!hasVerifiedConflictReleaseHint(request, conflict)) {

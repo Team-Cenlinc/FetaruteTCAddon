@@ -34,6 +34,7 @@ import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -813,7 +814,6 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             null);
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
-
     service.handleSignalTick(train, false);
 
     assertEquals(1, train.hardStopCalls);
@@ -897,6 +897,715 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleSignalTickHoldsWithoutForwardAuthorityWhenDynamicPlatformsAreFull() {
+    NodeId approach = NodeId.of("OP:W:PPK:1:001");
+    NodeId platformOne = NodeId.of("OP:S:PPK:1");
+    NodeId platformTwo = NodeId.of("OP:S:PPK:2");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("ppk-arrival"), List.of(approach, platformOne), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "incoming-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=ppk-arrival",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailEdge firstApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, platformOne),
+            approach,
+            platformOne,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge secondApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, platformTwo),
+            approach,
+            platformTwo,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                approach, new RailNodeTest(approach),
+                platformOne, new RailNodeTest(platformOne),
+                platformTwo, new RailNodeTest(platformTwo)),
+            Map.of(
+                firstApproach.id(), firstApproach,
+                secondApproach.id(), secondApproach),
+            Set.of());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "ppk-arrival")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings().extraInterfaces(OccupancyQueueSupport.class));
+    AtomicBoolean platformsFull = new AtomicBoolean(true);
+    when(occupancyManager.isNodeOccupied(platformOne))
+        .thenAnswer(invocation -> platformsFull.get());
+    when(occupancyManager.isNodeOccupied(platformTwo))
+        .thenAnswer(invocation -> platformsFull.get());
+    OccupancyResource retainedPhysicalFootprint =
+        OccupancyResource.forEdge(
+            EdgeId.undirected(NodeId.of("PHYSICAL-A"), NodeId.of("PHYSICAL-B")));
+    OccupancyClaim physicalFootprintClaim =
+        new OccupancyClaim(
+            retainedPhysicalFootprint,
+            "incoming-train",
+            Optional.of(route.id()),
+            Instant.EPOCH,
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.PHYSICAL_FOOTPRINT);
+    OccupancyClaim occupiedPlatformClaim =
+        new OccupancyClaim(
+            OccupancyResource.forNode(platformOne),
+            "turning-train",
+            Optional.of(route.id()),
+            Instant.EPOCH,
+            Duration.ZERO,
+            Optional.empty());
+    when(occupancyManager.snapshotClaims())
+        .thenAnswer(
+            invocation ->
+                platformsFull.get()
+                    ? List.of(physicalFootprintClaim, occupiedPlatformClaim)
+                    : List.of(physicalFootprintClaim));
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return platformsFull.get()
+                  ? new OccupancyDecision(
+                      false, request.now(), SignalAspect.STOP, List.of(occupiedPlatformClaim))
+                  : new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    OccupancyQueueSupport queueSupport = (OccupancyQueueSupport) occupancyManager;
+    OccupancyResource staleForwardQueue =
+        OccupancyResource.forConflict("single:ppk-arrival-throat");
+    when(queueSupport.snapshotQueues())
+        .thenReturn(
+            List.of(
+                new OccupancyQueueSnapshot(
+                    staleForwardQueue,
+                    Optional.of(CorridorDirection.B_TO_A),
+                    0,
+                    List.of(
+                        new OccupancyQueueEntry(
+                            "incoming-train",
+                            CorridorDirection.B_TO_A,
+                            Instant.EPOCH,
+                            Instant.EPOCH,
+                            10,
+                            0)))));
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    service.acquireDepartureGate("incoming-train", "ppk-dwell", "station-dwell");
+
+    service.handleSignalTick(train, false);
+
+    ArgumentCaptor<OccupancyRequest> capacityHoldCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager, atLeastOnce()).acquire(capacityHoldCaptor.capture());
+    OccupancyResource approachResource = OccupancyResource.forNode(approach);
+    assertTrue(
+        capacityHoldCaptor.getAllValues().stream()
+            .anyMatch(
+                request ->
+                    request.resourceList().equals(List.of(approachResource))
+                        && request.intentFor(approachResource) == ResourceIntent.HOLD_ONLY));
+    verify(occupancyManager, never())
+        .canEnter(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(occupancyManager, never())
+        .acquire(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(queueSupport, never()).touchQueues(any());
+    verify(queueSupport)
+        .removeQueueEntries(
+            eq("incoming-train"),
+            argThat(resources -> resources.equals(List.of(staleForwardQueue))));
+    verify(occupancyManager, never()).releaseResource(any(), any());
+    verify(tags.properties(), never()).setDestination(any());
+    assertEquals(0, train.launchCalls);
+    assertEquals(SignalAspect.STOP, registry.get("incoming-train").orElseThrow().lastSignal());
+
+    platformsFull.set(false);
+    assertTrue(service.releaseDepartureGate("incoming-train", "ppk-dwell"));
+    service.handleSignalTick(train, false);
+
+    verify(tags.properties()).setDestination(platformOne.value());
+    assertTrue(train.launchCalls > 0);
+  }
+
+  @Test
+  void progressTriggerHoldsWithoutForwardAuthorityWhenDynamicPlatformsAreFull() {
+    NodeId approach = NodeId.of("OP:W:PPK:1:001");
+    NodeId platformOne = NodeId.of("OP:S:PPK:1");
+    NodeId platformTwo = NodeId.of("OP:S:PPK:2");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("ppk-progress"), List.of(approach, platformOne), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "incoming-progress",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=ppk-progress",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailEdge firstApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, platformOne),
+            approach,
+            platformOne,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge secondApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, platformTwo),
+            approach,
+            platformTwo,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                approach, new RailNodeTest(approach),
+                platformOne, new RailNodeTest(platformOne),
+                platformTwo, new RailNodeTest(platformTwo)),
+            Map.of(
+                firstApproach.id(), firstApproach,
+                secondApproach.id(), secondApproach),
+            Set.of());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "ppk-progress")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeRegistry.SignNodeInfo platformInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(
+                platformOne, NodeType.STATION, Optional.empty(), Optional.empty()),
+            worldId,
+            "world",
+            0,
+            64,
+            0);
+    when(signNodeRegistry.findByNodeId(eq(platformOne), any()))
+        .thenReturn(Optional.of(platformInfo));
+    when(signNodeRegistry.findByNodeId(eq(platformTwo), any()))
+        .thenReturn(Optional.of(platformInfo));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(
+                    OccupancyQueueSupport.class,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .dispatcher
+                        .schedule
+                        .occupancy
+                        .OccupancyPreviewSupport
+                        .class));
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(platformOne),
+                    "turning-one",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty()),
+                new OccupancyClaim(
+                    OccupancyResource.forNode(platformTwo),
+                    "turning-two",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(false, request.now(), SignalAspect.STOP, List.of());
+            });
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    com.bergerkiller.bukkit.tc.events.SignActionEvent event =
+        mock(com.bergerkiller.bukkit.tc.events.SignActionEvent.class);
+    org.bukkit.World world = mock(org.bukkit.World.class);
+    when(world.getUID()).thenReturn(worldId);
+    when(event.getWorld()).thenReturn(world);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(approach, NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+
+    assertFalse(service.checkDeparture(train, definition));
+    service.handleProgressTrigger(train, event, definition);
+
+    RouteDefinition stopRoute =
+        new RouteDefinition(
+            RouteId.of("ppk-waypoint-stop"), List.of(approach, platformOne), Optional.empty());
+    TagStore stopTags =
+        new TagStore(
+            "incoming-waypoint-stop",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=ppk-waypoint-stop",
+            "FTA_ROUTE_INDEX=0");
+    when(routeDefinitions.findByCodes("op", "l1", "ppk-waypoint-stop"))
+        .thenReturn(Optional.of(stopRoute));
+    when(routeDefinitions.findStop(stopRoute.id(), 0))
+        .thenReturn(Optional.of(routeStop(0, approach, RouteStopPassType.STOP)));
+    when(routeDefinitions.findStop(stopRoute.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
+    RuntimeDispatchService stopService =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    stopService.handleProgressTrigger(
+        new FakeTrain(worldId, stopTags.properties(), false), event, definition);
+
+    verify(occupancyManager, never())
+        .canEnter(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(occupancyManager, never())
+        .acquire(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify((OccupancyQueueSupport) occupancyManager, never()).touchQueues(any());
+    verify(tags.properties(), never()).setDestination(any());
+    verify(stopTags.properties(), never()).setDestination(any());
+  }
+
+  @Test
+  void freeDynamicPlatformWithBusyThroatKeepsNormalQueuePosition() {
+    NodeId approach = NodeId.of("OP:W:PPK:1:001");
+    NodeId platform = NodeId.of("OP:S:PPK:1");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("ppk-throat-busy"), List.of(approach, platform), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "incoming-throat-wait",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=ppk-throat-busy",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithSingleEdge(approach, platform, 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "ppk-throat-busy"))
+        .thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platform, "DYNAMIC:OP:S:PPK:[1:1]")));
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeRegistry.SignNodeInfo platformInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(platform, NodeType.STATION, Optional.empty(), Optional.empty()),
+            worldId,
+            "world",
+            0,
+            64,
+            0);
+    when(signNodeRegistry.findByNodeId(eq(platform), any())).thenReturn(Optional.of(platformInfo));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(
+                    OccupancyQueueSupport.class,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .dispatcher
+                        .schedule
+                        .occupancy
+                        .OccupancyPreviewSupport
+                        .class));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport preview =
+        (org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport)
+            occupancyManager;
+    when(preview.canEnterPreview(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(false, request.now(), SignalAspect.STOP, List.of());
+            });
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(false, request.now(), SignalAspect.STOP, List.of());
+            });
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    assertFalse(
+        service.checkDeparture(
+            new FakeTrain(worldId, tags.properties(), false),
+            new SignNodeDefinition(
+                approach, NodeType.WAYPOINT, Optional.empty(), Optional.empty())));
+
+    OccupancyQueueSupport queueSupport = (OccupancyQueueSupport) occupancyManager;
+    verify(preview, atLeastOnce())
+        .canEnterPreview(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(queueSupport, atLeastOnce())
+        .touchQueues(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(queueSupport, never()).removeQueueEntries(anyString(), any());
+    verify(tags.properties(), never()).setDestination(any());
+  }
+
+  @Test
+  void depotSpawnAuthorityMaterializesImmediateDynamicPlatformBeforeGate() {
+    NodeId depot = NodeId.of("OP:D:DEPOT:1");
+    NodeId platformOne = NodeId.of("OP:S:PPK:1");
+    NodeId platformTwo = NodeId.of("OP:S:PPK:2");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("depot-immediate-dynamic"), List.of(depot, platformOne), Optional.empty());
+    RailEdge firstApproach =
+        new RailEdge(
+            EdgeId.undirected(depot, platformOne),
+            depot,
+            platformOne,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge secondApproach =
+        new RailEdge(
+            EdgeId.undirected(depot, platformTwo),
+            depot,
+            platformTwo,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                depot, new RailNodeTest(depot),
+                platformOne, new RailNodeTest(platformOne),
+                platformTwo, new RailNodeTest(platformTwo)),
+            Map.of(
+                firstApproach.id(), firstApproach,
+                secondApproach.id(), secondApproach),
+            Set.of());
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(platformOne),
+                    "platform-incumbent",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    when(occupancyManager.isNodeOccupied(platformTwo)).thenReturn(false);
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            mock(ConfigManager.class),
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    Optional<List<NodeId>> prepared =
+        service.prepareDepotSpawnDynamicAuthority(
+            "spawn-dynamic-train", route, route.waypoints(), graph, Instant.EPOCH);
+
+    assertEquals(Optional.of(List.of(depot, platformTwo)), prepared);
+    assertEquals(
+        List.of(depot, platformTwo),
+        service.resolveEffectiveWaypointsForEvent("spawn-dynamic-train", route));
+
+    service.cancelPreparedDepotSpawnDynamicAuthority("spawn-dynamic-train");
+
+    assertEquals(
+        route.waypoints(), service.resolveEffectiveWaypointsForEvent("spawn-dynamic-train", route));
+    verify(occupancyManager, never()).canEnter(any());
+    verify(occupancyManager, never()).acquire(any());
+  }
+
+  @Test
+  void depotSpawnAuthorityStopsBeforeFutureUnmaterializedDynamicPlaceholder() {
+    List<NodeId> nodes = new ArrayList<>();
+    nodes.add(NodeId.of("OP:D:DEPOT:1"));
+    for (int index = 1; index <= DynamicPlatformAllocator.ALLOCATION_EDGE_THRESHOLD + 1; index++) {
+      nodes.add(NodeId.of("OP:W:MID:" + index));
+    }
+    NodeId dynamicPlaceholder = NodeId.of("OP:S:PPK:1");
+    nodes.add(dynamicPlaceholder);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("depot-future-dynamic"), List.copyOf(nodes), Optional.empty());
+    int dynamicIndex = nodes.size() - 1;
+    RailGraph graph = graphWithLinearPath(nodes, 10);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findStop(route.id(), dynamicIndex))
+        .thenReturn(
+            Optional.of(dynamicStop(dynamicIndex, dynamicPlaceholder, "DYNAMIC:OP:S:PPK:[1:2]")));
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            mock(ConfigManager.class),
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    List<NodeId> prepared =
+        service
+            .prepareDepotSpawnDynamicAuthority(
+                "spawn-boundary-train", route, route.waypoints(), graph, Instant.EPOCH)
+            .orElseThrow();
+
+    assertEquals(nodes.subList(0, dynamicIndex), prepared);
+    assertFalse(prepared.contains(dynamicPlaceholder));
+    verify(occupancyManager, never()).canEnter(any());
+    verify(occupancyManager, never()).acquire(any());
+  }
+
+  @Test
+  void layoverDispatchDoesNotClaimTicketWhenNextDynamicPlatformsAreFull() {
+    NodeId terminal = NodeId.of("OP:S:PPK:1");
+    NodeId platformOne = NodeId.of("OP:S:NEXT:1");
+    NodeId platformTwo = NodeId.of("OP:S:NEXT:2");
+    UUID ticketRouteId = UUID.randomUUID();
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of(ticketRouteId.toString()), List.of(terminal, platformOne), Optional.empty());
+    RouteStop terminalStop = routeStop(0, terminal, RouteStopPassType.STOP);
+    RouteStop dynamicStop = dynamicStop(1, platformOne, "DYNAMIC:OP:S:NEXT:[1:2]");
+    TagStore tags = new TagStore("turning-train", "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailEdge firstApproach =
+        new RailEdge(
+            EdgeId.undirected(terminal, platformOne),
+            terminal,
+            platformOne,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge secondApproach =
+        new RailEdge(
+            EdgeId.undirected(terminal, platformTwo),
+            terminal,
+            platformTwo,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                terminal, new RailNodeTest(terminal),
+                platformOne, new RailNodeTest(platformOne),
+                platformTwo, new RailNodeTest(platformTwo)),
+            Map.of(
+                firstApproach.id(), firstApproach,
+                secondApproach.id(), secondApproach),
+            Set.of());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(ticketRouteId)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(route.id())).thenReturn(List.of(terminalStop, dynamicStop));
+    when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(terminalStop));
+    when(routeDefinitions.findStop(route.id(), 1)).thenReturn(Optional.of(dynamicStop));
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeRegistry.SignNodeInfo platformInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(
+                platformOne, NodeType.STATION, Optional.empty(), Optional.empty()),
+            worldId,
+            "world",
+            0,
+            64,
+            0);
+    when(signNodeRegistry.findByNodeId(any(), any())).thenReturn(Optional.of(platformInfo));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(
+                    OccupancyQueueSupport.class,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .dispatcher
+                        .schedule
+                        .occupancy
+                        .OccupancyPreviewSupport
+                        .class));
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(platformOne),
+                    "occupant-one",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty()),
+                new OccupancyClaim(
+                    OccupancyResource.forNode(platformTwo),
+                    "occupant-two",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            signNodeRegistry,
+            layoverRegistry,
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "turning-train",
+            TerminalKeyResolver.toTerminalKey(terminal),
+            terminal,
+            Instant.EPOCH,
+            Map.of());
+    ServiceTicket ticket =
+        new ServiceTicket(
+            "ticket-dynamic-full",
+            Instant.EPOCH,
+            ticketRouteId,
+            candidate.terminalKey(),
+            10,
+            ServiceTicket.TicketMode.OPERATION);
+
+    LayoverDispatchResult result =
+        service.dispatchLayover(
+            candidate, ticket, tags.properties(), new FakeTrain(worldId, tags.properties(), false));
+
+    assertFalse(result.dispatched());
+    assertEquals("dynamic-target-unavailable", result.reason());
+    verify(layoverRegistry, never()).claimDispatch(anyString(), anyString(), anyString());
+    verify(occupancyManager, never())
+        .canEnter(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(occupancyManager, never())
+        .acquire(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(tags.properties(), never()).setDestination(any());
+  }
+
+  @Test
   void handleSignalTickWritesDynamicDestinationAfterAcquireSucceeds() {
     NodeId current = NodeId.of("A");
     NodeId dynamic = NodeId.of("DYNAMIC");
@@ -950,6 +1659,236 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(new FakeTrain(worldId, tags.properties(), false), false);
 
     verify(tags.properties()).setDestination(allocated.value());
+  }
+
+  @Test
+  void departureAuthorityStopsBeforeUnmaterializedFutureDynamicPlaceholder() {
+    NodeId current = NodeId.of("OP:S:START:1");
+    NodeId ordinary = NodeId.of("OP:W:MID:1:001");
+    NodeId dynamicPlaceholder = NodeId.of("OP:S:PPK:1");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("future-dynamic-boundary"),
+            List.of(current, ordinary, dynamicPlaceholder),
+            Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "boundary-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=future-dynamic-boundary",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithLinearPath(route.waypoints(), 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "future-dynamic-boundary"))
+        .thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 2))
+        .thenReturn(Optional.of(dynamicStop(2, dynamicPlaceholder, "DYNAMIC:OP:S:PPK:[1:2]")));
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    assertTrue(
+        service.checkDeparture(
+            new FakeTrain(worldId, tags.properties(), false),
+            new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty())));
+
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager, atLeastOnce()).acquire(requestCaptor.capture());
+    List<OccupancyRequest> movementRequests =
+        requestCaptor.getAllValues().stream()
+            .filter(OccupancyRequest::hasMovementRequiredResources)
+            .toList();
+    assertFalse(movementRequests.isEmpty());
+    assertTrue(
+        movementRequests.stream()
+            .allMatch(
+                request ->
+                    !request
+                        .resourceList()
+                        .contains(OccupancyResource.forNode(dynamicPlaceholder))));
+    assertTrue(
+        movementRequests.stream()
+            .anyMatch(
+                request -> request.resourceList().contains(OccupancyResource.forNode(ordinary))));
+  }
+
+  @Test
+  void signalAuthorityStopsAtFirstMaterializedDynamicTarget() {
+    NodeId current = NodeId.of("OP:W:APPROACH:1:001");
+    NodeId firstPlatform = NodeId.of("OP:S:FIRST:1");
+    NodeId secondPlaceholder = NodeId.of("OP:S:SECOND:1");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("consecutive-dynamic-boundary"),
+            List.of(current, firstPlatform, secondPlaceholder),
+            Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "dynamic-boundary-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=consecutive-dynamic-boundary",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithLinearPath(route.waypoints(), 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "consecutive-dynamic-boundary"))
+        .thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, firstPlatform, "DYNAMIC:OP:S:FIRST:[1:1]")));
+    when(routeDefinitions.findStop(route.id(), 2))
+        .thenReturn(Optional.of(dynamicStop(2, secondPlaceholder, "DYNAMIC:OP:S:SECOND:[1:1]")));
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleSignalTick(new FakeTrain(worldId, tags.properties(), false), false);
+
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager, atLeastOnce()).acquire(requestCaptor.capture());
+    List<OccupancyRequest> movementRequests =
+        requestCaptor.getAllValues().stream()
+            .filter(OccupancyRequest::hasMovementRequiredResources)
+            .toList();
+    assertFalse(movementRequests.isEmpty());
+    assertTrue(
+        movementRequests.stream()
+            .allMatch(
+                request ->
+                    !request
+                        .resourceList()
+                        .contains(OccupancyResource.forNode(secondPlaceholder))));
+    verify(tags.properties()).setDestination(firstPlatform.value());
+  }
+
+  @Test
+  void unresolvedDynamicAfterSwitcherCannotExpandAtomicAuthority() {
+    NodeId current = NodeId.of("OP:S:START:1");
+    NodeId switcher = NodeId.of("switcher:dynamic-boundary");
+    NodeId dynamicPlaceholder = NodeId.of("OP:S:PPK:1");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("switcher-dynamic-boundary"),
+            List.of(current, switcher, dynamicPlaceholder),
+            Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "switcher-boundary-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=switcher-dynamic-boundary",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailEdge entry =
+        new RailEdge(
+            EdgeId.undirected(current, switcher),
+            current,
+            switcher,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge exit =
+        new RailEdge(
+            EdgeId.undirected(switcher, dynamicPlaceholder),
+            switcher,
+            dynamicPlaceholder,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                current, new RailNodeTest(current, NodeType.STATION, Optional.empty()),
+                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+                dynamicPlaceholder,
+                    new RailNodeTest(dynamicPlaceholder, NodeType.STATION, Optional.empty())),
+            Map.of(entry.id(), entry, exit.id(), exit),
+            Set.of());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "switcher-dynamic-boundary"))
+        .thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 2))
+        .thenReturn(Optional.of(dynamicStop(2, dynamicPlaceholder, "DYNAMIC:OP:S:PPK:[1:2]")));
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    assertFalse(
+        service.checkDeparture(
+            new FakeTrain(worldId, tags.properties(), false),
+            new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty())));
+
+    verify(occupancyManager, never())
+        .canEnter(argThat(OccupancyRequest::hasMovementRequiredResources));
+    verify(occupancyManager, never())
+        .acquire(argThat(OccupancyRequest::hasMovementRequiredResources));
   }
 
   @Test
@@ -10425,6 +11364,613 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void switcherOccupantClearingAuthorityLetsInsideTrainGoAndKeepsEntrantHeld() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = createMinimalService(manager, debugMessages);
+
+    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(entry, switcher), entry, switcher, 23, -1.0, true, Optional.empty());
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 33, -1.0, true, Optional.empty());
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
+    OccupancyResource exitEdgeResource = OccupancyResource.forEdge(exitEdge.id());
+    OccupancyResource exitNode = OccupancyResource.forNode(exit);
+
+    OccupancyRequest entrantClaim =
+        switcherTraversalRequest(
+            "entrant",
+            Instant.parse("2026-01-01T00:00:00Z"),
+            8,
+            List.of(entry, switcher, exit),
+            List.of(entryEdge, exitEdge),
+            List.of(switcherConflict));
+    assertTrue(manager.acquire(entrantClaim).allowed());
+    OccupancyRequest queuedOutsider =
+        switcherTraversalRequest(
+            "queued-outsider",
+            Instant.parse("2026-01-01T00:00:00.500Z"),
+            8,
+            List.of(entry, switcher, exit),
+            List.of(entryEdge, exitEdge),
+            List.of(switcherConflict));
+    manager.touchQueues(queuedOutsider);
+    assertEquals(
+        "queued-outsider",
+        manager.snapshotQueues().stream()
+            .filter(queue -> queue.resource().equals(switcherConflict))
+            .findFirst()
+            .orElseThrow()
+            .entries()
+            .get(0)
+            .trainName());
+
+    OccupancyRequest insideFootprint =
+        new OccupancyRequest(
+            "inside",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:01Z"),
+            List.of(switcherNode, exitEdgeResource),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(
+                switcherNode,
+                ResourceIntent.HOLD_ONLY,
+                exitEdgeResource,
+                ResourceIntent.HOLD_ONLY));
+    assertTrue(manager.acquire(insideFootprint).allowed());
+
+    OccupancyRequest insideRequest =
+        switcherTraversalRequest(
+            "inside",
+            Instant.parse("2026-01-01T00:00:02Z"),
+            8,
+            List.of(switcher, exit),
+            List.of(exitEdge),
+            List.of(switcherNode, exitEdgeResource, exitNode, switcherConflict));
+    OccupancyDecision initiallyBlocked = manager.canEnter(insideRequest);
+    assertFalse(initiallyBlocked.allowed());
+    assertEquals(switcherConflict, initiallyBlocked.blockers().get(0).resource());
+
+    OccupancyRequestContext context =
+        new OccupancyRequestContext(insideRequest, List.of(switcher, exit), List.of(exitEdge));
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                entry, new RailNodeTest(entry),
+                switcher, new RailNodeTest(switcher),
+                exit, new RailNodeTest(exit)),
+            Map.of(entryEdge.id(), entryEdge, exitEdge.id(), exitEdge),
+            Set.of());
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "withRuntimeConflictClearingEvidence",
+            OccupancyRequest.class,
+            OccupancyRequestContext.class,
+            RailGraph.class);
+    method.setAccessible(true);
+
+    OccupancyRequest clearingRequest =
+        (OccupancyRequest) method.invoke(service, insideRequest, context, graph);
+
+    assertEquals(AuthorizationPurpose.CONFLICT_CLEARING, clearingRequest.purpose());
+    assertEquals(
+        ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT,
+        clearingRequest.conflictReleaseHints().get(switcherConflict.key()).kind());
+    OccupancyDecision clearingDecision = manager.canEnter(clearingRequest);
+    assertTrue(clearingDecision.allowed(), clearingDecision.toString());
+    assertTrue(clearingDecision.conflictRelease());
+    SignalPublicationGate.Decision publication =
+        invokePublicationGate(service, clearingRequest, clearingDecision);
+    assertEquals(SignalDecisionInputType.DRAIN_THROUGH, publication.inputType());
+    assertEquals(SignalAspect.PROCEED, publication.visibleAspect());
+    assertTrue(manager.acquire(clearingRequest).allowed());
+
+    OccupancyRequest entrantMovement =
+        switcherTraversalRequest(
+            "entrant",
+            Instant.parse("2026-01-01T00:00:03Z"),
+            8,
+            List.of(entry, switcher, exit),
+            List.of(entryEdge, exitEdge),
+            List.of(switcherConflict, switcherNode, exitEdgeResource, exitNode));
+    OccupancyDecision entrantDecision = manager.canEnter(entrantMovement);
+
+    assertFalse(entrantDecision.allowed());
+    assertTrue(
+        entrantDecision.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    blocker.trainName().equals("inside")
+                        && (blocker.resource().equals(switcherNode)
+                            || blocker.resource().equals(exitEdgeResource))));
+    assertEquals("entrant", manager.getClaim(switcherConflict).orElseThrow().trainName());
+    assertEquals("inside", manager.getClaim(switcherNode).orElseThrow().trainName());
+    assertEquals("inside", manager.getClaim(exitEdgeResource).orElseThrow().trainName());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SWITCHER_DRAIN_THROUGH_AUTHORITY")
+                        && message.contains("train=inside")));
+  }
+
+  @Test
+  void switcherOccupantKeepsClearingAuthorityWhenEntrantClaimsAfterPlanSnapshot() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-581:65:643");
+    NodeId exit = NodeId.of("SWITCHER:Towny:-583:65:650");
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 8, -1.0, true, Optional.empty());
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
+    OccupancyResource exitEdgeResource = OccupancyResource.forEdge(exitEdge.id());
+    OccupancyResource exitNode = OccupancyResource.forNode(exit);
+    OccupancyManager manager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(OccupancyAdvisoryPreviewSupport.class));
+    when(manager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    switcherNode,
+                    "departing",
+                    Optional.empty(),
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.HOLD_ONLY),
+                new OccupancyClaim(
+                    exitEdgeResource,
+                    "departing",
+                    Optional.empty(),
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.HOLD_ONLY)));
+    OccupancyAdvisoryPreviewSupport advisorySupport = (OccupancyAdvisoryPreviewSupport) manager;
+    when(advisorySupport.scanAdvisoryRisks(any()))
+        .thenReturn(
+            List.of(
+                new AdvisoryRisk(
+                    switcherConflict,
+                    new OccupancyClaim(
+                        switcherConflict,
+                        "entrant",
+                        Optional.empty(),
+                        Instant.parse("2026-01-01T00:00:02Z"),
+                        Duration.ZERO,
+                        Optional.empty(),
+                        ClaimRole.MOVEMENT_REQUIRED),
+                    AdvisoryRiskSource.ACTIVE_SWITCHER_CONFLICT,
+                    "late-switcher-claim")));
+    RuntimeDispatchService service = createMinimalService(manager, debugMessages);
+
+    OccupancyRequest insideRequest =
+        switcherTraversalRequest(
+            "departing",
+            Instant.parse("2026-01-01T00:00:01Z"),
+            0,
+            List.of(switcher, exit),
+            List.of(exitEdge),
+            List.of(switcherNode, exitEdgeResource, exitNode, switcherConflict));
+    OccupancyRequestContext context =
+        new OccupancyRequestContext(insideRequest, List.of(switcher, exit), List.of(exitEdge));
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+                exit, new RailNodeTest(exit, NodeType.SWITCHER, Optional.empty())),
+            Map.of(exitEdge.id(), exitEdge),
+            Set.of());
+
+    OccupancyRequest clearingRequest =
+        invokeRuntimeConflictClearingEvidence(service, insideRequest, context, graph);
+
+    assertEquals(AuthorizationPurpose.CONFLICT_CLEARING, clearingRequest.purpose());
+    assertEquals(
+        ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT,
+        clearingRequest.conflictReleaseHints().get(switcherConflict.key()).kind());
+    OccupancyDecision authorizationDecision =
+        new OccupancyDecision(
+            true,
+            Instant.parse("2026-01-01T00:00:01Z"),
+            SignalAspect.PROCEED,
+            List.of(),
+            false,
+            "none");
+
+    OccupancyDecision advisoryDecision =
+        invokeAdvisoryPreviewDecision(
+            service, insideRequest.asLookaheadPreview(), authorizationDecision, clearingRequest);
+    assertEquals(SignalAspect.PROCEED, advisoryDecision.signal());
+    assertTrue(
+        advisoryDecision.blockers().stream()
+            .noneMatch(blocker -> switcherConflict.equals(blocker.resource())));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SWITCHER_DRAIN_THROUGH_AUTHORITY")
+                        && message.contains("train=departing")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DRAIN_THROUGH_ADVISORY_RISK_SUPPRESSED")
+                        && message.contains("conflictKey=" + switcherConflict.key())));
+  }
+
+  @Test
+  void periodicSignalTickLetsFirstLegSwitcherOccupantDrainThrough() {
+    List<String> debugMessages = new ArrayList<>();
+    Instant claimTime = Instant.parse("2026-01-01T00:00:00Z");
+    String trainName = "inside";
+    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(entry, switcher), entry, switcher, 23, -1.0, true, Optional.empty());
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 33, -1.0, true, Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                entry, new RailNodeTest(entry),
+                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+                exit, new RailNodeTest(exit)),
+            Map.of(entryEdge.id(), entryEdge, exitEdge.id(), exitEdge),
+            Set.of());
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
+    OccupancyResource exitEdgeResource = OccupancyResource.forEdge(exitEdge.id());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyRequest entrantClaim =
+        switcherTraversalRequest(
+            "entrant",
+            claimTime,
+            0,
+            List.of(entry, switcher, exit),
+            List.of(entryEdge, exitEdge),
+            List.of(switcherConflict));
+    assertTrue(manager.acquire(entrantClaim).allowed());
+    OccupancyRequest insideFootprint =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            claimTime.plusSeconds(1),
+            List.of(switcherNode, exitEdgeResource),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(
+                switcherNode,
+                ResourceIntent.HOLD_ONLY,
+                exitEdgeResource,
+                ResourceIntent.HOLD_ONLY));
+    assertTrue(manager.acquire(insideFootprint).allowed());
+
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(entry, exit), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            trainName,
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RouteProgressRegistry progressRegistry = new RouteProgressRegistry();
+    progressRegistry.initFromTags(trainName, tags.properties(), route);
+    progressRegistry.updateLastPassedGraphNode(trainName, switcher, claimTime.plusSeconds(2));
+    progressRegistry.updateSignal(trainName, SignalAspect.STOP, claimTime.plusSeconds(2));
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(1, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(20.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            railGraphService,
+            routeDefinitions,
+            progressRegistry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+
+    service.handleSignalTick(train, true);
+
+    assertEquals(1, train.launchCalls, debugMessages.toString());
+    assertEquals(
+        SignalAspect.PROCEED,
+        progressRegistry.get(trainName).orElseThrow().lastSignal(),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SWITCHER_DRAIN_THROUGH_AUTHORITY")
+                        && message.contains("train=" + trainName)),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DRAIN_THROUGH_ADVISORY_RISK_SUPPRESSED")
+                        && message.contains("conflictKey=" + switcherConflict.key())),
+        debugMessages.toString());
+    assertEquals("entrant", manager.getClaim(switcherConflict).orElseThrow().trainName());
+    assertEquals(trainName, manager.getClaim(switcherNode).orElseThrow().trainName());
+    assertEquals(trainName, manager.getClaim(exitEdgeResource).orElseThrow().trainName());
+  }
+
+  @Test
+  void drainThroughAdvisoryFilterKeepsOtherSwitcherRisk() throws Exception {
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    NodeId releasedSwitcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId otherSwitcher = NodeId.of("SWITCHER:Towny:-557:77:1193");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    RailEdge releasedExit =
+        new RailEdge(
+            EdgeId.undirected(releasedSwitcher, exit),
+            releasedSwitcher,
+            exit,
+            33,
+            -1.0,
+            true,
+            Optional.empty());
+    OccupancyResource releasedConflict =
+        OccupancyResource.forConflict("switcher:" + releasedSwitcher.value());
+    OccupancyResource otherConflict =
+        OccupancyResource.forConflict("switcher:" + otherSwitcher.value());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(
+                switcherTraversalRequest(
+                    "released-owner",
+                    now,
+                    0,
+                    List.of(releasedSwitcher, exit),
+                    List.of(releasedExit),
+                    List.of(releasedConflict)))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                switcherTraversalRequest(
+                    "other-owner",
+                    now.plusMillis(1),
+                    0,
+                    List.of(otherSwitcher, exit),
+                    List.of(
+                        new RailEdge(
+                            EdgeId.undirected(otherSwitcher, exit),
+                            otherSwitcher,
+                            exit,
+                            20,
+                            -1.0,
+                            true,
+                            Optional.empty())),
+                    List.of(otherConflict)))
+            .allowed());
+    RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
+    OccupancyRequest authorizationRequest =
+        switcherTraversalRequest(
+                "inside",
+                now.plusSeconds(1),
+                0,
+                List.of(releasedSwitcher, exit),
+                List.of(releasedExit),
+                List.of(releasedConflict))
+            .withConflictReleaseHints(
+                AuthorizationPurpose.CONFLICT_CLEARING,
+                Map.of(
+                    releasedConflict.key(),
+                    org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictReleaseHint
+                        .verifiedSwitcherOccupant(releasedConflict.key(), "test")));
+    OccupancyDecision authorizationDecision =
+        new OccupancyDecision(
+            true,
+            authorizationRequest.now(),
+            SignalAspect.PROCEED,
+            List.of(manager.getClaim(releasedConflict).orElseThrow()),
+            true);
+    OccupancyRequest advisoryRequest =
+        new OccupancyRequest(
+                "inside",
+                Optional.empty(),
+                now.plusSeconds(1),
+                List.of(releasedConflict, otherConflict),
+                Map.of())
+            .asLookaheadPreview();
+
+    OccupancyDecision advisoryDecision =
+        invokeAdvisoryPreviewDecision(
+            service, advisoryRequest, authorizationDecision, authorizationRequest);
+
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, advisoryDecision.signal());
+    assertFalse(
+        advisoryDecision.blockers().stream()
+            .anyMatch(blocker -> releasedConflict.equals(blocker.resource())));
+    assertTrue(
+        advisoryDecision.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    otherConflict.equals(blocker.resource())
+                        && blocker.trainName().equals("other-owner")));
+  }
+
+  @Test
+  void approachingTrainCannotClaimSwitcherDrainAuthority() throws Exception {
+    NodeId entry = NodeId.of("ENTRY");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("EXIT");
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(entry, switcher), entry, switcher, 23, -1.0, true, Optional.empty());
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 33, -1.0, true, Optional.empty());
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource entryNode = OccupancyResource.forNode(entry);
+    OccupancyManager manager = mock(OccupancyManager.class);
+    when(manager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    conflict,
+                    "incumbent",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.MOVEMENT_REQUIRED),
+                new OccupancyClaim(
+                    entryNode,
+                    "approaching",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.HOLD_ONLY)));
+    RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
+    OccupancyRequest request =
+        switcherTraversalRequest(
+            "approaching",
+            Instant.parse("2026-01-01T00:00:02Z"),
+            8,
+            List.of(entry, switcher, exit),
+            List.of(entryEdge, exitEdge),
+            List.of(entryNode, conflict));
+    OccupancyRequestContext context =
+        new OccupancyRequestContext(
+            request, List.of(entry, switcher, exit), List.of(entryEdge, exitEdge));
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                entry, new RailNodeTest(entry),
+                switcher, new RailNodeTest(switcher),
+                exit, new RailNodeTest(exit)),
+            Map.of(entryEdge.id(), entryEdge, exitEdge.id(), exitEdge),
+            Set.of());
+
+    OccupancyRequest result =
+        invokeRuntimeConflictClearingEvidence(service, request, context, graph);
+
+    assertEquals(AuthorizationPurpose.RUNTIME_MOVE, result.purpose());
+    assertTrue(result.conflictReleaseHints().isEmpty());
+  }
+
+  @Test
+  void switcherOccupantCannotBypassExternalExitNode() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("EXIT");
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 33, -1.0, true, Optional.empty());
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
+    OccupancyResource exitNode = OccupancyResource.forNode(exit);
+    OccupancyManager manager = mock(OccupancyManager.class);
+    when(manager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    conflict,
+                    "entrant",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.MOVEMENT_REQUIRED),
+                new OccupancyClaim(
+                    switcherNode,
+                    "inside",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.HOLD_ONLY),
+                new OccupancyClaim(
+                    exitNode,
+                    "external",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.MOVEMENT_REQUIRED)));
+    RuntimeDispatchService service = createMinimalService(manager, debugMessages);
+    OccupancyRequest request =
+        switcherTraversalRequest(
+            "inside",
+            Instant.parse("2026-01-01T00:00:02Z"),
+            8,
+            List.of(switcher, exit),
+            List.of(exitEdge),
+            List.of(switcherNode, OccupancyResource.forEdge(exitEdge.id()), exitNode, conflict));
+    OccupancyRequestContext context =
+        new OccupancyRequestContext(request, List.of(switcher, exit), List.of(exitEdge));
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                switcher, new RailNodeTest(switcher),
+                exit, new RailNodeTest(exit)),
+            Map.of(exitEdge.id(), exitEdge),
+            Set.of());
+
+    OccupancyRequest result =
+        invokeRuntimeConflictClearingEvidence(service, request, context, graph);
+
+    assertEquals(AuthorizationPurpose.RUNTIME_MOVE, result.purpose());
+    assertTrue(result.conflictReleaseHints().isEmpty());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DRAIN_THROUGH_BLOCKED")
+                        && message.contains("blockerResource=NODE:EXIT")
+                        && message.contains("blockerOwner=external")));
+  }
+
+  @Test
   void hardStopToProceedRequiresAcquireCommit() throws Exception {
     RuntimeDispatchService service = createMinimalService();
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
@@ -13639,6 +15185,128 @@ class RuntimeDispatchServiceTest {
             .allowed());
     assertTrue(manager.selfOwnedStaleRetainReleaseCandidate("train-1").isPresent());
     return manager;
+  }
+
+  private static OccupancyRequest switcherTraversalRequest(
+      String trainName,
+      Instant now,
+      int currentIndex,
+      List<NodeId> pathNodes,
+      List<RailEdge> pathEdges,
+      List<OccupancyResource> resources) {
+    if (pathNodes.size() != pathEdges.size() + 1) {
+      throw new IllegalArgumentException("pathNodes 与 pathEdges 数量不匹配");
+    }
+    List<DirectedTraversalContext.DirectedEdge> directedEdges = new ArrayList<>();
+    for (int index = 0; index < pathEdges.size(); index++) {
+      directedEdges.add(
+          new DirectedTraversalContext.DirectedEdge(
+              pathEdges.get(index).id(), pathNodes.get(index), pathNodes.get(index + 1)));
+    }
+    Map<String, Integer> entryOrders = new LinkedHashMap<>();
+    Map<String, DirectedTraversalContext.SwitcherPathSignature> switcherSignatures =
+        new LinkedHashMap<>();
+    for (OccupancyResource resource : resources) {
+      if (resource.kind() != ResourceKind.CONFLICT) {
+        continue;
+      }
+      entryOrders.put(resource.key(), entryOrders.size());
+      if (resource.key().startsWith("switcher:")) {
+        switcherSignatures.put(
+            resource.key(),
+            new DirectedTraversalContext.SwitcherPathSignature(resource.key(), pathNodes));
+      }
+    }
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            now,
+            resources,
+            Map.of(),
+            entryOrders,
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE);
+    return request.withDirectedContext(
+        Optional.of(
+            new DirectedTraversalContext(
+                trainName,
+                Optional.empty(),
+                currentIndex,
+                Optional.of(pathNodes.get(0)),
+                Optional.empty(),
+                Optional.of(pathNodes.get(0)),
+                pathNodes.size() < 2 ? Optional.empty() : Optional.of(pathNodes.get(1)),
+                pathNodes,
+                directedEdges,
+                Map.of(),
+                switcherSignatures,
+                "TEST",
+                1L,
+                1L,
+                "switcher-" + trainName,
+                Optional.empty())));
+  }
+
+  private static OccupancyRequest invokeRuntimeConflictClearingEvidence(
+      RuntimeDispatchService service,
+      OccupancyRequest request,
+      OccupancyRequestContext context,
+      RailGraph graph)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "withRuntimeConflictClearingEvidence",
+            OccupancyRequest.class,
+            OccupancyRequestContext.class,
+            RailGraph.class);
+    method.setAccessible(true);
+    return (OccupancyRequest) method.invoke(service, request, context, graph);
+  }
+
+  private static SignalPublicationGate.Decision invokePublicationGate(
+      RuntimeDispatchService service, OccupancyRequest request, OccupancyDecision decision)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "evaluatePublicationGate",
+            String.class,
+            OccupancyRequest.class,
+            OccupancyDecision.class,
+            SignalAspect.class,
+            boolean.class,
+            SignalComputationTrace.TokenState.class);
+    method.setAccessible(true);
+    return (SignalPublicationGate.Decision)
+        method.invoke(
+            service,
+            request.trainName(),
+            request,
+            decision,
+            SignalAspect.PROCEED,
+            false,
+            SignalComputationTrace.TokenState.ACTIVE);
+  }
+
+  private static OccupancyDecision invokeAdvisoryPreviewDecision(
+      RuntimeDispatchService service,
+      OccupancyRequest advisoryRequest,
+      OccupancyDecision fallback,
+      OccupancyRequest authorizationRequest)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "previewAdvisoryLookaheadReadOnly",
+            OccupancyRequest.class,
+            OccupancyDecision.class,
+            OccupancyRequest.class,
+            OccupancyDecision.class);
+    method.setAccessible(true);
+    Object result =
+        method.invoke(service, advisoryRequest, fallback, authorizationRequest, fallback);
+    java.lang.reflect.Method decisionAccessor = result.getClass().getDeclaredMethod("decision");
+    decisionAccessor.setAccessible(true);
+    return (OccupancyDecision) decisionAccessor.invoke(result);
   }
 
   private static OccupancyRequest singleConflictRequest(

@@ -67,6 +67,9 @@ public final class DynamicStopMatcher {
   private static final Pattern ACTION_PREFIX_PATTERN =
       Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
+  private static final Pattern DYNAMIC_DIRECTIVE_PATTERN =
+      Pattern.compile("(?:^|\\s)DYNAMIC(?:$|[\\s:])", Pattern.CASE_INSENSITIVE);
+
   private DynamicStopMatcher() {}
 
   /**
@@ -79,8 +82,8 @@ public final class DynamicStopMatcher {
     if (stop == null || stop.notes().isEmpty()) {
       return false;
     }
-    Optional<String> target = findDirectiveTarget(stop, "DYNAMIC");
-    return target.isPresent();
+    String raw = stop.notes().orElse("");
+    return DYNAMIC_DIRECTIVE_PATTERN.matcher(raw).find();
   }
 
   /**
@@ -376,13 +379,9 @@ public final class DynamicStopMatcher {
       }
       // 特殊处理 "CRET DYNAMIC:..." 格式
       if ("DYNAMIC".equalsIgnoreCase(prefix)) {
-        // 检查是否包含 DYNAMIC
-        int dynamicIdx = trimmed.toUpperCase(Locale.ROOT).indexOf("DYNAMIC");
-        if (dynamicIdx >= 0) {
-          String afterDynamic = trimmed.substring(dynamicIdx + "DYNAMIC".length()).trim();
-          if (afterDynamic.startsWith(":")) {
-            afterDynamic = afterDynamic.substring(1).trim();
-          }
+        java.util.regex.Matcher dynamicMatcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(trimmed);
+        if (dynamicMatcher.find()) {
+          String afterDynamic = trimmed.substring(dynamicMatcher.end()).trim();
           if (!afterDynamic.isBlank()) {
             return Optional.of(afterDynamic);
           }
