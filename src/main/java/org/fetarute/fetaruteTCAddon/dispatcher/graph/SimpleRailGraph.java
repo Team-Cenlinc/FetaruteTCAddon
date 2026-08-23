@@ -7,27 +7,47 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
 /** 线程安全的不可变调度图快照实现。 */
-public final class SimpleRailGraph implements RailGraph, RailGraphSectionSupport {
+public final class SimpleRailGraph
+    implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
 
   private final Map<NodeId, RailNode> nodesById;
   private final Map<EdgeId, RailEdge> edgesById;
   private final Map<NodeId, Set<RailEdge>> edgesFrom;
   private final Set<EdgeId> blockedEdges;
+  private final RailInterlockingState interlockingState;
   private volatile RailGraphConflictIndex conflictIndex;
   private volatile SingleLineSectionIndex sectionIndex;
 
   public SimpleRailGraph(
       Map<NodeId, RailNode> nodesById, Map<EdgeId, RailEdge> edgesById, Set<EdgeId> blockedEdges) {
+    this(nodesById, edgesById, blockedEdges, RailInterlockingState.unavailable());
+  }
+
+  /**
+   * 创建携带世界级物理联锁状态的不可变图快照。
+   *
+   * @param nodesById 节点快照
+   * @param edgesById 区间快照
+   * @param blockedEdges 已封锁区间
+   * @param interlockingState 与区间 universe 同版本的联锁状态
+   */
+  public SimpleRailGraph(
+      Map<NodeId, RailNode> nodesById,
+      Map<EdgeId, RailEdge> edgesById,
+      Set<EdgeId> blockedEdges,
+      RailInterlockingState interlockingState) {
     Objects.requireNonNull(nodesById, "nodesById");
     Objects.requireNonNull(edgesById, "edgesById");
     Objects.requireNonNull(blockedEdges, "blockedEdges");
     this.nodesById = Map.copyOf(nodesById);
     this.edgesById = Map.copyOf(edgesById);
     this.blockedEdges = Set.copyOf(blockedEdges);
+    this.interlockingState = Objects.requireNonNull(interlockingState, "interlockingState");
     this.edgesFrom = buildAdjacency(this.nodesById, this.edgesById);
   }
 
@@ -48,6 +68,15 @@ public final class SimpleRailGraph implements RailGraph, RailGraphSectionSupport
     return edgesById.values();
   }
 
+  /** 使用不可变 edge 索引执行常数时间查询。 */
+  @Override
+  public Optional<RailEdge> findEdge(EdgeId id) {
+    if (id == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(edgesById.get(EdgeId.undirected(id.a(), id.b())));
+  }
+
   @Override
   public Optional<RailNode> findNode(NodeId id) {
     Objects.requireNonNull(id, "id");
@@ -64,6 +93,12 @@ public final class SimpleRailGraph implements RailGraph, RailGraphSectionSupport
   public boolean isBlocked(EdgeId id) {
     Objects.requireNonNull(id, "id");
     return blockedEdges.contains(id);
+  }
+
+  /** 返回与当前图快照同时构建的物理联锁状态。 */
+  @Override
+  public RailInterlockingState interlockingState() {
+    return interlockingState;
   }
 
   /**

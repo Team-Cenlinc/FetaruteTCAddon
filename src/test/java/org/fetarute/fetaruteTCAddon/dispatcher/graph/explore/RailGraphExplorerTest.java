@@ -9,10 +9,36 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
 
 final class RailGraphExplorerTest {
+
+  @Test
+  void exposesCompletePhysicalFootprintForSynchronousBfs() {
+    InMemoryRailBlockAccess access = InMemoryRailBlockAccess.line(0, 2);
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+
+    ExploredRailEdge edge =
+        RailGraphExplorer.exploreEdges(
+                Map.of(
+                    a, Set.of(new RailBlockPos(0, 0, 0)),
+                    b, Set.of(new RailBlockPos(2, 0, 0))),
+                access,
+                64)
+            .get(EdgeId.undirected(a, b));
+
+    assertTrue(edge.footprint().complete());
+    assertEquals(
+        Set.of(
+            new RailFootprintCell(0, 0, 0),
+            new RailFootprintCell(1, 0, 0),
+            new RailFootprintCell(2, 0, 0)),
+        edge.footprint().cells());
+  }
 
   @Test
   void exploresDirectDistanceOnSimpleLine() {
@@ -107,6 +133,11 @@ final class RailGraphExplorerTest {
     @Override
     public Set<RailBlockPos> neighbors(RailBlockPos pos) {
       return adjacency.getOrDefault(pos, Set.of());
+    }
+
+    @Override
+    public boolean supportsExactBlockFootprint() {
+      return true;
     }
   }
 }

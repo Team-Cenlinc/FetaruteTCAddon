@@ -3,7 +3,9 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
+import com.bergerkiller.bukkit.tc.controller.components.RailPath;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
+import com.bergerkiller.bukkit.tc.controller.components.RailTracker;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
@@ -20,6 +22,10 @@ import org.bukkit.block.BlockFace;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailPathFootprintRasterizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailPathOccupancySliceResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
@@ -36,6 +42,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   private static final double MIN_LENGTH_PER_MEMBER_BLOCKS = 2.0;
   private static final double END_FOOTPRINT_PADDING_BLOCKS = 2.0;
   private static final double CURVE_PADDING_PER_GAP_BLOCKS = 0.25;
+  private static final int MAX_LIVE_BODY_WALK_STEPS = 256;
+  private static final double MAX_LIVE_BODY_WALK_DISTANCE_BLOCKS = 512.0;
+  private static final double LIVE_BODY_WALK_EPSILON = 1.0e-6;
 
   private final MinecartGroup group;
 
@@ -168,6 +177,387 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     return Double.isFinite(conservativeEstimate) && conservativeEstimate > 0.0
         ? OptionalDouble.of(conservativeEstimate)
         : OptionalDouble.empty();
+  }
+
+  /**
+   * 读取整列从车头到列尾的实时轨道路径足迹。
+   *
+   * <p>使用 group rail tracker 的 TrackedRail 链，而不是只采样各车厢中心方块；这样会包含车厢之间的曲线、坡道和中间轨道。整列位于同一条长 TCCoasters
+   * 路径时，投影每节车公开的前后轮绝对位置，并按真实 cartLength 补足轮轴到车体端部的余量，只离散完整车体覆盖的局部切片；跨多个路径时保守保留 tracker
+   * 全部路径，并从每节车中心沿正反方向继续行走半车长与方块边界余量。若 TrainCarts 已提供完整、连续且同世界的 {@code TrackedRail} block 链，但自定义轨道的
+   * {@link RailPath} 或 body-walk 无法解析，则退回该链声明的全部实际占用方块；这是更保守的真实现场证据，而非由 route 或实体坐标猜测。任一
+   * disconnected 段、跨世界、成员覆盖缺失、物理模型矛盾或 tracker 本身缺失时仍返回 empty。
+   */
+  @Override
+  public Optional<Set<RailFootprintCell>> liveRailFootprintCells() {
+    return observeLiveRailFootprint().cells();
+  }
+
+  @Override
+  @SuppressFBWarnings(
+      value = "BC_UNCONFIRMED_CAST_OF_RETURN_VALUE",
+      justification = "TrainCarts 的 MinecartMember#getEntity 泛型契约保证返回该成员对应的 CommonMinecart")
+  public LiveRailFootprintObservation observeLiveRailFootprint() {
+    if (!group.isValid()) {
+      return unavailable(LiveRailFootprintObservation.FailureReason.INVALID_GROUP, "group-invalid");
+    }
+    if (group.getRailTracker() == null) {
+      return unavailable(
+          LiveRailFootprintObservation.FailureReason.GROUP_RAIL_TRACKER_MISSING,
+          "group-rail-tracker-null");
+    }
+    java.util.List<RailTracker.TrackedRail> liveRailInformation =
+        group.getRailTracker().getRailInformation();
+    if (liveRailInformation == null || liveRailInformation.isEmpty()) {
+      return unavailable(
+          LiveRailFootprintObservation.FailureReason.GROUP_RAIL_INFORMATION_EMPTY,
+          liveRailInformation == null ? "rail-information-null" : "rail-information-empty");
+    }
+    java.util.List<RailTracker.TrackedRail> railInformation =
+        java.util.List.copyOf(liveRailInformation);
+    UUID expectedWorldId = worldId();
+    java.util.List<LiveRailPathSample> pathSamples =
+        new java.util.ArrayList<>(railInformation.size());
+    java.util.List<RailBlockPos> trackedRailBlocks =
+        new java.util.ArrayList<>(railInformation.size());
+    Set<MinecartMember<?>> observedMembers =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    RailState sharedRailState = null;
+    RailPath sharedPath = null;
+    RailBlockPos sharedRailBlock = null;
+    boolean allOnSamePath = true;
+    boolean useTrackedRailBlockFallback = false;
+    int trackedRailIndex = 0;
+    for (RailTracker.TrackedRail trackedRail : railInformation) {
+      if (trackedRail == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.TRACKED_RAIL_INVALID,
+            "trackedRail=" + trackedRailIndex + ":null");
+      }
+      if (trackedRail.disconnected
+          || trackedRail.state == null
+          || trackedRail.state.railPiece() == null
+          || trackedRail.state.railPiece().isNone()) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.TRACKED_RAIL_INVALID,
+            "trackedRail="
+                + trackedRailIndex
+                + ":disconnected="
+                + trackedRail.disconnected
+                + ":state="
+                + (trackedRail.state == null ? "null" : "present"));
+      }
+      Block railBlock = trackedRail.state.railBlock();
+      if (railBlock == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.RAIL_BLOCK_MISSING,
+            "trackedRail=" + trackedRailIndex);
+      }
+      UUID memberWorldId = railBlock.getWorld().getUID();
+      if (!expectedWorldId.equals(memberWorldId)) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.WORLD_MISMATCH,
+            "trackedRail=" + trackedRailIndex + ":world=" + memberWorldId);
+      }
+      RailBlockPos railBlockPos =
+          new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
+      trackedRailBlocks.add(railBlockPos);
+      if (trackedRail.member != null) {
+        observedMembers.add(trackedRail.member);
+      }
+      RailPath path = trackedRail.getPath();
+      if (path == null || path.isEmpty()) {
+        useTrackedRailBlockFallback = true;
+        allOnSamePath = false;
+        trackedRailIndex++;
+        continue;
+      }
+      pathSamples.add(new LiveRailPathSample(path, railBlockPos));
+      if (sharedRailState == null) {
+        sharedRailState = trackedRail.state;
+        sharedPath = path;
+        sharedRailBlock = railBlockPos;
+      } else if (!trackedRail.state.isSameRails(sharedRailState)
+          || path != sharedPath
+          || !railBlockPos.equals(sharedRailBlock)) {
+        allOnSamePath = false;
+      }
+      trackedRailIndex++;
+    }
+    java.util.List<MinecartMember<?>> members = new java.util.ArrayList<>();
+    int memberCount = 0;
+    for (MinecartMember<?> member : group) {
+      if (member == null || !observedMembers.contains(member)) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.MEMBER_NOT_OBSERVED,
+            "member=" + memberCount + ":" + (member == null ? "null" : "not-in-group-tracker"));
+      }
+      members.add(member);
+      memberCount++;
+    }
+    if (memberCount <= 0) {
+      return unavailable(
+          LiveRailFootprintObservation.FailureReason.GROUP_EMPTY, "group-member-count=0");
+    }
+    java.util.List<LiveCartGeometry> cartGeometries = new java.util.ArrayList<>(members.size());
+    for (int memberIndex = 0; memberIndex < members.size(); memberIndex++) {
+      MinecartMember<?> member = members.get(memberIndex);
+      com.bergerkiller.bukkit.common.entity.type.CommonMinecart<?> commonMinecart =
+          member.getEntity();
+      org.bukkit.entity.Minecart entity =
+          commonMinecart != null ? commonMinecart.getEntity() : null;
+      if (commonMinecart == null || entity == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.CART_ENTITY_MISSING,
+            "member=" + memberIndex);
+      }
+      if (!expectedWorldId.equals(entity.getWorld().getUID())) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.CART_WORLD_MISMATCH,
+            "member=" + memberIndex + ":world=" + entity.getWorld().getUID());
+      }
+      if (member.getWheels() == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.WHEEL_TRACKER_MISSING,
+            "member=" + memberIndex);
+      }
+      if (member.getProperties() == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.CART_PROPERTIES_MISSING,
+            "member=" + memberIndex);
+      }
+      com.bergerkiller.bukkit.tc.attachments.config.AttachmentModel model =
+          member.getProperties().getModel();
+      if (model == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.CART_MODEL_MISSING, "member=" + memberIndex);
+      }
+      org.bukkit.util.Vector frontWheel = member.getWheels().front().getAbsolutePosition();
+      org.bukkit.util.Vector backWheel = member.getWheels().back().getAbsolutePosition();
+      OptionalDouble endPadding =
+          PhysicalRailFootprintPolicy.requiredEndPaddingBlocks(
+              model.getCartLength(),
+              member.getWheels().front().getDistance(),
+              member.getWheels().back().getDistance());
+      OptionalDouble centerWalkDistance =
+          PhysicalRailFootprintPolicy.requiredCenterWalkDistanceBlocks(model.getCartLength());
+      if (frontWheel == null || backWheel == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.WHEEL_POSITION_MISSING,
+            "member=" + memberIndex);
+      }
+      if (endPadding.isEmpty() || centerWalkDistance.isEmpty()) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.CART_GEOMETRY_INVALID,
+            "member="
+                + memberIndex
+                + ":cartLength="
+                + model.getCartLength()
+                + ":frontWheel="
+                + member.getWheels().front().getDistance()
+                + ":backWheel="
+                + member.getWheels().back().getDistance());
+      }
+      if (centerWalkDistance.orElseThrow() > MAX_LIVE_BODY_WALK_DISTANCE_BLOCKS) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.BODY_WALK_DISTANCE_EXCEEDED,
+            "member=" + memberIndex + ":distance=" + centerWalkDistance.orElseThrow());
+      }
+      cartGeometries.add(
+          new LiveCartGeometry(
+              member,
+              frontWheel,
+              backWheel,
+              endPadding.orElseThrow(),
+              centerWalkDistance.orElseThrow()));
+    }
+    if (useTrackedRailBlockFallback) {
+      return trackedRailBlockFootprint(trackedRailBlocks);
+    }
+    if (allOnSamePath) {
+      if (sharedPath == null || sharedRailBlock == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.SHARED_PATH_CONTEXT_MISSING,
+            "shared-path-or-block-null");
+      }
+      java.util.List<org.bukkit.util.Vector> relativeWheelPositions =
+          new java.util.ArrayList<>(members.size() * 2);
+      double endPaddingBlocks = 0.0;
+      for (LiveCartGeometry geometry : cartGeometries) {
+        relativeWheelPositions.add(relativeToRailBlock(geometry.frontWheel(), sharedRailBlock));
+        relativeWheelPositions.add(relativeToRailBlock(geometry.backWheel(), sharedRailBlock));
+        endPaddingBlocks = Math.max(endPaddingBlocks, geometry.endPaddingBlocks());
+      }
+      Optional<Set<RailFootprintCell>> resolved =
+          RailPathOccupancySliceResolver.resolve(
+              sharedPath, sharedRailBlock, relativeWheelPositions, endPaddingBlocks);
+      return resolved
+          .map(LiveRailFootprintObservation::available)
+          .orElseGet(() -> trackedRailBlockFootprint(trackedRailBlocks));
+    }
+
+    Set<RailFootprintCell> cells = new java.util.TreeSet<>();
+    for (LiveRailPathSample sample : pathSamples) {
+      Set<RailFootprintCell> pathCells =
+          RailPathFootprintRasterizer.rasterize(sample.path(), sample.railBlock());
+      if (pathCells.isEmpty()) {
+        return trackedRailBlockFootprint(trackedRailBlocks);
+      }
+      cells.addAll(pathCells);
+    }
+    for (LiveCartGeometry geometry : cartGeometries) {
+      if (!rasterizeMemberBodyFromCenter(
+          cells, geometry.member(), geometry.centerWalkDistanceBlocks(), expectedWorldId)) {
+        return trackedRailBlockFootprint(trackedRailBlocks);
+      }
+    }
+    return cells.isEmpty()
+        ? unavailable(
+            LiveRailFootprintObservation.FailureReason.FOOTPRINT_EMPTY, "rasterized-cell-count=0")
+        : LiveRailFootprintObservation.available(cells);
+  }
+
+  /**
+   * 将 TrainCarts 已完整验证的 {@code TrackedRail} 方块链转换为保守物理足迹。
+   *
+   * <p>调用方必须已确认 group 有效、每条轨道连续且同世界，并且每个 member 均出现于该链。{@code
+   * RailTrackerGroup#getRailInformation()} 的上游契约给出的正是整列车 当前占用的全部轨道方块；因此本方法只是在精细路径 ABI
+   * 缺失时保留完整方块粒度，不能被实体位置、Route 或不完整 tracker 调用来制造清空证明。
+   *
+   * @param trackedRailBlocks 已验证的整列轨道方块链
+   * @return 非空时的保守方块足迹；缺失链仍返回 fail-closed 结果
+   */
+  static LiveRailFootprintObservation trackedRailBlockFootprint(
+      java.util.Collection<RailBlockPos> trackedRailBlocks) {
+    if (trackedRailBlocks == null || trackedRailBlocks.isEmpty()) {
+      return unavailable(
+          LiveRailFootprintObservation.FailureReason.FOOTPRINT_EMPTY, "tracked-rail-blocks-empty");
+    }
+    Set<RailFootprintCell> cells = new java.util.TreeSet<>();
+    int index = 0;
+    for (RailBlockPos railBlock : trackedRailBlocks) {
+      if (railBlock == null) {
+        return unavailable(
+            LiveRailFootprintObservation.FailureReason.TRACKED_RAIL_INVALID,
+            "tracked-rail-block=" + index + ":null");
+      }
+      cells.add(new RailFootprintCell(railBlock.x(), railBlock.y(), railBlock.z()));
+      index++;
+    }
+    return cells.isEmpty()
+        ? unavailable(
+            LiveRailFootprintObservation.FailureReason.FOOTPRINT_EMPTY, "tracked-rail-blocks-empty")
+        : LiveRailFootprintObservation.available(cells);
+  }
+
+  private static LiveRailFootprintObservation unavailable(
+      LiveRailFootprintObservation.FailureReason reason, String detail) {
+    return LiveRailFootprintObservation.unavailable(reason, detail);
+  }
+
+  private record LiveRailPathSample(RailPath path, RailBlockPos railBlock) {}
+
+  private record LiveCartGeometry(
+      MinecartMember<?> member,
+      org.bukkit.util.Vector frontWheel,
+      org.bukkit.util.Vector backWheel,
+      double endPaddingBlocks,
+      double centerWalkDistanceBlocks) {}
+
+  private static org.bukkit.util.Vector relativeToRailBlock(
+      org.bukkit.util.Vector absolutePosition, RailBlockPos railBlock) {
+    return new org.bukkit.util.Vector(
+        absolutePosition.getX() - railBlock.x(),
+        absolutePosition.getY() - railBlock.y(),
+        absolutePosition.getZ() - railBlock.z());
+  }
+
+  private static boolean rasterizeMemberBodyFromCenter(
+      Set<RailFootprintCell> cells,
+      MinecartMember<?> member,
+      double distanceBlocks,
+      UUID expectedWorldId) {
+    if (member.getRailTracker() == null || member.getRailTracker().getRail() == null) {
+      return false;
+    }
+    RailTracker.TrackedRail centerRail = member.getRailTracker().getRail();
+    if (centerRail.disconnected
+        || centerRail.state == null
+        || centerRail.getPath() == null
+        || centerRail.getPath().isEmpty()) {
+      return false;
+    }
+    RailState forwardState = centerRail.state.clone();
+    forwardState.initEnterDirection();
+    RailState reverseState = centerRail.state.cloneAndInvertMotion();
+    reverseState.initEnterDirection();
+    TrackWalkingPoint forwardWalker = new TrackWalkingPoint(forwardState);
+    TrackWalkingPoint reverseWalker = new TrackWalkingPoint(reverseState);
+    if (!centerRail.getPath().equals(forwardWalker.currentRailPath)
+        || !centerRail.getPath().equals(reverseWalker.currentRailPath)) {
+      return false;
+    }
+    return rasterizeBodyWalk(cells, forwardWalker, distanceBlocks, expectedWorldId)
+        && rasterizeBodyWalk(cells, reverseWalker, distanceBlocks, expectedWorldId);
+  }
+
+  private static boolean rasterizeBodyWalk(
+      Set<RailFootprintCell> cells,
+      TrackWalkingPoint walker,
+      double distanceBlocks,
+      UUID expectedWorldId) {
+    walker.setLoopFilter(true);
+    for (int step = 0; step < MAX_LIVE_BODY_WALK_STEPS; step++) {
+      if (!rasterizeWalkerPath(cells, walker, expectedWorldId)) {
+        return false;
+      }
+      double remaining = distanceBlocks - walker.movedTotal;
+      if (remaining <= LIVE_BODY_WALK_EPSILON) {
+        return true;
+      }
+      boolean movedToNextPath = walker.moveStep(remaining);
+      if (!rasterizeWalkerPath(cells, walker, expectedWorldId)) {
+        return false;
+      }
+      if (walker.movedTotal + LIVE_BODY_WALK_EPSILON >= distanceBlocks) {
+        return walker.failReason == TrackWalkingPoint.FailReason.NONE
+            || walker.failReason == TrackWalkingPoint.FailReason.LIMIT_REACHED;
+      }
+      if (!movedToNextPath) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  private static boolean rasterizeWalkerPath(
+      Set<RailFootprintCell> cells, TrackWalkingPoint walker, UUID expectedWorldId) {
+    if (walker.currentRailPath == null
+        || walker.currentRailPath.isEmpty()
+        || walker.state == null
+        || walker.state.railBlock() == null
+        || !expectedWorldId.equals(walker.state.railBlock().getWorld().getUID())) {
+      return false;
+    }
+    Block railBlock = walker.state.railBlock();
+    Set<RailFootprintCell> pathCells =
+        RailPathFootprintRasterizer.rasterize(
+            walker.currentRailPath,
+            new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ()));
+    if (pathCells.isEmpty()) {
+      return false;
+    }
+    cells.addAll(pathCells);
+    return true;
+  }
+
+  /** 以 TrainCarts 编组对象身份区分同名 split/link 过渡实例。 */
+  @Override
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "该接口刻意返回 MinecartGroup 对象身份，用于区分同名但不同物理编组；调用方不会修改该对象")
+  public Object physicalRuntimeIdentity() {
+    return group;
   }
 
   /** 执行紧急停车（不触发目的地逻辑）。 */

@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
-import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
@@ -17,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -38,9 +38,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverDispatchResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
@@ -65,6 +65,43 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public final class SimpleTicketAssigner implements TicketAssigner {
 
+  enum MaterializedSpawnProgress {
+    WAIT,
+    COMPLETE,
+    ROLLBACK
+  }
+
+  enum PendingMaterializedSpawnPhase {
+    AWAITING_PROMOTION,
+    ROLLBACK_REQUIRED,
+    AWAITING_REMOVAL
+  }
+
+  /** 按票据与精确物理身份区分实体化事务，避免额外实体覆盖唯一票据 owner。 */
+  private static final class MaterializedSpawnKey {
+    private final UUID ticketId;
+    private final Object physicalIdentity;
+
+    private MaterializedSpawnKey(UUID ticketId, RuntimeTrainHandle train) {
+      this.ticketId = Objects.requireNonNull(ticketId, "ticketId");
+      RuntimeTrainHandle requiredTrain = Objects.requireNonNull(train, "train");
+      Object identity = requiredTrain.physicalRuntimeIdentity();
+      this.physicalIdentity = identity == null ? requiredTrain : identity;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other instanceof MaterializedSpawnKey key
+          && ticketId.equals(key.ticketId)
+          && physicalIdentity == key.physicalIdentity;
+    }
+
+    @Override
+    public int hashCode() {
+      return 31 * ticketId.hashCode() + System.identityHashCode(physicalIdentity);
+    }
+  }
+
   private static final java.util.logging.Logger HEALTH_LOGGER =
       java.util.logging.Logger.getLogger("FetaruteTCAddon");
 
@@ -82,6 +119,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   /** 待复用票据默认最大保留时间；配置缺失时使用，0 表示显式禁用硬清理。 */
   private static final Duration DEFAULT_PENDING_LAYOVER_MAX_AGE = Duration.ofDays(1);
+
+  /** 新物理编组等待 TrainCarts 提供完整实时 rail footprint 的最长宽限。 */
+  private static final Duration MATERIALIZED_SPAWN_HYDRATION_GRACE = Duration.ofSeconds(4);
 
   /** 拥挤度进入 HOLD 的阈值。 */
   private static final double CONGESTION_HOLD_THRESHOLD = 0.72D;
@@ -130,6 +170,150 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       String terminalKey,
       String groupKey,
       Instant addedAt) {}
+
+  /**
+   * 已实体化且尚未完成票据提交或安全回滚的发车事务。
+   *
+   * <p>{@link PendingMaterializedSpawnPhase#AWAITING_PROMOTION} 才允许刷新信号并查询真实 footprint；一旦转入 {@link
+   * PendingMaterializedSpawnPhase#ROLLBACK_REQUIRED}，后续 tick 只能重试硬停车、销毁和账务回滚。账务动作完成后进入 {@link
+   * PendingMaterializedSpawnPhase#AWAITING_REMOVAL}，继续保留 ticket guard 并重试物理销毁，直到 runtime 收到精确
+   * GroupRemove；两个回滚阶段都不能重新进入 promotion 或票据完成路径。
+   */
+  private record PendingMaterializedSpawn(
+      SpawnTicket ticket,
+      SpawnService service,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      long recoveryEpoch,
+      Instant deadline,
+      boolean fallback,
+      boolean ticketOwner,
+      PendingMaterializedSpawnPhase phase,
+      String rollbackReason) {
+
+    private PendingMaterializedSpawn {
+      Objects.requireNonNull(ticket, "ticket");
+      Objects.requireNonNull(service, "service");
+      Objects.requireNonNull(trainName, "trainName");
+      Objects.requireNonNull(spawnLease, "spawnLease");
+      Objects.requireNonNull(train, "train");
+      Objects.requireNonNull(deadline, "deadline");
+      phase = phase == null ? PendingMaterializedSpawnPhase.AWAITING_PROMOTION : phase;
+      rollbackReason = rollbackReason == null ? "-" : rollbackReason;
+    }
+
+    private PendingMaterializedSpawn requiringRollback(String reason) {
+      if (phase == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        return this;
+      }
+      return new PendingMaterializedSpawn(
+          ticket,
+          service,
+          trainName,
+          spawnLease,
+          train,
+          recoveryEpoch,
+          deadline,
+          fallback,
+          ticketOwner,
+          PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED,
+          reason);
+    }
+
+    private PendingMaterializedSpawn awaitingRemoval() {
+      return new PendingMaterializedSpawn(
+          ticket,
+          service,
+          trainName,
+          spawnLease,
+          train,
+          recoveryEpoch,
+          deadline,
+          fallback,
+          ticketOwner,
+          PendingMaterializedSpawnPhase.AWAITING_REMOVAL,
+          rollbackReason);
+    }
+
+    private MaterializedSpawnKey key() {
+      return new MaterializedSpawnKey(ticket.id(), train);
+    }
+  }
+
+  /**
+   * 已生成物理编组后，提交 Depot 发车事务所需的不可变上下文。
+   *
+   * <p>常规发车与 Layover fallback 都必须经过同一提交器。这样两条入口会一致地执行 recovery epoch 检查、硬授权、 expected physical
+   * identity 登记、footprint promotion 以及失败回滚，不能因复制实现而出现一条入口重新引入“新车被视为迟加载”的时序漏洞。
+   */
+  private record MaterializedDepotSpawnContext(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      RouteOperationType operationType,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      DepotGateRequest gateRequest,
+      OccupancyRequest authorityRequest,
+      List<SpawnDepot> lineDepots,
+      DepotSpawner.MaterializedSpawn materializedSpawn,
+      long recoveryEpoch,
+      Instant now,
+      boolean fallback) {
+
+    private MaterializedDepotSpawnContext {
+      // 此对象仅在精确物理 runtime identity 已创建后构造。不能在这里做会逃离回滚边界的校验；
+      // finalizer 会把字段访问或 TrainCarts 调用的任何异常统一转入物理收容路径。
+      lineDepots =
+          lineDepots == null ? List.of() : lineDepots.stream().filter(Objects::nonNull).toList();
+    }
+  }
+
+  /**
+   * 已通过 Depot 发车预检、尚未创建物理编组的不可变上下文。
+   *
+   * <p>常规发车和 Layover fallback 必须共用这一上下文。它只承载已经建立的逻辑发车准备：Depot 选择、动态授权准备、预览联锁判定与 recovery epoch；它不包含
+   * {@link RuntimeTrainHandle}，因此不能触发 TrainCarts 实体化或绕开后续的统一提交与回滚。
+   */
+  private record PreparedDepotSpawn(
+      SpawnTicket ticket,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      List<SpawnDepot> lineDepots,
+      DepotGateRequest gateRequest,
+      long recoveryEpoch) {
+
+    private PreparedDepotSpawn {
+      ticket = Objects.requireNonNull(ticket, "ticket");
+      trainName = Objects.requireNonNull(trainName, "trainName");
+      spawnLease = Objects.requireNonNull(spawnLease, "spawnLease");
+      lineDepots =
+          lineDepots == null ? List.of() : lineDepots.stream().filter(Objects::nonNull).toList();
+      gateRequest = Objects.requireNonNull(gateRequest, "gateRequest");
+    }
+  }
+
+  /** Depot 发车入口的来源语义。 */
+  private enum DepotSpawnOrigin {
+    NORMAL(""),
+    FALLBACK("fallback-");
+
+    private final String reasonPrefix;
+
+    DepotSpawnOrigin(String reasonPrefix) {
+      this.reasonPrefix = reasonPrefix;
+    }
+
+    private boolean fallback() {
+      return this == FALLBACK;
+    }
+
+    private String reasonPrefix() {
+      return reasonPrefix;
+    }
+  }
 
   /**
    * 拥挤度评估快照。
@@ -182,6 +366,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // key 为 ticketId：避免同一 route 在 backlog>1 时覆盖导致“丢票据/永久卡 backlog”。
   private final java.util.Map<java.util.UUID, PendingLayoverEntry> pendingLayoverTickets =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.Map<MaterializedSpawnKey, PendingMaterializedSpawn>
+      pendingMaterializedSpawns = new java.util.concurrent.ConcurrentHashMap<>();
   // key 为 "<lineId>|<terminal>"：记录下一次优先尝试的 route 游标，实现同组 route 轮转。
   private final java.util.concurrent.ConcurrentMap<String, Integer> pendingLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -263,7 +449,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.launchAuthorizationService =
         new LaunchAuthorizationService(occupancyManager, null, this.debugLogger);
-    this.retryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
+    Duration configuredRetryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
+    this.retryDelay =
+        configuredRetryDelay.compareTo(Duration.ofMillis(50)) < 0
+            ? Duration.ofMillis(50)
+            : configuredRetryDelay;
     this.depotDispatchCoordinator = new DepotSpawnScheduler(this.retryDelay);
     this.maxSpawnPerTick = Math.max(1, maxSpawnPerTick);
     this.maxRetryAttempts = Math.max(1, maxRetryAttempts);
@@ -369,6 +559,74 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return removed;
   }
 
+  /**
+   * 把全部已实体化事务切换为只回滚状态，并同步尝试一次物理收容。
+   *
+   * <p>返回失败时调用方不得替换本 assigner；否则内存中的物理 identity、租约与票据 owner 会失去恢复者。
+   */
+  @Override
+  public boolean prepareForReplacement(Instant now) {
+    Instant recoveryAt = now == null ? Instant.now() : now;
+    List<PendingMaterializedSpawn> snapshot = List.copyOf(pendingMaterializedSpawns.values());
+    List<PendingMaterializedSpawn> rollbackSnapshot = new ArrayList<>();
+    for (PendingMaterializedSpawn pending : snapshot) {
+      if (pending == null) {
+        continue;
+      }
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        rollbackSnapshot.add(pending);
+        continue;
+      }
+      PendingMaterializedSpawn rollback =
+          pending.phase() == PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED
+              ? pending
+              : pending.requiringRollback("ticket-assigner-replacement");
+      if (rollback != pending
+          && !pendingMaterializedSpawns.replace(pending.key(), pending, rollback)) {
+        continue;
+      }
+      rollbackSnapshot.add(rollback);
+    }
+    boolean allQuarantined = true;
+    for (PendingMaterializedSpawn pending : rollbackSnapshot) {
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        continue;
+      }
+      RuntimeTrainHandle handle = pending.train();
+      try {
+        if (handle.isValid()
+            && !runtimeDispatchService.quarantineMaterializedSpawnRollback(
+                handle, pending.trainName(), pending.rollbackReason(), pending.ticketOwner())) {
+          allQuarantined = false;
+        }
+      } catch (RuntimeException | LinkageError failure) {
+        allQuarantined = false;
+        try {
+          debugLogger.accept(
+              "替换前登记实体化回滚隔离失败: train="
+                  + pending.trainName()
+                  + " error="
+                  + failure.getClass().getSimpleName()
+                  + ":"
+                  + String.valueOf(failure.getMessage()));
+        } catch (RuntimeException | LinkageError logFailure) {
+          HEALTH_LOGGER.warning("替换前回滚隔离日志写入失败: " + logFailure.getClass().getSimpleName());
+        }
+      }
+    }
+    if (!allQuarantined) {
+      return false;
+    }
+    for (PendingMaterializedSpawn pending : rollbackSnapshot) {
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        retryPendingMaterializedSpawnRemoval(pending);
+      } else {
+        retryPendingMaterializedSpawnRollback(pending, recoveryAt);
+      }
+    }
+    return pendingMaterializedSpawns.isEmpty();
+  }
+
   @Override
   public void resetDiagnostics() {
     spawnSuccess.reset();
@@ -385,8 +643,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     lastStorageProvider = provider;
     spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
+    advancePendingMaterializedSpawns(now);
+    Map<String, Integer> selectedDepotsThisTick = new HashMap<>();
     if (!pendingLayoverTickets.isEmpty()) {
-      refreshExpiredPendingTickets(provider, now);
+      refreshExpiredPendingTickets(provider, now, selectedDepotsThisTick);
       tryDispatchPendingLayover(now, Optional.of(provider), Optional.empty());
     }
     List<SpawnTicket> dueTickets = spawnManager.pollDueTickets(provider, now);
@@ -394,7 +654,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     dueTickets = orderDueTicketsWithRouteRotation(dueTickets);
-    dueTickets = applyDepotDispatchCoordination(provider, dueTickets, now);
+    dueTickets = applyDepotDispatchCoordination(provider, dueTickets, selectedDepotsThisTick, now);
     dueTickets = orderDepotTicketsByLineDepotLoad(provider, dueTickets);
     int remaining = maxSpawnPerTick;
     for (SpawnTicket ticket : dueTickets) {
@@ -406,18 +666,384 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         continue;
       }
       remaining--;
-      trySpawn(provider, now, ticket);
+      trySpawn(provider, now, ticket, selectedDepotsThisTick);
     }
   }
 
+  /** 推进已实体化发车事务；只有真实 footprint promotion 后才提交票据。 */
+  private void advancePendingMaterializedSpawns(Instant now) {
+    if (pendingMaterializedSpawns.isEmpty()) {
+      return;
+    }
+    for (PendingMaterializedSpawn pending : List.copyOf(pendingMaterializedSpawns.values())) {
+      if (pending == null || pending.ticket() == null || pending.train() == null) {
+        continue;
+      }
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        retryPendingMaterializedSpawnRemoval(pending);
+        continue;
+      }
+      if (!shouldEvaluateMaterializedSpawnPromotion(pending.phase())) {
+        retryPendingMaterializedSpawnRollback(pending, now);
+        continue;
+      }
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(pending.recoveryEpoch())) {
+        failPendingMaterializedSpawn(
+            pending, now, "startup-recovery-epoch-changed-before-pending-refresh");
+        continue;
+      }
+      RuntimeTrainHandle handle = pending.train();
+      if (!handle.isValid()) {
+        failPendingMaterializedSpawn(pending, now, "physical-group-invalid");
+        continue;
+      }
+      RuntimeDispatchService.ExpectedMaterializedSpawnStatus status;
+      try {
+        runtimeDispatchService.refreshSignal(handle);
+        status =
+            runtimeDispatchService.expectedMaterializedSpawnStatus(handle, pending.recoveryEpoch());
+      } catch (RuntimeException | LinkageError failure) {
+        debugLogger.accept(
+            "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=refresh-exception train="
+                + pending.trainName()
+                + " error="
+                + failure.getClass().getSimpleName()
+                + ":"
+                + String.valueOf(failure.getMessage()));
+        failPendingMaterializedSpawn(
+            pending, now, "pending-hydration-refresh-failed:" + failure.getClass().getSimpleName());
+        continue;
+      }
+      MaterializedSpawnProgress progress =
+          materializedSpawnProgress(status, now, pending.deadline());
+      if (progress == MaterializedSpawnProgress.COMPLETE) {
+        completePendingMaterializedSpawn(pending, now);
+        continue;
+      }
+      if (progress == MaterializedSpawnProgress.WAIT) {
+        continue;
+      }
+      String reason =
+          status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL
+              ? "physical-footprint-hydration-timeout"
+              : "physical-footprint-hydration-state-lost";
+      if (status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL) {
+        debugLogger.accept(
+            "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=timeout train="
+                + pending.trainName()
+                + " epoch="
+                + pending.recoveryEpoch()
+                + " deadline="
+                + pending.deadline());
+      }
+      failPendingMaterializedSpawn(pending, now, reason);
+    }
+  }
+
+  /** 根据认证状态与宽限截止时间决定票据继续等待、提交或回滚。 */
+  static MaterializedSpawnProgress materializedSpawnProgress(
+      RuntimeDispatchService.ExpectedMaterializedSpawnStatus status,
+      Instant now,
+      Instant deadline) {
+    if (status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED) {
+      return MaterializedSpawnProgress.COMPLETE;
+    }
+    if (status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL
+        && now != null
+        && deadline != null
+        && now.isBefore(deadline)) {
+      return MaterializedSpawnProgress.WAIT;
+    }
+    return MaterializedSpawnProgress.ROLLBACK;
+  }
+
+  /** 只有尚未决定回滚的事务可以刷新信号并继续 footprint promotion。 */
+  static boolean shouldEvaluateMaterializedSpawnPromotion(PendingMaterializedSpawnPhase phase) {
+    return phase == PendingMaterializedSpawnPhase.AWAITING_PROMOTION;
+  }
+
+  private void completePendingMaterializedSpawn(PendingMaterializedSpawn pending, Instant now) {
+    if (!pending.ticketOwner() || !pendingMaterializedSpawns.remove(pending.key(), pending)) {
+      return;
+    }
+    if (!runtimeDispatchService.isStartupRecoveryEpochReady(pending.recoveryEpoch())) {
+      retainAndRetryMaterializedSpawnRollback(
+          pending.requiringRollback("startup-recovery-epoch-changed-before-pending-complete"), now);
+      return;
+    }
+    try {
+      spawnManager.complete(pending.ticket());
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          "发车票据提交异常: train="
+              + pending.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+      retainAndRetryMaterializedSpawnRollback(
+          pending.requiringRollback(
+              "pending-ticket-complete-failed:" + failure.getClass().getSimpleName()),
+          now);
+      return;
+    }
+    recordMaterializedSpawnSuccess(
+        pending.ticket(), pending.service(), pending.trainName(), pending.fallback());
+  }
+
+  private void failPendingMaterializedSpawn(
+      PendingMaterializedSpawn pending, Instant now, String reason) {
+    PendingMaterializedSpawn rollback = pending.requiringRollback(reason);
+    if (!pendingMaterializedSpawns.replace(pending.key(), pending, rollback)) {
+      return;
+    }
+    retryPendingMaterializedSpawnRollback(rollback, now);
+  }
+
+  private void retainAndRetryMaterializedSpawnRollback(
+      PendingMaterializedSpawn rollback, Instant now) {
+    PendingMaterializedSpawn tracked = rollback;
+    PendingMaterializedSpawn previous =
+        pendingMaterializedSpawns.putIfAbsent(rollback.key(), rollback);
+    if (previous != null) {
+      tracked = previous.requiringRollback(rollback.rollbackReason());
+      if (!pendingMaterializedSpawns.replace(rollback.key(), previous, tracked)) {
+        return;
+      }
+    }
+    retryPendingMaterializedSpawnRollback(tracked, now);
+  }
+
+  private void retryPendingMaterializedSpawnRollback(
+      PendingMaterializedSpawn pending, Instant now) {
+    if (pending.phase() != PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED
+        || pendingMaterializedSpawns.get(pending.key()) != pending) {
+      return;
+    }
+    RuntimeTrainHandle handle = pending.train();
+    if (!handle.isValid()) {
+      if (runtimeDispatchService.consumeMaterializedSpawnRollbackRemoval(handle)) {
+        // 真实 GroupRemove 已先于本次状态推进到达；物理收容已经完成，可以继续回滚账务。
+      } else if (runtimeDispatchService.hasMaterializedSpawnRollbackQuarantine(
+          pending.trainName())) {
+        return;
+      } else {
+        runtimeDispatchService.quarantineMaterializedSpawnRollback(
+            handle, pending.trainName(), pending.rollbackReason(), pending.ticketOwner());
+        debugLogger.accept(
+            "实体化编组句柄失效但尚无 GroupRemove 证明，保留物理隔离: train="
+                + pending.trainName()
+                + " unloaded="
+                + runtimeDispatchService.isMaterializedSpawnRollbackUnloaded(handle));
+        return;
+      }
+    }
+    Optional<RuntimeTrainHandle> liveTrain =
+        handle.isValid() ? Optional.of(handle) : Optional.empty();
+    boolean contained;
+    try {
+      if (liveTrain.isPresent()
+          && !runtimeDispatchService.quarantineMaterializedSpawnRollback(
+              handle, pending.trainName(), pending.rollbackReason(), pending.ticketOwner())) {
+        handle.stopHard();
+        debugLogger.accept("已实体化发车无法登记 runtime 回滚隔离，保持硬停并等待重试: train=" + pending.trainName());
+        return;
+      }
+      contained =
+          pending.ticketOwner()
+              ? abortDepotSpawnForRecovery(
+                  pending.ticket(),
+                  now,
+                  pending.trainName(),
+                  pending.spawnLease(),
+                  liveTrain,
+                  pending.rollbackReason())
+              : containDuplicateMaterializedSpawn(liveTrain, pending.trainName());
+    } catch (RuntimeException | LinkageError failure) {
+      contained = false;
+      debugLogger.accept(
+          "已实体化发车恢复重试异常，继续保留隔离记录: train="
+              + pending.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    }
+    if (contained) {
+      PendingMaterializedSpawn awaitingRemoval = pending.awaitingRemoval();
+      if (pendingMaterializedSpawns.replace(pending.key(), pending, awaitingRemoval)) {
+        retryPendingMaterializedSpawnRemoval(awaitingRemoval);
+      }
+      return;
+    }
+    debugLogger.accept(
+        "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=rollback-retained train="
+            + pending.trainName()
+            + " ticket="
+            + pending.ticket().id()
+            + " reason="
+            + pending.rollbackReason());
+  }
+
+  /** 重试销毁已完成账务回滚、但仍等待精确 GroupRemove 的物理编组。 */
+  private void retryPendingMaterializedSpawnRemoval(PendingMaterializedSpawn pending) {
+    if (pending.phase() != PendingMaterializedSpawnPhase.AWAITING_REMOVAL
+        || pendingMaterializedSpawns.get(pending.key()) != pending) {
+      return;
+    }
+    if (!runtimeDispatchService.hasMaterializedSpawnRollbackQuarantine(pending.trainName())) {
+      // 已由 GroupRemove 或官方离线清理完成实体收容；消费确认，避免旧 group identity 在长运行中滞留。
+      runtimeDispatchService.consumeMaterializedSpawnRollbackRemoval(pending.train());
+      pendingMaterializedSpawns.remove(pending.key(), pending);
+      return;
+    }
+    RuntimeTrainHandle handle = pending.train();
+    if (!handle.isValid()) {
+      // invalid 既可能是销毁，也可能只是 GroupUnload；这里只等待真实 GroupRemove 清除 quarantine。
+      return;
+    }
+    try {
+      handle.stopHard();
+      handle.destroy();
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          "已实体化发车等待移除时销毁重试失败: train="
+              + pending.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    }
+  }
+
+  private boolean containDuplicateMaterializedSpawn(
+      Optional<RuntimeTrainHandle> liveTrain, String trainName) {
+    if (liveTrain.isEmpty()) {
+      return true;
+    }
+    boolean contained =
+        containMaterializedSpawnBeforeRelease(
+            liveTrain.orElseThrow(), () -> {}, () -> {}, () -> {}, debugLogger);
+    if (!contained) {
+      debugLogger.accept("额外物理编组收容失败，保持隔离记录: train=" + trainName);
+    }
+    return contained;
+  }
+
+  private void rollbackOrRetainMaterializedSpawn(
+      SpawnTicket ticket,
+      SpawnService service,
+      Instant now,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      long recoveryEpoch,
+      boolean fallback,
+      String reason) {
+    Optional<PendingMaterializedSpawn> existingTransaction =
+        pendingMaterializedSpawns.values().stream()
+            .filter(pending -> pending.ticket().id().equals(ticket.id()))
+            .findFirst();
+    boolean ownsTicket =
+        existingTransaction.isEmpty() || existingTransaction.orElseThrow().train() == train;
+    PendingMaterializedSpawn rollback =
+        new PendingMaterializedSpawn(
+            ticket,
+            service,
+            trainName,
+            spawnLease,
+            train,
+            recoveryEpoch,
+            now,
+            fallback,
+            ownsTicket,
+            PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED,
+            reason);
+    if (!ownsTicket) {
+      debugLogger.accept(
+          "检测到同票据的额外物理编组，仅执行物理收容且不重复回队: ticket=" + ticket.id() + " train=" + trainName);
+    }
+    retainAndRetryMaterializedSpawnRollback(rollback, now);
+  }
+
+  private boolean deferMaterializedSpawnUntilPromotion(
+      SpawnTicket ticket,
+      SpawnService service,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      long recoveryEpoch,
+      Instant now,
+      boolean fallback) {
+    PendingMaterializedSpawn pending =
+        new PendingMaterializedSpawn(
+            ticket,
+            service,
+            trainName,
+            spawnLease,
+            train,
+            recoveryEpoch,
+            now.plus(MATERIALIZED_SPAWN_HYDRATION_GRACE),
+            fallback,
+            true,
+            PendingMaterializedSpawnPhase.AWAITING_PROMOTION,
+            "-");
+    if (hasMaterializedSpawnTransaction(ticket.id())
+        || pendingMaterializedSpawns.putIfAbsent(pending.key(), pending) != null) {
+      return false;
+    }
+    debugLogger.accept(
+        "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=pending-ticket train="
+            + trainName
+            + " ticket="
+            + ticket.id()
+            + " epoch="
+            + recoveryEpoch
+            + " deadline="
+            + pending.deadline());
+    return true;
+  }
+
+  /** 判断票据是否已有尚未提交或完成物理收容的实体化事务。 */
+  private boolean hasMaterializedSpawnTransaction(java.util.UUID ticketId) {
+    return ticketId != null
+        && pendingMaterializedSpawns.values().stream()
+            .anyMatch(
+                pending ->
+                    pending != null
+                        && pending.ticket() != null
+                        && ticketId.equals(pending.ticket().id()));
+  }
+
+  private void recordMaterializedSpawnSuccess(
+      SpawnTicket ticket, SpawnService service, String trainName, boolean fallback) {
+    spawnSuccess.increment();
+    String depotUsed = ticket.selectedDepotNodeId().orElse(service.depotNodeId());
+    debugLogger.accept(
+        (fallback ? "Layover 降级发车成功: train=" : "自动发车成功: train=")
+            + trainName
+            + " route="
+            + service.operatorCode()
+            + "/"
+            + service.lineCode()
+            + "/"
+            + service.routeCode()
+            + " depot="
+            + depotUsed);
+  }
+
   private List<SpawnTicket> applyDepotDispatchCoordination(
-      StorageProvider provider, List<SpawnTicket> dueTickets, Instant now) {
+      StorageProvider provider,
+      List<SpawnTicket> dueTickets,
+      Map<String, Integer> selectedDepotsThisTick,
+      Instant now) {
     if (provider == null || dueTickets == null || dueTickets.isEmpty()) {
       return dueTickets == null ? List.of() : dueTickets;
     }
     List<SpawnTicket> depotTickets = new ArrayList<>();
     LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-    Map<String, Integer> selectedThisTick = new HashMap<>();
+    Map<String, Integer> selectedThisTick =
+        selectedDepotsThisTick == null ? new HashMap<>() : selectedDepotsThisTick;
     for (SpawnTicket ticket : dueTickets) {
       if (!isDepotSpawnTicket(provider, ticket)) {
         continue;
@@ -522,14 +1148,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *   <li>保留 pending 的“首次入队时间语义”，只在真正超时时刷新窗口
    * </ul>
    */
-  private void refreshExpiredPendingTickets(StorageProvider provider, Instant now) {
+  private void refreshExpiredPendingTickets(
+      StorageProvider provider, Instant now, Map<String, Integer> selectedDepotsThisTick) {
     java.util.List<java.util.UUID> removeIds = new java.util.ArrayList<>();
     java.util.Map<java.util.UUID, PendingLayoverEntry> refreshedEntries = new java.util.HashMap<>();
     int refreshed = 0;
     int fallbackTriggered = 0;
     int hardExpired = 0;
     Duration hardMaxAge = resolvePendingLayoverMaxAge();
-    Map<String, Integer> fallbackSelectedThisTick = new HashMap<>();
+    Map<String, Integer> fallbackSelectedThisTick =
+        selectedDepotsThisTick == null ? new HashMap<>() : selectedDepotsThisTick;
 
     for (var entry : pendingLayoverTickets.entrySet()) {
       java.util.UUID ticketId = entry.getKey();
@@ -712,7 +1340,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         provider, ticket, service, routeOpt.get(), lineOpt.get(), now, selectedThisTick);
   }
 
-  private boolean trySpawn(StorageProvider provider, Instant now, SpawnTicket ticket) {
+  private boolean trySpawn(
+      StorageProvider provider,
+      Instant now,
+      SpawnTicket ticket,
+      Map<String, Integer> selectedDepotsThisTick) {
+    if (hasMaterializedSpawnTransaction(ticket.id())) {
+      deferWithoutAttempt(ticket, now, "materialized-transaction-active");
+      return false;
+    }
     SpawnService service = ticket.service();
     Optional<Route> routeEntityOpt = provider.routes().findById(service.routeId());
     if (routeEntityOpt.isEmpty()) {
@@ -754,7 +1390,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                         + fallbackTimeoutSeconds.getAsLong()
                         + "s) 尝试从 depot 补发");
                 return trySpawnFromDepot(
-                    provider, ticket, service, route, line, now, new HashMap<>());
+                    provider, ticket, service, route, line, now, selectedDepotsThisTick);
               }
             } else {
               debugLogger.accept(
@@ -804,173 +1440,43 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
-    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
-    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
-      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      selectedDepotOpt =
-          selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot, Map.of(), now);
-    }
-    SpawnTicket effectiveTicket =
-        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket =
-        materializeDynamicDepotSelection(
+    Optional<PreparedDepotSpawn> preparedOpt =
+        prepareDepotSpawn(
             provider,
+            ticket,
             service,
-            effectiveTicket,
-            LineRuntimeSnapshot.capture(runtimeDispatchService),
-            Map.of(),
-            now);
-
-    String destCode =
-        RouteDestinationResolver.resolve(provider, routeEntity)
-            .map(RouteDestinationResolver.DestinationInfo::code)
-            .orElse(routeEntity.code());
-    String trainName =
-        TrainNameFormatter.buildTrainName(
-            service.operatorCode(),
-            service.lineCode(),
-            routeEntity.patternType(),
-            destCode,
-            ticket.id());
-
-    Optional<java.util.UUID> worldIdOpt =
-        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
-    if (worldIdOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "depot-world-missing");
-      return false;
-    }
-    Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
-    if (graphOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "graph-missing");
-      return false;
-    }
-    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
-    Optional<List<NodeId>> preparedWaypointsOpt =
-        runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            trainName, route, spawnWaypoints, graphOpt.get(), now);
-    if (preparedWaypointsOpt.isEmpty()) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "dynamic-authority-unavailable");
-      return false;
-    }
-    List<NodeId> preparedWaypoints = preparedWaypointsOpt.get();
-    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
-    OccupancyRequestBuilder builder =
-        new OccupancyRequestBuilder(
-            graphOpt.get(),
-            depotSpawnLookaheadEdges(runtime),
-            runtime.minClearEdges(),
-            runtime.rearGuardEdges(),
-            runtime.switcherZoneEdges(),
-            debugLogger);
-    Optional<DepotGateRequest> gateRequestOpt =
-        buildDepotSpawnGateRequest(
-            builder,
-            trainName,
             route,
-            preparedWaypoints,
+            line,
+            routeEntity,
+            spawnLease,
+            Map.of(),
+            now,
+            DepotSpawnOrigin.NORMAL);
+    if (preparedOpt.isEmpty()) {
+      return false;
+    }
+    PreparedDepotSpawn prepared = preparedOpt.get();
+    Optional<DepotSpawner.MaterializedSpawn> materializedSpawnOpt =
+        materializePreparedDepotSpawn(provider, prepared, now, DepotSpawnOrigin.NORMAL);
+    if (materializedSpawnOpt.isEmpty()) {
+      return false;
+    }
+    return finalizeMaterializedDepotSpawn(
+        new MaterializedDepotSpawnContext(
+            provider,
+            prepared.ticket(),
             service,
-            effectiveTicket,
+            route,
             routeEntity.operationType(),
-            now);
-    if (gateRequestOpt.isEmpty()) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "occupancy-context-failed");
-      return false;
-    }
-    DepotGateRequest gateRequest = gateRequestOpt.get();
-    OccupancyRequest request = gateRequest.request();
-    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
-        trainName, graphOpt.get(), gateRequest.context())) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "smart-depot-long-single-held");
-      return false;
-    }
-    LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "preview");
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-
-    Optional<MinecartGroup> groupOpt;
-    try {
-      groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
-    } catch (Exception e) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
-      requeue(effectiveTicket, now, "spawn-failed");
-      return false;
-    }
-    if (groupOpt.isEmpty()) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      requeue(effectiveTicket, now, "spawn-failed");
-      return false;
-    }
-    MinecartGroup group = groupOpt.get();
-    authorization = acquireSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "acquire");
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      destroySpawnedGroup(group);
-      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-    TrainProperties properties = group.getProperties();
-    if (applyPreparedSpawnDestination(properties, gateRequest.effectiveWaypoints())) {
-      applySpawnLifecycleTags(
-          Optional.of(provider), properties, service, routeEntity.operationType());
-    }
-    runtimeDispatchService.refreshSignal(group);
-    runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
-    spawnManager.complete(effectiveTicket);
-    spawnSuccess.increment();
-    String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
-    debugLogger.accept(
-        "自动发车成功: train="
-            + trainName
-            + " route="
-            + service.operatorCode()
-            + "/"
-            + service.lineCode()
-            + "/"
-            + service.routeCode()
-            + " depot="
-            + depotUsed);
-    return true;
+            prepared.trainName(),
+            prepared.spawnLease(),
+            prepared.gateRequest(),
+            prepared.gateRequest().request(),
+            prepared.lineDepots(),
+            materializedSpawnOpt.get(),
+            prepared.recoveryEpoch(),
+            now,
+            false));
   }
 
   /**
@@ -1934,6 +2440,203 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
+   * 准备 Depot 发车的逻辑授权。
+   *
+   * <p>本方法是物理实体化前的唯一预检入口。它可以建立临时动态授权、取得发车租约并进行 preview，但绝不调用 {@link
+   * DepotSpawner#spawn(StorageProvider, SpawnTicket, String,
+   * Instant)}。任何预检失败都会在返回前撤销已建立的临时状态并安排原票据重试。
+   *
+   * @param origin 常规或 fallback 发车来源；决定重试原因与 depot 选择账本的归属
+   * @return 已完成预检的上下文；空值表示失败已被处理
+   */
+  private Optional<PreparedDepotSpawn> prepareDepotSpawn(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      Line line,
+      Route routeEntity,
+      SpawnControl.Lease spawnLease,
+      Map<String, Integer> selectedThisTick,
+      Instant now,
+      DepotSpawnOrigin origin) {
+    DepotSpawnOrigin effectiveOrigin = origin == null ? DepotSpawnOrigin.NORMAL : origin;
+    String reasonPrefix = effectiveOrigin.reasonPrefix();
+    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
+    Map<String, Integer> depotSelections =
+        selectedThisTick == null ? new HashMap<>() : selectedThisTick;
+    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
+    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
+      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+      selectedDepotOpt =
+          selectBalancedDepot(
+              provider, line.id(), lineDepots, runtimeSnapshot, depotSelections, now);
+    }
+    SpawnTicket effectiveTicket =
+        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
+    effectiveTicket =
+        materializeDynamicDepotSelection(
+            provider,
+            service,
+            effectiveTicket,
+            LineRuntimeSnapshot.capture(runtimeDispatchService),
+            depotSelections,
+            now);
+    if (effectiveOrigin.fallback()) {
+      recordSelectedDepotForTick(effectiveTicket, lineDepots, selectedDepotOpt, depotSelections);
+    }
+
+    String destinationCode =
+        RouteDestinationResolver.resolve(provider, routeEntity)
+            .map(RouteDestinationResolver.DestinationInfo::code)
+            .orElse(routeEntity.code());
+    String trainName =
+        TrainNameFormatter.buildTrainName(
+            service.operatorCode(),
+            service.lineCode(),
+            routeEntity.patternType(),
+            destinationCode,
+            ticket.id());
+    if (runtimeDispatchService.hasMaterializedSpawnRollbackQuarantine(trainName)) {
+      releaseSpawnLease(spawnLease);
+      deferWithoutAttempt(effectiveTicket, now, "materialized-rollback-identity-live");
+      return Optional.empty();
+    }
+
+    Optional<java.util.UUID> worldIdOpt =
+        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
+    if (worldIdOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "depot-world-missing");
+      return Optional.empty();
+    }
+    Optional<RailGraph> graphOpt =
+        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
+    if (graphOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "graph-missing");
+      return Optional.empty();
+    }
+
+    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
+    Optional<List<NodeId>> preparedWaypointsOpt =
+        runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            trainName, route, spawnWaypoints, graphOpt.get(), now);
+    if (preparedWaypointsOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "dynamic-authority-unavailable");
+      return Optional.empty();
+    }
+
+    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(
+            graphOpt.get(),
+            depotSpawnLookaheadEdges(runtime),
+            runtime.minClearEdges(),
+            runtime.rearGuardEdges(),
+            runtime.switcherZoneEdges(),
+            debugLogger);
+    Optional<DepotGateRequest> gateRequestOpt =
+        buildDepotSpawnGateRequest(
+            builder,
+            trainName,
+            route,
+            preparedWaypointsOpt.get(),
+            service,
+            effectiveTicket,
+            routeEntity.operationType(),
+            now);
+    if (gateRequestOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "occupancy-context-failed");
+      return Optional.empty();
+    }
+    DepotGateRequest gateRequest = gateRequestOpt.get();
+    OccupancyRequest authorityRequest = gateRequest.request();
+    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
+        trainName, graphOpt.get(), gateRequest.context())) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "smart-depot-long-single-held");
+      return Optional.empty();
+    }
+    LaunchAuthorizationService.AuthorizationResult authorization =
+        previewSpawnGate(authorityRequest);
+    if (!authorization.allowed()) {
+      logDepotGateBlockedTrace(
+          effectiveTicket,
+          service,
+          route,
+          trainName,
+          lineDepots,
+          gateRequest,
+          authorization,
+          spawnLease,
+          reasonPrefix + "preview");
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(
+          effectiveTicket,
+          now,
+          reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
+      return Optional.empty();
+    }
+
+    OptionalLong startupRecoveryEpoch = runtimeDispatchService.captureReadyStartupRecoveryEpoch();
+    if (startupRecoveryEpoch.isEmpty()) {
+      abortDepotSpawnForRecovery(
+          effectiveTicket,
+          now,
+          trainName,
+          spawnLease,
+          Optional.empty(),
+          reasonPrefix + "startup-recovery-active");
+      return Optional.empty();
+    }
+    return Optional.of(
+        new PreparedDepotSpawn(
+            effectiveTicket,
+            trainName,
+            spawnLease,
+            lineDepots,
+            gateRequest,
+            startupRecoveryEpoch.getAsLong()));
+  }
+
+  /**
+   * 将已通过预检的 Depot 发车实体化。
+   *
+   * <p>此方法只负责 {@link DepotSpawner} 调用及其前置资源收口；物理 group 一旦返回，调用方必须立即交给 {@link
+   * #finalizeMaterializedDepotSpawn(MaterializedDepotSpawnContext)}，不能在这里加入额外初始化。
+   */
+  private Optional<DepotSpawner.MaterializedSpawn> materializePreparedDepotSpawn(
+      StorageProvider provider, PreparedDepotSpawn prepared, Instant now, DepotSpawnOrigin origin) {
+    DepotSpawnOrigin effectiveOrigin = origin == null ? DepotSpawnOrigin.NORMAL : origin;
+    try {
+      Optional<DepotSpawner.MaterializedSpawn> materializedSpawn =
+          depotSpawner.spawn(provider, prepared.ticket(), prepared.trainName(), now);
+      if (materializedSpawn.isPresent()) {
+        return materializedSpawn;
+      }
+    } catch (RuntimeException | LinkageError error) {
+      debugLogger.accept(
+          (effectiveOrigin.fallback() ? "Layover 降级发车异常" : "自动发车异常")
+              + ": spawn 抛出异常 train="
+              + prepared.trainName()
+              + " error="
+              + error);
+    }
+    runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(prepared.trainName());
+    releaseSpawnLease(prepared.spawnLease());
+    occupancyManager.releaseByTrain(prepared.trainName());
+    requeue(prepared.ticket(), now, effectiveOrigin.reasonPrefix() + "spawn-failed");
+    return Optional.empty();
+  }
+
+  /**
    * 从 Depot 直接发车的降级路径。
    *
    * <p>仅用于 RETURN 票据的 fallback 补发，不参与常规运营调度。若发车成功，会同步写入生命周期标签并刷新相关占用；失败则回到重试队列。
@@ -1955,6 +2658,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Line line,
       Instant now,
       Map<String, Integer> selectedThisTick) {
+
+    if (hasMaterializedSpawnTransaction(ticket.id())) {
+      deferWithoutAttempt(ticket, now, "materialized-transaction-active");
+      return false;
+    }
 
     Route routeEntity = provider.routes().findById(service.routeId()).orElse(null);
     if (routeEntity == null) {
@@ -1978,176 +2686,329 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
-    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
-    Map<String, Integer> depotSelections =
-        selectedThisTick == null ? new HashMap<>() : selectedThisTick;
-    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
-      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      selectedDepotOpt =
-          selectBalancedDepot(
-              provider, line.id(), lineDepots, runtimeSnapshot, depotSelections, now);
-    }
-    SpawnTicket effectiveTicket =
-        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket =
-        materializeDynamicDepotSelection(
+    Optional<PreparedDepotSpawn> preparedOpt =
+        prepareDepotSpawn(
             provider,
+            ticket,
             service,
-            effectiveTicket,
-            LineRuntimeSnapshot.capture(runtimeDispatchService),
-            depotSelections,
-            now);
-
-    String destCode =
-        RouteDestinationResolver.resolve(provider, routeEntity)
-            .map(RouteDestinationResolver.DestinationInfo::code)
-            .orElse(routeEntity.code());
-    String trainName =
-        TrainNameFormatter.buildTrainName(
-            service.operatorCode(),
-            service.lineCode(),
-            routeEntity.patternType(),
-            destCode,
-            ticket.id());
-
-    Optional<java.util.UUID> worldIdOpt =
-        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
-    if (worldIdOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-depot-world-missing");
-      return false;
-    }
-    Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
-    if (graphOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-graph-missing");
-      return false;
-    }
-    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
-    Optional<List<NodeId>> preparedWaypointsOpt =
-        runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            trainName, route, spawnWaypoints, graphOpt.get(), now);
-    if (preparedWaypointsOpt.isEmpty()) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-dynamic-authority-unavailable");
-      return false;
-    }
-    List<NodeId> preparedWaypoints = preparedWaypointsOpt.get();
-    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
-    OccupancyRequestBuilder builder =
-        new OccupancyRequestBuilder(
-            graphOpt.get(),
-            depotSpawnLookaheadEdges(runtime),
-            runtime.minClearEdges(),
-            runtime.rearGuardEdges(),
-            runtime.switcherZoneEdges(),
-            debugLogger);
-    Optional<DepotGateRequest> gateRequestOpt =
-        buildDepotSpawnGateRequest(
-            builder,
-            trainName,
             route,
-            preparedWaypoints,
+            line,
+            routeEntity,
+            spawnLease,
+            selectedThisTick,
+            now,
+            DepotSpawnOrigin.FALLBACK);
+    if (preparedOpt.isEmpty()) {
+      return false;
+    }
+    PreparedDepotSpawn prepared = preparedOpt.get();
+    Optional<DepotSpawner.MaterializedSpawn> materializedSpawnOpt =
+        materializePreparedDepotSpawn(provider, prepared, now, DepotSpawnOrigin.FALLBACK);
+    if (materializedSpawnOpt.isEmpty()) {
+      return false;
+    }
+    return finalizeMaterializedDepotSpawn(
+        new MaterializedDepotSpawnContext(
+            provider,
+            prepared.ticket(),
             service,
-            effectiveTicket,
+            route,
             routeEntity.operationType(),
-            now);
-    if (gateRequestOpt.isEmpty()) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-occupancy-context-failed");
-      return false;
-    }
-    DepotGateRequest gateRequest = gateRequestOpt.get();
-    OccupancyRequest request = gateRequest.request();
-    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
-        trainName, graphOpt.get(), gateRequest.context())) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-smart-depot-long-single-held");
-      return false;
-    }
-    LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "fallback-preview");
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
+            prepared.trainName(),
+            prepared.spawnLease(),
+            prepared.gateRequest(),
+            prepared.gateRequest().request(),
+            prepared.lineDepots(),
+            materializedSpawnOpt.get(),
+            prepared.recoveryEpoch(),
+            now,
+            true));
+  }
 
-    Optional<MinecartGroup> groupOpt;
+  /**
+   * 提交已实体化的 Depot 发车。
+   *
+   * <p>该方法是常规与 fallback 两条 Depot 入口唯一允许跨越“物理 group 已存在”边界的位置。它先取得硬授权，再写入 expected
+   * identity，随后才允许首次信号刷新；footprint 未水合时保留事务而不完成票据。任何失败都会先收容实体，再释放账务资源。
+   *
+   * @return 已完成或已安全登记为等待 footprint promotion 时返回 {@code true}
+   */
+  private boolean finalizeMaterializedDepotSpawn(MaterializedDepotSpawnContext context) {
+    RuntimeTrainHandle train = context.materializedSpawn().train();
+    String reasonPrefix = context.fallback() ? "fallback-" : "";
     try {
-      groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
-    } catch (Exception e) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      debugLogger.accept("Layover 降级发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
-      requeue(effectiveTicket, now, "fallback-spawn-failed");
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(context.recoveryEpoch())) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "startup-recovery-epoch-changed");
+        return false;
+      }
+      LaunchAuthorizationService.AuthorizationResult authorization =
+          acquireSpawnGate(context.authorityRequest());
+      if (!authorization.allowed()) {
+        logDepotGateBlockedTrace(
+            context.ticket(),
+            context.service(),
+            context.route(),
+            context.trainName(),
+            context.lineDepots(),
+            context.gateRequest(),
+            authorization,
+            context.spawnLease(),
+            context.fallback() ? "fallback-acquire" : "acquire");
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
+        return false;
+      }
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(context.recoveryEpoch())) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "startup-recovery-epoch-changed-after-acquire");
+        return false;
+      }
+      context.materializedSpawn().initialize();
+      TrainProperties properties = train.properties();
+      if (applyPreparedSpawnDestination(properties, context.gateRequest().effectiveWaypoints())) {
+        applySpawnLifecycleTags(
+            Optional.of(context.provider()),
+            properties,
+            context.service(),
+            context.operationType());
+      }
+      if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
+          runtimeDispatchService,
+          train,
+          context.authorityRequest(),
+          context.recoveryEpoch(),
+          () -> runtimeDispatchService.refreshSignal(train))) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "expected-spawn-physical-registration-failed");
+        return false;
+      }
+      runtimeDispatchService.requestSignalReevaluationForResources(
+          context.authorityRequest().resourceList(), context.trainName());
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(context.recoveryEpoch())) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "startup-recovery-epoch-changed-before-complete");
+        return false;
+      }
+      RuntimeDispatchService.ExpectedMaterializedSpawnStatus materializedStatus =
+          runtimeDispatchService.expectedMaterializedSpawnStatus(train, context.recoveryEpoch());
+      if (materializedStatus
+          == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL) {
+        if (deferMaterializedSpawnUntilPromotion(
+            context.ticket(),
+            context.service(),
+            context.trainName(),
+            context.spawnLease(),
+            train,
+            context.recoveryEpoch(),
+            context.now(),
+            context.fallback())) {
+          return true;
+        }
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "pending-materialized-spawn-registration-conflict");
+        return false;
+      }
+      if (materializedStatus != RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "expected-spawn-physical-state-lost-before-complete");
+        return false;
+      }
+      spawnManager.complete(context.ticket());
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          (context.fallback() ? "Layover 降级发车实体化事务异常: train=" : "自动发车实体化事务异常: train=")
+              + context.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+      retainMaterializedDepotSpawnRollback(
+          context,
+          reasonPrefix
+              + "materialized-spawn-initialization-failed:"
+              + failure.getClass().getSimpleName());
       return false;
     }
-    if (groupOpt.isEmpty()) {
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      requeue(effectiveTicket, now, "fallback-spawn-failed");
-      return false;
-    }
-    MinecartGroup group = groupOpt.get();
-    authorization = acquireSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "fallback-acquire");
-      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      destroySpawnedGroup(group);
-      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-    TrainProperties properties = group.getProperties();
-    if (applyPreparedSpawnDestination(properties, gateRequest.effectiveWaypoints())) {
-      applySpawnLifecycleTags(
-          Optional.of(provider), properties, service, routeEntity.operationType());
-    }
-    runtimeDispatchService.refreshSignal(group);
-    runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
-    spawnManager.complete(effectiveTicket);
-    spawnSuccess.increment();
-    String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
-    debugLogger.accept(
-        "Layover 降级发车成功: train="
-            + trainName
-            + " route="
-            + service.operatorCode()
-            + "/"
-            + service.lineCode()
-            + "/"
-            + service.routeCode()
-            + " depot="
-            + depotUsed);
+    recordMaterializedSpawnSuccess(
+        context.ticket(), context.service(), context.trainName(), context.fallback());
     return true;
+  }
+
+  /** 将同一实体化事务的所有失败统一交给“先收容、后释放”的回滚入口。 */
+  private void retainMaterializedDepotSpawnRollback(
+      MaterializedDepotSpawnContext context, String reason) {
+    rollbackOrRetainMaterializedSpawn(
+        context.ticket(),
+        context.service(),
+        context.now(),
+        context.trainName(),
+        context.spawnLease(),
+        context.materializedSpawn().train(),
+        context.recoveryEpoch(),
+        context.fallback(),
+        reason);
+  }
+
+  /**
+   * 在已实体化 Depot 编组的首次信号刷新前提交其物理身份登记。
+   *
+   * <p>调用方必须已经成功 acquire {@code acquiredAuthority}。登记失败时不执行刷新，由调用方按已实体化列车的 fail-closed
+   * 顺序回滚；成功时刷新必然发生在登记之后，避免同步信号 tick 把本次新车误判为未知迟加载实体。
+   */
+  static boolean registerExpectedMaterializedSpawnBeforeFirstRefresh(
+      RuntimeDispatchService runtimeDispatchService,
+      RuntimeTrainHandle train,
+      OccupancyRequest acquiredAuthority,
+      long startupRecoveryEpoch,
+      Runnable firstSignalRefresh) {
+    Objects.requireNonNull(runtimeDispatchService, "runtimeDispatchService");
+    Objects.requireNonNull(train, "train");
+    Objects.requireNonNull(acquiredAuthority, "acquiredAuthority");
+    Objects.requireNonNull(firstSignalRefresh, "firstSignalRefresh");
+    if (!runtimeDispatchService.registerExpectedMaterializedSpawn(
+        train, acquiredAuthority, startupRecoveryEpoch)) {
+      return false;
+    }
+    firstSignalRefresh.run();
+    return true;
+  }
+
+  /**
+   * 启动占用恢复抢占发车事务时执行统一回滚。
+   *
+   * <p>未创建实体时直接撤销临时状态；已经实体化时先完成硬停车与延迟销毁安排，并把 occupancy 保留到 GroupRemove 精确释放。票据只能在新的 READY epoch
+   * 中重试。物理收容或账务回滚异常时返回失败，调用方必须保留待处理记录，不得把票据视为已回队或继续执行任何放行动作。
+   *
+   * @return 实体已安全收容且账务动作全部完成，或尚未创建实体且普通回滚完成时为 {@code true}
+   */
+  private boolean abortDepotSpawnForRecovery(
+      SpawnTicket ticket,
+      Instant now,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      Optional<RuntimeTrainHandle> spawnedTrain,
+      String reason) {
+    if (spawnedTrain.isPresent()) {
+      return rollbackMaterializedDepotSpawn(
+          ticket, now, trainName, spawnLease, spawnedTrain.orElseThrow(), reason);
+    }
+    runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+    releaseSpawnLease(spawnLease);
+    occupancyManager.releaseByTrain(trainName);
+    requeue(ticket, now, reason);
+    return true;
+  }
+
+  /**
+   * 回滚已经实体化的 Depot 编组。
+   *
+   * <p>必须先硬停车并成功安排销毁，随后才能释放发车租约并回队。占用 claim 刻意保留到 GroupRemove 精确释放，避免延迟销毁的一 tick
+   * 内出现“实体仍在、保护已撤销”的窗口。任一收容或账务动作异常都会停止后续放行动作并返回失败，使上层保留恢复记录供下一 tick 重试隔离。
+   *
+   * @return 物理收容和全部账务回滚均完成时为 {@code true}
+   */
+  private boolean rollbackMaterializedDepotSpawn(
+      SpawnTicket ticket,
+      Instant now,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      String reason) {
+    boolean contained =
+        containMaterializedSpawnBeforeRelease(
+            train,
+            () -> runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName),
+            () -> releaseSpawnLease(spawnLease),
+            () -> requeueMaterializedSpawn(ticket, now, reason),
+            debugLogger);
+    if (!contained) {
+      debugLogger.accept("已实体化发车回滚未完整完成，不得视为发车成功: train=" + trainName + " reason=" + reason);
+    }
+    return contained;
+  }
+
+  /**
+   * 把已安全销毁的实体化失败票据重新入队。
+   *
+   * <p>普通失败达到尝试上限后可以结束票据；实体化失败则不能静默消费班次，否则一次 TrainCarts 水合竞态会永久丢失该发车。达到上限后保持原 attempts
+   * 并按正常重试间隔退避，等待现场或版本问题修复。
+   */
+  private void requeueMaterializedSpawn(SpawnTicket ticket, Instant now, String error) {
+    if (ticket == null) {
+      return;
+    }
+    spawnRetries.increment();
+    String reason = error == null ? "unknown" : error;
+    String key = "materialized-spawn-rollback:" + reason;
+    requeueByError
+        .computeIfAbsent(key, ignored -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+    Instant retryAt = (now == null ? Instant.now() : now).plus(retryDelay);
+    SpawnTicket retry =
+        ticket.attempts() + 1 >= maxRetryAttempts
+            ? ticket.delayedUntil(retryAt, key)
+            : ticket.withRetry(retryAt, key);
+    spawnManager.requeue(retry);
+    try {
+      debugLogger.accept(
+          "已实体化发车回滚后保留票据: ticket="
+              + ticket.id()
+              + " route="
+              + ticket.service().routeCode()
+              + " attempts="
+              + retry.attempts()
+              + " retryAt="
+              + retry.notBefore()
+              + " reason="
+              + key);
+    } catch (RuntimeException | LinkageError logFailure) {
+      HEALTH_LOGGER.warning("实体化发车回滚日志写入失败: " + logFailure.getClass().getSimpleName());
+    }
+  }
+
+  /**
+   * 以 fail-closed 顺序回滚已实体化编组。
+   *
+   * <p>该边界刻意不释放 occupancy；实体真正移除后由 GroupRemove 事件释放。物理停车或销毁安排失败时，不执行任何会允许重发的后续动作。
+   *
+   * @return 已硬停、安排销毁并完成后续账务动作时为 {@code true}
+   */
+  static boolean containMaterializedSpawnBeforeRelease(
+      RuntimeTrainHandle handle,
+      Runnable cancelPreparedAuthority,
+      Runnable releaseLease,
+      Runnable requeueTicket,
+      Consumer<String> logger) {
+    Objects.requireNonNull(handle, "handle");
+    Objects.requireNonNull(cancelPreparedAuthority, "cancelPreparedAuthority");
+    Objects.requireNonNull(releaseLease, "releaseLease");
+    Objects.requireNonNull(requeueTicket, "requeueTicket");
+    Consumer<String> safeLogger = logger != null ? logger : ignored -> {};
+    try {
+      handle.stopHard();
+      handle.destroy();
+    } catch (RuntimeException | LinkageError ex) {
+      safeLogger.accept(
+          "已实体化发车物理收容失败: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+      return false;
+    }
+    try {
+      cancelPreparedAuthority.run();
+      releaseLease.run();
+      requeueTicket.run();
+      return true;
+    } catch (RuntimeException | LinkageError ex) {
+      safeLogger.accept(
+          "已实体化发车账务回滚失败，编组已硬停并安排销毁: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+      return false;
+    }
   }
 
   /** 返回出车诊断快照（成功/重试/错误分布）。 */
@@ -2178,17 +3039,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       pendingLayoverTickets.remove(ticket.id());
       spawnManager.complete(ticket);
-      debugLogger.accept(
-          "自动发车放弃: ticket="
-              + ticket.id()
-              + " route="
-              + ticket.service().routeCode()
-              + " attempts="
-              + nextAttempts
-              + " max="
-              + maxRetryAttempts
-              + " error="
-              + error);
+      try {
+        debugLogger.accept(
+            "自动发车放弃: ticket="
+                + ticket.id()
+                + " route="
+                + ticket.service().routeCode()
+                + " attempts="
+                + nextAttempts
+                + " max="
+                + maxRetryAttempts
+                + " error="
+                + error);
+      } catch (RuntimeException | LinkageError logFailure) {
+        HEALTH_LOGGER.warning("自动发车放弃日志写入失败: " + logFailure.getClass().getSimpleName());
+      }
       return;
     }
     spawnRetries.increment();
@@ -2201,24 +3066,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     SpawnTicket retry = ticket.withRetry(next, error);
     spawnManager.requeue(retry);
     String routeCode = ticket.service().routeCode();
-    debugLogger.accept(
-        "自动发车重试入队: ticket="
-            + ticket.id()
-            + " route="
-            + routeCode
-            + " attempts="
-            + retry.attempts()
-            + " notBefore="
-            + retry.notBefore()
-            + " error="
-            + error);
+    try {
+      debugLogger.accept(
+          "自动发车重试入队: ticket="
+              + ticket.id()
+              + " route="
+              + routeCode
+              + " attempts="
+              + retry.attempts()
+              + " notBefore="
+              + retry.notBefore()
+              + " error="
+              + error);
 
-    if (key.startsWith("spawn-failed")
-        || key.startsWith("graph-missing")
-        || key.startsWith("depot-world-missing")) {
-      warnThrottled(
-          "spawn:" + key + ":" + routeCode,
-          "自动发车异常: route=" + routeCode + " error=" + key + " attempts=" + retry.attempts());
+      if (key.startsWith("spawn-failed")
+          || key.startsWith("graph-missing")
+          || key.startsWith("depot-world-missing")) {
+        warnThrottled(
+            "spawn:" + key + ":" + routeCode,
+            "自动发车异常: route=" + routeCode + " error=" + key + " attempts=" + retry.attempts());
+      }
+    } catch (RuntimeException | LinkageError logFailure) {
+      HEALTH_LOGGER.warning("自动发车重试日志写入失败: " + logFailure.getClass().getSimpleName());
     }
   }
 
@@ -2935,19 +3804,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (lease != null) {
       lease.release();
     }
-  }
-
-  /**
-   * 回收已实体化但未取得调度占用的 Depot 列车。
-   *
-   * <p>spawn 后 acquire 可能因同 tick 内其他状态变化失败；此时必须销毁刚创建的 TrainCarts group，避免没有 occupancy lease
-   * 的实体车留在线路上。
-   */
-  private static void destroySpawnedGroup(MinecartGroup group) {
-    if (group == null) {
-      return;
-    }
-    new TrainCartsRuntimeHandle(group).destroy();
   }
 
   private OptionalInt resolveLineMaxTrains(StorageProvider provider, Line line) {

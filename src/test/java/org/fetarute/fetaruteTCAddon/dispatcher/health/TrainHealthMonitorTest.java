@@ -3,26 +3,50 @@ package org.fetarute.fetaruteTCAddon.dispatcher.health;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.BlockerRelation;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 
 /** {@link TrainHealthMonitor} 单元测试。 */
 @DisplayName("TrainHealthMonitor 单元测试")
@@ -166,11 +190,88 @@ class TrainHealthMonitorTest {
 
   private RuntimeDispatchService.DeadlockBlockerSnapshot deadlockSnapshot(
       String blockerTrain, String conflictKey, CorridorDirection direction) {
+    BlockerRelation relation =
+        conflictKey.startsWith("switcher:")
+            ? BlockerRelation.SWITCHER_CONFLICT
+            : BlockerRelation.OPPOSITE_SINGLE_CONFLICT;
+    return deadlockSnapshot(
+        blockerTrain, conflictKey, direction, relation, ClaimRole.MOVEMENT_REQUIRED);
+  }
+
+  private RuntimeDispatchService.DeadlockBlockerSnapshot deadlockSnapshot(
+      String blockerTrain,
+      String conflictKey,
+      CorridorDirection direction,
+      BlockerRelation relation,
+      ClaimRole role) {
+    return deadlockSnapshot(blockerTrain, conflictKey, direction, relation.name(), role.name());
+  }
+
+  private RuntimeDispatchService.DeadlockBlockerSnapshot deadlockSnapshot(
+      String blockerTrain,
+      String conflictKey,
+      CorridorDirection direction,
+      String relation,
+      String role) {
     return new RuntimeDispatchService.DeadlockBlockerSnapshot(
         Set.of(
             new RuntimeDispatchService.DeadlockBlockerInfo(
-                blockerTrain, conflictKey, Optional.ofNullable(direction))),
+                blockerTrain,
+                conflictKey,
+                Optional.ofNullable(direction),
+                blockerTrain,
+                "CONFLICT:" + conflictKey,
+                relation,
+                ResourceIntent.MOVEMENT_REQUIRED.name(),
+                role,
+                "test",
+                1L,
+                1L)),
         Instant.now());
+  }
+
+  private void stubMutualSwitcherWait(String relation, String role) {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(eq("trainA"), any()))
+        .thenReturn(deadlockSnapshot("trainB", "switcher:SW", null, relation, role));
+    when(dispatchService.recentDeadlockBlockers(eq("trainB"), any()))
+        .thenReturn(deadlockSnapshot("trainA", "switcher:SW", null, relation, role));
+    when(dispatchService.deadlockTrainContext("trainA"))
+        .thenReturn(Optional.of(context("trainA", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("trainB"))
+        .thenReturn(Optional.of(context("trainB", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.destroyTrainByName(anyString(), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+  }
+
+  private void checkMutualWaitThroughDestroyThreshold() {
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+  }
+
+  private void assertMutualWaitIsWeakAndCannotDestroy() {
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("episodeType=SWITCHER_OR_NODE_EDGE_WEAK")
+                        && message.contains("destroyPolicy=diagnostic-only")),
+        debugLogs::toString);
+    assertFalse(
+        debugLogs.stream()
+            .anyMatch(message -> message.contains("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED")),
+        debugLogs::toString);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
   private void stubFollowerBlockedByLeader(
@@ -417,6 +518,27 @@ class TrainHealthMonitorTest {
 
     assertEquals(0, result.stallCount(), "停站期间静止不应视为 stall");
     assertTrue(alerts.isEmpty());
+  }
+
+  @Test
+  @DisplayName("Dwell 边界：停站结束后的短暂 STOP 不继承停站时长")
+  void dwellExitStopDoesNotTriggerDeadlockFallbackBeforeFreshStopThreshold() {
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(eq("train1"), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.of(1));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    monitor.check(Set.of("train1"), t0.plusSeconds(21));
+
+    assertFalse(
+        debugLogs.stream().anyMatch(message -> message.contains("DEADLOCK_DESTROY_SKIPPED")),
+        debugLogs.toString());
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
   @Test
@@ -1175,6 +1297,335 @@ class TrainHealthMonitorTest {
     assertFalse(
         debugLogs.stream().anyMatch(message -> message.contains("episodeType=CONFIRMED_SINGLE")),
         "switcher blocker 不应被标成 confirmed single");
+  }
+
+  @Test
+  @DisplayName("道岔 QUEUE_POSITION 互等只形成 weak episode，不能满足 destroy hard-cycle")
+  void switcherQueuePositionMutualWaitRemainsWeakAndCannotDestroy() {
+    stubMutualSwitcherWait(
+        BlockerRelation.SWITCHER_CONFLICT.name(), ClaimRole.QUEUE_POSITION.name());
+    checkMutualWaitThroughDestroyThreshold();
+    assertMutualWaitIsWeakAndCannotDestroy();
+  }
+
+  @Test
+  @DisplayName("道岔 UNLOCK_RESERVATION 互等只形成 weak episode，不能满足 destroy hard-cycle")
+  void switcherUnlockReservationMutualWaitRemainsWeakAndCannotDestroy() {
+    stubMutualSwitcherWait(
+        BlockerRelation.SWITCHER_CONFLICT.name(), ClaimRole.UNLOCK_RESERVATION.name());
+    checkMutualWaitThroughDestroyThreshold();
+    assertMutualWaitIsWeakAndCannotDestroy();
+  }
+
+  @Test
+  @DisplayName("道岔 PROTECTIVE_RETAIN 互等只形成 weak episode，不能满足 destroy hard-cycle")
+  void switcherProtectiveRetainMutualWaitRemainsWeakAndCannotDestroy() {
+    stubMutualSwitcherWait(
+        BlockerRelation.SWITCHER_CONFLICT.name(), ClaimRole.PROTECTIVE_RETAIN.name());
+    checkMutualWaitThroughDestroyThreshold();
+    assertMutualWaitIsWeakAndCannotDestroy();
+  }
+
+  @Test
+  @DisplayName("道岔 UNKNOWN 互等只形成 weak episode，不能满足 destroy hard-cycle")
+  void switcherUnknownMutualWaitRemainsWeakAndCannotDestroy() {
+    stubMutualSwitcherWait("UNKNOWN", "UNKNOWN");
+    checkMutualWaitThroughDestroyThreshold();
+    assertMutualWaitIsWeakAndCannotDestroy();
+  }
+
+  @Test
+  @DisplayName("实体 PHYSICAL_FOOTPRINT 道岔 blocker 可确认 live hard-cycle")
+  void switcherPhysicalFootprintMutualWaitConfirmsLiveHardCycle() {
+    stubMutualSwitcherWait(
+        BlockerRelation.HARD_OCCUPANCY.name(), ClaimRole.PHYSICAL_FOOTPRINT.name());
+    checkMutualWaitThroughDestroyThreshold();
+
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(message -> message.contains("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED")),
+        debugLogs::toString);
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("episodeType=LIVE_MUTUAL_BLOCKER_CYCLE")
+                        && message.contains("destroyPolicy=confirmed-live-hard-cycle")),
+        debugLogs::toString);
+  }
+
+  @Test
+  @DisplayName("destroy precheck 使用最新 typed blocker，降级为软预约后拒绝销毁")
+  void destroyPrecheckRejectsLiveCycleWhenLatestTypedSnapshotIsNoLongerHard() {
+    AtomicBoolean hardEvidence = new AtomicBoolean(true);
+    AtomicBoolean downgradeOnForwardUnlock = new AtomicBoolean(false);
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(eq("trainA"), any()))
+        .thenAnswer(
+            ignored ->
+                deadlockSnapshot(
+                    "trainB",
+                    "switcher:SW",
+                    null,
+                    BlockerRelation.SWITCHER_CONFLICT.name(),
+                    hardEvidence.get()
+                        ? ClaimRole.MOVEMENT_REQUIRED.name()
+                        : ClaimRole.UNLOCK_RESERVATION.name()));
+    when(dispatchService.recentDeadlockBlockers(eq("trainB"), any()))
+        .thenAnswer(
+            ignored ->
+                deadlockSnapshot(
+                    "trainA",
+                    "switcher:SW",
+                    null,
+                    BlockerRelation.SWITCHER_CONFLICT.name(),
+                    hardEvidence.get()
+                        ? ClaimRole.MOVEMENT_REQUIRED.name()
+                        : ClaimRole.UNLOCK_RESERVATION.name()));
+    when(dispatchService.deadlockTrainContext("trainA"))
+        .thenReturn(Optional.of(context("trainA", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("trainB"))
+        .thenReturn(Optional.of(context("trainB", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.applySmartForwardUnlock(any()))
+        .thenAnswer(
+            ignored -> {
+              if (downgradeOnForwardUnlock.get()) {
+                hardEvidence.set(false);
+              }
+              return RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate");
+            });
+    when(dispatchService.destroyTrainByName(anyString(), eq("health-deadlock-timeout")))
+        .thenReturn(true);
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(50));
+    downgradeOnForwardUnlock.set(true);
+    monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(100));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE")
+                        && message.contains("reason=blockers-not-all-live-hard")),
+        debugLogs::toString);
+  }
+
+  @Test
+  @DisplayName("真实占用快照形成 live cycle，冲突释放后销毁前检查不改写幸存授权")
+  void realOccupancyCycleRecoveryAndDestroyBeforeCheckPreserveSurvivorClaims() {
+    String trainA = "trainA";
+    String trainB = "trainB";
+    Instant occupancyTime = Instant.now();
+    NodeId firstEntry = NodeId.of("A:ENTRY");
+    NodeId firstSwitcher = NodeId.of("SWITCHER:TEST:FIRST");
+    NodeId firstExit = NodeId.of("A:EXIT");
+    NodeId secondEntry = NodeId.of("B:ENTRY");
+    NodeId secondSwitcher = NodeId.of("SWITCHER:TEST:SECOND");
+    NodeId secondExit = NodeId.of("B:EXIT");
+    OccupancyResource firstConflict =
+        OccupancyResource.forConflict("switcher:" + firstSwitcher.value());
+    OccupancyResource secondConflict =
+        OccupancyResource.forConflict("switcher:" + secondSwitcher.value());
+    OccupancyResource secondSwitcherNode = OccupancyResource.forNode(secondSwitcher);
+    OccupancyResource secondExitEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(secondSwitcher, secondExit));
+    OccupancyResource secondExitNode = OccupancyResource.forNode(secondExit);
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("health-route"),
+            List.of(NodeId.of("ROUTE:A"), NodeId.of("ROUTE:B")),
+            Optional.empty());
+    TrainProperties propertiesA = healthTrainProperties(trainA);
+    TrainProperties propertiesB = healthTrainProperties(trainB);
+    RouteProgressRegistry progressRegistry = new RouteProgressRegistry();
+    progressRegistry.initFromTags(trainA, propertiesA, route);
+    progressRegistry.initFromTags(trainB, propertiesB, route);
+    progressRegistry.updateSignal(trainA, SignalAspect.STOP, occupancyTime);
+    progressRegistry.updateSignal(trainB, SignalAspect.STOP, occupancyTime);
+    RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
+    when(routes.findByCodes("op", "line", "route")).thenReturn(Optional.of(route));
+    ConfigManager configManager = mock(ConfigManager.class, RETURNS_DEEP_STUBS);
+    when(configManager.current().runtimeSettings().distanceCacheRefreshSeconds()).thenReturn(3);
+    when(configManager.current().runtimeSettings().pathCacheMaxSize()).thenReturn(256);
+    when(configManager.current().smartDispatcherSettings().mode())
+        .thenReturn(SmartDispatcherMode.ENFORCE);
+    List<String> integrationLogs = new ArrayList<>();
+    RuntimeDispatchService realService =
+        new RuntimeDispatchService(
+            manager,
+            mock(RailGraphService.class),
+            routes,
+            progressRegistry,
+            mock(SignNodeRegistry.class),
+            new LayoverRegistry(),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            integrationLogs::add);
+    TrainHealthMonitor realMonitor =
+        new TrainHealthMonitor(
+            realService, new DwellRegistry(), new HealthAlertBus(), integrationLogs::add);
+    realMonitor.setProgressStuckThreshold(Duration.ofMinutes(5));
+    realMonitor.setProgressStopGraceThreshold(Duration.ofMinutes(3));
+    realMonitor.setDeadlockDestroyThreshold(Duration.ofSeconds(1));
+
+    OccupancyRequest firstOwner =
+        healthSwitcherRequest(
+            trainA,
+            occupancyTime,
+            firstConflict,
+            List.of(firstEntry, firstSwitcher, firstExit),
+            List.of(firstConflict),
+            manager.version(),
+            progressRegistry.version());
+    OccupancyRequest secondOwner =
+        healthSwitcherRequest(
+            trainB,
+            occupancyTime.plusMillis(1),
+            secondConflict,
+            List.of(secondEntry, secondSwitcher, secondExit),
+            List.of(secondConflict),
+            manager.version(),
+            progressRegistry.version());
+    assertTrue(manager.acquire(firstOwner).allowed());
+    assertTrue(manager.acquire(secondOwner).allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    trainA,
+                    Optional.empty(),
+                    occupancyTime.plusMillis(2),
+                    List.of(secondSwitcherNode, secondExitEdge),
+                    Map.of(),
+                    Map.of(),
+                    0,
+                    AuthorizationPurpose.RUNTIME_MOVE,
+                    Map.of(),
+                    Map.of(
+                        secondSwitcherNode,
+                        ResourceIntent.HOLD_ONLY,
+                        secondExitEdge,
+                        ResourceIntent.HOLD_ONLY)))
+            .allowed());
+    OccupancyRequest trainAWaiting =
+        healthSwitcherRequest(
+            trainA,
+            occupancyTime.plusMillis(3),
+            secondConflict,
+            List.of(secondSwitcher, secondExit),
+            List.of(secondConflict, secondSwitcherNode, secondExitEdge, secondExitNode),
+            manager.version(),
+            progressRegistry.version());
+    OccupancyRequest trainBWaiting =
+        healthSwitcherRequest(
+            trainB,
+            occupancyTime.plusMillis(4),
+            firstConflict,
+            List.of(NodeId.of("B:ALT"), firstSwitcher, NodeId.of("B:OUT")),
+            List.of(firstConflict),
+            manager.version(),
+            progressRegistry.version());
+    assertFalse(manager.canEnter(trainAWaiting).allowed());
+    assertFalse(manager.canEnter(trainBWaiting).allowed());
+    assertEquals(
+        Set.of(trainB),
+        realService.recentBlockerTrains(trainA, Duration.ofMinutes(1)),
+        integrationLogs::toString);
+    assertEquals(
+        Set.of(trainA),
+        realService.recentBlockerTrains(trainB, Duration.ofMinutes(1)),
+        integrationLogs::toString);
+
+    AtomicBoolean trainBPresent = new AtomicBoolean(true);
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.get(trainA)).thenReturn(propertiesA);
+      store
+          .when(() -> TrainPropertiesStore.get(trainB))
+          .thenAnswer(ignored -> trainBPresent.get() ? propertiesB : null);
+      store
+          .when(TrainPropertiesStore::getAll)
+          .thenAnswer(
+              ignored ->
+                  trainBPresent.get() ? List.of(propertiesA, propertiesB) : List.of(propertiesA));
+
+      long versionBeforeRecovery = manager.version();
+      Instant healthTime = Instant.now();
+      realMonitor.check(Set.of(trainA, trainB), healthTime);
+      realMonitor.check(Set.of(trainA, trainB), healthTime.plusSeconds(50));
+
+      assertTrue(
+          integrationLogs.stream()
+              .anyMatch(message -> message.contains("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED")),
+          integrationLogs.toString());
+      assertTrue(
+          integrationLogs.stream()
+              .anyMatch(message -> message.contains("SMART_RECOVERY_EVALUATION_ENTER")),
+          integrationLogs.toString());
+
+      assertTrue(manager.version() > versionBeforeRecovery);
+      assertEquals(trainB, manager.getClaim(secondConflict).orElseThrow().trainName());
+      assertTrue(
+          manager.snapshotClaims().stream()
+              .anyMatch(
+                  claim ->
+                      claim.trainName().equals(trainA)
+                          && claim.resource().equals(secondExitNode)
+                          && claim.role() == ClaimRole.MOVEMENT_REQUIRED));
+      assertTrue(
+          integrationLogs.stream()
+              .anyMatch(
+                  message ->
+                      message.contains("entryType=DEADLOCK_RELEASE_LOCK")
+                          && message.contains("train=" + trainA)),
+          integrationLogs.toString());
+      assertTrue(
+          integrationLogs.stream()
+              .anyMatch(
+                  message ->
+                      message.contains("SMART_SWITCHER_DRAIN_RECOVERY_APPLIED")
+                          && message.contains("train=" + trainA)
+                          && message.contains("occupancyMutated=true")),
+          integrationLogs.toString());
+
+      manager.releaseByTrain(trainB);
+      progressRegistry.remove(trainB);
+      trainBPresent.set(false);
+      List<OccupancyClaim> survivorClaimsBeforeCheck =
+          manager.snapshotClaims().stream()
+              .filter(claim -> claim.trainName().equals(trainA))
+              .toList();
+
+      realMonitor.check(Set.of(trainA), healthTime.plusSeconds(100));
+
+      assertEquals(
+          survivorClaimsBeforeCheck,
+          manager.snapshotClaims().stream()
+              .filter(claim -> claim.trainName().equals(trainA))
+              .toList());
+      assertFalse(
+          integrationLogs.stream()
+              .anyMatch(message -> message.contains("DEADLOCK_DESTROY_ATTEMPTED")),
+          integrationLogs.toString());
+    } finally {
+      SignalComputationTrace.configureLogger(null);
+    }
   }
 
   @Test
@@ -2096,5 +2547,60 @@ class TrainHealthMonitorTest {
     TrainHealthMonitor.CheckResult result = monitorNoDwell.check(Set.of("train1"), t1);
 
     assertEquals(1, result.stallCount(), "无 dwellRegistry 时也应检测 stall");
+  }
+
+  private static TrainProperties healthTrainProperties(String trainName) {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.getTrainName()).thenReturn(trainName);
+    when(properties.hasTags()).thenReturn(true);
+    when(properties.getTags())
+        .thenReturn(
+            List.of(
+                "FTA_OPERATOR_CODE=op",
+                "FTA_LINE_CODE=line",
+                "FTA_ROUTE_CODE=route",
+                "FTA_ROUTE_INDEX=0"));
+    return properties;
+  }
+
+  private static OccupancyRequest healthSwitcherRequest(
+      String trainName,
+      Instant now,
+      OccupancyResource conflict,
+      List<NodeId> pathNodes,
+      List<OccupancyResource> resources,
+      long occupancyVersion,
+      long progressVersion) {
+    List<DirectedTraversalContext.DirectedEdge> directedEdges = new ArrayList<>();
+    for (int index = 0; index + 1 < pathNodes.size(); index++) {
+      NodeId from = pathNodes.get(index);
+      NodeId to = pathNodes.get(index + 1);
+      directedEdges.add(
+          new DirectedTraversalContext.DirectedEdge(EdgeId.undirected(from, to), from, to));
+    }
+    OccupancyRequest request =
+        new OccupancyRequest(
+            trainName, Optional.empty(), now, resources, Map.of(), Map.of(conflict.key(), 0), 0);
+    return request.withDirectedContext(
+        Optional.of(
+            new DirectedTraversalContext(
+                trainName,
+                Optional.empty(),
+                0,
+                Optional.of(pathNodes.get(0)),
+                Optional.of(NodeId.of("ROUTE:A")),
+                Optional.of(pathNodes.get(0)),
+                pathNodes.size() < 2 ? Optional.empty() : Optional.of(pathNodes.get(1)),
+                pathNodes,
+                directedEdges,
+                Map.of(),
+                Map.of(
+                    conflict.key(),
+                    new DirectedTraversalContext.SwitcherPathSignature(conflict.key(), pathNodes)),
+                "HEALTH_INTEGRATION",
+                occupancyVersion,
+                progressVersion,
+                "health-integration",
+                Optional.empty())));
   }
 }

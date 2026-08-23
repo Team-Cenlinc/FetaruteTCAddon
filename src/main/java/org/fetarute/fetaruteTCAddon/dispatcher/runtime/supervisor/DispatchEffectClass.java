@@ -15,6 +15,8 @@ public enum DispatchEffectClass {
   SIGNAL_CONSTRAINT,
   /** 授权前置审查，只能计算是否具备后续动作资格。 */
   AUTHORITY_PRECHECK,
+  /** 请求标准信号链路在下一 tick 重新计算；请求本身不得签发授权或改写占用。 */
+  SIGNAL_REEVALUATION_REQUEST,
   /** 会改动占用、队列、道岔保持或 stale claim 的动作。 */
   OCCUPANCY_MUTATION,
   /** 会销毁列车或触发销毁后清理的动作。 */

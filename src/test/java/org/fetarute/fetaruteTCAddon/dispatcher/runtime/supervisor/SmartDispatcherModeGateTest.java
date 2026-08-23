@@ -67,6 +67,26 @@ class SmartDispatcherModeGateTest {
   }
 
   @Test
+  void smartDispatcherObserveOnlyDoesNotRequestSignalReevaluation() {
+    assertFalse(
+        SmartDispatcherModeGate.permissions(
+                SmartDispatcherMode.OBSERVE_ONLY, DispatchEffectClass.SIGNAL_REEVALUATION_REQUEST)
+            .canRequestSignalReevaluation());
+  }
+
+  @Test
+  void smartDispatcherEnforceCanRequestSignalReevaluationWithoutOtherEffects() {
+    SmartDispatcherModeGate.EffectPermissions permissions =
+        SmartDispatcherModeGate.permissions(
+            SmartDispatcherMode.ENFORCE, DispatchEffectClass.SIGNAL_REEVALUATION_REQUEST);
+
+    assertTrue(permissions.canRequestSignalReevaluation());
+    assertFalse(permissions.canChangeAspect());
+    assertFalse(permissions.canMutateOccupancy());
+    assertFalse(permissions.canDestroy());
+  }
+
+  @Test
   void smartDispatcherOffDoesNotApplyDecision() {
     DispatchDecision decision = signalAdvisoryDecision();
 
@@ -149,10 +169,17 @@ class SmartDispatcherModeGateTest {
         DispatchAction.RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN.executableDispatcherAction());
     assertTrue(DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION.executableDispatcherAction());
     assertTrue(DispatchAction.RELEASE_SPECULATIVE_UNLOCK_RESERVATION.executableDispatcherAction());
-    assertTrue(DispatchAction.ISSUE_UNLOCK_AUTHORITY.executableDispatcherAction());
+    assertTrue(DispatchAction.REQUEST_UNLOCK_AUTHORITY_REEVALUATION.executableDispatcherAction());
     assertTrue(DispatchAction.SMART_HEAD_ON_YIELD.executableDispatcherAction());
+    assertTrue(
+        DispatchAction.ACQUIRE_VERIFIED_SWITCHER_DRAIN_AUTHORITY.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_ADMISSION_HOLD.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY.executableDispatcherAction());
     assertTrue(DispatchAction.SMART_DRAIN_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
     assertTrue(DispatchAction.SMART_FORWARD_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
+    assertTrue(DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY.executableDispatcherAction());
+    assertTrue(DispatchAction.PROCEED_WITH_CAUTION.executableDispatcherAction());
+    assertTrue(DispatchAction.CAUTION_SPEED_LIMIT.executableDispatcherAction());
   }
 
   @Test
@@ -190,6 +217,18 @@ class SmartDispatcherModeGateTest {
         assertTrue(action.executableDispatcherAction());
       }
     }
+  }
+
+  @Test
+  void typedActionGateRejectsForbiddenActionEvenInEnforce() {
+    assertTrue(
+        SmartDispatcherModeGate.allows(
+            SmartDispatcherMode.ENFORCE, DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY));
+    assertTrue(
+        SmartDispatcherModeGate.allows(
+            SmartDispatcherMode.ENFORCE, DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY));
+    assertFalse(
+        SmartDispatcherModeGate.allows(SmartDispatcherMode.ENFORCE, DispatchAction.FORCE_PROCEED));
   }
 
   private static DispatchDecision signalAdvisoryDecision() {

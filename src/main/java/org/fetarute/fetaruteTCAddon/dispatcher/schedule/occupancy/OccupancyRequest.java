@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -328,6 +330,65 @@ public record OccupancyRequest(
       }
     }
     return withResourceIntents(intents).withDirectedSource("LOOKAHEAD_PREVIEW");
+  }
+
+  /**
+   * 返回移除全部 advisory preview 资源后的可写请求。
+   *
+   * <p>LOOKAHEAD_PREVIEW 是只读风险查询，不能经由通用 acquire API 落入 claims、队列或版本状态。保留 directed context
+   * 仅供剩余硬资源的方向与路径证明使用；所有按资源键索引的元数据同步收窄。
+   */
+  public OccupancyRequest withoutLookaheadPreviewResources() {
+    List<OccupancyResource> writableResources =
+        resources.stream()
+            .filter(Objects::nonNull)
+            .filter(resource -> intentFor(resource) != ResourceIntent.LOOKAHEAD_PREVIEW)
+            .toList();
+    if (writableResources.size() == resources.size()) {
+      return this;
+    }
+    java.util.Set<String> writableKeys = new LinkedHashSet<>();
+    Map<OccupancyResource, ResourceIntent> writableIntents = new LinkedHashMap<>();
+    for (OccupancyResource resource : writableResources) {
+      writableKeys.add(resource.key());
+      ResourceIntent intent = resourceIntents.get(resource);
+      if (intent != null) {
+        writableIntents.put(resource, intent);
+      }
+    }
+    Map<String, CorridorDirection> writableDirections = new LinkedHashMap<>();
+    corridorDirections.forEach(
+        (key, direction) -> {
+          if (writableKeys.contains(key)) {
+            writableDirections.put(key, direction);
+          }
+        });
+    Map<String, Integer> writableEntryOrders = new LinkedHashMap<>();
+    conflictEntryOrders.forEach(
+        (key, order) -> {
+          if (writableKeys.contains(key)) {
+            writableEntryOrders.put(key, order);
+          }
+        });
+    Map<String, ConflictReleaseHint> writableReleaseHints = new LinkedHashMap<>();
+    conflictReleaseHints.forEach(
+        (key, hint) -> {
+          if (writableKeys.contains(key)) {
+            writableReleaseHints.put(key, hint);
+          }
+        });
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        writableResources,
+        writableDirections,
+        writableEntryOrders,
+        priority,
+        purpose,
+        writableReleaseHints,
+        writableIntents,
+        directedContext);
   }
 
   /** 返回同一请求但替换有向 traversal 上下文。 */

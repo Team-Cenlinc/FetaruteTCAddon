@@ -4,7 +4,7 @@ plugins {
     id("com.diffplug.spotless") version "8.2.1"
     id("com.github.spotbugs") version "6.4.8"
     id("xyz.jpenilla.run-paper") version "2.3.1"
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    id("com.gradleup.shadow") version "8.3.11"
 }
 
 group = 'org.fetarute'
@@ -19,6 +19,10 @@ repositories {
     maven {
         name = "bergerkiller-repo"
         url = "https://ci.mg-dev.eu/plugin/repository/everything/"
+    }
+    maven {
+        name = "jitpack"
+        url = "https://jitpack.io"
     }
 }
 
@@ -46,6 +50,11 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.21.0")
     testImplementation("org.mockito:mockito-inline:5.2.0")
     testImplementation("org.xerial:sqlite-jdbc:3.51.2.0")
+    // TrainCarts 的可选软依赖会在 Mockito 重转换具体 runtime 类型时被加载；仅补齐测试 JVM。
+    testRuntimeOnly("org.apache.logging.log4j:log4j-core:2.24.1")
+    testRuntimeOnly("com.github.MilkBowl:VaultAPI:1.7") {
+        exclude group: "org.bukkit", module: "bukkit"
+    }
 }
 
 spotless {
@@ -65,6 +74,10 @@ spotless {
 checkstyle {
     toolVersion = "10.17.0"
     configFile = rootProject.file("config/checkstyle/checkstyle.xml")
+}
+
+tasks.withType(org.gradle.api.plugins.quality.Checkstyle).configureEach {
+    maxHeapSize = "1g"
 }
 
 spotbugs {
@@ -95,13 +108,29 @@ tasks.test {
     useJUnitPlatform()
 }
 
-def targetJavaVersion = 17
+def targetJavaVersion = 21
 def gitCommitProvider = providers.exec {
     commandLine 'git', 'rev-parse', '--short', 'HEAD'
 }.standardOutput.asText.map { it.trim() }
 def gitCommit = gitCommitProvider.getOrElse("unknown")
+def sourceFingerprintFiles = files(
+        fileTree("src/main"),
+        file("build.gradle"),
+        file("gradle.properties")
+).files.findAll { it.isFile() }.sort { left, right ->
+    rootDir.toPath().relativize(left.toPath()).toString() <=>
+            rootDir.toPath().relativize(right.toPath()).toString()
+}
+def sourceDigest = java.security.MessageDigest.getInstance("SHA-256")
+sourceFingerprintFiles.each { sourceFile ->
+    def relativePath = rootDir.toPath().relativize(sourceFile.toPath()).toString()
+    sourceDigest.update(relativePath.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    sourceDigest.update((byte) 0)
+    sourceDigest.update(sourceFile.bytes)
+}
+def sourceFingerprint = sourceDigest.digest().encodeHex().toString().substring(0, 12)
 def buildTimestamp = new Date().format("yyMMdd")
-def buildId = "build-${gitCommit}-${buildTimestamp}"
+def buildId = "build-${gitCommit}-src-${sourceFingerprint}-${buildTimestamp}"
 
 java {
     def javaVersion = JavaVersion.toVersion(targetJavaVersion)
@@ -147,7 +176,12 @@ tasks.named("jar") {
 }
 
 processResources {
-    def props = [version: version, gitCommit: gitCommit, buildId: buildId]
+    def props = [
+            version: version,
+            gitCommit: gitCommit,
+            sourceFingerprint: sourceFingerprint,
+            buildId: buildId
+    ]
     inputs.properties props
     filteringCharset 'UTF-8'
     filesMatching('plugin.yml') {

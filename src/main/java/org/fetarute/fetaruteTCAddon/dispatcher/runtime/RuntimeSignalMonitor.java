@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.status.TrainStatus;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -16,6 +17,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.LongSupplier;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor;
@@ -30,9 +33,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * <p>该类只负责周期性扫描在线列车、清理异常编组、采样 ETA 以及把结果送入 {@link RuntimeDispatchService}。真正的信号控制核心仍位于 {@link
  * RuntimeDispatchService#handleSignalTick(RuntimeTrainHandle, boolean)}，这里不直接承担运行时控车决策。
  *
- * <p>执行频率由配置 {@code runtime.dispatch-tick-interval-ticks} 控制。
+ * <p>执行频率由配置 {@code runtime.dispatch-tick-interval-ticks} 控制。单轮候选处理受固定预算约束；预算耗尽后保留同一轮候选快照， 下一个调度
+ * tick 继续，避免列车数量或单个调度链过长时独占服务器主线程。
  */
 public final class RuntimeSignalMonitor implements Runnable {
+
+  private static final Duration DEFAULT_CANDIDATE_WORK_BUDGET = Duration.ofMillis(5);
 
   private final RuntimeDispatchService dispatchService;
   private final EtaRuntimeSampler etaSampler;
@@ -40,6 +46,11 @@ public final class RuntimeSignalMonitor implements Runnable {
   private final DwellRegistry dwellRegistry;
   private final RouteProgressRegistry routeProgressRegistry;
   private final RouteDefinitionCache routeDefinitions;
+  private final RuntimeDispatchWorkCycle<GroupTickTarget> candidateWorkCycle;
+  private final Map<MinecartGroup, Boolean> lastObservedMovementByGroup = new IdentityHashMap<>();
+  private final int scanIntervalTicks;
+  private RuntimeCycleSnapshot activeCycle;
+  private long nextCycleEligibleTick = Long.MIN_VALUE;
 
   /**
    * FTA tag 存在但 route 无法解析的列车，累计被观测到的 tick 次数。超过阈值视为"脱管"并清理。
@@ -59,46 +70,174 @@ public final class RuntimeSignalMonitor implements Runnable {
       DwellRegistry dwellRegistry,
       RouteProgressRegistry routeProgressRegistry,
       RouteDefinitionCache routeDefinitions) {
+    this(
+        dispatchService,
+        etaSampler,
+        snapshotStore,
+        dwellRegistry,
+        routeProgressRegistry,
+        routeDefinitions,
+        DEFAULT_CANDIDATE_WORK_BUDGET,
+        System::nanoTime,
+        1);
+  }
+
+  /**
+   * 使用候选快照间隔创建巡检器。
+   *
+   * <p>调用方应以每 tick heartbeat 调度 {@link #run()}。该间隔只限制新一轮候选快照的开始；已经开始的周期仍由下一 tick 续跑，避免预算切分放大信号响应延迟。
+   *
+   * @param scanIntervalTicks 两次完整候选周期之间的最小间隔
+   */
+  public RuntimeSignalMonitor(
+      RuntimeDispatchService dispatchService,
+      EtaRuntimeSampler etaSampler,
+      TrainSnapshotStore snapshotStore,
+      DwellRegistry dwellRegistry,
+      RouteProgressRegistry routeProgressRegistry,
+      RouteDefinitionCache routeDefinitions,
+      int scanIntervalTicks) {
+    this(
+        dispatchService,
+        etaSampler,
+        snapshotStore,
+        dwellRegistry,
+        routeProgressRegistry,
+        routeDefinitions,
+        DEFAULT_CANDIDATE_WORK_BUDGET,
+        System::nanoTime,
+        scanIntervalTicks);
+  }
+
+  /**
+   * 使用指定候选工作周期创建巡检器。
+   *
+   * <p>该构造入口把主线程预算放在 {@link RuntimeSignalMonitor} 的单一 seam；生产装配使用默认预算，测试或未来配置适配可替换时间源与预算，
+   * 无需复制巡检逻辑或暴露内部候选类型。
+   */
+  RuntimeSignalMonitor(
+      RuntimeDispatchService dispatchService,
+      EtaRuntimeSampler etaSampler,
+      TrainSnapshotStore snapshotStore,
+      DwellRegistry dwellRegistry,
+      RouteProgressRegistry routeProgressRegistry,
+      RouteDefinitionCache routeDefinitions,
+      Duration candidateWorkBudget,
+      LongSupplier nanoTime,
+      int scanIntervalTicks) {
     this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
     this.etaSampler = etaSampler;
     this.snapshotStore = snapshotStore;
     this.dwellRegistry = dwellRegistry;
     this.routeProgressRegistry = routeProgressRegistry;
     this.routeDefinitions = routeDefinitions;
+    this.candidateWorkCycle =
+        new RuntimeDispatchWorkCycle<>(
+            Objects.requireNonNull(candidateWorkBudget, "candidateWorkBudget"),
+            Objects.requireNonNull(nanoTime, "nanoTime"));
+    if (scanIntervalTicks <= 0) {
+      throw new IllegalArgumentException("scanIntervalTicks 必须为正数");
+    }
+    this.scanIntervalTicks = scanIntervalTicks;
   }
 
   @Override
   public void run() {
-    Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
-    if (groups == null) {
+    runWithFailClosedBoundary(
+        "-", this::runGuardedCycle, dispatchService::failClosedAfterSignalReevaluationFailure);
+  }
+
+  /** 执行一轮周期巡检；任何未被逐组边界吸收的运行时或 ABI 错误都由 {@link #run()} 关闭全局授权门。 */
+  private void runGuardedCycle() {
+    RuntimeCycleSnapshot cycle = activeCycle;
+    if (cycle == null) {
+      long currentTick = currentTick();
+      if (currentTick < nextCycleEligibleTick) {
+        return;
+      }
+      cycle = collectCycleSnapshot();
+      if (cycle == null) {
+        return;
+      }
+      activeCycle = cycle;
+    }
+
+    try {
+      RuntimeDispatchWorkCycle.CycleResult result =
+          candidateWorkCycle.run(
+              cycle.candidates(),
+              candidate -> {
+                Instant now = Instant.now();
+                long tick = now.toEpochMilli() / 50L;
+                if (!runWithFailClosedBoundary(
+                    candidate.trainName(),
+                    () -> processCandidate(candidate, tick, now),
+                    dispatchService::failClosedAfterSignalReevaluationFailure)) {
+                  throw CycleProcessingInterrupted.INSTANCE;
+                }
+              });
+      if (!result.completed()) {
+        return;
+      }
+    } catch (CycleProcessingInterrupted ignored) {
       return;
     }
+    activeCycle = null;
+    completeCycleCleanup();
+    nextCycleEligibleTick = nextCycleEligibleTick(currentTick(), scanIntervalTicks);
+  }
+
+  private static long currentTick() {
+    return Instant.now().toEpochMilli() / 50L;
+  }
+
+  /** 计算完整周期结束后允许创建下一份候选快照的 tick，饱和到 {@link Long#MAX_VALUE}。 */
+  static long nextCycleEligibleTick(long completedAtTick, int intervalTicks) {
+    if (intervalTicks <= 0) {
+      throw new IllegalArgumentException("intervalTicks 必须为正数");
+    }
+    return completedAtTick > Long.MAX_VALUE - intervalTicks
+        ? Long.MAX_VALUE
+        : completedAtTick + intervalTicks;
+  }
+
+  /**
+   * 判断周期巡检是否需要进入完整 Movement Authority 流程。
+   *
+   * <p>首次观测必须完成一次恢复授权；运动中列车仍需持续控制。稳定静止的列车已经在上一轮写入 STOP/queue 状态，重复构建进路不能创造新的
+   * authority，只会重做方向解析并重新触碰占用状态。它们应等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估。
+   *
+   * @param previouslyMoving 上一次成功观测到的物理运动状态；首次为 {@code null}
+   * @param currentlyMoving 本次物理运动状态
+   * @return 是否应执行完整信号与授权处理
+   */
+  static boolean shouldRunFullSignalTick(Boolean previouslyMoving, boolean currentlyMoving) {
+    return previouslyMoving == null
+        || currentlyMoving
+        || previouslyMoving.booleanValue() != currentlyMoving;
+  }
+
+  /** 收集一份不会在预算续跑期间被新到列车替换的巡检候选快照。 */
+  private RuntimeCycleSnapshot collectCycleSnapshot() {
+    Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
+    if (groups == null) {
+      return null;
+    }
     Instant now = Instant.now();
-    long tick = now.toEpochMilli() / 50L;
     List<GroupTickTarget> candidates = new ArrayList<>();
     Map<String, List<GroupTickTarget>> groupsByLogicalName = new LinkedHashMap<>();
+    boolean scanComplete = true;
     for (MinecartGroup group : groups) {
-      if (group == null || !group.isValid()) {
-        continue;
-      }
-      TrainProperties properties = group.getProperties();
-      boolean ftaTagged = dispatchService.hasFtaRuntimeTag(properties);
-      boolean derailed = isDerailed(group);
-      if (!shouldInspectRuntimeGroup(ftaTagged, derailed)) {
-        continue;
-      }
-      if (derailed) {
-        dispatchService.handleAbnormalGroup(group, "status-derailed");
-        continue;
-      }
-      String rawTrainName = resolveRawTrainName(group);
-      String trainName = resolveLogicalTrainName(group);
-      if (trainName != null && !trainName.isBlank()) {
-        groupsByLogicalName
-            .computeIfAbsent(trainName, unused -> new ArrayList<>())
-            .add(new GroupTickTarget(group, trainName, rawTrainName));
-      }
-      candidates.add(new GroupTickTarget(group, trainName, rawTrainName));
+      String trainHint = safeRuntimeTrainName(group);
+      boolean inspected =
+          runWithFailClosedBoundary(
+              trainHint,
+              () -> collectCandidate(group, candidates, groupsByLogicalName),
+              dispatchService::failClosedAfterSignalReevaluationFailure);
+      scanComplete &= inspected;
+    }
+    if (!scanComplete) {
+      return null;
     }
 
     Set<MinecartGroup> duplicateGroups = cleanupDuplicateLogicalTrains(groupsByLogicalName);
@@ -116,39 +255,155 @@ public final class RuntimeSignalMonitor implements Runnable {
                   .orElse(null)));
     }
     dispatchService.traceSmartDispatchGlobalSnapshot(activeTrainNames, now);
-    for (GroupTickTarget candidate : candidates) {
-      MinecartGroup group = candidate.group();
-      if (duplicateGroups.contains(group)) {
-        continue;
-      }
-      String trainName = candidate.trainName();
-      dispatchService.handleSignalTick(group);
-      String runtimeOwnerName = resolvePersistedRuntimeOwnerName(group, trainName);
-      // 检测"脱管"列车：有 FTA tag 但 route 无法解析，连续多 tick 后视为异常并清理
-      if (runtimeOwnerName != null && !runtimeOwnerName.isBlank()) {
-        detectStaleFtaTrain(group, runtimeOwnerName);
-      }
-      if (etaSampler != null && runtimeOwnerName != null && !runtimeOwnerName.isBlank()) {
-        Optional<Integer> dwellRemainingSec =
-            dwellRegistry != null
-                ? dwellRegistry.remainingSeconds(runtimeOwnerName)
-                : Optional.empty();
-        NodeSampleInfo nodeInfo = resolveNodeInfo(runtimeOwnerName);
-        etaSampler.sample(
-            group,
-            tick,
-            now,
-            nodeInfo.currentNodeId,
-            nodeInfo.lastPassedNodeId,
-            dwellRemainingSec,
-            nodeInfo.signalAspect);
-      }
-    }
+    List<GroupTickTarget> uniqueCandidates =
+        candidates.stream()
+            .filter(candidate -> !duplicateGroups.contains(candidate.group()))
+            .toList();
+    return new RuntimeCycleSnapshot(uniqueCandidates);
+  }
+
+  /**
+   * 在完整候选周期之后按最新现场完成收尾。
+   *
+   * <p>不能复用周期开始时的 active 名单：预算续跑期间可能出现 Depot materialization、改名或实体销毁。收尾前重新扫描可避免把新实体的授权误清为孤儿。
+   */
+  private void completeCycleCleanup() {
+    Set<String> activeTrainNames = activeRuntimeOwnerNamesNow();
     dispatchService.cleanupOrphanOccupancyClaims(activeTrainNames);
     cleanupSnapshotStore(activeTrainNames);
     staleTrainTicks.keySet().removeIf(name -> !activeTrainNames.contains(name));
     if (dwellRegistry != null) {
       dwellRegistry.retain(activeTrainNames);
+    }
+    retainObservedMovementGroups();
+  }
+
+  /** 清除已经销毁的编组的运动采样，防止长期运行时保留过期实体引用。 */
+  private void retainObservedMovementGroups() {
+    Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
+    if (groups == null) {
+      return;
+    }
+    Set<MinecartGroup> activeGroups = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (MinecartGroup group : groups) {
+      if (group != null && group.isValid()) {
+        activeGroups.add(group);
+      }
+    }
+    lastObservedMovementByGroup.keySet().removeIf(group -> !activeGroups.contains(group));
+  }
+
+  /** 读取当前已存活编组的逻辑 owner，供预算周期完成后的 orphan cleanup 使用。 */
+  private Set<String> activeRuntimeOwnerNamesNow() {
+    Collection<MinecartGroup> groups = MinecartGroupStore.getGroups();
+    if (groups == null || groups.isEmpty()) {
+      return Set.of();
+    }
+    Set<String> activeNames = new HashSet<>();
+    for (MinecartGroup group : groups) {
+      if (group == null || !group.isValid()) {
+        continue;
+      }
+      TrainProperties properties = group.getProperties();
+      if (properties == null) {
+        continue;
+      }
+      boolean ftaTagged = dispatchService.hasFtaRuntimeTag(properties);
+      if (!ftaTagged || isDerailed(group)) {
+        continue;
+      }
+      activeNames.addAll(
+          activeRuntimeOwnerNames(
+              resolveLogicalTrainName(group),
+              TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+                  .orElse(null)));
+    }
+    return Set.copyOf(activeNames);
+  }
+
+  /** 收集一个稳定候选；本方法由逐组 fail-closed 边界调用。 */
+  private void collectCandidate(
+      MinecartGroup group,
+      List<GroupTickTarget> candidates,
+      Map<String, List<GroupTickTarget>> groupsByLogicalName) {
+    if (group == null || !group.isValid()) {
+      return;
+    }
+    TrainProperties properties = group.getProperties();
+    boolean ftaTagged = dispatchService.hasFtaRuntimeTag(properties);
+    boolean derailed = isDerailed(group);
+    if (!shouldInspectRuntimeGroup(ftaTagged, derailed)) {
+      return;
+    }
+    if (derailed) {
+      dispatchService.handleAbnormalGroup(group, "status-derailed");
+      return;
+    }
+    String rawTrainName = resolveRawTrainName(group);
+    String trainName = resolveLogicalTrainName(group);
+    GroupTickTarget candidate = new GroupTickTarget(group, trainName, rawTrainName);
+    if (trainName != null && !trainName.isBlank()) {
+      groupsByLogicalName.computeIfAbsent(trainName, unused -> new ArrayList<>()).add(candidate);
+    }
+    candidates.add(candidate);
+  }
+
+  /** 对一个候选执行必要的信号重评估、脱管检测与 ETA 采样；异常时不得继续本轮孤儿释放。 */
+  private void processCandidate(GroupTickTarget candidate, long tick, Instant now) {
+    MinecartGroup group = candidate.group();
+    String trainName = candidate.trainName();
+    boolean currentlyMoving = group.isMoving();
+    Boolean previouslyMoving = lastObservedMovementByGroup.get(group);
+    if (shouldRunFullSignalTick(previouslyMoving, currentlyMoving)) {
+      dispatchService.handleSignalTick(group);
+      currentlyMoving = group.isMoving();
+    }
+    lastObservedMovementByGroup.put(group, currentlyMoving);
+    String runtimeOwnerName = resolvePersistedRuntimeOwnerName(group, trainName);
+    if (runtimeOwnerName != null && !runtimeOwnerName.isBlank()) {
+      detectStaleFtaTrain(group, runtimeOwnerName);
+    }
+    if (etaSampler == null || runtimeOwnerName == null || runtimeOwnerName.isBlank()) {
+      return;
+    }
+    Optional<Integer> dwellRemainingSec =
+        dwellRegistry != null ? dwellRegistry.remainingSeconds(runtimeOwnerName) : Optional.empty();
+    NodeSampleInfo nodeInfo = resolveNodeInfo(runtimeOwnerName);
+    etaSampler.sample(
+        group,
+        tick,
+        now,
+        nodeInfo.currentNodeId,
+        nodeInfo.lastPassedNodeId,
+        dwellRemainingSec,
+        nodeInfo.signalAspect);
+  }
+
+  /** 尽力提取错误审计用列车名；该辅助不得让 ABI 错误逃出巡检边界。 */
+  private String safeRuntimeTrainName(MinecartGroup group) {
+    try {
+      String logicalName = resolveLogicalTrainName(group);
+      return logicalName == null || logicalName.isBlank() ? "-" : logicalName;
+    } catch (RuntimeException | LinkageError ignored) {
+      return "-";
+    }
+  }
+
+  /**
+   * 为周期任务建立同时覆盖 {@link RuntimeException} 与 {@link LinkageError} 的 fail-closed 边界。
+   *
+   * @return 操作完整成功时为 {@code true}；已触发恢复时为 {@code false}
+   */
+  static boolean runWithFailClosedBoundary(
+      String trainName, Runnable operation, BiConsumer<String, Throwable> failureHandler) {
+    Objects.requireNonNull(operation, "operation");
+    Objects.requireNonNull(failureHandler, "failureHandler");
+    try {
+      operation.run();
+      return true;
+    } catch (RuntimeException | LinkageError failure) {
+      failureHandler.accept(trainName, failure);
+      return false;
     }
   }
 
@@ -507,6 +762,24 @@ public final class RuntimeSignalMonitor implements Runnable {
       Optional<SignalAspect> signalAspect) {
     static final NodeSampleInfo EMPTY =
         new NodeSampleInfo(Optional.empty(), Optional.empty(), Optional.empty());
+  }
+
+  /** 同一候选处理已进入 fail-closed 边界后，停止本次预算并保留游标的内部信号。 */
+  private static final class CycleProcessingInterrupted extends RuntimeException {
+
+    private static final long serialVersionUID = 1L;
+    private static final CycleProcessingInterrupted INSTANCE = new CycleProcessingInterrupted();
+
+    private CycleProcessingInterrupted() {
+      super(null, null, false, false);
+    }
+  }
+
+  /** 一个不可被后续候选快照替换的巡检周期。 */
+  private record RuntimeCycleSnapshot(List<GroupTickTarget> candidates) {
+    private RuntimeCycleSnapshot {
+      candidates = List.copyOf(candidates);
+    }
   }
 
   private record GroupTickTarget(MinecartGroup group, String trainName, String rawTrainName) {}

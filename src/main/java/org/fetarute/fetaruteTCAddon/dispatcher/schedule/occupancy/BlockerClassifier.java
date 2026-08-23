@@ -22,6 +22,9 @@ public final class BlockerClassifier {
     if (claim.role() == ClaimRole.PHYSICAL_FOOTPRINT) {
       return BlockerRelation.HARD_OCCUPANCY;
     }
+    if (OccupancyResourceResolver.isInterlockingConflict(resource)) {
+      return BlockerRelation.HARD_OCCUPANCY;
+    }
     if (claim.role() == ClaimRole.UNLOCK_RESERVATION) {
       return BlockerRelation.STALE_PROTECTIVE_CLAIM;
     }
@@ -76,7 +79,8 @@ public final class BlockerClassifier {
       return false;
     }
     String key = resource.key();
-    return key.startsWith("single:") && key.contains(":cycle:");
+    return OccupancyResourceResolver.isInterlockingConflict(resource)
+        || (key.startsWith("single:") && key.contains(":cycle:"));
   }
 
   private static Optional<CorridorDirection> requestDirection(

@@ -15,13 +15,18 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdgeAccumulator;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailPathFootprintRasterizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
@@ -64,13 +69,14 @@ public final class NodeToNodeEdgeExplorer {
   private final Consumer<String> debugLogger;
 
   private final Queue<EdgeExplorationTask> pendingTasks = new ArrayDeque<>();
-  private final Map<EdgeId, Integer> discoveredEdges = new HashMap<>();
+  private final Map<EdgeId, ExploredRailEdgeAccumulator> discoveredEdges = new HashMap<>();
 
   /** 已探索过的节点对（无向），用于跳过重复探索 */
   private final Set<EdgeId> exploredPairs = new HashSet<>();
 
   private EdgeExplorationTask currentTask;
   private boolean done = false;
+  private boolean footprintEvidenceComplete = true;
 
   /**
    * 创建边探索器。
@@ -185,6 +191,7 @@ public final class NodeToNodeEdgeExplorer {
     // 检查是否是有效轨道
     RailPiece piece = RailPiece.create(railBlock);
     if (piece == null || piece.isNone()) {
+      markFootprintEvidenceIncomplete("invalid-anchor-rail:" + task.startNodeId.value());
       debugLogger.accept("无效轨道块: " + anchor + " for node " + task.startNodeId);
       return;
     }
@@ -226,6 +233,10 @@ public final class NodeToNodeEdgeExplorer {
 
     if (switcherNodeIds.contains(task.startNodeId)) {
       addSwitcherNeighborWalkers(task, railBlock);
+    }
+
+    if (task.walkers.isEmpty()) {
+      markFootprintEvidenceIncomplete("no-walker-direction:" + task.startNodeId.value());
     }
 
     debugLogger.accept(
@@ -319,9 +330,16 @@ public final class NodeToNodeEdgeExplorer {
   private boolean stepWalker(WalkerState ws, NodeId startNodeId) {
     TrackWalkingPoint walker = ws.walker;
 
+    captureCurrentPath(ws);
+
     // 移动一个轨道块
     if (!walker.moveFull()) {
       // 无法继续移动（轨道结束、环路等）
+      if (walker.failReason == TrackWalkingPoint.FailReason.LIMIT_REACHED
+          || walker.failReason == TrackWalkingPoint.FailReason.NONE) {
+        markFootprintEvidenceIncomplete(
+            "walker-failed:" + startNodeId.value() + ":" + walker.failReason);
+      }
       debugLogger.accept(
           "Walker 停止: node="
               + startNodeId
@@ -331,9 +349,11 @@ public final class NodeToNodeEdgeExplorer {
               + walker.movedTotal);
       return true;
     }
+    captureCurrentPath(ws);
 
     // 检查是否超过最大距离
     if (walker.movedTotal > maxDistance) {
+      markFootprintEvidenceIncomplete("max-distance:" + startNodeId.value());
       debugLogger.accept("Walker 超过最大距离: node=" + startNodeId + " distance=" + walker.movedTotal);
       return true;
     }
@@ -341,6 +361,7 @@ public final class NodeToNodeEdgeExplorer {
     // 检查当前位置是否是另一个节点的锚点
     Block currentBlock = walker.state.railBlock();
     if (currentBlock == null) {
+      markFootprintEvidenceIncomplete("rail-block-missing:" + startNodeId.value());
       return true;
     }
 
@@ -356,19 +377,35 @@ public final class NodeToNodeEdgeExplorer {
       // 标记为已探索（从两个方向都算同一条边）
       exploredPairs.add(edgeId);
 
-      // 检查是否已经有更短的边
-      Integer existing = discoveredEdges.get(edgeId);
-      if (existing == null || distance < existing) {
-        discoveredEdges.put(edgeId, distance);
-        debugLogger.accept(
-            "发现边: " + startNodeId + " ↔ " + targetNodeId + " len=" + distance + " blocks");
-      }
+      discoveredEdges
+          .computeIfAbsent(edgeId, ignored -> new ExploredRailEdgeAccumulator())
+          .recordCandidate(distance, ws.footprintCells, ws.footprintCaptured);
+      debugLogger.accept(
+          "发现边: " + startNodeId + " ↔ " + targetNodeId + " len=" + distance + " blocks");
 
       return true;
     }
 
     // 还没到达节点，继续
     return false;
+  }
+
+  private void captureCurrentPath(WalkerState walkerState) {
+    TrackWalkingPoint walker = walkerState.walker;
+    Block railBlock = walker.state.railBlock();
+    RailPath path = walker.currentRailPath;
+    if (railBlock == null || path == null || path.isEmpty()) {
+      walkerState.footprintCaptured = false;
+      return;
+    }
+    Set<RailFootprintCell> cells =
+        RailPathFootprintRasterizer.rasterize(
+            path, new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ()));
+    if (cells.isEmpty()) {
+      walkerState.footprintCaptured = false;
+      return;
+    }
+    walkerState.footprintCells.addAll(cells);
   }
 
   /** 检查从 fromNode 到 toNode 的边是否已经被探索过。 用于跳过反向探索（如果 A→B 已完成，则 B→A 可以跳过） */
@@ -381,7 +418,37 @@ public final class NodeToNodeEdgeExplorer {
   }
 
   public Map<EdgeId, Integer> getDiscoveredEdges() {
-    return Map.copyOf(discoveredEdges);
+    Map<EdgeId, Integer> lengths = new HashMap<>();
+    getExploredEdges().forEach((edgeId, edge) -> lengths.put(edgeId, edge.lengthBlocks()));
+    return Map.copyOf(lengths);
+  }
+
+  /**
+   * 返回当前已经发现的区间证据。
+   *
+   * <p>所有起点与方向尚未走完时，足迹会保持 {@code complete=false}，避免分段构建中途把部分线网误报为已完整取证。
+   */
+  public Map<EdgeId, ExploredRailEdge> getExploredEdges() {
+    Map<EdgeId, ExploredRailEdge> snapshot = new HashMap<>();
+    boolean complete = isDone() && footprintEvidenceComplete;
+    discoveredEdges.forEach(
+        (edgeId, accumulator) -> snapshot.put(edgeId, accumulator.snapshot(complete)));
+    return Map.copyOf(snapshot);
+  }
+
+  /**
+   * 返回本轮探索是否仍具备发布精确物理足迹的完整证据。
+   *
+   * <p>超距、无效 anchor、无可用 walker 或异常缺失轨道状态都会永久将本轮降级为不完整；已经成功发现的 edge 坐标仍保留，但最终联锁进入 fail-closed 哨兵模式。
+   */
+  public boolean hasCompleteFootprintEvidence() {
+    return footprintEvidenceComplete;
+  }
+
+  void markFootprintEvidenceIncomplete(String reason) {
+    footprintEvidenceComplete = false;
+    debugLogger.accept(
+        "轨道足迹证据降级: reason=" + (reason == null || reason.isBlank() ? "unknown" : reason.trim()));
   }
 
   public int pendingTaskCount() {
@@ -405,6 +472,8 @@ public final class NodeToNodeEdgeExplorer {
 
   private static class WalkerState {
     final TrackWalkingPoint walker;
+    final Set<RailFootprintCell> footprintCells = new TreeSet<>();
+    boolean footprintCaptured = true;
 
     WalkerState(TrackWalkingPoint walker) {
       this.walker = walker;

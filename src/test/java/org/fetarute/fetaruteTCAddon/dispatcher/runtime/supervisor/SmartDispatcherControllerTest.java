@@ -156,8 +156,74 @@ class SmartDispatcherControllerTest {
   }
 
   @Test
-  @DisplayName("protective-only blocker 不直接变成 STOP")
-  void protectiveRetainBlockerClassifiedAsProtectiveOnly() {
+  @DisplayName("计划 RouteStop 进入制动距离时只给出减速建议")
+  void plannedRouteStopProducesCautionInsteadOfImmediateStop() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            OptionalLong.of(18),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            RiskSource.ROUTE_STOP_OR_TERMINAL,
+            RiskFreshness.LIVE,
+            "-",
+            "NODE:OP:S:CENTRAL:1",
+            false,
+            false,
+            true,
+            false,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(routeStopInput(risk, true));
+
+    assertEquals(DispatchAction.PROCEED_WITH_CAUTION, decision.action());
+    assertEquals(DispatchEffectClass.SIGNAL_ADVISORY, decision.effectClass());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.targetAspect());
+    assertEquals(6.0, decision.targetSpeedBps());
+  }
+
+  @Test
+  @DisplayName("没有 RouteStop 证明的 route 末端必须保持停车")
+  void routeStopWithoutPlanProofFailsClosed() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            OptionalLong.of(18),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            RiskSource.ROUTE_STOP_OR_TERMINAL,
+            RiskFreshness.LIVE,
+            "-",
+            "NODE:OP:S:CENTRAL:1",
+            false,
+            false,
+            true,
+            false,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(routeStopInput(risk, false));
+
+    assertEquals(DispatchAction.HOLD_AT_SIGNAL, decision.action());
+    assertEquals(SignalAspect.STOP, decision.targetAspect());
+  }
+
+  @Test
+  @DisplayName("protective-only blocker 不发布无执行器的释放动作")
+  void protectiveRetainBlockerDefersReleaseToCanonicalOccupancyChain() {
     SmartDispatcherController controller = new SmartDispatcherController(message -> {});
     ForwardSignalRiskSnapshot risk =
         new ForwardSignalRiskSnapshot(
@@ -183,8 +249,9 @@ class SmartDispatcherControllerTest {
 
     DispatchDecision decision = controller.decideForwardSignal(input("train-A", risk));
 
-    assertEquals(DispatchAction.RELEASE_STALE_RETAIN, decision.action());
-    assertEquals(DispatchEffectClass.OCCUPANCY_MUTATION, decision.effectClass());
+    assertEquals(DispatchAction.NO_ACTION, decision.action());
+    assertEquals(DispatchEffectClass.DIAGNOSTIC_ONLY, decision.effectClass());
+    assertEquals("canonical-occupancy-recovery", decision.expectedUnblockEffect());
     assertNotEquals(SignalAspect.STOP, decision.targetAspect());
   }
 
@@ -229,49 +296,11 @@ class SmartDispatcherControllerTest {
                 24.0,
                 false,
                 "none",
-                "test"));
+                "test",
+                false));
 
     assertEquals(DispatchAction.NO_ACTION, decision.action());
     assertEquals(SignalAspect.PROCEED, decision.targetAspect());
-  }
-
-  @Test
-  @DisplayName("优先级评分按确定性规则选择 winner")
-  void priorityWinnerIsDeterministic() {
-    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
-    SmartDispatcherController.PrioritySelection selection =
-        controller.selectPriorityWinner(
-            List.of(
-                new SmartDispatcherController.PriorityInput(
-                    "train-B",
-                    "single:X",
-                    false,
-                    OptionalLong.of(20),
-                    false,
-                    false,
-                    2.0,
-                    Duration.ofSeconds(30),
-                    0,
-                    false,
-                    0,
-                    true),
-                new SmartDispatcherController.PriorityInput(
-                    "train-A",
-                    "single:X",
-                    true,
-                    OptionalLong.of(10),
-                    true,
-                    true,
-                    1.0,
-                    Duration.ofSeconds(5),
-                    0,
-                    false,
-                    0,
-                    true)));
-
-    assertNotNull(selection.winner());
-    assertEquals("train-A", selection.winner().trainId());
-    assertEquals(1, selection.losers().size());
   }
 
   @Test
@@ -425,6 +454,26 @@ class SmartDispatcherControllerTest {
         24.0,
         false,
         "none",
-        "test");
+        "test",
+        false);
+  }
+
+  private static SmartDispatcherController.ForwardDecisionInput routeStopInput(
+      ForwardSignalRiskSnapshot risk, boolean plannedRouteStopProven) {
+    return new SmartDispatcherController.ForwardDecisionInput(
+        "train-A",
+        risk,
+        SignalAspect.PROCEED,
+        10.0,
+        10.0,
+        6.0,
+        1.0,
+        256,
+        8.0,
+        24.0,
+        false,
+        "none",
+        "ROUTE_STOP_OR_TERMINAL",
+        plannedRouteStopProven);
   }
 }

@@ -41,8 +41,14 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.InterlockingZoneInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailInterlockingSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -623,6 +629,41 @@ final class JdbcRepositoryTest {
   }
 
   @Test
+  void shouldLoadLegacyRailEdgesWithoutFootprintColumn() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-edge-topology.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE fta_rail_edges ("
+              + "world_id TEXT NOT NULL,"
+              + "node_a TEXT NOT NULL,"
+              + "node_b TEXT NOT NULL,"
+              + "length_blocks INTEGER NOT NULL,"
+              + "base_speed_limit REAL NOT NULL,"
+              + "bidirectional INTEGER NOT NULL,"
+              + "PRIMARY KEY (world_id, node_a, node_b)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_edges VALUES (?, 'A', 'B', 14, 0.0, 1)")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+
+    RailEdgeRecord loaded = provider.railEdges().listByWorld(worldId).get(0);
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")), loaded.edgeId());
+    assertEquals(14, loaded.lengthBlocks());
+    assertEquals(0.0, loaded.baseSpeedLimit(), 1e-9);
+    assertTrue(loaded.bidirectional());
+  }
+
+  @Test
   void shouldPersistRailEdgeOverrides() {
     StorageProvider provider = setupProvider(TEST_DB);
     RailEdgeOverrideRepository repository = provider.railEdgeOverrides();
@@ -655,6 +696,87 @@ final class JdbcRepositoryTest {
 
     repository.delete(worldId, edgeId);
     assertTrue(repository.findByEdge(worldId, edgeId).isEmpty());
+  }
+
+  @Test
+  void shouldPersistRailEdgeTopology() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    RailEdgeRepository repository = provider.railEdges();
+    UUID worldId = UUID.randomUUID();
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+
+    repository.replaceWorld(worldId, List.of(new RailEdgeRecord(worldId, edgeId, 24, 8.5, true)));
+
+    RailEdgeRecord loaded = repository.listByWorld(worldId).get(0);
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(edgeId, loaded.edgeId());
+    assertEquals(24, loaded.lengthBlocks());
+    assertEquals(8.5, loaded.baseSpeedLimit(), 1e-9);
+    assertTrue(loaded.bidirectional());
+  }
+
+  @Test
+  void shouldReplaceAndLoadSparseRailInterlockingSnapshot() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    UUID worldId = UUID.randomUUID();
+    EdgeId first = EdgeId.undirected(NodeId.of("MT-W"), NodeId.of("MT-E"));
+    EdgeId second = EdgeId.undirected(NodeId.of("DS-N"), NodeId.of("DS-S"));
+    RailFootprintCell crossing = new RailFootprintCell(10, 64, 10);
+    InterlockingZoneInfo zone =
+        new InterlockingZoneInfo("interlocking:stable-zone", first, second, Set.of(crossing));
+    RailInterlockingSnapshotRecord snapshot =
+        new RailInterlockingSnapshotRecord(
+            worldId,
+            RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION,
+            "edge-signature",
+            new RailInterlockingCoverage(2, 2, true),
+            Map.of(zone.zoneKey(), zone));
+
+    provider.railInterlockingSnapshots().save(snapshot);
+
+    assertEquals(snapshot, provider.railInterlockingSnapshots().findByWorld(worldId).orElseThrow());
+    provider.railInterlockingSnapshots().delete(worldId);
+    assertTrue(provider.railInterlockingSnapshots().findByWorld(worldId).isEmpty());
+  }
+
+  @Test
+  void shouldIgnoreLegacyFootprintColumnWhenLoadingRailEdgeTopology() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-edge-extra-footprint.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE fta_rail_edges ("
+              + "world_id TEXT NOT NULL,"
+              + "node_a TEXT NOT NULL,"
+              + "node_b TEXT NOT NULL,"
+              + "length_blocks INTEGER NOT NULL,"
+              + "base_speed_limit REAL NOT NULL,"
+              + "bidirectional INTEGER NOT NULL,"
+              + "footprint_json TEXT,"
+              + "PRIMARY KEY (world_id, node_a, node_b)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_edges "
+                  + "(world_id, node_a, node_b, length_blocks, base_speed_limit, bidirectional, footprint_json) "
+                  + "VALUES (?, 'A', 'B', 12, 7.25, 1, '{not-json')")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+
+    RailEdgeRecord loaded = provider.railEdges().listByWorld(worldId).get(0);
+
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(edgeId, loaded.edgeId());
+    assertEquals(12, loaded.lengthBlocks());
+    assertEquals(7.25, loaded.baseSpeedLimit(), 1e-9);
+    assertTrue(loaded.bidirectional());
   }
 
   @Test

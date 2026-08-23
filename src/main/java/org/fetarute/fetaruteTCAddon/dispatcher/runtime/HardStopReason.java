@@ -23,6 +23,9 @@ public enum HardStopReason {
   /** TrainCarts/图层目标不可达时的安全兜底。 */
   UNREACHABLE_FAILOVER,
 
+  /** 调度图、Route 或进度等建立前进授权所需的权威状态暂时不可用。 */
+  SAFETY_STATE_UNAVAILABLE,
+
   /** 已确认或等待确认的 STOP 互卡恢复期间，不允许继续动车。 */
   DEADLOCK_CONFIRMED_WAITING,
 

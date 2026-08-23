@@ -41,7 +41,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
- * TrainCarts 实际出车实现：复用 /fta depot spawn 的核心逻辑（查找锚点轨道 → spawn → 写 tags）。
+ * TrainCarts 实际出车实现：查找锚点轨道并生成物理编组，再把可失败的 tags/warm-up 初始化延后交给上层事务执行。
  *
  * <p>注意：本类不负责闭塞门控与队列；上层 TicketAssigner 决定“何时允许 spawn”。
  */
@@ -79,7 +79,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   }
 
   @Override
-  public Optional<MinecartGroup> spawn(
+  public Optional<DepotSpawner.MaterializedSpawn> spawn(
       StorageProvider provider, SpawnTicket ticket, String trainName, Instant now) {
     if (provider == null || ticket == null || ticket.service() == null || trainName == null) {
       return Optional.empty();
@@ -145,10 +145,28 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
 
     MinecartGroup group = spawnedOpt.get();
+    return Optional.of(
+        new DepotSpawner.MaterializedSpawn(
+            group,
+            () ->
+                initializeMaterializedSpawn(
+                    group, ticket, service, depotId, pattern, route, provider, trainName, now)));
+  }
+
+  private void initializeMaterializedSpawn(
+      MinecartGroup group,
+      SpawnTicket ticket,
+      SpawnService service,
+      NodeId depotId,
+      String pattern,
+      Route route,
+      StorageProvider provider,
+      String trainName,
+      Instant now) {
     if (group.getProperties() != null) {
+      initializeSpawnOwner(group.getProperties(), trainName);
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
-      initializeSpawnOwner(group.getProperties(), trainName);
       addTags(group.getProperties(), ticket.id(), service, depotId, pattern, route, provider, now);
       TrainTagHelper.writeTag(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX, "0");
       TrainTagHelper.writeTag(
@@ -171,8 +189,6 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
                 org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController
                     .warmUpDoorAnimations(group),
             10L);
-
-    return Optional.of(group);
   }
 
   /**

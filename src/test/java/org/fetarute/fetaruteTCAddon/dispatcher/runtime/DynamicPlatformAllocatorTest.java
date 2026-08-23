@@ -7,8 +7,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -640,6 +642,53 @@ class DynamicPlatformAllocatorTest {
 
     assertTrue(result.isBlocked());
     assertEquals("invalid-dynamic-spec", result.reason());
+  }
+
+  @Test
+  void immediateDynamicStopMaterializesBeyondPreviewDistance() {
+    NodeId current = NodeId.of("OP:S:ORIGIN:1");
+    NodeId platform = NodeId.of("OP:S:DEST:1");
+    RouteId routeId = RouteId.of("IMMEDIATE-DYNAMIC-LONG-PATH");
+    List<NodeId> physicalPath = new ArrayList<>();
+    physicalPath.add(current);
+    for (int index = 1; index <= DynamicPlatformAllocator.ALLOCATION_EDGE_THRESHOLD; index++) {
+      physicalPath.add(NodeId.of("OP:W:ORIGIN:DEST:1:" + index));
+    }
+    physicalPath.add(platform);
+
+    List<RailNode> nodes = new ArrayList<>();
+    for (int index = 0; index < physicalPath.size(); index++) {
+      nodes.add(
+          mockNode(
+              physicalPath.get(index),
+              new Vector(index * 10.0, 0.0, 0.0),
+              index == physicalPath.size() - 1 ? NodeType.STATION : NodeType.WAYPOINT));
+    }
+    for (int index = 0; index < physicalPath.size(); index++) {
+      List<RailEdge> adjacent = new ArrayList<>();
+      if (index > 0) {
+        adjacent.add(edge(nodes.get(index), nodes.get(index - 1)));
+      }
+      if (index + 1 < physicalPath.size()) {
+        adjacent.add(edge(nodes.get(index), nodes.get(index + 1)));
+      }
+      mockEdges(physicalPath.get(index), adjacent.toArray(RailEdge[]::new));
+    }
+    when(graph.nodes()).thenReturn(nodes);
+
+    RouteDefinition route = mock(RouteDefinition.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.waypoints()).thenReturn(List.of(current, platform));
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.resolveAllocation(
+            "train-immediate-dynamic", route, 0, graph, current, Optional.empty());
+
+    assertTrue(result.isSelected());
+    assertEquals(platform, result.selected().orElseThrow().allocatedNode());
   }
 
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {

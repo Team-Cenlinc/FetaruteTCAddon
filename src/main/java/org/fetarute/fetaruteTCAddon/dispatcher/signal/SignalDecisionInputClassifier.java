@@ -50,25 +50,32 @@ public final class SignalDecisionInputClassifier {
     return SignalDecisionInputType.FORWARD_MOVEMENT;
   }
 
-  /** 判断该输入是否允许把信号提升为放行类 aspect。 */
+  /**
+   * 判断已分类输入是否允许把信号提升为放行类 aspect。
+   *
+   * <p>{@code inputType} 必须来自同一轮、携带 drain authority 证据的 {@link #classify(OccupancyRequest,
+   * DrainClassificationContext)}。不得在这里无上下文重新分类，否则 {@code DRAIN_THROUGH} 会退化为较宽松的 {@code
+   * CONFLICT_CLEARING} 并绕过 drain 的硬 blocker 条件。
+   */
   public static boolean mayPublishProceed(
       OccupancyRequest request,
+      SignalDecisionInputType inputType,
       boolean drainLeader,
       boolean drainAuthorityActive,
-      boolean pathHardBlockersClear,
+      boolean occupancyAuthorityAllowed,
       boolean movementInhibited,
       SignalComputationTrace.TokenState tokenState,
       boolean clearingHardStop) {
     if (request == null || !hasMovementRequiredResources(request)) {
       return false;
     }
-    if (tokenState == SignalComputationTrace.TokenState.INVALID) {
+    if (tokenState != SignalComputationTrace.TokenState.ACTIVE) {
       return false;
     }
     if (movementInhibited && !clearingHardStop) {
       return false;
     }
-    SignalDecisionInputType type = classify(request);
+    SignalDecisionInputType type = inputType == null ? SignalDecisionInputType.UNKNOWN : inputType;
     if (type == SignalDecisionInputType.FORWARD_MOVEMENT) {
       return true;
     }
@@ -76,7 +83,7 @@ public final class SignalDecisionInputClassifier {
       return true;
     }
     if (type == SignalDecisionInputType.DRAIN_THROUGH) {
-      return drainLeader && drainAuthorityActive && pathHardBlockersClear;
+      return drainLeader && drainAuthorityActive && occupancyAuthorityAllowed;
     }
     return false;
   }

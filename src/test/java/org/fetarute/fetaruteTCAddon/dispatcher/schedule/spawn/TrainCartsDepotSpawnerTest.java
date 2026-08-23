@@ -2,9 +2,11 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,6 +40,23 @@ class TrainCartsDepotSpawnerTest {
   }
 
   @Test
+  void spawnOwnerTagSurvivesTrainRenameFailureForStartupRecovery() {
+    MutableTrainProperties train = new MutableTrainProperties("train1");
+    doThrow(new IllegalStateException("rename-failed"))
+        .when(train.properties())
+        .setTrainName(anyString());
+
+    assertThrows(
+        IllegalStateException.class,
+        () -> TrainCartsDepotSpawner.initializeSpawnOwner(train.properties(), "SURC-DS-LW-1001"));
+
+    assertEquals(
+        "SURC-DS-LW-1001",
+        TrainTagHelper.readTagValue(train.properties(), RouteProgressRegistry.TAG_TRAIN_NAME)
+            .orElseThrow());
+  }
+
+  @Test
   void spawnLifecycleTagsReplaceInheritedTemplateStateAndClearControlState() {
     MutableTrainProperties train =
         new MutableTrainProperties(
@@ -54,6 +73,7 @@ class TrainCartsDepotSpawnerTest {
             "FTA_OP_MAX=100",
             "FTA_SPAWN_GROUP=old-group",
             "FTA_TICKET_ID=old-ticket",
+            TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING + "=true",
             "FTA_LAST_LAUNCH_AT=9999999999999",
             "FTA_LAST_SPEED_CMD_BPS=20.0",
             "FTA_LAST_SPEED_CMD_AT=9999999999999",
@@ -99,6 +119,10 @@ class TrainCartsDepotSpawnerTest {
     assertFalse(TrainTagHelper.readTagValue(train.properties(), "FTA_ROUTE_INDEX").isPresent());
     assertFalse(TrainTagHelper.readTagValue(train.properties(), "FTA_OP_TRIPS").isPresent());
     assertFalse(TrainTagHelper.readTagValue(train.properties(), "FTA_TICKET_ID").isPresent());
+    assertFalse(
+        TrainTagHelper.readTagValue(
+                train.properties(), TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING)
+            .isPresent());
     assertFalse(TrainTagHelper.readTagValue(train.properties(), "FTA_LAST_LAUNCH_AT").isPresent());
     assertFalse(
         TrainTagHelper.readTagValue(train.properties(), "FTA_LAST_SPEED_CMD_BPS").isPresent());

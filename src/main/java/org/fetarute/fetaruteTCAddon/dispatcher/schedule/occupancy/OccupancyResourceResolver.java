@@ -7,6 +7,7 @@ import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -49,6 +50,12 @@ public final class OccupancyResourceResolver {
                         || isBoundarylessCycleConflict(key))
             .ifPresent(key -> resources.add(OccupancyResource.forConflict(key)));
       }
+      if (graph instanceof RailGraphInterlockingSupport interlockingSupport) {
+        interlockingSupport
+            .interlockingState()
+            .zoneKeysForEdge(edge.id())
+            .forEach(key -> resources.add(OccupancyResource.forConflict(key)));
+      }
     }
     return List.copyOf(resources);
   }
@@ -77,6 +84,13 @@ public final class OccupancyResourceResolver {
   static String switcherConflictId(RailNode node) {
     Objects.requireNonNull(node, "node");
     return SWITCHER_CONFLICT_PREFIX + node.id().value();
+  }
+
+  /** 判断资源是否为物理足迹推导的严格联锁区。 */
+  public static boolean isInterlockingConflict(OccupancyResource resource) {
+    return resource != null
+        && resource.kind() == ResourceKind.CONFLICT
+        && resource.key().startsWith("interlocking:");
   }
 
   private static boolean isBoundarylessCycleConflict(String key) {

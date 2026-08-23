@@ -8,7 +8,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.junit.jupiter.api.Test;
@@ -114,6 +116,25 @@ final class RailGraphMergerTest {
                 edge ->
                     edge.id().equals(EdgeId.undirected(NodeId.of("X"), NodeId.of("Y")))
                         && edge.lengthBlocks() == 7));
+  }
+
+  @Test
+  void mergingSeparatelyVerifiedUniversesFailsClosedUntilFullBuild() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base =
+        verifiedGraph(worldId, Set.of(node("A"), node("B")), Set.of(edge("A", "B", 5)), Set.of());
+    RailGraph update =
+        verifiedGraph(worldId, Set.of(node("X"), node("Y")), Set.of(edge("X", "Y", 8)), Set.of());
+
+    RailGraph merged = RailGraphMerger.upsert(base, update).graph();
+
+    RailInterlockingState state = ((RailGraphInterlockingSupport) merged).interlockingState();
+    assertTrue(state.available());
+    assertFalse(state.coverage().complete());
+    assertEquals(
+        1, state.zoneKeysForEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B"))).size());
+    assertEquals(
+        1, state.zoneKeysForEdge(EdgeId.undirected(NodeId.of("X"), NodeId.of("Y"))).size());
   }
 
   @Test
@@ -228,6 +249,31 @@ final class RailGraphMergerTest {
       edgesById.put(edge.id(), edge);
     }
     return new SimpleRailGraph(nodesById, edgesById, blockedEdges);
+  }
+
+  private static SimpleRailGraph verifiedGraph(
+      UUID worldId,
+      Set<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes,
+      Set<RailEdge> edges,
+      Set<EdgeId> blockedEdges) {
+    Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodesById = new HashMap<>();
+    for (org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node : nodes) {
+      nodesById.put(node.id(), node);
+    }
+    Map<EdgeId, RailEdge> edgesById = new HashMap<>();
+    for (RailEdge edge : edges) {
+      edgesById.put(edge.id(), edge);
+    }
+    return new SimpleRailGraph(
+        nodesById,
+        edgesById,
+        blockedEdges,
+        RailInterlockingState.fromSnapshot(
+            worldId,
+            edgesById.keySet(),
+            new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage(
+                edgesById.size(), edgesById.size(), true),
+            Map.of()));
   }
 
   private static org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node(String id) {

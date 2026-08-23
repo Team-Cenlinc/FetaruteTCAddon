@@ -16,9 +16,11 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
+import com.bergerkiller.bukkit.tc.TrainCarts;
+import com.bergerkiller.bukkit.tc.offline.train.OfflineGroupManager;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
@@ -34,6 +36,7 @@ import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -42,8 +45,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.InterlockingZoneInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -59,11 +66,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolve
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskFreshness;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskSource;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartWaitForPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AdvisoryRisk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AdvisoryRiskSource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorityHandoffSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictClearingEvidenceKind;
@@ -82,18 +91,24 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalFootprintHydrationSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.StartupOccupancyReconstructionSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SwitcherMovementTopology;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.VerifiedSwitcherDrainClaims;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalPublicationGate;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -114,7 +129,10 @@ import org.mockito.stubbing.Answer;
 class RuntimeDispatchServiceTest {
 
   @Test
-  void handleSignalTickClearsTurnbackGuardWhenRouteIndexMissing() {
+  void handleSignalTickFailsClosedAndRetainsTurnbackGuardWhenRouteIndexMissing() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
     TagStore tags =
         new TagStore("train-1", "FTA_OPERATOR_CODE=op", "FTA_LINE_CODE=l1", "FTA_ROUTE_CODE=r1");
     UUID worldId = UUID.randomUUID();
@@ -122,14 +140,19 @@ class RuntimeDispatchServiceTest {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-1", tags.properties(), route);
+    registry.updateSignal("train-1", SignalAspect.PROCEED, Instant.now());
 
     RuntimeDispatchService service =
         new RuntimeDispatchService(
             occupancyManager,
             mock(RailGraphService.class),
-            mock(RouteDefinitionCache.class),
-            new RouteProgressRegistry(),
+            routeDefinitions,
+            registry,
             mock(SignNodeRegistry.class),
             mock(LayoverRegistry.class),
             new DwellRegistry(),
@@ -170,12 +193,15 @@ class RuntimeDispatchServiceTest {
 
     service.handleSignalTick(train, false);
 
-    verifyNoInteractions(occupancyManager);
-    assertFalse(service.hasTurnbackProtectedBlocker("train-1", protectedDecision));
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertEquals(1, train.hardStopCalls);
+    verify(occupancyManager, never()).releaseByTrain(anyString());
+    assertTrue(service.hasTurnbackProtectedBlocker("train-1", protectedDecision));
   }
 
   @Test
-  void handleSignalTickInitializesProgressRegistryAndAvoidsRepeatedLaunch() {
+  void handleSignalTickInitializesProgressRegistryAndAvoidsRepeatedLaunch() throws Exception {
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
@@ -203,12 +229,13 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
-    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
-    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
 
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
 
+    List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         new RuntimeDispatchService(
             occupancyManager,
@@ -221,24 +248,353 @@ class RuntimeDispatchServiceTest {
             configManager,
             null,
             new TrainConfigResolver(),
-            null);
+            debugMessages::add);
 
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
 
     service.handleSignalTick(train, false);
-    assertTrue(train.launchCalls == 1);
+    assertEquals(1, train.launchCalls, debugMessages.toString());
+    long occupancyVersionAfterInitialAuthority = occupancyManager.version();
+    MovementAuthorizationToken tokenAfterInitialAuthority = movementTokens(service).getFirst();
 
-    // 绿灯下仍然物理静止的列车需要补发 launch（上一次 launch 可能被冷却或停车竞态吞掉），
-    // 否则只能等 stall failover / 健康监控兜底。清掉冷却 tag 模拟冷却窗口已过。
+    // 同一物理授权下，静止不代表可以反复重置 TrainCarts action queue、换发 token 或收缩再申请占用。
+    // 清掉旧冷却 tag 模拟实际冷却时间持续流逝；真正的失速恢复由显式健康状态机决定。
     tags.removeTagKey("FTA_LAST_LAUNCH_AT");
-    service.handleSignalTick(train, false);
-    assertTrue(train.launchCalls == 2);
+    for (int iteration = 0; iteration < 1_000; iteration++) {
+      service.handleSignalTick(train, false);
+    }
+    assertEquals(1, train.launchCalls, debugMessages.toString());
+    assertEquals(
+        tokenAfterInitialAuthority,
+        movementTokens(service).getFirst(),
+        "无物理推进的相同授权不得换发 movement token");
+    assertEquals(
+        occupancyVersionAfterInitialAuthority,
+        occupancyManager.version(),
+        "无物理推进的相同授权不得推进 occupancy version: " + debugMessages);
 
     // 已在移动的列车信号未变化时不重复 launch。
     tags.removeTagKey("FTA_LAST_LAUNCH_AT");
     FakeTrain movingTrain = new FakeTrain(worldId, tags.properties(), true, 1.0);
     service.handleSignalTick(movingTrain, false);
     assertEquals(0, movingTrain.launchCalls);
+  }
+
+  @Test
+  void handleSignalTickRevokesProceedUntilGraphSnapshotReturns() {
+    NodeId currentNode = NodeId.of("A");
+    NodeId nextNode = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(currentNode, nextNode), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithSingleEdge(currentNode, nextNode, 10);
+    AtomicBoolean graphAvailable = new AtomicBoolean(true);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenAnswer(
+            ignored ->
+                graphAvailable.get()
+                    ? Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now()))
+                    : Optional.empty());
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+
+    graphAvailable.set(false);
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertEquals(1, train.hardStopCalls);
+    RuntimeStopState stopState = service.getActiveStopState("train-1").orElseThrow();
+    assertEquals(HardStopReason.SAFETY_STATE_UNAVAILABLE.name(), stopState.reasonCode());
+    assertEquals(
+        RuntimeStopState.ReleaseCondition.SAFETY_STATE_RESTORED_AND_AUTHORITY_REISSUED,
+        stopState.releaseCondition());
+    assertEquals(
+        RuntimeStopState.RetryTrigger.GRAPH_ROUTE_OR_PROGRESS_REFRESH, stopState.retryTrigger());
+    assertTrue(stopState.invalidatesAuthority());
+
+    graphAvailable.set(true);
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+    assertFalse(service.isMovementInhibited("train-1"));
+    assertTrue(service.getActiveStopState("train-1").isEmpty());
+  }
+
+  @Test
+  void handleSignalTickRevokesProceedUntilRouteDefinitionReturns() {
+    NodeId currentNode = NodeId.of("A");
+    NodeId nextNode = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(currentNode, nextNode), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    AtomicBoolean routeAvailable = new AtomicBoolean(true);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(currentNode, nextNode, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1"))
+        .thenAnswer(ignored -> routeAvailable.get() ? Optional.of(route) : Optional.empty());
+
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+
+    routeAvailable.set(false);
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertEquals(1, train.hardStopCalls);
+
+    routeAvailable.set(true);
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+    assertFalse(service.isMovementInhibited("train-1"));
+  }
+
+  @Test
+  void handleSignalTickRevokesProceedUntilNegativeRouteIndexIsRepaired() {
+    NodeId currentNode = NodeId.of("A");
+    NodeId nextNode = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(currentNode, nextNode), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(currentNode, nextNode, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+
+    tags.removeTagKey(RouteProgressRegistry.TAG_ROUTE_INDEX);
+    tags.tags.add(RouteProgressRegistry.TAG_ROUTE_INDEX + "=-1");
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertEquals(1, train.hardStopCalls);
+    verify(occupancyManager, never()).releaseByTrain(anyString());
+    RuntimeStopState stopState = service.getActiveStopState("train-1").orElseThrow();
+    assertEquals(HardStopReason.SAFETY_STATE_UNAVAILABLE.name(), stopState.reasonCode());
+    assertEquals(
+        RuntimeStopState.ReleaseCondition.SAFETY_STATE_RESTORED_AND_AUTHORITY_REISSUED,
+        stopState.releaseCondition());
+
+    tags.removeTagKey(RouteProgressRegistry.TAG_ROUTE_INDEX);
+    tags.tags.add(RouteProgressRegistry.TAG_ROUTE_INDEX + "=0");
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+    assertFalse(service.isMovementInhibited("train-1"));
+    assertTrue(service.getActiveStopState("train-1").isEmpty());
+  }
+
+  @Test
+  void handleSignalTickPublishesStopForProtectiveRetainWithoutInvalidatingAuthority()
+      throws Exception {
+    NodeId currentNode = NodeId.of("A");
+    NodeId nextNode = NodeId.of("B");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(currentNode, nextNode), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    AtomicBoolean protectiveBlocked = new AtomicBoolean(false);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(currentNode, nextNode, 10), Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnter(any()))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              if (!protectiveBlocked.get()) {
+                return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+              }
+              OccupancyResource resource = request.resourceList().get(0);
+              return new OccupancyDecision(
+                  false,
+                  request.now(),
+                  SignalAspect.STOP,
+                  List.of(
+                      new OccupancyClaim(
+                          resource,
+                          "protecting-train",
+                          Optional.empty(),
+                          request.now(),
+                          Duration.ZERO,
+                          Optional.empty(),
+                          ClaimRole.PROTECTIVE_RETAIN)));
+            });
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+
+    registry.updateSignal("train-1", SignalAspect.PROCEED_WITH_CAUTION, Instant.now());
+    installPublishedPhysicalSignal(service, "train-1", SignalAspect.PROCEED_WITH_CAUTION);
+    protectiveBlocked.set(true);
+    service.handleSignalTick(train, false);
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertFalse(service.isMovementInhibited("train-1"));
+    RuntimeStopState stopState = service.getActiveStopState("train-1").orElseThrow();
+    assertEquals("PROTECTIVE_RETAIN_HOLD", stopState.reasonCode());
+    assertEquals(
+        RuntimeStopState.ReleaseCondition.BLOCKING_RESOURCES_RELEASED_OR_TRANSFERRED,
+        stopState.releaseCondition());
+    assertEquals(
+        RuntimeStopState.RetryTrigger.OCCUPANCY_CHANGE_OR_PERIODIC_RECHECK,
+        stopState.retryTrigger());
+    assertFalse(stopState.invalidatesAuthority());
+    assertEquals("protecting-train", stopState.blockers().get(0).owner());
   }
 
   @Test
@@ -278,7 +634,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(route.id(), 0))
         .thenReturn(Optional.of(dynamicStop(0, terminalStation, "CRET DYNAMIC:SURC:D:LWN:[1:2]")));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
@@ -363,10 +719,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            routeDefinitions,
-            new RouteProgressRegistry(),
-            debugMessages);
+            mockOccupancyManager(), routeDefinitions, new RouteProgressRegistry(), debugMessages);
 
     java.lang.reflect.Method restoreSpawnOrigin =
         RuntimeDispatchService.class.getDeclaredMethod(
@@ -426,7 +779,7 @@ class RuntimeDispatchServiceTest {
                     graphWithSingleEdge(materializedDepot, firstStation, 10), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(20.0);
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
     RouteProgressRegistry registry = new RouteProgressRegistry();
@@ -456,7 +809,7 @@ class RuntimeDispatchServiceTest {
 
     RuntimeDispatchService rebuiltService =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             routeDefinitions,
             new RouteProgressRegistry(),
             new ArrayList<>());
@@ -497,7 +850,7 @@ class RuntimeDispatchServiceTest {
             "FTA_DEPOT_ID=" + materializedDepot.value());
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             routeDefinitions,
             new RouteProgressRegistry(),
             new ArrayList<>());
@@ -542,7 +895,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RouteDefinitionCache.class),
             new RouteProgressRegistry(),
             debugMessages);
@@ -583,7 +936,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RouteDefinitionCache.class),
             new RouteProgressRegistry(),
             debugMessages);
@@ -643,10 +996,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            routeDefinitions,
-            new RouteProgressRegistry(),
-            debugMessages);
+            mockOccupancyManager(), routeDefinitions, new RouteProgressRegistry(), debugMessages);
     java.lang.reflect.Method forceOverride =
         RuntimeDispatchService.class.getDeclaredMethod(
             "forceRecordEffectiveNode",
@@ -699,7 +1049,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     OccupancyResource nextNodeResource = OccupancyResource.forNode(next);
     when(occupancyManager.acquire(any()))
@@ -796,7 +1146,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags("train-1", tags.properties(), route);
     registry.updateSignal("train-1", SignalAspect.PROCEED, Instant.now());
@@ -855,7 +1205,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(route.id(), 1))
         .thenReturn(Optional.of(dynamicStop(1, dynamic, "DYNAMIC:OP:S:DEST:[1:1]")));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     OccupancyResource allocatedResource = OccupancyResource.forNode(allocated);
     when(occupancyManager.acquire(any()))
@@ -956,7 +1306,9 @@ class RuntimeDispatchServiceTest {
     OccupancyManager occupancyManager =
         mock(
             OccupancyManager.class,
-            org.mockito.Mockito.withSettings().extraInterfaces(OccupancyQueueSupport.class));
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(OccupancyQueueSupport.class, AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) occupancyManager).holdsHardAuthority(any())).thenReturn(true);
     AtomicBoolean platformsFull = new AtomicBoolean(true);
     when(occupancyManager.isNodeOccupied(platformOne))
         .thenAnswer(invocation -> platformsFull.get());
@@ -1378,7 +1730,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findStop(route.id(), 1))
         .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -1439,7 +1791,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(route.id(), dynamicIndex))
         .thenReturn(
             Optional.of(dynamicStop(dynamicIndex, dynamicPlaceholder, "DYNAMIC:OP:S:PPK:[1:2]")));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     RuntimeDispatchService service =
         new RuntimeDispatchService(
@@ -1638,7 +1990,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(route.id(), 1))
         .thenReturn(Optional.of(dynamicStop(1, dynamic, "DYNAMIC:OP:S:DEST:[1:1]")));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -1662,7 +2014,88 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleSignalTickAuthorizesImmediateDynamicDestinationBeyondPreviewDistance()
+      throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId current = NodeId.of("OP:S:ORIGIN:1");
+    NodeId allocated = NodeId.of("OP:S:DEST:1");
+    List<NodeId> physicalPath = new ArrayList<>();
+    physicalPath.add(current);
+    for (int index = 1; index <= DynamicPlatformAllocator.ALLOCATION_EDGE_THRESHOLD; index++) {
+      physicalPath.add(NodeId.of("OP:W:ORIGIN:DEST:1:" + index));
+    }
+    physicalPath.add(allocated);
+    RailGraph graph = graphWithConflictFreeLinearPath(physicalPath, 10);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("immediate-dynamic-long-path"),
+            List.of(current, allocated),
+            Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-dynamic-long-path",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=immediate-dynamic-long-path",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "immediate-dynamic-long-path"))
+        .thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, allocated, "DYNAMIC:OP:S:DEST:[1:1]")));
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.handleSignalTick(train, false);
+
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DYNAMIC 紧邻目标越过预选距离") && message.contains("edgeDistance=9")),
+        debugMessages::toString);
+    assertTrue(
+        debugMessages.stream().anyMatch(message -> message.contains("DYNAMIC effective node 写入")),
+        debugMessages::toString);
+    verify(occupancyManager, atLeastOnce())
+        .acquire(argThat(OccupancyRequest::hasMovementRequiredResources));
+    assertEquals(1, movementTokenCount(service));
+    assertEquals(
+        SignalAspect.PROCEED, registry.get("train-dynamic-long-path").orElseThrow().lastSignal());
+    verify(tags.properties()).clearDestinationRoute();
+    verify(tags.properties()).setDestination(allocated.value());
+    assertEquals(1, train.launchCalls);
+    assertEquals(0, train.hardStopCalls);
+  }
+
+  @Test
   void departureAuthorityStopsBeforeUnmaterializedFutureDynamicPlaceholder() {
+    List<String> debugMessages = new ArrayList<>();
     NodeId current = NodeId.of("OP:S:START:1");
     NodeId ordinary = NodeId.of("OP:W:MID:1:001");
     NodeId dynamicPlaceholder = NodeId.of("OP:S:PPK:1");
@@ -1679,7 +2112,7 @@ class RuntimeDispatchServiceTest {
             "FTA_ROUTE_CODE=future-dynamic-boundary",
             "FTA_ROUTE_INDEX=0");
     UUID worldId = UUID.randomUUID();
-    RailGraph graph = graphWithLinearPath(route.waypoints(), 10);
+    RailGraph graph = graphWithConflictFreeLinearPath(route.waypoints(), 10);
 
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
@@ -1691,7 +2124,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(Optional.of(route));
     when(routeDefinitions.findStop(route.id(), 2))
         .thenReturn(Optional.of(dynamicStop(2, dynamicPlaceholder, "DYNAMIC:OP:S:PPK:[1:2]")));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
@@ -1707,12 +2140,13 @@ class RuntimeDispatchServiceTest {
             configManager,
             null,
             new TrainConfigResolver(),
-            null);
+            debugMessages::add);
 
     assertTrue(
         service.checkDeparture(
             new FakeTrain(worldId, tags.properties(), false),
-            new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty())));
+            new SignNodeDefinition(current, NodeType.STATION, Optional.empty(), Optional.empty())),
+        debugMessages::toString);
 
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
@@ -1753,7 +2187,7 @@ class RuntimeDispatchServiceTest {
             "FTA_ROUTE_CODE=consecutive-dynamic-boundary",
             "FTA_ROUTE_INDEX=0");
     UUID worldId = UUID.randomUUID();
-    RailGraph graph = graphWithLinearPath(route.waypoints(), 10);
+    RailGraph graph = graphWithConflictFreeLinearPath(route.waypoints(), 10);
 
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
@@ -1769,7 +2203,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(Optional.of(dynamicStop(1, firstPlatform, "DYNAMIC:OP:S:FIRST:[1:1]")));
     when(routeDefinitions.findStop(route.id(), 2))
         .thenReturn(Optional.of(dynamicStop(2, secondPlaceholder, "DYNAMIC:OP:S:SECOND:[1:1]")));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
@@ -1863,7 +2297,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(Optional.of(route));
     when(routeDefinitions.findStop(route.id(), 2))
         .thenReturn(Optional.of(dynamicStop(2, dynamicPlaceholder, "DYNAMIC:OP:S:PPK:[1:2]")));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
     RuntimeDispatchService service =
@@ -1920,7 +2354,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -2047,6 +2481,21 @@ class RuntimeDispatchServiceTest {
     TagStore tags = new TagStore("train-main~a", "FTA_TRAIN_NAME=train-main");
 
     assertTrue(service.hasFtaRuntimeTag(tags.properties()));
+    assertFalse(service.hasCompleteFtaRouteIdentity(tags.properties()));
+  }
+
+  @Test
+  void completeFtaRouteIdentityRequiresRouteLevelEvidence() {
+    RuntimeDispatchService service = createMinimalService();
+    TagStore tags =
+        new TagStore(
+            "train-main",
+            "FTA_TRAIN_NAME=train-main",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=line",
+            "FTA_ROUTE_CODE=route");
+
+    assertTrue(service.hasCompleteFtaRouteIdentity(tags.properties()));
   }
 
   @Test
@@ -2079,7 +2528,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.getClaim(any())).thenReturn(Optional.empty());
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
@@ -2155,7 +2604,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.getClaim(any())).thenReturn(Optional.empty());
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     Answer<OccupancyDecision> allowWithConflictBlocker =
@@ -2320,7 +2769,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -2383,7 +2832,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -2434,14 +2883,14 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithLinearPath(List.of(a, b, c, d), 10), Instant.now())));
+                    graphWithConflictFreeLinearPath(List.of(a, b, c, d), 10), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -2474,7 +2923,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void recoverableSmartHoldDoesNotInvalidateTokenOrClearDestination() {
+  void recoverableSmartHoldDoesNotInvalidateTokenClearDestinationOrSelfSchedule() {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
@@ -2519,7 +2968,9 @@ class RuntimeDispatchServiceTest {
         mock(
             OccupancyManager.class,
             org.mockito.Mockito.withSettings()
-                .extraInterfaces(OccupancyAdvisoryPreviewSupport.class));
+                .extraInterfaces(
+                    OccupancyAdvisoryPreviewSupport.class, AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) occupancyManager).holdsHardAuthority(any())).thenReturn(true);
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
     OccupancyAdvisoryPreviewSupport advisorySupport =
@@ -2556,6 +3007,8 @@ class RuntimeDispatchServiceTest {
             null,
             new TrainConfigResolver(),
             debugMessages::add);
+    List<String> reevaluationRequests = new ArrayList<>();
+    service.setSignalReevaluationRequester(reevaluationRequests::add);
 
     FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.0);
     service.handleSignalTick(train, true);
@@ -2579,6 +3032,8 @@ class RuntimeDispatchServiceTest {
     assertFalse(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_AUTHORITY_WINDOW_EXCEEDED_REAL")));
+    assertTrue(
+        reevaluationRequests.isEmpty(), "静态 recoverable STOP 只能等待事实变化或周期巡检，不能自行排入下一 tick 授权链");
   }
 
   @Test
@@ -2617,7 +3072,9 @@ class RuntimeDispatchServiceTest {
         mock(
             OccupancyManager.class,
             org.mockito.Mockito.withSettings()
-                .extraInterfaces(OccupancyAdvisoryPreviewSupport.class));
+                .extraInterfaces(
+                    OccupancyAdvisoryPreviewSupport.class, AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) occupancyManager).holdsHardAuthority(any())).thenReturn(true);
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
@@ -2663,7 +3120,9 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     assertEquals(
-        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
+        SignalAspect.PROCEED_WITH_CAUTION,
+        registry.get("train-1").orElseThrow().lastSignal(),
+        debugMessages.toString());
     assertEquals(0, train.hardStopCalls);
     assertFalse(
         service
@@ -2678,7 +3137,7 @@ class RuntimeDispatchServiceTest {
 
   @Test
   void forwardRiskSourceTreatsProvenSameDirectionSwitcherAsTraceOnly() throws Exception {
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     RuntimeDispatchService service = createMinimalService(occupancyManager, new ArrayList<>());
     OccupancyResource section = OccupancyResource.forConflict("single:test:A~B");
     OccupancyResource switcher = OccupancyResource.forConflict("switcher:SWITCHER:test");
@@ -2708,7 +3167,8 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void forwardRiskSourceUsesProgressRegistryWhenClaimRouteIsMissing() throws Exception {
+  void forwardRiskSourceRequiresSwitcherMovementSignatureEvenWhenRouteProgressMatches()
+      throws Exception {
     SimpleOccupancyManager occupancyManager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
@@ -2747,7 +3207,7 @@ class RuntimeDispatchServiceTest {
 
     RiskSource source = invokeRiskSourceForBlocker(service, request, blocker);
 
-    assertEquals(RiskSource.SAME_DIRECTION_FOLLOW, source);
+    assertEquals(RiskSource.SWITCHER_NOT_VERIFIED, source);
   }
 
   @Test
@@ -2783,7 +3243,7 @@ class RuntimeDispatchServiceTest {
         otherRoute);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             routeDefinitionCacheWith(Map.of(routeUuid, route, otherRouteUuid, otherRoute)),
             registry,
             new ArrayList<>());
@@ -2813,7 +3273,7 @@ class RuntimeDispatchServiceTest {
         turnbackRoute);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             routeDefinitionCacheWith(turnbackRoute, routeUuid),
             registry,
             new ArrayList<>());
@@ -2823,7 +3283,7 @@ class RuntimeDispatchServiceTest {
 
   @Test
   void forwardRiskSourceKeepsPhysicalNodeAsHardBlocker() throws Exception {
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     RuntimeDispatchService service = createMinimalService(occupancyManager, new ArrayList<>());
     OccupancyResource node = OccupancyResource.forNode(NodeId.of("B"));
     OccupancyRequest request =
@@ -2846,7 +3306,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void routeStopHoldDoesNotBecomeAuthorityWindowExceeded() {
+  void routeStopPublishesCautionWithoutRecoverableHold() {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");
     NodeId station = NodeId.of("OP:S:CENTRAL:1");
@@ -2888,7 +3348,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(route.id(), 1))
         .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -2910,21 +3370,32 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.5);
     service.handleSignalTick(train, true);
 
-    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(
+        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
     assertEquals(0, train.hardStopCalls);
-    verify(tags.properties(), never()).clearDestinationRoute();
     verify(tags.properties(), never()).clearDestination();
-    RuntimeDispatchService.SmartRecoveryInput recovery =
-        service.smartRecoveryInput("train-1", Duration.ZERO, SignalAspect.STOP);
-    assertTrue(recovery.destinationPresent());
-    assertEquals(SignalComputationTrace.TokenState.PENDING, recovery.movementTokenState());
-    assertFalse(recovery.movementInhibited());
-    assertTrue(
+    assertEquals(station.value(), destination.get());
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertTrue(speedCaptor.getValue() > 0.0);
+    assertFalse(
         debugMessages.stream()
             .anyMatch(
                 message ->
                     message.contains("SMART_DISPATCH_RECOVERABLE_HOLD")
                         && message.contains("riskSource=ROUTE_STOP_OR_TERMINAL")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("MOVEMENT_AUTHORITY_PLANNED_STOP_ADVISORY")
+                        && message.contains("reason=ROUTE_STOP_OR_TERMINAL")));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DISPATCH_ACTION_OBSERVED")
+                        && message.contains("effectClass=SIGNAL_ADVISORY")));
     assertFalse(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_AUTHORITY_WINDOW_EXCEEDED_REAL")));
@@ -2959,7 +3430,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -3012,7 +3483,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithLinearPath(List.of(a, b, c, d), 10), Instant.now())));
+                    graphWithConflictFreeLinearPath(List.of(a, b, c, d), 10), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(40.0);
 
@@ -3027,7 +3498,7 @@ class RuntimeDispatchServiceTest {
             Instant.now(),
             Duration.ZERO,
             Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.getClaim(OccupancyResource.forNode(c)))
         .thenReturn(Optional.of(leaderAtSecondEdge));
@@ -3118,7 +3589,7 @@ class RuntimeDispatchServiceTest {
             Optional.empty());
     when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -3199,7 +3670,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.getClaim(any())).thenReturn(Optional.empty());
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
@@ -3329,6 +3800,133 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void checkDepartureFailsClosedWhenRouteDefinitionIsUnavailable() {
+    NodeId station = NodeId.of("OP:S:JBS:1");
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=missing",
+            "FTA_ROUTE_INDEX=0");
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(UUID.randomUUID(), tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(station, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertFalse(service.checkDeparture(train, definition));
+
+    assertEquals(1, train.hardStopCalls);
+    assertTrue(service.isMovementInhibited("train-1"));
+    verify(occupancyManager, never()).canEnter(any());
+    verify(occupancyManager, never()).acquire(any());
+    verify(occupancyManager, never()).releaseByTrain(anyString());
+  }
+
+  @Test
+  void checkDepartureFailsClosedWhenGraphSnapshotIsUnavailable() {
+    NodeId station = NodeId.of("OP:S:JBS:1");
+    NodeId throat = NodeId.of("OP:S:JBS:1:001");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(station, throat), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(UUID.randomUUID(), tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(station, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertFalse(service.checkDeparture(train, definition));
+
+    assertEquals(1, train.hardStopCalls);
+    assertTrue(service.isMovementInhibited("train-1"));
+    verify(occupancyManager, never()).canEnter(any());
+    verify(occupancyManager, never()).acquire(any());
+  }
+
+  @Test
+  void checkDepartureFailsClosedWhenStationCannotBeLocatedOnRoute() {
+    NodeId routeStart = NodeId.of("OP:S:OTHER:1");
+    NodeId routeEnd = NodeId.of("OP:S:OTHER:2");
+    NodeId observedStation = NodeId.of("OP:S:JBS:1");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(routeStart, routeEnd), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    FakeTrain train = new FakeTrain(UUID.randomUUID(), tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(
+            observedStation, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertFalse(service.checkDeparture(train, definition));
+
+    assertEquals(1, train.hardStopCalls);
+    assertTrue(service.isMovementInhibited("train-1"));
+    verify(occupancyManager, never()).canEnter(any());
+    verify(occupancyManager, never()).acquire(any());
+  }
+
+  @Test
   void checkDepartureDoesNotAcquireForwardWindowWhenHardBlockerBypassIsSuppressed() {
     NodeId current = NodeId.of("ST");
     NodeId next = NodeId.of("NEXT");
@@ -3358,7 +3956,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
@@ -3377,6 +3975,7 @@ class RuntimeDispatchServiceTest {
             });
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
+    List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         new RuntimeDispatchService(
             occupancyManager,
@@ -3389,7 +3988,7 @@ class RuntimeDispatchServiceTest {
             configManager,
             null,
             new TrainConfigResolver(),
-            null);
+            debugMessages::add);
 
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     SignNodeDefinition definition =
@@ -3407,6 +4006,10 @@ class RuntimeDispatchServiceTest {
         acquireCaptor.getValue().resourceList());
     assertTrue(
         service.recentBlockerTrains("train-1", Duration.ofSeconds(30)).contains("front-train"));
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_STOP_RETAIN_RESOURCE_SHRINK")),
+        "没有候选或实际资源释放的 STOP retain 不得伪造 shrink 生命周期: " + debugMessages);
   }
 
   @Test
@@ -3439,7 +4042,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
@@ -3523,6 +4126,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags("train-1", tags.properties(), route);
     registry.initFromTags("train-back", backTags.properties(), route);
+    List<String> debugMessages = new ArrayList<>();
 
     RuntimeDispatchService service =
         new RuntimeDispatchService(
@@ -3536,7 +4140,7 @@ class RuntimeDispatchServiceTest {
             configManager,
             null,
             new TrainConfigResolver(),
-            null);
+            debugMessages::add);
 
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     SignNodeDefinition definition =
@@ -3618,11 +4222,187 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void blockedDepartureUsesActualTrainLengthWhenShrinkingRearHold() {
+    String trainName = "train-1";
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId station = NodeId.of("D");
+    NodeId next = NodeId.of("E");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, c, station, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            trainName,
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=3");
+    UUID worldId = UUID.randomUUID();
+    PhysicalGraphFixture physicalGraph =
+        withSyntheticPhysicalFootprints(graphWithLinearPath(route.waypoints(), 10), worldId);
+    RailGraph graph = physicalGraph.graph();
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    SignalEventBus eventBus = new SignalEventBus();
+    List<OccupancyReleasedEvent> releaseEvents = new ArrayList<>();
+    eventBus.subscribe(OccupancyReleasedEvent.class, releaseEvents::add);
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy(), eventBus);
+    OccupancyResource clearedRearEdge = OccupancyResource.forEdge(EdgeId.undirected(a, b));
+    OccupancyResource protectedRearEdge = OccupancyResource.forEdge(EdgeId.undirected(b, c));
+    OccupancyResource blockedForwardEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(station, next));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                        trainName,
+                        Optional.of(route.id()),
+                        Instant.now(),
+                        List.of(clearedRearEdge, protectedRearEdge),
+                        Map.of(),
+                        Map.of(),
+                        0,
+                        AuthorizationPurpose.RUNTIME_MOVE)
+                    .withResourceIntents(
+                        Map.of(
+                            clearedRearEdge,
+                            ResourceIntent.PROTECTIVE_RETAIN,
+                            protectedRearEdge,
+                            ResourceIntent.PROTECTIVE_RETAIN)))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "front-train",
+                    Optional.of(route.id()),
+                    Instant.now(),
+                    List.of(blockedForwardEdge),
+                    Map.of(),
+                    0))
+            .allowed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isValid()).thenReturn(true);
+    when(train.isMoving()).thenReturn(false);
+    when(train.worldId()).thenReturn(worldId);
+    when(train.properties()).thenReturn(tags.properties());
+    when(train.estimatedTrainLengthBlocks()).thenReturn(OptionalDouble.of(1.0));
+    when(train.liveRailFootprintCells())
+        .thenReturn(Optional.of(Set.of(physicalGraph.cellsByEdge().get(EdgeId.undirected(b, c)))));
+    SignNodeDefinition definition =
+        new SignNodeDefinition(station, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertFalse(service.checkDeparture(train, definition));
+
+    assertTrue(manager.getClaim(clearedRearEdge).isEmpty(), "已超过配置余量与真实车长的后向资源必须及时释放");
+    assertEquals(trainName, manager.getClaim(protectedRearEdge).orElseThrow().trainName());
+    assertFalse(
+        releaseEvents.stream()
+            .flatMap(event -> event.releasedResources().stream())
+            .anyMatch(protectedRearEdge::equals),
+        "仍被列尾覆盖的资源不能先发布 release 再重新 acquire");
+    assertEquals("front-train", manager.getClaim(blockedForwardEdge).orElseThrow().trainName());
+  }
+
+  @Test
+  void departureRetainsActualTrainLengthWhenConfiguredRearGuardEdgesIsZero() {
+    String trainName = "long-train";
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId station = NodeId.of("C");
+    NodeId next = NodeId.of("D");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, station, next), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            trainName,
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=2");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithConflictFreeCyclePath(route.waypoints(), 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView base = testConfigView(20, 20.0);
+    when(configManager.current())
+        .thenReturn(withRuntimeSettings(base, runtimeWithRearGuardEdges(base, 0)));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isValid()).thenReturn(true);
+    when(train.isMoving()).thenReturn(false);
+    when(train.worldId()).thenReturn(worldId);
+    when(train.properties()).thenReturn(tags.properties());
+    when(train.estimatedTrainLengthBlocks()).thenReturn(OptionalDouble.of(15.0));
+    SignNodeDefinition definition =
+        new SignNodeDefinition(station, NodeType.STATION, Optional.empty(), Optional.empty());
+
+    assertTrue(service.checkDeparture(train, definition), debugMessages.toString());
+
+    assertEquals(
+        trainName,
+        manager
+            .getClaim(OccupancyResource.forEdge(EdgeId.undirected(a, b)))
+            .orElseThrow()
+            .trainName(),
+        "固定 rearGuardEdges 为零时仍必须覆盖真实列车长度");
+  }
+
+  @Test
   void checkDepartureUsesFullAdmissionLookaheadBeyondHardAuthorityWindow() {
     NodeId depot = NodeId.of("D");
     NodeId station = NodeId.of("S");
     NodeId throat = NodeId.of("T");
-    NodeId occupiedAhead = NodeId.of("OCC");
+    NodeId occupiedAhead = NodeId.of("OP:S:OCC:1");
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("r"), List.of(depot, station, throat, occupiedAhead), Optional.empty());
@@ -3651,7 +4431,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
     OccupancyResource distantNode = OccupancyResource.forNode(occupiedAhead);
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
@@ -3730,7 +4510,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
             inv -> {
@@ -3872,7 +4652,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
             inv -> {
@@ -4000,7 +4780,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -4049,7 +4829,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void handleSignalTickClearsBehindLookaheadClaimsBeforeAuthorizingFrontTrain() {
+  void lookaheadPreviewCannotBlockFrontTrainAuthorization() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     NodeId c = NodeId.of("C");
@@ -4064,8 +4844,7 @@ class RuntimeDispatchServiceTest {
             "FTA_ROUTE_INDEX=1");
     TagStore backTags = new TagStore("train-back", "FTA_ROUTE_INDEX=0");
     UUID worldId = UUID.randomUUID();
-
-    RailGraph graph = graphWithTwoEdges(a, b, c, 10, 10);
+    RailGraph graph = graphWithConflictFreeLinearPath(route.waypoints(), 10);
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
@@ -4085,12 +4864,18 @@ class RuntimeDispatchServiceTest {
     OccupancyResource forwardEdge = OccupancyResource.forEdge(EdgeId.undirected(b, c));
     occupancyManager.acquire(
         new OccupancyRequest(
-            "train-back",
-            Optional.of(route.id()),
-            Instant.now(),
-            List.of(frontNode, forwardEdge),
-            Map.of(),
-            0));
+                "train-back",
+                Optional.of(route.id()),
+                Instant.now(),
+                List.of(frontNode, forwardEdge),
+                Map.of(),
+                0)
+            .withResourceIntents(
+                Map.of(
+                    frontNode,
+                    ResourceIntent.LOOKAHEAD_PREVIEW,
+                    forwardEdge,
+                    ResourceIntent.LOOKAHEAD_PREVIEW)));
 
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags("train-1", tags.properties(), route);
@@ -4116,6 +4901,80 @@ class RuntimeDispatchServiceTest {
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
     assertEquals(SignalAspect.PROCEED, aspect);
     assertEquals("train-1", occupancyManager.getClaim(forwardEdge).orElseThrow().trainName());
+  }
+
+  @Test
+  void handleSignalTickNeverReleasesBehindTrainHardAuthorityByPlannedProgress() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("r"), List.of(a, b, c), Optional.empty());
+    TagStore frontTags =
+        new TagStore(
+            "train-front",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=1");
+    TagStore behindTags = new TagStore("train-behind", "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+
+    RailGraph graph = graphWithTwoEdges(a, b, c, 10, 10);
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    OccupancyResource forwardEdge = OccupancyResource.forEdge(EdgeId.undirected(b, c));
+    OccupancyRequest behindAuthority =
+        new OccupancyRequest(
+            "train-behind",
+            Optional.of(route.id()),
+            Instant.now(),
+            List.of(forwardEdge),
+            Map.of(),
+            0);
+    assertTrue(occupancyManager.acquire(behindAuthority).allowed());
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-front", frontTags.properties(), route);
+    registry.initFromTags("train-behind", behindTags.properties(), route);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleSignalTick(new FakeTrain(worldId, frontTags.properties(), false), false);
+
+    assertTrue(
+        occupancyManager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(forwardEdge)
+                        && claim.trainName().equals("train-behind")
+                        && claim.role() == ClaimRole.MOVEMENT_REQUIRED),
+        "运行图进度只能清理软前瞻，不能撤销另一列车的硬移动授权");
   }
 
   @Test
@@ -4153,12 +5012,13 @@ class RuntimeDispatchServiceTest {
     OccupancyResource forwardEdge = OccupancyResource.forEdge(EdgeId.undirected(mid, b));
     occupancyManager.acquire(
         new OccupancyRequest(
-            "train-rear",
-            Optional.of(route.id()),
-            Instant.now(),
-            List.of(forwardEdge),
-            Map.of(),
-            0));
+                "train-rear",
+                Optional.of(route.id()),
+                Instant.now(),
+                List.of(forwardEdge),
+                Map.of(),
+                0)
+            .withResourceIntents(Map.of(forwardEdge, ResourceIntent.LOOKAHEAD_PREVIEW)));
 
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags("train-front", frontTags.properties(), route);
@@ -4189,9 +5049,10 @@ class RuntimeDispatchServiceTest {
 
   @Test
   void handleSignalTickClearsBehindQueueEntryBeforeAuthorizingFrontTrain() {
+    List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");
     NodeId switcher = NodeId.of("SW");
-    NodeId b = NodeId.of("B");
+    NodeId b = NodeId.of("OP:S:EXIT:1");
     RouteDefinition route =
         new RouteDefinition(RouteId.of("r"), List.of(a, switcher, b), Optional.empty());
     TagStore frontTags =
@@ -4247,13 +5108,13 @@ class RuntimeDispatchServiceTest {
             configManager,
             null,
             new TrainConfigResolver(),
-            null);
+            debugMessages::add);
 
     FakeTrain train = new FakeTrain(worldId, frontTags.properties(), false);
     service.handleSignalTick(train, false);
 
     SignalAspect aspect = registry.get("train-front").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.PROCEED, aspect);
+    assertEquals(SignalAspect.PROCEED, aspect, debugMessages::toString);
     assertTrue(
         occupancyManager.snapshotQueues().stream()
             .flatMap(snapshot -> snapshot.entries().stream())
@@ -4363,7 +5224,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -4513,10 +5374,15 @@ class RuntimeDispatchServiceTest {
             "FTA_ROUTE_CODE=r1",
             "FTA_ROUTE_INDEX=1");
     UUID worldId = UUID.randomUUID();
-    RailGraph graph = graphWithSwitcherExit(a, switcher, exit, b, c, 10, 10, 10, 10);
+    PhysicalGraphFixture physicalGraph =
+        withSyntheticPhysicalFootprints(
+            graphWithSwitcherExit(a, switcher, exit, b, c, 10, 10, 10, 10), worldId);
+    RailGraph graph = physicalGraph.graph();
 
     ConfigManager configManager = mock(ConfigManager.class);
-    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    ConfigManager.ConfigView base = testConfigView(20, 20.0);
+    when(configManager.current())
+        .thenReturn(withRuntimeSettings(base, runtimeWithRearGuardEdges(base, 0)));
 
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
@@ -4559,7 +5425,10 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             null);
 
-    service.handleSignalTick(new FakeTrain(worldId, tags.properties(), false), false);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    train.liveRailFootprintCells =
+        Optional.of(Set.of(physicalGraph.cellsByEdge().get(EdgeId.undirected(b, c))));
+    service.handleSignalTick(train, false);
 
     assertTrue(occupancyManager.getClaim(switcherConflict).isEmpty());
   }
@@ -4578,10 +5447,7 @@ class RuntimeDispatchServiceTest {
     registry.updateLastPassedGraphNode("train-1", switcher, Instant.now());
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            new ArrayList<>());
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, new ArrayList<>());
 
     List<NodeId> eventWaypoints =
         service.resolveEffectiveWaypointsForEvent("train-1", route, 0, graph);
@@ -4618,14 +5484,15 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithLinearPath(List.of(a, m1, m2, m3, d), 10), Instant.now())));
+                    graphWithConflictFreeLinearPath(List.of(a, m1, m2, m3, d), 10),
+                    Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -4703,7 +5570,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -4749,7 +5616,7 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
 
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags(trainName, tags.properties(), route);
@@ -4790,7 +5657,7 @@ class RuntimeDispatchServiceTest {
     RuntimeDispatchService service =
         spy(
             new RuntimeDispatchService(
-                mock(OccupancyManager.class),
+                mockOccupancyManager(),
                 mock(RailGraphService.class),
                 mock(RouteDefinitionCache.class),
                 registry,
@@ -4812,7 +5679,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void rebuildOccupancySnapshotReleasesOrphanClaims() {
+  void rebuildOccupancySnapshotAtomicallyReplacesOrphanClaims() {
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
@@ -4833,26 +5700,26 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
+                    startupPhysicalGraph(worldId), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
-    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
-    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
-    when(occupancyManager.snapshotClaims())
-        .thenReturn(
-            List.of(
-                new OccupancyClaim(
-                    new OccupancyResource(ResourceKind.EDGE, "A~B"),
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        occupancyManager
+            .acquire(
+                new OccupancyRequest(
                     "ghost",
                     Optional.empty(),
                     Instant.now(),
-                    Duration.ZERO,
-                    Optional.empty())));
+                    List.of(new OccupancyResource(ResourceKind.EDGE, "A~B")),
+                    Map.of()))
+            .allowed());
 
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
 
@@ -4872,9 +5739,1564 @@ class RuntimeDispatchServiceTest {
 
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
 
-    service.rebuildOccupancySnapshot(List.of(train));
+    assertTrue(service.rebuildOccupancySnapshot(List.of(train)));
 
-    verify(occupancyManager).releaseByTrain("ghost");
+    assertFalse(
+        occupancyManager.snapshotClaims().stream()
+            .anyMatch(claim -> claim.trainName().equals("ghost")));
+    assertTrue(
+        occupancyManager.snapshotClaims().stream()
+            .anyMatch(claim -> claim.trainName().equals("train-1")));
+  }
+
+  @Test
+  void startupReconstructionGateStopsEventTickBeforeFieldScan() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, mockOccupancyManager());
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+
+    service.beginStartupOccupancyReconstruction();
+    service.handleSignalTick(train, false);
+
+    assertTrue(train.hardStopCalls > 0);
+    assertEquals(0, train.launchCalls);
+    assertTrue(service.isMovementInhibited("train-1"));
+  }
+
+  @Test
+  void startupReconstructionEpochInvalidatesInFlightSpawnFenceUntilReady() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+
+    OptionalLong initialEpoch = service.captureReadyStartupRecoveryEpoch();
+    assertTrue(initialEpoch.isPresent());
+
+    service.beginStartupOccupancyReconstruction();
+
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isEmpty());
+    assertFalse(service.isStartupRecoveryEpochReady(initialEpoch.getAsLong()));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of()));
+    OptionalLong rebuiltEpoch = service.captureReadyStartupRecoveryEpoch();
+    assertTrue(rebuiltEpoch.isPresent());
+    assertFalse(rebuiltEpoch.getAsLong() == initialEpoch.getAsLong());
+    assertTrue(service.isStartupRecoveryEpochReady(rebuiltEpoch.getAsLong()));
+  }
+
+  @Test
+  void startupReconstructionGateBlocksDepartureBeforeAuthorization() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(
+            NodeId.of("A"), NodeType.STATION, Optional.empty(), Optional.empty());
+
+    service.beginStartupOccupancyReconstruction();
+
+    assertFalse(service.checkDeparture(train, definition));
+    assertTrue(train.hardStopCalls > 0);
+    assertEquals(0, train.launchCalls);
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    verify(tags.properties(), never()).setDestination(anyString());
+  }
+
+  @Test
+  void startupReconstructionGateBlocksStationArrivalBeforeProgressMutation() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, mockOccupancyManager());
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(
+            NodeId.of("A"), NodeType.STATION, Optional.empty(), Optional.empty());
+
+    service.beginStartupOccupancyReconstruction();
+    service.handleStationArrival(train, definition);
+
+    assertTrue(train.hardStopCalls > 0);
+    verify(tags.properties(), never()).clearDestinationRoute();
+    verify(tags.properties(), never()).setDestination(anyString());
+  }
+
+  @Test
+  void startupReconstructionGateBlocksProgressTriggerBeforeAuthorization() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "train-1",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    com.bergerkiller.bukkit.tc.events.SignActionEvent event =
+        mock(com.bergerkiller.bukkit.tc.events.SignActionEvent.class);
+    org.bukkit.World world = mock(org.bukkit.World.class);
+    when(world.getUID()).thenReturn(worldId);
+    when(event.getWorld()).thenReturn(world);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(
+            NodeId.of("A"), NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+
+    service.beginStartupOccupancyReconstruction();
+    service.handleProgressTrigger(train, event, definition);
+
+    assertTrue(train.hardStopCalls > 0);
+    assertEquals(0, train.launchCalls);
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    verify(tags.properties(), never()).setDestination(anyString());
+  }
+
+  @Test
+  void startupReconstructionFailsClosedForResidualFtaTrainWithoutRouteEvidence() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain residual =
+        new FakeTrain(
+            worldId,
+            new TagStore("residual", "FTA_TRAIN_NAME=residual", "FTA_ROUTE_INDEX=0").properties(),
+            false);
+
+    assertFalse(service.rebuildOccupancySnapshot(List.of(residual)));
+
+    assertTrue(residual.hardStopCalls > 0);
+    assertTrue(service.isMovementInhibited("residual"));
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+  }
+
+  @Test
+  void startupSignalGateStopsPartiallyTaggedFtaTrainBeforeManagedFilter() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, mockOccupancyManager());
+    FakeTrain residual =
+        new FakeTrain(
+            worldId,
+            new TagStore("residual", "FTA_TRAIN_NAME=residual", "FTA_ROUTE_INDEX=0").properties(),
+            false);
+
+    service.beginStartupOccupancyReconstruction();
+    service.handleSignalTick(residual, false);
+
+    assertTrue(residual.hardStopCalls > 0);
+    assertTrue(service.isMovementInhibited("residual"));
+    assertEquals(0, residual.launchCalls);
+  }
+
+  @Test
+  void startupReconstructionFailsClosedWithoutCompleteLiveRailFootprint() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    train.liveRailFootprintCells = Optional.empty();
+
+    assertFalse(service.rebuildOccupancySnapshot(List.of(train)));
+
+    assertTrue(train.hardStopCalls > 0);
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_LIVE_RAIL_FOOTPRINT_OBSERVATION")
+                        && message.contains("reason=LEGACY_UNAVAILABLE")),
+        debugMessages::toString);
+  }
+
+  @Test
+  void startupReconstructionFailsClosedWhenLiveRailApiHasLinkageError() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    train.liveRailFootprintFailure = new NoSuchMethodError("TrainCarts ABI mismatch");
+
+    assertFalse(service.rebuildOccupancySnapshot(List.of(train)));
+
+    assertTrue(train.hardStopCalls > 0);
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    assertTrue(service.isMovementInhibited("train-1"));
+  }
+
+  @Test
+  void startupSparseZoneClaimCannotReleaseBeforeLiveRailProofClearsIt() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RailGraph graph = startupPhysicalCrossingGraph(worldId);
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, message -> {}, graph);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    OccupancyResource logicalEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
+    String zoneKey =
+        ((RailGraphInterlockingSupport) graph)
+            .interlockingState()
+            .exactZones()
+            .keySet()
+            .iterator()
+            .next();
+    OccupancyResource physicalZone = OccupancyResource.forConflict(zoneKey);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(train)));
+    service.releaseResourcesNotInRequest("train-1", List.of(), Set.of());
+
+    Map<OccupancyResource, ClaimRole> retainedClaims =
+        occupancyManager.snapshotClaims().stream()
+            .filter(claim -> claim.trainName().equals("train-1"))
+            .collect(
+                java.util.stream.Collectors.toMap(OccupancyClaim::resource, OccupancyClaim::role));
+    assertFalse(retainedClaims.containsKey(logicalEdge));
+    assertEquals(ClaimRole.PHYSICAL_FOOTPRINT, retainedClaims.get(physicalZone));
+  }
+
+  @Test
+  void releaseResourcesNotInRequestShrinksCanonicalOwnerThroughSplitAlias() {
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource retained = OccupancyResource.forNode(NodeId.of("CURRENT"));
+    OccupancyResource stale = OccupancyResource.forNode(NodeId.of("BEHIND"));
+    OccupancyRequest canonicalRequest =
+        new OccupancyRequest(
+            "train-main",
+            Optional.empty(),
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of(retained, stale),
+            Map.of());
+    assertTrue(occupancyManager.acquire(canonicalRequest).allowed());
+    RuntimeDispatchService service = createMinimalService(occupancyManager, new ArrayList<>());
+
+    List<OccupancyResource> released =
+        service.releaseResourcesNotInRequest("train-main~a", List.of(retained), Set.of());
+
+    assertEquals(List.of(stale), released);
+    assertEquals("train-main", occupancyManager.getClaim(retained).orElseThrow().trainName());
+    assertTrue(occupancyManager.getClaim(stale).isEmpty());
+  }
+
+  @Test
+  void lateLoadedTrainHydratesAtomicallyBeforeNormalAuthorization() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain existing =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "existing",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain late =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "late",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    OccupancyResource physicalEdge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
+    service.handleSignalTick(late, false);
+
+    assertTrue(late.hardStopCalls > 0);
+    assertEquals(0, late.launchCalls);
+    assertEquals(
+        Set.of("existing", "late"),
+        occupancyManager.snapshotClaims().stream()
+            .filter(claim -> claim.resource().equals(physicalEdge))
+            .map(OccupancyClaim::trainName)
+            .collect(java.util.stream.Collectors.toSet()));
+  }
+
+  @Test
+  void unresolvedLateLoadedTrainClosesGlobalGateAndRequestsRecovery() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain existing =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "existing",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain unresolved =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "unresolved",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    unresolved.liveRailFootprintCells = Optional.empty();
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
+    int existingStopsBeforeLateLoad = existing.hardStopCalls;
+    service.handleSignalTick(unresolved, false);
+    service.handleSignalTick(existing, false);
+
+    assertTrue(recoveryRequested.get());
+    assertTrue(unresolved.hardStopCalls > 0);
+    assertTrue(existing.hardStopCalls > existingStopsBeforeLateLoad);
+    assertEquals(0, unresolved.launchCalls);
+  }
+
+  @Test
+  void legacyLiveRailFootprintAdapterExposesUnavailableReason() {
+    FakeTrain train =
+        new FakeTrain(
+            UUID.randomUUID(), new TagStore("train-1", "FTA_ROUTE_INDEX=0").properties(), false);
+    train.liveRailFootprintCells = Optional.empty();
+
+    LiveRailFootprintObservation unavailable = train.observeLiveRailFootprint();
+
+    assertFalse(unavailable.available());
+    assertEquals(
+        LiveRailFootprintObservation.FailureReason.LEGACY_UNAVAILABLE, unavailable.failureReason());
+
+    Set<RailFootprintCell> cells = Set.of(new RailFootprintCell(1, 64, 1));
+    train.liveRailFootprintCells = Optional.of(cells);
+
+    LiveRailFootprintObservation available = train.observeLiveRailFootprint();
+
+    assertTrue(available.available());
+    assertEquals(cells, available.cells().orElseThrow());
+    assertEquals(LiveRailFootprintObservation.FailureReason.NONE, available.failureReason());
+  }
+
+  @Test
+  void expectedDepotSpawnRegistersPhysicalIdentityBeforeFirstSignalRefresh() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RailGraph graph = startupPhysicalCrossingGraph(worldId);
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add, graph);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0",
+                    TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING + "=true")
+                .properties(),
+            false);
+    train.liveRailFootprintCells = Optional.empty();
+    OccupancyResource edge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
+    OccupancyResource zone =
+        OccupancyResource.forConflict(
+            ((RailGraphInterlockingSupport) graph)
+                .interlockingState()
+                .exactZones()
+                .keySet()
+                .iterator()
+                .next());
+    OccupancyRequest spawnAuthority =
+        new OccupancyRequest(
+            "train-1",
+            Optional.of(route.id()),
+            Instant.now(),
+            List.of(edge, zone),
+            Map.of(),
+            Map.of(),
+            10,
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(
+                edge, ResourceIntent.MOVEMENT_REQUIRED,
+                zone, ResourceIntent.MOVEMENT_REQUIRED));
+    assertTrue(service.rebuildOccupancySnapshot(List.of()));
+    long recoveryEpoch = service.captureReadyStartupRecoveryEpoch().orElseThrow();
+    assertTrue(occupancyManager.acquire(spawnAuthority).allowed());
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    assertFalse(
+        service.registerExpectedMaterializedSpawn(train, spawnAuthority, recoveryEpoch + 1));
+    assertEquals(0, train.hardStopCalls);
+    assertTrue(service.registerExpectedMaterializedSpawn(train, spawnAuthority, recoveryEpoch));
+    FakeTrain duplicate =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0",
+                    TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING + "=true")
+                .properties(),
+            false);
+    assertFalse(
+        service.registerExpectedMaterializedSpawn(duplicate, spawnAuthority, recoveryEpoch));
+    assertTrue(duplicate.hardStopCalls > 0);
+    service.handleSignalTick(train, false);
+    assertTrue(train.hardStopCalls > 0);
+    assertEquals(0, train.launchCalls);
+    assertEquals(
+        RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL,
+        service.expectedMaterializedSpawnStatus(train, recoveryEpoch));
+    assertFalse(recoveryRequested.get());
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isPresent());
+
+    train.liveRailFootprintCells = Optional.of(Set.of(new RailFootprintCell(0, 64, 0)));
+    service.handleSignalTick(train, false);
+    long waitingFootprintLogs =
+        debugMessages.stream()
+            .filter(message -> message.contains("result=waiting-footprint"))
+            .count();
+    train.liveRailFootprintCells = Optional.empty();
+    service.handleSignalTick(train, false);
+    service.releaseResourcesNotInRequest("train-1", List.of(), Set.of());
+
+    assertFalse(recoveryRequested.get());
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isPresent());
+    assertTrue(
+        debugMessages.stream().anyMatch(message -> message.contains("result=promoted")),
+        debugMessages::toString);
+    assertEquals(
+        RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED,
+        service.expectedMaterializedSpawnStatus(train, recoveryEpoch));
+    assertEquals(
+        waitingFootprintLogs,
+        debugMessages.stream()
+            .filter(message -> message.contains("result=waiting-footprint"))
+            .count());
+    assertTrue(
+        occupancyManager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(zone)
+                        && TrainNameNormalizer.sameLogicalTrain(
+                            claim.trainName(), spawnAuthority.trainName())));
+  }
+
+  @Test
+  void removingExpectedDepotSpawnCleansProvisionalStateWithoutStartingGlobalRecovery() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0",
+                    TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING + "=true")
+                .properties(),
+            false);
+    train.liveRailFootprintCells = Optional.empty();
+    OccupancyResource edge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
+    OccupancyRequest spawnAuthority =
+        new OccupancyRequest(
+            "train-1",
+            Optional.of(route.id()),
+            Instant.now(),
+            List.of(edge),
+            Map.of(),
+            Map.of(),
+            10,
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(edge, ResourceIntent.MOVEMENT_REQUIRED));
+    assertTrue(service.rebuildOccupancySnapshot(List.of()));
+    long recoveryEpoch = service.captureReadyStartupRecoveryEpoch().orElseThrow();
+    assertTrue(occupancyManager.acquire(spawnAuthority).allowed());
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+    assertTrue(service.registerExpectedMaterializedSpawn(train, spawnAuthority, recoveryEpoch));
+
+    service.handleTrainRemoved(train);
+
+    assertFalse(recoveryRequested.get());
+    assertTrue(service.isStartupRecoveryEpochReady(recoveryEpoch));
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+  }
+
+  @Test
+  void recoveryStartedDuringExpectedSpawnHydrationCannotPublishStalePromotion() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager delegate =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            withSettings()
+                .extraInterfaces(
+                    AuthorityHandoffSupport.class,
+                    StartupOccupancyReconstructionSupport.class,
+                    PhysicalFootprintHydrationSupport.class)
+                .defaultAnswer(org.mockito.AdditionalAnswers.delegatesTo(delegate)));
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(
+            worldId, route, occupancyManager, debugMessages::add, startupPhysicalGraph(worldId));
+    java.util.concurrent.atomic.AtomicReference<RuntimeDispatchService> serviceRef =
+        new java.util.concurrent.atomic.AtomicReference<>(service);
+    PhysicalFootprintHydrationSupport hydrationSupport =
+        (PhysicalFootprintHydrationSupport) occupancyManager;
+    when(hydrationSupport.replaceTrainPhysicalFootprint(any()))
+        .thenAnswer(
+            invocation -> {
+              StartupOccupancyReconstructionSupport.ReconstructionResult result =
+                  delegate.replaceTrainPhysicalFootprint(invocation.getArgument(0));
+              serviceRef.get().beginStartupOccupancyReconstruction();
+              return result;
+            });
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0",
+                    TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING + "=true")
+                .properties(),
+            false);
+    train.liveRailFootprintCells = Optional.of(Set.of(new RailFootprintCell(0, 64, 0)));
+    OccupancyResource edge =
+        OccupancyResource.forEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")));
+    OccupancyRequest spawnAuthority =
+        new OccupancyRequest(
+            "train-1",
+            Optional.of(route.id()),
+            Instant.now(),
+            List.of(edge),
+            Map.of(),
+            Map.of(),
+            10,
+            AuthorizationPurpose.DEPOT_SPAWN,
+            Map.of(),
+            Map.of(edge, ResourceIntent.MOVEMENT_REQUIRED));
+    assertTrue(service.rebuildOccupancySnapshot(List.of()));
+    long recoveryEpoch = service.captureReadyStartupRecoveryEpoch().orElseThrow();
+    assertTrue(occupancyManager.acquire(spawnAuthority).allowed());
+    assertTrue(service.registerExpectedMaterializedSpawn(train, spawnAuthority, recoveryEpoch));
+
+    service.handleSignalTick(train, false);
+
+    assertFalse(service.isStartupRecoveryEpochReady(recoveryEpoch));
+    assertTrue(train.hardStopCalls > 0);
+    assertEquals(0, train.launchCalls);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("result=stale-after-hydration-commit")),
+        debugMessages::toString);
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("result=promoted")),
+        debugMessages::toString);
+  }
+
+  @Test
+  void duplicatePhysicalGroupWithSameLogicalOwnerClosesGlobalGateWithoutReplacingFootprint() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain existing =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "shared-owner",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain duplicate =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "shared-owner",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
+    long versionBeforeDuplicate = occupancyManager.version();
+
+    service.handleSignalTick(duplicate, false);
+
+    assertTrue(recoveryRequested.get());
+    assertTrue(duplicate.hardStopCalls > 0);
+    assertEquals(0, duplicate.launchCalls);
+    assertEquals(versionBeforeDuplicate, occupancyManager.version());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_DUPLICATE_LOGICAL_OWNER_IDENTITY")),
+        debugMessages::toString);
+  }
+
+  @Test
+  void removingOldSameNameGroupDoesNotClearSurvivorPhysicalSnapshot() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain survivor =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "shared-owner",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain removedOldGroup =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "shared-owner",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(survivor)));
+    List<OccupancyClaim> claimsBeforeRemoval = occupancyManager.snapshotClaims();
+    long versionBeforeRemoval = occupancyManager.version();
+
+    service.handleTrainRemoved(removedOldGroup);
+
+    assertTrue(recoveryRequested.get());
+    assertEquals(claimsBeforeRemoval, occupancyManager.snapshotClaims());
+    assertEquals(versionBeforeRemoval, occupancyManager.version());
+  }
+
+  @Test
+  void latePhysicalHydrationExceptionClosesGlobalGateAndRequestsRecovery() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager delegate =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            withSettings()
+                .extraInterfaces(
+                    StartupOccupancyReconstructionSupport.class,
+                    PhysicalFootprintHydrationSupport.class)
+                .defaultAnswer(org.mockito.AdditionalAnswers.delegatesTo(delegate)));
+    PhysicalFootprintHydrationSupport hydrationSupport =
+        (PhysicalFootprintHydrationSupport) occupancyManager;
+    when(hydrationSupport.replaceTrainPhysicalFootprint(any()))
+        .thenThrow(new IllegalStateException("tracker-unavailable"));
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain existing =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "existing",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain late =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "late",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
+    int existingStopsBeforeLateLoad = existing.hardStopCalls;
+
+    service.handleSignalTick(late, false);
+    service.handleSignalTick(existing, false);
+
+    assertTrue(recoveryRequested.get());
+    assertTrue(late.hardStopCalls > 0);
+    assertTrue(existing.hardStopCalls > existingStopsBeforeLateLoad);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message -> message.contains("SMART_LATE_LOAD_PHYSICAL_HYDRATION result=exception")),
+        debugMessages::toString);
+  }
+
+  @Test
+  void rebuildOccupancySnapshotStopsEveryTrainBeforeAtomicCommit() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    List<String> controlEvents = new ArrayList<>();
+    FakeTrain first =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "first",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false,
+            0.0,
+            controlEvents,
+            "first");
+    FakeTrain second =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "second",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false,
+            0.0,
+            controlEvents,
+            "second");
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(first, second)));
+
+    assertTrue(firstEventIndex(controlEvents, "first:hard-stop") >= 0, controlEvents::toString);
+    assertTrue(firstEventIndex(controlEvents, "second:hard-stop") >= 0, controlEvents::toString);
+    assertEquals(
+        2,
+        occupancyManager.snapshotClaims().stream()
+            .map(OccupancyClaim::trainName)
+            .distinct()
+            .count());
+    assertEquals(0, first.launchCalls);
+    assertEquals(0, second.launchCalls);
+  }
+
+  @Test
+  void preparedPhysicalSnapshotKeepsAuthorizationGateClosedUntilExplicitCompletion() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+
+    assertTrue(service.prepareStartupOccupancySnapshot(List.of(train)));
+    int stopsAfterPrepare = train.hardStopCalls;
+    long versionAfterPrepare = occupancyManager.version();
+
+    service.handleSignalTick(train, false);
+
+    assertTrue(train.hardStopCalls > stopsAfterPrepare);
+    assertEquals(0, train.launchCalls);
+    assertEquals(versionAfterPrepare, occupancyManager.version());
+
+    assertTrue(service.completeStartupOccupancyReconstruction(List.of(train)));
+
+    assertTrue(occupancyManager.version() >= versionAfterPrepare);
+  }
+
+  @Test
+  void startupRefreshFailureReclosesGlobalAuthorizationGate() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    assertTrue(service.prepareStartupOccupancySnapshot(List.of(train)));
+    train.physicalIdentityFailure = new LinkageError("runtime ABI mismatch");
+
+    assertFalse(service.completeStartupOccupancyReconstruction(List.of(train)));
+
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isEmpty());
+    assertTrue(recoveryRequested.get());
+    assertTrue(train.hardStopCalls >= 2);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("state=STOP_FIRST")
+                        && message.contains("startup-authorization-refresh-failed")));
+  }
+
+  @Test
+  void abnormalPhysicalQuarantineIncludesTaglessSplitRemainderUntilExactEntityRemoval() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service = startupReconstructionService(worldId, route, occupancyManager);
+    FakeTrain abnormal =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "abnormal",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain taglessSplitRemainder =
+        new FakeTrain(worldId, new TagStore("abnormal~a").properties(), false);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(abnormal)));
+    List<OccupancyClaim> claimsBeforeQuarantine = occupancyManager.snapshotClaims();
+    long versionBeforeQuarantine = occupancyManager.version();
+    int launchesBeforeQuarantine = abnormal.launchCalls;
+    AtomicBoolean abnormalRemoved = new AtomicBoolean();
+    List<Boolean> recoveryResults = new ArrayList<>();
+    service.setStartupRecoveryRequestedListener(
+        () -> {
+          List<FakeTrain> liveTrains =
+              abnormalRemoved.get()
+                  ? List.of(taglessSplitRemainder)
+                  : List.of(abnormal, taglessSplitRemainder);
+          boolean prepared = service.prepareStartupOccupancySnapshot(liveTrains);
+          recoveryResults.add(prepared);
+          if (prepared) {
+            service.completeStartupOccupancyReconstruction(liveTrains);
+          }
+        });
+
+    service.beginFtaAbnormalPhysicalQuarantine(
+        List.of(abnormal, taglessSplitRemainder), "abnormal", "unexpected-split-source");
+
+    assertEquals(List.of(false), recoveryResults);
+    assertEquals(claimsBeforeQuarantine, occupancyManager.snapshotClaims());
+    assertEquals(versionBeforeQuarantine, occupancyManager.version());
+    assertEquals(launchesBeforeQuarantine, abnormal.launchCalls);
+    assertTrue(taglessSplitRemainder.hardStopCalls > 0);
+    RuntimeStopState quarantineStop = service.getActiveStopState("abnormal").orElseThrow();
+    assertEquals("ABNORMAL_PHYSICAL_QUARANTINE", quarantineStop.reasonCode());
+    assertEquals(
+        RuntimeStopState.ReleaseCondition.FIELD_RECONSTRUCTION_COMMITTED,
+        quarantineStop.releaseCondition());
+    assertEquals(
+        RuntimeStopState.RetryTrigger.STARTUP_RECONSTRUCTION_RETRY, quarantineStop.retryTrigger());
+
+    abnormalRemoved.set(true);
+    service.handleTrainRemoved(abnormal);
+
+    assertEquals(List.of(false, false), recoveryResults);
+    assertEquals(claimsBeforeQuarantine, occupancyManager.snapshotClaims());
+    assertEquals(launchesBeforeQuarantine, abnormal.launchCalls);
+
+    service.handleTrainRemoved(taglessSplitRemainder);
+    assertTrue(service.prepareStartupOccupancySnapshot(List.of()));
+    service.completeStartupOccupancyReconstruction(List.of());
+
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    assertEquals(launchesBeforeQuarantine, abnormal.launchCalls);
+  }
+
+  @Test
+  void materializedSpawnRollbackQuarantineBlocksExternalRefreshUntilExactRemoval() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "rollback-train",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(train)));
+    assertFalse(occupancyManager.snapshotClaims().isEmpty());
+    int launchesBeforeRollback = train.launchCalls;
+
+    assertTrue(
+        service.quarantineMaterializedSpawnRollback(
+            train, "rollback-train", "test-rollback", true));
+    service.handleSignalTick(train, false);
+
+    assertTrue(train.hardStopCalls > 0);
+    assertEquals(launchesBeforeRollback, train.launchCalls);
+    assertFalse(occupancyManager.snapshotClaims().isEmpty());
+    assertTrue(
+        debugMessages.stream().anyMatch(message -> message.contains("rollback-quarantined")));
+
+    service.handleTrainRemoved(train);
+
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+  }
+
+  @Test
+  void materializedSpawnRollbackKeepsLogicalClaimsUntilDuplicateIdentityIsRemoved() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, ignored -> {});
+    TagStore ownerTags =
+        new TagStore(
+            "rollback-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    FakeTrain owner = new FakeTrain(worldId, ownerTags.properties(), false);
+    FakeTrain duplicate = new FakeTrain(worldId, ownerTags.properties(), false);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(owner)));
+    assertFalse(occupancyManager.snapshotClaims().isEmpty());
+    assertTrue(
+        service.quarantineMaterializedSpawnRollback(
+            owner, "rollback-train", "owner-rollback", true));
+    assertTrue(
+        service.quarantineMaterializedSpawnRollback(
+            duplicate, "rollback-train", "duplicate-rollback", false));
+    assertTrue(service.hasMaterializedSpawnRollbackQuarantine("ROLLBACK-TRAIN"));
+
+    service.handleTrainRemoved(owner);
+
+    assertFalse(occupancyManager.snapshotClaims().isEmpty(), "owner 先移除时仍有重复物理实体，不能提前释放逻辑 claims");
+
+    service.handleTrainRemoved(duplicate);
+
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    assertFalse(service.hasMaterializedSpawnRollbackQuarantine("rollback-train"));
+  }
+
+  @Test
+  void materializedSpawnRollbackUnloadTransfersAndRetriesUntilReloadedIdentityIsRemoved() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, ignored -> {});
+    TagStore tags =
+        new TagStore(
+            "rollback-train",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_INDEX=0");
+    FakeTrain original = new FakeTrain(worldId, tags.properties(), false);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(original)));
+    assertFalse(occupancyManager.snapshotClaims().isEmpty());
+    assertTrue(
+        service.quarantineMaterializedSpawnRollback(
+            original, "rollback-train", "unload-rollback", true));
+
+    service.handleTrainUnloaded(original);
+
+    assertTrue(service.isMaterializedSpawnRollbackUnloaded(original));
+    assertTrue(service.hasMaterializedSpawnRollbackQuarantine("rollback-train"));
+    assertFalse(occupancyManager.snapshotClaims().isEmpty());
+
+    FakeTrain reloaded = new FakeTrain(worldId, tags.properties(), false);
+    assertTrue(service.resumeMaterializedSpawnRollback(reloaded));
+    assertEquals(1, reloaded.destroyCalls);
+    assertTrue(service.resumeMaterializedSpawnRollback(reloaded));
+    assertEquals(2, reloaded.destroyCalls, "同一重载 identity 必须允许恢复循环持续重试销毁");
+    assertFalse(occupancyManager.snapshotClaims().isEmpty());
+
+    service.handleTrainRemoved(reloaded);
+
+    assertTrue(service.consumeMaterializedSpawnRollbackRemoval(original));
+    assertFalse(service.consumeMaterializedSpawnRollbackRemoval(original));
+    assertFalse(service.hasMaterializedSpawnRollbackQuarantine("rollback-train"));
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+    assertFalse(service.hasMaterializedSpawnRollbackTag(tags.properties()));
+  }
+
+  @Test
+  void persistentMaterializedSpawnRollbackWaitsForOfficialOfflineRemovalProof() {
+    RuntimeDispatchService service =
+        startupReconstructionService(
+            UUID.randomUUID(),
+            new RouteDefinition(
+                RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty()),
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            ignored -> {});
+    TagStore tags =
+        new TagStore(
+            "offline-rollback",
+            TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING + "=true");
+    when(tags.properties().getHolder()).thenReturn(null);
+    TrainCarts trainCarts = mock(TrainCarts.class);
+    OfflineGroupManager offlineGroups = mock(OfflineGroupManager.class);
+    when(tags.properties().getTrainCarts()).thenReturn(trainCarts);
+    when(trainCarts.getOfflineGroups()).thenReturn(offlineGroups);
+    when(offlineGroups.destroyGroupAsync("offline-rollback"))
+        .thenReturn(CompletableFuture.completedFuture(Boolean.TRUE));
+
+    try (var propertiesStore = mockStatic(TrainPropertiesStore.class)) {
+      propertiesStore
+          .when(TrainPropertiesStore::getAll)
+          .thenReturn(List.of(tags.properties()), List.of());
+
+      assertFalse(service.retryPersistentMaterializedSpawnRollbackRemovals());
+      assertTrue(service.retryPersistentMaterializedSpawnRollbackRemovals());
+      verify(offlineGroups).destroyGroupAsync("offline-rollback");
+    }
+  }
+
+  @Test
+  void potentialFtaSplitIsContainedImmediatelyWithoutReleasingPhysicalClaims() throws Exception {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain source =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "source",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain taglessRemainder =
+        new FakeTrain(worldId, new TagStore("source~detached").properties(), false);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(source)));
+    List<OccupancyClaim> claimsBefore = occupancyManager.snapshotClaims();
+    long occupancyVersionBefore = occupancyManager.version();
+    List<OccupancyResource> authorityResources =
+        claimsBefore.stream().map(OccupancyClaim::resource).distinct().toList();
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "source",
+                1L,
+                Instant.now(),
+                NodeId.of("A"),
+                NodeId.of("B"),
+                authorityResources,
+                SignalAspect.PROCEED)
+            .activate("B"));
+    assertEquals(1, movementTokenCount(service));
+
+    service.containPotentialFtaPhysicalChange(List.of(source, taglessRemainder), "member-remove");
+
+    assertTrue(source.hardStopCalls > 0);
+    assertTrue(taglessRemainder.hardStopCalls > 0);
+    assertEquals(0, movementTokenCount(service));
+    assertFalse(
+        validMovementAuthorization(
+            service, "source", NodeId.of("A"), NodeId.of("B"), authorityResources));
+    assertEquals(claimsBefore, occupancyManager.snapshotClaims());
+    assertEquals(occupancyVersionBefore, occupancyManager.version());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED")
+                        && message.contains("source=member-remove")),
+        debugMessages::toString);
+  }
+
+  @Test
+  void nonFtaDerailedTrainCannotEnterFtaPhysicalQuarantine() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    RuntimeDispatchService service =
+        startupReconstructionService(
+            worldId,
+            route,
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()));
+    FakeTrain nonFta = new FakeTrain(worldId, new TagStore("ordinary-train").properties(), false);
+
+    assertFalse(service.quarantineAbnormalPhysicalIdentity(nonFta));
+  }
+
+  @Test
+  void rebuildOccupancySnapshotWithNoTrainsStillReleasesGhostClaims() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        occupancyManager
+            .acquire(
+                new OccupancyRequest(
+                    "ghost",
+                    Optional.empty(),
+                    Instant.now(),
+                    List.of(new OccupancyResource(ResourceKind.EDGE, "A~B")),
+                    Map.of()))
+            .allowed());
+    RuntimeDispatchService service =
+        startupReconstructionService(UUID.randomUUID(), route, occupancyManager);
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of()));
+
+    assertTrue(occupancyManager.snapshotClaims().isEmpty());
+  }
+
+  @Test
+  void failedStartupHydrationKeepsGateClosedUntilRetrySucceeds() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager delegate =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            withSettings()
+                .extraInterfaces(StartupOccupancyReconstructionSupport.class)
+                .defaultAnswer(org.mockito.AdditionalAnswers.delegatesTo(delegate)));
+    StartupOccupancyReconstructionSupport reconstructionSupport =
+        (StartupOccupancyReconstructionSupport) occupancyManager;
+    when(reconstructionSupport.reconstructPhysicalSnapshot(any()))
+        .thenReturn(
+            StartupOccupancyReconstructionSupport.ReconstructionResult.rejected(
+                "atomic-commit-failed"))
+        .thenAnswer(invocation -> delegate.reconstructPhysicalSnapshot(invocation.getArgument(0)));
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+
+    assertFalse(service.rebuildOccupancySnapshot(List.of(train)));
+    service.handleSignalTick(train, false);
+    assertEquals(0, train.launchCalls);
+    assertTrue(service.isMovementInhibited("train-1"));
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(train)));
+    verify(occupancyManager, atLeastOnce()).acquire(any());
+    assertTrue(
+        debugMessages.stream().anyMatch(message -> message.contains("state=READY trains=1")),
+        debugMessages::toString);
+  }
+
+  @Test
+  void expectedPhysicalTopologyChangeDefersAuthorityUntilAtomicFieldReconstruction() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    UUID worldId = UUID.randomUUID();
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        startupReconstructionService(worldId, route, occupancyManager, debugMessages::add);
+    FakeTrain train =
+        new FakeTrain(
+            worldId,
+            new TagStore(
+                    "train-1",
+                    "FTA_OPERATOR_CODE=op",
+                    "FTA_LINE_CODE=l1",
+                    "FTA_ROUTE_CODE=r1",
+                    "FTA_ROUTE_INDEX=0")
+                .properties(),
+            false);
+    FakeTrain linkingGroup =
+        new FakeTrain(worldId, new TagStore("unmanaged-linking-group").properties(), false);
+    linkingGroup.physicalIdentityUnavailable = true;
+
+    assertTrue(service.rebuildOccupancySnapshot(List.of(train)));
+    List<OccupancyClaim> claimsBeforeLink = occupancyManager.snapshotClaims();
+    debugMessages.clear();
+    AtomicBoolean recoveryRequested = new AtomicBoolean();
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequested.set(true));
+
+    service.beginExpectedPhysicalTopologyRecovery(List.of(train, linkingGroup), "group-link");
+
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isEmpty());
+    assertTrue(recoveryRequested.get());
+    assertTrue(train.hardStopCalls > 0);
+    assertTrue(linkingGroup.hardStopCalls > 0);
+    assertEquals(claimsBeforeLink, occupancyManager.snapshotClaims());
+    assertTrue(service.isMovementInhibited("train-1"));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_EXPECTED_PHYSICAL_TOPOLOGY_RECOVERY")
+                        && message.contains("state=STOP_FIRST")
+                        && message.contains("claimsRetained=true")),
+        debugMessages::toString);
+  }
+
+  private static RuntimeDispatchService startupReconstructionService(
+      UUID worldId, RouteDefinition route, OccupancyManager occupancyManager) {
+    return startupReconstructionService(worldId, route, occupancyManager, null);
+  }
+
+  private static RuntimeDispatchService startupReconstructionService(
+      UUID worldId,
+      RouteDefinition route,
+      OccupancyManager occupancyManager,
+      java.util.function.Consumer<String> debugLogger) {
+    return startupReconstructionService(
+        worldId, route, occupancyManager, debugLogger, startupPhysicalGraph(worldId));
+  }
+
+  private static RuntimeDispatchService startupReconstructionService(
+      UUID worldId,
+      RouteDefinition route,
+      OccupancyManager occupancyManager,
+      java.util.function.Consumer<String> debugLogger,
+      RailGraph graph) {
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    return new RuntimeDispatchService(
+        occupancyManager,
+        railGraphService,
+        routeDefinitions,
+        new RouteProgressRegistry(),
+        mock(SignNodeRegistry.class),
+        mock(LayoverRegistry.class),
+        new DwellRegistry(),
+        configManager,
+        null,
+        new TrainConfigResolver(),
+        debugLogger);
+  }
+
+  private static RailGraph startupPhysicalGraph(UUID worldId) {
+    NodeId from = NodeId.of("A");
+    NodeId to = NodeId.of("B");
+    RailEdge edge =
+        new RailEdge(EdgeId.undirected(from, to), from, to, 10, -1.0, true, Optional.empty());
+    Map<NodeId, RailNode> nodes = Map.of(from, new RailNodeTest(from), to, new RailNodeTest(to));
+    Map<EdgeId, RailEdge> edges = Map.of(edge.id(), edge);
+    return new SimpleRailGraph(
+        nodes,
+        edges,
+        Set.of(),
+        RailInterlockingState.fromSnapshot(
+            worldId,
+            edges.keySet(),
+            new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage(
+                1, 1, true),
+            Map.of()));
+  }
+
+  private static RailGraph startupPhysicalCrossingGraph(UUID worldId) {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    NodeId d = NodeId.of("D");
+    RailEdge routeEdge =
+        new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge crossingEdge =
+        new RailEdge(EdgeId.undirected(c, d), c, d, 10, -1.0, true, Optional.empty());
+    Map<NodeId, RailNode> nodes =
+        Map.of(
+            a,
+            new RailNodeTest(a),
+            b,
+            new RailNodeTest(b),
+            c,
+            new RailNodeTest(c),
+            d,
+            new RailNodeTest(d));
+    Map<EdgeId, RailEdge> edges =
+        Map.of(routeEdge.id(), routeEdge, crossingEdge.id(), crossingEdge);
+    String zoneKey = "interlocking:test-startup-crossing";
+    InterlockingZoneInfo zone =
+        new InterlockingZoneInfo(
+            zoneKey, routeEdge.id(), crossingEdge.id(), Set.of(new RailFootprintCell(0, 64, 0)));
+    return new SimpleRailGraph(
+        nodes,
+        edges,
+        Set.of(),
+        RailInterlockingState.fromSnapshot(
+            worldId,
+            edges.keySet(),
+            new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage(
+                2, 2, true),
+            Map.of(zoneKey, zone)));
+  }
+
+  private static int firstEventIndex(List<String> events, String suffix) {
+    for (int index = 0; index < events.size(); index++) {
+      if (events.get(index).endsWith(suffix)) {
+        return index;
+      }
+    }
+    return -1;
   }
 
   @Test
@@ -4887,7 +7309,7 @@ class RuntimeDispatchServiceTest {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
 
     RouteProgressRegistry registry = new RouteProgressRegistry();
@@ -4966,7 +7388,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -5126,7 +7548,7 @@ class RuntimeDispatchServiceTest {
         "train-behind", new TagStore("train-behind", "FTA_ROUTE_INDEX=0").properties(), route);
     RuntimeDispatchService service =
         new RuntimeDispatchService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RailGraphService.class),
             mock(RouteDefinitionCache.class),
             registry,
@@ -5187,7 +7609,7 @@ class RuntimeDispatchServiceTest {
         "train-behind", new TagStore("train-behind", "FTA_ROUTE_INDEX=0").properties(), route);
     RuntimeDispatchService service =
         new RuntimeDispatchService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RailGraphService.class),
             mock(RouteDefinitionCache.class),
             registry,
@@ -5365,7 +7787,7 @@ class RuntimeDispatchServiceTest {
     dwellRegistry.start("turning-train", 30);
     RuntimeDispatchService service =
         new RuntimeDispatchService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RailGraphService.class),
             mock(RouteDefinitionCache.class),
             new RouteProgressRegistry(),
@@ -5490,6 +7912,140 @@ class RuntimeDispatchServiceTest {
             .map(OccupancyClaim::resource)
             .collect(java.util.stream.Collectors.toSet());
     assertEquals(Set.of(locationResource, throatResource, crossing), retained);
+  }
+
+  @Test
+  void dispatchLayoverHandsOffAuthorityAndKeepsOldFootprintUntilRearClear() {
+    String previousTrainName = "turning-train";
+    NodeId approach = NodeId.of("SURC:TERM:APPROACH:1");
+    NodeId terminal = NodeId.of("SURC:S:TERM:1");
+    NodeId throat = NodeId.of("SURC:S:TERM:1:001");
+    NodeId clear = NodeId.of("SURC:TERM:NEXT:1:001");
+    RailEdge oldApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, terminal),
+            approach,
+            terminal,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge terminalThroat =
+        new RailEdge(
+            EdgeId.undirected(terminal, throat),
+            terminal,
+            throat,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge throatClear =
+        new RailEdge(
+            EdgeId.undirected(throat, clear), throat, clear, 10, -1.0, true, Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                approach, new RailNodeTest(approach),
+                terminal, new RailNodeTest(terminal),
+                throat, new RailNodeTest(throat),
+                clear, new RailNodeTest(clear)),
+            Map.of(
+                oldApproach.id(), oldApproach,
+                terminalThroat.id(), terminalThroat,
+                throatClear.id(), throatClear),
+            Set.of());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("turnback"), List.of(terminal, throat, clear), Optional.empty());
+    UUID ticketRouteId = UUID.randomUUID();
+    UUID worldId = UUID.randomUUID();
+    OccupancyResource oldApproachResource = OccupancyResource.forEdge(oldApproach.id());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    previousTrainName,
+                    Optional.empty(),
+                    Instant.now(),
+                    List.of(oldApproachResource, OccupancyResource.forNode(terminal)),
+                    Map.of()))
+            .allowed());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(1, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(20.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(ticketRouteId)).thenReturn(Optional.of(route));
+    when(routeDefinitions.listStops(route.id())).thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        previousTrainName,
+        TerminalKeyResolver.toTerminalKey(terminal),
+        terminal,
+        Instant.now().minusSeconds(1),
+        Map.of());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    TagStore tags = new TagStore(previousTrainName);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
+    LayoverRegistry.LayoverCandidate candidate =
+        layoverRegistry.get(previousTrainName).orElseThrow();
+    ServiceTicket ticket =
+        new ServiceTicket(
+            "ticket-turnback",
+            Instant.now(),
+            ticketRouteId,
+            candidate.terminalKey(),
+            10,
+            ServiceTicket.TicketMode.OPERATION);
+
+    LayoverDispatchResult result =
+        service.dispatchLayover(candidate, ticket, tags.properties(), train);
+
+    assertTrue(result.dispatched(), result.reason());
+    String committedTrainName = result.trainName().orElseThrow();
+    assertEquals(1, train.launchCalls);
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    oldApproachResource.equals(claim.resource())
+                        && TrainNameNormalizer.sameLogicalTrain(
+                            claim.trainName(), committedTrainName)
+                        && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
+
+    service.observeTurnbackFootprintProgress(committedTrainName, throat);
+
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    oldApproachResource.equals(claim.resource())
+                        && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
+
+    service.observeTurnbackFootprintProgress(committedTrainName, clear);
+
+    assertFalse(
+        manager.snapshotClaims().stream()
+            .anyMatch(claim -> oldApproachResource.equals(claim.resource())));
   }
 
   @Test
@@ -5747,6 +8303,164 @@ class RuntimeDispatchServiceTest {
       edges.put(edgeId, new RailEdge(edgeId, from, to, lengthBlocks, -1.0, true, Optional.empty()));
     }
     return new SimpleRailGraph(railNodes, edges, Set.of());
+  }
+
+  /** 为逻辑图的每条边配置唯一完整 rail cell，供运行时释放测试提供可验证的现场证据。 */
+  private static PhysicalGraphFixture withSyntheticPhysicalFootprints(
+      RailGraph source, UUID worldId) {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    source.nodes().forEach(node -> nodes.put(node.id(), node));
+    List<RailEdge> sortedEdges =
+        source.edges().stream()
+            .sorted(java.util.Comparator.comparing(edge -> edge.id().toString()))
+            .toList();
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailFootprintCell> cellsByEdge = new LinkedHashMap<>();
+    for (int index = 0; index < sortedEdges.size(); index++) {
+      RailEdge edge = sortedEdges.get(index);
+      RailFootprintCell cell = new RailFootprintCell(10_000 + index, 64, 20_000 + index);
+      RailEdge physicalEdge =
+          new RailEdge(
+              edge.id(),
+              edge.from(),
+              edge.to(),
+              edge.lengthBlocks(),
+              edge.baseSpeedLimit(),
+              edge.bidirectional(),
+              edge.metadata());
+      edges.put(physicalEdge.id(), physicalEdge);
+      cellsByEdge.put(physicalEdge.id(), cell);
+    }
+    RailInterlockingState interlockingState =
+        RailInterlockingState.fromSnapshot(
+            worldId,
+            edges.keySet(),
+            new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage(
+                edges.size(), edges.size(), true),
+            Map.of());
+    return new PhysicalGraphFixture(
+        new SimpleRailGraph(nodes, edges, Set.of(), interlockingState), Map.copyOf(cellsByEdge));
+  }
+
+  /** 携带 edge 到唯一现场 cell 的物理图测试夹具。 */
+  private record PhysicalGraphFixture(
+      RailGraph graph, Map<EdgeId, RailFootprintCell> cellsByEdge) {}
+
+  /**
+   * 构造不携带冲突索引能力的线性图夹具。
+   *
+   * <p>用于只验证制动窗口、距离扫描或动态 authority 边界的测试，避免 {@link SimpleRailGraph} 自动生成的单线冲突组改变被测语义。
+   */
+  private static RailGraph graphWithConflictFreeLinearPath(List<NodeId> nodes, int lengthBlocks) {
+    java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> railNodes =
+        new java.util.LinkedHashMap<>();
+    java.util.List<RailEdge> edges = new java.util.ArrayList<>();
+    for (NodeId node : nodes) {
+      railNodes.put(node, new RailNodeTest(node));
+    }
+    for (int index = 0; index + 1 < nodes.size(); index++) {
+      NodeId from = nodes.get(index);
+      NodeId to = nodes.get(index + 1);
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.add(new RailEdge(edgeId, from, to, lengthBlocks, -1.0, true, Optional.empty()));
+    }
+    return new RailGraph() {
+      @Override
+      public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
+        return railNodes.values();
+      }
+
+      @Override
+      public java.util.Collection<RailEdge> edges() {
+        return edges;
+      }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+        return Optional.ofNullable(railNodes.get(id));
+      }
+
+      @Override
+      public java.util.Set<RailEdge> edgesFrom(NodeId id) {
+        if (id == null) {
+          return Set.of();
+        }
+        return edges.stream()
+            .filter(edge -> edge.from().equals(id) || edge.to().equals(id))
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+      }
+
+      @Override
+      public boolean isBlocked(EdgeId id) {
+        return false;
+      }
+    };
+  }
+
+  /**
+   * 构造不产生桥链单线 section 的环形图夹具。
+   *
+   * <p>回边只用于证明各 route edge 存在替代路径，并使用足够大的长度避免改变逐段最短路；测试仍沿 {@code nodes} 给出的规范路径运行。
+   */
+  private static RailGraph graphWithConflictFreeCyclePath(List<NodeId> nodes, int lengthBlocks) {
+    if (nodes.size() < 3) {
+      throw new IllegalArgumentException("环形图至少需要三个节点");
+    }
+    java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> railNodes =
+        new java.util.LinkedHashMap<>();
+    java.util.List<RailEdge> edges = new java.util.ArrayList<>();
+    for (NodeId node : nodes) {
+      railNodes.put(node, new RailNodeTest(node));
+    }
+    for (int index = 0; index + 1 < nodes.size(); index++) {
+      NodeId from = nodes.get(index);
+      NodeId to = nodes.get(index + 1);
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.add(new RailEdge(edgeId, from, to, lengthBlocks, -1.0, true, Optional.empty()));
+    }
+    NodeId first = nodes.get(0);
+    NodeId last = nodes.get(nodes.size() - 1);
+    EdgeId returnEdgeId = EdgeId.undirected(last, first);
+    edges.add(
+        new RailEdge(
+            returnEdgeId,
+            last,
+            first,
+            Math.max(lengthBlocks + 1, Math.multiplyExact(lengthBlocks, nodes.size())),
+            -1.0,
+            true,
+            Optional.empty()));
+    return new RailGraph() {
+      @Override
+      public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
+        return railNodes.values();
+      }
+
+      @Override
+      public java.util.Collection<RailEdge> edges() {
+        return edges;
+      }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+        return Optional.ofNullable(railNodes.get(id));
+      }
+
+      @Override
+      public java.util.Set<RailEdge> edgesFrom(NodeId id) {
+        if (id == null) {
+          return Set.of();
+        }
+        return edges.stream()
+            .filter(edge -> edge.from().equals(id) || edge.to().equals(id))
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+      }
+
+      @Override
+      public boolean isBlocked(EdgeId id) {
+        return false;
+      }
+    };
   }
 
   private static final class ConflictExitGraph implements RailGraph, RailGraphConflictSupport {
@@ -6302,6 +9016,44 @@ class RuntimeDispatchServiceTest {
         runtime.hudPlayerDisplayTemplate());
   }
 
+  private static ConfigManager.RuntimeSettings runtimeWithRearGuardEdges(
+      ConfigManager.ConfigView base, int rearGuardEdges) {
+    ConfigManager.RuntimeSettings runtime = base.runtimeSettings();
+    return new ConfigManager.RuntimeSettings(
+        runtime.dispatchTickIntervalTicks(),
+        runtime.launchCooldownTicks(),
+        runtime.lookaheadEdges(),
+        runtime.minClearEdges(),
+        rearGuardEdges,
+        runtime.switcherZoneEdges(),
+        runtime.approachSpeedBps(),
+        runtime.cautionSpeedBps(),
+        runtime.approachDepotSpeedBps(),
+        runtime.speedCurveEnabled(),
+        runtime.speedCurveType(),
+        runtime.speedCurveFactor(),
+        runtime.speedCurveEarlyBrakeBlocks(),
+        runtime.failoverStallSpeedBps(),
+        runtime.failoverStallTicks(),
+        runtime.failoverUnreachableStop(),
+        runtime.movementAuthorityEnabled(),
+        runtime.movementAuthorityStopMarginBlocks(),
+        runtime.movementAuthorityCautionMarginBlocks(),
+        runtime.speedCommandHysteresisBps(),
+        runtime.speedCommandAccelFactor(),
+        runtime.speedCommandDecelFactor(),
+        runtime.distanceCacheRefreshSeconds(),
+        runtime.hudBossBarEnabled(),
+        runtime.hudBossBarTickIntervalTicks(),
+        runtime.hudBossBarTemplate(),
+        runtime.hudActionBarEnabled(),
+        runtime.hudActionBarTickIntervalTicks(),
+        runtime.hudActionBarTemplate(),
+        runtime.hudPlayerDisplayEnabled(),
+        runtime.hudPlayerDisplayTickIntervalTicks(),
+        runtime.hudPlayerDisplayTemplate());
+  }
+
   private static ConfigManager.RuntimeSettings runtimeWithApproachSpeed(
       ConfigManager.ConfigView base, double approachSpeedBps) {
     ConfigManager.RuntimeSettings runtime = base.runtimeSettings();
@@ -6434,7 +9186,7 @@ class RuntimeDispatchServiceTest {
             Optional.of("DSTY SURN:D:DEPOT:2"));
     when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -6487,7 +9239,7 @@ class RuntimeDispatchServiceTest {
             Optional.empty());
     when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     RailGraphService railGraphService = mock(RailGraphService.class);
 
     RuntimeDispatchService service =
@@ -6584,7 +9336,7 @@ class RuntimeDispatchServiceTest {
             Optional.of("DSTY DEPOT"));
     when(routeDefinitions.findStop(route.id(), 0)).thenReturn(Optional.of(stop));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     RailGraphService railGraphService = mock(RailGraphService.class);
 
     RuntimeDispatchService service =
@@ -6652,7 +9404,7 @@ class RuntimeDispatchServiceTest {
             Optional.empty());
     when(routeDefinitions.findStop(route.id(), 1)).thenReturn(Optional.of(termStop));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -6764,7 +9516,7 @@ class RuntimeDispatchServiceTest {
             Optional.empty());
     when(routeDefinitions.findStop(route.id(), 1)).thenReturn(Optional.of(stop));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -6827,7 +9579,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -6895,7 +9647,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(any(), eq(1)))
         .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.PASS)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -6959,7 +9711,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(any(), eq(1)))
         .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -7024,7 +9776,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(any(), eq(1)))
         .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -7069,8 +9821,10 @@ class RuntimeDispatchServiceTest {
 
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView base = testConfigView(1, 40.0);
+    ConfigManager.ConfigView approachConfig =
+        withRuntimeSettings(base, runtimeWithApproachSpeed(base, 6.0));
     when(configManager.current())
-        .thenReturn(withRuntimeSettings(base, runtimeWithApproachSpeed(base, 6.0)));
+        .thenReturn(withSmartDispatcherMode(approachConfig, SmartDispatcherMode.OFF));
 
     RailGraph graph = graphWithStationSwitcherPath(a, waypoint, switcher, station, 80, 10, 20);
     RailGraphService railGraphService = mock(RailGraphService.class);
@@ -7084,7 +9838,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(any(), eq(1)))
         .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -7132,8 +9886,10 @@ class RuntimeDispatchServiceTest {
 
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView base = testConfigView(1, 40.0);
+    ConfigManager.ConfigView approachConfig =
+        withRuntimeSettings(base, runtimeWithApproachSpeed(base, 6.0));
     when(configManager.current())
-        .thenReturn(withRuntimeSettings(base, runtimeWithApproachSpeed(base, 6.0)));
+        .thenReturn(withSmartDispatcherMode(approachConfig, SmartDispatcherMode.OFF));
 
     RailGraph graph = graphWithStationSwitcherPath(a, waypoint, switcher, station, 110, 10, 20);
     RailGraphService railGraphService = mock(RailGraphService.class);
@@ -7147,7 +9903,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(any(), eq(1)))
         .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -7213,7 +9969,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findStop(any(), eq(1)))
         .thenReturn(Optional.of(routeStop(1, depot, RouteStopPassType.TERMINATE)));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -7273,7 +10029,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
             inv -> {
@@ -7345,7 +10101,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
     OccupancyResource blocker = OccupancyResource.forEdge(EdgeId.undirected(b, c));
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
             inv -> {
@@ -7419,7 +10175,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
@@ -7489,7 +10245,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
@@ -7567,7 +10323,7 @@ class RuntimeDispatchServiceTest {
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
     OccupancyResource blocker = OccupancyResource.forNode(b);
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.canEnter(any()))
         .thenAnswer(
@@ -7608,6 +10364,20 @@ class RuntimeDispatchServiceTest {
     assertTrue(diagnostics.destinationPresentWhileBlocked());
     assertEquals("NEXT", diagnostics.retainedDestination());
     assertEquals("BLOCKED_BY_OCCUPANCY", diagnostics.blockedReason());
+    RuntimeStopState stopState = service.getActiveStopState("train-1").orElseThrow();
+    assertEquals("BLOCKED_BY_OCCUPANCY", stopState.reasonCode());
+    assertEquals(
+        RuntimeStopState.ReleaseCondition.BLOCKING_RESOURCES_RELEASED_OR_TRANSFERRED,
+        stopState.releaseCondition());
+    assertEquals(
+        RuntimeStopState.RetryTrigger.OCCUPANCY_CHANGE_OR_PERIODIC_RECHECK,
+        stopState.retryTrigger());
+    assertEquals(
+        List.of(
+            new RuntimeStopState.Blocker(
+                blocker.toString(), "other", ClaimRole.MOVEMENT_REQUIRED.name())),
+        stopState.blockers());
+    assertFalse(stopState.invalidatesAuthority());
     verify(tags.properties(), never()).clearDestinationRoute();
     verify(tags.properties(), never()).clearDestination();
     verify(tags.properties(), never()).setDestination(any());
@@ -7617,14 +10387,11 @@ class RuntimeDispatchServiceTest {
   @Test
   void stopFromProtectiveRetainDoesNotInvalidateToken() throws Exception {
     List<String> debugMessages = new ArrayList<>();
-    RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), debugMessages);
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     OccupancyResource resource = OccupancyResource.forNode(b);
-    OccupancyRequest request =
-        new OccupancyRequest(
-            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+    OccupancyRequest request = completeTwoNodeAuthorityRequest("train-1", Instant.now(), a, b);
     RouteDefinition route = new RouteDefinition(RouteId.of("r"), List.of(a, b), Optional.empty());
     TagStore tags = new TagStore("train-1", "FTA_ROUTE_INDEX=0");
     when(tags.properties().getDestination()).thenReturn("NEXT");
@@ -7699,6 +10466,102 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void identicalPhysicalAuthorityReusesActiveMovementToken() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(mockOccupancyManager(), new ArrayList<>());
+    NodeId from = NodeId.of("A");
+    NodeId destination = NodeId.of("B");
+    OccupancyRequest request =
+        completeTwoNodeAuthorityRequest(
+            "train-1", Instant.parse("2026-08-17T12:00:00Z"), from, destination);
+    java.lang.reflect.Method issue =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "issueMovementAuthorizationToken",
+            String.class,
+            NodeId.class,
+            NodeId.class,
+            OccupancyRequest.class,
+            SignalAspect.class,
+            Instant.class);
+    java.lang.reflect.Method activate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "activateMovementAuthorizationTokenRetainingInhibitor",
+            String.class,
+            MovementAuthorizationToken.class,
+            String.class);
+    issue.setAccessible(true);
+    activate.setAccessible(true);
+
+    MovementAuthorizationToken initial =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                "train-1",
+                from,
+                destination,
+                request,
+                SignalAspect.PROCEED,
+                Instant.parse("2026-08-17T12:00:00Z"));
+    assertTrue((boolean) activate.invoke(service, "train-1", initial, "B"));
+
+    MovementAuthorizationToken repeated =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                "train-1",
+                from,
+                destination,
+                request,
+                SignalAspect.PROCEED,
+                Instant.parse("2026-08-17T12:01:00Z"));
+
+    assertEquals(initial.claimVersion(), repeated.claimVersion());
+    assertTrue(repeated.active());
+    assertEquals(Optional.of("B"), repeated.committedDestination());
+  }
+
+  @Test
+  void activeTokenWithCurrentDestinationDoesNotRewriteTrainCartsDestination() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(mockOccupancyManager(), new ArrayList<>());
+    NodeId from = NodeId.of("A");
+    NodeId destination = NodeId.of("B");
+    TagStore tags = new TagStore("train-1");
+    when(tags.properties().getDestination()).thenReturn("B");
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "train-1",
+                1L,
+                Instant.parse("2026-08-17T12:00:00Z"),
+                from,
+                destination,
+                Optional.of(destination),
+                1,
+                List.of(OccupancyResource.forNode(from), OccupancyResource.forNode(destination)),
+                SignalAspect.PROCEED)
+            .activate("B"));
+    java.lang.reflect.Method commit =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "commitAuthorizedDestination",
+            TrainProperties.class,
+            String.class,
+            RouteDefinition.class,
+            int.class,
+            NodeId.class);
+    commit.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    Optional<String> committed =
+        (Optional<String>)
+            commit.invoke(service, tags.properties(), "train-1", null, 1, destination);
+
+    assertEquals(Optional.of("B"), committed);
+    verify(tags.properties(), never()).clearDestinationRoute();
+    verify(tags.properties(), never()).setDestination(any());
+  }
+
+  @Test
   void edgeSpeedLookaheadOnlyLowersForForwardLowerSpeedConstraint() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
@@ -7736,7 +10599,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
 
@@ -7772,10 +10635,18 @@ class RuntimeDispatchServiceTest {
     private final TrainProperties properties;
     private final boolean moving;
     private final double speedBlocksPerTick;
+    private final List<String> controlEvents;
+    private final String controlEventName;
     private int launchCalls = 0;
     private int destroyCalls = 0;
     private int stopCalls = 0;
     private int hardStopCalls = 0;
+    private Optional<Set<RailFootprintCell>> liveRailFootprintCells =
+        Optional.of(Set.of(new RailFootprintCell(0, 64, 0)));
+    private OptionalDouble estimatedTrainLengthBlocks = OptionalDouble.of(1.0);
+    private LinkageError liveRailFootprintFailure;
+    private LinkageError physicalIdentityFailure;
+    private boolean physicalIdentityUnavailable;
 
     private FakeTrain(UUID worldId, TrainProperties properties, boolean moving) {
       this(worldId, properties, moving, 0.0);
@@ -7783,10 +10654,22 @@ class RuntimeDispatchServiceTest {
 
     private FakeTrain(
         UUID worldId, TrainProperties properties, boolean moving, double speedBlocksPerTick) {
+      this(worldId, properties, moving, speedBlocksPerTick, null, null);
+    }
+
+    private FakeTrain(
+        UUID worldId,
+        TrainProperties properties,
+        boolean moving,
+        double speedBlocksPerTick,
+        List<String> controlEvents,
+        String controlEventName) {
       this.worldId = worldId;
       this.properties = properties;
       this.moving = moving;
       this.speedBlocksPerTick = speedBlocksPerTick;
+      this.controlEvents = controlEvents;
+      this.controlEventName = controlEventName;
     }
 
     @Override
@@ -7810,8 +10693,29 @@ class RuntimeDispatchServiceTest {
     }
 
     @Override
+    public Object physicalRuntimeIdentity() {
+      if (physicalIdentityFailure != null) {
+        throw physicalIdentityFailure;
+      }
+      return physicalIdentityUnavailable ? null : this;
+    }
+
+    @Override
     public TrainProperties properties() {
       return properties;
+    }
+
+    @Override
+    public OptionalDouble estimatedTrainLengthBlocks() {
+      return estimatedTrainLengthBlocks;
+    }
+
+    @Override
+    public Optional<Set<RailFootprintCell>> liveRailFootprintCells() {
+      if (liveRailFootprintFailure != null) {
+        throw liveRailFootprintFailure;
+      }
+      return liveRailFootprintCells;
     }
 
     @Override
@@ -7823,11 +10727,13 @@ class RuntimeDispatchServiceTest {
     public void stopHard() {
       hardStopCalls++;
       stopCalls++;
+      recordControlEvent("hard-stop");
     }
 
     @Override
     public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
       launchCalls++;
+      recordControlEvent("launch");
     }
 
     @Override
@@ -7851,6 +10757,12 @@ class RuntimeDispatchServiceTest {
 
     @Override
     public void reverse() {}
+
+    private void recordControlEvent(String event) {
+      if (controlEvents != null && controlEventName != null) {
+        controlEvents.add(controlEventName + ":" + event);
+      }
+    }
   }
 
   // ====== CHANGE Action 测试 ======
@@ -8012,7 +10924,7 @@ class RuntimeDispatchServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  void collectImpactedTrainsForResourceRefreshIncludesClaimsAndQueues() throws Exception {
+  void requestSignalReevaluationForResourcesIncludesClaimsAndQueues() throws Exception {
     OccupancyManager occupancyManager =
         mock(
             OccupancyManager.class,
@@ -8063,7 +10975,7 @@ class RuntimeDispatchServiceTest {
 
     java.lang.reflect.Method method =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "collectImpactedTrainsForResourceRefresh", Set.class, String.class);
+            "collectImpactedTrainsForResourceReevaluation", Set.class, String.class);
     method.setAccessible(true);
     Map<String, String> impacted =
         (Map<String, String>) method.invoke(service, Set.of(target), "spawn-train");
@@ -8072,6 +10984,25 @@ class RuntimeDispatchServiceTest {
     assertTrue(impacted.containsKey("train-a"));
     assertTrue(impacted.containsKey("train-c"));
     assertFalse(impacted.containsKey("spawn-train"));
+
+    List<String> reevaluationRequests = new ArrayList<>();
+    service.setSignalReevaluationRequester(reevaluationRequests::add);
+
+    service.requestSignalReevaluationForResources(List.of(target), "spawn-train");
+
+    assertEquals(List.of("Train-A", "Train-C"), reevaluationRequests);
+
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    reevaluationRequests.clear();
+
+    Map<String, String> queueOnlyImpacted =
+        (Map<String, String>) method.invoke(service, Set.of(target), "spawn-train");
+
+    assertEquals(Map.of("train-c", "Train-C"), queueOnlyImpacted);
+
+    service.requestSignalReevaluationForResources(List.of(target), "spawn-train");
+
+    assertEquals(List.of("Train-C"), reevaluationRequests);
   }
 
   @Test
@@ -8241,10 +11172,10 @@ class RuntimeDispatchServiceTest {
   @Test
   void movementInhibitedOnlyClearsAfterTokenCommit() throws Exception {
     RuntimeDispatchService service = createMinimalService();
-    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
-    OccupancyRequest request =
-        new OccupancyRequest(
-            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    OccupancyResource resource = OccupancyResource.forNode(b);
+    OccupancyRequest request = completeTwoNodeAuthorityRequest("train-1", Instant.now(), a, b);
 
     java.lang.reflect.Method invalidate =
         RuntimeDispatchService.class.getDeclaredMethod(
@@ -8271,24 +11202,14 @@ class RuntimeDispatchServiceTest {
     invalidate.invoke(service, "train-1", HardStopReason.AUTHORIZATION_FAILURE);
     MovementAuthorizationToken token =
         (MovementAuthorizationToken)
-            issue.invoke(
-                service,
-                "train-1",
-                NodeId.of("A"),
-                NodeId.of("B"),
-                request,
-                SignalAspect.PROCEED,
-                Instant.now());
+            issue.invoke(service, "train-1", a, b, request, SignalAspect.PROCEED, Instant.now());
 
     assertTrue(service.isMovementInhibited("train-1"));
     assertFalse(token.active());
 
     assertTrue((boolean) activate.invoke(service, "train-1", token, "B"));
     assertTrue(service.isMovementInhibited("train-1"));
-    assertFalse(
-        (boolean)
-            validMovementAuthorization(
-                service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+    assertFalse((boolean) validMovementAuthorization(service, "train-1", a, b, List.of(resource)));
   }
 
   @Test
@@ -8345,8 +11266,7 @@ class RuntimeDispatchServiceTest {
   @Test
   void proceedEventIgnoredUntilPeriodicCommit() {
     List<String> debugMessages = new ArrayList<>();
-    RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), debugMessages);
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
 
     service.applySignalFromEvent("train-1", SignalAspect.PROCEED);
 
@@ -8358,8 +11278,7 @@ class RuntimeDispatchServiceTest {
   @Test
   void authorizationStopDoesNotPhysicallyPublishBeforeCycleFinalDecision() {
     List<String> debugMessages = new ArrayList<>();
-    RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), debugMessages);
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
 
     service.applySignalFromEvent("train-1", SignalAspect.STOP);
 
@@ -8376,8 +11295,7 @@ class RuntimeDispatchServiceTest {
   @Test
   void eventCoalescedDirtyDoesNotRecordPublishedProceed() {
     List<String> debugMessages = new ArrayList<>();
-    RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), debugMessages);
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
 
     service.applySignalFromEvent("train-1", SignalAspect.PROCEED);
 
@@ -8399,8 +11317,7 @@ class RuntimeDispatchServiceTest {
   @Test
   void movementInhibitedEventProceedDoesNotDirtyOrPublish() throws Exception {
     List<String> debugMessages = new ArrayList<>();
-    RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), debugMessages);
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
     java.lang.reflect.Method invalidate =
         RuntimeDispatchService.class.getDeclaredMethod(
             "invalidateMovementAuthorization", String.class, HardStopReason.class);
@@ -8432,7 +11349,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -8457,7 +11374,10 @@ class RuntimeDispatchServiceTest {
             .anyMatch(message -> message.contains("SMART_DEPOT_LONG_SINGLE_HELD")));
     assertTrue(
         debugMessages.stream()
-            .anyMatch(message -> message.contains("SMART_ACTION_ALLOWED_BY_EFFECT_GATE")));
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ACTION_ALLOWED_BY_EFFECT_GATE")
+                        && message.contains("action=SMART_ADMISSION_HOLD")));
   }
 
   @Test
@@ -8629,6 +11549,32 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void throatAdvisoryPathCannotReplaceIncompleteHardAuthority() {
+    List<String> debugMessages = new ArrayList<>();
+    ThroatFixture throat = ppkThroatFixture();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "SURC-MT-LP-2387",
+            throat.graph(),
+            throat.advisoryOnlyContext("SURC-MT-LP-2387", CorridorDirection.A_TO_B));
+
+    assertFalse(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("reason=throat-hard-authority-incomplete")),
+        debugMessages.toString());
+  }
+
+  @Test
   void throatQueueWinnerIsNotBlockedByLoserQueuedOnInternalConflict() {
     List<String> debugMessages = new ArrayList<>();
     ThroatFixture throat = ppkThroatFixture();
@@ -8758,6 +11704,15 @@ class RuntimeDispatchServiceTest {
                     message.contains("SMART_ADMISSION_REASON")
                         && message.contains("reason=throat-section-not-atomically-clear")),
         debugMessages.toString());
+    RuntimeDispatchService.DeadlockBlockerSnapshot snapshot =
+        service.recentDeadlockBlockers("SURC-MT-LP-2387", Duration.ofSeconds(30));
+    assertTrue(
+        snapshot.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    blocker.trainName().equals("SURC-MT-LP-0888")
+                        && blocker.resourceKey().equals("NODE:OP:S:PPK:2")),
+        () -> "咽喉原子准入拒绝必须发布 typed blocker: " + snapshot.blockers());
   }
 
   @Test
@@ -8857,13 +11812,28 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictContextWithResources(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                edgeAb,
+                edgeBc,
+                a,
+                b,
+                c,
+                List.of(
+                    conflict,
+                    OccupancyResource.forNode(a),
+                    OccupancyResource.forEdge(edgeAb.id()),
+                    OccupancyResource.forNode(b),
+                    OccupancyResource.forEdge(edgeBc.id()),
+                    OccupancyResource.forNode(c)))
+            .request();
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    assertTrue(
-        manager
-            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
-            .allowed());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
     RouteDefinition route =
         new RouteDefinition(RouteId.of("plain-follow"), List.of(a, b, c), Optional.empty());
     UUID routeUuid = UUID.randomUUID();
@@ -8881,11 +11851,7 @@ class RuntimeDispatchServiceTest {
             registry,
             debugMessages,
             SmartDispatcherMode.ENFORCE);
-    installMovementToken(
-        service,
-        new MovementAuthorizationToken(
-                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
-            .activate("C"));
+    issueAndActivateMovementToken(service, "leader", a, c, leaderAuthority, "C");
 
     boolean allowed =
         service.smartDepotAdmissionAllowsSpawn(
@@ -8969,7 +11935,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -9004,7 +11970,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -9042,7 +12008,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -9081,13 +12047,28 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictContextWithResources(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                edgeAb,
+                edgeBc,
+                a,
+                b,
+                c,
+                List.of(
+                    conflict,
+                    OccupancyResource.forNode(a),
+                    OccupancyResource.forEdge(edgeAb.id()),
+                    OccupancyResource.forNode(b),
+                    OccupancyResource.forEdge(edgeBc.id()),
+                    OccupancyResource.forNode(c)))
+            .request();
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    assertTrue(
-        manager
-            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
-            .allowed());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
     RouteProgressRegistry registry = new RouteProgressRegistry();
     RouteDefinition route =
         new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
@@ -9110,11 +12091,7 @@ class RuntimeDispatchServiceTest {
     RuntimeDispatchService service =
         createMinimalService(
             manager, routeDefinitions, registry, debugMessages, SmartDispatcherMode.ENFORCE);
-    installMovementToken(
-        service,
-        new MovementAuthorizationToken(
-                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
-            .activate("C"));
+    issueAndActivateMovementToken(service, "leader", a, c, leaderAuthority, "C");
     long versionBefore = manager.version();
     int claimsBefore = manager.snapshotClaims().size();
 
@@ -9148,6 +12125,141 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictContextWithResources(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                edgeAb,
+                edgeBc,
+                a,
+                b,
+                c,
+                List.of(
+                    conflict,
+                    OccupancyResource.forNode(a),
+                    OccupancyResource.forEdge(edgeAb.id()),
+                    OccupancyResource.forNode(b),
+                    OccupancyResource.forEdge(edgeBc.id()),
+                    OccupancyResource.forNode(c)))
+            .request();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid, "FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    issueAndActivateMovementToken(service, "leader", a, c, leaderAuthority, "C");
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertTrue(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("drainProven=true")
+                        && message.contains("same-direction-leader-drain-predicted")));
+  }
+
+  @Test
+  void sameDirectionLeaderDestinationBeyondHardAuthorityBlocksFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~B";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictContextWithResources(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                edgeAb,
+                edgeBc,
+                a,
+                b,
+                c,
+                List.of(
+                    conflict,
+                    OccupancyResource.forNode(a),
+                    OccupancyResource.forEdge(edgeAb.id()),
+                    OccupancyResource.forNode(b)))
+            .request();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
+    UUID routeUuid = UUID.randomUUID();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(
+        "leader",
+        new TagStore("leader", "FTA_ROUTE_ID=" + routeUuid + ",FTA_ROUTE_INDEX=0").properties(),
+        route);
+    registry.updateLastPassedGraphNode("leader", a, Instant.now());
+    registry.updateSignal("leader", SignalAspect.PROCEED, Instant.now());
+    RuntimeDispatchService service =
+        createMinimalService(
+            manager,
+            routeDefinitionCacheWith(route, routeUuid),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    issueAndActivateMovementToken(service, "leader", a, c, leaderAuthority, "C");
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "follower",
+            new ConflictExitGraph(a, b, c, edgeAb, edgeBc, conflictKey),
+            singleConflictContext(
+                "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
+
+    assertFalse(allowed, debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
+                        && message.contains("same-direction-leader-authority-boundary-incomplete")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void sameDirectionLeaderTokenWithLostHardResourceBlocksFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    String conflictKey = "single:test:A~B";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
+    RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyResource lostEdge = OccupancyResource.forEdge(edgeAb.id());
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
@@ -9175,7 +12287,13 @@ class RuntimeDispatchServiceTest {
     installMovementToken(
         service,
         new MovementAuthorizationToken(
-                "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
+                "leader",
+                1L,
+                Instant.now(),
+                a,
+                c,
+                List.of(conflict, lostEdge),
+                SignalAspect.PROCEED)
             .activate("C"));
 
     boolean allowed =
@@ -9185,14 +12303,14 @@ class RuntimeDispatchServiceTest {
             singleConflictContext(
                 "follower", conflict, CorridorDirection.A_TO_B, edgeAb, edgeBc, a, b, c));
 
-    assertTrue(allowed, debugMessages.toString());
+    assertFalse(allowed, debugMessages.toString());
     assertTrue(
         debugMessages.stream()
             .anyMatch(
                 message ->
                     message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
-                        && message.contains("drainProven=true")
-                        && message.contains("same-direction-leader-drain-predicted")));
+                        && message.contains("same-direction-leader-hard-authority-missing")),
+        debugMessages.toString());
   }
 
   @Test
@@ -9320,13 +12438,26 @@ class RuntimeDispatchServiceTest {
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
     RailEdge edgeCs =
         new RailEdge(EdgeId.undirected(c, station), c, station, 10, -1.0, true, Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictPathContext(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                List.of(a, b, c, station),
+                List.of(edgeAb, edgeBc, edgeCs),
+                List.of(
+                    OccupancyResource.forNode(a),
+                    OccupancyResource.forEdge(edgeAb.id()),
+                    OccupancyResource.forNode(b),
+                    OccupancyResource.forEdge(edgeBc.id()),
+                    OccupancyResource.forNode(c),
+                    OccupancyResource.forEdge(edgeCs.id()),
+                    OccupancyResource.forNode(station)))
+            .request();
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    assertTrue(
-        manager
-            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
-            .allowed());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
     RouteDefinition route =
         new RouteDefinition(RouteId.of("terminal"), List.of(a, b, c, station), Optional.empty());
     UUID routeUuid = UUID.randomUUID();
@@ -9347,11 +12478,7 @@ class RuntimeDispatchServiceTest {
             debugMessages,
             SmartDispatcherMode.ENFORCE,
             dwellRegistry);
-    installMovementToken(
-        service,
-        new MovementAuthorizationToken(
-                "leader", 1L, Instant.now(), a, station, List.of(conflict), SignalAspect.PROCEED)
-            .activate("OP:S:CHT:3"));
+    issueAndActivateMovementToken(service, "leader", a, station, leaderAuthority, "OP:S:CHT:3");
 
     boolean allowed =
         service.smartDepotAdmissionAllowsSpawn(
@@ -9373,7 +12500,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void alreadyInsideTerminalFollowThroughPredictionAllowsFollower() throws Exception {
+  void alreadyInsideTerminalRouteWithoutActiveAuthorityBlocksFollower() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
@@ -9424,21 +12551,21 @@ class RuntimeDispatchServiceTest {
             singleConflictContext(
                 "follower", conflict, CorridorDirection.A_TO_B, edgeBc, edgeCs, b, c, station));
 
-    assertTrue(allowed, debugMessages.toString());
+    assertFalse(allowed, debugMessages.toString());
     assertTrue(
         debugMessages.stream()
             .anyMatch(
                 message ->
                     message.contains("SMART_SAME_DIRECTION_LEADER_DRAIN_PREDICTION")
-                        && message.contains("drainProven=true")
-                        && message.contains("same-direction-leader-terminal-follow-through")),
+                        && message.contains("drainProven=false")
+                        && message.contains("same-direction-leader-authority-token-missing")),
         debugMessages.toString());
-    assertFalse(
+    assertTrue(
         debugMessages.stream()
             .anyMatch(
                 message ->
                     message.contains("SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER")
-                        && message.contains("same-direction-leader-terminal-station-mutex")),
+                        && message.contains("same-direction-leader-authority-token-missing")),
         debugMessages.toString());
   }
 
@@ -10067,13 +13194,22 @@ class RuntimeDispatchServiceTest {
             -1.0,
             true,
             Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictPathContext(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                List.of(switcher, station),
+                List.of(edge),
+                List.of(
+                    OccupancyResource.forNode(switcher),
+                    OccupancyResource.forEdge(edge.id()),
+                    OccupancyResource.forNode(station)))
+            .request();
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    assertTrue(
-        manager
-            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
-            .allowed());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
     RouteDefinition route =
         new RouteDefinition(RouteId.of("boundary"), List.of(switcher, station), Optional.empty());
     UUID routeUuid = UUID.randomUUID();
@@ -10091,17 +13227,8 @@ class RuntimeDispatchServiceTest {
             registry,
             debugMessages,
             SmartDispatcherMode.ENFORCE);
-    installMovementToken(
-        service,
-        new MovementAuthorizationToken(
-                "leader",
-                1L,
-                Instant.now(),
-                switcher,
-                station,
-                List.of(conflict),
-                SignalAspect.PROCEED)
-            .activate("BOUNDARY"));
+    issueAndActivateMovementToken(
+        service, "leader", switcher, station, leaderAuthority, station.value());
     long versionBefore = manager.version();
     int claimsBefore = manager.snapshotClaims().size();
     int tokensBefore = movementTokenCount(service);
@@ -10128,7 +13255,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void sameDirectionLeaderWithoutVisibleExitDoesNotConvergeFollower() throws Exception {
+  void emptySingleZoneWithoutVisibleExitFailsClosedAtDepotAdmission() {
     List<String> debugMessages = new ArrayList<>();
     NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
     NodeId plainEnd = NodeId.of("PLAIN-END");
@@ -10146,10 +13273,58 @@ class RuntimeDispatchServiceTest {
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    boolean allowed =
+        service.smartDepotAdmissionAllowsSpawn(
+            "entrant",
+            new ConflictBoundaryGraph(switcher, plainEnd, edge, conflictKey),
+            singleConflictBoundaryContext(
+                "entrant", conflict, CorridorDirection.A_TO_B, edge, switcher, plainEnd));
+
+    assertFalse(allowed, debugMessages.toString());
     assertTrue(
-        manager
-            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
-            .allowed());
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_ADMISSION_REASON")
+                        && message.contains("entry-lookahead-exit-not-feasible")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void sameDirectionLeaderWithoutVisibleExitDoesNotConvergeFollower() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId switcher = NodeId.of("SWITCHER:Towny:1:64:1");
+    NodeId plainEnd = NodeId.of("PLAIN-END");
+    String conflictKey = "single:test:SW~PLAIN";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge edge =
+        new RailEdge(
+            EdgeId.undirected(switcher, plainEnd),
+            switcher,
+            plainEnd,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictPathContext(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                List.of(switcher, plainEnd),
+                List.of(edge),
+                List.of(
+                    OccupancyResource.forNode(switcher),
+                    OccupancyResource.forEdge(edge.id()),
+                    OccupancyResource.forNode(plainEnd)))
+            .request();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
     RouteDefinition route =
         new RouteDefinition(RouteId.of("plain-end"), List.of(switcher, plainEnd), Optional.empty());
     UUID routeUuid = UUID.randomUUID();
@@ -10167,17 +13342,8 @@ class RuntimeDispatchServiceTest {
             registry,
             debugMessages,
             SmartDispatcherMode.ENFORCE);
-    installMovementToken(
-        service,
-        new MovementAuthorizationToken(
-                "leader",
-                1L,
-                Instant.now(),
-                switcher,
-                plainEnd,
-                List.of(conflict),
-                SignalAspect.PROCEED)
-            .activate("PLAIN-END"));
+    issueAndActivateMovementToken(
+        service, "leader", switcher, plainEnd, leaderAuthority, "PLAIN-END");
 
     boolean allowed =
         service.smartDepotAdmissionAllowsSpawn(
@@ -10336,7 +13502,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10376,7 +13542,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10415,7 +13581,7 @@ class RuntimeDispatchServiceTest {
             -1.0,
             true,
             Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10449,8 +13615,7 @@ class RuntimeDispatchServiceTest {
   void healthDestroyMayRunButDoesNotConvertHardBarrierIntoDispatcherAllow() {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartForwardUnlock(
@@ -10469,7 +13634,7 @@ class RuntimeDispatchServiceTest {
   void smartDrainUnlockAllowsProvenSingleRegionDrainOut() {
     List<String> debugMessages = new ArrayList<>();
     OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10510,7 +13675,7 @@ class RuntimeDispatchServiceTest {
   void smartForwardUnlockAllowsProvenSingleRegionDrainOutToFinalRefresh() {
     List<String> debugMessages = new ArrayList<>();
     OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10553,7 +13718,7 @@ class RuntimeDispatchServiceTest {
   void smartDrainUnlockDrainOutProofDoesNotCoverUnrelatedHardBlocker() {
     List<String> debugMessages = new ArrayList<>();
     OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10600,7 +13765,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -10631,7 +13796,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
+            mockOccupancyManager(), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartForwardUnlock(smartForwardUnlockInput("train-1", Set.of(), false, false));
@@ -10650,8 +13815,7 @@ class RuntimeDispatchServiceTest {
   void smartForwardUnlockNotAppliedWhenHardBlockerExists() {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartForwardUnlock(
@@ -10668,8 +13832,7 @@ class RuntimeDispatchServiceTest {
   void smartForwardUnlockNotAppliedWhenOppositeSingleConflictExists() {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartForwardUnlock(smartForwardUnlockInput("train-1", Set.of(), true, false));
@@ -10688,8 +13851,7 @@ class RuntimeDispatchServiceTest {
   void smartForwardUnlockDoesNotClearValidDestinationOrInvalidateToken() {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartForwardUnlock(smartForwardUnlockInput("train-1", Set.of(), false, true));
@@ -10708,7 +13870,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RouteDefinitionCache.class),
             registry,
             debugMessages,
@@ -10726,7 +13888,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RouteDefinitionCache.class),
             registry,
             debugMessages,
@@ -10742,8 +13904,7 @@ class RuntimeDispatchServiceTest {
   void signalAdvisoryCannotClearInhibitorWhenLiveBarrierAppearsAfterSnapshot() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
     installMovementInhibitor(service, "train-1");
     installSmartUnlockBlockerSnapshot(
         service, "train-1", "external", "CONFLICT:single:test:A~B", Instant.now());
@@ -10769,7 +13930,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
+            mockOccupancyManager(), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
     installMovementInhibitor(service, "train-1");
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
@@ -10788,7 +13949,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RouteDefinitionCache.class),
             registry,
             debugMessages,
@@ -10808,7 +13969,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
+            mockOccupancyManager(),
             mock(RouteDefinitionCache.class),
             registry,
             debugMessages,
@@ -10831,8 +13992,7 @@ class RuntimeDispatchServiceTest {
   void oppositeDirectionSingleRegionBlocksSignalAdvisory() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
     installMovementInhibitor(service, "train-1");
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
@@ -10852,8 +14012,7 @@ class RuntimeDispatchServiceTest {
   void unknownDirectionSingleRegionBlocksSignalAdvisory() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
     installMovementInhibitor(service, "train-1");
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
@@ -10872,8 +14031,7 @@ class RuntimeDispatchServiceTest {
   void oppositeDirectionSingleRegionBlocksMovementInhibitorClear() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
     installMovementInhibitor(service, "train-1");
 
     service.applySmartForwardUnlock(
@@ -10930,6 +14088,68 @@ class RuntimeDispatchServiceTest {
         debugMessages.stream().anyMatch(message -> message.contains("destinationMutated=true")));
     assertFalse(
         debugMessages.stream().anyMatch(message -> message.contains("tokenInvalidated=true")));
+  }
+
+  @Test
+  void healthSelfOwnedRetainReleaseRechecksCachedInterlockingScope() {
+    List<String> debugMessages = new ArrayList<>();
+    String trainName = "train-1";
+    OccupancyResource single = OccupancyResource.forConflict("single:test:A~B");
+    OccupancyResource interlocking = OccupancyResource.forConflict("interlocking:0123456789abcdef");
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyRequest retain =
+        singleConflictRequest(trainName, single, CorridorDirection.A_TO_B)
+            .withResourceIntents(Map.of(single, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(retain).allowed());
+
+    OccupancyRequest reversed = singleConflictRequest(trainName, single, CorridorDirection.B_TO_A);
+    OccupancyRequest withClearInterlockingAhead =
+        new OccupancyRequest(
+                reversed.trainName(),
+                reversed.routeId(),
+                reversed.now(),
+                List.of(single, interlocking),
+                reversed.corridorDirections(),
+                reversed.conflictEntryOrders(),
+                reversed.priority(),
+                reversed.purpose(),
+                reversed.conflictReleaseHints(),
+                reversed.resourceIntents())
+            .withDirectedContext(reversed.directedContext());
+    assertFalse(manager.canEnter(withClearInterlockingAhead).allowed());
+    assertTrue(manager.selfOwnedStaleRetainReleaseCandidate(trainName).isPresent());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "blocker",
+                    Optional.empty(),
+                    Instant.parse("2026-01-01T00:00:01Z"),
+                    List.of(interlocking),
+                    Map.of()))
+            .allowed());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    RuntimeDispatchService.SmartRecoveryActionResult result =
+        service.applySmartSelfOwnedStaleRetainRelease(smartSelfRetainInput(trainName));
+
+    assertFalse(result.applied());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(single)
+                        && claim.trainName().equals(trainName)
+                        && claim.role() == ClaimRole.PROTECTIVE_RETAIN));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED")
+                        && message.contains("reason=self-owned-stale-retain-not-found")));
   }
 
   @Test
@@ -11156,7 +14376,7 @@ class RuntimeDispatchServiceTest {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
+            mockOccupancyManager(), debugMessages, SmartDispatcherMode.OBSERVE_ONLY);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartDrainUnlock(smartDrainUnlockInput("train-1", Set.of(), false));
@@ -11172,8 +14392,7 @@ class RuntimeDispatchServiceTest {
   void smartDrainUnlockDoesNotFakeDrainAuthority() {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartDrainUnlock(smartDrainUnlockInput("train-1", Set.of(), false));
@@ -11192,8 +14411,7 @@ class RuntimeDispatchServiceTest {
   void smartDrainUnlockBlockedByDifferentOwnerOppositeClaim() {
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class), debugMessages, SmartDispatcherMode.ENFORCE);
+        createMinimalService(mockOccupancyManager(), debugMessages, SmartDispatcherMode.ENFORCE);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         service.applySmartDrainUnlock(smartDrainUnlockInput("train-1", Set.of("opposite"), true));
@@ -11371,9 +14589,9 @@ class RuntimeDispatchServiceTest {
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
     RuntimeDispatchService service = createMinimalService(manager, debugMessages);
 
-    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
-    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
-    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    NodeId entry = NodeId.of("ENTRY");
+    NodeId switcher = NodeId.of("SWITCHER:TEST:GENERAL");
+    NodeId exit = NodeId.of("EXIT");
     RailEdge entryEdge =
         new RailEdge(
             EdgeId.undirected(entry, switcher), entry, switcher, 23, -1.0, true, Optional.empty());
@@ -11390,7 +14608,7 @@ class RuntimeDispatchServiceTest {
         switcherTraversalRequest(
             "entrant",
             Instant.parse("2026-01-01T00:00:00Z"),
-            8,
+            5,
             List.of(entry, switcher, exit),
             List.of(entryEdge, exitEdge),
             List.of(switcherConflict));
@@ -11399,7 +14617,7 @@ class RuntimeDispatchServiceTest {
         switcherTraversalRequest(
             "queued-outsider",
             Instant.parse("2026-01-01T00:00:00.500Z"),
-            8,
+            5,
             List.of(entry, switcher, exit),
             List.of(entryEdge, exitEdge),
             List.of(switcherConflict));
@@ -11436,7 +14654,7 @@ class RuntimeDispatchServiceTest {
         switcherTraversalRequest(
             "inside",
             Instant.parse("2026-01-01T00:00:02Z"),
-            8,
+            5,
             List.of(switcher, exit),
             List.of(exitEdge),
             List.of(switcherNode, exitEdgeResource, exitNode, switcherConflict));
@@ -11444,26 +14662,10 @@ class RuntimeDispatchServiceTest {
     assertFalse(initiallyBlocked.allowed());
     assertEquals(switcherConflict, initiallyBlocked.blockers().get(0).resource());
 
-    OccupancyRequestContext context =
-        new OccupancyRequestContext(insideRequest, List.of(switcher, exit), List.of(exitEdge));
-    RailGraph graph =
-        new SimpleRailGraph(
-            Map.of(
-                entry, new RailNodeTest(entry),
-                switcher, new RailNodeTest(switcher),
-                exit, new RailNodeTest(exit)),
-            Map.of(entryEdge.id(), entryEdge, exitEdge.id(), exitEdge),
-            Set.of());
-    java.lang.reflect.Method method =
-        RuntimeDispatchService.class.getDeclaredMethod(
-            "withRuntimeConflictClearingEvidence",
-            OccupancyRequest.class,
-            OccupancyRequestContext.class,
-            RailGraph.class);
-    method.setAccessible(true);
-
     OccupancyRequest clearingRequest =
-        (OccupancyRequest) method.invoke(service, insideRequest, context, graph);
+        VerifiedSwitcherDrainClaims.prepare(
+                insideRequest, switcherVerificationSnapshot(manager.snapshotClaims()))
+            .request();
 
     assertEquals(AuthorizationPurpose.CONFLICT_CLEARING, clearingRequest.purpose());
     assertEquals(
@@ -11482,7 +14684,7 @@ class RuntimeDispatchServiceTest {
         switcherTraversalRequest(
             "entrant",
             Instant.parse("2026-01-01T00:00:03Z"),
-            8,
+            5,
             List.of(entry, switcher, exit),
             List.of(entryEdge, exitEdge),
             List.of(switcherConflict, switcherNode, exitEdgeResource, exitNode));
@@ -11499,12 +14701,6 @@ class RuntimeDispatchServiceTest {
     assertEquals("entrant", manager.getClaim(switcherConflict).orElseThrow().trainName());
     assertEquals("inside", manager.getClaim(switcherNode).orElseThrow().trainName());
     assertEquals("inside", manager.getClaim(exitEdgeResource).orElseThrow().trainName());
-    assertTrue(
-        debugMessages.stream()
-            .anyMatch(
-                message ->
-                    message.contains("SWITCHER_DRAIN_THROUGH_AUTHORITY")
-                        && message.contains("train=inside")));
   }
 
   @Test
@@ -11520,11 +14716,8 @@ class RuntimeDispatchServiceTest {
     OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
     OccupancyResource exitEdgeResource = OccupancyResource.forEdge(exitEdge.id());
     OccupancyResource exitNode = OccupancyResource.forNode(exit);
-    OccupancyManager manager =
-        mock(
-            OccupancyManager.class,
-            org.mockito.Mockito.withSettings()
-                .extraInterfaces(OccupancyAdvisoryPreviewSupport.class));
+    SimpleOccupancyManager manager = mock(SimpleOccupancyManager.class);
+    when(manager.version()).thenReturn(1L);
     when(manager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -11564,24 +14757,19 @@ class RuntimeDispatchServiceTest {
 
     OccupancyRequest insideRequest =
         switcherTraversalRequest(
-            "departing",
-            Instant.parse("2026-01-01T00:00:01Z"),
-            0,
-            List.of(switcher, exit),
-            List.of(exitEdge),
-            List.of(switcherNode, exitEdgeResource, exitNode, switcherConflict));
-    OccupancyRequestContext context =
-        new OccupancyRequestContext(insideRequest, List.of(switcher, exit), List.of(exitEdge));
-    RailGraph graph =
-        new SimpleRailGraph(
-            Map.of(
-                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
-                exit, new RailNodeTest(exit, NodeType.SWITCHER, Optional.empty())),
-            Map.of(exitEdge.id(), exitEdge),
-            Set.of());
-
+                "departing",
+                Instant.parse("2026-01-01T00:00:01Z"),
+                0,
+                List.of(switcher, exit),
+                List.of(exitEdge),
+                List.of(switcherNode, exitEdgeResource, exitNode, switcherConflict))
+            .withDirectedProgressVersion(0L);
     OccupancyRequest clearingRequest =
-        invokeRuntimeConflictClearingEvidence(service, insideRequest, context, graph);
+        VerifiedSwitcherDrainClaims.prepare(
+                insideRequest,
+                new VerifiedSwitcherDrainClaims.VerificationSnapshot(
+                    manager.snapshotClaims(), 1L, 0L))
+            .request();
 
     assertEquals(AuthorizationPurpose.CONFLICT_CLEARING, clearingRequest.purpose());
     assertEquals(
@@ -11607,37 +14795,273 @@ class RuntimeDispatchServiceTest {
         debugMessages.stream()
             .anyMatch(
                 message ->
-                    message.contains("SWITCHER_DRAIN_THROUGH_AUTHORITY")
-                        && message.contains("train=departing")));
-    assertTrue(
-        debugMessages.stream()
-            .anyMatch(
-                message ->
                     message.contains("DRAIN_THROUGH_ADVISORY_RISK_SUPPRESSED")
                         && message.contains("conflictKey=" + switcherConflict.key())));
   }
 
   @Test
-  void periodicSignalTickLetsFirstLegSwitcherOccupantDrainThrough() {
+  void periodicSignalTickLetsPpkTurnbackOccupantDrainThrough() {
     List<String> debugMessages = new ArrayList<>();
     Instant claimTime = Instant.parse("2026-01-01T00:00:00Z");
-    String trainName = "inside";
-    NodeId entry = NodeId.of("SURC:SPB:JBS:1:003");
-    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
-    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    String trainName = "SURC-MT-LH-6469";
+    String entrantTrainName = "SURC-MT-LP-8712";
+    NodeId entrantPlatform = NodeId.of("SURC:PPK:RVS:1:001");
+    NodeId entrantSwitcher = NodeId.of("SWITCHER:Towny:-579:65:650");
+    NodeId entry = NodeId.of("SWITCHER:Towny:-581:65:637");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-581:65:643");
+    NodeId exitSwitcher = NodeId.of("SWITCHER:Towny:-583:65:650");
+    NodeId exit = NodeId.of("SURC:PPK:RVS:2:001");
+    RailEdge entrantPlatformEdge =
+        new RailEdge(
+            EdgeId.undirected(entrantPlatform, entrantSwitcher),
+            entrantPlatform,
+            entrantSwitcher,
+            21,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge entrantSwitcherEdge =
+        new RailEdge(
+            EdgeId.undirected(entrantSwitcher, switcher),
+            entrantSwitcher,
+            switcher,
+            7,
+            -1.0,
+            true,
+            Optional.empty());
     RailEdge entryEdge =
         new RailEdge(
-            EdgeId.undirected(entry, switcher), entry, switcher, 23, -1.0, true, Optional.empty());
+            EdgeId.undirected(entry, switcher), entry, switcher, 4, -1.0, true, Optional.empty());
+    RailEdge switcherExitEdge =
+        new RailEdge(
+            EdgeId.undirected(switcher, exitSwitcher),
+            switcher,
+            exitSwitcher,
+            7,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge exitEdge =
+        new RailEdge(
+            EdgeId.undirected(exitSwitcher, exit),
+            exitSwitcher,
+            exit,
+            21,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                entrantPlatform, new RailNodeTest(entrantPlatform),
+                entrantSwitcher,
+                    new RailNodeTest(entrantSwitcher, NodeType.SWITCHER, Optional.empty()),
+                entry, new RailNodeTest(entry, NodeType.SWITCHER, Optional.empty()),
+                switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
+                exitSwitcher, new RailNodeTest(exitSwitcher, NodeType.SWITCHER, Optional.empty()),
+                exit, new RailNodeTest(exit)),
+            Map.of(
+                entrantPlatformEdge.id(), entrantPlatformEdge,
+                entrantSwitcherEdge.id(), entrantSwitcherEdge,
+                entryEdge.id(), entryEdge,
+                switcherExitEdge.id(), switcherExitEdge,
+                exitEdge.id(), exitEdge),
+            Set.of());
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
+    OccupancyResource exitEdgeResource = OccupancyResource.forEdge(switcherExitEdge.id());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyRequest entrantClaim =
+        switcherTraversalRequest(
+                entrantTrainName,
+                claimTime,
+                13,
+                List.of(entrantPlatform, entrantSwitcher, switcher, entry),
+                List.of(entrantPlatformEdge, entrantSwitcherEdge, entryEdge),
+                List.of(switcherConflict))
+            .withSchedulingMetadata(claimTime, 20);
+    assertTrue(manager.acquire(entrantClaim).allowed());
+    OccupancyRequest insideFootprint =
+        new OccupancyRequest(
+            trainName,
+            Optional.empty(),
+            claimTime.plusSeconds(1),
+            List.of(switcherNode, exitEdgeResource),
+            Map.of(),
+            Map.of(),
+            -10,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(
+                switcherNode,
+                ResourceIntent.HOLD_ONLY,
+                exitEdgeResource,
+                ResourceIntent.HOLD_ONLY));
+    assertTrue(manager.acquire(insideFootprint).allowed());
+
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("SURC:MT:MT-2O_ShortD"), List.of(entry, exit), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            trainName,
+            "FTA_OPERATOR_CODE=SURC",
+            "FTA_LINE_CODE=MT",
+            "FTA_ROUTE_CODE=MT-2O_ShortD",
+            "FTA_ROUTE_INDEX=0",
+            "FTA_PRIORITY=-10");
+    UUID worldId = UUID.randomUUID();
+    RouteProgressRegistry progressRegistry = new RouteProgressRegistry();
+    progressRegistry.initFromTags(trainName, tags.properties(), route);
+    progressRegistry.updateLastPassedGraphNode(trainName, switcher, claimTime.plusSeconds(2));
+    progressRegistry.updateSignal(trainName, SignalAspect.STOP, claimTime.plusSeconds(2));
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(1, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(20.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("SURC", "MT", "MT-2O_ShortD")).thenReturn(Optional.of(route));
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            railGraphService,
+            routeDefinitions,
+            progressRegistry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+
+    service.handleSignalTick(train, true);
+
+    assertEquals(1, train.launchCalls, debugMessages.toString());
+    assertEquals(
+        SignalAspect.PROCEED,
+        progressRegistry.get(trainName).orElseThrow().lastSignal(),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SWITCHER_DRAIN_THROUGH_AUTHORITY")
+                        && message.contains("train=" + trainName)),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_DRAIN_CONFLICT_SUPPRESSED")
+                        && message.contains("train=" + trainName)
+                        && message.contains("conflictKey=" + switcherConflict.key())),
+        debugMessages.toString());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DRAIN_THROUGH_ADVISORY_RISK_SUPPRESSED")
+                        && message.contains("conflictKey=" + switcherConflict.key())),
+        debugMessages.toString());
+    assertEquals(entrantTrainName, manager.getClaim(switcherConflict).orElseThrow().trainName());
+    assertEquals(trainName, manager.getClaim(switcherNode).orElseThrow().trainName());
+    assertEquals(trainName, manager.getClaim(exitEdgeResource).orElseThrow().trainName());
+    OccupancyDecision entrantDecision =
+        manager.canEnter(
+            switcherTraversalRequest(
+                    entrantTrainName,
+                    claimTime.plusSeconds(3),
+                    13,
+                    List.of(entrantPlatform, entrantSwitcher, switcher, entry),
+                    List.of(entrantPlatformEdge, entrantSwitcherEdge, entryEdge),
+                    List.of(switcherConflict, switcherNode, exitEdgeResource))
+                .withSchedulingMetadata(claimTime.plusSeconds(3), 20));
+    assertFalse(entrantDecision.allowed());
+    assertTrue(
+        entrantDecision.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    blocker.trainName().equals(trainName)
+                        && (blocker.resource().equals(switcherNode)
+                            || blocker.resource().equals(exitEdgeResource))));
+  }
+
+  @Test
+  void periodicSignalTickLetsSpbCrossingOccupantDrainAtRouteIndexEight() {
+    List<String> debugMessages = new ArrayList<>();
+    Instant claimTime = Instant.parse("2026-01-01T00:00:00Z");
+    String trainName = "SURC-MT-LP-0690";
+    String entrantTrainName = "SURC-MT-LP-2983";
+    NodeId entrant = NodeId.of("SURC:SPB:JBS:1:003");
+    NodeId entrantSwitcher = NodeId.of("SWITCHER:Towny:-555:77:1196");
+    NodeId mergeSwitcher = NodeId.of("SWITCHER:Towny:-557:77:1193");
+    NodeId insideEntry = NodeId.of("SURC:SPB:WSD:2:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId exit = NodeId.of("SURC:SPB:JBS:1:002");
+    RailEdge entrantEdge =
+        new RailEdge(
+            EdgeId.undirected(entrant, entrantSwitcher),
+            entrant,
+            entrantSwitcher,
+            5,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge entrantMergeEdge =
+        new RailEdge(
+            EdgeId.undirected(entrantSwitcher, mergeSwitcher),
+            entrantSwitcher,
+            mergeSwitcher,
+            2,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge mergeEdge =
+        new RailEdge(
+            EdgeId.undirected(mergeSwitcher, switcher),
+            mergeSwitcher,
+            switcher,
+            16,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge insideEntryEdge =
+        new RailEdge(
+            EdgeId.undirected(insideEntry, switcher),
+            insideEntry,
+            switcher,
+            40,
+            -1.0,
+            true,
+            Optional.empty());
     RailEdge exitEdge =
         new RailEdge(
             EdgeId.undirected(switcher, exit), switcher, exit, 33, -1.0, true, Optional.empty());
     RailGraph graph =
         new SimpleRailGraph(
             Map.of(
-                entry, new RailNodeTest(entry),
+                entrant, new RailNodeTest(entrant),
+                entrantSwitcher,
+                    new RailNodeTest(entrantSwitcher, NodeType.SWITCHER, Optional.empty()),
+                mergeSwitcher, new RailNodeTest(mergeSwitcher, NodeType.SWITCHER, Optional.empty()),
+                insideEntry, new RailNodeTest(insideEntry),
                 switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()),
                 exit, new RailNodeTest(exit)),
-            Map.of(entryEdge.id(), entryEdge, exitEdge.id(), exitEdge),
+            Map.of(
+                entrantEdge.id(), entrantEdge,
+                entrantMergeEdge.id(), entrantMergeEdge,
+                mergeEdge.id(), mergeEdge,
+                insideEntryEdge.id(), insideEntryEdge,
+                exitEdge.id(), exitEdge),
             Set.of());
     OccupancyResource switcherConflict =
         OccupancyResource.forConflict("switcher:" + switcher.value());
@@ -11648,11 +15072,11 @@ class RuntimeDispatchServiceTest {
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
     OccupancyRequest entrantClaim =
         switcherTraversalRequest(
-            "entrant",
+            entrantTrainName,
             claimTime,
-            0,
-            List.of(entry, switcher, exit),
-            List.of(entryEdge, exitEdge),
+            8,
+            List.of(entrant, entrantSwitcher, mergeSwitcher, switcher, exit),
+            List.of(entrantEdge, entrantMergeEdge, mergeEdge, exitEdge),
             List.of(switcherConflict));
     assertTrue(manager.acquire(entrantClaim).allowed());
     OccupancyRequest insideFootprint =
@@ -11674,14 +15098,27 @@ class RuntimeDispatchServiceTest {
     assertTrue(manager.acquire(insideFootprint).allowed());
 
     RouteDefinition route =
-        new RouteDefinition(RouteId.of("r"), List.of(entry, exit), Optional.empty());
+        new RouteDefinition(
+            RouteId.of("SURC:MT:MT-2F_Short"),
+            List.of(
+                NodeId.of("SURC:TEST:0"),
+                NodeId.of("SURC:TEST:1"),
+                NodeId.of("SURC:TEST:2"),
+                NodeId.of("SURC:TEST:3"),
+                NodeId.of("SURC:TEST:4"),
+                NodeId.of("SURC:TEST:5"),
+                NodeId.of("SURC:TEST:6"),
+                NodeId.of("SURC:TEST:7"),
+                insideEntry,
+                exit),
+            Optional.empty());
     TagStore tags =
         new TagStore(
             trainName,
             "FTA_OPERATOR_CODE=op",
             "FTA_LINE_CODE=l1",
             "FTA_ROUTE_CODE=r1",
-            "FTA_ROUTE_INDEX=0");
+            "FTA_ROUTE_INDEX=8");
     UUID worldId = UUID.randomUUID();
     RouteProgressRegistry progressRegistry = new RouteProgressRegistry();
     progressRegistry.initFromTags(trainName, tags.properties(), route);
@@ -11733,9 +15170,30 @@ class RuntimeDispatchServiceTest {
                     message.contains("DRAIN_THROUGH_ADVISORY_RISK_SUPPRESSED")
                         && message.contains("conflictKey=" + switcherConflict.key())),
         debugMessages.toString());
-    assertEquals("entrant", manager.getClaim(switcherConflict).orElseThrow().trainName());
+    assertEquals(entrantTrainName, manager.getClaim(switcherConflict).orElseThrow().trainName());
     assertEquals(trainName, manager.getClaim(switcherNode).orElseThrow().trainName());
     assertEquals(trainName, manager.getClaim(exitEdgeResource).orElseThrow().trainName());
+    OccupancyDecision entrantDecision =
+        manager.canEnter(
+            switcherTraversalRequest(
+                entrantTrainName,
+                claimTime.plusSeconds(3),
+                8,
+                List.of(entrant, entrantSwitcher, mergeSwitcher, switcher, exit),
+                List.of(entrantEdge, entrantMergeEdge, mergeEdge, exitEdge),
+                List.of(
+                    switcherConflict,
+                    switcherNode,
+                    exitEdgeResource,
+                    OccupancyResource.forNode(exit))));
+    assertFalse(entrantDecision.allowed());
+    assertTrue(
+        entrantDecision.blockers().stream()
+            .anyMatch(
+                blocker ->
+                    blocker.trainName().equals(trainName)
+                        && (blocker.resource().equals(switcherNode)
+                            || blocker.resource().equals(exitEdgeResource))));
   }
 
   @Test
@@ -11790,6 +15248,27 @@ class RuntimeDispatchServiceTest {
                             Optional.empty())),
                     List.of(otherConflict)))
             .allowed());
+    OccupancyResource releasedNode = OccupancyResource.forNode(releasedSwitcher);
+    OccupancyResource releasedExitEdge = OccupancyResource.forEdge(releasedExit.id());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "inside",
+                    Optional.empty(),
+                    now.plusMillis(2),
+                    List.of(releasedNode, releasedExitEdge),
+                    Map.of(),
+                    Map.of(),
+                    0,
+                    AuthorizationPurpose.RUNTIME_MOVE,
+                    Map.of(),
+                    Map.of(
+                        releasedNode,
+                        ResourceIntent.HOLD_ONLY,
+                        releasedExitEdge,
+                        ResourceIntent.HOLD_ONLY)))
+            .allowed());
     RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
     OccupancyRequest authorizationRequest =
         switcherTraversalRequest(
@@ -11798,7 +15277,9 @@ class RuntimeDispatchServiceTest {
                 0,
                 List.of(releasedSwitcher, exit),
                 List.of(releasedExit),
-                List.of(releasedConflict))
+                List.of(releasedConflict, releasedNode, releasedExitEdge))
+            .withDirectedOccupancyVersion(manager.version())
+            .withDirectedProgressVersion(0L)
             .withConflictReleaseHints(
                 AuthorizationPurpose.CONFLICT_CLEARING,
                 Map.of(
@@ -11838,9 +15319,9 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void approachingTrainCannotClaimSwitcherDrainAuthority() throws Exception {
+  void approachingTrainCannotClaimSwitcherDrainAuthority() {
     NodeId entry = NodeId.of("ENTRY");
-    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+    NodeId switcher = NodeId.of("SWITCHER:TEST:APPROACH");
     NodeId exit = NodeId.of("EXIT");
     RailEdge entryEdge =
         new RailEdge(
@@ -11850,7 +15331,7 @@ class RuntimeDispatchServiceTest {
             EdgeId.undirected(switcher, exit), switcher, exit, 33, -1.0, true, Optional.empty());
     OccupancyResource conflict = OccupancyResource.forConflict("switcher:" + switcher.value());
     OccupancyResource entryNode = OccupancyResource.forNode(entry);
-    OccupancyManager manager = mock(OccupancyManager.class);
+    OccupancyManager manager = mockOccupancyManager();
     when(manager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -11870,7 +15351,6 @@ class RuntimeDispatchServiceTest {
                     Duration.ZERO,
                     Optional.empty(),
                     ClaimRole.HOLD_ONLY)));
-    RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
     OccupancyRequest request =
         switcherTraversalRequest(
             "approaching",
@@ -11879,29 +15359,18 @@ class RuntimeDispatchServiceTest {
             List.of(entry, switcher, exit),
             List.of(entryEdge, exitEdge),
             List.of(entryNode, conflict));
-    OccupancyRequestContext context =
-        new OccupancyRequestContext(
-            request, List.of(entry, switcher, exit), List.of(entryEdge, exitEdge));
-    RailGraph graph =
-        new SimpleRailGraph(
-            Map.of(
-                entry, new RailNodeTest(entry),
-                switcher, new RailNodeTest(switcher),
-                exit, new RailNodeTest(exit)),
-            Map.of(entryEdge.id(), entryEdge, exitEdge.id(), exitEdge),
-            Set.of());
-
     OccupancyRequest result =
-        invokeRuntimeConflictClearingEvidence(service, request, context, graph);
+        VerifiedSwitcherDrainClaims.prepare(
+                request, switcherVerificationSnapshot(manager.snapshotClaims()))
+            .request();
 
     assertEquals(AuthorizationPurpose.RUNTIME_MOVE, result.purpose());
     assertTrue(result.conflictReleaseHints().isEmpty());
   }
 
   @Test
-  void switcherOccupantCannotBypassExternalExitNode() throws Exception {
-    List<String> debugMessages = new ArrayList<>();
-    NodeId switcher = NodeId.of("SWITCHER:Towny:-566:77:1179");
+  void switcherOccupantCannotBypassExternalExitNode() {
+    NodeId switcher = NodeId.of("SWITCHER:TEST:BLOCKED");
     NodeId exit = NodeId.of("EXIT");
     RailEdge exitEdge =
         new RailEdge(
@@ -11909,7 +15378,7 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict("switcher:" + switcher.value());
     OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
     OccupancyResource exitNode = OccupancyResource.forNode(exit);
-    OccupancyManager manager = mock(OccupancyManager.class);
+    OccupancyManager manager = mockOccupancyManager();
     when(manager.snapshotClaims())
         .thenReturn(
             List.of(
@@ -11937,7 +15406,6 @@ class RuntimeDispatchServiceTest {
                     Duration.ZERO,
                     Optional.empty(),
                     ClaimRole.MOVEMENT_REQUIRED)));
-    RuntimeDispatchService service = createMinimalService(manager, debugMessages);
     OccupancyRequest request =
         switcherTraversalRequest(
             "inside",
@@ -11946,37 +15414,24 @@ class RuntimeDispatchServiceTest {
             List.of(switcher, exit),
             List.of(exitEdge),
             List.of(switcherNode, OccupancyResource.forEdge(exitEdge.id()), exitNode, conflict));
-    OccupancyRequestContext context =
-        new OccupancyRequestContext(request, List.of(switcher, exit), List.of(exitEdge));
-    RailGraph graph =
-        new SimpleRailGraph(
-            Map.of(
-                switcher, new RailNodeTest(switcher),
-                exit, new RailNodeTest(exit)),
-            Map.of(exitEdge.id(), exitEdge),
-            Set.of());
-
-    OccupancyRequest result =
-        invokeRuntimeConflictClearingEvidence(service, request, context, graph);
+    VerifiedSwitcherDrainClaims.Preparation preparation =
+        VerifiedSwitcherDrainClaims.prepare(
+            request, switcherVerificationSnapshot(manager.snapshotClaims()));
+    OccupancyRequest result = preparation.request();
 
     assertEquals(AuthorizationPurpose.RUNTIME_MOVE, result.purpose());
     assertTrue(result.conflictReleaseHints().isEmpty());
-    assertTrue(
-        debugMessages.stream()
-            .anyMatch(
-                message ->
-                    message.contains("DRAIN_THROUGH_BLOCKED")
-                        && message.contains("blockerResource=NODE:EXIT")
-                        && message.contains("blockerOwner=external")));
+    assertEquals(exitNode, preparation.hardBlocker().orElseThrow().resource());
+    assertEquals("external", preparation.hardBlocker().orElseThrow().trainName());
   }
 
   @Test
   void hardStopToProceedRequiresAcquireCommit() throws Exception {
     RuntimeDispatchService service = createMinimalService();
-    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
-    OccupancyRequest request =
-        new OccupancyRequest(
-            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    OccupancyResource resource = OccupancyResource.forNode(b);
+    OccupancyRequest request = completeTwoNodeAuthorityRequest("train-1", Instant.now(), a, b);
 
     java.lang.reflect.Method issue =
         RuntimeDispatchService.class.getDeclaredMethod(
@@ -12002,31 +15457,20 @@ class RuntimeDispatchServiceTest {
 
     MovementAuthorizationToken pending =
         (MovementAuthorizationToken)
-            issue.invoke(
-                service,
-                "train-1",
-                NodeId.of("A"),
-                NodeId.of("B"),
-                request,
-                SignalAspect.PROCEED,
-                Instant.now());
+            issue.invoke(service, "train-1", a, b, request, SignalAspect.PROCEED, Instant.now());
 
-    assertFalse(
-        (boolean)
-            hasValid.invoke(service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+    assertFalse((boolean) hasValid.invoke(service, "train-1", a, b, List.of(resource)));
     assertTrue((boolean) activate.invoke(service, "train-1", pending, "B"));
-    assertTrue(
-        (boolean)
-            hasValid.invoke(service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+    assertTrue((boolean) hasValid.invoke(service, "train-1", a, b, List.of(resource)));
   }
 
   @Test
   void acquireEventDoesNotStopSameTrainReentrantly() throws Exception {
     RuntimeDispatchService service = createMinimalService();
-    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
-    OccupancyRequest request =
-        new OccupancyRequest(
-            "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of());
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    OccupancyResource resource = OccupancyResource.forNode(b);
+    OccupancyRequest request = completeTwoNodeAuthorityRequest("train-1", Instant.now(), a, b);
 
     java.lang.reflect.Method issue =
         RuntimeDispatchService.class.getDeclaredMethod(
@@ -12052,14 +15496,7 @@ class RuntimeDispatchServiceTest {
 
     MovementAuthorizationToken token =
         (MovementAuthorizationToken)
-            issue.invoke(
-                service,
-                "train-1",
-                NodeId.of("A"),
-                NodeId.of("B"),
-                request,
-                SignalAspect.PROCEED,
-                Instant.now());
+            issue.invoke(service, "train-1", a, b, request, SignalAspect.PROCEED, Instant.now());
     assertTrue((boolean) activate.invoke(service, "train-1", token, "B"));
 
     service.applySignalFromEvent("train-1", SignalAspect.STOP);
@@ -12067,9 +15504,7 @@ class RuntimeDispatchServiceTest {
     RuntimeDispatchService.SignalRuntimeStats stats = service.signalRuntimeStats();
     assertEquals(1, stats.dirtyTrainCount());
     assertEquals(1, stats.coalescedEventCount());
-    assertTrue(
-        (boolean)
-            hasValid.invoke(service, "train-1", NodeId.of("A"), NodeId.of("B"), List.of(resource)));
+    assertTrue((boolean) hasValid.invoke(service, "train-1", a, b, List.of(resource)));
   }
 
   @Test
@@ -12091,10 +15526,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
 
     assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED));
 
@@ -12113,6 +15545,42 @@ class RuntimeDispatchServiceTest {
                     message.contains("event=SIGNAL_FINAL_DECISION")
                         && message.contains("physicalPublished=false")
                         && message.contains("didMutate=false")));
+  }
+
+  @Test
+  void duplicateDirectStopDoesNotRepublishOrInvalidateProgressSnapshot() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
+    long versionBefore = registry.version();
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.STOP));
+
+    assertEquals(versionBefore, registry.version());
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .noneMatch(
+                message ->
+                    message.contains("SMART_SIGNAL_FINAL")
+                        && message.contains("physicalPublished=true")));
+  }
+
+  @Test
+  void runtimeCacheCleanupDropsPublishedPhysicalSignalForReusedTrainName() throws Exception {
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, new ArrayList<>());
+    installPublishedPhysicalSignal(service, "train-1", SignalAspect.PROCEED);
+
+    assertEquals(SignalAspect.PROCEED, currentPhysicalAspect(service, "train-1"));
+
+    invokeClearRuntimeCachesForTrain(service, "train-1");
+
+    assertEquals(SignalAspect.STOP, currentPhysicalAspect(service, "train-1"));
   }
 
   @Test
@@ -12155,6 +15623,102 @@ class RuntimeDispatchServiceTest {
                     message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
                         && message.contains("single-region-hard-barrier")
                         && message.contains("didMutate=false")));
+  }
+
+  @Test
+  void externalOccupancyHoldBlocksNarrowAuthoritySignalUntilResourceIsFree() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
+    OccupancyResource externalConflict =
+        OccupancyResource.forConflict("single:test:external-ahead");
+    assertTrue(
+        manager
+            .acquire(
+                singleConflictRequest("external-train", externalConflict, CorridorDirection.A_TO_B))
+            .allowed());
+
+    NodeId currentNode = NodeId.of("A");
+    NodeId nextNode = NodeId.of("B");
+    OccupancyRequest authorityRequest =
+        completeTwoNodeAuthorityRequest("train-1", Instant.now(), currentNode, nextNode);
+    assertTrue(manager.acquire(authorityRequest).allowed());
+    authorityRequest =
+        authorityRequest
+            .withDirectedOccupancyVersion(manager.version())
+            .withDirectedProgressVersion(registry.version());
+    issueAndActivateMovementToken(service, "train-1", currentNode, nextNode, authorityRequest, "B");
+
+    OccupancyClaim externalClaim = manager.getClaim(externalConflict).orElseThrow();
+    OccupancyDecision blocked =
+        new OccupancyDecision(
+            false,
+            Instant.now(),
+            SignalAspect.STOP,
+            List.of(externalClaim),
+            false,
+            "external-single-conflict");
+    java.lang.reflect.Method recordStopState =
+        RuntimeDispatchService.class.getDeclaredMethod("recordStopState", RuntimeStopState.class);
+    recordStopState.setAccessible(true);
+    recordStopState.invoke(
+        service,
+        RuntimeStopState.occupancyHold("train-1", "BLOCKED_BY_OCCUPANCY", blocked, Instant.now()));
+
+    OccupancyDecision allowed =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            authorityRequest, allowed, publication, currentNode, nextNode, true);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, authorization));
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(
+        "BLOCKED_BY_OCCUPANCY", service.getActiveStopState("train-1").orElseThrow().reasonCode());
+
+    manager.releaseByTrain("external-train");
+    assertTrue(
+        manager
+            .acquire(
+                singleConflictRequest(
+                    "replacement-train", externalConflict, CorridorDirection.B_TO_A))
+            .allowed());
+    OccupancyRequest transferredAuthorityRequest =
+        authorityRequest
+            .withDirectedOccupancyVersion(manager.version())
+            .withDirectedProgressVersion(registry.version());
+    Object transferredAuthorization =
+        finalSignalAuthorization(
+            transferredAuthorityRequest, allowed, publication, currentNode, nextNode, true);
+
+    assertFalse(
+        invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, transferredAuthorization));
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+
+    manager.releaseByTrain("replacement-train");
+    OccupancyRequest releasedAuthorityRequest =
+        authorityRequest
+            .withDirectedOccupancyVersion(manager.version())
+            .withDirectedProgressVersion(registry.version());
+    Object releasedAuthorization =
+        finalSignalAuthorization(
+            releasedAuthorityRequest, allowed, publication, currentNode, nextNode, true);
+
+    assertTrue(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, releasedAuthorization));
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(service.getActiveStopState("train-1").isEmpty());
   }
 
   @Test
@@ -12208,10 +15772,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
     OccupancyRequest request =
         staleProgressRequest(
@@ -12248,6 +15809,151 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void signalProceedRequiresPhysicalAuthorityBoundary() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    RuntimeDispatchService service =
+        createMinimalService(
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        staleProgressRequest(
+            "train-1", RouteId.of("signal-test"), 0, registry.version(), List.of(resource));
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "train-1",
+                1L,
+                Instant.now(),
+                NodeId.of("A"),
+                NodeId.of("B"),
+                List.of(resource),
+                SignalAspect.PROCEED)
+            .activate("B"));
+    OccupancyDecision decision =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            request, decision, publication, NodeId.of("A"), NodeId.of("B"), true);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, authorization));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("movement-token-authority-boundary-missing")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void signalProceedRequiresLiveHardAuthorityOwnership() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
+    OccupancyManager manager =
+        mock(OccupancyManager.class, withSettings().extraInterfaces(AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) manager).holdsHardAuthority(any())).thenReturn(false);
+    RuntimeDispatchService service =
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        staleProgressRequest(
+            "train-1", RouteId.of("signal-test"), 0, registry.version(), List.of(resource));
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "train-1",
+                1L,
+                Instant.now(),
+                NodeId.of("A"),
+                NodeId.of("B"),
+                Optional.of(NodeId.of("B")),
+                1,
+                List.of(resource),
+                SignalAspect.PROCEED)
+            .activate("B"));
+    OccupancyDecision decision =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            request, decision, publication, NodeId.of("A"), NodeId.of("B"), true);
+
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED, authorization));
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("hard-authority-not-held")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void alreadyPublishedProceedDowngradesWhenHardAuthorityIsLost() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.PROCEED);
+    OccupancyManager manager =
+        mock(OccupancyManager.class, withSettings().extraInterfaces(AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) manager).holdsHardAuthority(any())).thenReturn(false);
+    RuntimeDispatchService service =
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        staleProgressRequest(
+            "train-1", RouteId.of("signal-test"), 0, registry.version(), List.of(resource));
+    installMovementToken(
+        service,
+        new MovementAuthorizationToken(
+                "train-1",
+                1L,
+                Instant.now(),
+                NodeId.of("A"),
+                NodeId.of("B"),
+                List.of(resource),
+                SignalAspect.PROCEED)
+            .activate("B"));
+    installPublishedPhysicalSignal(service, "train-1", SignalAspect.PROCEED);
+    OccupancyDecision decision =
+        new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+    SignalPublicationGate.Decision publication =
+        new SignalPublicationGate.Decision(
+            SignalAspect.PROCEED,
+            SignalAspect.PROCEED,
+            SignalDecisionInputType.FORWARD_MOVEMENT,
+            false,
+            false,
+            "allowed");
+    Object authorization =
+        finalSignalAuthorization(
+            request, decision, publication, NodeId.of("A"), NodeId.of("B"), true);
+
+    invokePhysicalSignalPublication(
+        service, "train-1", SignalAspect.PROCEED, SignalAspect.PROCEED, authorization);
+
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+  }
+
+  @Test
   void directCautionUpdateCannotBypassFinalAuthorization() throws Exception {
     RouteProgressRegistry registry = new RouteProgressRegistry();
     TagStore tags =
@@ -12264,10 +15970,7 @@ class RuntimeDispatchServiceTest {
     registry.updateSignal("train-1", SignalAspect.PROCEED, Instant.now());
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            new ArrayList<>());
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, new ArrayList<>());
 
     assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.PROCEED_WITH_CAUTION));
 
@@ -12275,40 +15978,23 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void retainEventDoesNotClearPublishedCaution() throws Exception {
-    RouteProgressRegistry registry = new RouteProgressRegistry();
-    TagStore tags =
-        new TagStore(
-            "train-1",
-            "FTA_OPERATOR_CODE=op",
-            "FTA_LINE_CODE=l1",
-            "FTA_ROUTE_CODE=r1",
-            "FTA_ROUTE_INDEX=0");
-    RouteDefinition route =
-        new RouteDefinition(
-            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
-    registry.initFromTags("train-1", tags.properties(), route);
+  void directPureCautionUpdateCannotBypassFinalAuthorization() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = signalRegistryForTrain("train-1", SignalAspect.STOP);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            new ArrayList<>());
-    java.lang.reflect.Method preserve =
-        RuntimeDispatchService.class.getDeclaredMethod(
-            "updateSignalOrWarnPreservingPublishedCaution",
-            String.class,
-            SignalAspect.class,
-            Instant.class,
-            String.class);
-    preserve.setAccessible(true);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
 
-    installPublishedPhysicalSignal(service, "train-1", SignalAspect.PROCEED_WITH_CAUTION);
-    registry.updateSignal("train-1", SignalAspect.PROCEED_WITH_CAUTION, Instant.now());
-    preserve.invoke(service, "train-1", SignalAspect.STOP, Instant.now(), "retain-only");
+    assertFalse(invokeSignalUpdate(service, "train-1", SignalAspect.CAUTION));
 
-    assertEquals(
-        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DIRECT_SIGNAL_UPDATE_SUPPRESSED")
+                        && message.contains("final-authorization-missing")),
+        debugMessages.toString());
   }
 
   @Test
@@ -12447,7 +16133,7 @@ class RuntimeDispatchServiceTest {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags(trainName, tags.properties(), route);
@@ -12479,7 +16165,7 @@ class RuntimeDispatchServiceTest {
     RuntimeDispatchService service = createMinimalService();
     // 不应抛异常
     service.handleTrainRemoved("");
-    service.handleTrainRemoved(null);
+    service.handleTrainRemoved((String) null);
   }
 
   // ====== 孤儿清理返回统计结果测试 ======
@@ -12495,7 +16181,7 @@ class RuntimeDispatchServiceTest {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     Instant now = Instant.now();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
@@ -12549,7 +16235,7 @@ class RuntimeDispatchServiceTest {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     Instant now = Instant.now();
     when(occupancyManager.snapshotClaims())
         .thenReturn(
@@ -12587,6 +16273,56 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void cleanupOrphanOccupancyClaimsKeepsCanonicalStateForActiveSplitAlias() {
+    String canonicalName = "train-main";
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("r"), List.of(NodeId.of("A"), NodeId.of("B")), Optional.empty());
+    TagStore tags = new TagStore(canonicalName, "FTA_ROUTE_INDEX=0");
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags(canonicalName, tags.properties(), route);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(NodeId.of("A")),
+                    canonicalName,
+                    Optional.empty(),
+                    Instant.now(),
+                    Duration.ZERO,
+                    Optional.empty())));
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.snapshot()).thenReturn(List.of());
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            registry,
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    service.acquireDepartureGate(canonicalName, "session-1", "test");
+
+    RuntimeDispatchService.CleanupResult result =
+        service.cleanupOrphanOccupancyClaimsWithReport(Set.of("train-main~a"));
+
+    assertEquals(0, result.removedProgress());
+    assertEquals(0, result.releasedTrains());
+    assertTrue(registry.get(canonicalName).isPresent());
+    assertTrue(service.hasDepartureGate(canonicalName));
+    verify(occupancyManager, never()).releaseByTrain(anyString());
+  }
+
+  @Test
   void relatedLogicalTrainMatchingUsesTrackedNameAndSplitAlias() {
     RuntimeDispatchService service = createMinimalService();
     TagStore taggedSplit =
@@ -12610,14 +16346,14 @@ class RuntimeDispatchServiceTest {
     assertFalse(service.isRelatedLogicalTrain(unrelated.properties(), "train-main"));
   }
 
-  // ====== refreshSignalsForResources 测试 ======
+  // ====== resource wake-up 测试 ======
 
   @Test
-  void refreshSignalsForResourcesSkipsEmptyInput() {
+  void requestSignalReevaluationForResourcesSkipsEmptyInput() {
     RuntimeDispatchService service = createMinimalService();
     // 不应抛异常
-    service.refreshSignalsForResources(List.of(), "source");
-    service.refreshSignalsForResources(null, "source");
+    service.requestSignalReevaluationForResources(List.of(), "source");
+    service.requestSignalReevaluationForResources(null, "source");
   }
 
   // ====== Smart unlock reservation observation 测试 ======
@@ -12708,6 +16444,281 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void unchangedPlannerTraceCannotSuppressExecutorRecheck() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    ConfigManager.ConfigView base = testConfigView(20, 20.0);
+    ConfigManager.ConfigView plannerView =
+        new ConfigManager.ConfigView(
+            base.configVersion(),
+            base.debugEnabled(),
+            base.locale(),
+            base.storageSettings(),
+            base.graphSettings(),
+            base.autoStationSettings(),
+            base.runtimeSettings(),
+            base.spawnSettings(),
+            base.trainConfigSettings(),
+            base.reclaimSettings(),
+            new ConfigManager.SmartDispatcherSettings(
+                SmartDispatcherMode.ENFORCE, enforcePlannerSettings()),
+            base.healthSettings());
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(plannerView);
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    SmartWaitForPlanner.PlanResult unchangedResult =
+        new SmartWaitForPlanner.PlanResult(
+            "same-graph",
+            candidate.planHash(),
+            "same-throttle-key",
+            List.of("trace"),
+            List.of(candidate),
+            Optional.of(candidate),
+            false,
+            true);
+    SmartDispatcherController controller = mock(SmartDispatcherController.class);
+    when(controller.planMinimalForwardUnlock(any())).thenReturn(unchangedResult);
+    java.lang.reflect.Field controllerField =
+        RuntimeDispatchService.class.getDeclaredField("smartDispatcherController");
+    controllerField.setAccessible(true);
+    controllerField.set(service, controller);
+    java.lang.reflect.Field cooldownField =
+        RuntimeDispatchService.class.getDeclaredField("smartUnlockNoReleaseCooldowns");
+    cooldownField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, Instant> cooldowns =
+        (java.util.concurrent.ConcurrentMap<String, Instant>) cooldownField.get(service);
+    cooldowns.put(
+        "plan:" + candidate.cycleId() + ":" + candidate.planHash(), Instant.now().plusSeconds(60));
+    java.lang.reflect.Method tracePlanner =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "traceSmartMinimalForwardPlanner", Set.class, Map.class, Instant.class);
+    tracePlanner.setAccessible(true);
+
+    tracePlanner.invoke(service, Set.of(), Map.of(), Instant.now());
+    tracePlanner.invoke(service, Set.of(), Map.of(), Instant.now());
+
+    assertEquals(
+        2,
+        debugMessages.stream()
+            .filter(
+                message ->
+                    message.contains("SMART_DISPATCH_EXECUTOR_SKIPPED")
+                        && message.contains("NO_RELEASE_COOLDOWN"))
+            .count(),
+        debugMessages.toString());
+  }
+
+  @Test
+  void executorCooldownUsesPlannerSnapshotTime() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    Instant capturedAt = Instant.parse("2026-01-01T00:00:00Z");
+    java.lang.reflect.Field cooldownField =
+        RuntimeDispatchService.class.getDeclaredField("smartUnlockNoReleaseCooldowns");
+    cooldownField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, Instant> cooldowns =
+        (java.util.concurrent.ConcurrentMap<String, Instant>) cooldownField.get(service);
+    cooldowns.put(
+        "plan:" + candidate.cycleId() + ":" + candidate.planHash(), capturedAt.plusSeconds(30));
+
+    assertEquals(
+        "NO_RELEASE_COOLDOWN",
+        smartDispatchExecutorSkipReason(
+            service, candidate, enforcePlannerSettings(), capturedAt.plusSeconds(29)));
+    assertEquals(
+        "-",
+        smartDispatchExecutorSkipReason(
+            service, candidate, enforcePlannerSettings(), capturedAt.plusSeconds(31)));
+  }
+
+  @Test
+  void activeReservationIsIdempotentEvenWhenLegacyGuardSettingIsFalse() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    installSmartUnlockReservation(
+        service, candidate, List.of(OccupancyResource.forNode(NodeId.of("B"))), 1L, 100);
+    ConfigManager.SmartDispatcherPlannerSettings legacyDisabledGuard =
+        new ConfigManager.SmartDispatcherPlannerSettings(
+            true,
+            SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD,
+            4,
+            100,
+            1000L,
+            true,
+            false,
+            false,
+            false);
+
+    assertEquals(
+        "ACTIVE_RESERVATION_EXISTS",
+        smartDispatchExecutorSkipReason(
+            service, candidate, legacyDisabledGuard, Instant.parse("2026-01-01T00:00:00Z")));
+    assertEquals(
+        "ACTIVE_RESERVATION_EXISTS",
+        smartDispatchExecutorSkipReason(
+            service,
+            smartUnlockCandidate("train-1", "cycle-2"),
+            legacyDisabledGuard,
+            Instant.parse("2026-01-01T00:00:00Z")));
+  }
+
+  @Test
+  void mutualOwnerTraceCapturesPriorityPhysicalFootprintAndAuthorityEvidence() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:SW");
+    OccupancyResource physicalNode = OccupancyResource.forNode(NodeId.of("SW"));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "train-1",
+                    Optional.empty(),
+                    Instant.now(),
+                    List.of(physicalNode),
+                    Map.of(),
+                    Map.of(),
+                    0,
+                    AuthorizationPurpose.RUNTIME_MOVE,
+                    Map.of(),
+                    Map.of(physicalNode, ResourceIntent.HOLD_ONLY)))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "train-2", Optional.empty(), Instant.now(), List.of(conflict), Map.of(), 3))
+            .allowed());
+    OccupancyRequest waitingRequest =
+        new OccupancyRequest(
+            "train-1", Optional.empty(), Instant.now(), List.of(conflict), Map.of(), 23);
+    assertFalse(manager.canEnter(waitingRequest).allowed());
+
+    SmartWaitForPlanner.TrainState trainOne =
+        new SmartWaitForPlanner.TrainState(
+            "train-1",
+            "route-1",
+            4,
+            "SW",
+            "OUT",
+            "SW",
+            CorridorDirection.A_TO_B,
+            "test",
+            "-",
+            60,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "NONE");
+    SmartWaitForPlanner.TrainState trainTwo =
+        new SmartWaitForPlanner.TrainState(
+            "train-2",
+            "route-2",
+            7,
+            "ENTRY",
+            "SW",
+            "ENTRY",
+            CorridorDirection.B_TO_A,
+            "test",
+            "-",
+            60,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "NONE");
+    SmartWaitForPlanner.PlannerInput plannerInput =
+        new SmartWaitForPlanner.PlannerInput(
+            Instant.now(),
+            new SmartWaitForPlanner.PlannerSettings(
+                true,
+                SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD,
+                4,
+                20,
+                20_000L,
+                true,
+                false,
+                false,
+                true),
+            List.of(
+                new SmartWaitForPlanner.InputEdge(
+                    "train-1",
+                    "train-2",
+                    conflict.toString(),
+                    "CONFLICT",
+                    "forward",
+                    "MOVEMENT_REQUIRED",
+                    "MOVEMENT_REQUIRED",
+                    "test",
+                    CorridorDirection.A_TO_B,
+                    0L,
+                    true)),
+            Map.of("train-1", trainOne, "train-2", trainTwo),
+            Set.of(),
+            Set.of());
+    java.lang.reflect.Method trace =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "traceMutualConflictOwnerSet",
+            SmartWaitForPlanner.PlannerInput.class,
+            SmartWaitForPlanner.UnlockCandidate.class,
+            boolean.class);
+    trace.setAccessible(true);
+    trace.invoke(
+        service,
+        plannerInput,
+        smartUnlockCandidate(conflict.toString(), CorridorDirection.A_TO_B),
+        false);
+
+    String ownerTrace =
+        debugMessages.stream()
+            .filter(message -> message.contains("SMART_MUTUAL_CONFLICT_OWNER_SET"))
+            .findFirst()
+            .orElseThrow();
+    assertTrue(ownerTrace.contains("train-1=23@RUNTIME_MOVE"), ownerTrace);
+    assertTrue(ownerTrace.contains("NODE:SW@HOLD_ONLY"), ownerTrace);
+    assertTrue(ownerTrace.contains("reason=no-token"), ownerTrace);
+    assertFalse(ownerTrace.contains("ownerPriorities={train-1=unknown"), ownerTrace);
+    assertFalse(ownerTrace.contains("ownerPhysicalFootprints={train-1=unknown"), ownerTrace);
+    assertFalse(ownerTrace.contains("ownerReservedAuthorities={train-1=unknown"), ownerTrace);
+  }
+
+  @Test
   void unlockAuthorityRequiresGlobalEnforceAndEffectGate() throws Exception {
     RuntimeDispatchService observeOnly =
         createMinimalService(
@@ -12732,13 +16743,169 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void unlockAuthorityDoesNotClearDestination() throws Exception {
+  void smartUnlockPlannerNeverIssuesAuthorityFromBlockerResources() throws Exception {
     PlannerExecutionSnapshot snapshot =
         executePlannerReservationForMode(SmartDispatcherMode.ENFORCE);
 
     assertTrue(
-        movementTokens(snapshot.service()).stream()
-            .anyMatch(token -> token.committedDestination().isPresent()));
+        movementTokens(snapshot.service()).isEmpty(),
+        "wait-for blocker resources are not a complete movement-authority window");
+    assertTrue(
+        snapshot.manager().snapshotClaims().isEmpty(),
+        "planner selection must not acquire blocker resources outside canonical admission");
+    assertTrue(
+        snapshot.debugMessages().stream()
+            .anyMatch(message -> message.contains("TEST_SIGNAL_REEVALUATION_REQUEST train-1")),
+        snapshot.debugMessages().toString());
+  }
+
+  @Test
+  void smartUnlockSelectionAddsBoundedCanonicalQueuePriorityIntent() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    installSmartUnlockReservation(
+        service,
+        candidate,
+        List.of(OccupancyResource.forNode(NodeId.of("B"))),
+        currentTraceTick(),
+        1000);
+    DispatchPriorityResolution base =
+        new DispatchPriorityResolution(
+            0,
+            DispatchPrioritySource.ROUTE_CODE_TAGS,
+            Optional.empty(),
+            Optional.of("op:l1:r1"),
+            Optional.empty(),
+            "operation_type_missing");
+
+    DispatchPriorityResolution selected =
+        service.applySmartUnlockPriorityIntent("train-1", NodeId.of("A"), NodeId.of("B"), base);
+
+    assertTrue(selected.priority() > base.priority());
+    assertTrue(selected.priority() - base.priority() <= 240);
+  }
+
+  @Test
+  void smartUnlockSelectionDoesNotOverrideManualPriority() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    installSmartUnlockReservation(
+        service,
+        candidate,
+        List.of(OccupancyResource.forNode(NodeId.of("B"))),
+        currentTraceTick(),
+        1000);
+    DispatchPriorityResolution manual =
+        new DispatchPriorityResolution(
+            50,
+            DispatchPrioritySource.MANUAL_FTA_PRIORITY,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "manual",
+            false,
+            true,
+            50,
+            0);
+
+    assertEquals(
+        manual,
+        service.applySmartUnlockPriorityIntent("train-1", NodeId.of("A"), NodeId.of("B"), manual));
+  }
+
+  @Test
+  void smartUnlockPriorityIntentSaturatesWithoutIntegerOverflow() throws Exception {
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            new ArrayList<>(),
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    installSmartUnlockReservation(
+        service,
+        candidate,
+        List.of(OccupancyResource.forNode(NodeId.of("B"))),
+        currentTraceTick(),
+        1000);
+    DispatchPriorityResolution nearMaximum =
+        new DispatchPriorityResolution(
+            Integer.MAX_VALUE - 10,
+            DispatchPrioritySource.ROUTE_CODE_TAGS,
+            Optional.empty(),
+            Optional.of("op:l1:r1"),
+            Optional.empty(),
+            "operation_type_missing",
+            false,
+            false,
+            0,
+            Integer.MAX_VALUE - 10);
+
+    DispatchPriorityResolution selected =
+        service.applySmartUnlockPriorityIntent(
+            "train-1", NodeId.of("A"), NodeId.of("B"), nearMaximum);
+
+    assertEquals(Integer.MAX_VALUE, selected.priority());
+    assertEquals(Integer.MAX_VALUE, selected.policyAdjustment());
+  }
+
+  @Test
+  void stopRetainPreservesCanonicalSmartUnlockQueuePriority() throws Exception {
+    String trainName = "winner";
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    OccupancyResource conflict = OccupancyResource.forConflict("single:test:A~B");
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    assertTrue(
+        manager
+            .acquire(singleConflictRequest("blocker", conflict, CorridorDirection.A_TO_B))
+            .allowed());
+    RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("queue-priority"), List.of(a, b), Optional.empty());
+    Instant now = Instant.now();
+    OccupancyRequest canonicalRequest =
+        singleConflictRequest(trainName, conflict, CorridorDirection.A_TO_B)
+            .withSchedulingMetadata(now, 240);
+
+    invokeRetainStopOccupancy(
+        service,
+        trainName,
+        route,
+        0,
+        a,
+        Optional.of(canonicalRequest),
+        graphWithSingleEdge(a, b, 10),
+        now);
+
+    OccupancyQueueEntry queuedWinner =
+        manager.snapshotQueues().stream()
+            .filter(snapshot -> snapshot.resource().equals(conflict))
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .filter(entry -> entry.trainName().equals(trainName))
+            .findFirst()
+            .orElseThrow();
+    assertEquals(240, queuedWinner.priority());
+  }
+
+  @Test
+  void unlockReevaluationDoesNotClearDestination() throws Exception {
+    PlannerExecutionSnapshot snapshot =
+        executePlannerReservationForMode(SmartDispatcherMode.ENFORCE);
+
+    assertTrue(movementTokens(snapshot.service()).isEmpty());
     assertFalse(
         snapshot.debugMessages().stream()
             .anyMatch(
@@ -12786,14 +16953,15 @@ class RuntimeDispatchServiceTest {
 
     assertTrue(
         snapshot.debugMessages().stream()
-            .anyMatch(message -> message.contains("SMART_UNLOCK_AUTHORITY_ISSUED")));
+            .anyMatch(
+                message -> message.contains("SMART_UNLOCK_AUTHORITY_REEVALUATION_REQUESTED")));
     assertTrue(
         snapshot.debugMessages().stream()
             .anyMatch(
                 message ->
                     message.contains("SMART_UNLOCK_PLAN_APPLY")
-                        && message.contains("applyPhase=authority-issued")
-                        && message.contains("applyResult=authority-issued")));
+                        && message.contains("applyPhase=reevaluation-requested")
+                        && message.contains("applyResult=canonical-reevaluation-requested")));
     assertEquals(SignalAspect.STOP, registry.get("train-1").orElseThrow().lastSignal());
   }
 
@@ -12892,6 +17060,97 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void stopRetainWithUnknownTrainLengthKeepsAllProvenRearEdges() throws Exception {
+    String trainName = "long-train";
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    UUID worldId = UUID.randomUUID();
+    PhysicalGraphFixture physicalGraph =
+        withSyntheticPhysicalFootprints(graphWithTwoEdges(a, b, c, 10, 10), worldId);
+    RailGraph graph = physicalGraph.graph();
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("rear-retain"), List.of(a, b, c), Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource rearEdge = OccupancyResource.forEdge(EdgeId.undirected(a, b));
+    OccupancyRequest existingRearFootprint =
+        new OccupancyRequest(
+                trainName,
+                Optional.of(route.id()),
+                Instant.now(),
+                List.of(rearEdge),
+                Map.of(),
+                Map.of(),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .withResourceIntents(Map.of(rearEdge, ResourceIntent.PROTECTIVE_RETAIN));
+    assertTrue(manager.acquire(existingRearFootprint).allowed());
+    RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
+    FakeTrain train = new FakeTrain(worldId, new TagStore(trainName).properties(), false);
+    train.estimatedTrainLengthBlocks = OptionalDouble.empty();
+    train.liveRailFootprintCells =
+        Optional.of(Set.of(physicalGraph.cellsByEdge().get(EdgeId.undirected(a, b))));
+
+    invokeRetainStopOccupancy(
+        service, trainName, route, 2, c, Optional.empty(), graph, Instant.now(), train);
+
+    assertTrue(manager.getClaim(rearEdge).isPresent(), "未知车长不能成为释放已证明列尾占用的依据");
+  }
+
+  @Test
+  void stopRetainUsesTrainLengthAcrossTccCurveWithoutPersistedTrackCells() throws Exception {
+    String trainName = "curve-train";
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    RailFootprintCell rearCell = new RailFootprintCell(10, 64, 10);
+    RailEdge rear = new RailEdge(EdgeId.undirected(a, b), a, b, 40, -1.0, true, Optional.empty());
+    RailEdge current =
+        new RailEdge(EdgeId.undirected(b, c), b, c, 40, -1.0, true, Optional.empty());
+    Map<EdgeId, RailEdge> edges = Map.of(rear.id(), rear, current.id(), current);
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(a, new RailNodeTest(a), b, new RailNodeTest(b), c, new RailNodeTest(c)),
+            edges,
+            Set.of(),
+            RailInterlockingState.fromSnapshot(
+                worldId,
+                edges.keySet(),
+                new org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .graph
+                    .interlocking
+                    .RailInterlockingCoverage(2, 2, true),
+                Map.of()));
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("tcc-rear-retain"), List.of(a, b, c), Optional.empty());
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource rearEdge = OccupancyResource.forEdge(rear.id());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    trainName, Optional.of(route.id()), Instant.now(), List.of(rearEdge), Map.of()))
+            .allowed());
+    RuntimeDispatchService service = createMinimalService(manager, new ArrayList<>());
+    FakeTrain train = new FakeTrain(worldId, new TagStore(trainName).properties(), false, 0.0);
+    train.estimatedTrainLengthBlocks = OptionalDouble.of(80.0);
+    train.liveRailFootprintCells = Optional.of(Set.of(rearCell));
+
+    invokeRetainStopOccupancy(
+        service, trainName, route, 2, c, Optional.empty(), graph, Instant.now(), train);
+
+    assertTrue(
+        manager.getClaim(rearEdge).isPresent(), "TCC 长曲线不持久化全轨迹时，Node-first 车长保护仍不得提前释放后方进路");
+  }
+
+  @Test
   void stopRetainUsesNextLegOriginLastPassedAndReleasesStaleThroatFootprint() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     String trainName = "SURC-MT-LH-8023";
@@ -12926,7 +17185,7 @@ class RuntimeDispatchServiceTest {
             -1.0,
             true,
             Optional.empty());
-    RailGraph graph =
+    RailGraph logicalGraph =
         new SimpleRailGraph(
             Map.of(
                 hhuDepot,
@@ -12953,6 +17212,9 @@ class RuntimeDispatchServiceTest {
                 ppkToRvsEdge.id(),
                 ppkToRvsEdge),
             Set.of());
+    UUID worldId = UUID.randomUUID();
+    PhysicalGraphFixture physicalGraph = withSyntheticPhysicalFootprints(logicalGraph, worldId);
+    RailGraph graph = physicalGraph.graph();
     RouteDefinition route =
         new RouteDefinition(
             RouteId.of("MT-2O_ShortD"), List.of(hhuDepot, ppkToRvs), Optional.empty());
@@ -12994,8 +17256,13 @@ class RuntimeDispatchServiceTest {
             registry,
             debugMessages,
             SmartDispatcherMode.ENFORCE);
+    FakeTrain train = new FakeTrain(worldId, new TagStore(trainName).properties(), false);
+    train.liveRailFootprintCells =
+        Optional.of(
+            Set.of(physicalGraph.cellsByEdge().get(EdgeId.undirected(ppkStation, ppkToRvs))));
 
-    invokeRetainStopOccupancy(service, trainName, route, 0, hhuDepot, graph, Instant.now());
+    invokeRetainStopOccupancy(
+        service, trainName, route, 0, hhuDepot, Optional.empty(), graph, Instant.now(), train);
 
     assertTrue(manager.getClaim(staleEdge).isEmpty(), debugMessages.toString());
     assertTrue(manager.getClaim(staleSingle).isEmpty(), debugMessages.toString());
@@ -13118,6 +17385,153 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void queuePositionBlockerIsInactiveForSmartPlannerNormalAdmission() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    RuntimeDispatchService.DeadlockBlockerInfo queueBlocker =
+        new RuntimeDispatchService.DeadlockBlockerInfo(
+            "waiting",
+            "switcher:TEST",
+            Optional.empty(),
+            "waiting",
+            "CONFLICT:switcher:TEST",
+            "SWITCHER_CONFLICT",
+            "MOVEMENT_REQUIRED",
+            "QUEUE_POSITION",
+            "canEnterPreview:queue-blocked",
+            currentTraceTick(),
+            1L);
+    RuntimeDispatchService.DeadlockBlockerInfo liveBlocker =
+        new RuntimeDispatchService.DeadlockBlockerInfo(
+            "owner",
+            "",
+            Optional.empty(),
+            "owner",
+            "NODE:SWITCHER:TEST",
+            "HARD_OCCUPANCY",
+            "MOVEMENT_REQUIRED",
+            "MOVEMENT_REQUIRED",
+            "canEnterPreview:blockers",
+            currentTraceTick(),
+            1L);
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "smartPlannerEdgeActiveForNormalAdmission",
+            RuntimeDispatchService.DeadlockBlockerInfo.class);
+    method.setAccessible(true);
+
+    assertFalse((boolean) method.invoke(service, queueBlocker));
+    assertTrue((boolean) method.invoke(service, liveBlocker));
+  }
+
+  @Test
+  void switcherMergeTopologySurvivesRuntimeSnapshotRefreshAndReachesPlanner() throws Exception {
+    RuntimeDispatchService service = createMinimalService();
+    Instant now = Instant.parse("2026-07-18T14:24:57Z");
+    Instant mtSampledAt = now.plusSeconds(5);
+    NodeId dsIngress = NodeId.of("SURC:S:JBS:1:001");
+    NodeId mtIngress = NodeId.of("SURC:S:JBS:3:001");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:-520:77:1390");
+    NodeId exit = NodeId.of("SURC:JBS:CSB:2:001");
+    RailEdge dsEntry =
+        new RailEdge(
+            EdgeId.undirected(dsIngress, switcher),
+            dsIngress,
+            switcher,
+            4,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge mtEntry =
+        new RailEdge(
+            EdgeId.undirected(mtIngress, switcher),
+            mtIngress,
+            switcher,
+            4,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge egress =
+        new RailEdge(
+            EdgeId.undirected(switcher, exit), switcher, exit, 4, -1.0, true, Optional.empty());
+    OccupancyResource switcherConflict =
+        OccupancyResource.forConflict("switcher:" + switcher.value());
+    OccupancyResource switcherNode = OccupancyResource.forNode(switcher);
+    OccupancyRequest dsRequest =
+        switcherTraversalRequest(
+            "SURC-DS-LW-5912",
+            now,
+            0,
+            List.of(dsIngress, switcher, exit),
+            List.of(dsEntry, egress),
+            List.of(switcherConflict, switcherNode));
+    OccupancyRequest mtRequest =
+        switcherTraversalRequest(
+            "SURC-MT-LO-3495",
+            now,
+            0,
+            List.of(mtIngress, switcher, exit),
+            List.of(mtEntry, egress),
+            List.of(switcherConflict, switcherNode));
+    OccupancyDecision dsBlocked = blockedBy(switcherNode, "SURC-MT-LO-3495", now);
+    OccupancyDecision mtBlocked = blockedBy(switcherConflict, "SURC-DS-LW-5912", mtSampledAt);
+
+    updateBlockerSnapshot(service, "SURC-DS-LW-5912", dsBlocked, dsRequest, now, "test-rich");
+    updateBlockerSnapshot(
+        service, "SURC-MT-LO-3495", mtBlocked, mtRequest, mtSampledAt, "test-rich");
+    updateBlockerSnapshotWithoutRequest(
+        service, "SURC-DS-LW-5912", dsBlocked, mtSampledAt.plusMillis(1));
+
+    List<SmartWaitForPlanner.InputEdge> edges =
+        smartPlannerInputEdges(
+            service,
+            Map.of(),
+            Set.of("SURC-DS-LW-5912", "SURC-MT-LO-3495"),
+            mtSampledAt.plusMillis(2),
+            10_000L);
+
+    assertEquals(2, edges.size());
+    assertTrue(
+        edges.stream()
+            .allMatch(
+                edge ->
+                    edge.switcherMovement()
+                        .filter(
+                            movement ->
+                                movement.relation() == SwitcherMovementTopology.Relation.MERGE)
+                        .isPresent()),
+        () -> "edges=" + edges);
+
+    Instant oneSidedStaleAt = now.plusSeconds(11);
+    updateBlockerSnapshotWithoutRequest(service, "SURC-DS-LW-5912", dsBlocked, oneSidedStaleAt);
+    updateBlockerSnapshotWithoutRequest(service, "SURC-MT-LO-3495", mtBlocked, oneSidedStaleAt);
+    List<SmartWaitForPlanner.InputEdge> oneSidedStaleEdges =
+        smartPlannerInputEdges(
+            service,
+            Map.of(),
+            Set.of("SURC-DS-LW-5912", "SURC-MT-LO-3495"),
+            oneSidedStaleAt.plusMillis(1),
+            10_000L);
+
+    assertTrue(
+        oneSidedStaleEdges.stream().noneMatch(edge -> edge.switcherMovement().isPresent()),
+        () -> "oneSidedStaleEdges=" + oneSidedStaleEdges);
+
+    updateBlockerSnapshotWithoutRequest(service, "SURC-DS-LW-5912", dsBlocked, now.plusSeconds(20));
+    updateBlockerSnapshotWithoutRequest(service, "SURC-MT-LO-3495", mtBlocked, now.plusSeconds(20));
+    List<SmartWaitForPlanner.InputEdge> refreshedEdges =
+        smartPlannerInputEdges(
+            service,
+            Map.of(),
+            Set.of("SURC-DS-LW-5912", "SURC-MT-LO-3495"),
+            now.plusSeconds(20).plusMillis(1),
+            10_000L);
+
+    assertTrue(
+        refreshedEdges.stream().noneMatch(edge -> edge.switcherMovement().isPresent()),
+        () -> "refreshedEdges=" + refreshedEdges);
+  }
+
+  @Test
   void oppositeDirectionSingleRegionBlocksUnlockAuthority() throws Exception {
     PlannerExecutionSnapshot snapshot =
         executeSingleRegionPlannerReservationWithExternalOccupant(CorridorDirection.B_TO_A);
@@ -13152,10 +17566,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
     installSmartUnlockReservation(service, candidate, List.of(resource), currentTraceTick(), 1000);
@@ -13184,19 +17595,41 @@ class RuntimeDispatchServiceTest {
   void smartUnlockSuccessRequiresReleasedBlocker() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
-    installSmartUnlockReservation(
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId authorityBoundary = NodeId.of("A-MID");
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    List<OccupancyResource> authorityResources =
+        List.of(
+            OccupancyResource.forNode(a),
+            OccupancyResource.forEdge(EdgeId.undirected(a, authorityBoundary)),
+            OccupancyResource.forNode(authorityBoundary));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "train-1", Optional.empty(), Instant.now(), authorityResources, Map.of()))
+            .allowed());
+    installSmartUnlockReservation(service, candidate, List.of(resource), currentTraceTick(), 1000);
+    installMovementToken(
         service,
-        candidate,
-        List.of(OccupancyResource.forNode(NodeId.of("B"))),
-        currentTraceTick(),
-        1000);
+        new MovementAuthorizationToken(
+                "train-1",
+                1L,
+                Instant.now(),
+                a,
+                b,
+                Optional.of(authorityBoundary),
+                1,
+                authorityResources,
+                SignalAspect.PROCEED)
+            .activate("B"));
     installSmartUnlockBlockerSnapshot(service, "follower", "other-train", "NODE:C", Instant.now());
 
     observeSmartUnlockReservations(service, Instant.now());
@@ -13213,10 +17646,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
     installSmartUnlockReservation(
         service,
@@ -13249,19 +17679,31 @@ class RuntimeDispatchServiceTest {
   void smartUnlockInvalidTokenNeverLogsSuccess() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
     RuntimeDispatchService service =
-        createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+        createMinimalService(manager, mock(RouteDefinitionCache.class), registry, debugMessages);
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
-    installSmartUnlockReservation(
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "train-1", Optional.empty(), Instant.now(), List.of(resource), Map.of()))
+            .allowed());
+    installSmartUnlockReservation(service, candidate, List.of(resource), currentTraceTick(), 1000);
+    installMovementToken(
         service,
-        candidate,
-        List.of(OccupancyResource.forNode(NodeId.of("B"))),
-        currentTraceTick(),
-        1000);
+        new MovementAuthorizationToken(
+                "train-1",
+                1L,
+                Instant.now(),
+                NodeId.of("A"),
+                NodeId.of("B"),
+                List.of(resource),
+                SignalAspect.PROCEED)
+            .activate("B"));
     installMovementInhibitor(service, "train-1");
     registry.updateLastPassedGraphNode("train-1", NodeId.of("B"), Instant.now());
 
@@ -13282,10 +17724,7 @@ class RuntimeDispatchServiceTest {
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
     installSmartUnlockReservation(
@@ -13334,6 +17773,76 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void missingLiveBlockerSnapshotReturnsEmptyWithoutFailureNoise() {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mockOccupancyManager(),
+            mock(RouteDefinitionCache.class),
+            new RouteProgressRegistry(),
+            debugMessages);
+
+    assertTrue(
+        service
+            .recentDeadlockBlockers("never-blocked", Duration.ofSeconds(30))
+            .blockers()
+            .isEmpty());
+    assertTrue(
+        service
+            .recentDeadlockBlockers("never-blocked", Duration.ofSeconds(30))
+            .blockers()
+            .isEmpty());
+    assertFalse(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED")
+                        && message.contains("reason=missing")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void runtimeMoveWithoutProgressStillRejectsLiveBlockerSnapshot() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    RuntimeDispatchService service =
+        createMinimalService(
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
+    RouteId routeId = RouteId.of("runtime-progress-required");
+    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
+    OccupancyRequest request =
+        progressRequest(
+            "runtime-train", routeId, 0, NodeId.of("A"), NodeId.of("A"), 0L, List.of(resource));
+    OccupancyClaim blocker =
+        new OccupancyClaim(
+            resource,
+            "front-train",
+            Optional.of(routeId),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.MOVEMENT_REQUIRED);
+    OccupancyDecision decision =
+        new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(blocker));
+
+    updateLiveBlockerSnapshot(service, "runtime-train", decision, request, Instant.now());
+
+    assertTrue(
+        service
+            .recentDeadlockBlockers("runtime-train", Duration.ofSeconds(30))
+            .blockers()
+            .isEmpty());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED")
+                        && message.contains("reason=PROGRESS_CONTEXT_MISSING")
+                        && message.contains("train=runtime-train")),
+        debugMessages.toString());
+  }
+
+  @Test
   void staleProgressContextDoesNotUpdateLiveBlockerSnapshot() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RouteDefinition route =
@@ -13352,10 +17861,7 @@ class RuntimeDispatchServiceTest {
     registry.initFromTags("train-1", tags.properties(), route);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("C"));
     OccupancyRequest request =
         staleProgressRequest("train-1", route.id(), 2, registry.version() - 1L, List.of(resource));
@@ -13398,10 +17904,7 @@ class RuntimeDispatchServiceTest {
     registry.initFromTags("train-1", tags.properties(), route);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("B"));
     OccupancyRequest request =
         progressRequest(
@@ -13456,10 +17959,7 @@ class RuntimeDispatchServiceTest {
     registry.initFromTags("train-1", tags.properties(), route);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
     OccupancyResource resource = OccupancyResource.forNode(NodeId.of("MID-1"));
     OccupancyRequest staleRequest =
         progressRequest(
@@ -13555,6 +18055,9 @@ class RuntimeDispatchServiceTest {
                     message.contains("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED")
                         && message.contains("blockerTrain=leader")),
         debugMessages.toString());
+    assertFalse(
+        debugMessages.stream().anyMatch(message -> message.contains("SNAPSHOT_USED")),
+        "读取仍然有效的 blocker 快照不得伪造新的诊断状态迁移: " + debugMessages);
   }
 
   // ====== recentBlockerTrains 测试 ======
@@ -13623,10 +18126,7 @@ class RuntimeDispatchServiceTest {
     registry.updateSignal("logic-main", SignalAspect.STOP, Instant.now());
     service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            new ArrayList<>());
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, new ArrayList<>());
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13660,7 +18160,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     when(routes.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
     RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), routes, registry, new ArrayList<>());
+        createMinimalService(mockOccupancyManager(), routes, registry, new ArrayList<>());
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13694,7 +18194,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     when(routes.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
     RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), routes, registry, debugMessages);
+        createMinimalService(mockOccupancyManager(), routes, registry, debugMessages);
     installSmartUnlockBlockerSnapshot(
         service, "train-1", "external", "CONFLICT:single:test:A~B", Instant.now());
 
@@ -13729,7 +18229,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     when(routes.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
     RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), routes, registry, debugMessages);
+        createMinimalService(mockOccupancyManager(), routes, registry, debugMessages);
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get("train-1")).thenReturn(tags.properties());
@@ -13762,7 +18262,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     when(routes.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
     RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), routes, registry, debugMessages);
+        createMinimalService(mockOccupancyManager(), routes, registry, debugMessages);
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13798,10 +18298,7 @@ class RuntimeDispatchServiceTest {
     registry.initFromTags("logic-main", tags.properties(), route);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13822,6 +18319,30 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void signalReevaluationFailureClosesAuthorityGateAndRequestsRecovery() {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
+    int[] recoveryRequests = {0};
+    service.setStartupRecoveryRequestedListener(() -> recoveryRequests[0]++);
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
+      store.when(TrainPropertiesStore::getAll).thenReturn(List.of());
+
+      service.failClosedAfterSignalReevaluationFailure("train-abi", new LinkageError("test-abi"));
+    }
+
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isEmpty());
+    assertEquals(1, recoveryRequests[0]);
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_SIGNAL_REEVALUATION_FAIL_CLOSED")
+                        && message.contains("action=STOP_FIRST_RECOVERY")));
+  }
+
+  @Test
   void destroyTrainByNameUsesAliasAwareResolution() {
     List<String> debugMessages = new ArrayList<>();
     RouteDefinition route =
@@ -13839,10 +18360,7 @@ class RuntimeDispatchServiceTest {
     registry.initFromTags("logic-main", tags.properties(), route);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13888,10 +18406,7 @@ class RuntimeDispatchServiceTest {
     registry.initFromTags("logic-main", tags.properties(), route);
     RuntimeDispatchService service =
         createMinimalService(
-            mock(OccupancyManager.class),
-            mock(RouteDefinitionCache.class),
-            registry,
-            debugMessages);
+            mockOccupancyManager(), mock(RouteDefinitionCache.class), registry, debugMessages);
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13914,8 +18429,7 @@ class RuntimeDispatchServiceTest {
   @Test
   void deadlockDestroyLogsResolveFailure() {
     List<String> debugMessages = new ArrayList<>();
-    RuntimeDispatchService service =
-        createMinimalService(mock(OccupancyManager.class), debugMessages);
+    RuntimeDispatchService service = createMinimalService(mockOccupancyManager(), debugMessages);
 
     try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
       store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
@@ -13943,7 +18457,22 @@ class RuntimeDispatchServiceTest {
   }
 
   private RuntimeDispatchService createMinimalService() {
-    return createMinimalService(mock(OccupancyManager.class), new ArrayList<>());
+    return createMinimalService(mockOccupancyManager(), new ArrayList<>());
+  }
+
+  /**
+   * 构造把测试中的 successful acquire 视为已提交硬授权的 OccupancyManager 替身。
+   *
+   * <p>大量运行时测试只关心控车与信号计算，并用 Mockito 直接返回 allowed decision；该替身显式补上生产实现提供的最终 owner 校验能力。需要验证 owner
+   * 丢失的用例应自行构造返回 {@code false} 的接口实现。
+   */
+  private static OccupancyManager mockOccupancyManager() {
+    OccupancyManager manager =
+        mock(OccupancyManager.class, withSettings().extraInterfaces(AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) manager).holdsHardAuthority(any())).thenReturn(true);
+    when(((AuthorityHandoffSupport) manager).migrateAuthorityOwner(anyString(), anyString()))
+        .thenReturn(true);
+    return manager;
   }
 
   private RouteProgressRegistry smartUnlockProgressRegistry() {
@@ -14008,6 +18537,32 @@ class RuntimeDispatchServiceTest {
         60);
   }
 
+  private SmartWaitForPlanner.UnlockCandidate smartUnlockCandidate(
+      String trainName, String cycleId) {
+    SmartWaitForPlanner.UnlockCandidate base = smartUnlockCandidate();
+    return new SmartWaitForPlanner.UnlockCandidate(
+        trainName,
+        cycleId,
+        base.kind(),
+        base.releaseResources(),
+        base.resources(),
+        base.authorityEnd(),
+        base.currentNode(),
+        base.nextNode(),
+        base.direction(),
+        base.releaseResourceCount(),
+        base.fullRouteResourceCount(),
+        base.reservationResourceLimit(),
+        base.score(),
+        base.accepted(),
+        base.rejectReason(),
+        base.recommendation(),
+        base.simulation(),
+        base.releasesBottleneck(),
+        base.improvesSameLineCascade(),
+        base.stuckDurationSeconds());
+  }
+
   private SmartWaitForPlanner.UnlockCandidate headOnYieldCandidate(
       OccupancyResource conflict, OccupancyResource physicalNode) {
     SmartWaitForPlanner.GraphOnlySimulation simulation =
@@ -14050,6 +18605,8 @@ class RuntimeDispatchServiceTest {
     RuntimeDispatchService service =
         createMinimalService(
             manager, mock(RouteDefinitionCache.class), registry, debugMessages, mode);
+    service.setSignalReevaluationRequester(
+        trainName -> debugMessages.add("TEST_SIGNAL_REEVALUATION_REQUEST " + trainName));
     long versionBefore = manager.version();
     int claimsBefore = manager.snapshotClaims().size();
     int queuesBefore = manager.snapshotQueues().size();
@@ -14096,13 +18653,28 @@ class RuntimeDispatchServiceTest {
     OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
     RailEdge edgeAb = new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
     RailEdge edgeBc = new RailEdge(EdgeId.undirected(b, c), b, c, 10, -1.0, true, Optional.empty());
+    OccupancyRequest leaderAuthority =
+        singleConflictContextWithResources(
+                "leader",
+                conflict,
+                CorridorDirection.A_TO_B,
+                edgeAb,
+                edgeBc,
+                a,
+                b,
+                c,
+                List.of(
+                    conflict,
+                    OccupancyResource.forNode(a),
+                    OccupancyResource.forEdge(edgeAb.id()),
+                    OccupancyResource.forNode(b),
+                    OccupancyResource.forEdge(edgeBc.id()),
+                    OccupancyResource.forNode(c)))
+            .request();
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    assertTrue(
-        manager
-            .acquire(singleConflictRequest("leader", conflict, CorridorDirection.A_TO_B))
-            .allowed());
+    assertTrue(manager.acquire(leaderAuthority).allowed());
     RouteProgressRegistry registry = new RouteProgressRegistry();
     RouteDefinition route =
         new RouteDefinition(RouteId.of("follow"), List.of(a, b, c), Optional.empty());
@@ -14120,11 +18692,7 @@ class RuntimeDispatchServiceTest {
     RuntimeDispatchService service =
         createMinimalService(manager, routeDefinitions, registry, debugMessages, mode);
     if (installLeaderToken) {
-      installMovementToken(
-          service,
-          new MovementAuthorizationToken(
-                  "leader", 1L, Instant.now(), a, c, List.of(conflict), SignalAspect.PROCEED)
-              .activate("C"));
+      issueAndActivateMovementToken(service, "leader", a, c, leaderAuthority, "C");
     }
     long versionBefore = manager.version();
     int claimsBefore = manager.snapshotClaims().size();
@@ -14257,6 +18825,48 @@ class RuntimeDispatchServiceTest {
     tokens.put(token.trainName().toLowerCase(java.util.Locale.ROOT), token);
   }
 
+  private static MovementAuthorizationToken issueAndActivateMovementToken(
+      RuntimeDispatchService service,
+      String trainName,
+      NodeId currentNode,
+      NodeId destinationNode,
+      OccupancyRequest authorityRequest,
+      String destinationName)
+      throws Exception {
+    java.lang.reflect.Method issue =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "issueMovementAuthorizationToken",
+            String.class,
+            NodeId.class,
+            NodeId.class,
+            OccupancyRequest.class,
+            SignalAspect.class,
+            Instant.class);
+    java.lang.reflect.Method activate =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "activateMovementAuthorizationTokenRetainingInhibitor",
+            String.class,
+            MovementAuthorizationToken.class,
+            String.class);
+    issue.setAccessible(true);
+    activate.setAccessible(true);
+    MovementAuthorizationToken token =
+        (MovementAuthorizationToken)
+            issue.invoke(
+                service,
+                trainName,
+                currentNode,
+                destinationNode,
+                authorityRequest,
+                SignalAspect.PROCEED,
+                Instant.now());
+    assertTrue((boolean) activate.invoke(service, trainName, token, destinationName));
+    return movementTokens(service).stream()
+        .filter(candidate -> candidate.trainName().equals(trainName))
+        .findFirst()
+        .orElseThrow();
+  }
+
   private static boolean validMovementAuthorization(
       RuntimeDispatchService service,
       String trainName,
@@ -14295,6 +18905,28 @@ class RuntimeDispatchServiceTest {
             authorizationClass);
     method.setAccessible(true);
     return (boolean) method.invoke(service, trainName, aspect, Instant.now(), authorization);
+  }
+
+  private static Object invokePhysicalSignalPublication(
+      RuntimeDispatchService service,
+      String trainName,
+      SignalAspect aspect,
+      SignalAspect fallback,
+      Object authorization)
+      throws Exception {
+    Class<?> authorizationClass =
+        Class.forName(
+            "org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService$FinalSignalAuthorization");
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "publishPhysicalSignalIfRequired",
+            String.class,
+            SignalAspect.class,
+            SignalAspect.class,
+            Instant.class,
+            authorizationClass);
+    method.setAccessible(true);
+    return method.invoke(service, trainName, aspect, fallback, Instant.now(), authorization);
   }
 
   private static Object finalSignalAuthorization(
@@ -14362,6 +18994,23 @@ class RuntimeDispatchServiceTest {
     published.put(trainName.toLowerCase(java.util.Locale.ROOT), aspect);
   }
 
+  private static SignalAspect currentPhysicalAspect(
+      RuntimeDispatchService service, String trainName) throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "currentPhysicalAspect", String.class, SignalAspect.class);
+    method.setAccessible(true);
+    return (SignalAspect) method.invoke(service, trainName, SignalAspect.STOP);
+  }
+
+  private static void invokeClearRuntimeCachesForTrain(
+      RuntimeDispatchService service, String trainName) throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod("clearRuntimeCachesForTrain", String.class);
+    method.setAccessible(true);
+    method.invoke(service, trainName);
+  }
+
   private void executeSmartUnlockReservation(
       RuntimeDispatchService service,
       SmartWaitForPlanner.UnlockCandidate candidate,
@@ -14423,8 +19072,19 @@ class RuntimeDispatchServiceTest {
             direction,
             List.of(exit, switcher, throat, entry),
             List.of(exitEdge, switcherEdge, entryEdge),
-            List.of(conflict));
+            atomicResources(true));
       }
+      return singleConflictPathContext(
+          trainName,
+          conflict,
+          direction,
+          List.of(entry, throat, switcher, exit),
+          List.of(entryEdge, switcherEdge, exitEdge),
+          atomicResources(false));
+    }
+
+    private OccupancyRequestContext advisoryOnlyContext(
+        String trainName, CorridorDirection direction) {
       return singleConflictPathContext(
           trainName,
           conflict,
@@ -14446,14 +19106,19 @@ class RuntimeDispatchServiceTest {
     }
 
     private List<OccupancyResource> atomicResources() {
+      return atomicResources(false);
+    }
+
+    private List<OccupancyResource> atomicResources(boolean reverse) {
       LinkedHashSet<OccupancyResource> resources = new LinkedHashSet<>();
       resources.add(conflict);
+      resources.add(OccupancyResource.forConflict("switcher:" + switcher.value()));
       resources.add(OccupancyResource.forEdge(entryEdge.id()));
       resources.add(OccupancyResource.forEdge(switcherEdge.id()));
       resources.add(OccupancyResource.forEdge(exitEdge.id()));
-      resources.add(OccupancyResource.forNode(throat));
+      resources.add(OccupancyResource.forNode(reverse ? entry : throat));
       resources.add(OccupancyResource.forNode(switcher));
-      resources.add(OccupancyResource.forNode(exit));
+      resources.add(OccupancyResource.forNode(reverse ? throat : exit));
       return List.copyOf(resources);
     }
   }
@@ -14469,6 +19134,9 @@ class RuntimeDispatchServiceTest {
     Map<String, CorridorDirection> directions =
         Map.of(entryConflict.key(), direction, internalConflict.key(), direction);
     Map<String, Integer> entryOrders = Map.of(entryConflict.key(), 0, internalConflict.key(), 1);
+    LinkedHashSet<OccupancyResource> hardResources = new LinkedHashSet<>(throat.atomicResources());
+    hardResources.add(entryConflict);
+    hardResources.add(internalConflict);
     DirectedTraversalContext directedContext =
         new DirectedTraversalContext(
             trainName,
@@ -14498,7 +19166,7 @@ class RuntimeDispatchServiceTest {
             trainName,
             Optional.empty(),
             Instant.parse("2026-01-01T00:00:01Z"),
-            List.of(entryConflict, internalConflict),
+            List.copyOf(hardResources),
             directions,
             entryOrders,
             0,
@@ -14709,8 +19377,8 @@ class RuntimeDispatchServiceTest {
             ttlTicks,
             candidate.resources(),
             List.of("follower"),
-            "-",
-            "A",
+            candidate.currentNode(),
+            candidate.currentNode(),
             -1L,
             true);
     java.lang.reflect.Field byCycleField =
@@ -14814,6 +19482,21 @@ class RuntimeDispatchServiceTest {
       RailGraph graph,
       Instant now)
       throws Exception {
+    invokeRetainStopOccupancy(
+        service, trainName, route, currentIndex, currentNode, Optional.empty(), graph, now);
+  }
+
+  private void invokeRetainStopOccupancy(
+      RuntimeDispatchService service,
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      Optional<OccupancyRequest> movementRequest,
+      RailGraph graph,
+      Instant now,
+      RuntimeTrainHandle train)
+      throws Exception {
     java.lang.reflect.Method method =
         RuntimeDispatchService.class.getDeclaredMethod(
             "retainStopOccupancy",
@@ -14821,10 +19504,30 @@ class RuntimeDispatchServiceTest {
             RouteDefinition.class,
             int.class,
             NodeId.class,
+            Optional.class,
             RailGraph.class,
-            Instant.class);
+            Instant.class,
+            RuntimeTrainHandle.class);
     method.setAccessible(true);
-    method.invoke(service, trainName, route, currentIndex, currentNode, graph, now);
+    method.invoke(
+        service, trainName, route, currentIndex, currentNode, movementRequest, graph, now, train);
+  }
+
+  private void invokeRetainStopOccupancy(
+      RuntimeDispatchService service,
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      Optional<OccupancyRequest> movementRequest,
+      RailGraph graph,
+      Instant now)
+      throws Exception {
+    FakeTrain train = new FakeTrain(UUID.randomUUID(), new TagStore(trainName).properties(), false);
+    train.estimatedTrainLengthBlocks = OptionalDouble.empty();
+    train.liveRailFootprintCells = Optional.empty();
+    invokeRetainStopOccupancy(
+        service, trainName, route, currentIndex, currentNode, movementRequest, graph, now, train);
   }
 
   private boolean smartUnlockNoReleaseCooldownActive(
@@ -14853,6 +19556,22 @@ class RuntimeDispatchServiceTest {
     return (String) method.invoke(service, candidate, settings);
   }
 
+  private String smartDispatchExecutorSkipReason(
+      RuntimeDispatchService service,
+      SmartWaitForPlanner.UnlockCandidate candidate,
+      ConfigManager.SmartDispatcherPlannerSettings settings,
+      Instant now)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "smartDispatchExecutorSkipReason",
+            SmartWaitForPlanner.UnlockCandidate.class,
+            ConfigManager.SmartDispatcherPlannerSettings.class,
+            Instant.class);
+    method.setAccessible(true);
+    return (String) method.invoke(service, candidate, settings, now);
+  }
+
   private void updateLiveBlockerSnapshot(
       RuntimeDispatchService service,
       String trainName,
@@ -14870,6 +19589,66 @@ class RuntimeDispatchServiceTest {
             String.class);
     method.setAccessible(true);
     method.invoke(service, trainName, decision, request, now, "canEnterPreview:blockers");
+  }
+
+  private void updateBlockerSnapshot(
+      RuntimeDispatchService service,
+      String trainName,
+      OccupancyDecision decision,
+      OccupancyRequest request,
+      Instant now,
+      String source)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "updateBlockerSnapshot",
+            String.class,
+            OccupancyDecision.class,
+            OccupancyRequest.class,
+            Instant.class,
+            String.class);
+    method.setAccessible(true);
+    method.invoke(service, trainName, decision, request, now, source);
+  }
+
+  private void updateBlockerSnapshotWithoutRequest(
+      RuntimeDispatchService service, String trainName, OccupancyDecision decision, Instant now)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "updateBlockerSnapshot", String.class, OccupancyDecision.class, Instant.class);
+    method.setAccessible(true);
+    method.invoke(service, trainName, decision, now);
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<SmartWaitForPlanner.InputEdge> smartPlannerInputEdges(
+      RuntimeDispatchService service,
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      Set<String> activeTrainNames,
+      Instant now,
+      long topologyTtlMs)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "smartPlannerInputEdges", Map.class, Set.class, Instant.class, long.class);
+    method.setAccessible(true);
+    return (List<SmartWaitForPlanner.InputEdge>)
+        method.invoke(service, progress, activeTrainNames, now, topologyTtlMs);
+  }
+
+  private static OccupancyDecision blockedBy(
+      OccupancyResource resource, String blockerTrain, Instant now) {
+    OccupancyClaim blocker =
+        new OccupancyClaim(
+            resource,
+            blockerTrain,
+            Optional.empty(),
+            now,
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.MOVEMENT_REQUIRED);
+    return new OccupancyDecision(false, now, SignalAspect.STOP, List.of(blocker));
   }
 
   private OccupancyDecision recoverSelfOwnedStaleRetainDecision(
@@ -14945,10 +19724,7 @@ class RuntimeDispatchServiceTest {
 
   private RuntimeDispatchService createMinimalService(RouteDefinitionCache routeDefinitions) {
     return createMinimalService(
-        mock(OccupancyManager.class),
-        routeDefinitions,
-        new RouteProgressRegistry(),
-        new ArrayList<>());
+        mockOccupancyManager(), routeDefinitions, new RouteProgressRegistry(), new ArrayList<>());
   }
 
   private RuntimeDispatchService createMinimalService(
@@ -15248,20 +20024,27 @@ class RuntimeDispatchServiceTest {
                 Optional.empty())));
   }
 
-  private static OccupancyRequest invokeRuntimeConflictClearingEvidence(
-      RuntimeDispatchService service,
-      OccupancyRequest request,
-      OccupancyRequestContext context,
-      RailGraph graph)
-      throws Exception {
-    java.lang.reflect.Method method =
-        RuntimeDispatchService.class.getDeclaredMethod(
-            "withRuntimeConflictClearingEvidence",
-            OccupancyRequest.class,
-            OccupancyRequestContext.class,
-            RailGraph.class);
-    method.setAccessible(true);
-    return (OccupancyRequest) method.invoke(service, request, context, graph);
+  /** 构造一条完整覆盖 from-node、edge 与 to-node 的单区间运行授权请求。 */
+  private static OccupancyRequest completeTwoNodeAuthorityRequest(
+      String trainName, Instant now, NodeId fromNode, NodeId toNode) {
+    RailEdge edge =
+        new RailEdge(
+            EdgeId.undirected(fromNode, toNode), fromNode, toNode, 1, -1.0, true, Optional.empty());
+    return switcherTraversalRequest(
+        trainName,
+        now,
+        0,
+        List.of(fromNode, toNode),
+        List.of(edge),
+        List.of(
+            OccupancyResource.forNode(fromNode),
+            OccupancyResource.forEdge(edge.id()),
+            OccupancyResource.forNode(toNode)));
+  }
+
+  private static VerifiedSwitcherDrainClaims.VerificationSnapshot switcherVerificationSnapshot(
+      List<OccupancyClaim> claims) {
+    return new VerifiedSwitcherDrainClaims.VerificationSnapshot(claims, 1L, 1L);
   }
 
   private static SignalPublicationGate.Decision invokePublicationGate(
@@ -15630,7 +20413,7 @@ class RuntimeDispatchServiceTest {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
     when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
     when(occupancyManager.canEnter(any()))

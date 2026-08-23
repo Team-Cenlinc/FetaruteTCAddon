@@ -47,6 +47,12 @@ public final class BukkitRailBlockAccess implements RailBlockAccess {
     return Set.copyOf(neighbors);
   }
 
+  /** Bukkit 原生轨道访问只返回逐方块相邻位置，predecessor 链可作为精确方块足迹。 */
+  @Override
+  public boolean supportsExactBlockFootprint() {
+    return true;
+  }
+
   private static Set<Offset> offsetsForShape(Rail.Shape shape) {
     if (shape == null) {
       return Set.of();

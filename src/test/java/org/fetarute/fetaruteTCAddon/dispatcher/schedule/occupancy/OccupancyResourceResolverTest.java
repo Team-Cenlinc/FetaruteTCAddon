@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -17,12 +18,39 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.junit.jupiter.api.Test;
 
 class OccupancyResourceResolverTest {
+
+  @Test
+  void crossingEdgesReceiveSamePhysicalInterlockingResource() {
+    RailEdge first = edge(NodeId.of("A1"), NodeId.of("A2"));
+    RailEdge second = edge(NodeId.of("B1"), NodeId.of("B2"));
+    RailFootprintCell crossing = new RailFootprintCell(4, 8, 12);
+    Map<EdgeId, RailEdge> edges = Map.of(first.id(), first, second.id(), second);
+    RailInterlockingState interlocking =
+        RailInterlockingState.from(
+            UUID.fromString("11111111-2222-3333-4444-555555555555"),
+            edges.keySet(),
+            Map.of(
+                first.id(), new RailEdgeFootprint(1, true, Set.of(crossing)),
+                second.id(), new RailEdgeFootprint(1, true, Set.of(crossing))));
+    SimpleRailGraph graph = new SimpleRailGraph(Map.of(), edges, Set.of(), interlocking);
+
+    Set<OccupancyResource> firstConflicts = conflictResources(graph, first);
+    Set<OccupancyResource> secondConflicts = conflictResources(graph, second);
+    Set<OccupancyResource> shared = new HashSet<>(firstConflicts);
+    shared.retainAll(secondConflicts);
+
+    assertEquals(
+        1, shared.stream().filter(OccupancyResourceResolver::isInterlockingConflict).count());
+  }
 
   @Test
   void resourcesForEdgeAddsSwitcherConflict() {

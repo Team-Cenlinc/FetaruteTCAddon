@@ -4,7 +4,7 @@ import java.util.Objects;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 
-/** 持久化的区间记录。 */
+/** 持久化的纯拓扑区间记录；普通轨道方块不会写入 Edge 行。 */
 public record RailEdgeRecord(
     UUID worldId, EdgeId edgeId, int lengthBlocks, double baseSpeedLimit, boolean bidirectional) {
 

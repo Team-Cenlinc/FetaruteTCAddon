@@ -143,6 +143,7 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+    materialized-spawn-pending: "<prefix> <red>重载已安全中止</red> <gray>仍有列车处于强制收容重试；处理完成后请再次执行</gray> <white>/fta reload</white>"
 
   speed:
     section:
@@ -408,7 +409,7 @@ command:
       entry-component: "<gray>/fta graph component list</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
       hover-component: "<gray>点击填充:</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
       entry-conflict: "<gray>/fta graph conflict</gray> <white>-</white> <dark_aqua>联合闭锁冲突组</dark_aqua>"
-      hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
+      hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path/interlocking list/interlocking get</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
@@ -420,6 +421,7 @@ command:
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
+      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>当前仍有列车占用 claim；请先停车并清空占用后重试，旧快照保持生效</gray>"
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, replaced_components=<white><replaced_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
@@ -455,6 +457,16 @@ command:
         page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
         empty: "<prefix> <gray>路径未涉及冲突组</gray> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
         entry: "<gray>-</gray> <white><key></white>"
+      interlocking:
+        page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+        list:
+          header: "<prefix> <dark_aqua>物理联锁区</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+          empty: "<prefix> <gray>当前图没有精确物理联锁区</gray> <dark_aqua>请同时检查 /fta graph info 的 coverage</dark_aqua>"
+          entry: "<gray>-</gray> <white><key></white> <gray>(first=<white><first_edge></white>, second=<white><second_edge></white>, overlap_cells=<white><cells></white>)</gray>"
+        get:
+          not-found: "<prefix> <red>未找到物理联锁区：</red><white><key></white>"
+          header: "<prefix> <dark_aqua>物理联锁区证据</dark_aqua> <gray>(key=<white><key></white>, first=<white><first_edge></white>, second=<white><second_edge></white>, overlap_cells=<white><cells></white>)</gray>"
+          cell: "<gray>-</gray> <white>(<x>, <y>, <z>)</white>"
 
     edge:
       list:
@@ -606,6 +618,7 @@ command:
       meta: "<gray>-</gray> <dark_aqua>builtAt</dark_aqua>=<white><built_at></white> <dark_aqua>components</dark_aqua>=<white><components></white> <dark_aqua>blocked</dark_aqua>=<white><blocked_edges></white> <dark_aqua>isolated</dark_aqua>=<white><isolated_nodes></white>"
       nodes: "<gray>-</gray> <dark_aqua>nodes</dark_aqua> <gray>(waypoint=<white><waypoint></white>, station=<white><station></white>, depot=<white><depot></white>, destination=<white><destination></white>, switcher=<white><switcher></white>)</gray>"
       switcher: "<gray>-</gray> <dark_aqua>switcher</dark_aqua> <gray>(sign=<white><switcher_sign></white>, auto=<white><switcher_auto></white>)</gray>"
+      interlocking: "<gray>-</gray> <dark_aqua>稀疏物理联锁</dark_aqua> <gray>(catalog=<white><status></white>, covered_edges=<white><captured></white>/<white><expected></white>, zone_cells=<white><cells></white>, multi_zone_cells=<white><shared_cells></white>, exact_zones=<white><zones></white>)</gray>"
       edge-top-header: "<gray>-</gray> <dark_aqua>top edges</dark_aqua> <gray>(by length_blocks)</gray>"
       edge: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(len=<white><len></white>)</gray>"
 
@@ -920,6 +933,7 @@ command:
 
   depot:
     spawn:
+      coordinated-only: "<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"
       not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"
       not-depot: "<prefix> <red>节点不是车库</red> <gray>(node=<white><node></white>)</gray>"
       world-missing: "<prefix> <red>车库所在世界未加载</red> <gray>(world=<white><world></white>)</gray>"
@@ -985,6 +999,7 @@ command:
       approach: "  <gray>Approach:</gray> node=<white><node></white> kind=<white><kind></white> reason=<white><reason></white> distance=<white><distance></white> limit=<white><limit></white>"
       occupancy: "  <gray>占用诊断:</gray> blockers=<white><blockers></white> request=<white><request></white> claims=<white><claims></white>"
       signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white> destBlocked=<white><destination_blocked></white> retained=<white><retained_destination></white> reason=<white><blocked_reason></white>"
+      stop: "  <gray>STOP 生命周期:</gray> reason=<white><reason></white> detail=<white><detail></white> release=<white><release></white> retry=<white><retry></white> invalidatesAuthority=<white><invalidates_authority></white> blockers=<white><blockers></white>"
       set:
         route:
           storage-not-ready: "<prefix> <red>存储尚未就绪，无法解析公司/线路层级（请先 /fta reload 或检查数据库连接）</red>"

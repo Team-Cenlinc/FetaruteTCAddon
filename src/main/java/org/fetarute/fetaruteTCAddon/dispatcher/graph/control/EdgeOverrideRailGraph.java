@@ -11,8 +11,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -23,7 +25,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  * <p>当前仅覆盖 {@link #isBlocked(EdgeId)}，其余方法均委托给底层图。包装后会保留底层图的冲突走廊与单线 section
  * 查询能力，避免运维覆盖导致调度请求丢失互斥资源或方向证据。
  */
-public final class EdgeOverrideRailGraph implements RailGraph, RailGraphSectionSupport {
+public final class EdgeOverrideRailGraph
+    implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
 
   private final RailGraph delegate;
   private final Map<EdgeId, RailEdgeOverrideRecord> overrides;
@@ -50,6 +53,12 @@ public final class EdgeOverrideRailGraph implements RailGraph, RailGraphSectionS
   @Override
   public Collection<RailEdge> edges() {
     return delegate.edges();
+  }
+
+  /** 透传底层图的 edge 索引查询。 */
+  @Override
+  public Optional<RailEdge> findEdge(EdgeId id) {
+    return delegate.findEdge(id);
   }
 
   /** 查询节点（不应用覆盖）。 */
@@ -113,5 +122,14 @@ public final class EdgeOverrideRailGraph implements RailGraph, RailGraphSectionS
       return support.sectionInfoForEdge(edgeId);
     }
     return Optional.empty();
+  }
+
+  /** 透传底层图的物理联锁状态，避免运维覆盖视图丢失严格互斥资源。 */
+  @Override
+  public RailInterlockingState interlockingState() {
+    if (delegate instanceof RailGraphInterlockingSupport support) {
+      return support.interlockingState();
+    }
+    return RailInterlockingState.unavailable();
   }
 }

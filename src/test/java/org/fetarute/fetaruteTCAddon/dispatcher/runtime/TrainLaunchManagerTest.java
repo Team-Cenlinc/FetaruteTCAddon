@@ -226,6 +226,43 @@ class TrainLaunchManagerTest {
   }
 
   @Test
+  void identicalStationaryAuthorizationsIssueOneLaunchUntilPhysicalProgress() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-stationary-authority");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return true;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0, 0);
+
+    for (int i = 0; i < 1_000; i++) {
+      TrainLaunchManager.ControlApplicationResult result =
+          manager.applyControl(
+              train,
+              tags.properties(),
+              SignalAspect.PROCEED,
+              8.0,
+              config,
+              true,
+              OptionalLong.empty(),
+              Optional.empty(),
+              runtime);
+      assertTrue(result.launchCommandAccepted());
+    }
+
+    assertEquals(1, attempts.get(), "同一静止授权不能在每次重评估中重新写入 launch action");
+  }
+
+  @Test
   void applyControlTreatsAlreadyMovingTrainAsAcceptedLaunch() {
     TrainLaunchManager manager = new TrainLaunchManager();
     TagStore tags = new TagStore("train-already-moving");
@@ -347,9 +384,14 @@ class TrainLaunchManagerTest {
 
   private static ConfigManager.RuntimeSettings runtimeSettings(
       double hysteresisBps, double accelFactor, double decelFactor) {
+    return runtimeSettings(hysteresisBps, accelFactor, decelFactor, 10);
+  }
+
+  private static ConfigManager.RuntimeSettings runtimeSettings(
+      double hysteresisBps, double accelFactor, double decelFactor, int launchCooldownTicks) {
     return new ConfigManager.RuntimeSettings(
         20,
-        10,
+        launchCooldownTicks,
         2,
         1,
         1,

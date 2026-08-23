@@ -15,8 +15,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 /**
  * 单线入口 lookahead 评估器。
  *
- * <p>评估器只读取 {@link MovementPlanSnapshot} 的 canonical expanded path。当前占用窗口看不到出口时，会继续在同一快照的 expanded
- * path 内扩展到 single exit；只有扩展后仍不可见出口，才返回 fail-closed。
+ * <p>评估器只读取 {@link MovementPlanSnapshot} 的 canonical expanded path。当前硬授权窗口看不到出口时，会继续在同一快照的 expanded
+ * path 内定位所需清出点，但拓扑可见性本身不构成通行许可：只有当前 hard authority 已覆盖清出点才返回可行，否则返回所需授权边数并 fail-closed。规范计划明确终止在
+ * single 边界 Station/Depot 时，仅当该行为节点已经位于当前 hard authority 内，才能作为安全停车例外。
  */
 public final class EntryLookaheadEvaluator {
 
@@ -42,6 +43,41 @@ public final class EntryLookaheadEvaluator {
     /** 是否应安全侧阻塞。 */
     public boolean failClosed() {
       return !exitFeasible;
+    }
+
+    /**
+     * 返回本次入口授权至少需要覆盖的有向边数。
+     *
+     * <p>出口仅在 advisory expanded path 中可见时，该值会大于当前 hard window；调用方必须据此重新构建完整硬授权，不能把拓扑可见性直接当成通行许可。
+     */
+    public int requiredHardAuthorityEdgeCount() {
+      return Math.max(exitIndexBeforeExtension, exitIndexAfterExtension);
+    }
+
+    /** 是否已经由当前 hard authority 覆盖到冲突区清出点。 */
+    public boolean hardAuthorityCoversExit() {
+      return entryZoneStartIndex < 0 || (exitFeasible && exitIndexBeforeExtension >= 0);
+    }
+
+    /** 是否已经证明授权末端位于冲突区外的安全停车侧。 */
+    public boolean safeHoldOutsideConflict() {
+      return hardAuthorityCoversExit();
+    }
+
+    /**
+     * 校验冲突区外的授权末端是否同时满足当前制动距离。
+     *
+     * @param distanceToAuthorityEndBlocks 当前物理位置到 hard authority 末端的距离
+     * @param requiredStoppingDistanceBlocks 当前速度、减速度与停车余量推导出的停车距离
+     */
+    public boolean brakingSafeHoldOutsideConflict(
+        double distanceToAuthorityEndBlocks, double requiredStoppingDistanceBlocks) {
+      return safeHoldOutsideConflict()
+          && Double.isFinite(distanceToAuthorityEndBlocks)
+          && Double.isFinite(requiredStoppingDistanceBlocks)
+          && distanceToAuthorityEndBlocks >= 0.0
+          && requiredStoppingDistanceBlocks >= 0.0
+          && distanceToAuthorityEndBlocks + 1.0e-6 >= requiredStoppingDistanceBlocks;
     }
   }
 
@@ -77,6 +113,19 @@ public final class EntryLookaheadEvaluator {
           true,
           "exit-visible-before-extension");
     }
+    if (targetIsSingleRegionBoundary(plan, support, zoneId, entryIndex, windowEdges)) {
+      int boundaryIndex = Math.max(0, plan.expandedPathNodes().size() - 1);
+      return new Result(
+          true,
+          windowNodes,
+          zoneId,
+          entryIndex,
+          boundaryIndex,
+          false,
+          boundaryIndex,
+          true,
+          "exit-is-target-boundary");
+    }
     int maxEdges = Math.max(windowEdges, Math.min(maxLookaheadEdges, edgeCount));
     int exitAfter = firstExitIndex(edges, support, zoneId, entryIndex, maxEdges);
     if (exitAfter >= 0) {
@@ -88,10 +137,11 @@ public final class EntryLookaheadEvaluator {
           -1,
           true,
           exitAfter,
-          true,
-          "exit-visible-after-extension");
+          false,
+          "exit-visible-outside-hard-authority");
     }
     if (targetIsSingleRegionBoundary(plan, support, zoneId, entryIndex, maxEdges)) {
+      int boundaryIndex = Math.max(0, plan.expandedPathNodes().size() - 1);
       return new Result(
           true,
           windowNodes,
@@ -99,9 +149,9 @@ public final class EntryLookaheadEvaluator {
           entryIndex,
           -1,
           true,
-          Math.max(0, plan.expandedPathNodes().size() - 1),
-          true,
-          "exit-is-target-boundary");
+          boundaryIndex,
+          false,
+          "target-boundary-outside-hard-authority");
     }
     return new Result(
         true,

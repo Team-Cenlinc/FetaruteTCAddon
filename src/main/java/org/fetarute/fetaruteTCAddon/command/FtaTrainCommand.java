@@ -738,6 +738,22 @@ public final class FtaTrainCommand {
                 "destination_blocked", diag.destinationPresentWhileBlocked() ? "yes" : "no",
                 "retained_destination", diag.retainedDestination(),
                 "blocked_reason", diag.blockedReason())));
+    plugin
+        .getRuntimeDispatchService()
+        .flatMap(service -> service.getActiveStopState(diag.trainName()))
+        .ifPresent(
+            stopState ->
+                sender.sendMessage(
+                    locale.component(
+                        "command.train.debug.stop",
+                        Map.of(
+                            "reason", stopState.reasonCode(),
+                            "detail", stopState.detail(),
+                            "release", stopState.releaseCondition().name(),
+                            "retry", stopState.retryTrigger().name(),
+                            "invalidates_authority",
+                                String.valueOf(stopState.invalidatesAuthority()),
+                            "blockers", formatStopBlockers(stopState.blockers())))));
     sender.sendMessage(
         Component.text("  ")
             .append(
@@ -763,6 +779,17 @@ public final class FtaTrainCommand {
       return "-";
     }
     return values.stream().limit(6).collect(java.util.stream.Collectors.joining(", "));
+  }
+
+  private static String formatStopBlockers(
+      List<org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState.Blocker> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      return "-";
+    }
+    return blockers.stream()
+        .limit(6)
+        .map(blocker -> blocker.resource() + "@" + blocker.owner() + ":" + blocker.role())
+        .collect(java.util.stream.Collectors.joining(", "));
   }
 
   private static String formatOptionalSpeed(java.util.OptionalDouble bps) {

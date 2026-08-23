@@ -236,7 +236,7 @@ class ConfigManagerTest {
   }
 
   @Test
-  // P0 stabilization 指纹必须证明现场 jar 已包含 recoverable hold 与 retain lifecycle 修复。
+  // 运行时指纹必须证明现场 jar 已包含物理平交联锁与启动占用重建。
   void smartRuntimeBuildFingerprintTraceIncludesPatchLevel() {
     String trace =
         ConfigManager.smartRuntimeBuildFingerprintTrace(
@@ -248,7 +248,10 @@ class ConfigManagerTest {
     assertTrue(trace.contains("pluginVersion=0.0.2"));
     assertTrue(trace.contains("gitCommit=e56dd0e"));
     assertTrue(trace.contains("buildTime=build-e56dd0e-260525"));
-    assertTrue(trace.contains("dispatcherPatchLevel=P0_SIGNAL_RETAIN_DISPATCHER"));
+    assertTrue(trace.contains("dispatcherPatchLevel=P2_PHYSICAL_TOPOLOGY_QUERY_INDEX"));
+    assertTrue(trace.contains("physicalInterlockingFootprint=true"));
+    assertTrue(trace.contains("liveFootprintReverseIndex=true"));
+    assertTrue(trace.contains("startupOccupancyReconstruction=true"));
     assertTrue(trace.contains("recoverableHoldContainsRouteStopOrTerminal=true"));
   }
 }

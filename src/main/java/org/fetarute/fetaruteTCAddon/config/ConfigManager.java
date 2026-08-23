@@ -389,7 +389,10 @@ public final class ConfigManager {
         + gitCommit.filter(value -> !value.isBlank()).orElse("unknown")
         + " buildTime="
         + buildTime.filter(value -> !value.isBlank()).orElse("unknown")
-        + " dispatcherPatchLevel=P0_SIGNAL_RETAIN_DISPATCHER"
+        + " dispatcherPatchLevel=P2_PHYSICAL_TOPOLOGY_QUERY_INDEX"
+        + " physicalInterlockingFootprint=true"
+        + " liveFootprintReverseIndex=true"
+        + " startupOccupancyReconstruction=true"
         + " recoverableHoldContainsRouteStopOrTerminal=true";
   }
 

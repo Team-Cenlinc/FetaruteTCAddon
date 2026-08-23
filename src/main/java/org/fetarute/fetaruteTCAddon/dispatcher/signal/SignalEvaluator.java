@@ -1,272 +1,225 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
-import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
-import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyQueueChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
-import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 
 /**
- * 信号评估器。
+ * 占用事实到完整信号重评估的事件桥。
  *
- * <p>订阅占用变化事件，在资源状态变化时重新评估受影响列车的信号。
+ * <p>资源释放，或已记录的 Gate Queue 队首资格变化，才可能使列车获得新的 Movement Authority 候选。资源获取与普通队列维护会改变内部记录， 但不会让任何等待列车从
+ * blocked 变为 eligible；把它们当作 wake-up 会在同一份现场事实下反复执行完整授权。本类因此只将释放资源或精确资格变化中 已登记的队首交给下一 tick
+ * 的完整运行时重评估入口。
  *
- * <p>职责：
- *
- * <ul>
- *   <li>订阅 {@link OccupancyAcquiredEvent} 和 {@link OccupancyReleasedEvent}
- *   <li>根据事件中的 affectedTrains 列表，重新评估这些列车的信号状态
- *   <li>若信号变化，发布 {@link SignalChangedEvent}
- * </ul>
- *
- * <p>此组件将"主动查询"改为"被动推送"，减少周期性 tick 的频率需求。
+ * <p>实际合并、去重和防重入由 {@link RuntimeSignalReevaluationScheduler} 承担；Gate Queue 仍是唯一 winner 来源。
  */
-public class SignalEvaluator {
+public final class SignalEvaluator {
 
   private final SignalEventBus eventBus;
-  private final OccupancyManager occupancyManager;
-  private final TrainRequestProvider requestProvider;
+  private final WaitingTrainProvider waitingTrainProvider;
+  private final Consumer<String> reevaluationRequester;
+  private final BiConsumer<String, Throwable> failureHandler;
   private final Consumer<String> debugLogger;
 
-  /** 缓存每个列车的上次信号状态，用于检测变化。 */
-  private final Map<String, SignalAspect> lastSignalCache = new ConcurrentHashMap<>();
-
-  private SignalEventBus.Subscription acquiredSubscription;
+  private SignalEventBus.Subscription queueChangedSubscription;
   private SignalEventBus.Subscription releasedSubscription;
 
   /**
-   * 构建信号评估器。
+   * 构建占用事件桥。
    *
    * @param eventBus 事件总线
-   * @param occupancyManager 占用管理器
-   * @param requestProvider 列车请求构建器（用于为受影响列车构建 OccupancyRequest）
+   * @param waitingTrainProvider 等待列车查询器
+   * @param reevaluationRequester 下一 tick 完整重评估请求入口
    */
   public SignalEvaluator(
       SignalEventBus eventBus,
-      OccupancyManager occupancyManager,
-      TrainRequestProvider requestProvider) {
-    this(eventBus, occupancyManager, requestProvider, msg -> {});
+      WaitingTrainProvider waitingTrainProvider,
+      Consumer<String> reevaluationRequester) {
+    this(
+        eventBus,
+        waitingTrainProvider,
+        reevaluationRequester,
+        (trainName, error) -> {},
+        message -> {});
   }
 
   /**
-   * 构建信号评估器。
+   * 构建占用事件桥。
    *
    * @param eventBus 事件总线
-   * @param occupancyManager 占用管理器
-   * @param requestProvider 列车请求构建器
+   * @param waitingTrainProvider 等待列车查询器
+   * @param reevaluationRequester 下一 tick 完整重评估请求入口
    * @param debugLogger 调试日志输出
    */
   public SignalEvaluator(
       SignalEventBus eventBus,
-      OccupancyManager occupancyManager,
-      TrainRequestProvider requestProvider,
+      WaitingTrainProvider waitingTrainProvider,
+      Consumer<String> reevaluationRequester,
+      Consumer<String> debugLogger) {
+    this(
+        eventBus,
+        waitingTrainProvider,
+        reevaluationRequester,
+        (trainName, error) -> {},
+        debugLogger);
+  }
+
+  /**
+   * 构建带 fail-closed 故障边界的占用事件桥。
+   *
+   * @param eventBus 事件总线
+   * @param waitingTrainProvider 等待列车查询器
+   * @param reevaluationRequester 下一 tick 完整重评估请求入口
+   * @param failureHandler 同步等待查询失败后的 fail-closed 回调
+   * @param debugLogger 调试日志输出
+   */
+  public SignalEvaluator(
+      SignalEventBus eventBus,
+      WaitingTrainProvider waitingTrainProvider,
+      Consumer<String> reevaluationRequester,
+      BiConsumer<String, Throwable> failureHandler,
       Consumer<String> debugLogger) {
     this.eventBus = Objects.requireNonNull(eventBus, "eventBus");
-    this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
-    this.requestProvider = Objects.requireNonNull(requestProvider, "requestProvider");
-    this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
-    SignalComputationTrace.configureLogger(this.debugLogger);
+    this.waitingTrainProvider =
+        Objects.requireNonNull(waitingTrainProvider, "waitingTrainProvider");
+    this.reevaluationRequester =
+        Objects.requireNonNull(reevaluationRequester, "reevaluationRequester");
+    this.failureHandler = Objects.requireNonNull(failureHandler, "failureHandler");
+    this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
   }
 
-  /** 启动评估器，订阅事件。 */
+  /** 启动事件桥，订阅占用事实。 */
   public void start() {
-    if (acquiredSubscription != null) {
-      return; // 已启动
+    if (releasedSubscription != null) {
+      return;
     }
-    acquiredSubscription = eventBus.subscribe(OccupancyAcquiredEvent.class, this::onAcquired);
+    queueChangedSubscription =
+        eventBus.subscribe(OccupancyQueueChangedEvent.class, this::onQueueChanged);
     releasedSubscription = eventBus.subscribe(OccupancyReleasedEvent.class, this::onReleased);
-    debugLogger.accept("SignalEvaluator 已启动");
+    debugLogger.accept("占用事件信号重评估桥已启动");
   }
 
-  /** 停止评估器，取消订阅。 */
+  /** 停止事件桥并取消订阅。 */
   public void stop() {
-    if (acquiredSubscription != null) {
-      acquiredSubscription.unsubscribe();
-      acquiredSubscription = null;
-    }
     if (releasedSubscription != null) {
       releasedSubscription.unsubscribe();
       releasedSubscription = null;
     }
-    lastSignalCache.clear();
-    debugLogger.accept("SignalEvaluator 已停止");
+    if (queueChangedSubscription != null) {
+      queueChangedSubscription.unsubscribe();
+      queueChangedSubscription = null;
+    }
+    debugLogger.accept("占用事件信号重评估桥已停止");
   }
 
-  /** 处理占用获取事件：重新评估受影响列车。 */
-  private void onAcquired(OccupancyAcquiredEvent event) {
-    if (event == null) {
-      return;
-    }
-    List<String> affected = event.affectedTrains();
-    if (affected == null || affected.isEmpty()) {
-      return;
-    }
-    Instant now = event.timestamp();
-    for (String trainName : affected) {
-      reevaluate(trainName, now);
-    }
-  }
-
-  /** 处理占用释放事件：资源释放后，所有等待该资源的列车需重新评估。 */
   private void onReleased(OccupancyReleasedEvent event) {
-    if (event == null) {
+    if (event == null || event.releasedResources().isEmpty()) {
       return;
     }
-    // 获取等待释放资源的列车列表
-    List<String> waitingTrains = requestProvider.trainsWaitingFor(event.releasedResources());
+    requestWaitingTrains(event.releasedResources(), event.trainName(), true, "occupancy-released");
+  }
+
+  private void onQueueChanged(OccupancyQueueChangedEvent event) {
+    if (event == null || event.eligibleTrainNames().isEmpty()) {
+      return;
+    }
+    requestAffectedTrains(
+        event.eligibleTrainNames(), event.sourceTrainName(), true, "occupancy-queue-eligible");
+  }
+
+  private void requestWaitingTrains(
+      List<OccupancyResource> resources,
+      String sourceTrainName,
+      boolean excludeSourceTrain,
+      String source) {
+    List<String> waitingTrains;
+    try {
+      waitingTrains = waitingTrainProvider.trainsWaitingFor(resources);
+    } catch (RuntimeException | LinkageError error) {
+      notifyFailure(sourceTrainName, error);
+      safeDebug(
+          "占用仲裁等待列车查询失败: train="
+              + sourceTrainName
+              + " source="
+              + source
+              + " error="
+              + error.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(error.getMessage()));
+      return;
+    }
     if (waitingTrains == null || waitingTrains.isEmpty()) {
       return;
     }
-    Instant now = event.timestamp();
-    for (String trainName : waitingTrains) {
-      reevaluate(trainName, now);
+    requestAffectedTrains(waitingTrains, sourceTrainName, excludeSourceTrain, source);
+  }
+
+  private void requestAffectedTrains(
+      List<String> trainNames, String sourceTrainName, boolean excludeSourceTrain, String source) {
+    for (String trainName : trainNames) {
+      if (trainName == null
+          || trainName.isBlank()
+          || (excludeSourceTrain
+              && TrainNameNormalizer.sameLogicalTrain(trainName, sourceTrainName))) {
+        continue;
+      }
+      try {
+        reevaluationRequester.accept(trainName);
+      } catch (RuntimeException | LinkageError error) {
+        notifyFailure(trainName, error);
+        safeDebug(
+            "信号完整重评估请求失败: train="
+                + trainName
+                + " source="
+                + source
+                + " error="
+                + error.getClass().getSimpleName()
+                + ":"
+                + String.valueOf(error.getMessage()));
+      }
     }
   }
 
-  /**
-   * 重新评估指定列车的信号状态。
-   *
-   * <p>若信号变化，发布 {@link SignalChangedEvent}。
-   */
-  private void reevaluate(String trainName, Instant now) {
-    if (trainName == null || trainName.isBlank()) {
-      return;
-    }
-    Optional<OccupancyRequest> requestOpt = requestProvider.buildRequest(trainName, now);
-    if (requestOpt.isEmpty()) {
-      // 列车不存在或无法构建请求
-      lastSignalCache.remove(trainName);
-      return;
-    }
-    OccupancyRequest request = requestOpt.get();
-    OccupancyDecision decision = previewDecision(request);
-    SignalAspect computedSignal = decision.signal();
-    SignalAspect previous = lastSignalCache.get(trainName);
-    SignalPublicationGate.Decision publication =
-        SignalPublicationGate.evaluate(
-            new SignalPublicationGate.Input(
-                request,
-                computedSignal,
-                false,
-                SignalComputationTrace.TokenState.NONE,
-                decision.conflictRelease(),
-                decision.conflictRelease()
-                    && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING,
-                false,
-                false,
-                false,
-                false,
-                request.movementPlanSnapshot().map(plan -> plan.routeIndex() == 0).orElse(false),
-                true,
-                true,
-                "-"));
-    boolean publishSuppressed = publication.blocked();
-    Optional<SignalAspect> publishedSignal =
-        publishSuppressed ? Optional.empty() : Optional.of(publication.visibleAspect());
-    SignalAspect traceAspect =
-        publishedSignal.orElse(previous != null ? previous : SignalAspect.STOP);
-    SignalComputationTrace.emit(
-        SignalComputationTrace.builder(
-                trainName, trainName, SignalComputationTrace.Source.EVENT, traceAspect)
-            .previousAspect(previous)
-            .primaryReason("signal-evaluator-preview:" + decision.reason())
-            .field("signalDecisionInputType", publication.inputType())
-            .field("computedAspect", computedSignal)
-            .field("publicationGateAspect", publication.visibleAspect())
-            .field("publicationGateReason", publication.reason())
-            .field("publishedAspect", publishedSignal.map(Enum::name).orElse("PRESERVE"))
-            .field("publishSuppressed", publishSuppressed)
-            .request(request)
-            .decision(decision, request),
-        debugLogger);
-
-    if (publishedSignal.isEmpty()) {
-      return;
-    }
-    SignalAspect newSignal = publishedSignal.get();
-    if (previous == null || previous != newSignal) {
-      lastSignalCache.put(trainName, newSignal);
-      SignalChangedEvent changeEvent = new SignalChangedEvent(now, trainName, previous, newSignal);
-      eventBus.publish(changeEvent);
-      debugLogger.accept(
-          "信号变化(事件): train="
+  private void notifyFailure(String trainName, Throwable error) {
+    try {
+      failureHandler.accept(trainName, error);
+    } catch (RuntimeException | LinkageError handlerError) {
+      safeDebug(
+          "信号事件桥故障处理失败: train="
               + trainName
-              + " "
-              + (previous != null ? previous : "null")
-              + " -> "
-              + newSignal);
+              + " error="
+              + handlerError.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(handlerError.getMessage()));
     }
   }
 
-  /** 更新列车信号缓存（供外部同步调用，如周期性 tick 兜底）。 */
-  public void updateCache(String trainName, SignalAspect signal) {
-    if (trainName != null && signal != null) {
-      lastSignalCache.put(trainName, signal);
-    }
-  }
-
-  /** 获取列车上次信号状态（用于诊断）。 */
-  public Optional<SignalAspect> lastSignal(String trainName) {
-    return Optional.ofNullable(lastSignalCache.get(trainName));
-  }
-
-  /**
-   * 事件评估只负责判断是否需要触发一次更严格信号刷新，不能写入冲突队列。
-   *
-   * <p>真实放行/排队由 {@code RuntimeDispatchService#handleSignalTick} 执行；这里禁止调用带副作用的 {@link
-   * OccupancyManager#canEnter(OccupancyRequest)}，否则会在没有实体申请的事件链路里留下队列项，进而造成后续异常 STOP。 若占用管理器没有只读
-   * preview 能力，则保守返回 STOP。
-   */
-  private OccupancyDecision previewDecision(OccupancyRequest request) {
-    if (occupancyManager instanceof OccupancyPreviewSupport preview) {
-      return preview.canEnterPreview(request);
-    }
-    return new OccupancyDecision(false, request.now(), SignalAspect.STOP, List.of());
-  }
-
-  /** 清除列车信号缓存（列车销毁时调用）。 */
-  public void clearCache(String trainName) {
-    if (trainName != null) {
-      lastSignalCache.remove(trainName);
+  private void safeDebug(String message) {
+    try {
+      debugLogger.accept(message);
+    } catch (RuntimeException | LinkageError ignored) {
+      // 日志不可用不能打断同步 occupancy 事件栈，也不能阻止同批其他列车进入 fail-closed。
     }
   }
 
   /**
-   * 列车请求提供者接口。
+   * 等待列车查询器接口。
    *
-   * <p>用于为受影响列车构建 {@link OccupancyRequest}，以及查询等待特定资源的列车列表。
+   * <p>事件桥只读取资源释放后应重新评估的列车。它不构建 preview 请求，也不参与 Movement Authority、资源取得或信号发布。
    */
-  public interface TrainRequestProvider {
-
+  public interface WaitingTrainProvider {
     /**
-     * 为指定列车构建占用请求。
+     * 返回已释放资源上当前 Gate Queue 队首。
      *
-     * @param trainName 列车名
-     * @param now 当前时间
-     * @return 请求（列车不存在时返回空）
+     * @param resources 已释放资源
+     * @return 获得重新授权机会的逻辑列车名
      */
-    Optional<OccupancyRequest> buildRequest(String trainName, Instant now);
-
-    /**
-     * 获取等待指定资源的列车列表。
-     *
-     * @param resources 已释放的资源列表
-     * @return 等待这些资源的列车名列表
-     */
-    List<String> trainsWaitingFor(
-        List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource>
-            resources);
+    List<String> trainsWaitingFor(List<OccupancyResource> resources);
   }
 }

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
 import java.util.Objects;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
@@ -30,7 +31,7 @@ public final class SignalPublicationGate {
       boolean pathDrainingTowardExit,
       boolean ordinaryDeparture,
       boolean topologyExitHintOnly,
-      boolean pathHardBlockersClear,
+      OccupancyDecision occupancyDecision,
       String incident) {
 
     public Input {
@@ -38,6 +39,16 @@ public final class SignalPublicationGate {
       movementTokenState =
           movementTokenState == null ? SignalComputationTrace.TokenState.NONE : movementTokenState;
       incident = incident == null || incident.isBlank() ? "-" : incident.trim();
+    }
+
+    /**
+     * 返回占用层已经确认可以赋予行车授权的事实。
+     *
+     * <p>冲突清空进路可能保留已被精确认证的 blocker 作为审计信息，因此不能以 blocker 列表是否为空代替该判断；只有 {@link
+     * OccupancyDecision#allowed()} 才能把这项事实传递给信号发布门。
+     */
+    boolean occupancyAuthorityAllowed() {
+      return occupancyDecision != null && occupancyDecision.allowed();
     }
   }
 
@@ -115,11 +126,15 @@ public final class SignalPublicationGate {
         || inputType == SignalDecisionInputType.UNKNOWN) {
       return BlockResult.hard("input-type-" + inputType.name().toLowerCase(java.util.Locale.ROOT));
     }
+    if (!input.occupancyAuthorityAllowed()) {
+      return BlockResult.hard("occupancy-not-allowed");
+    }
     if (input.movementInhibited()) {
       return BlockResult.hard("movement-inhibited");
     }
-    if (input.movementTokenState() == SignalComputationTrace.TokenState.INVALID) {
-      return BlockResult.hard("movement-token-invalid");
+    if (input.candidateAspect().requiresActiveMovementAuthority()
+        && input.movementTokenState() != SignalComputationTrace.TokenState.ACTIVE) {
+      return BlockResult.hard("movement-token-not-active");
     }
     if (inputType == SignalDecisionInputType.DRAIN_THROUGH) {
       if (!input.drainLeader()) {
@@ -131,9 +146,10 @@ public final class SignalPublicationGate {
     }
     if (!SignalDecisionInputClassifier.mayPublishProceed(
         request,
+        inputType,
         input.drainLeader(),
         input.drainAuthorityActive(),
-        input.pathHardBlockersClear(),
+        input.occupancyAuthorityAllowed(),
         input.movementInhibited(),
         input.movementTokenState(),
         false)) {

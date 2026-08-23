@@ -151,7 +151,12 @@ public record DirectedTraversalContext(
     }
   }
 
-  /** 道岔区路径签名；本轮先作为诊断字段，不改变 switcher 共享语义。 */
+  /**
+   * 道岔区路径签名。
+   *
+   * <p>除诊断外，实体 switcher 出清模块会把该签名与 current/effective node、首条有向边及精确 conflict key
+   * 交叉验证；签名本身不授予放行资格，也不改变 switcher 共享语义。
+   */
   public record SwitcherPathSignature(String switcherKey, List<NodeId> pathNodes) {
     public SwitcherPathSignature {
       switcherKey = switcherKey == null ? "" : switcherKey.trim();

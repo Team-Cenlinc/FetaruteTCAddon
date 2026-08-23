@@ -15,10 +15,14 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -30,11 +34,44 @@ import org.junit.jupiter.api.Test;
 final class EdgeOverrideRailGraphTest {
 
   @Test
+  void preservesPhysicalInterlockingStateWhenOverridesAreApplied() {
+    EdgeId first = EdgeId.undirected(NodeId.of("A1"), NodeId.of("A2"));
+    EdgeId second = EdgeId.undirected(NodeId.of("B1"), NodeId.of("B2"));
+    RailFootprintCell crossing = new RailFootprintCell(4, 8, 12);
+    RailInterlockingState state =
+        RailInterlockingState.from(
+            UUID.fromString("11111111-2222-3333-4444-555555555555"),
+            Set.of(first, second),
+            Map.of(
+                first, new RailEdgeFootprint(1, true, Set.of(crossing)),
+                second, new RailEdgeFootprint(1, true, Set.of(crossing))));
+    RailGraph base = new SimpleRailGraph(Map.of(), Map.of(), Set.of(), state);
+    RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
+
+    assertEquals(
+        state.zoneKeysForEdge(first),
+        ((RailGraphInterlockingSupport) wrapped).interlockingState().zoneKeysForEdge(first));
+  }
+
+  @Test
   void delegatesToUnderlyingGraphWhenNoOverrides() {
     EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
     RailGraph base = graph(edgeId, false);
     RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
     assertFalse(wrapped.isBlocked(edgeId));
+  }
+
+  @Test
+  void indexedEdgeLookupNormalizesOrientationAndSurvivesOverrideWrapping() {
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+    EdgeId reversed = new EdgeId(edgeId.b(), edgeId.a());
+    RailGraph base = graph(edgeId, false);
+    RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
+
+    RailEdge expected = base.findEdge(edgeId).orElseThrow();
+
+    assertEquals(Optional.of(expected), base.findEdge(reversed));
+    assertEquals(Optional.of(expected), wrapped.findEdge(reversed));
   }
 
   @Test

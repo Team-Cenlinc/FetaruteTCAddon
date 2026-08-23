@@ -10,14 +10,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ExpandedPathPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.MovementPlanSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SwitcherMovementTopology;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -48,6 +54,82 @@ class SmartWaitForPlannerTest {
     assertTrue(
         result.traceLines().stream()
             .anyMatch(line -> line.contains("SMART_DISPATCH_PLAN_SELECTED")));
+  }
+
+  @Test
+  void splitAliasesOfSameLogicalTrainCannotFormWaitForCycle() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "SURC-MT-LP-3108",
+                        "SURC-MT-LP-3108~1",
+                        "CONFLICT:single:LP",
+                        CorridorDirection.A_TO_B),
+                    edge(
+                        "SURC-MT-LP-3108~1",
+                        "SURC-MT-LP-3108",
+                        "CONFLICT:single:LP",
+                        CorridorDirection.A_TO_B)),
+                Map.of(
+                    "SURC-MT-LP-3108", state("SURC-MT-LP-3108", 20),
+                    "SURC-MT-LP-3108~1", state("SURC-MT-LP-3108~1", 20))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertTrue(result.candidates().isEmpty());
+    assertFalse(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_DISPATCH_CYCLE_DETECTED")));
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_WAIT_FOR_GRAPH")
+                        && line.contains("edges=0")
+                        && line.contains("rejectedEdges=2")));
+    assertEquals(
+        2,
+        result.traceLines().stream()
+            .filter(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_REJECTED")
+                        && line.contains("reason=self-owned-edge"))
+            .count());
+  }
+
+  @Test
+  void physicalInterlockingCycleNeverProducesSpeculativeUnlockPlan() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "crossing-A",
+                        "crossing-B",
+                        "CONFLICT:interlocking:0123456789abcdef",
+                        CorridorDirection.A_TO_B),
+                    edge(
+                        "crossing-B",
+                        "crossing-A",
+                        "CONFLICT:interlocking:0123456789abcdef",
+                        CorridorDirection.A_TO_B)),
+                Map.of(
+                    "crossing-A", state("crossing-A", 20),
+                    "crossing-B", state("crossing-B", 40))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertFalse(result.candidates().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .allMatch(
+                candidate ->
+                    !candidate.accepted()
+                        && candidate
+                            .rejectReason()
+                            .equals("PHYSICAL_INTERLOCKING_NON_SPECULATIVE")));
   }
 
   @Test
@@ -261,6 +343,128 @@ class SmartWaitForPlannerTest {
   }
 
   @Test
+  void multiBranchSwitcherMergeUsesTopologyInsteadOfCorridorDirection() {
+    SwitcherMovementTopology.Classification dsAgainstMt =
+        jbsMerge("SURC:S:JBS:1:001", "SURC:S:JBS:3:001");
+    SwitcherMovementTopology.Classification mtAgainstDs =
+        jbsMerge("SURC:S:JBS:3:001", "SURC:S:JBS:1:001");
+    List<SmartWaitForPlanner.InputEdge> edges =
+        List.of(
+            switcherEdge(
+                "SURC-DS-LW-5912",
+                "SURC-MT-LO-3495",
+                "NODE:SWITCHER:Towny:-520:77:1390",
+                dsAgainstMt),
+            switcherEdge(
+                "SURC-MT-LO-3495",
+                "SURC-DS-LW-5912",
+                "CONFLICT:switcher:SWITCHER:Towny:-520:77:1390",
+                mtAgainstDs));
+    Map<String, SmartWaitForPlanner.TrainState> states =
+        Map.of(
+            "SURC-DS-LW-5912", stateWithoutDirectionEvidence("SURC-DS-LW-5912", 20),
+            "SURC-MT-LO-3495", stateWithoutDirectionEvidence("SURC-MT-LO-3495", 40));
+
+    SmartWaitForPlanner.PlanResult result = planner.plan(input(enforceSettings(), edges, states));
+    SmartWaitForPlanner.PlanResult reversed =
+        planner.plan(input(enforceSettings(), List.of(edges.get(1), edges.get(0)), states));
+
+    assertTrue(result.selectedPlan().isEmpty(), "merge 目前只交回 Gate Queue 仲裁");
+    assertFalse(result.directionAuditNeeded());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_SWITCHER_MERGE_DETECTED")
+                        && line.contains("currentConflictOwner=SURC-DS-LW-5912")
+                        && line.contains("otherTrain=SURC-MT-LO-3495")));
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains(
+                        "SMART_DISPATCH_FALLBACK_NOT_READY"
+                            + " reason=SWITCHER_MERGE_EXECUTOR_NOT_READY")));
+    assertEquals(
+        result.traceLines().stream()
+            .filter(line -> line.contains("SMART_DISPATCH_SWITCHER_MERGE_DETECTED"))
+            .toList(),
+        reversed.traceLines().stream()
+            .filter(line -> line.contains("SMART_DISPATCH_SWITCHER_MERGE_DETECTED"))
+            .toList());
+  }
+
+  @Test
+  void switcherMergeWithoutTopologyStillRequiresDirectionAudit() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "SURC-DS-LW-5912",
+                        "SURC-MT-LO-3495",
+                        "NODE:SWITCHER:Towny:-520:77:1390",
+                        CorridorDirection.UNKNOWN),
+                    edge(
+                        "SURC-MT-LO-3495",
+                        "SURC-DS-LW-5912",
+                        "CONFLICT:switcher:SWITCHER:Towny:-520:77:1390",
+                        CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "SURC-DS-LW-5912", stateWithoutDirectionEvidence("SURC-DS-LW-5912", 20),
+                    "SURC-MT-LO-3495", stateWithoutDirectionEvidence("SURC-MT-LO-3495", 40))));
+
+    assertTrue(result.directionAuditNeeded());
+    assertFalse(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_DISPATCH_SWITCHER_MERGE_DETECTED")));
+  }
+
+  @Test
+  void switcherMergeEvidenceDoesNotHideAdditionalHardBlocker() {
+    SwitcherMovementTopology.Classification dsAgainstMt =
+        jbsMerge("SURC:S:JBS:1:001", "SURC:S:JBS:3:001");
+    SwitcherMovementTopology.Classification mtAgainstDs =
+        jbsMerge("SURC:S:JBS:3:001", "SURC:S:JBS:1:001");
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    switcherEdge(
+                        "SURC-DS-LW-5912",
+                        "SURC-MT-LO-3495",
+                        "NODE:SWITCHER:Towny:-520:77:1390",
+                        dsAgainstMt),
+                    switcherEdge(
+                        "SURC-MT-LO-3495",
+                        "SURC-DS-LW-5912",
+                        "CONFLICT:switcher:SWITCHER:Towny:-520:77:1390",
+                        mtAgainstDs),
+                    edge(
+                        "SURC-DS-LW-5912",
+                        "SURC-MT-LO-3495",
+                        "EDGE:SURC:JBS:CSB:2:001~SURC:JBS:CSB:2:002",
+                        CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "SURC-DS-LW-5912", stateWithoutDirectionEvidence("SURC-DS-LW-5912", 20),
+                    "SURC-MT-LO-3495", stateWithoutDirectionEvidence("SURC-MT-LO-3495", 40))));
+
+    assertTrue(result.directionAuditNeeded());
+    assertFalse(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_DISPATCH_SWITCHER_MERGE_DETECTED")));
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains(
+                        "SMART_DISPATCH_FALLBACK_NOT_READY"
+                            + " reason=INSUFFICIENT_DIRECTION_EVIDENCE")));
+  }
+
+  @Test
   void graphOnlySimulationLogsConfidence() {
     SmartWaitForPlanner.PlanResult result =
         planner.plan(
@@ -291,6 +495,41 @@ class SmartWaitForPlannerTest {
             Map.of("WS-A", state("WS-A", 20), "WS-B", state("WS-B", 40)));
 
     assertEquals(planner.plan(input).throttleKey(), planner.plan(input).throttleKey());
+  }
+
+  @Test
+  void activeReservationCycleCannotStarveAnotherExecutableCycle() {
+    List<SmartWaitForPlanner.InputEdge> edges =
+        List.of(
+            edge("A-1", "A-2", "CONFLICT:single:A", CorridorDirection.A_TO_B),
+            edge("A-2", "A-1", "CONFLICT:single:A", CorridorDirection.A_TO_B),
+            edge("B-1", "B-2", "CONFLICT:single:B", CorridorDirection.A_TO_B),
+            edge("B-2", "B-1", "CONFLICT:single:B", CorridorDirection.A_TO_B));
+    Map<String, SmartWaitForPlanner.TrainState> states =
+        Map.of(
+            "A-1", state("A-1", 100),
+            "A-2", state("A-2", 90),
+            "B-1", state("B-1", 20),
+            "B-2", state("B-2", 10));
+    SmartWaitForPlanner.PlannerInput input =
+        new SmartWaitForPlanner.PlannerInput(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            enforceSettings(),
+            edges,
+            states,
+            Set.of("mutual:A-1|A-2"),
+            Set.of("A-1"));
+
+    SmartWaitForPlanner.PlanResult result = planner.plan(input);
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertEquals("mutual:B-1|B-2", result.selectedPlan().orElseThrow().cycleId());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_ACTIVE_RESERVATION_SKIPPED")
+                        && line.contains("cycleId=mutual:A-1|A-2")));
   }
 
   @Test
@@ -548,7 +787,7 @@ class SmartWaitForPlannerTest {
       List<SmartWaitForPlanner.InputEdge> edges,
       Map<String, SmartWaitForPlanner.TrainState> states) {
     return new SmartWaitForPlanner.PlannerInput(
-        Instant.parse("2026-01-01T00:00:00Z"), settings, edges, states, Set.of());
+        Instant.parse("2026-01-01T00:00:00Z"), settings, edges, states, Set.of(), Set.of());
   }
 
   private static SmartWaitForPlanner.PlannerSettings enforceSettings() {
@@ -583,6 +822,68 @@ class SmartWaitForPlannerTest {
         direction,
         ageMs,
         true);
+  }
+
+  private static SmartWaitForPlanner.InputEdge switcherEdge(
+      String blocked,
+      String blocker,
+      String resource,
+      SwitcherMovementTopology.Classification movement) {
+    return new SmartWaitForPlanner.InputEdge(
+        blocked,
+        blocker,
+        resource,
+        resourceKind(resource),
+        "HARD_OCCUPANCY",
+        "MOVEMENT_REQUIRED",
+        "MOVEMENT_REQUIRED",
+        "test",
+        CorridorDirection.UNKNOWN,
+        Optional.of(movement),
+        10,
+        true);
+  }
+
+  private static SwitcherMovementTopology.Classification jbsMerge(
+      String firstIngress, String secondIngress) {
+    String switcherNode = "SWITCHER:Towny:-520:77:1390";
+    OccupancyResource switcher = OccupancyResource.forConflict("switcher:" + switcherNode);
+    return SwitcherMovementTopology.classify(
+        switcher,
+        switcherPlan("first", switcher, firstIngress, switcherNode),
+        switcherPlan("second", switcher, secondIngress, switcherNode));
+  }
+
+  private static Optional<MovementPlanSnapshot> switcherPlan(
+      String train, OccupancyResource switcher, String ingress, String switcherNode) {
+    List<NodeId> path =
+        List.of(NodeId.of(ingress), NodeId.of(switcherNode), NodeId.of("SURC:JBS:CSB:2:001"));
+    List<DirectedTraversalContext.DirectedEdge> directedEdges =
+        List.of(
+            new DirectedTraversalContext.DirectedEdge(
+                EdgeId.undirected(path.get(0), path.get(1)), path.get(0), path.get(1)),
+            new DirectedTraversalContext.DirectedEdge(
+                EdgeId.undirected(path.get(1), path.get(2)), path.get(1), path.get(2)));
+    return Optional.of(
+        new MovementPlanSnapshot(
+            train,
+            Optional.empty(),
+            0,
+            Optional.of(path.get(0)),
+            Optional.empty(),
+            Optional.of(path.get(0)),
+            Optional.of(path.get(1)),
+            new ExpandedPathPlan(
+                path,
+                directedEdges,
+                Map.of(),
+                Map.of(
+                    switcher.key(),
+                    new DirectedTraversalContext.SwitcherPathSignature(switcher.key(), path))),
+            List.of(switcher),
+            1L,
+            1L,
+            "planner-" + train));
   }
 
   private static String resourceKind(String resource) {

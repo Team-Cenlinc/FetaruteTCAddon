@@ -3,7 +3,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
@@ -15,8 +14,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * 确定性智能调度监督器。
  *
  * <p>本类不接管 TrainCarts 物理控制，也不绕过 {@code SignalPublicationGate}。它只基于全局快照、前方风险与 blocker graph
- * 输出可追踪的调度建议：提前 CAUTION、优先级排序、stale 清理候选、forward unlock 候选和 destroy 前置审查。所有排序均使用稳定字段，禁止依赖 HashMap
- * 遍历顺序或随机数。
+ * 输出可追踪的调度建议：提前 CAUTION、stale 清理候选、forward unlock 候选和 destroy 前置审查。资源竞争优先级由运行时 {@code
+ * DispatchPriorityResolver} 与占用层 Gate Queue 统一仲裁，本类不维护第二套评分模型。
  */
 public final class SmartDispatcherController {
 
@@ -81,53 +80,6 @@ public final class SmartDispatcherController {
       pendingLayoverTicketCount = Math.max(0, pendingLayoverTicketCount);
       backlogTicketCount = Math.max(0, backlogTicketCount);
       trainIds = sortedCopy(trainIds);
-    }
-  }
-
-  /** 单列车优先级输入。 */
-  public record PriorityInput(
-      String trainId,
-      String resourceId,
-      boolean insideConflict,
-      OptionalLong distanceToConflictExit,
-      boolean freshMovementAuthority,
-      boolean compatibleSelfClaim,
-      double currentSpeedBps,
-      Duration waitingDuration,
-      int routePriority,
-      boolean dwellReadyToDepart,
-      int downstreamBlockedTrainCount,
-      boolean safeToMove) {
-
-    public PriorityInput {
-      trainId = normalize(trainId, "-");
-      resourceId = normalize(resourceId, "-");
-      distanceToConflictExit =
-          distanceToConflictExit == null ? OptionalLong.empty() : distanceToConflictExit;
-      currentSpeedBps =
-          Double.isFinite(currentSpeedBps) && currentSpeedBps > 0.0 ? currentSpeedBps : 0.0;
-      waitingDuration =
-          waitingDuration == null || waitingDuration.isNegative() ? Duration.ZERO : waitingDuration;
-      routePriority = Math.max(0, routePriority);
-      downstreamBlockedTrainCount = Math.max(0, downstreamBlockedTrainCount);
-    }
-  }
-
-  /** 确定性优先级评分。 */
-  public record PriorityScore(
-      String trainId, String resourceId, int score, List<String> reasons, boolean safeToMove) {
-
-    public PriorityScore {
-      trainId = normalize(trainId, "-");
-      resourceId = normalize(resourceId, "-");
-      reasons = reasons == null ? List.of() : List.copyOf(reasons);
-    }
-  }
-
-  /** 同一资源竞争的 winner/loser 输出。 */
-  public record PrioritySelection(PriorityScore winner, List<PriorityScore> losers) {
-    public PrioritySelection {
-      losers = losers == null ? List.of() : List.copyOf(losers);
     }
   }
 
@@ -269,8 +221,8 @@ public final class SmartDispatcherController {
   /**
    * 根据前方风险与制动能力输出调度决策。
    *
-   * <p>该方法不会因为 stale/unknown 风险直接输出 STOP；只有已经进入紧急停车距离、硬安全边界失败或调用方显式传入 {@code directStopAllowed}
-   * 时才返回 {@link DispatchAction#HOLD_AT_SIGNAL}。
+   * <p>该方法不会因为 stale/unknown 风险直接输出 STOP。计划中的 RouteStop/终点只提供减速建议，实际停站由对应的站点或终点运行时行为完成；只有真实 blocker
+   * 等硬安全边界已进入紧急停车距离，或调用方显式传入 {@code directStopAllowed} 时，才返回 {@link DispatchAction#HOLD_AT_SIGNAL}。
    */
   public DispatchDecision decideForwardSignal(ForwardDecisionInput input) {
     Objects.requireNonNull(input, "input");
@@ -367,24 +319,20 @@ public final class SmartDispatcherController {
         && risk.riskSource() != RiskSource.ROUTE_STOP_OR_TERMINAL
         && risk.riskSource() != RiskSource.MOVEMENT_AUTHORITY_PHYSICAL_END) {
       traceCautionRejected(risk, "stale-or-protective-risk");
-      DispatchAction action =
-          risk.canRelease()
-              ? DispatchAction.RELEASE_STALE_RETAIN
-              : DispatchAction.RECALCULATE_AUTHORITY;
       DispatchDecision decision =
           new DispatchDecision(
               risk.trainId(),
-              action,
+              DispatchAction.NO_ACTION,
               input.currentAspect(),
               input.currentTargetSpeedBps(),
               OptionalLong.empty(),
               OptionalLong.empty(),
               input.authorityEndReason(),
               risk.riskSource(),
-              action.effectClass(),
+              DispatchEffectClass.DIAGNOSTIC_ONLY,
               "stale-risk",
               "stale-or-protective-risk-does-not-stop",
-              "refresh-evidence-before-hard-action",
+              "canonical-occupancy-recovery",
               true,
               false,
               braking);
@@ -452,7 +400,12 @@ public final class SmartDispatcherController {
     return decision;
   }
 
-  /** 前方风险决策输入。 */
+  /**
+   * 前方风险决策输入。
+   *
+   * <p>{@code plannedRouteStopProven} 只接受运行时从当前规范 RouteDefinition 快照确认的非 {@code PASS}
+   * RouteStop。风险来源声称 route 末端但没有这项证明时，必须继续按硬停车边界处理，避免缺失路线证明绕过 Signal 的 fail-closed 授权链。
+   */
   public record ForwardDecisionInput(
       String trainId,
       ForwardSignalRiskSnapshot risk,
@@ -466,7 +419,8 @@ public final class SmartDispatcherController {
       double cautionMarginBlocks,
       boolean directStopAllowed,
       String directStopReason,
-      String authorityEndReason) {
+      String authorityEndReason,
+      boolean plannedRouteStopProven) {
 
     public ForwardDecisionInput {
       trainId = normalize(trainId, "-");
@@ -492,115 +446,6 @@ public final class SmartDispatcherController {
       directStopReason = normalize(directStopReason, "none");
       authorityEndReason = normalize(authorityEndReason, "none");
     }
-  }
-
-  /** 计算并 trace 优先级评分。 */
-  public PriorityScore scorePriority(PriorityInput input) {
-    Objects.requireNonNull(input, "input");
-    int score = 0;
-    List<String> reasons = new ArrayList<>();
-    if (!input.safeToMove()) {
-      reasons.add("unsafe-to-move");
-      PriorityScore result =
-          new PriorityScore(input.trainId(), input.resourceId(), Integer.MIN_VALUE, reasons, false);
-      tracePriority(result);
-      return result;
-    }
-    if (input.insideConflict()) {
-      score += 10_000;
-      reasons.add("inside-conflict");
-    }
-    if (input.distanceToConflictExit().isPresent()) {
-      long distance = input.distanceToConflictExit().getAsLong();
-      int distanceScore = (int) Math.max(0L, 2_000L - Math.min(2_000L, distance));
-      score += distanceScore;
-      reasons.add("near-exit:" + distance);
-    }
-    if (input.freshMovementAuthority()) {
-      score += 1_500;
-      reasons.add("fresh-authority");
-    }
-    if (input.compatibleSelfClaim()) {
-      score += 1_200;
-      reasons.add("compatible-self-claim");
-    }
-    if (input.currentSpeedBps() > 0.0) {
-      int speedScore = (int) Math.min(900.0, input.currentSpeedBps() * 60.0);
-      score += speedScore;
-      reasons.add("controlled-speed:" + Math.round(input.currentSpeedBps()));
-    }
-    long waitSeconds = input.waitingDuration().toSeconds();
-    int aging = (int) Math.min(1_200L, Math.max(0L, waitSeconds / 5L) * 10L);
-    if (aging > 0) {
-      score += aging;
-      reasons.add("aging:" + waitSeconds + "s");
-      traceLogger.accept(
-          "SMART_DISPATCH_STARVATION_AGING train="
-              + input.trainId()
-              + " seconds="
-              + waitSeconds
-              + " score="
-              + aging);
-    }
-    if (input.routePriority() > 0) {
-      score += input.routePriority() * 50;
-      reasons.add("route-priority:" + input.routePriority());
-    }
-    if (input.dwellReadyToDepart()) {
-      score += 400;
-      reasons.add("dwell-ready");
-    }
-    if (input.downstreamBlockedTrainCount() > 0) {
-      score += input.downstreamBlockedTrainCount() * 120;
-      reasons.add("downstream-blocked:" + input.downstreamBlockedTrainCount());
-    }
-    PriorityScore result =
-        new PriorityScore(input.trainId(), input.resourceId(), score, reasons, input.safeToMove());
-    tracePriority(result);
-    return result;
-  }
-
-  /** 在同一资源的候选列车中选择 winner，排序完全确定。 */
-  public PrioritySelection selectPriorityWinner(List<PriorityInput> inputs) {
-    if (inputs == null || inputs.isEmpty()) {
-      return new PrioritySelection(null, List.of());
-    }
-    List<PriorityScore> scores =
-        inputs.stream()
-            .filter(Objects::nonNull)
-            .map(this::scorePriority)
-            .sorted(
-                Comparator.comparingInt(PriorityScore::score)
-                    .reversed()
-                    .thenComparing(PriorityScore::trainId)
-                    .thenComparing(PriorityScore::resourceId))
-            .toList();
-    if (scores.isEmpty()) {
-      return new PrioritySelection(null, List.of());
-    }
-    PriorityScore winner = scores.get(0);
-    List<PriorityScore> losers = scores.size() <= 1 ? List.of() : scores.subList(1, scores.size());
-    traceLogger.accept(
-        "SMART_DISPATCH_PRIORITY_WINNER train="
-            + winner.trainId()
-            + " resource="
-            + winner.resourceId()
-            + " score="
-            + winner.score()
-            + " reasons="
-            + winner.reasons());
-    for (PriorityScore loser : losers) {
-      traceLogger.accept(
-          "SMART_DISPATCH_PRIORITY_LOSER train="
-              + loser.trainId()
-              + " resource="
-              + loser.resourceId()
-              + " score="
-              + loser.score()
-              + " winner="
-              + winner.trainId());
-    }
-    return new PrioritySelection(winner, losers);
   }
 
   /** 执行 destroy 前置审查。 */
@@ -831,8 +676,12 @@ public final class SmartDispatcherController {
             (input.currentSpeedBps() * input.currentSpeedBps() - targetSpeed * targetSpeed)
                 / (2.0 * input.decelBps2()));
     boolean planningVisible = distanceOpt.isPresent() && distance <= input.planningHorizonBlocks();
+    boolean plannedRouteStop =
+        input.plannedRouteStopProven() && risk.riskSource() == RiskSource.ROUTE_STOP_OR_TERMINAL;
     boolean shouldHardStop =
-        distanceOpt.isPresent() && distance <= stopBrakingDistance + input.stopMarginBlocks();
+        !plannedRouteStop
+            && distanceOpt.isPresent()
+            && distance <= stopBrakingDistance + input.stopMarginBlocks();
     boolean trainMoving = input.currentSpeedBps() > 0.0;
     boolean shouldApplySpeedLimit =
         trainMoving
@@ -972,22 +821,6 @@ public final class SmartDispatcherController {
             + decision.action()
             + " effectClass="
             + decision.effectClass());
-  }
-
-  private void tracePriority(PriorityScore score) {
-    traceLogger.accept(
-        "SMART_DISPATCH_PRIORITY_SCORE train="
-            + score.trainId()
-            + " resource="
-            + score.resourceId()
-            + " score="
-            + score.score()
-            + " safeToMove="
-            + score.safeToMove()
-            + " reasons="
-            + score.reasons());
-    traceLogger.accept(
-        "SMART_DISPATCH_PRIORITY_REASON train=" + score.trainId() + " reasons=" + score.reasons());
   }
 
   private void traceCautionRejected(ForwardSignalRiskSnapshot risk, String reason) {

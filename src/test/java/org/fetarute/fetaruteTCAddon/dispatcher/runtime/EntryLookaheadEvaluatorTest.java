@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test;
 class EntryLookaheadEvaluatorTest {
 
   @Test
-  void entryLookaheadUsesCanonicalExpandedPath() {
+  void visibleExitOutsideHardAuthorityDoesNotProveSafeEntry() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     NodeId c = NodeId.of("C");
@@ -44,8 +44,39 @@ class EntryLookaheadEvaluatorTest {
     assertEquals(-1, result.exitIndexBeforeExtension());
     assertTrue(result.extensionAttempted());
     assertEquals(2, result.exitIndexAfterExtension());
+    assertFalse(result.exitFeasible());
+    assertTrue(result.failClosed());
+    assertFalse(result.hardAuthorityCoversExit());
+    assertFalse(result.safeHoldOutsideConflict());
+    assertEquals(2, result.requiredHardAuthorityEdgeCount());
+    assertEquals("exit-visible-outside-hard-authority", result.failureReason());
+  }
+
+  @Test
+  void hardAuthorityThroughExitProvesSafeEntryAndHoldPoint() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    NodeId c = NodeId.of("C");
+    EdgeId ab = EdgeId.undirected(a, b);
+    EdgeId bc = EdgeId.undirected(b, c);
+    String zone = "single:test";
+    MovementPlanSnapshot plan =
+        plan(
+            List.of(a, b, c),
+            List.of(edge(ab, a, b), edge(bc, b, c)),
+            Map.of(zone, CorridorDirection.A_TO_B));
+
+    EntryLookaheadEvaluator.Result result =
+        EntryLookaheadEvaluator.evaluate(
+            plan, support(Map.of(ab, zone)), OccupancyResource.forConflict(zone), 2, 2);
+
     assertTrue(result.exitFeasible());
     assertFalse(result.failClosed());
+    assertTrue(result.hardAuthorityCoversExit());
+    assertTrue(result.safeHoldOutsideConflict());
+    assertTrue(result.brakingSafeHoldOutsideConflict(30.0, 20.0));
+    assertFalse(result.brakingSafeHoldOutsideConflict(10.0, 20.0));
+    assertEquals(2, result.requiredHardAuthorityEdgeCount());
   }
 
   @Test
@@ -89,11 +120,54 @@ class EntryLookaheadEvaluatorTest {
         EntryLookaheadEvaluator.evaluate(
             plan, support(Map.of(edgeId, zone)), OccupancyResource.forConflict(zone), 1, 1);
 
-    assertTrue(result.extensionAttempted());
+    assertFalse(result.extensionAttempted());
     assertEquals(1, result.exitIndexAfterExtension());
     assertTrue(result.exitFeasible());
     assertFalse(result.failClosed());
+    assertTrue(result.hardAuthorityCoversExit());
+    assertTrue(result.safeHoldOutsideConflict());
     assertEquals("exit-is-target-boundary", result.failureReason());
+  }
+
+  @Test
+  void remoteStationBoundaryOutsideHardAuthorityFailsClosed() {
+    NodeId entry = NodeId.of("ENTRY");
+    NodeId insideA = NodeId.of("INSIDE:A");
+    NodeId insideB = NodeId.of("INSIDE:B");
+    NodeId insideC = NodeId.of("INSIDE:C");
+    NodeId station = NodeId.of("OP:S:BOUNDARY:1");
+    EdgeId first = EdgeId.undirected(entry, insideA);
+    EdgeId second = EdgeId.undirected(insideA, insideB);
+    EdgeId third = EdgeId.undirected(insideB, insideC);
+    EdgeId fourth = EdgeId.undirected(insideC, station);
+    String zone = "single:test";
+    MovementPlanSnapshot plan =
+        plan(
+            List.of(entry, insideA, insideB, insideC, station),
+            List.of(
+                edge(first, entry, insideA),
+                edge(second, insideA, insideB),
+                edge(third, insideB, insideC),
+                edge(fourth, insideC, station)),
+            Map.of(zone, CorridorDirection.A_TO_B));
+
+    EntryLookaheadEvaluator.Result result =
+        EntryLookaheadEvaluator.evaluate(
+            plan,
+            support(Map.of(first, zone, second, zone, third, zone, fourth, zone)),
+            OccupancyResource.forConflict(zone),
+            2,
+            4);
+
+    assertTrue(result.extensionAttempted());
+    assertEquals(-1, result.exitIndexBeforeExtension());
+    assertEquals(4, result.exitIndexAfterExtension());
+    assertFalse(result.exitFeasible());
+    assertTrue(result.failClosed());
+    assertFalse(result.hardAuthorityCoversExit());
+    assertFalse(result.safeHoldOutsideConflict());
+    assertEquals(4, result.requiredHardAuthorityEdgeCount());
+    assertEquals("target-boundary-outside-hard-authority", result.failureReason());
   }
 
   @Test

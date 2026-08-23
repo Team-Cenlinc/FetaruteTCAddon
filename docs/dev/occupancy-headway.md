@@ -14,6 +14,7 @@
 
 ## ResourceIntent 与 ClaimRole
 - 每个请求资源都会携带 `ResourceIntent`：`MOVEMENT_REQUIRED`、`PROTECTIVE_RETAIN`、`QUEUE_POSITION`、`HOLD_ONLY`、`LOOKAHEAD_PREVIEW`。
+- `LOOKAHEAD_PREVIEW` 只属于风险预览。即使调用方误把含 preview 的完整请求传入通用 `acquire`，占用管理器也会先剥离 preview 资源及其 metadata；它不能成为 claim、queue、版本写入或 Movement Authority。
 - `MOVEMENT_REQUIRED` 表示本轮前进授权必须取得的资源；`canEnter` 只对这类资源 fail-closed。
 - `PROTECTIVE_RETAIN` 与 `HOLD_ONLY` 用于当前位置、尾部保护和 STOP 保留。它们不会阻止前车的 forward movement；如果与其他列车冲突，运行时应保持本车保护、约束后车或触发 stale claim 清理。
 - `QUEUE_POSITION` 只表示冲突队列位次，适用于门控等待和停站等待期间保住排序；它不应被当作 NODE/EDGE 硬占用。
@@ -51,7 +52,7 @@
 
 ## Lookahead 占用
 - 运行时可按“当前节点 + N 段边”申请占用，降低咽喉/道岔前的卡死。
-- 对实际选定路径，只有首个 `SWITCHER` 或显式咽喉已经进入普通 hard lookahead 时，构建器才会把从当前安全边界、经过该冲突点、直到首个正常图边界/出清站点的 NODE、EDGE 与 CONFLICT 一次性提升为 `MOVEMENT_REQUIRED`。远端联锁仍只存在于完整 Movement Plan/advisory 中，不能提前扩大当前硬授权；一旦开始提升却无法证明冲突区出口，请求为空并 fail-closed，避免列车只拿到道口入口就停在冲突区内。
+- 对实际选定路径，只有首个 `SWITCHER`、显式咽喉或无方向的精确 `CONFLICT:interlocking:*` 已经进入普通 hard lookahead 时，构建器才会把从当前安全边界、经过该冲突点、直到首个正常图边界/出清站点的 NODE、EDGE 与 CONFLICT 一次性提升为 `MOVEMENT_REQUIRED`。方向性 `CONFLICT:single:*` 不做整段出口提升，继续由局部硬窗口、方向锁、headway 和前车 token 控制同向跟驰。远端联锁仍只存在于完整 Movement Plan/advisory 中，不能提前扩大当前硬授权；一旦精确物理联锁开始提升却无法证明冲突外第一条清出边，请求为空并 fail-closed，避免列车只拿到道口入口就停在冲突区内。
 - **重要**：lookahead 边数基于 **RailGraph 展开后的实际边**，而非 Route 定义中的节点跨度。
   - Route 节点 A→B 之间如果在 RailGraph 中有多个中间 Waypoint，会先展开再按边数截断。
   - 这确保了 `lookahead-edges=2` 始终代表 2 条实际轨道边（约 60-100 blocks），而非 2 个站间区间。
@@ -71,7 +72,7 @@
 - 相关说明见 `docs/dev/runtime-dispatch.md`。
 
 ## 事件驱动信号系统
-- 占用变化时 `SimpleOccupancyManager` 会发布 `OccupancyAcquiredEvent` / `OccupancyReleasedEvent`。
+- 占用变化时 `SimpleOccupancyManager` 会发布 `OccupancyAcquiredEvent` / `OccupancyReleasedEvent`；纯 Gate Queue 撤队、TTL 过期、release lock 失效，或既有条目的方向/优先级/路径签名变化则发布 `OccupancyQueueChangedEvent`，不伪称物理资源已经释放。首次入队仍由当前完整授权链处理，不额外自唤醒。
 - `SignalEvaluator` 订阅这些事件，即时重新评估受影响列车的信号状态。
 - 信号变化时发布 `SignalChangedEvent`，由运行时桥接层默认 coalesce 为 dirty train；周期 tick 再统一做前向授权、destination commit 与控车落地。
 - STOP 可作为高优先级刷新来源，但不在 `OccupancyManager.acquire()` 同步调用栈内重入同一列车 hard STOP，避免 acquire → event → STOP → 下一 tick PROCEED 的抖动。

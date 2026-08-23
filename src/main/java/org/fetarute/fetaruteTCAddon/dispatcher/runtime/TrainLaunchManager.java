@@ -26,6 +26,7 @@ public final class TrainLaunchManager {
   private static final long TICK_MILLIS = 50L;
   private static final double MOVING_CONTROL_EPSILON_BPT = 0.005;
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
+  private static final String TAG_PENDING_LAUNCH_COMMAND = "FTA_PENDING_LAUNCH_COMMAND";
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
   private static final String TAG_LAST_SPEED_CMD_AT = "FTA_LAST_SPEED_CMD_AT";
 
@@ -123,6 +124,7 @@ public final class TrainLaunchManager {
     }
 
     if (aspect == SignalAspect.STOP) {
+      clearPendingLaunchCommand(properties);
       StopControlMode resolvedStopMode =
           stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
       if (resolvedStopMode == StopControlMode.HARD_STOP) {
@@ -175,16 +177,9 @@ public final class TrainLaunchManager {
     boolean launchCommandAccepted = false;
     // 非 STOP 信号：允许发车或对运动中列车补充能量
     if (train != null) {
-      if (!train.isMoving()) {
-        // 静止时需要发车：受 allowLaunch 和冷却时间限制
-        if (allowLaunch && canIssueLaunch(properties, runtimeSettings)) {
-          launchCommandAccepted =
-              train.requestLaunchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
-          if (launchCommandAccepted) {
-            markLaunchIssued(properties, runtimeSettings);
-          }
-        }
-      } else {
+      if (train.isMoving()) {
+        // 物理运动是唯一能消费待发车命令的正向证据；此后相同授权无需保留发车去重标记。
+        clearPendingLaunchCommand(properties);
         if (allowLaunch) {
           launchCommandAccepted = true;
         }
@@ -194,6 +189,24 @@ public final class TrainLaunchManager {
           // 运动中：放行/信号变化时补充牵引；目标速度下降时也下发一次 launch，让 TrainCarts
           // 按加减速度平滑收敛到 approach/限速目标，而不是只硬切 speedLimit。
           train.accelerateTo(targetBpt, controlAcceleration);
+        }
+      } else {
+        // 静止时需要发车：受 allowLaunch 和冷却时间限制
+        String commandSignature =
+            pendingLaunchCommandSignature(aspect, targetBpt, accelBpt2, launchFallbackDirection);
+        if (!allowLaunch) {
+          clearPendingLaunchCommand(properties);
+        } else if (hasPendingLaunchCommand(properties, commandSignature)) {
+          // 相同授权已由 TrainCarts 接受。不能以“仍静止”作为重置 action 队列的理由；必须等待
+          // 物理进度、STOP/撤销或新的授权参数，才能再次向执行层写入命令。
+          launchCommandAccepted = true;
+        } else if (canIssueLaunch(properties, runtimeSettings)) {
+          launchCommandAccepted =
+              train.requestLaunchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
+          if (launchCommandAccepted) {
+            markLaunchIssued(properties, runtimeSettings);
+            rememberPendingLaunchCommand(properties, commandSignature);
+          }
         }
       }
     }
@@ -250,6 +263,54 @@ public final class TrainLaunchManager {
     }
     TrainTagHelper.writeTag(
         properties, TAG_LAST_LAUNCH_AT, String.valueOf(System.currentTimeMillis()));
+  }
+
+  /**
+   * 判断静止列车是否仍持有与本次授权完全相同的已接受发车命令。
+   *
+   * <p>该标记不是 Movement Authority，也不替代 Gate Queue；它只记录执行层已经接受过的幂等 action。列车发生物理运动、收到
+   * STOP/撤销，或授权参数变化后， 调用方必须重新进入正常的调度判定。
+   */
+  private static boolean hasPendingLaunchCommand(
+      TrainProperties properties, String commandSignature) {
+    return TrainTagHelper.readTagValue(properties, TAG_PENDING_LAUNCH_COMMAND)
+        .filter(commandSignature::equals)
+        .isPresent();
+  }
+
+  /** 记录已被 TrainCarts 接受、但尚未由物理进度消费的发车命令。 */
+  private static void rememberPendingLaunchCommand(
+      TrainProperties properties, String commandSignature) {
+    TrainTagHelper.writeTag(properties, TAG_PENDING_LAUNCH_COMMAND, commandSignature);
+  }
+
+  /** 清除当前列车的待发车幂等标记。 */
+  private static void clearPendingLaunchCommand(TrainProperties properties) {
+    TrainTagHelper.removeTagKey(properties, TAG_PENDING_LAUNCH_COMMAND);
+  }
+
+  /**
+   * 生成执行层发车命令的稳定身份。
+   *
+   * <p>只采用实际写入 TrainCarts 的参数；时间戳、周期编号和日志字段均不得进入签名，否则同一授权会再次变成新命令。
+   */
+  private static String pendingLaunchCommandSignature(
+      SignalAspect aspect,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared,
+      java.util.Optional<org.bukkit.block.BlockFace> fallbackDirection) {
+    String aspectName = aspect == null ? "UNKNOWN" : aspect.name();
+    String fallback =
+        fallbackDirection == null || fallbackDirection.isEmpty()
+            ? "-"
+            : fallbackDirection.get().name();
+    return aspectName
+        + ':'
+        + Long.toUnsignedString(Double.doubleToLongBits(targetBlocksPerTick), 16)
+        + ':'
+        + Long.toUnsignedString(Double.doubleToLongBits(accelBlocksPerTickSquared), 16)
+        + ':'
+        + fallback;
   }
 
   /**

@@ -157,9 +157,9 @@ runtime:
   speed-command-decel-factor: 1.0
   # 最短路距离缓存异步刷新周期（秒）
   distance-cache-refresh-seconds: 3
-  # failover：低速判定阈值（blocks per second）
+  # 兼容旧配置：低速恢复已迁移到 health.stall-threshold-seconds，不再由信号 tick 使用
   failover-stall-speed-bps: 0.2
-  # failover：低速连续 tick 触发阈值（以 dispatch-tick 为单位）
+  # 兼容旧配置：不再作为 dispatch tick 重试阈值
   failover-stall-ticks: 60
   # failover：目标不可达时强制停车
   failover-unreachable-stop: true

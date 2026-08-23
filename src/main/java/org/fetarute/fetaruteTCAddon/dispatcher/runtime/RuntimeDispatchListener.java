@@ -11,11 +11,20 @@ import com.bergerkiller.bukkit.tc.events.MemberRemoveEvent;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import org.bukkit.Bukkit;
 import org.bukkit.block.Sign;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -35,9 +44,29 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
 public final class RuntimeDispatchListener implements Listener {
 
   private final RuntimeDispatchService dispatchService;
+  private final Consumer<Runnable> nextTickScheduler;
+  private final DeferredIdentityBatch<MinecartGroup, PendingUnexpectedSplit>
+      pendingUnexpectedSplits;
 
   public RuntimeDispatchListener(RuntimeDispatchService dispatchService) {
+    this(
+        dispatchService,
+        task ->
+            Bukkit.getScheduler()
+                .runTask(JavaPlugin.getProvidingPlugin(RuntimeDispatchListener.class), task));
+  }
+
+  /**
+   * 创建可注入下一 tick 调度器的监听器。
+   *
+   * <p>该入口仅供同包测试精确推进事件边界；生产环境统一使用 Bukkit 主线程调度器。
+   */
+  RuntimeDispatchListener(
+      RuntimeDispatchService dispatchService, Consumer<Runnable> nextTickScheduler) {
     this.dispatchService = dispatchService;
+    this.nextTickScheduler = nextTickScheduler;
+    this.pendingUnexpectedSplits =
+        new DeferredIdentityBatch<>(nextTickScheduler, this::classifyUnexpectedSplit);
   }
 
   @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -83,18 +112,75 @@ public final class RuntimeDispatchListener implements Listener {
     if (event == null) {
       return;
     }
-    refreshGroup(event.getGroup1());
-    refreshGroup(event.getGroup2());
+    MinecartGroup first = event.getGroup1();
+    MinecartGroup second = event.getGroup2();
+    dispatchService.beginExpectedPhysicalTopologyRecovery(
+        identityDistinctMatching(List.of(first, second), group -> group != null).stream()
+            .map(TrainCartsRuntimeHandle::new)
+            .toList(),
+        "group-link");
   }
 
   @EventHandler(priority = EventPriority.MONITOR)
   public void onGroupCreate(GroupCreateEvent event) {
-    refreshGroup(event != null ? event.getGroup() : null);
+    MinecartGroup group = event != null ? event.getGroup() : null;
+    if (group == null) {
+      return;
+    }
+    TrainCartsRuntimeHandle handle = new TrainCartsRuntimeHandle(group);
+    handleGroupCreate(handle, () -> refreshGroup(group));
+  }
+
+  /**
+   * 处理已适配的 GroupCreate 物理身份。
+   *
+   * <p>把 TrainCarts 事件对象适配留在入口处，保证 tombstone 收容、继承标签硬停与下一 tick 刷新能在不初始化 TrainCarts 静态类型的单测中验证。
+   * 真实事件仍由 {@link #onGroupCreate(GroupCreateEvent)} 传入精确 {@link TrainCartsRuntimeHandle}。
+   *
+   * @param handle 刚创建的精确物理列车句柄
+   * @param deferredRefresh 下一 tick 的完整信号刷新动作
+   */
+  void handleGroupCreate(RuntimeTrainHandle handle, Runnable deferredRefresh) {
+    if (handle == null) {
+      return;
+    }
+    if (!dispatchService.containMaterializedSpawnRollbackOnCreate(handle)) {
+      stopInheritedFtaGroupUntilCreateCompletes(handle);
+    }
+    if (nextTickScheduler != null && deferredRefresh != null) {
+      nextTickScheduler.accept(deferredRefresh);
+    }
+  }
+
+  /**
+   * 把 GroupCreate 的属性读取推迟到下一 tick。
+   *
+   * <p>TrainCarts 会在 {@code SpawnableGroup#spawn} 尚未返回、正式 owner/route/index 尚未写入时同步发布
+   * GroupCreate。当前 tick 读取模板继承标签会把插件自己的 Depot spawn 误判为迟加载列车，并在发车事务中途关闭全局授权门。
+   */
+  static <T> void deferGroupCreateRefresh(
+      Consumer<Runnable> nextTickScheduler, T group, Consumer<T> refresh) {
+    if (nextTickScheduler == null || group == null || refresh == null) {
+      return;
+    }
+    nextTickScheduler.accept(() -> refresh.accept(group));
+  }
+
+  /** GroupCreate 同步窗口内只冻结继承了 FTA 标签的编组，不读取半初始化路线语义。 */
+  private void stopInheritedFtaGroupUntilCreateCompletes(RuntimeTrainHandle train) {
+    try {
+      if (train.properties() == null || !dispatchService.hasFtaRuntimeTag(train.properties())) {
+        return;
+      }
+      train.stopHard();
+    } catch (RuntimeException | LinkageError ignored) {
+      // 下一 tick 的统一 signal/recovery 入口仍会 fail-closed；事件回调本身不能被兼容性错误杀死。
+    }
   }
 
   @EventHandler(priority = EventPriority.MONITOR)
   public void onGroupUnload(GroupUnloadEvent event) {
-    handleGroupRemoved(event != null ? event.getGroup() : null);
+    handleGroupUnloaded(event != null ? event.getGroup() : null);
   }
 
   @EventHandler(priority = EventPriority.MONITOR)
@@ -103,10 +189,11 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   /**
-   * 编组拆分/脱挂兜底：一旦检测到 FTA member 从编组移除，删除涉及的整列逻辑列车，避免“半编组”继续参与调度。
+   * 编组拆分/脱挂兜底：聚合同 tick 的成员移除，并在下一 tick 确认是否仍有残编存活。
    *
-   * <p>TrainCarts 没有专门的 split 事件，MemberRemoveEvent 是最稳定的异常编组信号。该事件对普通 TrainCarts
-   * 列车语义过宽，可能只是玩家拆车或其他插件重组；因此这里必须先确认源/目标编组带有 FTA runtime tag。
+   * <p>TrainCarts 整组销毁时会先为每节车厢触发 {@link MemberRemoveEvent}，最后才触发组移除事件；立即清理会把正常销毁误报为 split，甚至递归销毁。
+   * 因此 FTA 成员事件当下只冻结相关物理实例并撤销旧授权，不释放 claim、不清状态也不销毁；若同 tick 收到组移除/卸载则取消候选并走正常精确清理，仅在下一 tick
+   * 仍存在源编组或拆分残编时才按异常处理。
    */
   @EventHandler(priority = EventPriority.MONITOR)
   public void onMemberRemove(MemberRemoveEvent event) {
@@ -123,21 +210,21 @@ public final class RuntimeDispatchListener implements Listener {
     if (!sourceFta && !detachedFta && !sourceDerailed && !detachedDerailed) {
       return;
     }
-    String splitDetail = buildUnexpectedSplitDetail(sourceGroup, detachedGroup, member);
-    if (sourceFta) {
-      dispatchService.handleAbnormalGroup(sourceGroup, "unexpected-split-source", splitDetail);
-    } else if (sourceDerailed) {
-      dispatchService.handleAbnormalGroup(sourceGroup, "status-derailed", splitDetail);
+    if (sourceFta || detachedFta) {
+      List<MinecartGroup> potentialPhysicalGroups = new ArrayList<>();
+      potentialPhysicalGroups.add(sourceGroup);
+      potentialPhysicalGroups.add(detachedGroup);
+      dispatchService.containPotentialFtaPhysicalChange(
+          identityDistinctMatching(potentialPhysicalGroups, group -> group != null).stream()
+              .map(TrainCartsRuntimeHandle::new)
+              .toList(),
+          "member-remove");
     }
-
-    if (member == null) {
-      return;
-    }
-    if (detachedFta && detachedGroup != null && detachedGroup != sourceGroup) {
-      dispatchService.handleAbnormalGroup(detachedGroup, "unexpected-split-detached", splitDetail);
-    } else if (detachedDerailed && detachedGroup != null && detachedGroup != sourceGroup) {
-      dispatchService.handleAbnormalGroup(detachedGroup, "status-derailed", splitDetail);
-    }
+    queueUnexpectedSplitCheck(
+        sourceGroup,
+        member,
+        buildUnexpectedSplitDetail(sourceGroup, detachedGroup, member),
+        sourceFta || detachedFta);
   }
 
   private boolean hasFtaRuntimeTag(MinecartGroup group) {
@@ -147,21 +234,68 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   private void handleGroupRemoved(MinecartGroup group) {
-    if (group == null || group.getProperties() == null) {
+    pendingUnexpectedSplits.cancel(group);
+    if (group == null) {
       return;
     }
-    String trainName = dispatchService.resolveManagedTrainName(group.getProperties()).orElse(null);
-    if (trainName == null || trainName.isBlank()) {
+    dispatchService.handleTrainRemoved(new TrainCartsRuntimeHandle(group));
+  }
+
+  private void queueUnexpectedSplitCheck(
+      MinecartGroup sourceGroup,
+      MinecartMember<?> member,
+      String splitDetail,
+      boolean ftaRuntimeTagged) {
+    if (sourceGroup == null) {
       return;
     }
-    dispatchService.handleTrainRemoved(trainName);
+    pendingUnexpectedSplits.add(
+        sourceGroup,
+        () -> new PendingUnexpectedSplit(sourceGroup, member, splitDetail, ftaRuntimeTagged),
+        pending -> pending.add(member));
+  }
+
+  private void classifyUnexpectedSplit(PendingUnexpectedSplit pending) {
+    for (MinecartGroup survivingGroup : pending.survivingGroups()) {
+      String reason = pending.reasonFor(survivingGroup);
+      dispatchService.handleAbnormalGroup(survivingGroup, reason, pending.detail());
+    }
   }
 
   private void refreshGroup(MinecartGroup group) {
     if (group == null || !group.isValid()) {
       return;
     }
+    TrainCartsRuntimeHandle handle = new TrainCartsRuntimeHandle(group);
+    if (dispatchService.resumeMaterializedSpawnRollback(handle)) {
+      return;
+    }
+    if (group.getProperties() != null
+        && dispatchService.hasMaterializedSpawnRollbackTag(group.getProperties())) {
+      dispatchService.handleAbnormalGroup(group, "group-create-materialized-rollback-pending");
+      return;
+    }
     dispatchService.handleSignalTick(group);
+  }
+
+  private void handleGroupUnloaded(MinecartGroup group) {
+    pendingUnexpectedSplits.cancel(group);
+    if (group == null) {
+      return;
+    }
+    notifyGroupUnloaded(dispatchService, new TrainCartsRuntimeHandle(group));
+  }
+
+  /**
+   * 向运行时传递 GroupUnload 的句柄边界。
+   *
+   * <p>Unload 只表示实体暂时离线，不得被当作 GroupRemove；该方法故意不触碰移除确认或 occupancy release。
+   */
+  static void notifyGroupUnloaded(
+      RuntimeDispatchService dispatchService, RuntimeTrainHandle train) {
+    if (dispatchService != null && train != null) {
+      dispatchService.handleTrainUnloaded(train);
+    }
   }
 
   private Optional<SignNodeDefinition> resolveDefinition(SignActionEvent event) {
@@ -271,5 +405,118 @@ public final class RuntimeDispatchListener implements Listener {
     }
     org.bukkit.block.Block block = member.getBlock(0, 0, 0);
     return block != null ? RuntimeDiagnosticFormatter.formatLocation(block.getLocation()) : null;
+  }
+
+  /** 按对象身份保留所有满足条件的候选，避免内容相等或可变 hash 把不同残编误合并。 */
+  static <T> List<T> identityDistinctMatching(List<T> candidates, Predicate<T> predicate) {
+    Map<T, Boolean> seen = new IdentityHashMap<>();
+    List<T> matches = new ArrayList<>();
+    if (candidates == null || predicate == null) {
+      return List.of();
+    }
+    for (T candidate : candidates) {
+      if (candidate == null || seen.containsKey(candidate) || !predicate.test(candidate)) {
+        continue;
+      }
+      seen.put(candidate, Boolean.TRUE);
+      matches.add(candidate);
+    }
+    return List.copyOf(matches);
+  }
+
+  /** 同一源编组在一个 tick 内产生的成员移除候选；以对象身份聚合，避免可变编组的 {@code hashCode} 失稳。 */
+  private static final class PendingUnexpectedSplit {
+
+    private final MinecartGroup sourceGroup;
+    private final List<MinecartMember<?>> removedMembers = new ArrayList<>();
+    private final String firstDetail;
+    private final boolean ftaRuntimeTagged;
+
+    private PendingUnexpectedSplit(
+        MinecartGroup sourceGroup,
+        MinecartMember<?> member,
+        String firstDetail,
+        boolean ftaRuntimeTagged) {
+      this.sourceGroup = sourceGroup;
+      this.firstDetail = firstDetail;
+      this.ftaRuntimeTagged = ftaRuntimeTagged;
+      add(member);
+    }
+
+    private String reasonFor(MinecartGroup survivingGroup) {
+      if (!ftaRuntimeTagged) {
+        return "status-derailed";
+      }
+      return survivingGroup == sourceGroup
+          ? "unexpected-split-source"
+          : "unexpected-split-detached";
+    }
+
+    private void add(MinecartMember<?> member) {
+      if (member != null) {
+        removedMembers.add(member);
+      }
+    }
+
+    private List<MinecartGroup> survivingGroups() {
+      List<MinecartGroup> candidates = new ArrayList<>();
+      candidates.add(sourceGroup);
+      for (MinecartMember<?> member : removedMembers) {
+        candidates.add(member.getGroup());
+      }
+      return identityDistinctMatching(candidates, PendingUnexpectedSplit::isAlive);
+    }
+
+    private String detail() {
+      StringBuilder builder = new StringBuilder();
+      RuntimeDiagnosticFormatter.appendKeyValue(
+          builder, "memberRemovalCount", Integer.toString(removedMembers.size()));
+      RuntimeDiagnosticFormatter.appendKeyValue(builder, "firstRemoval", firstDetail);
+      return builder.length() == 0 ? null : builder.toString();
+    }
+
+    private static boolean isAlive(MinecartGroup group) {
+      return group != null && group.isValid() && group.getProperties() != null;
+    }
+  }
+
+  /**
+   * 按对象身份聚合同一 tick 的候选事件，并在下一 tick 至多交付一次。
+   *
+   * <p>键可能是内容持续变化的 TrainCarts 编组，因此必须使用 identity 语义；取消后旧任务即使稍后执行，也不能误消费同一对象的新一批候选。
+   */
+  static final class DeferredIdentityBatch<K, V> {
+
+    private final Map<K, V> pending = new IdentityHashMap<>();
+    private final Consumer<Runnable> nextTickScheduler;
+    private final Consumer<V> processor;
+
+    DeferredIdentityBatch(Consumer<Runnable> nextTickScheduler, Consumer<V> processor) {
+      this.nextTickScheduler = nextTickScheduler;
+      this.processor = processor;
+    }
+
+    void add(K key, Supplier<V> initializer, Consumer<V> aggregator) {
+      V current = pending.get(key);
+      if (current != null) {
+        aggregator.accept(current);
+        return;
+      }
+      V created = initializer.get();
+      pending.put(key, created);
+      nextTickScheduler.accept(() -> deliver(key, created));
+    }
+
+    void cancel(K key) {
+      pending.remove(key);
+    }
+
+    private void deliver(K key, V expected) {
+      if (pending.get(key) != expected) {
+        return;
+      }
+      pending.remove(key);
+      processor.accept(expected);
+    }
   }
 }

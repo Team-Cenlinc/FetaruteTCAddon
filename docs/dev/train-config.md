@@ -32,7 +32,7 @@ tags:
 ## 运行时行为
 - PROCEED 信号：使用调度图默认速度作为基准，再叠加边限速。
 - CAUTION/PROCEED_WITH_CAUTION 信号：使用连通分量的 caution 速度上限（无覆盖时回退为 `runtime.caution-speed-bps`）。
-- STOP 信号：限速 0 并停车。
+- STOP 信号：限速 0 并停车。只有当前 route index 后已记录非 `PASS` RouteStop 的计划停靠接近，才仅通过 approach 或 CAUTION 限速而不因制动距离单独变成 STOP；裸终点、真实物理 blocker、授权失败和证据缺失仍会 fail-closed 到 STOP。
 - 普通 PROCEED 不再把“到下一图节点的距离”当作停车曲线约束。速度曲线只会在真实 blocker/caution、移动授权约束、STOP/TERM waypoint 或前方低限速边存在时下压目标速度。
 
 ### `/fta train debug` 速度链

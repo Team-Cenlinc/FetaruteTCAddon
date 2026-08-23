@@ -86,6 +86,46 @@ class StorageSpawnManagerTest {
   }
 
   @Test
+  void restoreForReplacementRebuildsBacklogAndDeduplicatesTicketIds() {
+    StorageProvider provider = mockProvider(enabledRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 5, 5, 10, Duration.ofHours(1));
+    StorageSpawnManager source = new StorageSpawnManager(settings, null);
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    SpawnTicket ticket = source.pollDueTickets(provider, now).get(0);
+    StorageSpawnManager replacement = new StorageSpawnManager(settings, null);
+    SpawnManager.ReplacementSnapshot snapshot = source.snapshotForReplacement();
+
+    replacement.restoreForReplacement(snapshot, List.of(ticket, ticket), now);
+    List<SpawnTicket> restored = replacement.pollDueTickets(provider, now);
+
+    assertEquals(List.of(ticket), restored);
+    assertTrue(replacement.snapshotQueue().isEmpty());
+    assertEquals(
+        snapshot.nextDueAtByService(), replacement.snapshotForReplacement().nextDueAtByService());
+  }
+
+  @Test
+  void materializedRollbackTicketIsNotDroppedByGenericQueueAgeCleanup() {
+    StorageProvider provider = mockProvider(enabledRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ofSeconds(999), Duration.ZERO, 1, 1, 10, Duration.ofHours(1));
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    SpawnTicket ticket = manager.pollDueTickets(provider, now).get(0);
+    SpawnTicket rollback =
+        ticket.delayedUntil(
+            now.plusSeconds(5), "materialized-spawn-rollback:physical-hydration-timeout");
+    manager.requeue(rollback);
+
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now.plusSeconds(3600));
+
+    assertEquals(List.of(rollback), due);
+  }
+
+  @Test
   void pollDueTicketsSkipsLineWhenMultipleCandidatesAndNoneEnabled() {
     StorageProvider provider = mockProvider(twoCandidatesNoneEnabled());
     StorageSpawnManager.SpawnManagerSettings settings =

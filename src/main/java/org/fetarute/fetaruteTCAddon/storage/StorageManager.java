@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.storage;
 
 import java.io.File;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -155,7 +157,7 @@ public final class StorageManager {
       if (!connection.getAutoCommit()) {
         connection.commit();
       }
-    } catch (Exception ex) {
+    } catch (SQLException | RuntimeException ex) {
       logger.warn("初始化数据库表失败: " + ex.getMessage());
       storageProvider =
           new UnavailableStorageProvider("Schema initialization failed: " + ex.getMessage());
@@ -177,7 +179,7 @@ public final class StorageManager {
    *   <li>LTD_EXPRESS → LIMITED_EXPRESS
    * </ul>
    */
-  private void applyCompatibilityMigrations(java.sql.Connection connection) {
+  private void applyCompatibilityMigrations(Connection connection) throws SQLException {
     ensureRailGraphSnapshotSignatureColumn(connection);
     ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);

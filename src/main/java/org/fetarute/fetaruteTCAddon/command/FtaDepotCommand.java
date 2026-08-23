@@ -136,6 +136,13 @@ public final class FtaDepotCommand {
                 ctx -> {
                   CommandSender sender = ctx.sender();
                   LocaleManager locale = plugin.getLocaleManager();
+                  if (plugin
+                      .getRuntimeDispatchService()
+                      .map(service -> service.requiresCoordinatedMaterializedSpawn())
+                      .orElse(false)) {
+                    sender.sendMessage(locale.component("command.depot.spawn.coordinated-only"));
+                    return;
+                  }
                   Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerOpt =
                       readyProvider(sender);
                   if (providerOpt.isEmpty()) {

@@ -11,10 +11,101 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
 
 final class RailGraphMultiSourceExplorerSessionTest {
+
+  @Test
+  void unionsEverySuccessfulCandidateFootprintWhileKeepingShortestLength() {
+    InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
+    RailBlockPos shortA = new RailBlockPos(0, 0, 0);
+    RailBlockPos shortMiddle = new RailBlockPos(1, 0, 0);
+    RailBlockPos shortB = new RailBlockPos(2, 0, 0);
+    access.connect(shortA, shortMiddle, 1.0);
+    access.connect(shortMiddle, shortB, 1.0);
+
+    RailBlockPos longA = new RailBlockPos(0, 1, 0);
+    RailBlockPos longOne = new RailBlockPos(1, 1, 0);
+    RailBlockPos longTwo = new RailBlockPos(2, 1, 0);
+    RailBlockPos longThree = new RailBlockPos(3, 1, 0);
+    RailBlockPos longB = new RailBlockPos(4, 1, 0);
+    access.connect(longA, longOne, 1.0);
+    access.connect(longOne, longTwo, 1.0);
+    access.connect(longTwo, longThree, 1.0);
+    access.connect(longThree, longB, 1.0);
+
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(a, Set.of(shortA, longA), b, Set.of(shortB, longB)), access, 64);
+
+    while (!session.isDone()) {
+      session.step(10);
+    }
+
+    ExploredRailEdge edge = session.exploredEdges().get(EdgeId.undirected(a, b));
+    assertEquals(2, edge.lengthBlocks());
+    assertTrue(edge.footprint().complete());
+    assertEquals(
+        Set.of(
+            cell(shortA),
+            cell(shortMiddle),
+            cell(shortB),
+            cell(longA),
+            cell(longOne),
+            cell(longTwo),
+            cell(longThree),
+            cell(longB)),
+        edge.footprint().cells());
+  }
+
+  @Test
+  void doesNotClaimCompleteFootprintBeforeExplorationQueueFinishes() {
+    InMemoryRailBlockAccess access = InMemoryRailBlockAccess.line(0, 1);
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    EdgeId edgeId = EdgeId.undirected(a, b);
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(
+                a, Set.of(new RailBlockPos(0, 0, 0)),
+                b, Set.of(new RailBlockPos(1, 0, 0))),
+            access,
+            64);
+
+    session.step(1);
+
+    assertFalse(session.isDone());
+    assertFalse(session.exploredEdges().get(edgeId).footprint().complete());
+
+    while (!session.isDone()) {
+      session.step(1);
+    }
+    assertTrue(session.exploredEdges().get(edgeId).footprint().complete());
+  }
+
+  @Test
+  void longJumpAccessCannotPublishEndpointOnlyTraceAsCompleteFootprint() {
+    RailBlockPos aPos = new RailBlockPos(0, 0, 0);
+    RailBlockPos bPos = new RailBlockPos(16, 0, 0);
+    RailBlockAccess longJumpAccess = new LongJumpRailBlockAccess(aPos, bPos);
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    EdgeId edgeId = EdgeId.undirected(a, b);
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(a, Set.of(aPos), b, Set.of(bPos)), longJumpAccess, 64);
+
+    while (!session.isDone()) {
+      session.step(1);
+    }
+
+    assertFalse(session.exploredEdges().get(edgeId).footprint().complete());
+  }
 
   @Test
   void exploresDirectDistanceOnSimpleLine() {
@@ -329,6 +420,35 @@ final class RailGraphMultiSourceExplorerSessionTest {
     }
   }
 
+  private static RailFootprintCell cell(RailBlockPos pos) {
+    return new RailFootprintCell(pos.x(), pos.y(), pos.z());
+  }
+
+  /** 模拟只暴露长跳端点、无法证明中间逐方块轨迹的访问器。 */
+  private static final class LongJumpRailBlockAccess implements RailBlockAccess {
+
+    private final RailBlockPos first;
+    private final RailBlockPos second;
+
+    private LongJumpRailBlockAccess(RailBlockPos first, RailBlockPos second) {
+      this.first = first;
+      this.second = second;
+    }
+
+    @Override
+    public boolean isRail(RailBlockPos pos) {
+      return first.equals(pos) || second.equals(pos);
+    }
+
+    @Override
+    public Set<RailBlockPos> neighbors(RailBlockPos pos) {
+      if (first.equals(pos)) {
+        return Set.of(second);
+      }
+      return second.equals(pos) ? Set.of(first) : Set.of();
+    }
+  }
+
   /** 用于单元测试的内存轨道图：直接用邻接表描述 railNeighbors。 */
   private static final class InMemoryRailBlockAccess implements RailBlockAccess {
 
@@ -373,6 +493,11 @@ final class RailGraphMultiSourceExplorerSessionTest {
     @Override
     public Set<RailBlockPos> neighbors(RailBlockPos pos) {
       return adjacency.getOrDefault(pos, Set.of());
+    }
+
+    @Override
+    public boolean supportsExactBlockFootprint() {
+      return true;
     }
 
     @Override

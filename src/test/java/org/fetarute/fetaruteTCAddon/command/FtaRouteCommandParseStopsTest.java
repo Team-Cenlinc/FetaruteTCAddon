@@ -402,6 +402,7 @@ class FtaRouteCommandParseStopsTest {
   private static FetaruteTCAddon mockPlugin() {
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
     when(plugin.getName()).thenReturn("FetaruteTCAddon");
+    when(plugin.namespace()).thenReturn("fetarutetcaddon");
     return plugin;
   }
 

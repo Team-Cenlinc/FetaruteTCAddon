@@ -3,7 +3,9 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 
 /** 运行时控车抽象：隔离 TrainCarts 具体实现，便于单测与后续扩展。 */
 public interface RuntimeTrainHandle {
@@ -30,6 +32,40 @@ public interface RuntimeTrainHandle {
    */
   default OptionalDouble estimatedTrainLengthBlocks() {
     return OptionalDouble.empty();
+  }
+
+  /**
+   * 返回整列车头到列尾当前覆盖的 TrainCarts RailPath 栅格足迹。
+   *
+   * <p>该证据用于启动/迟加载现场占用水合；只要任一车厢未被有效轨迹覆盖、轨迹断开、跨世界或无效，实现就必须返回 empty，调用方不得用实体位置或 routeIndex 猜测。
+   */
+  default Optional<Set<RailFootprintCell>> liveRailFootprintCells() {
+    return Optional.empty();
+  }
+
+  /**
+   * 返回带结构化失败原因的整列实时轨道足迹。
+   *
+   * <p>兼容旧测试句柄与其它实现：只实现 {@link #liveRailFootprintCells()} 时，缺失统一标记为 {@link
+   * LiveRailFootprintObservation.FailureReason#LEGACY_UNAVAILABLE}。TrainCarts 适配器应覆盖本方法并报告精确阶段。
+   */
+  default LiveRailFootprintObservation observeLiveRailFootprint() {
+    Optional<Set<RailFootprintCell>> cells = liveRailFootprintCells();
+    if (cells != null && cells.isPresent() && !cells.orElseThrow().isEmpty()) {
+      return LiveRailFootprintObservation.available(cells.orElseThrow());
+    }
+    return LiveRailFootprintObservation.unavailable(
+        LiveRailFootprintObservation.FailureReason.LEGACY_UNAVAILABLE,
+        "runtime-handle-did-not-report-cells");
+  }
+
+  /**
+   * 返回当前物理编组实例的稳定身份。
+   *
+   * <p>同一逻辑列车名可能在 split/link/create 过渡期同时对应多个实体编组；启动水合 marker 必须同时匹配逻辑 owner 与该实例身份，不能只按列车名复用。
+   */
+  default Object physicalRuntimeIdentity() {
+    return this;
   }
 
   /**

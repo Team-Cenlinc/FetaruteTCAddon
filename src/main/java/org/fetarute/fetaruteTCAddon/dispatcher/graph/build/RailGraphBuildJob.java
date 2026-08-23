@@ -15,6 +15,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeValidator;
@@ -24,6 +25,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphMultiSourceExplorerSession;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -317,37 +320,43 @@ public final class RailGraphBuildJob implements Runnable {
       }
 
       // 根据模式执行边探索
-      Map<EdgeId, Integer> edgeLengths;
+      Map<EdgeId, ExploredRailEdge> exploredEdges;
       if (edgeExploreMode.isNodeToNode()) {
         if (currentNodeExplorer == null) {
           return;
         }
-        edgeLengths =
+        exploredEdges =
             runNodeToNodeEdgeExplore(
                 deadline, currentNodeExplorer, currentFinalNodes, currentDuplicateNodeIds);
       } else {
         if (currentEdgeSession == null) {
           return;
         }
-        edgeLengths =
+        exploredEdges =
             runBfsEdgeExplore(
                 deadline, currentEdgeSession, currentFinalNodes, currentDuplicateNodeIds);
       }
 
-      if (edgeLengths == null) {
+      if (exploredEdges == null) {
         // 还没完成
         return;
       }
 
       // 完成构建
-      RailGraph graph = buildGraph(currentFinalNodes, edgeLengths);
+      RailGraphBuildCompletion completion = computeCompletion();
+      boolean allNodeAnchorsResolved;
+      synchronized (this) {
+        allNodeAnchorsResolved = status != null && status.nodesMissingAnchors() == 0;
+      }
+      Map<EdgeId, ExploredRailEdge> publishedEdges =
+          applyBuildCompletion(exploredEdges, completion, allNodeAnchorsResolved);
+      RailGraph graph = buildGraph(world.getUID(), currentFinalNodes, publishedEdges);
       Instant builtAt = Instant.now();
       String signature = RailGraphSignature.signatureForNodes(currentFinalNodes);
       cancel();
       RailGraphBuildResult result =
           new RailGraphBuildResult(
               graph, builtAt, signature, currentFinalNodes, List.of(), currentDuplicateNodeIds);
-      RailGraphBuildCompletion completion = computeCompletion();
       Optional<RailGraphBuildContinuation> nextContinuation = Optional.empty();
       if (mode == BuildMode.HERE && connectedDiscovery != null && connectedDiscovery.isPaused()) {
         nextContinuation =
@@ -370,7 +379,7 @@ public final class RailGraphBuildJob implements Runnable {
    *
    * @return 边长映射（如果完成），或 null（如果还在进行中）
    */
-  private Map<EdgeId, Integer> runBfsEdgeExplore(
+  private Map<EdgeId, ExploredRailEdge> runBfsEdgeExplore(
       long deadline,
       RailGraphMultiSourceExplorerSession currentEdgeSession,
       List<RailNodeRecord> currentFinalNodes,
@@ -410,7 +419,7 @@ public final class RailGraphBuildJob implements Runnable {
       return null;
     }
 
-    return currentEdgeSession.edgeLengths();
+    return currentEdgeSession.exploredEdges();
   }
 
   /**
@@ -418,7 +427,7 @@ public final class RailGraphBuildJob implements Runnable {
    *
    * @return 边长映射（如果完成），或 null（如果还在进行中）
    */
-  private Map<EdgeId, Integer> runNodeToNodeEdgeExplore(
+  private Map<EdgeId, ExploredRailEdge> runNodeToNodeEdgeExplore(
       long deadline,
       NodeToNodeEdgeExplorer currentNodeExplorer,
       List<RailNodeRecord> currentFinalNodes,
@@ -446,7 +455,7 @@ public final class RailGraphBuildJob implements Runnable {
     }
 
     debugLogger.accept("节点到节点探索完成: edges=" + currentNodeExplorer.discoveredEdgeCount());
-    return currentNodeExplorer.getDiscoveredEdges();
+    return currentNodeExplorer.getExploredEdges();
   }
 
   private RailGraphBuildCompletion computeCompletion() {
@@ -497,16 +506,16 @@ public final class RailGraphBuildJob implements Runnable {
 
       Set<RailBlockPos> visitedRails = currentConnectedDiscovery.visitedRails();
       List<RailNodeRecord> discovered = new ArrayList<>(nodesById.values());
-      List<RailNodeRecord> filtered =
+      ComponentNodeAnchors filtered =
           filterNodesInComponent(discovered, visitedRails, currentAccess);
       debugLogger.accept(
           "HERE 节点过滤: discovered="
               + discovered.size()
               + " filtered="
-              + filtered.size()
+              + filtered.nodes().size()
               + " visitedRails="
               + visitedRails.size());
-      finishDiscoveryAndStartEdgePhase(filtered, currentAccess);
+      finishDiscoveryAndStartEdgePhase(filtered.nodes(), currentAccess, filtered.anchorsByNode());
       return;
     }
 
@@ -534,18 +543,20 @@ public final class RailGraphBuildJob implements Runnable {
       return;
     }
 
-    finishDiscoveryAndStartEdgePhase(List.copyOf(nodesById.values()), currentAccess);
+    finishDiscoveryAndStartEdgePhase(List.copyOf(nodesById.values()), currentAccess, Map.of());
   }
 
   private void finishDiscoveryAndStartEdgePhase(
-      List<RailNodeRecord> discoveredNodes, TrainCartsRailBlockAccess currentAccess) {
+      List<RailNodeRecord> discoveredNodes,
+      TrainCartsRailBlockAccess currentAccess,
+      Map<NodeId, Set<RailBlockPos>> discoveredAnchorsByNode) {
     if (discoveredNodes.isEmpty()) {
       throw new IllegalStateException("未扫描到任何节点");
     }
     if (!containsSignalNodes(discoveredNodes)) {
       throw new IllegalStateException("未扫描到任何本插件节点牌子");
     }
-    initEdgeSession(discoveredNodes, currentAccess);
+    initEdgeSession(discoveredNodes, currentAccess, discoveredAnchorsByNode);
     synchronized (this) {
       this.finalNodes = discoveredNodes;
       this.duplicateNodeIds =
@@ -579,10 +590,15 @@ public final class RailGraphBuildJob implements Runnable {
   }
 
   private void initEdgeSession(
-      List<RailNodeRecord> nodes, TrainCartsRailBlockAccess currentAccess) {
-    Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
+      List<RailNodeRecord> nodes,
+      TrainCartsRailBlockAccess currentAccess,
+      Map<NodeId, Set<RailBlockPos>> discoveredAnchorsByNode) {
+    Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>(discoveredAnchorsByNode);
     int missingAnchors = 0;
     for (RailNodeRecord node : nodes) {
+      if (anchorsByNode.containsKey(node.nodeId())) {
+        continue;
+      }
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
       int anchorRadius = resolveAnchorRadius(node.nodeType());
       Set<RailBlockPos> anchors = currentAccess.findNearestRailBlocks(center, anchorRadius);
@@ -685,11 +701,17 @@ public final class RailGraphBuildJob implements Runnable {
     }
   }
 
-  private List<RailNodeRecord> filterNodesInComponent(
+  /**
+   * 筛选 HERE 连通分量内的节点，并保留本轮已经解析出的轨道锚点。
+   *
+   * <p>锚点搜索会检查节点周围一整个方块立方体；将结果交给 edge phase 复用，避免 discovery 完成的同一 tick 对每个保留节点再执行一次完全相同的世界查询。
+   */
+  private ComponentNodeAnchors filterNodesInComponent(
       List<RailNodeRecord> discovered,
       Set<RailBlockPos> visitedRails,
       TrainCartsRailBlockAccess access) {
     List<RailNodeRecord> filtered = new ArrayList<>();
+    Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
     for (RailNodeRecord node : discovered) {
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
       Set<RailBlockPos> anchors =
@@ -699,12 +721,31 @@ public final class RailGraphBuildJob implements Runnable {
       }
       if (anchors.stream().anyMatch(visitedRails::contains)) {
         filtered.add(node);
+        anchorsByNode.put(node.nodeId(), Set.copyOf(anchors));
       }
     }
-    return List.copyOf(filtered);
+    return new ComponentNodeAnchors(filtered, anchorsByNode);
   }
 
-  private RailGraph buildGraph(List<RailNodeRecord> nodeRecords, Map<EdgeId, Integer> edgeLengths) {
+  /** HERE 节点过滤与已验证 anchor 的不可变交接结果。 */
+  private record ComponentNodeAnchors(
+      List<RailNodeRecord> nodes, Map<NodeId, Set<RailBlockPos>> anchorsByNode) {
+
+    private ComponentNodeAnchors {
+      nodes = List.copyOf(nodes);
+      Map<NodeId, Set<RailBlockPos>> immutableAnchors = new HashMap<>();
+      anchorsByNode.forEach((nodeId, anchors) -> immutableAnchors.put(nodeId, Set.copyOf(anchors)));
+      anchorsByNode = Map.copyOf(immutableAnchors);
+    }
+  }
+
+  static RailGraph buildGraph(
+      java.util.UUID worldId,
+      List<RailNodeRecord> nodeRecords,
+      Map<EdgeId, ExploredRailEdge> exploredEdges) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(nodeRecords, "nodeRecords");
+    Objects.requireNonNull(exploredEdges, "exploredEdges");
     Map<NodeId, RailNode> nodesById = new HashMap<>();
     for (RailNodeRecord node : nodeRecords) {
       SignRailNode railNode =
@@ -718,13 +759,13 @@ public final class RailGraphBuildJob implements Runnable {
     }
 
     // 过滤跨轨道直连边（同一区间的不同轨道应通过 switcher 连接）
-    Map<EdgeId, Integer> filteredEdgeLengths =
-        RailEdgeValidator.filterCrossTrackEdges(edgeLengths, nodesById);
+    Map<EdgeId, ExploredRailEdge> filteredEdges =
+        RailEdgeValidator.filterCrossTrackExploredEdges(exploredEdges, nodesById);
 
     Map<EdgeId, RailEdge> edgesById = new HashMap<>();
-    for (Map.Entry<EdgeId, Integer> entry : filteredEdgeLengths.entrySet()) {
+    for (Map.Entry<EdgeId, ExploredRailEdge> entry : filteredEdges.entrySet()) {
       EdgeId edgeId = entry.getKey();
-      int lengthBlocks = entry.getValue();
+      ExploredRailEdge exploredEdge = entry.getValue();
       RailNode a = nodesById.get(edgeId.a());
       RailNode b = nodesById.get(edgeId.b());
       if (a == null || b == null) {
@@ -736,13 +777,53 @@ public final class RailGraphBuildJob implements Runnable {
               edgeId,
               edgeId.a(),
               edgeId.b(),
-              lengthBlocks,
+              exploredEdge.lengthBlocks(),
               0.0,
               true,
               Optional.of(new RailEdgeMetadata(a.waypointMetadata(), b.waypointMetadata()))));
     }
 
-    return new SimpleRailGraph(nodesById, edgesById, Set.of());
+    Map<EdgeId, RailEdgeFootprint> footprintsByEdge = new HashMap<>();
+    edgesById
+        .keySet()
+        .forEach(edgeId -> footprintsByEdge.put(edgeId, filteredEdges.get(edgeId).footprint()));
+    RailInterlockingState interlockingState =
+        RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge);
+    return new SimpleRailGraph(nodesById, edgesById, Set.of(), interlockingState);
+  }
+
+  /**
+   * 把世界发现阶段的完整性约束应用到每条已捕获足迹。
+   *
+   * <p>即使局部 edge walker 已经自然耗尽，未加载区块、加载失败或达到续跑配额都表示世界级探索尚不完整；此时保留已捕获坐标用于诊断，但不得发布 {@code
+   * complete=true}。
+   */
+  static Map<EdgeId, ExploredRailEdge> applyBuildCompletion(
+      Map<EdgeId, ExploredRailEdge> exploredEdges, RailGraphBuildCompletion completion) {
+    return applyBuildCompletion(exploredEdges, completion, true);
+  }
+
+  static Map<EdgeId, ExploredRailEdge> applyBuildCompletion(
+      Map<EdgeId, ExploredRailEdge> exploredEdges,
+      RailGraphBuildCompletion completion,
+      boolean allNodeAnchorsResolved) {
+    Objects.requireNonNull(exploredEdges, "exploredEdges");
+    Objects.requireNonNull(completion, "completion");
+    if (completion == RailGraphBuildCompletion.COMPLETE && allNodeAnchorsResolved) {
+      return Map.copyOf(exploredEdges);
+    }
+
+    Map<EdgeId, ExploredRailEdge> incomplete = new HashMap<>();
+    exploredEdges.forEach(
+        (edgeId, edge) -> {
+          RailEdgeFootprint footprint = edge.footprint();
+          incomplete.put(
+              edgeId,
+              new ExploredRailEdge(
+                  edge.lengthBlocks(),
+                  new RailEdgeFootprint(footprint.formatVersion(), false, footprint.cells())));
+        });
+    return Map.copyOf(incomplete);
   }
 
   public record RailGraphBuildStatus(

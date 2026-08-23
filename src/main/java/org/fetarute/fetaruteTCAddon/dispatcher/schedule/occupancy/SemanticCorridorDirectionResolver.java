@@ -31,21 +31,58 @@ final class SemanticCorridorDirectionResolver {
     this.graph = Objects.requireNonNull(graph, "graph");
   }
 
-  Result resolve(List<NodeId> resourceNodes, List<NodeId> pathNodes, NodeId from, NodeId to) {
-    PathAxisResolution pathAxis = resolvePathAxis(pathNodes, from, to);
+  /**
+   * 为同一条 movement path 建立可复用的本地语义方向索引。
+   *
+   * <p>一次占用请求会为路径上的多个 single conflict 查询方向。路径轴、分叉 gap 与 interval 锚点只取决于这条路径，不能为每一条边重复 构建；调用方应在处理同一
+   * {@code pathNodes} 的所有冲突前只调用一次本方法。
+   */
+  PathAxisIndex indexPath(List<NodeId> pathNodes) {
+    if (pathNodes == null || pathNodes.isEmpty()) {
+      return new PathAxisIndex(List.of(), List.of());
+    }
+    List<IndexedDirectedStationPair> anchors = indexedDirectedPairs(pathNodes);
+    List<PathAxisSegment> segments =
+        anchors.isEmpty() ? List.of() : pathAxisSegments(pathNodes, anchors);
+    List<PathAxisMatch> matches = new ArrayList<>();
+    for (PathAxisSegment segment : segments) {
+      List<IndexedPathAnchor> pathAnchors =
+          segment
+              .axisResolution()
+              .axis()
+              .map(axis -> indexedAnchors(axis, segment.pathNodes(), AnchorMode.PATH_LOCAL))
+              .orElseGet(List::of);
+      matches.add(new PathAxisMatch(segment, pathAnchors));
+    }
+    return new PathAxisIndex(pathNodes, matches);
+  }
+
+  Result resolve(List<NodeId> resourceNodes, PathAxisIndex pathAxisIndex, NodeId from, NodeId to) {
+    PathAxisLookup pathAxis = resolvePathAxis(pathAxisIndex, from, to);
     Result pathResult =
         resolveWithAxis(
-            pathAxis.axisResolution(), pathAxis.pathNodes(), from, to, AnchorMode.PATH_LOCAL);
+            pathAxis.resolution().axisResolution(),
+            pathAxis.resolution().pathNodes(),
+            pathAxis.pathAnchors(),
+            from,
+            to,
+            AnchorMode.PATH_LOCAL);
     if (pathResult.status() != Status.NO_AXIS) {
       return pathResult;
     }
     return resolveWithAxis(
-        resolveAxis(resourceNodes), pathNodes, from, to, AnchorMode.RESOURCE_FALLBACK);
+        resolveAxis(resourceNodes),
+        pathAxis.resolution().pathNodes(),
+        null,
+        from,
+        to,
+        AnchorMode.RESOURCE_FALLBACK);
   }
 
   private Result resolveWithAxis(
       AxisResolution axisResolution,
       List<NodeId> pathNodes,
+      List<IndexedPathAnchor> cachedPathAnchors,
       NodeId from,
       NodeId to,
       AnchorMode anchorMode) {
@@ -56,35 +93,36 @@ final class SemanticCorridorDirectionResolver {
       return Result.ambiguous();
     }
     SemanticAxis axis = axisResolution.axis().orElseThrow();
-    Optional<DirectedStationPair> flow = resolveFlow(axis, pathNodes, from, to, anchorMode);
+    Optional<DirectedStationPair> flow =
+        resolveFlow(axis, pathNodes, cachedPathAnchors, from, to, anchorMode);
     if (flow.isEmpty()) {
       return Result.unresolved();
     }
     return axis.directionOf(flow.get()).map(Result::resolved).orElseGet(Result::ambiguous);
   }
 
-  private PathAxisResolution resolvePathAxis(List<NodeId> pathNodes, NodeId from, NodeId to) {
-    if (pathNodes == null || pathNodes.isEmpty()) {
-      return PathAxisResolution.noAxis(List.of());
+  private PathAxisLookup resolvePathAxis(PathAxisIndex pathAxisIndex, NodeId from, NodeId to) {
+    if (pathAxisIndex == null || pathAxisIndex.pathNodes().isEmpty()) {
+      return PathAxisLookup.noAxis(List.of());
     }
+    List<NodeId> pathNodes = pathAxisIndex.pathNodes();
     int edgeIndex = edgeIndex(pathNodes, from, to);
     if (edgeIndex < 0) {
-      return PathAxisResolution.noAxis(pathNodes);
+      return PathAxisLookup.noAxis(pathNodes);
     }
-    List<IndexedDirectedStationPair> anchors = indexedDirectedPairs(pathNodes);
-    if (anchors.isEmpty()) {
-      return PathAxisResolution.noAxis(pathNodes);
+    List<PathAxisMatch> matches = pathAxisIndex.matches();
+    if (matches.isEmpty()) {
+      return PathAxisLookup.noAxis(pathNodes);
     }
-    List<PathAxisSegment> segments = pathAxisSegments(pathNodes, anchors);
-    for (PathAxisSegment segment : segments) {
-      if (segment.containsEdge(edgeIndex)) {
-        return PathAxisResolution.of(segment.axisResolution(), segment.pathNodes());
+    for (PathAxisMatch match : matches) {
+      if (match.segment().containsEdge(edgeIndex)) {
+        return PathAxisLookup.of(match);
       }
     }
-    if (isPathAxisBranchGap(segments, edgeIndex)) {
-      return PathAxisResolution.ambiguous(pathNodes);
+    if (isPathAxisBranchGap(matches, edgeIndex)) {
+      return PathAxisLookup.ambiguous(pathNodes);
     }
-    return PathAxisResolution.noAxis(pathNodes);
+    return PathAxisLookup.noAxis(pathNodes);
   }
 
   private List<IndexedDirectedStationPair> indexedDirectedPairs(List<NodeId> pathNodes) {
@@ -153,10 +191,10 @@ final class SemanticCorridorDirectionResolver {
     return segments;
   }
 
-  private boolean isPathAxisBranchGap(List<PathAxisSegment> segments, int edgeIndex) {
-    for (int i = 0; i + 1 < segments.size(); i++) {
-      PathAxisSegment left = segments.get(i);
-      PathAxisSegment right = segments.get(i + 1);
+  private boolean isPathAxisBranchGap(List<PathAxisMatch> matches, int edgeIndex) {
+    for (int i = 0; i + 1 < matches.size(); i++) {
+      PathAxisSegment left = matches.get(i).segment();
+      PathAxisSegment right = matches.get(i + 1).segment();
       if (right.startsAfterBranch()
           && edgeIndex > left.endEdgeInclusive()
           && edgeIndex < right.startEdgeInclusive()) {
@@ -231,7 +269,12 @@ final class SemanticCorridorDirectionResolver {
   }
 
   private Optional<DirectedStationPair> resolveFlow(
-      SemanticAxis axis, List<NodeId> pathNodes, NodeId from, NodeId to, AnchorMode anchorMode) {
+      SemanticAxis axis,
+      List<NodeId> pathNodes,
+      List<IndexedPathAnchor> cachedPathAnchors,
+      NodeId from,
+      NodeId to,
+      AnchorMode anchorMode) {
     if (axis == null || pathNodes == null || pathNodes.size() < 2 || from == null || to == null) {
       return Optional.empty();
     }
@@ -239,7 +282,8 @@ final class SemanticCorridorDirectionResolver {
     if (edgeIndex < 0) {
       return Optional.empty();
     }
-    List<IndexedPathAnchor> anchors = indexedAnchors(axis, pathNodes, anchorMode);
+    List<IndexedPathAnchor> anchors =
+        cachedPathAnchors == null ? indexedAnchors(axis, pathNodes, anchorMode) : cachedPathAnchors;
     if (anchors.isEmpty()) {
       return Optional.empty();
     }
@@ -550,6 +594,29 @@ final class SemanticCorridorDirectionResolver {
     }
   }
 
+  /** 已定位到单条 path edge 的语义轴结果与预解析锚点。 */
+  private record PathAxisLookup(
+      PathAxisResolution resolution, List<IndexedPathAnchor> pathAnchors) {
+    private PathAxisLookup {
+      Objects.requireNonNull(resolution, "resolution");
+      pathAnchors = pathAnchors == null ? List.of() : List.copyOf(pathAnchors);
+    }
+
+    static PathAxisLookup of(PathAxisMatch match) {
+      return new PathAxisLookup(
+          PathAxisResolution.of(match.segment().axisResolution(), match.segment().pathNodes()),
+          match.pathAnchors());
+    }
+
+    static PathAxisLookup noAxis(List<NodeId> pathNodes) {
+      return new PathAxisLookup(PathAxisResolution.noAxis(pathNodes), List.of());
+    }
+
+    static PathAxisLookup ambiguous(List<NodeId> pathNodes) {
+      return new PathAxisLookup(PathAxisResolution.ambiguous(pathNodes), List.of());
+    }
+  }
+
   /** 带路径下标的站间方向锚点，用于把同一条 movement path 切成局部语义段。 */
   private record IndexedDirectedStationPair(int index, DirectedStationPair direction) {
     private IndexedDirectedStationPair {
@@ -606,6 +673,34 @@ final class SemanticCorridorDirectionResolver {
 
     boolean containsEdge(int edgeIndex) {
       return edgeIndex >= startEdgeInclusive && edgeIndex <= endEdgeInclusive;
+    }
+  }
+
+  /** 单一局部语义段及其只读 path 锚点。 */
+  private record PathAxisMatch(PathAxisSegment segment, List<IndexedPathAnchor> pathAnchors) {
+    private PathAxisMatch {
+      Objects.requireNonNull(segment, "segment");
+      pathAnchors = pathAnchors == null ? List.of() : List.copyOf(pathAnchors);
+    }
+  }
+
+  /** 同一 movement path 的不可变语义方向索引，仅在本包内传递。 */
+  static final class PathAxisIndex {
+
+    private final List<NodeId> pathNodes;
+    private final List<PathAxisMatch> matches;
+
+    private PathAxisIndex(List<NodeId> pathNodes, List<PathAxisMatch> matches) {
+      this.pathNodes = pathNodes == null ? List.of() : List.copyOf(pathNodes);
+      this.matches = matches == null ? List.of() : List.copyOf(matches);
+    }
+
+    private List<NodeId> pathNodes() {
+      return pathNodes;
+    }
+
+    private List<PathAxisMatch> matches() {
+      return matches;
     }
   }
 

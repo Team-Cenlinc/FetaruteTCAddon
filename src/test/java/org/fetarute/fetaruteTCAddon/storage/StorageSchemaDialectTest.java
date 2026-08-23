@@ -1,8 +1,10 @@
 package org.fetarute.fetaruteTCAddon.storage;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import org.fetarute.fetaruteTCAddon.storage.dialect.MySqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.schema.StorageSchema;
 import org.junit.jupiter.api.Test;
 
@@ -46,5 +48,34 @@ final class StorageSchemaDialectTest {
     assertTrue(table.contains("blocked_manual"));
     assertTrue(table.contains("blocked_until"));
     assertTrue(table.contains("updated_at"));
+  }
+
+  @Test
+  void railEdgesStayTopologyOnlyAndSparseInterlockingSnapshotUsesDialectText() {
+    StorageSchema schema = new StorageSchema("fta_");
+
+    String sqlite = railEdges(schema.sqliteStatements());
+    String mysql = railEdges(schema.statements(new MySqlDialect()));
+    String sqliteInterlocking = railInterlockingSnapshots(schema.sqliteStatements());
+    String mysqlInterlocking = railInterlockingSnapshots(schema.statements(new MySqlDialect()));
+
+    assertFalse(sqlite.contains("footprint_json"));
+    assertFalse(mysql.contains("footprint_json"));
+    assertTrue(sqliteInterlocking.contains("snapshot_json TEXT NOT NULL"));
+    assertTrue(mysqlInterlocking.contains("snapshot_json LONGTEXT NOT NULL"));
+  }
+
+  private static String railEdges(List<String> ddl) {
+    return ddl.stream()
+        .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS fta_rail_edges"))
+        .findFirst()
+        .orElseThrow();
+  }
+
+  private static String railInterlockingSnapshots(List<String> ddl) {
+    return ddl.stream()
+        .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS fta_rail_interlocking_snapshots"))
+        .findFirst()
+        .orElseThrow();
   }
 }

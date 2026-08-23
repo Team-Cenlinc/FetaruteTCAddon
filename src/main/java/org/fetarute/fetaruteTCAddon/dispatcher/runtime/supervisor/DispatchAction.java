@@ -7,10 +7,18 @@ public enum DispatchAction {
   RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
   ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
   RELEASE_SPECULATIVE_UNLOCK_RESERVATION(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
-  ISSUE_UNLOCK_AUTHORITY(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
+  REQUEST_UNLOCK_AUTHORITY_REEVALUATION(
+      DispatchEffectClass.SIGNAL_REEVALUATION_REQUEST, true, false),
   SMART_HEAD_ON_YIELD(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
+  ACQUIRE_VERIFIED_SWITCHER_DRAIN_AUTHORITY(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
+  /** 已验证 admission 拒绝后的本地保持；不写 destination、token 或 occupancy。 */
+  SMART_ADMISSION_HOLD(DispatchEffectClass.SIGNAL_CONSTRAINT, true, false),
+  /** HealthMonitor 的信号刷新、硬停或受限重启；不得直接签发新的 Movement Authority。 */
+  SMART_HEALTH_SIGNAL_RECOVERY(DispatchEffectClass.SIGNAL_CONSTRAINT, true, false),
   SMART_DRAIN_UNLOCK_SIGNAL_ADVISORY(DispatchEffectClass.SIGNAL_CONSTRAINT, true, false),
   SMART_FORWARD_UNLOCK_SIGNAL_ADVISORY(DispatchEffectClass.SIGNAL_CONSTRAINT, true, false),
+  /** 仅在完整 deadlock review 已通过后销毁已选定的 leader；不可作为普通恢复动作使用。 */
+  EXECUTE_VERIFIED_DEADLOCK_DESTROY(DispatchEffectClass.DESTROY_ACTION, true, false),
   SAME_DIRECTION_FOLLOW_THROUGH_PREVIEW(DispatchEffectClass.DIAGNOSTIC_ONLY, false, false),
   FORCE_PROCEED(DispatchEffectClass.SIGNAL_CONSTRAINT, true, true),
   DESTROY_TRAIN(DispatchEffectClass.DESTROY_ACTION, true, true),
@@ -21,19 +29,13 @@ public enum DispatchAction {
   ALLOW_TURNBACK_BYPASS(DispatchEffectClass.AUTHORITY_PRECHECK, true, true),
   SAME_DIRECTION_FOLLOW_THROUGH_ALLOW(DispatchEffectClass.SIGNAL_CONSTRAINT, true, true),
 
-  /** 兼容旧 supervisor 决策语义；真实 mutation 不应再直接绑定到这些 legacy action。 */
+  /** 兼容前方信号决策语义；真实 occupancy mutation 不得从该组动作直接发起。 */
   PROCEED(DispatchEffectClass.SIGNAL_ADVISORY),
-  PROCEED_WITH_CAUTION(DispatchEffectClass.SIGNAL_ADVISORY),
-  CAUTION_SPEED_LIMIT(DispatchEffectClass.SIGNAL_ADVISORY),
+  PROCEED_WITH_CAUTION(DispatchEffectClass.SIGNAL_ADVISORY, true, false),
+  CAUTION_SPEED_LIMIT(DispatchEffectClass.SIGNAL_ADVISORY, true, false),
   HOLD_AT_SIGNAL(DispatchEffectClass.SIGNAL_CONSTRAINT),
   WAIT_FOR_PRIORITY_TRAIN(DispatchEffectClass.SIGNAL_CONSTRAINT),
   ALLOW_DRAIN_THROUGH(DispatchEffectClass.AUTHORITY_PRECHECK),
-  RELEASE_STALE_RETAIN(DispatchEffectClass.OCCUPANCY_MUTATION),
-  RELEASE_STALE_QUEUE_ENTRY(DispatchEffectClass.OCCUPANCY_MUTATION),
-  RELEASE_STALE_SWITCHER_CLAIM(DispatchEffectClass.OCCUPANCY_MUTATION),
-  FORWARD_UNLOCK(DispatchEffectClass.OCCUPANCY_MUTATION),
-  RECALCULATE_AUTHORITY(DispatchEffectClass.AUTHORITY_PRECHECK),
-  DESTROY_CANDIDATE(DispatchEffectClass.DESTROY_ACTION, true, true),
   NO_ACTION(DispatchEffectClass.DIAGNOSTIC_ONLY, false, false);
 
   private final DispatchEffectClass effectClass;

@@ -17,10 +17,13 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherModeGate;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.BlockerRelation;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
@@ -532,6 +535,12 @@ public final class TrainHealthMonitor {
       boolean isDwelling =
           dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent();
       if (isDwelling) {
+        // Dwell 是受控停车，不应计入下一段 STOP 的互卡/停滞年龄。每次采样都把两个时钟锚定到当前时刻，
+        // 这样停站结束后的短暂信号重算窗口会从零开始观察。
+        snapshots.put(
+            key,
+            new TrainSnapshot(
+                currentProgress, currentGraphNode, currentSignal, currentSpeed, now, now, now));
         recovery.resetStall();
         recovery.resetProgress();
         recovery.resetDeadlock();
@@ -611,7 +620,10 @@ public final class TrainHealthMonitor {
                 ? HealthAlert.fixed(HealthAlert.AlertType.PROGRESS_STUCK, trainName, message)
                 : HealthAlert.of(HealthAlert.AlertType.PROGRESS_STUCK, trainName, message));
         continue;
-      } else if (!progressed && !isMoving && currentSignal == SignalAspect.STOP) {
+      } else if (!progressed
+          && !isMoving
+          && currentSignal == SignalAspect.STOP
+          && progressDuration.compareTo(deadlockMinStopDuration) >= 0) {
         traceDeadlockSkipped(trainName, current, progressDuration, activeKeys, now);
         if (autoFixEnabled
             && tryDestroyDeadlockFallback(trainName, current, progressDuration, activeKeys, now)) {
@@ -699,7 +711,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     if (!smartDispatcherAllowsHealthMutation(
-        trainName, "STALL_RECOVERY", DispatchEffectClass.SIGNAL_CONSTRAINT, "health-stall")) {
+        trainName, DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY, "health-stall")) {
       return false;
     }
     traceSmartRecoveryDecision(trainName, "SMART_FORWARD_UNLOCK_CANDIDATE", "stall");
@@ -804,10 +816,7 @@ public final class TrainHealthMonitor {
       }
     }
     if (!smartDispatcherAllowsHealthMutation(
-        trainName,
-        "PROGRESS_STUCK_RECOVERY",
-        DispatchEffectClass.SIGNAL_CONSTRAINT,
-        "health-progress-stuck")) {
+        trainName, DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY, "health-progress-stuck")) {
       return false;
     }
     if (currentSignal == SignalAspect.STOP) {
@@ -853,7 +862,7 @@ public final class TrainHealthMonitor {
     } else {
       debugLogger.accept("TrainHealthMonitor 修复停滞(stage=relaunch): train=" + trainName);
       debugLogger.accept(
-          "HEALTH_LEGACY_DIAGNOSTIC action=FORCE_RELAUNCH train="
+          "SMART_HEALTH_EFFECT_EXECUTION action=SMART_HEALTH_SIGNAL_RECOVERY effect=FORCE_RELAUNCH train="
               + trainName
               + " source=health-progress-stuck dispatcherAction=false");
       fixed = dispatchService.forceRelaunchByName(trainName);
@@ -1016,7 +1025,7 @@ public final class TrainHealthMonitor {
       return Optional.empty();
     }
     for (RuntimeDispatchService.DeadlockBlockerInfo blocker : snapshot.blockers()) {
-      if (!isLiveCycleBlockerResource(blocker)) {
+      if (!isLiveHardCycleBlocker(blocker)) {
         continue;
       }
       String blockerKey = keyOf(blocker.trainName());
@@ -1031,7 +1040,7 @@ public final class TrainHealthMonitor {
       Optional<RuntimeDispatchService.DeadlockBlockerInfo> reverseOpt =
           reverseSnapshot.blockers().stream()
               .filter(candidate -> trainKey.equals(keyOf(candidate.trainName())))
-              .filter(this::isLiveCycleBlockerResource)
+              .filter(this::isLiveHardCycleBlocker)
               .findFirst();
       if (reverseOpt.isEmpty()) {
         continue;
@@ -1170,6 +1179,30 @@ public final class TrainHealthMonitor {
     return resource.startsWith("switcher:") || resource.startsWith("single:");
   }
 
+  /**
+   * 判断 live wait-for 边是否携带可用于 hard-cycle 的实体授权证据。
+   *
+   * <p>资源名称只能说明 blocker 位于哪一类冲突区，不能证明它代表真实占用。队列位次、软预约、保护保留与旧版 UNKNOWN 快照都只能进入 weak
+   * 诊断；只有明确的硬阻塞关系与移动/实体 footprint claim 同时存在时，才允许升级为 non-weak episode。
+   */
+  private boolean isLiveHardCycleBlocker(RuntimeDispatchService.DeadlockBlockerInfo blocker) {
+    return isLiveCycleBlockerResource(blocker) && isExplicitHardBlocker(blocker);
+  }
+
+  private static boolean isExplicitHardBlocker(RuntimeDispatchService.DeadlockBlockerInfo blocker) {
+    if (blocker == null) {
+      return false;
+    }
+    boolean hardRole =
+        ClaimRole.MOVEMENT_REQUIRED.name().equals(blocker.role())
+            || ClaimRole.PHYSICAL_FOOTPRINT.name().equals(blocker.role());
+    boolean hardRelation =
+        BlockerRelation.OPPOSITE_SINGLE_CONFLICT.name().equals(blocker.relation())
+            || BlockerRelation.SWITCHER_CONFLICT.name().equals(blocker.relation())
+            || BlockerRelation.HARD_OCCUPANCY.name().equals(blocker.relation());
+    return hardRole && hardRelation;
+  }
+
   private static String liveCycleResourceKey(RuntimeDispatchService.DeadlockBlockerInfo blocker) {
     if (blocker == null) {
       return "-";
@@ -1216,6 +1249,7 @@ public final class TrainHealthMonitor {
   private static boolean isUsableSingleConflictBlocker(
       RuntimeDispatchService.DeadlockBlockerInfo blocker) {
     return blocker != null
+        && isExplicitHardBlocker(blocker)
         && blocker.trainName() != null
         && !blocker.trainName().isBlank()
         && blocker.conflictKey() != null
@@ -1799,8 +1833,7 @@ public final class TrainHealthMonitor {
     }
     if (!smartDispatcherAllowsHealthMutation(
         targetTrain,
-        "SMART_DEADLOCK_DESTROY_FALLBACK",
-        DispatchEffectClass.DESTROY_ACTION,
+        DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY,
         "health-deadlock-destroy-fallback")) {
       traceFallbackDeadlockDestroySkipped(
           targetTrain,
@@ -1813,7 +1846,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     debugLogger.accept(
-        "HEALTH_LEGACY_DIAGNOSTIC action=DESTROY_TRAIN train="
+        "SMART_HEALTH_EFFECT_EXECUTION action=EXECUTE_VERIFIED_DEADLOCK_DESTROY effect=DESTROY_TRAIN train="
             + targetTrain
             + " source=health-deadlock-destroy-fallback dispatcherAction=false");
     dispatchService.scheduleSurvivorRefreshAfterTrainRemoved(targetTrain, followerTrain);
@@ -2523,23 +2556,19 @@ public final class TrainHealthMonitor {
             + (reason == null || reason.isBlank() ? "mode-gate" : reason));
   }
 
+  /**
+   * HealthMonitor 进入 Smart effect chain 的唯一入口。
+   *
+   * <p>健康监控只能请求已登记的 {@link DispatchAction}，不能自带字符串动作名或 effect class。具体列车操作仍在前方的 deadlock
+   * review、refresh 或 hard-stop 分支中执行；本入口只在 ENFORCE 下授权该已命名效果。
+   */
   private boolean smartDispatcherAllowsHealthMutation(
-      String trainName, String action, DispatchEffectClass effectClass, String source) {
+      String trainName, DispatchAction action, String source) {
+    DispatchAction safeAction = action == null ? DispatchAction.NONE : action;
+    DispatchEffectClass effectClass = safeAction.effectClass();
     SmartDispatcherMode mode = smartDispatcherMode();
     traceSmartDispatcherMode(trainName, mode, source);
-    if (action == null || !action.startsWith("SMART_")) {
-      traceLegacyRecoveryDeprecated(trainName, action, source, effectClass);
-    }
-    SmartDispatcherModeGate.EffectPermissions permissions =
-        SmartDispatcherModeGate.permissions(mode, effectClass);
-    boolean allowed =
-        switch (effectClass == null ? DispatchEffectClass.DIAGNOSTIC_ONLY : effectClass) {
-          case SIGNAL_ADVISORY, SIGNAL_CONSTRAINT -> permissions.canChangeAspect()
-              || permissions.canChangeTargetSpeed();
-          case OCCUPANCY_MUTATION -> permissions.canMutateOccupancy();
-          case DESTROY_ACTION -> permissions.canDestroy();
-          default -> false;
-        };
+    boolean allowed = SmartDispatcherModeGate.allows(mode, safeAction);
     if (allowed) {
       debugLogger.accept(
           "SMART_ACTION_ALLOWED_BY_EFFECT_GATE train="
@@ -2547,7 +2576,7 @@ public final class TrainHealthMonitor {
               + " mode="
               + mode
               + " action="
-              + action
+              + safeAction
               + " effectClass="
               + effectClass
               + " source="
@@ -2556,7 +2585,7 @@ public final class TrainHealthMonitor {
           "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
               + trainName
               + " recoveryDecision="
-              + action
+              + safeAction
               + " effectClass="
               + effectClass
               + " source="
@@ -2567,7 +2596,7 @@ public final class TrainHealthMonitor {
           "SMART_RECOVERY_PATH_SELECTED train="
               + trainName
               + " action="
-              + action
+              + safeAction
               + " effectClass="
               + effectClass
               + " source="
@@ -2579,10 +2608,10 @@ public final class TrainHealthMonitor {
           "SMART_DISPATCH_DISABLED train=" + trainName + " source=" + source + " mode=" + mode);
     }
     debugLogger.accept(
-        "LEGACY_RECOVERY_SKIPPED_FOR_SMART_CONTROL train="
+        "SMART_HEALTH_EFFECT_SUPPRESSED train="
             + trainName
             + " action="
-            + action
+            + safeAction
             + " mode="
             + mode
             + " effectClass="
@@ -2592,7 +2621,7 @@ public final class TrainHealthMonitor {
     traceSmartDispatcherActionSuppressed(
         trainName,
         mode,
-        action,
+        safeAction.name(),
         effectClass,
         mode == SmartDispatcherMode.OFF ? "smart-dispatcher-off" : "observe-only-no-side-effects");
     debugLogger.accept(
@@ -2601,26 +2630,12 @@ public final class TrainHealthMonitor {
             + " mode="
             + mode
             + " recoveryDecision="
-            + action
+            + safeAction
             + " effectClass="
             + effectClass
             + " source="
             + source);
     return false;
-  }
-
-  private void traceLegacyRecoveryDeprecated(
-      String trainName, String action, String source, DispatchEffectClass effectClass) {
-    debugLogger.accept(
-        "LEGACY_RECOVERY_DEPRECATED train="
-            + trainName
-            + " action="
-            + action
-            + " effectClass="
-            + effectClass
-            + " source="
-            + source
-            + " replacement=smart-traffic-control");
   }
 
   private void traceSmartRecoveryDecision(String trainName, String event, String reason) {
@@ -2946,10 +2961,7 @@ public final class TrainHealthMonitor {
     SmartDispatcherMode mode = smartDispatcherMode();
     traceSmartDispatcherMode(episode.trainA, mode, "health-deadlock");
     if (!smartDispatcherAllowsHealthMutation(
-        episode.trainA,
-        "DEADLOCK_RECOVERY",
-        DispatchEffectClass.SIGNAL_CONSTRAINT,
-        "health-deadlock")) {
+        episode.trainA, DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY, "health-deadlock")) {
       traceDeadlockDestroySkipped(
           episode, observation, progressDuration, now, "smart-dispatcher-" + mode.name());
       return false;
@@ -2989,7 +3001,7 @@ public final class TrainHealthMonitor {
     }
 
     if (!liveBlockerCycle && episode.reissueCount <= 0) {
-      traceSmartRecoveryDecision(episode.trainA, "LEGACY_RECOVERY_DEPRECATED", "hard-stop-pair");
+      traceSmartRecoveryDecision(episode.trainA, "SMART_HEALTH_SIGNAL_RECOVERY", "hard-stop-pair");
       debugLogger.accept(
           "TrainHealthMonitor 解锁互卡(stage=hard-stop-pair): pair="
               + episode.trainA
@@ -3215,8 +3227,7 @@ public final class TrainHealthMonitor {
         episode.stableLeader, "SMART_DESTROY_CANDIDATE", destroyReview.reason());
     if (!smartDispatcherAllowsHealthMutation(
         episode.stableLeader,
-        "SMART_DESTROY_CANDIDATE",
-        DispatchEffectClass.DESTROY_ACTION,
+        DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY,
         "health-deadlock-destroy")) {
       debugLogger.accept(
           "SMART_DESTROY_SUPPRESSED_BY_MODE train="
@@ -3230,7 +3241,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     debugLogger.accept(
-        "HEALTH_LEGACY_DIAGNOSTIC action=DESTROY_TRAIN train="
+        "SMART_HEALTH_EFFECT_EXECUTION action=EXECUTE_VERIFIED_DEADLOCK_DESTROY effect=DESTROY_TRAIN train="
             + episode.stableLeader
             + " source=health-deadlock-destroy dispatcherAction=false");
     debugLogger.accept(
@@ -3566,10 +3577,43 @@ public final class TrainHealthMonitor {
     return episode != null && episode.weak ? Duration.ZERO : deadlockDestroyThreshold;
   }
 
-  private static boolean allBlockersLiveHard(DeadlockEpisode episode) {
-    return episode != null
-        && !episode.weak
-        && (episode.conflictKey.startsWith("single:") || episode.conflictKey.startsWith("live:"));
+  /**
+   * 在 destroy 审查前使用最新 typed blocker 快照重新确认双向 hard wait-for 边。
+   *
+   * <p>episode 只保存稳定身份与首见时间，不能把此前的 {@code live:} key 当作当前硬占用证明。恢复动作可能已经使 claim 降级、释放或改写；因此最终
+   * destructive action 必须再次看到双方互相指向、且 relation/role 仍为明确硬语义。single episode 还必须保持同一 conflict
+   * 与已知对向方向。
+   */
+  private boolean allBlockersLiveHard(DeadlockEpisode episode) {
+    if (episode == null || episode.weak) {
+      return false;
+    }
+    Optional<RuntimeDispatchService.DeadlockBlockerInfo> first =
+        latestHardBlockerBetween(episode.trainA, episode.trainB, episode.conflictKey);
+    Optional<RuntimeDispatchService.DeadlockBlockerInfo> second =
+        latestHardBlockerBetween(episode.trainB, episode.trainA, episode.conflictKey);
+    if (first.isEmpty() || second.isEmpty()) {
+      return false;
+    }
+    return !episode.conflictKey.startsWith("single:")
+        || isKnownOpposite(first.get().direction(), second.get().direction());
+  }
+
+  private Optional<RuntimeDispatchService.DeadlockBlockerInfo> latestHardBlockerBetween(
+      String waitingTrain, String blockerTrain, String episodeConflictKey) {
+    String blockerKey = keyOf(blockerTrain);
+    if (blockerKey == null) {
+      return Optional.empty();
+    }
+    return recentDeadlockBlockerSnapshot(waitingTrain).blockers().stream()
+        .filter(blocker -> blockerKey.equals(keyOf(blocker.trainName())))
+        .filter(
+            blocker ->
+                episodeConflictKey.startsWith("single:")
+                    ? episodeConflictKey.equals(blocker.conflictKey())
+                        && isUsableSingleConflictBlocker(blocker)
+                    : episodeConflictKey.startsWith("live:") && isLiveHardCycleBlocker(blocker))
+        .findFirst();
   }
 
   private long remainingMsUntilDestroy(DeadlockEpisode episode, Instant now) {

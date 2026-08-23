@@ -10,19 +10,24 @@ import java.util.OptionalDouble;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingEdgeSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailComponentCautionRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailInterlockingSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -35,6 +40,8 @@ public final class RailGraphService {
   private final RailGraphBuilder builder;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<UUID, RailGraphSnapshot> snapshots = new ConcurrentHashMap<>();
+  private final ConcurrentMap<UUID, RailInterlockingState> lastActivatedInterlockingStates =
+      new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailGraphStaleState> staleStates = new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailGraphComponentIndex> componentIndexes =
       new ConcurrentHashMap<>();
@@ -42,6 +49,7 @@ public final class RailGraphService {
       new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
+  private volatile BooleanSupplier snapshotActivationGuard = () -> true;
 
   public RailGraphService(SignNodeRegistry registry, Consumer<String> debugLogger) {
     this(new SignRegistryRailGraphBuilder(registry, debugLogger), debugLogger);
@@ -60,9 +68,7 @@ public final class RailGraphService {
     Objects.requireNonNull(world, "world");
     RailGraph graph = builder.build(world);
     UUID worldId = world.getUID();
-    snapshots.put(worldId, new RailGraphSnapshot(graph, Instant.now()));
-    componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
-    staleStates.remove(worldId);
+    activateSnapshot(worldId, graph, Instant.now());
     return graph;
   }
 
@@ -70,10 +76,64 @@ public final class RailGraphService {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(builtAt, "builtAt");
-    UUID worldId = world.getUID();
+    activateSnapshot(world.getUID(), graph, builtAt);
+  }
+
+  /**
+   * 设置图快照激活前的静默条件检查。
+   *
+   * <p>只有 old/new 物理联锁资源投影发生变化时才调用该 guard。运行时应注入“当前没有任何占用 claim”；默认恒为 true，以保持独立图测试与启动预热兼容。
+   */
+  public void setSnapshotActivationGuard(BooleanSupplier snapshotActivationGuard) {
+    this.snapshotActivationGuard =
+        Objects.requireNonNull(snapshotActivationGuard, "snapshotActivationGuard");
+  }
+
+  /**
+   * 在持久化新快照前校验其物理联锁资源投影是否允许切换。
+   *
+   * <p>图构建命令在同一主线程调用链中先执行本校验、再提交 SQL 事务、最后调用 {@link #putSnapshot(World, RailGraph, Instant)}。这样既不会在
+   * active claim 存在时先改磁盘，也不会在 SQL 失败时先改内存。
+   *
+   * @throws IllegalStateException 资源投影变化且当前仍有占用 claim
+   */
+  public void validateSnapshotActivation(World world, RailGraph graph) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(graph, "graph");
+    validateSnapshotActivation(world.getUID(), graph);
+  }
+
+  private void activateSnapshot(UUID worldId, RailGraph graph, Instant builtAt) {
+    validateSnapshotActivation(worldId, graph);
+    RailInterlockingState nextState = interlockingState(graph);
+    RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
-    componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
+    componentIndexes.put(worldId, nextComponentIndex);
+    lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
+  }
+
+  private void validateSnapshotActivation(UUID worldId, RailGraph graph) {
+    RailGraphSnapshot current = snapshots.get(worldId);
+    RailInterlockingState currentState =
+        lastActivatedInterlockingStates.getOrDefault(
+            worldId,
+            current == null
+                ? RailInterlockingState.unavailable()
+                : interlockingState(current.graph()));
+    RailInterlockingState nextState = interlockingState(graph);
+    if ((current != null || lastActivatedInterlockingStates.containsKey(worldId))
+        && !currentState.sameResourceProjection(nextState)
+        && !snapshotActivationGuard.getAsBoolean()) {
+      throw new IllegalStateException("仍有列车占用 claim，拒绝切换物理联锁资源投影");
+    }
+  }
+
+  private static RailInterlockingState interlockingState(RailGraph graph) {
+    if (graph instanceof RailGraphInterlockingSupport support) {
+      return support.interlockingState();
+    }
+    return RailInterlockingState.unavailable();
   }
 
   public Optional<RailGraphSnapshot> getSnapshot(World world) {
@@ -392,6 +452,8 @@ public final class RailGraphService {
     RailEdgeOverrideRepository overrideRepo = provider.railEdgeOverrides();
     RailComponentCautionRepository cautionRepo = provider.railComponentCautions();
     RailGraphSnapshotRepository snapshotRepo = provider.railGraphSnapshots();
+    RailInterlockingSnapshotRepository interlockingSnapshotRepo =
+        provider.railInterlockingSnapshots();
 
     for (World world : worlds) {
       if (world == null) {
@@ -475,6 +537,16 @@ public final class RailGraphService {
       }
 
       java.util.List<RailEdgeRecord> edgeRecords = edgeRepo.listByWorld(worldId);
+      Optional<RailInterlockingSnapshotRecord> interlockingSnapshot = Optional.empty();
+      try {
+        interlockingSnapshot = interlockingSnapshotRepo.findByWorld(worldId);
+      } catch (Exception ex) {
+        debugLogger.accept(
+            "读取 rail_interlocking_snapshots 失败，已按 fail-closed 加载: world="
+                + worldId
+                + " msg="
+                + ex.getMessage());
+      }
       if (snapshot.nodeSignature().isEmpty() && !currentSignature.isEmpty()) {
         RailGraphSnapshotRecord updated =
             new RailGraphSnapshotRecord(
@@ -494,10 +566,13 @@ public final class RailGraphService {
                   + ex.getMessage());
         }
       }
-      RailGraph graph = buildGraphFromRecords(nodeRecords, edgeRecords);
-      snapshots.put(worldId, new RailGraphSnapshot(graph, snapshot.builtAt()));
-      componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
-      staleStates.remove(worldId);
+      RailGraph graph = buildGraphFromRecords(nodeRecords, edgeRecords, interlockingSnapshot);
+      try {
+        activateSnapshot(worldId, graph, snapshot.builtAt());
+      } catch (IllegalStateException exception) {
+        debugLogger.accept(
+            "持久化调度图未激活，旧联锁投影保持生效: world=" + worldId + " msg=" + exception.getMessage());
+      }
     }
   }
 
@@ -508,6 +583,21 @@ public final class RailGraphService {
    */
   public static RailGraph buildGraphFromRecords(
       java.util.List<RailNodeRecord> nodeRecords, java.util.List<RailEdgeRecord> edgeRecords) {
+    return buildGraphFromRecords(nodeRecords, edgeRecords, Optional.empty());
+  }
+
+  /**
+   * 从纯 Node/Edge 记录与独立的稀疏联锁快照还原图。
+   *
+   * <p>快照缺失、Edge 签名不一致或 Zone 引用损坏时，图仍可用于诊断，但全部 Edge 会投影同一个 incomplete sentinel，运行授权保持 fail-closed。
+   */
+  public static RailGraph buildGraphFromRecords(
+      java.util.List<RailNodeRecord> nodeRecords,
+      java.util.List<RailEdgeRecord> edgeRecords,
+      Optional<RailInterlockingSnapshotRecord> interlockingSnapshot) {
+    Objects.requireNonNull(nodeRecords, "nodeRecords");
+    Objects.requireNonNull(edgeRecords, "edgeRecords");
+    Objects.requireNonNull(interlockingSnapshot, "interlockingSnapshot");
     Map<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId, RailNode> nodesById = new HashMap<>();
     for (RailNodeRecord node : nodeRecords) {
       SignRailNode railNode =
@@ -540,7 +630,46 @@ public final class RailGraphService {
       edgesById.put(edgeId, railEdge);
     }
 
-    return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of());
+    RailInterlockingState interlockingState =
+        resolveWorldId(nodeRecords, edgeRecords)
+            .map(
+                worldId ->
+                    restoreInterlockingState(worldId, edgesById.keySet(), interlockingSnapshot))
+            .orElseGet(RailInterlockingState::unavailable);
+    return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of(), interlockingState);
+  }
+
+  private static RailInterlockingState restoreInterlockingState(
+      UUID worldId,
+      java.util.Set<EdgeId> expectedEdges,
+      Optional<RailInterlockingSnapshotRecord> snapshotOpt) {
+    if (snapshotOpt.isEmpty()) {
+      return RailInterlockingState.incomplete(worldId, expectedEdges);
+    }
+    RailInterlockingSnapshotRecord snapshot = snapshotOpt.get();
+    String currentSignature = RailInterlockingEdgeSignature.of(expectedEdges);
+    if (!worldId.equals(snapshot.worldId())
+        || snapshot.formatVersion() != RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION
+        || !currentSignature.equals(snapshot.edgeSignature())) {
+      return RailInterlockingState.incomplete(worldId, expectedEdges);
+    }
+    try {
+      return RailInterlockingState.fromSnapshot(
+          worldId, expectedEdges, snapshot.coverage(), snapshot.zones());
+    } catch (IllegalArgumentException exception) {
+      return RailInterlockingState.incomplete(worldId, expectedEdges);
+    }
+  }
+
+  private static Optional<UUID> resolveWorldId(
+      java.util.List<RailNodeRecord> nodeRecords, java.util.List<RailEdgeRecord> edgeRecords) {
+    if (!edgeRecords.isEmpty()) {
+      return Optional.of(edgeRecords.get(0).worldId());
+    }
+    if (!nodeRecords.isEmpty()) {
+      return Optional.of(nodeRecords.get(0).worldId());
+    }
+    return Optional.empty();
   }
 
   public record RailGraphSnapshot(RailGraph graph, Instant builtAt) {

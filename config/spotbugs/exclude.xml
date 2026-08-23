@@ -217,6 +217,10 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailInterlockingSnapshotRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailComponentCautionRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
@@ -245,10 +249,52 @@
         <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
     </Match>
 
+    <!-- JDBC migration 单测使用 Mockito Connection/Statement/ResultSet，不会打开真实数据库资源。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManagerTest"/>
+        <Method name="requiredRailEdgeFootprintMigrationPropagatesFailure"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION,ODR_OPEN_DATABASE_RESOURCE,SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManagerTest"/>
+        <Method name="existingRailEdgeFootprintColumnSkipsAlter"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION,ODR_OPEN_DATABASE_RESOURCE"/>
+    </Match>
+
     <!-- Mockito static mocking 的 when(...) 使用 void lambda 记录调用，SpotBugs 会误报“忽略返回值”。 -->
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParserTest"/>
         <Method name="lambda$ignoresTagSignsOnBukkitSign$0"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+
+    <!-- Paper 1.21 的 ItemStack#setItemMeta 返回兼容性 boolean，但仍会修改 ItemStack；SpotBugs 将其误判为无副作用。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaGraphCommand"/>
+        <Method name="createDebugStick"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaRouteCommand"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener"/>
+        <Method name="createStickItem"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener"/>
+        <Method name="createDebugStickItem"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener"/>
+        <Method name="onRightClickSignOrRail"/>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
     </Match>
 

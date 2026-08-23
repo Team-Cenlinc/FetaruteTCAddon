@@ -5,8 +5,12 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
@@ -46,9 +50,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchDiagnosticGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
@@ -58,6 +64,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupanc
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnMonitor;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.StorageSpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TrainCartsDepotSpawner;
@@ -71,8 +78,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.RuntimeDispatchRequestProvider;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.RuntimeSignalReevaluationScheduler;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalEvaluator;
-import org.fetarute.fetaruteTCAddon.dispatcher.signal.TrainController;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
 import org.fetarute.fetaruteTCAddon.display.SimpleDisplayService;
@@ -108,14 +115,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private HeadwayRule headwayRule;
   private SignalEventBus signalEventBus;
   private SignalEvaluator signalEvaluator;
-  private TrainController trainController;
+  private RuntimeSignalReevaluationScheduler signalReevaluationScheduler;
   private RouteDefinitionCache routeDefinitionCache;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
   private DwellRegistry dwellRegistry;
   private RuntimeDispatchService runtimeDispatchService;
+  private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
+  private boolean runtimeDispatchRecoveryComplete;
   private ReclaimManager reclaimManager;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
+  private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
   private org.bukkit.scheduler.BukkitTask healthMonitorTask;
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
@@ -140,6 +150,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
     this.loggerManager = new LoggerManager(getLogger());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+    this.runtimeDispatchDiagnosticGate = new RuntimeDispatchDiagnosticGate(loggerManager::debug);
 
     this.localeManager = new LocaleManager(this, configManager.current().locale(), loggerManager);
     this.localeManager.reload();
@@ -169,34 +180,23 @@ public final class FetaruteTCAddon extends JavaPlugin {
   @Override
   public void onDisable() {
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
+    beginRuntimeDispatchShutdown();
+    boolean persistentRollbacksContained =
+        runtimeDispatchService == null
+            || runtimeDispatchService.retryPersistentMaterializedSpawnRollbackRemovals();
+    if (!persistentRollbacksContained
+        || (spawnTicketAssigner != null
+            && !spawnTicketAssigner.prepareForReplacement(java.time.Instant.now()))) {
+      getLogger().severe("插件停用时仍有实体化发车事务未完成物理收容；相关编组已保持 runtime 隔离");
+    }
     unregisterSignActions();
-    if (trainController != null) {
-      trainController.stop();
-      trainController = null;
-    }
-    if (signalEvaluator != null) {
-      signalEvaluator.stop();
-      signalEvaluator = null;
-    }
     if (signalEventBus != null) {
       signalEventBus.clear();
       signalEventBus = null;
     }
-    if (runtimeMonitorTask != null) {
-      runtimeMonitorTask.cancel();
-      runtimeMonitorTask = null;
-    }
-    if (healthMonitorTask != null) {
-      healthMonitorTask.cancel();
-      healthMonitorTask = null;
-    }
-    if (healthMonitor != null) {
-      healthMonitor.clear();
-      healthMonitor = null;
-    }
-    if (spawnMonitorTask != null) {
-      spawnMonitorTask.cancel();
-      spawnMonitorTask = null;
+    if (runtimeRecoveryTask != null) {
+      runtimeRecoveryTask.cancel();
+      runtimeRecoveryTask = null;
     }
     if (displayService != null) {
       displayService.stop();
@@ -206,6 +206,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       reclaimManager.stop();
       reclaimManager = null;
     }
+    runtimeDispatchRecoveryComplete = false;
     if (storageManager != null) {
       storageManager.shutdown();
     }
@@ -238,6 +239,27 @@ public final class FetaruteTCAddon extends JavaPlugin {
       sender.sendMessage("插件尚未初始化，无法重载");
       return;
     }
+    beginRuntimeDispatchRecovery("command-reload");
+    java.time.Instant replacementAt = java.time.Instant.now();
+    boolean persistentRollbacksContained =
+        runtimeDispatchService == null
+            || runtimeDispatchService.retryPersistentMaterializedSpawnRollbackRemovals();
+    if (!persistentRollbacksContained
+        || (spawnTicketAssigner != null
+            && !spawnTicketAssigner.prepareForReplacement(replacementAt))) {
+      getLogger().severe("重载已安全中止：仍有实体化发车事务未完成物理收容；请检查日志并重试 /fta reload");
+      sender.sendMessage(localeManager.component("command.reload.materialized-spawn-pending"));
+      scheduleRuntimeOccupancyReconstruction(1L);
+      return;
+    }
+    SpawnManager.ReplacementSnapshot spawnReplacementSnapshot =
+        spawnManager == null
+            ? new SpawnManager.ReplacementSnapshot(List.of(), Map.of(), 0L)
+            : spawnManager.snapshotForReplacement();
+    List<SpawnTicket> replacementPendingTickets = new ArrayList<>();
+    if (spawnTicketAssigner != null) {
+      replacementPendingTickets.addAll(spawnTicketAssigner.snapshotPendingTickets());
+    }
     if (displayService != null) {
       displayService.stop();
       displayService = null;
@@ -263,13 +285,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     initRouteDefinitionCache();
     initHealthMonitor();
-    restartHealthMonitorTask();
-    restartRuntimeMonitor();
     initSpawnScheduler();
+    if (spawnManager != null) {
+      spawnManager.restoreForReplacement(
+          spawnReplacementSnapshot, replacementPendingTickets, replacementAt);
+    }
     initReclaimManager();
     initDisplayService();
     // 重新初始化公开 API，确保外部插件引用有效
     initApi();
+    scheduleRuntimeOccupancyReconstruction(1L);
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
 
@@ -476,9 +501,28 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   private void initOccupancyManager() {
     this.headwayRule = HeadwayRule.fixed(Duration.ZERO);
-    this.signalEventBus = new SignalEventBus(loggerManager::debug);
+    this.signalEventBus = new SignalEventBus(runtimeDispatchDiagnostics());
     this.occupancyManager =
         new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy(), signalEventBus);
+    if (this.railGraphService != null) {
+      this.railGraphService.setSnapshotActivationGuard(
+          () -> this.occupancyManager == null || this.occupancyManager.snapshotClaims().isEmpty());
+    }
+  }
+
+  /**
+   * 返回 Dispatcher、Signal 与 Health 共同使用的诊断出口。
+   *
+   * <p>生命周期测试或异常初始化路径可能在 gate 建立前调用局部初始化；该情况下保留普通 debug 输出，但正式插件启动必须 使用同一个有界
+   * gate，避免多个周期组件分别放大控制台日志。
+   *
+   * @return 运行时诊断日志出口
+   */
+  private Consumer<String> runtimeDispatchDiagnostics() {
+    if (runtimeDispatchDiagnosticGate != null) {
+      return runtimeDispatchDiagnosticGate;
+    }
+    return loggerManager == null ? message -> {} : loggerManager::debug;
   }
 
   private void initRouteDefinitionCache() {
@@ -557,7 +601,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
             configManager,
             storageManager,
             new TrainConfigResolver(),
-            loggerManager::debug);
+            runtimeDispatchDiagnostics());
+    runtimeDispatchRecoveryComplete = false;
+    beginRuntimeDispatchRecovery("plugin-enable");
+    runtimeDispatchService.setStartupRecoveryRequestedListener(
+        () -> requestRuntimeDispatchRecovery("late-loaded-or-relinked-train"));
     getServer()
         .getPluginManager()
         .registerEvents(new RuntimeDispatchListener(runtimeDispatchService), this);
@@ -566,75 +614,282 @@ public final class FetaruteTCAddon extends JavaPlugin {
       runtimeDispatchService.setEtaService(etaService);
     }
     initHealthMonitor();
-    restartHealthMonitorTask();
-    restartRuntimeMonitor();
-    initSignalEventDrivenComponents();
-    getServer()
-        .getScheduler()
-        .runTaskLater(
-            this,
-            () -> {
-              try {
-                java.util.List<org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle>
-                    handles = new java.util.ArrayList<>();
-                for (MinecartGroup group : MinecartGroupStore.getGroups()) {
-                  if (group == null || !group.isValid()) {
-                    continue;
-                  }
-                  handles.add(new TrainCartsRuntimeHandle(group));
-                }
-                runtimeDispatchService.rebuildOccupancySnapshot(handles);
-              } catch (Exception ex) {
-                debug("运行时占用重建失败: " + ex.getMessage());
-              }
-            },
-            1L);
+    scheduleRuntimeOccupancyReconstruction(1L);
   }
 
   /**
-   * 初始化事件驱动的信号组件（SignalEvaluator + TrainController）。
+   * 延迟重建运行时现场占用；安全证据暂不可用时保持 stop-first 并自动重试。
    *
-   * <p>这些组件订阅占用变化事件，实现即时信号响应，减少对周期性 tick 的依赖。
+   * <p>重试只重新读取 TrainCarts 当前列车集合，不主动加载区块。图快照、Route 或 claim 冲突恢复后，下一轮会自动完成水合并开放授权。
+   */
+  private void scheduleRuntimeOccupancyReconstruction(long delayTicks) {
+    RuntimeDispatchService service = runtimeDispatchService;
+    if (service == null || (runtimeRecoveryTask != null && !runtimeRecoveryTask.isCancelled())) {
+      return;
+    }
+    runtimeRecoveryTask =
+        getServer()
+            .getScheduler()
+            .runTaskLater(
+                this,
+                () -> {
+                  runtimeRecoveryTask = null;
+                  boolean completed = false;
+                  List<RuntimeTrainHandle> handles = new ArrayList<>();
+                  try {
+                    boolean persistentRollbacksContained =
+                        service.retryPersistentMaterializedSpawnRollbackRemovals();
+                    boolean incompleteFtaIdentityFound = false;
+                    for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+                      if (group == null || !group.isValid()) {
+                        continue;
+                      }
+                      com.bergerkiller.bukkit.tc.properties.TrainProperties properties =
+                          group.getProperties();
+                      TrainCartsRuntimeHandle handle = new TrainCartsRuntimeHandle(group);
+                      if (properties != null
+                          && service.hasMaterializedSpawnRollbackTag(properties)) {
+                        incompleteFtaIdentityFound = true;
+                        if (!service.resumeMaterializedSpawnRollback(handle)) {
+                          service.handleAbnormalGroup(
+                              group, "startup-materialized-rollback-pending");
+                        }
+                        continue;
+                      }
+                      if (properties != null
+                          && service.hasFtaRuntimeTag(properties)
+                          && !service.hasCompleteFtaRouteIdentity(properties)) {
+                        incompleteFtaIdentityFound = true;
+                        service.handleAbnormalGroup(group, "startup-incomplete-fta-identity");
+                        continue;
+                      }
+                      handles.add(handle);
+                    }
+                    boolean materializedSpawnsContained =
+                        spawnTicketAssigner == null
+                            || spawnTicketAssigner.prepareForReplacement(java.time.Instant.now());
+                    if (!persistentRollbacksContained
+                        || !materializedSpawnsContained
+                        || incompleteFtaIdentityFound) {
+                      service.beginStartupOccupancyReconstruction();
+                      debug("运行时恢复等待实体化发车或身份异常物理收容完成，保持 STOP_FIRST");
+                    } else {
+                      completed = service.prepareStartupOccupancySnapshot(handles);
+                    }
+                  } catch (RuntimeException | LinkageError ex) {
+                    service.beginStartupOccupancyReconstruction();
+                    debug(
+                        "运行时占用重建失败，已回退 STOP_FIRST 并等待重试: "
+                            + ex.getClass().getSimpleName()
+                            + ":"
+                            + String.valueOf(ex.getMessage()));
+                  }
+                  if (completed && isEnabled() && runtimeDispatchService == service) {
+                    completed = startRuntimeDispatchComponentsAfterRecovery(service, handles);
+                  }
+                  if (!completed && isEnabled() && runtimeDispatchService == service) {
+                    scheduleRuntimeOccupancyReconstruction(20L);
+                  }
+                },
+                Math.max(1L, delayTicks));
+  }
+
+  /** 由调度服务请求的迟加载/重组列车全局 fail-safe 恢复。 */
+  private void requestRuntimeDispatchRecovery(String reason) {
+    if (!isEnabled() || runtimeDispatchService == null) {
+      return;
+    }
+    beginRuntimeDispatchRecovery(reason);
+    scheduleRuntimeOccupancyReconstruction(1L);
+  }
+
+  /**
+   * 在现场占用完成原子提交后启动所有可能签发授权或改变列车生命周期的组件。
+   *
+   * <p>健康恢复、周期信号、事件信号、自动发车和折返回收共享同一个启动门，避免其中任一组件在空快照或半水合快照上抢先运行。
+   */
+  private boolean startRuntimeDispatchComponentsAfterRecovery(
+      RuntimeDispatchService service, Collection<? extends RuntimeTrainHandle> handles) {
+    if (runtimeDispatchRecoveryComplete) {
+      return true;
+    }
+    if (service == null || runtimeDispatchService != service) {
+      return false;
+    }
+    try {
+      restartHealthMonitorTask();
+      restartRuntimeMonitor();
+      initSignalEventDrivenComponents();
+      restartSpawnMonitor();
+      if (reclaimManager != null) {
+        reclaimManager.start();
+      }
+      if (!service.completeStartupOccupancyReconstruction(handles)) {
+        runtimeDispatchRecoveryComplete = false;
+        suspendRuntimeDispatchComponentsForRecovery();
+        debug("运行时授权刷新未完成，保持 STOP_FIRST 并等待重试");
+        return false;
+      }
+      runtimeDispatchRecoveryComplete = true;
+      debug("运行时现场占用已原子恢复，调度/信号/发车组件已启动");
+      return true;
+    } catch (RuntimeException | LinkageError ex) {
+      suspendRuntimeDispatchComponentsForRecovery();
+      service.beginStartupOccupancyReconstruction();
+      debug(
+          "运行时组件恢复失败，保持 STOP_FIRST 并等待重试: "
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+      return false;
+    }
+  }
+
+  /**
+   * 进入启动/重载共用的运行时恢复事务。
+   *
+   * <p>先关闭调度服务的授权门以及所有 wake-up、发车和周期组件，再在主线程同步冻结全部受管编组。RuntimeDispatchListener
+   * 保持注册，用服务层统一门控吸收恢复窗口内的牌子与列车事件。
+   */
+  private void beginRuntimeDispatchRecovery(String reason) {
+    runtimeDispatchRecoveryComplete = false;
+    RuntimeDispatchService service = runtimeDispatchService;
+    if (service != null) {
+      service.beginStartupOccupancyReconstruction();
+    }
+    suspendRuntimeDispatchComponentsForRecovery();
+    try {
+      if (service != null) {
+        for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+          freezeRuntimeGroupForRecovery(service, group);
+        }
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      debug(
+          "运行时恢复枚举现场列车失败，继续保持 STOP_FIRST: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+    }
+    debug("运行时恢复事务已进入 STOP_FIRST: reason=" + String.valueOf(reason));
+  }
+
+  /**
+   * 将插件置入停用状态，而不再触碰 TrainCarts 的现场编组。
+   *
+   * <p>Paper 的服务器关闭可能在非主线程执行插件禁用。此时枚举或冻结 {@link MinecartGroup} 会把 FTA 的恢复流程带入
+   * TrainCarts/BKCommonLib 的线程边界，也可能让尚未关闭的重评估 scheduler 尝试注册下一 tick 任务。停用只需撤销授权 与 wake-up，并让运行时保持
+   * STOP_FIRST；服务器随后会负责实体和世界的最终关闭。
+   */
+  private void beginRuntimeDispatchShutdown() {
+    runtimeDispatchRecoveryComplete = false;
+    suspendRuntimeDispatchComponentsForRecovery();
+    if (runtimeDispatchService != null) {
+      runtimeDispatchService.beginStartupOccupancyReconstruction();
+    }
+    debug("运行时停用事务已进入 STOP_FIRST: reason=plugin-disable");
+  }
+
+  /** 在完整 ABI 边界内识别并冻结一个现场编组，错误日志不再次访问 TrainCarts 对象。 */
+  private void freezeRuntimeGroupForRecovery(RuntimeDispatchService service, MinecartGroup group) {
+    String trainName = "-";
+    try {
+      if (group == null || !group.isValid()) {
+        return;
+      }
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties = group.getProperties();
+      if (properties == null) {
+        return;
+      }
+      trainName = String.valueOf(properties.getTrainName());
+      if (!service.hasFtaRuntimeTag(properties)) {
+        return;
+      }
+      TrainCartsRuntimeHandle handle = new TrainCartsRuntimeHandle(group);
+      handle.stopHard();
+      service.handleSignalTick(group);
+    } catch (RuntimeException | LinkageError ex) {
+      debug(
+          "运行时恢复冻结现场列车失败: train="
+              + trainName
+              + " error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+    }
+  }
+
+  /** 停止所有可能签发授权或改变列车生命周期的运行时组件。 */
+  private void suspendRuntimeDispatchComponentsForRecovery() {
+    if (signalEvaluator != null) {
+      signalEvaluator.stop();
+      signalEvaluator = null;
+    }
+    if (runtimeDispatchService != null) {
+      runtimeDispatchService.setSignalReevaluationRequester(null);
+    }
+    if (signalReevaluationScheduler != null) {
+      signalReevaluationScheduler.close();
+      signalReevaluationScheduler = null;
+    }
+    if (runtimeMonitorTask != null) {
+      runtimeMonitorTask.cancel();
+      runtimeMonitorTask = null;
+    }
+    if (healthMonitorTask != null) {
+      healthMonitorTask.cancel();
+      healthMonitorTask = null;
+    }
+    if (spawnMonitorTask != null) {
+      spawnMonitorTask.cancel();
+      spawnMonitorTask = null;
+    }
+    if (reclaimManager != null) {
+      reclaimManager.stop();
+    }
+  }
+
+  /**
+   * 初始化占用事件驱动的下一 tick 完整信号重评估组件。
+   *
+   * <p>事件只触发 wake-up；实际 signal、占用取得和 Movement Authority 仍由 RuntimeDispatchService 的完整周期入口统一计算。
    */
   private void initSignalEventDrivenComponents() {
     if (signalEventBus == null
         || occupancyManager == null
         || railGraphService == null
+        || runtimeDispatchService == null
         || loggerManager == null) {
       return;
     }
-    // 创建请求提供者
+    if (signalEvaluator != null) {
+      signalEvaluator.stop();
+      signalEvaluator = null;
+    }
+    runtimeDispatchService.setSignalReevaluationRequester(null);
+    if (signalReevaluationScheduler != null) {
+      signalReevaluationScheduler.close();
+      signalReevaluationScheduler = null;
+    }
+    // 创建占用事件桥的只读等待列车查询器
     RuntimeDispatchRequestProvider requestProvider =
-        new RuntimeDispatchRequestProvider(
-            railGraphService,
-            routeDefinitionCache,
-            routeProgressRegistry,
-            configManager,
-            occupancyManager,
-            (trainName, route, currentIndex, graph) ->
-                runtimeDispatchService.resolveEffectiveWaypointsForEvent(
-                    trainName, route, currentIndex, graph),
-            (trainName, route, currentIndex, graph) ->
-                runtimeDispatchService.resolveDirectionContextWaypointsForEvent(trainName, route),
-            runtimeDispatchService.dispatchPriorityResolver(),
-            loggerManager::debug);
-    // 创建信号评估器
+        new RuntimeDispatchRequestProvider(occupancyManager);
+    signalReevaluationScheduler =
+        new RuntimeSignalReevaluationScheduler(
+            task -> getServer().getScheduler().runTask(this, task),
+            runtimeDispatchService::reevaluateSignalByName,
+            runtimeDispatchService::failClosedAfterSignalReevaluationFailure,
+            runtimeDispatchDiagnostics());
+    runtimeDispatchService.setSignalReevaluationRequester(signalReevaluationScheduler::request);
     signalEvaluator =
         new SignalEvaluator(
-            signalEventBus, occupancyManager, requestProvider, loggerManager::debug);
-    signalEvaluator.start();
-    // 创建控车器
-    trainController =
-        new TrainController(
             signalEventBus,
-            (trainName, signal) -> {
-              if (runtimeDispatchService != null) {
-                runtimeDispatchService.applySignalFromEvent(trainName, signal);
-              }
-            },
-            loggerManager::debug);
-    trainController.start();
-    loggerManager.debug("信号事件驱动组件已启动");
+            requestProvider,
+            signalReevaluationScheduler::request,
+            runtimeDispatchService::failClosedAfterSignalReevaluationFailure,
+            runtimeDispatchDiagnostics());
+    signalEvaluator.start();
+    loggerManager.debug("占用事件下一 tick 完整信号重评估组件已启动");
   }
 
   private void initEtaService() {
@@ -700,9 +955,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     trainSnapshotStore,
                     dwellRegistry,
                     routeProgressRegistry,
-                    routeDefinitionCache),
-                interval,
-                interval);
+                    routeDefinitionCache,
+                    interval),
+                1L,
+                1L);
   }
 
   /** 重启健康检查定时任务（与 RuntimeSignalMonitor 解耦，避免遗漏初始化或异常链路影响）。 */
@@ -742,7 +998,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             occupancyManager,
             dwellRegistry,
             configManager,
-            loggerManager::debug);
+            runtimeDispatchDiagnostics());
     // 应用配置
     healthMonitor.setEnabled(settings.enabled());
     healthMonitor.setCheckInterval(java.time.Duration.ofSeconds(settings.checkIntervalSeconds()));
@@ -816,7 +1072,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (etaService != null) {
       etaService.attachTicketSources(spawnManager, spawnTicketAssigner);
     }
-    restartSpawnMonitor();
+    if (runtimeDispatchRecoveryComplete) {
+      restartSpawnMonitor();
+    }
   }
 
   private void restartSpawnMonitor() {
@@ -852,7 +1110,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.reclaimManager =
         new ReclaimManager(
             this, layoverRegistry, spawnTicketAssigner, configManager, loggerManager::debug);
-    this.reclaimManager.start();
+    if (runtimeDispatchRecoveryComplete) {
+      this.reclaimManager.start();
+    }
   }
 
   /**

@@ -16,6 +16,10 @@ public final class TrainSpawnTagInitializer {
   /** 新车的实际 Depot 起点仍可用于 route index 0 恢复；驶离或折返 handoff 后写为 false。 */
   public static final String TAG_SPAWN_ORIGIN_PENDING = "FTA_SPAWN_ORIGIN_PENDING";
 
+  /** 已实体化编组必须被物理销毁、不得在重载后恢复运营。 */
+  public static final String TAG_MATERIALIZED_ROLLBACK_PENDING =
+      "FTA_MATERIALIZED_ROLLBACK_PENDING";
+
   private static final List<String> LIFECYCLE_TAG_KEYS =
       List.of(
           "FTA_RUN_ID",
@@ -26,6 +30,7 @@ public final class TrainSpawnTagInitializer {
           "FTA_PATTERN",
           "FTA_DEPOT_ID",
           TAG_SPAWN_ORIGIN_PENDING,
+          TAG_MATERIALIZED_ROLLBACK_PENDING,
           "FTA_SPAWN_PATTERN",
           "FTA_DEST_CODE",
           "FTA_DEST_NAME",
@@ -64,8 +69,8 @@ public final class TrainSpawnTagInitializer {
       throw new IllegalArgumentException("trainName 不能为空");
     }
     String owner = trainName.trim();
-    properties.setTrainName(owner);
     TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_TRAIN_NAME, owner);
+    properties.setTrainName(owner);
   }
 
   /**

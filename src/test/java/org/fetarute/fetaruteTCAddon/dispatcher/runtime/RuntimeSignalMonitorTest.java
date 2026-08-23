@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -94,5 +95,46 @@ class RuntimeSignalMonitorTest {
             Map.of("train-1", 1, "train-2", 1, "train-3", 1));
 
     assertTrue(duplicates.isEmpty());
+  }
+
+  @Test
+  @DisplayName("周期巡检遇到 ABI 错误必须触发 fail-closed 且不让错误逃出任务")
+  void periodicInspectionLinkageFailureTriggersFailClosedBoundary() {
+    AtomicReference<String> failedTrain = new AtomicReference<>();
+    AtomicReference<Throwable> capturedFailure = new AtomicReference<>();
+    LinkageError failure = new LinkageError("runtime ABI mismatch");
+
+    boolean completed =
+        RuntimeSignalMonitor.runWithFailClosedBoundary(
+            "train-1",
+            () -> {
+              throw failure;
+            },
+            (trainName, throwable) -> {
+              failedTrain.set(trainName);
+              capturedFailure.set(throwable);
+            });
+
+    assertFalse(completed);
+    assertEquals("train-1", failedTrain.get());
+    assertEquals(failure, capturedFailure.get());
+  }
+
+  @Test
+  @DisplayName("完整周期后才等待配置间隔，未完成周期由下一 tick 续跑")
+  void nextCycleEligibilityWaitsOnlyAfterCompletedCycle() {
+    assertEquals(140L, RuntimeSignalMonitor.nextCycleEligibleTick(120L, 20));
+    assertEquals(
+        Long.MAX_VALUE, RuntimeSignalMonitor.nextCycleEligibleTick(Long.MAX_VALUE - 3L, 20));
+  }
+
+  @Test
+  @DisplayName("稳定静止列车不应被周期心跳重复执行完整授权")
+  void fullSignalTickRequiresFirstObservationOrPhysicalMovementChange() {
+    assertTrue(RuntimeSignalMonitor.shouldRunFullSignalTick(null, false));
+    assertFalse(RuntimeSignalMonitor.shouldRunFullSignalTick(false, false));
+    assertTrue(RuntimeSignalMonitor.shouldRunFullSignalTick(false, true));
+    assertTrue(RuntimeSignalMonitor.shouldRunFullSignalTick(true, true));
+    assertTrue(RuntimeSignalMonitor.shouldRunFullSignalTick(true, false));
   }
 }

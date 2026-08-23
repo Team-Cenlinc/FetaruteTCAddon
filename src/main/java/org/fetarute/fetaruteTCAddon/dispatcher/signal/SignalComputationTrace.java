@@ -98,7 +98,7 @@ public final class SignalComputationTrace {
     }
     Consumer<String> out = logger != null ? logger : globalLogger;
     if (markStableTraceEmitted(stableRawTraceKey(message))) {
-      out.accept(message);
+      emitBestEffort(out, message);
     }
   }
 
@@ -110,6 +110,7 @@ public final class SignalComputationTrace {
     private final SignalAspect newAspect;
     private final Source source;
     private final long tick;
+    private DirectedTraversalContext directedContext;
     private SignalAspect previousAspect;
     private boolean hasBlockers;
     private boolean hasDistanceOnlyConstraint;
@@ -217,21 +218,7 @@ public final class SignalComputationTrace {
       if (context == null) {
         return this;
       }
-      field("requestId", context.requestId());
-      field("directedSource", context.source());
-      field("directedOccupancyVersion", context.occupancyVersion());
-      field("directedProgressVersion", context.progressVersion());
-      field("routeId", context.routeId().map(Object::toString).orElse("-"));
-      field("currentIndex", context.currentIndex());
-      field("directedCurrentNode", formatNode(context.currentNode()));
-      field("lastPassedGraphNode", formatNode(context.lastPassedGraphNode()));
-      field("effectiveFromNode", formatNode(context.effectiveFromNode()));
-      field("effectiveToNode", formatNode(context.effectiveToNode()));
-      field("expandedPathNodes", formatNodeList(context.expandedPathNodes()));
-      field("directedEdges", context.directedEdges());
-      field("singleConflictDirections", context.singleConflictDirections());
-      field("switcherPathSignatures", context.switcherPathSignatures());
-      field("authorityTokenId", context.authorityTokenId().orElse("-"));
+      directedContext = context;
       return this;
     }
 
@@ -346,11 +333,34 @@ public final class SignalComputationTrace {
       fields.put("aspectTransition", formatAspect(effectivePrevious) + "->" + newAspect.name());
       fields.put("debugRecentFlipWithin2Ticks", String.valueOf(recentFlip));
       fields.put("blockers", blockers.isEmpty() ? "[]" : blockers.toString());
+      appendDirectedContextFields();
       String formattedFields = formatFields(fields);
       if (markStableTraceEmitted(stableSignalTraceKey(canonicalName, formattedFields, fields))) {
-        out.accept("SignalTrace " + formattedFields);
+        emitBestEffort(out, "SignalTrace " + formattedFields);
       }
       return this;
+    }
+
+    /** 仅在 trace 确实需要输出时才展开完整路径，避免稳定运行期格式化大图快照。 */
+    private void appendDirectedContextFields() {
+      if (directedContext == null) {
+        return;
+      }
+      field("requestId", directedContext.requestId());
+      field("directedSource", directedContext.source());
+      field("directedOccupancyVersion", directedContext.occupancyVersion());
+      field("directedProgressVersion", directedContext.progressVersion());
+      field("routeId", directedContext.routeId().map(Object::toString).orElse("-"));
+      field("currentIndex", directedContext.currentIndex());
+      field("directedCurrentNode", formatNode(directedContext.currentNode()));
+      field("lastPassedGraphNode", formatNode(directedContext.lastPassedGraphNode()));
+      field("effectiveFromNode", formatNode(directedContext.effectiveFromNode()));
+      field("effectiveToNode", formatNode(directedContext.effectiveToNode()));
+      field("expandedPathNodes", formatNodeList(directedContext.expandedPathNodes()));
+      field("directedEdges", directedContext.directedEdges());
+      field("singleConflictDirections", directedContext.singleConflictDirections());
+      field("switcherPathSignatures", directedContext.switcherPathSignatures());
+      field("authorityTokenId", directedContext.authorityTokenId().orElse("-"));
     }
 
     private boolean isSuppressedPhysicalNoOp(SignalAspect effectivePrevious, boolean recentFlip) {
@@ -367,6 +377,19 @@ public final class SignalComputationTrace {
 
   private static boolean isRestrictive(SignalAspect aspect) {
     return aspect == SignalAspect.STOP || isCautionLike(aspect);
+  }
+
+  /**
+   * 尽力输出诊断信息，并隔离外部日志适配器的运行时异常。
+   *
+   * <p>诊断 logger 是旁路 seam，不能反向中断信号或占用状态提交。虚拟机级 {@link Error} 仍保留默认传播语义。
+   */
+  private static void emitBestEffort(Consumer<String> logger, String message) {
+    try {
+      logger.accept(message);
+    } catch (RuntimeException ignored) {
+      // 诊断输出失败不能改变信号计算或占用状态。
+    }
   }
 
   private static boolean isCautionLike(SignalAspect aspect) {
@@ -556,7 +579,8 @@ public final class SignalComputationTrace {
       return false;
     }
     String normalized = fieldName.toLowerCase(Locale.ROOT);
-    return "tick".equals(normalized)
+    return "sequence".equals(normalized)
+        || "tick".equals(normalized)
         || "requestid".equals(normalized)
         || "sampletick".equals(normalized)
         || normalized.endsWith("version");

@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,16 +13,16 @@ import org.junit.jupiter.api.Test;
 class SignalComputationTraceTest {
 
   @Test
-  void rawTraceSuppressesStableDuplicateIgnoringTickAndVersionFields() {
+  void rawTraceSuppressesStableDuplicateIgnoringLifecycleSequenceTickAndVersionFields() {
     List<String> traces = new ArrayList<>();
     SignalComputationTrace.configureLogger(traces::add);
 
     SignalComputationTrace.emitRaw(
-        "SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED train=MT-1 tick=10 occupancyVersion=1 "
+        "SMART_RESOURCE_LIFECYCLE sequence=1 train=MT-1 tick=10 occupancyVersion=1 "
             + "resource=EDGE:A-B relation=HARD_OCCUPANCY reason=held",
         traces::add);
     SignalComputationTrace.emitRaw(
-        "SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED train=MT-1 tick=11 occupancyVersion=2 "
+        "SMART_RESOURCE_LIFECYCLE sequence=2 train=MT-1 tick=11 occupancyVersion=2 "
             + "resource=EDGE:A-B relation=HARD_OCCUPANCY reason=held",
         traces::add);
 
@@ -68,6 +69,22 @@ class SignalComputationTraceTest {
         traces::add);
 
     assertTrue(traces.isEmpty());
+  }
+
+  @Test
+  void throwingLoggerCannotEscapeStructuredSignalTrace() {
+    SignalComputationTrace.configureLogger(null);
+    try {
+      assertDoesNotThrow(
+          () ->
+              SignalComputationTrace.emit(
+                  stableStopTrace(),
+                  message -> {
+                    throw new IllegalStateException("diagnostic-sink-failed");
+                  }));
+    } finally {
+      SignalComputationTrace.configureLogger(null);
+    }
   }
 
   private static SignalComputationTrace.Builder stableStopTrace() {

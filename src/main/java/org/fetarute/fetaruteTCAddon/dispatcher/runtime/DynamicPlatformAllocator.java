@@ -40,7 +40,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNorma
  *
  * <ul>
  *   <li>当前 RouteStop 为 DYNAMIC 类型
- *   <li>列车距离该站点 ≤ {@link #ALLOCATION_EDGE_THRESHOLD} 个 edges
+ *   <li>列车距离该站点 ≤ {@link #ALLOCATION_EDGE_THRESHOLD} 个 edges；若它就是下一 RouteStop，则允许越过该预选阈值
  *   <li>尚未为该站点分配过站台（避免重复分配）
  * </ul>
  *
@@ -236,10 +236,26 @@ public final class DynamicPlatformAllocator {
                 + ")");
       }
 
-      // 计算到目标的 edge 距离
+      // 计算到目标的 edge 距离。紧邻 DYNAMIC 是当前 route leg 的唯一目标；若它本身
+      // 比预选窗口长，继续等待永远不会让 routeIndex 前进到更近的位置，必须在这里
+      // 先完成候选选择。选择仍只建立预订，实际 NODE/EDGE 授权仍由后续信号链独立裁定。
       int edgeDistance = calculateEdgeDistance(graph, waypoints, currentIndex, targetIndex);
-      if (edgeDistance > ALLOCATION_EDGE_THRESHOLD) {
+      boolean immediateDynamicTarget = targetIndex == currentIndex + 1;
+      if (!immediateDynamicTarget && edgeDistance > ALLOCATION_EDGE_THRESHOLD) {
         continue;
+      }
+      if (immediateDynamicTarget && edgeDistance > ALLOCATION_EDGE_THRESHOLD) {
+        debugLogger.accept(
+            "DYNAMIC 紧邻目标越过预选距离: train="
+                + trainName
+                + ", route="
+                + route.id().value()
+                + ", stopIndex="
+                + targetIndex
+                + ", edgeDistance="
+                + edgeDistance
+                + ", previewThreshold="
+                + ALLOCATION_EDGE_THRESHOLD);
       }
 
       // 执行分配

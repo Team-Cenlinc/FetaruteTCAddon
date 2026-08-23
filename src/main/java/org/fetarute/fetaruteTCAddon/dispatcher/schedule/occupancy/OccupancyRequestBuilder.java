@@ -34,8 +34,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
  * 运行时占用请求构建器：把“列车状态 + 线路定义 + 图”转换成 OccupancyRequest。
  *
  * <p>默认会占用 lookahead 边与对应节点资源，并附加走廊/道岔冲突资源；道岔冲突可按 {@code switcherZoneEdges} 限制为“前 N 段边内的道岔”。
- * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。 尾部保护通过 {@code rearGuardEdges} 保留当前节点向后 N
- * 段边，避免长编组尾部被追尾。
+ * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。尾部保护同时满足 {@code rearGuardEdges}
+ * 的边数下限与列车长度导出的最小方块距离，避免长编组车头过点后提前释放仍被列尾占用的平交/道岔资源。
  *
  * <p>同时会记录冲突区 entryOrder（首次进入冲突的边序号），用于冲突区放行与死锁解除。
  *
@@ -50,6 +50,8 @@ public final class OccupancyRequestBuilder {
   private final int effectiveLookaheadEdges;
   private final long minLookaheadDistanceBlocks;
   private final int maxLookaheadEdges;
+  private final long minRearGuardDistanceBlocks;
+  private final long minConflictExitDistanceBlocks;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final SemanticCorridorDirectionResolver semanticDirectionResolver;
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
@@ -91,6 +93,52 @@ public final class OccupancyRequestBuilder {
       long minLookaheadDistanceBlocks,
       int maxLookaheadEdges,
       java.util.function.Consumer<String> debugLogger) {
+    this(
+        graph,
+        lookaheadEdges,
+        minClearEdges,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        0L,
+        debugLogger);
+  }
+
+  public OccupancyRequestBuilder(
+      RailGraph graph,
+      int lookaheadEdges,
+      int minClearEdges,
+      int rearGuardEdges,
+      int switcherZoneEdges,
+      long minLookaheadDistanceBlocks,
+      int maxLookaheadEdges,
+      long minRearGuardDistanceBlocks,
+      java.util.function.Consumer<String> debugLogger) {
+    this(
+        graph,
+        lookaheadEdges,
+        minClearEdges,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        0L,
+        debugLogger);
+  }
+
+  private OccupancyRequestBuilder(
+      RailGraph graph,
+      int lookaheadEdges,
+      int minClearEdges,
+      int rearGuardEdges,
+      int switcherZoneEdges,
+      long minLookaheadDistanceBlocks,
+      int maxLookaheadEdges,
+      long minRearGuardDistanceBlocks,
+      long minConflictExitDistanceBlocks,
+      java.util.function.Consumer<String> debugLogger) {
     this.graph = Objects.requireNonNull(graph, "graph");
     this.semanticDirectionResolver = new SemanticCorridorDirectionResolver(this.graph);
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
@@ -109,14 +157,51 @@ public final class OccupancyRequestBuilder {
     if (minLookaheadDistanceBlocks < 0L) {
       throw new IllegalArgumentException("minLookaheadDistanceBlocks 必须为非负数");
     }
+    if (minRearGuardDistanceBlocks < 0L) {
+      throw new IllegalArgumentException("minRearGuardDistanceBlocks 必须为非负数");
+    }
+    if (minConflictExitDistanceBlocks < 0L) {
+      throw new IllegalArgumentException("minConflictExitDistanceBlocks 必须为非负数");
+    }
     this.switcherZoneEdges = switcherZoneEdges;
     this.rearGuardEdges = rearGuardEdges;
     this.effectiveLookaheadEdges = Math.max(lookaheadEdges, minClearEdges);
     this.minLookaheadDistanceBlocks = minLookaheadDistanceBlocks;
+    this.minRearGuardDistanceBlocks = minRearGuardDistanceBlocks;
+    this.minConflictExitDistanceBlocks = minConflictExitDistanceBlocks;
     this.maxLookaheadEdges =
         maxLookaheadEdges <= 0
             ? this.effectiveLookaheadEdges
             : Math.max(this.effectiveLookaheadEdges, maxLookaheadEdges);
+  }
+
+  /**
+   * 返回要求物理联锁出口具备最小净空距离的新构建器。
+   *
+   * <p>该距离从最后一条携带同一 {@code interlocking:*} 资源的边之后开始累计，用于证明列车进入冲突区前，前方泊位至少能容纳整列车与停车余量。它与后向列尾保护、常规
+   * lookahead 距离相互独立；完整路径无法证明足够净空时，请求会 fail-closed。
+   *
+   * @param distanceBlocks 冲突区外所需的最小净空方块数
+   * @return 保留当前全部设置、仅替换出口净空距离的新构建器
+   */
+  public OccupancyRequestBuilder withMinimumConflictExitDistanceBlocks(long distanceBlocks) {
+    if (distanceBlocks < 0L) {
+      throw new IllegalArgumentException("distanceBlocks 必须为非负数");
+    }
+    if (distanceBlocks == minConflictExitDistanceBlocks) {
+      return this;
+    }
+    return new OccupancyRequestBuilder(
+        graph,
+        effectiveLookaheadEdges,
+        0,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        distanceBlocks,
+        debugLogger);
   }
 
   /**
@@ -279,6 +364,29 @@ public final class OccupancyRequestBuilder {
     }
     // 按实际图边截断：至少覆盖 edge 下限和距离下限，同时受 maxLookaheadEdges 硬上限约束。
     List<NodeId> expandedNodes = truncateLookahead(fullExpanded, fullEdges);
+    ConflictExitAuthorityWindow conflictExitWindow =
+        resolveConflictExitAuthorityWindow(fullEdges, expandedNodes);
+    if (conflictExitWindow.applicable() && !conflictExitWindow.resolved()) {
+      debugLogger.accept(
+          "构建请求失败: 物理联锁缺少可见清出边 train="
+              + trainName
+              + " conflicts="
+              + conflictExitWindow.conflictKeys()
+              + " nodes="
+              + fullExpanded);
+      return Optional.empty();
+    }
+    if (conflictExitWindow.resolved()
+        && conflictExitWindow.requiredNodeCount() > expandedNodes.size()) {
+      expandedNodes = List.copyOf(fullExpanded.subList(0, conflictExitWindow.requiredNodeCount()));
+      debugLogger.accept(
+          "冲突区出口提升为硬授权: train="
+              + trainName
+              + " conflicts="
+              + conflictExitWindow.conflictKeys()
+              + " nodes="
+              + conflictExitWindow.requiredNodeCount());
+    }
     AtomicAuthorityWindow atomicWindow =
         resolveAtomicInterlockingWindow(fullExpanded, expandedNodes, purpose);
     if (atomicWindow.applicable() && !atomicWindow.resolved()) {
@@ -338,6 +446,14 @@ public final class OccupancyRequestBuilder {
         resolveCorridorDirectionResolution(directionExpanded);
     Map<String, CorridorDirection> corridorDirections =
         requestCorridorDirections(resources, windowDirections, planDirections);
+    reportFinalDirectionFailures(
+        trainName,
+        routeId,
+        purpose,
+        resources,
+        corridorDirections,
+        windowDirections,
+        planDirections);
     Map<String, CorridorDirection> planCorridorDirections = planDirections.directions();
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
     DirectedTraversalContext directedContext =
@@ -365,7 +481,12 @@ public final class OccupancyRequestBuilder {
             intents,
             Optional.of(directedContext));
     return Optional.of(
-        new OccupancyRequestContext(request, expandedNodes, edges, Optional.of(directedContext)));
+        new OccupancyRequestContext(
+            request,
+            expandedNodes,
+            edges,
+            Optional.of(directedContext),
+            minLookaheadDistanceBlocks));
   }
 
   /**
@@ -456,6 +577,111 @@ public final class OccupancyRequestBuilder {
     return enteredInterlocking
         ? AtomicAuthorityWindow.unresolved(fullPath.get(0))
         : AtomicAuthorityWindow.notApplicable();
+  }
+
+  /**
+   * 把当前 hard window 已经触及的冲突区扩展到可原子取得的清出点。
+   *
+   * <p>本窗口只处理无方向的精确 {@code interlocking:*} 物理联锁资源；方向性 {@code single:*} 继续由局部硬窗口、方向锁、跟驰间隔和 leader
+   * token 协作，不能扩张为整段单线独占。
+   *
+   * <p>清出点从冲突区最后一条边之后开始，至少覆盖首条无该冲突的边，并按 {@link #minConflictExitDistanceBlocks}
+   * 继续累计可用泊位距离，使请求同时持有冲突内全部 EDGE/NODE/CONFLICT
+   * 与足以容纳列车的冲突外资源。若清出窗口进入另一个冲突区，则继续扩展新冲突，直到找到不再引入冲突的稳定窗口。这样 entry lookahead 只负责描述 canonical
+   * 路径，真正准入仍由同一个 {@link OccupancyRequest} 的 fresh acquire 原子完成。单个 switcher 的路径锁继续由后续
+   * throat/switcher 原子窗口负责，避免在这里把相邻边重复解释为第二套出口规则。
+   *
+   * <p>完整路径没有可见清出边时 builder 直接返回空请求并 fail-closed；不能把原始短窗口继续交给不理解物理联锁的调用方。若 route
+   * 终止在联锁区内，应补充可证明车体完全清出的图边界，而不是把 destination 当作出清证据。
+   */
+  private ConflictExitAuthorityWindow resolveConflictExitAuthorityWindow(
+      List<RailEdge> fullEdges, List<NodeId> hardWindow) {
+    if (fullEdges == null || fullEdges.isEmpty() || hardWindow == null || hardWindow.size() < 2) {
+      return ConflictExitAuthorityWindow.notApplicable();
+    }
+    int hardEdgeCount = Math.min(fullEdges.size(), hardWindow.size() - 1);
+    Set<String> conflictKeys = conflictKeysForEdges(fullEdges, hardEdgeCount);
+    if (conflictKeys.isEmpty()) {
+      return ConflictExitAuthorityWindow.notApplicable();
+    }
+
+    int requiredEdgeCount = hardEdgeCount;
+    Set<String> resolvedKeys = new LinkedHashSet<>();
+    boolean expanded;
+    do {
+      expanded = false;
+      List<String> candidates =
+          conflictKeys.stream().filter(key -> !resolvedKeys.contains(key)).toList();
+      for (String conflictKey : candidates) {
+        int exitEdgeCount = conflictExitEdgeCount(fullEdges, conflictKey);
+        if (exitEdgeCount < 0) {
+          return ConflictExitAuthorityWindow.unresolved(conflictKeys);
+        }
+        resolvedKeys.add(conflictKey);
+        if (exitEdgeCount > requiredEdgeCount) {
+          requiredEdgeCount = exitEdgeCount;
+          expanded = true;
+        }
+      }
+      Set<String> newlyVisible = conflictKeysForEdges(fullEdges, requiredEdgeCount);
+      if (conflictKeys.addAll(newlyVisible)) {
+        expanded = true;
+      }
+    } while (expanded || resolvedKeys.size() < conflictKeys.size());
+
+    return ConflictExitAuthorityWindow.resolved(requiredEdgeCount + 1, conflictKeys);
+  }
+
+  private Set<String> conflictKeysForEdges(List<RailEdge> edges, int edgeCount) {
+    if (edges == null || edges.isEmpty() || edgeCount <= 0) {
+      return new LinkedHashSet<>();
+    }
+    Set<String> keys = new LinkedHashSet<>();
+    int limit = Math.min(edges.size(), edgeCount);
+    for (int index = 0; index < limit; index++) {
+      List<OccupancyResource> edgeResources =
+          OccupancyResourceResolver.resourcesForEdge(graph, edges.get(index));
+      for (OccupancyResource resource : edgeResources) {
+        if (resource != null
+            && resource.kind() == ResourceKind.CONFLICT
+            && isExactPhysicalInterlockingKey(resource.key())) {
+          keys.add(resource.key());
+        }
+      }
+    }
+    return keys;
+  }
+
+  private static boolean isExactPhysicalInterlockingKey(String key) {
+    return key != null
+        && key.startsWith("interlocking:")
+        && !key.startsWith("interlocking:incomplete:");
+  }
+
+  private int conflictExitEdgeCount(List<RailEdge> edges, String conflictKey) {
+    boolean entered = false;
+    long clearanceDistanceBlocks = 0L;
+    for (int index = 0; index < edges.size(); index++) {
+      RailEdge edge = edges.get(index);
+      boolean edgeInConflict =
+          OccupancyResourceResolver.resourcesForEdge(graph, edge).stream()
+              .anyMatch(
+                  resource ->
+                      resource != null
+                          && resource.kind() == ResourceKind.CONFLICT
+                          && resource.key().equals(conflictKey));
+      if (edgeInConflict) {
+        entered = true;
+        clearanceDistanceBlocks = 0L;
+      } else if (entered) {
+        long edgeLengthBlocks = Math.max(0L, edge.lengthBlocks());
+        clearanceDistanceBlocks = saturatingAdd(clearanceDistanceBlocks, edgeLengthBlocks);
+        if (clearanceDistanceBlocks >= minConflictExitDistanceBlocks) {
+          return index + 1;
+        }
+      }
+    }
+    return -1;
   }
 
   private boolean isInterlockingNode(NodeId nodeId) {
@@ -990,7 +1216,7 @@ public final class OccupancyRequestBuilder {
   }
 
   private List<NodeId> resolveRearGuardNodes(List<NodeId> nodes, int currentIndex) {
-    if (rearGuardEdges <= 0) {
+    if (rearGuardEdges <= 0 && minRearGuardDistanceBlocks <= 0L) {
       return List.of();
     }
     if (nodes == null || nodes.size() < 2) {
@@ -999,7 +1225,8 @@ public final class OccupancyRequestBuilder {
     if (currentIndex <= 0 || currentIndex >= nodes.size()) {
       return List.of();
     }
-    int startIndex = Math.max(0, currentIndex - rearGuardEdges);
+    int startIndex =
+        minRearGuardDistanceBlocks > 0L ? 0 : Math.max(0, currentIndex - rearGuardEdges);
     if (startIndex >= currentIndex) {
       return List.of();
     }
@@ -1019,26 +1246,59 @@ public final class OccupancyRequestBuilder {
       debugLogger.accept("rear-guard 解析失败: expandPathNodes 返回空 nodes=" + nodes);
       return List.of();
     }
-    // 按实际边数截断：从末尾往前保留 rearGuardEdges 条边
-    return truncateRearGuardToEdgeCount(expanded, rearGuardEdges);
+    return truncateRearGuardByEdgesAndDistance(expanded);
   }
 
   /**
-   * 从末尾往前截断尾部保护节点列表。
+   * 从车头当前位置向后截断尾部保护节点列表。
    *
-   * <p>保留最后 {@code maxEdges} 条边对应的节点（即 maxEdges+1 个节点）。
+   * <p>先计算配置 {@code rearGuardEdges}
+   * 对应的安全余量距离，再叠加列车长度下限；从末尾逐边累计，直到同时满足配置边数和总距离。若已知后向路径不足，则保留全部可证明路径而不是缩短阈值。
    */
-  private List<NodeId> truncateRearGuardToEdgeCount(List<NodeId> nodes, int maxEdges) {
+  private List<NodeId> truncateRearGuardByEdgesAndDistance(List<NodeId> nodes) {
     if (nodes == null || nodes.isEmpty()) {
       return List.of();
     }
-    if (maxEdges <= 0) {
+    if (nodes.size() < 2 || (rearGuardEdges <= 0 && minRearGuardDistanceBlocks <= 0L)) {
       return List.of(nodes.get(nodes.size() - 1));
     }
-    // 边数 = 节点数 - 1，从末尾保留 maxEdges+1 个节点
-    int keepNodes = Math.min(nodes.size(), maxEdges + 1);
-    int startIndex = nodes.size() - keepNodes;
+    long configuredMargin = 0L;
+    int availableEdges = nodes.size() - 1;
+    int configuredEdges = Math.min(rearGuardEdges, availableEdges);
+    for (int offset = 0; offset < configuredEdges; offset++) {
+      int edgeIndex = availableEdges - 1 - offset;
+      configuredMargin =
+          saturatingAdd(
+              configuredMargin,
+              findEdge(nodes.get(edgeIndex), nodes.get(edgeIndex + 1))
+                  .map(RailEdge::lengthBlocks)
+                  .map(length -> Math.max(0, length))
+                  .orElse(0));
+    }
+    long requiredDistance = saturatingAdd(configuredMargin, minRearGuardDistanceBlocks);
+    long coveredDistance = 0L;
+    int includedEdges = 0;
+    while (includedEdges < availableEdges
+        && (includedEdges < rearGuardEdges || coveredDistance < requiredDistance)) {
+      int edgeIndex = availableEdges - 1 - includedEdges;
+      coveredDistance =
+          saturatingAdd(
+              coveredDistance,
+              findEdge(nodes.get(edgeIndex), nodes.get(edgeIndex + 1))
+                  .map(RailEdge::lengthBlocks)
+                  .map(length -> Math.max(0, length))
+                  .orElse(0));
+      includedEdges++;
+    }
+    int startIndex = nodes.size() - includedEdges - 1;
     return nodes.subList(startIndex, nodes.size());
+  }
+
+  private static long saturatingAdd(long left, long right) {
+    if (right <= 0L) {
+      return left;
+    }
+    return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
   }
 
   private List<RailEdge> resolveRearGuardEdges(List<NodeId> expandedNodes) {
@@ -1360,7 +1620,7 @@ public final class OccupancyRequestBuilder {
               + " segmentBStart="
               + current.toNode().value());
       debugLogger.accept(
-          "SMART_JBS_SEGMENT_AUTHORITY train="
+          "SMART_TURNBACK_SEGMENT_AUTHORITY train="
               + trainName
               + " segment=A"
               + " from="
@@ -1469,6 +1729,8 @@ public final class OccupancyRequestBuilder {
     if (pathNodes == null || pathNodes.size() < 2) {
       return CorridorDirectionResolution.empty();
     }
+    SemanticCorridorDirectionResolver.PathAxisIndex pathAxisIndex =
+        semanticDirectionResolver.indexPath(pathNodes);
     Map<String, CorridorDirection> directions = new LinkedHashMap<>();
     Set<String> blockedDirectionKeys = new HashSet<>();
     for (int i = 0; i < pathNodes.size() - 1; i++) {
@@ -1487,21 +1749,10 @@ public final class OccupancyRequestBuilder {
                   return;
                 }
                 DirectionResolution resolution =
-                    resolveCorridorDirection(info, pathNodes, from, to);
+                    resolveCorridorDirection(info, pathNodes, pathAxisIndex, from, to);
                 if (resolution.blocksDirection()) {
                   directions.remove(info.key());
                   blockedDirectionKeys.add(info.key());
-                  debugLogger.accept(
-                      "方向判定失败: key="
-                          + info.key()
-                          + " from="
-                          + from.value()
-                          + " to="
-                          + to.value()
-                          + " corridorNodes="
-                          + info.nodes().stream()
-                              .map(NodeId::value)
-                              .collect(java.util.stream.Collectors.joining(",")));
                   return;
                 }
                 if (directions.containsKey(info.key())) {
@@ -1509,19 +1760,7 @@ public final class OccupancyRequestBuilder {
                 }
                 if (resolution.direction().isPresent()) {
                   directions.put(info.key(), resolution.direction().get());
-                  return;
                 }
-                debugLogger.accept(
-                    "方向判定失败: key="
-                        + info.key()
-                        + " from="
-                        + from.value()
-                        + " to="
-                        + to.value()
-                        + " corridorNodes="
-                        + info.nodes().stream()
-                            .map(NodeId::value)
-                            .collect(java.util.stream.Collectors.joining(",")));
               });
       if (graph instanceof RailGraphSectionSupport sectionSupport) {
         sectionSupport
@@ -1533,21 +1772,10 @@ public final class OccupancyRequestBuilder {
                     return;
                   }
                   DirectionResolution resolution =
-                      resolveSectionDirection(info, pathNodes, from, to);
+                      resolveSectionDirection(info, pathNodes, pathAxisIndex, from, to);
                   if (resolution.blocksDirection()) {
                     directions.remove(info.key());
                     blockedDirectionKeys.add(info.key());
-                    debugLogger.accept(
-                        "section 方向判定失败: key="
-                            + info.key()
-                            + " from="
-                            + from.value()
-                            + " to="
-                            + to.value()
-                            + " sectionNodes="
-                            + info.nodes().stream()
-                                .map(NodeId::value)
-                                .collect(java.util.stream.Collectors.joining(",")));
                     return;
                   }
                   if (directions.containsKey(info.key())) {
@@ -1555,19 +1783,7 @@ public final class OccupancyRequestBuilder {
                   }
                   if (resolution.direction().isPresent()) {
                     directions.put(info.key(), resolution.direction().get());
-                    return;
                   }
-                  debugLogger.accept(
-                      "section 方向判定失败: key="
-                          + info.key()
-                          + " from="
-                          + from.value()
-                          + " to="
-                          + to.value()
-                          + " sectionNodes="
-                          + info.nodes().stream()
-                              .map(NodeId::value)
-                              .collect(java.util.stream.Collectors.joining(",")));
                 });
       }
     }
@@ -1605,6 +1821,52 @@ public final class OccupancyRequestBuilder {
     return Map.copyOf(merged);
   }
 
+  /**
+   * 在物理窗口与 canonical plan 合并完成后，仅报告实际请求资源中仍无法确定方向的单线资源。
+   *
+   * <p>窗口解析失败可能被完整计划恢复，非桥 micro corridor 也可能根本不属于本次授权。把诊断延迟到最终资源集合确定之后，可避免把中间态误报成调度故障，同时保留真正
+   * UNKNOWN 的 fail-closed 证据。
+   */
+  private void reportFinalDirectionFailures(
+      String trainName,
+      Optional<RouteId> routeId,
+      AuthorizationPurpose purpose,
+      Collection<OccupancyResource> resources,
+      Map<String, CorridorDirection> finalDirections,
+      CorridorDirectionResolution windowDirections,
+      CorridorDirectionResolution planDirections) {
+    for (OccupancyResource resource : resources) {
+      if (resource == null
+          || resource.kind() != ResourceKind.CONFLICT
+          || !resource.key().startsWith("single:")
+          || finalDirections.containsKey(resource.key())) {
+        continue;
+      }
+      debugLogger.accept(
+          "方向判定失败: stage=FINAL train="
+              + trainName
+              + " route="
+              + routeId.map(RouteId::value).orElse("-")
+              + " purpose="
+              + purpose.name()
+              + " key="
+              + resource.key()
+              + " window="
+              + directionState(windowDirections, resource.key())
+              + " plan="
+              + directionState(planDirections, resource.key())
+              + " finalSource=NONE");
+    }
+  }
+
+  private String directionState(CorridorDirectionResolution resolution, String key) {
+    if (resolution.blockedKeys().contains(key)) {
+      return "BLOCKED";
+    }
+    CorridorDirection direction = resolution.directions().get(key);
+    return direction == null ? "UNRESOLVED" : direction.name();
+  }
+
   private Map<String, Integer> resolveConflictEntryOrders(List<RailEdge> edges) {
     if (edges == null || edges.isEmpty()) {
       return Map.of();
@@ -1626,21 +1888,36 @@ public final class OccupancyRequestBuilder {
   }
 
   private DirectionResolution resolveCorridorDirection(
-      RailGraphCorridorInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
+      RailGraphCorridorInfo info,
+      List<NodeId> pathNodes,
+      SemanticCorridorDirectionResolver.PathAxisIndex pathAxisIndex,
+      NodeId from,
+      NodeId to) {
     if (info == null) {
       return DirectionResolution.unresolved();
     }
     return resolveDirectionalConflict(
-        info.left(), info.right(), info.nodes(), List.of(), pathNodes, from, to);
+        info.left(), info.right(), info.nodes(), List.of(), pathNodes, pathAxisIndex, from, to);
   }
 
   private DirectionResolution resolveSectionDirection(
-      SingleLineSectionInfo info, List<NodeId> pathNodes, NodeId from, NodeId to) {
+      SingleLineSectionInfo info,
+      List<NodeId> pathNodes,
+      SemanticCorridorDirectionResolver.PathAxisIndex pathAxisIndex,
+      NodeId from,
+      NodeId to) {
     if (info == null) {
       return DirectionResolution.unresolved();
     }
     return resolveDirectionalConflict(
-        info.left(), info.right(), info.nodes(), info.boundaries(), pathNodes, from, to);
+        info.left(),
+        info.right(),
+        info.nodes(),
+        info.boundaries(),
+        pathNodes,
+        pathAxisIndex,
+        from,
+        to);
   }
 
   private DirectionResolution resolveDirectionalConflict(
@@ -1649,11 +1926,15 @@ public final class OccupancyRequestBuilder {
       List<NodeId> orderedNodes,
       List<NodeId> boundaryNodes,
       List<NodeId> pathNodes,
+      SemanticCorridorDirectionResolver.PathAxisIndex pathAxisIndex,
       NodeId from,
       NodeId to) {
     SemanticCorridorDirectionResolver.Result semantic =
         semanticDirectionResolver.resolve(
-            semanticResourceNodes(left, right, orderedNodes, boundaryNodes), pathNodes, from, to);
+            semanticResourceNodes(left, right, orderedNodes, boundaryNodes),
+            pathAxisIndex,
+            from,
+            to);
     if (semantic.resolved()) {
       return DirectionResolution.resolved(semantic.direction());
     }
@@ -1893,6 +2174,29 @@ public final class OccupancyRequestBuilder {
     private static AtomicAuthorityWindow resolved(NodeId entry, NodeId exit, int exitIndex) {
       return new AtomicAuthorityWindow(
           true, true, Optional.ofNullable(entry), Optional.ofNullable(exit), exitIndex);
+    }
+  }
+
+  /** 当前 hard window 触及冲突区后的清出授权窗口。 */
+  private record ConflictExitAuthorityWindow(
+      boolean applicable, boolean resolved, int requiredNodeCount, Set<String> conflictKeys) {
+
+    private ConflictExitAuthorityWindow {
+      requiredNodeCount = Math.max(0, requiredNodeCount);
+      conflictKeys = conflictKeys == null ? Set.of() : Set.copyOf(conflictKeys);
+    }
+
+    private static ConflictExitAuthorityWindow notApplicable() {
+      return new ConflictExitAuthorityWindow(false, false, 0, Set.of());
+    }
+
+    private static ConflictExitAuthorityWindow unresolved(Set<String> conflictKeys) {
+      return new ConflictExitAuthorityWindow(true, false, 0, conflictKeys);
+    }
+
+    private static ConflictExitAuthorityWindow resolved(
+        int requiredNodeCount, Set<String> conflictKeys) {
+      return new ConflictExitAuthorityWindow(true, true, requiredNodeCount, conflictKeys);
     }
   }
 

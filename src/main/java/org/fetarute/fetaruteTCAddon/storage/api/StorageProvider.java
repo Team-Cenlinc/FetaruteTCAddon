@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCau
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
@@ -47,6 +48,8 @@ public interface StorageProvider extends AutoCloseable {
   RailComponentCautionRepository railComponentCautions();
 
   RailGraphSnapshotRepository railGraphSnapshots();
+
+  RailInterlockingSnapshotRepository railInterlockingSnapshots();
 
   HudTemplateRepository hudTemplates();
 
