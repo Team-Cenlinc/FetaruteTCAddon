@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -62,6 +63,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -2707,6 +2710,34 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
+  void materializedSpawnWritesRollbackMarkerBeforeFallibleInitializationAndReassertsItOnFailure() {
+    MutableTrainTags trainTags = new MutableTrainTags();
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(trainTags.properties());
+    DepotSpawner.MaterializedSpawn materializedSpawn =
+        new DepotSpawner.MaterializedSpawn(
+            train,
+            () -> {
+              assertTrue(
+                  trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+                  "可失败初始化开始前必须已建立持久化回滚边界");
+              TrainTagHelper.removeTagKey(
+                  trainTags.properties(),
+                  TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING);
+              throw new IllegalStateException("test-initializer-failure");
+            });
+
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            SimpleTicketAssigner.initializeMaterializedSpawnWithRollbackMarker(materializedSpawn));
+
+    assertTrue(
+        trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+        "initializer 删除 marker 后抛错时必须在 finally 中恢复墓碑");
+  }
+
+  @Test
   void tickKeepsMaterializedDepotSpawnPendingUntilFootprintPromotion() {
     UUID routeId = UUID.randomUUID();
     NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
@@ -2750,7 +2781,8 @@ class SimpleTicketAssignerLayoverTest {
               return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
             });
 
-    TrainProperties properties = mock(TrainProperties.class);
+    MutableTrainTags trainTags = new MutableTrainTags();
+    TrainProperties properties = trainTags.properties();
     RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
     when(train.isValid()).thenReturn(true);
     when(train.properties()).thenReturn(properties);
@@ -2793,6 +2825,19 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).complete(any(SpawnTicket.class));
     verify(spawnManager, never()).requeue(any(SpawnTicket.class));
     verify(train, never()).destroy();
+    assertTrue(
+        trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+        "等待 footprint promotion 时必须保留跨重启事务墓碑");
+
+    doAnswer(
+            invocation -> {
+              assertTrue(
+                  trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+                  "票据提交完成前不得清除实体化事务墓碑");
+              return null;
+            })
+        .when(spawnManager)
+        .complete(ticket);
 
     assigner.tick(provider, spawnedAt.plusSeconds(1));
 
@@ -2801,6 +2846,9 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).requeue(any(SpawnTicket.class));
     verify(depotSpawner, times(1)).spawn(any(), any(), anyString(), any());
     verify(train, never()).destroy();
+    assertFalse(
+        trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+        "票据成功提交后必须清除实体化事务墓碑");
   }
 
   @Test
@@ -3050,6 +3098,47 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).requeue(any(SpawnTicket.class));
     assertEquals(1, assigner.snapshotPendingTickets().size());
     assertEquals(0L, assigner.snapshotDiagnostics().retries());
+  }
+
+  /** 提供会真实保存增删结果的 TrainCarts tag mock，供跨 tick 生命周期断言使用。 */
+  private static final class MutableTrainTags {
+    private final TrainProperties properties = mock(TrainProperties.class);
+    private final List<String> tags = new ArrayList<>();
+
+    private MutableTrainTags() {
+      when(properties.hasTags()).thenAnswer(invocation -> !tags.isEmpty());
+      when(properties.getTags()).thenAnswer(invocation -> List.copyOf(tags));
+      doAnswer(
+              invocation -> {
+                for (Object argument : invocation.getArguments()) {
+                  if (argument instanceof String tag) {
+                    tags.add(tag);
+                  }
+                }
+                return null;
+              })
+          .when(properties)
+          .addTags(any(String[].class));
+      doAnswer(
+              invocation -> {
+                for (Object argument : invocation.getArguments()) {
+                  if (argument instanceof String tag) {
+                    tags.remove(tag);
+                  }
+                }
+                return null;
+              })
+          .when(properties)
+          .removeTags(any(String[].class));
+    }
+
+    private TrainProperties properties() {
+      return properties;
+    }
+
+    private boolean hasTag(String key) {
+      return TrainTagHelper.readTagValue(properties, key).isPresent();
+    }
   }
 
   private static OccupancyClaim congestedEdgeClaim() {

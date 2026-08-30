@@ -357,6 +357,15 @@ public final class OccupancyRequestBuilder {
     List<NodeId> directionExpanded =
         expandDirectionContextPath(
             trainName, routeId, directionContextNodes, currentIndex, purpose, fullExpanded);
+    Optional<ExpandedPathPlan> canonicalRearRetainPathPlan =
+        resolveCanonicalRearRetainPathPlan(
+            trainName,
+            routeId,
+            nodes,
+            directionContextNodes,
+            currentIndex,
+            directionExpanded,
+            purpose);
     List<RailEdge> fullEdges = resolveEdges(fullExpanded);
     if (fullEdges.isEmpty()) {
       debugLogger.accept("构建请求失败: full resolveEdges 返回空 (边未找到?) nodes=" + fullExpanded);
@@ -458,15 +467,16 @@ public final class OccupancyRequestBuilder {
     Map<String, Integer> conflictEntryOrders = resolveConflictEntryOrders(edges);
     DirectedTraversalContext directedContext =
         buildDirectedContext(
-            trainName,
-            routeId,
-            currentIndex,
-            Optional.ofNullable(nodes.get(currentIndex)),
-            fullExpanded,
-            fullEdges,
-            planCorridorDirections,
-            resources,
-            purpose.name());
+                trainName,
+                routeId,
+                currentIndex,
+                Optional.ofNullable(nodes.get(currentIndex)),
+                fullExpanded,
+                fullEdges,
+                planCorridorDirections,
+                resources,
+                purpose.name())
+            .withCanonicalRearRetainPathPlan(canonicalRearRetainPathPlan);
     OccupancyRequest request =
         new OccupancyRequest(
             trainName,
@@ -535,6 +545,98 @@ public final class OccupancyRequestBuilder {
       return liveExpanded;
     }
     return split;
+  }
+
+  /**
+   * 构建严格终止于当前有效节点的最近已走行规范路径。
+   *
+   * <p>当列车仍位于同一 route leg 的中间节点时，路径取 canonical current waypoint 到真实 current/last-passed
+   * 的前缀；当列车刚推进到新的 route index 时，路径取上一 waypoint 到当前 waypoint 的完整上一 leg。两者都来自本次 builder
+   * 使用的同一图快照，并要求当前锚点唯一、边链完整且无回环。
+   *
+   * <p>该路径不参与本次资源集合、走廊方向或联锁授权，只允许上层把仍然 live、同 route、自持有的 {@link ClaimRole#PROTECTIVE_RETAIN}
+   * NODE/EDGE 识别为前进后可重评估的尾部资源。任何展开失败、重复锚点或路径损坏都返回 empty。
+   */
+  private Optional<ExpandedPathPlan> resolveCanonicalRearRetainPathPlan(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> movementNodes,
+      List<NodeId> directionContextNodes,
+      int currentIndex,
+      List<NodeId> directionExpanded,
+      AuthorizationPurpose purpose) {
+    if (movementNodes == null
+        || directionContextNodes == null
+        || currentIndex < 0
+        || currentIndex >= movementNodes.size()
+        || currentIndex >= directionContextNodes.size()) {
+      return Optional.empty();
+    }
+    NodeId currentNode = movementNodes.get(currentIndex);
+    NodeId canonicalCurrentNode = directionContextNodes.get(currentIndex);
+    if (currentNode == null || canonicalCurrentNode == null) {
+      return Optional.empty();
+    }
+
+    List<NodeId> rearPath;
+    if (!currentNode.equals(canonicalCurrentNode)) {
+      if (directionExpanded == null
+          || directionExpanded.size() < 2
+          || !directionExpanded.get(0).equals(canonicalCurrentNode)) {
+        return Optional.empty();
+      }
+      int anchorIndex = directionExpanded.indexOf(currentNode);
+      if (anchorIndex <= 0 || anchorIndex != directionExpanded.lastIndexOf(currentNode)) {
+        return Optional.empty();
+      }
+      rearPath = List.copyOf(directionExpanded.subList(0, anchorIndex + 1));
+    } else {
+      if (currentIndex <= 0) {
+        return Optional.empty();
+      }
+      NodeId previousNode = directionContextNodes.get(currentIndex - 1);
+      if (previousNode == null || previousNode.equals(currentNode)) {
+        return Optional.empty();
+      }
+      List<NodeId> expanded = expandPathNodes(List.of(previousNode, currentNode));
+      if (expanded.isEmpty()) {
+        return Optional.empty();
+      }
+      rearPath =
+          splitAtRepeatedOppositeTraversal(
+              trainName,
+              routeId.map(RouteId::value).orElse("-"),
+              purpose == null ? AuthorizationPurpose.RUNTIME_MOVE : purpose,
+              expanded);
+    }
+    return toCanonicalRearRetainPathPlan(rearPath, currentNode);
+  }
+
+  private Optional<ExpandedPathPlan> toCanonicalRearRetainPathPlan(
+      List<NodeId> pathNodes, NodeId currentNode) {
+    if (pathNodes == null
+        || pathNodes.size() < 2
+        || currentNode == null
+        || !pathNodes.get(pathNodes.size() - 1).equals(currentNode)
+        || pathNodes.indexOf(currentNode) != pathNodes.lastIndexOf(currentNode)
+        || new HashSet<>(pathNodes).size() != pathNodes.size()) {
+      return Optional.empty();
+    }
+    List<RailEdge> pathEdges = resolveEdges(pathNodes);
+    if (pathEdges.size() != pathNodes.size() - 1) {
+      return Optional.empty();
+    }
+    List<DirectedTraversalContext.DirectedEdge> directedEdges = new ArrayList<>(pathEdges.size());
+    for (int index = 0; index < pathEdges.size(); index++) {
+      NodeId fromNode = pathNodes.get(index);
+      NodeId toNode = pathNodes.get(index + 1);
+      RailEdge edge = pathEdges.get(index);
+      if (edge == null || !edge.id().equals(EdgeId.undirected(fromNode, toNode))) {
+        return Optional.empty();
+      }
+      directedEdges.add(new DirectedTraversalContext.DirectedEdge(edge.id(), fromNode, toNode));
+    }
+    return Optional.of(new ExpandedPathPlan(pathNodes, directedEdges, Map.of(), Map.of()));
   }
 
   /**
@@ -1180,7 +1282,8 @@ public final class OccupancyRequestBuilder {
         plan.occupancyVersion(),
         plan.progressVersion(),
         plan.requestId(),
-        Optional.empty());
+        Optional.empty(),
+        plan.canonicalRearRetainPathPlan());
   }
 
   /**

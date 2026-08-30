@@ -420,6 +420,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     tags.put("FTA_PATTERN", route.patternType().name());
     tags.put("FTA_DEPOT_ID", depotId != null ? depotId.value() : "");
     tags.put(TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "true");
+    tags.put(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING, "true");
     tags.put("FTA_SPAWN_PATTERN", spawnPattern);
     tags.put("FTA_RUN_AT", String.valueOf(ts.toEpochMilli()));
     tags.put("FTA_DEST_CODE", "");

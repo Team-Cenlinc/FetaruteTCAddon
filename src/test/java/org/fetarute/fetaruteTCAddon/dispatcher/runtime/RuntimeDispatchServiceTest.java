@@ -9,12 +9,14 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -64,6 +66,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskFreshness;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.RiskSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
@@ -78,6 +81,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictClearingEvidenceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ExpandedPathPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.MovementPlanSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyAdvisoryPreviewSupport;
@@ -6262,6 +6266,7 @@ class RuntimeDispatchServiceTest {
         service.registerExpectedMaterializedSpawn(train, spawnAuthority, recoveryEpoch + 1));
     assertEquals(0, train.hardStopCalls);
     assertTrue(service.registerExpectedMaterializedSpawn(train, spawnAuthority, recoveryEpoch));
+    assertTrue(service.isCurrentMaterializedSpawnTransactionIdentity(train));
     FakeTrain duplicate =
         new FakeTrain(
             worldId,
@@ -6276,6 +6281,7 @@ class RuntimeDispatchServiceTest {
             false);
     assertFalse(
         service.registerExpectedMaterializedSpawn(duplicate, spawnAuthority, recoveryEpoch));
+    assertFalse(service.isCurrentMaterializedSpawnTransactionIdentity(duplicate));
     assertTrue(duplicate.hardStopCalls > 0);
     service.handleSignalTick(train, false);
     assertTrue(train.hardStopCalls > 0);
@@ -6304,6 +6310,7 @@ class RuntimeDispatchServiceTest {
     assertEquals(
         RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED,
         service.expectedMaterializedSpawnStatus(train, recoveryEpoch));
+    assertTrue(service.isCurrentMaterializedSpawnTransactionIdentity(train));
     assertEquals(
         waitingFootprintLogs,
         debugMessages.stream()
@@ -16359,6 +16366,530 @@ class RuntimeDispatchServiceTest {
   // ====== Smart unlock reservation observation 测试 ======
 
   @Test
+  void canonicalMovementPlansAllowNodeEdgeCycleToReachMinimalForwardReservation() throws Exception {
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(Instant.now());
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("reason=INSUFFICIENT_DIRECTION_EVIDENCE")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void staleCanonicalMovementPlansKeepNodeEdgeCycleFailClosed() throws Exception {
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(Instant.now());
+    Instant blockerRefreshAt = fixture.now().plusMillis(1_500L);
+    updateBlockerSnapshotWithoutRequest(
+        fixture.service(), fixture.trainA(), fixture.decisionA(), blockerRefreshAt);
+    updateBlockerSnapshotWithoutRequest(
+        fixture.service(), fixture.trainB(), fixture.decisionB(), blockerRefreshAt);
+
+    fixture
+        .service()
+        .traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), blockerRefreshAt.plusMillis(1L));
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=MOVEMENT_PLAN_STALE")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void blockerCanonicalPlansWithInitiallyEmptyLastPassedExpireWhenLastPassedAppears()
+      throws Exception {
+    Instant now = Instant.now();
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(now);
+    NodeId a0 = NodeId.of("SURC:S:RVS:1");
+    NodeId a1 = NodeId.of("SURC:RVS:LYM:2:001");
+    NodeId b0 = NodeId.of("SURC:S:LYM:1");
+    NodeId b1 = NodeId.of("SURC:LYM:RVS:2:001");
+    replaceRouteProgressLastPassed(
+        fixture.progressRegistry(), fixture.trainA(), Optional.empty(), now.minusMillis(1L));
+    replaceRouteProgressLastPassed(
+        fixture.progressRegistry(), fixture.trainB(), Optional.empty(), now.minusMillis(1L));
+    updateBlockerSnapshot(
+        fixture.service(),
+        fixture.trainA(),
+        fixture.decisionA(),
+        completeTwoNodeAuthorityRequest(
+            fixture.trainA(), now, a0, a1, Optional.of(RouteId.of("planner-node-edge-a"))),
+        now,
+        "test-empty-last-passed");
+    updateBlockerSnapshot(
+        fixture.service(),
+        fixture.trainB(),
+        fixture.decisionB(),
+        completeTwoNodeAuthorityRequest(
+            fixture.trainB(), now, b0, b1, Optional.of(RouteId.of("planner-node-edge-b"))),
+        now,
+        "test-empty-last-passed");
+    assertTrue(
+        fixture
+            .progressRegistry()
+            .updateLastPassedGraphNode(fixture.trainA(), a0, now.plusMillis(1L)));
+    assertTrue(
+        fixture
+            .progressRegistry()
+            .updateLastPassedGraphNode(fixture.trainB(), b0, now.plusMillis(1L)));
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), now.plusMillis(1L));
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=PLAN_PROGRESS_WINDOW_MOVED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void routeLessCanonicalMovementPlansKeepNodeEdgeCycleFailClosed() throws Exception {
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(Instant.now(), false);
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=PLAN_ROUTE_ID_MISSING")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void latestCanonicalSignalPlanAllowsBottleneckLeaderWithoutOwnBlockerSnapshot() throws Exception {
+    Instant now = Instant.now();
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(now);
+    String followerC = "SURC-MT-LP-9643";
+    NodeId leaderFrom = NodeId.of("SURC:S:RVS:1");
+    NodeId leaderTo = NodeId.of("SURC:RVS:LYM:2:001");
+    OccupancyDecision clear =
+        new OccupancyDecision(false, now, SignalAspect.STOP, List.of(), false, "test-clear");
+    OccupancyDecision blockedByLeader =
+        blockedBy(OccupancyResource.forNode(leaderTo), fixture.trainA(), now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), fixture.trainA(), clear, now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), fixture.trainB(), blockedByLeader, now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), followerC, blockedByLeader, now);
+    replaceRouteProgressLastPassed(
+        fixture.progressRegistry(), fixture.trainA(), Optional.empty(), now.minusMillis(1L));
+    invokeMarkDirectedRequest(
+        fixture.service(),
+        completeTwoNodeAuthorityRequest(
+            fixture.trainA(),
+            now,
+            leaderFrom,
+            leaderTo,
+            Optional.of(RouteId.of("planner-node-edge-a"))),
+        SignalComputationTrace.Source.PERIODIC_TICK);
+
+    fixture
+        .service()
+        .traceSmartDispatchGlobalSnapshot(
+            Set.of(fixture.trainA(), fixture.trainB(), followerC), now);
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DISPATCH_PLAN_SELECTED train=" + fixture.trainA())
+                        && message.contains("cycleId=bottleneck:")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void canonicalSignalPlanAllows5108RearSwitcherProtectiveRetainToDrainForward() throws Exception {
+    NodeId depot = NodeId.of("SURC:D:HHU:3");
+    NodeId rearSwitcher = NodeId.of("SWITCHER:Towny:502:74:996");
+    NodeId currentAnchor = NodeId.of("SURC:S:HHU:1");
+    NodeId nextNode = NodeId.of("SURC:ZKW:HHU:1:006");
+    RearProtectionPlannerFixture fixture =
+        rearProtectionPlannerFixture(
+            "SURC-MT-LP-5108",
+            RouteId.of("planner-log-5108"),
+            List.of(depot, currentAnchor, nextNode),
+            List.of(depot, currentAnchor, nextNode),
+            List.of(depot, rearSwitcher, currentAnchor, nextNode),
+            1,
+            currentAnchor,
+            OccupancyResource.forNode(rearSwitcher),
+            ClaimRole.PROTECTIVE_RETAIN);
+
+    clearInvocations(fixture.manager());
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+    verify(fixture.manager(), times(1)).snapshotClaims();
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(
+                message -> message.contains("SMART_DISPATCH_PLAN_SELECTED train=SURC-MT-LP-5108")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DISPATCH_CANDIDATE_DECISION")
+                        && message.contains("blockerResource=NODE:SWITCHER:Towny:502:74:996")
+                        && message.contains(
+                            "directionEvidenceKind=CANONICAL_MOVEMENT_PLAN_WITH_REAR_RETAIN")
+                        && message.contains("rejected=false")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.manager().snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(OccupancyResource.forNode(rearSwitcher))
+                        && claim.role() == ClaimRole.PROTECTIVE_RETAIN),
+        "planner 只能请求 leader 重新评估，不能直接释放 rear claim");
+  }
+
+  @Test
+  void canonicalSignalPlanAllows7327RearStationProtectiveRetainToDrainForward() throws Exception {
+    NodeId rearStation = NodeId.of("SURC:S:RVS:1");
+    NodeId rearThroat = NodeId.of("SURC:PPK:RVS:1:002");
+    NodeId currentAnchor = NodeId.of("SURC:PPK:RVS:1:001");
+    NodeId nextNode = NodeId.of("SWITCHER:Towny:593:68:1140");
+    RearProtectionPlannerFixture fixture =
+        rearProtectionPlannerFixture(
+            "SURC-MT-LP-7327",
+            RouteId.of("planner-log-7327"),
+            List.of(rearStation, nextNode),
+            List.of(currentAnchor, nextNode),
+            List.of(rearStation, rearThroat, currentAnchor, nextNode),
+            0,
+            currentAnchor,
+            OccupancyResource.forNode(rearStation),
+            ClaimRole.PROTECTIVE_RETAIN);
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(
+                message -> message.contains("SMART_DISPATCH_PLAN_SELECTED train=SURC-MT-LP-7327")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DISPATCH_CANDIDATE_DECISION")
+                        && message.contains("blockerResource=NODE:SURC:S:RVS:1")
+                        && message.contains(
+                            "directionEvidenceKind=CANONICAL_MOVEMENT_PLAN_WITH_REAR_RETAIN")
+                        && message.contains("rejected=false")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.manager().snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(OccupancyResource.forNode(rearStation))
+                        && claim.role() == ClaimRole.PROTECTIVE_RETAIN),
+        "planner 只能请求 leader 重新评估，不能直接释放 rear claim");
+  }
+
+  @Test
+  void canonicalSignalPlanRejectsRearPathResourceWithoutProtectiveRetainRole() throws Exception {
+    NodeId depot = NodeId.of("SURC:D:HHU:3");
+    NodeId rearSwitcher = NodeId.of("SWITCHER:Towny:502:74:996");
+    NodeId currentAnchor = NodeId.of("SURC:S:HHU:1");
+    NodeId nextNode = NodeId.of("SURC:ZKW:HHU:1:006");
+    RearProtectionPlannerFixture fixture =
+        rearProtectionPlannerFixture(
+            "SURC-MT-LP-5108",
+            RouteId.of("planner-log-5108"),
+            List.of(depot, currentAnchor, nextNode),
+            List.of(depot, currentAnchor, nextNode),
+            List.of(depot, rearSwitcher, currentAnchor, nextNode),
+            1,
+            currentAnchor,
+            OccupancyResource.forNode(rearSwitcher),
+            ClaimRole.MOVEMENT_REQUIRED);
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=INSUFFICIENT_DIRECTION_EVIDENCE")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void canonicalSignalPlanRejectsRearProtectiveRetainFromAnotherRoute() throws Exception {
+    NodeId rearStation = NodeId.of("SURC:S:RVS:1");
+    NodeId rearThroat = NodeId.of("SURC:PPK:RVS:1:002");
+    NodeId currentAnchor = NodeId.of("SURC:PPK:RVS:1:001");
+    NodeId nextNode = NodeId.of("SWITCHER:Towny:593:68:1140");
+    RearProtectionPlannerFixture fixture =
+        rearProtectionPlannerFixture(
+            "SURC-MT-LP-7327",
+            RouteId.of("planner-log-7327"),
+            List.of(rearStation, nextNode),
+            List.of(currentAnchor, nextNode),
+            List.of(rearStation, rearThroat, currentAnchor, nextNode),
+            0,
+            currentAnchor,
+            OccupancyResource.forNode(rearStation),
+            ClaimRole.PROTECTIVE_RETAIN,
+            RouteId.of("another-route"));
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=INSUFFICIENT_DIRECTION_EVIDENCE")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void syntheticForwardPlanCannotDeclareRearRetainWithoutBuilderProof() throws Exception {
+    NodeId rearStation = NodeId.of("SURC:S:RVS:1");
+    NodeId rearThroat = NodeId.of("SURC:PPK:RVS:1:002");
+    NodeId currentAnchor = NodeId.of("SURC:PPK:RVS:1:001");
+    NodeId nextNode = NodeId.of("SWITCHER:Towny:593:68:1140");
+    RouteId routeId = RouteId.of("planner-log-7327");
+    List<NodeId> physicalPath = List.of(rearStation, rearThroat, currentAnchor, nextNode);
+    RearProtectionPlannerFixture fixture =
+        rearProtectionPlannerFixture(
+            "SURC-MT-LP-7327",
+            routeId,
+            List.of(rearStation, nextNode),
+            List.of(currentAnchor, nextNode),
+            physicalPath,
+            0,
+            currentAnchor,
+            OccupancyResource.forNode(rearStation),
+            ClaimRole.PROTECTIVE_RETAIN);
+    invokeMarkDirectedRequest(
+        fixture.service(),
+        completeExpandedAuthorityRequest("SURC-MT-LP-7327", fixture.now(), physicalPath, routeId),
+        SignalComputationTrace.Source.PERIODIC_TICK);
+
+    fixture.service().traceSmartDispatchGlobalSnapshot(fixture.activeTrains(), fixture.now());
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=INSUFFICIENT_DIRECTION_EVIDENCE")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void canonicalSignalPlanWithInitiallyEmptyLastPassedExpiresWhenLastPassedAppears()
+      throws Exception {
+    Instant now = Instant.now();
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(now);
+    String followerC = "SURC-MT-LP-9643";
+    NodeId leaderFrom = NodeId.of("SURC:S:RVS:1");
+    NodeId leaderTo = NodeId.of("SURC:RVS:LYM:2:001");
+    OccupancyDecision clear =
+        new OccupancyDecision(false, now, SignalAspect.STOP, List.of(), false, "test-clear");
+    OccupancyDecision blockedByLeader =
+        blockedBy(OccupancyResource.forNode(leaderTo), fixture.trainA(), now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), fixture.trainA(), clear, now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), fixture.trainB(), blockedByLeader, now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), followerC, blockedByLeader, now);
+    replaceRouteProgressLastPassed(
+        fixture.progressRegistry(), fixture.trainA(), Optional.empty(), now.minusMillis(1L));
+    invokeMarkDirectedRequest(
+        fixture.service(),
+        completeTwoNodeAuthorityRequest(
+            fixture.trainA(),
+            now,
+            leaderFrom,
+            leaderTo,
+            Optional.of(RouteId.of("planner-node-edge-a"))),
+        SignalComputationTrace.Source.PERIODIC_TICK);
+    assertTrue(
+        fixture
+            .progressRegistry()
+            .updateLastPassedGraphNode(fixture.trainA(), leaderFrom, now.plusMillis(1L)));
+
+    fixture
+        .service()
+        .traceSmartDispatchGlobalSnapshot(
+            Set.of(fixture.trainA(), fixture.trainB(), followerC), now.plusMillis(1L));
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=PLAN_PROGRESS_WINDOW_MOVED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void staleCanonicalSignalPlanCannotAuthorizeBottleneckLeaderWithoutOwnBlockerSnapshot()
+      throws Exception {
+    Instant now = Instant.now();
+    NodeEdgePlannerFixture fixture = nodeEdgePlannerFixture(now);
+    String followerC = "SURC-MT-LP-9643";
+    NodeId leaderFrom = NodeId.of("SURC:S:RVS:1");
+    NodeId leaderTo = NodeId.of("SURC:RVS:LYM:2:001");
+    OccupancyDecision clear =
+        new OccupancyDecision(false, now, SignalAspect.STOP, List.of(), false, "test-clear");
+    OccupancyDecision blockedByLeader =
+        blockedBy(OccupancyResource.forNode(leaderTo), fixture.trainA(), now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), fixture.trainA(), clear, now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), fixture.trainB(), blockedByLeader, now);
+    updateBlockerSnapshotWithoutRequest(fixture.service(), followerC, blockedByLeader, now);
+    invokeMarkDirectedRequest(
+        fixture.service(),
+        completeTwoNodeAuthorityRequest(
+            fixture.trainA(),
+            now.minusSeconds(2),
+            leaderFrom,
+            leaderTo,
+            Optional.of(RouteId.of("planner-node-edge-a"))),
+        SignalComputationTrace.Source.PERIODIC_TICK);
+
+    fixture
+        .service()
+        .traceSmartDispatchGlobalSnapshot(
+            Set.of(fixture.trainA(), fixture.trainB(), followerC), now);
+
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_DISPATCH_PLAN_SELECTED")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .anyMatch(message -> message.contains("reason=MOVEMENT_PLAN_STALE")),
+        fixture.debugMessages().toString());
+    assertTrue(
+        fixture.debugMessages().stream()
+            .noneMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_CREATED")),
+        fixture.debugMessages().toString());
+  }
+
+  @Test
+  void canonicalSignalPlanTrimsResourcesBehindLastPassedProgress() throws Exception {
+    Instant now = Instant.now();
+    String trainName = "SURC-MT-LP-5108";
+    RouteId routeId = RouteId.of("planner-node-edge-a");
+    NodeId nodeA = NodeId.of("SURC:S:RVS:1");
+    NodeId nodeB = NodeId.of("SURC:RVS:LYM:2:001");
+    NodeId nodeC = NodeId.of("SURC:S:LYM:1");
+    EdgeId edgeAB = EdgeId.undirected(nodeA, nodeB);
+    EdgeId edgeBC = EdgeId.undirected(nodeB, nodeC);
+    MovementPlanSnapshot original =
+        new MovementPlanSnapshot(
+            trainName,
+            Optional.of(routeId),
+            0,
+            Optional.of(nodeA),
+            Optional.of(nodeA),
+            Optional.of(nodeA),
+            Optional.of(nodeB),
+            new ExpandedPathPlan(
+                List.of(nodeA, nodeB, nodeC),
+                List.of(
+                    new DirectedTraversalContext.DirectedEdge(edgeAB, nodeA, nodeB),
+                    new DirectedTraversalContext.DirectedEdge(edgeBC, nodeB, nodeC)),
+                Map.of(),
+                Map.of()),
+            List.of(
+                OccupancyResource.forNode(nodeA),
+                OccupancyResource.forEdge(edgeAB),
+                OccupancyResource.forNode(nodeB),
+                OccupancyResource.forEdge(edgeBC),
+                OccupancyResource.forNode(nodeC)),
+            1L,
+            1L,
+            "trim-test");
+    RouteProgressRegistry.RouteProgressEntry progress =
+        new RouteProgressRegistry.RouteProgressEntry(
+            trainName,
+            UUID.randomUUID(),
+            routeId,
+            0,
+            Optional.of(nodeC),
+            Optional.of(nodeB),
+            SignalAspect.STOP,
+            now);
+    java.lang.reflect.Method align =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "alignMovementPlanToCurrentProgress",
+            MovementPlanSnapshot.class,
+            RouteProgressRegistry.RouteProgressEntry.class);
+    align.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    Optional<MovementPlanSnapshot> aligned =
+        (Optional<MovementPlanSnapshot>) align.invoke(null, original, progress);
+
+    MovementPlanSnapshot remaining = aligned.orElseThrow();
+    assertEquals(List.of(nodeB, nodeC), remaining.expandedPathNodes());
+    assertEquals(Optional.of(nodeB), remaining.effectiveFromNode());
+    assertEquals(Optional.of(nodeC), remaining.effectiveToNode());
+    assertFalse(remaining.movementRequiredResources().contains(OccupancyResource.forNode(nodeA)));
+    assertFalse(remaining.movementRequiredResources().contains(OccupancyResource.forEdge(edgeAB)));
+    assertTrue(remaining.movementRequiredResources().contains(OccupancyResource.forEdge(edgeBC)));
+    assertTrue(CanonicalForwardPathEvidence.derive(trainName, remaining).evidence().isPresent());
+  }
+
+  @Test
   void globalObserveOnlyPlannerEnforceDoesNotMutateOccupancy() throws Exception {
     PlannerExecutionSnapshot snapshot =
         executePlannerReservationForMode(SmartDispatcherMode.OBSERVE_ONLY);
@@ -16507,11 +17038,11 @@ class RuntimeDispatchServiceTest {
         "plan:" + candidate.cycleId() + ":" + candidate.planHash(), Instant.now().plusSeconds(60));
     java.lang.reflect.Method tracePlanner =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "traceSmartMinimalForwardPlanner", Set.class, Map.class, Instant.class);
+            "traceSmartMinimalForwardPlanner", Set.class, Map.class, Instant.class, List.class);
     tracePlanner.setAccessible(true);
 
-    tracePlanner.invoke(service, Set.of(), Map.of(), Instant.now());
-    tracePlanner.invoke(service, Set.of(), Map.of(), Instant.now());
+    tracePlanner.invoke(service, Set.of(), Map.of(), Instant.now(), List.of());
+    tracePlanner.invoke(service, Set.of(), Map.of(), Instant.now(), List.of());
 
     assertEquals(
         2,
@@ -16697,13 +17228,15 @@ class RuntimeDispatchServiceTest {
             "traceMutualConflictOwnerSet",
             SmartWaitForPlanner.PlannerInput.class,
             SmartWaitForPlanner.UnlockCandidate.class,
-            boolean.class);
+            boolean.class,
+            java.util.Collection.class);
     trace.setAccessible(true);
     trace.invoke(
         service,
         plannerInput,
         smartUnlockCandidate(conflict.toString(), CorridorDirection.A_TO_B),
-        false);
+        false,
+        manager.snapshotClaims());
 
     String ownerTrace =
         debugMessages.stream()
@@ -16761,11 +17294,14 @@ class RuntimeDispatchServiceTest {
 
   @Test
   void smartUnlockSelectionAddsBoundedCanonicalQueuePriorityIntent() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
             new SimpleOccupancyManager(
                 (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
-            new ArrayList<>(),
+            mock(RouteDefinitionCache.class),
+            smartUnlockProgressRegistry(),
+            debugMessages,
             SmartDispatcherMode.ENFORCE);
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
     installSmartUnlockReservation(
@@ -16788,6 +17324,101 @@ class RuntimeDispatchServiceTest {
 
     assertTrue(selected.priority() > base.priority());
     assertTrue(selected.priority() - base.priority() <= 240);
+  }
+
+  @Test
+  void canonicalSmartUnlockPriorityRollsBackAfterRouteIdentityChanges() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = smartUnlockProgressRegistry();
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    installSmartUnlockReservation(
+        service,
+        candidate,
+        List.of(OccupancyResource.forNode(NodeId.of("B"))),
+        currentTraceTick(),
+        1000);
+    RouteDefinition replacementRoute =
+        new RouteDefinition(
+            RouteId.of("other-route"),
+            List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C")),
+            Optional.empty());
+    registry.initFromTags(
+        "train-1", new TagStore("train-1", "FTA_ROUTE_INDEX=0").properties(), replacementRoute);
+    DispatchPriorityResolution base =
+        new DispatchPriorityResolution(
+            0,
+            DispatchPrioritySource.ROUTE_CODE_TAGS,
+            Optional.empty(),
+            Optional.of("op:l1:r1"),
+            Optional.empty(),
+            "operation_type_missing");
+
+    DispatchPriorityResolution selected =
+        service.applySmartUnlockPriorityIntent("train-1", NodeId.of("A"), NodeId.of("B"), base);
+
+    assertEquals(base, selected);
+    assertFalse(service.hasActiveSmartUnlockReservation("train-1"));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_UNLOCK_ROLLBACK_STARTED")
+                        && message.contains("reason=canonical-progress-window-moved")),
+        debugMessages.toString());
+  }
+
+  @Test
+  void canonicalSmartUnlockPriorityRollsBackAfterSameIndexLastPassedChanges() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RouteProgressRegistry registry = smartUnlockProgressRegistry();
+    RuntimeDispatchService service =
+        createMinimalService(
+            new SimpleOccupancyManager(
+                (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+            mock(RouteDefinitionCache.class),
+            registry,
+            debugMessages,
+            SmartDispatcherMode.ENFORCE);
+    SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
+    installSmartUnlockReservation(
+        service,
+        candidate,
+        List.of(OccupancyResource.forNode(NodeId.of("B"))),
+        currentTraceTick(),
+        1000);
+    NodeId intermediateNode = NodeId.of("A-MID");
+    assertTrue(
+        registry.updateLastPassedGraphNode("train-1", intermediateNode, Instant.now()),
+        "测试夹具必须保持 route index 不变并只推进真实 last-passed");
+    DispatchPriorityResolution base =
+        new DispatchPriorityResolution(
+            0,
+            DispatchPrioritySource.ROUTE_CODE_TAGS,
+            Optional.empty(),
+            Optional.of("op:l1:r1"),
+            Optional.empty(),
+            "operation_type_missing");
+
+    DispatchPriorityResolution selected =
+        service.applySmartUnlockPriorityIntent("train-1", intermediateNode, NodeId.of("B"), base);
+
+    assertEquals(base, selected);
+    assertFalse(service.hasActiveSmartUnlockReservation("train-1"));
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_UNLOCK_ROLLBACK_STARTED")
+                        && message.contains("reason=canonical-progress-window-moved")),
+        debugMessages.toString());
   }
 
   @Test
@@ -16825,11 +17456,14 @@ class RuntimeDispatchServiceTest {
 
   @Test
   void smartUnlockPriorityIntentSaturatesWithoutIntegerOverflow() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
             new SimpleOccupancyManager(
                 (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
-            new ArrayList<>(),
+            mock(RouteDefinitionCache.class),
+            smartUnlockProgressRegistry(),
+            debugMessages,
             SmartDispatcherMode.ENFORCE);
     SmartWaitForPlanner.UnlockCandidate candidate = smartUnlockCandidate();
     installSmartUnlockReservation(
@@ -17561,7 +18195,7 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
-  void smartUnlockProgressWithoutReleaseDoesNotLogSuccess() throws Exception {
+  void smartUnlockProgressWindowDriftRollsBackWithoutSuccess() throws Exception {
     List<String> debugMessages = new ArrayList<>();
     RouteProgressRegistry registry = smartUnlockProgressRegistry();
     RuntimeDispatchService service =
@@ -17575,20 +18209,16 @@ class RuntimeDispatchServiceTest {
     registry.updateLastPassedGraphNode("train-1", NodeId.of("B"), Instant.now());
     observeSmartUnlockReservations(service, Instant.now());
 
-    assertTrue(
+    assertFalse(
         debugMessages.stream()
-            .anyMatch(message -> message.contains("SMART_UNLOCK_PROGRESS_NO_RELEASE")));
+            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_SUCCESS")));
     assertTrue(
         debugMessages.stream()
             .anyMatch(
                 message ->
-                    message.contains("SMART_UNLOCK_PLAN_APPLY")
-                        && message.contains("applyPhase=progress-check")
-                        && message.contains("applyResult=no-progress")));
-    assertFalse(
-        debugMessages.stream()
-            .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_SUCCESS")));
-    assertTrue(service.hasActiveSmartUnlockReservation("train-1"));
+                    message.contains("SMART_UNLOCK_RESERVATION_ROLLBACK")
+                        && message.contains("reason=canonical-progress-window-moved")));
+    assertFalse(service.hasActiveSmartUnlockReservation("train-1"));
   }
 
   @Test
@@ -17655,7 +18285,6 @@ class RuntimeDispatchServiceTest {
         currentTraceTick(),
         1000);
 
-    registry.updateLastPassedGraphNode("train-1", NodeId.of("B"), Instant.now());
     observeSmartUnlockReservations(service, Instant.now());
 
     assertTrue(
@@ -17664,9 +18293,6 @@ class RuntimeDispatchServiceTest {
                 message ->
                     message.contains("SMART_UNLOCK_RELEASE_EVIDENCE_UNKNOWN")
                         && message.contains("reason=BLOCKER_SNAPSHOT_MISSING")));
-    assertTrue(
-        debugMessages.stream()
-            .anyMatch(message -> message.contains("SMART_UNLOCK_PROGRESS_NO_RELEASE")));
     assertFalse(
         debugMessages.stream()
             .anyMatch(message -> message.contains("SMART_UNLOCK_RESERVATION_SUCCESS")));
@@ -17705,7 +18331,6 @@ class RuntimeDispatchServiceTest {
                 SignalAspect.PROCEED)
             .activate("B"));
     installMovementInhibitor(service, "train-1");
-    registry.updateLastPassedGraphNode("train-1", NodeId.of("B"), Instant.now());
 
     observeSmartUnlockReservations(service, Instant.now());
 
@@ -17730,7 +18355,6 @@ class RuntimeDispatchServiceTest {
     installSmartUnlockReservation(
         service, candidate, List.of(resource), currentTraceTick() - 10L, 1);
     installSmartUnlockBlockerSnapshot(service, "follower", "train-1", "NODE:B", Instant.now());
-    registry.updateLastPassedGraphNode("train-1", NodeId.of("B"), Instant.now());
 
     observeSmartUnlockReservations(service, Instant.now());
 
@@ -18460,6 +19084,232 @@ class RuntimeDispatchServiceTest {
     return createMinimalService(mockOccupancyManager(), new ArrayList<>());
   }
 
+  private NodeEdgePlannerFixture nodeEdgePlannerFixture(Instant now) throws Exception {
+    return nodeEdgePlannerFixture(now, true);
+  }
+
+  private NodeEdgePlannerFixture nodeEdgePlannerFixture(Instant now, boolean includeRouteId)
+      throws Exception {
+    String trainA = "SURC-MT-LP-5108";
+    String trainB = "SURC-MT-LP-7327";
+    NodeId a0 = NodeId.of("SURC:S:RVS:1");
+    NodeId a1 = NodeId.of("SURC:RVS:LYM:2:001");
+    NodeId b0 = NodeId.of("SURC:S:LYM:1");
+    NodeId b1 = NodeId.of("SURC:LYM:RVS:2:001");
+    RouteDefinition routeA =
+        new RouteDefinition(RouteId.of("planner-node-edge-a"), List.of(a0, a1), Optional.empty());
+    RouteDefinition routeB =
+        new RouteDefinition(RouteId.of("planner-node-edge-b"), List.of(b0, b1), Optional.empty());
+    RouteProgressRegistry progressRegistry = new RouteProgressRegistry();
+    progressRegistry.initFromTags(
+        trainA, new TagStore(trainA, "FTA_ROUTE_INDEX=0").properties(), routeA);
+    progressRegistry.initFromTags(
+        trainB, new TagStore(trainB, "FTA_ROUTE_INDEX=0").properties(), routeB);
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    ConfigManager.ConfigView base = testConfigView(20, 20.0);
+    ConfigManager.ConfigView plannerView =
+        new ConfigManager.ConfigView(
+            base.configVersion(),
+            base.debugEnabled(),
+            base.locale(),
+            base.storageSettings(),
+            base.graphSettings(),
+            base.autoStationSettings(),
+            base.runtimeSettings(),
+            base.spawnSettings(),
+            base.trainConfigSettings(),
+            base.reclaimSettings(),
+            new ConfigManager.SmartDispatcherSettings(
+                SmartDispatcherMode.ENFORCE, enforcePlannerSettings()),
+            base.healthSettings());
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(plannerView);
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            progressRegistry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    service.setSignalReevaluationRequester(
+        trainName -> debugMessages.add("TEST_SIGNAL_REEVALUATION_REQUEST " + trainName));
+    OccupancyRequest requestA =
+        completeTwoNodeAuthorityRequest(
+            trainA, now, a0, a1, includeRouteId ? Optional.of(routeA.id()) : Optional.empty());
+    OccupancyRequest requestB =
+        completeTwoNodeAuthorityRequest(
+            trainB, now, b0, b1, includeRouteId ? Optional.of(routeB.id()) : Optional.empty());
+    OccupancyDecision decisionA =
+        blockedBy(OccupancyResource.forEdge(EdgeId.undirected(b0, b1)), trainB, now);
+    OccupancyDecision decisionB = blockedBy(OccupancyResource.forNode(a1), trainA, now);
+    updateBlockerSnapshot(service, trainA, decisionA, requestA, now, "test-canonical-plan");
+    updateBlockerSnapshot(service, trainB, decisionB, requestB, now, "test-canonical-plan");
+    return new NodeEdgePlannerFixture(
+        service,
+        progressRegistry,
+        debugMessages,
+        Set.of(trainA, trainB),
+        trainA,
+        trainB,
+        decisionA,
+        decisionB,
+        now);
+  }
+
+  /**
+   * 构造日志中“leader 已越过 rear claim、两个 follower 仍被该 claim 阻塞”的 planner 现场。
+   *
+   * <p>leader 的规范计划保留完整展开路径，但实时进度已经推进到 {@code currentAnchor}；占用层同时保存一条指定角色的 rear NODE/EDGE
+   * claim。这样测试不会用前方资源替代真实事故中的保护性尾部窗口。
+   */
+  private RearProtectionPlannerFixture rearProtectionPlannerFixture(
+      String leaderTrain,
+      RouteId routeId,
+      List<NodeId> routeNodes,
+      List<NodeId> movementNodes,
+      List<NodeId> physicalPath,
+      int currentIndex,
+      NodeId currentAnchor,
+      OccupancyResource rearResource,
+      ClaimRole rearClaimRole)
+      throws Exception {
+    return rearProtectionPlannerFixture(
+        leaderTrain,
+        routeId,
+        routeNodes,
+        movementNodes,
+        physicalPath,
+        currentIndex,
+        currentAnchor,
+        rearResource,
+        rearClaimRole,
+        routeId);
+  }
+
+  private RearProtectionPlannerFixture rearProtectionPlannerFixture(
+      String leaderTrain,
+      RouteId routeId,
+      List<NodeId> routeNodes,
+      List<NodeId> movementNodes,
+      List<NodeId> physicalPath,
+      int currentIndex,
+      NodeId currentAnchor,
+      OccupancyResource rearResource,
+      ClaimRole rearClaimRole,
+      RouteId rearClaimRouteId)
+      throws Exception {
+    Instant now = Instant.now();
+    RouteDefinition route = new RouteDefinition(routeId, routeNodes, Optional.empty());
+    RouteProgressRegistry progressRegistry = new RouteProgressRegistry();
+    progressRegistry.initFromTags(
+        leaderTrain,
+        new TagStore(leaderTrain, "FTA_ROUTE_INDEX=" + currentIndex).properties(),
+        route);
+    assertTrue(
+        progressRegistry.updateLastPassedGraphNode(
+            leaderTrain, currentAnchor, now.minusMillis(1L)));
+
+    List<String> debugMessages = new ArrayList<>();
+    SimpleOccupancyManager manager =
+        spy(
+            new SimpleOccupancyManager(
+                (unusedRoute, unusedResource) -> Duration.ZERO,
+                SignalAspectPolicy.defaultPolicy()));
+    ConfigManager.ConfigView base = testConfigView(20, 20.0);
+    ConfigManager.ConfigView plannerView =
+        new ConfigManager.ConfigView(
+            base.configVersion(),
+            base.debugEnabled(),
+            base.locale(),
+            base.storageSettings(),
+            base.graphSettings(),
+            base.autoStationSettings(),
+            base.runtimeSettings(),
+            base.spawnSettings(),
+            base.trainConfigSettings(),
+            base.reclaimSettings(),
+            new ConfigManager.SmartDispatcherSettings(
+                SmartDispatcherMode.ENFORCE, enforcePlannerSettings()),
+            base.healthSettings());
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(plannerView);
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            manager,
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class),
+            progressRegistry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            debugMessages::add);
+    service.setSignalReevaluationRequester(
+        trainName -> debugMessages.add("TEST_SIGNAL_REEVALUATION_REQUEST " + trainName));
+
+    OccupancyRequest rearClaimRequest =
+        new OccupancyRequest(
+            leaderTrain,
+            Optional.of(rearClaimRouteId),
+            now,
+            List.of(rearResource),
+            Map.of(),
+            Map.of(),
+            0,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            Map.of(),
+            Map.of(
+                rearResource,
+                rearClaimRole == ClaimRole.PROTECTIVE_RETAIN
+                    ? ResourceIntent.PROTECTIVE_RETAIN
+                    : ResourceIntent.MOVEMENT_REQUIRED));
+    assertTrue(manager.acquire(rearClaimRequest).allowed());
+    assertTrue(
+        manager.snapshotClaims().stream()
+            .anyMatch(
+                claim ->
+                    claim.resource().equals(rearResource)
+                        && claim.role() == rearClaimRole
+                        && claim.routeId().equals(Optional.of(rearClaimRouteId))));
+
+    OccupancyRequest canonicalRequest =
+        new OccupancyRequestBuilder(graphWithConflictFreeLinearPath(physicalPath, 1), 4, 0, 0, 0)
+            .buildContextFromNodesWithDirectionContext(
+                leaderTrain,
+                Optional.of(routeId),
+                movementNodes,
+                routeNodes,
+                currentIndex,
+                now,
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow()
+            .request();
+    invokeMarkDirectedRequest(
+        service, canonicalRequest, SignalComputationTrace.Source.PERIODIC_TICK);
+    OccupancyDecision clear =
+        new OccupancyDecision(false, now, SignalAspect.STOP, List.of(), false, "test-clear");
+    OccupancyDecision blockedByRear = blockedBy(rearResource, leaderTrain, now, rearClaimRole);
+    String followerA = leaderTrain + "-FOLLOWER-A";
+    String followerB = leaderTrain + "-FOLLOWER-B";
+    updateBlockerSnapshotWithoutRequest(service, leaderTrain, clear, now);
+    updateBlockerSnapshotWithoutRequest(service, followerA, blockedByRear, now);
+    updateBlockerSnapshotWithoutRequest(service, followerB, blockedByRear, now);
+    return new RearProtectionPlannerFixture(
+        service, manager, debugMessages, Set.of(leaderTrain, followerA, followerB), now);
+  }
+
   /**
    * 构造把测试中的 successful acquire 视为已提交硬授权的 OccupancyManager 替身。
    *
@@ -18514,6 +19364,26 @@ class RuntimeDispatchServiceTest {
             1, 0, true, 1, 0, 1, SmartWaitForPlanner.Confidence.HIGH, "test");
     String safeResource = resource == null || resource.isBlank() ? "NODE:B" : resource;
     CorridorDirection safeDirection = direction == null ? CorridorDirection.UNKNOWN : direction;
+    NodeId fromNode = NodeId.of("A");
+    NodeId toNode = NodeId.of("B");
+    Optional<CanonicalForwardPathEvidence> forwardPathEvidence =
+        safeResource.startsWith("NODE:") || safeResource.startsWith("EDGE:")
+            ? Optional.of(
+                new CanonicalForwardPathEvidence(
+                    "train-1",
+                    "smart-unlock",
+                    0,
+                    fromNode.value(),
+                    toNode.value(),
+                    "-",
+                    List.of(
+                        new CanonicalForwardPathEvidence.DirectedStep(
+                            EdgeId.undirected(fromNode, toNode), fromNode, toNode)),
+                    List.of(safeResource),
+                    1L,
+                    1L,
+                    "test-smart-unlock"))
+            : Optional.empty();
     return new SmartWaitForPlanner.UnlockCandidate(
         "train-1",
         "cycle-1",
@@ -18534,7 +19404,8 @@ class RuntimeDispatchServiceTest {
         simulation,
         true,
         true,
-        60);
+        60,
+        forwardPathEvidence);
   }
 
   private SmartWaitForPlanner.UnlockCandidate smartUnlockCandidate(
@@ -18560,7 +19431,8 @@ class RuntimeDispatchServiceTest {
         base.simulation(),
         base.releasesBottleneck(),
         base.improvesSameLineCascade(),
-        base.stuckDurationSeconds());
+        base.stuckDurationSeconds(),
+        base.forwardPathEvidence());
   }
 
   private SmartWaitForPlanner.UnlockCandidate headOnYieldCandidate(
@@ -18593,7 +19465,7 @@ class RuntimeDispatchServiceTest {
 
   private PlannerExecutionSnapshot executePlannerReservationForMode(SmartDispatcherMode mode)
       throws Exception {
-    return executePlannerReservationForMode(mode, new RouteProgressRegistry());
+    return executePlannerReservationForMode(mode, smartUnlockProgressRegistry());
   }
 
   private PlannerExecutionSnapshot executePlannerReservationForMode(
@@ -19016,15 +19888,40 @@ class RuntimeDispatchServiceTest {
       SmartWaitForPlanner.UnlockCandidate candidate,
       ConfigManager.SmartDispatcherPlannerSettings settings)
       throws Exception {
+    java.lang.reflect.Field occupancyManagerField =
+        RuntimeDispatchService.class.getDeclaredField("occupancyManager");
+    occupancyManagerField.setAccessible(true);
+    OccupancyManager occupancyManager = (OccupancyManager) occupancyManagerField.get(service);
+    List<OccupancyClaim> liveClaims =
+        occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
     java.lang.reflect.Method method =
         RuntimeDispatchService.class.getDeclaredMethod(
             "executeSmartUnlockReservation",
             SmartWaitForPlanner.UnlockCandidate.class,
             ConfigManager.SmartDispatcherPlannerSettings.class,
-            Instant.class);
+            Instant.class,
+            java.util.Collection.class);
     method.setAccessible(true);
-    method.invoke(service, candidate, settings, Instant.now());
+    method.invoke(service, candidate, settings, Instant.now(), liveClaims);
   }
+
+  private record NodeEdgePlannerFixture(
+      RuntimeDispatchService service,
+      RouteProgressRegistry progressRegistry,
+      List<String> debugMessages,
+      Set<String> activeTrains,
+      String trainA,
+      String trainB,
+      OccupancyDecision decisionA,
+      OccupancyDecision decisionB,
+      Instant now) {}
+
+  private record RearProtectionPlannerFixture(
+      RuntimeDispatchService service,
+      SimpleOccupancyManager manager,
+      List<String> debugMessages,
+      Set<String> activeTrains,
+      Instant now) {}
 
   private record PlannerExecutionSnapshot(
       RuntimeDispatchService service,
@@ -19355,6 +20252,8 @@ class RuntimeDispatchServiceTest {
             List.class,
             NodeId.class,
             String.class,
+            String.class,
+            int.class,
             long.class,
             int.class,
             List.class,
@@ -19373,6 +20272,11 @@ class RuntimeDispatchServiceTest {
             resources,
             NodeId.of(candidate.authorityEnd()),
             candidate.planHash(),
+            candidate.forwardPathEvidence().map(CanonicalForwardPathEvidence::routeId).orElse("-"),
+            candidate
+                .forwardPathEvidence()
+                .map(CanonicalForwardPathEvidence::routeIndex)
+                .orElse(-1),
             createdTick,
             ttlTicks,
             candidate.resources(),
@@ -19621,6 +20525,33 @@ class RuntimeDispatchServiceTest {
     method.invoke(service, trainName, decision, now);
   }
 
+  private void replaceRouteProgressLastPassed(
+      RouteProgressRegistry registry,
+      String trainName,
+      Optional<NodeId> lastPassed,
+      Instant updatedAt)
+      throws Exception {
+    RouteProgressRegistry.RouteProgressEntry current = registry.get(trainName).orElseThrow();
+    RouteProgressRegistry.RouteProgressEntry replacement =
+        new RouteProgressRegistry.RouteProgressEntry(
+            current.trainName(),
+            current.routeUuid(),
+            current.routeId(),
+            current.currentIndex(),
+            current.nextTarget(),
+            lastPassed,
+            current.lastSignal(),
+            updatedAt);
+    java.lang.reflect.Field entriesField = RouteProgressRegistry.class.getDeclaredField("entries");
+    entriesField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, RouteProgressRegistry.RouteProgressEntry> entries =
+        (java.util.concurrent.ConcurrentMap<String, RouteProgressRegistry.RouteProgressEntry>)
+            entriesField.get(registry);
+    entries.put(TrainNameNormalizer.normalizeKey(trainName), replacement);
+    registry.updateSignal(trainName, replacement.lastSignal(), updatedAt);
+  }
+
   @SuppressWarnings("unchecked")
   private List<SmartWaitForPlanner.InputEdge> smartPlannerInputEdges(
       RuntimeDispatchService service,
@@ -19639,15 +20570,14 @@ class RuntimeDispatchServiceTest {
 
   private static OccupancyDecision blockedBy(
       OccupancyResource resource, String blockerTrain, Instant now) {
+    return blockedBy(resource, blockerTrain, now, ClaimRole.MOVEMENT_REQUIRED);
+  }
+
+  private static OccupancyDecision blockedBy(
+      OccupancyResource resource, String blockerTrain, Instant now, ClaimRole role) {
     OccupancyClaim blocker =
         new OccupancyClaim(
-            resource,
-            blockerTrain,
-            Optional.empty(),
-            now,
-            Duration.ZERO,
-            Optional.empty(),
-            ClaimRole.MOVEMENT_REQUIRED);
+            resource, blockerTrain, Optional.empty(), now, Duration.ZERO, Optional.empty(), role);
     return new OccupancyDecision(false, now, SignalAspect.STOP, List.of(blocker));
   }
 
@@ -20027,19 +20957,120 @@ class RuntimeDispatchServiceTest {
   /** 构造一条完整覆盖 from-node、edge 与 to-node 的单区间运行授权请求。 */
   private static OccupancyRequest completeTwoNodeAuthorityRequest(
       String trainName, Instant now, NodeId fromNode, NodeId toNode) {
+    return completeTwoNodeAuthorityRequest(trainName, now, fromNode, toNode, Optional.empty());
+  }
+
+  /** 构造携带完整展开路径、route identity 与全部 NODE/EDGE movement window 的请求。 */
+  private static OccupancyRequest completeExpandedAuthorityRequest(
+      String trainName, Instant now, List<NodeId> pathNodes, RouteId routeId) {
+    List<RailEdge> pathEdges = new ArrayList<>();
+    List<OccupancyResource> resources = new ArrayList<>();
+    for (int index = 0; index < pathNodes.size(); index++) {
+      NodeId node = pathNodes.get(index);
+      resources.add(OccupancyResource.forNode(node));
+      if (index >= pathNodes.size() - 1) {
+        continue;
+      }
+      NodeId next = pathNodes.get(index + 1);
+      RailEdge edge =
+          new RailEdge(EdgeId.undirected(node, next), node, next, 1, -1.0, true, Optional.empty());
+      pathEdges.add(edge);
+      resources.add(OccupancyResource.forEdge(edge.id()));
+    }
+    OccupancyRequest request =
+        switcherTraversalRequest(trainName, now, 0, pathNodes, pathEdges, resources);
+    DirectedTraversalContext context = request.directedContext().orElseThrow();
+    return new OccupancyRequest(
+            request.trainName(),
+            Optional.of(routeId),
+            request.now(),
+            request.resources(),
+            request.corridorDirections(),
+            request.conflictEntryOrders(),
+            request.priority(),
+            request.purpose(),
+            request.conflictReleaseHints(),
+            request.resourceIntents())
+        .withDirectedContext(
+            Optional.of(
+                new DirectedTraversalContext(
+                    context.trainKey(),
+                    Optional.of(routeId),
+                    context.currentIndex(),
+                    context.currentNode(),
+                    context.lastPassedGraphNode(),
+                    context.effectiveFromNode(),
+                    context.effectiveToNode(),
+                    context.expandedPathNodes(),
+                    context.directedEdges(),
+                    context.singleConflictDirections(),
+                    context.switcherPathSignatures(),
+                    context.source(),
+                    context.occupancyVersion(),
+                    context.progressVersion(),
+                    context.requestId(),
+                    context.authorityTokenId())));
+  }
+
+  private static OccupancyRequest completeTwoNodeAuthorityRequest(
+      String trainName, Instant now, NodeId fromNode, NodeId toNode, Optional<RouteId> routeId) {
     RailEdge edge =
         new RailEdge(
             EdgeId.undirected(fromNode, toNode), fromNode, toNode, 1, -1.0, true, Optional.empty());
-    return switcherTraversalRequest(
-        trainName,
-        now,
-        0,
-        List.of(fromNode, toNode),
-        List.of(edge),
-        List.of(
-            OccupancyResource.forNode(fromNode),
-            OccupancyResource.forEdge(edge.id()),
-            OccupancyResource.forNode(toNode)));
+    OccupancyRequest request =
+        switcherTraversalRequest(
+            trainName,
+            now,
+            0,
+            List.of(fromNode, toNode),
+            List.of(edge),
+            List.of(
+                OccupancyResource.forNode(fromNode),
+                OccupancyResource.forEdge(edge.id()),
+                OccupancyResource.forNode(toNode)));
+    DirectedTraversalContext context = request.directedContext().orElseThrow();
+    return new OccupancyRequest(
+            request.trainName(),
+            routeId,
+            request.now(),
+            request.resources(),
+            request.corridorDirections(),
+            request.conflictEntryOrders(),
+            request.priority(),
+            request.purpose(),
+            request.conflictReleaseHints(),
+            request.resourceIntents())
+        .withDirectedContext(
+            Optional.of(
+                new DirectedTraversalContext(
+                    context.trainKey(),
+                    routeId,
+                    context.currentIndex(),
+                    context.currentNode(),
+                    context.lastPassedGraphNode(),
+                    context.effectiveFromNode(),
+                    context.effectiveToNode(),
+                    context.expandedPathNodes(),
+                    context.directedEdges(),
+                    context.singleConflictDirections(),
+                    context.switcherPathSignatures(),
+                    context.source(),
+                    context.occupancyVersion(),
+                    context.progressVersion(),
+                    context.requestId(),
+                    context.authorityTokenId())));
+  }
+
+  private static OccupancyRequest invokeMarkDirectedRequest(
+      RuntimeDispatchService service,
+      OccupancyRequest request,
+      SignalComputationTrace.Source source)
+      throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "markDirectedRequest", OccupancyRequest.class, SignalComputationTrace.Source.class);
+    method.setAccessible(true);
+    return (OccupancyRequest) method.invoke(service, request, source);
   }
 
   private static VerifiedSwitcherDrainClaims.VerificationSnapshot switcherVerificationSnapshot(

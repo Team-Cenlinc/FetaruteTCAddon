@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
  * @param occupancyVersion 占用快照版本
  * @param progressVersion 运行进度快照版本
  * @param requestId 请求快照 id
+ * @param canonicalRearRetainPathPlan 同一 builder 周期验证的最近已走行路径；仅用于收紧保护性尾部重评估证据
  */
 public record MovementPlanSnapshot(
     String trainKey,
@@ -38,7 +39,8 @@ public record MovementPlanSnapshot(
     List<OccupancyResource> movementRequiredResources,
     long occupancyVersion,
     long progressVersion,
-    String requestId) {
+    String requestId,
+    Optional<ExpandedPathPlan> canonicalRearRetainPathPlan) {
 
   public MovementPlanSnapshot {
     trainKey = trainKey == null ? "" : TrainNameNormalizer.normalizeKey(trainKey);
@@ -51,6 +53,38 @@ public record MovementPlanSnapshot(
     movementRequiredResources =
         movementRequiredResources == null ? List.of() : List.copyOf(movementRequiredResources);
     requestId = requestId == null || requestId.isBlank() ? "-" : requestId.trim();
+    canonicalRearRetainPathPlan =
+        canonicalRearRetainPathPlan == null ? Optional.empty() : canonicalRearRetainPathPlan;
+  }
+
+  /** 保留旧调用点的便捷构造器；没有 builder 证据时尾部路径必须为空。 */
+  public MovementPlanSnapshot(
+      String trainKey,
+      Optional<RouteId> routeId,
+      int routeIndex,
+      Optional<NodeId> currentNode,
+      Optional<NodeId> lastPassedGraphNode,
+      Optional<NodeId> effectiveFromNode,
+      Optional<NodeId> effectiveToNode,
+      ExpandedPathPlan expandedPathPlan,
+      List<OccupancyResource> movementRequiredResources,
+      long occupancyVersion,
+      long progressVersion,
+      String requestId) {
+    this(
+        trainKey,
+        routeId,
+        routeIndex,
+        currentNode,
+        lastPassedGraphNode,
+        effectiveFromNode,
+        effectiveToNode,
+        expandedPathPlan,
+        movementRequiredResources,
+        occupancyVersion,
+        progressVersion,
+        requestId,
+        Optional.empty());
   }
 
   /** 从请求的有向上下文生成快照。 */
@@ -82,7 +116,8 @@ public record MovementPlanSnapshot(
             movement,
             context.occupancyVersion(),
             context.progressVersion(),
-            context.requestId()));
+            context.requestId(),
+            context.canonicalRearRetainPathPlan()));
   }
 
   /** 便捷访问完整展开节点。 */

@@ -30,6 +30,24 @@ class RuntimeDispatchDiagnosticGateTest {
   }
 
   @Test
+  void suppressesStableInputEdgeWhenOnlyObservedAgeChanges() {
+    List<String> messages = new ArrayList<>();
+    AtomicLong nowNanos = new AtomicLong();
+    RuntimeDispatchDiagnosticGate gate =
+        new RuntimeDispatchDiagnosticGate(messages::add, Duration.ofSeconds(5), 32, nowNanos::get);
+
+    gate.accept(
+        "SMART_DISPATCH_INPUT_EDGE blockedTrain=MT-1 blockerTrain=MT-2 resource=NODE:A "
+            + "relation=HARD_OCCUPANCY ageMs=100 activeForNormalAdmission=true");
+    nowNanos.addAndGet(Duration.ofMillis(50).toNanos());
+    gate.accept(
+        "SMART_DISPATCH_INPUT_EDGE blockedTrain=MT-1 blockerTrain=MT-2 resource=NODE:A "
+            + "relation=HARD_OCCUPANCY ageMs=150 activeForNormalAdmission=true");
+
+    assertEquals(1, messages.size());
+  }
+
+  @Test
   void suppressesAnyStableObservationDiagnosticInsteadOfMaintainingAPrefixAllowlist() {
     List<String> messages = new ArrayList<>();
     AtomicLong nowNanos = new AtomicLong();
@@ -142,5 +160,39 @@ class RuntimeDispatchDiagnosticGateTest {
         "SMART_DISPATCH_EXECUTOR_SKIPPED train=MT-1 planId=plan-a reason=NO_RELEASE_COOLDOWN");
 
     assertEquals(2, messages.size());
+  }
+
+  @Test
+  void preservesUnlockTransactionAuditsAfterObservationBudgetIsExhausted() {
+    List<String> messages = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate =
+        new RuntimeDispatchDiagnosticGate(
+            messages::add, Duration.ofSeconds(5), 32, Duration.ofSeconds(60), 1, () -> 0L);
+
+    String ordinaryObservation = "SIGNAL_CAUTION_REASON train=MT-1 reason=budget-filler";
+    String reservationCreated =
+        "SMART_UNLOCK_RESERVATION_CREATED reservationId=unlock-1 train=MT-1";
+    String reevaluationRequested =
+        "SMART_UNLOCK_AUTHORITY_REEVALUATION_REQUESTED reservationId=unlock-1 train=MT-1";
+    String planApply =
+        "SMART_UNLOCK_PLAN_APPLY reservationId=unlock-1 applyPhase=reevaluation-requested";
+    String rollbackStarted = "SMART_UNLOCK_ROLLBACK_STARTED reservationId=unlock-1 train=MT-1";
+    String rollbackDone = "SMART_UNLOCK_ROLLBACK_DONE reservationId=unlock-1 train=MT-1";
+
+    gate.accept(ordinaryObservation);
+    gate.accept(reservationCreated);
+    gate.accept(reevaluationRequested);
+    gate.accept(planApply);
+    gate.accept(rollbackStarted);
+    gate.accept(rollbackDone);
+
+    assertEquals(
+        List.of(
+            ordinaryObservation,
+            reservationCreated,
+            reevaluationRequested,
+            rollbackStarted,
+            rollbackDone),
+        messages);
   }
 }

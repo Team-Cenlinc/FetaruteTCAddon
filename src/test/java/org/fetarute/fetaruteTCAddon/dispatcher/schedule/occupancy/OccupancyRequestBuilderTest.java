@@ -731,6 +731,83 @@ class OccupancyRequestBuilderTest {
   }
 
   @Test
+  void canonicalRearRetainPathPreservesPreviousLegAcrossRouteIndexAdvance() {
+    NodeId depot = NodeId.of("SURC:D:HHU:3");
+    NodeId switcher = NodeId.of("SWITCHER:Towny:502:74:996");
+    NodeId current = NodeId.of("SURC:S:HHU:1");
+    NodeId next = NodeId.of("SURC:ZKW:HHU:1:006");
+    List<NodeId> physicalPath = List.of(depot, switcher, current, next);
+    SimpleRailGraph graph = linearGraph(physicalPath);
+    RouteId routeId = RouteId.of("SURC:MT:MT-2F_Short");
+
+    OccupancyRequest request =
+        new OccupancyRequestBuilder(graph, 3, 0, 0, 0)
+            .buildContextFromNodesWithDirectionContext(
+                "SURC-MT-LP-5108",
+                Optional.of(routeId),
+                List.of(depot, current, next),
+                List.of(depot, current, next),
+                1,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow()
+            .request()
+            .withDirectedSource("PERIODIC_TICK");
+
+    DirectedTraversalContext context = request.directedContext().orElseThrow();
+    assertEquals(List.of(current, next), context.expandedPathNodes());
+    assertFalse(request.resourceList().contains(OccupancyResource.forNode(switcher)));
+    assertFalse(
+        request
+            .resourceList()
+            .contains(OccupancyResource.forEdge(EdgeId.undirected(depot, switcher))));
+    assertEquals(
+        List.of(depot, switcher, current),
+        context.canonicalRearRetainPathPlan().orElseThrow().expandedPathNodes());
+    assertEquals(
+        List.of(depot, switcher, current),
+        request
+            .movementPlanSnapshot()
+            .orElseThrow()
+            .canonicalRearRetainPathPlan()
+            .orElseThrow()
+            .expandedPathNodes());
+  }
+
+  @Test
+  void canonicalRearRetainPathPreservesCurrentLegPrefixAtIntermediateLastPassed() {
+    NodeId station = NodeId.of("SURC:S:RVS:1");
+    NodeId throatTwo = NodeId.of("SURC:PPK:RVS:1:002");
+    NodeId current = NodeId.of("SURC:PPK:RVS:1:001");
+    NodeId next = NodeId.of("SWITCHER:Towny:593:68:1140");
+    SimpleRailGraph graph = linearGraph(List.of(station, throatTwo, current, next));
+    RouteId routeId = RouteId.of("SURC:MT:MT-2F_Short");
+
+    OccupancyRequest request =
+        new OccupancyRequestBuilder(graph, 3, 0, 0, 0)
+            .buildContextFromNodesWithDirectionContext(
+                "SURC-MT-LP-7327",
+                Optional.of(routeId),
+                List.of(current, next),
+                List.of(station, next),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0,
+                AuthorizationPurpose.RUNTIME_MOVE)
+            .orElseThrow()
+            .request();
+
+    DirectedTraversalContext context = request.directedContext().orElseThrow();
+    assertEquals(List.of(current, next), context.expandedPathNodes());
+    assertFalse(request.resourceList().contains(OccupancyResource.forNode(station)));
+    assertFalse(request.resourceList().contains(OccupancyResource.forNode(throatTwo)));
+    assertEquals(
+        List.of(station, throatTwo, current),
+        context.canonicalRearRetainPathPlan().orElseThrow().expandedPathNodes());
+  }
+
+  @Test
   void rearGuardRequestKeepsOnlyTailSegment() {
     NodeId nodeA = NodeId.of("A");
     NodeId nodeB = NodeId.of("B");
@@ -2712,6 +2789,22 @@ class OccupancyRequestBuilderTest {
 
   private static RailEdge edge(NodeId from, NodeId to, EdgeId id) {
     return new RailEdge(id, from, to, 10, 8.0, true, Optional.empty());
+  }
+
+  private static SimpleRailGraph linearGraph(List<NodeId> pathNodes) {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    for (int index = 0; index < pathNodes.size(); index++) {
+      NodeId node = pathNodes.get(index);
+      nodes.put(node, waypoint(node, index * 10.0));
+      if (index == 0) {
+        continue;
+      }
+      NodeId previous = pathNodes.get(index - 1);
+      EdgeId edgeId = EdgeId.undirected(previous, node);
+      edges.put(edgeId, new RailEdge(edgeId, previous, node, 10, 8.0, true, Optional.empty()));
+    }
+    return new SimpleRailGraph(nodes, edges, Set.of());
   }
 
   private static MovementPlanSnapshot movementPlanWithDirections(

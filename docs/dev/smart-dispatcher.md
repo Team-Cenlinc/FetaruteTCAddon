@@ -51,10 +51,11 @@ shadow JAR 跑一份完整日志；日志开头的 `buildId` / `sourceFingerprin
 
 稳定期日志预算：插件启动时只创建一个 Runtime Dispatch diagnostic gate，`RuntimeDispatchService`、占用事件桥、
 信号重评估调度器、`SignalEvaluator` 与 `HealthMonitor` 必须共用该出口。所有观察 trace（包括 signal、lookahead、
-occupancy、admission 与 `SignalTrace`）按稳定签名最多每 5 秒输出一次；tick、requestId、sequence 或版本号变化不能
+occupancy、admission 与 `SignalTrace`）按稳定签名最多每 5 秒输出一次；tick、requestId、sequence、观察年龄 ageMs 或版本号变化不能
 单独形成新行。观察 trace 在全部组件间还共享每分钟 120 行预算；预算恢复后的首条会先输出
-`SMART_DISPATCH_DIAGNOSTICS_SUPPRESSED` 汇总。执行器审计（`SMART_DISPATCH_EXECUTOR_*`）不受这两条限制，必须保留
-每次重新核验。状态字段变化会立即产生新行，直到观察预算耗尽；限流只能减轻观察噪声，绝不能跳过一次实际授权复核或改变
+`SMART_DISPATCH_DIAGNOSTICS_SUPPRESSED` 汇总。执行器审计（`SMART_DISPATCH_EXECUTOR_*`）以及 unlock reservation
+的创建、重评估、成功/失败与回滚事务边界不受这两条限制，必须保留每次重新核验和完整事务链。候选、`PLAN_APPLY` 与逐 tick
+progress 仍受门控。普通状态字段变化会立即产生新行，直到观察预算耗尽；限流只能减轻观察噪声，绝不能跳过一次实际授权复核或改变
 调度决策。
 
 `SMART_DISPATCH_DIAGNOSTICS_SUPPRESSED` 会同时输出 `repeat`、`budgetDrop`、`repeatKinds` 与 `budgetKinds`：前者表示
@@ -66,8 +67,7 @@ STOP-retain 生成生命周期事件；只有 owner、route、headway、role、�
 需要输出后格式化，禁止在被 gate 丢弃前构造大字符串。若稳定行车仍持续出现 suppressed 汇总，应把它当作待修复的上游事件
 或诊断源，而不是调大预算或接受日志门控。
 
-停止服务器后，FTA 日志不得出现 `Plugin attempted to register task while disabled`。TrainCarts、BKCommonLib 或其他插件在
-`Thread-0` 的关闭异常需单独记录，不得作为 FTA Dispatcher 成功或失败的证据。
+停止服务器后，FTA 日志不得出现 `Plugin attempted to register task while disabled`。`onDisable()` 只撤销 FTA API、授权门、wake-up、调度任务与存储，不再枚举 TrainCarts、重试离线编组销毁或调用实体化发车 `prepareForReplacement`。Depot 物理编组一旦返回精确 identity，就会在任何可失败的 tags/warm-up 初始化前写入 `FTA_MATERIALIZED_ROLLBACK_PENDING=true` 事务墓碑；初始化器必须保留该标记，外层事务也会在初始化结束或抛错时重新确认。只有 footprint 已 promotion 且发车票据提交成功后才清除。因此包括 4 秒 hydration 等待窗在内的未完成事务都会由持久标签保留到下次启动的 STOP_FIRST 恢复。只有插件仍启用且处于受控生命周期的 `/fta reload` 才同步执行物理收口。TrainCarts、BKCommonLib 或其他插件在 `Thread-0` 的关闭异常需单独记录，不得作为 FTA Dispatcher 成功或失败的证据。
 
 模式相关 trace：
 
@@ -90,6 +90,8 @@ STOP-retain 生成生命周期事件；只有 owner、route、headway、role、�
 - progress / occupancy / blocker snapshot / movement token / inhibitor 计数
 - `occupancyVersion` 与 `progressVersion`
 
+同一轮全局 planner 只读取一次 occupancy claim 快照，并把这份不可变视图用于列车状态、保护性尾部证明、mutual-owner 诊断与执行前方向屏障。该视图不跨 tick 缓存；下一轮仍重新读取 live claims，避免运行图扩大后按列车重复复制整张占用表，也不引入图版本或进度失效问题。
+
 随后每列车的局部信号评估仍由既有 runtime 流程完成：canonical `MovementPlanSnapshot` 与 canonical `ExpandedPathPlan` 继续作为 entry lookahead、占用申请和信号发布的事实来源。Runtime 会从同一 expanded path 派生短 `hardAuthorityWindow` 与更远的 `advisoryLookaheadWindow`；Smart Dispatcher 只在最终 visible aspect 发布前读取这些结果并输出监督建议。
 
 当前 route index 后存在非 `PASS` RouteStop 时，`ROUTE_STOP_OR_TERMINAL` 是停靠/折返行为边界，而不是前方实体 blocker。它只会产生速度建议（必要时为 `PROCEED_WITH_CAUTION`），不得仅因进入制动距离而发布 `STOP`；实际停靠仍由对应站点、终点或 TrainCarts destination 行为完成。没有 RouteStop 证明的裸交路终点，以及缺少路线、物理占用、方向或硬授权证据的情况继续 fail-closed 到 `STOP`。
@@ -99,6 +101,12 @@ Occupancy acquire/release 与 deadlock-resolved 事件不会发布预览信号�
 Planner 选择前会排除已有 reservation 的 cycle 与列车，再从剩余 accepted candidate 中选择最高分方案，避免一个暂不可重复执行的高分 cycle 长期压住其他可解锁 cycle。当前 reservation 索引和 movement token 都是每 cycle/每 train 单值，因此执行器无条件维持“同 cycle 或同 train 最多一个 active reservation”的幂等不变量；旧配置即使把 `one-active-reservation-per-cycle` 设为 `false`，也不会覆盖仍在观察、TTL 或 rollback 生命周期内的 reservation。
 
 Planner 的 `resources/releaseResources` 表示 wait-for graph 中预计被释放的瓶颈，不是完整 Movement Authority。ENFORCE 选中 winner 后只记录短生命周期选择意图、向规范 Gate Queue priority 叠加有界且不覆盖人工优先级的 boost，并请求下一 tick 重评估；不得直接 acquire 这些 blocker、写 destination 或签发 token。成功反馈也必须同时看到：重评估后生成的 fresh active token、目标边界一致、destination 已提交、token 声明的全部硬资源仍由同一逻辑列车持有，以及瓶颈资源确已释放。任一条件缺失只回滚选择意图，不清除规范运行时已经签发的 token。
+
+NODE/EDGE blocker 没有 `A_TO_B/B_TO_A` 这种二值走廊方向。Planner 会优先读取同一列车的 fresh live blocker 快照；若 bottleneck leader 本身没有 blocker 快照，则读取最近一次完整信号请求留下的 canonical `MovementPlanSnapshot`。后者只在配置的 movement-plan TTL 内有效，并且必须仍匹配 canonical train key、精确 route ID/index 与 last-passed/effective-start 进度窗口；其中 last-passed 的 `-` 表示“采样时确实不存在”，不是通配符。缓存路径会从真实进度锚点裁掉车后部分，锚点缺失或重复时拒绝使用。两种来源都要逐项验证 effective from/to、完整节点链、有向边链和物理 `EdgeId`，且每个待释放 NODE/EDGE 都必须由验证后的前向链覆盖，才生成 `CANONICAL_MOVEMENT_PLAN` 前向证明。
+
+唯一的 rear 例外是 `CANONICAL_MOVEMENT_PLAN_WITH_REAR_RETAIN`。生产 builder 会在生成当前 forward plan 的同一图快照内，额外附带一条不参与资源申请或方向解析的 `canonicalRearRetainPathPlan`：若 last-passed 仍在当前 route leg 中间，它只覆盖当前 canonical waypoint 到真实 last-passed 的已走前缀；若 route index 刚推进到 waypoint，它只覆盖紧邻上一 waypoint 到当前 waypoint 的上一 leg。该路径必须唯一终止于真实 last-passed、节点不重复且每条有向边与物理 `EdgeId` 完整一致；不能从已经裁剪为 last-passed 起点的 forward plan 反向猜测 rear。待解释资源还必须严格位于该路径末端锚点之前，并且占用层当前仍存在同一逻辑列车、同一 route identity、角色为 `PROTECTIVE_RETAIN` 的 NODE/EDGE claim。缓存只保存路径候选，planner 每次使用时都重新与 live claims 取交集；`PHYSICAL_FOOTPRINT`、`HOLD_ONLY`、无 route、路径外、当前锚点本身或任意 conflict 均不成立。该证据只说明 leader 规范前进后会收缩自己的保护性尾部窗口，仍只允许创建“下一 tick 重新评估此列车”的短期 winner 意图，不能直接释放 claim、伪造成 `CorridorDirection` 或绕过完整 Movement Authority。由它创建的 priority 意图还会绑定原 route ID/index，进度身份漂移时立即回滚。
+
+计划缺失、超过 TTL、route/index 已推进、last-passed 从缺失变为存在、路径少边/错边、起终点折叠、边链不连续或释放资源未被上述任一严格证据覆盖时继续以稳定原因码 fail-closed。`CONFLICT:single:*` 与 `YIELD_TO_HEAD_ON` 始终要求真实 single-corridor 方向；每个非 NODE/EDGE blocker（包括 switcher）也必须各自携带已知且彼此一致的 topology 方向。混合资源必须同时具备这些逐资源方向证据与 canonical 路径证明，已知 single 或另一个 conflict 都不能掩盖 UNKNOWN switcher。
 
 ## 安全状态分层
 
@@ -125,7 +133,7 @@ Planner 的 `resources/releaseResources` 表示 wait-for graph 中预计被释�
 5. 物理快照提交后仍保持 `HYDRATING`。插件先成功启动全部监督组件，随后才以单个完成阶段进入 `READY` 并逐车 fresh acquire；任一组件启动失败，或进入 `READY` 后任一列车的首次刷新发生 runtime/ABI 异常，都会立即把全局门重新关闭到 `STOP_FIRST`、硬停本轮车队并请求完整恢复。`/fta reload` 使用同一个事务，不得在 reload 后直接恢复信号或发车任务。
 6. 恢复完成后迟加载、重连或改名后的受管列车必须先完成单列原子现场水合；该提交同时替换本车逻辑 HOLD 与 sparse `PHYSICAL_FOOTPRINT`，并保留其他 owner/queue。水合资格同时绑定 canonical train key 与 TrainCarts 物理编组实例，不能由同名 split/link group 继承；若发现同一 key 的第二个 live group 或现场证据不足，则重新关闭全局授权门并触发完整扫描，不允许晚加载列车绕过恢复。
 7. 只有 sparse Zone 现场资源进入启动 release guard；后续完整 `TrackedRail` 证明车体已经离开该 Zone 后，guard 才会收缩。普通 EDGE/NODE 的后方保护由规范 Route、当前 Node 与真实车长计算，不再依赖常驻 cell -> Edge 表。
-8. READY 阶段的 Depot 新车使用独立的 `provisional -> promoted` 事务：实体化前捕获 recovery epoch，`DepotSpawner` 在物理 group 生成后立即把 identity 返回给上层，tags/warm-up 等可失败初始化只能在 group-aware 事务内执行。实体化后先取得完整硬授权并硬停车，再绑定本次物理 group identity。首次 `TrackedRail` 尚未就绪时只冻结该车，不把它误判为未知迟加载列车；真实 footprint 原子提交后才允许继续信号链并完成发车票据。票据、租约与硬授权最多等待 4 秒（小于发车租约的 5 秒 TTL），超时会先收容实体再重排票据。任何实体化后异常都会单向进入 `ROLLBACK_REQUIRED -> AWAITING_REMOVAL`：前一阶段硬停、安排销毁与回滚账务，后一阶段持续保留 ticket guard、按精确 identity 写入 runtime quarantine 并重试销毁，直到 TrainCarts 精确发出 GroupRemove 才完成清理。`group.isValid()==false` 也可能只是 GroupUnload，不能作为销毁证据；卸载前的 quarantine、claims 与 ticket guard 会保留，并通过持久化回滚标签转移到重载后的新物理身份。离线编组只接受 TrainCarts official offline store 的成功销毁结果，完整重启后也会先扫描 `TrainPropertiesStore` 中的 tombstone，收容完成前不得进入 READY；两个阶段都禁止再次刷新信号、promotion 或完成成功票据。同一 ticket 只允许存在一个未完成实体化事务；额外 group 使用独立物理恢复记录，但不拥有票据完成/重排权，逻辑 claims 要等同名隔离实体全部精确移除后才释放。epoch 在提交中变化时保留现场 claims 并拒绝 stale promotion；实体化失败达到普通尝试上限或通用队列 age 时仍保留班次并退避，不会静默消费票据。重载前会先全量隔离全部 pending identity，再开始任何销毁；若收口未完成则安全中止重载，现场恢复任务会继续推进旧 assigner 的物理收容。重载成功会按 ticket id 去重迁移 queue 与 layover pending，并原样迁移每个服务的 `nextDueAt` 与全局 sequence，避免重放历史班次。运行时物理闭锁接管期间，未复用该事务的 `/fta depot spawn` 手动旁路会被拒绝。
+8. READY 阶段的 Depot 新车使用独立的 `provisional -> promoted` 事务：实体化前捕获 recovery epoch，`DepotSpawner` 在物理 group 生成后立即把 identity 返回给上层，tags/warm-up 等可失败初始化只能在 group-aware 事务内执行。实体化后先取得完整硬授权并硬停车；物理 identity 一经取得就在任何可失败初始化前写入持久事务墓碑，初始化器规范化生命周期标签时继续保留并由外层 finally 复写确认。随后才绑定本次 physical identity 并首次刷新信号，只有真实 footprint promotion 与票据提交都成功后才清除墓碑。首次 `TrackedRail` 尚未就绪时只冻结该车，不把它误判为未知迟加载列车；真实 footprint 原子提交后才允许继续信号链并完成发车票据。票据、租约与硬授权最多等待 4 秒（小于发车租约的 5 秒 TTL），超时会先收容实体再重排票据。任何实体化后异常都会单向进入 `ROLLBACK_REQUIRED -> AWAITING_REMOVAL`：前一阶段硬停、安排销毁与回滚账务，后一阶段持续保留 ticket guard、按精确 identity 写入 runtime quarantine 并重试销毁，直到 TrainCarts 精确发出 GroupRemove 才完成清理。`group.isValid()==false` 也可能只是 GroupUnload，不能作为销毁证据；卸载前的 quarantine、claims 与 ticket guard 会保留，并通过持久化回滚标签转移到重载后的新物理身份。离线编组只接受 TrainCarts official offline store 的成功销毁结果，完整重启后也会先扫描 `TrainPropertiesStore` 中的 tombstone，收容完成前不得进入 READY；两个阶段都禁止再次刷新信号、promotion 或完成成功票据。同一 ticket 只允许存在一个未完成实体化事务；额外 group 使用独立物理恢复记录，但不拥有票据完成/重排权，逻辑 claims 要等同名隔离实体全部精确移除后才释放。epoch 在提交中变化时保留现场 claims 并拒绝 stale promotion；实体化失败达到普通尝试上限或通用队列 age 时仍保留班次并退避，不会静默消费票据。重载前会先全量隔离全部 pending identity，再开始任何销毁；若收口未完成则安全中止重载，现场恢复任务会继续推进旧 assigner 的物理收容。重载成功会按 ticket id 去重迁移 queue 与 layover pending，并原样迁移每个服务的 `nextDueAt` 与全局 sequence，避免重放历史班次。运行时物理闭锁接管期间，未复用该事务的 `/fta depot spawn` 手动旁路会被拒绝。
 9. 普通运行时身份的 GroupRemove/Unload 清理必须匹配同一个物理编组实例；同名旧 split group 的迟到事件不得按 canonical name 清除存活组的 claim，而应保持现场快照并重新进入全局恢复。实体化回滚是更严格的例外：GroupUnload 只转入 offline 精确收容，不能释放 quarantine、claims 或 ticket guard。
 
 该事务保证旧授权不会在半水合快照上重放；现场已经重叠的列车会继续保持 STOP，等待真实通过/清空证据或人工处置，而不是由恢复顺序选出一个虚假的 owner。
@@ -180,6 +188,10 @@ Planner 的 `resources/releaseResources` 表示 wait-for graph 中预计被释�
 - [ ] SPB-JBS-WSD：输家保持可审计 STOP，胜者列尾清空后由 release event 自动重试并通过，无需人工 refresh/destroy。
 - [ ] SPB-JBS-WSD：重载或重启时，两列现场 footprint 先原子重建，再恢复信号、健康和发车组件。
 - [ ] PPK-RVS：复查平交/咽喉资源映射、释放时机与既有同向跟驰，无吞吐回归。
+- [ ] 5108：上一 leg 的 `NODE:SWITCHER:Towny:502:74:996` 仍为同 route `PROTECTIVE_RETAIN` 时，只能生成 `CANONICAL_MOVEMENT_PLAN_WITH_REAR_RETAIN` winner 与下一 tick 规范重评估；planner 不直接释放 claim，列车取得 fresh token 并实际前进后才允许尾部窗口收缩。
+- [ ] 7327：上一 leg 的 `NODE:SURC:S:RVS:1` 仍为同 route `PROTECTIVE_RETAIN` 时，同样必须由规范信号链取得 fresh token/destination 后排空；不得因 station 类型、route index 为 0 或路径裁剪而退化为永久 STOP。
+- [ ] winner 存活期间主动改变 route、index 或 last-passed 锚点，必须立即出现 `reason=canonical-progress-window-moved` rollback，旧 priority 意图不能等待 TTL 才消失。
+- [ ] 按“事故双车 -> 4 至 6 列 -> 目标运行图”分阶段加车，在同一硬件与相同图快照下记录 Paper MSPT/TPS；`RailGraphPathFinder.shortestPath` 不应成为主线程主要热点，目标列车数下不得出现持续超过 50 ms 的 tick。若前一 canonical leg 展开成为明显热点，再基于 profiler 证据设计图版本绑定的路径复用，当前版本不预置跨 tick 缓存。
 - [ ] 日志包含新 build fingerprint、精确 interlocking key、claim lifecycle、STOP release condition 与最终授权 token；不得再出现双方同时 `PROCEED`。
 
 ## Step 1：Smart traffic control admission

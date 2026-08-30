@@ -14,6 +14,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
  *
  * <p>轨道图的物理资源仍使用无向 {@link EdgeId}，但运行时信号、单线方向、队列和健康监控需要稳定的 from→to
  * 视角。该上下文只描述“本次请求从哪里向哪里走”，不改变图模型，也不直接参与资源互斥。
+ *
+ * <p>{@code canonicalRearRetainPathPlan} 是 builder 在同一次图快照上验证的、严格终止于当前有效节点的最近已走行路径。它只供运行时识别同 route
+ * 的 {@code PROTECTIVE_RETAIN} 是否确实位于车后；不得用于扩大硬授权、推导单线方向或直接释放 claim。
  */
 public record DirectedTraversalContext(
     String trainKey,
@@ -31,7 +34,8 @@ public record DirectedTraversalContext(
     long occupancyVersion,
     long progressVersion,
     String requestId,
-    Optional<String> authorityTokenId) {
+    Optional<String> authorityTokenId,
+    Optional<ExpandedPathPlan> canonicalRearRetainPathPlan) {
 
   public DirectedTraversalContext {
     trainKey = trainKey == null ? "" : TrainNameNormalizer.normalizeKey(trainKey);
@@ -51,6 +55,46 @@ public record DirectedTraversalContext(
         requestId == null || requestId.isBlank() ? UUID.randomUUID().toString() : requestId.trim();
     authorityTokenId =
         authorityTokenId == null ? Optional.empty() : authorityTokenId.map(String::trim);
+    canonicalRearRetainPathPlan =
+        canonicalRearRetainPathPlan == null ? Optional.empty() : canonicalRearRetainPathPlan;
+  }
+
+  /** 保留旧调用点的便捷构造器；未由 builder 明确提供时，不得假定存在规范尾部路径。 */
+  public DirectedTraversalContext(
+      String trainKey,
+      Optional<RouteId> routeId,
+      int currentIndex,
+      Optional<NodeId> currentNode,
+      Optional<NodeId> lastPassedGraphNode,
+      Optional<NodeId> effectiveFromNode,
+      Optional<NodeId> effectiveToNode,
+      List<NodeId> expandedPathNodes,
+      List<DirectedEdge> directedEdges,
+      Map<String, CorridorDirection> singleConflictDirections,
+      Map<String, SwitcherPathSignature> switcherPathSignatures,
+      String source,
+      long occupancyVersion,
+      long progressVersion,
+      String requestId,
+      Optional<String> authorityTokenId) {
+    this(
+        trainKey,
+        routeId,
+        currentIndex,
+        currentNode,
+        lastPassedGraphNode,
+        effectiveFromNode,
+        effectiveToNode,
+        expandedPathNodes,
+        directedEdges,
+        singleConflictDirections,
+        switcherPathSignatures,
+        source,
+        occupancyVersion,
+        progressVersion,
+        requestId,
+        authorityTokenId,
+        Optional.empty());
   }
 
   /** 返回同一路径但替换来源标签后的上下文。 */
@@ -71,7 +115,8 @@ public record DirectedTraversalContext(
         occupancyVersion,
         progressVersion,
         requestId,
-        authorityTokenId);
+        authorityTokenId,
+        canonicalRearRetainPathPlan);
   }
 
   /** 返回同一路径但迁移到新列车身份后的上下文。 */
@@ -92,7 +137,8 @@ public record DirectedTraversalContext(
         occupancyVersion,
         progressVersion,
         requestId,
-        authorityTokenId);
+        authorityTokenId,
+        canonicalRearRetainPathPlan);
   }
 
   /** 返回同一路径但替换占用快照版本后的上下文。 */
@@ -113,7 +159,8 @@ public record DirectedTraversalContext(
         nextOccupancyVersion,
         progressVersion,
         requestId,
-        authorityTokenId);
+        authorityTokenId,
+        canonicalRearRetainPathPlan);
   }
 
   /** 返回同一路径但替换运行进度快照版本后的上下文。 */
@@ -134,7 +181,31 @@ public record DirectedTraversalContext(
         occupancyVersion,
         nextProgressVersion,
         requestId,
-        authorityTokenId);
+        authorityTokenId,
+        canonicalRearRetainPathPlan);
+  }
+
+  /** 返回同一前向语义但附加 builder 已验证的规范尾部路径。 */
+  public DirectedTraversalContext withCanonicalRearRetainPathPlan(
+      Optional<ExpandedPathPlan> rearPathPlan) {
+    return new DirectedTraversalContext(
+        trainKey,
+        routeId,
+        currentIndex,
+        currentNode,
+        lastPassedGraphNode,
+        effectiveFromNode,
+        effectiveToNode,
+        expandedPathNodes,
+        directedEdges,
+        singleConflictDirections,
+        switcherPathSignatures,
+        source,
+        occupancyVersion,
+        progressVersion,
+        requestId,
+        authorityTokenId,
+        rearPathPlan);
   }
 
   /** 有向边：保留无向物理 edgeId，同时记录本次 traversal 的 from/to。 */

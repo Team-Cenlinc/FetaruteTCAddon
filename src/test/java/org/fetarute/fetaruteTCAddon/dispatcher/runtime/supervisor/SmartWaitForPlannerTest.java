@@ -12,6 +12,7 @@ import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
@@ -223,6 +224,26 @@ class SmartWaitForPlannerTest {
   }
 
   @Test
+  void canonicalNodeEvidenceUnlocksBottleneckLeader() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("follower-1", "leader", "NODE:leader:next", CorridorDirection.UNKNOWN),
+                    edge("follower-2", "leader", "NODE:leader:next", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "follower-1", stateWithCanonicalForwardEvidence("follower-1", 10),
+                    "follower-2", stateWithCanonicalForwardEvidence("follower-2", 20),
+                    "leader", stateWithCanonicalForwardEvidence("leader", 30))));
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertEquals("leader", result.selectedPlan().orElseThrow().train());
+    assertTrue(result.selectedPlan().orElseThrow().releasesBottleneck());
+    assertTrue(result.selectedPlan().orElseThrow().forwardPathEvidence().isPresent());
+  }
+
+  @Test
   void sameLineCascadeIsDetected() {
     SmartWaitForPlanner.PlanResult result =
         planner.plan(
@@ -239,6 +260,26 @@ class SmartWaitForPlannerTest {
     assertTrue(
         result.traceLines().stream()
             .anyMatch(line -> line.contains("SMART_DISPATCH_SAME_LINE_CASCADE_DETECTED")));
+  }
+
+  @Test
+  void canonicalNodeEvidenceUnlocksSameLineCascadeHead() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("tail", "middle", "NODE:middle:next", CorridorDirection.UNKNOWN),
+                    edge("middle", "head", "NODE:head:next", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "tail", stateWithCanonicalForwardEvidence("tail", 10),
+                    "middle", stateWithCanonicalForwardEvidence("middle", 20),
+                    "head", stateWithCanonicalForwardEvidence("head", 30))));
+
+    assertTrue(result.selectedPlan().isPresent());
+    assertEquals("head", result.selectedPlan().orElseThrow().train());
+    assertTrue(result.selectedPlan().orElseThrow().improvesSameLineCascade());
+    assertTrue(result.selectedPlan().orElseThrow().forwardPathEvidence().isPresent());
   }
 
   @Test
@@ -559,7 +600,7 @@ class SmartWaitForPlannerTest {
   }
 
   @Test
-  void plannerInfersDirectionFromRouteContextWhenSnapshotDirectionUnknown() {
+  void routeContextCannotReplaceUnknownSingleCorridorDirection() {
     SmartWaitForPlanner.PlanResult result =
         planner.plan(
             input(
@@ -569,13 +610,13 @@ class SmartWaitForPlannerTest {
                     edge("WS-B", "WS-A", "CONFLICT:single:WS", CorridorDirection.UNKNOWN)),
                 Map.of("WS-A", state("WS-A", 20), "WS-B", state("WS-B", 40))));
 
-    assertTrue(result.selectedPlan().isPresent());
+    assertTrue(result.selectedPlan().isEmpty());
     assertTrue(
-        result.traceLines().stream()
-            .anyMatch(
-                line ->
-                    line.contains("SMART_DISPATCH_DIRECTION_INFERRED")
-                        && line.contains("source=RUNTIME_ROUTE_CONTEXT")));
+        result.candidates().stream()
+            .allMatch(
+                candidate ->
+                    candidate.direction() == CorridorDirection.UNKNOWN
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
   }
 
   @Test
@@ -585,13 +626,9 @@ class SmartWaitForPlannerTest {
             input(
                 enforceSettings(),
                 List.of(
+                    edge("follower-1", "leader", "CONFLICT:switcher:one", CorridorDirection.A_TO_B),
                     edge(
-                        "follower-1", "leader", "CONFLICT:switcher:one", CorridorDirection.UNKNOWN),
-                    edge(
-                        "follower-2",
-                        "leader",
-                        "CONFLICT:switcher:two",
-                        CorridorDirection.UNKNOWN)),
+                        "follower-2", "leader", "CONFLICT:switcher:two", CorridorDirection.A_TO_B)),
                 Map.of(
                     "leader", state("leader", 30),
                     "follower-1", state("follower-1", 1),
@@ -760,6 +797,181 @@ class SmartWaitForPlannerTest {
             || result.traceLines().get(evidenceIndex).contains("resourceKind=NODE"));
     assertTrue(result.traceLines().get(evidenceIndex).contains("currentNode=WS-"));
     assertTrue(result.traceLines().get(evidenceIndex).contains("nextNode=WS-"));
+  }
+
+  @Test
+  void canonicalForwardPathCannotReplaceSingleCorridorDirection() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("WS-A", "WS-B", "CONFLICT:single:WS", CorridorDirection.UNKNOWN),
+                    edge("WS-B", "WS-A", "CONFLICT:single:WS", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "WS-A", stateWithCanonicalForwardEvidence("WS-A", 20),
+                    "WS-B", stateWithCanonicalForwardEvidence("WS-B", 40))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .allMatch(
+                candidate ->
+                    candidate.forwardPathEvidence().isEmpty()
+                        && candidate.direction() == CorridorDirection.UNKNOWN
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
+  }
+
+  @Test
+  void bottleneckCandidateRequiresDirectionOnEverySingleCorridorResource() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "follower-known",
+                        "leader",
+                        "CONFLICT:single:known",
+                        CorridorDirection.A_TO_B),
+                    edge(
+                        "follower-unknown",
+                        "leader",
+                        "CONFLICT:single:unknown",
+                        CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "follower-known", state("follower-known", 10),
+                    "follower-unknown", state("follower-unknown", 20),
+                    "leader", state("leader", 30))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertFalse(result.candidates().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .filter(candidate -> candidate.train().equals("leader"))
+            .allMatch(
+                candidate ->
+                    !candidate.accepted()
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
+  }
+
+  @Test
+  void knownSingleDirectionCannotReplaceCanonicalProofForMixedNodeResource() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "follower-single",
+                        "leader",
+                        "CONFLICT:single:known",
+                        CorridorDirection.A_TO_B),
+                    edge("follower-node", "leader", "NODE:UNRELATED", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "follower-single", state("follower-single", 10),
+                    "follower-node", state("follower-node", 20),
+                    "leader", stateWithCanonicalForwardEvidence("leader", 30))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .filter(candidate -> candidate.train().equals("leader"))
+            .allMatch(
+                candidate ->
+                    !candidate.accepted()
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_DIRECTION_EVIDENCE train=leader")
+                        && line.contains("confidence=HIGH")),
+        () -> "traceLines=" + result.traceLines());
+  }
+
+  @Test
+  void canonicalProofCannotReplaceUnknownSwitcherDirectionInMixedCandidate() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "follower-switcher",
+                        "leader",
+                        "CONFLICT:switcher:unknown",
+                        CorridorDirection.UNKNOWN),
+                    edge("follower-node", "leader", "NODE:leader:next", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "follower-switcher", stateWithoutDirectionEvidence("follower-switcher", 10),
+                    "follower-node", stateWithoutDirectionEvidence("follower-node", 20),
+                    "leader", stateWithCanonicalForwardEvidence("leader", 30))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .filter(candidate -> candidate.train().equals("leader"))
+            .allMatch(
+                candidate ->
+                    !candidate.accepted()
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
+  }
+
+  @Test
+  void knownSingleAndCanonicalPathCannotMaskUnknownSwitcherDirection() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge(
+                        "follower-single",
+                        "leader",
+                        "CONFLICT:single:known",
+                        CorridorDirection.A_TO_B),
+                    edge(
+                        "follower-switcher",
+                        "leader",
+                        "CONFLICT:switcher:unknown",
+                        CorridorDirection.UNKNOWN),
+                    edge("follower-node", "leader", "NODE:leader:next", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "follower-single", stateWithoutDirectionEvidence("follower-single", 10),
+                    "follower-switcher", stateWithoutDirectionEvidence("follower-switcher", 20),
+                    "follower-node", stateWithoutDirectionEvidence("follower-node", 30),
+                    "leader", stateWithCanonicalForwardEvidence("leader", 40))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .filter(candidate -> candidate.train().equals("leader"))
+            .allMatch(
+                candidate ->
+                    !candidate.accepted()
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
+  }
+
+  @Test
+  void canonicalForwardPathCannotClaimUnrelatedNodeEdgeBlocker() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("WS-A", "WS-B", "EDGE:UNRELATED-A~UNRELATED-B", CorridorDirection.UNKNOWN),
+                    edge("WS-B", "WS-A", "NODE:UNRELATED-C", CorridorDirection.UNKNOWN)),
+                Map.of(
+                    "WS-A", stateWithCanonicalForwardEvidence("WS-A", 20),
+                    "WS-B", stateWithCanonicalForwardEvidence("WS-B", 40))));
+
+    assertTrue(result.selectedPlan().isEmpty());
+    assertTrue(
+        result.candidates().stream()
+            .allMatch(
+                candidate ->
+                    candidate.forwardPathEvidence().isEmpty()
+                        && candidate.rejectReason().equals("INSUFFICIENT_DIRECTION_EVIDENCE")));
   }
 
   @Test
@@ -939,6 +1151,52 @@ class SmartWaitForPlannerTest {
         false,
         false,
         "NONE");
+  }
+
+  private static SmartWaitForPlanner.TrainState stateWithCanonicalForwardEvidence(
+      String train, long stuckSeconds) {
+    NodeId current = NodeId.of(train + ":current");
+    NodeId next = NodeId.of(train + ":next");
+    EdgeId edgeId = EdgeId.undirected(current, next);
+    MovementPlanSnapshot plan =
+        new MovementPlanSnapshot(
+            train,
+            Optional.of(RouteId.of("COMP:OP:LINE:route")),
+            1,
+            Optional.of(current),
+            Optional.of(current),
+            Optional.of(current),
+            Optional.of(next),
+            new ExpandedPathPlan(
+                List.of(current, next),
+                List.of(new DirectedTraversalContext.DirectedEdge(edgeId, current, next)),
+                Map.of(),
+                Map.of()),
+            List.of(OccupancyResource.forEdge(edgeId)),
+            1L,
+            1L,
+            "planner-" + train);
+    CanonicalForwardPathEvidence evidence =
+        CanonicalForwardPathEvidence.derive(train, plan).evidence().orElseThrow();
+    return new SmartWaitForPlanner.TrainState(
+        train,
+        "COMP:OP:LINE:route",
+        1,
+        current.value(),
+        next.value(),
+        current.value(),
+        CorridorDirection.UNKNOWN,
+        "CANONICAL_MOVEMENT_PLAN",
+        "-",
+        stuckSeconds,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        "NONE",
+        Optional.of(evidence));
   }
 
   private static SmartWaitForPlanner.TrainState state(

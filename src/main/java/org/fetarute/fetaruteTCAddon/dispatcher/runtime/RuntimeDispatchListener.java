@@ -267,15 +267,48 @@ public final class RuntimeDispatchListener implements Listener {
       return;
     }
     TrainCartsRuntimeHandle handle = new TrainCartsRuntimeHandle(group);
+    refreshCreatedGroup(
+        handle,
+        () ->
+            dispatchService.handleAbnormalGroup(
+                group, "group-create-materialized-rollback-pending"),
+        () -> dispatchService.handleSignalTick(group));
+  }
+
+  /**
+   * 在 GroupCreate 延迟边界上区分当前 Depot 事务墓碑与孤立回滚墓碑。
+   *
+   * <p>正常 provisional 编组必须继续信号水合；只有无法由当前进程的精确 expected/hydrated identity
+   * 解释的持久墓碑才进入异常收容。该分支保留为句柄级入口，避免测试初始化 TrainCarts 静态类型。
+   *
+   * @param handle 下一 tick 仍有效的精确物理编组
+   * @param orphanedTombstoneContainment 孤立墓碑的异常收容动作
+   * @param signalRefresh 当前事务或普通编组的完整信号刷新动作
+   */
+  void refreshCreatedGroup(
+      RuntimeTrainHandle handle, Runnable orphanedTombstoneContainment, Runnable signalRefresh) {
+    if (handle == null || !handle.isValid()) {
+      return;
+    }
     if (dispatchService.resumeMaterializedSpawnRollback(handle)) {
       return;
     }
-    if (group.getProperties() != null
-        && dispatchService.hasMaterializedSpawnRollbackTag(group.getProperties())) {
-      dispatchService.handleAbnormalGroup(group, "group-create-materialized-rollback-pending");
+    TrainProperties properties = handle.properties();
+    if (properties != null && dispatchService.hasMaterializedSpawnRollbackTag(properties)) {
+      if (dispatchService.isCurrentMaterializedSpawnTransactionIdentity(handle)) {
+        if (signalRefresh != null) {
+          signalRefresh.run();
+        }
+        return;
+      }
+      if (orphanedTombstoneContainment != null) {
+        orphanedTombstoneContainment.run();
+      }
       return;
     }
-    dispatchService.handleSignalTick(group);
+    if (signalRefresh != null) {
+      signalRefresh.run();
+    }
   }
 
   private void handleGroupUnloaded(MinecartGroup group) {

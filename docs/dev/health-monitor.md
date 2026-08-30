@@ -82,6 +82,7 @@
 ## 定时推进机制
 - HealthMonitor 由独立 Bukkit 定时任务每 1 秒调用一次 `tick()`。
 - 实际检查频率由 `health.check-interval-seconds` 控制：`tick()` 会在该间隔到达时才执行完整检查。
+- 控制台对同一列车、同一类型的稳定健康状态每分钟最多提醒一次；活动与恢复之间的状态转换会立即输出，不影响检查、恢复动作或 `/fta health alerts` 的诊断入口。
 - 设计上已与 `RuntimeSignalMonitor` 解耦，避免“运行时监控先启动、health 尚未初始化”导致周期检查失效。
 - `/fta health check` 与 `/fta health heal` 会手动触发即时检查，并附带一次强制互卡解锁尝试。
 

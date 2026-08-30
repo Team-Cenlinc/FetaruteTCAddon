@@ -18,7 +18,8 @@ import java.util.function.LongSupplier;
  * <p>调度判定会由事件、周期 tick 和授权刷新等多个入口触发。同一稳定状态若每次都写控制台，会掩盖真正的状态跃迁， 也会在服务器关闭时放大已有的线程问题。
  *
  * <p>本类默认处理所有运行时观察 trace：忽略请求号、tick、序列号及版本号后，短时间内相同的状态只输出一次。所有观察 trace
- * 还共享有界窗口预算，避免多列车稳定运行时仍按列车数放大控制台负担。只有执行器审计会逐次原样透传，以保留每一轮 动作复核的证据；状态变化仍会立即输出，直到观察预算耗尽。
+ * 还共享有界窗口预算，避免多列车稳定运行时仍按列车数放大控制台负担。执行器审计和 unlock 事务边界会逐次原样透传， 以保留动作复核及 reservation
+ * 创建、重评估、成功或回滚的完整证据；普通状态变化仍会立即输出，直到观察预算耗尽。
  *
  * <p>缓存采用固定容量的访问顺序 LRU，避免高基数的列车或资源标识无限占用内存。该类不参与授权、占用或速度控制， 因而不能作为任何安全判定的输入。
  */
@@ -121,7 +122,7 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
     if (message == null || message.isBlank()) {
       return;
     }
-    if (isExecutorAudit(message)) {
+    if (isUnboundedAudit(message)) {
       output.accept(message);
       return;
     }
@@ -220,13 +221,38 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
   }
 
   /**
-   * 执行器会在每一次请求时重新核对授权条件；不得把这些审计记录与观察 trace 一并吞掉。
+   * 识别必须逐次保留的事务审计。
+   *
+   * <p>执行器会在每一次请求时重新核对授权条件；unlock reservation 的创建、重评估及终态则共同组成可回放事务链。二者都不能被普通观察预算吞掉。候选选择、{@code
+   * PLAN_APPLY} 与逐 tick progress 仍受门控，避免为保留事务证据而重新放大稳定期日志。
    *
    * @param message 原始诊断行
-   * @return 是否必须逐次保留的执行器审计
+   * @return 是否必须逐次保留的事务审计
    */
-  private static boolean isExecutorAudit(String message) {
-    return message.startsWith("SMART_DISPATCH_EXECUTOR_");
+  private static boolean isUnboundedAudit(String message) {
+    if (message.startsWith("SMART_DISPATCH_EXECUTOR_")) {
+      return true;
+    }
+    int separator = message.indexOf(' ');
+    String kind = separator < 0 ? message : message.substring(0, separator);
+    return switch (kind) {
+      case "SMART_UNLOCK_RESERVATION_CREATED",
+          "SMART_UNLOCK_AUTHORITY_REEVALUATION_REQUESTED",
+          "SMART_UNLOCK_AUTHORITY_INVALID_NO_RELEASE",
+          "SMART_UNLOCK_AUTHORITY_REJECTED",
+          "SMART_UNLOCK_SUCCESS",
+          "SMART_UNLOCK_RESERVATION_SUCCESS",
+          "SMART_UNLOCK_RESERVATION_EXPIRED",
+          "SMART_UNLOCK_FAILED",
+          "SMART_UNLOCK_RESERVATION_NO_RELEASE_TIMEOUT",
+          "SMART_UNLOCK_RELEASE_EVIDENCE_UNKNOWN",
+          "SMART_UNLOCK_ROLLBACK_STARTED",
+          "SMART_UNLOCK_RESERVATION_ROLLED_BACK",
+          "SMART_UNLOCK_RESERVATION_ROLLBACK",
+          "SMART_UNLOCK_ROLLBACK_DONE",
+          "SMART_UNLOCK_APPLIED" -> true;
+      default -> false;
+    };
   }
 
   private static String stableSignature(String message) {
@@ -276,6 +302,7 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
         || fieldName.equals("tick")
         || fieldName.equals("sampletick")
         || fieldName.equals("requestid")
+        || fieldName.equals("agems")
         || fieldName.endsWith("version");
   }
 

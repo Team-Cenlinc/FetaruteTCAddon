@@ -63,6 +63,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthority
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDistanceCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchDecisionSnapshot;
@@ -90,6 +91,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictReleas
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DrainPathHardBlockers;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ExpandedPathPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.FieldOccupancySnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.MovementPlanSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyAdvisoryPreviewSupport;
@@ -289,6 +291,8 @@ public final class RuntimeDispatchService {
       new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
   private final java.util.concurrent.ConcurrentMap<String, BlockerSnapshot> blockerSnapshots =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentMap<String, CanonicalMovementPlanSnapshot>
+      canonicalForwardMovementPlans = new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, FollowerStuckLeaderEvidence>
       followerStuckLeaderEvidence = new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, SmartUnlockReservation>
@@ -556,6 +560,8 @@ public final class RuntimeDispatchService {
       List<OccupancyResource> resources,
       NodeId plannedDestinationNode,
       String planHash,
+      String canonicalRouteId,
+      int canonicalRouteIndex,
       long createdTick,
       int ttlTicks,
       List<String> expectedReleasedResources,
@@ -570,6 +576,9 @@ public final class RuntimeDispatchService {
       cycleId = cycleId == null || cycleId.isBlank() ? "-" : cycleId.trim();
       planKind = planKind == null || planKind.isBlank() ? "-" : planKind.trim();
       planHash = planHash == null || planHash.isBlank() ? "-" : planHash.trim();
+      canonicalRouteId =
+          canonicalRouteId == null || canonicalRouteId.isBlank() ? "-" : canonicalRouteId.trim();
+      canonicalRouteIndex = Math.max(-1, canonicalRouteIndex);
       resources = resources == null ? List.of() : List.copyOf(resources);
       ttlTicks = Math.max(1, ttlTicks);
       expectedReleasedResources =
@@ -591,6 +600,10 @@ public final class RuntimeDispatchService {
       return tick - createdTick >= ttlTicks;
     }
 
+    private boolean hasCanonicalRouteIdentity() {
+      return !canonicalRouteId.equals("-") && canonicalRouteIndex >= 0;
+    }
+
     private SmartUnlockReservation reevaluationRequested(long claimVersion) {
       return new SmartUnlockReservation(
           reservationId,
@@ -600,6 +613,8 @@ public final class RuntimeDispatchService {
           resources,
           plannedDestinationNode,
           planHash,
+          canonicalRouteId,
+          canonicalRouteIndex,
           createdTick,
           ttlTicks,
           expectedReleasedResources,
@@ -1541,7 +1556,9 @@ public final class RuntimeDispatchService {
         occupancyManager instanceof OccupancyQueueSupport queueSupport
             ? queueSupport.snapshotQueues().size()
             : 0;
-    int claimCount = occupancyManager == null ? 0 : occupancyManager.snapshotClaims().size();
+    List<OccupancyClaim> liveClaims =
+        occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
+    int claimCount = liveClaims.size();
     SmartDispatcherController.GlobalRailwayStateSnapshot snapshot =
         new SmartDispatcherController.GlobalRailwayStateSnapshot(
             now == null ? Instant.now() : now,
@@ -1559,13 +1576,15 @@ public final class RuntimeDispatchService {
             0,
             trainIds);
     smartDispatcherController.traceGlobalSnapshot(snapshot);
-    traceSmartMinimalForwardPlanner(active, progress, now == null ? Instant.now() : now);
+    traceSmartMinimalForwardPlanner(
+        active, progress, now == null ? Instant.now() : now, liveClaims);
   }
 
   private void traceSmartMinimalForwardPlanner(
       Set<String> activeTrainNames,
       Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
-      Instant now) {
+      Instant now,
+      List<OccupancyClaim> liveClaims) {
     ConfigManager.SmartDispatcherPlannerSettings config = smartDispatcherPlannerSettings();
     if (!config.enabled()
         || config.mode() == SmartDispatcherPlannerMode.OFF
@@ -1573,6 +1592,8 @@ public final class RuntimeDispatchService {
       return;
     }
     observeSmartUnlockReservations(now);
+    Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims =
+        indexProtectiveRetainClaims(liveClaims);
     SmartWaitForPlanner.PlannerInput input =
         new SmartWaitForPlanner.PlannerInput(
             now,
@@ -1587,7 +1608,13 @@ public final class RuntimeDispatchService {
                 config.allowTurnbackBeforeBoundary(),
                 config.oneActiveReservationPerCycle()),
             smartPlannerInputEdges(progress, activeTrainNames, now, config.blockerSnapshotTtlMs()),
-            smartPlannerTrainStates(progress, activeTrainNames, now),
+            smartPlannerTrainStates(
+                progress,
+                activeTrainNames,
+                now,
+                config.blockerSnapshotTtlMs(),
+                liveClaims,
+                protectiveRetainClaims),
             smartUnlockReservationsByCycle.keySet(),
             smartUnlockReservationsByTrain.keySet());
     SmartWaitForPlanner.PlanResult result =
@@ -1604,7 +1631,7 @@ public final class RuntimeDispatchService {
               plan -> {
                 traceSmartUnlockPlanApply(
                     plan, null, "selected", "unchanged-suppressed", true, "-");
-                traceMutualConflictOwnerSet(input, plan, true);
+                traceMutualConflictOwnerSet(input, plan, true, liveClaims);
               });
       debugLogger.accept(
           "SMART_DISPATCH_PLAN_UNCHANGED_SUPPRESSED graphHash="
@@ -1621,7 +1648,7 @@ public final class RuntimeDispatchService {
           .ifPresent(
               plan -> {
                 traceSmartUnlockPlanApply(plan, null, "selected", "selected", false, "-");
-                traceMutualConflictOwnerSet(input, plan, false);
+                traceMutualConflictOwnerSet(input, plan, false, liveClaims);
               });
     }
     // throttle 只控制重复 trace；执行资格必须每轮复核，否则 reservation 回滚后的 cooldown
@@ -1632,7 +1659,8 @@ public final class RuntimeDispatchService {
           .ifPresent(
               plan -> {
                 DispatchAction action = smartPlannerAction(plan);
-                String skipReason = smartDispatchExecutorSkipReason(plan, config, action, now);
+                String skipReason =
+                    smartDispatchExecutorSkipReason(plan, config, action, now, liveClaims);
                 if (!"-".equals(skipReason)) {
                   traceSmartUnlockReservationWouldCreate(plan, action, skipReason);
                   traceSmartDispatchExecutorSkipped(plan, skipReason);
@@ -1641,7 +1669,7 @@ public final class RuntimeDispatchService {
                 if (isHeadOnYieldPlan(plan)) {
                   executeSmartHeadOnYield(plan, config, now);
                 } else {
-                  executeSmartUnlockReservation(plan, config, now);
+                  executeSmartUnlockReservation(plan, config, now, liveClaims);
                 }
               });
     }
@@ -1813,7 +1841,10 @@ public final class RuntimeDispatchService {
   private Map<String, SmartWaitForPlanner.TrainState> smartPlannerTrainStates(
       Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
       Set<String> activeTrainNames,
-      Instant now) {
+      Instant now,
+      long movementPlanTtlMs,
+      List<OccupancyClaim> liveClaims,
+      Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims) {
     Set<String> names = new LinkedHashSet<>();
     if (activeTrainNames != null) {
       names.addAll(activeTrainNames);
@@ -1836,22 +1867,55 @@ public final class RuntimeDispatchService {
       if (trainName == null || trainName.isBlank()) {
         continue;
       }
-      SmartRecoveryInput input = smartRecoveryInput(trainName, Duration.ZERO, SignalAspect.STOP);
+      PlannerForwardPathResolution pathResolution =
+          smartPlannerForwardPathEvidence(
+              trainName, now, movementPlanTtlMs, protectiveRetainClaims);
+      SmartRecoveryInput input =
+          smartRecoveryInput(trainName, Duration.ZERO, SignalAspect.STOP, liveClaims);
       CorridorDirection inferredDirection = smartPlannerForwardDirection(input);
+      Optional<CanonicalForwardPathEvidence> forwardPathEvidence = pathResolution.evidence();
+      String routeId =
+          forwardPathEvidence
+              .map(CanonicalForwardPathEvidence::routeId)
+              .filter(value -> !value.equals("-"))
+              .orElse(input.routeId());
+      int currentIndex =
+          forwardPathEvidence
+              .map(CanonicalForwardPathEvidence::routeIndex)
+              .orElse(input.currentIndex());
+      String currentNode =
+          forwardPathEvidence
+              .map(CanonicalForwardPathEvidence::fromNode)
+              .orElseGet(() -> nodeText(input.currentNode()));
+      String nextNode =
+          forwardPathEvidence
+              .map(CanonicalForwardPathEvidence::toNode)
+              .orElseGet(() -> nodeText(input.nextNode()));
+      String lastPassedGraphNode =
+          forwardPathEvidence
+              .map(CanonicalForwardPathEvidence::lastPassedGraphNode)
+              .filter(value -> !value.equals("-"))
+              .orElse(input.lastPassedGraphNode());
       states.put(
           input.train(),
           new SmartWaitForPlanner.TrainState(
               input.train(),
-              input.routeId(),
-              input.currentIndex(),
-              nodeText(input.currentNode()),
-              nodeText(input.nextNode()),
-              input.lastPassedGraphNode(),
+              routeId,
+              currentIndex,
+              currentNode,
+              nextNode,
+              lastPassedGraphNode,
               inferredDirection,
-              inferredDirection == CorridorDirection.UNKNOWN ? "UNKNOWN" : "RUNTIME_ROUTE_CONTEXT",
-              inferredDirection == CorridorDirection.UNKNOWN
-                  ? smartPlannerDirectionFailureReason(input)
-                  : "-",
+              forwardPathEvidence.isPresent()
+                  ? forwardPathEvidence.orElseThrow().evidenceKind()
+                  : inferredDirection == CorridorDirection.UNKNOWN
+                      ? "UNKNOWN"
+                      : "RUNTIME_ROUTE_CONTEXT",
+              forwardPathEvidence.isPresent()
+                  ? "-"
+                  : inferredDirection == CorridorDirection.UNKNOWN
+                      ? smartPlannerDirectionFailureReason(input, pathResolution.failureReason())
+                      : "-",
               input.stuckDurationSeconds(),
               input.signal() == SignalAspect.STOP,
               false,
@@ -1859,9 +1923,125 @@ public final class RuntimeDispatchService {
               false,
               input.oppositeSingleConflictPresent(),
               false,
-              input.movementTokenState().name()));
+              input.movementTokenState().name(),
+              forwardPathEvidence));
     }
     return Map.copyOf(states);
+  }
+
+  /**
+   * 从 live blocker 快照或最近一次完整信号请求派生通用前向路径证明。
+   *
+   * <p>TTL、进度窗口和当前 route/index 在派生前全部复验；任何缺失或漂移都返回稳定原因码。最近信号请求只缓存不可变 canonical path 语义，使本身没有
+   * blocker 快照的 bottleneck leader 仍可证明前向路径；占用、队列、Signal 与授权继续实时重算。
+   */
+  private PlannerForwardPathResolution smartPlannerForwardPathEvidence(
+      String trainName,
+      Instant now,
+      long movementPlanTtlMs,
+      Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims) {
+    BlockerSnapshot snapshot = blockerSnapshots.get(normalizeTrainKey(trainName));
+    PlannerForwardPathResolution blockerResolution = null;
+    if (snapshot != null && snapshot.movementPlan().isPresent()) {
+      if (!canonicalProgressWindowCurrent(trainName, snapshot.progressWindow())) {
+        blockerResolution = PlannerForwardPathResolution.rejected("PLAN_PROGRESS_WINDOW_MOVED");
+      } else {
+        blockerResolution =
+            derivePlannerForwardPathEvidence(
+                trainName,
+                snapshot.movementPlan().orElseThrow(),
+                snapshot.movementPlanSampledAt(),
+                now,
+                movementPlanTtlMs,
+                progressRegistry
+                    .get(trainName)
+                    .map(
+                        progress ->
+                            canonicalForwardProgressReleaseCandidates(
+                                snapshot.movementPlan().orElseThrow(), progress))
+                    .orElse(List.of()),
+                protectiveRetainClaims);
+        if (blockerResolution.evidence().isPresent()) {
+          return blockerResolution;
+        }
+      }
+    }
+
+    String trainKey = normalizeTrainKey(trainName);
+    CanonicalMovementPlanSnapshot latest = canonicalForwardMovementPlans.get(trainKey);
+    if (latest == null) {
+      return blockerResolution == null
+          ? PlannerForwardPathResolution.rejected("MOVEMENT_PLAN_MISSING")
+          : blockerResolution;
+    }
+    if (!canonicalProgressWindowCurrent(trainName, latest.progressWindow())) {
+      canonicalForwardMovementPlans.remove(trainKey, latest);
+      return PlannerForwardPathResolution.rejected("PLAN_PROGRESS_WINDOW_MOVED");
+    }
+    PlannerForwardPathResolution latestResolution =
+        derivePlannerForwardPathEvidence(
+            trainName,
+            latest.movementPlan(),
+            latest.sampledAt(),
+            now,
+            movementPlanTtlMs,
+            latest.forwardProgressReleaseCandidates(),
+            protectiveRetainClaims);
+    if (latestResolution.evidence().isEmpty()) {
+      canonicalForwardMovementPlans.remove(trainKey, latest);
+    }
+    return latestResolution;
+  }
+
+  private PlannerForwardPathResolution derivePlannerForwardPathEvidence(
+      String trainName,
+      MovementPlanSnapshot movementPlan,
+      Instant sampledAt,
+      Instant now,
+      long movementPlanTtlMs,
+      List<String> forwardProgressReleaseCandidates,
+      Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims) {
+    if (sampledAt == null || sampledAt.equals(Instant.EPOCH)) {
+      return PlannerForwardPathResolution.rejected("MOVEMENT_PLAN_SAMPLE_TIME_MISSING");
+    }
+    Instant evaluatedAt = now == null ? Instant.now() : now;
+    long ageMs = Math.max(0L, Duration.between(sampledAt, evaluatedAt).toMillis());
+    if (ageMs > Math.max(1L, movementPlanTtlMs)) {
+      return PlannerForwardPathResolution.rejected("MOVEMENT_PLAN_STALE");
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> progress = progressRegistry.get(trainName);
+    if (progress.isEmpty()) {
+      return PlannerForwardPathResolution.rejected("ACTIVE_PROGRESS_MISSING");
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = progress.orElseThrow();
+    if (movementPlan.routeIndex() != entry.currentIndex()) {
+      return PlannerForwardPathResolution.rejected("PLAN_ROUTE_INDEX_MOVED");
+    }
+    if (movementPlan.routeId().isEmpty()) {
+      return PlannerForwardPathResolution.rejected("PLAN_ROUTE_ID_MISSING");
+    }
+    if (!movementPlan.routeId().orElseThrow().equals(entry.routeId())) {
+      return PlannerForwardPathResolution.rejected("PLAN_ROUTE_ID_MOVED");
+    }
+    Optional<MovementPlanSnapshot> aligned =
+        alignMovementPlanToCurrentProgress(movementPlan, entry);
+    if (aligned.isEmpty()) {
+      return PlannerForwardPathResolution.rejected("PLAN_PROGRESS_ALIGNMENT_FAILED");
+    }
+    CanonicalForwardPathEvidence.Derivation derivation =
+        CanonicalForwardPathEvidence.derive(trainName, aligned.orElseThrow());
+    Optional<CanonicalForwardPathEvidence> evidence =
+        derivation
+            .evidence()
+            .map(
+                proof ->
+                    proof.withForwardProgressReleaseResources(
+                        verifiedForwardProgressReleaseResources(
+                            trainName,
+                            entry.routeId(),
+                            forwardProgressReleaseCandidates,
+                            protectiveRetainClaims)));
+    return new PlannerForwardPathResolution(evidence, derivation.failureReason());
   }
 
   private boolean smartPlannerEdgeActiveForNormalAdmission(DeadlockBlockerInfo blocker) {
@@ -1884,7 +2064,13 @@ public final class RuntimeDispatchService {
     return CorridorDirection.UNKNOWN;
   }
 
-  private static String smartPlannerDirectionFailureReason(SmartRecoveryInput input) {
+  private static String smartPlannerDirectionFailureReason(
+      SmartRecoveryInput input, String pathFailureReason) {
+    if (pathFailureReason != null
+        && !pathFailureReason.isBlank()
+        && !pathFailureReason.equals("-")) {
+      return pathFailureReason;
+    }
     if (input == null || input.train().isBlank()) {
       return "ACTIVE_STATE_MISSING";
     }
@@ -1932,12 +2118,13 @@ public final class RuntimeDispatchService {
   private void executeSmartUnlockReservation(
       SmartWaitForPlanner.UnlockCandidate plan,
       ConfigManager.SmartDispatcherPlannerSettings config,
-      Instant now) {
+      Instant now,
+      Collection<OccupancyClaim> liveClaims) {
     if (isHeadOnYieldPlan(plan)) {
       executeSmartHeadOnYield(plan, config, now);
       return;
     }
-    traceSmartDispatchExecutorBridge(plan, config, now);
+    traceSmartDispatchExecutorBridge(plan, config, now, liveClaims);
     if (!smartDispatcherRegisteredActionAllowed(
         plan == null ? "-" : plan.train(),
         "smart-minimal-forward-planner",
@@ -1976,7 +2163,7 @@ public final class RuntimeDispatchService {
       return;
     }
     if (singleRegionOppositeOrUnknownExternalBarrier(
-        plan.train(), planResources, plan.direction())) {
+        plan.train(), planResources, plan.direction(), liveClaims)) {
       traceSingleRegionHardBarrier(
           plan.train(),
           DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION,
@@ -1986,9 +2173,20 @@ public final class RuntimeDispatchService {
           plan, SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER);
       return;
     }
-    if (plan.direction() == CorridorDirection.UNKNOWN || config.allowReverse()) {
+    if (plan.direction() == CorridorDirection.UNKNOWN
+        && planResources.stream().anyMatch(RuntimeDispatchService::isSingleConflict)) {
+      debugLogger.accept(
+          "SMART_DIRECTION_INVARIANT_BLOCKED train="
+              + plan.train()
+              + " cycleId="
+              + plan.cycleId()
+              + " reason=SINGLE_CORRIDOR_DIRECTION_MISSING");
+      traceSmartDispatchExecutorSkipped(plan, "INSUFFICIENT_DIRECTION_EVIDENCE");
+      return;
+    }
+    if (!plan.hasForwardDirectionEvidence() || config.allowReverse()) {
       String reason =
-          plan.direction() == CorridorDirection.UNKNOWN
+          !plan.hasForwardDirectionEvidence()
               ? "INSUFFICIENT_DIRECTION_EVIDENCE"
               : "SAME_DIRECTION_FAILED";
       debugLogger.accept(
@@ -1997,7 +2195,7 @@ public final class RuntimeDispatchService {
               + " cycleId="
               + plan.cycleId()
               + " reason="
-              + (plan.direction() == CorridorDirection.UNKNOWN
+              + (!plan.hasForwardDirectionEvidence()
                   ? "INSUFFICIENT_DIRECTION_EVIDENCE"
                   : "allow-reverse-misconfigured"));
       traceSmartDispatchExecutorSkipped(plan, reason);
@@ -2026,6 +2224,16 @@ public final class RuntimeDispatchService {
     long tick = currentSignalTraceTick();
     String reservationId = "unlock-" + Long.toUnsignedString(tick) + "-" + plan.planHash();
     List<String> initiallyBlockedTrains = initiallyBlockedTrains(plan.train(), plan.resources());
+    Optional<CanonicalForwardPathEvidence> canonicalEvidence = plan.forwardPathEvidence();
+    String canonicalRouteId =
+        canonicalEvidence.map(CanonicalForwardPathEvidence::routeId).orElse("-");
+    int canonicalRouteIndex =
+        canonicalEvidence.map(CanonicalForwardPathEvidence::routeIndex).orElse(-1);
+    String canonicalLastPassedGraphNode =
+        canonicalEvidence
+            .map(CanonicalForwardPathEvidence::lastPassedGraphNode)
+            .filter(value -> !value.equals("-"))
+            .orElse(plan.currentNode());
     SmartUnlockReservation reservation =
         new SmartUnlockReservation(
             reservationId,
@@ -2035,12 +2243,14 @@ public final class RuntimeDispatchService {
             planResources,
             plannedDestinationNode,
             plan.planHash(),
+            canonicalRouteId,
+            canonicalRouteIndex,
             tick,
             config.reservationTtlTicks(),
             plan.resources(),
             initiallyBlockedTrains,
             plan.currentNode(),
-            plan.currentNode(),
+            canonicalLastPassedGraphNode,
             -1L,
             false);
     smartUnlockReservationsByCycle.put(plan.cycleId(), reservation);
@@ -2064,16 +2274,17 @@ public final class RuntimeDispatchService {
             + plan.resources());
     traceSmartUnlockPlanApply(
         plan, reservation, "reservation-created", "reservation-created", false, "-");
-    commitSmartUnlockReservation(reservation, plan, now);
+    commitSmartUnlockReservation(reservation, plan, now, liveClaims);
   }
 
   private void traceSmartDispatchExecutorBridge(
       SmartWaitForPlanner.UnlockCandidate plan,
       ConfigManager.SmartDispatcherPlannerSettings config,
-      Instant now) {
+      Instant now,
+      Collection<OccupancyClaim> liveClaims) {
     String reasonIfNot =
         smartDispatchExecutorSkipReason(
-            plan, config, DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION, now);
+            plan, config, DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION, now, liveClaims);
     MovementAuthorizationToken token =
         plan == null ? null : movementToken(plan.train()).orElse(null);
     String destination = token == null ? "-" : token.committedDestination().orElse("-");
@@ -2109,7 +2320,17 @@ public final class RuntimeDispatchService {
             + " currentNode="
             + (plan == null ? "-" : plan.currentNode())
             + " nextNode="
-            + (plan == null ? "-" : plan.nextNode()));
+            + (plan == null ? "-" : plan.nextNode())
+            + " corridorDirection="
+            + (plan == null ? CorridorDirection.UNKNOWN : plan.direction())
+            + " directionEvidenceKind="
+            + smartDirectionEvidenceKind(plan)
+            + " forwardPathEvidenceHash="
+            + (plan == null
+                ? "-"
+                : plan.forwardPathEvidence()
+                    .map(CanonicalForwardPathEvidence::evidenceHash)
+                    .orElse("-")));
   }
 
   String smartDispatchExecutorSkipReason(
@@ -2130,6 +2351,17 @@ public final class RuntimeDispatchService {
       ConfigManager.SmartDispatcherPlannerSettings config,
       DispatchAction action,
       Instant now) {
+    Collection<OccupancyClaim> liveClaims =
+        occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
+    return smartDispatchExecutorSkipReason(plan, config, action, now, liveClaims);
+  }
+
+  private String smartDispatchExecutorSkipReason(
+      SmartWaitForPlanner.UnlockCandidate plan,
+      ConfigManager.SmartDispatcherPlannerSettings config,
+      DispatchAction action,
+      Instant now,
+      Collection<OccupancyClaim> liveClaims) {
     if (plan == null || !plan.accepted()) {
       return "PLAN_NOT_ACCEPTED";
     }
@@ -2159,10 +2391,17 @@ public final class RuntimeDispatchService {
     }
     if (!isHeadOnYieldPlan(plan)
         && singleRegionOppositeOrUnknownExternalBarrier(
-            plan.train(), resources, plan.direction())) {
+            plan.train(), resources, plan.direction(), liveClaims)) {
       return SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER;
     }
-    if (plan.direction() == CorridorDirection.UNKNOWN) {
+    if (plan.direction() == CorridorDirection.UNKNOWN
+        && resources.stream().anyMatch(RuntimeDispatchService::isSingleConflict)) {
+      return "INSUFFICIENT_DIRECTION_EVIDENCE";
+    }
+    if (isHeadOnYieldPlan(plan) && plan.direction() == CorridorDirection.UNKNOWN) {
+      return "INSUFFICIENT_DIRECTION_EVIDENCE";
+    }
+    if (!isHeadOnYieldPlan(plan) && !plan.hasForwardDirectionEvidence()) {
       return "INSUFFICIENT_DIRECTION_EVIDENCE";
     }
     if (settings.allowReverse()) {
@@ -2402,7 +2641,8 @@ public final class RuntimeDispatchService {
   private void traceMutualConflictOwnerSet(
       SmartWaitForPlanner.PlannerInput input,
       SmartWaitForPlanner.UnlockCandidate selectedPlan,
-      boolean suppressedAsUnchanged) {
+      boolean suppressedAsUnchanged,
+      Collection<OccupancyClaim> liveClaims) {
     if (input == null || selectedPlan == null) {
       return;
     }
@@ -2440,7 +2680,8 @@ public final class RuntimeDispatchService {
             edge.blockerTrain(),
             edge.role(),
             edge.direction(),
-            edge.intent());
+            edge.intent(),
+            liveClaims);
         addPlannerOwner(
             owners,
             ownerRoles,
@@ -2454,7 +2695,8 @@ public final class RuntimeDispatchService {
             edge.blockedTrain(),
             "REQUESTER",
             edge.direction(),
-            edge.source());
+            edge.source(),
+            liveClaims);
       }
       Set<String> nonSelectedOwners = new LinkedHashSet<>(owners);
       nonSelectedOwners.removeIf(
@@ -2511,7 +2753,8 @@ public final class RuntimeDispatchService {
       String owner,
       String role,
       CorridorDirection direction,
-      String requestInputType) {
+      String requestInputType,
+      Collection<OccupancyClaim> liveClaims) {
     String safeOwner = safeTraceValue(owner);
     if ("-".equals(safeOwner)) {
       return;
@@ -2524,7 +2767,8 @@ public final class RuntimeDispatchService {
     ownerRequestInputTypes.put(safeOwner, safeTraceValue(requestInputType));
     ownerRouteIndexes.put(safeOwner, state == null ? "-" : String.valueOf(state.currentIndex()));
     ownerPriorities.put(safeOwner, plannerOwnerPriorityEvidence(safeOwner));
-    ownerPhysicalFootprints.put(safeOwner, plannerOwnerPhysicalFootprintEvidence(safeOwner, state));
+    ownerPhysicalFootprints.put(
+        safeOwner, plannerOwnerPhysicalFootprintEvidence(safeOwner, state, liveClaims));
     ownerReservedAuthorities.put(safeOwner, plannerOwnerReservedAuthorityEvidence(safeOwner));
   }
 
@@ -2546,10 +2790,10 @@ public final class RuntimeDispatchService {
 
   /** 返回仲裁时当前实体位置与物理/保持 claim 的只读证据。 */
   private String plannerOwnerPhysicalFootprintEvidence(
-      String owner, SmartWaitForPlanner.TrainState state) {
+      String owner, SmartWaitForPlanner.TrainState state, Collection<OccupancyClaim> liveClaims) {
     List<String> claims = new ArrayList<>();
-    if (occupancyManager != null) {
-      for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+    if (liveClaims != null) {
+      for (OccupancyClaim claim : liveClaims) {
         if (claim == null
             || !TrainNameNormalizer.sameLogicalTrain(owner, claim.trainName())
             || (claim.role() != ClaimRole.PHYSICAL_FOOTPRINT
@@ -2658,6 +2902,23 @@ public final class RuntimeDispatchService {
         : DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION;
   }
 
+  private static String smartDirectionEvidenceKind(SmartWaitForPlanner.UnlockCandidate plan) {
+    if (plan == null) {
+      return "MISSING";
+    }
+    if (plan.direction() != CorridorDirection.UNKNOWN && plan.forwardPathEvidence().isPresent()) {
+      return plan.forwardPathEvidence().orElseThrow().forwardProgressReleaseResources().isEmpty()
+          ? "COMPOSITE_CORRIDOR_AND_CANONICAL"
+          : "COMPOSITE_CORRIDOR_AND_CANONICAL_REAR_RETAIN";
+    }
+    if (plan.direction() != CorridorDirection.UNKNOWN) {
+      return "SINGLE_CORRIDOR_DIRECTION";
+    }
+    return plan.forwardPathEvidence()
+        .map(CanonicalForwardPathEvidence::evidenceKind)
+        .orElse("MISSING");
+  }
+
   private void executeSmartHeadOnYield(
       SmartWaitForPlanner.UnlockCandidate plan,
       ConfigManager.SmartDispatcherPlannerSettings config,
@@ -2728,9 +2989,12 @@ public final class RuntimeDispatchService {
   }
 
   private void commitSmartUnlockReservation(
-      SmartUnlockReservation reservation, SmartWaitForPlanner.UnlockCandidate plan, Instant now) {
+      SmartUnlockReservation reservation,
+      SmartWaitForPlanner.UnlockCandidate plan,
+      Instant now,
+      Collection<OccupancyClaim> liveClaims) {
     if (singleRegionOppositeOrUnknownExternalBarrier(
-        reservation.trainName(), reservation.resources(), plan.direction())) {
+        reservation.trainName(), reservation.resources(), plan.direction(), liveClaims)) {
       traceSingleRegionHardBarrier(
           reservation.trainName(),
           DispatchAction.REQUEST_UNLOCK_AUTHORITY_REEVALUATION,
@@ -2742,6 +3006,12 @@ public final class RuntimeDispatchService {
           reservation, SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER);
       return;
     }
+    if (plan.direction() == CorridorDirection.UNKNOWN
+        && reservation.resources().stream().anyMatch(RuntimeDispatchService::isSingleConflict)) {
+      traceSmartUnlockAuthorityRejected(reservation, "single-corridor-direction-missing");
+      rollbackSmartUnlockReservation(reservation, "single-corridor-direction-missing");
+      return;
+    }
     if (!smartDispatcherRegisteredActionAllowed(
         reservation.trainName(),
         "smart-unlock-authority-reevaluation",
@@ -2751,7 +3021,7 @@ public final class RuntimeDispatchService {
       return;
     }
     if (singleRegionOppositeOrUnknownExternalBarrier(
-        reservation.trainName(), reservation.resources(), plan.direction())) {
+        reservation.trainName(), reservation.resources(), plan.direction(), liveClaims)) {
       traceSingleRegionHardBarrier(
           reservation.trainName(),
           DispatchAction.REQUEST_UNLOCK_AUTHORITY_REEVALUATION,
@@ -2820,6 +3090,11 @@ public final class RuntimeDispatchService {
         List.copyOf(smartUnlockReservationsByCycle.values());
     for (SmartUnlockReservation reservation : reservations) {
       if (reservation == null) {
+        continue;
+      }
+      if (reservation.hasCanonicalRouteIdentity()
+          && !smartUnlockCanonicalProgressCurrent(reservation.trainName(), reservation)) {
+        rollbackSmartUnlockReservation(reservation, "canonical-progress-window-moved");
         continue;
       }
       SmartRecoveryInput state =
@@ -3750,10 +4025,232 @@ public final class RuntimeDispatchService {
     }
     SignalComputationTrace.Source effectiveSource =
         source == null ? SignalComputationTrace.Source.PERIODIC_TICK : source;
-    return request
-        .withDirectedSource(effectiveSource.name())
-        .withDirectedOccupancyVersion(occupancyVersion())
-        .withDirectedProgressVersion(progressRegistry.version());
+    OccupancyRequest directed =
+        request
+            .withDirectedSource(effectiveSource.name())
+            .withDirectedOccupancyVersion(occupancyVersion())
+            .withDirectedProgressVersion(progressRegistry.version());
+    rememberCanonicalForwardMovementPlan(directed, request.now());
+    return directed;
+  }
+
+  /**
+   * 记录最新一次完整信号链生成的规范前向路径语义。
+   *
+   * <p>该缓存不保存占用、队列、Signal 或 Movement Authority 结论；planner 只在短 TTL、同 route/index/last-passed 窗口内把它用作
+   * NODE/EDGE 前向证明。若列车已经进入展开路径中间节点，会从真实 last-passed 节点裁掉身后路径；路径不含该节点或出现重复节点时拒绝缓存。
+   */
+  private void rememberCanonicalForwardMovementPlan(OccupancyRequest request, Instant sampledAt) {
+    if (request == null || request.directedContext().isEmpty()) {
+      return;
+    }
+    String trainKey = normalizeTrainKey(request.trainName());
+    if (trainKey.isEmpty()) {
+      return;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> progress =
+        progressRegistry.get(request.trainName());
+    Optional<MovementPlanSnapshot> movementPlan = request.movementPlanSnapshot();
+    if (progress.isEmpty() || movementPlan.isEmpty()) {
+      canonicalForwardMovementPlans.remove(trainKey);
+      return;
+    }
+    Optional<MovementPlanSnapshot> aligned =
+        alignMovementPlanToCurrentProgress(movementPlan.orElseThrow(), progress.orElseThrow());
+    List<String> forwardProgressReleaseCandidates =
+        canonicalForwardProgressReleaseCandidates(
+            movementPlan.orElseThrow(), progress.orElseThrow());
+    if (aligned.isEmpty()
+        || CanonicalForwardPathEvidence.derive(request.trainName(), aligned.orElseThrow())
+            .evidence()
+            .isEmpty()) {
+      canonicalForwardMovementPlans.remove(trainKey);
+      return;
+    }
+    canonicalForwardMovementPlans.put(
+        trainKey,
+        new CanonicalMovementPlanSnapshot(
+            aligned.orElseThrow(),
+            sampledAt == null ? Instant.now() : sampledAt,
+            captureBlockerProgressWindow(request.trainName()),
+            forwardProgressReleaseCandidates));
+  }
+
+  private static Optional<MovementPlanSnapshot> alignMovementPlanToCurrentProgress(
+      MovementPlanSnapshot plan, RouteProgressRegistry.RouteProgressEntry progress) {
+    if (plan == null
+        || progress == null
+        || plan.routeId().isEmpty()
+        || !plan.routeId().orElseThrow().equals(progress.routeId())
+        || plan.routeIndex() != progress.currentIndex()) {
+      return Optional.empty();
+    }
+    List<NodeId> nodes = plan.expandedPathNodes();
+    List<DirectedTraversalContext.DirectedEdge> edges = plan.directedEdges();
+    NodeId lastPassed =
+        progress.lastPassedGraphNode().orElseGet(() -> plan.effectiveFromNode().orElse(null));
+    if (lastPassed == null || nodes.size() < 2 || edges.size() != nodes.size() - 1) {
+      return Optional.empty();
+    }
+    int startIndex = nodes.indexOf(lastPassed);
+    if (startIndex < 0
+        || startIndex != nodes.lastIndexOf(lastPassed)
+        || startIndex >= nodes.size() - 1) {
+      return Optional.empty();
+    }
+    List<NodeId> forwardNodes = List.copyOf(nodes.subList(startIndex, nodes.size()));
+    List<DirectedTraversalContext.DirectedEdge> forwardEdges =
+        List.copyOf(edges.subList(startIndex, edges.size()));
+    Set<String> forwardResourceKeys = new LinkedHashSet<>();
+    for (NodeId node : forwardNodes) {
+      forwardResourceKeys.add(OccupancyResource.forNode(node).toString());
+    }
+    for (DirectedTraversalContext.DirectedEdge edge : forwardEdges) {
+      forwardResourceKeys.add(OccupancyResource.forEdge(edge.edgeId()).toString());
+    }
+    List<OccupancyResource> forwardMovementResources =
+        plan.movementRequiredResources().stream()
+            .filter(resource -> forwardResourceKeys.contains(resource.toString()))
+            .toList();
+    if (forwardMovementResources.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        new MovementPlanSnapshot(
+            plan.trainKey(),
+            plan.routeId(),
+            plan.routeIndex(),
+            Optional.of(lastPassed),
+            Optional.of(lastPassed),
+            Optional.of(lastPassed),
+            Optional.of(forwardNodes.get(1)),
+            new ExpandedPathPlan(forwardNodes, forwardEdges, Map.of(), Map.of()),
+            forwardMovementResources,
+            plan.occupancyVersion(),
+            plan.progressVersion(),
+            plan.requestId(),
+            plan.canonicalRearRetainPathPlan()));
+  }
+
+  /**
+   * 从 builder 显式携带的规范尾部路径计算“严格位于当前 last-passed 后方”的 NODE/EDGE 候选。
+   *
+   * <p>前向 Movement Plan 在生产 builder 中必然从当前 last-passed 起步，不能反向猜测已经走过的节点；因此这里只接受 {@link
+   * MovementPlanSnapshot#canonicalRearRetainPathPlan()}。候选本身仍不构成 planner 证据：使用前还必须与占用层的实时、自持有、同
+   * route {@link ClaimRole#PROTECTIVE_RETAIN} 取交集。真实 last-passed、唯一末端锚点以及完整有向边链任一不成立都 fail-closed。
+   */
+  private static List<String> canonicalForwardProgressReleaseCandidates(
+      MovementPlanSnapshot plan, RouteProgressRegistry.RouteProgressEntry progress) {
+    if (plan == null
+        || progress == null
+        || plan.routeId().isEmpty()
+        || !plan.routeId().orElseThrow().equals(progress.routeId())
+        || plan.routeIndex() != progress.currentIndex()
+        || !plan.trainKey().equals(TrainNameNormalizer.normalizeKey(progress.trainName()))
+        || progress.lastPassedGraphNode().isEmpty()
+        || plan.canonicalRearRetainPathPlan().isEmpty()) {
+      return List.of();
+    }
+    ExpandedPathPlan rearPath = plan.canonicalRearRetainPathPlan().orElseThrow();
+    List<NodeId> nodes = rearPath.expandedPathNodes();
+    List<DirectedTraversalContext.DirectedEdge> edges = rearPath.directedEdges();
+    NodeId anchor = progress.lastPassedGraphNode().orElseThrow();
+    if (nodes.size() < 2 || edges.size() != nodes.size() - 1) {
+      return List.of();
+    }
+    int anchorIndex = nodes.indexOf(anchor);
+    if (anchorIndex <= 0
+        || anchorIndex != nodes.lastIndexOf(anchor)
+        || anchorIndex != nodes.size() - 1
+        || new LinkedHashSet<>(nodes).size() != nodes.size()) {
+      return List.of();
+    }
+    for (int index = 0; index < edges.size(); index++) {
+      NodeId expectedFrom = nodes.get(index);
+      NodeId expectedTo = nodes.get(index + 1);
+      DirectedTraversalContext.DirectedEdge edge = edges.get(index);
+      if (expectedFrom == null
+          || expectedTo == null
+          || edge == null
+          || !edge.fromNode().equals(expectedFrom)
+          || !edge.toNode().equals(expectedTo)
+          || !edge.edgeId().equals(EdgeId.undirected(expectedFrom, expectedTo))) {
+        return List.of();
+      }
+    }
+    LinkedHashSet<String> candidates = new LinkedHashSet<>();
+    for (int index = 0; index < anchorIndex; index++) {
+      candidates.add(OccupancyResource.forNode(nodes.get(index)).toString());
+      candidates.add(OccupancyResource.forEdge(edges.get(index).edgeId()).toString());
+    }
+    return List.copyOf(candidates);
+  }
+
+  /**
+   * 为单轮 Smart planner 建立保护性尾部 claim 索引。
+   *
+   * <p>索引只来自同一轮全局快照，不跨 tick 缓存；这样既避免按列车重复复制完整占用表，也不会引入图版本或列车进度失效问题。
+   */
+  private static Map<ProtectiveRetainClaimKey, List<String>> indexProtectiveRetainClaims(
+      Collection<OccupancyClaim> claims) {
+    if (claims == null || claims.isEmpty()) {
+      return Map.of();
+    }
+    Map<ProtectiveRetainClaimKey, LinkedHashSet<String>> mutable = new LinkedHashMap<>();
+    for (OccupancyClaim claim : claims) {
+      if (claim == null
+          || claim.resource() == null
+          || (claim.resource().kind() != ResourceKind.NODE
+              && claim.resource().kind() != ResourceKind.EDGE)
+          || claim.role() != ClaimRole.PROTECTIVE_RETAIN
+          || claim.routeId().isEmpty()) {
+        continue;
+      }
+      String trainKey = TrainNameNormalizer.normalizeKey(claim.trainName());
+      if (trainKey.isEmpty()) {
+        continue;
+      }
+      ProtectiveRetainClaimKey key =
+          new ProtectiveRetainClaimKey(trainKey, claim.routeId().orElseThrow());
+      mutable
+          .computeIfAbsent(key, ignored -> new LinkedHashSet<>())
+          .add(claim.resource().toString());
+    }
+    Map<ProtectiveRetainClaimKey, List<String>> indexed = new LinkedHashMap<>();
+    mutable.forEach((key, resources) -> indexed.put(key, List.copyOf(resources)));
+    return Map.copyOf(indexed);
+  }
+
+  /**
+   * 把规范路径后方候选收紧为当前仍存在的保护性尾部 claim。
+   *
+   * <p>只接受同一逻辑列车、精确 route identity、NODE/EDGE 与 {@link ClaimRole#PROTECTIVE_RETAIN}；{@code
+   * PHYSICAL_FOOTPRINT}、{@code HOLD_ONLY}、无 route 的遗留 claim 以及任意路径外资源继续 fail-closed。
+   */
+  private List<String> verifiedForwardProgressReleaseResources(
+      String trainName,
+      RouteId routeId,
+      List<String> candidates,
+      Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims) {
+    if (routeId == null
+        || candidates == null
+        || candidates.isEmpty()
+        || protectiveRetainClaims == null
+        || protectiveRetainClaims.isEmpty()) {
+      return List.of();
+    }
+    Set<String> eligible = Set.copyOf(candidates);
+    LinkedHashSet<String> verified = new LinkedHashSet<>();
+    List<String> currentRetains =
+        protectiveRetainClaims.getOrDefault(
+            new ProtectiveRetainClaimKey(TrainNameNormalizer.normalizeKey(trainName), routeId),
+            List.of());
+    for (String resource : currentRetains) {
+      if (eligible.contains(resource)) {
+        verified.add(resource);
+      }
+    }
+    return List.copyOf(verified);
   }
 
   /**
@@ -5470,13 +5967,31 @@ public final class RuntimeDispatchService {
    * <p>本方法属于 Bukkit 主线程状态机边界；所有调用方必须在主线程串行调用，不能与发车登记或状态查询并发执行。
    */
   public void beginStartupOccupancyReconstruction() {
+    closeRuntimeAuthorizationGate("STARTUP_RECONSTRUCTION");
+  }
+
+  /**
+   * 在插件停用线程上关闭运行时授权门。
+   *
+   * <p>该入口只修改本服务的 volatile/atomic/concurrent 状态并输出诊断，不枚举 TrainCarts、不调用 Bukkit
+   * scheduler，也不销毁编组；因此可由 Paper 的非主线程 disable 生命周期调用。未完成的物理收容必须留给下次主线程启动恢复继续处理。
+   */
+  public void beginPluginShutdown() {
+    closeRuntimeAuthorizationGate("PLUGIN_SHUTDOWN");
+  }
+
+  private void closeRuntimeAuthorizationGate(String source) {
     startupRecoveryEnforced = true;
     startupOccupancyReconstructionState = StartupOccupancyReconstructionState.STOP_FIRST;
     long recoveryEpoch = startupOccupancyRecoveryEpoch.incrementAndGet();
     hydratedPhysicalOwnerIdentities.clear();
     expectedMaterializedSpawns.clear();
+    canonicalForwardMovementPlans.clear();
     debugLogger.accept(
-        "SMART_STARTUP_OCCUPANCY_RECONSTRUCTION state=STOP_FIRST epoch=" + recoveryEpoch);
+        "SMART_STARTUP_OCCUPANCY_RECONSTRUCTION state=STOP_FIRST epoch="
+            + recoveryEpoch
+            + " source="
+            + (source == null || source.isBlank() ? "UNKNOWN" : source));
   }
 
   /**
@@ -5553,6 +6068,37 @@ public final class RuntimeDispatchService {
       return ExpectedMaterializedSpawnStatus.PROVISIONAL;
     }
     return ExpectedMaterializedSpawnStatus.STALE_OR_UNKNOWN;
+  }
+
+  /**
+   * 判断持久事务墓碑是否仍属于本进程认证的精确 Depot 物理身份。
+   *
+   * <p>GroupCreate 的延迟刷新可能与 4 秒 footprint promotion 窗口重叠。此时墓碑表示“票据尚未提交”，不能当作重启遗留回滚列车销毁；只有同一 READY
+   * epoch 的 provisional identity，或已经完成本进程 hydration 的同一
+   * identity，才允许继续走正常信号水合。重启与授权门关闭都会清空这些内存身份，因此孤立墓碑仍会 fail-closed 收容。
+   *
+   * @param train 待核验的精确物理编组
+   * @return 墓碑仍由当前进程的实体化事务拥有时为 {@code true}
+   */
+  public boolean isCurrentMaterializedSpawnTransactionIdentity(RuntimeTrainHandle train) {
+    if (train == null || !train.isValid() || train.properties() == null) {
+      return false;
+    }
+    TrainProperties properties = train.properties();
+    String trainName = resolveTrackedTrainName(properties).orElseGet(properties::getTrainName);
+    String trainKey = normalizeTrainKey(trainName);
+    Object runtimeIdentity = train.physicalRuntimeIdentity();
+    if (trainKey.isBlank() || runtimeIdentity == null) {
+      return false;
+    }
+    ExpectedMaterializedSpawn expectedSpawn = expectedMaterializedSpawns.get(trainKey);
+    if (expectedSpawn != null
+        && expectedSpawn.physicalIdentity() == runtimeIdentity
+        && isStartupRecoveryEpochReady(expectedSpawn.recoveryEpoch())) {
+      return true;
+    }
+    return startupOccupancyReconstructionState == StartupOccupancyReconstructionState.READY
+        && hydratedPhysicalOwnerIdentities.get(trainKey) == runtimeIdentity;
   }
 
   /**
@@ -5701,8 +6247,7 @@ public final class RuntimeDispatchService {
         new MaterializedSpawnRollbackQuarantine(trainName, releaseLogicalOwnerOnRemoval));
     TrainProperties properties = train.properties();
     if (properties != null) {
-      TrainTagHelper.writeTag(
-          properties, TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING, "true");
+      TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
       String physicalOwner =
           resolveTrackedTrainName(properties).orElseGet(properties::getTrainName);
       String trainKey = normalizeTrainKey(physicalOwner);
@@ -6875,8 +7420,7 @@ public final class RuntimeDispatchService {
         materializedRollback != null
             || (expectedRemoval != null && expectedRemoval.physicalIdentity() == removedIdentity);
     if (persistentRollbackRemoval) {
-      TrainTagHelper.removeTagKey(
-          removedProperties, TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING);
+      TrainSpawnTagInitializer.clearMaterializedSpawnTransactionPending(removedProperties);
     }
     if (materializedRemovalConfirmed) {
       Object originalIdentity = materializedSpawnRollbackPredecessors.remove(removedIdentity);
@@ -7053,6 +7597,7 @@ public final class RuntimeDispatchService {
     routeTrainTracker.remove(trainName);
     effectiveNodeOverrides.remove(key);
     blockerSnapshots.remove(key);
+    canonicalForwardMovementPlans.remove(key);
     movementAuthorizationTokens.remove(key);
     movementInhibitors.remove(key);
     activeStopStates.remove(key);
@@ -8044,6 +8589,25 @@ public final class RuntimeDispatchService {
     }
   }
 
+  /** Smart planner 通用前向路径证明的 fail-closed 派生结果。 */
+  private record PlannerForwardPathResolution(
+      Optional<CanonicalForwardPathEvidence> evidence, String failureReason) {
+    private PlannerForwardPathResolution {
+      evidence = evidence == null ? Optional.empty() : evidence;
+      failureReason =
+          failureReason == null || failureReason.isBlank()
+              ? evidence.isPresent() ? "-" : "UNKNOWN"
+              : failureReason.trim();
+    }
+
+    private static PlannerForwardPathResolution rejected(String reason) {
+      return new PlannerForwardPathResolution(Optional.empty(), reason);
+    }
+  }
+
+  /** 单轮 planner 中按逻辑列车与精确 route 定位保护性尾部 claim 的键。 */
+  private record ProtectiveRetainClaimKey(String trainKey, RouteId routeId) {}
+
   private record BlockerSnapshot(
       Set<DeadlockBlockerInfo> blockers,
       Instant sampledAt,
@@ -8088,6 +8652,23 @@ public final class RuntimeDispatchService {
         }
       }
       return Set.copyOf(names);
+    }
+  }
+
+  /** 最新一次完整信号链留下的不可变 canonical path；不携带任何授权或占用结论。 */
+  private record CanonicalMovementPlanSnapshot(
+      MovementPlanSnapshot movementPlan,
+      Instant sampledAt,
+      BlockerProgressWindow progressWindow,
+      List<String> forwardProgressReleaseCandidates) {
+    private CanonicalMovementPlanSnapshot {
+      Objects.requireNonNull(movementPlan, "movementPlan");
+      sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
+      progressWindow = progressWindow == null ? BlockerProgressWindow.unknown() : progressWindow;
+      forwardProgressReleaseCandidates =
+          forwardProgressReleaseCandidates == null
+              ? List.of()
+              : List.copyOf(forwardProgressReleaseCandidates);
     }
   }
 
@@ -8243,20 +8824,46 @@ public final class RuntimeDispatchService {
   }
 
   private boolean blockerSnapshotProgressCurrent(String trainName, BlockerSnapshot snapshot) {
-    if (snapshot == null || !snapshot.progressWindow().known()) {
+    return snapshot != null && progressWindowCurrent(trainName, snapshot.progressWindow());
+  }
+
+  private boolean progressWindowCurrent(String trainName, BlockerProgressWindow progressWindow) {
+    if (progressWindow == null || !progressWindow.known()) {
       return true;
     }
     Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
     if (current.isEmpty()) {
       return false;
     }
-    BlockerProgressWindow expected = snapshot.progressWindow();
+    BlockerProgressWindow expected = progressWindow;
     RouteProgressRegistry.RouteProgressEntry entry = current.get();
     String currentLastPassed = entry.lastPassedGraphNode().map(NodeId::value).orElse("-");
     return (expected.routeId().equals("-") || expected.routeId().equals(entry.routeId().value()))
         && (expected.currentIndex() < 0 || expected.currentIndex() == entry.currentIndex())
         && (expected.lastPassedNode().equals("-")
             || expected.lastPassedNode().equals(currentLastPassed));
+  }
+
+  /**
+   * 校验 canonical movement-plan 缓存的精确进度窗口。
+   *
+   * <p>blocker 快照为兼容旧数据允许未知字段，但信号请求缓存只在 route progress 完整时写入，因此 route、index 与 last-passed（包括“尚未
+   * passed”的 {@code -}）必须逐项相等；不存在通配语义。
+   */
+  private boolean canonicalProgressWindowCurrent(
+      String trainName, BlockerProgressWindow progressWindow) {
+    if (progressWindow == null || !progressWindow.known()) {
+      return false;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
+    if (current.isEmpty()) {
+      return false;
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = current.orElseThrow();
+    String currentLastPassed = entry.lastPassedGraphNode().map(NodeId::value).orElse("-");
+    return progressWindow.routeId().equals(entry.routeId().value())
+        && progressWindow.currentIndex() == entry.currentIndex()
+        && progressWindow.lastPassedNode().equals(currentLastPassed);
   }
 
   private void traceBlockerSnapshotProgressMoved(
@@ -8379,12 +8986,19 @@ public final class RuntimeDispatchService {
 
   /** 返回指定列车当前持有的 conflict claim key，用于健康诊断判定 occupant-to-many 模式。 */
   public Set<String> currentConflictClaimKeys(String trainName) {
+    Collection<OccupancyClaim> liveClaims =
+        occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
+    return currentConflictClaimKeys(trainName, liveClaims);
+  }
+
+  private Set<String> currentConflictClaimKeys(
+      String trainName, Collection<OccupancyClaim> liveClaims) {
     String key = normalizeTrainKey(trainName);
-    if (key.isEmpty() || occupancyManager == null) {
+    if (key.isEmpty() || liveClaims == null || liveClaims.isEmpty()) {
       return Set.of();
     }
     Set<String> keys = new LinkedHashSet<>();
-    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+    for (OccupancyClaim claim : liveClaims) {
       if (claim == null
           || claim.trainName() == null
           || claim.resource() == null
@@ -8407,8 +9021,8 @@ public final class RuntimeDispatchService {
   /**
    * 把 Smart Dispatcher 选中的短生命周期 winner 意图叠加到规范 Gate Queue priority。
    *
-   * <p>只有列车仍位于 planner 采样的 current node、下一规范目标仍是同一个 authority boundary，且没有人工 priority 时才生效。该方法只改变普通
-   * OccupancyRequest 的排序数值；真实 owner、完整资源 acquire、方向屏障和最终信号门仍由正常运行时链路执行。
+   * <p>只有列车仍位于 planner 采样的 route/index 与 current node、下一规范目标仍是同一个 authority boundary，且没有人工 priority
+   * 时才生效。该方法只改变普通 OccupancyRequest 的排序数值；真实 owner、完整资源 acquire、方向屏障和最终信号门仍由正常运行时链路执行。
    */
   DispatchPriorityResolution applySmartUnlockPriorityIntent(
       String trainName,
@@ -8422,11 +9036,21 @@ public final class RuntimeDispatchService {
         smartUnlockReservationsByTrain.get(normalizeTrainKey(trainName));
     if (reservation == null
         || !reservation.reevaluationRequested()
-        || reservation.expired(currentSignalTraceTick())
-        || currentNode == null
+        || reservation.expired(currentSignalTraceTick())) {
+      return baseResolution;
+    }
+    if (reservation.hasCanonicalRouteIdentity()
+        && !smartUnlockCanonicalProgressCurrent(trainName, reservation)) {
+      rollbackSmartUnlockReservation(reservation, "canonical-progress-window-moved");
+      return baseResolution;
+    }
+    if (currentNode == null
         || nextNode == null
         || !currentNode.value().equals(reservation.initialCurrentNode())
         || !nextNode.equals(reservation.plannedDestinationNode())) {
+      if (reservation.hasCanonicalRouteIdentity()) {
+        rollbackSmartUnlockReservation(reservation, "canonical-progress-window-moved");
+      }
       return baseResolution;
     }
     int priority = saturatingIntAdd(baseResolution.priority(), SMART_UNLOCK_PRIORITY_BOOST);
@@ -8461,6 +9085,23 @@ public final class RuntimeDispatchService {
             + nextNode.value()
             + " bypassedHardAuthority=false");
     return selected;
+  }
+
+  /** canonical proof 驱动的 priority 意图只在原 route/index/last-passed 仍精确匹配时有效。 */
+  private boolean smartUnlockCanonicalProgressCurrent(
+      String trainName, SmartUnlockReservation reservation) {
+    Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
+    return current
+        .filter(entry -> entry.routeId().value().equals(reservation.canonicalRouteId()))
+        .filter(entry -> entry.currentIndex() == reservation.canonicalRouteIndex())
+        .filter(
+            entry ->
+                entry
+                    .lastPassedGraphNode()
+                    .map(NodeId::value)
+                    .orElse("-")
+                    .equals(reservation.initialLastPassedGraphNode()))
+        .isPresent();
   }
 
   private static int saturatingIntAdd(int value, int increment) {
@@ -8507,6 +9148,16 @@ public final class RuntimeDispatchService {
   /** 构建 Smart recovery 的只读输入快照。 */
   public SmartRecoveryInput smartRecoveryInput(
       String trainName, Duration stuckDuration, SignalAspect fallbackSignal) {
+    List<OccupancyClaim> liveClaims =
+        occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
+    return smartRecoveryInput(trainName, stuckDuration, fallbackSignal, liveClaims);
+  }
+
+  private SmartRecoveryInput smartRecoveryInput(
+      String trainName,
+      Duration stuckDuration,
+      SignalAspect fallbackSignal,
+      Collection<OccupancyClaim> liveClaims) {
     RuntimeTrainResolution resolution =
         resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
     String resolvedName = resolution.resolved() ? resolution.resolvedName() : trainName;
@@ -8537,9 +9188,9 @@ public final class RuntimeDispatchService {
     if (blockers.isEmpty() && trainName != null && !trainName.equals(resolvedName)) {
       blockers = recentBlockerTrains(trainName, BLOCKER_SNAPSHOT_TTL);
     }
-    Set<String> conflictClaims = currentConflictClaimKeys(resolvedName);
+    Set<String> conflictClaims = currentConflictClaimKeys(resolvedName, liveClaims);
     if (conflictClaims.isEmpty() && trainName != null && !trainName.equals(resolvedName)) {
-      conflictClaims = currentConflictClaimKeys(trainName);
+      conflictClaims = currentConflictClaimKeys(trainName, liveClaims);
     }
     boolean insideSingle =
         conflictClaims.stream().anyMatch(key -> key != null && key.startsWith("single:"));
@@ -21120,10 +21771,21 @@ public final class RuntimeDispatchService {
       String trainName,
       Collection<OccupancyResource> resources,
       CorridorDirection requestedDirection) {
-    if (resources == null || resources.isEmpty() || occupancyManager == null) {
+    Collection<OccupancyClaim> liveClaims =
+        occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
+    return singleRegionOppositeOrUnknownExternalBarrier(
+        trainName, resources, requestedDirection, liveClaims);
+  }
+
+  private boolean singleRegionOppositeOrUnknownExternalBarrier(
+      String trainName,
+      Collection<OccupancyResource> resources,
+      CorridorDirection requestedDirection,
+      Collection<OccupancyClaim> liveClaims) {
+    if (resources == null || resources.isEmpty() || liveClaims == null || liveClaims.isEmpty()) {
       return false;
     }
-    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
+    for (OccupancyClaim claim : liveClaims) {
       if (claim == null
           || claim.resource() == null
           || claim.role() == ClaimRole.UNLOCK_RESERVATION

@@ -9,6 +9,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.util.ArrayDeque;
 import java.util.List;
@@ -39,6 +40,7 @@ class RuntimeDispatchListenerTest {
     RuntimeDispatchListener listener =
         new RuntimeDispatchListener(dispatchService, nextTickTasks::add);
     RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(mock(TrainProperties.class));
     when(dispatchService.containMaterializedSpawnRollbackOnCreate(any())).thenReturn(true);
 
     listener.handleGroupCreate(train, () -> {});
@@ -54,6 +56,7 @@ class RuntimeDispatchListenerTest {
     RuntimeDispatchListener listener =
         new RuntimeDispatchListener(dispatchService, nextTickTasks::add);
     RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(mock(TrainProperties.class));
 
     listener.handleGroupCreate(train, () -> dispatchService.handleSignalTick(train, false));
 
@@ -63,6 +66,43 @@ class RuntimeDispatchListenerTest {
     nextTickTasks.remove().run();
 
     verify(dispatchService).handleSignalTick(train, false);
+  }
+
+  @Test
+  void deferredGroupCreateKeepsCurrentProvisionalTombstoneOnHydrationPath() {
+    RuntimeDispatchService dispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchListener listener = new RuntimeDispatchListener(dispatchService, Runnable::run);
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(mock(TrainProperties.class));
+    AtomicInteger abnormalContainments = new AtomicInteger();
+    AtomicInteger signalRefreshes = new AtomicInteger();
+    when(train.isValid()).thenReturn(true);
+    when(dispatchService.hasMaterializedSpawnRollbackTag(any())).thenReturn(true);
+    when(dispatchService.isCurrentMaterializedSpawnTransactionIdentity(train)).thenReturn(true);
+
+    listener.refreshCreatedGroup(
+        train, abnormalContainments::incrementAndGet, signalRefreshes::incrementAndGet);
+
+    assertEquals(0, abnormalContainments.get());
+    assertEquals(1, signalRefreshes.get());
+  }
+
+  @Test
+  void deferredGroupCreateContainsOrphanedPersistentTombstone() {
+    RuntimeDispatchService dispatchService = mock(RuntimeDispatchService.class);
+    RuntimeDispatchListener listener = new RuntimeDispatchListener(dispatchService, Runnable::run);
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(mock(TrainProperties.class));
+    AtomicInteger abnormalContainments = new AtomicInteger();
+    AtomicInteger signalRefreshes = new AtomicInteger();
+    when(train.isValid()).thenReturn(true);
+    when(dispatchService.hasMaterializedSpawnRollbackTag(any())).thenReturn(true);
+
+    listener.refreshCreatedGroup(
+        train, abnormalContainments::incrementAndGet, signalRefreshes::incrementAndGet);
+
+    assertEquals(1, abnormalContainments.get());
+    assertEquals(0, signalRefreshes.get());
   }
 
   @Test

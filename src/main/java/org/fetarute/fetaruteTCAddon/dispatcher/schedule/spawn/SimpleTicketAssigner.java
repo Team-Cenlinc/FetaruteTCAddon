@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -787,8 +788,35 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           now);
       return;
     }
+    clearCompletedMaterializedSpawnMarker(pending.train(), pending.trainName());
     recordMaterializedSpawnSuccess(
         pending.ticket(), pending.service(), pending.trainName(), pending.fallback());
+  }
+
+  /**
+   * 在票据已经提交后清除跨重启事务墓碑。
+   *
+   * <p>清理异常不能把已提交票据重新回队；保留墓碑会让下一次启动 fail-closed 地收容该编组，并留下明确诊断。
+   */
+  private void clearCompletedMaterializedSpawnMarker(RuntimeTrainHandle train, String trainName) {
+    try {
+      TrainProperties properties = Objects.requireNonNull(train, "train").properties();
+      TrainSpawnTagInitializer.clearMaterializedSpawnTransactionPending(
+          Objects.requireNonNull(properties, "properties"));
+      if (TrainTagHelper.readTagValue(
+              properties, TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING)
+          .isPresent()) {
+        debugLogger.accept("实体化发车票据已提交但事务墓碑仍存在，将在下次启动收容: train=" + trainName);
+      }
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          "实体化发车票据已提交但事务墓碑清理失败，将在下次启动收容: train="
+              + trainName
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    }
   }
 
   private void failPendingMaterializedSpawn(
@@ -2764,8 +2792,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             context, reasonPrefix + "startup-recovery-epoch-changed-after-acquire");
         return false;
       }
-      context.materializedSpawn().initialize();
-      TrainProperties properties = train.properties();
+      TrainProperties properties =
+          initializeMaterializedSpawnWithRollbackMarker(context.materializedSpawn());
       if (applyPreparedSpawnDestination(properties, context.gateRequest().effectiveWaypoints())) {
         applySpawnLifecycleTags(
             Optional.of(context.provider()),
@@ -2773,6 +2801,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             context.service(),
             context.operationType());
       }
+      TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,
@@ -2815,6 +2844,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         return false;
       }
       spawnManager.complete(context.ticket());
+      clearCompletedMaterializedSpawnMarker(train, context.trainName());
     } catch (RuntimeException | LinkageError failure) {
       debugLogger.accept(
           (context.fallback() ? "Layover 降级发车实体化事务异常: train=" : "自动发车实体化事务异常: train=")
@@ -2833,6 +2863,30 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     recordMaterializedSpawnSuccess(
         context.ticket(), context.service(), context.trainName(), context.fallback());
     return true;
+  }
+
+  /**
+   * 在任何可失败初始化前为精确物理编组写入持久化回滚墓碑。
+   *
+   * <p>TrainCarts 初始化会规范化生命周期 tags，因此 finally 中必须再次确认墓碑仍存在。即使初始化动作删除墓碑后抛错，外层事务也能在本次进程中收容列车，且
+   * 崩溃恢复仍不会把未提交编组误认为可运营列车。
+   *
+   * @param materializedSpawn 已经存在的精确物理编组及其延后初始化动作
+   * @return 同一物理编组的 TrainCarts 属性
+   */
+  static TrainProperties initializeMaterializedSpawnWithRollbackMarker(
+      DepotSpawner.MaterializedSpawn materializedSpawn) {
+    DepotSpawner.MaterializedSpawn requiredSpawn =
+        Objects.requireNonNull(materializedSpawn, "materializedSpawn");
+    TrainProperties properties =
+        Objects.requireNonNull(requiredSpawn.train().properties(), "properties");
+    TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+    try {
+      requiredSpawn.initialize();
+    } finally {
+      TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+    }
+    return properties;
   }
 
   /** 将同一实体化事务的所有失败统一交给“先收容、后释放”的回滚入口。 */

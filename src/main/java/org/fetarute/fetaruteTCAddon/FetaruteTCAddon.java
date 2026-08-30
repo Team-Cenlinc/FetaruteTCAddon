@@ -177,18 +177,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 "locale.loaded", Map.of("locale", localeManager.getCurrentLocale())));
   }
 
+  /**
+   * 停用插件并关闭 FTA 自身的授权、调度器、监听状态与存储。
+   *
+   * <p>服务器关闭阶段可能已经离开 Bukkit 主线程，因此这里禁止启动任何 TrainCarts 现场枚举、实体化回滚或编组销毁。 未完成物理收容由持久回滚标签保留，并在下次启动的
+   * STOP_FIRST 恢复事务中继续；显式 {@code /fta reload} 仍会在插件保持启用且位于受控主线程生命周期时完成同步收口。
+   */
   @Override
   public void onDisable() {
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     beginRuntimeDispatchShutdown();
-    boolean persistentRollbacksContained =
-        runtimeDispatchService == null
-            || runtimeDispatchService.retryPersistentMaterializedSpawnRollbackRemovals();
-    if (!persistentRollbacksContained
-        || (spawnTicketAssigner != null
-            && !spawnTicketAssigner.prepareForReplacement(java.time.Instant.now()))) {
-      getLogger().severe("插件停用时仍有实体化发车事务未完成物理收容；相关编组已保持 runtime 隔离");
-    }
     unregisterSignActions();
     if (signalEventBus != null) {
       signalEventBus.clear();
@@ -783,10 +781,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   private void beginRuntimeDispatchShutdown() {
     runtimeDispatchRecoveryComplete = false;
-    suspendRuntimeDispatchComponentsForRecovery();
     if (runtimeDispatchService != null) {
-      runtimeDispatchService.beginStartupOccupancyReconstruction();
+      runtimeDispatchService.beginPluginShutdown();
     }
+    suspendRuntimeDispatchComponentsForRecovery();
     debug("运行时停用事务已进入 STOP_FIRST: reason=plugin-disable");
   }
 

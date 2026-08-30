@@ -58,6 +58,33 @@ public final class TrainSpawnTagInitializer {
   private TrainSpawnTagInitializer() {}
 
   /**
+   * 标记一个已经实体化、但票据尚未完成提交的发车事务。
+   *
+   * <p>该标记故意复用 rollback pending 语义：若服务器在 footprint promotion
+   * 或票据提交前关闭，内存事务会丢失，下一次启动必须销毁该物理编组而不是把它恢复为运营列车。
+   *
+   * @param properties 已实体化编组的 TrainCarts 属性
+   */
+  public static void markMaterializedSpawnTransactionPending(TrainProperties properties) {
+    TrainTagHelper.writeTag(
+        Objects.requireNonNull(properties, "properties"),
+        TAG_MATERIALIZED_ROLLBACK_PENDING,
+        "true");
+  }
+
+  /**
+   * 清除已完成 promotion 与票据提交的实体化事务标记。
+   *
+   * <p>调用方必须保证票据提交已经成功；提前清除会让关闭或崩溃恢复无法识别未完成的物理编组。
+   *
+   * @param properties 已完成发车事务的 TrainCarts 属性
+   */
+  public static void clearMaterializedSpawnTransactionPending(TrainProperties properties) {
+    TrainTagHelper.removeTagKey(
+        Objects.requireNonNull(properties, "properties"), TAG_MATERIALIZED_ROLLBACK_PENDING);
+  }
+
+  /**
    * 同时覆盖 TrainCarts 名称与插件 owner tag。
    *
    * @param properties 新生成列车属性
