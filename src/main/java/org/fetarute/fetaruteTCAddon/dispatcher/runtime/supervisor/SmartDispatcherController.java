@@ -141,6 +141,47 @@ public final class SmartDispatcherController {
     }
   }
 
+  /** 长时间停滞列车 cleanup 的最终审查输入。 */
+  public record StuckCleanupInput(
+      String trainId,
+      boolean targetResolvedToRuntimeGroup,
+      boolean targetFtaManaged,
+      boolean targetRecentlyProgressed,
+      boolean recoveryExhausted,
+      boolean controlledStop,
+      boolean moving,
+      boolean waitingOnLiveBlocker,
+      boolean activeUnlockReservation,
+      boolean hasPassengers,
+      Duration persisted,
+      Duration threshold,
+      Duration passengerThreshold) {
+
+    public StuckCleanupInput {
+      trainId = normalize(trainId, "-");
+      persisted = nonNegative(persisted);
+      threshold = nonNegative(threshold);
+      passengerThreshold = nonNegative(passengerThreshold);
+    }
+  }
+
+  /** 长时间停滞列车 cleanup 的最终审查结果。 */
+  public record StuckCleanupReview(
+      boolean allowed, String reason, boolean requiresPostVerification) {
+
+    public StuckCleanupReview {
+      reason = normalize(reason, allowed ? "allowed" : "rejected");
+    }
+
+    public static StuckCleanupReview allowed(String reason) {
+      return new StuckCleanupReview(true, reason, true);
+    }
+
+    public static StuckCleanupReview rejected(String reason) {
+      return new StuckCleanupReview(false, reason, false);
+    }
+  }
+
   /** destroy 后验证结果。 */
   public record DestroyVerificationResult(
       String trainId,
@@ -612,13 +653,96 @@ public final class SmartDispatcherController {
                 : List.of("safe-drain", "stale-release", "forward-unlock", "priority-scheduling")));
   }
 
+  /**
+   * 对普通长时间停滞列车执行 destroy 前的独立复审。
+   *
+   * <p>该入口不接受“正常排队”作为 cleanup 理由：新鲜外部 blocker、受控停车、仍在移动或尚有 active unlock reservation
+   * 时一律拒绝。载客列车不是永久豁免，但必须满足更长保护阈值；执行层仍需等待真实 GroupRemove 后才能释放占用。
+   */
+  public StuckCleanupReview reviewStuckCleanupCandidate(StuckCleanupInput input) {
+    Objects.requireNonNull(input, "input");
+    traceLogger.accept(
+        "STUCK_CLEANUP_PRECHECK train="
+            + input.trainId()
+            + " persisted="
+            + input.persisted().toSeconds()
+            + "s threshold="
+            + input.threshold().toSeconds()
+            + "s passengerThreshold="
+            + input.passengerThreshold().toSeconds()
+            + "s passengers="
+            + input.hasPassengers()
+            + " recoveryExhausted="
+            + input.recoveryExhausted()
+            + " waitingOnLiveBlocker="
+            + input.waitingOnLiveBlocker());
+    if (input.threshold().isZero()
+        || input.passengerThreshold().isZero()
+        || input.passengerThreshold().compareTo(input.threshold()) < 0) {
+      return StuckCleanupReview.rejected("cleanup-threshold-invalid");
+    }
+    if (!input.targetResolvedToRuntimeGroup()) {
+      return StuckCleanupReview.rejected("target-runtime-group-unresolved");
+    }
+    if (!input.targetFtaManaged()) {
+      return StuckCleanupReview.rejected("target-not-fta-managed");
+    }
+    if (input.targetRecentlyProgressed()) {
+      return StuckCleanupReview.rejected("target-recently-progressed");
+    }
+    if (!input.recoveryExhausted()) {
+      return StuckCleanupReview.rejected("recovery-not-exhausted");
+    }
+    if (input.controlledStop()) {
+      return StuckCleanupReview.rejected("controlled-stop");
+    }
+    if (input.moving()) {
+      return StuckCleanupReview.rejected("train-moving");
+    }
+    if (input.waitingOnLiveBlocker()) {
+      return StuckCleanupReview.rejected("waiting-on-live-blocker");
+    }
+    if (input.activeUnlockReservation()) {
+      return StuckCleanupReview.rejected("active-unlock-reservation");
+    }
+    Duration requiredThreshold =
+        input.hasPassengers()
+            ? max(input.threshold(), input.passengerThreshold())
+            : input.threshold();
+    if (input.persisted().compareTo(requiredThreshold) < 0) {
+      return StuckCleanupReview.rejected(
+          input.hasPassengers() ? "passenger-grace" : "cleanup-threshold-not-reached");
+    }
+    traceLogger.accept(
+        "STUCK_CLEANUP_CONFIRMED train="
+            + input.trainId()
+            + " passengers="
+            + input.hasPassengers()
+            + " persisted="
+            + input.persisted().toSeconds()
+            + "s");
+    return StuckCleanupReview.allowed("verified-long-stuck-cleanup");
+  }
+
   /** 记录 destroy 后验证结果。 */
   public void traceDestroyVerification(DestroyVerificationResult result) {
+    traceDestroyVerification(result, "DEADLOCK_DESTROY");
+  }
+
+  /**
+   * 记录指定 cleanup 类型的 destroy 后验证结果。
+   *
+   * @param result 验证结果
+   * @param eventPrefix 事件前缀；仅接受已知 cleanup 前缀，其他值回退为 deadlock
+   */
+  public void traceDestroyVerification(DestroyVerificationResult result, String eventPrefix) {
     if (result == null) {
       return;
     }
+    String prefix =
+        "STUCK_CLEANUP_DESTROY".equals(eventPrefix) ? "STUCK_CLEANUP_DESTROY" : "DEADLOCK_DESTROY";
     traceLogger.accept(
-        (result.passed() ? "DEADLOCK_DESTROY_VERIFY_PASSED" : "DEADLOCK_DESTROY_VERIFY_FAILED")
+        (result.passed() ? prefix + "_VERIFY_PASSED" : prefix + "_VERIFY_FAILED")
             + " train="
             + result.trainId()
             + " runtimeGroupGone="
@@ -894,6 +1018,14 @@ public final class SmartDispatcherController {
         .map(String::trim)
         .sorted(String.CASE_INSENSITIVE_ORDER.thenComparing(Comparator.naturalOrder()))
         .toList();
+  }
+
+  private static Duration nonNegative(Duration value) {
+    return value == null || value.isNegative() ? Duration.ZERO : value;
+  }
+
+  private static Duration max(Duration first, Duration second) {
+    return first.compareTo(second) >= 0 ? first : second;
   }
 
   private static String normalize(String raw, String fallback) {

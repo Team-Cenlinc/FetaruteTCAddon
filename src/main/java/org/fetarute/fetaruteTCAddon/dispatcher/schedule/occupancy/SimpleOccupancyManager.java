@@ -1981,7 +1981,7 @@ public final class SimpleOccupancyManager
       String otherTrain,
       String source,
       String relationSource,
-      boolean knownSameRouteLeader) {
+      boolean knownDirectedPathLeader) {
     if (!isSwitcherConflictResource(switcherResource)
         || request == null
         || otherTrain == null
@@ -2005,7 +2005,7 @@ public final class SimpleOccupancyManager
       return false;
     }
     Optional<SectionDirectionMatch> match = sameDirectionSectionMatch(request, otherTrain);
-    if (match.isEmpty() && !knownSameRouteLeader) {
+    if (match.isEmpty() && !knownDirectedPathLeader) {
       return false;
     }
     traceSwitcherSameDirectionSectionFollowThrough(
@@ -2469,7 +2469,7 @@ public final class SimpleOccupancyManager
       OccupancyRequest request,
       OccupancyResource blockerResource,
       String blockerTrainName,
-      boolean knownSameRouteLeader) {
+      boolean knownDirectedPathLeader) {
     if (request == null
         || blockerResource == null
         || blockerTrainName == null
@@ -2486,10 +2486,10 @@ public final class SimpleOccupancyManager
           blockerTrainName,
           "forward-risk",
           relationSource,
-          knownSameRouteLeader);
+          knownDirectedPathLeader);
     }
     if (isSingleCorridorConflict(blockerResource)) {
-      return knownSameRouteLeader
+      return knownDirectedPathLeader
           || sameDirectionSectionMatch(request, blockerTrainName).isPresent();
     }
     return false;

@@ -19,6 +19,8 @@ public enum DispatchAction {
   SMART_FORWARD_UNLOCK_SIGNAL_ADVISORY(DispatchEffectClass.SIGNAL_CONSTRAINT, true, false),
   /** 仅在完整 deadlock review 已通过后销毁已选定的 leader；不可作为普通恢复动作使用。 */
   EXECUTE_VERIFIED_DEADLOCK_DESTROY(DispatchEffectClass.DESTROY_ACTION, true, false),
+  /** 仅在长期无进展、恢复耗尽且不属于正常排队后执行通用 stuck cleanup。 */
+  EXECUTE_VERIFIED_STUCK_CLEANUP(DispatchEffectClass.DESTROY_ACTION, true, false),
   SAME_DIRECTION_FOLLOW_THROUGH_PREVIEW(DispatchEffectClass.DIAGNOSTIC_ONLY, false, false),
   FORCE_PROCEED(DispatchEffectClass.SIGNAL_CONSTRAINT, true, true),
   DESTROY_TRAIN(DispatchEffectClass.DESTROY_ACTION, true, true),

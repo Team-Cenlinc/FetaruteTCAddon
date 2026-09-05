@@ -89,9 +89,9 @@ public final class RuntimeDispatchListener implements Listener {
       return;
     }
     SignNodeDefinition definition = definitionOpt.get();
-    // Waypoint MEMBER_ENTER：仅更新 lastPassedGraphNode（用于 arriving 判定），不推进 routeIndex
+    // 车头先于编组进入牌子时，已声明的普通经过点必须立即推进；STOP/TERM 与未声明中间点仍等待原有边界。
     if (action == SignActionType.MEMBER_ENTER && definition.nodeType() == NodeType.WAYPOINT) {
-      dispatchService.updateLastPassedGraphNode(event, definition);
+      dispatchService.handleWaypointMemberEnter(event, definition);
       return;
     }
     // STATION STOP/TERM 由 AutoStation.handleStop() -> handleStationArrival() 在列车停稳后推进，

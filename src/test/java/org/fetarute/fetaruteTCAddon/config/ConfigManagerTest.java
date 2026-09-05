@@ -78,10 +78,10 @@ class ConfigManagerTest {
   }
 
   @Test
-  // health 互卡销毁兜底参数应从配置读取
-  void parseHealthDeadlockDestroySettings() {
+  // 兼容旧键的单一 destructive cleanup 总开关应同时服务死锁与普通长时间停滞策略。
+  void parseHealthTrainCleanupSettingsFromLegacyKey() {
     YamlConfiguration config = new YamlConfiguration();
-    config.set("health.deadlock-destroy-enabled", false);
+    config.set("health.deadlock-destroy-enabled", true);
     config.set("health.deadlock-destroy-threshold-seconds", 75);
     config.set("health.deadlock-destroy-cooldown-seconds", 180);
     config.set("health.deadlock-episode-grace-seconds", 12);
@@ -89,11 +89,39 @@ class ConfigManagerTest {
 
     ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
 
-    assertFalse(view.healthSettings().deadlockDestroyEnabled());
+    assertTrue(view.healthSettings().trainCleanupEnabled());
     assertEquals(75, view.healthSettings().deadlockDestroyThresholdSeconds());
     assertEquals(180, view.healthSettings().deadlockDestroyCooldownSeconds());
     assertEquals(12, view.healthSettings().deadlockEpisodeGraceSeconds());
     assertEquals(25, view.healthSettings().deadlockMinStopSeconds());
+  }
+
+  @Test
+  // 普通长时间停滞 cleanup 只保留自己的阈值，不再引入第二个总开关。
+  void parseHealthStuckCleanupSettings() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("health.deadlock-destroy-enabled", true);
+    config.set("health.stuck-cleanup-threshold-seconds", 720);
+    config.set("health.stuck-cleanup-passenger-threshold-seconds", 2400);
+    config.set("health.stuck-cleanup-cooldown-seconds", 150);
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertTrue(view.healthSettings().trainCleanupEnabled());
+    assertEquals(720, view.healthSettings().stuckCleanupThresholdSeconds());
+    assertEquals(2400, view.healthSettings().stuckCleanupPassengerThresholdSeconds());
+    assertEquals(150, view.healthSettings().stuckCleanupCooldownSeconds());
+  }
+
+  @Test
+  // 未显式配置 destructive cleanup 时必须保持关闭，避免默认构造路径绕过安全配置。
+  void healthTrainCleanupDefaultsDisabled() {
+    YamlConfiguration config = new YamlConfiguration();
+
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertFalse(view.healthSettings().trainCleanupEnabled());
+    assertFalse(ConfigManager.HealthSettings.defaults().trainCleanupEnabled());
   }
 
   @Test

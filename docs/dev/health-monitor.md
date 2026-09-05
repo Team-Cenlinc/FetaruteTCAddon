@@ -36,10 +36,24 @@
 7. 若 confirmed 条件缺少方向或 single conflict 证据，但 blocker 快照持续互相指向，系统会进入 weaker episode；weaker episode 仅诊断和重新取证，不再因为等待时间增长进入销毁。
 8. 一台列车停在道岔区并作为 blocker 阻塞多车时，健康监控只输出 `SWITCHER_OCCUPANT_BLOCKING_MANY` 诊断，不把该模式升级成 confirmed single，也不直接销毁 occupant。
 
+### 普通长时间停滞 cleanup
+
+普通 cleanup 用于“没有形成双方互卡，但一列受管车在区间中长期无任何进展”的场景。它与 confirmed deadlock 销毁分开取证，默认关闭，也不把正常 Gate Queue 等待当作故障。
+
+1. 候选必须持续没有 route index 或图节点进展，并已实际执行至少三轮分级恢复；第三次 progress 恢复后的同一轮检查不能立刻 cleanup，至少还要经过一个后续采样，并从最后一次 progress/stall recovery mutation 起等待完整的 recovery cooldown 观察窗。恢复链耗尽后会暂停这两类主动恢复，避免每轮重试不断刷新观察时钟。列车仍在移动、处于 dwell/departure gate/layover/manual hold、存在新鲜外部 blocker，或仍有 active unlock reservation 时都拒绝 cleanup。
+2. Health 先对整批候选做纯排序，再最多选择一列；执行前由 Runtime 与 Smart Dispatcher 重新解析真实 TrainCarts group、FTA 管控标记、进度索引、速度、乘客树和 hold/blocker 状态。正常排队保护会同时读取最近授权 blocker 快照与 Gate Queue 的直接成员快照，任一证据仍新鲜都不允许删除；读取失败也按 fail-closed 处理。采样后刚恢复的列车因此不会被旧快照删除。
+3. 排序优先保护玩家：空车始终排在载客车前；同类中依次优先 `RETURN`、`CREATE`、`OPERATION`，再优先 Depot 相关、未接近 route 终点、较低调度优先级与较早进度的列车。载客车还必须超过单独的更长阈值。
+4. 每轮 health check 最多执行一次 cleanup，并有全局冷却。执行仍受 Smart Dispatcher `DESTROY_ACTION` mode gate 控制；只有 `ENFORCE` 会产生实体副作用，`OBSERVE_ONLY/OFF` 只保留诊断。
+5. cleanup 不提前释放 NODE/EDGE/CONFLICT claim。只有 TrainCarts 确认实体移除后，`GroupRemoveEvent -> handleTrainRemoved -> OccupancyReleasedEvent` 才释放占用；SignalEvaluator 随后读取该资源的 Gate Queue 队首，并在下一 tick 请求完整授权重评估。没有已登记队列的后继车仍由正常周期信号与 spawn retry 恢复。
+
+LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 corridor owner 保留完整原子授权；对向/后继列车按 Gate Queue 等待。只有 owner 自身长期无进展、没有在等待另一列 live blocker、且安全恢复已经耗尽时，才可能成为普通 cleanup 候选。实现不按线路、车库或站名写特判。
+
 ### 互卡销毁诊断
 - Health/runtime 桥接入口使用统一的 alias-aware 解析：先匹配 TrainCarts 精确名，再匹配 runtime active state、FTA 逻辑名、`FTA_TRAIN_NAME`/历史名与 split alias。解析不使用包含、前缀或编辑距离等模糊匹配。
 - `destroyTrainByName`、`refreshSignalByName`、`reapplyHardStopByName`、`getTrainState`、`deadlockTrainContext` 共用同一解析结果，避免“state 能找到但 destroy 找不到”的分裂。
 - 自动销毁链路会输出 `DEADLOCK_EPISODE_CREATED`、`DEADLOCK_GRAPH_SNAPSHOT`、`DEADLOCK_BLOCKER_CHAIN`、`DEADLOCK_DESTROY_PRECHECK`、`DEADLOCK_DESTROY_CANDIDATE_SELECTED`、`DEADLOCK_DESTROY_ATTEMPTED`、`DEADLOCK_DESTROY_RESULT`、`DEADLOCK_DESTROY_POST_CLEANUP`、`DEADLOCK_DESTROY_VERIFY_PASSED/FAILED` 与 `DEADLOCK_DESTROY_SKIPPED`。若没有销毁，trace 应能区分：未形成 episode、weak/protective-only/stale blocker、非同一 `CONFLICT:single`、方向 `UNKNOWN`、blocker 快照缺失/过期、解析失败、实体不存在或 TrainCarts destroy API 失败。
+- 普通停滞 cleanup 使用独立的 `STUCK_CLEANUP_DESTROY_ATTEMPTED/RESULT/POST_CLEANUP/VERIFY_*` 事件与 `HEALTH_MONITOR_STUCK_CLEANUP` source，不冒充 confirmed deadlock 遥测。
+- `STUCK_LEADER_FALLBACK` 中的后车只提供 stuck-leader 证据，诊断字段使用 `evidenceFollower`；它不是前车 Signal/Occupancy 的真实 blocker。
 - `destroyTrainByName` 只有在解析到 `TrainProperties` 且实体 holder 有效时才返回成功；实体不存在时会记录 `ENTITY_NOT_FOUND`，不会把 no-op 伪报成已修复。
 - `weaker:*`、stale retain、stale queue、protective-only claim 只能作为诊断或 stale cleanup 候选，不得作为 confirmed destroy 依据。
 
@@ -66,9 +80,12 @@
 - `health.progress-stuck-threshold-seconds`
 - `health.progress-stop-grace-seconds`
 - `health.deadlock-threshold-seconds`
-- `health.deadlock-destroy-enabled`
+- `health.deadlock-destroy-enabled`（兼容保留的实体列车 destructive cleanup 总开关；同时控制 confirmed deadlock 与普通长时间停滞 cleanup）
 - `health.deadlock-destroy-threshold-seconds`（0 表示禁用最终销毁兜底，默认 60 秒）
 - `health.deadlock-destroy-cooldown-seconds`
+- `health.stuck-cleanup-threshold-seconds`（空车默认 600 秒）
+- `health.stuck-cleanup-passenger-threshold-seconds`（载客车默认 1800 秒，且不得短于空车阈值）
+- `health.stuck-cleanup-cooldown-seconds`（默认 120 秒；每轮仍最多清理一列）
 - `health.deadlock-episode-grace-seconds`（默认 15 秒）
 - `health.deadlock-min-stop-seconds`
 - `health.blocker-snapshot-max-age-seconds`
@@ -92,6 +109,7 @@
 - 若列车长期 STOP 且请求方向已经与自持 single claim/queue 的旧方向相反，健康恢复只会按当前授权请求清理该同车残留；方向未知、其他列车 blocker、NODE/EDGE 硬占用或普通对向会车仍保持 fail-closed。
 - 硬 STOP 会清空 TrainCarts destination route 和 destination、下发 speedLimit=0、清运动授权 token，并禁止 health reissue，直到下一次 fresh acquire 成功。
 - `HealthMonitor` 每次 `tick/check/heal` 都会先收集当前 TrainCarts 存活列车名，并调用 `RuntimeDispatchService.cleanupOrphanOccupancyClaimsWithReport(...)` 清理 progress、运行时占用、layover、departure gate、blocker snapshot 与动态站台缓存残留，然后再执行 `TrainHealthMonitor` 与 `OccupancyHealer`。
+- 普通 stuck cleanup 与互卡 destroy 都不会在发起 `train.destroy()` 时提前释放现场占用；后车恢复以精确实体移除事件为提交点，再由 Gate Queue 队首下一 tick 重评估，避免旧实体仍在轨道上时出现抢占窗口。
 - 这条兜底链路用于覆盖 `/train destroyall` 或其他未触发 `GroupRemoveEvent` 的全服列车消失场景：即使事件侧没有逐车回调，`/fta health heal` 与周期 health tick 也能按“当前存活列车集合”释放孤儿 claim 和脱管 progress。
 - `OccupancyHealer` 仍负责传统的占用超时/孤儿 claim 诊断；运行时 cleanup 负责与 progress、layover、departure gate 同步，避免只释放 occupancy 但保留调度状态。
 - `RuntimeSignalMonitor` 对普通非 FTA TrainCarts 列车只做脱轨安全兜底：明确 `TrainStatus.Derailed` 时销毁实体，但不会把普通列车加入 dispatch、ETA 或 orphan active 集合；事件侧 `MemberRemoveEvent` 也只有在源/目标编组已带 derailed 状态时才清理普通列车。

@@ -178,6 +178,7 @@ class SmartDispatcherModeGateTest {
     assertTrue(DispatchAction.SMART_DRAIN_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
     assertTrue(DispatchAction.SMART_FORWARD_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
     assertTrue(DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY.executableDispatcherAction());
+    assertTrue(DispatchAction.EXECUTE_VERIFIED_STUCK_CLEANUP.executableDispatcherAction());
     assertTrue(DispatchAction.PROCEED_WITH_CAUTION.executableDispatcherAction());
     assertTrue(DispatchAction.CAUTION_SPEED_LIMIT.executableDispatcherAction());
   }
@@ -227,6 +228,9 @@ class SmartDispatcherModeGateTest {
     assertTrue(
         SmartDispatcherModeGate.allows(
             SmartDispatcherMode.ENFORCE, DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY));
+    assertTrue(
+        SmartDispatcherModeGate.allows(
+            SmartDispatcherMode.ENFORCE, DispatchAction.EXECUTE_VERIFIED_STUCK_CLEANUP));
     assertFalse(
         SmartDispatcherModeGate.allows(SmartDispatcherMode.ENFORCE, DispatchAction.FORCE_PROCEED));
   }

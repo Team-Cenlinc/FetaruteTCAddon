@@ -46,6 +46,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
  *   <li>STOP 下的长时间停滞先重刷信号，再清理可证明的自持 single 反向残留，最后重下发硬 STOP；不 reissue destination，避免健康监控绕过红灯强制动车
  *   <li>若 STOP 期间仍能看到新鲜 blocker 快照，则只在 STOP 宽限窗口内视为合法排队；超宽限后仍进入非动车恢复链，避免 blocker 持续刷新导致永久不自愈
  *   <li>互相阻塞的自动恢复先按列车对执行 refresh → hard STOP；超过销毁阈值且仍未恢复时，销毁 pair leader 作为最终兜底，避免永久占线
+ *   <li>普通长时间停滞 cleanup 默认关闭；启用后也只会在安全恢复耗尽、没有实时 blocker 且不属于受控停车时，每批最多清理一列，并优先空车、最后才考虑载客列车
  *   <li>STOP 信号下的 progress stuck 允许更长宽限，避免把正常排队误判为故障
  * </ul>
  */
@@ -82,6 +83,7 @@ public final class TrainHealthMonitor {
     private Instant lastDeadlockAttemptAt = Instant.EPOCH;
     private int stallStage;
     private int progressStage;
+    private int progressRecoveryAttempts;
     private int deadlockStage;
 
     private void resetStall() {
@@ -91,6 +93,7 @@ public final class TrainHealthMonitor {
 
     private void resetProgress() {
       progressStage = 0;
+      progressRecoveryAttempts = 0;
       lastProgressAttemptAt = Instant.EPOCH;
     }
 
@@ -245,11 +248,23 @@ public final class TrainHealthMonitor {
   /** STOP 互卡最终销毁阈值：为 0 时禁用自动销毁。 */
   private Duration deadlockDestroyThreshold = Duration.ofSeconds(60);
 
-  /** STOP 互卡最终销毁兜底是否启用。 */
-  private boolean deadlockDestroyEnabled = true;
+  /** 实体列车 destructive cleanup 总开关。 */
+  private boolean trainCleanupEnabled;
 
   /** 同一互卡对销毁兜底冷却，避免新 episode 立即连续销毁第二列车。 */
   private Duration deadlockDestroyCooldown = Duration.ofSeconds(120);
+
+  /** 空车进入普通 stuck cleanup 的最短无进展时间。 */
+  private Duration stuckCleanupThreshold = Duration.ofMinutes(10);
+
+  /** 有玩家乘坐列车进入普通 stuck cleanup 的保护阈值。 */
+  private Duration stuckCleanupPassengerThreshold = Duration.ofMinutes(30);
+
+  /** 两次普通 stuck cleanup 尝试之间的全局冷却。 */
+  private Duration stuckCleanupCooldown = Duration.ofMinutes(2);
+
+  /** 最近一次普通 stuck cleanup 尝试时间。 */
+  private volatile Instant lastStuckCleanupAt = Instant.EPOCH;
 
   /** confirmed episode 暂时失去 blocker 快照后保留的宽限。 */
   private Duration deadlockEpisodeGrace = Duration.ofSeconds(15);
@@ -339,15 +354,40 @@ public final class TrainHealthMonitor {
     }
   }
 
-  /** 设置 STOP 互卡最终销毁兜底是否启用。 */
-  public void setDeadlockDestroyEnabled(boolean enabled) {
-    this.deadlockDestroyEnabled = enabled;
+  /** 设置实体列车 destructive cleanup 总开关。 */
+  public void setTrainCleanupEnabled(boolean enabled) {
+    this.trainCleanupEnabled = enabled;
   }
 
   /** 设置同一互卡对销毁冷却时间。 */
   public void setDeadlockDestroyCooldown(Duration cooldown) {
     if (cooldown != null && !cooldown.isNegative()) {
       this.deadlockDestroyCooldown = cooldown;
+    }
+  }
+
+  /** 设置空车 cleanup 阈值。 */
+  public void setStuckCleanupThreshold(Duration threshold) {
+    if (threshold != null && !threshold.isNegative() && !threshold.isZero()) {
+      this.stuckCleanupThreshold = threshold;
+      if (stuckCleanupPassengerThreshold.compareTo(threshold) < 0) {
+        stuckCleanupPassengerThreshold = threshold;
+      }
+    }
+  }
+
+  /** 设置载客列车 cleanup 保护阈值。 */
+  public void setStuckCleanupPassengerThreshold(Duration threshold) {
+    if (threshold != null && !threshold.isNegative() && !threshold.isZero()) {
+      this.stuckCleanupPassengerThreshold =
+          threshold.compareTo(stuckCleanupThreshold) < 0 ? stuckCleanupThreshold : threshold;
+    }
+  }
+
+  /** 设置普通 stuck cleanup 的全局冷却。 */
+  public void setStuckCleanupCooldown(Duration cooldown) {
+    if (cooldown != null && !cooldown.isNegative()) {
+      this.stuckCleanupCooldown = cooldown;
     }
   }
 
@@ -479,6 +519,7 @@ public final class TrainHealthMonitor {
     int stallCount = 0;
     int progressStuckCount = 0;
     int fixedCount = 0;
+    List<StuckTrainCleanupPolicy.Candidate> stuckCleanupCandidates = new ArrayList<>();
 
     for (String trainName : active) {
       String key = keyOf(trainName);
@@ -547,13 +588,19 @@ public final class TrainHealthMonitor {
         continue;
       }
 
+      Duration progressDuration = Duration.between(lastProgress, now);
+      boolean cleanupRecoveryAttemptLimitReached =
+          trainCleanupEnabled
+              && progressDuration.compareTo(stuckCleanupThreshold) >= 0
+              && recovery.progressRecoveryAttempts >= 3;
+
       // 检测：有 PROCEED 信号但长时间静止
       if (currentSignal == SignalAspect.PROCEED && !isMoving) {
         Duration stallDuration = Duration.between(lastMove, now);
         if (stallDuration.compareTo(stallThreshold) > 0) {
           stallCount++;
           boolean fixed = false;
-          if (autoFixEnabled) {
+          if (autoFixEnabled && !cleanupRecoveryAttemptLimitReached) {
             fixed = tryFixStall(trainName, recovery, now);
             if (fixed) {
               fixedCount++;
@@ -575,7 +622,6 @@ public final class TrainHealthMonitor {
       }
 
       // 检测：进度长时间不推进
-      Duration progressDuration = Duration.between(lastProgress, now);
       Optional<DeadlockObservation> deadlockObservation =
           !progressed
                   && !isMoving
@@ -652,7 +698,7 @@ public final class TrainHealthMonitor {
         RuntimeDispatchService.SmartRecoveryInput smartRecoveryInput =
             traceSmartProgressStuckBridge(
                 trainName, currentSignal, progressDuration, "progress-stuck");
-        if (autoFixEnabled) {
+        if (autoFixEnabled && !cleanupRecoveryAttemptLimitReached) {
           fixed =
               tryFixProgressStuck(
                   trainName, currentSignal, progressDuration, recovery, now, smartRecoveryInput);
@@ -680,9 +726,15 @@ public final class TrainHealthMonitor {
                         + currentProgress
                         + " signal="
                         + currentSignal));
+        collectStuckCleanupCandidate(
+            trainName, progressDuration, recovery, now, stuckCleanupCandidates);
       } else if (progressed || progressDuration.compareTo(progressStuckThreshold) <= 0) {
         recovery.resetProgress();
       }
+    }
+
+    if (autoFixEnabled && tryCleanupLongStuckTrain(stuckCleanupCandidates, now)) {
+      fixedCount++;
     }
 
     traceSwitcherOccupantBlockingMany(active, now);
@@ -698,6 +750,7 @@ public final class TrainHealthMonitor {
     deadlockPairLastAttemptAt.clear();
     deadlockPairLastDestroyAt.clear();
     lastDeadlockDestroyAt = Instant.EPOCH;
+    lastStuckCleanupAt = Instant.EPOCH;
     deadlockEpisodes.clear();
     deadlockFallbackEvidence.clear();
     traceFingerprints.clear();
@@ -751,6 +804,9 @@ public final class TrainHealthMonitor {
     if (!canAttempt(now, recovery.lastProgressAttemptAt)) {
       traceSmartRecoveryDecision(trainName, "SMART_RECOVERY_SKIPPED", "recovery-cooldown");
       return false;
+    }
+    if (smartDispatcherMode() == SmartDispatcherMode.ENFORCE) {
+      recovery.progressRecoveryAttempts++;
     }
     debugLogger.accept(
         "SMART_RECOVERY_ACTION_ORDER train="
@@ -877,6 +933,148 @@ public final class TrainHealthMonitor {
     recovery.lastProgressAttemptAt = now;
     recovery.progressStage = fixed ? nextStage : 0;
     return fixed;
+  }
+
+  private void collectStuckCleanupCandidate(
+      String trainName,
+      Duration progressDuration,
+      RecoveryState recovery,
+      Instant now,
+      List<StuckTrainCleanupPolicy.Candidate> candidates) {
+    if (!trainCleanupEnabled
+        || progressDuration == null
+        || progressDuration.compareTo(stuckCleanupThreshold) < 0
+        || candidates == null) {
+      return;
+    }
+    Optional<RuntimeDispatchService.DeadlockTrainContext> context =
+        dispatchService.deadlockTrainContext(trainName);
+    if (context.isEmpty()) {
+      traceHealthEvent(
+          "STUCK_CLEANUP_SKIPPED",
+          "stuck-cleanup-context:" + keyOf(trainName),
+          "train=" + trainName + " reason=context-missing");
+      return;
+    }
+    StuckTrainCleanupPolicy.Candidate candidate =
+        new StuckTrainCleanupPolicy.Candidate(
+            context.get(),
+            progressDuration,
+            cleanupRecoveryObservationComplete(recovery, now),
+            hasRecentBlockers(trainName)
+                || dispatchService.hasRecentGateQueueEntry(trainName, blockerSnapshotMaxAge));
+    candidates.add(candidate);
+    StuckTrainCleanupPolicy.Eligibility eligibility =
+        StuckTrainCleanupPolicy.eligibility(
+            candidate, stuckCleanupThreshold, stuckCleanupPassengerThreshold);
+    if (eligibility != StuckTrainCleanupPolicy.Eligibility.ELIGIBLE) {
+      traceHealthEvent(
+          "STUCK_CLEANUP_SKIPPED",
+          "stuck-cleanup-skip:" + keyOf(trainName),
+          "train="
+              + trainName
+              + " reason="
+              + eligibility.reason()
+              + " stuck="
+              + progressDuration.toSeconds()
+              + "s attempts="
+              + (recovery == null ? 0 : recovery.progressRecoveryAttempts));
+    }
+  }
+
+  /**
+   * 判断最后一次分级恢复后是否已经留出完整观察窗。
+   *
+   * <p>第三次 progress 恢复只完成“恢复链耗尽”，不能在同一次健康检查中立刻销毁。必须经过至少一个后续采样，并等待最后一次 progress 或 stall recovery
+   * cooldown 到期，才能把列车交给 cleanup 复审。
+   */
+  private boolean cleanupRecoveryObservationComplete(RecoveryState recovery, Instant now) {
+    if (recovery == null || now == null || recovery.progressRecoveryAttempts < 3) {
+      return false;
+    }
+    Instant lastRecoveryAttempt = recovery.lastProgressAttemptAt;
+    if (recovery.lastStallAttemptAt != null
+        && (lastRecoveryAttempt == null
+            || recovery.lastStallAttemptAt.isAfter(lastRecoveryAttempt))) {
+      lastRecoveryAttempt = recovery.lastStallAttemptAt;
+    }
+    if (lastRecoveryAttempt == null
+        || lastRecoveryAttempt.equals(Instant.EPOCH)
+        || !now.isAfter(lastRecoveryAttempt)) {
+      return false;
+    }
+    return !now.isBefore(lastRecoveryAttempt.plus(recoveryCooldown));
+  }
+
+  /**
+   * 从本轮所有普通停滞候选中最多清理一列车。
+   *
+   * <p>选择完成后仍调用 RuntimeDispatchService 重新解析实体与上下文；Smart Dispatcher mode gate 再限制 destroy
+   * 副作用。这里不释放占用，后车恢复依赖真实 GroupRemove 触发的 OccupancyReleased 事件。
+   */
+  private boolean tryCleanupLongStuckTrain(
+      List<StuckTrainCleanupPolicy.Candidate> candidates, Instant now) {
+    if (!trainCleanupEnabled
+        || candidates == null
+        || candidates.isEmpty()
+        || now == null
+        || now.isBefore(lastStuckCleanupAt.plus(stuckCleanupCooldown))) {
+      return false;
+    }
+    Optional<StuckTrainCleanupPolicy.Candidate> selected =
+        StuckTrainCleanupPolicy.select(
+            candidates, stuckCleanupThreshold, stuckCleanupPassengerThreshold);
+    if (selected.isEmpty()) {
+      return false;
+    }
+    StuckTrainCleanupPolicy.Candidate candidate = selected.get();
+    RuntimeDispatchService.DeadlockTrainContext context = candidate.context();
+    SmartDispatcherController.StuckCleanupReview review =
+        dispatchService.reviewStuckCleanupCandidate(
+            context.trainName(),
+            context.progressIndex(),
+            candidate.recoveryExhausted(),
+            candidate.stuckDuration(),
+            stuckCleanupThreshold,
+            stuckCleanupPassengerThreshold);
+    if (!review.allowed()) {
+      traceHealthEvent(
+          "STUCK_CLEANUP_SKIPPED",
+          "stuck-cleanup-review:" + keyOf(context.trainName()),
+          "train=" + context.trainName() + " reason=" + review.reason());
+      return false;
+    }
+    if (!smartDispatcherAllowsHealthMutation(
+        context.trainName(),
+        DispatchAction.EXECUTE_VERIFIED_STUCK_CLEANUP,
+        "health-stuck-cleanup")) {
+      return false;
+    }
+    debugLogger.accept(
+        "STUCK_CLEANUP_CANDIDATE_SELECTED train="
+            + context.trainName()
+            + " stuck="
+            + candidate.stuckDuration().toSeconds()
+            + "s passengers="
+            + context.hasPassengers()
+            + " operation="
+            + context.operationType()
+            + " depotRelated="
+            + context.depotRelated());
+    debugLogger.accept(
+        "SMART_HEALTH_EFFECT_EXECUTION action=EXECUTE_VERIFIED_STUCK_CLEANUP "
+            + "effect=DESTROY_TRAIN train="
+            + context.trainName()
+            + " source=health-stuck-cleanup dispatcherAction=false");
+    lastStuckCleanupAt = now;
+    boolean destroyed =
+        dispatchService.destroyTrainByName(context.trainName(), "health-stuck-cleanup-timeout");
+    debugLogger.accept(
+        (destroyed ? "STUCK_CLEANUP_EXECUTED" : "STUCK_CLEANUP_FAILED")
+            + " train="
+            + context.trainName()
+            + " postRemovalRecovery=occupancy-release-event");
+    return destroyed;
   }
 
   /**
@@ -1392,7 +1590,7 @@ public final class TrainHealthMonitor {
             + " destroyPolicy="
             + (observation.weak() ? "diagnostic-only" : "confirmed-live-hard-cycle")
             + " destroyEnabled="
-            + deadlockDestroyEnabled
+            + trainCleanupEnabled
             + " blockerSnapshotSource="
             + observation.blockerSnapshotSource()
             + " sourceSnapshotAgeMs="
@@ -1917,7 +2115,7 @@ public final class TrainHealthMonitor {
     debugLogger.accept(
         "SMART_FALLBACK_RECOVERY_ACTION_ORDER train="
             + targetTrain
-            + " blockerTrain="
+            + fallbackCounterpartField(evidenceGroup)
             + emptyDash(followerTrain)
             + " evidenceGroup="
             + emptyDash(evidenceGroup)
@@ -2009,7 +2207,7 @@ public final class TrainHealthMonitor {
       int passengerCount,
       boolean manualControl,
       String evidenceGroup) {
-    if (!deadlockDestroyEnabled
+    if (!trainCleanupEnabled
         || deadlockDestroyThreshold == null
         || deadlockDestroyThreshold.isZero()) {
       return "DESTROY_DISABLED";
@@ -2095,7 +2293,7 @@ public final class TrainHealthMonitor {
             + " tick="
             + (now == null ? Instant.now() : now).toEpochMilli()
             + " destroyEnabled="
-            + deadlockDestroyEnabled
+            + trainCleanupEnabled
             + " thresholdSeconds="
             + requiredDestroyThreshold(null).toSeconds()
             + " cooldownRemainingMs="
@@ -2126,7 +2324,7 @@ public final class TrainHealthMonitor {
             + followerStuckLeaderEvidencePresent
             + " unlockNoReleaseTimeoutPresent="
             + unlockNoReleaseTimeoutPresent
-            + " blockerTrain="
+            + fallbackCounterpartField(evidenceGroup)
             + emptyDash(blockerTrain)
             + " resource="
             + emptyDash(resource)
@@ -2138,6 +2336,10 @@ public final class TrainHealthMonitor {
             + eligible
             + " ineligibleReason="
             + emptyDash(ineligibleReason));
+  }
+
+  private static String fallbackCounterpartField(String evidenceGroup) {
+    return "STUCK_LEADER_FALLBACK".equals(evidenceGroup) ? " evidenceFollower=" : " blockerTrain=";
   }
 
   private void traceFallbackDeadlockDestroySkipped(
@@ -2208,7 +2410,7 @@ public final class TrainHealthMonitor {
             + (noProgressDuration == null ? 0L : noProgressDuration.toMillis())
             + " noProgressDurationMs="
             + (noProgressDuration == null ? 0L : noProgressDuration.toMillis())
-            + " blockerTrain="
+            + fallbackCounterpartField(evidenceGroup)
             + emptyDash(blockerTrain)
             + " resource="
             + emptyDash(resource)
@@ -3520,7 +3722,7 @@ public final class TrainHealthMonitor {
     if (episode == null) {
       return "NOT_MUTUAL";
     }
-    if (!deadlockDestroyEnabled
+    if (!trainCleanupEnabled
         || deadlockDestroyThreshold == null
         || deadlockDestroyThreshold.isZero()) {
       return "DESTROY_DISABLED";
@@ -3645,7 +3847,7 @@ public final class TrainHealthMonitor {
 
   private boolean shouldDestroyDeadlockLeader(
       DeadlockEpisode episode, Duration progressDuration, Instant now) {
-    if (!deadlockDestroyEnabled
+    if (!trainCleanupEnabled
         || episode == null
         || episode.destroyAttempted
         || episode.weak

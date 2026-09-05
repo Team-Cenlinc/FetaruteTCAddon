@@ -439,6 +439,129 @@ class SmartDispatcherControllerTest {
     assertEquals("confirmed-live-hard-cycle-last-resort-direction-audit", review.reason());
   }
 
+  @Test
+  @DisplayName("恢复耗尽且长期无 blocker 的空车可通过 stuck cleanup 审查")
+  void stuckCleanupAllowsVerifiedEmptyTrain() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview review =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Duration.ofMinutes(11),
+                Duration.ofMinutes(10),
+                Duration.ofMinutes(30)));
+
+    assertTrue(review.allowed());
+    assertEquals("verified-long-stuck-cleanup", review.reason());
+    assertTrue(review.requiresPostVerification());
+  }
+
+  @Test
+  @DisplayName("载客列车必须等到更长保护阈值")
+  void stuckCleanupRejectsPassengerBeforeProtectedThreshold() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview review =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Duration.ofMinutes(20),
+                Duration.ofMinutes(10),
+                Duration.ofMinutes(30)));
+
+    assertFalse(review.allowed());
+    assertEquals("passenger-grace", review.reason());
+  }
+
+  @Test
+  @DisplayName("正在等新鲜 blocker 的列车不能由通用 cleanup 删除")
+  void stuckCleanupRejectsLiveQueueWaiter() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview review =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                true,
+                false,
+                false,
+                Duration.ofHours(1),
+                Duration.ofMinutes(10),
+                Duration.ofMinutes(30)));
+
+    assertFalse(review.allowed());
+    assertEquals("waiting-on-live-blocker", review.reason());
+  }
+
+  @Test
+  @DisplayName("无效 cleanup 阈值不能把全真安全标志升级为销毁授权")
+  void stuckCleanupRejectsInvalidThresholds() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview missingThreshold =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Duration.ofHours(1),
+                null,
+                Duration.ofMinutes(30)));
+    SmartDispatcherController.StuckCleanupReview negativePassengerThreshold =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Duration.ofHours(1),
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(-1)));
+
+    assertFalse(missingThreshold.allowed());
+    assertEquals("cleanup-threshold-invalid", missingThreshold.reason());
+    assertFalse(negativePassengerThreshold.allowed());
+    assertEquals("cleanup-threshold-invalid", negativePassengerThreshold.reason());
+  }
+
   private static SmartDispatcherController.ForwardDecisionInput input(
       String trainId, ForwardSignalRiskSnapshot risk) {
     return new SmartDispatcherController.ForwardDecisionInput(

@@ -130,6 +130,18 @@ Depot spawn gate 同样遵守此边界：若紧邻出库点的是 DYNAMIC，必�
 若无法选台则在 preview、spawn 与可写 acquire 之前重试，不得用 `fromTrack` 占位节点申请进路或写入
 TrainCarts destination。
 
+### Materialization 粘性
+
+同一列车、route 与 stop index 一旦选出合法 effective node，该选择在本段运行中保持稳定。后续中间 waypoint 或周期 signal tick 只能复用已经 materialize 的站台；即使另一站台此刻更空闲，也不能覆盖原选择。原站台暂时繁忙时应保持 `BLOCKED` 并等待普通占用/Gate Queue 放行，不能通过重新选台制造 destination 与已申请进路分叉。
+
+只有 materialization 的 route/声明节点/RouteStop 定义证据失效、交路 handoff 清理旧状态，或列车真实完成该进度窗口后，运行时才允许建立新的选择。相关回归应同时验证“首次选择成功”和“后续推进点不会从已选股道跳回较小股道”。
+
+### Waypoint 事件边界
+
+列车车头进入已经声明在 Route 中的普通 transit/PASS Waypoint 时，运行时会在 `MEMBER_ENTER` 立即推进并 materialize 后续 DYNAMIC 目标。这样即使 TrainCarts/TCCoasters 组合没有再送达 `GROUP_ENTER`，也不会出现 `lastPassedGraphNode` 已到咽喉、route index 与 destination 却仍停在上一段的状态。
+
+Waypoint STOP/TERMINATE 仍等待 `GROUP_ENTER`，保留整组到齐、居中与停站语义。若随后又收到同节点的 `GROUP_ENTER`，同节点/同索引去重窗会阻止重复推进。
+
 ### 占用检查
 
 - 使用 `OccupancyManager` 检查 NODE 资源占用

@@ -25,6 +25,7 @@ import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.offline.train.OfflineGroupManager;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
+import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -1548,12 +1549,13 @@ class RuntimeDispatchServiceTest {
     org.bukkit.World world = mock(org.bukkit.World.class);
     when(world.getUID()).thenReturn(worldId);
     when(event.getWorld()).thenReturn(world);
+    when(event.getAction()).thenReturn(SignActionType.MEMBER_ENTER);
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     SignNodeDefinition definition =
         new SignNodeDefinition(approach, NodeType.WAYPOINT, Optional.empty(), Optional.empty());
 
     assertFalse(service.checkDeparture(train, definition));
-    service.handleProgressTrigger(train, event, definition);
+    service.handleWaypointMemberEnter(train, event, definition);
 
     RouteDefinition stopRoute =
         new RouteDefinition(
@@ -1585,7 +1587,7 @@ class RuntimeDispatchServiceTest {
             new TrainConfigResolver(),
             null);
 
-    stopService.handleProgressTrigger(
+    stopService.handleWaypointMemberEnter(
         new FakeTrain(worldId, stopTags.properties(), false), event, definition);
 
     verify(occupancyManager, never())
@@ -1595,6 +1597,140 @@ class RuntimeDispatchServiceTest {
     verify((OccupancyQueueSupport) occupancyManager, never()).touchQueues(any());
     verify(tags.properties(), never()).setDestination(any());
     verify(stopTags.properties(), never()).setDestination(any());
+  }
+
+  @Test
+  void waypointMemberEnterKeepsMaterializedDynamicPlatformWithoutGroupEnter() throws Exception {
+    NodeId approach = NodeId.of("OP:W:PPK:1:001");
+    NodeId platformOne = NodeId.of("OP:S:PPK:1");
+    NodeId platformTwo = NodeId.of("OP:S:PPK:2");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("ppk-materialized"), List.of(approach, platformOne), Optional.empty());
+    TagStore tags =
+        new TagStore(
+            "incoming-materialized",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=ppk-materialized",
+            "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailEdge firstApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, platformOne),
+            approach,
+            platformOne,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge secondApproach =
+        new RailEdge(
+            EdgeId.undirected(approach, platformTwo),
+            approach,
+            platformTwo,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                approach, new RailNodeTest(approach),
+                platformOne, new RailNodeTest(platformOne),
+                platformTwo, new RailNodeTest(platformTwo)),
+            Map.of(firstApproach.id(), firstApproach, secondApproach.id(), secondApproach),
+            Set.of());
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "ppk-materialized"))
+        .thenReturn(Optional.of(route));
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
+    SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
+    SignNodeRegistry.SignNodeInfo platformInfo =
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(
+                platformOne, NodeType.STATION, Optional.empty(), Optional.empty()),
+            worldId,
+            "world",
+            0,
+            64,
+            0);
+    when(signNodeRegistry.findByNodeId(eq(platformOne), any()))
+        .thenReturn(Optional.of(platformInfo));
+    when(signNodeRegistry.findByNodeId(eq(platformTwo), any()))
+        .thenReturn(Optional.of(platformInfo));
+
+    OccupancyManager occupancyManager =
+        mock(
+            OccupancyManager.class,
+            org.mockito.Mockito.withSettings()
+                .extraInterfaces(
+                    OccupancyQueueSupport.class,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .dispatcher
+                        .schedule
+                        .occupancy
+                        .OccupancyPreviewSupport
+                        .class));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(((org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport)
+                occupancyManager)
+            .canEnterPreview(any()))
+        .thenAnswer(allowProceed());
+    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
+    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+    java.lang.reflect.Method forceOverride =
+        RuntimeDispatchService.class.getDeclaredMethod(
+            "forceRecordEffectiveNode",
+            String.class,
+            RouteDefinition.class,
+            int.class,
+            NodeId.class);
+    forceOverride.setAccessible(true);
+    forceOverride.invoke(service, "incoming-materialized", route, 1, platformTwo);
+    com.bergerkiller.bukkit.tc.events.SignActionEvent event =
+        mock(com.bergerkiller.bukkit.tc.events.SignActionEvent.class);
+    org.bukkit.World world = mock(org.bukkit.World.class);
+    when(world.getUID()).thenReturn(worldId);
+    when(event.getWorld()).thenReturn(world);
+    when(event.getAction()).thenReturn(SignActionType.MEMBER_ENTER);
+
+    service.handleWaypointMemberEnter(
+        new FakeTrain(worldId, tags.properties(), false),
+        event,
+        new SignNodeDefinition(approach, NodeType.WAYPOINT, Optional.empty(), Optional.empty()));
+    service.handleProgressTrigger(
+        new FakeTrain(worldId, tags.properties(), false),
+        event,
+        new SignNodeDefinition(approach, NodeType.WAYPOINT, Optional.empty(), Optional.empty()));
+
+    verify(tags.properties(), times(1)).setDestination(platformTwo.value());
+    verify(tags.properties(), never()).setDestination(platformOne.value());
+    assertEquals(
+        List.of(approach, platformTwo),
+        service.resolveEffectiveWaypointsForEvent("incoming-materialized", route));
   }
 
   @Test
@@ -5052,13 +5188,87 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  void handleSignalTickClearsBehindLookaheadFromDifferentRouteOnSharedDirectedPath() {
+    NodeId a = NodeId.of("A");
+    NodeId mid = NodeId.of("M");
+    NodeId b = NodeId.of("B");
+    RouteDefinition frontRoute =
+        new RouteDefinition(RouteId.of("front-route"), List.of(a, b), Optional.empty());
+    RouteDefinition rearRoute =
+        new RouteDefinition(RouteId.of("rear-route"), List.of(a, b), Optional.empty());
+    UUID rearRouteUuid = UUID.randomUUID();
+    TagStore frontTags =
+        new TagStore(
+            "train-front",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=front",
+            "FTA_ROUTE_INDEX=0");
+    TagStore rearTags =
+        new TagStore("train-rear", "FTA_ROUTE_ID=" + rearRouteUuid, "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithTwoEdges(a, mid, b, 10, 10);
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "front")).thenReturn(Optional.of(frontRoute));
+    when(routeDefinitions.findById(rearRouteUuid)).thenReturn(Optional.of(rearRoute));
+
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    OccupancyResource forwardEdge = OccupancyResource.forEdge(EdgeId.undirected(mid, b));
+    occupancyManager.acquire(
+        new OccupancyRequest(
+                "train-rear",
+                Optional.of(rearRoute.id()),
+                Instant.now(),
+                List.of(forwardEdge),
+                Map.of(),
+                0)
+            .withResourceIntents(Map.of(forwardEdge, ResourceIntent.LOOKAHEAD_PREVIEW)));
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-front", frontTags.properties(), frontRoute);
+    registry.initFromTags("train-rear", rearTags.properties(), rearRoute);
+    registry.updateLastPassedGraphNode("train-front", mid, Instant.now());
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleSignalTick(new FakeTrain(worldId, frontTags.properties(), false), false);
+
+    assertEquals("train-front", occupancyManager.getClaim(forwardEdge).orElseThrow().trainName());
+    assertEquals(SignalAspect.PROCEED, registry.get("train-front").orElseThrow().lastSignal());
+  }
+
+  @Test
   void handleSignalTickClearsBehindQueueEntryBeforeAuthorizingFrontTrain() {
     List<String> debugMessages = new ArrayList<>();
     NodeId a = NodeId.of("A");
+    NodeId approach = NodeId.of("M");
     NodeId switcher = NodeId.of("SW");
-    NodeId b = NodeId.of("OP:S:EXIT:1");
+    NodeId b = NodeId.of("B");
     RouteDefinition route =
-        new RouteDefinition(RouteId.of("r"), List.of(a, switcher, b), Optional.empty());
+        new RouteDefinition(RouteId.of("r"), List.of(a, approach, switcher, b), Optional.empty());
     TagStore frontTags =
         new TagStore(
             "train-front",
@@ -5068,7 +5278,7 @@ class RuntimeDispatchServiceTest {
             "FTA_ROUTE_INDEX=1");
     TagStore rearTags = new TagStore("train-rear", "FTA_ROUTE_INDEX=0");
     UUID worldId = UUID.randomUUID();
-    RailGraph graph = graphWithSwitcher(a, switcher, b, 10, 10);
+    RailGraph graph = graphWithApproachAndSwitcher(a, approach, switcher, b, 10, 10, 10);
 
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
@@ -5087,14 +5297,25 @@ class RuntimeDispatchServiceTest {
             HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
     OccupancyResource switcherConflict = OccupancyResource.forConflict("switcher:SW");
     occupancyManager.touchQueues(
-        new OccupancyRequest(
+        switcherTraversalRequest(
             "train-rear",
-            Optional.of(route.id()),
             Instant.now(),
-            List.of(switcherConflict),
-            Map.of(),
-            Map.of(switcherConflict.key(), 0),
-            0));
+            0,
+            List.of(a, approach, switcher, b),
+            List.of(
+                new RailEdge(
+                    EdgeId.undirected(a, approach), a, approach, 10, -1.0, true, Optional.empty()),
+                new RailEdge(
+                    EdgeId.undirected(approach, switcher),
+                    approach,
+                    switcher,
+                    10,
+                    -1.0,
+                    true,
+                    Optional.empty()),
+                new RailEdge(
+                    EdgeId.undirected(switcher, b), switcher, b, 10, -1.0, true, Optional.empty())),
+            List.of(switcherConflict)));
 
     RouteProgressRegistry registry = new RouteProgressRegistry();
     registry.initFromTags("train-front", frontTags.properties(), route);
@@ -5117,28 +5338,123 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, frontTags.properties(), false);
     service.handleSignalTick(train, false);
 
-    SignalAspect aspect = registry.get("train-front").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.PROCEED, aspect, debugMessages::toString);
     assertTrue(
         occupancyManager.snapshotQueues().stream()
             .flatMap(snapshot -> snapshot.entries().stream())
             .noneMatch(entry -> entry.trainName().equalsIgnoreCase("train-rear")));
+    assertFalse(
+        service.recentBlockerTrains("train-front", Duration.ofSeconds(30)).contains("train-rear"),
+        debugMessages::toString);
   }
 
   @Test
-  void handleSignalTickKeepsSwitcherQueueBlockerFromDifferentRoute() {
+  void handleSignalTickClearsBehindQueueFromDifferentRouteOnSharedDirectedPath() {
     NodeId a = NodeId.of("A");
+    NodeId approach = NodeId.of("M");
     NodeId switcher = NodeId.of("SW");
     NodeId b = NodeId.of("B");
-    RouteDefinition route =
-        new RouteDefinition(RouteId.of("r"), List.of(a, switcher, b), Optional.empty());
+    RouteDefinition frontRoute =
+        new RouteDefinition(
+            RouteId.of("front-route"), List.of(a, approach, switcher, b), Optional.empty());
+    RouteDefinition rearRoute =
+        new RouteDefinition(
+            RouteId.of("rear-route"), List.of(a, approach, switcher, b), Optional.empty());
+    UUID rearRouteUuid = UUID.randomUUID();
     TagStore frontTags =
         new TagStore(
             "train-front",
             "FTA_OPERATOR_CODE=op",
             "FTA_LINE_CODE=l1",
-            "FTA_ROUTE_CODE=r1",
+            "FTA_ROUTE_CODE=front",
             "FTA_ROUTE_INDEX=1");
+    TagStore rearTags =
+        new TagStore("train-rear", "FTA_ROUTE_ID=" + rearRouteUuid, "FTA_ROUTE_INDEX=0");
+    UUID worldId = UUID.randomUUID();
+    RailGraph graph = graphWithApproachAndSwitcher(a, approach, switcher, b, 10, 10, 10);
+
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(configManager.current()).thenReturn(testConfigView(20, 20.0));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+        .thenReturn(1000.0);
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findByCodes("op", "l1", "front")).thenReturn(Optional.of(frontRoute));
+    when(routeDefinitions.findById(rearRouteUuid)).thenReturn(Optional.of(rearRoute));
+
+    SimpleOccupancyManager occupancyManager =
+        new SimpleOccupancyManager(
+            HeadwayRule.fixed(Duration.ZERO), SignalAspectPolicy.defaultPolicy());
+    OccupancyResource switcherConflict = OccupancyResource.forConflict("switcher:SW");
+    occupancyManager.touchQueues(
+        switcherTraversalRequest(
+            "train-rear",
+            Instant.now(),
+            0,
+            List.of(a, approach, switcher, b),
+            List.of(
+                new RailEdge(
+                    EdgeId.undirected(a, approach), a, approach, 10, -1.0, true, Optional.empty()),
+                new RailEdge(
+                    EdgeId.undirected(approach, switcher),
+                    approach,
+                    switcher,
+                    10,
+                    -1.0,
+                    true,
+                    Optional.empty()),
+                new RailEdge(
+                    EdgeId.undirected(switcher, b), switcher, b, 10, -1.0, true, Optional.empty())),
+            List.of(switcherConflict)));
+
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    registry.initFromTags("train-front", frontTags.properties(), frontRoute);
+    registry.initFromTags("train-rear", rearTags.properties(), rearRoute);
+
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            railGraphService,
+            routeDefinitions,
+            registry,
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            configManager,
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    service.handleSignalTick(new FakeTrain(worldId, frontTags.properties(), false), false);
+
+    assertTrue(
+        occupancyManager.snapshotQueues().stream()
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .noneMatch(entry -> entry.trainName().equalsIgnoreCase("train-rear")));
+    assertFalse(
+        service.recentBlockerTrains("train-front", Duration.ofSeconds(30)).contains("train-rear"));
+  }
+
+  @Test
+  void handleSignalTickKeepsUnknownSwitcherQueueFromDifferentRouteOnSharedDirectedPath() {
+    NodeId a = NodeId.of("A");
+    NodeId switcher = NodeId.of("SW");
+    NodeId b = NodeId.of("B");
+    RouteDefinition frontRoute =
+        new RouteDefinition(RouteId.of("front-route"), List.of(a, switcher, b), Optional.empty());
+    RouteDefinition rearRoute =
+        new RouteDefinition(RouteId.of("rear-route"), List.of(a, switcher, b), Optional.empty());
+    UUID rearRouteUuid = UUID.randomUUID();
+    TagStore frontTags =
+        new TagStore(
+            "train-front",
+            "FTA_OPERATOR_CODE=op",
+            "FTA_LINE_CODE=l1",
+            "FTA_ROUTE_CODE=front",
+            "FTA_ROUTE_INDEX=1");
+    TagStore rearTags =
+        new TagStore("train-rear", "FTA_ROUTE_ID=" + rearRouteUuid, "FTA_ROUTE_INDEX=0");
     UUID worldId = UUID.randomUUID();
     RailGraph graph = graphWithSwitcher(a, switcher, b, 10, 10);
 
@@ -5152,7 +5468,8 @@ class RuntimeDispatchServiceTest {
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
-    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
+    when(routeDefinitions.findByCodes("op", "l1", "front")).thenReturn(Optional.of(frontRoute));
+    when(routeDefinitions.findById(rearRouteUuid)).thenReturn(Optional.of(rearRoute));
 
     SimpleOccupancyManager occupancyManager =
         new SimpleOccupancyManager(
@@ -5160,8 +5477,8 @@ class RuntimeDispatchServiceTest {
     OccupancyResource switcherConflict = OccupancyResource.forConflict("switcher:SW");
     occupancyManager.touchQueues(
         new OccupancyRequest(
-            "crossing-train",
-            Optional.of(RouteId.of("other-route")),
+            "train-rear",
+            Optional.of(rearRoute.id()),
             Instant.now(),
             List.of(switcherConflict),
             Map.of(),
@@ -5169,7 +5486,8 @@ class RuntimeDispatchServiceTest {
             0));
 
     RouteProgressRegistry registry = new RouteProgressRegistry();
-    registry.initFromTags("train-front", frontTags.properties(), route);
+    registry.initFromTags("train-front", frontTags.properties(), frontRoute);
+    registry.initFromTags("train-rear", rearTags.properties(), rearRoute);
 
     RuntimeDispatchService service =
         new RuntimeDispatchService(
@@ -5191,9 +5509,11 @@ class RuntimeDispatchServiceTest {
     SignalAspect aspect = registry.get("train-front").orElseThrow().lastSignal();
     assertEquals(SignalAspect.STOP, aspect);
     assertTrue(
-        service
-            .recentBlockerTrains("train-front", Duration.ofSeconds(30))
-            .contains("crossing-train"));
+        service.recentBlockerTrains("train-front", Duration.ofSeconds(30)).contains("train-rear"));
+    assertTrue(
+        occupancyManager.snapshotQueues().stream()
+            .flatMap(snapshot -> snapshot.entries().stream())
+            .anyMatch(entry -> entry.trainName().equalsIgnoreCase("train-rear")));
   }
 
   @Test
@@ -7574,6 +7894,7 @@ class RuntimeDispatchServiceTest {
             int.class,
             NodeId.class,
             RailGraph.class,
+            OccupancyRequest.class,
             Set.class,
             OccupancyClaim.class);
     method.setAccessible(true);
@@ -7587,6 +7908,12 @@ class RuntimeDispatchServiceTest {
                 1,
                 b,
                 graphWithTwoEdges(a, b, c, 10, 10),
+                new OccupancyRequest(
+                    "train-front",
+                    Optional.of(route.id()),
+                    Instant.now(),
+                    List.of(forwardEdge),
+                    Map.of()),
                 Set.of(forwardEdge),
                 footprint);
 
@@ -7647,6 +7974,7 @@ class RuntimeDispatchServiceTest {
             int.class,
             NodeId.class,
             RailGraph.class,
+            OccupancyRequest.class,
             Set.class,
             OccupancyClaim.class);
     method.setAccessible(true);
@@ -7660,6 +7988,12 @@ class RuntimeDispatchServiceTest {
                 1,
                 b,
                 graphWithTwoEdges(a, b, c, 10, 10),
+                new OccupancyRequest(
+                    "train-front",
+                    Optional.of(route.id()),
+                    Instant.now(),
+                    List.of(sharedCrossing),
+                    Map.of()),
                 Set.of(sharedCrossing),
                 movement);
 
@@ -8785,6 +9119,20 @@ class RuntimeDispatchServiceTest {
             b, new RailNodeTest(b)),
         Map.of(edge1.id(), edge1, edge2.id(), edge2),
         Set.of());
+  }
+
+  private static RailGraph graphWithApproachAndSwitcher(
+      NodeId a, NodeId approach, NodeId switcher, NodeId b, int length1, int length2, int length3) {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    nodes.put(a, new RailNodeTest(a));
+    nodes.put(approach, new RailNodeTest(approach));
+    nodes.put(switcher, new RailNodeTest(switcher, NodeType.SWITCHER, Optional.empty()));
+    nodes.put(b, new RailNodeTest(b));
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    addEdge(edges, a, approach, length1);
+    addEdge(edges, approach, switcher, length2);
+    addEdge(edges, switcher, b, length3);
+    return new SimpleRailGraph(nodes, edges, Set.of());
   }
 
   private static RailGraph graphWithSwitcherExit(

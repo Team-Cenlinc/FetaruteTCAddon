@@ -65,6 +65,7 @@ class TrainHealthMonitorTest {
     alertBus = new HealthAlertBus();
     debugLogs = new ArrayList<>();
     monitor = new TrainHealthMonitor(dispatchService, dwellRegistry, alertBus, debugLogs::add);
+    monitor.setTrainCleanupEnabled(true);
     when(dispatchService.smartDispatcherMode()).thenReturn(SmartDispatcherMode.ENFORCE);
     when(dispatchService.smartRecoveryInput(anyString(), any(), any()))
         .thenAnswer(
@@ -79,7 +80,12 @@ class TrainHealthMonitorTest {
         .thenReturn(RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate"));
     when(dispatchService.applySmartDrainUnlock(any()))
         .thenReturn(RuntimeDispatchService.SmartRecoveryActionResult.skipped("not-candidate"));
+    when(dispatchService.hasRecentGateQueueEntry(anyString(), any())).thenReturn(false);
     stubDefaultDestroyPrecheck();
+    when(dispatchService.reviewStuckCleanupCandidate(
+            anyString(), anyInt(), anyBoolean(), any(), any(), any()))
+        .thenReturn(
+            SmartDispatcherController.StuckCleanupReview.allowed("verified-long-stuck-cleanup"));
   }
 
   private void stubDefaultDestroyPrecheck() {
@@ -143,6 +149,210 @@ class TrainHealthMonitorTest {
   private RuntimeDispatchService.TrainRuntimeState state(
       String name, int idx, SignalAspect signal, double speedBpt) {
     return new RuntimeDispatchService.TrainRuntimeState(name, idx, signal, speedBpt);
+  }
+
+  @Test
+  void destructiveCleanupDefaultsDisabled() {
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("train1"))
+        .thenReturn(Optional.of(context("train1", 3, RouteOperationType.OPERATION, false, false)));
+    TrainHealthMonitor disabledMonitor =
+        new TrainHealthMonitor(dispatchService, dwellRegistry, alertBus, debugLogs::add);
+    disabledMonitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    disabledMonitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    disabledMonitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    disabledMonitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    disabledMonitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(60));
+    disabledMonitor.setStuckCleanupCooldown(Duration.ZERO);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    disabledMonitor.check(Set.of("train1"), t0);
+    disabledMonitor.check(Set.of("train1"), t0.plusSeconds(10));
+    disabledMonitor.check(Set.of("train1"), t0.plusSeconds(20));
+    disabledMonitor.check(Set.of("train1"), t0.plusSeconds(30));
+    disabledMonitor.check(Set.of("train1"), t0.plusSeconds(40));
+
+    verify(dispatchService, never())
+        .reviewStuckCleanupCandidate(anyString(), anyInt(), anyBoolean(), any(), any(), any());
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
+  void longStuckEmptyTrainIsCleanedAfterRecoveryIsExhausted() {
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("train1"))
+        .thenReturn(Optional.of(context("train1", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.destroyTrainByName("train1", "health-stuck-cleanup-timeout"))
+        .thenReturn(true);
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(60));
+    monitor.setStuckCleanupCooldown(Duration.ZERO);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    monitor.check(Set.of("train1"), t0.plusSeconds(30));
+    verify(dispatchService, never()).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(40));
+
+    verify(dispatchService)
+        .reviewStuckCleanupCandidate(
+            "train1",
+            3,
+            true,
+            Duration.ofSeconds(40),
+            Duration.ofSeconds(20),
+            Duration.ofSeconds(60));
+    verify(dispatchService).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+    assertEquals(1, result.fixedCount());
+  }
+
+  @Test
+  void proceedStallRecoveryCannotRunInSameCheckAsCleanup() {
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 3, SignalAspect.PROCEED, 0.0)));
+    when(dispatchService.deadlockTrainContext("train1"))
+        .thenReturn(Optional.of(context("train1", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.destroyTrainByName("train1", "health-stuck-cleanup-timeout"))
+        .thenReturn(true);
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setStallThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(60));
+    monitor.setStuckCleanupCooldown(Duration.ZERO);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    monitor.check(Set.of("train1"), t0.plusSeconds(30));
+    verify(dispatchService, never()).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+    clearInvocations(dispatchService);
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(40));
+
+    verify(dispatchService, never()).refreshSignalByName("train1");
+    verify(dispatchService, never()).forceRelaunchByName("train1");
+    verify(dispatchService).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+  }
+
+  @Test
+  void cleanupBatchSelectsEmptyTrainBeforePassengerTrain() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("passenger"))
+        .thenReturn(Optional.of(state("passenger", 1, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("empty"))
+        .thenReturn(Optional.of(state("empty", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("passenger"))
+        .thenReturn(
+            Optional.of(
+                context("passenger", 1, RouteOperationType.RETURN, true, false, true, false)));
+    when(dispatchService.deadlockTrainContext("empty"))
+        .thenReturn(Optional.of(context("empty", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.destroyTrainByName("empty", "health-stuck-cleanup-timeout"))
+        .thenReturn(true);
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupCooldown(Duration.ZERO);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    Set<String> trains = Set.of("passenger", "empty");
+
+    monitor.check(trains, t0);
+    monitor.check(trains, t0.plusSeconds(10));
+    monitor.check(trains, t0.plusSeconds(20));
+    monitor.check(trains, t0.plusSeconds(30));
+    monitor.check(trains, t0.plusSeconds(40));
+
+    verify(dispatchService).destroyTrainByName("empty", "health-stuck-cleanup-timeout");
+    verify(dispatchService, never())
+        .destroyTrainByName("passenger", "health-stuck-cleanup-timeout");
+  }
+
+  @Test
+  void liveQueueWaiterIsNeverGenericCleanupCandidate() {
+    when(dwellRegistry.remainingSeconds("waiting")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("waiting"))
+        .thenReturn(Optional.of(state("waiting", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("waiting"))
+        .thenReturn(Optional.of(context("waiting", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.recentBlockerTrains(eq("waiting"), any())).thenReturn(Set.of());
+    when(dispatchService.hasRecentGateQueueEntry(eq("waiting"), any())).thenReturn(true);
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(60));
+    monitor.setStuckCleanupCooldown(Duration.ZERO);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    monitor.check(Set.of("waiting"), t0);
+    monitor.check(Set.of("waiting"), t0.plusSeconds(10));
+    monitor.check(Set.of("waiting"), t0.plusSeconds(20));
+    monitor.check(Set.of("waiting"), t0.plusSeconds(30));
+    monitor.check(Set.of("waiting"), t0.plusSeconds(40));
+
+    verify(dispatchService, never())
+        .reviewStuckCleanupCandidate(anyString(), anyInt(), anyBoolean(), any(), any(), any());
+    verify(dispatchService, never()).destroyTrainByName("waiting", "health-stuck-cleanup-timeout");
+  }
+
+  @Test
+  void observeOnlyCyclesDoNotExhaustRecoveryBeforeEnforceIsEnabled() {
+    AtomicBoolean enforce = new AtomicBoolean();
+    when(dispatchService.smartDispatcherMode())
+        .thenAnswer(
+            invocation ->
+                enforce.get() ? SmartDispatcherMode.ENFORCE : SmartDispatcherMode.OBSERVE_ONLY);
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("train1"))
+        .thenReturn(Optional.of(context("train1", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.destroyTrainByName("train1", "health-stuck-cleanup-timeout"))
+        .thenReturn(true);
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(60));
+    monitor.setStuckCleanupCooldown(Duration.ZERO);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    monitor.check(Set.of("train1"), t0.plusSeconds(30));
+    verify(dispatchService, never()).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+
+    enforce.set(true);
+    monitor.check(Set.of("train1"), t0.plusSeconds(40));
+    monitor.check(Set.of("train1"), t0.plusSeconds(50));
+    verify(dispatchService, never()).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(60));
+    verify(dispatchService, never()).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(70));
+    verify(dispatchService).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
   }
 
   private RuntimeDispatchService.TrainRuntimeState state(
@@ -2093,7 +2303,9 @@ class TrainHealthMonitorTest {
                 message ->
                     message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
                         && message.contains("train=leader")
-                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")
+                        && message.contains("evidenceFollower=follower")
+                        && !message.contains("blockerTrain=")));
   }
 
   @Test
@@ -2157,6 +2369,13 @@ class TrainHealthMonitorTest {
                     message.contains("SMART_DESTROY_SKIPPED_SAFE_ALTERNATIVE")
                         && message.contains("recoveryDecision=SMART_FORWARD_UNLOCK")
                         && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_FALLBACK_RECOVERY_ACTION_ORDER")
+                        && message.contains("evidenceFollower=follower")
+                        && !message.contains("blockerTrain=")));
   }
 
   @Test

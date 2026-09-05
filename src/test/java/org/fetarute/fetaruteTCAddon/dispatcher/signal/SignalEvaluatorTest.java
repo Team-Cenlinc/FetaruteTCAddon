@@ -6,12 +6,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyQueueChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
@@ -176,6 +183,58 @@ class SignalEvaluatorTest {
     assertEquals(1, nextTickTasks.size());
     nextTickTasks.remove(0).run();
     assertEquals(List.of("JBS-MT"), fullyReevaluated);
+  }
+
+  @Test
+  void cleanupRemovalReleaseWakesQueuedFollowerOnNextTick() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+    OccupancyResource corridor = OccupancyResource.forConflict("single:ws:lwn~hhu");
+    Instant now = Instant.now();
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "stuck-owner",
+                    Optional.empty(),
+                    now,
+                    List.of(corridor),
+                    Map.of(corridor.key(), CorridorDirection.A_TO_B),
+                    20))
+            .allowed());
+    assertFalse(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "following-train",
+                    Optional.empty(),
+                    now.plusSeconds(1),
+                    List.of(corridor),
+                    Map.of(corridor.key(), CorridorDirection.B_TO_A),
+                    20))
+            .allowed());
+    List<Runnable> nextTickTasks = new ArrayList<>();
+    List<String> fullyReevaluated = new ArrayList<>();
+    RuntimeSignalReevaluationScheduler scheduler =
+        new RuntimeSignalReevaluationScheduler(nextTickTasks::add, fullyReevaluated::add);
+    SignalEvaluator bridge =
+        new SignalEvaluator(
+            eventBus,
+            new RuntimeDispatchRequestProvider(manager),
+            scheduler::request,
+            message -> {});
+    assertEquals(
+        List.of("following-train"),
+        new RuntimeDispatchRequestProvider(manager).trainsWaitingFor(List.of(corridor)));
+    bridge.start();
+
+    manager.releaseByTrain("stuck-owner");
+
+    assertTrue(fullyReevaluated.isEmpty());
+    assertEquals(1, nextTickTasks.size());
+    nextTickTasks.remove(0).run();
+    assertEquals(List.of("following-train"), fullyReevaluated);
   }
 
   @Test

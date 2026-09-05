@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 26;
+  private static final int EXPECTED_CONFIG_VERSION = 27;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -498,8 +498,11 @@ public final class ConfigManager {
     int progressStopGraceSeconds = 60;
     int deadlockThresholdSeconds = 45;
     int deadlockDestroyThresholdSeconds = 60;
-    boolean deadlockDestroyEnabled = false;
+    boolean trainCleanupEnabled = false;
     int deadlockDestroyCooldownSeconds = 120;
+    int stuckCleanupThresholdSeconds = 600;
+    int stuckCleanupPassengerThresholdSeconds = 1800;
+    int stuckCleanupCooldownSeconds = 120;
     int deadlockEpisodeGraceSeconds = 15;
     int deadlockMinStopSeconds = 20;
     int blockerSnapshotMaxAgeSeconds = 20;
@@ -547,14 +550,38 @@ public final class ConfigManager {
             "health.deadlock-destroy-threshold-seconds 配置无效: " + deadlockDestroyThresholdSeconds);
         deadlockDestroyThresholdSeconds = 60;
       }
-      deadlockDestroyEnabled =
-          section.getBoolean("deadlock-destroy-enabled", deadlockDestroyEnabled);
+      trainCleanupEnabled = section.getBoolean("deadlock-destroy-enabled", trainCleanupEnabled);
       deadlockDestroyCooldownSeconds =
           section.getInt("deadlock-destroy-cooldown-seconds", deadlockDestroyCooldownSeconds);
       if (deadlockDestroyCooldownSeconds < 0) {
         logger.warning(
             "health.deadlock-destroy-cooldown-seconds 配置无效: " + deadlockDestroyCooldownSeconds);
         deadlockDestroyCooldownSeconds = 120;
+      }
+      stuckCleanupThresholdSeconds =
+          section.getInt("stuck-cleanup-threshold-seconds", stuckCleanupThresholdSeconds);
+      if (stuckCleanupThresholdSeconds <= 0) {
+        logger.warning(
+            "health.stuck-cleanup-threshold-seconds 配置无效: " + stuckCleanupThresholdSeconds);
+        stuckCleanupThresholdSeconds = 600;
+      }
+      stuckCleanupPassengerThresholdSeconds =
+          section.getInt(
+              "stuck-cleanup-passenger-threshold-seconds", stuckCleanupPassengerThresholdSeconds);
+      if (stuckCleanupPassengerThresholdSeconds <= 0) {
+        logger.warning(
+            "health.stuck-cleanup-passenger-threshold-seconds 配置无效: "
+                + stuckCleanupPassengerThresholdSeconds);
+        stuckCleanupPassengerThresholdSeconds = 1800;
+      }
+      stuckCleanupPassengerThresholdSeconds =
+          Math.max(stuckCleanupThresholdSeconds, stuckCleanupPassengerThresholdSeconds);
+      stuckCleanupCooldownSeconds =
+          section.getInt("stuck-cleanup-cooldown-seconds", stuckCleanupCooldownSeconds);
+      if (stuckCleanupCooldownSeconds < 0) {
+        logger.warning(
+            "health.stuck-cleanup-cooldown-seconds 配置无效: " + stuckCleanupCooldownSeconds);
+        stuckCleanupCooldownSeconds = 120;
       }
       deadlockEpisodeGraceSeconds =
           section.getInt("deadlock-episode-grace-seconds", deadlockEpisodeGraceSeconds);
@@ -599,8 +626,11 @@ public final class ConfigManager {
         progressStopGraceSeconds,
         deadlockThresholdSeconds,
         deadlockDestroyThresholdSeconds,
-        deadlockDestroyEnabled,
+        trainCleanupEnabled,
         deadlockDestroyCooldownSeconds,
+        stuckCleanupThresholdSeconds,
+        stuckCleanupPassengerThresholdSeconds,
+        stuckCleanupCooldownSeconds,
         deadlockEpisodeGraceSeconds,
         deadlockMinStopSeconds,
         blockerSnapshotMaxAgeSeconds,
@@ -1362,8 +1392,11 @@ public final class ConfigManager {
       int progressStopGraceSeconds,
       int deadlockThresholdSeconds,
       int deadlockDestroyThresholdSeconds,
-      boolean deadlockDestroyEnabled,
+      boolean trainCleanupEnabled,
       int deadlockDestroyCooldownSeconds,
+      int stuckCleanupThresholdSeconds,
+      int stuckCleanupPassengerThresholdSeconds,
+      int stuckCleanupCooldownSeconds,
       int deadlockEpisodeGraceSeconds,
       int deadlockMinStopSeconds,
       int blockerSnapshotMaxAgeSeconds,
@@ -1393,6 +1426,16 @@ public final class ConfigManager {
       if (deadlockDestroyCooldownSeconds < 0) {
         throw new IllegalArgumentException("deadlockDestroyCooldownSeconds 必须为非负数");
       }
+      if (stuckCleanupThresholdSeconds <= 0) {
+        throw new IllegalArgumentException("stuckCleanupThresholdSeconds 必须为正数");
+      }
+      if (stuckCleanupPassengerThresholdSeconds < stuckCleanupThresholdSeconds) {
+        throw new IllegalArgumentException(
+            "stuckCleanupPassengerThresholdSeconds 不得小于 stuckCleanupThresholdSeconds");
+      }
+      if (stuckCleanupCooldownSeconds < 0) {
+        throw new IllegalArgumentException("stuckCleanupCooldownSeconds 必须为非负数");
+      }
       if (deadlockEpisodeGraceSeconds < 0) {
         throw new IllegalArgumentException("deadlockEpisodeGraceSeconds 必须为非负数");
       }
@@ -1412,7 +1455,8 @@ public final class ConfigManager {
 
     public static HealthSettings defaults() {
       return new HealthSettings(
-          true, 5, true, 30, 60, 60, 45, 60, true, 120, 15, 20, 20, 10, 10, true, true);
+          true, 5, true, 30, 60, 60, 45, 60, false, 120, 600, 1800, 120, 15, 20, 20, 10, 10, true,
+          true);
     }
   }
 

@@ -31,7 +31,7 @@
 ## Waypoint 停站
 - waypoint 节点在 RouteStop 标记为 STOP/TERMINATE 时也会执行停站（PASS 则直接通过）。
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
-- 停站仅在 `GROUP_ENTER` 触发（忽略 `MEMBER_ENTER`），避免过早点刹导致居中不稳。
+- Waypoint STOP/TERMINATE 停站仍只在 `GROUP_ENTER` 触发，避免过早点刹导致居中不稳；已声明的普通 transit/PASS Waypoint 会在车头 `MEMBER_ENTER` 立即推进，覆盖 TrainCarts 未送达 `GROUP_ENTER` 的 TCCoasters 事件边界。随后重复事件由同节点/同索引去重窗吸收。
 - 停站期间会保持 STOP 信号；STOP waypoint dwell handoff 属于明确行为例外，可提前写入下一跳 destination，确保发车时直接走寻路方向，但不会在此处放行或发车。
 - 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，并同步刷新前方冲突队列位次，避免后车在等待窗口内抢占发车顺序。
 - 运行时只要检测到列车仍在 dwell 窗口，就会强制维持 STOP（不依赖当前 index 再次命中 RouteStop），避免”停站后被提前放行”。
@@ -137,10 +137,10 @@
 - 单线走廊的冲突区放行候选仅在请求列车与 blocker 的方向都能判定且互为对向时成立；方向为 `UNKNOWN` 或队列中缺少方向信息时保持 STOP，避免把同向前后车误判为会车死锁。
 - 已有 single conflict claim 的方向不会被后续当前位置 retain/hold 覆盖，无论后续请求是无方向还是给出了相反方向；已有 `MOVEMENT_REQUIRED` 角色也不会被保护请求降级。普通请求沿用原 claim 方向，终点折返则由原子 Authority Handoff 一次性替换为反向硬授权。
 - 自持 single claim 的 zone 不在本次 `MovementPlanSnapshot` 穿越路径上、且请求对该 zone 不要求 hard authority 时，该 claim 仅视为车尾/区域保护，不否决本车继续移动（trace `SMART_SELF_OWNED_CONTINUATION_ALLOWED reason=tail-protection-zone-not-on-plan`）。claim 与方向原样保留，外部对向/未知方向列车仍由 single-region barrier 拦截；对该 zone 仍要求 hard authority 的请求保持 fail-closed。这样折返后真正的 `self-owned-single-opposite-direction` 拒绝不会被车尾保护 zone 的 `direction-unknown` 拒绝掩盖，健康监控的 `clearSelfOwnedSingleDirectionMismatch` 才能识别并清理同 zone 反向残留；该恢复入口的方向解析与占用层一致（`corridorDirections` 缺失时回退 movement plan 的 `singleConflictDirections`）。
-- 发车门控和周期信号 tick 在正式 `canEnter()` 前会清理同 Route 后方列车留在当前授权资源上的前瞻 queue entry；该步骤不释放 claim，且不同 route、未知进度、索引不在后方的列车仍会作为真实冲突阻塞。
-- 同 Route 同 index 的跟驰列车会继续比较 `lastPassedGraphNode` 在当前 route 段最短路上的顺序；当前车已经通过更靠前的中间节点时，可清理后车留在当前授权窗口里的前瞻 claim/queue，避免同向追驰互相红灯。
+- 发车门控和周期信号 tick 在正式 `canEnter()` 前会清理后方列车留在当前授权资源上的前瞻 queue entry。相同 Route 使用 progress index 与当前段节点顺序；不同 Route 还必须在双方完整 effective canonical path 中唯一证明“后车节点 → 前车节点”，并对当前 soft resource 给出相同的有向证据：EDGE 必须是同一有向边、NODE 必须具有相同前驱/后继、single conflict 必须方向一致、switcher conflict 必须具有 exact `SAME_MOVEMENT` signature。缺 route UUID、动态 materialization、路径、资源级证据或唯一顺序时继续作为真实冲突阻塞。
+- 该清理只涉及 `LOOKAHEAD_PREVIEW` 与纯 queue entry；`MOVEMENT_REQUIRED`、`PHYSICAL_FOOTPRINT`、对向、交叉、分歧/汇入签名、terminal throat mutex 与未知方向均保持原有 fail-closed 语义。
 - 单线 `CONFLICT:single` 队列只在存在对向/未知方向竞争时串行化；队列中全是同向列车时，跟驰距离交给 NODE/EDGE 硬占用控制，不再由 conflict 队列额外互斥。
-- 前向风险的同向跟驰判定会优先使用占用层的 section/queue 证明；当两车前后错开导致 claim 不在同一 section 实例时，运行时会用 `RouteProgressRegistry` 额外证明“同 route 且 blocker 索引在前”，再交给占用层作为 `knownSameRouteLeader` 证据。该 route-progress 证据可以补足 single-section 实例错位，但不能替代 switcher 的 exact movement signature；`CONFLICT:switcher` 只有双方都被分类为 `SAME_MOVEMENT` 才能按同向跟驰忽略，`MERGE / DIVERGE / HEAD_ON / CROSSING / UNKNOWN` 均继续交给道岔互斥与 Gate Queue。该证据不放宽物理 `NODE`/`EDGE` blocker；终端站台/Depot 相邻 switcher 仍由咽喉 mutex fail-closed。若任一进度缺失、route 不同、blocker 不在前、route 定义无法确认或存在重复 waypoint 折返边界，则保持原有 STOP/CAUTION 行为。
+- 前向风险的同向跟驰判定会优先使用占用层的 section/queue 证明；当两车前后错开导致 claim 不在同一 section 实例时，运行时会用 `RouteProgressRegistry` 或资源级 canonical path 证明 blocker 位于前方，再交给占用层作为 `knownDirectedPathLeader` 证据。该证据可以补足 single-section 实例错位，但不能替代 switcher 的 exact movement signature；`CONFLICT:switcher` 只有双方都被分类为 `SAME_MOVEMENT` 才能按同向跟驰忽略，`MERGE / DIVERGE / HEAD_ON / CROSSING / UNKNOWN` 均继续交给道岔互斥与 Gate Queue。该证据不放宽物理 `NODE`/`EDGE` blocker；终端站台/Depot 相邻 switcher 仍由咽喉 mutex fail-closed。若任一进度缺失、不同 Route 的资源走向不能确认、blocker 不在前、route 定义无法确认或存在重复 waypoint 折返边界，则保持原有 STOP/CAUTION 行为。
 - `SignalConstraintEnvelope` 是信号/速度约束的统一数据模型：同向前车、authority end、single conflict entry、station/depot approach、edge speed limit 等都归并为 constraint points；`SignalAspect` 只作为显示层，实际控车以 envelope 的目标速度与 STOP 模式为准。当前实现保留既有 `SignalLookahead` / movement authority 计算路径，并为后续 cache planner 提供稳定结构。
 - 可用 `/fta occupancy stats` 观察自愈与出车重试统计，`/fta occupancy heal` 可手动触发清理。
 
@@ -260,6 +260,8 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
     direction re-audit（刷新双方信号，优先让 section token 方向补齐链路重新生效）。只有 re-audit 后、等待更长 last-resort
     阈值且仍能证明阻塞活跃交通时，才允许更高门槛的安全移除。
   - 互卡 refresh/hard-stop 只是“恢复动作已执行”，不再作为“已修复”计数；真正的自动兜底由 `SmartDispatcherController -> alias-aware destroyTrainByName -> post cleanup/verification` 完成。
+  - 普通长时间停滞 cleanup 与 confirmed deadlock 分开取证且默认关闭。启用后也要求安全恢复至少尝试三轮，并在最后一次 progress/stall recovery mutation 后经过一个后续采样和完整 recovery cooldown；无受控停车/移动/live blocker/active unlock，且最近 blocker 与 Gate Queue 直接成员快照都确认没有正常等待，才进入批次排序。批次内优先空车、最后考虑载客车；执行前会再次读取 live group，且仍需 Smart Dispatcher `ENFORCE` mode gate。
+  - WS 的 LWN↔HHU 仅是普通长 corridor 竞争的一种实例：移动中的 owner 保留原子授权，对向列车进入 Gate Queue；真正失去进展的 owner 经过通用恢复与 cleanup 取证后退出，不引入 route/station 特判。
 - 每个 signal monitor tick 会先输出 `SMART_DISPATCH_GLOBAL_SNAPSHOT`，随后单车信号评估把 canonical `MovementPlanSnapshot` / `ExpandedPathPlan` 转换为 `ForwardSignalRiskSnapshot`，用于提前 CAUTION 和限速。
 - 健康检查由独立定时任务驱动（每秒 tick + `health.check-interval-seconds` 间隔门控），不再依赖信号监控任务触发。
 - 这是唯一允许因“持续静止”重新触及发车/目的地执行器的路径；它以实时健康样本和恢复冷却为证据，不能被同 tick 的 occupancy wake-up 或周期信号重评估重复触发。
@@ -314,6 +316,7 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 
 ## 调度销毁（handleDestroy）与完整清理
 - 调度销毁清理范围与 `handleTrainRemoved` 保持一致（进度、停站状态、trigger 状态、信号警告、departure gate、节点历史、动态分配、有效节点覆盖、blocker 快照、routeTrainTracker 位置条目）。Smart Dispatcher 触发的 destroy 还会在数 tick 后执行 verification：确认 runtime group、FTA managed state、occupancy claim、single queue、switcher claim、deadlock graph 与 health episode 不再引用目标列车。
+- confirmed deadlock 与普通 stuck cleanup 都只负责发起销毁，不在该调用栈提前释放现场资源。精确 `GroupRemoveEvent` 提交清理后会发布 `OccupancyReleasedEvent`；事件桥只唤醒受影响资源上已登记的 Gate Queue 队首，并合并到下一 tick 的完整授权重评估。这样既保证后续列车恢复，也不在旧车尚未物理移除时提前放行。
 - `train.destroy()` 仍延迟 1 tick 执行物理销毁；post verification 会补跑 runtime cleanup，避免 `GroupRemoveEvent` 缺失时残留 occupancy/queue/retain/blocker snapshot。
 - TrainCarts 整列销毁会先逐车厢发出 `MemberRemoveEvent`，最后才发出 `GroupRemoveEvent`/`GroupUnloadEvent`。监听器先同步冻结 FTA 源编组与可见残编的物理实例、撤销旧 Movement Authority，但不释放 claim、不清进度也不销毁；随后按源编组对象身份聚合同 tick 的 member 事件并延迟一 tick 分类。同 tick 收到组移除会取消异常候选并只走正常精确清理，只有下一 tick 仍存活的源组或残编才聚合触发一次 `unexpected-split-*`，避免批量 `/train destroyall` 被误报并递归销毁，同时关闭事件到分类之间的旧授权窗口。
 - TrainCarts split 后若把列车临时改成 `main~a/main~b`，运行时会优先使用 `FTA_TRAIN_NAME` 作为逻辑主键，不把这些后缀别名当作真实 rename，避免把进度/占用主键污染成临时名。

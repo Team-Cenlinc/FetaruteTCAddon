@@ -83,20 +83,20 @@ public interface OccupancyManager {
   /**
    * 判断某个抽象冲突 blocker 是否已被证明为同向跟驰关系。
    *
-   * <p>{@code knownSameRouteLeader} 由运行时层提供，表示双方已通过 RouteProgressRegistry 证明为同 route 且 blocker
-   * 位于前方。占用层仍必须保留自身的终端咽喉、物理资源与方向安全排除；默认实现继续 fail-closed。
+   * <p>{@code knownDirectedPathLeader} 由运行时层提供，表示双方已通过同 Route 进度或两条 canonical path 的资源级有向证据证明
+   * blocker 位于前方。占用层仍必须保留自身的 exact switcher signature、终端咽喉、物理资源与方向安全排除；默认实现继续 fail-closed。
    *
    * @param request 当前列车的占用请求
    * @param blockerResource 触发风险的 blocker 资源
    * @param blockerTrainName blocker 所属列车
-   * @param knownSameRouteLeader 是否已有运行时 route 进度证明 blocker 为同向前车
+   * @param knownDirectedPathLeader 是否已有运行时 canonical path 证明 blocker 为同向前车
    * @return 仅当实现能证明该抽象冲突可按同向跟驰处理时返回 {@code true}
    */
   default boolean isProvenSameDirectionFollower(
       OccupancyRequest request,
       OccupancyResource blockerResource,
       String blockerTrainName,
-      boolean knownSameRouteLeader) {
+      boolean knownDirectedPathLeader) {
     return false;
   }
 

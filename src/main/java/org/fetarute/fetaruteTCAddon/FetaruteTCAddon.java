@@ -1009,9 +1009,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
         java.time.Duration.ofSeconds(settings.deadlockThresholdSeconds()));
     healthMonitor.setDeadlockDestroyThreshold(
         java.time.Duration.ofSeconds(settings.deadlockDestroyThresholdSeconds()));
-    healthMonitor.setDeadlockDestroyEnabled(settings.deadlockDestroyEnabled());
+    healthMonitor.setTrainCleanupEnabled(settings.trainCleanupEnabled());
     healthMonitor.setDeadlockDestroyCooldown(
         java.time.Duration.ofSeconds(settings.deadlockDestroyCooldownSeconds()));
+    healthMonitor.setStuckCleanupThreshold(
+        java.time.Duration.ofSeconds(settings.stuckCleanupThresholdSeconds()));
+    healthMonitor.setStuckCleanupPassengerThreshold(
+        java.time.Duration.ofSeconds(settings.stuckCleanupPassengerThresholdSeconds()));
+    healthMonitor.setStuckCleanupCooldown(
+        java.time.Duration.ofSeconds(settings.stuckCleanupCooldownSeconds()));
     healthMonitor.setDeadlockEpisodeGrace(
         java.time.Duration.ofSeconds(settings.deadlockEpisodeGraceSeconds()));
     healthMonitor.setDeadlockMinStopDuration(

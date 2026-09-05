@@ -124,14 +124,29 @@ public final class HealthMonitor {
     trainMonitor.setDeadlockDestroyThreshold(threshold);
   }
 
-  /** 设置 STOP 互卡最终销毁兜底是否启用。 */
-  public void setDeadlockDestroyEnabled(boolean enabled) {
-    trainMonitor.setDeadlockDestroyEnabled(enabled);
+  /** 设置实体列车 destructive cleanup 总开关。 */
+  public void setTrainCleanupEnabled(boolean enabled) {
+    trainMonitor.setTrainCleanupEnabled(enabled);
   }
 
   /** 设置同一互卡对销毁冷却。 */
   public void setDeadlockDestroyCooldown(Duration cooldown) {
     trainMonitor.setDeadlockDestroyCooldown(cooldown);
+  }
+
+  /** 设置普通空车 stuck cleanup 阈值。 */
+  public void setStuckCleanupThreshold(Duration threshold) {
+    trainMonitor.setStuckCleanupThreshold(threshold);
+  }
+
+  /** 设置载客列车 stuck cleanup 的更长保护阈值。 */
+  public void setStuckCleanupPassengerThreshold(Duration threshold) {
+    trainMonitor.setStuckCleanupPassengerThreshold(threshold);
+  }
+
+  /** 设置普通 stuck cleanup 的全局冷却。 */
+  public void setStuckCleanupCooldown(Duration cooldown) {
+    trainMonitor.setStuckCleanupCooldown(cooldown);
   }
 
   /** 设置互卡 episode 快照抖动保留宽限。 */
