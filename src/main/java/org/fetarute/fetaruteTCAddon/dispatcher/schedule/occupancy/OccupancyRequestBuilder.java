@@ -455,6 +455,8 @@ public final class OccupancyRequestBuilder {
         resolveCorridorDirectionResolution(directionExpanded);
     Map<String, CorridorDirection> corridorDirections =
         requestCorridorDirections(resources, windowDirections, planDirections);
+    Set<String> unresolvedDirectionKeys =
+        unresolvedDirectionKeys(resources, windowDirections, planDirections, corridorDirections);
     reportFinalDirectionFailures(
         trainName,
         routeId,
@@ -489,7 +491,8 @@ public final class OccupancyRequestBuilder {
             purpose,
             Map.of(),
             intents,
-            Optional.of(directedContext));
+            Optional.of(directedContext),
+            unresolvedDirectionKeys);
     return Optional.of(
         new OccupancyRequestContext(
             request,
@@ -1891,6 +1894,41 @@ public final class OccupancyRequestBuilder {
       }
     }
     return new CorridorDirectionResolution(directions, blockedDirectionKeys);
+  }
+
+  /**
+   * 收集本次请求中“方向已被明确判定为不可确定”的单线冲突 key。
+   *
+   * <p>{@code blockedKeys} 原本只用于抑制方向与输出诊断，从未随请求下发；下游因此只能看到 corridorDirections 里的缺键，
+   * 无法区分“本次计划不含该冲突”和“证据矛盾必须 fail-closed”，于是继续沿回退链取用已持有 claim 的旧方向——
+   * 换向后旧方向复活、对向屏障失效的通路正在于此。这里把该集合限定到实际请求资源后随请求下发。
+   */
+  private Set<String> unresolvedDirectionKeys(
+      Collection<OccupancyResource> resources,
+      CorridorDirectionResolution windowDirections,
+      CorridorDirectionResolution planDirections,
+      Map<String, CorridorDirection> finalDirections) {
+    if (resources == null || resources.isEmpty()) {
+      return Set.of();
+    }
+    CorridorDirectionResolution window =
+        windowDirections == null ? CorridorDirectionResolution.empty() : windowDirections;
+    CorridorDirectionResolution plan =
+        planDirections == null ? CorridorDirectionResolution.empty() : planDirections;
+    Set<String> unresolved = new LinkedHashSet<>();
+    for (OccupancyResource resource : resources) {
+      if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
+        continue;
+      }
+      String key = resource.key();
+      if (key == null || finalDirections.containsKey(key)) {
+        continue;
+      }
+      if (plan.blockedKeys().contains(key) || window.blockedKeys().contains(key)) {
+        unresolved.add(key);
+      }
+    }
+    return Set.copyOf(unresolved);
   }
 
   private Map<String, CorridorDirection> requestCorridorDirections(

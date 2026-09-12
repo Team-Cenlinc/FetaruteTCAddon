@@ -3419,6 +3419,13 @@ public final class SimpleOccupancyManager
     if (!isSingleCorridorConflict(resource)) {
       return DirectionResolution.unknown();
     }
+    if (request.directionExplicitlyUnresolved(resource.key())) {
+      // 语义解析器已判定该冲突的方向证据矛盾或不足。缺键可以继续找其它证据，但"明确不可确定"不行：
+      // 再往下走等价的 section token、movement plan 或已持有 claim 的方向，都会把被否决的推断重新变成
+      // 看似确定的方向——换向后旧方向复活、对向屏障失效正由此而来。这里必须直接 UNKNOWN。
+      traceDirectionFailClosed(request, resource);
+      return DirectionResolution.unknown();
+    }
     CorridorDirection direction = request.corridorDirections().get(resource.key());
     if (direction != null && direction != CorridorDirection.UNKNOWN) {
       return new DirectionResolution(
@@ -3458,6 +3465,24 @@ public final class SimpleOccupancyManager
       }
     }
     return DirectionResolution.unknown();
+  }
+
+  /**
+   * 记录一次被显式否决的方向回退。
+   *
+   * <p>只做观测。该 trace 让实服日志能直接统计"因为证据矛盾而被拦下的方向回退"次数，从而区分本次收紧到底消除了多少 陈旧方向，而不是把它混进普通的方向判定失败里。
+   */
+  private void traceDirectionFailClosed(OccupancyRequest request, OccupancyResource resource) {
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                request.trainName(),
+                request.trainName(),
+                SignalComputationTrace.Source.OCCUPANCY,
+                SignalAspect.STOP)
+            .primaryReason("SMART_DIRECTION_FALLBACK_BLOCKED")
+            .field("conflictKey", resource.key())
+            .field("reason", "semantic-resolver-marked-unresolved")
+            .request(request));
   }
 
   private DirectionResolution resolveEquivalentSectionTokenDirection(
@@ -3754,7 +3779,13 @@ public final class SimpleOccupancyManager
         directionMatches,
         pathExitsZone,
         externalBlockerAhead || oppositeSingleAhead);
-    if (!directionsKnown && request.directedContext().isEmpty() && requested.isEmpty()) {
+    // "hold 刷新未带方向" 可以忽略自持 blocker；但语义解析器<b>明确判定</b>不可确定时不行——
+    // 那不是省略，是证据矛盾，必须落到下面的 fail-closed 判定。保护性/hold 请求从不携带该标记，
+    // 因此普通刷新路径不受影响。
+    if (!directionsKnown
+        && !request.directionExplicitlyUnresolved(resource.key())
+        && request.directedContext().isEmpty()
+        && requested.isEmpty()) {
       SignalComputationTrace.emit(
           SignalComputationTrace.builder(
                   request.trainName(),

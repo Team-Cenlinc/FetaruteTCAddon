@@ -890,6 +890,7 @@ final class DispatchScenarioHarness {
         "最近准入与自持判定",
         10,
         "SMART_ADMISSION_REASON",
+        "保护道岔占用",
         "SELF_OWNED",
         "ADMISSION_EXIT_PROOF",
         "REJECT_",

@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 
 /**
@@ -20,6 +21,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
  *
  * <p>purpose 标识请求来源；缺失来源只能退化为 {@link AuthorizationPurpose#RUNTIME_MOVE}，不得退化成 {@link
  * AuthorizationPurpose#CONFLICT_CLEARING}。冲突区释放还必须携带 conflictReleaseHints，证明列车已经在同一冲突区内且目标是清空出口。
+ *
+ * <p>unresolvedDirectionKeys 记录“语义解析器已明确判定不可确定方向”的单线冲突 key。它与 corridorDirections
+ * 中单纯的缺键<b>不是</b>同一件事： 缺键可能只是该冲突不在本次计划内，可以继续由其它证据补齐；而出现在本集合中的 key 表示证据本身矛盾或不足，任何回退推断都不得再给出方向， 必须按
+ * UNKNOWN 做 fail-closed 处理。二者若不区分，换向后列车会沿回退链取回自己的旧方向 claim，从而绕过对向屏障。
  */
 public record OccupancyRequest(
     String trainName,
@@ -32,7 +37,8 @@ public record OccupancyRequest(
     AuthorizationPurpose purpose,
     Map<String, ConflictReleaseHint> conflictReleaseHints,
     Map<OccupancyResource, ResourceIntent> resourceIntents,
-    Optional<DirectedTraversalContext> directedContext) {
+    Optional<DirectedTraversalContext> directedContext,
+    Set<String> unresolvedDirectionKeys) {
 
   public OccupancyRequest {
     Objects.requireNonNull(trainName, "trainName");
@@ -53,6 +59,45 @@ public record OccupancyRequest(
     conflictEntryOrders = Map.copyOf(conflictEntryOrders);
     conflictReleaseHints = Map.copyOf(conflictReleaseHints);
     resourceIntents = Map.copyOf(resourceIntents);
+    unresolvedDirectionKeys =
+        unresolvedDirectionKeys == null ? Set.of() : Set.copyOf(unresolvedDirectionKeys);
+  }
+
+  /**
+   * 返回该单线冲突的方向是否已被明确判定为不可确定。
+   *
+   * @param conflictKey 单线冲突 key
+   * @return {@code true} 表示必须按 UNKNOWN fail-closed，不得再走任何方向回退
+   */
+  public boolean directionExplicitlyUnresolved(String conflictKey) {
+    return conflictKey != null && unresolvedDirectionKeys.contains(conflictKey);
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      Map<String, Integer> conflictEntryOrders,
+      int priority,
+      AuthorizationPurpose purpose,
+      Map<String, ConflictReleaseHint> conflictReleaseHints,
+      Map<OccupancyResource, ResourceIntent> resourceIntents,
+      Optional<DirectedTraversalContext> directedContext) {
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        directedContext,
+        Set.of());
   }
 
   public OccupancyRequest(

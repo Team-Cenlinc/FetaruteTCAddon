@@ -79,22 +79,23 @@ class DispatchScenarioBaselineTest {
    *
    * <h3>为什么停用</h3>
    *
-   * <p>现状：两车已能在 BRAVO 正确交会（east 在 1 道、west 在 2 道，身后区间正常释放），随后各自保留进入侧咽喉、 又需要对方的出口侧咽喉，形成咽喉 2-cycle，停因
-   * {@code SINGLE_CORRIDOR_FAIL_CLOSED}。
+   * <p>现状：两车已能在 BRAVO 正确交会（east 在 1 道、west 在 2 道，身后区间也正常释放），随后双双停在 {@code
+   * SINGLE_CORRIDOR_FAIL_CLOSED}——<b>方向判定失败</b>，并各自保留进入侧咽喉、需要对方的出口侧咽喉。
    *
-   * <p>但这不足以判定为生产缺陷，因为骨架的拓扑前提在真实网络上并不成立：{@code SingleLineSectionIndex} 只为<b>桥边</b>生成 {@code
-   * single:section:*}，而线性走廊让每条边都是桥，于是整条走廊变成一个不可分割的互斥区。 对照 2026-09-12 实服日志：真实的 {@code
-   * single:section:bridge:*} 键<b>全部是车库短支线</b> （{@code D:HHU:1~SWITCHER:...}），正线因为成环而完全不生成该类冲突区，
-   * {@code admissionDecision} 也以 {@code NOT_APPLIED}（53 次）为主。也就是说本场景撞的墙在生产上基本不会出现。
+   * <p>已排除的假设（都实测证伪，别重复走）：<b>不是</b>道岔区保护 （{@code protectedSwitcherZoneClaims} 的 {@code 保护道岔占用}
+   * trace 从未出现，claim 是 {@code MOVEMENT_REQUIRED} 而非保护性残留）；<b>不是</b>站间缺少 INTERVAL 节点（补上后 section 变 2
+   * 条边， 静止列车进不去，方向仍未解决）；<b>不是</b> {@code single:section:} 形态不真实 （实服日志确认 {@code STATION~SWITCHER} 与
+   * {@code SWITCHER~SWITCHER} 正是生产形态）。
+   *
+   * <p>剩余差异：实服的单线冲突键带 <b>INTERVAL 语义轴锚</b> （{@code single:SURC:CGL:WYB:1:00x:<A>~<B>}，576
+   * 次），而骨架里锚是车站 （{@code single:OP:S:ALFA:1:...}）。方向解析走的正是语义轴，这条差异尚未排除。
    *
    * <h3>启用条件</h3>
    *
-   * <p>需要先让骨架拓扑具备真实网络的成环特性（正线边不是桥），使正线由 EDGE/NODE + {@code switcher:} 冲突约束， 而不是被压成一个全局 {@code
-   * single:section:} 互斥区。在那之前本场景的红色反映的是夹具保真度，不是调度行为。 已验证：{@code
-   * threeSameDirectionTrainsAllReachTheEnd} 覆盖同向多车，{@code singleTrainTraversesTheCorridor}
-   * 覆盖基线，二者均绿。
+   * <p>Phase 1（方向模型归一）落地后重新启用：届时方向来自一次运动的唯一判定，而不是逐资源的多级回退，
+   * 本场景是否仍红将直接回答"这是建模缺陷还是骨架差异"。在那之前红色不足以判定为生产缺陷。
    */
-  @org.junit.jupiter.api.Disabled("骨架拓扑把整条走廊压成单一 single:section 互斥区，该前提在生产网络上不成立；需先建成环拓扑后再启用")
+  @org.junit.jupiter.api.Disabled("停因是方向判定失败，指向 Phase 1 方向模型；道岔区保护与 INTERVAL 缺失两个假设已实测证伪")
   @Test
   void opposingTrainsSerializeAndBothPass() {
     DispatchScenarioHarness.Topology topology =
