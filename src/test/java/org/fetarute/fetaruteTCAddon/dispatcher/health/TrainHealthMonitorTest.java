@@ -2221,7 +2221,55 @@ class TrainHealthMonitorTest {
                 message ->
                     message.contains("SMART_DEADLOCK_DESTROY_EXECUTED")
                         && message.contains("train=follower")
-                        && message.contains("evidenceGroup=STUCK_LEADER_FALLBACK")));
+                        && message.contains("evidenceGroup=CURRENT_TRAIN_AUTHORITY_FALLBACK")
+                        && message.contains("blockerTrain=leader")));
+  }
+
+  @Test
+  @DisplayName("当前等待车授权失效时，恢复诊断保留原有阻塞方向")
+  void currentAuthorityFallbackDoesNotReverseWaiterAndBlocker() {
+    stubFollowerBlockedByLeader(
+        smartRecoveryInput(
+            "leader", SignalComputationTrace.TokenState.ACTIVE, true, "leader-authority-active"),
+        context("leader", 7, RouteOperationType.OPERATION, false, false));
+    when(dispatchService.smartRecoveryInput(eq("follower"), any(), any()))
+        .thenReturn(
+            smartRecoveryInput(
+                "follower",
+                SignalComputationTrace.TokenState.INVALID,
+                true,
+                "current-authority-invalid"));
+    monitor.setTrainCleanupEnabled(false);
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    Instant t0 = Instant.now();
+
+    monitor.check(Set.of("follower", "leader"), t0);
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+    monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
+
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.startsWith("SMART_DEADLOCK_DESTROY_ELIGIBILITY:")
+                        && message.contains("train=follower ")
+                        && message.contains("blockerTrain=leader ")
+                        && message.contains("evidenceGroup=CURRENT_TRAIN_AUTHORITY_FALLBACK")
+                        && message.contains("followerStuckLeaderEvidencePresent=false")),
+        debugLogs::toString);
+    assertFalse(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("train=follower ")
+                        && message.contains("evidenceFollower=leader ")));
+    assertFalse(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("train=leader ")
+                        && message.contains("blockerTrain=follower ")));
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
   @Test

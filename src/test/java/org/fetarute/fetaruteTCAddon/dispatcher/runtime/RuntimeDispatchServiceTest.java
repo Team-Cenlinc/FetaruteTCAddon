@@ -1,5 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.dynamicStop;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.graphWithConflictFreeLinearPath;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.routeStop;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.testConfigView;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,7 +15,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -29,7 +32,6 @@ import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -64,7 +66,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.FakeTrain;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.TagStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
@@ -8688,57 +8691,6 @@ class RuntimeDispatchServiceTest {
       RailGraph graph, Map<EdgeId, RailFootprintCell> cellsByEdge) {}
 
   /**
-   * 构造不携带冲突索引能力的线性图夹具。
-   *
-   * <p>用于只验证制动窗口、距离扫描或动态 authority 边界的测试，避免 {@link SimpleRailGraph} 自动生成的单线冲突组改变被测语义。
-   */
-  private static RailGraph graphWithConflictFreeLinearPath(List<NodeId> nodes, int lengthBlocks) {
-    java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> railNodes =
-        new java.util.LinkedHashMap<>();
-    java.util.List<RailEdge> edges = new java.util.ArrayList<>();
-    for (NodeId node : nodes) {
-      railNodes.put(node, new RailNodeTest(node));
-    }
-    for (int index = 0; index + 1 < nodes.size(); index++) {
-      NodeId from = nodes.get(index);
-      NodeId to = nodes.get(index + 1);
-      EdgeId edgeId = EdgeId.undirected(from, to);
-      edges.add(new RailEdge(edgeId, from, to, lengthBlocks, -1.0, true, Optional.empty()));
-    }
-    return new RailGraph() {
-      @Override
-      public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
-        return railNodes.values();
-      }
-
-      @Override
-      public java.util.Collection<RailEdge> edges() {
-        return edges;
-      }
-
-      @Override
-      public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
-        return Optional.ofNullable(railNodes.get(id));
-      }
-
-      @Override
-      public java.util.Set<RailEdge> edgesFrom(NodeId id) {
-        if (id == null) {
-          return Set.of();
-        }
-        return edges.stream()
-            .filter(edge -> edge.from().equals(id) || edge.to().equals(id))
-            .collect(java.util.stream.Collectors.toUnmodifiableSet());
-      }
-
-      @Override
-      public boolean isBlocked(EdgeId id) {
-        return false;
-      }
-    };
-  }
-
-  /**
    * 构造不产生桥链单线 section 的环形图夹具。
    *
    * <p>回边只用于证明各 route edge 存在替代路径，并使用足够大的长度避免改变逐段最短路；测试仍沿 {@code nodes} 给出的规范路径运行。
@@ -9236,70 +9188,6 @@ class RuntimeDispatchServiceTest {
         Set.of());
   }
 
-  private static ConfigManager.ConfigView testConfigView(
-      int intervalTicks, double defaultSpeedBps) {
-    ConfigManager.StorageSettings storage =
-        new ConfigManager.StorageSettings(
-            ConfigManager.StorageBackend.SQLITE,
-            new ConfigManager.SqliteSettings("data/test.sqlite"),
-            Optional.empty(),
-            new ConfigManager.PoolSettings(1, 1000, 1000, 1000));
-    ConfigManager.GraphSettings graph = new ConfigManager.GraphSettings(defaultSpeedBps, 6, 2);
-    ConfigManager.AutoStationSettings autoStation =
-        new ConfigManager.AutoStationSettings("", 1.0f, 1.0f);
-    ConfigManager.RuntimeSettings runtime =
-        new ConfigManager.RuntimeSettings(
-            intervalTicks,
-            10,
-            1,
-            1,
-            1,
-            3,
-            0.0,
-            6.0,
-            3.5,
-            true,
-            SpeedCurveType.PHYSICS,
-            1.0,
-            0.0,
-            0.2,
-            60,
-            true,
-            true,
-            2.0,
-            8.0,
-            0.15,
-            1.0,
-            1.0,
-            3,
-            true,
-            10,
-            Optional.empty(),
-            false,
-            10,
-            Optional.empty(),
-            false,
-            10,
-            Optional.empty());
-    ConfigManager.TrainTypeSettings typeDefaults = new ConfigManager.TrainTypeSettings(1.0, 1.0);
-    ConfigManager.TrainConfigSettings train =
-        new ConfigManager.TrainConfigSettings(
-            "emu", typeDefaults, typeDefaults, typeDefaults, typeDefaults);
-    return new ConfigManager.ConfigView(
-        10,
-        false,
-        "zh_CN",
-        storage,
-        graph,
-        autoStation,
-        runtime,
-        new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
-        train,
-        new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L),
-        new ConfigManager.SmartDispatcherSettings(SmartDispatcherMode.ENFORCE),
-        ConfigManager.HealthSettings.defaults());
-  }
-
   private static SignNodeRegistry registryWithStation(UUID worldId, NodeId station) {
     SignNodeRegistry registry = new SignNodeRegistry();
     registry.put(
@@ -9445,61 +9333,6 @@ class RuntimeDispatchServiceTest {
         runtime.hudPlayerDisplayEnabled(),
         runtime.hudPlayerDisplayTickIntervalTicks(),
         runtime.hudPlayerDisplayTemplate());
-  }
-
-  private static final class TagStore {
-    private final TrainProperties properties;
-    private final List<String> tags;
-
-    private TagStore(String trainName, String... initial) {
-      this.tags = new ArrayList<>(Arrays.asList(initial));
-      this.properties = mock(TrainProperties.class);
-      when(properties.getTrainName()).thenReturn(trainName);
-      when(properties.hasTags()).thenAnswer(inv -> !tags.isEmpty());
-      when(properties.getTags()).thenAnswer(inv -> List.copyOf(tags));
-      when(properties.toString()).thenReturn("TrainProperties(" + trainName + ")");
-      // 支持 addTags 和 removeTags 以测试 TrainTagHelper
-      // varargs 在 Mockito doAnswer 时，整个 varargs 作为 Object[] 传入
-      lenient()
-          .doAnswer(
-              inv -> {
-                Object[] args = inv.getArguments();
-                if (args != null) {
-                  for (Object arg : args) {
-                    if (arg instanceof String s && !s.isBlank()) {
-                      tags.add(s);
-                    }
-                  }
-                }
-                return null;
-              })
-          .when(properties)
-          .addTags(any(String[].class));
-      lenient()
-          .doAnswer(
-              inv -> {
-                Object[] args = inv.getArguments();
-                if (args != null) {
-                  for (Object arg : args) {
-                    if (arg instanceof String s) {
-                      tags.remove(s);
-                    }
-                  }
-                }
-                return null;
-              })
-          .when(properties)
-          .removeTags(any(String[].class));
-    }
-
-    private TrainProperties properties() {
-      return properties;
-    }
-
-    private void removeTagKey(String key) {
-      String prefix = key + "=";
-      tags.removeIf(tag -> tag != null && (tag.equals(key) || tag.startsWith(prefix)));
-    }
   }
 
   @Test
@@ -10983,141 +10816,6 @@ class RuntimeDispatchServiceTest {
         diagnostics.edgeSpeedLookaheadMinBps().getAsDouble(),
         1.0e-6);
     assertEquals("edge_speed_lookahead", diagnostics.finalLimiterSource());
-  }
-
-  private static final class FakeTrain implements RuntimeTrainHandle {
-    private final UUID worldId;
-    private final TrainProperties properties;
-    private final boolean moving;
-    private final double speedBlocksPerTick;
-    private final List<String> controlEvents;
-    private final String controlEventName;
-    private int launchCalls = 0;
-    private int destroyCalls = 0;
-    private int stopCalls = 0;
-    private int hardStopCalls = 0;
-    private Optional<Set<RailFootprintCell>> liveRailFootprintCells =
-        Optional.of(Set.of(new RailFootprintCell(0, 64, 0)));
-    private OptionalDouble estimatedTrainLengthBlocks = OptionalDouble.of(1.0);
-    private LinkageError liveRailFootprintFailure;
-    private LinkageError physicalIdentityFailure;
-    private boolean physicalIdentityUnavailable;
-
-    private FakeTrain(UUID worldId, TrainProperties properties, boolean moving) {
-      this(worldId, properties, moving, 0.0);
-    }
-
-    private FakeTrain(
-        UUID worldId, TrainProperties properties, boolean moving, double speedBlocksPerTick) {
-      this(worldId, properties, moving, speedBlocksPerTick, null, null);
-    }
-
-    private FakeTrain(
-        UUID worldId,
-        TrainProperties properties,
-        boolean moving,
-        double speedBlocksPerTick,
-        List<String> controlEvents,
-        String controlEventName) {
-      this.worldId = worldId;
-      this.properties = properties;
-      this.moving = moving;
-      this.speedBlocksPerTick = speedBlocksPerTick;
-      this.controlEvents = controlEvents;
-      this.controlEventName = controlEventName;
-    }
-
-    @Override
-    public boolean isValid() {
-      return true;
-    }
-
-    @Override
-    public boolean isMoving() {
-      return moving;
-    }
-
-    @Override
-    public double currentSpeedBlocksPerTick() {
-      return speedBlocksPerTick;
-    }
-
-    @Override
-    public UUID worldId() {
-      return worldId;
-    }
-
-    @Override
-    public Object physicalRuntimeIdentity() {
-      if (physicalIdentityFailure != null) {
-        throw physicalIdentityFailure;
-      }
-      return physicalIdentityUnavailable ? null : this;
-    }
-
-    @Override
-    public TrainProperties properties() {
-      return properties;
-    }
-
-    @Override
-    public OptionalDouble estimatedTrainLengthBlocks() {
-      return estimatedTrainLengthBlocks;
-    }
-
-    @Override
-    public Optional<Set<RailFootprintCell>> liveRailFootprintCells() {
-      if (liveRailFootprintFailure != null) {
-        throw liveRailFootprintFailure;
-      }
-      return liveRailFootprintCells;
-    }
-
-    @Override
-    public void stop() {
-      stopCalls++;
-    }
-
-    @Override
-    public void stopHard() {
-      hardStopCalls++;
-      stopCalls++;
-      recordControlEvent("hard-stop");
-    }
-
-    @Override
-    public void launch(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
-      launchCalls++;
-      recordControlEvent("launch");
-    }
-
-    @Override
-    public void destroy() {
-      destroyCalls++;
-    }
-
-    @Override
-    public void setRouteIndex(int index) {}
-
-    @Override
-    public void setRouteId(String routeId) {}
-
-    @Override
-    public void setDestination(String destination) {}
-
-    @Override
-    public java.util.Optional<org.bukkit.block.BlockFace> forwardDirection() {
-      return java.util.Optional.empty();
-    }
-
-    @Override
-    public void reverse() {}
-
-    private void recordControlEvent(String event) {
-      if (controlEvents != null && controlEventName != null) {
-        controlEvents.add(controlEventName + ":" + event);
-      }
-    }
   }
 
   // ====== CHANGE Action 测试 ======
@@ -21747,28 +21445,6 @@ class RuntimeDispatchServiceTest {
             Map.of(),
             Optional.of(directedContext));
     return new OccupancyRequestContext(request, List.of(firstNode, lastNode), List.of(edge));
-  }
-
-  private static RouteStop routeStop(int sequence, NodeId nodeId, RouteStopPassType passType) {
-    return new RouteStop(
-        UUID.randomUUID(),
-        sequence,
-        Optional.empty(),
-        Optional.of(nodeId.value()),
-        Optional.empty(),
-        passType,
-        Optional.empty());
-  }
-
-  private static RouteStop dynamicStop(int sequence, NodeId nodeId, String notes) {
-    return new RouteStop(
-        UUID.randomUUID(),
-        sequence,
-        Optional.empty(),
-        Optional.of(nodeId.value()),
-        Optional.empty(),
-        RouteStopPassType.STOP,
-        Optional.of(notes));
   }
 
   private RuntimeDispatchService createServiceWithHardNodeBlocker() {

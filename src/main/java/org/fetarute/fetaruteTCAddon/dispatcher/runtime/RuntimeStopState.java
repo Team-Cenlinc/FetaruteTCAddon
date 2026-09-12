@@ -1,11 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import java.time.Instant;
-import java.util.LinkedHashSet;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 
 /**
@@ -19,7 +17,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecis
  * @param detail 触发入口提供的详细原因
  * @param releaseCondition 解除 STOP 前必须成立的条件
  * @param retryTrigger 触发重新评估的事件
- * @param blockers 当前阻塞资源快照
+ * @param blockers 当前阻塞资源快照；按资源、owner 与角色去重排序，不把枚举顺序变化视为新停因
  * @param invalidatesAuthority 是否已经撤销既有 Movement Authority
  * @param enteredAt 本轮 STOP 生命周期开始时间
  */
@@ -106,7 +104,17 @@ public record RuntimeStopState(
     detail = normalize(detail, "-");
     releaseCondition = Objects.requireNonNull(releaseCondition, "releaseCondition");
     retryTrigger = Objects.requireNonNull(retryTrigger, "retryTrigger");
-    blockers = blockers == null ? List.of() : List.copyOf(blockers);
+    blockers =
+        blockers == null
+            ? List.of()
+            : List.copyOf(
+                blockers.stream()
+                    .distinct()
+                    .sorted(
+                        Comparator.comparing(Blocker::resource)
+                            .thenComparing(Blocker::owner)
+                            .thenComparing(Blocker::role))
+                    .toList());
     enteredAt = enteredAt == null ? Instant.now() : enteredAt;
   }
 
@@ -240,15 +248,12 @@ public record RuntimeStopState(
     if (decision == null || decision.blockers().isEmpty()) {
       return List.of();
     }
-    Set<Blocker> blockers = new LinkedHashSet<>();
-    for (OccupancyClaim claim : decision.blockers()) {
-      if (claim == null) {
-        continue;
-      }
-      blockers.add(
-          new Blocker(claim.resource().toString(), claim.trainName(), claim.role().name()));
-    }
-    return List.copyOf(blockers);
+    return decision.blockers().stream()
+        .filter(Objects::nonNull)
+        .map(
+            claim ->
+                new Blocker(claim.resource().toString(), claim.trainName(), claim.role().name()))
+        .toList();
   }
 
   private static String normalize(String value, String fallback) {

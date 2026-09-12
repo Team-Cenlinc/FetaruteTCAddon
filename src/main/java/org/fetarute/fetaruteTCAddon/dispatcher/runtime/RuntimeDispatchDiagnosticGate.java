@@ -19,7 +19,7 @@ import java.util.function.LongSupplier;
  *
  * <p>本类默认处理所有运行时观察 trace：忽略请求号、tick、序列号及版本号后，短时间内相同的状态只输出一次。所有观察 trace
  * 还共享有界窗口预算，避免多列车稳定运行时仍按列车数放大控制台负担。执行器审计和 unlock 事务边界会逐次原样透传， 以保留动作复核及 reservation
- * 创建、重评估、成功或回滚的完整证据；普通状态变化仍会立即输出，直到观察预算耗尽。
+ * 创建、重评估、成功或回滚的完整证据。到达提交、STOP 与真实资源生命周期由生产端按语义变化去重后逐次透传，确保实际进度、首次停因、资源释放与解除事件不被预算吞掉；普通观察状态变化仍受预算约束。
  *
  * <p>缓存采用固定容量的访问顺序 LRU，避免高基数的列车或资源标识无限占用内存。该类不参与授权、占用或速度控制， 因而不能作为任何安全判定的输入。
  */
@@ -224,7 +224,9 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
    * 识别必须逐次保留的事务审计。
    *
    * <p>执行器会在每一次请求时重新核对授权条件；unlock reservation 的创建、重评估及终态则共同组成可回放事务链。二者都不能被普通观察预算吞掉。候选选择、{@code
-   * PLAN_APPLY} 与逐 tick progress 仍受门控，避免为保留事务证据而重新放大稳定期日志。
+   * PLAN_APPLY} 与逐 tick progress 仍受门控，避免为保留事务证据而重新放大稳定期日志。{@code SMART_STOP_LIFECYCLE}
+   * 只由真实的进入、变更和解除产生；{@code SMART_RESOURCE_LIFECYCLE} 只在 claim 创建、释放或 owner/角色/方向变化时产生。 生产端已抑制稳定
+   * STOP 和 claim refresh 心跳，必须保留完整变化边界。
    *
    * @param message 原始诊断行
    * @return 是否必须逐次保留的事务审计
@@ -236,7 +238,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
     int separator = message.indexOf(' ');
     String kind = separator < 0 ? message : message.substring(0, separator);
     return switch (kind) {
-      case "SMART_UNLOCK_RESERVATION_CREATED",
+      case "SMART_ROUTE_ARRIVAL",
+          "SMART_STOP_LIFECYCLE",
+          "SMART_RESOURCE_LIFECYCLE",
+          "SMART_UNLOCK_RESERVATION_CREATED",
           "SMART_UNLOCK_AUTHORITY_REEVALUATION_REQUESTED",
           "SMART_UNLOCK_AUTHORITY_INVALID_NO_RELEASE",
           "SMART_UNLOCK_AUTHORITY_REJECTED",

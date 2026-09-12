@@ -1737,7 +1737,7 @@ public final class TrainHealthMonitor {
       if (currentTrainIsStuckDestroyTarget(trainName, current, progressDuration)) {
         if (evaluateDeadlockDestroyFallback(
             evidence,
-            "STUCK_LEADER_FALLBACK",
+            "CURRENT_TRAIN_AUTHORITY_FALLBACK",
             blocker.trainName(),
             trainName,
             resource,
@@ -1898,12 +1898,16 @@ public final class TrainHealthMonitor {
             targetSnapshot == null ? SignalAspect.STOP : targetSnapshot.signal());
     RuntimeDispatchService.DeadlockTrainContext targetContext =
         dispatchService.deadlockTrainContext(targetTrain).orElse(null);
+    boolean currentTrainAuthorityEvidence =
+        "CURRENT_TRAIN_AUTHORITY_FALLBACK".equals(requestedEvidenceGroup);
     boolean requestedStuckLeaderEvidence = "STUCK_LEADER_FALLBACK".equals(requestedEvidenceGroup);
     boolean stuckLeaderEvidence =
-        targetInput.movementTokenState() == SignalComputationTrace.TokenState.INVALID
-            || !targetInput.destinationPresent();
+        !currentTrainAuthorityEvidence
+            && (targetInput.movementTokenState() == SignalComputationTrace.TokenState.INVALID
+                || !targetInput.destinationPresent());
     String evidenceGroup =
-        "UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK".equals(requestedEvidenceGroup)
+        currentTrainAuthorityEvidence
+                || "UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK".equals(requestedEvidenceGroup)
             ? requestedEvidenceGroup
             : requestedStuckLeaderEvidence || stuckLeaderEvidence
                 ? "STUCK_LEADER_FALLBACK"
@@ -2338,8 +2342,18 @@ public final class TrainHealthMonitor {
             + emptyDash(ineligibleReason));
   }
 
+  /**
+   * 按恢复目标与等待边的关系标注另一辆车，不能把恢复目标一律当作被后车等待的 leader。
+   *
+   * <p>当前车授权失效时，另一辆车仍是其 blocker；恢复 blocker 时，另一辆车只提供等待证据。 unlock 自身超时没有外部阻塞关系，因此使用中性字段。
+   */
   private static String fallbackCounterpartField(String evidenceGroup) {
-    return "STUCK_LEADER_FALLBACK".equals(evidenceGroup) ? " evidenceFollower=" : " blockerTrain=";
+    return switch (evidenceGroup) {
+      case "STUCK_LEADER_FALLBACK" -> " evidenceFollower=";
+      case "PLANNER_WAIT_FOR_EDGE_FALLBACK" -> " evidenceWaiter=";
+      case "CURRENT_TRAIN_AUTHORITY_FALLBACK" -> " blockerTrain=";
+      default -> " counterpartTrain=";
+    };
   }
 
   private void traceFallbackDeadlockDestroySkipped(

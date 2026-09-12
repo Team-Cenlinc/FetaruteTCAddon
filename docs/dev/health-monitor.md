@@ -54,6 +54,8 @@ LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 cor
 - 自动销毁链路会输出 `DEADLOCK_EPISODE_CREATED`、`DEADLOCK_GRAPH_SNAPSHOT`、`DEADLOCK_BLOCKER_CHAIN`、`DEADLOCK_DESTROY_PRECHECK`、`DEADLOCK_DESTROY_CANDIDATE_SELECTED`、`DEADLOCK_DESTROY_ATTEMPTED`、`DEADLOCK_DESTROY_RESULT`、`DEADLOCK_DESTROY_POST_CLEANUP`、`DEADLOCK_DESTROY_VERIFY_PASSED/FAILED` 与 `DEADLOCK_DESTROY_SKIPPED`。若没有销毁，trace 应能区分：未形成 episode、weak/protective-only/stale blocker、非同一 `CONFLICT:single`、方向 `UNKNOWN`、blocker 快照缺失/过期、解析失败、实体不存在或 TrainCarts destroy API 失败。
 - 普通停滞 cleanup 使用独立的 `STUCK_CLEANUP_DESTROY_ATTEMPTED/RESULT/POST_CLEANUP/VERIFY_*` 事件与 `HEALTH_MONITOR_STUCK_CLEANUP` source，不冒充 confirmed deadlock 遥测。
 - `STUCK_LEADER_FALLBACK` 中的后车只提供 stuck-leader 证据，诊断字段使用 `evidenceFollower`；它不是前车 Signal/Occupancy 的真实 blocker。
+- `CURRENT_TRAIN_AUTHORITY_FALLBACK` 表示当前等待车自身授权失效，`train` 是当前等待车，`blockerTrain` 是它正在等待的实际 owner；不会把该 owner 写成 `evidenceFollower`，也不会据此设置 `followerStuckLeaderEvidencePresent`。
+- `PLANNER_WAIT_FOR_EDGE_FALLBACK` 评估的是被其他车等待的目标，另一辆证据车写为 `evidenceWaiter`；`UNLOCK_NO_RELEASE_TIMEOUT_FALLBACK` 使用中性的 `counterpartTrain`。这些分类不额外授予解锁或销毁权限，仍经过原有安全门。
 - `destroyTrainByName` 只有在解析到 `TrainProperties` 且实体 holder 有效时才返回成功；实体不存在时会记录 `ENTITY_NOT_FOUND`，不会把 no-op 伪报成已修复。
 - `weaker:*`、stale retain、stale queue、protective-only claim 只能作为诊断或 stale cleanup 候选，不得作为 confirmed destroy 依据。
 
@@ -100,6 +102,7 @@ LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 cor
 - HealthMonitor 由独立 Bukkit 定时任务每 1 秒调用一次 `tick()`。
 - 实际检查频率由 `health.check-interval-seconds` 控制：`tick()` 会在该间隔到达时才执行完整检查。
 - 控制台对同一列车、同一类型的稳定健康状态每分钟最多提醒一次；活动与恢复之间的状态转换会立即输出，不影响检查、恢复动作或 `/fta health alerts` 的诊断入口。
+- 健康告警包含 `train=<列车名>`；未关联具体列车的全局告警使用 `train=-`。节点车头触发日志也包含 TrainCarts 车名和事件类型，便于与运行时规范列车名、改名记录关联。
 - 设计上已与 `RuntimeSignalMonitor` 解耦，避免“运行时监控先启动、health 尚未初始化”导致周期检查失效。
 - `/fta health check` 与 `/fta health heal` 会手动触发即时检查，并附带一次强制互卡解锁尝试。
 
@@ -107,7 +110,7 @@ LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 cor
 - 信号 tick 在 `canEnter=false` 或硬 STOP 时会保留当前位置保护窗口（当前节点 + rear guard + 当前单线 corridor claim）。
 - 目的：撤销 TrainCarts 运动意图的同时，继续持有仍处于单线走廊内的 `CONFLICT:single`，避免对向列车因窗口滑动看不到 blocker 而冒进。
 - 若列车长期 STOP 且请求方向已经与自持 single claim/queue 的旧方向相反，健康恢复只会按当前授权请求清理该同车残留；方向未知、其他列车 blocker、NODE/EDGE 硬占用或普通对向会车仍保持 fail-closed。
-- 硬 STOP 会清空 TrainCarts destination route 和 destination、下发 speedLimit=0、清运动授权 token，并禁止 health reissue，直到下一次 fresh acquire 成功。
+- 硬 STOP 下发 speedLimit=0、撤销运动授权并安装 inhibitor，直到完整授权链重新签发有效 token。destination 是否清除由具体停车原因决定；图、交路等安全证据暂缺时保留原 destination 与现场 claim，但旧 destination 不再具备动车权限。
 - `HealthMonitor` 每次 `tick/check/heal` 都会先收集当前 TrainCarts 存活列车名，并调用 `RuntimeDispatchService.cleanupOrphanOccupancyClaimsWithReport(...)` 清理 progress、运行时占用、layover、departure gate、blocker snapshot 与动态站台缓存残留，然后再执行 `TrainHealthMonitor` 与 `OccupancyHealer`。
 - 普通 stuck cleanup 与互卡 destroy 都不会在发起 `train.destroy()` 时提前释放现场占用；后车恢复以精确实体移除事件为提交点，再由 Gate Queue 队首下一 tick 重评估，避免旧实体仍在轨道上时出现抢占窗口。
 - 这条兜底链路用于覆盖 `/train destroyall` 或其他未触发 `GroupRemoveEvent` 的全服列车消失场景：即使事件侧没有逐车回调，`/fta health heal` 与周期 health tick 也能按“当前存活列车集合”释放孤儿 claim 和脱管 progress。

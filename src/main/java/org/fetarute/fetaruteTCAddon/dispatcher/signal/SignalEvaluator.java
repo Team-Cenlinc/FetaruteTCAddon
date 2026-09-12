@@ -14,8 +14,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
  * 占用事实到完整信号重评估的事件桥。
  *
  * <p>资源释放，或已记录的 Gate Queue 队首资格变化，才可能使列车获得新的 Movement Authority 候选。资源获取与普通队列维护会改变内部记录， 但不会让任何等待列车从
- * blocked 变为 eligible；把它们当作 wake-up 会在同一份现场事实下反复执行完整授权。本类因此只将释放资源或精确资格变化中 已登记的队首交给下一 tick
- * 的完整运行时重评估入口。
+ * blocked 变为 eligible；把它们当作 wake-up 会在同一份现场事实下反复执行完整授权。本类将释放资源上已登记的队首与动态容量等待者，以及精确资格变化中的队首，交给下一
+ * tick 的完整运行时重评估入口。容量通知只允许重新选台，不提前取得任何资源或队列资格。
  *
  * <p>实际合并、去重和防重入由 {@link RuntimeSignalReevaluationScheduler} 承担；Gate Queue 仍是唯一 winner 来源。
  */
@@ -215,7 +215,7 @@ public final class SignalEvaluator {
    */
   public interface WaitingTrainProvider {
     /**
-     * 返回已释放资源上当前 Gate Queue 队首。
+     * 返回已释放资源上的直接 Gate Queue 队首与显式登记的容量等待者。
      *
      * @param resources 已释放资源
      * @return 获得重新授权机会的逻辑列车名

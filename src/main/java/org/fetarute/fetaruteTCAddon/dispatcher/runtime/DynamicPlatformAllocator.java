@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.bukkit.block.BlockFace;
@@ -201,7 +202,7 @@ public final class DynamicPlatformAllocator {
                   + ", stopIndex="
                   + targetIndex
                   + ")");
-          return DynamicResolution.blocked("invalid-dynamic-spec");
+          return DynamicResolution.blocked("invalid-dynamic-spec", OptionalInt.of(targetIndex));
         }
         continue;
       }
@@ -272,7 +273,7 @@ public final class DynamicPlatformAllocator {
       if (allocated.isEmpty()) {
         debugLogger.accept(
             "DYNAMIC 分配失败: 无可用站台 (train=" + trainName + ", spec=" + formatSpec(spec) + ")");
-        return DynamicResolution.blocked("no-available-platform");
+        return DynamicResolution.blocked("no-available-platform", OptionalInt.of(targetIndex));
       }
 
       NodeId allocatedNode = allocated.get();

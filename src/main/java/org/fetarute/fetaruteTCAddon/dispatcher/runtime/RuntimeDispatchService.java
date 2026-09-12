@@ -395,6 +395,10 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, RuntimeStopState> activeStopStates =
       new java.util.concurrent.ConcurrentHashMap<>();
 
+  /** 撤出普通队列的 DYNAMIC 容量等待者；仅供资源释放事件查询，不参与授权。 */
+  private final DynamicCapacityWaitRegistry dynamicCapacityWaits =
+      new DynamicCapacityWaitRegistry();
+
   /**
    * 启动现场重建门。
    *
@@ -1435,6 +1439,18 @@ public final class RuntimeDispatchService {
             : trainName -> {
               throw new IllegalStateException("signal-reevaluation-requester-not-configured");
             };
+  }
+
+  /**
+   * 查询已在变化资源上登记的动态容量等待者，供同步占用事件桥使用。
+   *
+   * <p>这里只读取预先构建的通知索引，不扫描列车进度或轨道图；返回列车仍须在下一 tick 重新完成选台和授权。
+   *
+   * @param resources 本次释放的资源
+   * @return 需要安排完整重评估的逻辑列车名
+   */
+  public List<String> trainsWaitingForDynamicCapacity(List<OccupancyResource> resources) {
+    return dynamicCapacityWaits.trainsWaitingFor(resources);
   }
 
   /** 设置 EtaService（可选），用于在推进点时使 ETA 缓存失效。 */
@@ -4438,7 +4454,7 @@ public final class RuntimeDispatchService {
           currentIndex,
           definition.nodeId(),
           now,
-          dynamicSelection.reason());
+          dynamicSelection);
       return false;
     }
     if (dynamicSelection.isSelected()) {
@@ -4742,7 +4758,7 @@ public final class RuntimeDispatchService {
       trainName = resolveTrackedTrainName(properties).orElse("unknown");
     }
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
-    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
+    Optional<RouteDefinition> routeOpt = resolveArrivalRouteOrStop(train, trainName);
     if (routeOpt.isEmpty()) {
       debugLogger.accept(
           "Station 推进失败: 未找到线路定义 train="
@@ -4791,9 +4807,8 @@ public final class RuntimeDispatchService {
       handleChangeAction(trainName, properties, stop);
     }
     // 推进 routeIndex
-    progressRegistry.advance(
-        trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
-    invalidateTrainEta(trainName);
+    recordArrivalProgress(
+        trainName, routeUuidOpt.orElse(null), route, currentIndex, currentNode, properties, now);
     debugLogger.accept(
         "Station 推进: train="
             + trainName
@@ -4851,14 +4866,7 @@ public final class RuntimeDispatchService {
     }
     if (dynamicResolution.isBlocked()) {
       holdForUnavailableDynamicDestination(
-          train,
-          properties,
-          trainName,
-          route,
-          currentIndex,
-          currentNode,
-          now,
-          dynamicResolution.reason());
+          train, properties, trainName, route, currentIndex, currentNode, now, dynamicResolution);
       return;
     }
     if (graphOpt.isPresent()) {
@@ -4972,7 +4980,14 @@ public final class RuntimeDispatchService {
     if (routeOpt.isEmpty()) {
       return false;
     }
-    RouteDefinition route = routeOpt.get();
+    return shouldAdvancePassedWaypoint(properties, definition, routeOpt.get());
+  }
+
+  private boolean shouldAdvancePassedWaypoint(
+      TrainProperties properties, SignNodeDefinition definition, RouteDefinition route) {
+    if (definition.nodeType() != NodeType.WAYPOINT) {
+      return false;
+    }
     OptionalInt tagIndex =
         TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
             .map(OptionalInt::of)
@@ -5042,7 +5057,18 @@ public final class RuntimeDispatchService {
       return;
     }
     TrainProperties properties = train.properties();
-    if (shouldAdvancePassedWaypoint(properties, definition)) {
+    if (!isFtaManagedTrain(properties)) {
+      return;
+    }
+    String trainName = handleRenameIfNeeded(properties);
+    if (trainName == null || trainName.isBlank()) {
+      trainName = resolveTrackedTrainName(properties).orElse("unknown");
+    }
+    Optional<RouteDefinition> routeOpt = resolveArrivalRouteOrStop(train, trainName);
+    if (routeOpt.isEmpty()) {
+      return;
+    }
+    if (shouldAdvancePassedWaypoint(properties, definition, routeOpt.get())) {
       handleProgressTrigger(train, event, definition);
       return;
     }
@@ -5050,9 +5076,72 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 推进点触发：申请占用 → 下发目的地 → 发车/限速。
+   * 到达事件解析交路；定义缺失时立即撤销上一周期放行。
    *
-   * <p>当前节点由牌子解析得到，下一跳从 RouteDefinition 中推导。
+   * <p>调用方必须先确认列车受 FTA 管控。缺少交路时不能猜测新索引，也不能只记录失败后沿用旧 PROCEED；复用与出站门控、信号 tick 相同的
+   * 安全状态停车入口，保留已确认的进度和现场 claim，等待交路证据恢复后重新授权。
+   */
+  private Optional<RouteDefinition> resolveArrivalRouteOrStop(
+      RuntimeTrainHandle train, String trainName) {
+    Optional<RouteDefinition> route = resolveRouteDefinition(train.properties());
+    if (route.isEmpty()) {
+      applySafetyStateUnavailableStop(
+          train,
+          train.properties(),
+          trainName,
+          null,
+          -1,
+          Instant.now(),
+          "route-definition-missing",
+          "route-definition-restored");
+    }
+    return route;
+  }
+
+  /**
+   * 提交实际到达并留下不受普通观察预算抑制的进度证据。
+   *
+   * <p>普通经过、停站与终到共用此入口。相同交路、索引和实际节点的重复事件不再发出审计记录；日志只证明到达事实已提交，不代表下一跳获得授权。
+   */
+  private void recordArrivalProgress(
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      TrainProperties properties,
+      Instant now) {
+    Optional<RouteProgressRegistry.RouteProgressEntry> previous = progressRegistry.get(trainName);
+    progressRegistry.recordArrival(
+        trainName, routeUuid, route, currentIndex, currentNode, properties, now);
+    invalidateTrainEta(trainName);
+    if (previous
+        .filter(
+            entry ->
+                entry.routeId().equals(route.id())
+                    && entry.currentIndex() == currentIndex
+                    && entry.lastPassedGraphNode().filter(currentNode::equals).isPresent())
+        .isPresent()) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_ROUTE_ARRIVAL train="
+            + trainName
+            + " route="
+            + route.id().value()
+            + " previousIndex="
+            + previous.map(RouteProgressRegistry.RouteProgressEntry::currentIndex).orElse(-1)
+            + " index="
+            + currentIndex
+            + " arrivedNode="
+            + currentNode.value());
+  }
+
+  /**
+   * 推进点触发：提交到达事实 → 申请下一跳占用 → 下发目的地 → 发车/限速。
+   *
+   * <p>当前节点由牌子解析得到，下一跳从 RouteDefinition 中推导。普通 PASS 到达后，即使下一跳容量不足、缺图或授权失败，也不能撤销本次
+   * 到达索引与实际节点；恢复时从已抵达位置重新规划。STOP/TERM 仍遵守整组到齐和停站门控。
    */
   public void handleProgressTrigger(SignActionEvent event, SignNodeDefinition definition) {
     if (event == null || definition == null || !event.hasGroup()) {
@@ -5088,7 +5177,7 @@ public final class RuntimeDispatchService {
       trainName = resolveTrackedTrainName(properties).orElse("unknown");
     }
     Optional<UUID> routeUuidOpt = readRouteUuid(properties);
-    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
+    Optional<RouteDefinition> routeOpt = resolveArrivalRouteOrStop(train, trainName);
     if (routeOpt.isEmpty()) {
       debugLogger.accept(
           "调度推进失败: 未找到线路定义 train=" + trainName + " " + describeRouteTags(properties, routeUuidOpt));
@@ -5156,9 +5245,14 @@ public final class RuntimeDispatchService {
       handleChangeAction(trainName, properties, stop);
       if (shouldEnterLayoverAtTerminateStop(route, currentIndex, stop)) {
         int dwellSeconds = resolveWaypointDwellSeconds(stop);
-        progressRegistry.advance(
-            trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
-        invalidateTrainEta(trainName);
+        recordArrivalProgress(
+            trainName,
+            routeUuidOpt.orElse(null),
+            route,
+            currentIndex,
+            currentNode,
+            properties,
+            now);
         // TERM 到达：只保留当前节点占用，释放窗口外资源，防止后车追尾
         if (occupancyManager != null) {
           RailGraph graph = resolveGraph(event).orElse(null);
@@ -5203,9 +5297,8 @@ public final class RuntimeDispatchService {
     }
     int nextIndex = currentIndex + 1;
     if (nextIndex >= route.waypoints().size()) {
-      progressRegistry.advance(
-          trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
-      invalidateTrainEta(trainName);
+      recordArrivalProgress(
+          trainName, routeUuidOpt.orElse(null), route, currentIndex, currentNode, properties, now);
       // 检查是否有 DSTY DYNAMIC depot 需要前往
       Optional<RailGraph> graphOpt = resolveGraph(event);
       if (graphOpt.isPresent()) {
@@ -5260,14 +5353,14 @@ public final class RuntimeDispatchService {
       // STOP waypoint 到达：只保留当前节点占用，释放窗口外资源，防止后车追尾
       if (occupancyManager != null) {
         if (dynamicResolution.isBlocked()) {
-          retainDynamicCapacityWaitOccupancy(trainName, route, currentNode, now);
+          retainDynamicCapacityWaitOccupancy(
+              trainName, route, currentIndex, nextIndex, currentNode, graph, now);
         } else {
           retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now, train);
         }
       }
-      progressRegistry.advance(
-          trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
-      invalidateTrainEta(trainName);
+      recordArrivalProgress(
+          trainName, routeUuidOpt.orElse(null), route, currentIndex, currentNode, properties, now);
       recordStopState(
           RuntimeStopState.plannedStop(
               trainName,
@@ -5300,6 +5393,9 @@ public final class RuntimeDispatchService {
       scheduleWaypointCenterAfterStop(event, definition.nodeId(), trainName, waypointDwellSeconds);
       return;
     }
+    // 普通经过点已实际到达，先提交进度；下一跳缺图、容量不足或授权失败都不能撤销到达事实。
+    recordArrivalProgress(
+        trainName, routeUuidOpt.orElse(null), route, currentIndex, currentNode, properties, now);
     if (graphOpt.isEmpty()) {
       debugLogger.accept(
           "调度推进失败: 未找到调度图 train="
@@ -5308,6 +5404,15 @@ public final class RuntimeDispatchService {
               + definition.nodeId().value()
               + " route="
               + route.id().value());
+      applySafetyStateUnavailableStop(
+          train,
+          properties,
+          trainName,
+          route,
+          currentIndex,
+          now,
+          "graph-snapshot-missing",
+          "graph-snapshot-restored");
       return;
     }
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
@@ -5331,14 +5436,7 @@ public final class RuntimeDispatchService {
     OccupancyRequestContext context;
     if (dynamicSelection.isBlocked()) {
       holdForUnavailableDynamicDestination(
-          train,
-          properties,
-          trainName,
-          route,
-          currentIndex,
-          currentNode,
-          now,
-          dynamicSelection.reason());
+          train, properties, trainName, route, currentIndex, currentNode, now, dynamicSelection);
       return;
     }
     if (dynamicSelection.isSelected()) {
@@ -5496,10 +5594,6 @@ public final class RuntimeDispatchService {
               + decision.earliestTime()
               + " blockers="
               + summarizeBlockers(decision));
-      // 阻塞时：已到达当前节点，但前方资源尚未 acquire 成功，不能写入下一跳 destination。
-      progressRegistry.advance(
-          trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
-      invalidateTrainEta(trainName);
       // 阻塞等待期间与停站逻辑保持一致：保留当前位置/尾部保护，并持续刷新前向冲突队列位次，
       // 避免后车在当前车等待放行时先抢到更靠前的队头。
       if (occupancyManager != null) {
@@ -5521,9 +5615,6 @@ public final class RuntimeDispatchService {
           AuthorityEnd.none());
       return;
     }
-    progressRegistry.advance(
-        trainName, routeUuidOpt.orElse(null), route, currentIndex, properties, now);
-    invalidateTrainEta(trainName);
     MovementAuthorizationToken token =
         issueMovementAuthorizationToken(
             trainName,
@@ -7661,6 +7752,7 @@ public final class RuntimeDispatchService {
     clearDepartureGate(trainName);
     clearNodeHistory(trainName);
     dynamicAllocator.clearAllocations(trainName);
+    dynamicCapacityWaits.remove(trainName);
     routeTrainTracker.remove(trainName);
     effectiveNodeOverrides.remove(key);
     blockerSnapshots.remove(key);
@@ -11385,7 +11477,7 @@ public final class RuntimeDispatchService {
           currentIndex,
           currentNode,
           recoveryNow,
-          dynamicSelection.reason());
+          dynamicSelection);
       debugLogger.accept(
           "HealthMonitor reissueDestination blocked: train="
               + trainName
@@ -12723,14 +12815,7 @@ public final class RuntimeDispatchService {
         tryDynamicPlatformAllocation(train, trainName, route, currentIndex, currentNode);
     if (dynamicResolution.isBlocked()) {
       holdForUnavailableDynamicDestination(
-          train,
-          properties,
-          trainName,
-          route,
-          currentIndex,
-          currentNode,
-          now,
-          dynamicResolution.reason());
+          train, properties, trainName, route, currentIndex, currentNode, now, dynamicResolution);
       return;
     }
 
@@ -14434,6 +14519,7 @@ public final class RuntimeDispatchService {
     }
     // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+    dynamicCapacityWaits.remove(trainName);
     blockerSnapshots.remove(normalizeTrainKey(trainName));
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
@@ -15826,18 +15912,19 @@ public final class RuntimeDispatchService {
       int currentIndex,
       NodeId currentNode,
       Instant now,
-      String reason) {
+      DynamicResolution<?> resolution) {
     RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
+    int targetIndex = resolution.blockedStopIndex().orElse(currentIndex + 1);
     int withdrawnQueueEntries =
-        retainDynamicCapacityWaitOccupancy(trainName, route, currentNode, now);
+        retainDynamicCapacityWaitOccupancy(
+            trainName, route, currentIndex, targetIndex, currentNode, graph, now);
     properties.clearDestinationRoute();
     properties.clearDestination();
     NodeId nextNode =
         currentIndex + 1 < route.waypoints().size()
             ? resolveEffectiveNode(trainName, route, currentIndex + 1)
             : null;
-    String resolvedReason =
-        reason == null || reason.isBlank() ? "dynamic-target-unavailable" : reason;
+    String resolvedReason = resolution.reason();
     OccupancyDecision blocked =
         new OccupancyDecision(
             false,
@@ -15870,7 +15957,9 @@ public final class RuntimeDispatchService {
             + " reason="
             + resolvedReason
             + " withdrawnQueueEntries="
-            + withdrawnQueueEntries);
+            + withdrawnQueueEntries
+            + " targetIndex="
+            + targetIndex);
   }
 
   private static String dynamicWaitLogLabel(String reason) {
@@ -16131,7 +16220,7 @@ public final class RuntimeDispatchService {
   /**
    * 权威运行状态暂时不可用时撤销既有放行并立即硬停车。
    *
-   * <p>调度图、Route 或进度是签发 Movement Authority 的安全证据；任一证据在周期 tick 中消失时，不能通过 early return 继续沿用上一周期的
+   * <p>调度图、Route 或进度是签发 Movement Authority 的安全证据；任一证据在事件或周期 tick 中消失时，不能通过 early return 继续沿用上一周期的
    * {@code PROCEED}。该入口保留既有占用 claim 与 TrainCarts destination，只撤销运动授权、安装 inhibitor 并发布硬
    * STOP。证据恢复后，正常信号流程必须重新完成 acquire、token 激活和最终信号验证，才会自动清除 inhibitor。
    *
@@ -16924,6 +17013,7 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return;
     }
+    dynamicCapacityWaits.remove(trainName);
     RuntimeStopState cleared = activeStopStates.remove(key);
     if (cleared == null) {
       return;
@@ -18347,27 +18437,28 @@ public final class RuntimeDispatchService {
         readEffectiveNode(trainName, route, targetIndex)
             .filter(node -> DynamicStopMatcher.matchesStop(node, stopOpt.get()));
 
-    Optional<DynamicSelection> selection =
-        selectDynamicStationTargetForProgressCandidate(
-            trainName,
-            route,
-            currentIndex,
-            targetIndex,
-            fromNode,
-            graph,
-            builder,
-            now,
-            priority,
-            baseNodes,
-            spec,
-            materializedTarget,
-            purpose);
-    return selection
-        .<DynamicResolution<DynamicSelection>>map(DynamicResolution::selected)
-        .orElseGet(() -> DynamicResolution.blocked("no-available-dynamic-target"));
+    return selectDynamicStationTargetForProgressCandidate(
+        trainName,
+        route,
+        currentIndex,
+        targetIndex,
+        fromNode,
+        graph,
+        builder,
+        now,
+        priority,
+        baseNodes,
+        spec,
+        materializedTarget,
+        purpose);
   }
 
-  private Optional<DynamicSelection> selectDynamicStationTargetForProgressCandidate(
+  /**
+   * 选择可达且有容量的目标，并把各候选的首个拒绝原因带回 STOP 生命周期。
+   *
+   * <p>候选 owner/角色仅是诊断证据，不能写入实际授权 blocker 集合；咽喉忙碌的可用站台仍进入普通 FIFO 授权链。
+   */
+  private DynamicResolution<DynamicSelection> selectDynamicStationTargetForProgressCandidate(
       String trainName,
       RouteDefinition route,
       int currentIndex,
@@ -18387,18 +18478,31 @@ public final class RuntimeDispatchService {
 
     // 收集所有可行的候选
     List<DynamicCandidate> candidates = new java.util.ArrayList<>();
+    List<String> rejections = new ArrayList<>();
     for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
       NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (materializedTarget.isPresent() && !materializedTarget.get().equals(candidate)) {
         continue;
       }
       if (!isDynamicCandidateKnown(candidate, graph)) {
+        rejections.add("candidate=" + candidate.value() + ":node-or-sign-missing");
         continue;
       }
-      if (!isNodeFree(trainName, candidate)) {
+      List<OccupancyClaim> nodeBlockers = externalNodeClaims(trainName, candidate);
+      if (!nodeBlockers.isEmpty()) {
+        rejections.add(
+            "candidate="
+                + candidate.value()
+                + ":node-occupied:"
+                + nodeBlockers.stream()
+                    .map(claim -> "owner=" + claim.trainName() + ":role=" + claim.role().name())
+                    .distinct()
+                    .sorted()
+                    .toList());
         continue;
       }
       if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
+        rejections.add("candidate=" + candidate.value() + ":unreachable");
         continue;
       }
       List<NodeId> nodes = new java.util.ArrayList<>(baseNodes);
@@ -18416,6 +18520,7 @@ public final class RuntimeDispatchService {
               purpose,
               OptionalInt.of(targetIndex));
       if (ctxOpt.isEmpty()) {
+        rejections.add("candidate=" + candidate.value() + ":movement-plan-unresolvable");
         continue;
       }
       OccupancyRequest request = ctxOpt.get().request();
@@ -18439,7 +18544,8 @@ public final class RuntimeDispatchService {
               + spec.fromTrack()
               + ":"
               + spec.toTrack());
-      return Optional.empty();
+      return DynamicResolution.blocked(
+          "no-available-dynamic-target rejections=" + rejections, OptionalInt.of(targetIndex));
     }
 
     List<DynamicCandidate> preferredCandidates =
@@ -18448,7 +18554,8 @@ public final class RuntimeDispatchService {
         preferredCandidates.isEmpty() ? candidates : preferredCandidates;
     if (selectionPool.size() == 1) {
       DynamicCandidate single = selectionPool.get(0);
-      return Optional.of(new DynamicSelection(single.candidate, single.context, single.decision));
+      return DynamicResolution.selected(
+          new DynamicSelection(single.candidate, single.context, single.decision));
     }
 
     // 多个候选时，按方向优选
@@ -18457,12 +18564,13 @@ public final class RuntimeDispatchService {
             trainName, fromNode, baseNodes, currentIndex, selectionPool, graph);
 
     if (best != null) {
-      return Optional.of(new DynamicSelection(best.candidate, best.context, best.decision));
+      return DynamicResolution.selected(
+          new DynamicSelection(best.candidate, best.context, best.decision));
     }
 
     // 兜底：返回第一个候选
     DynamicCandidate fallback = selectionPool.get(0);
-    return Optional.of(
+    return DynamicResolution.selected(
         new DynamicSelection(fallback.candidate, fallback.context, fallback.decision));
   }
 
@@ -18889,20 +18997,17 @@ public final class RuntimeDispatchService {
     if (nodeId == null || occupancyManager == null) {
       return false;
     }
+    return externalNodeClaims(trainName, nodeId).isEmpty();
+  }
+
+  /** 读取目标节点的外车 claim，供候选筛选与对应拒绝证据共用同一份快照。 */
+  private List<OccupancyClaim> externalNodeClaims(String trainName, NodeId nodeId) {
     OccupancyResource resource = OccupancyResource.forNode(nodeId);
-    for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
-      if (claim == null || claim.resource() == null) {
-        continue;
-      }
-      if (!resource.equals(claim.resource())) {
-        continue;
-      }
-      if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
-        continue;
-      }
-      return false;
-    }
-    return true;
+    return occupancyManager.snapshotClaims().stream()
+        .filter(Objects::nonNull)
+        .filter(claim -> resource.equals(claim.resource()))
+        .filter(claim -> !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName))
+        .toList();
   }
 
   /**
@@ -19120,6 +19225,7 @@ public final class RuntimeDispatchService {
       }
 
       migrateStartupPhysicalHydrationOwner(previousKey, currentKey);
+      dynamicCapacityWaits.rename(previousTrainName, currentTrainName);
 
       movementAuthorizationTokens.remove(previousKey);
       movementAuthorizationTokens.remove(currentKey);
@@ -26055,6 +26161,7 @@ public final class RuntimeDispatchService {
         || index >= route.waypoints().size()) {
       return;
     }
+    dynamicCapacityWaits.targetResolved(trainName, route.id(), index);
     NodeId declared = route.waypoints().get(index);
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {
@@ -27085,11 +27192,18 @@ public final class RuntimeDispatchService {
   /**
    * 在 DYNAMIC 容量耗尽时刷新当前位置保护。
    *
-   * <p>该入口先撤回纯排队位次，再仅在当前位置没有任何本车 claim 时补一个 NODE/HOLD_ONLY claim。它不构造前向边或冲突资源，也不刷新、降级、收缩既有
-   * claim；无可用站台不是改变真实占用角色的物理证据。
+   * <p>先登记下一动态目标的容量通知，再撤回纯排队位次；资源释放后由通知请求下一 tick 重评估。仅在当前位置没有任何本车 claim 时补一个 NODE/HOLD_ONLY
+   * claim。本入口不构造前向边或冲突资源，也不刷新、降级、收缩既有 claim；无可用站台不是改变真实占用角色的物理证据。
    */
   private int retainDynamicCapacityWaitOccupancy(
-      String trainName, RouteDefinition route, NodeId currentNode, Instant now) {
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      int targetIndex,
+      NodeId currentNode,
+      RailGraph graph,
+      Instant now) {
+    registerDynamicCapacityWait(trainName, route, currentIndex, targetIndex, graph);
     int withdrawnQueueEntries = withdrawForwardQueuePositions(trainName);
     if (occupancyManager == null
         || trainName == null
@@ -27121,6 +27235,42 @@ public final class RuntimeDispatchService {
       occupancyManager.acquire(locationHold);
     }
     return withdrawnQueueEntries;
+  }
+
+  /**
+   * 在正常调度调用栈内预先索引已知候选 NODE，供释放事件按资源直接定位等待窗口。
+   *
+   * <p>只枚举图快照中匹配既有 DYNAMIC 解析规则的站台/Depot，不将咽喉或整条进路加入通知。已有 materialization 时只监听该目标，避免无关站台释放反复唤醒。
+   * 图或定义缺失时清除旧通知并继续 fail-closed，不能用通知推断新目标。
+   */
+  private void registerDynamicCapacityWait(
+      String trainName, RouteDefinition route, int currentIndex, int targetIndex, RailGraph graph) {
+    if (route == null || graph == null) {
+      dynamicCapacityWaits.remove(trainName);
+      return;
+    }
+    Optional<DynamicStopMatcher.DynamicSpec> spec =
+        routeDefinitions
+            .findStop(route.id(), targetIndex)
+            .flatMap(DynamicStopMatcher::parseDynamicSpec);
+    if (spec.isEmpty()) {
+      dynamicCapacityWaits.remove(trainName);
+      return;
+    }
+    Optional<NodeId> materializedTarget =
+        readEffectiveNode(trainName, route, targetIndex)
+            .filter(node -> DynamicStopMatcher.matches(node, spec.get()));
+    List<OccupancyResource> resources =
+        materializedTarget
+            .map(node -> List.of(OccupancyResource.forNode(node)))
+            .orElseGet(
+                () ->
+                    graph.nodes().stream()
+                        .map(RailNode::id)
+                        .filter(node -> DynamicStopMatcher.matches(node, spec.get()))
+                        .map(OccupancyResource::forNode)
+                        .toList());
+    dynamicCapacityWaits.register(trainName, route.id(), currentIndex, targetIndex, resources);
   }
 
   /**
@@ -27811,6 +27961,7 @@ public final class RuntimeDispatchService {
       return;
     }
     if (route != null) {
+      dynamicCapacityWaits.retainCurrentWindow(trainName, route.id(), minIndexToKeep);
       dynamicAllocator.releaseCompletedAllocations(trainName, route.id(), minIndexToKeep);
     }
     String key = normalizeTrainKey(trainName);

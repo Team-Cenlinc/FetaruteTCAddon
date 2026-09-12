@@ -123,6 +123,13 @@ CRET DYNAMIC:SURN:D:DEPOT:[1:3]    # CRET + DYNAMIC 简写
 queue entry，让已经停靠的列车能够先取得出站进路。已取得的 NODE、EDGE、
 CONFLICT claim 以及列车实际占用的轨道不会因此释放或绕过。
 
+撤队后，运行时通过 `DynamicCapacityWaitRegistry` 单独登记已知候选站台/Depot 的 NODE
+通知。目标索引来自选台器的受阻结果，覆盖隔着中间 PASS 的提前选台；当前索引单独用于窗口失效判断。
+释放事件按资源索引查找等待者，并安排下一 Bukkit tick 完整重评估；无需等到健康检查
+或重新触发牌子。通知本身不占队列、不授予优先权，也不签发授权；若候选已被其他列车重新占用，
+仍保持 STOP 并继续等待。已有 materialization 时只监听该目标，选台成功后撤销容量通知，
+后续咽喉竞争进入普通 Gate Queue。推进、交路切换、列车移除与已提交的改名同步清理或迁移通知。
+
 若站台空闲且可达，只是咽喉、单线或道岔暂时繁忙，选择器仍会 materialize 该站台，
 随后由普通授权链进入 FIFO queue；此时不得误报为容量耗尽并反复撤队。授权请求只能到达
 首个已 materialize 的 DYNAMIC 目标，不能借由 lookahead 或原子联锁越过后续声明占位节点。
@@ -132,15 +139,19 @@ TrainCarts destination。
 
 ### Materialization 粘性
 
-同一列车、route 与 stop index 一旦选出合法 effective node，该选择在本段运行中保持稳定。后续中间 waypoint 或周期 signal tick 只能复用已经 materialize 的站台；即使另一站台此刻更空闲，也不能覆盖原选择。原站台暂时繁忙时应保持 `BLOCKED` 并等待普通占用/Gate Queue 放行，不能通过重新选台制造 destination 与已申请进路分叉。
+同一列车、route 与 stop index 一旦选出合法 effective node，该选择在本段运行中保持稳定。后续中间 waypoint 或周期 signal tick 只能复用已经 materialize 的站台；即使另一站台此刻更空闲，也不能覆盖原选择。原站台 NODE 暂时繁忙时保持 `BLOCKED` 并监听该站台容量释放；站台有容量而进路繁忙时等待普通 Gate Queue，不能通过重新选台制造 destination 与已申请进路分叉。
 
 只有 materialization 的 route/声明节点/RouteStop 定义证据失效、交路 handoff 清理旧状态，或列车真实完成该进度窗口后，运行时才允许建立新的选择。相关回归应同时验证“首次选择成功”和“后续推进点不会从已选股道跳回较小股道”。
 
 ### Waypoint 事件边界
 
-列车车头进入已经声明在 Route 中的普通 transit/PASS Waypoint 时，运行时会在 `MEMBER_ENTER` 立即推进并 materialize 后续 DYNAMIC 目标。这样即使 TrainCarts/TCCoasters 组合没有再送达 `GROUP_ENTER`，也不会出现 `lastPassedGraphNode` 已到咽喉、route index 与 destination 却仍停在上一段的状态。
+列车车头进入已经声明在 Route 中的普通 transit/PASS Waypoint 时，运行时会在 `MEMBER_ENTER` 先提交到达索引和实际节点，再尝试 materialize 后续 DYNAMIC 目标。到达事实与下一跳授权相互独立：即使站台容量不足、图快照缺失或前向计划无法构建，也保留本次进度并安全停车；恢复后从已抵达位置规划下一目标，不重新下发已到达的 PASS 点。这样即使 TrainCarts/TCCoasters 组合没有再送达 `GROUP_ENTER`，也不会丢失到达事实。
+
+到达动态站台时，`RouteProgressRegistry.recordArrival` 在同一份进度快照中提交索引与实际股道。例如声明节点是 PPK 1、列车实际到达 PPK 2 时，`lastPassedGraphNode` 必须是 PPK 2。没有现场事件证据的初始化、交路移交继续使用各自的恢复规则。
 
 Waypoint STOP/TERMINATE 仍等待 `GROUP_ENTER`，保留整组到齐、居中与停站语义。若随后又收到同节点的 `GROUP_ENTER`，同节点/同索引去重窗会阻止重复推进。
+
+实际进度提交记录为 `SMART_ROUTE_ARRIVAL`，带列车名、交路、前后索引与 `arrivedNode`。前向候选选择无可用目标时，会把各候选的首个拒绝原因带入 `SMART_STOP_LIFECYCLE.detail`：节点/牌子缺失、节点占用、不可达或无法构建进路；节点占用还包含当时的 owner 与 claim role。这些候选证据只解释选台失败，不作为真实前向 blocker 或放行依据。相关诊断与复现边界见 [2026-09-05 拥堵修复记录](dispatch-congestion-20260905.md)。
 
 ### 占用检查
 

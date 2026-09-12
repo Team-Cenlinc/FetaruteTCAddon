@@ -59,7 +59,13 @@ public final class RouteProgressRegistry {
     String normalizedName = requireTrainName(trainName);
     int index = TrainTagHelper.readIntTag(properties, TAG_ROUTE_INDEX).orElse(0);
     RouteProgressEntry entry =
-        upsert(normalizedName, parseRouteId(properties).orElse(null), route, index, Instant.now());
+        upsert(
+            normalizedName,
+            parseRouteId(properties).orElse(null),
+            route,
+            index,
+            Instant.now(),
+            Optional.empty());
     TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     return entry;
   }
@@ -67,7 +73,8 @@ public final class RouteProgressRegistry {
   /**
    * 推进进度并写回 tag。
    *
-   * <p>currentIndex 为“已抵达节点索引”。
+   * <p>currentIndex 为“已抵达节点索引”。该入口供没有现场到达事件的初始化与交路移交使用；有实际节点证据时应调用 {@link #recordArrival}，避免把
+   * DYNAMIC 声明占位节点当成实际位置。
    */
   public RouteProgressEntry advance(
       String trainName,
@@ -76,8 +83,53 @@ public final class RouteProgressRegistry {
       int currentIndex,
       TrainProperties properties,
       Instant now) {
+    return writeProgress(
+        trainName, routeUuid, route, currentIndex, properties, now, Optional.empty());
+  }
+
+  /**
+   * 提交已验证的到达索引和实际图节点，再写回恢复用 tag。
+   *
+   * <p>实际节点可以是 DYNAMIC 选出的股道，不必等于 Route 声明中的占位节点。二者在同一份进度快照内提交，避免后续授权和健康检查读取到
+   * “索引已推进、位置仍指向占位股道”的组合。该操作只记录到达事实，不授予下一跳通行权，也不释放占用。
+   *
+   * @param trainName 规范列车名
+   * @param routeUuid 当前交路 UUID；仅 code 定义的交路可为 {@code null}
+   * @param route 已解析的交路定义
+   * @param currentIndex 已匹配到达节点的交路索引
+   * @param arrivedNode 现场事件确认的实际节点
+   * @param properties 用于持久化进度 tag 的列车属性
+   * @param now 到达时间
+   */
+  public RouteProgressEntry recordArrival(
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId arrivedNode,
+      TrainProperties properties,
+      Instant now) {
+    return writeProgress(
+        trainName,
+        routeUuid,
+        route,
+        currentIndex,
+        properties,
+        now,
+        Optional.of(Objects.requireNonNull(arrivedNode, "arrivedNode")));
+  }
+
+  private RouteProgressEntry writeProgress(
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      TrainProperties properties,
+      Instant now,
+      Optional<NodeId> arrivedNode) {
     String normalizedName = requireTrainName(trainName);
-    RouteProgressEntry entry = upsert(normalizedName, routeUuid, route, currentIndex, now);
+    RouteProgressEntry entry =
+        upsert(normalizedName, routeUuid, route, currentIndex, now, arrivedNode);
     TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     TrainTagHelper.writeTag(properties, TAG_ROUTE_INDEX, String.valueOf(currentIndex));
     TrainTagHelper.writeTag(properties, TAG_ROUTE_UPDATED_AT, String.valueOf(now.toEpochMilli()));
@@ -220,7 +272,12 @@ public final class RouteProgressRegistry {
   }
 
   private RouteProgressEntry upsert(
-      String trainName, UUID routeUuid, RouteDefinition route, int currentIndex, Instant now) {
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      Instant now,
+      Optional<NodeId> arrivedNode) {
     String normalizedName = requireTrainName(trainName);
     if (route.waypoints().isEmpty()) {
       throw new IllegalArgumentException("route waypoints 不能为空");
@@ -237,11 +294,14 @@ public final class RouteProgressRegistry {
     RouteId routeId = route.id();
     RouteProgressEntry existing = entries.get(key);
     SignalAspect lastSignal = existing != null ? existing.lastSignal() : SignalAspect.STOP;
-    // 若 currentIndex 变化，重置 lastPassedGraphNode；否则保留已有值
-    Optional<NodeId> lastPassed =
-        existing != null && existing.currentIndex() == boundedIndex
-            ? existing.lastPassedGraphNode()
-            : Optional.ofNullable(currentWaypoint);
+    // 现场到达证据优先；没有事件证据的恢复/移交仍沿用原来的索引推导规则。
+    Optional<NodeId> lastPassed = arrivedNode;
+    if (lastPassed.isEmpty()) {
+      lastPassed =
+          existing != null && existing.currentIndex() == boundedIndex
+              ? existing.lastPassedGraphNode()
+              : Optional.ofNullable(currentWaypoint);
+    }
     RouteProgressEntry entry =
         new RouteProgressEntry(
             normalizedName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);

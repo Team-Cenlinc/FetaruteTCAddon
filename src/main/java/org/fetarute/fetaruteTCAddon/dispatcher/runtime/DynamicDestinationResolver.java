@@ -92,7 +92,7 @@ final class DynamicDestinationResolver {
             forwardDirection == null ? Optional.empty() : forwardDirection);
     if (!allocation.isSelected()) {
       return allocation.isBlocked()
-          ? DynamicResolution.blocked(allocation.reason())
+          ? DynamicResolution.blocked(allocation.reason(), allocation.blockedStopIndex())
           : DynamicResolution.notApplicable(allocation.reason());
     }
     DynamicPlatformAllocator.AllocationResult result = allocation.selected().orElseThrow();

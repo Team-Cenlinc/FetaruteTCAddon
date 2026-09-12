@@ -14,6 +14,36 @@ import org.junit.jupiter.api.Test;
 class RuntimeStopStateTest {
 
   @Test
+  void blockerEnumerationOrderDoesNotCreateANewStopLifecycle() {
+    Instant now = Instant.parse("2026-09-05T00:00:00Z");
+    var first = new RuntimeStopState.Blocker("NODE:A", "leader-1", "PHYSICAL_FOOTPRINT");
+    var second = new RuntimeStopState.Blocker("EDGE:A-B", "leader-2", "MOVEMENT_REQUIRED");
+    RuntimeStopState original = occupancyStop(List.of(first, second), now);
+    RuntimeStopState reordered = occupancyStop(List.of(second, first, first), now.plusSeconds(1));
+    RuntimeStopState transferred =
+        occupancyStop(
+            List.of(
+                first, new RuntimeStopState.Blocker("EDGE:A-B", "leader-3", "MOVEMENT_REQUIRED")),
+            now.plusSeconds(2));
+
+    assertTrue(original.sameLifecycle(reordered));
+    assertFalse(original.sameLifecycle(transferred));
+  }
+
+  /** 只改变 blocker 证据，保留同一停车原因与恢复条件。 */
+  private RuntimeStopState occupancyStop(List<RuntimeStopState.Blocker> blockers, Instant now) {
+    return new RuntimeStopState(
+        "waiting",
+        "BLOCKED_BY_OCCUPANCY",
+        "occupied",
+        RuntimeStopState.ReleaseCondition.BLOCKING_RESOURCES_RELEASED_OR_TRANSFERRED,
+        RuntimeStopState.RetryTrigger.OCCUPANCY_CHANGE_OR_PERIODIC_RECHECK,
+        blockers,
+        false,
+        now);
+  }
+
+  @Test
   void publicationGateLocalStopRequiresDrainAuthorityAndLeaderRevalidation() {
     Instant now = Instant.parse("2026-07-28T00:00:00Z");
     OccupancyDecision decision =

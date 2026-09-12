@@ -393,13 +393,15 @@ public final class HealthMonitor {
     return Set.copyOf(names);
   }
 
+  /** 保留告警所属列车，避免不同交路相同索引的停滞记录被误合并。 */
   private void logAlert(HealthAlert alert) {
     if (alert == null) {
       return;
     }
     String prefix = alert.autoFixed() ? "[FTA Health] 已修复: " : "[FTA Health] 告警: ";
     java.util.logging.Logger.getLogger("FetaruteTCAddon")
-        .warning(prefix + alert.type() + " " + alert.message());
+        .warning(
+            prefix + alert.type() + " train=" + alert.train().orElse("-") + " " + alert.message());
   }
 
   /** 单次检查结果。 */

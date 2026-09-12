@@ -871,7 +871,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     // 创建占用事件桥的只读等待列车查询器
     RuntimeDispatchRequestProvider requestProvider =
-        new RuntimeDispatchRequestProvider(occupancyManager);
+        new RuntimeDispatchRequestProvider(
+            occupancyManager, runtimeDispatchService::trainsWaitingForDynamicCapacity);
     signalReevaluationScheduler =
         new RuntimeSignalReevaluationScheduler(
             task -> getServer().getScheduler().runTask(this, task),

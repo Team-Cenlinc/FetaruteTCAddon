@@ -1,11 +1,22 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.junit.jupiter.api.Test;
 
 /** {@link RuntimeDispatchDiagnosticGate} 的控制台去重测试。 */
@@ -89,9 +100,9 @@ class RuntimeDispatchDiagnosticGateTest {
     RuntimeDispatchDiagnosticGate gate =
         new RuntimeDispatchDiagnosticGate(messages::add, Duration.ofSeconds(5), 32, nowNanos::get);
 
-    gate.accept("SMART_RESOURCE_LIFECYCLE train=MT-1 sequence=1 tick=100 occupancyVersion=1");
+    gate.accept("SMART_RESOURCE_SNAPSHOT train=MT-1 sequence=1 tick=100 occupancyVersion=1");
     nowNanos.addAndGet(Duration.ofSeconds(5).toNanos());
-    gate.accept("SMART_RESOURCE_LIFECYCLE train=MT-1 sequence=2 tick=200 occupancyVersion=2");
+    gate.accept("SMART_RESOURCE_SNAPSHOT train=MT-1 sequence=2 tick=200 occupancyVersion=2");
 
     assertEquals(2, messages.size());
   }
@@ -145,6 +156,73 @@ class RuntimeDispatchDiagnosticGateTest {
             + "budgetKinds=[SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED(reason=STALE_PROGRESS_CONTEXT):1] "
             + "budget=1 windowSeconds=60",
         messages.get(1));
+  }
+
+  @Test
+  void preservesArrivalAndStopLifecycleBoundariesAfterObservationBudgetIsExhausted() {
+    List<String> messages = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate =
+        new RuntimeDispatchDiagnosticGate(
+            messages::add, Duration.ofSeconds(5), 32, Duration.ofSeconds(60), 1, () -> 0L);
+    String observation = "SIGNAL_CAUTION_REASON train=MT-1 reason=budget-filler";
+    String arrival = "SMART_ROUTE_ARRIVAL train=MT-1 index=13 arrivedNode=OP:PPK:RVS:1:001";
+    String entered = "SMART_STOP_LIFECYCLE event=enter train=MT-1 reasonCode=AUTHORIZATION_FAILURE";
+    String transitioned =
+        "SMART_STOP_LIFECYCLE event=transition train=MT-1 reasonCode=HARD_BLOCKER_STOP";
+    String cleared = "SMART_STOP_LIFECYCLE event=clear train=MT-1 clearReason=authority-active";
+
+    gate.accept(observation);
+    gate.accept(arrival);
+    gate.accept(entered);
+    gate.accept(transitioned);
+    gate.accept(cleared);
+    gate.accept(entered);
+    gate.accept("SIGNAL_CAUTION_REASON train=MT-2 reason=still-budgeted");
+
+    assertEquals(List.of(observation, arrival, entered, transitioned, cleared, entered), messages);
+  }
+
+  @Test
+  void preservesActualClaimChangesAfterBudgetExhaustionWithoutRepeatingStableRefreshes() {
+    List<String> messages = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate =
+        new RuntimeDispatchDiagnosticGate(
+            messages::add, Duration.ofSeconds(5), 32, Duration.ofSeconds(60), 1, () -> 0L);
+    gate.accept("SIGNAL_CAUTION_REASON train=MT-1 reason=budget-filler");
+    SignalComputationTrace.configureLogger(gate);
+    try {
+      SimpleOccupancyManager occupancy =
+          new SimpleOccupancyManager(
+              (route, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+      OccupancyResource node = OccupancyResource.forNode(NodeId.of("OP:S:PPK:1"));
+      Instant now = Instant.parse("2026-09-05T00:00:00Z");
+      OccupancyRequest retain =
+          new OccupancyRequest("MT-1", Optional.empty(), now, List.of(node), Map.of())
+              .withResourceIntents(Map.of(node, ResourceIntent.PROTECTIVE_RETAIN));
+      OccupancyRequest movement =
+          new OccupancyRequest(
+              "MT-1", Optional.empty(), now.plusSeconds(1), List.of(node), Map.of());
+
+      assertTrue(occupancy.acquire(retain).allowed());
+      assertTrue(occupancy.acquire(movement).allowed());
+      assertTrue(occupancy.acquire(movement).allowed());
+      assertEquals(1, occupancy.releaseByTrain("MT-1"));
+      gate.accept("SMART_RESOURCE_SNAPSHOT train=MT-1 reason=still-budgeted");
+
+      List<String> lifecycle =
+          messages.stream()
+              .filter(message -> message.startsWith("SMART_RESOURCE_LIFECYCLE "))
+              .toList();
+      assertEquals(3, lifecycle.size(), messages::toString);
+      assertTrue(lifecycle.get(0).contains("event=acquire"));
+      assertTrue(lifecycle.get(1).contains("event=merge"));
+      assertTrue(lifecycle.get(1).contains("oldRole=PROTECTIVE_RETAIN newRole=MOVEMENT_REQUIRED"));
+      assertTrue(lifecycle.get(2).contains("event=release"));
+      assertTrue(
+          messages.stream().noneMatch(message -> message.startsWith("SMART_RESOURCE_SNAPSHOT ")));
+    } finally {
+      SignalComputationTrace.configureLogger(null);
+    }
   }
 
   @Test

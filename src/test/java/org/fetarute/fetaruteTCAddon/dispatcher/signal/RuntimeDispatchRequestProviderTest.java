@@ -55,6 +55,13 @@ class RuntimeDispatchRequestProviderTest {
                     unrelated, Optional.empty(), 0, List.of(unrelatedWaiter))));
 
     assertEquals(List.of("train-head"), provider.trainsWaitingFor(List.of(changed)));
+
+    RuntimeDispatchRequestProvider withCapacityWaiters =
+        new RuntimeDispatchRequestProvider(
+            occupancyManager, resources -> List.of("capacity-waiter", "train-head"));
+    assertEquals(
+        List.of("train-head", "capacity-waiter"),
+        withCapacityWaiters.trainsWaitingFor(List.of(changed)));
   }
 
   @Test
