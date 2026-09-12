@@ -18211,7 +18211,12 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
 
-    // 解析范围
+    // 解析范围。未声明范围时不再默认成单一 1 道：那会让候选集合只剩 1 道，
+    // 而 DynamicStopMatcher 的同名解析把未声明范围视作更宽的区间，两者口径不一致时，
+    // 已固化到 2 道的列车会与唯一候选 1 道不相等，循环静默走空，最终只留下
+    // "no-available-dynamic-target rejections=[]"——列车被永久硬停在站外且无任何原因。
+    // 未声明范围统一表示"该站现有的全部股道"，由调用方按图枚举。
+    boolean unbounded = rangeRaw.isBlank();
     int fromTrack = 1;
     int toTrack = 1;
     if (!rangeRaw.isBlank()) {
@@ -18244,7 +18249,8 @@ public final class RuntimeDispatchService {
     }
     int start = Math.min(fromTrack, toTrack);
     int end = Math.max(fromTrack, toTrack);
-    return Optional.of(new DynamicStopSpec(operatorCode, nodeType, nodeName, start, end));
+    return Optional.of(
+        new DynamicStopSpec(operatorCode, nodeType, nodeName, start, end, unbounded));
   }
 
   private static OptionalInt parsePositiveInt(String raw) {
@@ -18272,8 +18278,18 @@ public final class RuntimeDispatchService {
    * @param fromTrack 起始轨道号
    * @param toTrack 结束轨道号
    */
+  /**
+   * DYNAMIC 目标规范。
+   *
+   * @param unbounded 规范未声明轨道范围；表示"该站现有的全部股道"，不得退化成单一 1 道
+   */
   private record DynamicStopSpec(
-      String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
+      String operatorCode,
+      String nodeType,
+      String nodeName,
+      int fromTrack,
+      int toTrack,
+      boolean unbounded) {
     private DynamicStopSpec {
       Objects.requireNonNull(operatorCode, "operatorCode");
       Objects.requireNonNull(nodeType, "nodeType");
@@ -18458,6 +18474,53 @@ public final class RuntimeDispatchService {
    *
    * <p>候选 owner/角色仅是诊断证据，不能写入实际授权 blocker 集合；咽喉忙碌的可用站台仍进入普通 FIFO 授权链。
    */
+  /**
+   * 解析 DYNAMIC 规范实际要枚举的股道号。
+   *
+   * <p>声明了范围就按范围；未声明范围时<b>枚举该站在图上实际存在的全部股道</b>，而不是套用一个人为上限。 人为上限既可能漏掉编号更大的股道，也不能表达"这个站现有的所有股道"这一意图。
+   */
+  private List<Integer> dynamicCandidateTracks(DynamicStopSpec spec, RailGraph graph) {
+    if (!spec.unbounded()) {
+      List<Integer> declared = new ArrayList<>();
+      for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
+        declared.add(track);
+      }
+      return declared;
+    }
+    String prefix =
+        spec.operatorCode().trim()
+            + ":"
+            + spec.nodeType().trim()
+            + ":"
+            + spec.nodeName().trim()
+            + ":";
+    java.util.TreeSet<Integer> discovered = new java.util.TreeSet<>();
+    if (graph != null) {
+      for (org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node : graph.nodes()) {
+        if (node == null || node.id() == null || node.id().value() == null) {
+          continue;
+        }
+        String value = node.id().value();
+        if (!value.regionMatches(true, 0, prefix, 0, prefix.length())) {
+          continue;
+        }
+        String trackPart = value.substring(prefix.length());
+        if (trackPart.isEmpty() || trackPart.indexOf(':') >= 0) {
+          continue;
+        }
+        try {
+          int track = Integer.parseInt(trackPart);
+          if (track >= 1) {
+            discovered.add(track);
+          }
+        } catch (NumberFormatException ignored) {
+          // 非数字股道段不是候选。
+        }
+      }
+    }
+    return new ArrayList<>(discovered);
+  }
+
   private DynamicResolution<DynamicSelection> selectDynamicStationTargetForProgressCandidate(
       String trainName,
       RouteDefinition route,
@@ -18479,9 +18542,22 @@ public final class RuntimeDispatchService {
     // 收集所有可行的候选
     List<DynamicCandidate> candidates = new java.util.ArrayList<>();
     List<String> rejections = new ArrayList<>();
-    for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
+    List<Integer> tracks = dynamicCandidateTracks(spec, graph);
+    if (tracks.isEmpty()) {
+      rejections.add(
+          "spec=" + operator + ":" + nodeType + ":" + nodeName + ":no-known-track-on-graph");
+    }
+    for (int track : tracks) {
       NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (materializedTarget.isPresent() && !materializedTarget.get().equals(candidate)) {
+        // 必须记录：这条分支原本静默 continue，当已固化目标与任何候选都不相等时，
+        // 整个循环会一声不响地走空，最终只留下 "no-available-dynamic-target rejections=[]"——
+        // 列车被硬停在站外而系统说不出任何理由。
+        rejections.add(
+            "candidate="
+                + candidate.value()
+                + ":not-materialized-target:"
+                + materializedTarget.get().value());
         continue;
       }
       if (!isDynamicCandidateKnown(candidate, graph)) {

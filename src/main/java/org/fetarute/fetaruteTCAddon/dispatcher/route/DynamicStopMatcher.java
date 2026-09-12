@@ -164,9 +164,12 @@ public final class DynamicStopMatcher {
       return Optional.empty();
     }
 
-    // 解析范围
+    // 解析范围。未声明范围时不再假定 1..10 这样的人为上限：
+    // 该上限既可能漏掉编号更大的股道，也无法表达"这个站现有的全部股道"。
+    // 未声明范围的规范标记为 unbounded，由调用方按图上实际存在的股道枚举。
+    boolean unbounded = rangeRaw.isBlank();
     int fromTrack = 1;
-    int toTrack = 10; // 默认上限为 10，避免无范围时产生巨大循环
+    int toTrack = 1;
     if (!rangeRaw.isBlank()) {
       String normalizedRange = rangeRaw.trim();
       if (normalizedRange.startsWith("[") && normalizedRange.endsWith("]")) {
@@ -197,7 +200,7 @@ public final class DynamicStopMatcher {
     }
     int start = Math.min(fromTrack, toTrack);
     int end = Math.max(fromTrack, toTrack);
-    return Optional.of(new DynamicSpec(operatorCode, nodeType, nodeName, start, end));
+    return Optional.of(new DynamicSpec(operatorCode, nodeType, nodeName, start, end, unbounded));
   }
 
   /**
@@ -263,6 +266,9 @@ public final class DynamicStopMatcher {
       return false;
     }
     int track = trackOpt.getAsInt();
+    if (spec.unbounded()) {
+      return track >= 1;
+    }
     return track >= spec.fromTrack() && track <= spec.toTrack();
   }
 
@@ -464,13 +470,25 @@ public final class DynamicStopMatcher {
    * @param nodeName 站点/车库名称
    * @param fromTrack 起始轨道号
    * @param toTrack 结束轨道号
+   * @param unbounded 规范是否未声明轨道范围
    */
   public record DynamicSpec(
-      String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
+      String operatorCode,
+      String nodeType,
+      String nodeName,
+      int fromTrack,
+      int toTrack,
+      boolean unbounded) {
     public DynamicSpec {
       Objects.requireNonNull(operatorCode, "operatorCode");
       Objects.requireNonNull(nodeType, "nodeType");
       Objects.requireNonNull(nodeName, "nodeName");
+    }
+
+    /** 兼容旧调用：显式范围即非 unbounded。 */
+    public DynamicSpec(
+        String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
+      this(operatorCode, nodeType, nodeName, fromTrack, toTrack, false);
     }
 
     /** 是否为 Depot 类型。 */
