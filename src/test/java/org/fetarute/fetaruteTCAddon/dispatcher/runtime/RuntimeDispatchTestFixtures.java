@@ -85,6 +85,18 @@ final class RuntimeDispatchTestFixtures {
   }
 
   static ConfigManager.ConfigView testConfigView(int intervalTicks, double defaultSpeedBps) {
+    return testConfigView(intervalTicks, defaultSpeedBps, 1, 1);
+  }
+
+  /**
+   * 构造可调硬授权窗口的配置视图。
+   *
+   * <p>默认的 {@code lookaheadEdges=1} 只覆盖一条边，因此任何多于一条边的单线 section 都无法证明清出，列车会被 {@code
+   * entry-lookahead-exit-not-feasible} 永久挡住。真实部署使用的是 {@code lookahead-edges: 3}；需要让列车真正跑起来的
+   * 多车场景必须显式给出与 section 长度匹配的窗口。
+   */
+  static ConfigManager.ConfigView testConfigView(
+      int intervalTicks, double defaultSpeedBps, int lookaheadEdges, int minClearEdges) {
     ConfigManager.StorageSettings storage =
         new ConfigManager.StorageSettings(
             ConfigManager.StorageBackend.SQLITE,
@@ -98,8 +110,8 @@ final class RuntimeDispatchTestFixtures {
         new ConfigManager.RuntimeSettings(
             intervalTicks,
             10,
-            1,
-            1,
+            lookaheadEdges,
+            minClearEdges,
             1,
             3,
             0.0,
