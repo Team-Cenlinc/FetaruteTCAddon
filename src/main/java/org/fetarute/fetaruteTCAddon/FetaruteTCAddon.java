@@ -623,6 +623,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private void scheduleRuntimeOccupancyReconstruction(long delayTicks) {
     RuntimeDispatchService service = runtimeDispatchService;
     if (service == null || (runtimeRecoveryTask != null && !runtimeRecoveryTask.isCancelled())) {
+      // 已有待执行任务时丢弃本次请求是有意的（避免重复重建），但丢弃本身必须可见：
+      // 若任务因故永不执行，这里就是"恢复请求全部被吞掉"的唯一证据。
+      debug(
+          "运行时占用重建请求被忽略: reason=" + (service == null ? "service-missing" : "task-already-pending"));
       return;
     }
     runtimeRecoveryTask =
@@ -682,9 +686,22 @@ public final class FetaruteTCAddon extends JavaPlugin {
                             + ":"
                             + String.valueOf(ex.getMessage()));
                   }
+                  boolean snapshotPrepared = completed;
                   if (completed && isEnabled() && runtimeDispatchService == service) {
                     completed = startRuntimeDispatchComponentsAfterRecovery(service, handles);
                   }
+                  // 每次重建尝试都必须留下结论。实服 2026-09-13 的全线冻结里，恢复被请求了 5 次，
+                  // 但三条既有日志（等待收容 / 重建失败 / 桥已启动）一条都没出现——既定不了它有没有跑，
+                  // 也定不了是快照没准备好还是组件没起来。这一行让下一次现场直接给出答案。
+                  debug(
+                      "运行时占用重建尝试: handles="
+                          + handles.size()
+                          + " snapshotPrepared="
+                          + snapshotPrepared
+                          + " componentsStarted="
+                          + completed
+                          + " willRetry="
+                          + (!completed && isEnabled() && runtimeDispatchService == service));
                   if (!completed && isEnabled() && runtimeDispatchService == service) {
                     scheduleRuntimeOccupancyReconstruction(20L);
                   }
