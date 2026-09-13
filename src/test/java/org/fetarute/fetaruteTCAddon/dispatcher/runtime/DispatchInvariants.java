@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -17,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueue
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 
 /**
@@ -45,6 +47,7 @@ final class DispatchInvariants {
       Map<String, List<NodeId>> routePathsByTrain,
       Map<NodeId, List<NodeId>> adjacency,
       List<StoppedTrain> stoppedTrains,
+      List<AuthorityView> authorities,
       List<OccupancyQueueSnapshot> queues,
       Map<String, Long> queueBaselines,
       List<String> diagnosticsSinceLastTick) {
@@ -53,6 +56,7 @@ final class DispatchInvariants {
       routePathsByTrain = routePathsByTrain == null ? Map.of() : Map.copyOf(routePathsByTrain);
       adjacency = adjacency == null ? Map.of() : Map.copyOf(adjacency);
       stoppedTrains = stoppedTrains == null ? List.of() : List.copyOf(stoppedTrains);
+      authorities = authorities == null ? List.of() : List.copyOf(authorities);
       queues = queues == null ? List.of() : List.copyOf(queues);
       queueBaselines = queueBaselines == null ? Map.of() : Map.copyOf(queueBaselines);
       diagnosticsSinceLastTick =
@@ -67,11 +71,21 @@ final class DispatchInvariants {
    */
   record StoppedTrain(String trainName, RuntimeStopState state, int consecutiveTicks) {}
 
+  /**
+   * 一列车本 tick 的"可见信号 + 授权"现场。
+   *
+   * @param visibleSignal 已发布给该车的信号
+   * @param token 当前 Movement Authority token；不存在时为 empty
+   */
+  record AuthorityView(
+      String trainName, SignalAspect visibleSignal, Optional<MovementAuthorizationToken> token) {}
+
   static List<String> check(Sample sample) {
     List<String> violations = new ArrayList<>();
     violations.addAll(checkI1PhysicalHardOccupancyIsExclusive(sample));
     violations.addAll(checkI2SingleCorridorDirectionIsConsistent(sample));
     violations.addAll(checkI3ClaimsStayOnOwnRoute(sample));
+    violations.addAll(checkI4ProceedImpliesExecutableAuthority(sample));
     violations.addAll(checkI5BlockingIsExplainable(sample));
     violations.addAll(checkI6RequestContextMatchesProgress(sample));
     violations.addAll(checkI7QueuePositionDoesNotRegress(sample));
@@ -231,6 +245,84 @@ final class DispatchInvariants {
       }
     }
     return keys;
+  }
+
+  // ------------------------------------------------------------------ I4
+
+  /**
+   * I4 可见 PROCEED 蕴含可执行授权。
+   *
+   * <p>可见信号 ≠ {@code STOP} ⟹ 存在 {@code active} 的 token、{@code hasPhysicalAuthorityBoundary()} 为真、 且
+   * token 的 {@code resources} 全部由本车持有硬 claim（{@code MOVEMENT_REQUIRED} 或 {@code
+   * PHYSICAL_FOOTPRINT}）。
+   *
+   * <p>出处：{@code MovementAuthorizationToken.hasPhysicalAuthorityBoundary()} 的 Javadoc——
+   * "信号发布、发车与跟驰预测必须在此条件成立后，才可把 token 解释为可执行的 Movement Authority"。
+   *
+   * <p>只检查 token 里的 <b>NODE/EDGE</b> 资源。CONFLICT 资源在账本里的合法角色包括 {@code HOLD_ONLY}、 {@code
+   * PROTECTIVE_RETAIN} 等非硬角色（保位、尾部保护、联锁保护都会这样落账），把它们一并要求成硬 claim
+   * 会把正确的占用形态误报成缺失授权。物理资源则必须是硬持有——那才是"能不能真的走过去"。
+   *
+   * <p>当前保证：<b>仅代码假设</b>。实服曾观察到 {@code ACTIVE + PROCEED} 却静止的列车（7782 / 4252），
+   * 说明这条在生产上不成立；本条负责回答它在骨架现场是否也不成立。
+   */
+  private static List<String> checkI4ProceedImpliesExecutableAuthority(Sample sample) {
+    Map<String, Set<String>> hardClaimsByTrain = new LinkedHashMap<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null || !isPhysical(claim.resource()) || !isHardRole(claim.role())) {
+        continue;
+      }
+      hardClaimsByTrain
+          .computeIfAbsent(
+              TrainNameNormalizer.normalizeKey(claim.trainName()), unused -> new TreeSet<>())
+          .add(claim.resource().toString());
+    }
+    List<String> violations = new ArrayList<>();
+    for (AuthorityView view : sample.authorities()) {
+      if (view == null
+          || view.visibleSignal() == null
+          || view.visibleSignal() == SignalAspect.STOP) {
+        continue;
+      }
+      String train = TrainNameNormalizer.normalizeKey(view.trainName());
+      MovementAuthorizationToken token = view.token().orElse(null);
+      if (token == null) {
+        violations.add("I4 可见非 STOP 但没有 token: train=" + train + " signal=" + view.visibleSignal());
+        continue;
+      }
+      if (!token.active()) {
+        violations.add(
+            "I4 可见非 STOP 但 token 非 active: train=" + train + " signal=" + view.visibleSignal());
+        continue;
+      }
+      if (!token.hasPhysicalAuthorityBoundary()) {
+        violations.add(
+            "I4 可见非 STOP 但 token 没有物理授权边界: train="
+                + train
+                + " signal="
+                + view.visibleSignal()
+                + " authorizedEdgeCount="
+                + token.authorizedEdgeCount());
+        continue;
+      }
+      Set<String> held = hardClaimsByTrain.getOrDefault(train, Set.of());
+      Set<String> missing = new TreeSet<>();
+      for (OccupancyResource resource : token.resources()) {
+        if (isPhysical(resource) && !held.contains(resource.toString())) {
+          missing.add(resource.toString());
+        }
+      }
+      if (!missing.isEmpty()) {
+        violations.add(
+            "I4 token 物理资源未被本车硬持有: train="
+                + train
+                + " signal="
+                + view.visibleSignal()
+                + " missing="
+                + missing);
+      }
+    }
+    return violations;
   }
 
   // ------------------------------------------------------------------ I5

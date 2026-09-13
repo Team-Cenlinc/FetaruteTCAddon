@@ -110,6 +110,6 @@ class DispatchBlockingExplainabilityTest {
 
     harness.runTicks(MAX_TICKS);
 
-    harness.assertNoViolationsOf("I1", "I2", "I3");
+    harness.assertNoViolationsOf("I1", "I2", "I3", "I4");
   }
 }

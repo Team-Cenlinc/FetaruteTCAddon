@@ -880,6 +880,9 @@ final class DispatchScenarioHarness {
   /** 整场观察到的单个冲突队列最大并发条目数——1 表示从未真正发生竞争。 */
   private int maxQueueDepth;
 
+  /** I4 实际判定过多少次"可见信号非 STOP"的现场——为 0 表示它整场没被检验过。 */
+  private int proceedAuthorityChecks;
+
   /**
    * I7 实际做过多少次"有基线可比"的比较。
    *
@@ -892,6 +895,11 @@ final class DispatchScenarioHarness {
   /** 整场观察到的单个冲突队列最大并发条目数；{@code < 2} 表示从未真正发生排队竞争。 */
   int maxQueueDepth() {
     return maxQueueDepth;
+  }
+
+  /** I4 判定过多少次"可见信号非 STOP"的现场；为 0 表示 I4 整场没被检验过。 */
+  int proceedAuthorityChecks() {
+    return proceedAuthorityChecks;
   }
 
   private void tallyQueueContention(DispatchInvariants.Sample sample) {
@@ -942,6 +950,7 @@ final class DispatchScenarioHarness {
             routePathsByTrain(),
             adjacency,
             stoppedTrains(),
+            authorityViews(),
             occupancy.snapshotQueues(),
             queueBaselines,
             fresh);
@@ -983,6 +992,21 @@ final class DispatchScenarioHarness {
       stopped.add(new DispatchInvariants.StoppedTrain(name, state, ticks));
     }
     return stopped;
+  }
+
+  /** 采集本 tick 各车的"可见信号 + 授权 token"现场，供 I4 判定。 */
+  private List<DispatchInvariants.AuthorityView> authorityViews() {
+    List<DispatchInvariants.AuthorityView> views = new ArrayList<>();
+    for (ScenarioTrain train : trains.values()) {
+      SignalAspect visible = signalOf(train.name());
+      if (visible != SignalAspect.STOP) {
+        proceedAuthorityChecks++;
+      }
+      views.add(
+          new DispatchInvariants.AuthorityView(
+              train.name(), visible, service.movementAuthorityView(train.name())));
+    }
+    return views;
   }
 
   private record StopStreak(String identity, int ticks) {}

@@ -3868,6 +3868,16 @@ public final class RuntimeDispatchService {
       boolean ordinaryDeparture,
       boolean topologyExitHintOnly) {}
 
+  /**
+   * 只读地读取某列车当前的 Movement Authority token。
+   *
+   * <p>存在的唯一目的是让回归骨架能断言"可见信号非 STOP 时，确实存在可执行的授权"（Phase 0 的 I4）。 它不改变任何状态，也没有生产调用点——生产内部一律走同包的私有
+   * {@link #movementToken(String)}。 返回的是不可变 record，调用方无法借它影响调度。
+   */
+  Optional<MovementAuthorizationToken> movementAuthorityView(String trainName) {
+    return movementToken(trainName);
+  }
+
   private Optional<MovementAuthorizationToken> movementToken(String trainName) {
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {

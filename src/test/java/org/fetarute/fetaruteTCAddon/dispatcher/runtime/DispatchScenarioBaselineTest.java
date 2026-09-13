@@ -65,7 +65,7 @@ class DispatchScenarioBaselineTest {
     // 都被占满时停在 AUTHORIZATION_FAILURE / dynamic-target-blocked:no-available-platform，
     // 而停因里既没有具名 blocker 也没有队列位次。那是真实缺陷，由
     // DispatchBlockingExplainabilityTest 正面钉住，不在这里掩盖。
-    harness.assertNoViolationsOf("I1", "I2", "I3", "I6");
+    harness.assertNoViolationsOf("I1", "I2", "I3", "I4", "I6");
     // 同向跟驰的正确判据是"都在推进且没有互相拒绝"，不是"都到同一终点"——
     // 终端站只有一条股道，先到的车停在那里会合法地封住它身后的区间。
     for (String name : names) {
@@ -99,7 +99,7 @@ class DispatchScenarioBaselineTest {
     harness.runTicks(MAX_TICKS);
 
     // 安全侧全部成立：没有物理共占、单线方向没有被破坏、没有越界 claim、证据链没有断。
-    harness.assertNoViolationsOf("I1", "I2", "I3", "I5", "I6");
+    harness.assertNoViolationsOf("I1", "I2", "I3", "I4", "I5", "I6");
     // 双方确实都进了会让环，并且分属不同股道——对向屏障做对了事，不是靠把谁挡在环外换来的。
     assertEquals("OP:S:BRAVO", stationGroupOf(harness.positionOf("east")), harness.describeState());
     assertEquals("OP:S:BRAVO", stationGroupOf(harness.positionOf("west")), harness.describeState());
