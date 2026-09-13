@@ -138,6 +138,15 @@ class DispatchScenarioBaselineTest {
           harness.stopReasonOf(name),
           "停因形态变了，成因需要重新归因: " + name + "\n" + harness.describeState());
     }
+    // 这个环是调度<b>自己说出来的</b>：两车的 blockers 互指对方。它同时说明 I5 在这里是成立的——
+    // 停车可解释，只是解释出来的依赖构成了环，没人能打破。
+    assertEquals(
+        List.of("east->west->east"),
+        harness.observedWaitCycles(),
+        "wait-for 环的形态变了:\n" + harness.describeState());
+    assertTrue(
+        harness.hasLiveWaitCycle(),
+        "环在不启用 destroy 的情况下自行消解了——这是好事，请把本用例翻转。\n" + harness.describeState());
   }
 
   private DispatchScenarioHarness opposingPair() {

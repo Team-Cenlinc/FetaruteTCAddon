@@ -21,6 +21,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -41,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.RuntimeDispatchRequestProvider;
@@ -883,6 +886,11 @@ final class DispatchScenarioHarness {
   /** I4 实际判定过多少次"可见信号非 STOP"的现场——为 0 表示它整场没被检验过。 */
   private int proceedAuthorityChecks;
 
+  /** 整场观察到的最长 wait-for 环长度与样本。 */
+  private int longestWaitCycle;
+
+  private final Set<String> observedWaitCycles = new java.util.LinkedHashSet<>();
+
   /**
    * I7 实际做过多少次"有基线可比"的比较。
    *
@@ -895,6 +903,106 @@ final class DispatchScenarioHarness {
   /** 整场观察到的单个冲突队列最大并发条目数；{@code < 2} 表示从未真正发生排队竞争。 */
   int maxQueueDepth() {
     return maxQueueDepth;
+  }
+
+  /**
+   * 整场观察到的最长 wait-for 环长度（按列车数）；0 表示从未出现环。
+   *
+   * <p>环由各车 {@code RuntimeStopState.blockers} 的 owner 关系构成：A 的 blocker 归 B 所有即记一条 A→B。
+   * 这是<b>调度自己说出来的依赖</b>，不是骨架另算的——如果调度说不出依赖（I5 违反），这里就看不见环， 二者的关系本身就是结论。
+   */
+  int longestObservedWaitCycle() {
+    return longestWaitCycle;
+  }
+
+  /** 观察到的 wait-for 环样本（去重，按发现顺序），用于失败时直接给出环上的列车。 */
+  List<String> observedWaitCycles() {
+    return List.copyOf(observedWaitCycles);
+  }
+
+  /** 当前是否仍存在 wait-for 环。 */
+  boolean hasLiveWaitCycle() {
+    return !findWaitCycles(currentWaitForEdges()).isEmpty();
+  }
+
+  private Map<String, Set<String>> currentWaitForEdges() {
+    Map<String, Set<String>> edges = new TreeMap<>();
+    for (ScenarioTrain train : trains.values()) {
+      String blocked = TrainNameNormalizer.normalizeKey(train.name());
+      Set<String> owners = new TreeSet<>();
+      service
+          .getActiveStopState(train.name())
+          .ifPresent(
+              state -> {
+                for (RuntimeStopState.Blocker blocker : state.blockers()) {
+                  if (blocker == null) {
+                    continue;
+                  }
+                  String owner = TrainNameNormalizer.normalizeKey(blocker.owner());
+                  if (!owner.isEmpty() && !owner.equals("-") && !owner.equals(blocked)) {
+                    owners.add(owner);
+                  }
+                }
+              });
+      if (!owners.isEmpty()) {
+        edges.put(blocked, owners);
+      }
+    }
+    return edges;
+  }
+
+  /** 朴素 DFS 找有向环；只返回规范化后的环（从字典序最小节点起），便于去重。 */
+  private static Set<String> findWaitCycles(Map<String, Set<String>> edges) {
+    Set<String> cycles = new java.util.LinkedHashSet<>();
+    for (String start : edges.keySet()) {
+      java.util.Deque<String> path = new java.util.ArrayDeque<>();
+      walkForCycles(edges, start, start, path, cycles, 0);
+    }
+    return cycles;
+  }
+
+  private static void walkForCycles(
+      Map<String, Set<String>> edges,
+      String start,
+      String current,
+      java.util.Deque<String> path,
+      Set<String> cycles,
+      int depth) {
+    if (depth > 6) {
+      return;
+    }
+    path.addLast(current);
+    for (String next : edges.getOrDefault(current, Set.of())) {
+      if (next.equals(start) && path.size() >= 2) {
+        List<String> cycle = new ArrayList<>(path);
+        cycles.add(canonicalCycle(cycle));
+      } else if (!path.contains(next)) {
+        walkForCycles(edges, start, next, path, cycles, depth + 1);
+      }
+    }
+    path.removeLast();
+  }
+
+  /** 把环旋转到字典序最小的起点，让同一个环只被记一次。 */
+  private static String canonicalCycle(List<String> cycle) {
+    int min = 0;
+    for (int i = 1; i < cycle.size(); i++) {
+      if (cycle.get(i).compareTo(cycle.get(min)) < 0) {
+        min = i;
+      }
+    }
+    List<String> rotated = new ArrayList<>();
+    for (int i = 0; i < cycle.size(); i++) {
+      rotated.add(cycle.get((min + i) % cycle.size()));
+    }
+    return String.join("->", rotated) + "->" + rotated.get(0);
+  }
+
+  private void tallyWaitCycles() {
+    for (String cycle : findWaitCycles(currentWaitForEdges())) {
+      observedWaitCycles.add(cycle);
+      longestWaitCycle = Math.max(longestWaitCycle, cycle.split("->").length - 1);
+    }
   }
 
   /** I4 判定过多少次"可见信号非 STOP"的现场；为 0 表示 I4 整场没被检验过。 */
@@ -955,6 +1063,7 @@ final class DispatchScenarioHarness {
             queueBaselines,
             fresh);
     tallyQueueContention(sample);
+    tallyWaitCycles();
     List<String> found = DispatchInvariants.check(sample);
     for (String violation : found) {
       violations.add("tick=" + tick + " " + violation);
