@@ -76,6 +76,15 @@ public final class SimpleOccupancyManager
   private final AtomicLong staleQueueCleanupCount = new AtomicLong();
   private final Map<String, SelfOwnedStaleRetainCandidate> selfOwnedStaleRetainCandidates =
       new LinkedHashMap<>();
+
+  /**
+   * 队列仲裁结果的语义去重。
+   *
+   * <p>仲裁每 tick 都会重算，但只有<b>结果</b>变化才是新证据。生产端按 (资源, 请求方) 记住上一次的结论， 仅在结论变化时输出；这样该 trace
+   * 才能进入诊断门的免预算白名单，不会在稳定期淹没日志。
+   */
+  private final Map<String, String> pendingWinnerArbitrationSignatures = new LinkedHashMap<>();
+
   private volatile LiveBlockerSnapshotListener liveBlockerSnapshotListener =
       NOOP_LIVE_BLOCKER_SNAPSHOT_LISTENER;
 
@@ -1936,17 +1945,42 @@ public final class SimpleOccupancyManager
     OccupancyQueueEntry entry = blockingEntry.get();
     long pendingWinnerWaitSeconds =
         Math.max(0L, Duration.between(entry.firstSeen(), request.now()).toSeconds());
-    SignalComputationTrace.emitRaw(
+    // 仲裁主键是 firstSeen 减去有上限的优先级折扣，优先级只有 500ms/点、最多 2 分钟。
+    // 因此“谁先入队”几乎总是决定性的；把两侧的 firstSeen 年龄与折扣一并输出，
+    // 才能判断一次长时间阻塞到底来自优先级、还是来自远处列车提前入队占位。
+    long priorityAdvantageSeconds =
+        Math.min(
+            QUEUE_MAX_PRIORITY_ADVANTAGE.toSeconds(),
+            Math.max(
+                -QUEUE_MAX_PRIORITY_ADVANTAGE.toSeconds(),
+                entry.priority() * QUEUE_PRIORITY_POINT_ADVANTAGE.toMillis() / 1000L));
+    OccupancyQueueEntry requesterEntry =
+        Optional.ofNullable(queues.get(resource))
+            .flatMap(queue -> queue.entryFor(request.trainName()))
+            .orElse(null);
+    long requesterWaitSeconds =
+        requesterEntry == null
+            ? -1L
+            : Math.max(0L, Duration.between(requesterEntry.firstSeen(), request.now()).toSeconds());
+    String message =
         "SMART_PENDING_WINNER_ARBITRATION requesterTrain="
             + safeLifecycleValue(request.trainName())
             + " requesterPriority="
             + request.priority()
+            + " requesterEntryOrder="
+            + (requesterEntry == null ? -1 : requesterEntry.entryOrder())
+            + " requesterWaitSeconds="
+            + requesterWaitSeconds
             + " pendingWinnerTrain="
             + safeLifecycleValue(entry.trainName())
             + " pendingWinnerPriority="
             + entry.priority()
+            + " pendingWinnerEntryOrder="
+            + entry.entryOrder()
             + " pendingWinnerWaitSeconds="
             + pendingWinnerWaitSeconds
+            + " pendingWinnerPriorityAdvantageSeconds="
+            + priorityAdvantageSeconds
             + " priorityAdvantageCapSeconds="
             + QUEUE_MAX_PRIORITY_ADVANTAGE.toSeconds()
             + " resource="
@@ -1956,7 +1990,25 @@ public final class SimpleOccupancyManager
             + " reason="
             + safeLifecycleValue(reason)
             + " source="
-            + safeLifecycleValue(source));
+            + safeLifecycleValue(source);
+
+    // 只在仲裁结论变化时输出：赢家、决定、原因或双方的相对位次发生变化才算新证据。
+    String signature =
+        safeLifecycleValue(entry.trainName())
+            + "|"
+            + safeLifecycleValue(decision)
+            + "|"
+            + safeLifecycleValue(reason)
+            + "|"
+            + entry.entryOrder()
+            + "|"
+            + (requesterEntry == null ? -1 : requesterEntry.entryOrder());
+    String key = resource + "@" + TrainNameNormalizer.normalizeKey(request.trainName());
+    if (signature.equals(pendingWinnerArbitrationSignatures.get(key))) {
+      return;
+    }
+    pendingWinnerArbitrationSignatures.put(key, signature);
+    SignalComputationTrace.emitRaw(message);
   }
 
   private boolean isSwitcherConflictResource(OccupancyResource resource) {

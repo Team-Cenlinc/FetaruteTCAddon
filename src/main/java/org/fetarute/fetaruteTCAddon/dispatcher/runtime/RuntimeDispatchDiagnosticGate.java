@@ -255,7 +255,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           "SMART_UNLOCK_RESERVATION_ROLLED_BACK",
           "SMART_UNLOCK_RESERVATION_ROLLBACK",
           "SMART_UNLOCK_ROLLBACK_DONE",
-          "SMART_UNLOCK_APPLIED" -> true;
+          "SMART_UNLOCK_APPLIED",
+          // 队列仲裁结论：生产端已按 (资源, 请求方) 的结论签名去重，只有赢家、决定、原因或位次变化才输出。
+          // 它是判断"前方无车却进不去"的唯一直接证据——被普通观察预算吞掉时，长时间阻塞完全无法归因。
+          "SMART_PENDING_WINNER_ARBITRATION" -> true;
       default -> false;
     };
   }
