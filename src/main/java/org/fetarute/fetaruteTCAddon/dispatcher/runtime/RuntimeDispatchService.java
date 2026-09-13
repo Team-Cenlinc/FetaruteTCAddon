@@ -3122,8 +3122,10 @@ public final class RuntimeDispatchService {
       SmartRecoveryInput state =
           smartRecoveryInput(reservation.trainName(), Duration.ZERO, SignalAspect.STOP);
       boolean nodeChanged = !nodeText(state.currentNode()).equals(reservation.initialCurrentNode());
+      // 同上：基线缺失时该项无法判断，不能算作“已移动”。currentNode 变化仍由 nodeChanged 覆盖。
       boolean lastPassedChanged =
-          !state.lastPassedGraphNode().equals(reservation.initialLastPassedGraphNode());
+          hasRecordedLastPassedBaseline(reservation)
+              && !state.lastPassedGraphNode().equals(reservation.initialLastPassedGraphNode());
       boolean blockersReleased = expectedSmartUnlockBlockersReleased(reservation, now);
       MovementAuthorizationToken observedToken =
           movementToken(reservation.trainName()).orElse(null);
@@ -9371,12 +9373,38 @@ public final class RuntimeDispatchService {
   }
 
   /** canonical proof 驱动的 priority 意图只在原 route/index/last-passed 仍精确匹配时有效。 */
+  /**
+   * 预约创建时是否真的记录到了 lastPassedGraphNode 基线。
+   *
+   * <p>硬授权请求的 {@code DirectedTraversalContext} 目前把 lastPassedGraphNode 建为 {@code Optional.empty()}
+   * （见 {@code OccupancyRequestBuilder} 主构造点），因此由它派生的 canonical evidence 里该字段是 {@code "-"}。
+   * 拿这个从未记录过的值去和进度表里的真实节点比较，结果恒为“不等”，于是每一个 unlock 预约创建出来就注定被回滚 （实服 2.5 小时：9004 次预约、释放 claim
+   * 0、{@code canonical-progress-window-moved} 回滚 4342 次）， 死锁恢复在实践中完全失效。
+   *
+   * <p>缺失的基线只能表示“这一项无法判断”，不能表示“列车动了”。
+   */
+  private static boolean hasRecordedLastPassedBaseline(SmartUnlockReservation reservation) {
+    String baseline = reservation.initialLastPassedGraphNode();
+    return baseline != null && !baseline.isBlank() && !"-".equals(baseline);
+  }
+
+  /**
+   * 判断预约创建后列车的 canonical 进度窗口是否仍然未移动。
+   *
+   * <p>routeId 与 currentIndex 始终参与判定；lastPassedGraphNode 只在<b>确实记录到基线</b>时才参与，
+   * 避免把“没记录”误判成“已移动”。列车真的推进时 currentIndex 或 lastPassed 会变化，回滚照常触发。
+   */
   private boolean smartUnlockCanonicalProgressCurrent(
       String trainName, SmartUnlockReservation reservation) {
     Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
-    return current
-        .filter(entry -> entry.routeId().value().equals(reservation.canonicalRouteId()))
-        .filter(entry -> entry.currentIndex() == reservation.canonicalRouteIndex())
+    Optional<RouteProgressRegistry.RouteProgressEntry> sameWindow =
+        current
+            .filter(entry -> entry.routeId().value().equals(reservation.canonicalRouteId()))
+            .filter(entry -> entry.currentIndex() == reservation.canonicalRouteIndex());
+    if (!hasRecordedLastPassedBaseline(reservation)) {
+      return sameWindow.isPresent();
+    }
+    return sameWindow
         .filter(
             entry ->
                 entry
