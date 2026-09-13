@@ -2320,11 +2320,7 @@ public final class RuntimeDispatchService {
         canonicalEvidence.map(CanonicalForwardPathEvidence::routeId).orElse("-");
     int canonicalRouteIndex =
         canonicalEvidence.map(CanonicalForwardPathEvidence::routeIndex).orElse(-1);
-    String canonicalLastPassedGraphNode =
-        canonicalEvidence
-            .map(CanonicalForwardPathEvidence::lastPassedGraphNode)
-            .filter(value -> !value.equals("-"))
-            .orElse(plan.currentNode());
+    String canonicalLastPassedGraphNode = canonicalUnlockBaseline(canonicalEvidence);
     SmartUnlockReservation reservation =
         new SmartUnlockReservation(
             reservationId,
@@ -3185,7 +3181,10 @@ public final class RuntimeDispatchService {
       }
       if (reservation.hasCanonicalRouteIdentity()
           && !smartUnlockCanonicalProgressCurrent(reservation.trainName(), reservation)) {
-        rollbackSmartUnlockReservation(reservation, "canonical-progress-window-moved");
+        rollbackSmartUnlockReservation(
+            reservation,
+            "canonical-progress-window-moved:"
+                + smartUnlockCanonicalProgressMismatch(reservation.trainName(), reservation));
         continue;
       }
       SmartRecoveryInput state =
@@ -9484,7 +9483,10 @@ public final class RuntimeDispatchService {
     }
     if (reservation.hasCanonicalRouteIdentity()
         && !smartUnlockCanonicalProgressCurrent(trainName, reservation)) {
-      rollbackSmartUnlockReservation(reservation, "canonical-progress-window-moved");
+      rollbackSmartUnlockReservation(
+          reservation,
+          "canonical-progress-window-moved:"
+              + smartUnlockCanonicalProgressMismatch(trainName, reservation));
       return baseResolution;
     }
     if (currentNode == null
@@ -9552,6 +9554,59 @@ public final class RuntimeDispatchService {
    * <p>routeId 与 currentIndex 始终参与判定；lastPassedGraphNode 只在<b>确实记录到基线</b>时才参与，
    * 避免把“没记录”误判成“已移动”。列车真的推进时 currentIndex 或 lastPassed 会变化，回滚照常触发。
    */
+  /**
+   * 说明规范进度窗口到底哪一项对不上。
+   *
+   * <p>回滚原因此前一律写成 {@code canonical-progress-window-moved}，把 routeId / currentIndex /
+   * lastPassedGraphNode 三个判定揉成一个标签——实服里 80 次回滚全是这个原因，却无法从日志判断是哪一项， 只能回头读代码。这里把它拆开。
+   *
+   * @return 匹配时返回 {@code "-"}，否则返回具体失配项
+   */
+  private String smartUnlockCanonicalProgressMismatch(
+      String trainName, SmartUnlockReservation reservation) {
+    Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);
+    if (current.isEmpty()) {
+      return "progress-entry-missing";
+    }
+    RouteProgressRegistry.RouteProgressEntry entry = current.get();
+    if (!entry.routeId().value().equals(reservation.canonicalRouteId())) {
+      return "route-changed";
+    }
+    if (entry.currentIndex() != reservation.canonicalRouteIndex()) {
+      return "route-index-moved";
+    }
+    if (!hasRecordedLastPassedBaseline(reservation)) {
+      return "-";
+    }
+    String currentLastPassed = entry.lastPassedGraphNode().map(NodeId::value).orElse("-");
+    return currentLastPassed.equals(reservation.initialLastPassedGraphNode())
+        ? "-"
+        : "last-passed-moved";
+  }
+
+  /**
+   * 选取 unlock 预约的 lastPassed 基线。
+   *
+   * <p>规范证据里没有 lastPassed 时只能记"未记录"（{@code "-"}），<b>绝不能拿 currentNode 顶替</b>。 二者是不同的量：currentNode
+   * 是本次计划的窗口起点，lastPassedGraphNode 是列车真实走过的最后一个图节点。 列车停在两个 waypoint 之间或咽喉里时它们本来就不相等，而 {@link
+   * #smartUnlockCanonicalProgressCurrent} 会拿这个基线去和进度表的 lastPassedGraphNode 比较——顶替值是个 真实节点，正好骗过
+   * {@link #hasRecordedLastPassedBaseline} 的空值守卫，随后必然比较失败，于是预约在 释放任何 claim 之前就被判成 {@code
+   * canonical-progress-window-moved} 回滚。
+   *
+   * <p>实服 2026-09-13：80 次 unlock 预约、80 次回滚，全部 {@code releasedReservationClaims=0}， 死锁确认 219 次只解开 1
+   * 次。这与 {@code 22fcde1} 修掉的"拿窗口起点顶替进度锚点"是同一个错误模式， 也与 {@code 5963ab6}
+   * 同一条规则：<b>缺失的基线只能表示"无从判断"，不得由任何别的量顶替</b>。
+   */
+  static String canonicalUnlockBaseline(Optional<CanonicalForwardPathEvidence> canonicalEvidence) {
+    if (canonicalEvidence == null) {
+      return "-";
+    }
+    return canonicalEvidence
+        .map(CanonicalForwardPathEvidence::lastPassedGraphNode)
+        .filter(value -> value != null && !value.isBlank() && !value.equals("-"))
+        .orElse("-");
+  }
+
   private boolean smartUnlockCanonicalProgressCurrent(
       String trainName, SmartUnlockReservation reservation) {
     Optional<RouteProgressRegistry.RouteProgressEntry> current = progressRegistry.get(trainName);

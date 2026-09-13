@@ -1,10 +1,14 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -72,6 +76,51 @@ class SmartUnlockProgressBaselineTest {
       return -1;
     }
     return 0;
+  }
+
+  /**
+   * 规范证据缺 lastPassed 时，基线必须记成"未记录"，不得由 currentNode 之类的别的量顶替。
+   *
+   * <p>此前这里写的是 {@code .orElse(plan.currentNode())}。currentNode 是本次计划的<b>窗口起点</b>， 与列车真实走过的
+   * lastPassedGraphNode 是两个量；列车停在两个 waypoint 之间或咽喉里时二者本来就不等。 而顶替值是个<b>真实节点</b>，正好骗过 {@link
+   * #missingBaselineIsNotTreatedAsRecorded} 守住的空值判定， 随后 {@code smartUnlockCanonicalProgressCurrent}
+   * 拿它去和进度表的 lastPassedGraphNode 比较必然失败。
+   *
+   * <p>实服 2026-09-13 的后果：**80 次 unlock 预约、80 次回滚**，全部 {@code releasedReservationClaims=0}——预约在释放任何
+   * claim 之前就作废，死锁确认 219 次只解开 1 次， 恢复层等于完全失效。
+   */
+  @Test
+  void missingCanonicalEvidenceYieldsUnrecordedBaseline() {
+    assertEquals("-", RuntimeDispatchService.canonicalUnlockBaseline(Optional.empty()));
+    assertEquals("-", RuntimeDispatchService.canonicalUnlockBaseline(null));
+    assertEquals("-", RuntimeDispatchService.canonicalUnlockBaseline(Optional.of(evidence("-"))));
+    assertEquals("-", RuntimeDispatchService.canonicalUnlockBaseline(Optional.of(evidence(""))));
+    assertEquals("-", RuntimeDispatchService.canonicalUnlockBaseline(Optional.of(evidence("   "))));
+  }
+
+  /** 证据里有真实 lastPassed 时必须原样采用——收紧不得波及正常路径。 */
+  @Test
+  void realCanonicalEvidenceIsUsedAsBaseline() {
+    assertEquals(
+        "SURC:ZKW:HHU:1:006",
+        RuntimeDispatchService.canonicalUnlockBaseline(
+            Optional.of(evidence("SURC:ZKW:HHU:1:006"))));
+  }
+
+  private static CanonicalForwardPathEvidence evidence(String lastPassedGraphNode) {
+    return new CanonicalForwardPathEvidence(
+        "train-a",
+        "SURC:DS:DS-1F_Full",
+        3,
+        "SURC:S:HHU:1",
+        "SURC:ZKW:HHU:1:006",
+        lastPassedGraphNode,
+        List.of(),
+        List.of(),
+        List.of(),
+        1L,
+        1L,
+        "req-1");
   }
 
   @Test
