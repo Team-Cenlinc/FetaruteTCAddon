@@ -15209,7 +15209,7 @@ public final class RuntimeDispatchService {
         if (nodeClaim.isPresent()
             && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, nodeClaim.get())) {
           return distanceToForwardTrainSignal(
-              distanceBlocks, currentSpeedBps, decelBps2, runtimeSettings);
+              distanceBlocks, currentSpeedBps, decelBps2, runtimeSettings, baseAspect);
         }
       }
 
@@ -15218,7 +15218,7 @@ public final class RuntimeDispatchService {
       if (edgeClaim.isPresent()
           && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, edgeClaim.get())) {
         return distanceToForwardTrainSignal(
-            distanceBlocks, currentSpeedBps, decelBps2, runtimeSettings);
+            distanceBlocks, currentSpeedBps, decelBps2, runtimeSettings, baseAspect);
       }
     }
 
@@ -15313,11 +15313,22 @@ public final class RuntimeDispatchService {
    *
    * <p>这里复用移动授权的制动距离思路，但使用跟驰专用 margin。edge count 只作为扫描上限，不再决定信号等级。
    */
-  private SignalAspect distanceToForwardTrainSignal(
+  /**
+   * 按到前车的距离推导跟驰信号。
+   *
+   * <p>距离超过 caution 阈值时返回 {@code baseAspect}，即前车<b>不施加任何额外限制</b>。此前这里无条件返回 {@code
+   * PROCEED_WITH_CAUTION}：只要前向扫描（最多 {@link #FORWARD_TRAIN_SCAN_MAX_EDGES} 条边，按实服边长可达 数百
+   * blocks）里出现任何一辆车，后车就被永久钉在 caution 速度上，哪怕两车之间还隔着好几个空闲区间—— 表现就是“前面明明有空位却只会爬行”。实服 25 分钟日志里 {@code
+   * PROCEED_WITH_CAUTION} 占已发布信号的 45%， 而同期真正的 {@code STOP} 只有 6 次。
+   *
+   * <p>STOP 与 CAUTION 两个阈值均未改动；两者都随速度按 {@code v²/2a} 自然增长，因此列车加速后阈值同步放大， 逼近前车时仍会按原有曲线依次降级。
+   */
+  private static SignalAspect distanceToForwardTrainSignal(
       long distanceBlocks,
       double currentSpeedBps,
       double decelBps2,
-      ConfigManager.RuntimeSettings runtimeSettings) {
+      ConfigManager.RuntimeSettings runtimeSettings,
+      SignalAspect baseAspect) {
     double speed = Double.isFinite(currentSpeedBps) ? Math.max(0.0, currentSpeedBps) : 0.0;
     double decel = Double.isFinite(decelBps2) && decelBps2 > 0.0 ? decelBps2 : 0.001;
     int followingStopMargin =
@@ -15337,9 +15348,8 @@ public final class RuntimeDispatchService {
       return SignalAspect.STOP;
     } else if (distanceBlocks + 1.0e-6 <= cautionThreshold) {
       return SignalAspect.CAUTION;
-    } else {
-      return SignalAspect.PROCEED_WITH_CAUTION;
     }
+    return baseAspect;
   }
 
   private long forwardScanEdgeLength(

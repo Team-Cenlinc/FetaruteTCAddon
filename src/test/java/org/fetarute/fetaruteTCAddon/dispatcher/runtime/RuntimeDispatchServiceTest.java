@@ -3600,8 +3600,15 @@ class RuntimeDispatchServiceTest {
     assertEquals(0, train.hardStopCalls);
   }
 
+  /**
+   * 前向扫描会看到硬授权窗口之外的前车，但该前车已远在 caution 阈值之外，因此不施加任何降级。
+   *
+   * <p>旧契约在这里断言 {@code PROCEED_WITH_CAUTION}：只要扫描范围内出现任何一辆车就无条件限速。 实服代价很大——{@code
+   * caution-speed-bps} 为 10，而线路边限速多为 16.7/22.2 bps， 等于对每一个后车掉速一半以上；日志里 {@code PROCEED_WITH_CAUTION}
+   * 占已发布信号 45%， 而真正的 STOP 只有 6 次。STOP 与 CAUTION 两个距离阈值未改动，见 {@code distanceToForwardTrainSignal}。
+   */
   @Test
-  void forwardTrainDistanceUsesFullAdvisoryPathBeyondHardAuthorityWindow() {
+  void forwardTrainBeyondCautionThresholdDoesNotDowngrade() {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     NodeId c = NodeId.of("C");
@@ -3669,8 +3676,7 @@ class RuntimeDispatchServiceTest {
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
     service.handleSignalTick(train, true);
 
-    assertEquals(
-        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
+    assertEquals(SignalAspect.PROCEED, registry.get("train-1").orElseThrow().lastSignal());
     assertEquals(0, train.hardStopCalls);
   }
 
@@ -5786,6 +5792,11 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  /**
+   * 前向扫描按展开路径计数边数；本例中的前车同样远在 caution 阈值之外，因此不降级。
+   *
+   * <p>断言随 {@code distanceToForwardTrainSignal} 的新契约更新：远处前车不再无条件限速。
+   */
   void handleSignalTickForwardScanCountsExpandedPathEdges() {
     NodeId a = NodeId.of("A");
     NodeId m1 = NodeId.of("M1");
@@ -5865,7 +5876,7 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, false);
 
     SignalAspect aspect = registry.get("train-1").orElseThrow().lastSignal();
-    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, aspect);
+    assertEquals(SignalAspect.PROCEED, aspect);
   }
 
   @Test
