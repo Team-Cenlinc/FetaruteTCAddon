@@ -254,6 +254,15 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
     if (message.startsWith("SMART_DISPATCH_EXECUTOR_")) {
       return true;
     }
+    // 终点站 layover 是列车"跑完一趟之后去哪了"的唯一记录，全部事件驱动、天然低频
+    // （实服 42 分钟：注册 5、复用等待 46、复用成功 18、改名 3），不存在按 tick 放大的路径。
+    //
+    // 它被预算吞掉时后果很隐蔽：复用会给列车改名，旧名从此不再出现。缺了这几行就无法把改名链接起来，
+    // "某个列车名不再出现"会被读成"这辆车冻住了"——2026-09-13 我就是这样误判了一轮，
+    // 据此写下的"5 辆车冻死在终点站"是错的（见 dispatch-disproven-hypotheses #11）。
+    if (message.startsWith("Layover ")) {
+      return true;
+    }
     int separator = message.indexOf(' ');
     String kind = separator < 0 ? message : message.substring(0, separator);
     return switch (kind) {

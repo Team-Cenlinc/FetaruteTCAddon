@@ -92,6 +92,27 @@ class DiagnosticBudgetConfigurableTest {
     assertEquals(30, applied, "恢复层执行证据不得被预算吞掉：" + out);
   }
 
+  /**
+   * 终点站 layover 事件必须不受预算约束。
+   *
+   * <p>复用会给列车改名（{@code Layover 复用: trainName 更新为 X}），旧名从此不再出现在任何日志里。
+   * 缺了这几行就无法把改名链接起来，"某个列车名不再出现"会被读成"这辆车冻住了"——2026-09-13 就是这样误判了一轮，据此得出的"5 辆车冻死在终点站"是错的。
+   */
+  @Test
+  void layoverLifecycleEventsAreNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 10; i++) {
+      gate.accept("Layover 注册: train=t" + i + " terminalKey=surc:s:ppk:1 station=PPK");
+      gate.accept("Layover 复用: trainName 更新为 SURC-MT-LH-" + i);
+      gate.accept("Layover 复用等待: route=MT-2O_ShortD start=SURC:S:PPK:1");
+    }
+
+    long layover = out.stream().filter(l -> l.startsWith("Layover ")).count();
+    assertEquals(30, layover, "layover 生命周期事件不得被预算吞掉：" + out.size());
+  }
+
   /** 事务审计不受预算约束——调预算不得动摇这条边界。 */
   @Test
   void transactionAuditsIgnoreTheBudgetEntirely() {
