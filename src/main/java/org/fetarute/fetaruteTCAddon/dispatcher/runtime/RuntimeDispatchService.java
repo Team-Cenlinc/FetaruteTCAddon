@@ -9489,13 +9489,41 @@ public final class RuntimeDispatchService {
               + smartUnlockCanonicalProgressMismatch(trainName, reservation));
       return baseResolution;
     }
-    if (currentNode == null
-        || nextNode == null
-        || !currentNode.value().equals(reservation.initialCurrentNode())
-        || !nextNode.equals(reservation.plannedDestinationNode())) {
+    if (currentNode == null || !currentNode.value().equals(reservation.initialCurrentNode())) {
       if (reservation.hasCanonicalRouteIdentity()) {
-        rollbackSmartUnlockReservation(reservation, "canonical-progress-window-moved");
+        rollbackSmartUnlockReservation(
+            reservation,
+            "current-node-moved:"
+                + reservation.initialCurrentNode()
+                + "->"
+                + (currentNode == null ? "-" : currentNode.value()));
       }
+      return baseResolution;
+    }
+    // 这里**不能**拿 nextNode 去和 plannedDestinationNode 比。
+    //
+    // nextNode 是下一个**路径点**（route.waypoints() 里的车站/通过点），plannedDestinationNode 是恢复计划的
+    // **授权窗口边界**（至多 ALLOCATION_EDGE_THRESHOLD 条边以外的走行线图节点）。两者只在"下一个路径点恰好落在
+    // 授权窗口末端"这个巧合下相等；授权边界落在两个路径点之间才是常态。
+    //
+    // 实服 2026-09-13：MT-2F_Short 的路径点是 … → SURC:S:PTK:1 → SURC:S:RVS:1 → …，而授权边界是
+    // SURC:RVS:PTK:1:002（PTK 与 RVS 之间的走行线节点，根本不在路径点列表里）。判定因此恒假——42 分钟里
+    // SMART_UNLOCK_RESERVATION_CREATED 78 次、回滚 78 次，而 SMART_UNLOCK_PRIORITY_INTENT_APPLIED **为 0**：
+    // 恢复层唯一的执行手段一次都没生效过。回滚理由还被写成 canonical-progress-window-moved，而上面那道规范
+    // 进度判定明明刚刚通过——这正是该缺陷长期没被发现的原因。
+    //
+    // "列车是否仍停在计划采样的位置、朝同一方向"这件事，上面的 smartUnlockCanonicalProgressCurrent
+    // （routeId + currentIndex + lastPassedGraphNode）已经完整回答了；nextNode 在这里只剩一个正确的用途：
+    // 确认前方还存在下一个规范目标。
+    if (nextNode == null) {
+      if (reservation.hasCanonicalRouteIdentity()) {
+        rollbackSmartUnlockReservation(reservation, "no-next-canonical-target");
+      }
+      return baseResolution;
+    }
+    if (!reservation.hasCanonicalRouteIdentity()) {
+      // 没有规范身份就没有"仍在采样点、朝同一方向"的证据。缺证据只能表示"无法判断"，按 fail-closed 不授予
+      // priority 意图。旧实现在该分支上靠"下一路径点恰好等于授权边界"这个巧合放行，那不是证据。
       return baseResolution;
     }
     int priority = saturatingIntAdd(baseResolution.priority(), SMART_UNLOCK_PRIORITY_BOOST);
