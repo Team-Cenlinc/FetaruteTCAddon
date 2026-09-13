@@ -360,6 +360,19 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, String>
       liveRailFootprintDiagnosticStates = new java.util.concurrent.ConcurrentHashMap<>();
 
+  /**
+   * 已由调度主动销毁、但实体尚未真正消失的物理编组；使用对象身份语义，值为下达销毁的时刻。
+   *
+   * <p>{@code handleDestroy} 会立即清掉进度、缓存与 route tag，但 {@code train.destroy()} 的物理销毁延迟 1 tick
+   * （见该方法注释：同步释放占用会让 SpawnMonitor 在物理销毁前 acquire 并 spawn 新车导致撞车）。这个窗口里实体仍然存活， 仍可能触发 {@code
+   * MEMBER_ENTER}。此时它看起来就是一列"没有任何 route 证据的陌生列车"，会被迟加载隔离判成现场异常， 进而关闭<b>全局</b>授权门。实服 2026-09-13
+   * 就是这样：LWN 段场一辆车 DSTY 之后同一秒来了一个滞后到站事件， 全局重建被重新触发且再未 READY，此后 8 分钟每辆车每个 tick 都 fail-closed。
+   *
+   * <p>因此本集合只用来识别"这是我们自己刚销毁的那辆车的滞后事件"，据此丢弃该事件；它<b>不</b>放宽对真正陌生实体的隔离。
+   */
+  private final Map<Object, Instant> dispatchDestroyedPhysicalIdentities =
+      java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
+
   /** 已发生待分类物理变化或已确认异常、等待 TrainCarts 精确移除的物理编组；使用对象身份语义。 */
   private final Set<Object> abnormalPhysicalQuarantines =
       java.util.Collections.synchronizedSet(
@@ -448,6 +461,15 @@ public final class RuntimeDispatchService {
 
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Duration BLOCKER_SNAPSHOT_TTL = Duration.ofSeconds(20);
+
+  /**
+   * 调度销毁之后，仍把该物理身份的事件视为"自己刚销毁的滞后事件"的时长。
+   *
+   * <p>物理销毁只延迟 1 tick，取 30 秒是给 GroupRemove 事件足够余量。超过这个窗口仍在报事件的实体，说明销毁没有真正完成，
+   * 那才是需要走隔离的现场异常——所以这里必须过期，不能永久豁免。
+   */
+  private static final Duration DISPATCH_DESTROY_STALE_EVENT_GRACE = Duration.ofSeconds(30);
+
   private static final Duration SMART_UNLOCK_NO_RELEASE_COOLDOWN = Duration.ofSeconds(30);
 
   /**
@@ -7338,6 +7360,64 @@ public final class RuntimeDispatchService {
    * @param source 被门控的事件来源，用于 STOP 审计
    * @return {@code true} 表示事件已被硬 STOP 吸收，调用方不得继续改写进度、destination 或授权
    */
+  /** 记录一次调度销毁的物理身份，供随后可能到达的滞后事件识别。 */
+  private void rememberDispatchDestroyedIdentity(RuntimeTrainHandle train) {
+    if (train == null) {
+      return;
+    }
+    Object identity = train.physicalRuntimeIdentity();
+    if (identity == null) {
+      return;
+    }
+    pruneDispatchDestroyedIdentities();
+    dispatchDestroyedPhysicalIdentities.put(identity, clockNow());
+  }
+
+  /** 实体真正消失后不再需要豁免。 */
+  private void forgetDispatchDestroyedIdentity(Object identity) {
+    if (identity != null) {
+      dispatchDestroyedPhysicalIdentities.remove(identity);
+    }
+  }
+
+  private void pruneDispatchDestroyedIdentities() {
+    Instant deadline = clockNow().minus(DISPATCH_DESTROY_STALE_EVENT_GRACE);
+    synchronized (dispatchDestroyedPhysicalIdentities) {
+      dispatchDestroyedPhysicalIdentities
+          .values()
+          .removeIf(at -> at == null || at.isBefore(deadline));
+    }
+  }
+
+  /**
+   * 判断该事件是否来自调度自己刚销毁、实体尚未消失的列车。
+   *
+   * <p>这类事件必须丢弃而不是走迟加载隔离：它的 route 证据是我们自己在 {@code handleDestroy} 里清掉的，
+   * 把它当成陌生实体会关闭全局授权门，并且实服观察到关闭后不会再恢复。丢弃只影响这一辆已判死刑的车， 不改变对真正陌生实体的处置。
+   */
+  private boolean isDispatchDestroyedStaleEvent(RuntimeTrainHandle train, String source) {
+    if (train == null || dispatchDestroyedPhysicalIdentities.isEmpty()) {
+      return false;
+    }
+    Object identity = train.physicalRuntimeIdentity();
+    if (identity == null) {
+      return false;
+    }
+    pruneDispatchDestroyedIdentities();
+    Instant destroyedAt = dispatchDestroyedPhysicalIdentities.get(identity);
+    if (destroyedAt == null) {
+      return false;
+    }
+    debugLogger.accept(
+        "SMART_DISPATCH_DESTROY_STALE_EVENT_IGNORED train="
+            + resolveTrackedTrainName(train.properties()).orElse("-")
+            + " source="
+            + (source == null || source.isBlank() ? "runtime-event" : source)
+            + " destroyedAgoMs="
+            + Duration.between(destroyedAt, clockNow()).toMillis());
+    return true;
+  }
+
   private boolean startupOccupancyRecoveryBlocks(RuntimeTrainHandle train, String source) {
     StartupOccupancyReconstructionState state = startupOccupancyReconstructionState;
     if (train != null
@@ -7345,6 +7425,9 @@ public final class RuntimeDispatchService {
         && train.physicalRuntimeIdentity() != null
         && abnormalPhysicalQuarantines.contains(train.physicalRuntimeIdentity())) {
       stopAbnormalTrainBeforeDestroy(train, null);
+      return true;
+    }
+    if (isDispatchDestroyedStaleEvent(train, source)) {
       return true;
     }
     if (train == null
@@ -7637,6 +7720,7 @@ public final class RuntimeDispatchService {
       return;
     }
     Object removedIdentity = removedTrain.physicalRuntimeIdentity();
+    forgetDispatchDestroyedIdentity(removedIdentity);
     unloadedMaterializedSpawnRollbackIdentities.remove(removedIdentity);
     abnormalPhysicalQuarantines.remove(removedIdentity);
     MaterializedSpawnRollbackQuarantine materializedRollback =
@@ -17935,6 +18019,7 @@ public final class RuntimeDispatchService {
     }
     layoverRegistry.unregister(trainName);
     if (train != null) {
+      rememberDispatchDestroyedIdentity(train);
       train.destroy();
     }
     progressRegistry.remove(trainName);
