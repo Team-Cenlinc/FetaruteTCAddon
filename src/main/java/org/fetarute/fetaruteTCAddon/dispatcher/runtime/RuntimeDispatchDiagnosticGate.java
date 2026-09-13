@@ -48,12 +48,31 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
 
   /** 使用运行时默认窗口创建诊断 gate。 */
   public RuntimeDispatchDiagnosticGate(Consumer<String> output) {
+    this(output, DEFAULT_MAX_OBSERVATION_EMISSIONS);
+  }
+
+  /**
+   * 使用指定的每分钟观察预算创建诊断 gate。
+   *
+   * <p>预算原本是硬编码的 {@value #DEFAULT_MAX_OBSERVATION_EMISSIONS} 条/分钟。实服排查时这个值偏低： 2026-09-13 一轮 42
+   * 分钟里丢弃 305,203 行、写出 36,229 行（**89% 被丢**）， 连 {@code SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED}
+   * 这类只在异常时出现的 trace 都一条没留下—— 于是「没 grep 到」既可能是没发生，也可能是被丢了，**无法区分**，排查因此停摆。
+   *
+   * <p>排查期间需要能临时调高；稳定运行时应当调回默认值，否则控制台会按列车数放大。
+   *
+   * @param output 实际日志接收端
+   * @param maxObservationEmissionsPerMinute 每分钟最多输出的观察 trace 数；非正值回落到默认
+   */
+  public RuntimeDispatchDiagnosticGate(
+      Consumer<String> output, int maxObservationEmissionsPerMinute) {
     this(
         output,
         DEFAULT_REPEAT_WINDOW,
         DEFAULT_MAX_SIGNATURES,
         DEFAULT_OBSERVATION_BUDGET_WINDOW,
-        DEFAULT_MAX_OBSERVATION_EMISSIONS,
+        maxObservationEmissionsPerMinute > 0
+            ? maxObservationEmissionsPerMinute
+            : DEFAULT_MAX_OBSERVATION_EMISSIONS,
         System::nanoTime);
   }
 

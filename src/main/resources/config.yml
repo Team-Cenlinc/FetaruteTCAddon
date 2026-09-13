@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 27
+config-version: 28
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -7,6 +7,10 @@ locale: zh_CN
 debug:
   # 是否启用插件调试日志
   enabled: false
+  # 每分钟最多输出多少条“观察类”调度诊断。
+  # 执行器审计、停因生命周期、资源生命周期等事务证据不受此限制，始终逐条输出。
+  # 默认 120 适合稳定运行；排查拥堵/死锁时调到 1200~3000，查完记得调回来，否则控制台会按列车数放大。
+  observation-budget-per-minute: 120
 
 # Smart Dispatcher / Traffic Control Supervisor 安全隔离
 smart-dispatcher:

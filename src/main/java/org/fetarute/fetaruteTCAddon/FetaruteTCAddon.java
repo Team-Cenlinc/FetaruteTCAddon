@@ -150,7 +150,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
     this.loggerManager = new LoggerManager(getLogger());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
-    this.runtimeDispatchDiagnosticGate = new RuntimeDispatchDiagnosticGate(loggerManager::debug);
+    // 排查期可临时调高；默认 120 条/分钟在实服拥堵时会丢掉约九成诊断，导致"没 grep 到"无法解读。
+    this.runtimeDispatchDiagnosticGate =
+        new RuntimeDispatchDiagnosticGate(
+            loggerManager::debug, getConfig().getInt("debug.observation-budget-per-minute", 120));
 
     this.localeManager = new LocaleManager(this, configManager.current().locale(), loggerManager);
     this.localeManager.reload();
