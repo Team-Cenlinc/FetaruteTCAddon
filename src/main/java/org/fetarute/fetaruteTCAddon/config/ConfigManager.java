@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 28;
+  private static final int EXPECTED_CONFIG_VERSION = 29;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -78,7 +78,19 @@ public final class ConfigManager {
   private static final SmartDispatcherPlannerMode DEFAULT_SMART_DISPATCHER_PLANNER_MODE =
       SmartDispatcherPlannerMode.OBSERVE_ONLY;
   private static final int DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES = 4;
-  private static final int DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS = 60;
+
+  /**
+   * unlock 预约的存活时长，单位是 50ms 的信号 tick（见 {@code currentSignalTraceTick}）。
+   *
+   * <p>原值 60 = **3 秒**。实测「列车被放行 → 走到下一个节点」中位数 **21 秒**、p75 31 秒、p90 66 秒， 只有 **3%** 能在 3
+   * 秒内完成。于是预约必然在它等待的那个移动完成之前过期：实服 2026-09-13 第四轮 68 个预约全部 2–4 秒内夭折，66 次 no-release-timeout 里 **65 次
+   * {@code currentNodeChanged=true}** ——列车明明已经动了，却被 3 秒的秒表判为失败。
+   *
+   * <p>1200 tick = 60 秒，高于 p75。过长的代价有界（只多保留一会儿队列 priority 意图，且列车一旦推进 就会由 canonical
+   * 进度判定回滚）；过短的代价是恢复层 97% 必然失败。
+   */
+  private static final int DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS = 1200;
+
   private static final long DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS = 10_000L;
   private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_REQUIRE_SAME_DIRECTION = true;
   private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_REVERSE = false;

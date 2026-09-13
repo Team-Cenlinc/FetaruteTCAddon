@@ -2359,8 +2359,10 @@ public final class RuntimeDispatchService {
             + plannedDestinationNode.value()
             + " createdTick="
             + tick
-            + " ttl="
+            + " ttlTicks="
             + config.reservationTtlTicks()
+            + " ttlSeconds="
+            + (config.reservationTtlTicks() * 50L / 1000.0)
             + " expectedReleasedResources="
             + plan.resources());
     traceSmartUnlockPlanApply(
@@ -3309,8 +3311,12 @@ public final class RuntimeDispatchService {
                 + reservation.reservationId()
                 + " train="
                 + reservation.trainName()
-                + " ttl="
-                + reservation.ttlTicks());
+                + " ttlTicks="
+                + reservation.ttlTicks()
+                + " ttlSeconds="
+                + (reservation.ttlTicks() * 50L / 1000.0)
+                + " aliveTicks="
+                + (tick - reservation.createdTick()));
         debugLogger.accept(
             "SMART_UNLOCK_FAILED reservationId="
                 + reservation.reservationId()
