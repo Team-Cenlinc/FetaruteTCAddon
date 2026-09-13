@@ -84,6 +84,34 @@ final class DispatchScenarioHarness {
    */
   private static final int DEBUG_LOG_RETAINED_LINES = 3000;
 
+  /** 场景时钟的起点与步长。50ms/tick 与 Minecraft 的 20 tick/s 一致。 */
+  private static final Instant SCENARIO_EPOCH = Instant.parse("2026-01-01T00:00:00Z");
+
+  private static final Duration SCENARIO_TICK_DURATION = Duration.ofMillis(50);
+
+  /**
+   * 确定推进的场景时钟。
+   *
+   * <p>调度的排队与仲裁带时间语义：队列条目的 {@code firstSeen} 决定 {@code arbitrationDeadlineMillis}，
+   * 进而决定同一冲突区上谁先走。骨架一个 tick 只花约 1ms，生产是 50ms；用墙钟跑时所有时间戳被压进同一毫秒， 先后关系退化成任意打破——实测同一场景连跑 6 次，队列位次倒退出现
+   * 3 次、不出现 3 次，而且据此写下过一条 并不存在的"缺陷"。注入本时钟之后这些时间戳只取决于 tick 序号，50ms/tick 与生产一致。
+   *
+   * <p><b>确定性靠的是结构（不读墙钟），不是靠重复跑几次去碰。</b>曾试过写"同一场景连跑 20 次比对摘要"的 守卫，实测它连故意换回墙钟都抓不到：同一个 JVM
+   * 里连续几轮速度相近，摘要照样一致；真正的漂移发生在 不同进程、不同机器负载之间。那种守卫既抓不住问题，又要为 60 个场景实例付出内存与时间，已经移除。
+   */
+  static final class ScenarioClock implements java.util.function.Supplier<Instant> {
+    private Instant current = SCENARIO_EPOCH;
+
+    @Override
+    public Instant get() {
+      return current;
+    }
+
+    void advance(Duration step) {
+      current = current.plus(step);
+    }
+  }
+
   /** 读取最近 blocker 快照时使用的观察窗口。 */
   private static final Duration BLOCKER_OBSERVATION_WINDOW = Duration.ofSeconds(30);
 
@@ -151,6 +179,9 @@ final class DispatchScenarioHarness {
   /** 是否在每个 tick 前驱动 Smart 恢复层；默认关闭，原因见 {@link Builder#smartRecoveryLayer(boolean)}。 */
   private final boolean smartRecoveryLayer;
 
+  /** 确定推进的场景时钟，注入给 {@link RuntimeDispatchService}。 */
+  private final ScenarioClock clock;
+
   private final List<String> violations = new ArrayList<>();
 
   /** 每列车当前 STOP 生命周期的标识与已连续出现的 tick 数，供 I5 判断"停了多久"。 */
@@ -168,7 +199,9 @@ final class DispatchScenarioHarness {
       SignActionEvent enterEvent,
       Map<NodeId, List<NodeId>> adjacency,
       Map<String, RouteDefinition> routeByTrain,
-      boolean smartRecoveryLayer) {
+      boolean smartRecoveryLayer,
+      ScenarioClock clock) {
+    this.clock = clock;
     this.smartRecoveryLayer = smartRecoveryLayer;
     this.adjacency = adjacency;
     this.routeByTrain = routeByTrain;
@@ -645,9 +678,13 @@ final class DispatchScenarioHarness {
               });
 
       SignalEventBus eventBus = new SignalEventBus();
+      ScenarioClock clock = new ScenarioClock();
       SimpleOccupancyManager occupancy =
           new SimpleOccupancyManager(
-              (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+              (routeId, resource) -> Duration.ZERO,
+              SignalAspectPolicy.defaultPolicy(),
+              eventBus,
+              clock);
       RouteProgressRegistry registry = new RouteProgressRegistry();
       // 有界：多车场景每 tick 会产生成百上千行，无界保留会把测试 JVM 撑爆（实测 OOM）。
       // 只留最近若干行供失败现场展示；不变量所需的"本 tick 新增"走 pendingDiagnostics，不依赖这里。
@@ -665,7 +702,8 @@ final class DispatchScenarioHarness {
               config,
               null,
               new TrainConfigResolver(),
-              debugLog::add);
+              debugLog::add,
+              clock);
 
       Map<String, ScenarioTrain> trains = new LinkedHashMap<>();
       Map<String, RouteDefinition> routeByTrainName = new LinkedHashMap<>();
@@ -716,7 +754,8 @@ final class DispatchScenarioHarness {
               enterEventMock(worldId),
               buildAdjacency(edgePairs),
               routeByTrainName,
-              smartRecoveryLayer);
+              smartRecoveryLayer,
+              clock);
       RuntimeSignalReevaluationScheduler scheduler =
           new RuntimeSignalReevaluationScheduler(
               nextTickTasks::add,
@@ -790,10 +829,10 @@ final class DispatchScenarioHarness {
   void runTicks(int count) {
     for (int i = 0; i < count; i++) {
       tick++;
+      clock.advance(SCENARIO_TICK_DURATION);
       drainNextTickTasks();
       if (smartRecoveryLayer) {
-        service.traceSmartDispatchGlobalSnapshot(
-            new LinkedHashSet<>(trains.keySet()), Instant.now());
+        service.traceSmartDispatchGlobalSnapshot(new LinkedHashSet<>(trains.keySet()), clock.get());
       }
       for (ScenarioTrain train : trains.values()) {
         service.handleSignalTick(train, false);

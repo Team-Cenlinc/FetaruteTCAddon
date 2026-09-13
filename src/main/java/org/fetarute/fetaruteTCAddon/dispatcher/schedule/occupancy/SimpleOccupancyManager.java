@@ -89,6 +89,9 @@ public final class SimpleOccupancyManager
       NOOP_LIVE_BLOCKER_SNAPSHOT_LISTENER;
 
   /** 冲突区放行锁：key=冲突资源 key，value=被放行列车与锁定过期时间。 */
+  /** 时间源；生产为 {@link Instant#now()}，回归骨架注入确定推进的时钟。 */
+  private final java.util.function.Supplier<Instant> clock;
+
   private final Map<String, DeadlockReleaseLock> deadlockReleaseLocks = new LinkedHashMap<>();
 
   /**
@@ -227,9 +230,32 @@ public final class SimpleOccupancyManager
    */
   public SimpleOccupancyManager(
       HeadwayRule headwayRule, SignalAspectPolicy signalPolicy, SignalEventBus eventBus) {
+    this(headwayRule, signalPolicy, eventBus, Instant::now);
+  }
+
+  /**
+   * 使用可注入时间源构建。
+   *
+   * <p>队列条目的 {@code firstSeen} 决定 {@code arbitrationDeadlineMillis}，进而决定同一冲突区上谁先走； TTL
+   * 清理同样看"现在"。只要它是墙钟，同一组输入在不同负载下就可能得出不同的放行顺序。生产一律用 {@link
+   * Instant#now()}（上面那个构造器），行为与注入前完全一致；本构造器只为让回归骨架能给出确定的时间推进。
+   *
+   * @param clock 时间源，不得为 null
+   */
+  public SimpleOccupancyManager(
+      HeadwayRule headwayRule,
+      SignalAspectPolicy signalPolicy,
+      SignalEventBus eventBus,
+      java.util.function.Supplier<Instant> clock) {
+    this.clock = Objects.requireNonNull(clock, "clock");
     this.headwayRule = Objects.requireNonNull(headwayRule, "headwayRule");
     this.signalPolicy = signalPolicy != null ? signalPolicy : SignalAspectPolicy.defaultPolicy();
     this.eventBus = eventBus;
+  }
+
+  /** 读取"现在"。实例方法一律走这里，不要直接调 {@link Instant#now()}。 */
+  private Instant clockNow() {
+    return clock.get();
   }
 
   /** 返回占用/队列快照版本。claim 或 queue 发生真实变更时递增。 */
@@ -1340,7 +1366,7 @@ public final class SimpleOccupancyManager
     if (currentTrainName.equals(nextTrainName)) {
       return true;
     }
-    purgeExpiredQueueEntries(Instant.now());
+    purgeExpiredQueueEntries(clockNow());
     if (hasAuthorityState(nextTrainName)) {
       return false;
     }
@@ -2154,7 +2180,7 @@ public final class SimpleOccupancyManager
       int priority,
       int entryOrder,
       Instant now) {
-    Instant safeNow = now == null ? Instant.now() : now;
+    Instant safeNow = now == null ? clockNow() : now;
     OccupancyQueueEntry candidate =
         queue.candidateEntry(
             request.trainName(),
@@ -2571,7 +2597,7 @@ public final class SimpleOccupancyManager
       int activeClaims = claims.getOrDefault(resource, List.of()).size();
       snapshots.add(
           new OccupancyQueueSnapshot(
-              resource, activeDirection, activeClaims, queue.snapshotEntries(Instant.now())));
+              resource, activeDirection, activeClaims, queue.snapshotEntries(clockNow())));
     }
     return List.copyOf(snapshots);
   }
@@ -2729,7 +2755,7 @@ public final class SimpleOccupancyManager
     releaseDeadlockLocksForTrain(candidate.trainName());
     selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(candidate.trainName()));
     version.incrementAndGet();
-    publishReleasedEvent(candidate.trainName(), List.of(candidate.resource()), Instant.now());
+    publishReleasedEvent(candidate.trainName(), List.of(candidate.resource()), clockNow());
     return new SelfOwnedStaleRetainReleaseResult(
         true, true, "released-self-owned-stale-retain", List.of(candidate.resource()));
   }
@@ -2773,7 +2799,7 @@ public final class SimpleOccupancyManager
       return 0;
     }
     int removed = 0;
-    Instant now = Instant.now();
+    Instant now = clockNow();
     List<OccupancyResource> changedResources = new ArrayList<>();
     Set<String> eligibleTrainNames = new LinkedHashSet<>();
     for (OccupancyResource resource : resources) {
@@ -2848,7 +2874,7 @@ public final class SimpleOccupancyManager
       version.incrementAndGet();
     }
     if (!releasedResources.isEmpty()) {
-      publishReleasedEvent(trainName, releasedResources, Instant.now());
+      publishReleasedEvent(trainName, releasedResources, clockNow());
     }
     return removed;
   }
@@ -2895,7 +2921,7 @@ public final class SimpleOccupancyManager
         removeFromQueuesForResources(expected, List.of(resource));
         version.incrementAndGet();
         selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(expected));
-        publishReleasedEvent(expected, List.of(resource), Instant.now());
+        publishReleasedEvent(expected, List.of(resource), clockNow());
       }
       return removed;
     }
@@ -2913,7 +2939,7 @@ public final class SimpleOccupancyManager
       removeFromQueuesForResources(evicted, List.of(resource));
       selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(evicted));
     }
-    publishReleasedEvent("*", List.of(resource), Instant.now());
+    publishReleasedEvent("*", List.of(resource), clockNow());
     version.incrementAndGet();
     return true;
   }
@@ -2961,7 +2987,7 @@ public final class SimpleOccupancyManager
     }
     version.incrementAndGet();
     selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(expected));
-    publishReleasedEvent(expected, List.of(resource), Instant.now());
+    publishReleasedEvent(expected, List.of(resource), clockNow());
     return retainedQueue;
   }
 
@@ -3027,7 +3053,7 @@ public final class SimpleOccupancyManager
     if (removed > 0) {
       selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(trainName));
       version.incrementAndGet();
-      publishReleasedEvent(trainName, releasedResources, Instant.now());
+      publishReleasedEvent(trainName, releasedResources, clockNow());
     }
     return removed;
   }
@@ -3044,7 +3070,7 @@ public final class SimpleOccupancyManager
       return 0;
     }
     int removed = 0;
-    Instant now = Instant.now();
+    Instant now = clockNow();
     Set<OccupancyResource> releasedResources = new LinkedHashSet<>();
     Set<OccupancyResource> queueResources = new LinkedHashSet<>();
     Set<OccupancyResource> directQueueChanges = new LinkedHashSet<>();
@@ -3121,7 +3147,7 @@ public final class SimpleOccupancyManager
     selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(request.trainName()));
     version.incrementAndGet();
     if (!releasedResources.isEmpty()) {
-      publishReleasedEvent(request.trainName(), List.copyOf(releasedResources), Instant.now());
+      publishReleasedEvent(request.trainName(), List.copyOf(releasedResources), clockNow());
     }
     return removed;
   }
@@ -3435,7 +3461,7 @@ public final class SimpleOccupancyManager
   }
 
   private OccupancyDecision singleRegionHardBarrierDecision(Instant now, OccupancyClaim blocker) {
-    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant effectiveNow = now == null ? clockNow() : now;
     return new OccupancyDecision(
         false,
         effectiveNow,
@@ -5451,7 +5477,7 @@ public final class SimpleOccupancyManager
       return removeFromQueuesForTrain(trainName);
     }
     int removed = 0;
-    Instant now = Instant.now();
+    Instant now = clockNow();
     List<OccupancyResource> changedResources = new ArrayList<>();
     Set<String> eligibleTrainNames = new LinkedHashSet<>();
     for (OccupancyResource resource : resources) {
@@ -5489,7 +5515,7 @@ public final class SimpleOccupancyManager
       return 0;
     }
     int removed = 0;
-    Instant now = Instant.now();
+    Instant now = clockNow();
     List<OccupancyResource> changedResources = new ArrayList<>();
     Set<String> eligibleTrainNames = new LinkedHashSet<>();
     Iterator<Map.Entry<OccupancyResource, ConflictQueue>> iterator = queues.entrySet().iterator();
@@ -5555,7 +5581,7 @@ public final class SimpleOccupancyManager
       changedResources.add(OccupancyResource.forConflict(entry.getKey()));
       removed++;
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     publishQueueChangedEvent(
         trainName, changedResources, queueHeadsForResources(changedResources, now), now);
     return removed;

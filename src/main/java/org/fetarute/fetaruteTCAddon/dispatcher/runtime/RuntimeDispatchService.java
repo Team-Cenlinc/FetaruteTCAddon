@@ -289,6 +289,15 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
   private volatile CleanupResult lastCleanupResult =
       new CleanupResult(java.time.Instant.EPOCH, 0, 0, 0);
+
+  /** 时间源；生产为 {@link Instant#now()}，回归骨架注入确定推进的时钟。 */
+  private final java.util.function.Supplier<Instant> clock;
+
+  /** 读取"现在"。全类一律走这里，不要直接调 {@link Instant#now()}。 */
+  private Instant clockNow() {
+    return clock.get();
+  }
+
   private final java.util.concurrent.ConcurrentMap<String, BlockerSnapshot> blockerSnapshots =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, CanonicalMovementPlanSnapshot>
@@ -1338,6 +1347,45 @@ public final class RuntimeDispatchService {
       StorageManager storageManager,
       TrainConfigResolver trainConfigResolver,
       Consumer<String> debugLogger) {
+    this(
+        occupancyManager,
+        railGraphService,
+        routeDefinitions,
+        progressRegistry,
+        signNodeRegistry,
+        layoverRegistry,
+        dwellRegistry,
+        configManager,
+        storageManager,
+        trainConfigResolver,
+        debugLogger,
+        Instant::now);
+  }
+
+  /**
+   * 使用可注入时间源构造。
+   *
+   * <p>调度的排队与仲裁语义带时间：队列条目的 {@code firstSeen} 决定 {@code arbitrationDeadlineMillis}，
+   * 进而决定同一冲突区上谁先走。这些时间戳最终都来自本类读取的"现在"，因此只要它是墙钟， <b>同一组输入在不同机器/不同负载下会得出不同的放行顺序</b>——多车回归场景实测同一份代码连跑
+   * 6 次， 队列位次倒退出现 3 次、不出现 3 次。
+   *
+   * <p>生产一律使用 {@link Instant#now()}（上面那个构造器），行为与注入前完全一致；本构造器只为让回归骨架
+   * 能给出确定的时间推进。<b>它不改变任何判定逻辑，只改变"现在"从哪里读。</b>
+   */
+  public RuntimeDispatchService(
+      OccupancyManager occupancyManager,
+      RailGraphService railGraphService,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry progressRegistry,
+      SignNodeRegistry signNodeRegistry,
+      LayoverRegistry layoverRegistry,
+      DwellRegistry dwellRegistry,
+      ConfigManager configManager,
+      StorageManager storageManager,
+      TrainConfigResolver trainConfigResolver,
+      Consumer<String> debugLogger,
+      java.util.function.Supplier<Instant> clock) {
+    this.clock = Objects.requireNonNull(clock, "clock");
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
@@ -1494,7 +1542,7 @@ public final class RuntimeDispatchService {
       return;
     }
     String normalizedReason = reason == null || reason.isBlank() ? "unspecified" : reason.trim();
-    departureGates.put(key, new DepartureGate(sessionId.trim(), Instant.now(), normalizedReason));
+    departureGates.put(key, new DepartureGate(sessionId.trim(), clockNow(), normalizedReason));
   }
 
   /**
@@ -1528,7 +1576,7 @@ public final class RuntimeDispatchService {
    * @return 诊断数据（如果缓存命中且未过期）
    */
   public Optional<ControlDiagnostics> getDiagnostics(String trainName) {
-    return diagnosticsCache.get(trainName, Instant.now());
+    return diagnosticsCache.get(trainName, clockNow());
   }
 
   /**
@@ -1537,7 +1585,7 @@ public final class RuntimeDispatchService {
    * @return 未过期的诊断数据映射
    */
   public java.util.Map<String, ControlDiagnostics> getDiagnosticsSnapshot() {
-    return diagnosticsCache.snapshot(Instant.now());
+    return diagnosticsCache.snapshot(clockNow());
   }
 
   /** 返回信号事件合并与 envelope/cache 相关的运行统计。 */
@@ -1583,7 +1631,7 @@ public final class RuntimeDispatchService {
     int claimCount = liveClaims.size();
     SmartDispatcherController.GlobalRailwayStateSnapshot snapshot =
         new SmartDispatcherController.GlobalRailwayStateSnapshot(
-            now == null ? Instant.now() : now,
+            now == null ? clockNow() : now,
             trainIds.size(),
             active.size(),
             progress.size(),
@@ -1598,8 +1646,7 @@ public final class RuntimeDispatchService {
             0,
             trainIds);
     smartDispatcherController.traceGlobalSnapshot(snapshot);
-    traceSmartMinimalForwardPlanner(
-        active, progress, now == null ? Instant.now() : now, liveClaims);
+    traceSmartMinimalForwardPlanner(active, progress, now == null ? clockNow() : now, liveClaims);
   }
 
   private void traceSmartMinimalForwardPlanner(
@@ -1701,7 +1748,7 @@ public final class RuntimeDispatchService {
     if (result == null || result.candidates().isEmpty()) {
       return;
     }
-    Instant capturedAt = now == null ? Instant.now() : now;
+    Instant capturedAt = now == null ? clockNow() : now;
     for (SmartWaitForPlanner.UnlockCandidate candidate : result.candidates()) {
       if (candidate == null || !smartDirectionAuditReason(candidate.rejectReason())) {
         continue;
@@ -1723,7 +1770,7 @@ public final class RuntimeDispatchService {
     if (snapshot == null) {
       return Optional.empty();
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     if (!effectiveTtl.isZero() && snapshot.capturedAt().plus(effectiveTtl).isBefore(now)) {
       smartDirectionAuditSnapshots.remove(key, snapshot);
       return Optional.empty();
@@ -1839,7 +1886,7 @@ public final class RuntimeDispatchService {
         || !blockerSnapshotProgressCurrent(trainName, snapshot)) {
       return false;
     }
-    Instant evaluatedAt = now == null ? Instant.now() : now;
+    Instant evaluatedAt = now == null ? clockNow() : now;
     long ageMs =
         Math.max(0L, Duration.between(snapshot.movementPlanSampledAt(), evaluatedAt).toMillis());
     return ageMs <= Math.max(1L, topologyTtlMs);
@@ -2026,7 +2073,7 @@ public final class RuntimeDispatchService {
     if (sampledAt == null || sampledAt.equals(Instant.EPOCH)) {
       return PlannerForwardPathResolution.rejected("MOVEMENT_PLAN_SAMPLE_TIME_MISSING");
     }
-    Instant evaluatedAt = now == null ? Instant.now() : now;
+    Instant evaluatedAt = now == null ? clockNow() : now;
     long ageMs = Math.max(0L, Duration.between(sampledAt, evaluatedAt).toMillis());
     if (ageMs > Math.max(1L, movementPlanTtlMs)) {
       return PlannerForwardPathResolution.rejected("MOVEMENT_PLAN_STALE");
@@ -2358,7 +2405,7 @@ public final class RuntimeDispatchService {
   String smartDispatchExecutorSkipReason(
       SmartWaitForPlanner.UnlockCandidate plan,
       ConfigManager.SmartDispatcherPlannerSettings config) {
-    return smartDispatchExecutorSkipReason(plan, config, Instant.now());
+    return smartDispatchExecutorSkipReason(plan, config, clockNow());
   }
 
   String smartDispatchExecutorSkipReason(
@@ -2449,7 +2496,7 @@ public final class RuntimeDispatchService {
     if (plan == null) {
       return false;
     }
-    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant effectiveNow = now == null ? clockNow() : now;
     Instant until =
         firstActiveSmartUnlockCooldown(
             effectiveNow,
@@ -2462,7 +2509,7 @@ public final class RuntimeDispatchService {
     if (keys == null || keys.length == 0) {
       return null;
     }
-    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant effectiveNow = now == null ? clockNow() : now;
     for (String key : keys) {
       if (key == null || key.isBlank()) {
         continue;
@@ -2987,7 +3034,7 @@ public final class RuntimeDispatchService {
     if (occupancyManager instanceof OccupancyQueueSupport queueSupport) {
       removedQueues = queueSupport.removeQueueEntries(plan.train(), resources);
     }
-    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant effectiveNow = now == null ? clockNow() : now;
     smartUnlockNoReleaseCooldowns.put(
         smartUnlockTrainCycleCooldownKey(plan.train(), plan.cycleId()),
         effectiveNow.plus(SMART_UNLOCK_NO_RELEASE_COOLDOWN));
@@ -3319,7 +3366,7 @@ public final class RuntimeDispatchService {
         new OccupancyRequest(
             token.trainName(),
             Optional.empty(),
-            now == null ? Instant.now() : now,
+            now == null ? clockNow() : now,
             List.copyOf(hardIntents.keySet()),
             Map.of(),
             Map.of(),
@@ -3334,7 +3381,7 @@ public final class RuntimeDispatchService {
     if (reservation == null) {
       return;
     }
-    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant effectiveNow = now == null ? clockNow() : now;
     rememberTrainInstant(smartUnlockBlockerReleaseAt, reservation.trainName(), effectiveNow);
     for (String blockedTrain : reservation.initiallyBlockedTrains()) {
       rememberTrainInstant(smartUnlockBlockerReleaseAt, blockedTrain, effectiveNow);
@@ -3346,7 +3393,7 @@ public final class RuntimeDispatchService {
     if (reservation == null) {
       return;
     }
-    Instant effectiveNow = now == null ? Instant.now() : now;
+    Instant effectiveNow = now == null ? clockNow() : now;
     rememberTrainInstant(smartUnlockNoReleaseTimeouts, reservation.trainName(), effectiveNow);
     Instant until = effectiveNow.plus(SMART_UNLOCK_NO_RELEASE_COOLDOWN);
     smartUnlockNoReleaseCooldowns.put(
@@ -3385,7 +3432,7 @@ public final class RuntimeDispatchService {
             reservation, blockedTrain, "BLOCKER_SNAPSHOT_MISSING", now);
         return false;
       }
-      Instant effectiveNow = now == null ? Instant.now() : now;
+      Instant effectiveNow = now == null ? clockNow() : now;
       if (snapshot.sampledAt().isBefore(effectiveNow.minus(BLOCKER_SNAPSHOT_TTL))) {
         blockerSnapshots.remove(blockedKey, snapshot);
         traceSmartUnlockReleaseEvidenceUnknown(
@@ -3429,7 +3476,7 @@ public final class RuntimeDispatchService {
             + " reason="
             + (reason == null || reason.isBlank() ? "UNKNOWN" : reason)
             + " sampledAt="
-            + (now == null ? Instant.now() : now));
+            + (now == null ? clockNow() : now));
   }
 
   private void rollbackSmartUnlockReservation(SmartUnlockReservation reservation, String reason) {
@@ -4123,7 +4170,7 @@ public final class RuntimeDispatchService {
         trainKey,
         new CanonicalMovementPlanSnapshot(
             aligned.orElseThrow(),
-            sampledAt == null ? Instant.now() : sampledAt,
+            sampledAt == null ? clockNow() : sampledAt,
             captureBlockerProgressWindow(request.trainName()),
             forwardProgressReleaseCandidates));
   }
@@ -4397,7 +4444,7 @@ public final class RuntimeDispatchService {
           trainName,
           null,
           -1,
-          Instant.now(),
+          clockNow(),
           "route-definition-missing",
           "route-definition-restored");
       return false;
@@ -4417,7 +4464,7 @@ public final class RuntimeDispatchService {
           trainName,
           route,
           currentIndex,
-          Instant.now(),
+          clockNow(),
           "departure-route-index-unresolved",
           "station-route-index-resolved");
       return false;
@@ -4438,7 +4485,7 @@ public final class RuntimeDispatchService {
       return true;
     }
 
-    Instant now = Instant.now();
+    Instant now = clockNow();
     Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
     if (graphOpt.isEmpty()) {
       applySafetyStateUnavailableStop(
@@ -4824,7 +4871,7 @@ public final class RuntimeDispatchService {
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneDynamicResolutionState(trainName, route, currentIndex);
     observeTurnbackFootprintProgress(trainName, currentNode);
-    Instant now = Instant.now();
+    Instant now = clockNow();
     // 处理 DSTY 销毁
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     if (stopOpt.isPresent()) {
@@ -5061,7 +5108,7 @@ public final class RuntimeDispatchService {
     if (nodeId == null) {
       return;
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     progressRegistry.updateLastPassedGraphNode(trainName, nodeId, now);
     observePhysicalNodeForSpawnOrigin(properties, nodeId, -1);
     observeTurnbackFootprintProgress(trainName, nodeId);
@@ -5121,7 +5168,7 @@ public final class RuntimeDispatchService {
           trainName,
           null,
           -1,
-          Instant.now(),
+          clockNow(),
           "route-definition-missing",
           "route-definition-restored");
     }
@@ -5254,7 +5301,7 @@ public final class RuntimeDispatchService {
     observePhysicalNodeForSpawnOrigin(properties, currentNode, currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneDynamicResolutionState(trainName, route, currentIndex);
-    Instant now = Instant.now();
+    Instant now = clockNow();
     Optional<RouteProgressRegistry.RouteProgressEntry> progressBeforeTrigger =
         progressRegistry.get(trainName);
     if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
@@ -6017,8 +6064,7 @@ public final class RuntimeDispatchService {
     }
 
     CleanupResult result =
-        new CleanupResult(
-            java.time.Instant.now(), removedProgress, releasedTrains, removedLayovers);
+        new CleanupResult(clockNow(), removedProgress, releasedTrains, removedLayovers);
     lastCleanupResult = result;
 
     if (removedProgress > 0 || releasedTrains > 0 || removedLayovers > 0) {
@@ -6780,8 +6826,8 @@ public final class RuntimeDispatchService {
         invalidateMovementAuthorization(trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE);
         recordStopState(
             RuntimeStopState.hardStop(
-                trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE, null, Instant.now()));
-        updateSignalOrWarn(trainName, SignalAspect.STOP, Instant.now());
+                trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE, null, clockNow()));
+        updateSignalOrWarn(trainName, SignalAspect.STOP, clockNow());
         invalidatedOwners.add(trainName);
       } catch (RuntimeException | LinkageError ex) {
         debugLogger.accept(
@@ -6873,8 +6919,8 @@ public final class RuntimeDispatchService {
       invalidateMovementAuthorization(trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE);
       recordStopState(
           RuntimeStopState.hardStop(
-              trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE, null, Instant.now()));
-      updateSignalOrWarn(trainName, SignalAspect.STOP, Instant.now());
+              trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE, null, clockNow()));
+      updateSignalOrWarn(trainName, SignalAspect.STOP, clockNow());
       invalidatedOwners.add(trainName);
     }
     debugLogger.accept(
@@ -7128,7 +7174,7 @@ public final class RuntimeDispatchService {
       return StartupOccupancyEvidence.incomplete();
     }
     String trainName = handleRenameIfNeeded(properties);
-    Instant now = Instant.now();
+    Instant now = clockNow();
     Optional<Integer> taggedIndex =
         TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
@@ -7278,7 +7324,7 @@ public final class RuntimeDispatchService {
         trainName,
         route.orElse(null),
         currentIndex,
-        Instant.now(),
+        clockNow(),
         unavailableReason,
         "startup-field-snapshot-complete");
   }
@@ -7938,7 +7984,7 @@ public final class RuntimeDispatchService {
     if (!"-".equals(logicalTrainName)) {
       invalidateMovementAuthorization(logicalTrainName, HardStopReason.SAFETY_STATE_UNAVAILABLE);
       recordStopState(
-          RuntimeStopState.abnormalPhysicalQuarantine(logicalTrainName, reason, Instant.now()));
+          RuntimeStopState.abnormalPhysicalQuarantine(logicalTrainName, reason, clockNow()));
     }
     if (trains != null) {
       for (RuntimeTrainHandle train : trains) {
@@ -9067,7 +9113,7 @@ public final class RuntimeDispatchService {
     }
     Duration ttl =
         maxAge == null || maxAge.isNegative() || maxAge.isZero() ? BLOCKER_SNAPSHOT_TTL : maxAge;
-    Instant cutoff = Instant.now().minus(ttl);
+    Instant cutoff = clockNow().minus(ttl);
     if (snapshot.sampledAt().isBefore(cutoff)) {
       blockerSnapshots.remove(key, snapshot);
       return Set.of();
@@ -9098,7 +9144,7 @@ public final class RuntimeDispatchService {
     }
     Duration ttl =
         maxAge == null || maxAge.isNegative() || maxAge.isZero() ? BLOCKER_SNAPSHOT_TTL : maxAge;
-    Instant cutoff = Instant.now().minus(ttl);
+    Instant cutoff = clockNow().minus(ttl);
     try {
       List<OccupancyQueueSnapshot> snapshots = queueSupport.snapshotQueues();
       if (snapshots == null) {
@@ -9226,14 +9272,14 @@ public final class RuntimeDispatchService {
     }
     Duration ttl =
         maxAge == null || maxAge.isNegative() || maxAge.isZero() ? BLOCKER_SNAPSHOT_TTL : maxAge;
-    Instant cutoff = Instant.now().minus(ttl);
+    Instant cutoff = clockNow().minus(ttl);
     if (snapshot.sampledAt().isBefore(cutoff)) {
       blockerSnapshots.remove(key, snapshot);
       debugLogger.accept(
           "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED train="
               + trainName
               + " reason=expired ageMs="
-              + Duration.between(snapshot.sampledAt(), Instant.now()).toMillis());
+              + Duration.between(snapshot.sampledAt(), clockNow()).toMillis());
       return new DeadlockBlockerSnapshot(Set.of(), Instant.EPOCH);
     }
     if (!blockerSnapshotProgressCurrent(trainName, snapshot)) {
@@ -9267,7 +9313,7 @@ public final class RuntimeDispatchService {
     }
     Duration ttl =
         maxAge == null || maxAge.isNegative() || maxAge.isZero() ? BLOCKER_SNAPSHOT_TTL : maxAge;
-    Instant cutoff = Instant.now().minus(ttl);
+    Instant cutoff = clockNow().minus(ttl);
     if (evidence.sampledAt().isBefore(cutoff)) {
       followerStuckLeaderEvidence.remove(key, evidence);
       return Optional.empty();
@@ -9282,7 +9328,7 @@ public final class RuntimeDispatchService {
     if (followerKey.isEmpty() || leaderKey.isEmpty() || followerKey.equals(leaderKey)) {
       return;
     }
-    Instant sampled = now == null ? Instant.now() : now;
+    Instant sampled = now == null ? clockNow() : now;
     String resourceKey = resource == null || resource.isBlank() ? "-" : resource.trim();
     followerStuckLeaderEvidence.compute(
         followerKey,
@@ -9803,7 +9849,7 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     OccupancyRequest request =
-        selfOwnedRetainValidationRequest(input.train(), candidate, Instant.now());
+        selfOwnedRetainValidationRequest(input.train(), candidate, clockNow());
     if (singleRegionOppositeOrUnknownExternalBarrier(
         input.train(), List.of(candidate.resource()), candidate.requestedDirection())) {
       traceSingleRegionHardBarrier(
@@ -9846,7 +9892,7 @@ public final class RuntimeDispatchService {
   private SelfOwnedRetainDecisionRecovery maybeRecoverSelfOwnedStaleRetainPreview(
       OccupancyRequest request, String source) {
     OccupancyDecision noChange =
-        new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "none");
+        new OccupancyDecision(false, clockNow(), SignalAspect.STOP, List.of(), false, "none");
     if (request == null || !(occupancyManager instanceof SimpleOccupancyManager manager)) {
       return SelfOwnedRetainDecisionRecovery.noChange(noChange);
     }
@@ -9864,7 +9910,7 @@ public final class RuntimeDispatchService {
       OccupancyRequest request, OccupancyDecision decision, String source) {
     if (decision == null) {
       return new SelfOwnedRetainDecisionRecovery(
-          new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "none"),
+          new OccupancyDecision(false, clockNow(), SignalAspect.STOP, List.of(), false, "none"),
           false);
     }
     if (request == null || decision.allowed()) {
@@ -9889,7 +9935,7 @@ public final class RuntimeDispatchService {
       String source) {
     if (decision == null) {
       return new SelfOwnedRetainDecisionRecovery(
-          new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "none"),
+          new OccupancyDecision(false, clockNow(), SignalAspect.STOP, List.of(), false, "none"),
           false);
     }
     if (request == null || decision.allowed()) {
@@ -10342,7 +10388,7 @@ public final class RuntimeDispatchService {
     }
     String key = normalizeTrainKey(input.train());
     BlockerSnapshot blockerSnapshot = blockerSnapshots.get(key);
-    Instant now = Instant.now();
+    Instant now = clockNow();
     if (blockerSnapshot == null
         || blockerSnapshot.blockedRequest().isEmpty()
         || blockerSnapshot.sampledAt().isBefore(now.minus(BLOCKER_SNAPSHOT_TTL))
@@ -10978,7 +11024,7 @@ public final class RuntimeDispatchService {
     Optional<RailGraph> graphOpt =
         group.getWorld() == null
             ? Optional.empty()
-            : resolveGraph(group.getWorld().getUID(), Instant.now());
+            : resolveGraph(group.getWorld().getUID(), clockNow());
     if (routeOpt.isEmpty() || graphOpt.isEmpty()) {
       return Optional.of(
           drainabilityResult(
@@ -11005,7 +11051,7 @@ public final class RuntimeDispatchService {
             route,
             effectiveNodes,
             entry.currentIndex(),
-            Instant.now(),
+            clockNow(),
             resolvePriority(resolution.properties(), route),
             AuthorizationPurpose.RUNTIME_MOVE);
     if (contextOpt.isEmpty()) {
@@ -11350,7 +11396,7 @@ public final class RuntimeDispatchService {
             route,
             effectiveNodes,
             currentIndex,
-            Instant.now(),
+            clockNow(),
             resolvePriority(properties, route),
             AuthorizationPurpose.RUNTIME_MOVE,
             trainHandle.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
@@ -11506,7 +11552,7 @@ public final class RuntimeDispatchService {
     }
     RailGraph graph = graphOpt.get();
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
-    Instant recoveryNow = Instant.now();
+    Instant recoveryNow = clockNow();
     RuntimeTrainHandle trainHandle = new TrainCartsRuntimeHandle(group);
     OccupancyRequestBuilder builder =
         runtimeLookaheadBuilder(
@@ -11554,7 +11600,7 @@ public final class RuntimeDispatchService {
             effectiveNodes,
             effectiveNodes,
             currentIndex,
-            Instant.now(),
+            clockNow(),
             resolvePriority(properties, route),
             AuthorizationPurpose.RUNTIME_MOVE);
     if (contextOpt.isEmpty()) {
@@ -11569,7 +11615,7 @@ public final class RuntimeDispatchService {
                 route,
                 effectiveNodes,
                 currentIndex,
-                Instant.now(),
+                clockNow(),
                 resolvePriority(properties, route),
                 AuthorizationPurpose.RUNTIME_MOVE,
                 trainHandle.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
@@ -11604,7 +11650,7 @@ public final class RuntimeDispatchService {
     }
     OccupancyDecision preview = previewOccupancyDecision(authorizationRequest);
     ProceedDecision previewProceed =
-        evaluateProceedDecision(trainName, preview, Instant.now(), "health-reissue");
+        evaluateProceedDecision(trainName, preview, clockNow(), "health-reissue");
     if (!previewProceed.proceedAllowed()) {
       debugLogger.accept(
           "HEALTH_REISSUE_PREVIEW_BLOCKED train="
@@ -11616,7 +11662,7 @@ public final class RuntimeDispatchService {
     }
     OccupancyDecision acquired = occupancyManager.acquire(authorizationRequest);
     ProceedDecision acquiredProceed =
-        evaluateProceedDecision(trainName, acquired, Instant.now(), "health-reissue-acquire");
+        evaluateProceedDecision(trainName, acquired, clockNow(), "health-reissue-acquire");
     if (!acquiredProceed.proceedAllowed()) {
       applyHardStop(
           new TrainCartsRuntimeHandle(group),
@@ -11641,7 +11687,7 @@ public final class RuntimeDispatchService {
             nextNode,
             effectiveHeldHardAuthorityRequest(authorizationRequest, acquired),
             acquired.signal(),
-            Instant.now());
+            clockNow());
     retainRearGuardOccupancyBestEffort(
         trainName,
         route,
@@ -11650,7 +11696,7 @@ public final class RuntimeDispatchService {
         authorizationRequest.movementPlanSnapshot(),
         graph,
         runtimeSettings,
-        Instant.now(),
+        clockNow(),
         trainHandle);
     Optional<String> destinationName =
         commitAuthorizedDestination(properties, trainName, route, currentIndex + 1, nextNode);
@@ -11670,12 +11716,7 @@ public final class RuntimeDispatchService {
           nextNode,
           graph,
           new OccupancyDecision(
-              false,
-              Instant.now(),
-              SignalAspect.STOP,
-              List.of(),
-              false,
-              "destination-commit-failed"),
+              false, clockNow(), SignalAspect.STOP, List.of(), false, "destination-commit-failed"),
           authorizationRequest,
           authorityEnd);
       return false;
@@ -12757,7 +12798,7 @@ public final class RuntimeDispatchService {
       clearDepartureGate(trainName);
       return;
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     trainName = handleRenameIfNeeded(properties);
     if (layoverRegistry.get(trainName).isPresent()) {
       clearDepartureGate(trainName);
@@ -14495,7 +14536,7 @@ public final class RuntimeDispatchService {
       }
     }
     // readyAt = 当前时间 + 停站时长
-    Instant readyAt = dwellSeconds > 0 ? Instant.now().plusSeconds(dwellSeconds) : Instant.now();
+    Instant readyAt = dwellSeconds > 0 ? clockNow().plusSeconds(dwellSeconds) : clockNow();
     layoverRegistry.register(trainName, terminalKey, location, readyAt, tags);
     debugLogger.accept(
         "Layover 注册: train="
@@ -14567,7 +14608,7 @@ public final class RuntimeDispatchService {
       layoverRegistry.unregister(trainName);
       return LayoverDispatchResult.failed(trainName, "train-invalid");
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     Optional<String> readinessBlocker = layoverReadinessBlocker(candidate, trainHandle, now);
     if (readinessBlocker.isPresent()) {
       debugLogger.accept("Layover 发车等待: train=" + trainName + " reason=" + readinessBlocker.get());
@@ -15030,7 +15071,7 @@ public final class RuntimeDispatchService {
     OccupancyDecision blocked =
         new OccupancyDecision(
             false,
-            Instant.now(),
+            clockNow(),
             SignalAspect.STOP,
             List.of(),
             false,
@@ -15400,7 +15441,7 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank() || aspect == null) {
       return false;
     }
-    Instant observedAt = now == null ? Instant.now() : now;
+    Instant observedAt = now == null ? clockNow() : now;
     if (aspect == SignalAspect.STOP) {
       ensureStopStateContext(trainName, observedAt);
     }
@@ -16106,7 +16147,7 @@ public final class RuntimeDispatchService {
     if (properties == null || trainName == null || trainName.isBlank()) {
       return;
     }
-    Instant stoppedAt = Instant.now();
+    Instant stoppedAt = clockNow();
     invalidateMovementAuthorization(trainName, reason);
     recordStopState(RuntimeStopState.hardStop(trainName, reason, decision, stoppedAt));
     if (shouldClearDestinationOnHardStop(reason, clearDestination)) {
@@ -16257,13 +16298,13 @@ public final class RuntimeDispatchService {
           currentIndex,
           currentNode,
           graph,
-          now == null ? Instant.now() : now,
+          now == null ? clockNow() : now,
           train);
     }
     OccupancyDecision blocked =
         new OccupancyDecision(
             false,
-            now == null ? Instant.now() : now,
+            now == null ? clockNow() : now,
             SignalAspect.STOP,
             List.of(),
             false,
@@ -16325,7 +16366,7 @@ public final class RuntimeDispatchService {
         recoveryCondition == null || recoveryCondition.isBlank()
             ? "safety-state-restored"
             : recoveryCondition;
-    Instant stoppedAt = now == null ? Instant.now() : now;
+    Instant stoppedAt = now == null ? clockNow() : now;
     debugLogger.accept(
         "SMART_SAFETY_STATE_UNAVAILABLE train="
             + trainName
@@ -16388,7 +16429,7 @@ public final class RuntimeDispatchService {
       OccupancyDecision decision,
       OccupancyRequest request,
       AuthorityEnd authorityEnd) {
-    Instant stoppedAt = Instant.now();
+    Instant stoppedAt = clockNow();
     String reason =
         waitReason == null || waitReason.isBlank() ? "BLOCKED_BY_OCCUPANCY" : waitReason;
     recordStopState(RuntimeStopState.occupancyHold(trainName, reason, decision, stoppedAt));
@@ -16529,7 +16570,7 @@ public final class RuntimeDispatchService {
           nextNode = resolveEffectiveNode(trainName, route, index + 1);
         }
         if (train != null) {
-          graph = resolveGraph(train.worldId(), Instant.now()).orElse(null);
+          graph = resolveGraph(train.worldId(), clockNow()).orElse(null);
         }
       }
     }
@@ -17216,7 +17257,7 @@ public final class RuntimeDispatchService {
           nextNode,
           graph,
           new OccupancyDecision(
-              false, Instant.now(), SignalAspect.STOP, List.of(), false, "movement-token-missing"),
+              false, clockNow(), SignalAspect.STOP, List.of(), false, "movement-token-missing"),
           null,
           AuthorityEnd.none());
       return;
@@ -17291,7 +17332,7 @@ public final class RuntimeDispatchService {
             .map(RouteProgressRegistry.RouteProgressEntry::currentIndex)
             .orElse(-1);
     DepartureGate departureGate = departureGates.get(normalizeTrainKey(trainName));
-    Instant now = Instant.now();
+    Instant now = clockNow();
     double currentSpeedBps =
         train != null ? train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND : 0.0;
     TargetSpeedDecision decision =
@@ -17496,7 +17537,7 @@ public final class RuntimeDispatchService {
     String key = trainName.toLowerCase(java.util.Locale.ROOT);
     String sessionId = Long.toString(waypointStopCounter.incrementAndGet());
     WaypointStopState stopState =
-        new WaypointStopState(sessionId, nodeId, Instant.now(), dwellSeconds, false);
+        new WaypointStopState(sessionId, nodeId, clockNow(), dwellSeconds, false);
     waypointStopStates.put(key, stopState);
 
     JavaPlugin plugin = resolveSchedulerPlugin();
@@ -17637,7 +17678,7 @@ public final class RuntimeDispatchService {
       NodeId currentNode,
       NodeId nextNode,
       OccupancyDecision decision) {
-    Instant now = Instant.now();
+    Instant now = clockNow();
     updateBlockerSnapshot(trainName, decision, now);
     boolean releaseCandidate =
         occupancyManager instanceof SimpleOccupancyManager manager
@@ -18730,7 +18771,7 @@ public final class RuntimeDispatchService {
     if (occupancyManager instanceof OccupancyPreviewSupport preview) {
       return preview.canEnterPreview(request);
     }
-    Instant now = request == null ? Instant.now() : request.now();
+    Instant now = request == null ? clockNow() : request.now();
     return new OccupancyDecision(
         false, now, SignalAspect.STOP, List.of(), false, "preview-support-missing");
   }
@@ -18748,14 +18789,14 @@ public final class RuntimeDispatchService {
     }
     return fallback != null
         ? fallback
-        : new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
+        : new OccupancyDecision(true, clockNow(), SignalAspect.PROCEED, List.of());
   }
 
   private OccupancyDecision singleZoneBlockedDecision(
       OccupancyRequest request, String reason, Instant now) {
     OccupancyDecision fallback =
         new OccupancyDecision(
-            false, now == null ? Instant.now() : now, SignalAspect.STOP, List.of(), false, reason);
+            false, now == null ? clockNow() : now, SignalAspect.STOP, List.of(), false, reason);
     OccupancyDecision preview = previewOccupancyDecisionReadOnly(request, fallback);
     if (preview == null || preview.blockers().isEmpty()) {
       return fallback;
@@ -18815,7 +18856,7 @@ public final class RuntimeDispatchService {
       return new AdvisoryPreviewResult(
           fallback != null
               ? fallback
-              : new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()),
+              : new OccupancyDecision(true, clockNow(), SignalAspect.PROCEED, List.of()),
           List.of());
     }
     if (occupancyManager instanceof OccupancyAdvisoryPreviewSupport advisoryPreview) {
@@ -19381,12 +19422,12 @@ public final class RuntimeDispatchService {
               HardStopReason.AUTHORIZATION_FAILURE,
               new OccupancyDecision(
                   false,
-                  Instant.now(),
+                  clockNow(),
                   SignalAspect.STOP,
                   List.of(),
                   false,
                   "owner-migrated-authority-revalidation-required"),
-              Instant.now()));
+              clockNow()));
       return true;
     }
   }
@@ -19488,7 +19529,7 @@ public final class RuntimeDispatchService {
       RuntimeTrainHandle candidate = new TrainCartsRuntimeHandle(properties.getHolder());
       train = candidate.isValid() ? candidate : null;
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     OccupancyDecision blocked =
         new OccupancyDecision(
             false,
@@ -19693,7 +19734,7 @@ public final class RuntimeDispatchService {
         nextNode,
         graph,
         new OccupancyDecision(
-            false, Instant.now(), SignalAspect.STOP, List.of(), false, "relaunch-suppressed"),
+            false, clockNow(), SignalAspect.STOP, List.of(), false, "relaunch-suppressed"),
         null,
         AuthorityEnd.none());
     return true;
@@ -21357,7 +21398,7 @@ public final class RuntimeDispatchService {
                       trainName,
                       List.of(blocker),
                       context.request(),
-                      Instant.now(),
+                      clockNow(),
                       "throat-section-atomic"));
       SmartAdmissionResult result =
           smartAdmissionBlocked(
@@ -22213,7 +22254,7 @@ public final class RuntimeDispatchService {
     if (hold == null) {
       return false;
     }
-    Instant now = Instant.now();
+    Instant now = clockNow();
     if (hold.capturedAt().plus(SAME_DIRECTION_LEADER_HOLD_TTL).isBefore(now)) {
       sameDirectionLeaderHolds.remove(leaderKey, hold);
       return false;
@@ -22226,7 +22267,7 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return;
     }
-    sameDirectionLeaderHolds.put(key, new SameDirectionLeaderHold(leaderTrain, Instant.now()));
+    sameDirectionLeaderHolds.put(key, new SameDirectionLeaderHold(leaderTrain, clockNow()));
   }
 
   private void forgetSameDirectionLeaderHold(String trainName) {
@@ -22898,7 +22939,7 @@ public final class RuntimeDispatchService {
           blockerReason = "opposite-direction-claim";
         } else {
           sameDirectionLeader = true;
-          leaderProgressFresh |= hasFreshLeaderProgress(claim.trainName(), Instant.now());
+          leaderProgressFresh |= hasFreshLeaderProgress(claim.trainName(), clockNow());
           leaderWillTerminalOrDwell |= leaderWillTerminalOrDwell(claim.trainName());
           if (isMovementInhibited(claim.trainName())) {
             leaderStalled = true;
@@ -22933,7 +22974,7 @@ public final class RuntimeDispatchService {
               blockerReason = "opposite-direction-queue";
             } else {
               sameDirectionLeader = true;
-              leaderProgressFresh |= hasFreshLeaderProgress(entry.trainName(), Instant.now());
+              leaderProgressFresh |= hasFreshLeaderProgress(entry.trainName(), clockNow());
               leaderWillTerminalOrDwell |= leaderWillTerminalOrDwell(entry.trainName());
               if (isMovementInhibited(entry.trainName())) {
                 leaderStalled = true;
@@ -23051,7 +23092,7 @@ public final class RuntimeDispatchService {
             effectiveNodes,
             leaderDirectionContextNodes,
             leaderCurrentIndex,
-            Instant.now(),
+            clockNow(),
             0,
             AuthorizationPurpose.RUNTIME_MOVE);
     if (contextOpt.isEmpty()) {
@@ -23184,7 +23225,7 @@ public final class RuntimeDispatchService {
           null);
     }
     if (!leaderToken.resources().contains(conflict)
-        || !movementTokenBackedByLiveHardAuthority(leaderToken, Instant.now())) {
+        || !movementTokenBackedByLiveHardAuthority(leaderToken, clockNow())) {
       return SameDirectionLeaderDrainPrediction.blocked(
           "same-direction-leader-hard-authority-missing",
           true,
@@ -24181,7 +24222,7 @@ public final class RuntimeDispatchService {
           trainName,
           admission.leaderTrain(),
           conflict == null ? "-" : "CONFLICT:" + conflict.key(),
-          Instant.now());
+          clockNow());
     }
     if (context != null && context.request() != null) {
       debugLogger.accept(
@@ -28193,7 +28234,7 @@ public final class RuntimeDispatchService {
     }
     double defaultSpeed = config.graphSettings().defaultSpeedBlocksPerSecond();
     UUID worldId = train.worldId();
-    Instant now = Instant.now();
+    Instant now = clockNow();
 
     // 1. 尝试直接相邻边
     Optional<RailEdge> directEdgeOpt = findEdge(graph, from, to);
@@ -28226,7 +28267,7 @@ public final class RuntimeDispatchService {
    */
   private SignalLookahead.EdgeSpeedResolver createEdgeSpeedResolver(UUID worldId) {
     double defaultSpeed = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
-    Instant now = Instant.now();
+    Instant now = clockNow();
     return edge ->
         railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
   }
@@ -28298,14 +28339,14 @@ public final class RuntimeDispatchService {
     if (event == null || event.getWorld() == null) {
       return Optional.empty();
     }
-    return resolveGraph(event.getWorld().getUID(), Instant.now());
+    return resolveGraph(event.getWorld().getUID(), clockNow());
   }
 
   private Optional<RailGraph> resolveGraph(UUID worldId, Instant now) {
     if (worldId == null) {
       return Optional.empty();
     }
-    Instant snapshotTime = now != null ? now : Instant.now();
+    Instant snapshotTime = now != null ? now : clockNow();
     return railGraphService
         .getSnapshot(worldId)
         .map(
@@ -28707,7 +28748,7 @@ public final class RuntimeDispatchService {
       blockerSnapshots.remove(key);
       return;
     }
-    Instant sampledAt = now == null ? Instant.now() : now;
+    Instant sampledAt = now == null ? clockNow() : now;
     BlockerProgressWindow progressWindow = captureBlockerProgressWindow(trainName);
     Optional<MovementPlanSnapshot> movementPlan =
         request == null ? Optional.empty() : request.movementPlanSnapshot();
