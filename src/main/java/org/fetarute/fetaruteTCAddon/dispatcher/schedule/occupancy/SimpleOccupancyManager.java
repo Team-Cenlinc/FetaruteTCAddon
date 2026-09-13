@@ -1942,6 +1942,12 @@ public final class SimpleOccupancyManager
     if (request == null || resource == null || blockingEntry == null || blockingEntry.isEmpty()) {
       return;
     }
+    // 预览路径（ETA 估算）不入队、不改状态，它被队首挡住并不代表列车真的走不了；
+    // 实测 20 条仲裁证据里 19 条来自 canEnterPreview，把真正的一条淹没了。
+    // 该 trace 的用途是回答“这辆车为什么进不去”，因此只记录权威判定。
+    if (source != null && source.toLowerCase(Locale.ROOT).contains("preview")) {
+      return;
+    }
     OccupancyQueueEntry entry = blockingEntry.get();
     long pendingWinnerWaitSeconds =
         Math.max(0L, Duration.between(entry.firstSeen(), request.now()).toSeconds());

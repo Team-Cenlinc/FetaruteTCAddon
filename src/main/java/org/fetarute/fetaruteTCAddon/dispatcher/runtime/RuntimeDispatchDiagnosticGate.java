@@ -258,7 +258,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           "SMART_UNLOCK_APPLIED",
           // 队列仲裁结论：生产端已按 (资源, 请求方) 的结论签名去重，只有赢家、决定、原因或位次变化才输出。
           // 它是判断"前方无车却进不去"的唯一直接证据——被普通观察预算吞掉时，长时间阻塞完全无法归因。
-          "SMART_PENDING_WINNER_ARBITRATION" -> true;
+          "SMART_PENDING_WINNER_ARBITRATION",
+          // 优先级是队列仲裁的输入之一；生产端已按 (列车, 结果签名) 去重，只有解析结果变化才输出。
+          // 它被预算吞掉时，无法判断一次阻塞到底来自优先级还是来自入队先后。
+          "SMART_PRIORITY_RESOLVED" -> true;
       default -> false;
     };
   }

@@ -41,6 +41,16 @@ public final class DispatchPriorityResolver {
   private final Function<String, Optional<RouteProgressRegistry.RouteProgressEntry>> progressLookup;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<String, Integer> operatorPriorityCache = new ConcurrentHashMap<>();
+
+  /**
+   * 每列车上一次解析出的优先级签名。
+   *
+   * <p>优先级每 tick 都会重解析，但只有<b>结果变化</b>才是新证据。生产端在此去重后，该 trace 才能进入诊断门的免预算白名单： 实服日志里它此前只留下 12
+   * 条，涉事列车一条都没有，导致队列仲裁无法归因。
+   */
+  private final ConcurrentMap<String, String> resolvedPrioritySignatures =
+      new ConcurrentHashMap<>();
+
   private final ConcurrentMap<UUID, RouteLookup> routeLookupByUuid = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, RouteLookup> routeLookupByCode = new ConcurrentHashMap<>();
 
@@ -435,6 +445,18 @@ public final class DispatchPriorityResolver {
 
   private void traceResolved(
       String traceContext, String trainName, DispatchPriorityResolution resolution) {
+    String signature =
+        resolution.priority()
+            + "|"
+            + resolution.source()
+            + "|"
+            + resolution.routeCode().orElse("-")
+            + "|"
+            + resolution.fallbackReason();
+    String key = normalize(trainName);
+    if (signature.equals(resolvedPrioritySignatures.put(key, signature))) {
+      return;
+    }
     SignalComputationTrace.emitRaw(
         "SMART_PRIORITY_RESOLVED context="
             + safe(traceContext)

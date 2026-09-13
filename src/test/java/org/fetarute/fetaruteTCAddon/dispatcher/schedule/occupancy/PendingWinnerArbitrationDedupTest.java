@@ -61,6 +61,19 @@ class PendingWinnerArbitrationDedupTest {
   }
 
   @Test
+  void previewPathDoesNotProduceArbitrationEvidence() {
+    SimpleOccupancyManager manager = manager();
+    manager.canEnter(request("early-train", 0, 0));
+    traces.clear();
+
+    // 预览不入队、不改状态，被队首挡住不代表列车真的走不了。
+    // 实测 20 条证据里 19 条来自预览，把唯一一条权威判定淹没了。
+    manager.canEnterPreview(request("late-train", 0, 5));
+
+    assertEquals(0, arbitrationLines(), "预览路径不得产出仲裁证据");
+  }
+
+  @Test
   void stableArbitrationConclusionIsEmittedOnce() {
     SimpleOccupancyManager manager = manager();
     // 先入队的一方成为 pending winner。
