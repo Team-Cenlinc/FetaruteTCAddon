@@ -562,6 +562,94 @@ class SmartDispatcherControllerTest {
     assertEquals("cleanup-threshold-invalid", negativePassengerThreshold.reason());
   }
 
+  @Test
+  @DisplayName("远处的站台/终点不得降速：规划视野不是减速判据")
+  void distantRouteStopDoesNotTriggerCaution() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    // 实服 2026-09-13：WS 车在距站台 385 blocks 处就被压成黄灯。
+    //
+    // 这里取 200：它必须<b>同时</b>落在规划视野内（本用例 256）与减速所需距离之外，才能把
+    // "只因为看得见就降速"和"看不见所以不降速"区分开。取 385 会超出视野，新旧实现都不降速，
+    // 用例就成了空的——第一版正是这么写的。以本用例参数（10 bps 接近、6 bps caution 速度、
+    // 减速度 1.0），从 10 减到 6 只需 (100-36)/2 = 32 blocks，加 24 裕量共 56。
+    // 实测：旧实现在 40/100/200/250 全部降速，新实现只在 40 降速。
+    // 以本用例的参数（10 bps 接近、6 bps caution 速度、减速度 1.0），从 10 减到 6 只需
+    // (100-36)/2 = 32 blocks，加上 24 的裕量也只要 56。385 是它的近七倍。
+    DispatchDecision decision =
+        controller.decideForwardSignal(routeStopInput(routeStopRisk(200), true));
+
+    assertEquals(DispatchAction.NO_ACTION, decision.action());
+    assertEquals(SignalAspect.PROCEED, decision.targetAspect());
+  }
+
+  @Test
+  @DisplayName("进入减速距离后必须降速")
+  void routeStopInsideBrakingDistanceTriggersCaution() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    DispatchDecision decision =
+        controller.decideForwardSignal(routeStopInput(routeStopRisk(40), true));
+
+    assertEquals(DispatchAction.PROCEED_WITH_CAUTION, decision.action());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.targetAspect());
+  }
+
+  @Test
+  @DisplayName("降速生效之后不得自行释放——否则黄灯会反复闪")
+  void cautionDoesNotReleaseOnceTheTrainHasSlowedDown() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    // 列车已经按 caution 降到 6 bps，但线路允许速度仍是 10：一旦释放它就会重新加速。
+    // 判定若用**瞬时**速度算制动距离，此时 (36-36)/2 = 0，阈值塌成 24，35 > 24 便会释放，
+    // 于是"降速->释放->加速->再降速"在二十几 blocks 的带里反复，表现为黄灯反复闪。
+    // 判定改用"不减速会达到的速度"（max(当前, 允许)）之后，阈值稳定在 56，不会释放。
+    SmartDispatcherController.ForwardDecisionInput slowedDown =
+        new SmartDispatcherController.ForwardDecisionInput(
+            "train-A",
+            routeStopRisk(35),
+            SignalAspect.PROCEED_WITH_CAUTION,
+            6.0,
+            10.0,
+            6.0,
+            1.0,
+            256,
+            8.0,
+            24.0,
+            false,
+            "none",
+            "ROUTE_STOP_OR_TERMINAL",
+            true);
+
+    DispatchDecision decision = controller.decideForwardSignal(slowedDown);
+
+    // 断言 action 而不是 targetAspect：NO_ACTION 会把 currentAspect 原样带出，
+    // 而本用例的 currentAspect 恰好就是 PROCEED_WITH_CAUTION——断 aspect 会永远成立。
+    assertEquals(
+        DispatchAction.PROCEED_WITH_CAUTION, decision.action(), "列车已降到 caution 速度后判定被释放，会造成黄灯反复切换");
+  }
+
+  private static ForwardSignalRiskSnapshot routeStopRisk(long distance) {
+    return new ForwardSignalRiskSnapshot(
+        "train-A",
+        OptionalLong.empty(),
+        OptionalLong.of(distance),
+        OptionalLong.of(distance),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.of(distance),
+        RiskSource.ROUTE_STOP_OR_TERMINAL,
+        RiskFreshness.LIVE,
+        "-",
+        "edge:A-B",
+        false,
+        false,
+        true,
+        false,
+        false);
+  }
+
   private static SmartDispatcherController.ForwardDecisionInput input(
       String trainId, ForwardSignalRiskSnapshot risk) {
     return new SmartDispatcherController.ForwardDecisionInput(

@@ -402,7 +402,10 @@ public final class SmartDispatcherController {
               risk.riskSource(),
               action.effectClass(),
               "braking-anticipation",
-              "risk-visible-with-braking-distance",
+              // 用 BrakingProfile 的真实判定原因，而不是写死一句"with-braking-distance"。
+              // 修复前这个标签在"只因为进入视野而降速"的路径上同样输出，读 trace 会以为
+              // 判定确实算过制动距离——这正是本缺陷长期没被发现的原因。
+              braking.targetSpeedReason(),
               "reduce-speed-before-boundary",
               true,
               false,
@@ -794,10 +797,16 @@ public final class SmartDispatcherController {
             : input.cautionSpeedBps();
     double stopBrakingDistance =
         (input.currentSpeedBps() * input.currentSpeedBps()) / (2.0 * input.decelBps2());
+    // 判定"该不该开始减速"必须用**不减速的话会达到的速度**来算，而不是当前瞬时速度。
+    //
+    // 用瞬时速度会自相矛盾：降速一旦生效，当前速度逼近目标速度，所需制动距离塌向 0，判定随即释放，
+    // 列车重新加速，又重新触发——在一条二十几 blocks 宽的带里反复切黄灯。取"当前速度与当前允许速度
+    // 的较大者"让阈值不随降速缩水，判定因此单向、无振荡。
+    double approachSpeed = Math.max(input.currentSpeedBps(), input.currentTargetSpeedBps());
     double cautionBrakingDistance =
         Math.max(
             0.0,
-            (input.currentSpeedBps() * input.currentSpeedBps() - targetSpeed * targetSpeed)
+            (approachSpeed * approachSpeed - targetSpeed * targetSpeed)
                 / (2.0 * input.decelBps2()));
     boolean planningVisible = distanceOpt.isPresent() && distance <= input.planningHorizonBlocks();
     boolean plannedRouteStop =
@@ -807,24 +816,30 @@ public final class SmartDispatcherController {
             && distanceOpt.isPresent()
             && distance <= stopBrakingDistance + input.stopMarginBlocks();
     boolean trainMoving = input.currentSpeedBps() > 0.0;
+    // 只有"再不减速就来不及"才降速。
+    //
+    // 此前这里还有一条并列分支：只要风险落在规划视野内（planningVisible）且元数据新鲜就降速，
+    // 与需要多少距离减速无关。规划视野是"能看多远"，不是"该不该减速"——实服 2026-09-13 里 WS 车在
+    // 距站台 385 blocks 处就被压成黄灯。
+    //
+    // 这与 c18c1ae 修掉的"远处前车把后车永久压在 caution"是同一个错，只是发生在
+    // ROUTE_STOP_OR_TERMINAL 这一支上，当时没有一并修。
+    boolean withinCautionBrakingDistance =
+        distanceOpt.isPresent() && distance <= cautionBrakingDistance + input.cautionMarginBlocks();
     boolean shouldApplySpeedLimit =
         trainMoving
             && planningVisible
             && !shouldHardStop
-            && risk.riskSource() != RiskSource.NONE
-            && risk.riskFreshness() != RiskFreshness.STALE
-            && risk.riskFreshness() != RiskFreshness.PROTECTIVE_ONLY
-            && risk.riskFreshness() != RiskFreshness.UNKNOWN;
-    if (trainMoving
-        && planningVisible
-        && !shouldHardStop
-        && distance <= cautionBrakingDistance + input.cautionMarginBlocks()) {
-      shouldApplySpeedLimit = true;
-    }
+            && withinCautionBrakingDistance
+            && risk.riskSource() != RiskSource.NONE;
     String reason =
         shouldHardStop
             ? "inside-stop-distance"
-            : shouldApplySpeedLimit ? "inside-planning-horizon" : "outside-planning-horizon";
+            : shouldApplySpeedLimit
+                ? "inside-caution-braking-distance"
+                : withinCautionBrakingDistance
+                    ? "caution-risk-not-actionable"
+                    : "outside-caution-braking-distance";
     return new BrakingProfile(
         input.currentSpeedBps(),
         targetSpeed,
