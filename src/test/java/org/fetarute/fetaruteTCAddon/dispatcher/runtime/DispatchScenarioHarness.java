@@ -72,12 +72,68 @@ final class DispatchScenarioHarness {
    */
   static final int DEFAULT_EDGE_LENGTH = 30;
 
+  /**
+   * 失败现场保留的 debug 行数上限。
+   *
+   * <p>多车场景每 tick 产生成百上千行，整套场景无界保留会把测试 JVM 撑爆（实测 {@code OutOfMemoryError}）。 展示只需要最近若干行；不变量需要的"本
+   * tick 新增"走独立缓冲，不受此上限影响。
+   */
+  private static final int DEBUG_LOG_RETAINED_LINES = 3000;
+
+  /** 需要整场累计计数的诊断 token——保留窗口会丢弃旧行，但计数必须完整。 */
+  private static final List<String> COUNTED_DIAGNOSTIC_TOKENS =
+      List.of("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED", "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED");
+
+  /** 只保留最近 N 行的 debug 汇聚点，同时把每一行原样转发给当前 tick 的待检缓冲。 */
+  static final class BoundedLog {
+    private final java.util.ArrayDeque<String> retained = new java.util.ArrayDeque<>();
+    private final List<String> sink = new ArrayList<>();
+    private final int limit;
+
+    BoundedLog(int limit) {
+      this.limit = Math.max(1, limit);
+    }
+
+    void add(String line) {
+      if (line == null) {
+        return;
+      }
+      sink.add(line);
+      retained.addLast(line);
+      while (retained.size() > limit) {
+        retained.removeFirst();
+      }
+    }
+
+    /** 取走自上次调用以来的全部新行。 */
+    List<String> drain() {
+      if (sink.isEmpty()) {
+        return List.of();
+      }
+      List<String> fresh = List.copyOf(sink);
+      sink.clear();
+      return fresh;
+    }
+
+    List<String> retained() {
+      return List.copyOf(retained);
+    }
+
+    int size() {
+      return retained.size();
+    }
+
+    String get(int index) {
+      return retained().get(index);
+    }
+  }
+
   private final SimpleOccupancyManager occupancy;
   private final RouteProgressRegistry registry;
   private final RuntimeDispatchService service;
   private final Map<String, ScenarioTrain> trains;
   private final List<Runnable> nextTickTasks;
-  private final List<String> debugLog;
+  private final BoundedLog debugLog;
   private final SignActionEvent enterEvent;
   private final Map<NodeId, List<NodeId>> adjacency;
   private final Map<String, RouteDefinition> routeByTrain;
@@ -85,9 +141,6 @@ final class DispatchScenarioHarness {
 
   /** 每列车当前 STOP 生命周期的标识与已连续出现的 tick 数，供 I5 判断"停了多久"。 */
   private final Map<String, StopStreak> stopStreaks = new LinkedHashMap<>();
-
-  /** 已经喂给 I6 的 debug 行数；每 tick 只看新增部分。 */
-  private int diagnosticsWatermark;
 
   private int tick;
 
@@ -97,7 +150,7 @@ final class DispatchScenarioHarness {
       RuntimeDispatchService service,
       Map<String, ScenarioTrain> trains,
       List<Runnable> nextTickTasks,
-      List<String> debugLog,
+      BoundedLog debugLog,
       SignActionEvent enterEvent,
       Map<NodeId, List<NodeId>> adjacency,
       Map<String, RouteDefinition> routeByTrain) {
@@ -478,7 +531,9 @@ final class DispatchScenarioHarness {
           new SimpleOccupancyManager(
               (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
       RouteProgressRegistry registry = new RouteProgressRegistry();
-      List<String> debugLog = new ArrayList<>();
+      // 有界：多车场景每 tick 会产生成百上千行，无界保留会把测试 JVM 撑爆（实测 OOM）。
+      // 只留最近若干行供失败现场展示；不变量所需的"本 tick 新增"走 pendingDiagnostics，不依赖这里。
+      BoundedLog debugLog = new BoundedLog(DEBUG_LOG_RETAINED_LINES);
 
       RuntimeDispatchService service =
           new RuntimeDispatchService(
@@ -796,8 +851,9 @@ final class DispatchScenarioHarness {
     return registry;
   }
 
+  /** 保留的最近若干行，用于失败现场展示。不是全量日志。 */
   List<String> debugLog() {
-    return List.copyOf(debugLog);
+    return debugLog.retained();
   }
 
   /** 返回按列车名排序的 claim 快照，避免枚举顺序进入断言。 */
@@ -812,7 +868,31 @@ final class DispatchScenarioHarness {
 
   // ---------------------------------------------------------------- 不变量
 
+  /** 整场累计出现过的诊断 token 次数；保留窗口有上限，计数没有。 */
+  private final Map<String, Integer> diagnosticCounts = new LinkedHashMap<>();
+
+  /**
+   * 整场（不受保留窗口限制）出现过多少次含该 token 的 debug 行。
+   *
+   * <p>用它来确认某条证据链<b>真的跑过</b>，避免"没触发也算绿"。
+   */
+  int diagnosticCount(String token) {
+    return diagnosticCounts.getOrDefault(token, 0);
+  }
+
+  private void tallyDiagnostics(List<String> lines) {
+    for (String line : lines) {
+      for (String token : COUNTED_DIAGNOSTIC_TOKENS) {
+        if (line.contains(token)) {
+          diagnosticCounts.merge(token, 1, Integer::sum);
+        }
+      }
+    }
+  }
+
   private void checkInvariants() {
+    List<String> fresh = debugLog.drain();
+    tallyDiagnostics(fresh);
     List<String> found =
         DispatchInvariants.check(
             new DispatchInvariants.Sample(
@@ -822,7 +902,7 @@ final class DispatchScenarioHarness {
                 adjacency,
                 stoppedTrains(),
                 occupancy.snapshotQueues(),
-                drainNewDiagnostics()));
+                fresh));
     for (String violation : found) {
       violations.add("tick=" + tick + " " + violation);
     }
@@ -858,17 +938,6 @@ final class DispatchScenarioHarness {
       stopped.add(new DispatchInvariants.StoppedTrain(name, state, ticks));
     }
     return stopped;
-  }
-
-  /** 返回上次检查之后新产生的 debug 行。 */
-  private List<String> drainNewDiagnostics() {
-    if (diagnosticsWatermark >= debugLog.size()) {
-      diagnosticsWatermark = debugLog.size();
-      return List.of();
-    }
-    List<String> fresh = List.copyOf(debugLog.subList(diagnosticsWatermark, debugLog.size()));
-    diagnosticsWatermark = debugLog.size();
-    return fresh;
   }
 
   private record StopStreak(String identity, int ticks) {}
@@ -1019,8 +1088,9 @@ final class DispatchScenarioHarness {
    */
   List<String> recentDecisionTrace(int limit, String... keywords) {
     List<String> picked = new ArrayList<>();
-    for (int i = debugLog.size() - 1; i >= 0 && picked.size() < limit; i--) {
-      String line = debugLog.get(i);
+    List<String> recent = debugLog.retained();
+    for (int i = recent.size() - 1; i >= 0 && picked.size() < limit; i--) {
+      String line = recent.get(i);
       if (line == null) {
         continue;
       }

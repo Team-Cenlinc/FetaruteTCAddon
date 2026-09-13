@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -75,33 +77,70 @@ class DispatchScenarioBaselineTest {
   }
 
   /**
-   * S03 单线对向双车。<b>暂停用</b>——骨架拓扑尚不足以真实表达正线冲突区。
+   * S03 单线对向双车。
    *
-   * <p>恰好一方先行，另一方被对向屏障拦下并入队；先行方通过并释放后，后行方必须能取得反向锁。
+   * <h3>为什么曾经停用，以及为什么现在恢复</h3>
    *
-   * <p>防护对象：对向屏障的基础回归。任何后续阶段若让它由绿变红，立即回滚。
+   * <p>原停用理由是"停在 {@code SINGLE_CORRIDOR_FAIL_CLOSED}——方向判定失败，归 Phase 1"。<b>那个归因是错的。</b>
+   * 真正的成因是骨架从不走生产的到站入口（见 {@link DispatchScenarioHarness} 的 {@code advance}）：route index 永远停在起点，
+   * waypoint N 与 N+1 塌成同一节点，movement plan 不可构建，停因才显示为 {@code SINGLE_CORRIDOR_FAIL_CLOSED}。 补上
+   * {@code handleStationArrival} 之后该停因在骨架里完全消失，本场景的进展推进到了完全不同的阶段。
    *
-   * <h3>为什么停用</h3>
+   * <p>另外，"实服冲突键带 INTERVAL 语义轴锚、骨架里是车站"这条残留差异也<b>已证伪</b>：{@code
+   * RailGraphConflictIndex.buildCorridorKey} 里那段锚是 {@code resolveComponentKey} 给的<b>连通分量代表节点</b>，
+   * 纯命名空间，不参与方向解析。实服恰好是 INTERVAL 节点当了分量最小值而已。
    *
-   * <p>现状：两车已能在 BRAVO 正确交会（east 在 1 道、west 在 2 道，身后区间也正常释放），随后双双停在 {@code
-   * SINGLE_CORRIDOR_FAIL_CLOSED}——<b>方向判定失败</b>，并各自保留进入侧咽喉、需要对方的出口侧咽喉。
-   *
-   * <p>已排除的假设（都实测证伪，别重复走）：<b>不是</b>道岔区保护 （{@code protectedSwitcherZoneClaims} 的 {@code 保护道岔占用}
-   * trace 从未出现，claim 是 {@code MOVEMENT_REQUIRED} 而非保护性残留）；<b>不是</b>站间缺少 INTERVAL 节点（补上后 section 变 2
-   * 条边， 静止列车进不去，方向仍未解决）；<b>不是</b> {@code single:section:} 形态不真实 （实服日志确认 {@code STATION~SWITCHER} 与
-   * {@code SWITCHER~SWITCHER} 正是生产形态）。
-   *
-   * <p>剩余差异：实服的单线冲突键带 <b>INTERVAL 语义轴锚</b> （{@code single:SURC:CGL:WYB:1:00x:<A>~<B>}，576
-   * 次），而骨架里锚是车站 （{@code single:OP:S:ALFA:1:...}）。方向解析走的正是语义轴，这条差异尚未排除。
-   *
-   * <h3>启用条件</h3>
-   *
-   * <p>Phase 1（方向模型归一）落地后重新启用：届时方向来自一次运动的唯一判定，而不是逐资源的多级回退，
-   * 本场景是否仍红将直接回答"这是建模缺陷还是骨架差异"。在那之前红色不足以判定为生产缺陷。
+   * <p>因此现在把它拆成两条：交会本身（安全，绿）与交会之后（liveness，红且已定位）。
    */
-  @org.junit.jupiter.api.Disabled("停因是方向判定失败，指向 Phase 1 方向模型；道岔区保护与 INTERVAL 缺失两个假设已实测证伪")
   @Test
-  void opposingTrainsSerializeAndBothPass() {
+  void opposingTrainsMeetWithoutCoOccupancy() {
+    DispatchScenarioHarness harness = opposingPair();
+
+    harness.runTicks(MAX_TICKS);
+
+    // 安全侧全部成立：没有物理共占、单线方向没有被破坏、没有越界 claim、证据链没有断。
+    harness.assertNoViolationsOf("I1", "I2", "I3", "I5", "I6");
+    // 双方确实都进了会让环，并且分属不同股道——对向屏障做对了事，不是靠把谁挡在环外换来的。
+    assertEquals("OP:S:BRAVO", stationGroupOf(harness.positionOf("east")), harness.describeState());
+    assertEquals("OP:S:BRAVO", stationGroupOf(harness.positionOf("west")), harness.describeState());
+    assertNotEquals(
+        harness.positionOf("east"),
+        harness.positionOf("west"),
+        "两列对向车停在同一条股道上\n" + harness.describeState());
+  }
+
+  /**
+   * S03 后半段：<b>当前已知缺陷</b>——交会成功之后双方被对方的尾部保护锁死。
+   *
+   * <p>形态固定：east 停在 BRAVO 的一条股道、west 停在另一条，双方停因都是 {@code PROTECTIVE_RETAIN_HOLD}， 而各自的 blocker
+   * 正是<b>对方对其出发站的 {@code PROTECTIVE_RETAIN}</b>——east 仍保留 ALFA、west 仍保留 CHARLIE，
+   * 而那恰好是对方要去的地方。两条尾部保护构成 2-环，谁都不动，于是谁都不释放。
+   *
+   * <p>安全没有被破坏（见上一条用例）；坏掉的是 liveness。这与实服 {@code self-owned-single-continuation-rejected}（本轮日志 119
+   * 次，集中在段场出库道岔）很可能是同一族问题： 尾部保护的释放条件依赖"列车继续前进"，而列车恰恰因为它而停着。归属 Phase 4（全局仲裁需要能看见并打破这种环）。
+   *
+   * <p><b>修好后本用例会失败。</b>那时把它与上一条合并回"双方最终都通过"，而不是删掉。
+   */
+  @Test
+  void opposingTrainsCurrentlyDeadlockOnRearRetainAfterMeeting() {
+    DispatchScenarioHarness harness = opposingPair();
+
+    harness.runTicks(MAX_TICKS);
+
+    assertFalse(
+        harness.reachedEnd("east") && harness.reachedEnd("west"),
+        "对向双车已经都能走完走廊——尾部保护 2-环可能已修复。"
+            + "请把本用例与 opposingTrainsMeetWithoutCoOccupancy 合并回'双方最终都通过'，而不是删掉。\n"
+            + harness.describeState());
+    for (String name : List.of("east", "west")) {
+      assertEquals(
+          "PROTECTIVE_RETAIN_HOLD",
+          harness.stopReasonOf(name),
+          "停因形态变了，成因需要重新归因: " + name + "\n" + harness.describeState());
+    }
+  }
+
+  private DispatchScenarioHarness opposingPair() {
     DispatchScenarioHarness.Topology topology =
         DispatchScenarioHarness.loopCorridor(List.of("ALFA", "BRAVO", "CHARLIE"));
     List<NodeId> eastbound = topology.physicalPath();
@@ -111,20 +150,11 @@ class DispatchScenarioBaselineTest {
     List<NodeId> westStations = new ArrayList<>(eastStations);
     java.util.Collections.reverse(westStations);
 
-    DispatchScenarioHarness harness =
-        DispatchScenarioHarness.builder()
-            .topology(topology)
-            .train("east", "east-route", eastbound, eastStations, 0)
-            .train("west", "west-route", westbound, westStations, 0)
-            .build();
-    List<String> names = List.of("east", "west");
-
-    runUntilAllArrive(harness, names);
-
-    harness.assertNoViolations();
-    for (String name : names) {
-      assertTrue(harness.reachedEnd(name), "对向列车 " + name + " 未走完走廊\n" + harness.describeState());
-    }
+    return DispatchScenarioHarness.builder()
+        .topology(topology)
+        .train("east", "east-route", eastbound, eastStations, 0)
+        .train("west", "west-route", westbound, westStations, 0)
+        .build();
   }
 
   private static void runUntilAllArrive(DispatchScenarioHarness harness, List<String> names) {
@@ -134,5 +164,10 @@ class DispatchScenarioBaselineTest {
         return;
       }
     }
+  }
+
+  private static String stationGroupOf(NodeId nodeId) {
+    String[] parts = nodeId.value().split(":");
+    return parts.length >= 3 ? parts[0] + ":" + parts[1] + ":" + parts[2] : nodeId.value();
   }
 }

@@ -67,8 +67,7 @@ class DispatchBlockingExplainabilityTest {
     harness.runTicks(MAX_TICKS);
 
     assertTrue(
-        harness.debugLog().stream()
-            .anyMatch(line -> line.contains("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED")),
+        harness.diagnosticCount("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED") > 0,
         "整场没有写入过任何 blocker 快照——I6 全绿是空的，证据链上游已经断了");
     harness.assertNoViolationsOf("I6");
   }

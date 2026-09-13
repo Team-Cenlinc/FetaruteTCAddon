@@ -106,6 +106,9 @@ tasks {
 
 tasks.test {
     useJUnitPlatform()
+    // Phase 0 的多车场景骨架会在一个 JVM 里连跑多个 700 tick 的完整调度现场，
+    // Gradle 默认的 512MB 不够（实测在 Mockito 建 mock 时 OutOfMemoryError）。
+    maxHeapSize = "2g"
 }
 
 def targetJavaVersion = 21
