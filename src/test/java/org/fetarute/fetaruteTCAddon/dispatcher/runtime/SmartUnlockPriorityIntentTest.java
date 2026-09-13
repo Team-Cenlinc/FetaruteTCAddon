@@ -79,6 +79,30 @@ class SmartUnlockPriorityIntentTest {
         "生效时必须留下 SMART_UNLOCK_PRIORITY_INTENT_APPLIED；debug=" + debugMessages);
   }
 
+  /**
+   * 生产端必须按 (预约, 生效优先级) 去重。
+   *
+   * <p>这条 trace 已被列为诊断门的**必留审计**（它是恢复层唯一的执行证据，被预算吞掉就无法回答
+   * "恢复层动没动"）。必留意味着它绕过重复窗口和预算两道闸，所以**去重责任在生产端**—— 该方法每个周期信号 tick 都会被调用，不去重就会按 tick 放大整个日志。
+   */
+  @Test
+  void priorityIntentIsEmittedOncePerReservationNotPerTick() throws Exception {
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service = serviceWithProgressAtPtk(debugMessages);
+    installReservation(service, AUTHORITY_BOUNDARY, PTK.value());
+    DispatchPriorityResolution base = basePriority();
+
+    for (int tick = 0; tick < 20; tick++) {
+      service.applySmartUnlockPriorityIntent("train-1", PTK, RVS, base);
+    }
+
+    long applied =
+        debugMessages.stream()
+            .filter(m -> m.contains("SMART_UNLOCK_PRIORITY_INTENT_APPLIED"))
+            .count();
+    assertEquals(1, applied, "结论没变就不该重复输出，否则必留审计会按 tick 放大：" + applied);
+  }
+
   /** 列车真的走了（路径 index 前进）时仍须回滚——收紧不得被这次放宽抵消。 */
   @Test
   void priorityIntentStillRollsBackWhenTrainActuallyAdvanced() throws Exception {

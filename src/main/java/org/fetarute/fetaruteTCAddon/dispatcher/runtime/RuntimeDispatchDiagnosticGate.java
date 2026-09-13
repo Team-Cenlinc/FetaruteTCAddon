@@ -275,6 +275,9 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           "SMART_UNLOCK_RESERVATION_ROLLBACK",
           "SMART_UNLOCK_ROLLBACK_DONE",
           "SMART_UNLOCK_APPLIED",
+          // 恢复层唯一的执行证据。生产端已按 (预约, 生效优先级) 去重，只有意图变化才输出。
+          // 它被普通观察预算吞掉时，"恢复层到底动没动"无法回答——实服 2026-09-13 正是如此。
+          "SMART_UNLOCK_PRIORITY_INTENT_APPLIED",
           // 队列仲裁结论：生产端已按 (资源, 请求方) 的结论签名去重，只有赢家、决定、原因或位次变化才输出。
           // 它是判断"前方无车却进不去"的唯一直接证据——被普通观察预算吞掉时，长时间阻塞完全无法归因。
           "SMART_PENDING_WINNER_ARBITRATION",

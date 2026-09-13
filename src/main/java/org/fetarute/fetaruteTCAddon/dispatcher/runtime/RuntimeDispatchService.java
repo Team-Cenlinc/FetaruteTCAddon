@@ -370,6 +370,10 @@ public final class RuntimeDispatchService {
    *
    * <p>因此本集合只用来识别"这是我们自己刚销毁的那辆车的滞后事件"，据此丢弃该事件；它<b>不</b>放宽对真正陌生实体的隔离。
    */
+  /** 生产端去重：每列车最近一次输出过的 unlock priority 意图签名（预约 + 生效优先级）。 */
+  private final java.util.concurrent.ConcurrentMap<String, String> lastSmartUnlockPriorityIntent =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private final Map<Object, Instant> dispatchDestroyedPhysicalIdentities =
       java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
 
@@ -3263,6 +3267,7 @@ public final class RuntimeDispatchService {
         smartUnlockReservationsByCycle.remove(reservation.cycleId(), reservation);
         smartUnlockReservationsByTrain.remove(
             normalizeTrainKey(reservation.trainName()), reservation);
+        lastSmartUnlockPriorityIntent.remove(normalizeTrainKey(reservation.trainName()));
         rememberSmartUnlockBlockerRelease(reservation, now);
         debugLogger.accept(
             "SMART_UNLOCK_SUCCESS reservationId="
@@ -3532,6 +3537,9 @@ public final class RuntimeDispatchService {
             reservation.trainName(), reservation.resources(), ClaimRole.UNLOCK_RESERVATION);
     smartUnlockReservationsByCycle.remove(reservation.cycleId(), reservation);
     smartUnlockReservationsByTrain.remove(normalizeTrainKey(reservation.trainName()), reservation);
+    // 预约没了，去重签名也随之失效；不清掉会让同名列车的下一个预约首次生效时漏输出，
+    // 也会让这张表随列车改名无界增长。
+    lastSmartUnlockPriorityIntent.remove(normalizeTrainKey(reservation.trainName()));
     debugLogger.accept(
         "SMART_UNLOCK_RESERVATION_ROLLED_BACK reservationId="
             + reservation.reservationId()
@@ -9545,24 +9553,33 @@ public final class RuntimeDispatchService {
             false,
             baseResolution.policyBasePriority(),
             saturatingIntAdd(baseResolution.policyAdjustment(), SMART_UNLOCK_PRIORITY_BOOST));
-    debugLogger.accept(
-        "SMART_UNLOCK_PRIORITY_INTENT_APPLIED train="
-            + reservation.trainName()
-            + " reservationId="
-            + reservation.reservationId()
-            + " cycleId="
-            + reservation.cycleId()
-            + " basePriority="
-            + baseResolution.priority()
-            + " effectivePriority="
-            + selected.priority()
-            + " boost="
-            + SMART_UNLOCK_PRIORITY_BOOST
-            + " currentNode="
-            + currentNode.value()
-            + " plannedDestination="
-            + nextNode.value()
-            + " bypassedHardAuthority=false");
+    // 生产端按 (预约, 生效优先级) 去重后才交给诊断门。
+    //
+    // 该方法每个周期信号 tick 都会被调用，原样输出会按 tick 放大；而它同时是恢复层**唯一**的执行证据
+    // （实服 2026-09-13 三轮累计 0 次，直接导致"恢复层是否动过"无法判断）。因此走与其它 unlock 事务
+    // 边界一致的约定：生产端只在结论变化时输出，诊断门再把它列为必留审计，两边合起来才既不放大又不丢失。
+    String priorityIntentSignature = reservation.reservationId() + "@" + selected.priority();
+    if (!priorityIntentSignature.equals(
+        lastSmartUnlockPriorityIntent.put(normalizeTrainKey(trainName), priorityIntentSignature))) {
+      debugLogger.accept(
+          "SMART_UNLOCK_PRIORITY_INTENT_APPLIED train="
+              + reservation.trainName()
+              + " reservationId="
+              + reservation.reservationId()
+              + " cycleId="
+              + reservation.cycleId()
+              + " basePriority="
+              + baseResolution.priority()
+              + " effectivePriority="
+              + selected.priority()
+              + " boost="
+              + SMART_UNLOCK_PRIORITY_BOOST
+              + " currentNode="
+              + currentNode.value()
+              + " plannedDestination="
+              + nextNode.value()
+              + " bypassedHardAuthority=false");
+    }
     return selected;
   }
 

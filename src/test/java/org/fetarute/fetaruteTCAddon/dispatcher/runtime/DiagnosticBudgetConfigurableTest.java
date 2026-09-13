@@ -67,6 +67,31 @@ class DiagnosticBudgetConfigurableTest {
     assertEquals(120, decisions, "非正值必须回落到默认 120，而不是 0");
   }
 
+  /**
+   * 恢复层唯一的执行证据必须不受预算约束。
+   *
+   * <p>实服 2026-09-13 需要回答的问题是"恢复层到底动没动"，唯一能回答它的就是这条 trace。 它此前不在必留名单里，而其余每一条 unlock
+   * 事务边界都在——名单漏了最关键的那条。
+   */
+  @Test
+  void recoveryLayerEffectEvidenceIsNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 30; i++) {
+      gate.accept(
+          "SMART_UNLOCK_PRIORITY_INTENT_APPLIED train=t"
+              + i
+              + " reservationId=r"
+              + i
+              + " effectivePriority=240");
+    }
+
+    long applied =
+        out.stream().filter(l -> l.startsWith("SMART_UNLOCK_PRIORITY_INTENT_APPLIED")).count();
+    assertEquals(30, applied, "恢复层执行证据不得被预算吞掉：" + out);
+  }
+
   /** 事务审计不受预算约束——调预算不得动摇这条边界。 */
   @Test
   void transactionAuditsIgnoreTheBudgetEntirely() {
