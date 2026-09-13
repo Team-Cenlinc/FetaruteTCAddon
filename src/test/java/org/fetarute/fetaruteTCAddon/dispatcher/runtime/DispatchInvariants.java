@@ -46,6 +46,7 @@ final class DispatchInvariants {
       Map<NodeId, List<NodeId>> adjacency,
       List<StoppedTrain> stoppedTrains,
       List<OccupancyQueueSnapshot> queues,
+      Map<String, Long> queueBaselines,
       List<String> diagnosticsSinceLastTick) {
     Sample {
       claims = claims == null ? List.of() : List.copyOf(claims);
@@ -53,6 +54,7 @@ final class DispatchInvariants {
       adjacency = adjacency == null ? Map.of() : Map.copyOf(adjacency);
       stoppedTrains = stoppedTrains == null ? List.of() : List.copyOf(stoppedTrains);
       queues = queues == null ? List.of() : List.copyOf(queues);
+      queueBaselines = queueBaselines == null ? Map.of() : Map.copyOf(queueBaselines);
       diagnosticsSinceLastTick =
           diagnosticsSinceLastTick == null ? List.of() : List.copyOf(diagnosticsSinceLastTick);
     }
@@ -72,6 +74,7 @@ final class DispatchInvariants {
     violations.addAll(checkI3ClaimsStayOnOwnRoute(sample));
     violations.addAll(checkI5BlockingIsExplainable(sample));
     violations.addAll(checkI6RequestContextMatchesProgress(sample));
+    violations.addAll(checkI7QueuePositionDoesNotRegress(sample));
     return List.copyOf(violations);
   }
 
@@ -340,6 +343,96 @@ final class DispatchInvariants {
     }
     violations.addAll(reported);
     return violations;
+  }
+
+  // ------------------------------------------------------------------ I7
+
+  /**
+   * I7 队列位次不因 STOP/HOLD/重取而倒退。
+   *
+   * <p>列车在某冲突资源上取得队列位次后，无论中间经历 STOP、HOLD 还是授权重取，其 {@code enqueueSequence} 都不得增大——
+   * 增大意味着它被移出队列又重新入队，<b>静默失去了已经赢下的资格</b>，而后来者会插到它前面。
+   *
+   * <p>出处：{@code OccupancyQueueEntry.enqueueSequence} 的注释（"本冲突队列内的稳定到达序号"）与 {@code
+   * SimpleOccupancyManager.releaseResourceRetainingQueuePosition} 的存在本身——后者是专门为保住位次而写的，
+   * 但<b>没有任何测试验证三条 STOP 路径都调用了它</b>，硬停路径最可疑（它走 {@code releaseMovementAuthorityResources}）。
+   *
+   * <p>基线在列车<b>真正取得该资源的 claim</b> 时清除：那表示位次已经被兑现，之后再排队拿到更大的序号是正常的。 只在"从未兑现却序号变大"时报违反。
+   *
+   * <p>当前保证：有专门方法支持，但调用点覆盖情况未被验证——这正是本条要回答的问题。
+   */
+  private static List<String> checkI7QueuePositionDoesNotRegress(Sample sample) {
+    Set<String> claimHolders = claimedResourceOwners(sample);
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null || queue.resource() == null) {
+        continue;
+      }
+      String resource = queue.resource().toString();
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry == null) {
+          continue;
+        }
+        String key = queueKey(resource, entry.trainName());
+        if (claimHolders.contains(key)) {
+          continue;
+        }
+        Long best = sample.queueBaselines().get(key);
+        if (best != null && entry.enqueueSequence() > best) {
+          reported.add(
+              "I7 队列位次倒退: resource="
+                  + resource
+                  + " train="
+                  + TrainNameNormalizer.normalizeKey(entry.trainName())
+                  + " best="
+                  + best
+                  + " current="
+                  + entry.enqueueSequence());
+        }
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  /**
+   * 计算下一 tick 的队列位次基线。
+   *
+   * <p>由骨架在每次检查之后调用并保存返回值——判定本身仍是纯函数，跨 tick 的记忆放在调用方。
+   */
+  static Map<String, Long> nextQueueBaselines(Sample sample, Map<String, Long> previous) {
+    Map<String, Long> next = new LinkedHashMap<>(previous == null ? Map.of() : previous);
+    // 已经兑现位次的 (资源, 列车) 清除基线：之后重新排队拿到更大的序号是正常的。
+    next.keySet().removeAll(claimedResourceOwners(sample));
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null || queue.resource() == null) {
+        continue;
+      }
+      String resource = queue.resource().toString();
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry == null) {
+          continue;
+        }
+        next.merge(queueKey(resource, entry.trainName()), entry.enqueueSequence(), Math::min);
+      }
+    }
+    return Map.copyOf(next);
+  }
+
+  /** 当前持有 claim 的 (资源, 列车) 组合。 */
+  private static Set<String> claimedResourceOwners(Sample sample) {
+    Set<String> owners = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim != null && claim.resource() != null) {
+        owners.add(queueKey(claim.resource().toString(), claim.trainName()));
+      }
+    }
+    return owners;
+  }
+
+  private static String queueKey(String resource, String trainName) {
+    return resource + "|" + TrainNameNormalizer.normalizeKey(trainName);
   }
 
   // ------------------------------------------------------------------ 工具

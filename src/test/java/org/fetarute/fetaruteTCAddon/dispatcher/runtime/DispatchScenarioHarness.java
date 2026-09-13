@@ -871,6 +871,48 @@ final class DispatchScenarioHarness {
   /** 整场累计出现过的诊断 token 次数；保留窗口有上限，计数没有。 */
   private final Map<String, Integer> diagnosticCounts = new LinkedHashMap<>();
 
+  /** I7 的跨 tick 记忆：每个 (冲突资源, 列车) 迄今拿到过的最好 enqueueSequence。 */
+  private Map<String, Long> queueBaselines = Map.of();
+
+  /** I7 实际做过多少次"有基线可比"的比较——用来证明它不是空绿。 */
+  private int queuePositionComparisons;
+
+  /** 整场观察到的单个冲突队列最大并发条目数——1 表示从未真正发生竞争。 */
+  private int maxQueueDepth;
+
+  /**
+   * I7 实际做过多少次"有基线可比"的比较。
+   *
+   * <p>为 0 表示整场没有任何列车在<b>未取得 claim</b> 的情况下跨 tick 停留在同一个队列里——此时 I7 全绿不代表任何事。
+   */
+  int queuePositionComparisons() {
+    return queuePositionComparisons;
+  }
+
+  /** 整场观察到的单个冲突队列最大并发条目数；{@code < 2} 表示从未真正发生排队竞争。 */
+  int maxQueueDepth() {
+    return maxQueueDepth;
+  }
+
+  private void tallyQueueContention(DispatchInvariants.Sample sample) {
+    for (var queue : sample.queues()) {
+      if (queue == null || queue.resource() == null) {
+        continue;
+      }
+      maxQueueDepth = Math.max(maxQueueDepth, queue.entries().size());
+      for (var entry : queue.entries()) {
+        if (entry != null
+            && queueBaselines.containsKey(
+                queue.resource()
+                    + "|"
+                    + org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer
+                        .normalizeKey(entry.trainName()))) {
+          queuePositionComparisons++;
+        }
+      }
+    }
+  }
+
   /**
    * 整场（不受保留窗口限制）出现过多少次含该 token 的 debug 行。
    *
@@ -893,19 +935,22 @@ final class DispatchScenarioHarness {
   private void checkInvariants() {
     List<String> fresh = debugLog.drain();
     tallyDiagnostics(fresh);
-    List<String> found =
-        DispatchInvariants.check(
-            new DispatchInvariants.Sample(
-                tick,
-                sortedClaims(),
-                routePathsByTrain(),
-                adjacency,
-                stoppedTrains(),
-                occupancy.snapshotQueues(),
-                fresh));
+    DispatchInvariants.Sample sample =
+        new DispatchInvariants.Sample(
+            tick,
+            sortedClaims(),
+            routePathsByTrain(),
+            adjacency,
+            stoppedTrains(),
+            occupancy.snapshotQueues(),
+            queueBaselines,
+            fresh);
+    tallyQueueContention(sample);
+    List<String> found = DispatchInvariants.check(sample);
     for (String violation : found) {
       violations.add("tick=" + tick + " " + violation);
     }
+    queueBaselines = DispatchInvariants.nextQueueBaselines(sample, queueBaselines);
   }
 
   /**
