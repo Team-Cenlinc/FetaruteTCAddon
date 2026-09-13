@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -73,42 +72,45 @@ class DispatchQueueContentionTest {
   }
 
   /**
-   * I7：<b>当前已知缺陷</b>——硬停会让列车丢掉已经赢下的队列位次。
+   * I7 在排队竞争现场的观测结果：<b>约一半的运行会出现队列位次倒退，另一半不会</b>。
    *
-   * <p>实测轨迹（`CONFLICT:switcher:SWITCHER:C1:W` 上的 q2）：
+   * <h3>观测到的缺陷</h3>
+   *
+   * <p>出现时形态固定（{@code CONFLICT:switcher:SWITCHER:C1:W} 上的 q2）：
    *
    * <pre>
-   *   tick 1   enqueueSequence=1   停因 BLOCKED_BY_OCCUPANCY
-   *   tick 2   队列条目消失         停因转为 AUTHORIZATION_FAILURE
-   *   tick 262 重新入队，enqueueSequence=2
-   *   全程 q2 从未在该资源上持有过 claim
+   *   tick 1    enqueueSequence=1  停因 BLOCKED_BY_OCCUPANCY
+   *   tick 2    队列条目消失        停因转为 AUTHORIZATION_FAILURE
+   *   tick 262  重新入队 enqueueSequence=2
+   *   全程从未在该资源上持有过 claim
    * </pre>
    *
-   * <p>也就是说：一次硬停把它的排队条目整个摘掉，260 个 tick 之后它从队尾重新排。这正是 {@code releaseResourceRetainingQueuePosition}
-   * 想要防止的事——该方法存在，但硬停路径显然没有走它 （它走的是 {@code releaseMovementAuthorityResources}）。规格里对 S12
-   * 的怀疑"硬停路径最可疑"由此得到证实， 而且不需要先把 S12 造出来。
+   * <p>一次硬停把排队条目整个摘掉，260 个 tick 之后从队尾重排。{@code releaseResourceRetainingQueuePosition}
+   * 正是为防这件事写的，硬停路径却没走它（它走 {@code releaseMovementAuthorityResources}）。
    *
-   * <p>影响：后来者会插到它前面，先到先得被打破；在高密度区段表现为"某辆车一直排不上"。
+   * <h3>为什么这里不能断言它一定发生</h3>
    *
-   * <p><b>修好后本用例会失败。</b>那时把断言翻转成 {@code assertNoViolationsOf("I7")}，并把 I7 加进 {@link
-   * #contentionDoesNotBreakPhysicalSafety()} 的保证范围。
+   * <p>本场景<b>不确定</b>：同样的代码连跑 6 次，出现过 3 次 0 条违反、3 次数百条违反。原因是队列仲裁本身 依赖墙钟——{@code
+   * arbitrationDeadlineMillis} 由 {@code firstSeen} 与优先级折算的毫秒数算出，而 {@code RuntimeDispatchService}
+   * 直接读 {@code Instant.now()}，骨架注入不了时钟。跑得快慢不同， 谁先谁后就不同。打开 Smart 恢复层会让摆动更大（它的 TTL
+   * 与预约老化同样基于墙钟），但<b>关掉它也一样摆</b>。
+   *
+   * <p>所以真正的结论是：<b>排队竞争下的仲裁结果不可复现</b>。这比"硬停丢位次"更值得记——它意味着 任何关于队列先后的断言在当前实现上都无法稳定成立，也意味着 Phase 0
+   * 的"连跑 20 次结果一致" 在涉及队列竞争的场景上做不到，除非先把仲裁的时间源变成可注入的。
+   *
+   * <p>因此本用例只断言<b>与时序无关</b>的部分：真的发生了竞争，且<b>若</b>出现 I7 违反，形态必须仍是 已知的那一种。形态一变就说明出现了新的成因，需要重新归因。
    */
   @Test
-  void queuePositionCurrentlyRegressesAfterHardStop() {
+  void queuePositionRegressionKeepsItsKnownShapeWhenItOccurs() {
     DispatchScenarioHarness harness = contendingLoop();
 
     harness.runTicks(MAX_TICKS);
 
     assertFieldIsAlive(harness);
     List<String> regressions = harness.violationsOf("I7");
-    assertFalse(
-        regressions.isEmpty(),
-        "I7 已经不再被违反——队列位次可能已经修好了。请把本用例翻转为 assertNoViolationsOf(\"I7\")"
-            + "，并把 I7 加进 contentionDoesNotBreakPhysicalSafety 的保证范围，而不是删掉本用例。\n"
-            + harness.describeState());
     assertTrue(
         regressions.stream().allMatch(line -> line.contains("队列位次倒退")),
-        "I7 违反形态变了，需要重新归因:\n  " + String.join("\n  ", regressions));
+        "出现了形态不同的 I7 违反，成因需要重新归因:\n  " + String.join("\n  ", regressions));
   }
 
   /** 同一现场下结构性安全不得退化——排队竞争不是放宽互斥的理由。 */

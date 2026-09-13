@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -83,9 +84,15 @@ final class DispatchScenarioHarness {
    */
   private static final int DEBUG_LOG_RETAINED_LINES = 3000;
 
+  /** 读取最近 blocker 快照时使用的观察窗口。 */
+  private static final Duration BLOCKER_OBSERVATION_WINDOW = Duration.ofSeconds(30);
+
   /** 需要整场累计计数的诊断 token——保留窗口会丢弃旧行，但计数必须完整。 */
   private static final List<String> COUNTED_DIAGNOSTIC_TOKENS =
-      List.of("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED", "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED");
+      List.of(
+          "SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED",
+          "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED",
+          "SMART_WAIT_FOR_GRAPH");
 
   /** 只保留最近 N 行的 debug 汇聚点，同时把每一行原样转发给当前 tick 的待检缓冲。 */
   static final class BoundedLog {
@@ -140,6 +147,10 @@ final class DispatchScenarioHarness {
   private final SignActionEvent enterEvent;
   private final Map<NodeId, List<NodeId>> adjacency;
   private final Map<String, RouteDefinition> routeByTrain;
+
+  /** 是否在每个 tick 前驱动 Smart 恢复层；默认关闭，原因见 {@link Builder#smartRecoveryLayer(boolean)}。 */
+  private final boolean smartRecoveryLayer;
+
   private final List<String> violations = new ArrayList<>();
 
   /** 每列车当前 STOP 生命周期的标识与已连续出现的 tick 数，供 I5 判断"停了多久"。 */
@@ -156,7 +167,9 @@ final class DispatchScenarioHarness {
       BoundedLog debugLog,
       SignActionEvent enterEvent,
       Map<NodeId, List<NodeId>> adjacency,
-      Map<String, RouteDefinition> routeByTrain) {
+      Map<String, RouteDefinition> routeByTrain,
+      boolean smartRecoveryLayer) {
+    this.smartRecoveryLayer = smartRecoveryLayer;
     this.adjacency = adjacency;
     this.routeByTrain = routeByTrain;
     this.occupancy = occupancy;
@@ -233,6 +246,89 @@ final class DispatchScenarioHarness {
    *
    * @param stationNames 站名序列，首尾为终端站，中间为会让站；至少 2 个
    */
+  /**
+   * 生成闭合环形走廊：N 个单股道车站首尾相接成一个环。
+   *
+   * <p>专为 S10（三车循环等待）而造。两处刻意的选择：
+   *
+   * <ul>
+   *   <li><b>每站单股道</b>。会让环（{@link #loopCorridor}）的第二条股道会让后车绕过前车——那正是会让站的用处，
+   *       但也意味着环永远不会真正闭合。要复现循环等待就不能给它旁路。
+   *   <li><b>每站两端仍然放道岔</b>。{@code RailGraphConflictIndex} 的走廊边界是"度数≠2 <b>或</b> 节点类型为
+   *       SWITCHER"；单股道中间站的度数恰好是 2，若不放道岔，整个环没有任何边界，会被归并成一个 {@code
+   *       single:<component>:cycle:<minNode>} 的闭环冲突并严格互斥——全环同时只允许一列车，
+   *       那是串行化，不是循环等待，场景就失去意义了。放上道岔之后环被切成 N 段，每段是独立的单线区。
+   * </ul>
+   *
+   * <p>返回的 {@code physicalPath} / {@code stations} 是从 0 号站出发顺时针走一圈的视角； 其它起点用 {@link #ringRoute} 取。
+   */
+  static Topology ringCorridor(List<String> stationNames) {
+    if (stationNames.size() < 3) {
+      throw new IllegalArgumentException("环至少需要 3 个车站");
+    }
+    List<NodeId> nodes = new ArrayList<>();
+    List<NodeId[]> edges = new ArrayList<>();
+    for (String station : stationNames) {
+      nodes.add(ringWest(station));
+      nodes.add(ringTrack(station));
+      nodes.add(ringEast(station));
+      edges.add(new NodeId[] {ringWest(station), ringTrack(station)});
+      edges.add(new NodeId[] {ringTrack(station), ringEast(station)});
+    }
+    for (int i = 0; i < stationNames.size(); i++) {
+      String here = stationNames.get(i);
+      String next = stationNames.get((i + 1) % stationNames.size());
+      edges.add(new NodeId[] {ringEast(here), ringWest(next)});
+    }
+    return new Topology(
+        List.copyOf(nodes),
+        List.copyOf(edges),
+        ringRoute(stationNames, 0, stationNames.size() - 1),
+        ringStations(stationNames, 0, stationNames.size() - 1),
+        Map.of());
+  }
+
+  /**
+   * 环上从第 {@code startOffset} 个站出发、顺时针走 {@code legs} 段的物理路径。
+   *
+   * <p>刻意不走满一圈：交路首尾出现同一个节点会让 route index 与方向解析都失去单调性，那是另一类问题， 不应该混进循环等待场景。
+   */
+  static List<NodeId> ringRoute(List<String> stationNames, int startOffset, int legs) {
+    List<NodeId> path = new ArrayList<>();
+    int size = stationNames.size();
+    path.add(ringTrack(stationNames.get(startOffset % size)));
+    for (int leg = 0; leg < legs; leg++) {
+      String here = stationNames.get((startOffset + leg) % size);
+      String next = stationNames.get((startOffset + leg + 1) % size);
+      path.add(ringEast(here));
+      path.add(ringWest(next));
+      path.add(ringTrack(next));
+    }
+    return List.copyOf(path);
+  }
+
+  /** 与 {@link #ringRoute} 对应的 route waypoint（只有车站）。 */
+  static List<NodeId> ringStations(List<String> stationNames, int startOffset, int legs) {
+    List<NodeId> stations = new ArrayList<>();
+    int size = stationNames.size();
+    for (int i = 0; i <= legs; i++) {
+      stations.add(ringTrack(stationNames.get((startOffset + i) % size)));
+    }
+    return List.copyOf(stations);
+  }
+
+  private static NodeId ringTrack(String station) {
+    return NodeId.of("OP:S:" + station + ":1");
+  }
+
+  private static NodeId ringWest(String station) {
+    return NodeId.of("SWITCHER:" + station + ":W");
+  }
+
+  private static NodeId ringEast(String station) {
+    return NodeId.of("SWITCHER:" + station + ":E");
+  }
+
   static Topology loopCorridor(List<String> stationNames) {
     if (stationNames.size() < 2) {
       throw new IllegalArgumentException("至少需要 2 个车站");
@@ -310,6 +406,7 @@ final class DispatchScenarioHarness {
     private final Map<NodeId, String> dynamicSpecs = new LinkedHashMap<>();
     private final List<TrainSpec> trainSpecs = new ArrayList<>();
     private int edgeLength = DEFAULT_EDGE_LENGTH;
+    private boolean smartRecoveryLayer;
     private int lookaheadEdges = 3;
 
     Builder nodes(List<NodeId> value) {
@@ -327,6 +424,24 @@ final class DispatchScenarioHarness {
       explicitEdges.addAll(topology.edges());
       dynamicSpecs.clear();
       dynamicSpecs.putAll(topology.dynamicSpecByStation());
+      return this;
+    }
+
+    /**
+     * 是否在每个 tick 前驱动 Smart 恢复层（{@code traceSmartDispatchGlobalSnapshot}）。
+     *
+     * <p>生产的每个运行周期都会先调它再逐车做信号 tick（见 {@code RuntimeSignalMonitor}），所以打开它<b>更贴近生产</b>。
+     * 但它<b>默认关闭</b>，原因是确定性：恢复层的 TTL、预约老化、快照窗口全部基于 {@code Instant.now()}，而 {@code
+     * RuntimeDispatchService} 内部直接读它，骨架无法注入时钟。实测把它打开后，同一个场景连跑 6 次 出现 <b>3 次 0 条违反、3 次 956
+     * 条违反</b>——结果取决于这一轮跑得多快。
+     *
+     * <p>这本身是一条结论：<b>在生产同构的接线下，队列位次能不能保住是随墙钟摆动的</b>。它也让 Phase 0 的 退出条件"全套件连跑 20
+     * 次结果一致"无法在开启恢复层的场景上满足。
+     *
+     * <p>因此只在断言"恢复层看见了什么"这类<b>与时序无关</b>的事实时才打开它（例如 wait-for 图的节点数）， 不要用它来断言任何随时间演化的结果。
+     */
+    Builder smartRecoveryLayer(boolean value) {
+      smartRecoveryLayer = value;
       return this;
     }
 
@@ -600,7 +715,8 @@ final class DispatchScenarioHarness {
               debugLog,
               enterEventMock(worldId),
               buildAdjacency(edgePairs),
-              routeByTrainName);
+              routeByTrainName,
+              smartRecoveryLayer);
       RuntimeSignalReevaluationScheduler scheduler =
           new RuntimeSignalReevaluationScheduler(
               nextTickTasks::add,
@@ -675,6 +791,10 @@ final class DispatchScenarioHarness {
     for (int i = 0; i < count; i++) {
       tick++;
       drainNextTickTasks();
+      if (smartRecoveryLayer) {
+        service.traceSmartDispatchGlobalSnapshot(
+            new LinkedHashSet<>(trains.keySet()), Instant.now());
+      }
       for (ScenarioTrain train : trains.values()) {
         service.handleSignalTick(train, false);
       }
@@ -874,6 +994,9 @@ final class DispatchScenarioHarness {
   /** 整场累计出现过的诊断 token 次数；保留窗口有上限，计数没有。 */
   private final Map<String, Integer> diagnosticCounts = new LinkedHashMap<>();
 
+  /** 每个被计数 token 最后一次出现的完整行。 */
+  private final Map<String, String> lastDiagnosticByToken = new LinkedHashMap<>();
+
   /** I7 的跨 tick 记忆：每个 (冲突资源, 列车) 迄今拿到过的最好 enqueueSequence。 */
   private Map<String, Long> queueBaselines = Map.of();
 
@@ -885,6 +1008,9 @@ final class DispatchScenarioHarness {
 
   /** I4 实际判定过多少次"可见信号非 STOP"的现场——为 0 表示它整场没被检验过。 */
   private int proceedAuthorityChecks;
+
+  /** 整场有多少个 tick 至少有一辆车持有非空 blocker 快照。 */
+  private int blockerSnapshotObservations;
 
   /** 整场观察到的最长 wait-for 环长度与样本。 */
   private int longestWaitCycle;
@@ -998,6 +1124,29 @@ final class DispatchScenarioHarness {
     return String.join("->", rotated) + "->" + rotated.get(0);
   }
 
+  /**
+   * 统计"确实写入过 blocker 快照"的 tick 数。
+   *
+   * <p>刻意读<b>状态</b>而不是数 trace：{@code SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED} 要经过诊断预算门，
+   * 现场一嘈杂就会被压掉——用它判断"有没有写入"会把预算问题误读成证据缺失。
+   */
+  private void tallyBlockerSnapshots() {
+    for (ScenarioTrain train : trains.values()) {
+      if (!service
+          .recentDeadlockBlockers(train.name(), BLOCKER_OBSERVATION_WINDOW)
+          .blockers()
+          .isEmpty()) {
+        blockerSnapshotObservations++;
+        return;
+      }
+    }
+  }
+
+  /** 整场有多少个 tick 至少有一辆车持有非空 blocker 快照；为 0 表示证据链上游确实断了。 */
+  int blockerSnapshotObservations() {
+    return blockerSnapshotObservations;
+  }
+
   private void tallyWaitCycles() {
     for (String cycle : findWaitCycles(currentWaitForEdges())) {
       observedWaitCycles.add(cycle);
@@ -1043,9 +1192,19 @@ final class DispatchScenarioHarness {
       for (String token : COUNTED_DIAGNOSTIC_TOKENS) {
         if (line.contains(token)) {
           diagnosticCounts.merge(token, 1, Integer::sum);
+          lastDiagnosticByToken.put(token, line);
         }
       }
     }
+  }
+
+  /**
+   * 整场最后一次出现该 token 的完整 debug 行；没出现过时返回 {@code "-"}。
+   *
+   * <p>不受保留窗口限制——诊断门会把重复行压掉，关键证据经常出现在很早的 tick 上。
+   */
+  String lastDiagnostic(String token) {
+    return lastDiagnosticByToken.getOrDefault(token, "-");
   }
 
   private void checkInvariants() {
@@ -1064,6 +1223,7 @@ final class DispatchScenarioHarness {
             fresh);
     tallyQueueContention(sample);
     tallyWaitCycles();
+    tallyBlockerSnapshots();
     List<String> found = DispatchInvariants.check(sample);
     for (String violation : found) {
       violations.add("tick=" + tick + " " + violation);

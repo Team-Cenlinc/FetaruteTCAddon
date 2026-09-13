@@ -57,8 +57,9 @@ class DispatchBlockingExplainabilityTest {
    * <p>因此该缺陷的<b>回归保护在单元层</b>：{@link LiveBlockerSnapshotProgressAnchorTest}（回滚 22fcde1 会让其中 2
    * 条变红，已实测）。本用例是多车层面的看门狗，等 T3/T4/T5 进来之后才会真正吃上力。
    *
-   * <p>为避免"没触发也算绿"，这里额外断言快照机制确实跑过（至少一次 {@code SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED}）。
-   * 若该断言变红，说明证据链上游已经断了，此时 I6 的全绿没有任何意义。
+   * <p>为避免"没触发也算绿"，这里额外断言快照机制确实跑过。断言读的是<b>状态</b>（{@code recentDeadlockBlockers} 非空）而不是数
+   * trace：{@code SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED} 要过诊断预算门， 现场一嘈杂就会被压掉——接上 Smart 恢复层之后这条 trace
+   * 立刻被挤没了，而快照本身一直在写。 用 trace 有无判断状态，会把预算问题误读成证据缺失。
    */
   @Test
   void requestContextNeverDivergesFromProgressRegistry() {
@@ -67,8 +68,7 @@ class DispatchBlockingExplainabilityTest {
     harness.runTicks(MAX_TICKS);
 
     assertTrue(
-        harness.diagnosticCount("SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED") > 0,
-        "整场没有写入过任何 blocker 快照——I6 全绿是空的，证据链上游已经断了");
+        harness.blockerSnapshotObservations() > 0, "整场没有写入过任何 blocker 快照——I6 全绿是空的，证据链上游已经断了");
     harness.assertNoViolationsOf("I6");
   }
 
