@@ -83,6 +83,12 @@ final class DispatchScenarioHarness {
   private final Map<String, RouteDefinition> routeByTrain;
   private final List<String> violations = new ArrayList<>();
 
+  /** 每列车当前 STOP 生命周期的标识与已连续出现的 tick 数，供 I5 判断"停了多久"。 */
+  private final Map<String, StopStreak> stopStreaks = new LinkedHashMap<>();
+
+  /** 已经喂给 I6 的 debug 行数；每 tick 只看新增部分。 */
+  private int diagnosticsWatermark;
+
   private int tick;
 
   private DispatchScenarioHarness(
@@ -655,10 +661,18 @@ final class DispatchScenarioHarness {
     if (!train.travelToward(nextHop, step)) {
       return;
     }
-    service.handleWaypointMemberEnter(
-        train,
-        enterEvent,
-        new SignNodeDefinition(nextHop, nodeTypeFor(nextHop), Optional.empty(), Optional.empty()));
+    NodeType nodeType = nodeTypeFor(nextHop);
+    SignNodeDefinition definition =
+        new SignNodeDefinition(nextHop, nodeType, Optional.empty(), Optional.empty());
+    service.handleWaypointMemberEnter(train, enterEvent, definition);
+    if (nodeType == NodeType.STATION) {
+      // 车站到达必须走生产的到站入口。handleWaypointMemberEnter 对 NodeType.STATION 明确返回
+      // shouldAdvancePassedWaypoint=false（只更新 lastPassedGraphNode，不推进 route index），
+      // 推进由 AutoStation 的到站路径负责。只调前者会让 route index 永远停在起点，
+      // 而 applyCurrentNodeOverride 又把窗口起点改写成列车实际所在的站台——
+      // 于是 waypoint N 与 N+1 塌成同一个节点，movement plan 永久不可构建。
+      service.handleStationArrival(train, definition);
+    }
   }
 
   /**
@@ -801,11 +815,63 @@ final class DispatchScenarioHarness {
   private void checkInvariants() {
     List<String> found =
         DispatchInvariants.check(
-            new DispatchInvariants.Sample(tick, sortedClaims(), routePathsByTrain(), adjacency));
+            new DispatchInvariants.Sample(
+                tick,
+                sortedClaims(),
+                routePathsByTrain(),
+                adjacency,
+                stoppedTrains(),
+                occupancy.snapshotQueues(),
+                drainNewDiagnostics()));
     for (String violation : found) {
       violations.add("tick=" + tick + " " + violation);
     }
   }
+
+  /**
+   * 采集本 tick 各车的 STOP 状态及其已持续 tick 数。
+   *
+   * <p>"同一轮 STOP" 以 {@code reasonCode + enteredAt} 判定：停因变化或重新进入都会重新计数，避免把两次不同原因的停车 拼成一次长停车。
+   */
+  private List<DispatchInvariants.StoppedTrain> stoppedTrains() {
+    List<DispatchInvariants.StoppedTrain> stopped = new ArrayList<>();
+    for (ScenarioTrain train : trains.values()) {
+      String name = train.name();
+      if (reachedEnd(name)) {
+        // 已到交路终点的列车不参与 I5。骨架不建模终到生命周期（layover 登记、目的地清除、回库），
+        // 生产会把这类列车交给 REUSE_AT_TERM / TERMINAL 流程，而骨架只能让它原地被继续 tick，
+        // 于是调度（正确地）报 path_unresolvable:X->X。那是骨架缺口，不是"停车说不出原因"。
+        stopStreaks.remove(name);
+        continue;
+      }
+      Optional<RuntimeStopState> stateOpt = service.getActiveStopState(name);
+      if (stateOpt.isEmpty()) {
+        stopStreaks.remove(name);
+        continue;
+      }
+      RuntimeStopState state = stateOpt.get();
+      String identity = state.reasonCode() + "@" + state.enteredAt();
+      StopStreak previous = stopStreaks.get(name);
+      int ticks =
+          previous != null && previous.identity().equals(identity) ? previous.ticks() + 1 : 1;
+      stopStreaks.put(name, new StopStreak(identity, ticks));
+      stopped.add(new DispatchInvariants.StoppedTrain(name, state, ticks));
+    }
+    return stopped;
+  }
+
+  /** 返回上次检查之后新产生的 debug 行。 */
+  private List<String> drainNewDiagnostics() {
+    if (diagnosticsWatermark >= debugLog.size()) {
+      diagnosticsWatermark = debugLog.size();
+      return List.of();
+    }
+    List<String> fresh = List.copyOf(debugLog.subList(diagnosticsWatermark, debugLog.size()));
+    diagnosticsWatermark = debugLog.size();
+    return fresh;
+  }
+
+  private record StopStreak(String identity, int ticks) {}
 
   /**
    * 为 I3 提供每列车的合法资源范围。
@@ -833,6 +899,42 @@ final class DispatchScenarioHarness {
 
   List<String> violations() {
     return List.copyOf(violations);
+  }
+
+  /** 只返回指定不变量的违反，用于让场景显式声明它保证哪几条。 */
+  List<String> violationsOf(String invariantId) {
+    List<String> matched = new ArrayList<>();
+    for (String violation : violations) {
+      if (violation.contains(" " + invariantId + " ")) {
+        matched.add(violation);
+      }
+    }
+    return List.copyOf(matched);
+  }
+
+  /**
+   * 断言指定不变量没有被违反。
+   *
+   * <p>场景必须显式列出它保证哪几条，而不是笼统地"全绿"：Phase 0 的作用是把现状钉住，其中包含已知为错的行为。 用它来声明保证范围，用 {@link #violationsOf}
+   * 去正面钉住已知缺陷，<b>不要</b>用它来掩盖违反。
+   */
+  void assertNoViolationsOf(String... invariantIds) {
+    List<String> found = new ArrayList<>();
+    for (String id : invariantIds) {
+      found.addAll(violationsOf(id));
+    }
+    if (found.isEmpty()) {
+      return;
+    }
+    throw new AssertionError(
+        "不变量 "
+            + String.join("/", invariantIds)
+            + " 被违反 ("
+            + found.size()
+            + " 条):\n  "
+            + String.join("\n  ", found)
+            + "\n"
+            + describeState());
   }
 
   /** 违反时抛出，附带当前现场，避免需要重跑才能定位。 */

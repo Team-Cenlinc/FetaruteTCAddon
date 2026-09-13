@@ -13,6 +13,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
@@ -31,24 +33,45 @@ final class DispatchInvariants {
 
   private DispatchInvariants() {}
 
-  /** 单次检查所需的只读现场。 */
+  /**
+   * 单次检查所需的只读现场。
+   *
+   * <p>I1–I3 是纯快照函数。I5 需要"停了多久"，I6 需要"这一 tick 新产生了哪些诊断"，二者都不是单帧信息， 因此由骨架负责跨 tick
+   * 累积后传入——判定本身仍然是纯函数，不持有状态。
+   */
   record Sample(
       int tick,
       List<OccupancyClaim> claims,
       Map<String, List<NodeId>> routePathsByTrain,
-      Map<NodeId, List<NodeId>> adjacency) {
+      Map<NodeId, List<NodeId>> adjacency,
+      List<StoppedTrain> stoppedTrains,
+      List<OccupancyQueueSnapshot> queues,
+      List<String> diagnosticsSinceLastTick) {
     Sample {
       claims = claims == null ? List.of() : List.copyOf(claims);
       routePathsByTrain = routePathsByTrain == null ? Map.of() : Map.copyOf(routePathsByTrain);
       adjacency = adjacency == null ? Map.of() : Map.copyOf(adjacency);
+      stoppedTrains = stoppedTrains == null ? List.of() : List.copyOf(stoppedTrains);
+      queues = queues == null ? List.of() : List.copyOf(queues);
+      diagnosticsSinceLastTick =
+          diagnosticsSinceLastTick == null ? List.of() : List.copyOf(diagnosticsSinceLastTick);
     }
   }
+
+  /**
+   * 一列处于 STOP 的列车及其已持续的 tick 数。
+   *
+   * @param consecutiveTicks 同一轮 STOP 生命周期（按 reasonCode + enteredAt 判定）已连续出现的 tick 数
+   */
+  record StoppedTrain(String trainName, RuntimeStopState state, int consecutiveTicks) {}
 
   static List<String> check(Sample sample) {
     List<String> violations = new ArrayList<>();
     violations.addAll(checkI1PhysicalHardOccupancyIsExclusive(sample));
     violations.addAll(checkI2SingleCorridorDirectionIsConsistent(sample));
     violations.addAll(checkI3ClaimsStayOnOwnRoute(sample));
+    violations.addAll(checkI5BlockingIsExplainable(sample));
+    violations.addAll(checkI6RequestContextMatchesProgress(sample));
     return List.copyOf(violations);
   }
 
@@ -205,6 +228,118 @@ final class DispatchInvariants {
       }
     }
     return keys;
+  }
+
+  // ------------------------------------------------------------------ I5
+
+  /**
+   * I5 阻塞可解释性。
+   *
+   * <p>列车若处于非计划性 STOP 且持续超过 1 个 tick，必须存在一条当前有效的依赖：一个具名 blocker（资源与 owner 都不是占位符 {@code
+   * "-"}），或它在某个冲突队列中有一个具名位次。<b>不允许既没有 blocker 又不在任何队列里</b>——那意味着系统停了车却说不出在等谁。
+   *
+   * <p>出处：{@code RuntimeStopState.blockers} 字段的设计意图（"避免硬停车、普通占用等待和计划停车各自只写一段不可关联的字符串日志"）； 实服中
+   * {@code DEADLOCK_DESTROY_SKIPPED ... blockers=[] conflictKey=-} 伴随 127–178s 停车即是反例。
+   *
+   * <p>只看持续 <b>2 个及以上</b> tick 的 STOP：单 tick 的瞬时停车可能是授权刚撤销、blocker 尚未采样的正常中间态， 把它算进来会把时序噪声报成缺陷。
+   *
+   * <p>计划停车被排除——它们的"依赖"不是资源而是时间（dwell、门控、终到流程）。判别用 {@code releaseCondition} 而不是停因字符串：前者是枚举，后者是自由文本。
+   *
+   * <p>当前保证：<b>不成立</b>，这是收益最高的一条新增不变量。
+   */
+  private static List<String> checkI5BlockingIsExplainable(Sample sample) {
+    List<String> violations = new ArrayList<>();
+    Set<String> queuedTrains = new TreeSet<>();
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry != null) {
+          queuedTrains.add(TrainNameNormalizer.normalizeKey(entry.trainName()));
+        }
+      }
+    }
+    for (StoppedTrain stopped : sample.stoppedTrains()) {
+      if (stopped == null || stopped.state() == null || stopped.consecutiveTicks() < 2) {
+        continue;
+      }
+      RuntimeStopState state = stopped.state();
+      if (!isUnplannedStop(state)) {
+        continue;
+      }
+      if (hasNamedBlocker(state)
+          || queuedTrains.contains(TrainNameNormalizer.normalizeKey(stopped.trainName()))) {
+        continue;
+      }
+      violations.add(
+          "I5 停车不可解释: train="
+              + TrainNameNormalizer.normalizeKey(stopped.trainName())
+              + " reason="
+              + state.reasonCode()
+              + " detail="
+              + state.detail()
+              + " ticks="
+              + stopped.consecutiveTicks()
+              + " blockers="
+              + state.blockers()
+              + " inAnyQueue=false");
+    }
+    return violations;
+  }
+
+  /** 非计划性 STOP：撤销了授权，或是占用等待；计划停车（dwell / 终到流程）按解除条件排除。 */
+  private static boolean isUnplannedStop(RuntimeStopState state) {
+    RuntimeStopState.ReleaseCondition release = state.releaseCondition();
+    if (release == RuntimeStopState.ReleaseCondition.PLANNED_STOP_COMPLETED
+        || release == RuntimeStopState.ReleaseCondition.TERMINAL_LIFECYCLE_COMPLETED
+        || release == RuntimeStopState.ReleaseCondition.LAYOVER_READY_AND_AUTHORITY_REISSUED) {
+      return false;
+    }
+    return state.invalidatesAuthority() || "BLOCKED_BY_OCCUPANCY".equals(state.reasonCode());
+  }
+
+  private static boolean hasNamedBlocker(RuntimeStopState state) {
+    for (RuntimeStopState.Blocker blocker : state.blockers()) {
+      if (blocker != null && isNamed(blocker.resource()) && isNamed(blocker.owner())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isNamed(String value) {
+    return value != null && !value.isBlank() && !"-".equals(value);
+  }
+
+  // ------------------------------------------------------------------ I6
+
+  /**
+   * I6 请求上下文与进度表一致。
+   *
+   * <p>进入准入的请求所携带的进度锚点必须与 {@code RouteProgressRegistry} 当前记录一致，否则该次判定产生的 blocker 证据会被 {@code
+   * liveBlockerSnapshotProgressFresh} 丢弃——后果不是判错，是判不出，直接导致 I5 失效。
+   *
+   * <p>断言方式刻意选择<b>观察生产 trace</b> 而不是反射进内部：{@code SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED}
+   * 正是该丢弃行为唯一的对外信号。骨架的 tick 循环是同步的——信号 tick 阶段不更新进度表，到达提交在其后单独一段——
+   * 因此这里出现的任何"陈旧"都不可能是真的异步滞后，只能是上下文本身没对齐。
+   *
+   * <p>不把 {@code progressVersion == -1} 单列为违反：只有经过 {@code markDirectedRequest} 的运行时授权请求才会被写入版本号，
+   * 后方保护、保位、当前位置等请求天然没有版本，按 -1 判违反会把正常路径报成缺陷。
+   *
+   * <p>出处：{@code RuntimeDispatchService.liveBlockerSnapshotProgressFresh} 与 {@code
+   * traceLiveBlockerSnapshotRejected}。
+   */
+  private static List<String> checkI6RequestContextMatchesProgress(Sample sample) {
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (String line : sample.diagnosticsSinceLastTick()) {
+      if (line != null && line.contains("SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED")) {
+        reported.add("I6 请求上下文与进度表不一致，blocker 证据被丢弃: " + line.trim());
+      }
+    }
+    violations.addAll(reported);
+    return violations;
   }
 
   // ------------------------------------------------------------------ 工具
