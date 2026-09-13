@@ -50,7 +50,12 @@ final class DispatchInvariants {
       List<AuthorityView> authorities,
       List<OccupancyQueueSnapshot> queues,
       Map<String, Long> queueBaselines,
-      List<String> diagnosticsSinceLastTick) {
+      List<String> diagnosticsSinceLastTick,
+      Set<String> releasedThisTick,
+      Set<String> disappearedClaimKeys,
+      Set<String> destroyedTrainKeys,
+      Set<String> migratedAwayKeys,
+      Set<String> progressRegistryKeys) {
     Sample {
       claims = claims == null ? List.of() : List.copyOf(claims);
       routePathsByTrain = routePathsByTrain == null ? Map.of() : Map.copyOf(routePathsByTrain);
@@ -61,6 +66,13 @@ final class DispatchInvariants {
       queueBaselines = queueBaselines == null ? Map.of() : Map.copyOf(queueBaselines);
       diagnosticsSinceLastTick =
           diagnosticsSinceLastTick == null ? List.of() : List.copyOf(diagnosticsSinceLastTick);
+      releasedThisTick = releasedThisTick == null ? Set.of() : Set.copyOf(releasedThisTick);
+      disappearedClaimKeys =
+          disappearedClaimKeys == null ? Set.of() : Set.copyOf(disappearedClaimKeys);
+      destroyedTrainKeys = destroyedTrainKeys == null ? Set.of() : Set.copyOf(destroyedTrainKeys);
+      migratedAwayKeys = migratedAwayKeys == null ? Set.of() : Set.copyOf(migratedAwayKeys);
+      progressRegistryKeys =
+          progressRegistryKeys == null ? Set.of() : Set.copyOf(progressRegistryKeys);
     }
   }
 
@@ -89,6 +101,9 @@ final class DispatchInvariants {
     violations.addAll(checkI5BlockingIsExplainable(sample));
     violations.addAll(checkI6RequestContextMatchesProgress(sample));
     violations.addAll(checkI7QueuePositionDoesNotRegress(sample));
+    violations.addAll(checkI8ClaimsDisappearOnlyThroughRelease(sample));
+    violations.addAll(checkI9MigratedAwayNameLeavesNoResidue(sample));
+    violations.addAll(checkI10DestroyedTrainLeavesNoResidue(sample));
     return List.copyOf(violations);
   }
 
@@ -525,6 +540,147 @@ final class DispatchInvariants {
 
   private static String queueKey(String resource, String trainName) {
     return resource + "|" + TrainNameNormalizer.normalizeKey(trainName);
+  }
+
+  // ------------------------------------------------------------------ I8
+
+  /**
+   * I8 claim 只能通过宣告过的释放消失。
+   *
+   * <p>账本里某 (列车, 资源) 的 claim 在本 tick 消失了，就必须有一条对应的 {@code
+   * OccupancyReleasedEvent}。静默消失意味着有绕过释放入口的写法，那种路径不会通知信号层重评估， 后车也就不会被唤醒。
+   *
+   * <p>这是规格里 I8「释放的局部性」可稳定断言的形式。原表述是"释放 R 只影响 R"， 但账本每 tick 有大量合法变化，逐资源做 before/after 全量 diff
+   * 会把正常的窗口推进也算进来； 改为盯"消失是否都被宣告过"，既能抓住绕过释放入口的写法，又不会把窗口推进误报。
+   *
+   * <p>出处：{@code SimpleOccupancyManager.publishReleasedEvent} 与 {@code SignalEvaluator}
+   * 的释放唤醒链路——后者正是靠这些事件把队首唤醒的。
+   *
+   * <p>当前保证：<b>仅代码假设</b>；没有任何机制强制"移除 claim 必须发事件"。
+   */
+  private static List<String> checkI8ClaimsDisappearOnlyThroughRelease(Sample sample) {
+    if (sample.disappearedClaimKeys().isEmpty()) {
+      return List.of();
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (String vanished : sample.disappearedClaimKeys()) {
+      if (!sample.releasedThisTick().contains(vanished)) {
+        reported.add("I8 claim 未经宣告即消失: " + vanished);
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I9
+
+  /**
+   * I9 owner 迁移的全有全无（成功侧）。
+   *
+   * <p>{@code migrateRuntimeOwner} 返回 true 之后，<b>旧名不得在任何账本、队列或进度表中残留</b>。
+   * 残留意味着同一列实体同时以两个逻辑身份存在：一个持有 claim、一个被当成 blocker，恢复层会围着一个 不存在的列车打转。
+   *
+   * <p>失败侧（返回 false 后新名不得出现）不是逐 tick 性质，由 S14 在迁移那一刻直接断言。
+   *
+   * <p>出处：{@code migrateRuntimeOwner}（约 90 行手写伪事务）与 {@code
+   * rollbackRuntimeOwnerRegistries}。审计已定位一处缺口：{@code dynamicCapacityWaits.rename()}
+   * 在回滚点<b>之后</b>调用，不在回滚覆盖范围内。
+   *
+   * <p>当前保证：<b>靠手写事务维持</b>，没有结构保证。
+   */
+  private static List<String> checkI9MigratedAwayNameLeavesNoResidue(Sample sample) {
+    if (sample.migratedAwayKeys().isEmpty()) {
+      return List.of();
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim != null
+          && sample
+              .migratedAwayKeys()
+              .contains(TrainNameNormalizer.normalizeKey(claim.trainName()))) {
+        reported.add(
+            "I9 迁移后的旧名仍持有 claim: train="
+                + TrainNameNormalizer.normalizeKey(claim.trainName())
+                + " resource="
+                + claim.resource());
+      }
+    }
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry != null
+            && sample
+                .migratedAwayKeys()
+                .contains(TrainNameNormalizer.normalizeKey(entry.trainName()))) {
+          reported.add(
+              "I9 迁移后的旧名仍在队列中: train="
+                  + TrainNameNormalizer.normalizeKey(entry.trainName())
+                  + " resource="
+                  + queue.resource());
+        }
+      }
+    }
+    for (String key : sample.progressRegistryKeys()) {
+      if (sample.migratedAwayKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
+        reported.add("I9 迁移后的旧名仍在进度表中: train=" + key);
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I10
+
+  /**
+   * I10 世代隔离。
+   *
+   * <p>列车被销毁之后，它的 key 不得残留在账本 claim、冲突队列或进度表中。残留会让同名新列车继承 上一世代的状态，也会让恢复层把一个已经不存在的列车当成 blocker。
+   *
+   * <p>出处：{@code handleTrainRemoved} 与 {@code RuntimeDispatchService} 中 38 处 {@code
+   * .remove(key)}——清理分散在几十个 map 上，靠的是每处都没写漏。
+   *
+   * <p>当前保证：<b>靠清理代码维持</b>，没有任何结构保证。
+   */
+  private static List<String> checkI10DestroyedTrainLeavesNoResidue(Sample sample) {
+    if (sample.destroyedTrainKeys().isEmpty()) {
+      return List.of();
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null) {
+        continue;
+      }
+      String owner = TrainNameNormalizer.normalizeKey(claim.trainName());
+      if (sample.destroyedTrainKeys().contains(owner)) {
+        reported.add("I10 已销毁列车仍持有 claim: train=" + owner + " resource=" + claim.resource());
+      }
+    }
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry == null) {
+          continue;
+        }
+        String owner = TrainNameNormalizer.normalizeKey(entry.trainName());
+        if (sample.destroyedTrainKeys().contains(owner)) {
+          reported.add("I10 已销毁列车仍在队列中: train=" + owner + " resource=" + queue.resource());
+        }
+      }
+    }
+    for (String key : sample.progressRegistryKeys()) {
+      if (sample.destroyedTrainKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
+        reported.add("I10 已销毁列车仍在进度表中: train=" + key);
+      }
+    }
+    violations.addAll(reported);
+    return violations;
   }
 
   // ------------------------------------------------------------------ 工具

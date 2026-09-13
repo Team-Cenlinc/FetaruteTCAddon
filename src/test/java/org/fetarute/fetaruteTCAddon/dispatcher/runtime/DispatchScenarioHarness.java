@@ -182,6 +182,9 @@ final class DispatchScenarioHarness {
   /** 确定推进的场景时钟，注入给 {@link RuntimeDispatchService}。 */
   private final ScenarioClock clock;
 
+  /** 生产发布的释放事件累积（"列车key|资源"），由 builder 订阅 {@code OccupancyReleasedEvent} 填充。 */
+  private final List<String> releaseEvents;
+
   private final List<String> violations = new ArrayList<>();
 
   /** 每列车当前 STOP 生命周期的标识与已连续出现的 tick 数，供 I5 判断"停了多久"。 */
@@ -200,7 +203,9 @@ final class DispatchScenarioHarness {
       Map<NodeId, List<NodeId>> adjacency,
       Map<String, RouteDefinition> routeByTrain,
       boolean smartRecoveryLayer,
-      ScenarioClock clock) {
+      ScenarioClock clock,
+      List<String> releaseEvents) {
+    this.releaseEvents = releaseEvents;
     this.clock = clock;
     this.smartRecoveryLayer = smartRecoveryLayer;
     this.adjacency = adjacency;
@@ -678,6 +683,20 @@ final class DispatchScenarioHarness {
               });
 
       SignalEventBus eventBus = new SignalEventBus();
+      // I8 要回答"claim 是不是只通过宣告过的释放消失的"，所以必须订阅生产自己发布的释放事件，
+      // 而不是由骨架另算一套释放语义。
+      List<String> releaseEvents = new ArrayList<>();
+      eventBus.subscribe(
+          org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent.class,
+          event -> {
+            for (org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource
+                resource : event.releasedResources()) {
+              if (resource != null) {
+                releaseEvents.add(
+                    TrainNameNormalizer.normalizeKey(event.trainName()) + "|" + resource);
+              }
+            }
+          });
       ScenarioClock clock = new ScenarioClock();
       SimpleOccupancyManager occupancy =
           new SimpleOccupancyManager(
@@ -755,7 +774,8 @@ final class DispatchScenarioHarness {
               buildAdjacency(edgePairs),
               routeByTrainName,
               smartRecoveryLayer,
-              clock);
+              clock,
+              releaseEvents);
       RuntimeSignalReevaluationScheduler scheduler =
           new RuntimeSignalReevaluationScheduler(
               nextTickTasks::add,
@@ -835,10 +855,14 @@ final class DispatchScenarioHarness {
         service.traceSmartDispatchGlobalSnapshot(new LinkedHashSet<>(trains.keySet()), clock.get());
       }
       for (ScenarioTrain train : trains.values()) {
-        service.handleSignalTick(train, false);
+        if (!destroyedTrainKeys.contains(TrainNameNormalizer.normalizeKey(train.name()))) {
+          service.handleSignalTick(train, false);
+        }
       }
       for (ScenarioTrain train : trains.values()) {
-        advance(train);
+        if (!destroyedTrainKeys.contains(TrainNameNormalizer.normalizeKey(train.name()))) {
+          advance(train);
+        }
       }
       checkInvariants();
     }
@@ -1018,6 +1042,71 @@ final class DispatchScenarioHarness {
     return debugLog.retained();
   }
 
+  /**
+   * 销毁一列车：走生产的 {@code handleTrainRemoved}，之后不再驱动它。
+   *
+   * <p>销毁后该 key 交由 I10 检查残留——账本、队列、进度表里都不得再出现。
+   */
+  void destroyTrain(String trainName) {
+    ScenarioTrain train = train(trainName);
+    service.handleTrainRemoved(train);
+    destroyedTrainKeys.add(TrainNameNormalizer.normalizeKey(trainName));
+  }
+
+  /** 整场从账本消失过多少个 claim；为 0 表示 I8 整场没被检验过。 */
+  int claimDisappearances() {
+    return claimDisappearances;
+  }
+
+  /** 整场宣告过多少次释放。 */
+  int announcedReleases() {
+    return announcedReleases;
+  }
+
+  /** 迁移成功后被弃用的旧名。 */
+  Set<String> migratedAwayKeys() {
+    return Set.copyOf(migratedAwayKeys);
+  }
+
+  /** 已销毁列车的 key 集合。 */
+  Set<String> destroyedTrainKeys() {
+    return Set.copyOf(destroyedTrainKeys);
+  }
+
+  /**
+   * 触发运行时 owner 迁移（改名）。
+   *
+   * <p>{@code migrateRuntimeOwner} 是私有的；Phase 0 不为测试放宽生产可见性，用反射调用。
+   *
+   * @return 生产返回的迁移结果
+   */
+  boolean migrateOwner(String previousTrainName, String nextTrainName) {
+    try {
+      java.lang.reflect.Method method =
+          RuntimeDispatchService.class.getDeclaredMethod(
+              "migrateRuntimeOwner", String.class, String.class);
+      method.setAccessible(true);
+      boolean migrated = (boolean) method.invoke(service, previousTrainName, nextTrainName);
+      if (migrated) {
+        // 生产迁移只改调度侧；TrainCarts 那边的改名由事件源完成。骨架必须把这一半补上，
+        // 否则下一 tick 仍以旧名送进来，进度表立刻把旧名重新建出来。
+        ScenarioTrain renamed = trains.remove(previousTrainName);
+        if (renamed != null) {
+          renamed.rename(nextTrainName);
+          trains.put(nextTrainName, renamed);
+          RouteDefinition route = routeByTrain.remove(previousTrainName);
+          if (route != null) {
+            routeByTrain.put(nextTrainName, route);
+          }
+        }
+        migratedAwayKeys.add(TrainNameNormalizer.normalizeKey(previousTrainName));
+      }
+      return migrated;
+    } catch (ReflectiveOperationException ex) {
+      throw new AssertionError("migrateRuntimeOwner 调用失败", ex);
+    }
+  }
+
   /** 返回按列车名排序的 claim 快照，避免枚举顺序进入断言。 */
   List<OccupancyClaim> sortedClaims() {
     List<OccupancyClaim> claims = new ArrayList<>(occupancy.snapshotClaims());
@@ -1047,6 +1136,20 @@ final class DispatchScenarioHarness {
 
   /** I4 实际判定过多少次"可见信号非 STOP"的现场——为 0 表示它整场没被检验过。 */
   private int proceedAuthorityChecks;
+
+  /** 已被销毁的列车 key；销毁后不再驱动，并交给 I10 检查残留。 */
+  private final Set<String> destroyedTrainKeys = new java.util.LinkedHashSet<>();
+
+  /** 迁移成功后被弃用的旧名，交给 I9 检查残留。 */
+  private final Set<String> migratedAwayKeys = new java.util.LinkedHashSet<>();
+
+  /** 上一 tick 结束时的 claim 键集合，用于算出本 tick 消失了哪些 claim。 */
+  private Set<String> previousClaimKeys = Set.of();
+
+  /** 整场累计：消失过多少个 claim、宣告过多少次释放——为 0 时 I8 全绿不代表任何事。 */
+  private int claimDisappearances;
+
+  private int announcedReleases;
 
   /** 整场有多少个 tick 至少有一辆车持有非空 blocker 快照。 */
   private int blockerSnapshotObservations;
@@ -1198,6 +1301,32 @@ final class DispatchScenarioHarness {
     return proceedAuthorityChecks;
   }
 
+  /** 取走本 tick 宣告过的释放，并清空缓冲。 */
+  private Set<String> drainReleaseEvents() {
+    if (releaseEvents.isEmpty()) {
+      return Set.of();
+    }
+    Set<String> released = new java.util.LinkedHashSet<>(releaseEvents);
+    releaseEvents.clear();
+    announcedReleases += released.size();
+    return released;
+  }
+
+  /** 算出本 tick 从账本消失的 (列车, 资源)，并把基线推到当前。 */
+  private Set<String> disappearedClaimKeys() {
+    Set<String> now = new java.util.LinkedHashSet<>();
+    for (OccupancyClaim claim : occupancy.snapshotClaims()) {
+      if (claim != null && claim.resource() != null) {
+        now.add(TrainNameNormalizer.normalizeKey(claim.trainName()) + "|" + claim.resource());
+      }
+    }
+    Set<String> gone = new java.util.LinkedHashSet<>(previousClaimKeys);
+    gone.removeAll(now);
+    previousClaimKeys = now;
+    claimDisappearances += gone.size();
+    return gone;
+  }
+
   private void tallyQueueContention(DispatchInvariants.Sample sample) {
     for (var queue : sample.queues()) {
       if (queue == null || queue.resource() == null) {
@@ -1259,7 +1388,12 @@ final class DispatchScenarioHarness {
             authorityViews(),
             occupancy.snapshotQueues(),
             queueBaselines,
-            fresh);
+            fresh,
+            drainReleaseEvents(),
+            disappearedClaimKeys(),
+            destroyedTrainKeys,
+            migratedAwayKeys,
+            Set.copyOf(registry.snapshot().keySet()));
     tallyQueueContention(sample);
     tallyWaitCycles();
     tallyBlockerSnapshots();
@@ -1491,7 +1625,7 @@ final class DispatchScenarioHarness {
    */
   static final class ScenarioTrain implements RuntimeTrainHandle {
 
-    private final String name;
+    private String name;
     private final UUID worldId;
     private final TagStore tags;
     private final List<NodeId> path;
@@ -1529,6 +1663,17 @@ final class DispatchScenarioHarness {
 
     String name() {
       return name;
+    }
+
+    /**
+     * 改名：同时改掉句柄自报的名字与 {@code properties.getTrainName()}。
+     *
+     * <p>少了后半句，迁移之后骨架仍会以<b>旧名</b>把这辆车送进 tick，进度表会立刻把旧名重新建出来—— 那不是生产缺陷，是骨架没把改名做完。实测：只改前者会让 I9 立刻报
+     * 120 条"旧名仍在进度表中"。
+     */
+    void rename(String nextName) {
+      this.name = nextName;
+      org.mockito.Mockito.when(tags.properties().getTrainName()).thenReturn(nextName);
     }
 
     List<NodeId> path() {

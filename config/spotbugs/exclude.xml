@@ -345,6 +345,18 @@
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.LiveBlockerSnapshotProgressAnchorTest"/>
         <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
     </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchScenarioHarness"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchDestroyStaleEventTest"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.SmartUnlockProgressBaselineTest"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
 
     <!-- BKCommonLib CommonEntity -> Bukkit Entity 类型转换：getEntity().getEntity() 返回泛型 -->
     <Match>
