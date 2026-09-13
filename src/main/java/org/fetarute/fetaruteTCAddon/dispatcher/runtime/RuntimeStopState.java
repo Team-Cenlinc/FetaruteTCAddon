@@ -121,10 +121,35 @@ public record RuntimeStopState(
   /** 构造不会撤销旧 token 的普通占用等待。 */
   public static RuntimeStopState occupancyHold(
       String trainName, String reasonCode, OccupancyDecision decision, Instant now) {
+    return occupancyHold(trainName, reasonCode, decision, null, now);
+  }
+
+  /**
+   * 构造闭塞等待，并允许调用方显式给出明细。
+   *
+   * <p>{@link OccupancyDecision#reason()} 的默认值是字面量 {@code "none"}——它表示“没人填过原因”， 而不是“原因是
+   * none”。直接印出来会让读日志的人以为这就是结论。调用方知道原因时应当传进来； 传不进来时下面会把这个空缺**显式**标出，而不是伪装成一个结论。
+   */
+  public static RuntimeStopState occupancyHold(
+      String trainName, String reasonCode, OccupancyDecision decision, String detail, Instant now) {
+    String safeReasonCode = normalize(reasonCode, "BLOCKED_BY_OCCUPANCY");
+    String decisionReason = decision == null ? null : decision.reason();
+    String resolved;
+    if (detail != null && !detail.isBlank()) {
+      resolved = detail;
+    } else if (decision == null) {
+      resolved = "occupancy-decision-missing";
+    } else if (decisionReason == null
+        || decisionReason.isBlank()
+        || "none".equals(decisionReason)) {
+      resolved = safeReasonCode.toLowerCase(java.util.Locale.ROOT) + ":no-decision-reason";
+    } else {
+      resolved = decisionReason;
+    }
     return new RuntimeStopState(
         trainName,
-        normalize(reasonCode, "BLOCKED_BY_OCCUPANCY"),
-        decision == null ? "occupancy-decision-missing" : decision.reason(),
+        safeReasonCode,
+        stopDetailToken(resolved, HardStopReason.UNKNOWN),
         ReleaseCondition.BLOCKING_RESOURCES_RELEASED_OR_TRANSFERRED,
         RetryTrigger.OCCUPANCY_CHANGE_OR_PERIODIC_RECHECK,
         blockers(decision),
@@ -136,17 +161,64 @@ public record RuntimeStopState(
   public static RuntimeStopState hardStop(
       String trainName, HardStopReason reason, OccupancyDecision decision, Instant now) {
     HardStopReason safeReason = reason == null ? HardStopReason.UNKNOWN : reason;
-    List<Blocker> blockers = blockers(decision);
+    // 没有 decision 就没有原因可写。此前这里回落到枚举名小写（safety_state_unavailable），
+    // 读日志时与真实明细（safety-state-unavailable:xxx）长得几乎一样，却什么都没说——
+    // 实服 2026-09-13 有 122 次 invalidatesAuthority=true 的硬停车因此无法归因。
+    // 回落值必须自报"我没有原因"，而不是复述停因代码。
+    return hardStop(
+        trainName,
+        safeReason,
+        decision == null
+            ? safeReason.name().toLowerCase(java.util.Locale.ROOT) + ":no-decision-context"
+            : decision.reason(),
+        blockers(decision),
+        now);
+  }
+
+  /**
+   * 构造撤销既有 Movement Authority 的硬停车，并显式说明原因。
+   *
+   * <p>供没有 {@link OccupancyDecision}（因而没有 blocker 列表）但**知道自己为什么停**的路径使用。
+   *
+   * <p>存在的理由是日志预算：{@code SMART_STOP_LIFECYCLE} 属于必留的事务审计，而承载原因的那些 trace（如 {@code
+   * SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED}）受普通观察预算门控。实服丢弃率 89% 时，停车本身必然留痕、原因却必然丢失。**fail-closed
+   * 停车的原因必须写在必留的那一行里。**
+   */
+  public static RuntimeStopState hardStop(
+      String trainName, HardStopReason reason, String detail, Instant now) {
+    HardStopReason safeReason = reason == null ? HardStopReason.UNKNOWN : reason;
+    return hardStop(trainName, safeReason, detail, List.of(), now);
+  }
+
+  private static RuntimeStopState hardStop(
+      String trainName,
+      HardStopReason safeReason,
+      String detail,
+      List<Blocker> blockers,
+      Instant now) {
     ReleaseCondition releaseCondition = hardReleaseCondition(safeReason, !blockers.isEmpty());
     return new RuntimeStopState(
         trainName,
         safeReason.name(),
-        decision == null ? safeReason.name().toLowerCase(java.util.Locale.ROOT) : decision.reason(),
+        stopDetailToken(detail, safeReason),
         releaseCondition,
         hardRetryTrigger(safeReason),
         blockers,
         true,
         now);
+  }
+
+  /**
+   * 把明细压成单个 token。
+   *
+   * <p>明细会以 {@code detail=<值> releaseCondition=…} 的形式写进空格分隔的 trace；内部空白会把该行切断，
+   * 让后续字段错位。这里统一折叠，调用方不必各自记得。
+   */
+  private static String stopDetailToken(String detail, HardStopReason safeReason) {
+    if (detail == null || detail.isBlank()) {
+      return safeReason.name().toLowerCase(java.util.Locale.ROOT) + ":no-detail";
+    }
+    return detail.trim().replaceAll("\\s+", "_");
   }
 
   /** 构造信号发布门的本地可恢复 STOP；既有 token 保留，但不得维持可见通行信号。 */

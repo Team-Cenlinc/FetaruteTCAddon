@@ -6847,7 +6847,10 @@ public final class RuntimeDispatchService {
         invalidateMovementAuthorization(trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE);
         recordStopState(
             RuntimeStopState.hardStop(
-                trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE, null, clockNow()));
+                trainName,
+                HardStopReason.SAFETY_STATE_UNAVAILABLE,
+                "expected-physical-topology-recovery:" + diagnosticSource(source),
+                clockNow()));
         updateSignalOrWarn(trainName, SignalAspect.STOP, clockNow());
         invalidatedOwners.add(trainName);
       } catch (RuntimeException | LinkageError ex) {
@@ -6940,7 +6943,10 @@ public final class RuntimeDispatchService {
       invalidateMovementAuthorization(trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE);
       recordStopState(
           RuntimeStopState.hardStop(
-              trainName, HardStopReason.SAFETY_STATE_UNAVAILABLE, null, clockNow()));
+              trainName,
+              HardStopReason.SAFETY_STATE_UNAVAILABLE,
+              "potential-physical-change-contained:" + normalizedSource,
+              clockNow()));
       updateSignalOrWarn(trainName, SignalAspect.STOP, clockNow());
       invalidatedOwners.add(trainName);
     }
@@ -14090,6 +14096,9 @@ public final class RuntimeDispatchService {
           properties,
           trainName,
           "SMART_DISPATCH_RECOVERABLE_HOLD",
+          // holdReason 就在手边，却只进了上面 traceSmartSignalFinalDecision 那条受门控的行。
+          // 实服该停因 6 次全是 detail=none blockers=[]——完全无法归因。
+          "recoverable-hold:" + holdReason,
           route,
           currentNodeOpt.get(),
           nextNode.get(),
@@ -16596,10 +16605,40 @@ public final class RuntimeDispatchService {
       OccupancyDecision decision,
       OccupancyRequest request,
       AuthorityEnd authorityEnd) {
+    applyNonInvalidatingBlockedStop(
+        train,
+        properties,
+        trainName,
+        waitReason,
+        null,
+        route,
+        currentNode,
+        nextNode,
+        graph,
+        decision,
+        request,
+        authorityEnd);
+  }
+
+  /** 同上，但由调用方显式给出停因明细；用于 decision 自己不带原因的路径。 */
+  private void applyNonInvalidatingBlockedStop(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      String trainName,
+      String waitReason,
+      String waitDetail,
+      RouteDefinition route,
+      NodeId currentNode,
+      NodeId nextNode,
+      RailGraph graph,
+      OccupancyDecision decision,
+      OccupancyRequest request,
+      AuthorityEnd authorityEnd) {
     Instant stoppedAt = clockNow();
     String reason =
         waitReason == null || waitReason.isBlank() ? "BLOCKED_BY_OCCUPANCY" : waitReason;
-    recordStopState(RuntimeStopState.occupancyHold(trainName, reason, decision, stoppedAt));
+    recordStopState(
+        RuntimeStopState.occupancyHold(trainName, reason, decision, waitDetail, stoppedAt));
     updateBlockerSnapshot(trainName, decision, stoppedAt);
     boolean physicalPublished = updateSignalOrWarn(trainName, SignalAspect.STOP, stoppedAt);
     SmartUnlockReservation activeUnlock =
@@ -16755,7 +16794,16 @@ public final class RuntimeDispatchService {
         currentNode,
         nextNode,
         graph,
-        null,
+        // 原本传 null，停因明细因此回落成 deadlock_confirmed_waiting——复述停因代码，等于没写。
+        // HealthMonitor 自己知道为什么重新施加硬停车，这个原因必须落到必留的 SMART_STOP_LIFECYCLE 上，
+        // 而不是只写进下面那行受预算门控的 debugLogger。实服 2026-09-13 这一族 95 次全部无法归因。
+        new OccupancyDecision(
+            false,
+            clockNow(),
+            SignalAspect.STOP,
+            List.of(),
+            false,
+            "health-monitor-reapply:" + (reason == null || reason.isBlank() ? "health" : reason)),
         null,
         AuthorityEnd.none());
     debugLogger.accept(
@@ -17860,7 +17908,15 @@ public final class RuntimeDispatchService {
             + " blockers="
             + summarizeBlockers(decision));
     recordStopState(
-        RuntimeStopState.occupancyHold(trainName, "PROTECTIVE_RETAIN_HOLD", decision, now));
+        RuntimeStopState.occupancyHold(
+            trainName,
+            "PROTECTIVE_RETAIN_HOLD",
+            decision,
+            // releaseCandidate 上面刚算出来，却只写进了受预算门控的 STALE_PROTECTIVE_RETAIN_CANDIDATE。
+            // 停车行是必留的，结论必须落在这里——否则丢弃率高时只看得见"停了"，看不见"能不能放"。
+            "protective-retain:"
+                + (releaseCandidate ? "release-candidate" : "no-self-retain-candidate"),
+            now));
     updateSignalOrWarn(trainName, SignalAspect.STOP, now);
     if (train != null
         && properties != null
