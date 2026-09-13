@@ -4053,9 +4053,27 @@ public final class RuntimeDispatchService {
         request
             .withDirectedSource(effectiveSource.name())
             .withDirectedOccupancyVersion(occupancyVersion())
-            .withDirectedProgressVersion(progressRegistry.version());
+            .withDirectedProgressVersion(progressRegistry.version())
+            .withDirectedLastPassedGraphNode(currentLastPassedGraphNode(request.trainName()));
     rememberCanonicalForwardMovementPlan(directed, request.now());
     return directed;
+  }
+
+  /**
+   * 读取本请求建立时刻的真实进度锚点。
+   *
+   * <p>builder 拿不到进度表，有向上下文里的 lastPassedGraphNode 因此一直是空的。下游想判断“这份异步占用结论是否还属于
+   * 同一个进度窗口”，只能退而拿请求的窗口起点去和进度表里的图节点比较——但窗口起点是由 {@code resolveEffectiveCurrentNodeForSignal}
+   * 决定的，它在锚点不在 currentIndex -> next 最短路上时会主动退回 route 节点。 于是“窗口起点 !=
+   * 进度锚点”这件在建立时刻就已经成立的事，被当成了“列车已经移动”。
+   */
+  private Optional<NodeId> currentLastPassedGraphNode(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return Optional.empty();
+    }
+    return progressRegistry
+        .get(trainName)
+        .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode);
   }
 
   /**
@@ -28547,10 +28565,9 @@ public final class RuntimeDispatchService {
         context.routeId().isPresent() && !context.routeId().get().equals(entry.routeId());
     boolean indexMoved =
         context.currentIndex() >= 0 && context.currentIndex() != entry.currentIndex();
-    Optional<NodeId> requestProgressNode =
-        context.lastPassedGraphNode().isPresent()
-            ? context.lastPassedGraphNode()
-            : context.currentNode();
+    // 只拿建立时刻记录下来的进度锚点做比较。缺失的锚点表示“无从判断”，不得表示“列车已移动”——
+    // 请求窗口起点不是进度锚点，用它顶替会把建立时刻就已成立的差异误判成移动，从而丢掉本应写入的 blocker 证据。
+    Optional<NodeId> requestProgressNode = context.lastPassedGraphNode();
     boolean graphNodeMoved =
         requestProgressNode.isPresent()
             && entry.lastPassedGraphNode().isPresent()
@@ -28587,13 +28604,9 @@ public final class RuntimeDispatchService {
             + " currentRouteId="
             + (currentEntry == null ? "-" : currentEntry.routeId().value())
             + " requestLastPassed="
-            + (context == null
-                ? "-"
-                : context
-                    .lastPassedGraphNode()
-                    .or(context::currentNode)
-                    .map(NodeId::value)
-                    .orElse("-"))
+            + (context == null ? "-" : context.lastPassedGraphNode().map(NodeId::value).orElse("-"))
+            + " requestCurrentNode="
+            + (context == null ? "-" : context.currentNode().map(NodeId::value).orElse("-"))
             + " currentLastPassed="
             + (currentEntry == null
                 ? "-"

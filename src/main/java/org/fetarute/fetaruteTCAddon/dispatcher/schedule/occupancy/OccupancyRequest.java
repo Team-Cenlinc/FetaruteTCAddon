@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 
 /**
@@ -494,5 +495,14 @@ public record OccupancyRequest(
     }
     return withDirectedContext(
         Optional.of(directedContext.get().withProgressVersion(progressVersion)));
+  }
+
+  /** 返回同一请求但绑定构建时刻的真实进度锚点。 */
+  public OccupancyRequest withDirectedLastPassedGraphNode(Optional<NodeId> lastPassedGraphNode) {
+    if (directedContext.isEmpty()) {
+      return this;
+    }
+    return withDirectedContext(
+        Optional.of(directedContext.get().withLastPassedGraphNode(lastPassedGraphNode)));
   }
 }

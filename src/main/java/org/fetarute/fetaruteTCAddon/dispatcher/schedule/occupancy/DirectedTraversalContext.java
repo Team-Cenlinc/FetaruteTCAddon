@@ -163,6 +163,32 @@ public record DirectedTraversalContext(
         canonicalRearRetainPathPlan);
   }
 
+  /**
+   * 返回同一路径但绑定构建时刻真实进度锚点后的上下文。
+   *
+   * <p>builder 无法访问运行时进度表，构造时只能留空。运行时在下发前补上该锚点，下游才能把“请求建立时列车在哪” 与“现在列车在哪”做同类比较；缺失只表示无从判断，不得当作列车已移动。
+   */
+  public DirectedTraversalContext withLastPassedGraphNode(Optional<NodeId> nextLastPassed) {
+    return new DirectedTraversalContext(
+        trainKey,
+        routeId,
+        currentIndex,
+        currentNode,
+        nextLastPassed == null ? Optional.empty() : nextLastPassed,
+        effectiveFromNode,
+        effectiveToNode,
+        expandedPathNodes,
+        directedEdges,
+        singleConflictDirections,
+        switcherPathSignatures,
+        source,
+        occupancyVersion,
+        progressVersion,
+        requestId,
+        authorityTokenId,
+        canonicalRearRetainPathPlan);
+  }
+
   /** 返回同一路径但替换运行进度快照版本后的上下文。 */
   public DirectedTraversalContext withProgressVersion(long nextProgressVersion) {
     return new DirectedTraversalContext(
