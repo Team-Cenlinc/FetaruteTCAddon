@@ -97,6 +97,23 @@ final class RuntimeDispatchTestFixtures {
    */
   static ConfigManager.ConfigView testConfigView(
       int intervalTicks, double defaultSpeedBps, int lookaheadEdges, int minClearEdges) {
+    return testConfigView(
+        intervalTicks, defaultSpeedBps, lookaheadEdges, minClearEdges, SmartDispatcherMode.ENFORCE);
+  }
+
+  /**
+   * 构造可指定 Smart Dispatcher 模式的配置视图。
+   *
+   * <p>{@code OBSERVE_ONLY} 只禁止 <b>Smart Dispatcher</b> 的副作用（signal / destination / token /
+   * occupancy / destroy），基础准入层照常取 claim——所以"观察模式下账本 {@code version()} 增量为 0"
+   * 这种断言是不成立的。观察层零副作用只能<b>差分</b>验证：同一场景跑两遍，一遍不驱动 Smart 层、 一遍在 OBSERVE_ONLY 下驱动，账本演化必须完全一致。
+   */
+  static ConfigManager.ConfigView testConfigView(
+      int intervalTicks,
+      double defaultSpeedBps,
+      int lookaheadEdges,
+      int minClearEdges,
+      SmartDispatcherMode smartDispatcherMode) {
     ConfigManager.StorageSettings storage =
         new ConfigManager.StorageSettings(
             ConfigManager.StorageBackend.SQLITE,
@@ -155,7 +172,7 @@ final class RuntimeDispatchTestFixtures {
         new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
         train,
         new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L),
-        new ConfigManager.SmartDispatcherSettings(SmartDispatcherMode.ENFORCE),
+        new ConfigManager.SmartDispatcherSettings(smartDispatcherMode),
         ConfigManager.HealthSettings.defaults());
   }
 

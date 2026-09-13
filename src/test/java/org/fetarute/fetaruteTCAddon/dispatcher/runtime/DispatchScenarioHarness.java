@@ -445,6 +445,9 @@ final class DispatchScenarioHarness {
     private final List<TrainSpec> trainSpecs = new ArrayList<>();
     private int edgeLength = DEFAULT_EDGE_LENGTH;
     private boolean smartRecoveryLayer;
+    private org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode
+        smartDispatcherMode =
+            org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode.ENFORCE;
     private int lookaheadEdges = 3;
 
     Builder nodes(List<NodeId> value) {
@@ -480,6 +483,17 @@ final class DispatchScenarioHarness {
      */
     Builder smartRecoveryLayer(boolean value) {
       smartRecoveryLayer = value;
+      return this;
+    }
+
+    /**
+     * Smart Dispatcher 模式，默认 {@code ENFORCE}（与实服一致）。
+     *
+     * <p>{@code OBSERVE_ONLY} 用于 I11 的差分验证：它只禁止 Smart 层的副作用，基础准入层照常运行。
+     */
+    Builder smartDispatcherMode(
+        org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode value) {
+      smartDispatcherMode = value;
       return this;
     }
 
@@ -606,7 +620,9 @@ final class DispatchScenarioHarness {
                   worldId, railEdges.keySet(), footprints));
 
       ConfigManager config = mock(ConfigManager.class);
-      lenient().when(config.current()).thenReturn(testConfigView(20, 20.0, lookaheadEdges, 1));
+      lenient()
+          .when(config.current())
+          .thenReturn(testConfigView(20, 20.0, lookaheadEdges, 1, smartDispatcherMode));
 
       RailGraphService graphs = mock(RailGraphService.class);
       lenient()
