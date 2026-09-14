@@ -2211,11 +2211,16 @@ public final class TrainHealthMonitor {
       int passengerCount,
       boolean manualControl,
       String evidenceGroup) {
-    if (!trainCleanupEnabled
-        || deadlockDestroyThreshold == null
-        || deadlockDestroyThreshold.isZero()) {
-      return "DESTROY_DISABLED";
-    }
+    // 注意：`DESTROY_DISABLED` 这一道**故意放在整条链的最后**，见方法末尾。
+    //
+    // 它原本排第一，于是关掉销毁时这条链在第一道就短路，后面八道（阈值、静止时长、信号状态、
+    // 活跃解锁预约、冷却、证据重复性、授权状态…）**一次都不被求值**。
+    // 实服第十二轮 102 次评估全部只报 `DESTROY_DISABLED`——包括那两辆卡死 2073 秒和 1160 秒的车——
+    // 于是"就算打开销毁，它们到底够不够格"这个问题**只能靠真的打开来回答**，
+    // 而那是个不可逆、玩家可见的动作。
+    //
+    // 挪到最后之后：销毁行为**完全不变**（关闭时依旧永远 eligible=false），
+    // 但报出的是**真正拦住它的那一道**，于是可以在不冒任何风险的前提下回答那个问题。
     if (targetSnapshot == null || targetContext == null) {
       return "TARGET_STATE_MISSING";
     }
@@ -2257,6 +2262,14 @@ public final class TrainHealthMonitor {
         && targetInput.movementTokenState() == SignalComputationTrace.TokenState.ACTIVE
         && targetInput.destinationPresent()) {
       return "TARGET_AUTHORITY_ACTIVE";
+    }
+    // 走到这里说明**其余每一道都过了**：这辆车在销毁开启时就会被销毁。
+    // 放在最后判，是为了让关闭状态下的日志能回答"打开会怎样"，而无需真的打开。
+    // 语义不变：关闭时永远 eligible=false。
+    if (!trainCleanupEnabled
+        || deadlockDestroyThreshold == null
+        || deadlockDestroyThreshold.isZero()) {
+      return "DESTROY_DISABLED";
     }
     return "NONE";
   }

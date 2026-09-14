@@ -2870,4 +2870,73 @@ class TrainHealthMonitorTest {
                 "health-integration",
                 Optional.empty())));
   }
+
+  @Test
+  @DisplayName("销毁关闭时，报的必须是真正拦住它的那一道，而不是 DESTROY_DISABLED")
+  void destroyDisabledMustNotMaskTheCriterionThatActuallyBlocksDestruction() {
+    RuntimeDispatchService.SmartRecoveryInput leaderInput =
+        smartRecoveryInput(
+            "leader",
+            SignalComputationTrace.TokenState.ACTIVE,
+            true,
+            "leader-authority-active-but-terminal-mutex");
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("follower"))
+        .thenReturn(Optional.of(state("follower", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("leader"))
+        .thenReturn(Optional.of(state("leader", 7, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentDeadlockBlockers(anyString(), any()))
+        .thenReturn(new RuntimeDispatchService.DeadlockBlockerSnapshot(Set.of(), Instant.now()));
+    when(dispatchService.deadlockTrainContext("follower"))
+        .thenReturn(
+            Optional.of(context("follower", 5, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.deadlockTrainContext("leader"))
+        .thenReturn(Optional.of(context("leader", 7, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.smartRecoveryInput(eq("leader"), any(), any())).thenReturn(leaderInput);
+    when(dispatchService.recentFollowerStuckLeaderEvidence(eq("follower"), any()))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.FollowerStuckLeaderEvidence(
+                    "follower",
+                    "leader",
+                    "CONFLICT:single:test:A~B",
+                    Instant.now().minusSeconds(20),
+                    Instant.now(),
+                    2)));
+
+    // 阈值置零 = 销毁**关闭**。旧实现里 DESTROY_DISABLED 排在整条链第一道，于是这里会短路，
+    // 后面八道一次都不被求值——实服第十二轮 102 次评估全部只报这一个字符串，
+    // 包括两辆卡死 2073 秒和 1160 秒的车。于是"就算打开销毁它们够不够格"只能靠真的打开来回答，
+    // 而那是不可逆、玩家可见的动作。挪到最后之后，关闭状态下也能看到真正的拦截点。
+    monitor.setDeadlockDestroyThreshold(Duration.ZERO);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("follower", "leader"), t0);
+    TrainHealthMonitor.CheckResult result =
+        monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
+
+    assertEquals(0, result.fixedCount());
+    verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(leaderInput);
+    verify(dispatchService).applySmartDrainUnlock(leaderInput);
+    verify(dispatchService).applySmartForwardUnlock(leaderInput);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    // 判别核心：关闭状态下报的是**真正的**拦截理由。
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
+                        && message.contains("ineligibleReason=TARGET_AUTHORITY_ACTIVE")),
+        () -> "销毁关闭不得遮住真正的拦截理由：" + debugLogs);
+    // 语义必须不变：关闭时永远不销毁（上面的 verify never 已钉住），
+    // 且不得把 DESTROY_DISABLED 当成这一轮的结论输出。
+    assertFalse(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
+                        && message.contains("ineligibleReason=DESTROY_DISABLED")),
+        () -> "本场景应报真正的拦截理由，而不是 DESTROY_DISABLED：" + debugLogs);
+  }
 }
