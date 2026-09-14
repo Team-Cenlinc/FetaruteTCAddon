@@ -27745,6 +27745,65 @@ public final class RuntimeDispatchService {
    * <p>Mockito 等动态句柄可能不执行接口 default method 而直接返回 {@code null}；此时显式读取旧 API。该兼容分支仍把 empty 视为证据缺失，不改变
    * fail-closed 语义。
    */
+  /**
+   * 车体此刻**实际压住**的图区间。
+   *
+   * <p>Phase 4 的判据来源：要把自持尾部保护的回收从 CONFLICT 扩到 NODE/EDGE，必须能证明 "车体不在该资源上"。CONFLICT
+   * 是抽象互斥键，放了不会撞车；NODE/EDGE 对应物理空间， 车体还压着时释放就是 co-occupancy。
+   *
+   * <p><b>缺任何一环都返回 incomplete，调用方必须 fail-closed</b>：现场足迹读不到、 图不带联锁能力、或反向索引不可用（持久化快照重建的图没有逐边足迹）。
+   * "没覆盖"与"无从判断"必须分得开——把后者当前者正是本项目反复栽的那类缺陷。
+   *
+   * <p>本方法只做查询，不改变任何状态；接线到释放判定是单独一步。
+   */
+  LivePhysicalEdgeCoverage livePhysicalEdgeCoverage(RuntimeTrainHandle train, RailGraph graph) {
+    LiveRailFootprintObservation observation = readLiveRailFootprintObservation(train);
+    if (observation == null || !observation.available()) {
+      return LivePhysicalEdgeCoverage.incomplete("live-footprint-unavailable");
+    }
+    if (!(graph
+        instanceof
+        org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport
+        support)) {
+      return LivePhysicalEdgeCoverage.incomplete("interlocking-unsupported-graph");
+    }
+    var interlocking = support.interlockingState();
+    if (interlocking == null || !interlocking.cellCoverageAvailable()) {
+      return LivePhysicalEdgeCoverage.incomplete("cell-coverage-index-unavailable");
+    }
+    Set<OccupancyResource> covered = new LinkedHashSet<>();
+    for (var cell : observation.cells().orElse(java.util.Set.of())) {
+      for (var edgeId : interlocking.edgesForCell(cell)) {
+        covered.add(OccupancyResource.forEdge(edgeId));
+      }
+    }
+    return LivePhysicalEdgeCoverage.complete(covered);
+  }
+
+  /** {@link #livePhysicalEdgeCoverage} 的结果；{@code complete=false} 表示无从判断，不是"没覆盖"。 */
+  record LivePhysicalEdgeCoverage(
+      boolean complete, String incompleteReason, Set<OccupancyResource> resources) {
+
+    LivePhysicalEdgeCoverage {
+      incompleteReason =
+          incompleteReason == null || incompleteReason.isBlank() ? "-" : incompleteReason;
+      resources = resources == null ? Set.of() : Set.copyOf(resources);
+    }
+
+    static LivePhysicalEdgeCoverage incomplete(String reason) {
+      return new LivePhysicalEdgeCoverage(false, reason, Set.of());
+    }
+
+    static LivePhysicalEdgeCoverage complete(Set<OccupancyResource> resources) {
+      return new LivePhysicalEdgeCoverage(true, "-", resources);
+    }
+
+    /** 车体是否压在该资源上；**无从判断时一律返回 true**，让调用方保守处理。 */
+    boolean covers(OccupancyResource resource) {
+      return !complete || (resource != null && resources.contains(resource));
+    }
+  }
+
   private static LiveRailFootprintObservation readLiveRailFootprintObservation(
       RuntimeTrainHandle train) {
     if (train == null) {
