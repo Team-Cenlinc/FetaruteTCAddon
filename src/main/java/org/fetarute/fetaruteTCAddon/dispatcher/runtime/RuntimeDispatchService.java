@@ -1703,6 +1703,20 @@ public final class RuntimeDispatchService {
   private static final int BLOCKING_SNAPSHOT_MAX_RESOURCES = 8;
 
   /**
+   * 同一辆车两次状态快照之间的最小间隔。
+   *
+   * <p>周期方法在生产端约**每秒**调用一次（`dispatch-tick-interval-ticks: 20`），而实服同时卡住 30 秒以上的 列车峰值约 9 辆。不节流就是 2600
+   * 次 × 9 ≈ 2.3 万行、约 10 MB——这条 trace 又在必留名单里， 绕过重复窗口与预算两道闸，**去重责任全在生产端**（同 239b06b 的规矩）。
+   *
+   * <p>15 秒对"中位 183 秒"的滞留是足够的分辨率，量降到约 36 行/分钟。
+   */
+  private static final Duration BLOCKING_SNAPSHOT_MIN_INTERVAL = Duration.ofSeconds(15);
+
+  /** 每辆车最近一次输出状态快照的时刻；随 activeStopStates 一起收敛，不需要额外生命周期钩子。 */
+  private final java.util.concurrent.ConcurrentMap<String, Instant> lastBlockingSnapshotAt =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
    * 周期性输出「谁被挡住了、握着什么、在等什么」的状态快照。
    *
    * <p>现有诊断全是**事件**（enter/clear、acquire/release），只回答"发生了什么变化"。 要回答"此刻是什么状态"就只能拿事件流去推，而这在 2026-09-13
@@ -1727,6 +1741,7 @@ public final class RuntimeDispatchService {
           .computeIfAbsent(normalizeTrainKey(claim.trainName()), unused -> new ArrayList<>())
           .add(claim);
     }
+    lastBlockingSnapshotAt.keySet().retainAll(activeStopStates.keySet());
     for (RuntimeStopState state : List.copyOf(activeStopStates.values())) {
       if (state == null) {
         continue;
@@ -1736,6 +1751,12 @@ public final class RuntimeDispatchService {
         continue;
       }
       String key = normalizeTrainKey(state.trainName());
+      Instant lastAt = lastBlockingSnapshotAt.get(key);
+      if (lastAt != null
+          && Duration.between(lastAt, now).compareTo(BLOCKING_SNAPSHOT_MIN_INTERVAL) < 0) {
+        continue;
+      }
+      lastBlockingSnapshotAt.put(key, now);
       List<OccupancyClaim> held$ = claimsByTrain.getOrDefault(key, List.of());
       Map<String, Integer> byRole = new java.util.TreeMap<>();
       for (OccupancyClaim claim : held$) {

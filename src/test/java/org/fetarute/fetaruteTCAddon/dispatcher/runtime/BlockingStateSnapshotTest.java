@@ -76,6 +76,40 @@ class BlockingStateSnapshotTest {
     }
   }
 
+  /**
+   * 同一辆车必须按间隔节流。
+   *
+   * <p>这条 trace 在必留名单里，绕过重复窗口与预算两道闸——**去重责任全在生产端**。 周期方法生产端约每秒调用一次，实服同时卡 30 秒以上的车峰值约 9 辆；不节流就是 2600
+   * × 9 ≈ 2.3 万行、约 10 MB，把日志体积翻倍。
+   */
+  @Test
+  void repeatedCyclesDoNotReEmitTheSameTrainEveryTick() throws Exception {
+    List<String> debug = new ArrayList<>();
+    RuntimeDispatchService service = service(debug);
+    installStopState(
+        service,
+        RuntimeStopState.occupancyHold(
+            "train-1", "PROTECTIVE_RETAIN_HOLD", null, "stuck", NOW.minus(Duration.ofMinutes(3))));
+    LinkedHashSet<String> active = new LinkedHashSet<>(List.of("train-1"));
+
+    // 模拟 10 个周期（生产端约每秒一次），只跨过 1 个节流窗口。
+    for (int i = 0; i < 10; i++) {
+      service.traceSmartDispatchGlobalSnapshot(active, NOW.plusSeconds(i));
+    }
+
+    assertEquals(
+        1,
+        debug.stream().filter(l -> l.startsWith("SMART_BLOCKING_SNAPSHOT")).count(),
+        "同一辆车在一个节流窗口内只该输出一次：\n" + debug);
+
+    // 跨过窗口之后必须重新输出——节流不能变成静音。
+    service.traceSmartDispatchGlobalSnapshot(active, NOW.plusSeconds(40));
+    assertEquals(
+        2,
+        debug.stream().filter(l -> l.startsWith("SMART_BLOCKING_SNAPSHOT")).count(),
+        "跨过节流窗口后必须继续采样：\n" + debug);
+  }
+
   /** 刚进入停因的车不输出，避免把正常的短暂等待也刷成快照。 */
   @Test
   void freshHoldsAreNotSnapshotted() throws Exception {
