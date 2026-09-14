@@ -663,6 +663,57 @@ final class JdbcRepositoryTest {
     assertTrue(loaded.bidirectional());
   }
 
+  /**
+   * 旧库里 {@code footprint_json} **列已存在、可空、值全是 NULL** —— 这是用户实服库的真实形状。
+   *
+   * <p>该列是更早一版 schema 的遗留（当时被有意移除，只留下了列）。实测用户库： {@code footprint_json TEXT}（无 NOT NULL、无
+   * DEFAULT），511 行全为 NULL。
+   *
+   * <p>两处必须成立，否则上线即炸：
+   *
+   * <ul>
+   *   <li>兼容性迁移的 {@code ADD COLUMN} 会失败——SQLite 原文是 {@code duplicate column name: footprint_json}，含
+   *       "duplicate"，必须被静默容忍；
+   *   <li>读到 NULL 必须解成**空足迹**而不是抛出——于是 cell→edge 索引不可用、调用方 fail-closed， 行为与升级前一字不差，直到用户跑过一次 {@code
+   *       /fta graph build} 把足迹写进去。
+   * </ul>
+   */
+  @Test
+  void shouldLoadLegacyRailEdgesWithNullableFootprintColumnHoldingNulls() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-edge-null-footprint.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute("DROP TABLE IF EXISTS fta_rail_edges;");
+      // 逐字照搬用户实服库的列定义：可空、无 DEFAULT。
+      statement.execute(
+          "CREATE TABLE fta_rail_edges ("
+              + "world_id TEXT NOT NULL,"
+              + "node_a TEXT NOT NULL,"
+              + "node_b TEXT NOT NULL,"
+              + "length_blocks INTEGER NOT NULL,"
+              + "base_speed_limit REAL NOT NULL,"
+              + "bidirectional INTEGER NOT NULL, footprint_json TEXT,"
+              + "PRIMARY KEY (world_id, node_a, node_b)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_edges VALUES (?, 'A', 'B', 14, 0.0, 1, NULL)")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    // setupProvider 会跑 schema + 兼容性迁移；ADD COLUMN 必然撞 duplicate，必须不抛。
+    StorageProvider provider = setupProvider(dbFile);
+
+    RailEdgeRecord loaded = provider.railEdges().listByWorld(worldId).get(0);
+    assertEquals(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")), loaded.edgeId());
+    assertEquals(14, loaded.lengthBlocks());
+    assertTrue(loaded.footprintCells().isEmpty(), "NULL 必须解成空足迹（= 无从判断），而不是抛出或伪造出覆盖");
+  }
+
   @Test
   void shouldPersistRailEdgeOverrides() {
     StorageProvider provider = setupProvider(TEST_DB);

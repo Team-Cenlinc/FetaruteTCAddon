@@ -3564,7 +3564,24 @@ public final class RuntimeDispatchService {
                 + " observedClaimVersion="
                 + observedToken.claimVersion()
                 + " minimumFreshClaimVersion="
-                + reservation.minimumFreshClaimVersion());
+                + reservation.minimumFreshClaimVersion()
+                // **是谁让授权失效的**——这是这条回滚唯一缺的那一环。
+                //
+                // 实服第十二轮，使授权失效的停因排行是
+                // DEADLOCK_CONFIRMED_WAITING 505 / SAFETY_STATE_UNAVAILABLE 307 /
+                // AUTHORIZATION_FAILURE 158。若这里报出来的多是第一个，那就构成一个恶性循环：
+                // 死锁恢复建预约去解环 → 「死锁确认等待」这个停因使授权失效 →
+                // 预约被本分支回滚 → 环没解开。而 `1f398c7` 让环第一次被看见之后，
+                // DEADLOCK_CONFIRMED_WAITING 大增，很可能正是它把这条循环点着的。
+                //
+                // 但那是推断。**先把是谁写下来，下一轮再决定动不动行为**——
+                // 这条判定本身是对的（权都没了，解锁帮不上忙），要改的话改的是上游谁该使权失效，
+                // 属于安全相关路径，不能凭推断动。
+                + " invalidatedByStopReason="
+                + java.util.Optional.ofNullable(
+                        activeStopStates.get(normalizeTrainKey(reservation.trainName())))
+                    .map(RuntimeStopState::reasonCode)
+                    .orElse("none"));
         rememberSmartUnlockNoReleaseTimeout(reservation, now);
         rollbackSmartUnlockReservation(reservation, "authority-invalid-no-release");
         continue;
