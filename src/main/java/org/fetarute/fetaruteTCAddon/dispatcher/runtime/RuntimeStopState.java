@@ -296,8 +296,22 @@ public record RuntimeStopState(
           .SAFETY_STATE_RESTORED_AND_AUTHORITY_REISSUED;
       case UNREACHABLE_FAILOVER -> ReleaseCondition
           .DESTINATION_PATH_REACHABLE_AND_AUTHORITY_REISSUED;
-      case DEADLOCK_CONFIRMED_WAITING -> ReleaseCondition
-          .DEADLOCK_WINNER_OR_RESOURCE_RELEASE_CONFIRMED;
+        // DEADLOCK_CONFIRMED_WAITING 故意不在这里出现。
+        //
+        // 上面 hasBlockers 已经提前返回，所以这个 switch **只在没有任何 blocker 时执行**——
+        // 也就是说 DEADLOCK_WINNER_OR_RESOURCE_RELEASE_CONFIRMED 只会在"根本没有死锁证据"时被安上，
+        // 而它要求的是"决出死锁赢家或某个资源被释放"：没有 blocker 就没有赢家、也没有资源可释放，
+        // **这个条件永远不可能满足**，列车就此永久挂起。
+        //
+        // 实服 2026-09-13 第六轮 207 条快照落在这一族。典型现场（用户报的 LWN 出库堵点）：
+        //   train=SURC-WS-LC-3125 reasonCode=DEADLOCK_CONFIRMED_WAITING heldSeconds=139
+        //   holdsByRole={MOVEMENT_REQUIRED=5}  blockedBy=[]  movementToken=INVALID
+        // 车刚出库、五个资源全部到手、没有任何东西挡着，却被判成死锁并撤销授权；
+        // 而停车本身让进度停滞，HealthMonitor 再次判定 progress-stuck 又重新施加——自我维持。
+        //
+        // 这条停因真正的来源也不是死锁检测，而是 TrainHealthMonitor 的兜底
+        // `reapplyHardStopByName(..., "health-stop-progress-stuck")`——它只是"进度停滞、重新施加停车"。
+        // 没有 blocker 时，诚实的解除条件就是 default 的 ACTIVE_AUTHORITY_REISSUED：重新签发授权即可走。
       case LAYOVER_HOLD -> ReleaseCondition.LAYOVER_READY_AND_AUTHORITY_REISSUED;
       case TERMINAL_HOLD -> ReleaseCondition.TERMINAL_LIFECYCLE_COMPLETED;
       default -> ReleaseCondition.ACTIVE_AUTHORITY_REISSUED;
