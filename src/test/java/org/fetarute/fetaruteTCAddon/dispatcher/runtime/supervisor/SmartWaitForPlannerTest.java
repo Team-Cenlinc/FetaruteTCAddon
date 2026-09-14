@@ -35,6 +35,97 @@ class SmartWaitForPlannerTest {
   private final SmartWaitForPlanner planner = new SmartWaitForPlanner();
 
   @Test
+  @DisplayName("持有者自己也被挡住时，排队位边必须进图——否则互锁环永远不闭合")
+  void queuePositionEdgeEntersGraphWhenBlockerIsItselfBlocked() {
+    // 复刻实服 2026-09-14 第十轮的 WS-LH-0483 ↔ WS-LC-2008 互锁：
+    //   0483 → 2008  由 MOVEMENT_REQUIRED 持有，进图了（实服 18 次）
+    //   2008 → 0483  由 QUEUE_POSITION  持有，被删了（实服 105 次）
+    // 两条边的环删掉一条就永不闭合，全场没有任何一条死锁检测事件，四辆车拖垮全网吞吐。
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("WS-0483", "WS-2008", "CONFLICT:switcher:705", CorridorDirection.A_TO_B),
+                    queuePositionEdge("WS-2008", "WS-0483", "CONFLICT:single:section:bridge:587")),
+                Map.of("WS-0483", state("WS-0483", 40), "WS-2008", state("WS-2008", 40))));
+
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED")
+                        && line.contains("blockedTrain=WS-2008")
+                        && line.contains("blockerTrain=WS-0483")),
+        () -> "排队位边应因持有者自身被挡而进图: " + result.traceLines());
+    assertFalse(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_REJECTED")
+                        && line.contains("reason=inactive-for-normal-admission")),
+        () -> "不应再有 inactive-for-normal-admission 拒绝: " + result.traceLines());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_WAIT_FOR_GRAPH") && line.contains("edges=2")),
+        () -> "两条边都应进图，环才闭合: " + result.traceLines());
+  }
+
+  @Test
+  @DisplayName("持有者本身没被挡住时，排队位边仍然不进图（fail-closed，在动的车行为不变）")
+  void queuePositionEdgeStaysExcludedWhenBlockerIsNotBlocked() {
+    // 在动的车持有的排队位会随队列推进自行解开。无条件让它进图会造出假环，
+    // 而假阳性一路会走到销毁列车那一步，代价极高。所以这半边必须保持原样。
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    queuePositionEdge("WS-2008", "WS-0483", "CONFLICT:single:section:bridge:587")),
+                Map.of("WS-0483", state("WS-0483", 40), "WS-2008", state("WS-2008", 40))));
+
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_REJECTED")
+                        && line.contains("blockedTrain=WS-2008")
+                        && line.contains("reason=inactive-for-normal-admission")),
+        () -> "持有者没被挡住时排队位边必须继续被拒: " + result.traceLines());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_WAIT_FOR_GRAPH") && line.contains("edges=0")),
+        () -> "图里不应有边: " + result.traceLines());
+  }
+
+  @Test
+  @DisplayName("放宽只针对排队位：前瞻预览边即使持有者被挡住也不进图")
+  void lookaheadPreviewEdgeIsNeverAdmittedByTheQueuePositionRelaxation() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("WS-0483", "WS-2008", "CONFLICT:switcher:705", CorridorDirection.A_TO_B),
+                    lookaheadPreviewEdge(
+                        "WS-2008", "WS-0483", "CONFLICT:single:section:bridge:587")),
+                Map.of("WS-0483", state("WS-0483", 40), "WS-2008", state("WS-2008", 40))));
+
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_REJECTED")
+                        && line.contains("blockedTrain=WS-2008")
+                        && line.contains("reason=inactive-for-normal-admission")),
+        () -> "前瞻预览边不在放宽范围内: " + result.traceLines());
+    assertTrue(
+        result.traceLines().stream()
+            .anyMatch(line -> line.contains("SMART_WAIT_FOR_GRAPH") && line.contains("edges=1")),
+        () -> "只应有那条 MOVEMENT_REQUIRED 边: " + result.traceLines());
+  }
+
+  @Test
   void mutualCycleSelectsSameDirectionForwardCandidate() {
     SmartWaitForPlanner.PlanResult result =
         planner.plan(
@@ -1013,6 +1104,43 @@ class SmartWaitForPlannerTest {
         false,
         false,
         true);
+  }
+
+  /**
+   * 排队位边：{@code activeForNormalAdmission=false}，与实服里被 {@code inactive-for-normal-admission}
+   * 删掉的那种边同形。
+   */
+  private static SmartWaitForPlanner.InputEdge queuePositionEdge(
+      String blocked, String blocker, String resource) {
+    return new SmartWaitForPlanner.InputEdge(
+        blocked,
+        blocker,
+        resource,
+        resourceKind(resource),
+        "SWITCHER_CONFLICT",
+        "QUEUE_POSITION",
+        "QUEUE_POSITION",
+        "test",
+        CorridorDirection.A_TO_B,
+        10,
+        false);
+  }
+
+  /** 前瞻预览边：同样 {@code activeForNormalAdmission=false}，但**不在**放宽范围内。 */
+  private static SmartWaitForPlanner.InputEdge lookaheadPreviewEdge(
+      String blocked, String blocker, String resource) {
+    return new SmartWaitForPlanner.InputEdge(
+        blocked,
+        blocker,
+        resource,
+        resourceKind(resource),
+        "SWITCHER_CONFLICT",
+        "LOOKAHEAD_PREVIEW",
+        "LOOKAHEAD_PREVIEW",
+        "test",
+        CorridorDirection.A_TO_B,
+        10,
+        false);
   }
 
   private static SmartWaitForPlanner.InputEdge edge(

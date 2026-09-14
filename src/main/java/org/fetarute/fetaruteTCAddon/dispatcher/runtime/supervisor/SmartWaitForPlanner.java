@@ -474,8 +474,11 @@ public final class SmartWaitForPlanner {
     List<Edge> activeEdges = new ArrayList<>();
     int rejected = 0;
     int stale = 0;
+    // 第一趟：按严格规则（不放宽）算出「本身也被一条够强的边挡住」的车。
+    // 第二趟才允许 QUEUE_POSITION 边在持有者属于该集合时进图，见 inputEdgeRejection。
+    Set<String> blockedUnderStrictRules = strictlyBlockedTrains(input.edges(), input.settings());
     for (InputEdge edge : input.edges()) {
-      String rejection = inputEdgeRejection(edge, input.settings());
+      String rejection = inputEdgeRejection(edge, input.settings(), blockedUnderStrictRules);
       if (!rejection.isBlank()) {
         rejected++;
         if ("STALE_EDGE".equals(rejection)) {
@@ -486,6 +489,21 @@ public final class SmartWaitForPlanner {
       }
       activeEdges.add(new Edge(edge));
       traces.add(inputEdgeTrace(edge));
+      if (!edge.activeForNormalAdmission()) {
+        // 这条边只因为放宽才进的图。单独留痕，便于下一轮直接数出放宽被用了多少次、
+        // 以及吞吐的改善是不是由它带来的。
+        traces.add(
+            "SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED blockedTrain="
+                + edge.blockedTrain()
+                + " blockerTrain="
+                + edge.blockerTrain()
+                + " resource="
+                + edge.resource()
+                + " intent="
+                + edge.intent()
+                + " role="
+                + edge.role());
+      }
     }
     String graphHash = graphHash(activeEdges);
     traces.add(
@@ -1507,7 +1525,45 @@ public final class SmartWaitForPlanner {
     return nodes;
   }
 
-  private static String inputEdgeRejection(InputEdge edge, PlannerSettings settings) {
+  /**
+   * 按严格规则（不放宽任何 QUEUE_POSITION 边）跑一趟，收集「本身也被挡住」的列车。
+   *
+   * <p>传空集合给 {@link #inputEdgeRejection} 即为严格模式，因此这里不会递归，放宽也只有一级。
+   */
+  private static Set<String> strictlyBlockedTrains(
+      List<InputEdge> edges, PlannerSettings settings) {
+    Set<String> blocked = new TreeSet<>(TEXT_ORDER);
+    if (edges == null) {
+      return blocked;
+    }
+    for (InputEdge edge : edges) {
+      if (inputEdgeRejection(edge, settings, Set.of()).isBlank()) {
+        // 存归一化后的键：blockedTrain 来自 displayTrainNameForKey，blockerTrain 来自 blocker.trainName()，
+        // 是两个不同来源的量，直接比字面量就是在比两个不同的东西。两边都过 normalizeKey 才同口径
+        // （它同时剥掉 TrainCarts split 的临时后缀）。
+        blocked.add(TrainNameNormalizer.normalizeKey(edge.blockedTrain()));
+      }
+    }
+    return blocked;
+  }
+
+  /**
+   * 该边被排除是否**仅仅**因为它是排队位——LOOKAHEAD_PREVIEW 与 STALE_PROTECTIVE_CLAIM 不在放宽范围内。
+   *
+   * <p>放宽只针对 QUEUE_POSITION：实服证据是它删掉了互锁环的其中一条边（见下方注释）， 而 preview / stale claim 没有对应证据，按 fail-closed
+   * 一律不放。
+   */
+  private static boolean excludedOnlyAsQueuePosition(InputEdge edge) {
+    boolean queuePosition =
+        "QUEUE_POSITION".equals(edge.intent()) || "QUEUE_POSITION".equals(edge.role());
+    boolean preview =
+        "LOOKAHEAD_PREVIEW".equals(edge.intent()) || "LOOKAHEAD_PREVIEW".equals(edge.role());
+    boolean staleProtective = "STALE_PROTECTIVE_CLAIM".equals(edge.relation());
+    return queuePosition && !preview && !staleProtective;
+  }
+
+  private static String inputEdgeRejection(
+      InputEdge edge, PlannerSettings settings, Set<String> blockedUnderStrictRules) {
     if (edge == null) {
       return "null-edge";
     }
@@ -1519,7 +1575,24 @@ public final class SmartWaitForPlanner {
       return "self-owned-edge";
     }
     if (!edge.activeForNormalAdmission()) {
-      return "inactive-for-normal-admission";
+      // activeForNormalAdmission 是**准入强度**判据：QUEUE_POSITION 不代表物理占用、也不代表已授予的
+      // 行车权（见 SimpleOccupancyManager 中该 blocker 的构造注释），所以它不该挡正常准入——这没问题。
+      //
+      // 但**等待图不是准入**。一个事实上拦住了别人的排队预约，就是一条真实依赖；
+      // 拿准入强度当死锁判据是范畴错误。实服 2026-09-14 第十轮的代价：
+      // WS-LH-0483 ↔ WS-LC-2008 互锁 45 分钟，`0483→2008` 那条 MOVEMENT_REQUIRED 边进了图，
+      // 而 `2008→0483` 因为持有的是 QUEUE_POSITION 被删了 105 次。
+      // 两条边的环删掉一条就永不闭合，全场没有任何一条死锁检测事件，四辆车拖垮全网吞吐（16→1.6 到站/分）。
+      //
+      // 放宽必须窄且 fail-closed：**在动的**车持有的排队位会随队列推进自行解开，无条件进图会造出假环，
+      // 而假阳性会一路走到 SMART_DEADLOCK_DESTROY_ELIGIBILITY —— 那是会销毁列车的。
+      // 所以只有当持有者**自己也被一条严格规则下成立的边挡住**时，这条排队位才算真依赖。
+      // 这恰好就是成环条件，且在动的车行为完全不变。
+      if (!excludedOnlyAsQueuePosition(edge)
+          || !blockedUnderStrictRules.contains(
+              TrainNameNormalizer.normalizeKey(edge.blockerTrain()))) {
+        return "inactive-for-normal-admission";
+      }
     }
     if (edge.ageMs() > settings.blockerSnapshotTtlMs()) {
       return "STALE_EDGE";

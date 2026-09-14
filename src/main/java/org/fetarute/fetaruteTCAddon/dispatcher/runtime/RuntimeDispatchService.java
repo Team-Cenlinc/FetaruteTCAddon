@@ -325,6 +325,22 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
 
   /**
+   * 发车门控最近一次拒绝时的阻塞者摘要（诊断专用，不参与任何判定）。
+   *
+   * <p>为什么需要它：{@code SMART_BLOCKING_SNAPSHOT} 的 {@code blockedBy} 取自 {@link
+   * RuntimeStopState#blockers()}，而 {@code DEPARTURE_GATE_HOLD} 的停因状态建立时 blockers 是空的—— 真正的阻塞者只出现在
+   * {@code checkDeparture} 里那条独立的「发车门控阻塞」日志上。
+   *
+   * <p>代价是实打实的：2026-09-14 第十轮，WS-LH-0483 的快照连续 106 条写着 {@code blockedBy=[]}，
+   * 于是「它没有被任何东西挡住」被当成了事实，而它其实正被自己的受害者 WS-LC-2008 挡着—— 那是一个 45 分钟的互锁环。**空列表被读成了「不存在阻塞者」。**
+   *
+   * <p>因此这里用**独立字段** {@code departureGateBlockedBy} 输出，不去覆盖 {@code blockedBy}：
+   * 两个来源不同的量混进同一个字段，正是当初误导的根源。
+   */
+  private final java.util.concurrent.ConcurrentMap<String, DepartureGateBlockers>
+      departureGateBlockers = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
    * 运行时有效节点覆盖（按列车名 + route index）。
    *
    * <p>用于支持动态站台/同站不同站台容错：当列车实际到达的 NodeId 与线路定义不一致时，将“该索引的真实 NodeId”写入覆盖表， 后续信号 tick /
@@ -1600,13 +1616,18 @@ public final class RuntimeDispatchService {
       return false;
     }
     if (sessionId == null || sessionId.isBlank()) {
+      departureGateBlockers.remove(key);
       return departureGates.remove(key) != null;
     }
     DepartureGate existing = departureGates.get(key);
     if (existing == null || !existing.sessionId().equals(sessionId.trim())) {
       return false;
     }
-    return departureGates.remove(key, existing);
+    boolean removed = departureGates.remove(key, existing);
+    if (removed) {
+      departureGateBlockers.remove(key);
+    }
+    return removed;
   }
 
   /**
@@ -1712,6 +1733,14 @@ public final class RuntimeDispatchService {
    */
   private static final Duration BLOCKING_SNAPSHOT_MIN_INTERVAL = Duration.ofSeconds(15);
 
+  /**
+   * 发车门控阻塞者证据的有效期。
+   *
+   * <p>取两倍快照间隔：门控被持有期间 {@code checkDeparture} 每秒重跑一次，证据本该持续刷新；
+   * 超过这个窗口还没刷新，说明门控已经不在被反复拒绝的状态了，此时展示旧值会重演 2026-09-13 那次「把日志的某个切面当成系统状态」的错误。
+   */
+  private static final Duration DEPARTURE_GATE_BLOCKERS_TTL = Duration.ofSeconds(30);
+
   /** 每辆车最近一次输出状态快照的时刻；随 activeStopStates 一起收敛，不需要额外生命周期钩子。 */
   private final java.util.concurrent.ConcurrentMap<String, Instant> lastBlockingSnapshotAt =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -1783,6 +1812,8 @@ public final class RuntimeDispatchService {
               + summarizeResourceKeys(held$)
               + " blockedBy="
               + state.blockers()
+              + " departureGateBlockedBy="
+              + departureGateBlockedByText(state.trainName(), now)
               + " selfRetainReleaseCandidate="
               + selfRetainCandidate
               + " routeIndex="
@@ -4892,24 +4923,30 @@ public final class RuntimeDispatchService {
               .decision(decision, authorizationRequest));
       if (authorization.yielded()) {
         debugLogger.accept("发车门控让行: train=" + trainName + " priority=" + priority);
+        rememberDepartureGateBlockers(trainName, "yielded", now);
       } else {
         SignalAspect signal = decision == null ? SignalAspect.STOP : decision.signal();
         String blockers = decision == null ? "-" : summarizeBlockers(decision);
         debugLogger.accept(
             "发车门控阻塞: train=" + trainName + " aspect=" + signal + " blockers=" + blockers);
+        rememberDepartureGateBlockers(trainName, blockers, now);
       }
       return false;
     }
     if (authorization.acquireAttempted() && !authorization.acquired()) {
+      String blockers = summarizeBlockers(authorization.effectiveDecision());
       debugLogger.accept(
           "发车门控阻塞: train="
               + trainName
               + " aspect="
               + authorization.signal()
               + " blockers="
-              + summarizeBlockers(authorization.effectiveDecision()));
+              + blockers);
+      rememberDepartureGateBlockers(trainName, blockers, now);
       return false;
     }
+    // 走到这里就是放行：清掉上一次的拒绝证据，避免快照读到过期的阻塞者。
+    departureGateBlockers.remove(normalizeTrainKey(trainName));
     retainRearGuardOccupancyBestEffort(
         trainName,
         route,
@@ -16363,7 +16400,36 @@ public final class RuntimeDispatchService {
     String key = normalizeTrainKey(trainName);
     if (!key.isEmpty()) {
       departureGates.remove(key);
+      departureGateBlockers.remove(key);
     }
+  }
+
+  /** 记下发车门控这一次的拒绝证据，仅供 {@code SMART_BLOCKING_SNAPSHOT} 展示。 */
+  private void rememberDepartureGateBlockers(String trainName, String blockers, Instant at) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    departureGateBlockers.put(
+        key,
+        new DepartureGateBlockers(blockers == null || blockers.isBlank() ? "-" : blockers, at));
+  }
+
+  /**
+   * 发车门控拒绝证据的展示串；过期或没有就自报，绝不冒充「没有阻塞者」。
+   *
+   * <p>沿用本项目的通用规则：明细要么是原因，要么自报「我没有原因」，不许伪装成结论。
+   */
+  private String departureGateBlockedByText(String trainName, Instant now) {
+    DepartureGateBlockers recorded = departureGateBlockers.get(normalizeTrainKey(trainName));
+    if (recorded == null) {
+      return "not-recorded";
+    }
+    long ageMs = Duration.between(recorded.at(), now).toMillis();
+    if (ageMs > DEPARTURE_GATE_BLOCKERS_TTL.toMillis()) {
+      return "stale@" + ageMs + "ms";
+    }
+    return recorded.summary() + "@" + ageMs + "ms";
   }
 
   /** 迁移列车发车许可锁（用于列车改名场景）。 */
@@ -16376,6 +16442,12 @@ public final class RuntimeDispatchService {
     DepartureGate gate = departureGates.remove(oldKey);
     if (gate != null) {
       departureGates.put(newKey, gate);
+    }
+    // 诊断证据跟着门控一起搬家。留在旧名下就是又一条「旧名残留记录」，
+    // 而本项目已经因为那类残留误判过三次（改名 / 实时日志切面 / activeStopStates 旧名）。
+    DepartureGateBlockers blockers = departureGateBlockers.remove(oldKey);
+    if (blockers != null) {
+      departureGateBlockers.put(newKey, blockers);
     }
   }
 
@@ -19680,6 +19752,9 @@ public final class RuntimeDispatchService {
   }
 
   /** 发车许可锁快照。 */
+  /** 发车门控拒绝时的阻塞者摘要 + 采样时刻（诊断专用）。 */
+  private record DepartureGateBlockers(String summary, Instant at) {}
+
   private record DepartureGate(String sessionId, Instant acquiredAt, String reason) {
     private DepartureGate {
       Objects.requireNonNull(sessionId, "sessionId");

@@ -128,6 +128,74 @@ class BlockingStateSnapshotTest {
         "刚停 5 秒不该输出快照：\n" + debug);
   }
 
+  /**
+   * 发车门控停车必须带上它自己的阻塞者，且没有记录时要自报，不许看起来像"没有阻塞者"。
+   *
+   * <p>代价是实打实的：2026-09-14 第十轮，WS-LH-0483 连续 106 条快照写着 {@code blockedBy=[]}，
+   * 于是"它没有被任何东西挡住"被当成了事实。它其实正被自己的受害者 WS-LC-2008 挡着—— 一个 45 分钟的互锁环，而真正的阻塞者只出现在另一条独立日志上。
+   */
+  @Test
+  void departureGateHoldCarriesItsOwnBlockersAndSelfReportsWhenItHasNone() throws Exception {
+    List<String> debug = new ArrayList<>();
+    RuntimeDispatchService service = service(debug);
+    installStopState(
+        service,
+        RuntimeStopState.occupancyHold(
+            "train-1",
+            "DEPARTURE_GATE_HOLD",
+            null,
+            "autostation_dwell@sid-1",
+            NOW.minus(Duration.ofMinutes(3))));
+
+    // 每次采样都要推进时钟：快照有 15 秒最小间隔，同一时刻连采三次只会出第一条。
+    Instant first = NOW;
+    Instant second = NOW.plusSeconds(60);
+    Instant third = NOW.plusSeconds(120);
+
+    // 一：没有记录时必须自报 not-recorded，绝不能让读者误以为"没有阻塞者"。
+    service.traceSmartDispatchGlobalSnapshot(new LinkedHashSet<>(List.of("train-1")), first);
+    String empty = snapshotLine(debug);
+    assertTrue(empty.contains("departureGateBlockedBy=not-recorded"), "没有记录时必须自报，而不是沉默：" + empty);
+
+    // 二：有记录时必须把阻塞者显示出来——就是当初缺的那条信息。
+    debug.clear();
+    installDepartureGateBlockers(service, "CONFLICT:switcher:705@WS-LC-2008", second);
+    service.traceSmartDispatchGlobalSnapshot(new LinkedHashSet<>(List.of("train-1")), second);
+    String recorded = snapshotLine(debug);
+    assertTrue(
+        recorded.contains("departureGateBlockedBy=CONFLICT:switcher:705@WS-LC-2008"),
+        "发车门控的阻塞者必须出现在快照里：" + recorded);
+
+    // 三：过期的记录必须标成 stale，不能把旧切面当成当前状态——2026-09-13 栽过一次的正是这个。
+    debug.clear();
+    installDepartureGateBlockers(
+        service, "CONFLICT:switcher:705@WS-LC-2008", third.minusSeconds(120));
+    service.traceSmartDispatchGlobalSnapshot(new LinkedHashSet<>(List.of("train-1")), third);
+    String stale = snapshotLine(debug);
+    assertTrue(stale.contains("departureGateBlockedBy=stale@"), "过期记录必须自报过期：" + stale);
+  }
+
+  private static String snapshotLine(List<String> debug) {
+    return debug.stream()
+        .filter(l -> l.startsWith("SMART_BLOCKING_SNAPSHOT"))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("没有产生阻塞状态快照：\n" + debug));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void installDepartureGateBlockers(
+      RuntimeDispatchService service, String summary, Instant at) throws Exception {
+    var field = RuntimeDispatchService.class.getDeclaredField("departureGateBlockers");
+    field.setAccessible(true);
+    var recordClass =
+        Class.forName(
+            "org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService$DepartureGateBlockers");
+    var ctor = recordClass.getDeclaredConstructor(String.class, Instant.class);
+    ctor.setAccessible(true);
+    ((ConcurrentMap<String, Object>) field.get(service))
+        .put("train-1", ctor.newInstance(summary, at));
+  }
+
   @SuppressWarnings("unchecked")
   private static void installStopState(RuntimeDispatchService service, RuntimeStopState state)
       throws Exception {

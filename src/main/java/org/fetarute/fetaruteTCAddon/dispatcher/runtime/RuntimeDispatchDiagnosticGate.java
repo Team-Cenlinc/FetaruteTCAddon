@@ -296,6 +296,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 那里以信号灯色为判据（PROCEED 一律不输出），实服全场一条都没有。
           // 生产端用 emitRaw，自带按整行内容去重：内层原因不变就不会重复输出。
           "SMART_SELF_OWNED_CONTINUATION_REJECTED",
+          // 只因放宽才进入 wait-for graph 的排队位边（持有者自己也被挡住）。
+          // 它是"死锁图里少的那条边"这个修复的**唯一**生效证据：被预算吞掉，就分不清
+          // 下一轮吞吐的改善是不是由它带来的。规模受限于同时卡住的车对数，不随 tick 放大。
+          "SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED",
           // 提权被空耗的证据；每个预约至多一次。
           "SMART_UNLOCK_NO_PHYSICAL_PROGRESS",
           // 队列仲裁结论：生产端已按 (资源, 请求方) 的结论签名去重，只有赢家、决定、原因或位次变化才输出。

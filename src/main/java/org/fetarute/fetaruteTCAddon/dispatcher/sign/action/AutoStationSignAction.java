@@ -723,6 +723,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + location);
           }
           gaveUpOpen = true;
+          // 放弃开门后本任务不再运行，而发车门控是在 handleStop 里、进 WaitState 之前取的。
+          // 这里若不释放，门控就永久留在 departureGates 里：列车不仅自己走不了，
+          // 它身上的预约还会一直挡住别人，且没有任何一条路径会再来收拾。
+          // 另外两处 cancel（组失效、正常发车）都先释放了门控，这里必须对称。
+          plugin
+              .getRuntimeDispatchService()
+              .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+          exitOffsetState.restore();
           finalWaitState.stop();
           cancel();
           return;
