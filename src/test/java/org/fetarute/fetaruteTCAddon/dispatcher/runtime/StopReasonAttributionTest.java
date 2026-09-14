@@ -116,6 +116,29 @@ class StopReasonAttributionTest {
     assertFalse(missing.equals(reasonless), "两种空缺必须可区分：" + missing);
   }
 
+  /**
+   * 闭塞等待的明细必须分得清"哪道门拒的"和"有没有 blocker"。
+   *
+   * <p>实服第七轮 417 条 BLOCKED_BY_OCCUPANCY 里 394 条是 {@code no-decision-reason}——
+   * 既看不出是准入判定拒绝还是取资源失败，也看不出有没有 blocker。后者尤其要紧： "被拒却一个 blocker 都没有"是另一类问题，混在一起永远查不出来。
+   */
+  @Test
+  void blockedStopDetailSeparatesTheGateAndWhetherBlockersExist() {
+    String noReasonNoBlockers =
+        RuntimeDispatchService.blockedStopDetail("canenter", decisionWithReason("none"));
+    String realReason =
+        RuntimeDispatchService.blockedStopDetail(
+            "acquire", decisionWithReason("self-owned-single-continuation"));
+
+    assertTrue(noReasonNoBlockers.startsWith("canenter-blocked:"), noReasonNoBlockers);
+    assertTrue(noReasonNoBlockers.endsWith(":blockers=0"), noReasonNoBlockers);
+    assertTrue(noReasonNoBlockers.contains("no-decision-reason"), noReasonNoBlockers);
+
+    assertTrue(realReason.startsWith("acquire-blocked:"), realReason);
+    assertTrue(
+        realReason.contains("self-owned-single-continuation"), "占用层给了真实原因时必须原样带上：" + realReason);
+  }
+
   private static OccupancyDecision decisionWithReason(String reason) {
     return new OccupancyDecision(false, NOW, SignalAspect.STOP, List.of(), false, reason);
   }

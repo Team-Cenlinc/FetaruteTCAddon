@@ -1794,6 +1794,24 @@ public final class RuntimeDispatchService {
     }
   }
 
+  /**
+   * 为闭塞等待拼一个能分辨故障类型的明细。
+   *
+   * <p>占用层在这两条路径上常常不填 {@code reason}（默认字面量 {@code "none"}），于是 394 条停因只说
+   * "被占用挡住了"，既分不清是**准入判定**拒绝还是**实际取资源**失败，也看不出到底有没有 blocker。 后者尤其要紧："被拒却一个 blocker
+   * 都没有"是另一类问题，混在一起就永远查不出来。
+   */
+  static String blockedStopDetail(String gate, OccupancyDecision decision) {
+    String reason = decision == null ? null : decision.reason();
+    boolean informative = reason != null && !reason.isBlank() && !"none".equals(reason);
+    int blockers = decision == null || decision.blockers() == null ? 0 : decision.blockers().size();
+    return gate
+        + "-blocked:"
+        + (informative ? reason : "no-decision-reason")
+        + ":blockers="
+        + blockers;
+  }
+
   private static String summarizeResourceKeys(List<OccupancyClaim> claims) {
     List<String> keys = new ArrayList<>();
     for (OccupancyClaim claim : claims) {
@@ -13620,6 +13638,10 @@ public final class RuntimeDispatchService {
           properties,
           trainName,
           "BLOCKED_BY_OCCUPANCY",
+          // 占用层在这条路径上常常不填 reason（实服第七轮 394/417 是 no-decision-reason）。
+          // 至少要分清是**准入判定**拒绝还是**实际取资源**失败——两者是不同的故障，
+          // 且"被拒却一个 blocker 都没有"是最需要单独看见的一类。
+          blockedStopDetail("canenter", decision),
           route,
           currentNodeOpt.orElse(null),
           nextNode.orElse(null),
@@ -13726,6 +13748,7 @@ public final class RuntimeDispatchService {
           properties,
           trainName,
           "BLOCKED_BY_OCCUPANCY",
+          blockedStopDetail("acquire", acquired),
           route,
           currentNodeOpt.orElse(null),
           nextNode.orElse(null),
