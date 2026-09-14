@@ -219,6 +219,25 @@ class SmartDispatcherControllerTest {
 
     assertEquals(DispatchAction.HOLD_AT_SIGNAL, decision.action());
     assertEquals(SignalAspect.STOP, decision.targetAspect());
+
+    // 停因明细**必须是原因，或自报"我没有原因"，绝不许印 none**（d4aa7c9 立的规矩）。
+    //
+    // 这条分支有两个互不相同的触发源：调用方显式允许直停，或制动曲线判定已进入停车距离。
+    // 此前只取前者，而 ForwardDecisionInput 的压缩构造器早把该字段填成了字面量 "none"，
+    // 于是后者触发时报出来的就是 none——而且原写的兜底 "direct-stop-allowed" 是**死代码**
+    // （字段非空，normalize 的兜底永远不触发）。
+    //
+    // 代价：实服 2026-09-14 第十三轮，往 HHU 段场销毁的车停在
+    // `recoverable-hold:hold_at_signal:route_stop_or_terminal:none` 上 172–185 秒，
+    // **没有任何阻塞者**，而最内层原因是 none——看得见停，看不见为什么。
+    assertNotEquals(
+        "none",
+        decision.safetyReason(),
+        () -> "HOLD_AT_SIGNAL 的安全原因不许是 none：" + decision.safetyReason());
+    assertTrue(
+        decision.safetyReason().startsWith("braking:")
+            || decision.safetyReason().equals("no-direct-stop-reason"),
+        () -> "制动曲线触发时必须报出它自己的判定原因，否则只是把 none 换个写法：" + decision.safetyReason());
   }
 
   @Test

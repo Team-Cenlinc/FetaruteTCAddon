@@ -343,7 +343,7 @@ public final class SmartDispatcherController {
               risk.riskSource(),
               DispatchEffectClass.SIGNAL_CONSTRAINT,
               "safety",
-              normalize(input.directStopReason(), "direct-stop-allowed"),
+              holdAtSignalSafetyReason(input, braking),
               "hold-before-hard-boundary",
               true,
               false,
@@ -765,6 +765,46 @@ public final class SmartDispatcherController {
     if (!result.passed()) {
       traceLogger.accept("DESTROY_INCOMPLETE train=" + result.trainId());
     }
+  }
+
+  /**
+   * HOLD_AT_SIGNAL 的安全原因——**必须是原因，或自报"我没有原因"，不许印 {@code none}**。
+   *
+   * <p>这条分支有**两个互不相同的触发源**：
+   *
+   * <ul>
+   *   <li>{@code input.directStopAllowed()} —— 调用方显式允许直停，原因在 {@code directStopReason}；
+   *   <li>{@code braking.shouldHardStop()} —— 制动曲线判定已进入停车距离，原因在 {@code
+   *       braking.targetSpeedReason()}（如 {@code inside-stop-distance}）。
+   * </ul>
+   *
+   * <p>此前这里只取第一个，于是第二种触发时报出来的是 {@code none}。而且原本写的兜底 {@code "direct-stop-allowed"} **是死代码**：{@code
+   * ForwardDecisionInput} 的压缩构造器 早就把该字段填成了字面量 {@code "none"}（非空），所以 {@code normalize} 的兜底永远不触发。
+   *
+   * <p>代价：实服 2026-09-14 第十三轮，往 HHU 段场销毁的车停在 {@code
+   * recoverable-hold:hold_at_signal:route_stop_or_terminal:none} 上 **172–185 秒**， 没有任何阻塞者，而最内层原因是
+   * {@code none} —— 看得见停，看不见为什么。
+   *
+   * <p>这正是 {@code d4aa7c9} 立的规矩（明细要么是原因，要么自报没有原因，绝不印 {@code none}） 漏掉的一处。
+   */
+  private static String holdAtSignalSafetyReason(
+      ForwardDecisionInput input, BrakingProfile braking) {
+    String declared = input == null ? null : input.directStopReason();
+    // "none" 是"没人填过"的默认字面量，必须与真正填过的原因区别对待。
+    boolean declaredPresent =
+        declared != null && !declared.isBlank() && !declared.trim().equalsIgnoreCase("none");
+    if (declaredPresent) {
+      return declared.trim();
+    }
+    if (braking != null && braking.shouldHardStop()) {
+      // 真正的触发源是制动曲线；把它自己的判定原因报出来。
+      String brakingReason = braking.targetSpeedReason();
+      return brakingReason == null || brakingReason.isBlank()
+          ? "braking-hard-stop"
+          : "braking:" + brakingReason.trim();
+    }
+    // 两个来源都说不出原因——自报，而不是伪装成一个结论。
+    return "no-direct-stop-reason";
   }
 
   private DispatchDecision noAction(
