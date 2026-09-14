@@ -8,6 +8,7 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
 import org.junit.jupiter.api.Test;
 
@@ -134,5 +135,112 @@ class SmartUnlockProgressBaselineTest {
   @Test
   void realBaselineIsTreatedAsRecorded() {
     assertTrue(hasRecordedBaseline("SURC:ZKW:HHU:1:003"), "真实节点是有效基线，必须继续参与判定");
+  }
+
+  /**
+   * 「无物理进展」必须有一个**真正的物理**输入：车体实际方块。
+   *
+   * <p>原判据只看 {@code lastPassedGraphNode} 变没变——那是"越过了一个图节点"，不是"动了"。 拒绝用 {@code currentNode}
+   * 代替是对的（它随规划窗口滑动而变），但结果是整个判据 没有任何物理输入，只剩一个时间常数。
+   *
+   * <p>而那个常数（{@code SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS} = 25 秒）标定于第五轮的 中位 21 秒。实服第十 /
+   * 十一轮实测逐节点耗时**中位 37 / 32 秒**（p75 66 / 54 秒）—— **宽限低于中位数**，于是 56–59% 的正常行驶被判成"没动"。代价：第十一轮 98
+   * 个预约创建、98 个全部回滚、{@code SMART_UNLOCK_SUCCESS} 连续十一轮为 0， 其中 65 次的理由正是 {@code
+   * no-physical-progress}。
+   *
+   * <p>不调那个常数（p75 已逼近 TTL，调上去等于废掉早释放机制），而是补上物理判据。 本用例钉住它，并**同时钉住 fail-closed 的那一半**：缺证据永远不得当成"动过"。
+   */
+  @Test
+  void footprintMovementIsTheOnlyPhysicalEvidenceAndMissingEvidenceNeverCountsAsMoved()
+      throws Exception {
+    // 一：基线与现值都在、且不同 —— 车真的动了。
+    assertTrue(footprintMoved(1111, 2222), "车体方块变了就是动了，不该再被判无物理进展");
+
+    // 二：都在、相同 —— 确实没动，维持回滚。
+    assertFalse(footprintMoved(1111, 1111), "方块没变就是没动");
+
+    // 三、四：任一侧缺失 —— **无从判断**，必须 fail-closed 回到原行为。
+    // 这是本用例的判别核心：缺证据被当成证据，正是本项目反复栽跟头的那个形状。
+    assertFalse(footprintMoved(null, 2222), "缺基线只能表示无从判断，不得表示动过");
+    assertFalse(footprintMoved(1111, null), "缺现值只能表示无从判断，不得表示动过");
+  }
+
+  /** 按给定的基线/现值调用 smartUnlockFootprintMoved；null 表示该侧没有记录。 */
+  private static boolean footprintMoved(Integer baseline, Integer current) throws Exception {
+    RuntimeDispatchService service = bareService();
+    Object reservation = reservationWithIdAndTrain("res-1", "TRAIN-1");
+
+    if (baseline != null) {
+      mapField(service, "smartUnlockFootprintBaselines").put("res-1", baseline);
+    }
+    if (current != null) {
+      mapField(service, "livePhysicalFootprintFingerprints").put("train-1", current);
+    }
+
+    Method method =
+        Arrays.stream(RuntimeDispatchService.class.getDeclaredMethods())
+            .filter(m -> m.getName().equals("smartUnlockFootprintMoved"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("找不到 smartUnlockFootprintMoved"));
+    method.setAccessible(true);
+    return (boolean) method.invoke(service, reservation);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static java.util.Map<String, Integer> mapField(
+      RuntimeDispatchService service, String name) throws Exception {
+    var field = RuntimeDispatchService.class.getDeclaredField(name);
+    field.setAccessible(true);
+    return (java.util.Map<String, Integer>) field.get(service);
+  }
+
+  private static Object reservationWithIdAndTrain(String reservationId, String trainName)
+      throws ReflectiveOperationException {
+    Class<?> type =
+        Arrays.stream(RuntimeDispatchService.class.getDeclaredClasses())
+            .filter(c -> c.getSimpleName().equals("SmartUnlockReservation"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("找不到 SmartUnlockReservation"));
+    var constructor = type.getDeclaredConstructors()[0];
+    constructor.setAccessible(true);
+    Object[] args = new Object[constructor.getParameterCount()];
+    Class<?>[] paramTypes = constructor.getParameterTypes();
+    for (int i = 0; i < args.length; i++) {
+      args[i] = defaultValue(paramTypes[i]);
+    }
+    var components = type.getRecordComponents();
+    for (int i = 0; i < components.length; i++) {
+      if (components[i].getName().equals("reservationId")) {
+        args[i] = reservationId;
+      }
+      if (components[i].getName().equals("trainName")) {
+        args[i] = trainName;
+      }
+    }
+    return constructor.newInstance(args);
+  }
+
+  private static RuntimeDispatchService bareService() {
+    ConfigManager configManager = org.mockito.Mockito.mock(ConfigManager.class);
+    ConfigManager.ConfigView base = RuntimeDispatchTestFixtures.testConfigView(20, 20.0);
+    org.mockito.Mockito.when(configManager.current()).thenReturn(base);
+    return new RuntimeDispatchService(
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager(
+            (routeId, resource) -> java.time.Duration.ZERO,
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy
+                .defaultPolicy()),
+        org.mockito.Mockito.mock(
+            org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService.class),
+        org.mockito.Mockito.mock(
+            org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache.class),
+        new RouteProgressRegistry(),
+        org.mockito.Mockito.mock(
+            org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.class),
+        org.mockito.Mockito.mock(LayoverRegistry.class),
+        new DwellRegistry(),
+        configManager,
+        null,
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver(),
+        message -> {});
   }
 }

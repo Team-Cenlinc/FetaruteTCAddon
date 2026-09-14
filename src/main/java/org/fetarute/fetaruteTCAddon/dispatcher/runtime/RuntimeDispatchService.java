@@ -308,6 +308,30 @@ public final class RuntimeDispatchService {
       smartUnlockReservationsByCycle = new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, SmartUnlockReservation>
       smartUnlockReservationsByTrain = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 每辆车最近一次观测到的**车体实际方块**指纹（按车名键）。
+   *
+   * <p>存在的理由：解锁预约的「无物理进展」判据只看 {@code lastPassedGraphNode} 有没有变—— 那是"越过了一个图节点"，不是"动了"。代码里明确拒绝用
+   * {@code currentNode} 代替，理由正确 （它随规划窗口滑动而变，不是物理证据）；但结果是**整个判据没有任何真正的物理输入**。
+   *
+   * <p>代价已实测：宽限 {@link #SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS} 是 25 秒， 而实服第十/十一轮逐节点耗时**中位 37 / 32
+   * 秒**（p75 66 / 54 秒）——**宽限低于中位数**， 于是 56–59% 的**正常行驶**会被判成"没动"并回滚。第十一轮 98 个预约创建、98 个回滚、
+   * `SMART_UNLOCK_SUCCESS` 连续十一轮为 0，其中 65 次的理由就是 `no-physical-progress`。
+   *
+   * <p>注意宽限那个常数标定于第五轮（当时中位 21 秒），**线网变慢后它对应的现实已不存在**； 但也不能简单调大——p75 已逼近 TTL(60 秒)，调到 p75 等于废掉早释放机制，
+   * 把第五轮"提权一直挂在不动的车上"的老问题放回来。所以不动常数，**补一个真正的物理判据**。
+   *
+   * <p>车体方块来自列车句柄（{@code observeLiveRailFootprint}），**不依赖联锁 cell 索引**，
+   * 因此与"持久化快照没有逐边足迹"那个地基问题无关，现在就能用。
+   */
+  private final java.util.concurrent.ConcurrentMap<String, Integer>
+      livePhysicalFootprintFingerprints = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 解锁预约创建时的车体方块指纹基线（按 reservationId 键）；缺失表示"当时无从判断"。 */
+  private final java.util.concurrent.ConcurrentMap<String, Integer> smartUnlockFootprintBaselines =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockNoReleaseTimeouts =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockBlockerReleaseAt =
@@ -2529,6 +2553,12 @@ public final class RuntimeDispatchService {
             false);
     smartUnlockReservationsByCycle.put(plan.cycleId(), reservation);
     smartUnlockReservationsByTrain.put(normalizeTrainKey(plan.train()), reservation);
+    // 记下车体方块基线，供「无物理进展」判据比对。缺观测时不写，判据一侧按 fail-closed 保持原行为。
+    Integer footprintBaseline =
+        livePhysicalFootprintFingerprints.get(normalizeTrainKey(plan.train()));
+    if (footprintBaseline != null) {
+      smartUnlockFootprintBaselines.put(reservationId, footprintBaseline);
+    }
     debugLogger.accept(
         "SMART_UNLOCK_RESERVATION_CREATED reservationId="
             + reservationId
@@ -3438,10 +3468,24 @@ public final class RuntimeDispatchService {
       // 只有当宽限**严格短于** TTL 时才有意义：它的全部作用就是把一个过长的 TTL 提前截断。
       // 若 TTL 本身已经不长于宽限，就让正常的 no-release-timeout 去收尾——否则这条分支会把
       // 那条更具体的结论（"我们真的等满了"）永远抢走，短 TTL 下 no-release-timeout 将不复存在。
+      // 补一个**真正的物理**输入：车体实际方块动没动。
+      //
+      // 原判据只看 lastPassedGraphNode，那是"越过了一个图节点"，不是"动了"。拒绝用 currentNode
+      // 代替是对的（它随规划窗口滑动而变），但结果是整个判据没有任何物理输入，只剩一个时间常数。
+      // 而那个常数（25 秒）标定于第五轮的中位 21 秒；实服第十/十一轮逐节点耗时中位已是 37 / 32 秒，
+      // **宽限低于中位数** ⇒ 56–59% 的正常行驶被判"没动"。第十一轮 98 预约 / 98 回滚，其中 65 次是它。
+      //
+      // 不调那个常数：p75(54–66 秒) 已逼近 TTL(60 秒)，调到 p75 等于废掉早释放，
+      // 把第五轮"提权挂在不动的车上"的老问题放回来。所以改成——**方块变了就是动了，不回滚**。
+      //
+      // fail-closed：基线或现值任一缺失都视为"无从判断"，保持原行为（该回滚照样回滚）。
+      // 指纹在观测不可用时会被**清掉**而不是留旧值，所以"缺失"不会被"没变"冒充。
+      boolean physicallyMoved = smartUnlockFootprintMoved(reservation);
       if (noProgressGrace < reservation.ttlTicks()
           && hasRecordedLastPassedBaseline(reservation)
           && !lastPassedChanged
           && !blockersReleased
+          && !physicallyMoved
           && aliveTicks >= noProgressGrace) {
         debugLogger.accept(
             "SMART_UNLOCK_NO_PHYSICAL_PROGRESS reservationId="
@@ -3727,6 +3771,65 @@ public final class RuntimeDispatchService {
             + (now == null ? clockNow() : now));
   }
 
+  /**
+   * 记下该车此刻的车体方块指纹；无从观测时**清掉**旧值，绝不留一个过期的指纹冒充现状。
+   *
+   * <p>留旧值会让"指纹没变"同时意味着"车没动"和"我看不见车"——那正是本项目反复栽跟头的 「缺证据被当成证据」。清掉之后，缺证据表现为基线或现值缺失，判据一侧按 fail-closed
+   * 保持原行为。
+   */
+  private void rememberLivePhysicalFootprintFingerprint(
+      String trainName, RuntimeTrainHandle train) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty()) {
+      return;
+    }
+    OptionalInt fingerprint = livePhysicalFootprintFingerprint(train);
+    if (fingerprint.isPresent()) {
+      livePhysicalFootprintFingerprints.put(key, fingerprint.getAsInt());
+    } else {
+      livePhysicalFootprintFingerprints.remove(key);
+    }
+  }
+
+  /**
+   * 该预约存续期间，列车的车体方块有没有真的动过。
+   *
+   * <p>基线或现值任一缺失都返回 {@code false}（= 无从判断），由调用方保持原有的 fail-closed 行为—— **缺证据永远不得当成"动过"的证据**。
+   */
+  private boolean smartUnlockFootprintMoved(SmartUnlockReservation reservation) {
+    if (reservation == null) {
+      return false;
+    }
+    Integer baseline = smartUnlockFootprintBaselines.get(reservation.reservationId());
+    if (baseline == null) {
+      return false;
+    }
+    Integer current =
+        livePhysicalFootprintFingerprints.get(normalizeTrainKey(reservation.trainName()));
+    if (current == null) {
+      return false;
+    }
+    return !baseline.equals(current);
+  }
+
+  /** 车体实际方块集合的指纹；观测不可用或为空时返回 empty（= 无从判断，不是"没动"）。 */
+  private static OptionalInt livePhysicalFootprintFingerprint(RuntimeTrainHandle train) {
+    LiveRailFootprintObservation observation = readLiveRailFootprintObservation(train);
+    if (!observation.available()) {
+      return OptionalInt.empty();
+    }
+    var cells = observation.cells().orElse(java.util.Set.of());
+    if (cells.isEmpty()) {
+      return OptionalInt.empty();
+    }
+    // 与顺序无关的指纹：cells 是集合，遍历序不保证稳定，用异或/加和而不是 List.hashCode。
+    int fingerprint = cells.size();
+    for (var cell : cells) {
+      fingerprint ^= cell.hashCode() * 31;
+    }
+    return OptionalInt.of(fingerprint);
+  }
+
   private void rollbackSmartUnlockReservation(SmartUnlockReservation reservation, String reason) {
     if (reservation == null) {
       return;
@@ -3759,6 +3862,7 @@ public final class RuntimeDispatchService {
             reservation.trainName(), reservation.resources(), ClaimRole.UNLOCK_RESERVATION);
     smartUnlockReservationsByCycle.remove(reservation.cycleId(), reservation);
     smartUnlockReservationsByTrain.remove(normalizeTrainKey(reservation.trainName()), reservation);
+    smartUnlockFootprintBaselines.remove(reservation.reservationId());
     // 预约没了，去重签名也随之失效；不清掉会让同名列车的下一个预约首次生效时漏输出，
     // 也会让这张表随列车改名无界增长。
     lastSmartUnlockPriorityIntent.remove(normalizeTrainKey(reservation.trainName()));
@@ -13218,6 +13322,8 @@ public final class RuntimeDispatchService {
     }
     Instant now = clockNow();
     trainName = handleRenameIfNeeded(properties);
+    // 改名之后再记指纹：按新名存，避免又一条"旧名残留记录"。
+    rememberLivePhysicalFootprintFingerprint(trainName, train);
     if (layoverRegistry.get(trainName).isPresent()) {
       clearDepartureGate(trainName);
       LayoverCandidate candidate = layoverRegistry.get(trainName).orElse(null);
