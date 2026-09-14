@@ -16942,6 +16942,31 @@ public final class RuntimeDispatchService {
 
   /** 对在线列车重新下发硬 STOP，供健康监控在 STOP 互卡等待期间使用。 */
   public boolean reapplyHardStopByName(String trainName, String reason) {
+    // 没有任何 blocker 就不是死锁，不能再往上加一层 DEADLOCK_CONFIRMED_WAITING 硬停车。
+    //
+    // 这条兜底来自 TrainHealthMonitor 的"进度停滞"升级，语义只是"重新施加停车"，却顶着死锁的名字。
+    // 对一辆**没有任何东西挡着**的车施加它，唯一效果是再装一个 movement inhibitor、撤销它本来就有的授权，
+    // 而停车本身让进度继续停滞、下一轮健康检查再次判定 progress-stuck——自我维持。
+    //
+    // 实服 2026-09-13 第七轮：804 条快照落在这一族，**全部** blockedBy=[]、movementToken=INVALID，
+    // 滞留中位 543 秒、最长 1751 秒；同期 inhibitor 占车队比例从 0% 单调涨到 64%。
+    //
+    // 返回 false 时调用方（TrainHealthMonitor）会退回 refreshSignalByName——
+    // 对"没人挡、只是没动"的车，重新算一次信号正是该做的事。
+    Optional<RuntimeStopState> existingStop = getActiveStopState(trainName);
+    if (existingStop.isPresent() && existingStop.get().blockers().isEmpty()) {
+      debugLogger.accept(
+          "SMART_HEALTH_REAPPLY_SKIPPED_NO_BLOCKER train="
+              + diagnosticTrainName(trainName)
+              + " reasonCode="
+              + existingStop.get().reasonCode()
+              + " heldSeconds="
+              + Duration.between(existingStop.get().enteredAt(), clockNow()).toSeconds()
+              + " requestedReason="
+              + (reason == null || reason.isBlank() ? "-" : reason)
+              + " action=refresh-signal-instead");
+      return false;
+    }
     RuntimeTrainResolution resolution =
         resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.REAPPLY_HARD_STOP);
     TrainProperties properties = resolution.properties();
