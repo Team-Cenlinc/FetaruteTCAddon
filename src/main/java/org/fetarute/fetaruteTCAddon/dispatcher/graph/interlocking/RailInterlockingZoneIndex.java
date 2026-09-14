@@ -32,11 +32,24 @@ public final class RailInterlockingZoneIndex {
   private final Map<EdgeId, Set<String>> zoneKeysByEdge;
   private final Map<String, InterlockingZoneInfo> zoneInfoByKey;
   private final Map<RailFootprintCell, Set<String>> zoneKeysByCell;
+
+  /**
+   * 方块坐标 → 覆盖它的图区间。
+   *
+   * <p>Zone 只在两条**互不相邻**区间的足迹重叠处存在，因此 {@link #zoneKeysForCell} 覆盖不到普通区间方块。 要回答"车体此刻是否还压在某个
+   * NODE/EDGE 上"必须有这张全量反向索引。
+   *
+   * <p>**只有 {@link #from} 这条路径能建它**——{@link #fromZones} 从持久化快照重建时只有 Zone，
+   * 没有逐边足迹，此时索引为空，调用方必须按"无法判断"fail-closed 处理。
+   */
+  private final Map<RailFootprintCell, Set<EdgeId>> edgeIdsByCell;
+
   private final RailInterlockingCoverage coverage;
 
   private RailInterlockingZoneIndex(
       Map<EdgeId, Set<String>> zoneKeysByEdge,
       Map<String, InterlockingZoneInfo> zoneInfoByKey,
+      Map<RailFootprintCell, Set<EdgeId>> edgeIdsByCell,
       RailInterlockingCoverage coverage) {
     Map<EdgeId, Set<String>> immutableByEdge = new HashMap<>();
     zoneKeysByEdge.forEach(
@@ -45,6 +58,9 @@ public final class RailInterlockingZoneIndex {
     this.zoneKeysByEdge = Map.copyOf(immutableByEdge);
     this.zoneInfoByKey = Collections.unmodifiableMap(new TreeMap<>(zoneInfoByKey));
     this.zoneKeysByCell = buildZoneCellIndex(zoneInfoByKey);
+    Map<RailFootprintCell, Set<EdgeId>> immutableByCell = new HashMap<>();
+    edgeIdsByCell.forEach((cell, edges) -> immutableByCell.put(cell, Set.copyOf(edges)));
+    this.edgeIdsByCell = Map.copyOf(immutableByCell);
     this.coverage = coverage;
   }
 
@@ -137,9 +153,14 @@ public final class RailInterlockingZoneIndex {
           zoneKeysByEdge.computeIfAbsent(pair.second(), ignored -> new TreeSet<>()).add(key);
         });
 
+    Map<RailFootprintCell, Set<EdgeId>> edgeIdsByCell = new HashMap<>();
+    soleEdgeByCell.forEach((cell, edge) -> edgeIdsByCell.put(cell, Set.of(edge)));
+    sharedEdgesByCell.forEach((cell, edges) -> edgeIdsByCell.put(cell, Set.copyOf(edges)));
+
     return new RailInterlockingZoneIndex(
         zoneKeysByEdge,
         infoByKey,
+        edgeIdsByCell,
         new RailInterlockingCoverage(expected.size(), participatingEdgeCount, complete));
   }
 
@@ -190,7 +211,27 @@ public final class RailInterlockingZoneIndex {
           keysByEdge.computeIfAbsent(zone.firstEdge(), ignored -> new TreeSet<>()).add(key);
           keysByEdge.computeIfAbsent(zone.secondEdge(), ignored -> new TreeSet<>()).add(key);
         });
-    return new RailInterlockingZoneIndex(keysByEdge, infoByKey, coverage);
+    // 持久化快照只有 Zone，没有逐边足迹，因此 cell→edge 反向索引在这条路径上必然为空。
+    // 调用方必须按"无法判断"fail-closed 处理，见 cellCoverageAvailable()。
+    return new RailInterlockingZoneIndex(keysByEdge, infoByKey, Map.of(), coverage);
+  }
+
+  /**
+   * 返回覆盖该方块的全部图区间；索引不可用或方块不在任何区间上时返回空集合。
+   *
+   * <p><b>空集合有两种含义</b>：索引可用时表示"确实没有区间覆盖它"，索引不可用时表示"无从判断"。 调用方**必须**先用 {@link
+   * #cellCoverageAvailable()} 区分，不能把后者当成前者—— 那正是"缺证据被当成证据"这一类缺陷的温床。
+   */
+  public Set<EdgeId> edgesForCell(RailFootprintCell cell) {
+    if (cell == null) {
+      return Set.of();
+    }
+    return edgeIdsByCell.getOrDefault(cell, Set.of());
+  }
+
+  /** cell→edge 反向索引是否可用；持久化快照重建的索引不可用。 */
+  public boolean cellCoverageAvailable() {
+    return !edgeIdsByCell.isEmpty();
   }
 
   /** 返回指定区间参与的全部联锁区键；未知区间返回空集合。 */

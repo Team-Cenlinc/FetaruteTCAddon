@@ -173,6 +173,23 @@ public final class RailInterlockingState {
   }
 
   /** 返回指定区间需要共同申请的联锁区键。 */
+  /**
+   * 返回覆盖该方块的全部图区间。
+   *
+   * <p>供"车体此刻是否还压在某个 NODE/EDGE 上"的判定使用——这是 Phase 4 把尾部保护回收扩到 NODE/EDGE 的前置条件：CONFLICT
+   * 是抽象互斥键可以直接放，NODE/EDGE 对应物理空间， 车体还压着时释放就是 co-occupancy，必须有实测覆盖作证。
+   *
+   * <p><b>空集合有两种含义</b>，必须先用 {@link #cellCoverageAvailable()} 区分： 索引可用时是"确实没覆盖"，不可用时是"无从判断"。
+   */
+  public Set<EdgeId> edgesForCell(RailFootprintCell cell) {
+    return index.edgesForCell(cell);
+  }
+
+  /** cell→edge 反向索引是否可用；由持久化快照重建的状态不可用，调用方须 fail-closed。 */
+  public boolean cellCoverageAvailable() {
+    return index.cellCoverageAvailable();
+  }
+
   public Set<String> zoneKeysForEdge(EdgeId edgeId) {
     if (edgeId == null) {
       return Set.of();
