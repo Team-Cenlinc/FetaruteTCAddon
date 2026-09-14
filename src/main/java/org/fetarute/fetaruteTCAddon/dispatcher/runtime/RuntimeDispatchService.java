@@ -27757,8 +27757,10 @@ public final class RuntimeDispatchService {
    * <p>本方法只做查询，不改变任何状态；接线到释放判定是单独一步。
    */
   LivePhysicalEdgeCoverage livePhysicalEdgeCoverage(RuntimeTrainHandle train, RailGraph graph) {
+    // readLiveRailFootprintObservation 契约上不返回 null（train 为空时返回 unavailable），
+    // 因此这里只判 available，不再重复判空。
     LiveRailFootprintObservation observation = readLiveRailFootprintObservation(train);
-    if (observation == null || !observation.available()) {
+    if (!observation.available()) {
       return LivePhysicalEdgeCoverage.incomplete("live-footprint-unavailable");
     }
     if (!(graph
