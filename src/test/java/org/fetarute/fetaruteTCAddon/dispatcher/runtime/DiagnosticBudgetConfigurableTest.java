@@ -172,4 +172,91 @@ class DiagnosticBudgetConfigurableTest {
     long stops = out.stream().filter(l -> l.startsWith("SMART_STOP_LIFECYCLE")).count();
     assertTrue(stops == 50, "停因生命周期是必留事务审计，不得被预算吞掉，实际 " + stops);
   }
+
+  /**
+   * 环被检测到这件事必须不受预算约束。
+   *
+   * <p>它是"排队位边进图"那个修复（{@code 1f398c7}）唯一的终局判据。实服第十轮丢弃率 **91%** （输出 49790 行、丢弃 509047
+   * 行）——不列入必留，修好之后第一次检测到环那一行有九成概率被吞掉， 于是"到底修好没有"根本答不出来。
+   */
+  @Test
+  void cycleDetectionAndItsOutcomeAreNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 20; i++) {
+      gate.accept("SMART_DISPATCH_CYCLE_DETECTED type=MUTUAL cycleId=c" + i + " trains=[a, b]");
+      // 光知道"检测到环"不够：环检测之后什么都没发生，才是这十轮的常态
+      // （SMART_UNLOCK_SUCCESS 连续十轮为 0）。结局那一条同样不能丢，否则下一轮又只能得出
+      // "检测到了环，然后不知道"。
+      gate.accept("SMART_DISPATCH_PLAN_SELECTED train=t" + i + " cycleId=c" + i);
+      gate.accept("SMART_NO_SAME_DIRECTION_UNLOCK_PLAN recommendation=none cycleId=c" + i);
+    }
+
+    assertEquals(
+        20,
+        out.stream().filter(l -> l.startsWith("SMART_DISPATCH_CYCLE_DETECTED")).count(),
+        "环检测不得被预算吞掉：" + out.size());
+    assertEquals(
+        20,
+        out.stream().filter(l -> l.startsWith("SMART_DISPATCH_PLAN_SELECTED")).count(),
+        "解锁计划被选中不得被预算吞掉：" + out.size());
+    assertEquals(
+        20,
+        out.stream().filter(l -> l.startsWith("SMART_NO_SAME_DIRECTION_UNLOCK_PLAN")).count(),
+        "没有可用解锁计划的原因不得被预算吞掉：" + out.size());
+  }
+
+  /**
+   * 反向边界：{@code SMART_DEADLOCK_DESTROY_ELIGIBILITY} **故意不在**必留名单里。
+   *
+   * <p>它残留只有 128 行，看着便宜，真实体量却是 **3076 行 / 74 分钟 ≈ 41 行/分钟** （丢弃 2948 + 残留 128）——加进来要给日志增重 6%。而实服
+   * {@code destroyEnabled=false}， 它回答的"为什么没资格销毁"当前没有任何可操作性。
+   *
+   * <p>这条用例把这个取舍钉住：谁要加它进名单，先在这里说明为什么值这 6%。 也顺带钉住判体量的口径——**残留不是体量，体量是「丢弃 + 残留」**。
+   */
+  @Test
+  void destroyEligibilityStaysBudgetedBecauseItIsFortyOneLinesPerMinute() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 40; i++) {
+      gate.accept("SMART_DEADLOCK_DESTROY_ELIGIBILITY: train=t" + i + " eligible=false");
+    }
+
+    long kept =
+        out.stream().filter(l -> l.startsWith("SMART_DEADLOCK_DESTROY_ELIGIBILITY")).count();
+    assertTrue(kept < 40, "销毁资格判据应当受预算约束，实际全留了 " + kept + " 条");
+  }
+
+  /**
+   * 健康监视器的事件带冒号，必留判定必须照样认得出来。
+   *
+   * <p>两种生产端行格式不同：{@code RuntimeDispatchService} 输出 {@code 事件名 空格 ...}， 而 {@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor} 的 {@code traceHealthEvent}
+   * 输出 {@code 事件名 + ": " + message}。必留判定按第一个空格前的 token 取 kind，不去掉尾部冒号就会得到 {@code
+   * "SMART_DEADLOCK_DESTROY_EXECUTED:"}，与名单里的字面量**永不相等**—— 加进名单完全不起作用，而代码路径俱在、看起来像在工作。
+   *
+   * <p>销毁列车是不可逆动作。在放宽了排队位边进图条件之后，万一放宽造出假环并据此销毁了车， 这一行是唯一的证据，绝不允许被预算丢掉。
+   */
+  @Test
+  void healthMonitorEventsWithTrailingColonAreStillRecognizedAsMustKeep() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 20; i++) {
+      // 逐字照搬生产端格式：事件名后面紧跟冒号。
+      gate.accept("SMART_DEADLOCK_DESTROY_EXECUTED: train=t" + i + " reason=hard-cycle");
+      gate.accept("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED: trainA=a" + i + " trainB=b" + i);
+    }
+
+    assertEquals(
+        20,
+        out.stream().filter(l -> l.startsWith("SMART_DEADLOCK_DESTROY_EXECUTED")).count(),
+        "销毁执行是不可逆动作，不得被预算吞掉：" + out.size());
+    assertEquals(
+        20,
+        out.stream().filter(l -> l.startsWith("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED")).count(),
+        "死锁确认不得被预算吞掉：" + out.size());
+  }
 }

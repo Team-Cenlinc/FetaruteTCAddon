@@ -264,7 +264,14 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
       return true;
     }
     int separator = message.indexOf(' ');
-    String kind = separator < 0 ? message : message.substring(0, separator);
+    String rawKind = separator < 0 ? message : message.substring(0, separator);
+    // 去掉尾部冒号：两种生产端的行格式不一样。
+    //   RuntimeDispatchService 等：`SMART_ROUTE_ARRIVAL train=...`      —— 无冒号
+    //   TrainHealthMonitor.traceHealthEvent：`事件名 + ": " + message`  —— **有冒号**
+    // 不归一的话，健康事件的 kind 会是 `SMART_DEADLOCK_DESTROY_EXECUTED:`，
+    // 与名单里的字面量永不相等——加进名单也完全不起作用，而代码路径俱在、看起来像在工作。
+    // 这正是本项目反复出现的那个形状（守卫限定的量与真实情况永不相交，见 fec41c0 / CONFLICT-only）。
+    String kind = rawKind.endsWith(":") ? rawKind.substring(0, rawKind.length() - 1) : rawKind;
     return switch (kind) {
       case "SMART_ROUTE_ARRIVAL",
           "SMART_STOP_LIFECYCLE",
@@ -300,6 +307,29 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 它是"死锁图里少的那条边"这个修复的**唯一**生效证据：被预算吞掉，就分不清
           // 下一轮吞吐的改善是不是由它带来的。规模受限于同时卡住的车对数，不随 tick 放大。
           "SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED",
+          // 下面这组是"环终于闭合了没有、闭合之后做了什么"的完整链条。
+          //
+          // 为什么必须必留：实服第十轮丢弃率 **91%**（输出 49790 行、丢弃 509047 行）。
+          // 在这个丢弃率下，不在名单里的事件出不出得来基本是抛硬币——修好之后第一次检测到环，
+          // 那一行有九成概率被吞掉，于是"到底修好没有"根本答不出。
+          //
+          // 体量为什么不必担心：整条链都挂在 planner 的 trace 批次上，而批次由上游
+          // plan-unchanged 节流（同一 throttleKey 整批不输出）。实服实测
+          // `SMART_WAIT_FOR_GRAPH` 74 分钟只发射 **30 批**（且丢弃 0），
+          // 所以这几条的体量上界就是 30 批 × 每批个位数，合计百行量级，占日志 0.3% 以下。
+          //
+          // 反面教材就在隔壁：`SMART_DEADLOCK_DESTROY_ELIGIBILITY` 残留只有 128 行，
+          // 看着很便宜，实际体量是 **3076 行 / 74 分钟 ≈ 41 行/分钟**（丢弃 2948 + 残留 128），
+          // 加进来要给日志增重 6%。它是"为什么没资格销毁"，而实服 `destroyEnabled=false`
+          // 销毁根本没开——**故意不加**。判体量要用「丢弃 + 残留」，残留不是体量。
+          "SMART_DISPATCH_CYCLE_DETECTED",
+          "SMART_DISPATCH_PLAN_SELECTED",
+          "SMART_NO_SAME_DIRECTION_UNLOCK_PLAN",
+          "SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED",
+          // **销毁列车**：不可逆动作的记录绝不允许被预算丢掉。实服 destroyEnabled=false，
+          // 所以当前体量为 0，纯属"万一哪天开启"的保险——尤其是在放宽了排队位边进图条件之后，
+          // 万一放宽造出假环并据此销毁了车，这一行是唯一的证据。
+          "SMART_DEADLOCK_DESTROY_EXECUTED",
           // 提权被空耗的证据；每个预约至多一次。
           "SMART_UNLOCK_NO_PHYSICAL_PROGRESS",
           // 队列仲裁结论：生产端已按 (资源, 请求方) 的结论签名去重，只有赢家、决定、原因或位次变化才输出。
