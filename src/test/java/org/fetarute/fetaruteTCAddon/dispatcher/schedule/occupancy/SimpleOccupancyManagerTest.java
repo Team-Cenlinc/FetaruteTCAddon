@@ -4649,6 +4649,19 @@ class SimpleOccupancyManagerTest {
       assertTrue(inner.contains("pathExitsZone="), inner);
       assertTrue(inner.contains("externalSinglePresence="), inner);
       assertTrue(inner.contains("resource=" + conflict.key()), "必须点名是哪个单线区：" + inner);
+      // 「有对向占用」必须同时说出**是谁**、以及**是真占着还是只在排队**。
+      // 该存在性检查不往 blocker 列表加任何 claim，所以 blockedBy 补不上这一课——
+      // 第十轮我正是因此把"列表里只有自己"误读成"没有外部阻塞"。
+      // 三轮复发同一座桥（587~705）：第九轮 2269、第十轮 2008、第十二轮 9344 报同一个原因串，
+      // 而第十二轮那次在它身后堵出一辆卡死 2073 秒的车，却仍然看不到对向的是谁。
+      assertTrue(inner.contains("externalSinglePresenceOwner="), "必须说出是谁：" + inner);
+      // 判别核心：描述必须与布尔量**一致**。恒定值（永远 none 或永远 claim:）会在这里失败。
+      boolean presenceTrue = inner.contains("externalSinglePresence=true");
+      boolean ownerNone = inner.contains("externalSinglePresenceOwner=none");
+      assertEquals(
+          presenceTrue,
+          !ownerNone,
+          "externalSinglePresence 与 externalSinglePresenceOwner 必须一致：" + inner);
     } finally {
       SignalComputationTrace.configureLogger(null);
     }

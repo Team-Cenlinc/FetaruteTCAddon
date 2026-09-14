@@ -4143,6 +4143,13 @@ public final class SimpleOccupancyManager
             + externalBlockerAhead
             + " externalSinglePresence="
             + externalSinglePresence
+            // 光知道"有对向占用"不够——必须知道**是谁**、以及**是真占着还是只在排队**。
+            // 该存在性检查不往 blocker 列表加任何 claim，所以 blockedBy 补不上这一课
+            // （第十轮我正是因此把"列表里只有自己"误读成"没有外部阻塞"）。
+            // `queue-only` 意味着挡住一辆**已在区内**的车的只是个尚未进入的排队者——那是缺陷；
+            // `claim:...` 则说明屏障在正常工作。两者的下一步完全相反。
+            + " externalSinglePresenceOwner="
+            + describeExternalSinglePresence(request, resource)
             + " oppositeSingleAhead="
             + oppositeSingleAhead);
     return Optional.of(
@@ -4302,6 +4309,41 @@ public final class SimpleOccupancyManager
     }
     ConflictQueue queue = queues.get(resource);
     return queue != null && !queue.isEmpty() && queue.hasAnyOtherTrain(request.trainName());
+  }
+
+  /**
+   * 描述"前方对向占用"到底是谁、是哪一种——**纯诊断，不参与任何判定**。
+   *
+   * <p>{@link #hasExternalSinglePresence} 只返回布尔量，于是日志里 {@code externalSinglePresence=true}
+   * 只说明"有"，不说明"是谁"。而它恰恰**不往 blocker 列表里加任何 claim**，所以 {@code blockedBy}
+   * 也补不上这一课——第十轮我正是因此把"列表里只有自己"误读成"没有外部阻塞"。
+   *
+   * <p>代价是三轮复发：同一座桥 {@code single:section:bridge:SWITCHER:587~SWITCHER:705} 上， 第九轮 `WS-LC-2269`、第十轮
+   * `WS-LC-2008`、第十二轮 `WS-LC-9344` 报的是**同一个原因字符串**， 而第十二轮那次还在它身后堵出一辆卡死 2073
+   * 秒的车。看不到"是谁"，就无从判断那是正常对向车、 还是一个早该消失的陈旧占用。
+   *
+   * <p>更要紧的是区分两种来源：**claim 是真占着，queue 只是在排队等**。 若挡住一辆**已经在区内**的车的只是个尚未进入的排队者，那是真缺陷而不是正常屏障；
+   * 反之则是屏障在正常工作。这两种的下一步完全相反，必须能分开。
+   */
+  private String describeExternalSinglePresence(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return "-";
+    }
+    List<OccupancyClaim> existing = claims.get(resource);
+    if (existing != null) {
+      for (OccupancyClaim claim : existing) {
+        if (claim != null
+            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+          return "claim:" + claim.trainName() + "@" + claim.role();
+        }
+      }
+    }
+    ConflictQueue queue = queues.get(resource);
+    if (queue != null && !queue.isEmpty() && queue.hasAnyOtherTrain(request.trainName())) {
+      return "queue-only";
+    }
+    return "none";
   }
 
   private void traceSelfOwnedSameDirectionFrontFiltered(
