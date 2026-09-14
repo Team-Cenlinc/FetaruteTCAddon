@@ -482,6 +482,20 @@ public final class RuntimeDispatchService {
    * <p>SimpleOccupancyManager 每点折算 500ms 且把总优势封顶为两分钟，因此 240 点恰好达到既有反饥饿上限；再高也不会绕过等待老化、真实 claim
    * 或方向硬屏障。
    */
+  /**
+   * 预约在"完全没有物理进展"时提前放手的宽限（50ms 信号 tick）。
+   *
+   * <p>500 tick = 25 秒，略大于实测"放行 → 走到下一个节点"的中位 21 秒（p75 31 秒）。
+   *
+   * <p>为什么需要它：TTL 从 3 秒放到 60 秒之后，实服第五轮 **16 次超时全部是 {@code currentNodeChanged=true} 而 {@code
+   * lastPassedGraphNodeChanged=false}**——列车整整 60 秒 一个图节点都没真正走过去，而 +{@value
+   * #SMART_UNLOCK_PRIORITY_BOOST} 的提权就一直挂在它身上。 3 秒 TTL 时这件事自限，60 秒不再自限。该轮线网密度低、队列仲裁只发生 7 次，所以没造成伤害；
+   * 密度上去之后会开始咬。
+   *
+   * <p>取 {@code min(ttl, 本值)}：本值编码的是"真实移动需要多久"这个物理事实，不随 TTL 缩放； 而它又不该超过 TTL 本身。
+   */
+  private static final long SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS = 500L;
+
   private static final int SMART_UNLOCK_PRIORITY_BOOST = 240;
 
   /** 节点历史缓存：记录列车最近经过的节点（用于回退检测）。 */
@@ -1672,7 +1686,106 @@ public final class RuntimeDispatchService {
             0,
             trainIds);
     smartDispatcherController.traceGlobalSnapshot(snapshot);
+    traceBlockingStateSnapshot(progress, liveClaims, now == null ? clockNow() : now);
     traceSmartMinimalForwardPlanner(active, progress, now == null ? clockNow() : now, liveClaims);
+  }
+
+  /**
+   * 停车持续多久才开始输出状态快照。
+   *
+   * <p>30 秒高于正常停站（实测 {@code DEPARTURE_GATE_HOLD} 中位 21 秒），低于任何值得追查的滞留 （{@code
+   * PROTECTIVE_RETAIN_HOLD} 中位 183 秒）。**不按停因种类过滤**——"卡了很久却没有记录 blocker" 恰恰是最需要看见的一类，按 blocker
+   * 是否存在来过滤等于重新制造盲区。
+   */
+  private static final Duration BLOCKING_SNAPSHOT_MIN_HELD = Duration.ofSeconds(30);
+
+  /** 单行里最多列出多少个资源，避免长停车把日志撑爆。 */
+  private static final int BLOCKING_SNAPSHOT_MAX_RESOURCES = 8;
+
+  /**
+   * 周期性输出「谁被挡住了、握着什么、在等什么」的状态快照。
+   *
+   * <p>现有诊断全是**事件**（enter/clear、acquire/release），只回答"发生了什么变化"。 要回答"此刻是什么状态"就只能拿事件流去推，而这在 2026-09-13
+   * 至少骗过我两次： 「列车名不再出现」被推成「车停了」（其实是 layover 复用改名）， 「最后一个事件是 acquire」被推成「资源搁浅」（其实是刷新周期里的重新取得）。
+   * 两次都是**把日志的一个切面当成了系统状态**。
+   *
+   * <p>因此这里记的是状态：持有什么（按角色）、被谁挡着、自持尾部保护有没有可释放候选、 物理进度到哪了。规模有界——每个周期每辆**被挡住**的车一行，实服约 27 行/分钟。
+   */
+  private void traceBlockingStateSnapshot(
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      List<OccupancyClaim> liveClaims,
+      Instant now) {
+    if (activeStopStates.isEmpty()) {
+      return;
+    }
+    Map<String, List<OccupancyClaim>> claimsByTrain = new LinkedHashMap<>();
+    for (OccupancyClaim claim : liveClaims) {
+      if (claim == null || claim.trainName() == null) {
+        continue;
+      }
+      claimsByTrain
+          .computeIfAbsent(normalizeTrainKey(claim.trainName()), unused -> new ArrayList<>())
+          .add(claim);
+    }
+    for (RuntimeStopState state : List.copyOf(activeStopStates.values())) {
+      if (state == null) {
+        continue;
+      }
+      Duration held = Duration.between(state.enteredAt(), now);
+      if (held.compareTo(BLOCKING_SNAPSHOT_MIN_HELD) < 0) {
+        continue;
+      }
+      String key = normalizeTrainKey(state.trainName());
+      List<OccupancyClaim> held$ = claimsByTrain.getOrDefault(key, List.of());
+      Map<String, Integer> byRole = new java.util.TreeMap<>();
+      for (OccupancyClaim claim : held$) {
+        byRole.merge(String.valueOf(claim.role()), 1, Integer::sum);
+      }
+      boolean selfRetainCandidate =
+          occupancyManager instanceof SimpleOccupancyManager manager
+              && manager.selfOwnedStaleRetainReleaseCandidate(state.trainName()).isPresent();
+      RouteProgressRegistry.RouteProgressEntry entry = progress.get(state.trainName());
+      debugLogger.accept(
+          "SMART_BLOCKING_SNAPSHOT train="
+              + diagnosticTrainName(state.trainName())
+              + " heldSeconds="
+              + held.toSeconds()
+              + " reasonCode="
+              + state.reasonCode()
+              + " detail="
+              + state.detail()
+              + " releaseCondition="
+              + state.releaseCondition()
+              + " holdsByRole="
+              + byRole
+              + " holds="
+              + summarizeResourceKeys(held$)
+              + " blockedBy="
+              + state.blockers()
+              + " selfRetainReleaseCandidate="
+              + selfRetainCandidate
+              + " routeIndex="
+              + (entry == null ? -1 : entry.currentIndex())
+              + " lastPassedGraphNode="
+              + (entry == null ? "-" : entry.lastPassedGraphNode().map(NodeId::value).orElse("-"))
+              + " movementToken="
+              + tokenState(state.trainName(), movementToken(state.trainName()).orElse(null)));
+    }
+  }
+
+  private static String summarizeResourceKeys(List<OccupancyClaim> claims) {
+    List<String> keys = new ArrayList<>();
+    for (OccupancyClaim claim : claims) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (keys.size() >= BLOCKING_SNAPSHOT_MAX_RESOURCES) {
+        keys.add("…+" + (claims.size() - BLOCKING_SNAPSHOT_MAX_RESOURCES));
+        break;
+      }
+      keys.add(claim.resource().key() + "@" + claim.role());
+    }
+    return keys.toString();
   }
 
   private void traceSmartMinimalForwardPlanner(
@@ -3245,6 +3358,39 @@ public final class RuntimeDispatchService {
           blockersReleased && authorityConfirmed
               ? "-"
               : !authorityConfirmed ? "canonical-authority-not-confirmed" : "blocker-not-released");
+      // 完全没有物理进展就提前放手：提权不该停在一辆不动的车上。
+      //
+      // 只在**基线确实记录过**时才判定——缺基线只能表示"无法判断"，不得当作"没动"
+      // （同一条规则见 hasRecordedLastPassedBaseline 的说明）。currentNode 变化不算物理进展：
+      // 它会随规划窗口滑动而变，实服 16 次超时里它全是 true，而 lastPassedGraphNode 全是 false。
+      long aliveTicks = tick - reservation.createdTick();
+      long noProgressGrace = SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS;
+      // 只有当宽限**严格短于** TTL 时才有意义：它的全部作用就是把一个过长的 TTL 提前截断。
+      // 若 TTL 本身已经不长于宽限，就让正常的 no-release-timeout 去收尾——否则这条分支会把
+      // 那条更具体的结论（"我们真的等满了"）永远抢走，短 TTL 下 no-release-timeout 将不复存在。
+      if (noProgressGrace < reservation.ttlTicks()
+          && hasRecordedLastPassedBaseline(reservation)
+          && !lastPassedChanged
+          && !blockersReleased
+          && aliveTicks >= noProgressGrace) {
+        debugLogger.accept(
+            "SMART_UNLOCK_NO_PHYSICAL_PROGRESS reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " aliveTicks="
+                + aliveTicks
+                + " graceTicks="
+                + noProgressGrace
+                + " graceSeconds="
+                + (noProgressGrace * 50L / 1000.0)
+                + " lastPassedGraphNode="
+                + reservation.initialLastPassedGraphNode()
+                + " currentNodeChanged="
+                + nodeChanged);
+        rollbackSmartUnlockReservation(reservation, "no-physical-progress");
+        continue;
+      }
       if (reservation.reevaluationRequested() && tokenInvalid) {
         debugLogger.accept(
             "SMART_UNLOCK_AUTHORITY_INVALID_NO_RELEASE reservationId="

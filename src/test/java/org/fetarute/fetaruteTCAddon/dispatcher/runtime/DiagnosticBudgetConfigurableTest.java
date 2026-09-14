@@ -113,6 +113,27 @@ class DiagnosticBudgetConfigurableTest {
     assertEquals(30, layover, "layover 生命周期事件不得被预算吞掉：" + out.size());
   }
 
+  /**
+   * 阻塞状态快照必须不受预算约束。
+   *
+   * <p>它存在的唯一理由就是"事件流推不出当前状态"——2026-09-13 我两次据此判断错误。 被普通观察预算吞掉，它就退化成又一条可丢的事件 trace，等于没加。
+   */
+  @Test
+  void blockingStateSnapshotIsNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 25; i++) {
+      gate.accept(
+          "SMART_BLOCKING_SNAPSHOT train=t"
+              + i
+              + " heldSeconds=42 reasonCode=PROTECTIVE_RETAIN_HOLD");
+    }
+
+    long kept = out.stream().filter(l -> l.startsWith("SMART_BLOCKING_SNAPSHOT")).count();
+    assertEquals(25, kept, "状态快照不得被预算吞掉：" + out.size());
+  }
+
   /** 事务审计不受预算约束——调预算不得动摇这条边界。 */
   @Test
   void transactionAuditsIgnoreTheBudgetEntirely() {
