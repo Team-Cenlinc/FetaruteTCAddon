@@ -307,6 +307,14 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 它是"死锁图里少的那条边"这个修复的**唯一**生效证据：被预算吞掉，就分不清
           // 下一轮吞吐的改善是不是由它带来的。规模受限于同时卡住的车对数，不随 tick 放大。
           "SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED",
+          // 物理联锁覆盖是否真的可用——「车体实际压住哪些区间」这条证据链的**总闸**。
+          // 它为假时 livePhysicalEdgeCoverage 一律返回 incomplete，于是任何以实测覆盖为放行条件的
+          // 机制（尾部保护释放 / Phase 4）都会 fail-closed 到一个都不放。
+          // 而它有两条构建路径：完整图构建索引可用；从持久化快照重建**按设计索引必然为空**，
+          // 正常重启的服务器走的正是后者。丢了这一行，就可能在一个结构性为空的证据源上实现机制，
+          // 得到代码路径俱在、trace 照常输出、却从不触发的结果——本项目已栽过三次的形状。
+          // 每次图激活至多一行，不随 tick 放大。
+          "SMART_INTERLOCKING_COVERAGE",
           // 下面这组是"环终于闭合了没有、闭合之后做了什么"的完整链条。
           //
           // 为什么必须必留：实服第十轮丢弃率 **91%**（输出 49790 行、丢弃 509047 行）。

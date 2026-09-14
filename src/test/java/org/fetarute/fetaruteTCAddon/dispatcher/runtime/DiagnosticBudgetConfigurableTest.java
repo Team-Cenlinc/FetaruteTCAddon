@@ -208,6 +208,30 @@ class DiagnosticBudgetConfigurableTest {
   }
 
   /**
+   * 物理联锁覆盖可用性必须不受预算约束。
+   *
+   * <p>它是「车体实际压住哪些区间」这条证据链的总闸：为假时任何以实测覆盖为放行条件的机制 （尾部保护释放 / Phase 4）都 fail-closed
+   * 到一个都不放。丢了它，就分不清"机制没生效" 是因为没有需要放的，还是因为证据源结构性为空。
+   *
+   * <p>体量：每次图激活至多一行。
+   */
+  @Test
+  void interlockingCoverageAvailabilityIsNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 8; i++) {
+      gate.accept(
+          "SMART_INTERLOCKING_COVERAGE world=w"
+              + i
+              + " available=true cellCoverageAvailable=false expectedEdges=511");
+    }
+
+    long kept = out.stream().filter(l -> l.startsWith("SMART_INTERLOCKING_COVERAGE")).count();
+    assertEquals(8, kept, "联锁覆盖可用性不得被预算吞掉：" + out.size());
+  }
+
+  /**
    * 反向边界：{@code SMART_DEADLOCK_DESTROY_ELIGIBILITY} **故意不在**必留名单里。
    *
    * <p>它残留只有 128 行，看着便宜，真实体量却是 **3076 行 / 74 分钟 ≈ 41 行/分钟** （丢弃 2948 + 残留 128）——加进来要给日志增重 6%。而实服

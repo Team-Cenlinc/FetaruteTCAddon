@@ -111,6 +111,42 @@ public final class RailGraphService {
     componentIndexes.put(worldId, nextComponentIndex);
     lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
+    traceInterlockingCoverage(worldId, nextState);
+  }
+
+  /**
+   * 图激活时报告物理联锁覆盖的可用性。
+   *
+   * <p>为什么非有不可：{@code cellCoverageAvailable()} 是「车体实际压住哪些区间」这条证据链的**总闸**—— {@code
+   * RuntimeDispatchService.livePhysicalEdgeCoverage} 在它为假时一律返回 incomplete， 于是任何以实测覆盖为放行条件的机制（尾部保护释放
+   * / Phase 4）都会 fail-closed 到**一个都不放**。
+   *
+   * <p>而它有两条构建路径，结果天差地别：{@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingZoneIndex#from}
+   * 走完整图构建， 逐边足迹齐全，索引可用；{@code fromZones} 从持久化快照重建，**按设计只有 Zone、没有逐边足迹， 索引必然为空**。正常重启的服务器走的是后者。
+   *
+   * <p>此前运行时**没有任何诊断**能区分这两种状态：日志里只有构建期特性标志 {@code
+   * liveFootprintReverseIndex=true}，那只说明代码有这个功能，不说明索引真的建起来了。 缺了这一行，就可能在一个证据源结构性为空的地基上去实现 Phase
+   * 4，然后得到一个 代码路径俱在、trace 照常输出、却从不触发的机制——本项目已经栽过三次的形状。
+   *
+   * <p>每次图激活至多一行，不随 tick 放大。
+   */
+  private void traceInterlockingCoverage(UUID worldId, RailInterlockingState state) {
+    debugLogger.accept(
+        "SMART_INTERLOCKING_COVERAGE world="
+            + worldId
+            + " available="
+            + state.available()
+            + " cellCoverageAvailable="
+            + state.cellCoverageAvailable()
+            + " expectedEdges="
+            + state.expectedEdges().size()
+            + " exactZones="
+            + state.exactZoneCount()
+            + " indexedZoneCells="
+            + state.indexedZoneCellCount()
+            + " multiZoneCells="
+            + state.multiZoneCellCount());
   }
 
   private void validateSnapshotActivation(UUID worldId, RailGraph graph) {

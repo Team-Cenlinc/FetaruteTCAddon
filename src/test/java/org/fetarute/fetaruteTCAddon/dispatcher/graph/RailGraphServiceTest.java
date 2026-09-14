@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,6 +10,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -229,6 +231,72 @@ class RailGraphServiceTest {
   private static RailNodeRecord nodeRecord(UUID worldId, NodeId id, int x) {
     return new RailNodeRecord(
         worldId, id, NodeType.WAYPOINT, x, 64, 0, Optional.empty(), Optional.empty());
+  }
+
+  /**
+   * 图激活必须报出物理联锁覆盖是否可用，且两条构建路径必须报出**不同**的结果。
+   *
+   * <p>{@code cellCoverageAvailable()} 是「车体实际压住哪些区间」这条证据链的总闸： 它为假时 {@code
+   * RuntimeDispatchService.livePhysicalEdgeCoverage} 一律返回 incomplete， 于是任何以实测覆盖为放行条件的机制（尾部保护释放 /
+   * Phase 4）都 fail-closed 到**一个都不放**。
+   *
+   * <p>而两条路径结果天差地别：完整图构建有逐边足迹，索引可用；从持久化快照重建**按设计只有 Zone、 没有逐边足迹，索引必然为空**——正常重启的服务器走的正是后者。
+   *
+   * <p>此前运行时没有任何诊断能区分它们：日志里只有构建期特性标志 {@code liveFootprintReverseIndex=true}，
+   * 那只说明代码有这个功能，不说明索引真的建起来了。缺了这一行，就可能在一个结构性为空的证据源上 实现 Phase 4，得到一个代码路径俱在、trace 照常输出、却从不触发的机制。
+   */
+  @Test
+  void graphActivationReportsWhetherPhysicalCellCoverageIsActuallyUsable() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+
+    // 一：完整图构建（有逐边足迹）——索引应当可用。
+    List<String> builtLog = new ArrayList<>();
+    RailGraph builtGraph =
+        interlockingGraph(
+            worldId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 8))));
+    new RailGraphService(ignored -> builtGraph, builtLog::add).rebuild(world);
+    String builtLine = coverageLine(builtLog);
+    assertTrue(builtLine.contains("cellCoverageAvailable=true"), "完整图构建的索引应当可用：" + builtLine);
+
+    // 二：从持久化快照重建——按设计没有逐边足迹，索引必然为空。
+    List<String> restoredLog = new ArrayList<>();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    EdgeId edgeId = EdgeId.undirected(a, b);
+    RailInterlockingSnapshotRecord snapshot =
+        new RailInterlockingSnapshotRecord(
+            worldId,
+            RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION,
+            RailInterlockingEdgeSignature.of(Set.of(edgeId)),
+            new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage(
+                1, 1, true),
+            Map.of());
+    RailGraph restoredGraph =
+        RailGraphService.buildGraphFromRecords(
+            List.of(nodeRecord(worldId, a, 0), nodeRecord(worldId, b, 10)),
+            List.of(new RailEdgeRecord(worldId, edgeId, 10, 0.0, true)),
+            Optional.of(snapshot));
+    new RailGraphService(ignored -> restoredGraph, restoredLog::add).rebuild(world);
+    String restoredLine = coverageLine(restoredLog);
+    assertTrue(
+        restoredLine.contains("cellCoverageAvailable=false"),
+        "持久化快照重建的索引必然为空，必须如实报告：" + restoredLine);
+
+    // 判别性的关键：两条路径**必须**报出不同结果。只要这一条成立，
+    // 这条诊断就确实在区分它该区分的东西，而不是恒真或恒假的摆设。
+    assertNotEquals(
+        builtLine.contains("cellCoverageAvailable=true"),
+        restoredLine.contains("cellCoverageAvailable=true"),
+        "两条构建路径必须报出不同的覆盖可用性，否则这条诊断什么都没区分");
+  }
+
+  private static String coverageLine(List<String> log) {
+    return log.stream()
+        .filter(line -> line.startsWith("SMART_INTERLOCKING_COVERAGE"))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("图激活没有报告联锁覆盖：\n" + log));
   }
 
   private static RailGraph interlockingGraph(UUID worldId, RailEdgeFootprint footprint) {
