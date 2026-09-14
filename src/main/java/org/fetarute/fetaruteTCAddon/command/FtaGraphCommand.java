@@ -89,6 +89,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -6196,39 +6197,95 @@ public final class FtaGraphCommand {
       return List.of();
     }
     List<RouteValidationIssue> issues = new ArrayList<>();
-    List<NodeId> nodes = new ArrayList<>();
+    // DYNAMIC 停靠点**不解析到单一节点**（运行时才在若干站台里选一个），
+    // 所以它会被 resolveNodeId 判为空。此前这里直接报 `node-missing`，
+    // 于是每次 `/fta graph build` 之后，凡是带 DYNAMIC 的路线都会刷出一串
+    // "第 N 个停靠点缺少节点"——**全是误报**。
+    //
+    // route 包里本就有共享的 DynamicStopMatcher（isDynamicStop / matchesStop），
+    // FtaRouteCommand 定义路线时也确实做了 DYNAMIC 校验并有专用文案；
+    // 只有建图后这条校验路径两者都没用上。同一件事两处各写各的，正是它们分叉的原因。
+    //
+    // 按**分段**处理：DYNAMIC 停靠点切断可达性链条。既不报缺节点，
+    // 也不随便挑一个站台候选去连边——那会造出假的 `edge-unreachable`。
+    List<List<NodeId>> segments = new ArrayList<>();
+    List<NodeId> current = new ArrayList<>();
     boolean missingNode = false;
     for (RouteStop stop : stops) {
       if (stop == null) {
         continue;
       }
       Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
-      if (nodeIdOpt.isEmpty()) {
-        missingNode = true;
-        addMissingNodeIssue(provider, stop, issues);
+      if (nodeIdOpt.isPresent()) {
+        current.add(nodeIdOpt.get());
         continue;
       }
-      nodes.add(nodeIdOpt.get());
+      if (DynamicStopMatcher.isDynamicStop(stop)) {
+        List<NodeId> candidates = dynamicGraphCandidates(graph, stop);
+        if (candidates.isEmpty()) {
+          // 真的一个站台都不存在——这才是问题，且用 DYNAMIC 专用文案而不是 node-missing。
+          missingNode = true;
+          issues.add(
+              new RouteValidationIssue(
+                  "command.route.define.dynamic-no-valid-tracks",
+                  Map.of(
+                      "seq", String.valueOf(stop.sequence()),
+                      "spec", dynamicSpecText(stop),
+                      "range", "-")));
+        }
+        // 有候选 ⇒ 这个停靠点没问题；但选哪个站台要到运行时才知道，因此在此断段。
+        if (!current.isEmpty()) {
+          segments.add(List.copyOf(current));
+          current.clear();
+        }
+        continue;
+      }
+      missingNode = true;
+      addMissingNodeIssue(provider, stop, issues);
     }
-    if (missingNode || nodes.size() < 2) {
+    if (!current.isEmpty()) {
+      segments.add(List.copyOf(current));
+    }
+    if (missingNode) {
       return List.copyOf(issues);
     }
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
-    for (int i = 0; i < nodes.size() - 1; i++) {
-      NodeId from = nodes.get(i);
-      NodeId to = nodes.get(i + 1);
-      boolean reachable =
-          pathFinder
-              .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
-              .isPresent();
-      if (!reachable) {
-        issues.add(
-            new RouteValidationIssue(
-                "command.route.define.edge-unreachable",
-                Map.of("from", from.value(), "to", to.value())));
+    for (List<NodeId> segment : segments) {
+      for (int i = 0; i < segment.size() - 1; i++) {
+        NodeId from = segment.get(i);
+        NodeId to = segment.get(i + 1);
+        boolean reachable =
+            pathFinder
+                .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+                .isPresent();
+        if (!reachable) {
+          issues.add(
+              new RouteValidationIssue(
+                  "command.route.define.edge-unreachable",
+                  Map.of("from", from.value(), "to", to.value())));
+        }
       }
     }
     return List.copyOf(issues);
+  }
+
+  /** 图中与该 DYNAMIC 停靠点规格相符的全部候选节点。 */
+  private static List<NodeId> dynamicGraphCandidates(RailGraph graph, RouteStop stop) {
+    if (graph == null || stop == null) {
+      return List.of();
+    }
+    List<NodeId> candidates = new ArrayList<>();
+    for (RailNode node : graph.nodes()) {
+      if (node != null && DynamicStopMatcher.matchesStop(node.id(), stop)) {
+        candidates.add(node.id());
+      }
+    }
+    return List.copyOf(candidates);
+  }
+
+  /** DYNAMIC 规格的可读文本，仅用于校验提示。 */
+  private static String dynamicSpecText(RouteStop stop) {
+    return DynamicStopMatcher.parseDynamicSpec(stop).map(Object::toString).orElse("-");
   }
 
   private void addMissingNodeIssue(
