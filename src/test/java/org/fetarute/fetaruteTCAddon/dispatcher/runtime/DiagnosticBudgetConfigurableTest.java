@@ -134,6 +134,30 @@ class DiagnosticBudgetConfigurableTest {
     assertEquals(25, kept, "状态快照不得被预算吞掉：" + out.size());
   }
 
+  /**
+   * 自持单线续行被拒的内层原因必须不受预算约束。
+   *
+   * <p>外层标签把四个互不相同的成因压成同一个字符串；内层原因是唯一能分辨"WS 出库占着平面交叉不走" 到底属于哪一类的证据。它此前根本没进过日志——承载它的 trace 走
+   * SignalComputationTrace.Builder， 那里以**信号灯色**为判据（PROCEED 一律不输出），实服第九轮全场 177 行 SignalTrace 里
+   * 自持续行事件一条都没有。
+   */
+  @Test
+  void selfOwnedContinuationRejectReasonIsNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 12; i++) {
+      gate.accept(
+          "SMART_SELF_OWNED_CONTINUATION_REJECTED train=t"
+              + i
+              + " resource=single:comp:A~B reason=path-does-not-exit-or-continue");
+    }
+
+    long kept =
+        out.stream().filter(l -> l.startsWith("SMART_SELF_OWNED_CONTINUATION_REJECTED")).count();
+    assertEquals(12, kept, "内层原因不得被预算吞掉：" + out.size());
+  }
+
   /** 事务审计不受预算约束——调预算不得动摇这条边界。 */
   @Test
   void transactionAuditsIgnoreTheBudgetEntirely() {

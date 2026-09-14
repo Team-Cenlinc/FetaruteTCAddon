@@ -4594,6 +4594,66 @@ class SimpleOccupancyManagerTest {
     assertEquals("self-owned-single-continuation-rejected", blocked.reason());
   }
 
+  /**
+   * 自持续行被拒时，必须把**内层**原因单独输出一行。
+   *
+   * <p>外层 {@code decision.reason()} 把四个互不相同的成因（direction-unknown / path-does-not-exit-or-continue /
+   * external-hard-blocker-ahead / external-single-blocker-ahead）
+   * 压成同一个字符串，而它被十余处用例按等值钉住、不能改。内层原因是唯一能分辨 "WS 出库占着截断正线的单线区 171 秒不走"属于哪一类的证据。
+   *
+   * <p>它此前**根本没进过日志**：承载它的 SMART_SELF_OWNED_CONTINUATION_* 走 SignalComputationTrace.Builder，那里
+   * {@code shouldEmit} 以信号灯色为判据， 且所有事件压成单一 token {@code SignalTrace}——实服第九轮全场 177 行里一条自持续行事件都没有。
+   */
+  @Test
+  void selfOwnedContinuationRejectEmitsTheInnerReason() {
+    List<String> emitted = new java.util.ArrayList<>();
+    SignalComputationTrace.configureLogger(emitted::add);
+    try {
+      HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;
+      SimpleOccupancyManager manager =
+          new SimpleOccupancyManager(headwayRule, SignalAspectPolicy.defaultPolicy());
+      Instant now = Instant.parse("2026-01-01T00:00:00Z");
+      OccupancyResource conflict = OccupancyResource.forConflict("single:inner:A~B");
+      OccupancyResource nodeB = OccupancyResource.forNode(NodeId.of("B"));
+
+      manager.acquire(singleConflictRequest("train", now, conflict, CorridorDirection.A_TO_B));
+      manager.acquire(
+          new OccupancyRequest(
+              "blocker", Optional.empty(), now.plusSeconds(1), List.of(nodeB), Map.of(), 0));
+
+      OccupancyRequest base =
+          singleConflictRequest("train", now.plusSeconds(2), conflict, CorridorDirection.UNKNOWN);
+      OccupancyRequest blockedRequest =
+          new OccupancyRequest(
+                  base.trainName(),
+                  base.routeId(),
+                  base.now(),
+                  List.of(conflict, nodeB),
+                  base.corridorDirections(),
+                  base.conflictEntryOrders(),
+                  base.priority(),
+                  base.purpose(),
+                  base.conflictReleaseHints(),
+                  base.resourceIntents())
+              .withDirectedContext(base.directedContext());
+
+      OccupancyDecision blocked = manager.canEnter(blockedRequest);
+
+      assertFalse(blocked.allowed(), "前置：该请求必须确实被拒，否则本用例不判别任何东西");
+      String inner =
+          emitted.stream()
+              .filter(line -> line.startsWith("SMART_SELF_OWNED_CONTINUATION_REJECTED"))
+              .findFirst()
+              .orElseThrow(() -> new AssertionError("没有输出内层原因：" + emitted));
+      assertTrue(inner.contains("reason="), inner);
+      assertTrue(inner.contains("pathExitsZone="), inner);
+      assertTrue(inner.contains("externalSinglePresence="), inner);
+      assertTrue(inner.contains("resource=" + conflict.key()), "必须点名是哪个单线区：" + inner);
+    } finally {
+      SignalComputationTrace.configureLogger(null);
+    }
+  }
+
   @Test
   void selfOwnedSingleConflictOppositeDirectionStillBlocks() {
     HeadwayRule headwayRule = (routeId, resource) -> Duration.ZERO;

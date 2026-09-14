@@ -291,6 +291,11 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 被预算吞掉就等于没加。规模由车队规模与周期节拍决定，不随 tick 放大：
           // 生产端只为"已被挡住超过 10 秒"的车输出，实服约 27 行/分钟。
           "SMART_BLOCKING_SNAPSHOT",
+          // 自持单线续行被拒的**内层**原因。四个互不相同的成因此前被外层标签压成同一个字符串，
+          // 而承载它的 SMART_SELF_OWNED_CONTINUATION_* 走 SignalComputationTrace.Builder——
+          // 那里以信号灯色为判据（PROCEED 一律不输出），实服全场一条都没有。
+          // 生产端用 emitRaw，自带按整行内容去重：内层原因不变就不会重复输出。
+          "SMART_SELF_OWNED_CONTINUATION_REJECTED",
           // 提权被空耗的证据；每个预约至多一次。
           "SMART_UNLOCK_NO_PHYSICAL_PROGRESS",
           // 队列仲裁结论：生产端已按 (资源, 请求方) 的结论签名去重，只有赢家、决定、原因或位次变化才输出。

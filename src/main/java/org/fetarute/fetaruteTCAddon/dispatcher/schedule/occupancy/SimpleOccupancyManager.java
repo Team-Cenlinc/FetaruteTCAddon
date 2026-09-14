@@ -4108,6 +4108,43 @@ public final class SimpleOccupancyManager
                 "externalBlockerResource",
                 externalBlockerDetail.map(ExternalBlockerDetail::resourceKey).orElse("-"))
             .request(request));
+    // 把**内层**原因单独输出一条原始诊断。
+    //
+    // 外层标签把四个互不相同的内层原因压成同一个字符串（direction-unknown /
+    // path-does-not-exit-or-continue / external-hard-blocker-ahead /
+    // external-single-blocker-ahead），
+    // 于是读日志只知道"续行被拒"，不知道被哪一条拒。而 `decision.reason()` 被十余处用例按等值钉住，
+    // 不能直接改，所以走独立的一行。
+    //
+    // 为什么不能靠已有的 SMART_SELF_OWNED_CONTINUATION_* trace：它们走 SignalComputationTrace.Builder，
+    // 那里 `shouldEmit` 以**信号灯色**为判据（PROCEED 一律不输出），且全部事件压成单一 token
+    // `SignalTrace`。实服 2026-09-14 第九轮全场 177 行 SignalTrace，自持续行事件一条都没有。
+    // `emitRaw` 绕开那套灯色门控，并自带按整行内容的去重——内层原因不变就不会重复刷屏。
+    //
+    // 待答的问题：WS 从 LWN 段场出库的车占着截断正线的单线区 171 秒不走，
+    // 到底是 path-does-not-exit-or-continue 还是 external-single-blocker-ahead——
+    // `blockedBy` 分不出来，因为 externalSinglePresence 为真时不会往该列表里加任何 claim。
+    SignalComputationTrace.emitRaw(
+        "SMART_SELF_OWNED_CONTINUATION_REJECTED train="
+            + request.trainName()
+            + " resource="
+            + resource.key()
+            + " reason="
+            + reason
+            + " heldDirection="
+            + heldDirection
+            + " requestedDirection="
+            + requestedDirection
+            + " directionMatches="
+            + directionMatches
+            + " pathExitsZone="
+            + pathExitsZone
+            + " externalBlockerAhead="
+            + externalBlockerAhead
+            + " externalSinglePresence="
+            + externalSinglePresence
+            + " oppositeSingleAhead="
+            + oppositeSingleAhead);
     return Optional.of(
         new OccupancyDecision(
             false,
