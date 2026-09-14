@@ -283,4 +283,29 @@ class DiagnosticBudgetConfigurableTest {
         out.stream().filter(l -> l.startsWith("SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED")).count(),
         "死锁确认不得被预算吞掉：" + out.size());
   }
+
+  /**
+   * 「证不出会离开单线区」的**依据**必须不受预算约束。
+   *
+   * <p>结论一直看得见（{@code ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF}），依据却从来没进过日志—— 承载它的 trace 走 {@code
+   * SignalComputationTrace.emit}，那里以**信号灯色**为门。 实服第十二轮它 0 条，且被预算丢弃也是 0 条：**不是被丢的，是压根没输出**。
+   *
+   * <p>代价：`SURC-WS-LC-7203` 整轮 74 分钟停在这条停因上、**到站 0 次**，一步都没动过， 而"为什么证不出"无从得知。与 {@code 4a2e592}
+   * 同形状、同解法。
+   */
+  @Test
+  void singleZoneExitProofFailureReasonIsNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 14; i++) {
+      gate.accept(
+          "SMART_ENTRY_LOOKAHEAD_BLOCKED train=t"
+              + i
+              + " entryZone=single:section:bridge:A~B failureReason=exit-not-visible-after-extension");
+    }
+
+    long kept = out.stream().filter(l -> l.startsWith("SMART_ENTRY_LOOKAHEAD_BLOCKED")).count();
+    assertEquals(14, kept, "出口证明失败的依据不得被预算吞掉：" + out.size());
+  }
 }

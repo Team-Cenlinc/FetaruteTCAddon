@@ -25030,6 +25030,36 @@ public final class RuntimeDispatchService {
             .field("zoneMembership", "ENTERING_ZONE")
             .field("drainLeader", false)
             .request(request));
+    // 同时用 emitRaw 单独输出一行。
+    //
+    // 上面那条走 SignalComputationTrace.emit：以**信号灯色**为门（PROCEED 一律不输出），
+    // 且所有事件被压成单一 token。实服第十二轮它**一条都没进过日志**——不是被预算丢的，是压根没输出。
+    //
+    // 代价是实打实的：`SURC-WS-LC-7203` 整轮 74 分钟停在
+    // `ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF` 上、**到站 0 次**，一步都没动过，
+    // 而"为什么证不出它会离开"这条唯一的解释出不来，只能看到结论、看不到依据。
+    //
+    // 与 `4a2e592`（自持单线续行的内层原因）同一个形状、同一个解法：
+    // emitRaw 绕开灯色门控，并自带按整行内容去重——字段不变就不会重复刷屏。
+    SignalComputationTrace.emitRaw(
+        "SMART_ENTRY_LOOKAHEAD_BLOCKED train="
+            + trainName
+            + " entryZone="
+            + (conflict == null ? "-" : conflict.key())
+            + " failureReason="
+            + (lookahead == null ? "exit-not-visible-after-extension" : lookahead.failureReason())
+            + " exitFeasible="
+            + (lookahead != null && lookahead.exitFeasible())
+            + " extensionAttempted="
+            + (lookahead != null && lookahead.extensionAttempted())
+            + " entryZoneStartIndex="
+            + (lookahead == null ? -1 : lookahead.entryZoneStartIndex())
+            + " exitIndexBeforeExtension="
+            + (lookahead == null ? -1 : lookahead.exitIndexBeforeExtension())
+            + " exitIndexAfterExtension="
+            + (lookahead == null ? -1 : lookahead.exitIndexAfterExtension())
+            + " lookaheadWindowNodeCount="
+            + (lookahead == null ? 0 : lookahead.lookaheadWindowNodeCount()));
   }
 
   private Optional<OccupancyResource> singleConflictForEdge(RailGraph graph, RailEdge edge) {

@@ -320,6 +320,12 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。
           // 体量受限于同时在途的预约数（实服每轮 225 个），不随 tick 放大。
           "SMART_UNLOCK_PHYSICAL_PROGRESS_SAVED",
+          // 「已在区内、要续行、但证不出会离开」的**依据**。结论（ALREADY_INSIDE_CONTINUE_
+          // MISSING_EXIT_PROOF）一直看得见，依据却从来没进过日志——承载它的 trace 走
+          // SignalComputationTrace.emit，那里以信号灯色为门。实服第十二轮 0 条、被预算丢弃也是 0 条。
+          // 代价：`SURC-WS-LC-7203` 整轮 74 分钟停在这条上、到站 0 次，而无从判断为什么。
+          // 生产端用 emitRaw，自带按整行内容去重：字段不变就不重复输出。
+          "SMART_ENTRY_LOOKAHEAD_BLOCKED",
           // 下面这组是"环终于闭合了没有、闭合之后做了什么"的完整链条。
           //
           // 为什么必须必留：实服第十轮丢弃率 **91%**（输出 49790 行、丢弃 509047 行）。
