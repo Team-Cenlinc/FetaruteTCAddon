@@ -445,6 +445,7 @@ public final class StorageSchema {
                     length_blocks %s NOT NULL,
                     base_speed_limit %s NOT NULL,
                     bidirectional %s NOT NULL,
+                    footprint_json %s NOT NULL DEFAULT '',
                     PRIMARY KEY (world_id, node_a, node_b)
                 );
                 """,
@@ -454,7 +455,8 @@ public final class StorageSchema {
         dialect.stringType(),
         dialect.intType(),
         dialect.doubleType(),
-        dialect.intType());
+        dialect.intType(),
+        dialect.stringType());
   }
 
   private String railEdgeOverrides(SqlDialect dialect) {

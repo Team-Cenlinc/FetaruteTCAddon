@@ -223,11 +223,25 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     ArgumentCaptor<Collection<RailEdgeRecord>> persistedEdges =
         ArgumentCaptor.forClass(Collection.class);
     verify(edgeRepo).replaceWorld(eq(worldId), persistedEdges.capture());
+    // 拓扑照旧逐字段钉住。
     assertEquals(
-        Set.of(
-            new RailEdgeRecord(worldId, firstEdge, 2, 0.0, true),
-            new RailEdgeRecord(worldId, secondEdge, 3, 0.0, true)),
-        Set.copyOf(persistedEdges.getValue()));
+        Set.of(firstEdge, secondEdge),
+        persistedEdges.getValue().stream()
+            .map(RailEdgeRecord::edgeId)
+            .collect(java.util.stream.Collectors.toSet()));
+    assertEquals(
+        Set.of(2, 3),
+        persistedEdges.getValue().stream()
+            .map(RailEdgeRecord::lengthBlocks)
+            .collect(java.util.stream.Collectors.toSet()));
+
+    // 而逐边足迹**必须跟着一起落库**——这是本次改动的要害。
+    // 不落库的话，足迹只在完整图构建时存在，从快照恢复时 cell→edge 索引必然为空、
+    // cellCoverageAvailable() 为假，一切以实测覆盖为放行条件的机制全部 fail-closed 到一个都不放。
+    // 实服第十二轮实测 cellCoverageAvailable=false，而尾部保护占全网滞留的 38%。
+    assertTrue(
+        persistedEdges.getValue().stream().anyMatch(record -> !record.footprintCells().isEmpty()),
+        () -> "逐边足迹必须落库，否则 Phase 4 的地基永远是空的：" + persistedEdges.getValue());
 
     ArgumentCaptor<RailInterlockingSnapshotRecord> persistedInterlocking =
         ArgumentCaptor.forClass(RailInterlockingSnapshotRecord.class);

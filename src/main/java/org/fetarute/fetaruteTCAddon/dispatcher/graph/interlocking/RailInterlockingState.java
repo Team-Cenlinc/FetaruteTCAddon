@@ -190,6 +190,16 @@ public final class RailInterlockingState {
     return index.cellCoverageAvailable();
   }
 
+  /**
+   * 逐边足迹（由 cell→edge 索引反转而得），供持久化写出。
+   *
+   * <p>索引不可用时返回空 Map。调用方**必须**先用 {@link #cellCoverageAvailable()} 区分
+   * "确实没有"与"无从判断"——把后者当成前者写进库，会用一份空足迹覆盖掉库里原有的好数据。
+   */
+  public Map<EdgeId, Set<RailFootprintCell>> footprintCellsByEdge() {
+    return index.footprintCellsByEdge();
+  }
+
   public Set<String> zoneKeysForEdge(EdgeId edgeId) {
     if (edgeId == null) {
       return Set.of();

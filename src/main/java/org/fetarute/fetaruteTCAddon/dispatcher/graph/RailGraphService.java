@@ -15,6 +15,7 @@ import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingEdgeSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailComponentCautionRecord;
@@ -666,11 +667,32 @@ public final class RailGraphService {
       edgesById.put(edgeId, railEdge);
     }
 
+    // 库里带逐边足迹时，用**完整构建**那条路径重建联锁状态——只有它会建出 cell→edge 反向索引。
+    //
+    // 从 Zone 快照恢复（restoreInterlockingState）按设计只有 Zone、没有逐边足迹，
+    // 索引必然为空、cellCoverageAvailable() 为假，于是一切以实测覆盖为放行条件的机制
+    // （尾部保护释放 / Phase 4）全部 fail-closed 到一个都不放。
+    // 实服第十二轮实测正是 cellCoverageAvailable=false，而尾部保护占全网滞留的 38%。
+    //
+    // 只有**当真有足迹**时才走这条；否则保持原路径，行为一字不变。
+    java.util.Map<EdgeId, RailEdgeFootprint> footprintsByEdge = new HashMap<>();
+    for (RailEdgeRecord record : edgeRecords) {
+      if (record == null || record.edgeId() == null || record.footprintCells().isEmpty()) {
+        continue;
+      }
+      footprintsByEdge.put(
+          record.edgeId(),
+          new RailEdgeFootprint(
+              RailEdgeFootprint.CURRENT_FORMAT_VERSION, true, record.footprintCells()));
+    }
     RailInterlockingState interlockingState =
         resolveWorldId(nodeRecords, edgeRecords)
             .map(
                 worldId ->
-                    restoreInterlockingState(worldId, edgesById.keySet(), interlockingSnapshot))
+                    footprintsByEdge.isEmpty()
+                        ? restoreInterlockingState(
+                            worldId, edgesById.keySet(), interlockingSnapshot)
+                        : RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge))
             .orElseGet(RailInterlockingState::unavailable);
     return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of(), interlockingState);
   }

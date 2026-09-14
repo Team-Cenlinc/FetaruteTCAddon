@@ -6697,6 +6697,19 @@ public final class FtaGraphCommand {
     java.time.Instant builtAt = result.builtAt();
     java.util.UUID worldId = world.getUID();
 
+    // 逐边足迹必须跟着一起写库，否则下次启动从快照恢复时 cell→edge 索引必然为空、
+    // cellCoverageAvailable() 为假，一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase 4）
+    // 全部 fail-closed 到一个都不放。实服第十二轮实测确认 cellCoverageAvailable=false，
+    // 而尾部保护占全网滞留的 38%。
+    //
+    // 足迹在图对象上不再单独持有（建索引时被消费），所以从 cell→edge 索引反转回来。
+    // **覆盖不可用时一律写空**：那种情况下反转结果是空 Map，若当成"这些边没有足迹"写进去，
+    // 就会用一份空足迹覆盖掉库里原有的好数据——所以下面显式区分。
+    java.util.Map<EdgeId, java.util.Set<RailFootprintCell>> footprints =
+        (result.graph() instanceof RailGraphInterlockingSupport support
+                && support.interlockingState().cellCoverageAvailable())
+            ? support.interlockingState().footprintCellsByEdge()
+            : java.util.Map.of();
     List<RailEdgeRecord> edges =
         result.graph().edges().stream()
             .map(
@@ -6706,7 +6719,8 @@ public final class FtaGraphCommand {
                         edge.id(),
                         edge.lengthBlocks(),
                         edge.baseSpeedLimit(),
-                        edge.bidirectional()))
+                        edge.bidirectional(),
+                        footprints.getOrDefault(edge.id(), java.util.Set.of())))
             .toList();
     List<RailNodeRecord> nodes = result.nodes();
 

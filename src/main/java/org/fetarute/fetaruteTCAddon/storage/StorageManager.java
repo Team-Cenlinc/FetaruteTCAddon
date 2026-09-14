@@ -181,6 +181,7 @@ public final class StorageManager {
    */
   private void applyCompatibilityMigrations(Connection connection) throws SQLException {
     ensureRailGraphSnapshotSignatureColumn(connection);
+    ensureRailEdgeFootprintColumn(connection);
     ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);
   }
@@ -206,6 +207,39 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 rail_graph_snapshots.node_signature: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 rail_graph_snapshots.node_signature: " + ex.getMessage());
+    }
+  }
+
+  /**
+   * 兼容性迁移：为旧版 rail_edges 表补齐 footprint_json 列。
+   *
+   * <p>逐边足迹此前**从未被持久化**：它在图构建时存在，却在写库那一步丢失 （`RailEdge` 不带它，`RailInterlockingState.from(...)`
+   * 建完索引就消费掉了）。 于是每次从快照恢复图，cell→edge 索引必然为空、{@code cellCoverageAvailable()} 为假，
+   * 一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase 4）全部 fail-closed 到一个都不放。 实服第十二轮实测确认 {@code
+   * cellCoverageAvailable=false}，而尾部保护占全网滞留的 38%。
+   *
+   * <p>附加式、幂等，与既有两处迁移同形：加列失败且原因是"已存在"时静默返回。
+   */
+  private void ensureRailEdgeFootprintColumn(java.sql.Connection connection) {
+    String edgesTable = storageSchema.tablePrefix() + "rail_edges";
+    String sql =
+        "ALTER TABLE "
+            + edgesTable
+            + " ADD COLUMN footprint_json "
+            + dialect.stringType()
+            + " NOT NULL DEFAULT ''";
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: rail_edges.footprint_json (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 rail_edges.footprint_json: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 rail_edges.footprint_json: " + ex.getMessage());
     }
   }
 

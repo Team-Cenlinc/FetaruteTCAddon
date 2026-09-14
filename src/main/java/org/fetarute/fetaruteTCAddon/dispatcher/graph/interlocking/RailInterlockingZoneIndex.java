@@ -234,6 +234,33 @@ public final class RailInterlockingZoneIndex {
     return !edgeIdsByCell.isEmpty();
   }
 
+  /**
+   * 把 cell→edge 反向索引**反转**回逐边足迹，供持久化写出。
+   *
+   * <p>为什么需要反转而不是留存原始足迹：{@code from(...)} 在建索引时就把 {@code footprintsByEdge} 消费掉了，图对象上不再持有它；而 {@code
+   * RailEdge} 本身也不带足迹。于是写库那一步 （`FtaGraphCommand` 由 `RailEdge` 建 `RailEdgeRecord`）**根本拿不到足迹**，
+   * 逐边足迹就此丢失——下次启动从快照恢复时索引必然为空， {@link #cellCoverageAvailable()} 为假，一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase
+   * 4） 全部 fail-closed 到一个都不放。实服第十二轮实测正是 {@code cellCoverageAvailable=false}。
+   *
+   * <p>反转是无损的：索引本就是由足迹逐 cell 展开而成，倒回去得到同一组 cell，且不额外占内存。
+   *
+   * <p>只包含**参与联锁计算**的边（{@code participatesInInterlocking()} 为真的那些）； 索引不可用时返回空 Map——调用方必须先用 {@link
+   * #cellCoverageAvailable()} 区分 "确实没有"与"无从判断"，不得把后者当成前者写进库。
+   */
+  public Map<EdgeId, Set<RailFootprintCell>> footprintCellsByEdge() {
+    if (edgeIdsByCell.isEmpty()) {
+      return Map.of();
+    }
+    Map<EdgeId, Set<RailFootprintCell>> byEdge = new HashMap<>();
+    edgeIdsByCell.forEach(
+        (cell, edges) ->
+            edges.forEach(
+                edge -> byEdge.computeIfAbsent(edge, ignored -> new TreeSet<>()).add(cell)));
+    Map<EdgeId, Set<RailFootprintCell>> immutable = new HashMap<>();
+    byEdge.forEach((edge, cells) -> immutable.put(edge, Set.copyOf(cells)));
+    return Map.copyOf(immutable);
+  }
+
   /** 返回指定区间参与的全部联锁区键；未知区间返回空集合。 */
   public Set<String> zoneKeysForEdge(EdgeId edgeId) {
     if (edgeId == null) {

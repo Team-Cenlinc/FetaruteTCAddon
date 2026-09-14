@@ -328,6 +328,21 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, Integer>
       livePhysicalFootprintFingerprints = new java.util.concurrent.ConcurrentHashMap<>();
 
+  /** 车体指纹的上次采样时刻（按车名键），用于节流。 */
+  private final java.util.concurrent.ConcurrentMap<String, Instant> livePhysicalFootprintSampledAt =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 车体指纹的采样间隔。
+   *
+   * <p>取 2 秒的理由：这个指纹**唯一的消费者**是「无物理进展」判据，而那条判据的宽限是 {@link #SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS}（25
+   * 秒）。按 2 秒采样仍有 12 倍余量。
+   *
+   * <p>而 {@code observeLiveRailFootprint} 每次调用都要遍历列车各节的 tracked rail、 做 Bukkit 世界查询、光栅化路径——实服
+   * {@code dispatch-tick-interval-ticks: 20}（每秒一次）× 25 辆车 意味着每秒 25 次这样的遍历，全在主线程上，纯属过采样。
+   */
+  private static final Duration LIVE_FOOTPRINT_SAMPLE_INTERVAL = Duration.ofSeconds(2);
+
   /** 解锁预约创建时的车体方块指纹基线（按 reservationId 键）；缺失表示"当时无从判断"。 */
   private final java.util.concurrent.ConcurrentMap<String, Integer> smartUnlockFootprintBaselines =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -3812,6 +3827,15 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return;
     }
+    // 节流：观测本身不便宜（遍历列车各节 tracked rail + Bukkit 世界查询 + 路径光栅化），
+    // 而消费方只需要 25 秒的分辨率。不节流就是每秒每车做一次，纯属浪费主线程。
+    Instant sampleNow = clockNow();
+    Instant lastSampled = livePhysicalFootprintSampledAt.get(key);
+    if (lastSampled != null
+        && Duration.between(lastSampled, sampleNow).compareTo(LIVE_FOOTPRINT_SAMPLE_INTERVAL) < 0) {
+      return;
+    }
+    livePhysicalFootprintSampledAt.put(key, sampleNow);
     OptionalInt fingerprint = livePhysicalFootprintFingerprint(train);
     if (fingerprint.isPresent()) {
       livePhysicalFootprintFingerprints.put(key, fingerprint.getAsInt());
@@ -15179,6 +15203,11 @@ public final class RuntimeDispatchService {
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
     dynamicCapacityWaits.remove(trainName);
     blockerSnapshots.remove(normalizeTrainKey(trainName));
+    // 车体指纹与采样时刻同样按车名键：不随任务重置清掉，就会随 layover 改名无界增长，
+    // 而且旧名残留的指纹会让「无物理进展」判据拿上一趟的位置去比这一趟——
+    // 本项目已经三次栽在"旧名残留记录"上（改名 / 实时日志切面 / activeStopStates）。
+    livePhysicalFootprintFingerprints.remove(normalizeTrainKey(trainName));
+    livePhysicalFootprintSampledAt.remove(normalizeTrainKey(trainName));
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
     if (routeOpt.isEmpty()) {

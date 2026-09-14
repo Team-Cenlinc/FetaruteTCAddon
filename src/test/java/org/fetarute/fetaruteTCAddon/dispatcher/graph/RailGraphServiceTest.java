@@ -309,4 +309,81 @@ class RailGraphServiceTest {
         RailInterlockingState.from(worldId, edges.keySet(), Map.of(edge.id(), footprint));
     return new SimpleRailGraph(nodes, edges, Set.of(), state);
   }
+
+  /**
+   * 逐边足迹必须能往返持久化——否则 Phase 4 的地基永远是空的。
+   *
+   * <p>足迹在图构建时存在，却在写库那一步丢失：`RailEdge` 不带它， `RailInterlockingState.from(...)` 建完索引就把它消费了，而
+   * `RailEdgeRecord` 此前没有这个字段。 于是每次从快照恢复图，cell→edge 索引必然为空、{@code cellCoverageAvailable()} 为假，
+   * 一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase 4）全部 fail-closed 到**一个都不放**。
+   *
+   * <p>实服第十二轮实测确认 {@code cellCoverageAvailable=false}， 而 `PROTECTIVE_RETAIN_HOLD` 占全网滞留的
+   * **38%**（260 车·分 / 691 车·分，74 分钟一轮）， 且集中在 MT 的 PTK→SPB→JBS/WSD 主走廊上（`S:WSD:2` 出站中位 337 秒）。
+   *
+   * <p>本用例的判别核心是**带足迹与不带足迹必须得到相反的覆盖可用性**—— 只断言"能读回来"是不够的，那不证明它真的重建出了索引。
+   */
+  @Test
+  void edgeFootprintsSurvivePersistenceAndRebuildTheCellCoverageIndex() {
+    UUID worldId = UUID.randomUUID();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    EdgeId edgeId = EdgeId.undirected(a, b);
+    List<RailNodeRecord> nodes = List.of(nodeRecord(worldId, a, 0), nodeRecord(worldId, b, 10));
+    RailFootprintCell cell = new RailFootprintCell(2, 64, 8);
+
+    // 一：带足迹的记录 ⇒ 必须走完整构建路径，cell→edge 索引可用。
+    RailGraph withFootprint =
+        RailGraphService.buildGraphFromRecords(
+            nodes,
+            List.of(new RailEdgeRecord(worldId, edgeId, 10, 0.0, true, Set.of(cell))),
+            Optional.empty());
+    RailInterlockingState withState =
+        ((RailGraphInterlockingSupport) withFootprint).interlockingState();
+    assertTrue(withState.cellCoverageAvailable(), "带足迹持久化回来必须重建出 cell→edge 索引，否则 Phase 4 的地基仍然是空的");
+    assertTrue(
+        withState.edgesForCell(cell).contains(edgeId),
+        "反向索引必须能по方块查回那条边：" + withState.edgesForCell(cell));
+
+    // 二：不带足迹（旧库 / 旧行）⇒ 保持原行为，索引不可用，调用方 fail-closed。
+    RailGraph withoutFootprint =
+        RailGraphService.buildGraphFromRecords(
+            nodes, List.of(new RailEdgeRecord(worldId, edgeId, 10, 0.0, true)), Optional.empty());
+    RailInterlockingState withoutState =
+        ((RailGraphInterlockingSupport) withoutFootprint).interlockingState();
+    assertFalse(withoutState.cellCoverageAvailable(), "没有足迹时必须如实报告索引不可用——缺证据不得当成证据");
+
+    // 判别核心：两条路径必须得到**相反**的结果。只要这条成立，
+    // 这次改动就确实在做它该做的事，而不是一个恒真或恒假的摆设。
+    assertNotEquals(
+        withState.cellCoverageAvailable(),
+        withoutState.cellCoverageAvailable(),
+        "带足迹与不带足迹必须得到相反的覆盖可用性");
+  }
+
+  /** 足迹编解码必须往返一致；坏数据一律 fail-closed 成空集合，绝不抛出。 */
+  @Test
+  void footprintCodecRoundTripsAndFailsClosedOnGarbage() {
+    Set<RailFootprintCell> cells =
+        Set.of(new RailFootprintCell(1, 2, 3), new RailFootprintCell(-4, 64, 700));
+    String encoded =
+        org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeFootprintCodec.encode(cells);
+    assertEquals(
+        cells,
+        org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeFootprintCodec.decode(
+            encoded),
+        "往返必须一致");
+    for (String garbage :
+        List.of("", "   ", "not-json", "{}", "[[1,2]]", "[[1,2,3,4]]", "[1,2,3]")) {
+      assertTrue(
+          org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .graph
+              .persist
+              .RailEdgeFootprintCodec
+              .decode(garbage)
+              .isEmpty(),
+          "坏数据必须 fail-closed 成空集合而不是抛出：" + garbage);
+    }
+  }
 }
