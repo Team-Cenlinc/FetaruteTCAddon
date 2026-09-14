@@ -15224,6 +15224,16 @@ public final class RuntimeDispatchService {
       }
       trainName = regeneratedTrainName;
       request = request.withTrainName(trainName);
+      // 旧名的停因必须随改名一并退休。
+      //
+      // 这条链路逐个 rename 各个注册表（layoverRegistry / turnbackFootprintGuards / effectiveNodes /
+      // authority owner），**唯独没碰 activeStopStates**，也不走 migrateRuntimeOwner（那条路径是清理它的）。
+      // 于是旧名的 STOP 记录永久留在表里：实服 2026-09-13 第六轮 24 次复用改名，留下 **17 个**旧名
+      // 停在 DWELL_ACTIVE 上，`remainingSeconds` 冻结在 19，最长 2226 秒——而那些车其实好好地
+      // 以新名在跑。它同时污染一切按停因统计的诊断（新加的 SMART_BLOCKING_SNAPSHOT 里 52% 是这种幽灵）。
+      //
+      // 新服务从干净状态开始，旧停因没有任何延续意义，直接清除而不是迁移。
+      clearStopState(previousTrainName, "layover-reuse-rename");
       debugLogger.accept("Layover 复用: trainName 更新为 " + trainName);
     }
     if (!(occupancyManager instanceof AuthorityHandoffSupport handoffSupport)

@@ -55,8 +55,10 @@ final class DispatchInvariants {
       Set<String> disappearedClaimKeys,
       Set<String> destroyedTrainKeys,
       Set<String> migratedAwayKeys,
-      Set<String> progressRegistryKeys) {
+      Set<String> progressRegistryKeys,
+      Set<String> stopStateKeys) {
     Sample {
+      stopStateKeys = stopStateKeys == null ? Set.of() : Set.copyOf(stopStateKeys);
       claims = claims == null ? List.of() : List.copyOf(claims);
       routePathsByTrain = routePathsByTrain == null ? Map.of() : Map.copyOf(routePathsByTrain);
       adjacency = adjacency == null ? Map.of() : Map.copyOf(adjacency);
@@ -627,6 +629,14 @@ final class DispatchInvariants {
     for (String key : sample.progressRegistryKeys()) {
       if (sample.migratedAwayKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
         reported.add("I9 迁移后的旧名仍在进度表中: train=" + key);
+      }
+    }
+    for (String key : sample.stopStateKeys()) {
+      if (sample.migratedAwayKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
+        // 旧名的停因不退休，会永久留在 activeStopStates 里：实服 2026-09-13 第六轮 24 次
+        // layover 复用改名留下 17 个旧名停在 DWELL_ACTIVE 上（remainingSeconds 冻结、最长 2226 秒），
+        // 而那些车其实好好地以新名在跑。它还会污染一切按停因统计的诊断。
+        reported.add("I9 迁移后的旧名仍留有停因记录: train=" + key);
       }
     }
     violations.addAll(reported);

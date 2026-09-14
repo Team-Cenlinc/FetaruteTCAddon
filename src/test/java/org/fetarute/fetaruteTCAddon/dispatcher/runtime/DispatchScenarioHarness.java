@@ -1124,6 +1124,18 @@ final class DispatchScenarioHarness {
   }
 
   /** 返回按列车名排序的 claim 快照，避免枚举顺序进入断言。 */
+  /** 反射读出 activeStopStates 的键集合；I9 需要它来断言旧名的停因也退休了。 */
+  @SuppressWarnings("unchecked")
+  private Set<String> activeStopStateKeys() {
+    try {
+      var field = RuntimeDispatchService.class.getDeclaredField("activeStopStates");
+      field.setAccessible(true);
+      return Set.copyOf(((java.util.Map<String, ?>) field.get(service)).keySet());
+    } catch (ReflectiveOperationException ex) {
+      throw new AssertionError("读不到 activeStopStates", ex);
+    }
+  }
+
   List<OccupancyClaim> sortedClaims() {
     List<OccupancyClaim> claims = new ArrayList<>(occupancy.snapshotClaims());
     claims.sort(
@@ -1409,7 +1421,8 @@ final class DispatchScenarioHarness {
             disappearedClaimKeys(),
             destroyedTrainKeys,
             migratedAwayKeys,
-            Set.copyOf(registry.snapshot().keySet()));
+            Set.copyOf(registry.snapshot().keySet()),
+            activeStopStateKeys());
     tallyQueueContention(sample);
     tallyWaitCycles();
     tallyBlockerSnapshots();
