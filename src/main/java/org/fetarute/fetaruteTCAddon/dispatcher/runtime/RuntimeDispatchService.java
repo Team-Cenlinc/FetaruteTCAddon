@@ -3501,9 +3501,38 @@ public final class RuntimeDispatchService {
                 + " lastPassedGraphNode="
                 + reservation.initialLastPassedGraphNode()
                 + " currentNodeChanged="
-                + nodeChanged);
+                + nodeChanged
+                // 没有这三个字段，就分不清"车真的没动"和"物理判据压根没记上"——
+                // `a404912` 上线后 no-physical-progress 不降反升，而我无法归因，正是因为漏了它们。
+                // 判据本身可以是对的却无效（车确实没动），也可以是 fail-closed 空转（指纹缺失）；
+                // 这两种要采取的下一步完全相反，必须能分开。
+                + " footprintBaseline="
+                + smartUnlockFootprintBaselines.getOrDefault(reservation.reservationId(), null)
+                + " footprintCurrent="
+                + livePhysicalFootprintFingerprints.getOrDefault(
+                    normalizeTrainKey(reservation.trainName()), null)
+                + " footprintMoved="
+                + physicallyMoved);
         rollbackSmartUnlockReservation(reservation, "no-physical-progress");
         continue;
+      }
+      // 物理判据**救下**了这个预约：原判据要回滚，而车体方块证明它确实动了。
+      // 这是 `a404912` 唯一的生效证据——没有它，"修复有没有用"只能靠猜。
+      if (physicallyMoved
+          && noProgressGrace < reservation.ttlTicks()
+          && hasRecordedLastPassedBaseline(reservation)
+          && !lastPassedChanged
+          && !blockersReleased
+          && aliveTicks >= noProgressGrace) {
+        debugLogger.accept(
+            "SMART_UNLOCK_PHYSICAL_PROGRESS_SAVED reservationId="
+                + reservation.reservationId()
+                + " train="
+                + reservation.trainName()
+                + " aliveTicks="
+                + aliveTicks
+                + " graceTicks="
+                + noProgressGrace);
       }
       if (reservation.reevaluationRequested() && tokenInvalid) {
         debugLogger.accept(

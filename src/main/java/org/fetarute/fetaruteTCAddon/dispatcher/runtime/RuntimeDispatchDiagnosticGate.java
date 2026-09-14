@@ -315,6 +315,11 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 得到代码路径俱在、trace 照常输出、却从不触发的结果——本项目已栽过三次的形状。
           // 每次图激活至多一行，不随 tick 放大。
           "SMART_INTERLOCKING_COVERAGE",
+          // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
+          // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
+          // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。
+          // 体量受限于同时在途的预约数（实服每轮 225 个），不随 tick 放大。
+          "SMART_UNLOCK_PHYSICAL_PROGRESS_SAVED",
           // 下面这组是"环终于闭合了没有、闭合之后做了什么"的完整链条。
           //
           // 为什么必须必留：实服第十轮丢弃率 **91%**（输出 49790 行、丢弃 509047 行）。
