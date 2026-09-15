@@ -845,9 +845,12 @@ public final class TrainHealthMonitor {
     debugLogger.accept(
         "SMART_RECOVERY_ACTION_ORDER train="
             + trainName
+            // 这行宣告过六个动作，而实际只实现了三个——SMART_HOLD_FOLLOWERS 与
+            // SMART_DESTROY_CANDIDATE 从来不存在（destroy 走的是另一条 fallback 路径）。
+            // 日志宣告的恢复能力是实际的两倍，读日志的人（包括我）会据此误判"该动作试过了"。
+            // 现在按实际实现列出；SMART_QUEUE_POSITION_YIELD 是本轮新接的第四个。
             + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
-            + "SMART_FORWARD_UNLOCK,SMART_PURGE_STALE_QUEUE,SMART_HOLD_FOLLOWERS,"
-            + "SMART_DESTROY_CANDIDATE");
+            + "SMART_FORWARD_UNLOCK,SMART_QUEUE_POSITION_YIELD");
     RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
         safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(input));
     if (selfRetainRelease.candidate()) {
@@ -903,6 +906,34 @@ public final class TrainHealthMonitor {
       if (shouldHoldForSafeCandidate(trainName, null, forwardUnlock, false)) {
         recovery.lastProgressAttemptAt = now;
         return forwardUnlock.applied() && forwardUnlock.effectiveness().effective();
+      }
+    }
+    // 排队位次让出：割等待环上唯一一条"不是占用"的边。
+    //
+    // 排在前三个动作之后是刻意的：前三个都是让**自己**让出东西（自持 retain、drain、forward
+    // unlock），只有这一个动的是**别人**的排队位次，代价是队列公平性，因此放在最后。
+    //
+    // 它补上的是这条链此前根本没有的一类解：第十七轮 MT 线两车在相邻道岔上互卡
+    // 2839 / 2700 秒，等待图检测到该环 1455 次，而三个已实现动作没有一个能割它——
+    // 因为环上两条边一条是 MOVEMENT_REQUIRED、一条是 QUEUE_POSITION，
+    // 前三个动作都只处理自持资源。
+    RuntimeDispatchService.SmartRecoveryActionResult queueYield =
+        safeSmartRecoveryResult(dispatchService.applySmartQueuePositionYield(input));
+    if (queueYield.candidate()) {
+      debugLogger.accept(
+          "SMART_RECOVERY_DECISION train="
+              + trainName
+              + " recoveryDecision="
+              + queueYield.decision()
+              + " reason="
+              + queueYield.reason()
+              + " effectClass="
+              + queueYield.effectClass()
+              + " applied="
+              + queueYield.applied());
+      if (shouldHoldForSafeCandidate(trainName, null, queueYield, false)) {
+        recovery.lastProgressAttemptAt = now;
+        return queueYield.applied() && queueYield.effectiveness().effective();
       }
     }
     if (!smartDispatcherAllowsHealthMutation(

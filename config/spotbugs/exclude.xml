@@ -536,4 +536,20 @@
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <!--
+        RuntimeDispatchService 已经 30422 行，超过 SpotBugs 的单类分析上限
+        （SKIPPED_CLASS_TOO_BIG），于是它**整个类**都没有被静态分析过。
+
+        这里排除的是"跳过"这条报告本身，不是任何具体缺陷——不排除的话 check 直接失败，
+        而排除之后必须清楚代价：这个项目里最复杂、改动最频繁的一个类，
+        是全仓唯一一个 SpotBugs 看不见的地方。
+
+        真正的解法是把它拆开（信号 tick / 授权构建 / 恢复动作 / 诊断 至少是四块），
+        拆到每块都能被分析为止。在那之前，这个类的静态检查覆盖为零，
+        改它的人需要知道这一点。
+    -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService"/>
+        <Bug pattern="SKIPPED_CLASS_TOO_BIG"/>
+    </Match>
 </FindBugsFilter>

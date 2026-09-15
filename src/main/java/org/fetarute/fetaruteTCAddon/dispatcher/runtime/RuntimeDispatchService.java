@@ -11289,6 +11289,196 @@ public final class RuntimeDispatchService {
    * <p>该入口只处理“授权窗口/移动 token 卡住但没有可见硬 blocker”的 stuck case；所有真实副作用必须先经过 {@link
    * SmartDispatcherModeGate}。
    */
+  /**
+   * 割掉等待环上的**排队位次**边——环上唯一割了不影响安全的边。
+   *
+   * <p>问题形态（第十七轮实服，MT 线整条被掐死 47 分钟）：
+   *
+   * <pre>
+   *   MT-LH-3340  持有 switcher:637(MOVEMENT_REQUIRED)，想要 643
+   *               ← 被 MT-LP-0838 在 643 上的 **QUEUE_POSITION** 挡住
+   *   MT-LP-0838  在 643 排队（**并不持有它**），想要 637
+   *               ← 被 MT-LH-3340 的 MOVEMENT_REQUIRED 挡住
+   * </pre>
+   *
+   * 0838 永远排不到 643，因为它要的 637 在 3340 手里；而 3340 又被这个排队位挡着。 典型的优先级反转，两车各卡 2839 / 2700 秒。等待图检测到这个环
+   * <b>1455 次</b> （{@code SMART_DISPATCH_CYCLE_DETECTED}），而恢复链里三个已实现的动作没有一个能割它。
+   *
+   * <p><b>为什么割排队边是安全的</b>：{@code SimpleOccupancyManager.createQueueBlocker} 自己 的注释写着「该 blocker
+   * 不代表物理占用或已授予的行车权」，而 {@code physicalOccupancyText(QUEUE_POSITION)} 与 {@code
+   * reservedAuthorityText(QUEUE_POSITION)} 都是 {@code "false"}。撤销它不可能造成共占，代价只是队列公平性。 相比之下割
+   * MOVEMENT_REQUIRED 会动到已授予的行车权、割 PROTECTIVE_RETAIN 会动到物理空间。
+   *
+   * <p><b>判据是可证明的环，不是超时猜测</b>：
+   *
+   * <ol>
+   *   <li>被卡列车 A 的 blocker <b>全部</b>是 {@code QUEUE_POSITION}——它没有被任何真实占用挡住；
+   *   <li>排队者 B 自己也被挡，且挡它的资源 <b>A 正持有</b>——这直接证明 A→B→A 成环；
+   *   <li>满足则撤销 B 在该资源上的排队位次。
+   * </ol>
+   *
+   * 两条都不涉及任何具体线路、道岔或区段，对任意拓扑成立。
+   */
+  public SmartRecoveryActionResult applySmartQueuePositionYield(SmartRecoveryInput input) {
+    if (input == null || input.train().isBlank()) {
+      return SmartRecoveryActionResult.skipped("missing-input");
+    }
+    if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
+      return SmartRecoveryActionResult.skipped("occupancy-manager-does-not-support-queue-yield");
+    }
+    String blockedKey = normalizeTrainKey(input.train());
+    BlockerSnapshot blocked = blockerSnapshots.get(blockedKey);
+    if (blocked == null || blocked.blockers().isEmpty()) {
+      return SmartRecoveryActionResult.skipped("no-blocker-snapshot");
+    }
+    // ① A 必须**只**被排队位次挡住。只要还有一个真实占用挡着它，割队列解不开问题，
+    //    而且会白白牺牲别人的排队公平性。
+    for (DeadlockBlockerInfo blocker : blocked.blockers()) {
+      if (blocker == null || !"QUEUE_POSITION".equals(blocker.role())) {
+        return SmartRecoveryActionResult.skipped("not-queue-only-blocked");
+      }
+    }
+    Set<String> heldByBlocked = resourceKeysHeldBy(manager, input.train());
+    if (heldByBlocked.isEmpty()) {
+      return SmartRecoveryActionResult.skipped("blocked-train-holds-nothing");
+    }
+    Optional<QueueYieldTarget> targetOpt =
+        findProvenQueueCycle(
+            input.train(),
+            blocked.blockers(),
+            owner -> {
+              BlockerSnapshot snapshot = blockerSnapshots.get(normalizeTrainKey(owner));
+              return snapshot == null ? Set.of() : snapshot.blockers();
+            },
+            heldByBlocked);
+    if (targetOpt.isPresent()) {
+      QueueYieldTarget target = targetOpt.get();
+      String queueOwner = target.queueOwner();
+      Optional<OccupancyResource> resourceOpt = parseOccupancyResourceKey(target.resourceKey());
+      if (resourceOpt.isEmpty()) {
+        return SmartRecoveryActionResult.skipped("unparseable-resource-key");
+      }
+      SimpleOccupancyManager.QueuePositionYieldResult yield =
+          manager.yieldQueuePosition(resourceOpt.get(), queueOwner);
+      if (!yield.removed()) {
+        return SmartRecoveryActionResult.skipped("queue-yield-" + yield.reason());
+      }
+      debugLogger.accept(
+          "SMART_QUEUE_POSITION_YIELDED blockedTrain="
+              + input.train()
+              + " queueOwner="
+              + queueOwner
+              + " resource="
+              + target.resourceKey()
+              + " reason=proven-wait-cycle-through-queue-edge");
+      return new SmartRecoveryActionResult(
+          true,
+          true,
+          "SMART_QUEUE_POSITION_YIELD",
+          "yielded-queue-position-on-proven-cycle",
+          DispatchEffectClass.OCCUPANCY_MUTATION);
+    }
+    return SmartRecoveryActionResult.skipped("no-proven-queue-cycle");
+  }
+
+  /** {@link #findProvenQueueCycle} 找到的可割排队边。 */
+  record QueueYieldTarget(String queueOwner, String resourceKey) {}
+
+  /**
+   * 在等待关系里找出一条**可证明成环**的排队边。
+   *
+   * <p>两条判据，都不涉及任何具体线路或拓扑：
+   *
+   * <ol>
+   *   <li>被卡列车 A 的 blocker <b>全部</b>是 {@code QUEUE_POSITION}——它没有被任何真实占用挡住。
+   *       只要还有一个真实占用挡着它，割队列既解不开问题，又白白牺牲别人的排队公平性。
+   *   <li>排队者 B 自己也被挡，且挡它的是 A 本身、或是 A 正持有的某个资源 ⇒ A→B→A 成环，<b>已证明</b>，不是超时猜测。
+   * </ol>
+   *
+   * @param blockedTrain 被卡的列车 A
+   * @param blockedBy A 的 blocker 集合
+   * @param blockersOf 查某列车自身 blocker 的入口
+   * @param heldByBlocked A 当前持有的资源 key（不含排队位次）
+   */
+  static Optional<QueueYieldTarget> findProvenQueueCycle(
+      String blockedTrain,
+      Set<DeadlockBlockerInfo> blockedBy,
+      java.util.function.Function<String, Set<DeadlockBlockerInfo>> blockersOf,
+      Set<String> heldByBlocked) {
+    if (blockedTrain == null || blockedBy == null || blockedBy.isEmpty() || blockersOf == null) {
+      return Optional.empty();
+    }
+    for (DeadlockBlockerInfo blocker : blockedBy) {
+      if (blocker == null || !"QUEUE_POSITION".equals(blocker.role())) {
+        return Optional.empty(); // 有真实占用挡着 ⇒ 不是纯排队反转，不动。
+      }
+    }
+    Set<String> held = heldByBlocked == null ? Set.of() : heldByBlocked;
+    for (DeadlockBlockerInfo blocker : blockedBy) {
+      String queueOwner = blocker.trainName();
+      if (queueOwner == null || queueOwner.isBlank()) {
+        continue;
+      }
+      Set<DeadlockBlockerInfo> ownerBlockers = blockersOf.apply(queueOwner);
+      if (ownerBlockers == null || ownerBlockers.isEmpty()) {
+        continue; // 排队者自己没被挡 ⇒ 它排队是正当的，等它。
+      }
+      boolean closesCycle =
+          ownerBlockers.stream()
+              .filter(Objects::nonNull)
+              .anyMatch(
+                  b ->
+                      TrainNameNormalizer.sameLogicalTrain(b.trainName(), blockedTrain)
+                          || held.contains(b.resourceKey()));
+      if (closesCycle) {
+        return Optional.of(new QueueYieldTarget(queueOwner, blocker.resourceKey()));
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 把 {@code OccupancyResource.toString()} 形式的 key 还原成资源。
+   *
+   * <p>格式是 {@code KIND:key}，与 {@code OccupancyResource.toString()} 一一对应。 无法识别的 kind 返回空 ——
+   * 宁可不动，也不要把一个猜出来的资源交给账本去改。
+   */
+  private static Optional<OccupancyResource> parseOccupancyResourceKey(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return Optional.empty();
+    }
+    String trimmed = raw.trim();
+    int separator = trimmed.indexOf(':');
+    if (separator <= 0 || separator >= trimmed.length() - 1) {
+      return Optional.empty();
+    }
+    String kindText = trimmed.substring(0, separator);
+    String key = trimmed.substring(separator + 1);
+    for (ResourceKind kind : ResourceKind.values()) {
+      if (kind.name().equals(kindText)) {
+        return Optional.of(new OccupancyResource(kind, key));
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 某列车当前持有的全部资源 key（任何角色）。用于证明等待环的另一半。 */
+  private static Set<String> resourceKeysHeldBy(SimpleOccupancyManager manager, String trainName) {
+    Set<String> keys = new LinkedHashSet<>();
+    for (OccupancyClaim claim : manager.snapshotClaims()) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      if (claim.role() == ClaimRole.QUEUE_POSITION) {
+        continue; // 排队位次不是持有。
+      }
+      if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        keys.add(claim.resource().toString());
+      }
+    }
+    return keys;
+  }
+
   public SmartRecoveryActionResult applySmartForwardUnlock(SmartRecoveryInput input) {
     if (input == null || input.train().isBlank()) {
       return SmartRecoveryActionResult.skipped("missing-input");
@@ -22179,7 +22369,7 @@ public final class RuntimeDispatchService {
                   .movementPlanSnapshot()
                   .map(plan -> plan.directedEdges().size())
                   .orElse(context.edges().size()));
-      if (lookahead.failClosed()) {
+      if (lookahead.failClosed() && !exitFoundOutsideHardAuthority(lookahead)) {
         SmartAdmissionResult result =
             smartAdmissionBlocked(
                 trainName,
@@ -22195,6 +22385,28 @@ public final class RuntimeDispatchService {
         traceEntryLookaheadBlocked(trainName, context, conflict, lookahead);
         traceSmartAdmissionResult(trainName, context, result);
         return result;
+      }
+      if (lookahead.failClosed()) {
+        // 已在区内、且出口**找得到**、只是落在硬授权窗口之外 —— 此时拒绝是把车锁死在区内。
+        //
+        // 这一支的前提已经很强：hasClaimByTrain 说明车已经持有该单线区，而紧邻上方的
+        // singleRegionOppositeOrUnknownExternalBarrier 已经放行——真正的安全性质
+        // （没有对向或方向未知的外部屏障）在那里守住了，此处再拒不增加任何安全。
+        //
+        // 而拒绝的代价是实打实的：第十七轮 SURC-WS-LC-6650 停在
+        // ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF 上 3260 秒（54 分钟），
+        // blockedBy=[] 没有任何车挡它，整条 WS 线在它之后到站归零。
+        // 第十六轮是另一辆车、同一形态 449 秒；第十二轮 SURC-WS-LC-7203 整轮 74 分钟。
+        //
+        // 为什么不改成"把硬授权窗口延到出口"：buildHardAuthorityContext 的契约明写
+        // 「本窗口只处理无方向的精确 interlocking:*；方向性 single:* 继续由局部硬窗口、
+        // 方向锁、跟驰间隔和 leader token 协作，**不能扩张为整段单线独占**」。
+        // 那是刻意的设计决定——整段独占会毁掉长单线区的通过能力。
+        // 单线区本来就是靠"持方向锁 + 局部窗口逐段推进"通过的，而这正是本分支该放行的理由。
+        //
+        // 仍然 fail-closed 的情形没有变：exit-not-visible-after-extension / missing-plan
+        // ——那些是真的证不出路径会离开该区。
+        traceEntryLookaheadContinueOutsideAuthority(trainName, conflict, lookahead);
       }
       SingleZoneAdmissionState admission =
           singleZoneAdmissionState(
@@ -25306,6 +25518,51 @@ public final class RuntimeDispatchService {
             + (lookahead == null ? -1 : lookahead.exitIndexAfterExtension())
             + " lookaheadWindowNodeCount="
             + (lookahead == null ? 0 : lookahead.lookaheadWindowNodeCount()));
+  }
+
+  /**
+   * 出口**已经找到**、只是落在硬授权窗口之外。
+   *
+   * <p>与"证不出会离开"是两回事：这两种 failureReason 都带着一个 &ge;0 的出口下标 （{@code
+   * exitIndexAfterExtension}），即拓扑上已经证明该路径会离开这个单线区， 只是当前这一跳的硬授权没覆盖到那里。
+   *
+   * <p>判据只看 {@link EntryLookaheadEvaluator.Result} 自己报的原因，不涉及任何具体线路或区段。
+   */
+  static boolean exitFoundOutsideHardAuthority(EntryLookaheadEvaluator.Result lookahead) {
+    if (lookahead == null) {
+      return false;
+    }
+    String reason = lookahead.failureReason();
+    boolean reasonSaysOutsideWindow =
+        "exit-visible-outside-hard-authority".equals(reason)
+            || "target-boundary-outside-hard-authority".equals(reason);
+    // 双重确认：原因字符串说"在窗口外"，且确实带回了一个出口下标。
+    // 只信其中一个都可能被将来的改动悄悄改掉语义。
+    return reasonSaysOutsideWindow && lookahead.exitIndexAfterExtension() >= 0;
+  }
+
+  /**
+   * 报告"已在区内、出口在授权窗口之外仍放行"——这条放宽唯一的生效证据。
+   *
+   * <p>走 {@code emitRaw}：与 {@code SMART_ENTRY_LOOKAHEAD_BLOCKED} 同一个理由—— 灯色门控会让它在 PROCEED
+   * 时一条都不输出，而那正是需要看见它的时刻。 emitRaw 自带按整行内容去重，字段不变不会刷屏。
+   */
+  private void traceEntryLookaheadContinueOutsideAuthority(
+      String trainName, OccupancyResource conflict, EntryLookaheadEvaluator.Result lookahead) {
+    SignalComputationTrace.emitRaw(
+        "SMART_ALREADY_INSIDE_CONTINUE_ALLOWED train="
+            + trainName
+            + " zone="
+            + (conflict == null ? "-" : conflict.key())
+            + " failureReason="
+            + lookahead.failureReason()
+            + " exitIndexAfterExtension="
+            + lookahead.exitIndexAfterExtension()
+            + " requiredHardAuthorityEdgeCount="
+            + lookahead.requiredHardAuthorityEdgeCount()
+            + " lookaheadWindowNodeCount="
+            + lookahead.lookaheadWindowNodeCount(),
+        debugLogger);
   }
 
   private Optional<OccupancyResource> singleConflictForEdge(RailGraph graph, RailEdge edge) {

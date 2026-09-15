@@ -2692,6 +2692,51 @@ public final class SimpleOccupancyManager
     return releaseSelfOwnedStaleRetain(trainName, candidateOpt.get());
   }
 
+  /** {@link #yieldQueuePosition} 的结果。 */
+  public record QueuePositionYieldResult(boolean removed, String reason) {
+    public QueuePositionYieldResult {
+      reason = reason == null || reason.isBlank() ? "-" : reason;
+    }
+  }
+
+  /**
+   * 撤销某列车在某资源上的**排队位次**。
+   *
+   * <p>为什么这是所有解环手段里代价最小的一种：排队位次<b>不是占用</b>。本类自己的 {@code createQueueBlocker} 注释写着「该 blocker
+   * 不代表物理占用或已授予的行车权」， 而 {@code physicalOccupancyText(QUEUE_POSITION)} 与 {@code
+   * reservedAuthorityText(QUEUE_POSITION)} 都返回 {@code "false"}。因此撤销它<b>不可能造成共占</b>——它改变的只是仲裁顺序。
+   *
+   * <p>对照：释放 {@code PROTECTIVE_RETAIN} 会动到物理空间（车体可能还压着）， 释放 {@code MOVEMENT_REQUIRED}
+   * 会动到已授予的行车权。排队位次两者都不是。
+   *
+   * <p>本方法只做"撤销"这一个动作，<b>不判断该不该撤</b>——成环的判定由调用方用 blocker 快照完成，因为那需要跨列车的等待关系，不属于账本的职责。
+   *
+   * @param resource 目标资源
+   * @param trainName 要撤销其排队位次的列车
+   * @return 是否真的撤销了
+   */
+  public synchronized QueuePositionYieldResult yieldQueuePosition(
+      OccupancyResource resource, String trainName) {
+    if (resource == null || trainName == null || trainName.isBlank()) {
+      return new QueuePositionYieldResult(false, "missing-input");
+    }
+    ConflictQueue queue = queues.get(resource);
+    if (queue == null) {
+      return new QueuePositionYieldResult(false, "no-queue");
+    }
+    if (!queue.contains(trainName)) {
+      return new QueuePositionYieldResult(false, "not-queued");
+    }
+    if (!queue.remove(trainName)) {
+      return new QueuePositionYieldResult(false, "remove-noop");
+    }
+    if (queue.isEmpty()) {
+      queues.remove(resource);
+    }
+    version.incrementAndGet();
+    return new QueuePositionYieldResult(true, "yielded");
+  }
+
   /** {@link #releaseSelfOwnedPhysicalEdgeRetain} 的结果。 */
   public record PhysicalEdgeRetainReleaseResult(
       int releasedCount,

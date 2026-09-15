@@ -349,6 +349,13 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 实服第十五轮一次这样的卡死让 WS 线半小时产出掉 57%，而全网数字把它摊平看不出来。
           // 体量受限于"真的卡死过几次"，正常运行应当长期为 0——非 0 本身就是要查的信号。
           "SMART_DEPARTURE_GATE_EXPIRED",
+          // 割等待环上的排队边——这条新恢复动作唯一的生效证据。
+          // 第十七轮 MT 两车在相邻道岔上互卡 2839/2700 秒、等待图检测到该环 1455 次，
+          // 而当时三个已实现的恢复动作没有一个能割它。体量受限于"真的成环几次"。
+          "SMART_QUEUE_POSITION_YIELDED",
+          // 已在单线区内、出口在授权窗口外仍放行——那条放宽唯一的生效证据。
+          // 同一形态连续三轮掐死 WS 线（74 分钟 / 449 秒 / 3260 秒）。
+          "SMART_ALREADY_INSIDE_CONTINUE_ALLOWED",
           // 入库走行证明唯一的生效证据：计数直接等于"本该被 inside-stop-distance 硬停、
           // 现在没被硬停"的次数。第十五轮 3 辆车被硬停在离段场一个节点处，最长 172 秒，
           // 而它们 holds=[] blockedBy=[]。生产端按 (train, routeIndex) 去重。
