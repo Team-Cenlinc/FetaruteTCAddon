@@ -11457,22 +11457,33 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * blocker 快照是否还在 {@link #BLOCKER_SNAPSHOT_TTL} 内；过期的顺手丢掉。
+   * blocker 快照是否还在有效期内；过期的顺手丢掉。
    *
-   * <p>这里不能“读不到就当没被挡”——调用方把空 blocker 集合解释成“排队者没被挡，它排队是正当的”， 而那恰恰是**不割**的一边，所以缺证据时失败是闭向的。
+   * <p><b>有效期取 {@code smart-dispatcher.planner.blocker-snapshot-ttl-ms}，而不是写死的 {@link
+   * #BLOCKER_SNAPSHOT_TTL}。</b>同一份快照的“过没过期”在等待图那边已经有一个定义了——{@code SmartWaitForPlanner}
+   * 用这个配置值把超龄的边判为 {@code STALE_EDGE}。本方法判的是同一件事， 就不能再有第二个值：现网已把它从 10s 调到 120s（{@code cb0498f}
+   * 量过分布），写死 20s 会让两边静默地分叉。读不到配置时才回落到常量。
+   *
+   * <p>另外这里不能“读不到就当没被挡”——调用方把空 blocker 集合解释成“排队者没被挡，它排队是正当的”， 而那恰恰是**不割**的一边，所以缺证据时失败是闭向的。
    */
   private boolean blockerSnapshotFresh(String key, BlockerSnapshot snapshot, Instant now) {
     if (snapshot == null) {
       return false;
     }
     Instant effectiveNow = now == null ? clockNow() : now;
-    if (snapshot.sampledAt().isBefore(effectiveNow.minus(BLOCKER_SNAPSHOT_TTL))) {
+    if (snapshot.sampledAt().isBefore(effectiveNow.minus(blockerSnapshotMaxAge()))) {
       if (key != null) {
         blockerSnapshots.remove(key, snapshot);
       }
       return false;
     }
     return true;
+  }
+
+  /** 等待图与恢复层共用的 blocker 快照有效期。 */
+  private Duration blockerSnapshotMaxAge() {
+    long configuredMs = smartDispatcherPlannerSettings().blockerSnapshotTtlMs();
+    return configuredMs > 0L ? Duration.ofMillis(configuredMs) : BLOCKER_SNAPSHOT_TTL;
   }
 
   private static String queuePositionYieldCooldownKey(String resourceKey, String queueOwner) {

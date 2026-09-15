@@ -266,7 +266,10 @@ class QueuePositionYieldTest {
   @Test
   void staleBlockerSnapshotsAreNotProof() {
     Fixture fixture = new Fixture(SmartDispatcherMode.ENFORCE);
-    fixture.now = NOW.plusSeconds(21); // BLOCKER_SNAPSHOT_TTL = 20s
+    // 15 秒这个数是**特意挑的**：它大于配置里的 blocker-snapshot-ttl-ms（测试默认 10s），
+    // 却小于写死的 BLOCKER_SNAPSHOT_TTL（20s）。所以这条用例同时钉住两件事——
+    // 过期要拒，以及**有效期必须取配置值**。改回读常量，它会变红。
+    fixture.now = NOW.plusSeconds(15);
 
     RuntimeDispatchService.SmartRecoveryActionResult result =
         fixture.service.applySmartQueuePositionYield(fixture.blockedTrainInput());
