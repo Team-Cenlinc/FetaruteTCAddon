@@ -2692,6 +2692,99 @@ public final class SimpleOccupancyManager
     return releaseSelfOwnedStaleRetain(trainName, candidateOpt.get());
   }
 
+  /** {@link #releaseSelfOwnedPhysicalEdgeRetain} 的结果。 */
+  public record PhysicalEdgeRetainReleaseResult(
+      int releasedCount, String reason, List<OccupancyResource> released) {
+    public PhysicalEdgeRetainReleaseResult {
+      released = released == null ? List.of() : List.copyOf(released);
+      reason = reason == null || reason.isBlank() ? "-" : reason;
+    }
+  }
+
+  /**
+   * Phase 4：用**车体实测覆盖**证明列车已经离开某条 EDGE，才释放它身后的尾部保护。
+   *
+   * <p>为什么必须另起一条路径，而不是放宽既有的 CONFLICT 判据：
+   *
+   * <ul>
+   *   <li>既有 {@code strictSelfOwnedProtectiveRetainCandidate} 要求 {@code heldDirection !=
+   *       requestedDirection}，那是**反向自锁**语义； 而"车已驶离身后区间"是**同向**，两者是不同的东西，复用会把判据用错地方。
+   *   <li>CONFLICT 是抽象互斥键，NODE/EDGE 对应**物理空间**；车体还压着时释放 = co-occupancy，红线。
+   *       所以这条路径的放行条件只有一个：**实测覆盖证明它不在上面**。
+   * </ul>
+   *
+   * <p>为什么值得做：实服第十三轮，`PROTECTIVE_RETAIN_HOLD` 占全网滞留 **38%** （260 车·分 / 691 车·分），而既有回收机制
+   * `selfRetainReleaseCandidate=false` **2286 / 2286，成功率 0**——它开头就 `kind != CONFLICT` 返回， 而实服
+   * blocker 是 **NODE 1012 / EDGE 331 / CONFLICT 0**，判据与现实永不相交。
+   *
+   * <p><b>fail-closed 三重</b>：
+   *
+   * <ol>
+   *   <li>{@code coverage.complete()} 为假（观测不可用 / cell 索引不可用）⇒ 一个都不放；
+   *   <li>资源仍在覆盖集合里 ⇒ 车体还压着，不放；
+   *   <li>该资源上存在任何外部 claim 或外部排队 ⇒ 不放，避免释放后把别人放进来。
+   * </ol>
+   *
+   * <p>只处理 {@link ResourceKind#EDGE}。NODE 占 blocker 的 75%，但 {@code livePhysicalEdgeCoverage} 只产出
+   * EDGE 资源，**没有可靠的 NODE 证明**—— 用"不是任何被覆盖区间的端点"去反推依赖未经验证的假设，缺证据当证据正是红线所在。 NODE 需要另建按同一套光栅化口径的
+   * cell→node 索引，不在本次范围内。
+   */
+  public synchronized PhysicalEdgeRetainReleaseResult releaseSelfOwnedPhysicalEdgeRetain(
+      String trainName, boolean coverageComplete, Set<OccupancyResource> coveredResources) {
+    String key = TrainNameNormalizer.normalizeKey(trainName);
+    if (key.isEmpty()) {
+      return new PhysicalEdgeRetainReleaseResult(0, "missing-train", List.of());
+    }
+    if (!coverageComplete) {
+      // 缺证据 ⇒ 无从判断 ⇒ 一个都不放。绝不把"看不见"当成"已离开"。
+      return new PhysicalEdgeRetainReleaseResult(0, "coverage-incomplete", List.of());
+    }
+    Set<OccupancyResource> covered = coveredResources == null ? Set.of() : coveredResources;
+    List<OccupancyResource> releasable = new ArrayList<>();
+    for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
+      OccupancyResource resource = entry.getKey();
+      if (resource == null || resource.kind() != ResourceKind.EDGE) {
+        continue;
+      }
+      if (covered.contains(resource)) {
+        continue; // 车体仍压在上面。
+      }
+      List<OccupancyClaim> holders = entry.getValue();
+      if (holders == null || holders.isEmpty()) {
+        continue;
+      }
+      boolean selfProtectiveRetain = false;
+      boolean externalPresent = false;
+      for (OccupancyClaim claim : holders) {
+        if (claim == null) {
+          continue;
+        }
+        if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+          if (claim.role() == ClaimRole.PROTECTIVE_RETAIN) {
+            selfProtectiveRetain = true;
+          }
+        } else {
+          externalPresent = true;
+        }
+      }
+      if (!selfProtectiveRetain || externalPresent) {
+        continue;
+      }
+      ConflictQueue queue = queues.get(resource);
+      if (queue != null && queue.hasAnyOtherTrain(trainName)) {
+        continue; // 有别人在排队等它，释放会把对方放进来。
+      }
+      releasable.add(resource);
+    }
+    if (releasable.isEmpty()) {
+      return new PhysicalEdgeRetainReleaseResult(0, "no-departed-edge-retain", List.of());
+    }
+    int released =
+        releaseResourcesByTrainAndRole(trainName, releasable, ClaimRole.PROTECTIVE_RETAIN);
+    return new PhysicalEdgeRetainReleaseResult(
+        released, released > 0 ? "released" : "release-noop", List.copyOf(releasable));
+  }
+
   /**
    * 释放调用方刚刚用只读预览确认的 P0 self-retain 候选。
    *

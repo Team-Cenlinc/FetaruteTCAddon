@@ -343,6 +343,17 @@ public final class RuntimeDispatchService {
    */
   private static final Duration LIVE_FOOTPRINT_SAMPLE_INTERVAL = Duration.ofSeconds(2);
 
+  /**
+   * 每辆车最近一次的**实测边覆盖**（按车名键），Phase 4 的放行证据。
+   *
+   * <p>与车体指纹在同一次观测里一并算出，复用同一个 {@link #LIVE_FOOTPRINT_SAMPLE_INTERVAL} 节流——
+   * `observeLiveRailFootprint` 每次都要遍历列车各节 tracked rail、做 Bukkit 世界查询、光栅化路径， 不该为两个用途读两遍。
+   *
+   * <p>缺项表示"无从判断"，调用方必须 fail-closed（一个都不放），**绝不可当成"没覆盖"**。
+   */
+  private final java.util.concurrent.ConcurrentMap<String, LivePhysicalEdgeCoverage>
+      livePhysicalEdgeCoverages = new java.util.concurrent.ConcurrentHashMap<>();
+
   /** 解锁预约创建时的车体方块指纹基线（按 reservationId 键）；缺失表示"当时无从判断"。 */
   private final java.util.concurrent.ConcurrentMap<String, Integer> smartUnlockFootprintBaselines =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -3853,6 +3864,12 @@ public final class RuntimeDispatchService {
       return;
     }
     livePhysicalFootprintSampledAt.put(key, sampleNow);
+    // 同一次观测顺带算出实测边覆盖，供 Phase 4（尾部保护的实测释放）使用。
+    // 图拿不到时不写 ⇒ 调用方 fail-closed。
+    resolveGraph(train.worldId(), sampleNow)
+        .ifPresentOrElse(
+            graph -> livePhysicalEdgeCoverages.put(key, livePhysicalEdgeCoverage(train, graph)),
+            () -> livePhysicalEdgeCoverages.remove(key));
     OptionalInt fingerprint = livePhysicalFootprintFingerprint(train);
     if (fingerprint.isPresent()) {
       livePhysicalFootprintFingerprints.put(key, fingerprint.getAsInt());
@@ -10242,6 +10259,63 @@ public final class RuntimeDispatchService {
    * <p>该入口只释放占用层已识别的自持 stale/protective CONFLICT retain。它不会清理 destination、不会 invalidate movement
    * token，也不会释放车体 NODE/EDGE claim；真实 mutation 必须先通过 OCCUPANCY_MUTATION effect gate。
    */
+  /**
+   * Phase 4：用车体实测覆盖释放已驶离区间上的尾部保护。
+   *
+   * <p>返回 {@code null} 表示"这条路径没做任何事"，让调用方继续走原来的 not-found 分支—— 于是既有行为在证据不足时一字不变。
+   *
+   * <p>fail-closed：覆盖缺项（观测不可用 / cell 索引不可用 / 图拿不到）一律不放行。 该缺项**绝不可**被当成"没覆盖"——那正是"缺证据当证据"的红线。
+   */
+  private SmartRecoveryActionResult applyPhysicalEdgeRetainRelease(
+      SimpleOccupancyManager manager, SmartRecoveryInput input) {
+    LivePhysicalEdgeCoverage coverage =
+        livePhysicalEdgeCoverages.get(normalizeTrainKey(input.train()));
+    if (coverage == null) {
+      debugLogger.accept(
+          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+              + input.train()
+              + " reason=coverage-not-sampled");
+      return null;
+    }
+    if (!coverage.complete()) {
+      debugLogger.accept(
+          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+              + input.train()
+              + " reason=coverage-incomplete:"
+              + coverage.incompleteReason());
+      return null;
+    }
+    SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult result =
+        manager.releaseSelfOwnedPhysicalEdgeRetain(input.train(), true, coverage.resources());
+    if (result.releasedCount() <= 0) {
+      debugLogger.accept(
+          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+              + input.train()
+              + " reason="
+              + result.reason()
+              + " coveredEdges="
+              + coverage.resources().size());
+      return null;
+    }
+    // 这条路径**唯一**的生效证据。既有回收机制十三轮成功率 0，
+    // 所以一旦这条非零，就是 Phase 4 确实跑通了——归因干净。
+    debugLogger.accept(
+        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
+            + input.train()
+            + " releasedCount="
+            + result.releasedCount()
+            + " resources="
+            + result.released()
+            + " coveredEdges="
+            + coverage.resources().size());
+    return new SmartRecoveryActionResult(
+        true,
+        true,
+        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+        "physical-edge-retain-released:" + result.releasedCount(),
+        DispatchEffectClass.OCCUPANCY_MUTATION);
+  }
+
   public SmartRecoveryActionResult applySmartSelfOwnedStaleRetainRelease(SmartRecoveryInput input) {
     if (input == null || input.train().isBlank()) {
       return SmartRecoveryActionResult.skipped("missing-input");
@@ -10252,6 +10326,16 @@ public final class RuntimeDispatchService {
     Optional<BoundedSelfOwnedRetainCandidate> boundedCandidateOpt =
         boundedSelfOwnedRetainCandidate(manager, input);
     if (boundedCandidateOpt.isEmpty()) {
+      // Phase 4：既有 CONFLICT 路径没有候选时，再试**实测覆盖**这条平行路径。
+      //
+      // 既有路径开头就 `kind != CONFLICT` 返回，而实服 blocker 是
+      // NODE 1012 / EDGE 331 / **CONFLICT 0** —— 判据与现实永不相交，
+      // 实测第十三轮 `selfRetainReleaseCandidate=false` **2286 / 2286，成功率 0**。
+      // 而 `PROTECTIVE_RETAIN_HOLD` 占全网滞留 38%。
+      SmartRecoveryActionResult physical = applyPhysicalEdgeRetainRelease(manager, input);
+      if (physical != null) {
+        return physical;
+      }
       debugLogger.accept(
           "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
               + input.train()
@@ -15225,6 +15309,7 @@ public final class RuntimeDispatchService {
     // 本项目已经三次栽在"旧名残留记录"上（改名 / 实时日志切面 / activeStopStates）。
     livePhysicalFootprintFingerprints.remove(normalizeTrainKey(trainName));
     livePhysicalFootprintSampledAt.remove(normalizeTrainKey(trainName));
+    livePhysicalEdgeCoverages.remove(normalizeTrainKey(trainName));
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
     if (routeOpt.isEmpty()) {

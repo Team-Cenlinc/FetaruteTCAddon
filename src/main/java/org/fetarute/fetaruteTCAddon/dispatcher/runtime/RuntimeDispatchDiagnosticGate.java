@@ -315,6 +315,11 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 得到代码路径俱在、trace 照常输出、却从不触发的结果——本项目已栽过三次的形状。
           // 每次图激活至多一行，不随 tick 放大。
           "SMART_INTERLOCKING_COVERAGE",
+          // Phase 4（实测覆盖释放尾部保护）**唯一**的生效证据。
+          // 既有回收机制十三轮成功率 0（selfRetainReleaseCandidate=false 2286/2286），
+          // 所以这一条一旦非零，就是 Phase 4 确实跑通了——归因干净。
+          // 体量受限于同时可释放的区间数，不随 tick 放大。
+          "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。
