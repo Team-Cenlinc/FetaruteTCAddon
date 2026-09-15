@@ -27,33 +27,51 @@ class DispatchLivenessTest {
   private static final int MAX_TICKS = 900;
 
   /**
-   * L1 被他车尾部保护挡住的车必须最终推进（当前红，钉住缺陷）。
+   * L1 被他车尾部保护挡住的车必须最终推进。
    *
-   * <p>环本身已由 S10（{@code DispatchCircularWaitTest}）覆盖，这里钉的是另一件事：
-   * **尾部保护按定义是过渡态**——持有者正在离开，所以它应当很快消失。实服第八轮却是 439/439 条 `PROTECTIVE_RETAIN_HOLD` 快照都 {@code
-   * movementToken=ACTIVE} （自身授权完好、只是被别人的尾部保护挡着），而 1035 个 blocker 里 840 个是 PROTECTIVE_RETAIN， 挡人的 30
-   * 辆车 30 辆自己也被挡。整条链没有出口。
+   * <p><b>本用例已从"钉住缺陷"翻正。</b>此前它断言的是缺陷仍在：实服第八轮 439/439 条 {@code PROTECTIVE_RETAIN_HOLD} 快照都 {@code
+   * movementToken=ACTIVE}（自身授权完好、只是被别人的 尾部保护挡着），1035 个 blocker 里 840 个是 PROTECTIVE_RETAIN，挡人的 30 辆车
+   * 30 辆自己也被挡， 整条链没有出口。
    *
-   * <p><b>修好后本用例会失败。</b>那时翻转为"停留不得超过 N tick"并定出 N。
+   * <p>它一直绿着并不是因为缺陷还在，而是因为**骨架从未真正运转过实测覆盖层**： {@code liveRailFootprintCells} 返回一个固定的 y=200
+   * 方块，命不中任何边足迹；而 {@code smartRecoveryLayer(true)} 只调了一次全局快照，并不驱动任何恢复动作。两处补上之后 Phase 4 当场生效（{@code
+   * releasedCount=2 edges=1 nodes=1}），环自解。
    */
   @Test
-  void trainsBlockedOnlyByOthersProtectiveRetainCurrentlyNeverProceed() {
+  void trainsBlockedByOthersProtectiveRetainEventuallyProceed() {
     DispatchScenarioHarness harness = contendedLoop();
 
     harness.runTicks(MAX_TICKS);
 
+    List<String> trains = List.of("live-lead", "live-mid", "live-tail");
+
+    // 一：现场必须真的用到过尾部保护回收，否则本用例什么都没判别。
+    List<String> releases =
+        harness.debugLog().stream()
+            .filter(line -> line.contains("SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="))
+            .toList();
+    assertFalse(releases.isEmpty(), () -> "整场没有一次尾部保护回收——用例不判别任何东西\n" + harness.describeState());
+
+    // 二：不得有车最终停在别人的尾部保护上。
     List<String> stuck =
-        List.of("live-lead", "live-mid", "live-tail").stream()
+        trains.stream()
             .filter(t -> "PROTECTIVE_RETAIN_HOLD".equals(harness.stopReasonOf(t)))
             .toList();
-    assertTrue(
-        !stuck.isEmpty(),
-        "跑满 " + MAX_TICKS + " tick 后没有任何车停在尾部保护上——用例不判别任何东西\n" + harness.describeState());
-    assertFalse(
-        stuck.isEmpty(),
-        "尾部保护已经不再困住列车——缺陷可能已修复。"
-            + "请把本用例翻转为'停留不得超过 N tick'并定出 N，而不是删掉。\n"
-            + harness.describeState());
+    assertTrue(stuck.isEmpty(), () -> "仍有车停在尾部保护上：" + stuck + "\n" + harness.describeState());
+
+    // 三：也不得"中途卡很久又自己好了"——那同样是缺陷的形态，只断言终态会漏掉它。
+    // N 取 240 tick（12 秒模拟时间）：实测本场景最长连续 STOP 远低于此，
+    // 而缺陷未修时列车会卡满整场 900 tick。
+    for (String train : trains) {
+      assertTrue(
+          harness.stopStreakTicksOf(train) <= 240,
+          () ->
+              train
+                  + " 连续停车 "
+                  + harness.stopStreakTicksOf(train)
+                  + " tick，超过上限 240\n"
+                  + harness.describeState());
+    }
   }
 
   /**
@@ -73,31 +91,35 @@ class DispatchLivenessTest {
   }
 
   /**
-   * L3 自持尾部保护的回收机制当前从不产出候选（当前红，钉住缺陷）。
+   * L3 自持尾部保护的回收必须真的能释放，且放行条件必须是**实测物理覆盖**。
    *
-   * <p>实服 439/439 条 `PROTECTIVE_RETAIN_HOLD` 快照里 {@code selfRetainReleaseCandidate=false}。 成因是
-   * {@code rememberSelfOwnedStaleRetainCandidate} 与 {@code stillHasReleasableSelfOwnedRetain} 都要求
-   * {@code resource.kind() == CONFLICT}， 而实服的尾部保护 blocker 是 **NODE 840 / EDGE 若干 / CONFLICT 0**。
+   * <p><b>本用例已从"钉住缺陷"翻正。</b>原缺陷：{@code rememberSelfOwnedStaleRetainCandidate} 与 {@code
+   * stillHasReleasableSelfOwnedRetain} 都要求 {@code resource.kind() == CONFLICT}， 而实服的尾部保护 blocker 是
+   * **NODE 840 / EDGE 若干 / CONFLICT 0**，判据与现实永不相交。
    *
-   * <p>**不要靠去掉那道限制来"修"它**：CONFLICT 是抽象互斥键，NODE/EDGE 对应物理空间， 车体还压在上面时释放就是
-   * co-occupancy。正确做法是用实测物理覆盖做放行条件（Phase 4）。
-   *
-   * <p><b>修好后本用例会失败。</b>那时翻转为"必须能产出候选"。
+   * <p>修法不是去掉那道资源类型限制——CONFLICT 是抽象互斥键，NODE/EDGE 对应物理空间， 车体还压着时释放就是
+   * co-occupancy。因此这里**同时断言两件事**：确实释放了， 且释放来自实测覆盖（trace 带 {@code covered=}）。少了后半句，用"放宽资源类型"
+   * 蒙混过关的实现也能让本用例变绿。
    */
   @Test
-  void selfOwnedRetainReleaseCurrentlyNeverHasACandidate() {
+  void selfOwnedRetainReleaseUsesMeasuredPhysicalCoverage() {
     DispatchScenarioHarness harness = contendedLoop();
 
     harness.runTicks(MAX_TICKS);
 
-    List<String> retainHolds =
-        harness.debugLog().stream().filter(line -> line.contains("protective-retain:")).toList();
-    assertTrue(!retainHolds.isEmpty(), "整场没有出现尾部保护停车——用例不判别任何东西\n" + harness.describeState());
-    assertFalse(
-        retainHolds.stream().anyMatch(line -> line.contains("protective-retain:release-candidate")),
-        "出现了可释放候选——回收机制可能已经覆盖到 NODE/EDGE。"
-            + "请把本用例翻转为'必须能产出候选'，并确认放行条件用的是实测物理覆盖而不是放宽了资源类型。\n  "
-            + String.join("\n  ", retainHolds.subList(0, Math.min(5, retainHolds.size()))));
+    List<String> releases =
+        harness.debugLog().stream()
+            .filter(line -> line.contains("SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="))
+            .toList();
+    assertFalse(releases.isEmpty(), () -> "回收机制一次都没产出释放\n" + harness.describeState());
+    assertTrue(
+        releases.stream().allMatch(line -> line.contains(" covered=")),
+        () -> "释放没有带实测覆盖证据——放行条件可能被换成了放宽资源类型：\n  " + String.join("\n  ", releases));
+
+    // NODE 半边必须也在出力：NODE 占实服 blocker 的 75%，只放 EDGE 等于放过大头。
+    assertTrue(
+        releases.stream().anyMatch(line -> line.contains(" nodes=") && !line.contains(" nodes=0 ")),
+        () -> "只释放了 EDGE，NODE 半边没有生效：\n  " + String.join("\n  ", releases));
   }
 
   private static DispatchScenarioHarness contendedLoop() {

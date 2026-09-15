@@ -179,6 +179,16 @@ final class DispatchScenarioHarness {
   /** 是否在每个 tick 前驱动 Smart 恢复层；默认关闭，原因见 {@link Builder#smartRecoveryLayer(boolean)}。 */
   private final boolean smartRecoveryLayer;
 
+  /**
+   * 生产的健康监控器——恢复动作（含 Phase 4 的尾部保护回收）**唯一**的发起方。
+   *
+   * <p>此前 {@code smartRecoveryLayer(true)} 只调了一次 {@code traceSmartDispatchGlobalSnapshot}，
+   * 并不驱动任何恢复动作，于是 {@code applySmartSelfOwnedStaleRetainRelease} → {@code
+   * applyPhysicalEdgeRetainRelease} 这条链在骨架里从未执行过一次 （实测：整场 {@code SMART_PHYSICAL_EDGE_RETAIN_*} 与
+   * {@code SMART_RECOVERY_ACTION_ORDER} 均为 0）。 不接上它，Phase 4 的任何改动都只能靠实服 70 分钟一轮来验证。
+   */
+  private final org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor healthMonitor;
+
   /** 确定推进的场景时钟，注入给 {@link RuntimeDispatchService}。 */
   private final ScenarioClock clock;
 
@@ -204,7 +214,9 @@ final class DispatchScenarioHarness {
       Map<String, RouteDefinition> routeByTrain,
       boolean smartRecoveryLayer,
       ScenarioClock clock,
-      List<String> releaseEvents) {
+      List<String> releaseEvents,
+      org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor healthMonitor) {
+    this.healthMonitor = healthMonitor;
     this.releaseEvents = releaseEvents;
     this.clock = clock;
     this.smartRecoveryLayer = smartRecoveryLayer;
@@ -585,6 +597,11 @@ final class DispatchScenarioHarness {
       }
       Map<EdgeId, org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint>
           footprints = new LinkedHashMap<>();
+      // 逐边足迹的反查表：列车据此报告"此刻压在哪条边上"。
+      // 没有它，骨架的 liveRailFootprintCells 只能返回一个命不中任何边的占位方块，
+      // 于是整个实测覆盖层（Phase 4 / 尾部保护回收）在骨架里从来没有真正运转过——
+      // L1/L3 两条"钉住缺陷"的用例因此永远绿着，改动只能靠实服 70 分钟一轮来验证。
+      Map<EdgeId, RailFootprintCell> footprintCellByEdge = new LinkedHashMap<>();
       int cellIndex = 0;
       for (NodeId[] pair : edgePairs) {
         EdgeId edgeId = EdgeId.undirected(pair[0], pair[1]);
@@ -598,6 +615,8 @@ final class DispatchScenarioHarness {
         // 没有完整目录，LiveRailFootprintResolver 会返回 interlocking-catalog-incomplete，
         // 于是 livePhysicalReleaseGuardsOrFailRetain 保留列车的<b>全部</b> claim——
         // 任何涉及释放的场景都会必然死锁，而那是骨架缺少现场目录，不是调度缺陷。
+        RailFootprintCell cell = new RailFootprintCell(cellIndex++, 64, 0);
+        footprintCellByEdge.put(edgeId, cell);
         footprints.put(
             edgeId,
             new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint(
@@ -609,7 +628,7 @@ final class DispatchScenarioHarness {
                     .RailEdgeFootprint
                     .CURRENT_FORMAT_VERSION,
                 true,
-                Set.of(new RailFootprintCell(cellIndex++, 64, 0))));
+                Set.of(cell)));
       }
       SimpleRailGraph graph =
           new SimpleRailGraph(
@@ -740,6 +759,45 @@ final class DispatchScenarioHarness {
               debugLog::add,
               clock);
 
+      // 阈值按场景时钟压缩：骨架一个 tick = 50ms，跑满 900 tick 也只有 45 秒模拟时间，
+      // 而生产默认 progress-stuck 60 秒 / stop-grace 60 秒——照搬会让健康监控一次都不触发，
+      // 那样接上它等于没接。压缩后与生产的相对关系保持不变：grace < stuck < deadlock。
+      org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor healthMonitor = null;
+      if (smartRecoveryLayer) {
+        healthMonitor =
+            new org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor(
+                service,
+                null,
+                new org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus(),
+                debugLog::add);
+        // 自动修复只在 ENFORCE 下打开。
+        //
+        // ⚠️ 这个条件是**跟着 OBSERVE_ONLY 一起走的临时物**（用户 2026-09-14：该模式将被废弃）。
+        // 删除 SmartDispatcherMode.OBSERVE_ONLY 时，本条件与 DispatchObserverSideEffectTest
+        // 应一并删除——届时健康监控在骨架里就该无条件打开自动修复，与生产一致。
+        //
+        // 生产里 health.auto-fix-enabled 与 smart-dispatcher.mode 是两个独立开关，
+        // 但骨架的 smartRecoveryLayer 存在的意义是隔离出 **Smart 恢复层**：
+        // DispatchObserverSideEffectTest 断言的正是"OBSERVE_ONLY 下驱动它不得改变账本演化"。
+        // 健康监控的**旧式**自动修复（refreshSignal / reissueDestination / 占用清理）
+        // 不受 smartDispatcherMode 约束，照开会让那条边界判定失去意义——
+        // 它抓到的不再是观察层越界，而是骨架把两层接成了一层。
+        healthMonitor.setAutoFixEnabled(
+            smartDispatcherMode
+                == org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .SmartDispatcherMode
+                    .ENFORCE);
+        healthMonitor.setStallThreshold(Duration.ofSeconds(2));
+        healthMonitor.setProgressStuckThreshold(Duration.ofSeconds(3));
+        healthMonitor.setProgressStopGraceThreshold(Duration.ofSeconds(2));
+        healthMonitor.setDeadlockThreshold(Duration.ofSeconds(6));
+        healthMonitor.setDeadlockMinStopDuration(Duration.ofSeconds(2));
+      }
+
       Map<String, ScenarioTrain> trains = new LinkedHashMap<>();
       Map<String, RouteDefinition> routeByTrainName = new LinkedHashMap<>();
       for (TrainSpec spec : trainSpecs) {
@@ -753,7 +811,13 @@ final class DispatchScenarioHarness {
                 "FTA_ROUTE_INDEX=" + spec.startIndex());
         ScenarioTrain train =
             new ScenarioTrain(
-                spec.name(), worldId, tags, spec.path(), edgeLength, spec.startIndex());
+                spec.name(),
+                worldId,
+                tags,
+                spec.path(),
+                edgeLength,
+                spec.startIndex(),
+                Map.copyOf(footprintCellByEdge));
         registry.initFromTags(spec.name(), tags.properties(), route);
         // 交路索引必须与物理位置一致：取物理起点之前（含）最后一个交路 waypoint。
         // 否则列车的 nextTarget 会指向身后的站，判定链会从一个自相矛盾的状态出发。
@@ -791,7 +855,8 @@ final class DispatchScenarioHarness {
               routeByTrainName,
               smartRecoveryLayer,
               clock,
-              releaseEvents);
+              releaseEvents,
+              healthMonitor);
       RuntimeSignalReevaluationScheduler scheduler =
           new RuntimeSignalReevaluationScheduler(
               nextTickTasks::add,
@@ -869,6 +934,9 @@ final class DispatchScenarioHarness {
       drainNextTickTasks();
       if (smartRecoveryLayer) {
         service.traceSmartDispatchGlobalSnapshot(new LinkedHashSet<>(trains.keySet()), clock.get());
+        if (healthMonitor != null) {
+          healthMonitor.check(activeTrainKeys(), clock.get());
+        }
       }
       for (ScenarioTrain train : trains.values()) {
         if (!destroyedTrainKeys.contains(TrainNameNormalizer.normalizeKey(train.name()))) {
@@ -882,6 +950,17 @@ final class DispatchScenarioHarness {
       }
       checkInvariants();
     }
+  }
+
+  /** 当前仍在场的列车名集合——已销毁的不参与健康检查，与生产的 active set 语义一致。 */
+  private Set<String> activeTrainKeys() {
+    Set<String> keys = new LinkedHashSet<>();
+    for (ScenarioTrain train : trains.values()) {
+      if (!destroyedTrainKeys.contains(TrainNameNormalizer.normalizeKey(train.name()))) {
+        keys.add(train.name());
+      }
+    }
+    return keys;
   }
 
   private void drainNextTickTasks() {
@@ -1483,6 +1562,16 @@ final class DispatchScenarioHarness {
   private record StopStreak(String identity, int ticks) {}
 
   /**
+   * 某辆车当前这一段连续 STOP 已经持续了多少 tick。
+   *
+   * <p>L1 翻正之后需要它来给"停留不得超过 N tick"定量——只断言"最后没卡住"会漏掉 "中途卡了很久又自己好了"这种情况，而那正是尾部保护缺陷的典型形态。
+   */
+  int stopStreakTicksOf(String trainName) {
+    StopStreak streak = stopStreaks.get(trainName);
+    return streak == null ? 0 : streak.ticks();
+  }
+
+  /**
    * 为 I3 提供每列车的合法资源范围。
    *
    * <p>范围是"本车交路路径 + 其经停站的全部股道"。DYNAMIC 选台允许调度把列车分到 2 道，因此把同一站分组下的所有股道都算作 合法范围；再窄就会把正确的选台结果误报成陈旧
@@ -1660,7 +1749,10 @@ final class DispatchScenarioHarness {
     private final List<NodeId> path;
     private final int edgeLength;
 
+    private final Map<EdgeId, RailFootprintCell> footprintCellByEdge;
+
     private NodeId currentNode;
+    private NodeId previousNode;
     private NodeId movingToward;
     private double blocksIntoEdge;
     private int nodesPassed;
@@ -1681,13 +1773,18 @@ final class DispatchScenarioHarness {
         TagStore tags,
         List<NodeId> path,
         int edgeLength,
-        int startIndex) {
+        int startIndex,
+        Map<EdgeId, RailFootprintCell> footprintCellByEdge) {
       this.name = name;
       this.worldId = worldId;
       this.tags = tags;
       this.path = List.copyOf(path);
       this.edgeLength = edgeLength;
       this.currentNode = this.path.get(startIndex);
+      this.footprintCellByEdge =
+          footprintCellByEdge == null ? Map.of() : Map.copyOf(footprintCellByEdge);
+      // 起点之前的那条边：车刚落位时也算压在一条真实的边上，而不是"哪儿都不在"。
+      this.previousNode = startIndex > 0 ? this.path.get(startIndex - 1) : null;
     }
 
     String name() {
@@ -1764,6 +1861,7 @@ final class DispatchScenarioHarness {
         return false;
       }
       blocksIntoEdge = 0.0;
+      previousNode = currentNode;
       currentNode = target;
       movingToward = null;
       nodesPassed++;
@@ -1805,10 +1903,25 @@ final class DispatchScenarioHarness {
       return OptionalDouble.of(1.0);
     }
 
+    /**
+     * 报告车体此刻实际压住的方块。
+     *
+     * <p>此前这里返回一个固定的 {@code (0, 200, 0)}——y=200，刻意命不中任何边足迹（边足迹在 y=64）。 于是 {@code
+     * livePhysicalEdgeCoverage} 永远认为"这辆车哪条边都不在"，实测覆盖层在骨架里 从未真正运转过：{@code DispatchLivenessTest} 的
+     * L1/L3 两条"钉住缺陷"的用例因此永远绿着， Phase 4 的每一次改动都只能靠实服 70 分钟一轮来验证。
+     *
+     * <p>现在按车的实际位置报告：正在走某条边就报那条边，停在节点上就报**刚走完的那条**—— 车头到了节点，车尾仍在那条边上，这也是尾部保护要保护的东西。查不到边时返回空集合， 让上层
+     * fail-closed 成 incomplete，而不是把"不知道"当成"哪儿都不在"。
+     */
     @Override
     public Optional<Set<RailFootprintCell>> liveRailFootprintCells() {
-      // 目录完整时，未命中任何联锁区的方块即为"完整清空"，释放守卫因此可以正常收缩旧 claim。
-      return Optional.of(Set.of(new RailFootprintCell(0, 200, 0)));
+      NodeId from = movingToward != null ? currentNode : previousNode;
+      NodeId to = movingToward != null ? movingToward : currentNode;
+      if (from == null || to == null || from.equals(to)) {
+        return Optional.of(Set.of());
+      }
+      RailFootprintCell cell = footprintCellByEdge.get(EdgeId.undirected(from, to));
+      return Optional.of(cell == null ? Set.of() : Set.of(cell));
     }
 
     @Override

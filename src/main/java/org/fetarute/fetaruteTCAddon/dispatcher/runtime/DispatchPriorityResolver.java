@@ -454,9 +454,25 @@ public final class DispatchPriorityResolver {
             + "|"
             + resolution.fallbackReason();
     String key = normalize(trainName);
+    if (key == null) {
+      // normalize 按设计会把 null/空白归一成 null，而 resolvedPrioritySignatures 是
+      // ConcurrentHashMap——put(null, ...) 直接抛 NPE，把整次健康检查连同后续所有列车
+      // 一起打断。列车名缺失时放弃去重、照常输出一条 trace 即可：诊断的价值远小于
+      // "一辆没名字的车让整轮恢复停摆"的代价。
+      //
+      // 这条是 Phase 0 骨架接上真实健康监控后当场顶出来的：生产里它需要一个
+      // TrainProperties 报出空名字才会触发，因此一直潜伏着。
+      emitResolvedTrace(traceContext, trainName, resolution);
+      return;
+    }
     if (signature.equals(resolvedPrioritySignatures.put(key, signature))) {
       return;
     }
+    emitResolvedTrace(traceContext, trainName, resolution);
+  }
+
+  private void emitResolvedTrace(
+      String traceContext, String trainName, DispatchPriorityResolution resolution) {
     SignalComputationTrace.emitRaw(
         "SMART_PRIORITY_RESOLVED context="
             + safe(traceContext)
