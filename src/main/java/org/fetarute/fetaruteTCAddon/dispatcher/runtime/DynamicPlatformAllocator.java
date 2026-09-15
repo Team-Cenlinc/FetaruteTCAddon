@@ -535,9 +535,7 @@ public final class DynamicPlatformAllocator {
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
     List<ApproachCandidate> candidates = new ArrayList<>();
 
-    // 安全上限：防止 spec 范围过大导致长时间循环
-    int maxTrack = Math.min(spec.toTrack(), spec.fromTrack() + MAX_TRACK_CANDIDATES - 1);
-    for (int track = spec.fromTrack(); track <= maxTrack; track++) {
+    for (int track : candidateTracks(spec, graph)) {
       NodeId candidate =
           NodeId.of(
               spec.operatorCode() + ":" + spec.nodeType() + ":" + spec.nodeName() + ":" + track);
@@ -572,6 +570,69 @@ public final class DynamicPlatformAllocator {
         selectBestCandidateByDirection(trainName, currentNode, travelDir, freeCandidates, graph);
 
     return Optional.ofNullable(chosen != null ? chosen.nodeId : null);
+  }
+
+  /**
+   * 解析 DYNAMIC 规范实际要枚举的股道号。
+   *
+   * <p>声明了范围就按范围；<b>未声明范围时枚举该站在图上实际存在的全部股道</b>。
+   *
+   * <p>此前这里直接用 {@code spec.fromTrack()..spec.toTrack()}，而 {@link
+   * DynamicStopMatcher#parseDynamicSpec} 对未声明范围的规范返回 {@code from=1, to=1,
+   * unbounded=true}——解析器把"未声明"标了出来，并在注释里写明 "由调用方按图上实际存在的股道枚举"，但本分配器**从未读过 {@code unbounded()}**
+   * （改动前全文 0 处引用）。于是 {@code DYNAMIC:SURC:S:PPK} 退化成只看 1 号股道， 与写死 {@code S:PPK:1} 毫无区别。
+   *
+   * <p>第十六轮实服证据：分配器自报 {@code DYNAMIC 分配阻塞: 候选站台均被占用 spec=SURC:S:PPK:1}——PPK 明明有 1/2 两个站台，
+   * 候选集合里却只有一个。
+   *
+   * <p>枚举口径与 {@code RuntimeDispatchService.dynamicCandidateTracks} 保持一致： 按前缀匹配图上节点、只取纯数字股道段。{@link
+   * #MAX_TRACK_CANDIDATES} 仍作安全上限。
+   */
+  private List<Integer> candidateTracks(DynamicSpec spec, RailGraph graph) {
+    if (!spec.unbounded()) {
+      List<Integer> declared = new ArrayList<>();
+      int maxTrack = Math.min(spec.toTrack(), spec.fromTrack() + MAX_TRACK_CANDIDATES - 1);
+      for (int track = spec.fromTrack(); track <= maxTrack; track++) {
+        declared.add(track);
+      }
+      return declared;
+    }
+    String prefix =
+        spec.operatorCode().trim()
+            + ":"
+            + spec.nodeType().trim()
+            + ":"
+            + spec.nodeName().trim()
+            + ":";
+    java.util.TreeSet<Integer> discovered = new java.util.TreeSet<>();
+    if (graph != null) {
+      for (org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node : graph.nodes()) {
+        if (node == null || node.id() == null || node.id().value() == null) {
+          continue;
+        }
+        String value = node.id().value();
+        if (!value.regionMatches(true, 0, prefix, 0, prefix.length())) {
+          continue;
+        }
+        String trackPart = value.substring(prefix.length());
+        if (trackPart.isEmpty() || trackPart.indexOf(':') >= 0) {
+          continue;
+        }
+        try {
+          int track = Integer.parseInt(trackPart);
+          if (track >= 1) {
+            discovered.add(track);
+          }
+        } catch (NumberFormatException ignored) {
+          // 非数字股道段不是候选。
+        }
+        if (discovered.size() >= MAX_TRACK_CANDIDATES) {
+          break;
+        }
+      }
+    }
+    // 图上一个都发现不了时退回声明值，行为与改动前一致。
+    return discovered.isEmpty() ? List.of(spec.fromTrack()) : new ArrayList<>(discovered);
   }
 
   /**

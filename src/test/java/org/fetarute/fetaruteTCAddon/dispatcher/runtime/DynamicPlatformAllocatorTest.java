@@ -736,4 +736,74 @@ class DynamicPlatformAllocatorTest {
     when(route.waypoints()).thenReturn(Arrays.asList(fromId, NodeId.of("PLACEHOLDER")));
     return route;
   }
+
+  /**
+   * 未声明范围的 DYNAMIC 必须枚举图上**实际存在的全部股道**，而不是退化成只看 1 号。
+   *
+   * <p>{@link DynamicStopMatcher#parseDynamicSpec} 对未声明范围的规范返回 {@code from=1, to=1,
+   * unbounded=true}，并在注释里写明"由调用方按图上实际存在的股道枚举"。 本分配器改动前**全文 0 处引用 unbounded()**，于是直接用 from..to 得到
+   * [1,1]—— {@code DYNAMIC:OP:S:DEST} 与写死 {@code OP:S:DEST:1} 毫无区别。
+   *
+   * <p>第十六轮实服后果：PPK 有 1/2 两个站台，8 辆停着的 MT 车全部握 {@code S:PPK:1}， {@code S:PPK:2} 一次都没出现；分配器自报 {@code
+   * DYNAMIC 分配阻塞: 候选站台均被占用 spec=SURC:S:PPK:1}——候选集合里就只有一个。 终点可用站台减半，MT 走廊从 PTK 堵回 RVS（PTK:1 上 9
+   * 辆车、1810 车·秒）。
+   *
+   * <p>判别核心是**两个方向**：1 号被占时必须能选到 2 号（不再退化）， 且两个都空时仍按既有的方向判据选（不是随便改成选 2 号）。
+   */
+  @Test
+  void unboundedDynamicStopEnumeratesEveryTrackPresentInTheGraph() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    when(graph.nodes()).thenReturn(Arrays.asList(from, first, second));
+
+    RouteId routeId = RouteId.of("UNBOUNDED");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    // 关键：**不写范围**。既有用例全部写了 [1:2] / [1:1]，因此都碰不到这个缺陷。
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    mockOccupied(firstId, "other-train");
+
+    Optional<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.tryAllocate("train-unbounded", route, 0, graph, fromId);
+
+    assertTrue(result.isPresent(), "1 号被占时必须还能选到 2 号——退化成只看 1 号就会在这里返回空");
+    assertEquals(secondId, result.get().allocatedNode());
+  }
+
+  /** 声明了范围时行为不变：范围外的股道即使图上存在也不得被选中。 */
+  @Test
+  void declaredRangeStillExcludesTracksOutsideIt() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    when(graph.nodes()).thenReturn(Arrays.asList(from, first, second));
+
+    RouteId routeId = RouteId.of("DECLARED");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = mock(RouteStop.class);
+    when(stop.notes()).thenReturn(Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    mockOccupied(firstId, "other-train");
+
+    Optional<DynamicPlatformAllocator.AllocationResult> result =
+        allocator.tryAllocate("train-declared", route, 0, graph, fromId);
+
+    assertFalse(result.isPresent(), "声明了 [1:1] 就只许用 1 号——枚举全图会越过用户的显式声明");
+  }
 }
