@@ -3956,61 +3956,6 @@ public final class RuntimeDispatchService {
     } else {
       livePhysicalFootprintFingerprints.remove(key);
     }
-    reclaimDepartedProtectiveRetains(trainName, key);
-  }
-
-  /**
-   * 列车驶离后**主动**回收它留下的尾部保护，不必等到有人被卡住。
-   *
-   * <p>Phase 4 的判据没有任何问题，问题一直是它的**触发时机**：它只从 {@code TrainHealthMonitor} 的 progress-stuck 恢复链进来，而那条链
-   * (a) 要求有车已经停滞，(b) 释放的是**那辆停滞车自己**的 retain。 于是最常见的一种情形完全没人管：列车 X 正常驶离站台、把 retain 留在身后继续跑， 列车 Y
-   * 因此进不去——但被卡的是 Y，Phase 4 对 Y 跑一遍，动不了 X 的 retain。
-   *
-   * <p>第十六轮实服证据：停车快照里站台节点被持有 484 次 {@code MOVEMENT_REQUIRED}、 321 次 {@code PROTECTIVE_RETAIN}；而
-   * {@code S:RVS:2 / S:JBS:2 / S:ZKW:1 / S:SLL:2 / S:CSB:1} 五个站台**100% 只被尾保占着**，{@code S:PPK:1} 也有
-   * 49%——那些站台里没有车。 用户现场的说法是"1 里面没车为啥它要进 2"。
-   *
-   * <p>为什么这条是对的、而"让别人去抢占挂着尾保的站台"是错的：后者我实现过， {@code DispatchLivenessTest} 的 L1
-   * 当场变红——把"就地等"换成"占着进路推进到一个 进不去的地方"，净效果是负的。回收走的是相反方向：**把不该继续存在的占用拿掉**， 不让任何列车进入任何尚未空出的资源。
-   *
-   * <p>安全性完全继承 Phase 4：放行条件仍然只有"实测覆盖证明车不在该资源上"， 覆盖不完整就一个都不放。执行前还要过 {@link
-   * SmartDispatcherModeGate}—— 与恢复链同一道效果闸，因此 OBSERVE_ONLY 下不产生任何账本变更。
-   *
-   * <p>开销：挂在已有的 {@link #LIVE_FOOTPRINT_SAMPLE_INTERVAL} 节流点上（每车 2 秒一次）， 不新增任何观测；实服 16 辆车即每秒 8
-   * 次，每次遍历一遍 claim 表。
-   */
-  private void reclaimDepartedProtectiveRetains(String trainName, String key) {
-    if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
-      return;
-    }
-    LivePhysicalEdgeCoverage coverage = livePhysicalEdgeCoverages.get(key);
-    if (coverage == null || !coverage.complete()) {
-      return; // 缺证据 ⇒ 一个都不放。
-    }
-    SmartDispatcherMode mode = smartDispatcherMode();
-    if (!SmartDispatcherModeGate.allows(
-        mode, DispatchAction.RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN)) {
-      return;
-    }
-    SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult result =
-        manager.releaseSelfOwnedPhysicalEdgeRetain(trainName, true, coverage.resources());
-    if (result.releasedCount() <= 0) {
-      return; // 常态：身后没有可回收的 retain。不出日志，否则每车每 2 秒一行。
-    }
-    debugLogger.accept(
-        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
-            + trainName
-            + " source=periodic"
-            + " releasedCount="
-            + result.releasedCount()
-            + " edges="
-            + result.releasedEdges()
-            + " nodes="
-            + result.releasedNodes()
-            + " resources="
-            + result.released()
-            + " covered="
-            + coverage.resources().size());
   }
 
   /**
