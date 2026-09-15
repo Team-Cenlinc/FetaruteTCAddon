@@ -353,6 +353,9 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 现在没被硬停"的次数。第十五轮 3 辆车被硬停在离段场一个节点处，最长 172 秒，
           // 而它们 holds=[] blockedBy=[]。生产端按 (train, routeIndex) 去重。
           "SMART_DEPOT_RUN_IN_PROVEN",
+          // 注：SMART_PHYSICAL_EDGE_RETAIN_RELEASED 现在带 source=periodic|recovery。
+          // periodic 是列车正常驶离后的主动回收（不必等谁卡住），recovery 是旧的
+          // progress-stuck 恢复链。两者分开数才知道哪条在出力。
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。
