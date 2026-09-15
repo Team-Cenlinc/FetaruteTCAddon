@@ -35,10 +35,50 @@ final class TestServices {
     return minimal(debug, routeDefinitions, java.time.Instant::now);
   }
 
+  /** 需要钓住“OBSERVE_ONLY 不得改账本”的用例用这个变体。 */
+  static RuntimeDispatchService minimal(
+      List<String> debug,
+      SmartDispatcherMode mode,
+      java.util.function.Supplier<java.time.Instant> clock) {
+    return minimal(debug, mock(RouteDefinitionCache.class), clock, mode);
+  }
+
   static RuntimeDispatchService minimal(
       List<String> debug,
       RouteDefinitionCache routeDefinitions,
       java.util.function.Supplier<java.time.Instant> clock) {
+    return minimal(debug, routeDefinitions, clock, SmartDispatcherMode.ENFORCE);
+  }
+
+  /** 需要直接向账本播种占用的用例用这个变体（服务不暴露 occupancy manager）。 */
+  static RuntimeDispatchService minimal(
+      List<String> debug,
+      SimpleOccupancyManager occupancy,
+      SmartDispatcherMode mode,
+      java.util.function.Supplier<java.time.Instant> clock) {
+    return minimal(debug, mock(RouteDefinitionCache.class), clock, mode, occupancy);
+  }
+
+  static RuntimeDispatchService minimal(
+      List<String> debug,
+      RouteDefinitionCache routeDefinitions,
+      java.util.function.Supplier<java.time.Instant> clock,
+      SmartDispatcherMode mode) {
+    return minimal(
+        debug,
+        routeDefinitions,
+        clock,
+        mode,
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()));
+  }
+
+  static RuntimeDispatchService minimal(
+      List<String> debug,
+      RouteDefinitionCache routeDefinitions,
+      java.util.function.Supplier<java.time.Instant> clock,
+      SmartDispatcherMode mode,
+      SimpleOccupancyManager occupancy) {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView base = testConfigView(20, 20.0);
     when(configManager.current())
@@ -54,11 +94,10 @@ final class TestServices {
                 base.spawnSettings(),
                 base.trainConfigSettings(),
                 base.reclaimSettings(),
-                new ConfigManager.SmartDispatcherSettings(SmartDispatcherMode.ENFORCE),
+                new ConfigManager.SmartDispatcherSettings(mode),
                 base.healthSettings()));
     return new RuntimeDispatchService(
-        new SimpleOccupancyManager(
-            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
+        occupancy,
         mock(RailGraphService.class),
         routeDefinitions,
         new RouteProgressRegistry(),

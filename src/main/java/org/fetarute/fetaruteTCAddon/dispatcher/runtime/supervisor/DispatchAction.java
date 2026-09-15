@@ -10,6 +10,13 @@ public enum DispatchAction {
   REQUEST_UNLOCK_AUTHORITY_REEVALUATION(
       DispatchEffectClass.SIGNAL_REEVALUATION_REQUEST, true, false),
   SMART_HEAD_ON_YIELD(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
+  /**
+   * 撤销等待环上某列车的排队位次。
+   *
+   * <p>排队位次不是物理占用也不是已授予的行车权，但它仍然写在占用账本里，因此归入 {@link
+   * DispatchEffectClass#OCCUPANCY_MUTATION}——OBSERVE_ONLY 下一样不得落地。
+   */
+  SMART_QUEUE_POSITION_YIELD(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
   ACQUIRE_VERIFIED_SWITCHER_DRAIN_AUTHORITY(DispatchEffectClass.OCCUPANCY_MUTATION, true, false),
   /** 已验证 admission 拒绝后的本地保持；不写 destination、token 或 occupancy。 */
   SMART_ADMISSION_HOLD(DispatchEffectClass.SIGNAL_CONSTRAINT, true, false),

@@ -2727,13 +2727,25 @@ public final class SimpleOccupancyManager
     if (!queue.contains(trainName)) {
       return new QueuePositionYieldResult(false, "not-queued");
     }
+    Instant now = clockNow();
+    Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+    OccupancyQueueEntry removedEntry = queue.entryFor(trainName).orElse(null);
     if (!queue.remove(trainName)) {
       return new QueuePositionYieldResult(false, "remove-noop");
     }
+    traceQueueLifecycle(
+        resource, removedEntry, "WAITING_TRAIN", "remove", "smart-queue-position-yield", null);
+    // 道岔队列签名必须跟着队列项一起清——否则仲裁侧仍然认为该车在排队，
+    // 而本方法针对的死锁恰恰就是 switcher 冲突。
+    forgetSwitcherQueueSignature(resource, trainName);
+    // 割排队位的目的是让新队首**立刻**获得仲裁机会。不发资格变化就只能等下一轮
+    // 周期 tick，而被割的车每 tick 都在重新入队，很可能抢先把环恢复，这次割就白割了。
+    List<String> newlyEligible = newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now));
     if (queue.isEmpty()) {
       queues.remove(resource);
     }
     version.incrementAndGet();
+    publishQueueChangedEvent(trainName, List.of(resource), newlyEligible, now);
     return new QueuePositionYieldResult(true, "yielded");
   }
 

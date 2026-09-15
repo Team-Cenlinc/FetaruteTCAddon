@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -375,6 +376,11 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockNoReleaseCooldowns =
       new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** key 是 (resourceKey, 排队者)，防止割排队位退化成每 tick 一次的抖动。 */
+  private final java.util.concurrent.ConcurrentMap<String, Instant> queuePositionYieldCooldowns =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private final java.util.concurrent.ConcurrentMap<String, SmartDirectionAuditSnapshot>
       smartDirectionAuditSnapshots = new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, SameDirectionLeaderHold>
@@ -552,6 +558,14 @@ public final class RuntimeDispatchService {
   private static final Duration DISPATCH_DESTROY_STALE_EVENT_GRACE = Duration.ofSeconds(30);
 
   private static final Duration SMART_UNLOCK_NO_RELEASE_COOLDOWN = Duration.ofSeconds(30);
+
+  /**
+   * 同一 (资源, 排队者) 两次割排队位之间的最小间隔。
+   *
+   * <p>被割的车下一 tick 就会重新入队，若被解锁的车没有在这段时间里抢先通过，环会复原。 没有冷却时每轮健康检查都会再割一次——这正是已被撤回的主动回收尾部保护那个改动
+   * 在第十七轮实服上的败因（同一资源 93 分钟内反复释放 526 次）。
+   */
+  private static final Duration QUEUE_POSITION_YIELD_COOLDOWN = Duration.ofSeconds(60);
 
   /**
    * Smart unlock winner 的最大临时队列加分。
@@ -1676,6 +1690,15 @@ public final class RuntimeDispatchService {
     for (String key : java.util.List.copyOf(departureGates.keySet())) {
       expireStaleDepartureGate(key);
     }
+  }
+
+  /** 丢掉已到期的割排队位冷却，避免长期运行后 map 无限增长。 */
+  private void sweepExpiredQueuePositionYieldCooldowns() {
+    if (queuePositionYieldCooldowns.isEmpty()) {
+      return;
+    }
+    Instant now = clockNow();
+    queuePositionYieldCooldowns.entrySet().removeIf(entry -> !entry.getValue().isAfter(now));
   }
 
   private boolean expireStaleDepartureGate(String key) {
@@ -6533,6 +6556,7 @@ public final class RuntimeDispatchService {
     }
     departureGates.keySet().removeIf(key -> !activeKeys.contains(normalizeTrainKey(key)));
     sweepStaleDepartureGates();
+    sweepExpiredQueuePositionYieldCooldowns();
 
     int removedProgress = 0;
     for (String name : progressRegistry.snapshot().keySet()) {
@@ -11284,12 +11308,6 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 执行 Smart forward unlock / authority-token repair。
-   *
-   * <p>该入口只处理“授权窗口/移动 token 卡住但没有可见硬 blocker”的 stuck case；所有真实副作用必须先经过 {@link
-   * SmartDispatcherModeGate}。
-   */
-  /**
    * 割掉等待环上的**排队位次**边——环上唯一割了不影响安全的边。
    *
    * <p>问题形态（第十七轮实服，MT 线整条被掐死 47 分钟）：
@@ -11326,12 +11344,21 @@ public final class RuntimeDispatchService {
     if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
       return SmartRecoveryActionResult.skipped("occupancy-manager-does-not-support-queue-yield");
     }
+    Instant now = clockNow();
     String blockedKey = normalizeTrainKey(input.train());
     BlockerSnapshot blocked = blockerSnapshots.get(blockedKey);
     if (blocked == null || blocked.blockers().isEmpty()) {
       return SmartRecoveryActionResult.skipped("no-blocker-snapshot");
     }
-    // ① A 必须**只**被排队位次挡住。只要还有一个真实占用挡着它，割队列解不开问题，
+    // ① 快照必须新鲜。等待环是从两份快照拼出来的，只要其中一份过期，
+    //    “已证明成环”就降级成了猜测——而割的却是一辆可能正当排队的车。
+    if (!blockerSnapshotFresh(blockedKey, blocked, now)) {
+      return SmartRecoveryActionResult.skipped("stale-blocker-snapshot");
+    }
+    if (!blockerSnapshotProgressCurrent(input.train(), blocked)) {
+      return SmartRecoveryActionResult.skipped("blocked-train-progressed");
+    }
+    // ② A 必须**只**被排队位次挡住。只要还有一个真实占用挡着它，割队列解不开问题，
     //    而且会白白牺牲别人的排队公平性。
     for (DeadlockBlockerInfo blocker : blocked.blockers()) {
       if (blocker == null || !"QUEUE_POSITION".equals(blocker.role())) {
@@ -11347,38 +11374,111 @@ public final class RuntimeDispatchService {
             input.train(),
             blocked.blockers(),
             owner -> {
-              BlockerSnapshot snapshot = blockerSnapshots.get(normalizeTrainKey(owner));
-              return snapshot == null ? Set.of() : snapshot.blockers();
+              String ownerKey = normalizeTrainKey(owner);
+              BlockerSnapshot snapshot = blockerSnapshots.get(ownerKey);
+              if (!blockerSnapshotFresh(ownerKey, snapshot, now)) {
+                return Set.of();
+              }
+              return blockerSnapshotProgressCurrent(owner, snapshot)
+                  ? snapshot.blockers()
+                  : Set.of();
             },
             heldByBlocked);
-    if (targetOpt.isPresent()) {
-      QueueYieldTarget target = targetOpt.get();
-      String queueOwner = target.queueOwner();
-      Optional<OccupancyResource> resourceOpt = parseOccupancyResourceKey(target.resourceKey());
-      if (resourceOpt.isEmpty()) {
-        return SmartRecoveryActionResult.skipped("unparseable-resource-key");
+    if (targetOpt.isEmpty()) {
+      return SmartRecoveryActionResult.skipped("no-proven-queue-cycle");
+    }
+    QueueYieldTarget target = targetOpt.get();
+    String queueOwner = target.queueOwner();
+    Optional<OccupancyResource> resourceOpt = parseOccupancyResourceKey(target.resourceKey());
+    if (resourceOpt.isEmpty()) {
+      return SmartRecoveryActionResult.skipped("unparseable-resource-key");
+    }
+    // ③ 冷却。被割的车下一 tick 就会重新入队，环可能立刻复原；没有冷却就会
+    //    退化成每 tick 割一次的抖动（参见已撤回的主动回收尾部保护）。
+    String cooldownKey = queuePositionYieldCooldownKey(target.resourceKey(), queueOwner);
+    Instant cooldownUntil = queuePositionYieldCooldowns.get(cooldownKey);
+    if (cooldownUntil != null) {
+      if (cooldownUntil.isAfter(now)) {
+        debugLogger.accept(
+            "SMART_QUEUE_POSITION_YIELD_COOLDOWN blockedTrain="
+                + input.train()
+                + " queueOwner="
+                + queueOwner
+                + " resource="
+                + target.resourceKey()
+                + " remainingMs="
+                + Math.max(0L, Duration.between(now, cooldownUntil).toMillis()));
+        return SmartRecoveryActionResult.skipped("queue-yield-cooldown");
       }
-      SimpleOccupancyManager.QueuePositionYieldResult yield =
-          manager.yieldQueuePosition(resourceOpt.get(), queueOwner);
-      if (!yield.removed()) {
-        return SmartRecoveryActionResult.skipped("queue-yield-" + yield.reason());
-      }
+      queuePositionYieldCooldowns.remove(cooldownKey, cooldownUntil);
+    }
+    DispatchEffectClass effectClass = DispatchEffectClass.OCCUPANCY_MUTATION;
+    if (!smartDispatcherRegisteredActionAllowed(
+        input.train(),
+        "health-queue-position-inversion",
+        DispatchAction.SMART_QUEUE_POSITION_YIELD)) {
       debugLogger.accept(
-          "SMART_QUEUE_POSITION_YIELDED blockedTrain="
+          "SMART_QUEUE_POSITION_YIELD_SUPPRESSED_BY_MODE blockedTrain="
               + input.train()
               + " queueOwner="
               + queueOwner
               + " resource="
               + target.resourceKey()
-              + " reason=proven-wait-cycle-through-queue-edge");
+              + " mode="
+              + smartDispatcherMode()
+              + " effectClass="
+              + effectClass
+              + " occupancyMutated=false");
       return new SmartRecoveryActionResult(
-          true,
-          true,
-          "SMART_QUEUE_POSITION_YIELD",
-          "yielded-queue-position-on-proven-cycle",
-          DispatchEffectClass.OCCUPANCY_MUTATION);
+          true, false, "SMART_QUEUE_POSITION_YIELD", "suppressed-by-mode", effectClass);
     }
-    return SmartRecoveryActionResult.skipped("no-proven-queue-cycle");
+    SimpleOccupancyManager.QueuePositionYieldResult yield =
+        manager.yieldQueuePosition(resourceOpt.get(), queueOwner);
+    if (!yield.removed()) {
+      return SmartRecoveryActionResult.skipped("queue-yield-" + yield.reason());
+    }
+    queuePositionYieldCooldowns.put(cooldownKey, now.plus(QUEUE_POSITION_YIELD_COOLDOWN));
+    debugLogger.accept(
+        "SMART_QUEUE_POSITION_YIELDED blockedTrain="
+            + input.train()
+            + " queueOwner="
+            + queueOwner
+            + " resource="
+            + target.resourceKey()
+            + " cooldownMs="
+            + QUEUE_POSITION_YIELD_COOLDOWN.toMillis()
+            + " reason=proven-wait-cycle-through-queue-edge");
+    return new SmartRecoveryActionResult(
+        true,
+        true,
+        "SMART_QUEUE_POSITION_YIELD",
+        "yielded-queue-position-on-proven-cycle",
+        effectClass);
+  }
+
+  /**
+   * blocker 快照是否还在 {@link #BLOCKER_SNAPSHOT_TTL} 内；过期的顺手丢掉。
+   *
+   * <p>这里不能“读不到就当没被挡”——调用方把空 blocker 集合解释成“排队者没被挡，它排队是正当的”， 而那恰恰是**不割**的一边，所以缺证据时失败是闭向的。
+   */
+  private boolean blockerSnapshotFresh(String key, BlockerSnapshot snapshot, Instant now) {
+    if (snapshot == null) {
+      return false;
+    }
+    Instant effectiveNow = now == null ? clockNow() : now;
+    if (snapshot.sampledAt().isBefore(effectiveNow.minus(BLOCKER_SNAPSHOT_TTL))) {
+      if (key != null) {
+        blockerSnapshots.remove(key, snapshot);
+      }
+      return false;
+    }
+    return true;
+  }
+
+  private static String queuePositionYieldCooldownKey(String resourceKey, String queueOwner) {
+    return (resourceKey == null ? "-" : resourceKey)
+        + "|"
+        + TrainNameNormalizer.normalizeKey(queueOwner);
   }
 
   /** {@link #findProvenQueueCycle} 找到的可割排队边。 */
@@ -11414,7 +11514,22 @@ public final class RuntimeDispatchService {
       }
     }
     Set<String> held = heldByBlocked == null ? Set.of() : heldByBlocked;
+    // blockedBy 是 Set，迭代顺序不保证稳定。同一份网络状态必须永远割同一条边，
+    // 否则事后对着日志复盘会得到对不上的结论。
+    List<DeadlockBlockerInfo> ordered = new ArrayList<>();
     for (DeadlockBlockerInfo blocker : blockedBy) {
+      if (blocker != null) {
+        ordered.add(blocker);
+      }
+    }
+    ordered.sort(
+        Comparator.comparing(
+                DeadlockBlockerInfo::resourceKey, Comparator.nullsLast(String::compareTo))
+            .thenComparing(
+                DeadlockBlockerInfo::ownerCanonical, Comparator.nullsLast(String::compareTo))
+            .thenComparing(
+                DeadlockBlockerInfo::trainName, Comparator.nullsLast(String::compareTo)));
+    for (DeadlockBlockerInfo blocker : ordered) {
       String queueOwner = blocker.trainName();
       if (queueOwner == null || queueOwner.isBlank()) {
         continue;
@@ -11462,15 +11577,21 @@ public final class RuntimeDispatchService {
     return Optional.empty();
   }
 
-  /** 某列车当前持有的全部资源 key（任何角色）。用于证明等待环的另一半。 */
+  /**
+   * 某列车当前持有的、**能挡住别人**的资源 key。用于证明等待环的另一半。
+   *
+   * <p>“持有”在这里必须按**会不会挡住排队者**来定义，而不是“账本里有一条记录”。 否则会把一个**并不存在**的等待环判成已证明，继而去割一辆正当排队的车。
+   *
+   * <p>实际会踩到的是 {@link ClaimRole#UNLOCK_RESERVATION}：它**会**写进 claims，但 {@link
+   * ResourceIntent#UNLOCK_RESERVATION} 自己的文档写着「不得阻塞正常行车 admission」。 {@link
+   * ClaimRole#QUEUE_POSITION} 与 {@link ClaimRole#LOOKAHEAD_PREVIEW} 同样不挡人（后者目前根本 不会落入
+   * claims，列在这里只是不指望那个事实永远不变）。
+   */
   private static Set<String> resourceKeysHeldBy(SimpleOccupancyManager manager, String trainName) {
     Set<String> keys = new LinkedHashSet<>();
     for (OccupancyClaim claim : manager.snapshotClaims()) {
-      if (claim == null || claim.resource() == null) {
+      if (claim == null || claim.resource() == null || !blockingClaimRole(claim.role())) {
         continue;
-      }
-      if (claim.role() == ClaimRole.QUEUE_POSITION) {
-        continue; // 排队位次不是持有。
       }
       if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
         keys.add(claim.resource().toString());
@@ -11479,6 +11600,27 @@ public final class RuntimeDispatchService {
     return keys;
   }
 
+  /**
+   * claim 角色是否真的会挡住另一辆车。
+   *
+   * <p>口径与 {@link #externalOccupancyStopResourceStillHeld} 完全一致——同一个问题不应当在同一个类里 有两套答案。
+   */
+  private static boolean blockingClaimRole(ClaimRole role) {
+    if (role == null) {
+      return false;
+    }
+    return switch (role) {
+      case MOVEMENT_REQUIRED, PHYSICAL_FOOTPRINT, PROTECTIVE_RETAIN, HOLD_ONLY -> true;
+      case QUEUE_POSITION, LOOKAHEAD_PREVIEW, UNLOCK_RESERVATION -> false;
+    };
+  }
+
+  /**
+   * 执行 Smart forward unlock / authority-token repair。
+   *
+   * <p>该入口只处理“授权窗口/移动 token 卡住但没有可见硬 blocker”的 stuck case；所有真实副作用必须先经过 {@link
+   * SmartDispatcherModeGate}。
+   */
   public SmartRecoveryActionResult applySmartForwardUnlock(SmartRecoveryInput input) {
     if (input == null || input.train().isBlank()) {
       return SmartRecoveryActionResult.skipped("missing-input");
@@ -30036,7 +30178,13 @@ public final class RuntimeDispatchService {
     updateBlockerSnapshot(trainName, blockers, request, now, source);
   }
 
-  private void updateBlockerSnapshot(
+  /**
+   * blocker 快照的写入口（运行时与用例共用）。
+   *
+   * <p>包内可见是为了让用例能用**真实的** {@link OccupancyClaim} 播种等待关系， 而不是自己捏造 {@code BlockerSnapshot}
+   * 内部结构——后者会跳过 claim→blocker 的转换， 而那正是判环赖以成立的一步。
+   */
+  void updateBlockerSnapshot(
       String trainName,
       Collection<OccupancyClaim> blockerClaims,
       OccupancyRequest request,
