@@ -13,6 +13,25 @@ import org.junit.jupiter.api.Test;
 /** 下一 tick 信号完整重评估调度器测试。 */
 class RuntimeSignalReevaluationSchedulerTest {
 
+  /**
+   * 冻结时钟：让"一次 drain 能排空整批"成为**行为断言**，而不是速度断言。
+   *
+   * <p>默认构造器用真实 {@code System.nanoTime} 和 5 毫秒预算。冷 JVM 里（比如 forkEvery 之后 本类恰好是某个 fork
+   * 的第一个）类加载加上构造一个 {@code LinkageError} 就能吃掉这 5 毫秒， 于是第二辆车被推到下一 tick，而用例只 {@code runNextTick()}
+   * 一次——断言随机变红。 这个顺序依赖在 {@code forkEvery} 引入之前一直被"总有别的类先把 JVM 跑热"掩盖着， 在慢机器或 CI 上迟早会自己冒出来。
+   *
+   * <p>预算耗尽时的分批行为由 {@code drainYieldsRemainingBatchToFollowingTickWhenWorkBudgetExpires}
+   * 正面覆盖，因此这里冻结时钟不会丢掉任何判别力。
+   */
+  private static RuntimeSignalReevaluationScheduler withFrozenClock(
+      ManualNextTickScheduler nextTick,
+      java.util.function.Consumer<String> attempt,
+      java.util.function.BiConsumer<String, Throwable> failureHandler,
+      java.util.function.Consumer<String> debugLogger) {
+    return new RuntimeSignalReevaluationScheduler(
+        nextTick, attempt, failureHandler, debugLogger, Duration.ofMillis(5), () -> 0L);
+  }
+
   @Test
   void coalescesLogicalAliasesUntilNextTick() {
     ManualNextTickScheduler nextTick = new ManualNextTickScheduler();
@@ -108,7 +127,7 @@ class RuntimeSignalReevaluationSchedulerTest {
     List<String> diagnostics = new ArrayList<>();
     List<String> failedTrains = new ArrayList<>();
     RuntimeSignalReevaluationScheduler scheduler =
-        new RuntimeSignalReevaluationScheduler(
+        withFrozenClock(
             nextTick,
             trainName -> {
               if ("train-fail".equals(trainName)) {
@@ -152,7 +171,7 @@ class RuntimeSignalReevaluationSchedulerTest {
     ManualNextTickScheduler nextTick = new ManualNextTickScheduler();
     List<String> reevaluated = new ArrayList<>();
     RuntimeSignalReevaluationScheduler scheduler =
-        new RuntimeSignalReevaluationScheduler(
+        withFrozenClock(
             nextTick,
             trainName -> {
               if ("train-fail".equals(trainName)) {

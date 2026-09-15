@@ -108,7 +108,16 @@ tasks.test {
     useJUnitPlatform()
     // Phase 0 的多车场景骨架会在一个 JVM 里连跑多个 700 tick 的完整调度现场，
     // Gradle 默认的 512MB 不够（实测在 Mockito 建 mock 时 OutOfMemoryError）。
-    maxHeapSize = "2g"
+    //
+    // 2g → 4g（2026-09-15）：骨架接上真实 TrainHealthMonitor 之后，每个
+    // smartRecoveryLayer 场景都在驱动完整的生产恢复链，单 tick 的对象量显著上升。
+    // 实测 2g 下老年代打满 2047/2048MB、511 次 Full GC，test 任务挂死而非报错——
+    // 症状是"没有新的 XML 产出但 CPU 满载"，很容易误判成死循环（我误判过一次）。
+    maxHeapSize = "4g"
+    // 跨测试类累积是这里的真实成因：JUnit 在类跑完前一直持有实例，而每个骨架实例
+    // 都挂着一个完整的 RuntimeDispatchService。定期换 JVM 把累积封顶，
+    // 代价是每 40 个类多一次 JVM 启动（约 1 秒）。
+    forkEvery = 40
 }
 
 def targetJavaVersion = 21
