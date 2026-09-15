@@ -1383,4 +1383,59 @@ class SmartWaitForPlannerTest {
     }
     return -1;
   }
+
+  /**
+   * 方向证据不足时，必须报出**是哪一类冲突资源**造成的。
+   *
+   * <p>实服第十五轮 {@code NEED_DIRECTION_AUDIT} 241 次（占规划失败的 80%），但那条 reason 不说是谁害的，
+   * 只能靠交叉比对另一个事件才拆出：缺方向的 CONFLICT 里 switcher 3763、single 420、interlocking 98。
+   *
+   * <p>这个区分决定完全相反的两种行动：{@code single} 缺方向是**数据缺失**（同类里 1692 条是有方向的， 说明推导得出来，只是这些没推出来）；而 {@code
+   * switcher} 压根**没有 A/B 轴**——两车从不同支进同一组 道岔无论"同向"与否都冲突，对它要求走廊方向是判据用错了资源类别，补不出来。
+   * 看不见这个区分就只能猜，而本会话已经验证过：盲改会不降反升。
+   */
+  @Test
+  void directionBlockedByReportsWhichConflictClassCausedIt() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("SW-A", "SW-B", "CONFLICT:switcher:one", CorridorDirection.UNKNOWN),
+                    edge("SW-B", "SW-A", "CONFLICT:switcher:one", CorridorDirection.UNKNOWN)),
+                Map.of("SW-A", state("SW-A", 20), "SW-B", state("SW-B", 40))));
+
+    assertTrue(result.selectedPlan().isEmpty(), "方向未知不得产出计划");
+    String summary =
+        result.traceLines().stream()
+            .filter(line -> line.contains("SMART_NO_SAME_DIRECTION_UNLOCK_PLAN"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("没有产出聚合事件：" + result.traceLines()));
+    assertTrue(summary.contains("directionAuditNeeded=true"), summary);
+    assertTrue(
+        summary.contains("directionBlockedBy=switcher"),
+        () -> "必须说出是道岔害的，否则下一轮又要靠交叉比对才拆得出来：" + summary);
+    assertFalse(summary.contains("directionBlockedBy=-"), summary);
+  }
+
+  /** 同一条摘要在单线走廊上必须给出不同的类别——否则它不判别任何东西。 */
+  @Test
+  void directionBlockedBySeparatesSingleCorridorFromSwitcher() {
+    SmartWaitForPlanner.PlanResult result =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("WS-A", "WS-B", "CONFLICT:single:WS", CorridorDirection.UNKNOWN),
+                    edge("WS-B", "WS-A", "CONFLICT:single:WS", CorridorDirection.UNKNOWN)),
+                Map.of("WS-A", state("WS-A", 20), "WS-B", state("WS-B", 40))));
+
+    String summary =
+        result.traceLines().stream()
+            .filter(line -> line.contains("SMART_NO_SAME_DIRECTION_UNLOCK_PLAN"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("没有产出聚合事件：" + result.traceLines()));
+    assertTrue(summary.contains("directionBlockedBy=single"), summary);
+    assertFalse(summary.contains("switcher"), () -> "单线场景不该报成道岔——那样这条摘要就不判别任何东西了：" + summary);
+  }
 }

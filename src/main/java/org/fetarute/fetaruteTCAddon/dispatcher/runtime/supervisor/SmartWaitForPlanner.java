@@ -574,7 +574,16 @@ public final class SmartWaitForPlanner {
               + " directionAuditNeeded="
               + directionAuditNeeded
               + " hardDeadlockEvidenceStrong="
-              + hardEvidenceStrong);
+              + hardEvidenceStrong
+              // 报出**是哪一类冲突资源**造成方向证据不足。摘要放在这条聚合事件上，
+              // 而不是 SMART_DISPATCH_DIRECTION_EVIDENCE：后者不在诊断 must-keep 里，
+              // 实服一小时只活下来 10 条，而本事件 241 条且受保护。
+              //
+              // 这个区分决定相反的两种行动：single 缺方向是数据缺失（同类里 1692 条有方向，
+              // 说明推导得出来）；switcher 压根没有 A/B 轴，对它要求走廊方向是判据用错了
+              // 资源类别，补不出来——那条要换成"车物理上不在该节点"的证据。
+              + " directionBlockedBy="
+              + directionBlockingResourceClasses(candidates));
       String fallbackReason =
           onlySwitcherMergePatterns
               ? "SWITCHER_MERGE_EXECUTOR_NOT_READY"
@@ -1431,16 +1440,32 @@ public final class SmartWaitForPlanner {
 
     List<Edge> directedConflictEdges =
         releaseEdges.stream().filter(edge -> !canonicalPathResource(edge.resource())).toList();
-    boolean missingConflictDirection =
+    List<Edge> conflictsMissingDirection =
         directedConflictEdges.stream()
-            .map(edge -> edge.input().direction())
-            .anyMatch(direction -> direction == null || direction == CorridorDirection.UNKNOWN);
-    if (missingConflictDirection) {
+            .filter(
+                edge -> {
+                  CorridorDirection direction = edge.input().direction();
+                  return direction == null || direction == CorridorDirection.UNKNOWN;
+                })
+            .toList();
+    if (!conflictsMissingDirection.isEmpty()) {
+      // 报出**是哪一类资源**害的，而不是只说"方向证据不足"。
+      //
+      // 实服第十五轮 NEED_DIRECTION_AUDIT 241 次（占规划失败的 80%），但这条
+      // reason 不说是谁造成的，只能靠交叉比对另一个事件才拆得出来：
+      // 缺方向的 CONFLICT 里 switcher 3763、single 420、interlocking 98。
+      //
+      // 这个区分决定了完全相反的两种行动：single 缺方向是**数据缺失**（同类资源里
+      // 1692 条是有方向的，说明推导得出来，只是这 420 条没推出来）；而 switcher
+      // 压根**没有 A/B 轴**——CorridorDirection 是相对归一化区间定义的，道岔是节点身份，
+      // 两车从不同支进同一组道岔无论"同向"与否都冲突。对后者要求走廊方向是判据用错了
+      // 资源类别，不是数据缺失，因此不能靠"把方向补上"来修。
       return new DirectionResolution(
           CorridorDirection.UNKNOWN,
           forwardPathEvidence,
           forwardPathEvidence.isPresent() ? "CANONICAL_MOVEMENT_PLAN" : "UNKNOWN",
-          "CONFLICT_DIRECTION_MISSING");
+          "CONFLICT_DIRECTION_MISSING:"
+              + missingDirectionResourceClasses(conflictsMissingDirection));
     }
     Set<CorridorDirection> knownDirections =
         directedConflictEdges.stream()
@@ -2004,6 +2029,70 @@ public final class SmartWaitForPlanner {
       return "UNKNOWN";
     }
     return resource.substring(0, resource.indexOf(':')).toUpperCase(Locale.ROOT);
+  }
+
+  /**
+   * 汇总"因方向证据不足被拒"的候选里，出现了哪些类别的冲突资源。
+   *
+   * <p>只统计被 {@code INSUFFICIENT_DIRECTION_EVIDENCE} 拒掉的候选——其余拒因与方向无关， 混进来会把这条摘要稀释成噪声。输出形如 {@code
+   * switcher x3,single x1}。
+   */
+  private static String directionBlockingResourceClasses(List<UnlockCandidate> candidates) {
+    if (candidates == null || candidates.isEmpty()) {
+      return "-";
+    }
+    Map<String, Integer> counts = new java.util.TreeMap<>();
+    for (UnlockCandidate candidate : candidates) {
+      if (candidate == null
+          || !"INSUFFICIENT_DIRECTION_EVIDENCE".equals(candidate.rejectReason())) {
+        continue;
+      }
+      for (String resource : candidate.resources()) {
+        if (resource == null || canonicalPathResource(resource)) {
+          continue;
+        }
+        counts.merge(conflictResourceClass(resource), 1, Integer::sum);
+      }
+    }
+    if (counts.isEmpty()) {
+      return "-";
+    }
+    return counts.entrySet().stream()
+        .map(entry -> entry.getKey() + " x" + entry.getValue())
+        .collect(java.util.stream.Collectors.joining(","));
+  }
+
+  /**
+   * 把"缺方向的冲突资源"归纳成可 grep 的类别摘要，例如 {@code switcher x3,single x1}。
+   *
+   * <p>只输出类别与条数，不输出具体 key：类别决定行动，而 key 会让这条 trace 随线网规模放大。
+   */
+  private static String missingDirectionResourceClasses(List<Edge> edges) {
+    Map<String, Integer> counts = new java.util.TreeMap<>();
+    for (Edge edge : edges) {
+      if (edge == null) {
+        continue;
+      }
+      counts.merge(conflictResourceClass(edge.resource()), 1, Integer::sum);
+    }
+    if (counts.isEmpty()) {
+      return "-";
+    }
+    return counts.entrySet().stream()
+        .map(entry -> entry.getKey() + " x" + entry.getValue())
+        .collect(java.util.stream.Collectors.joining(","));
+  }
+
+  /** 冲突资源的类别前缀（{@code CONFLICT:switcher:...} → {@code switcher}）。 */
+  private static String conflictResourceClass(String resource) {
+    if (resource == null || resource.isBlank()) {
+      return "-";
+    }
+    String body =
+        resource.startsWith("CONFLICT:") ? resource.substring("CONFLICT:".length()) : resource;
+    int separator = body.indexOf(':');
+    String head = separator < 0 ? body : body.substring(0, separator);
+    return head.isBlank() ? "-" : head;
   }
 
   private static boolean canonicalPathResource(String resource) {
