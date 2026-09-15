@@ -1659,6 +1659,25 @@ public final class RuntimeDispatchService {
    * <p>这不削弱安全：锁的职责是"停站期间别走"，而移动授权是独立的另一层——那辆车全程 {@code
    * movementToken=ACTIVE}，本来就有权走。超时只是把一把烂在手里的锁还回去。
    */
+  /**
+   * 周期性清扫超时的发车许可锁。
+   *
+   * <p><b>为什么不能只挂在读取路径上。</b>第十六轮实服：SURC-WS-LN-7686 卡在 {@code DEPARTURE_GATE_HOLD} 超过 1026 秒（23:14
+   * 之后到站 0 次），而 {@code SMART_DEPARTURE_GATE_EXPIRED} 全场为 0——jar 里确实带着这段代码（已核对 jar 常量池与运行时指纹 {@code
+   * gitCommit=0b2b57f}），锁也确实只在 23:13:37 取过一次、 牌子此后再没触发过。唯一自洽的解释是：{@code handleSignalTick} 对这辆车根本没走到
+   * {@code hasDepartureGate} 那一行就提前 return 了。
+   *
+   * <p>教训很直接：<b>超时判据不能依赖那条正卡着的代码路径</b>。把它做成读触发，等于假设 "卡住的车仍会被正常读取"，而卡住恰恰意味着某条路径不再执行。清扫不依赖任何分支。
+   */
+  private void sweepStaleDepartureGates() {
+    if (departureGates.isEmpty()) {
+      return;
+    }
+    for (String key : java.util.List.copyOf(departureGates.keySet())) {
+      expireStaleDepartureGate(key);
+    }
+  }
+
   private boolean expireStaleDepartureGate(String key) {
     DepartureGate gate = departureGates.get(key);
     if (gate == null) {
@@ -6513,6 +6532,7 @@ public final class RuntimeDispatchService {
       }
     }
     departureGates.keySet().removeIf(key -> !activeKeys.contains(normalizeTrainKey(key)));
+    sweepStaleDepartureGates();
 
     int removedProgress = 0;
     for (String name : progressRegistry.snapshot().keySet()) {

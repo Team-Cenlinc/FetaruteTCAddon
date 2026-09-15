@@ -83,4 +83,51 @@ class DepartureGateExpiryTest {
         logs.stream().noneMatch(line -> line.startsWith("SMART_DEPARTURE_GATE_EXPIRED ")),
         () -> "正常释放不该被记成超时：" + logs);
   }
+
+  /**
+   * 超时释放**不得依赖读取路径**——清扫必须独立生效。
+   *
+   * <p>第十六轮实服证明了这一点：SURC-WS-LN-7686 卡在 {@code DEPARTURE_GATE_HOLD} 超过 1026 秒 （23:14 之后到站 0 次），而
+   * {@code SMART_DEPARTURE_GATE_EXPIRED} 全场为 0。jar 确实带着超时代码 （核对过 jar 常量池与运行时指纹 {@code
+   * gitCommit=0b2b57f}），锁也只在 23:13:37 取过一次、 牌子此后再没触发。唯一自洽的解释是 {@code handleSignalTick} 对这辆车提前
+   * return 了， 从没走到 {@code hasDepartureGate}。
+   *
+   * <p>把超时做成读触发，等于假设"卡住的车仍会被正常读取"——而卡住恰恰意味着某条路径不再执行。 本用例**只调清扫入口，一次都不调
+   * hasDepartureGate**，因此能判别这个区别。
+   */
+  @Test
+  void sweepExpiresGateWithoutAnyReadOnThatTrain() {
+    AtomicReference<Instant> now = new AtomicReference<>(T0);
+    List<String> logs = new ArrayList<>();
+    RuntimeDispatchService service = TestServices.minimal(logs, now::get);
+
+    service.acquireDepartureGate("train-A", "session-1", "autostation_dwell");
+    now.set(T0.plus(Duration.ofSeconds(181)));
+
+    // 只走周期清扫（列车仍在活跃集合里，因此不会被"车已消失"那条分支顺带删掉）。
+    service.cleanupOrphanOccupancyClaimsWithReport(java.util.Set.of("train-A"));
+
+    assertTrue(
+        logs.stream().anyMatch(line -> line.startsWith("SMART_DEPARTURE_GATE_EXPIRED ")),
+        () -> "清扫必须能独立释放，否则超时只在'车还正常'时才生效：" + logs);
+    assertFalse(service.hasDepartureGate("train-A"), "清扫之后锁应当已经不在");
+  }
+
+  /** 清扫不得误伤仍在余量内的正常停站。 */
+  @Test
+  void sweepLeavesGatesThatAreStillWithinTheWindow() {
+    AtomicReference<Instant> now = new AtomicReference<>(T0);
+    List<String> logs = new ArrayList<>();
+    RuntimeDispatchService service = TestServices.minimal(logs, now::get);
+
+    service.acquireDepartureGate("train-A", "session-1", "autostation_dwell");
+    now.set(T0.plus(Duration.ofSeconds(60)));
+
+    service.cleanupOrphanOccupancyClaimsWithReport(java.util.Set.of("train-A"));
+
+    assertTrue(service.hasDepartureGate("train-A"), "正常停站时长内不得被清扫掉");
+    assertTrue(
+        logs.stream().noneMatch(line -> line.startsWith("SMART_DEPARTURE_GATE_EXPIRED ")),
+        () -> logs.toString());
+  }
 }
