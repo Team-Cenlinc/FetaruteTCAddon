@@ -282,4 +282,65 @@ class ConfigManagerTest {
     assertTrue(trace.contains("startupOccupancyReconstruction=true"));
     assertTrue(trace.contains("recoverableHoldContainsRouteStopOrTerminal=true"));
   }
+
+  @Test
+  // 应解析发车准入控制：在网列车上限与拥挤门控阈值
+  void parseSpawnAdmissionControlSettings() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("spawn.max-active-trains", 12);
+    config.set("spawn.congestion-hold-threshold", 0.61);
+    config.set("spawn.congestion-release-threshold", 0.5);
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(12, view.spawnSettings().maxActiveTrains());
+    assertEquals(0.61, view.spawnSettings().congestionHoldThreshold());
+    assertEquals(0.5, view.spawnSettings().congestionReleaseThreshold());
+  }
+
+  @Test
+  // 缺省时应给出默认上限 16 与 0.58/0.48 阈值
+  void spawnAdmissionControlDefaultsWhenAbsent() {
+    ConfigManager.ConfigView view =
+        ConfigManager.parse(new YamlConfiguration(), Logger.getLogger("config-test"));
+
+    assertEquals(16, view.spawnSettings().maxActiveTrains());
+    assertEquals(0.58, view.spawnSettings().congestionHoldThreshold());
+    assertEquals(0.48, view.spawnSettings().congestionReleaseThreshold());
+  }
+
+  @Test
+  // 0 表示禁用准入控制，必须被原样保留而不是当成非法值
+  void spawnMaxActiveTrainsZeroDisablesAdmissionControl() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("spawn.max-active-trains", 0);
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(0, view.spawnSettings().maxActiveTrains());
+  }
+
+  @Test
+  // 非法上限/阈值应回退默认，而不是抛出或让门控恒真
+  void invalidSpawnAdmissionControlValuesFallBack() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("spawn.max-active-trains", -3);
+    config.set("spawn.congestion-hold-threshold", 0.0);
+    config.set("spawn.congestion-release-threshold", 1.7);
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(16, view.spawnSettings().maxActiveTrains());
+    assertEquals(0.58, view.spawnSettings().congestionHoldThreshold());
+    assertEquals(0.48, view.spawnSettings().congestionReleaseThreshold());
+  }
+
+  @Test
+  // 解除阈值高于触发阈值会让门控一进入 holding 就出不来，应整对回退默认
+  void releaseThresholdAboveHoldThresholdFallsBackToDefaults() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("spawn.congestion-hold-threshold", 0.40);
+    config.set("spawn.congestion-release-threshold", 0.90);
+    ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
+
+    assertEquals(0.58, view.spawnSettings().congestionHoldThreshold());
+    assertEquals(0.48, view.spawnSettings().congestionReleaseThreshold());
+  }
 }

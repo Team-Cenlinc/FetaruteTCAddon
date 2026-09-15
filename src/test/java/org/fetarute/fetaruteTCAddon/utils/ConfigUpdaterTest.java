@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -86,5 +87,38 @@ class ConfigUpdaterTest {
             logger);
     updater.update();
     return Files.readString(config, StandardCharsets.UTF_8);
+  }
+
+  @Test
+  // 用真实模板对 v29 实服 config 做迁移预演：三个准入控制新键必须被补进去，且既有值不被覆盖。
+  // 实服 config 是手工调过的（enabled=true、max-attempts=20），迁移吃掉它们会直接改变发车行为。
+  void realTemplateAddsAdmissionControlKeysToLiveConfig() throws IOException {
+    String template =
+        new String(
+            Objects.requireNonNull(
+                    ConfigUpdaterTest.class.getClassLoader().getResourceAsStream("config.yml"))
+                .readAllBytes(),
+            StandardCharsets.UTF_8);
+    String existing =
+        String.join(
+            "\n",
+            "config-version: 29",
+            "spawn:",
+            "  enabled: true",
+            "  tick-interval-ticks: 100",
+            "  max-spawn-per-tick: 1",
+            "  max-attempts: 20",
+            "  layover-fallback-multiplier: 2.0",
+            "  pending-layover-max-age-seconds: 7200",
+            "");
+
+    String merged = runUpdate(template, existing);
+
+    assertTrue(merged.contains("max-active-trains: 16"), "应补入在网列车上限");
+    assertTrue(merged.contains("congestion-hold-threshold: 0.58"), "应补入拥挤触发阈值");
+    assertTrue(merged.contains("congestion-release-threshold: 0.48"), "应补入拥挤解除阈值");
+    assertTrue(merged.contains("config-version: 30"), "应升到新版本");
+    assertTrue(merged.contains("enabled: true"), "既有的自动发车开关不能被模板覆盖");
+    assertTrue(merged.contains("max-attempts: 20"), "既有的重试次数不能被模板覆盖");
   }
 }

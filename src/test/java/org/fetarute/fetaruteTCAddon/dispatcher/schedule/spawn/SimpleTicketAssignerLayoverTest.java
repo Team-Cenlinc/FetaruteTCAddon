@@ -1453,6 +1453,11 @@ class SimpleTicketAssignerLayoverTest {
     when(spawnSettings.layoverFallbackMultiplier()).thenReturn(layoverFallbackMultiplier);
     when(spawnSettings.pendingLayoverMaxAgeSeconds())
         .thenReturn(Math.max(0L, pendingLayoverMaxAge.toSeconds()));
+    // 准入上限默认关闭（0），使既有 layover 用例的行为与引入准入控制之前一致；
+    // 阈值给真值，避免 Mockito 的 int/double 默认 0 让拥挤门控恒真。
+    when(spawnSettings.maxActiveTrains()).thenReturn(0);
+    when(spawnSettings.congestionHoldThreshold()).thenReturn(0.58D);
+    when(spawnSettings.congestionReleaseThreshold()).thenReturn(0.48D);
     when(runtimeSettings.lookaheadEdges()).thenReturn(2);
     when(runtimeSettings.minClearEdges()).thenReturn(0);
     when(runtimeSettings.rearGuardEdges()).thenReturn(0);
@@ -3049,9 +3054,15 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, Instant.now());
 
-    verify(spawnManager).requeue(any(SpawnTicket.class));
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
     verify(spawnManager, never()).complete(any());
-    assertEquals(1L, assigner.snapshotDiagnostics().retries());
+    // 拥堵是线网状态，不该消耗这张票的重试预算：attempts 必须原地不动，retries 不计。
+    // 否则顶住闸门约 max-attempts × retry-delay 之后票据会被 complete 掉，
+    // 等网疏通了班次已经凭空少了一批——那是取消发车，不是推迟发车。
+    assertEquals(ticket.attempts(), requeued.getValue().attempts(), "闸门延后不应累加 attempts");
+    assertEquals(0L, assigner.snapshotDiagnostics().retries());
+    // 但"拦了多少次"必须仍然可数。
     assertEquals(
         1L, assigner.snapshotDiagnostics().requeueByError().getOrDefault("congestion-hold", 0L));
   }

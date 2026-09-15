@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 29
+config-version: 30
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -221,6 +221,26 @@ spawn:
   queued-ticket-max-age-seconds: 7200
   # Layover pending 票据最大等待时间（秒）：超过后丢弃并释放 backlog，0 表示禁用硬清理
   pending-layover-max-age-seconds: 7200
+  # 【准入控制】全网在网列车数上限：达到后 depot 不再实体化新车（复用 layover 的车不受限）。
+  # 0 表示禁用。
+  #
+  # 这是"拥堵崩溃"的直接对策，实测依据：
+  #   5 辆 → 8.00 次到站/车/5分钟；13 辆 → 6.85（总产出峰值 89）；24 辆 → 1.04（总产出 25）。
+  # 车队接近翻倍而总产出掉了 72%——系统会一直往网里灌车直到堵死，此前没有任何一道闸门拦得住。
+  # 总产出在 13~14 辆附近见顶，故默认 16（留一点余量以便观察真实拐点是否更高）。
+  #
+  # 注意与 reclaim.max-active-trains 的区别：那个是"出口侧"（超限时回收闲置车），
+  # 本项是"入口侧"（超限时不再发新车）。
+  max-active-trains: 16
+  # 拥挤门控的触发/解除阈值（迟滞），作用于 SMART_SPAWN_CONGESTION_SCORE 里的 score。
+  #
+  # 这两个数需要按实测分布标定，不要凭感觉改。旧默认 0.72/0.58 在实服从未触发过一次：
+  # 14 辆车时最高分只有 0.464，因为评分的三个分量全是"本 route 自己"的局部量，
+  # 而且只数 EDGE claim（漏了约一半的 NODE 占用）。
+  # 现已补上 NODE 并加入 network 分量，当前默认是据此重估的首版取值——
+  # 下一轮拿到 score 分布后再定，届时看日志里 score= 的实际落点即可。
+  congestion-hold-threshold: 0.58
+  congestion-release-threshold: 0.48
 
 train:
   # 默认车种（emu/dmu/diesel_push_pull/electric_loco）

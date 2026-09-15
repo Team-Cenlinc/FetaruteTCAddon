@@ -332,6 +332,16 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // "差一点没够着 0.72"和"根本不在一个量级"要采取的行动完全相反。
           // 生产端按 (gateKey, 0.05 分档) 去重。
           "SMART_SPAWN_CONGESTION_SCORE",
+          // 注意：以下三条 SMART_SPAWN_* 目前并不经过本闸门——SimpleTicketAssigner 拿到的是
+          // loggerManager::debug 本身，不是 RuntimeDispatchDiagnosticGate。列在这里是为了
+          // 将来若改走本闸门不会被预算丢掉；同时也说明一件事：第十三轮 congestion-hold 的
+          // **0 次是真的 0 次**，不是被 91% 丢弃率吃掉的。
+          //
+          // 准入闸门：全网在网车数 / 上限——**无论是否拦下**。
+          // 这是本项目第一道真正的准入控制，它是否生效、以及车队实际稳在哪个数，
+          // 只能从这条看。生产端按 (line|route, active:holding) 去重：
+          // 稳态下 active 贴着 cap 不动，因此每条 route 至多几行，不随 tick 放大。
+          "SMART_SPAWN_FLEET_CAP",
           // RETURN 线路完全绕过拥堵闸门——实服 12 条线里有 4 条是 RETURN。
           // 这条豁免此前在日志里毫无痕迹。按 gateKey 去重，一条线至多一行。
           "SMART_SPAWN_CONGESTION_EXEMPT",

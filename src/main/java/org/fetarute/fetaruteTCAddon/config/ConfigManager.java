@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 29;
+  private static final int EXPECTED_CONFIG_VERSION = 30;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -109,6 +109,9 @@ public final class ConfigManager {
   private static final int DEFAULT_SPAWN_MAX_ATTEMPTS = 10;
   private static final long DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS = 86400L;
   private static final long DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS = 86400L;
+  private static final int DEFAULT_SPAWN_MAX_ACTIVE_TRAINS = 16;
+  private static final double DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD = 0.58D;
+  private static final double DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD = 0.48D;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -695,6 +698,9 @@ public final class ConfigManager {
     double layoverFallbackMultiplier = 2.0;
     long queuedTicketMaxAgeSeconds = DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS;
     long pendingLayoverMaxAgeSeconds = DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS;
+    int maxActiveTrains = DEFAULT_SPAWN_MAX_ACTIVE_TRAINS;
+    double congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
+    double congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
       tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
@@ -751,6 +757,33 @@ public final class ConfigManager {
             "spawn.pending-layover-max-age-seconds 配置无效: " + pendingLayoverMaxAgeSeconds);
         pendingLayoverMaxAgeSeconds = DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS;
       }
+      maxActiveTrains = section.getInt("max-active-trains", maxActiveTrains);
+      if (maxActiveTrains < 0) {
+        logger.warning("spawn.max-active-trains 配置无效: " + maxActiveTrains);
+        maxActiveTrains = DEFAULT_SPAWN_MAX_ACTIVE_TRAINS;
+      }
+      congestionHoldThreshold =
+          section.getDouble("congestion-hold-threshold", congestionHoldThreshold);
+      congestionReleaseThreshold =
+          section.getDouble("congestion-release-threshold", congestionReleaseThreshold);
+      if (!(congestionHoldThreshold > 0.0D) || congestionHoldThreshold > 1.0D) {
+        logger.warning("spawn.congestion-hold-threshold 配置无效: " + congestionHoldThreshold);
+        congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
+      }
+      if (!(congestionReleaseThreshold > 0.0D) || congestionReleaseThreshold > 1.0D) {
+        logger.warning("spawn.congestion-release-threshold 配置无效: " + congestionReleaseThreshold);
+        congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
+      }
+      if (congestionReleaseThreshold > congestionHoldThreshold) {
+        // 解除阈值高于触发阈值会让闸门一进入 holding 就无法退出，直接判为配置错误。
+        logger.warning(
+            "spawn.congestion-release-threshold 高于 hold 阈值，已回退默认: "
+                + congestionReleaseThreshold
+                + " > "
+                + congestionHoldThreshold);
+        congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
+        congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
+      }
     }
     return new SpawnSettings(
         enabled,
@@ -763,7 +796,10 @@ public final class ConfigManager {
         maxAttempts,
         layoverFallbackMultiplier,
         queuedTicketMaxAgeSeconds,
-        pendingLayoverMaxAgeSeconds);
+        pendingLayoverMaxAgeSeconds,
+        maxActiveTrains,
+        congestionHoldThreshold,
+        congestionReleaseThreshold);
   }
 
   /** 解析 storage 配置段。 */
@@ -1500,7 +1536,41 @@ public final class ConfigManager {
       int maxAttempts,
       double layoverFallbackMultiplier,
       long queuedTicketMaxAgeSeconds,
-      long pendingLayoverMaxAgeSeconds) {
+      long pendingLayoverMaxAgeSeconds,
+      int maxActiveTrains,
+      double congestionHoldThreshold,
+      double congestionReleaseThreshold) {
+
+    /** 兼容旧调用：未指定在网列车上限与拥挤阈值时沿用默认值。 */
+    public SpawnSettings(
+        boolean enabled,
+        int tickIntervalTicks,
+        int planRefreshTicks,
+        int maxSpawnPerTick,
+        int maxGeneratePerTick,
+        int maxBacklogPerService,
+        int retryDelayTicks,
+        int maxAttempts,
+        double layoverFallbackMultiplier,
+        long queuedTicketMaxAgeSeconds,
+        long pendingLayoverMaxAgeSeconds) {
+      this(
+          enabled,
+          tickIntervalTicks,
+          planRefreshTicks,
+          maxSpawnPerTick,
+          maxGeneratePerTick,
+          maxBacklogPerService,
+          retryDelayTicks,
+          maxAttempts,
+          layoverFallbackMultiplier,
+          queuedTicketMaxAgeSeconds,
+          pendingLayoverMaxAgeSeconds,
+          DEFAULT_SPAWN_MAX_ACTIVE_TRAINS,
+          DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD,
+          DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD);
+    }
+
     public SpawnSettings(
         boolean enabled,
         int tickIntervalTicks,
@@ -1522,7 +1592,10 @@ public final class ConfigManager {
           maxAttempts,
           layoverFallbackMultiplier,
           DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS,
-          DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS);
+          DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS,
+          DEFAULT_SPAWN_MAX_ACTIVE_TRAINS,
+          DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD,
+          DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD);
     }
 
     public SpawnSettings {
@@ -1555,6 +1628,19 @@ public final class ConfigManager {
       }
       if (pendingLayoverMaxAgeSeconds < 0L) {
         throw new IllegalArgumentException("pendingLayoverMaxAgeSeconds 必须为非负数");
+      }
+      if (maxActiveTrains < 0) {
+        throw new IllegalArgumentException("maxActiveTrains 必须为非负数");
+      }
+      if (!(congestionHoldThreshold > 0.0D) || congestionHoldThreshold > 1.0D) {
+        throw new IllegalArgumentException("congestionHoldThreshold 必须落在 (0,1]");
+      }
+      if (!(congestionReleaseThreshold > 0.0D) || congestionReleaseThreshold > 1.0D) {
+        throw new IllegalArgumentException("congestionReleaseThreshold 必须落在 (0,1]");
+      }
+      if (congestionReleaseThreshold > congestionHoldThreshold) {
+        throw new IllegalArgumentException(
+            "congestionReleaseThreshold 不能高于 congestionHoldThreshold");
       }
     }
   }

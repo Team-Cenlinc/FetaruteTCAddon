@@ -124,12 +124,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** 新物理编组等待 TrainCarts 提供完整实时 rail footprint 的最长宽限。 */
   private static final Duration MATERIALIZED_SPAWN_HYDRATION_GRACE = Duration.ofSeconds(4);
 
-  /** 拥挤度进入 HOLD 的阈值。 */
-  private static final double CONGESTION_HOLD_THRESHOLD = 0.72D;
-
-  /** 拥挤度退出 HOLD 的阈值（滞回，避免频繁抖动）。 */
-  private static final double CONGESTION_RELEASE_THRESHOLD = 0.58D;
-
   /** 拥挤门控状态保留时长（超过后会自动清理）。 */
   private static final Duration CONGESTION_GATE_TTL = Duration.ofMinutes(10);
 
@@ -323,13 +317,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   private record CongestionAssessment(
       double score,
-      double edgeBusyRate,
+      double occupancyRate,
       double routeTrainPressure,
       double lineSignalPressure,
+      double networkPressure,
       int busyEdges,
       int totalEdges,
+      int busyNodes,
+      int totalNodes,
       int activeRouteTrains,
-      int targetRouteTrains) {}
+      int targetRouteTrains,
+      int activeTrains,
+      int trainCap) {
+
+    int busyResources() {
+      return busyEdges + busyNodes;
+    }
+
+    int totalResources() {
+      return totalEdges + totalNodes;
+    }
+  }
 
   /** 拥挤门控状态（按 line+方向 key）。 */
   private record CongestionGateState(boolean holding, double lastScore, Instant updatedAt) {}
@@ -1435,7 +1443,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     if (shouldHoldByCongestion(provider, service, line, routeEntity, route, now)) {
-      requeue(ticket, now, "congestion-hold");
+      // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
+      // 这个隐患此前一直存在，只是拥堵闸门从未触发过一次，所以没人撞上。
+      deferByGate(ticket, now, "congestion-hold");
       return false;
     }
 
@@ -1513,6 +1523,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * <p>该门控只作用于 {@code OPERATION/CREATE}，RETURN 始终允许通过以便回库释放压力。
    */
   /** 拥堵分数的上次报告分档（按 gateKey），用于去重。 */
+  private final java.util.concurrent.ConcurrentMap<String, String> fleetCapReported =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private final java.util.concurrent.ConcurrentMap<String, String> congestionScoreReported =
       new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -1526,7 +1539,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Line line,
       Route routeEntity,
       CongestionAssessment assessment,
-      boolean holding) {
+      boolean holding,
+      double holdThreshold,
+      double releaseThreshold) {
     String bucket =
         String.format(Locale.ROOT, "%.2f", Math.floor(assessment.score() * 20.0) / 20.0);
     String signature = bucket + ":" + holding;
@@ -1538,21 +1553,79 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             Locale.ROOT,
             "SMART_SPAWN_CONGESTION_SCORE line=%s route=%s key=%s score=%.3f holding=%b"
                 + " holdThreshold=%.2f releaseThreshold=%.2f"
-                + " edge=%.3f(%d/%d) route=%.3f(%d/%d) signal=%.3f",
+                + " occ=%.3f(%d/%d) edgeBusy=%d nodeBusy=%d"
+                + " route=%.3f(%d/%d) signal=%.3f network=%.3f(%d/%d)",
             line == null ? "-" : line.code(),
             routeEntity == null ? "-" : routeEntity.code(),
             gateKey,
             assessment.score(),
             holding,
-            CONGESTION_HOLD_THRESHOLD,
-            CONGESTION_RELEASE_THRESHOLD,
-            assessment.edgeBusyRate(),
+            holdThreshold,
+            releaseThreshold,
+            assessment.occupancyRate(),
+            assessment.busyResources(),
+            assessment.totalResources(),
             assessment.busyEdges(),
-            assessment.totalEdges(),
+            assessment.busyNodes(),
             assessment.routeTrainPressure(),
             assessment.activeRouteTrains(),
             assessment.targetRouteTrains(),
-            assessment.lineSignalPressure()));
+            assessment.lineSignalPressure(),
+            assessment.networkPressure(),
+            assessment.activeTrains(),
+            assessment.trainCap()));
+  }
+
+  /** 在网列车数：progress 条目数，与 SMART_DISPATCH_GLOBAL_SNAPSHOT 的 trains= 同源。 */
+  private int activeTrainCount() {
+    Map<String, RouteProgressRegistry.RouteProgressEntry> entries =
+        runtimeDispatchService == null ? null : runtimeDispatchService.snapshotProgressEntries();
+    return entries == null ? 0 : entries.size();
+  }
+
+  /**
+   * 是否因全网在网列车达到上限而拒绝再实体化新车。
+   *
+   * <p>这是本项目第一道真正的**准入控制**。此前系统按周期不断尝试发车，没有任何一个量在 "网里已经有多少车"这个维度上设限：拥堵闸门测的是单条 route 自己的占用比例（且只数
+   * EDGE claim），在 14 辆车时最高只到 0.464，够不着 0.72 的阈值。
+   *
+   * <p>cap &lt;= 0 表示禁用，此时行为与本改动之前完全一致。
+   */
+  boolean shouldHoldByFleetCap(Line line, Route routeEntity) {
+    int cap = configManager.current().spawnSettings().maxActiveTrains();
+    if (cap <= 0) {
+      return false;
+    }
+    int active = activeTrainCount();
+    boolean holding = active >= cap;
+    traceFleetCap(line, routeEntity, active, cap, holding);
+    return holding;
+  }
+
+  /**
+   * 报告准入闸门状态——**无论是否拦下**。
+   *
+   * <p>按 (line|route, active, holding) 去重：达到上限后 active 会稳在 cap 附近，因此稳态下每条 route 至多几行，不随 tick
+   * 放大。不触发时也报，是为了让"离上限还有多远"可归因——本会话已经 验证过：只在触发时才打印的闸门，等于没有闸门。
+   */
+  private void traceFleetCap(Line line, Route routeEntity, int active, int cap, boolean holding) {
+    String key =
+        (line == null ? "-" : line.code()) + "|" + (routeEntity == null ? "-" : routeEntity.code());
+    String signature = active + ":" + holding;
+    if (signature.equals(fleetCapReported.put(key, signature))) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_SPAWN_FLEET_CAP line="
+            + (line == null ? "-" : line.code())
+            + " route="
+            + (routeEntity == null ? "-" : routeEntity.code())
+            + " active="
+            + active
+            + " cap="
+            + cap
+            + " holding="
+            + holding);
   }
 
   private boolean shouldHoldByCongestion(
@@ -1592,10 +1665,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     String gateKey = buildCongestionGateKey(service);
     CongestionGateState previous = congestionGates.get(gateKey);
     boolean wasHolding = previous != null && previous.holding();
+    ConfigManager.SpawnSettings spawnSettings = configManager.current().spawnSettings();
+    double holdThreshold = spawnSettings.congestionHoldThreshold();
+    double releaseThreshold = spawnSettings.congestionReleaseThreshold();
+
+    // 阈值不在 (0,1] 就把闸门整个关掉，而不是"全部拦下"。
+    //
+    // 这里刻意不 fail-closed：拥堵闸门的"关闭"方向是停止发车，阈值为 0 会让
+    // `score >= 0` 恒真，于是全网再也发不出一辆车——那不是保守，那是停运。
+    // 真正的安全兜底是 shouldHoldByFleetCap 那道硬上限，它不依赖这两个数。
+    if (!(holdThreshold > 0.0D) || holdThreshold > 1.0D || !(releaseThreshold > 0.0D)) {
+      warnThrottled(
+          "congestion-threshold-invalid",
+          "[FTA] 拥挤门控阈值无效，已跳过该门控: hold=" + holdThreshold + " release=" + releaseThreshold);
+      return false;
+    }
+
     boolean holding =
-        wasHolding
-            ? assessment.score() >= CONGESTION_RELEASE_THRESHOLD
-            : assessment.score() >= CONGESTION_HOLD_THRESHOLD;
+        wasHolding ? assessment.score() >= releaseThreshold : assessment.score() >= holdThreshold;
     congestionGates.put(gateKey, new CongestionGateState(holding, assessment.score(), now));
 
     // **不触发时也要把分数报出来**。
@@ -1609,21 +1696,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     // 而本会话已经验证过：盲改会不降反升。
     //
     // 按 (gateKey, 分数分档) 去重，不随 tick 放大。
-    traceCongestionScore(gateKey, line, routeEntity, assessment, holding);
+    traceCongestionScore(
+        gateKey, line, routeEntity, assessment, holding, holdThreshold, releaseThreshold);
 
     if (holding) {
       String scoreSummary =
           String.format(
               Locale.ROOT,
-              "score=%.2f edge=%.2f(%d/%d) route=%.2f(%d/%d) signal=%.2f",
+              "score=%.2f occ=%.2f(%d/%d) route=%.2f(%d/%d) signal=%.2f network=%.2f(%d/%d)",
               assessment.score(),
-              assessment.edgeBusyRate(),
-              assessment.busyEdges(),
-              assessment.totalEdges(),
+              assessment.occupancyRate(),
+              assessment.busyResources(),
+              assessment.totalResources(),
               assessment.routeTrainPressure(),
               assessment.activeRouteTrains(),
               assessment.targetRouteTrains(),
-              assessment.lineSignalPressure());
+              assessment.lineSignalPressure(),
+              assessment.networkPressure(),
+              assessment.activeTrains(),
+              assessment.trainCap());
       debugLogger.accept(
           "自动发车拥挤门控: line="
               + line.code()
@@ -1660,12 +1751,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /**
    * 评估当前票据对应方向的拥挤度。
    *
-   * <p>评分由三部分线性组合：
+   * <p>评分由四部分线性组合：
    *
    * <ul>
-   *   <li>edgeBusyRate：route 边集合中被占用的比例
+   *   <li>occupancyRate：route 的边**与节点**集合中被占用的比例
    *   <li>routeTrainPressure：同 route 在途车数 / 目标车数
    *   <li>lineSignalPressure：同 line 列车信号压力（STOP/CAUTION 等）
+   *   <li>networkPressure：全网在网车数 / 准入上限（准入控制关闭时为 0，权重退回旧的三分量口径）
    * </ul>
    */
   private CongestionAssessment evaluateCongestion(
@@ -1675,25 +1767,38 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Route routeEntity,
       RouteDefinition route) {
     Set<String> routeEdges = collectRouteEdgeKeys(route);
+    Set<String> routeNodes = collectRouteNodeKeys(route);
     int totalEdges = routeEdges.size();
+    int totalNodes = routeNodes.size();
     Set<String> busyEdgeKeys = new HashSet<>();
-    if (!routeEdges.isEmpty()) {
+    Set<String> busyNodeKeys = new HashSet<>();
+    if (!routeEdges.isEmpty() || !routeNodes.isEmpty()) {
       for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
         if (claim == null || claim.resource() == null) {
           continue;
         }
-        if (claim.resource().kind() != ResourceKind.EDGE) {
-          continue;
-        }
-        String key = normalizeEdgeKey(claim.resource().key());
-        if (!key.isBlank() && routeEdges.contains(key)) {
-          busyEdgeKeys.add(key);
+        // NODE 此前被整类漏掉。实服一轮里 EDGE 5550 / NODE 5471 / CONFLICT 2016——
+        // 只数 EDGE 等于对约一半的占用视而不见，这是 0.72 阈值够不着的原因之一。
+        if (claim.resource().kind() == ResourceKind.EDGE) {
+          String key = normalizeEdgeKey(claim.resource().key());
+          if (!key.isBlank() && routeEdges.contains(key)) {
+            busyEdgeKeys.add(key);
+          }
+        } else if (claim.resource().kind() == ResourceKind.NODE) {
+          String key = normalizeNodeKey(claim.resource().key());
+          if (!key.isBlank() && routeNodes.contains(key)) {
+            busyNodeKeys.add(key);
+          }
         }
       }
     }
     int busyEdges = busyEdgeKeys.size();
-    double edgeBusyRate =
-        totalEdges <= 0 ? 0.0D : clamp01((double) busyEdges / (double) totalEdges);
+    int busyNodes = busyNodeKeys.size();
+    int totalResources = totalEdges + totalNodes;
+    double occupancyRate =
+        totalResources <= 0
+            ? 0.0D
+            : clamp01((double) (busyEdges + busyNodes) / (double) totalResources);
 
     Map<String, RouteProgressRegistry.RouteProgressEntry> progressEntries =
         runtimeDispatchService.snapshotProgressEntries();
@@ -1726,17 +1831,75 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             ? 0.0D
             : clamp01((double) activeRouteTrains / (double) targetRouteTrains);
 
+    // 【全网压力】此前评分的三个分量全部是"本 route 自己"的局部量，因此在全网堵死时
+    // 依然可以很低——实服 14 辆车时最高分 0.464，而阈值是 0.72。加入全网在网车数/上限
+    // 这一项，闸门才可能在撞上硬上限之前就平滑地开始拦车。
+    int trainCap = configManager.current().spawnSettings().maxActiveTrains();
+    int activeTrains = activeTrainCount();
+    double networkPressure =
+        trainCap <= 0 ? 0.0D : clamp01((double) activeTrains / (double) trainCap);
+
     double score =
-        clamp01(edgeBusyRate * 0.55D + routeTrainPressure * 0.30D + lineSignalPressure * 0.15D);
+        combineCongestionScore(
+            occupancyRate, routeTrainPressure, lineSignalPressure, networkPressure, trainCap);
     return new CongestionAssessment(
         score,
-        edgeBusyRate,
+        occupancyRate,
         routeTrainPressure,
         lineSignalPressure,
+        networkPressure,
         busyEdges,
         totalEdges,
+        busyNodes,
+        totalNodes,
         activeRouteTrains,
-        targetRouteTrains);
+        targetRouteTrains,
+        activeTrains,
+        trainCap);
+  }
+
+  /**
+   * 拥挤度四分量的线性组合。
+   *
+   * <p>trainCap &lt;= 0（准入控制关闭）时退回本改动之前的三分量旧权重，便于用一个配置项把判别口径 整体还原——这样"评分变了"和"准入控制生效了"两件事可以分别证伪。
+   */
+  static double combineCongestionScore(
+      double occupancyRate,
+      double routeTrainPressure,
+      double lineSignalPressure,
+      double networkPressure,
+      int trainCap) {
+    if (trainCap <= 0) {
+      return clamp01(
+          occupancyRate * 0.55D + routeTrainPressure * 0.30D + lineSignalPressure * 0.15D);
+    }
+    return clamp01(
+        occupancyRate * 0.40D
+            + routeTrainPressure * 0.20D
+            + lineSignalPressure * 0.10D
+            + networkPressure * 0.30D);
+  }
+
+  /** 将 route waypoint 序列归一化为节点 key 集合（与 OccupancyResource.forNode 的 key 同源）。 */
+  static Set<String> collectRouteNodeKeys(RouteDefinition route) {
+    if (route == null || route.waypoints() == null || route.waypoints().isEmpty()) {
+      return Set.of();
+    }
+    Set<String> keys = new HashSet<>();
+    for (NodeId waypoint : route.waypoints()) {
+      if (waypoint == null) {
+        continue;
+      }
+      String key = normalizeNodeKey(waypoint.value());
+      if (!key.isBlank()) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }
+
+  static String normalizeNodeKey(String raw) {
+    return raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
   }
 
   /**
@@ -2561,6 +2724,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       DepotSpawnOrigin origin) {
     DepotSpawnOrigin effectiveOrigin = origin == null ? DepotSpawnOrigin.NORMAL : origin;
     String reasonPrefix = effectiveOrigin.reasonPrefix();
+
+    // 【准入控制】全网在网列车上限。
+    //
+    // 放在这里是因为本方法是"物理实体化前的唯一预检入口"——NORMAL 与 FALLBACK 两条路径都经过它。
+    // 拥堵闸门 shouldHoldByCongestion 只挂在常规路径上，layover 降级补发那条 return 在它之前，
+    // 于是降级补发能绕开一切拥堵约束往网里加车；这道闸门堵住的就是那个洞。
+    //
+    // 只拦"新造车"，不拦 layover 复用：复用的车本来就在网里，拦它只会让车积在终点站。
+    if (shouldHoldByFleetCap(line, routeEntity)) {
+      releaseSpawnLease(spawnLease);
+      // 用 deferWithoutAttempt 而不是 requeue：requeue 会 +1 attempts，到 max-attempts
+      // （实服配的是 20）就 spawnManager.complete(ticket) 把票据**丢掉**。
+      // 以 retry-delay 40 ticks 算，持续顶住上限约 40 秒后本该发的车就再也不会发了——
+      // 那是"取消发车"，不是"推迟发车"，等网疏通了班次已经凭空少了一批。
+      // 无限延后的兜底是 spawn.queued-ticket-max-age-seconds。
+      deferByGate(ticket, now, reasonPrefix + "fleet-cap");
+      return Optional.empty();
+    }
+
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
     Map<String, Integer> depotSelections =
         selectedThisTick == null ? new HashMap<>() : selectedThisTick;
@@ -3214,6 +3396,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     } catch (RuntimeException | LinkageError logFailure) {
       HEALTH_LOGGER.warning("自动发车重试日志写入失败: " + logFailure.getClass().getSimpleName());
     }
+  }
+
+  /**
+   * 因线网状态（拥堵 / 准入上限）而延后发车。
+   *
+   * <p>与 {@link #requeue} 的区别是**不消耗票据的重试预算**：线网堵不是这张票的过错，而 requeue 累到 max-attempts 会直接 {@code
+   * spawnManager.complete(ticket)} 把它丢掉——那是 取消发车而不是推迟发车。但仍按原因计数，否则"闸门拦了多少次"就没有了，而这一整轮改动
+   * 的目的恰恰是让闸门可观测。
+   */
+  private void deferByGate(SpawnTicket ticket, Instant now, String reason) {
+    String key = reason == null ? "unknown" : reason;
+    requeueByError
+        .computeIfAbsent(key, ignored -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+    deferWithoutAttempt(ticket, now, key);
   }
 
   private void deferWithoutAttempt(SpawnTicket ticket, Instant now, String reason) {
