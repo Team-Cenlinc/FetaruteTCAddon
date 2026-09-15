@@ -320,6 +320,21 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 所以这一条一旦非零，就是 Phase 4 确实跑通了——归因干净。
           // 体量受限于同时可释放的区间数，不随 tick 放大。
           "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+          // 全局重建 = **全网停车**。实服第十三轮 70.5 分钟里 epoch 走到 22，
+          // 而日志只有 3 行——其余被预算丢掉，于是"发生过多少次、谁触发的"两个都答不出。
+          // 同轮六辆车 heldSeconds 完全相同（1056，回推同一瞬间）而停因各异，
+          // 像被同一个全局事件打中；要证实或排除它，这一行不能丢。
+          // 每次重建至多一行，不随 tick 放大。
+          "SMART_STARTUP_OCCUPANCY_RECONSTRUCTION",
+          // 发车拥堵闸门的分数——**无论是否触发**。
+          // 实服第十三轮 congestion-hold **0 次**，而同期人均吞吐从 8.0 崩到 1.0、
+          // 车从 13 加到 24 总产出反掉 72%：刹车从未踩下，而我们看不见它离阈值多远。
+          // "差一点没够着 0.72"和"根本不在一个量级"要采取的行动完全相反。
+          // 生产端按 (gateKey, 0.05 分档) 去重。
+          "SMART_SPAWN_CONGESTION_SCORE",
+          // RETURN 线路完全绕过拥堵闸门——实服 12 条线里有 4 条是 RETURN。
+          // 这条豁免此前在日志里毫无痕迹。按 gateKey 去重，一条线至多一行。
+          "SMART_SPAWN_CONGESTION_EXEMPT",
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。

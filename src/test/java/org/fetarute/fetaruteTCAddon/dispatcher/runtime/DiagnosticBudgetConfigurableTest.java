@@ -308,4 +308,43 @@ class DiagnosticBudgetConfigurableTest {
     long kept = out.stream().filter(l -> l.startsWith("SMART_ENTRY_LOOKAHEAD_BLOCKED")).count();
     assertEquals(14, kept, "出口证明失败的依据不得被预算吞掉：" + out.size());
   }
+
+  /**
+   * 全局重建与发车拥堵分数必须不受预算约束。
+   *
+   * <p>重建 = **全网停车**。实服第十三轮 70.5 分钟里 epoch 走到 **22**，而日志只有 3 行—— 其余被预算丢掉，于是"发生过多少次"和"谁触发的"两个问题都答不出。
+   *
+   * <p>拥堵分数此前**只在闸门触发时**才打印，而实服 `congestion-hold` **0 次**， 同期人均吞吐从 8.0 崩到 1.0——刹车从未踩下，我们却看不见它离阈值
+   * 0.72 有多远。
+   */
+  @Test
+  void globalReconstructionAndSpawnCongestionScoreAreNeverBudgetDropped() {
+    List<String> out = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate = new RuntimeDispatchDiagnosticGate(out::add, 1);
+
+    for (int i = 0; i < 12; i++) {
+      gate.accept(
+          "SMART_STARTUP_OCCUPANCY_RECONSTRUCTION state=STOP_FIRST epoch="
+              + i
+              + " source=handleTrainUnloaded");
+      gate.accept(
+          "SMART_SPAWN_CONGESTION_SCORE line=L"
+              + i
+              + " route=R key=k score=0.41 holding=false holdThreshold=0.72");
+      gate.accept("SMART_SPAWN_CONGESTION_EXEMPT line=L" + i + " reason=operation-type-return");
+    }
+
+    assertEquals(
+        12,
+        out.stream().filter(l -> l.startsWith("SMART_STARTUP_OCCUPANCY_RECONSTRUCTION")).count(),
+        "全局停车不得被预算吞掉：" + out.size());
+    assertEquals(
+        12,
+        out.stream().filter(l -> l.startsWith("SMART_SPAWN_CONGESTION_SCORE")).count(),
+        "拥堵分数不得被预算吞掉：" + out.size());
+    assertEquals(
+        12,
+        out.stream().filter(l -> l.startsWith("SMART_SPAWN_CONGESTION_EXEMPT")).count(),
+        "RETURN 豁免不得被预算吞掉：" + out.size());
+  }
 }

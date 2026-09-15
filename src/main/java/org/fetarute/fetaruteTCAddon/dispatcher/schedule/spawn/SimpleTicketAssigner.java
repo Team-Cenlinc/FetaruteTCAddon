@@ -1512,6 +1512,49 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * <p>该门控只作用于 {@code OPERATION/CREATE}，RETURN 始终允许通过以便回库释放压力。
    */
+  /** 拥堵分数的上次报告分档（按 gateKey），用于去重。 */
+  private final java.util.concurrent.ConcurrentMap<String, String> congestionScoreReported =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 报告拥堵分数——**无论闸门是否触发**。
+   *
+   * <p>去重按分数的 0.05 分档：分档不变就不重复输出，因此规模由"闸门数 × 分档变化次数"决定， 不随 tick 放大。
+   */
+  private void traceCongestionScore(
+      String gateKey,
+      Line line,
+      Route routeEntity,
+      CongestionAssessment assessment,
+      boolean holding) {
+    String bucket =
+        String.format(Locale.ROOT, "%.2f", Math.floor(assessment.score() * 20.0) / 20.0);
+    String signature = bucket + ":" + holding;
+    if (signature.equals(congestionScoreReported.put(gateKey, signature))) {
+      return;
+    }
+    debugLogger.accept(
+        String.format(
+            Locale.ROOT,
+            "SMART_SPAWN_CONGESTION_SCORE line=%s route=%s key=%s score=%.3f holding=%b"
+                + " holdThreshold=%.2f releaseThreshold=%.2f"
+                + " edge=%.3f(%d/%d) route=%.3f(%d/%d) signal=%.3f",
+            line == null ? "-" : line.code(),
+            routeEntity == null ? "-" : routeEntity.code(),
+            gateKey,
+            assessment.score(),
+            holding,
+            CONGESTION_HOLD_THRESHOLD,
+            CONGESTION_RELEASE_THRESHOLD,
+            assessment.edgeBusyRate(),
+            assessment.busyEdges(),
+            assessment.totalEdges(),
+            assessment.routeTrainPressure(),
+            assessment.activeRouteTrains(),
+            assessment.targetRouteTrains(),
+            assessment.lineSignalPressure()));
+  }
+
   private boolean shouldHoldByCongestion(
       StorageProvider provider,
       SpawnService service,
@@ -1527,6 +1570,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     if (routeEntity.operationType() == RouteOperationType.RETURN) {
+      // RETURN 线路**完全绕过**拥堵闸门——这条豁免此前在日志里毫无痕迹。
+      // 实服 12 条线路里有 4 条是 RETURN，也就是三分之一的发车根本不受拥堵约束。
+      // 先让它可见，再谈这条豁免是否合理（它可能是对的：RETURN 是把车收回去，
+      // 拦住反而会让车积在线上）。按 gateKey 去重，一条线至多一行。
+      String returnKey = buildCongestionGateKey(service);
+      if (congestionScoreReported.put(returnKey, "return-exempt") == null) {
+        debugLogger.accept(
+            "SMART_SPAWN_CONGESTION_EXEMPT line="
+                + line.code()
+                + " route="
+                + routeEntity.code()
+                + " key="
+                + returnKey
+                + " reason=operation-type-return");
+      }
       return false;
     }
     CongestionAssessment assessment =
@@ -1539,6 +1597,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             ? assessment.score() >= CONGESTION_RELEASE_THRESHOLD
             : assessment.score() >= CONGESTION_HOLD_THRESHOLD;
     congestionGates.put(gateKey, new CongestionGateState(holding, assessment.score(), now));
+
+    // **不触发时也要把分数报出来**。
+    //
+    // 此前这个 summary 只在 holding 为真时打印，于是闸门从不触发时我们对分数一无所知——
+    // 实服第十三轮 `congestion-hold` **0 次**，而同期人均吞吐从 8.0 崩到 1.0（-87%），
+    // 车从 13 辆加到 24 辆、总产出反而掉了 72%。系统眼睁睁看着自己堵死而刹车从未踩下。
+    //
+    // 而"差一点没够着 0.72"和"根本不在一个量级"要采取的行动完全相反：
+    // 前者调阈值，后者要修评分本身（或那条 RETURN 豁免）。看不见分数就只能猜，
+    // 而本会话已经验证过：盲改会不降反升。
+    //
+    // 按 (gateKey, 分数分档) 去重，不随 tick 放大。
+    traceCongestionScore(gateKey, line, routeEntity, assessment, holding);
 
     if (holding) {
       String scoreSummary =

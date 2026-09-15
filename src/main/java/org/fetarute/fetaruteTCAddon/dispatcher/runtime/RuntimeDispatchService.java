@@ -6363,7 +6363,7 @@ public final class RuntimeDispatchService {
               + ":"
               + String.valueOf(stopFailure.getMessage()));
     }
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("failClosedAfterSignalReevaluationFailure");
     debugLogger.accept(
         "SMART_SIGNAL_REEVALUATION_FAIL_CLOSED train="
             + String.valueOf(trainName)
@@ -6649,7 +6649,22 @@ public final class RuntimeDispatchService {
    * <p>本方法属于 Bukkit 主线程状态机边界；所有调用方必须在主线程串行调用，不能与发车登记或状态查询并发执行。
    */
   public void beginStartupOccupancyReconstruction() {
-    closeRuntimeAuthorizationGate("STARTUP_RECONSTRUCTION");
+    beginStartupOccupancyReconstruction("unattributed");
+  }
+
+  /**
+   * 带来源的全局重建入口。
+   *
+   * <p>每次重建都会把授权门关成 STOP_FIRST，**全网停车**。实服第十三轮 70.5 分钟里 epoch 走到了 **22**， 而日志里只有 3 行（其余被预算丢掉），且 8
+   * 个调用点报出来的 source 全是同一个硬编码字符串 `STARTUP_RECONSTRUCTION`——**既不知道发生过多少次，也不知道是谁触发的**。
+   *
+   * <p>同轮还观察到六辆车的 `heldSeconds` 完全相同（都是 1056，回推同一瞬间 18:37:20） 而停因各不相同，像被同一个全局事件打中。要证实或排除它，必须先能区分来源。
+   *
+   * @param source 触发方标识，用于诊断归因；不参与任何判定
+   */
+  public void beginStartupOccupancyReconstruction(String source) {
+    closeRuntimeAuthorizationGate(
+        source == null || source.isBlank() ? "unattributed" : source.trim());
   }
 
   /**
@@ -6988,7 +7003,7 @@ public final class RuntimeDispatchService {
       return;
     }
     unloadedMaterializedSpawnRollbackIdentities.add(identity);
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("handleTrainUnloaded");
     try {
       startupRecoveryRequestedListener.run();
     } catch (RuntimeException | LinkageError failure) {
@@ -7098,7 +7113,7 @@ public final class RuntimeDispatchService {
     } catch (RuntimeException | LinkageError failure) {
       debugLogger.accept("迟加载实体化回滚编组同步硬停失败: error=" + failure.getClass().getSimpleName());
     }
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("containMaterializedSpawnRollbackOnCreate");
     try {
       startupRecoveryRequestedListener.run();
     } catch (RuntimeException | LinkageError failure) {
@@ -7253,7 +7268,7 @@ public final class RuntimeDispatchService {
       return;
     }
 
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("expected-physical-topology-recovery:" + source);
     Set<Object> stoppedIdentities =
         java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     Set<String> invalidatedOwners = new LinkedHashSet<>();
@@ -7413,7 +7428,7 @@ public final class RuntimeDispatchService {
    * @return {@code true} 表示物理快照已提交并等待统一开放；{@code false} 表示保持 STOP_FIRST
    */
   public boolean prepareStartupOccupancySnapshot(Collection<? extends RuntimeTrainHandle> trains) {
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("prepareStartupOccupancySnapshot");
     List<RuntimeTrainHandle> validTrains = validRuntimeTrains(trains);
     try {
       for (RuntimeTrainHandle train : validTrains) {
@@ -7546,7 +7561,7 @@ public final class RuntimeDispatchService {
       try {
         handleSignalTick(train, false);
       } catch (RuntimeException | LinkageError ex) {
-        beginStartupOccupancyReconstruction();
+        beginStartupOccupancyReconstruction("completeStartupOccupancyReconstruction");
         debugLogger.accept(
             "SMART_STARTUP_OCCUPANCY_RECONSTRUCTION state=STOP_FIRST"
                 + " result=startup-authorization-refresh-failed train="
@@ -7906,7 +7921,7 @@ public final class RuntimeDispatchService {
               + " source="
               + normalizedSource
               + " action=global-stop-first");
-      beginStartupOccupancyReconstruction();
+      beginStartupOccupancyReconstruction("startupOccupancyRecoveryBlocks");
       try {
         startupRecoveryRequestedListener.run();
       } catch (RuntimeException | LinkageError ex) {
@@ -7965,7 +7980,7 @@ public final class RuntimeDispatchService {
               + normalizedSource);
     }
 
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("startupOccupancyRecoveryBlocks");
     try {
       startupRecoveryRequestedListener.run();
     } catch (RuntimeException | LinkageError ex) {
@@ -8027,7 +8042,7 @@ public final class RuntimeDispatchService {
                 + trainName
                 + " source="
                 + source);
-        beginStartupOccupancyReconstruction();
+        beginStartupOccupancyReconstruction("expectedMaterializedSpawnHydrationBlocks");
         try {
           startupRecoveryRequestedListener.run();
         } catch (RuntimeException | LinkageError recoveryFailure) {
@@ -8086,7 +8101,7 @@ public final class RuntimeDispatchService {
                 + " source="
                 + source
                 + " action=global-stop-first");
-        beginStartupOccupancyReconstruction();
+        beginStartupOccupancyReconstruction("expectedMaterializedSpawnHydrationBlocks");
         try {
           startupRecoveryRequestedListener.run();
         } catch (RuntimeException | LinkageError recoveryFailure) {
@@ -8231,7 +8246,7 @@ public final class RuntimeDispatchService {
             "SMART_TRAIN_REMOVAL_IDENTITY_MISMATCH train="
                 + trainName
                 + " action=global-stop-first");
-        beginStartupOccupancyReconstruction();
+        beginStartupOccupancyReconstruction("handleTrainRemoved");
         try {
           startupRecoveryRequestedListener.run();
         } catch (RuntimeException ex) {
@@ -8518,7 +8533,7 @@ public final class RuntimeDispatchService {
             + logicalTrainName
             + " reason="
             + (reason == null || reason.isBlank() ? "unknown" : reason));
-    beginStartupOccupancyReconstruction();
+    beginStartupOccupancyReconstruction("quarantineVerifiedFtaAbnormalPhysicalIdentity");
     try {
       startupRecoveryRequestedListener.run();
     } catch (RuntimeException ex) {

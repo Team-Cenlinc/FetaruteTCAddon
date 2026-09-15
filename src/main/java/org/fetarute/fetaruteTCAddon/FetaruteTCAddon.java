@@ -676,13 +676,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     if (!persistentRollbacksContained
                         || !materializedSpawnsContained
                         || incompleteFtaIdentityFound) {
-                      service.beginStartupOccupancyReconstruction();
+                      service.beginStartupOccupancyReconstruction(
+                          "scheduleRuntimeOccupancyReconstruction");
                       debug("运行时恢复等待实体化发车或身份异常物理收容完成，保持 STOP_FIRST");
                     } else {
                       completed = service.prepareStartupOccupancySnapshot(handles);
                     }
                   } catch (RuntimeException | LinkageError ex) {
-                    service.beginStartupOccupancyReconstruction();
+                    service.beginStartupOccupancyReconstruction(
+                        "scheduleRuntimeOccupancyReconstruction");
                     debug(
                         "运行时占用重建失败，已回退 STOP_FIRST 并等待重试: "
                             + ex.getClass().getSimpleName()
@@ -753,7 +755,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       return true;
     } catch (RuntimeException | LinkageError ex) {
       suspendRuntimeDispatchComponentsForRecovery();
-      service.beginStartupOccupancyReconstruction();
+      service.beginStartupOccupancyReconstruction("startRuntimeDispatchComponentsAfterRecovery");
       debug(
           "运行时组件恢复失败，保持 STOP_FIRST 并等待重试: "
               + ex.getClass().getSimpleName()
@@ -773,7 +775,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     runtimeDispatchRecoveryComplete = false;
     RuntimeDispatchService service = runtimeDispatchService;
     if (service != null) {
-      service.beginStartupOccupancyReconstruction();
+      service.beginStartupOccupancyReconstruction("beginRuntimeDispatchRecovery");
     }
     suspendRuntimeDispatchComponentsForRecovery();
     try {
