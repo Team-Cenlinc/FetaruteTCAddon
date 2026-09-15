@@ -214,7 +214,7 @@ class TrainHealthMonitorTest {
             Duration.ofSeconds(20),
             Duration.ofSeconds(60));
     verify(dispatchService).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
-    assertEquals(1, result.fixedCount());
+    assertEquals(1, result.fixedCount(), "销毁/清理是当场完成的状态变化，当场计入");
   }
 
   @Test
@@ -916,7 +916,9 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("train1"), t0);
     TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(65));
 
-    assertEquals(1, result.fixedCount());
+    // 派发 ≠ 恢复：车尚未重新推进，因此这里断言的是派发计数。
+    assertEquals(1, result.recoveryDispatchedCount());
+    assertEquals(0, result.fixedCount(), "车还没动，不得计入已恢复");
     verify(dispatchService).applySmartForwardUnlock(input);
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
     assertTrue(
@@ -1002,7 +1004,9 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("train1"), t0);
     TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(65));
 
-    assertEquals(1, result.fixedCount());
+    // 派发 ≠ 恢复：车尚未重新推进，因此这里断言的是派发计数。
+    assertEquals(1, result.recoveryDispatchedCount());
+    assertEquals(0, result.fixedCount(), "车还没动，不得计入已恢复");
     verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(input);
     verify(dispatchService, never()).applySmartDrainUnlock(input);
     verify(dispatchService, never()).applySmartForwardUnlock(input);
@@ -1065,7 +1069,9 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("train1"), t0);
     TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(65));
 
-    assertEquals(1, result.fixedCount());
+    // 派发 ≠ 恢复：车尚未重新推进，因此这里断言的是派发计数。
+    assertEquals(1, result.recoveryDispatchedCount());
+    assertEquals(0, result.fixedCount(), "车还没动，不得计入已恢复");
     verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(input);
     verify(dispatchService).applySmartDrainUnlock(input);
     verify(dispatchService, never()).applySmartForwardUnlock(input);
@@ -2175,7 +2181,7 @@ class TrainHealthMonitorTest {
     TrainHealthMonitor.CheckResult result =
         monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
 
-    assertEquals(1, result.fixedCount());
+    assertEquals(1, result.fixedCount(), "销毁是当场可验证的状态变化，当场计入");
     verify(dispatchService).destroyTrainByName("leader", "health-deadlock-timeout");
     verify(dispatchService, never()).destroyTrainByName(eq("follower"), anyString());
     assertTrue(
@@ -2212,7 +2218,7 @@ class TrainHealthMonitorTest {
     TrainHealthMonitor.CheckResult result =
         monitor.check(Set.of("follower", "leader"), t0.plusSeconds(65));
 
-    assertEquals(1, result.fixedCount());
+    assertEquals(1, result.fixedCount(), "销毁/清理是当场完成的状态变化，当场计入");
     verify(dispatchService).destroyTrainByName("follower", "health-deadlock-timeout");
     verify(dispatchService, never()).destroyTrainByName(eq("leader"), anyString());
     assertTrue(
@@ -2342,7 +2348,7 @@ class TrainHealthMonitorTest {
     TrainHealthMonitor.CheckResult result =
         monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
 
-    assertEquals(1, result.fixedCount());
+    assertEquals(1, result.fixedCount(), "销毁/清理是当场完成的状态变化，当场计入");
     verify(dispatchService).destroyTrainByName("leader", "health-deadlock-timeout");
     verify(dispatchService, never()).destroyTrainByName(eq("follower"), anyString());
     assertTrue(
@@ -2405,7 +2411,7 @@ class TrainHealthMonitorTest {
     TrainHealthMonitor.CheckResult result =
         monitor.check(Set.of("follower", "leader"), t0.plusSeconds(50));
 
-    assertEquals(1, result.fixedCount());
+    assertEquals(1, result.fixedCount(), "销毁/清理是当场完成的状态变化，当场计入");
     verify(dispatchService).applySmartSelfOwnedStaleRetainRelease(leaderInput);
     verify(dispatchService).applySmartDrainUnlock(leaderInput);
     verify(dispatchService).applySmartForwardUnlock(leaderInput);
@@ -2938,5 +2944,64 @@ class TrainHealthMonitorTest {
                     message.contains("SMART_DEADLOCK_DESTROY_ELIGIBILITY")
                         && message.contains("ineligibleReason=DESTROY_DISABLED")),
         () -> "本场景应报真正的拦截理由，而不是 DESTROY_DISABLED：" + debugLogs);
+  }
+
+  @Test
+  @DisplayName("恢复动作派发后车没动，不得宣布已修复；车动了才算")
+  void recoveryIsOnlyReportedFixedAfterProgressActuallyResumes() {
+    // 实服第十五轮：SURC-WS-LN-3176 在同一个 idx=17 上"告警→已修复→告警→已修复"翻了 29 分钟，
+    // 而 `持续=` 从 182 秒一路涨到 1735 秒——车一步没挪。全局 411 次告警对 394 次"已修复"，
+    // 这个比例因此是假的，真实的恢复成功率无从得知。
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "self-owned-retain");
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+                "released-self-owned-stale-retain",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .OCCUPANCY_MUTATION));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 7, SignalAspect.STOP, 0.0)));
+    monitor.check(Set.of("train1"), t0);
+
+    // 一：派发了恢复动作，但进度索引仍是 7 ⇒ 只能算"已派发"，不得算"已恢复"。
+    TrainHealthMonitor.CheckResult dispatched = monitor.check(Set.of("train1"), t0.plusSeconds(65));
+    assertEquals(1, dispatched.recoveryDispatchedCount(), "应记为已派发");
+    assertEquals(0, dispatched.fixedCount(), "车没动就不许宣布已修复");
+
+    // 二：再过一轮车仍未推进 ⇒ 依然不许宣布已修复（此前这里会每次都翻成"已修复"）。
+    TrainHealthMonitor.CheckResult stillStuck =
+        monitor.check(Set.of("train1"), t0.plusSeconds(125));
+    assertEquals(0, stillStuck.fixedCount(), "持续卡住期间不得反复宣布已修复");
+
+    // 三：进度索引真的向前了 ⇒ 这时才算恢复，且只算一次。
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 8, SignalAspect.PROCEED, 4.0)));
+    TrainHealthMonitor.CheckResult recovered = monitor.check(Set.of("train1"), t0.plusSeconds(185));
+    assertEquals(1, recovered.fixedCount(), "车重新推进才算恢复");
+
+    TrainHealthMonitor.CheckResult afterwards =
+        monitor.check(Set.of("train1"), t0.plusSeconds(245));
+    assertEquals(0, afterwards.fixedCount(), "恢复只应计一次");
+
+    // 判别点：卡着与恢复必须得到相反结果。恒真或恒假的实现会在这里失败。
+    assertNotEquals(dispatched.fixedCount() > 0, recovered.fixedCount() > 0, "卡住与恢复必须相反");
   }
 }

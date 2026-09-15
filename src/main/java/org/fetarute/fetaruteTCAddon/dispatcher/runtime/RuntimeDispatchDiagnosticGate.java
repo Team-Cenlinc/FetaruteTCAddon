@@ -345,6 +345,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // RETURN 线路完全绕过拥堵闸门——实服 12 条线里有 4 条是 RETURN。
           // 这条豁免此前在日志里毫无痕迹。按 gateKey 去重，一条线至多一行。
           "SMART_SPAWN_CONGESTION_EXEMPT",
+          // 发车许可锁超时释放——一把烂在手里的锁的唯一痕迹。
+          // 实服第十五轮一次这样的卡死让 WS 线半小时产出掉 57%，而全网数字把它摊平看不出来。
+          // 体量受限于"真的卡死过几次"，正常运行应当长期为 0——非 0 本身就是要查的信号。
+          "SMART_DEPARTURE_GATE_EXPIRED",
           // 入库走行证明唯一的生效证据：计数直接等于"本该被 inside-stop-distance 硬停、
           // 现在没被硬停"的次数。第十五轮 3 辆车被硬停在离段场一个节点处，最长 172 秒，
           // 而它们 holds=[] blockedBy=[]。生产端按 (train, routeIndex) 去重。

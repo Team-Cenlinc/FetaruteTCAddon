@@ -24,8 +24,21 @@ final class TestServices {
     return minimal(debug, mock(RouteDefinitionCache.class));
   }
 
+  /** 需要控制时间的用例（如发车门锁超时）用这个变体注入自己的时钟。 */
+  static RuntimeDispatchService minimal(
+      List<String> debug, java.util.function.Supplier<java.time.Instant> clock) {
+    return minimal(debug, mock(RouteDefinitionCache.class), clock);
+  }
+
   /** 需要对 RouteStop 序列做断言的用例（如入库走行证明）用这个变体注入自己的 cache。 */
   static RuntimeDispatchService minimal(List<String> debug, RouteDefinitionCache routeDefinitions) {
+    return minimal(debug, routeDefinitions, java.time.Instant::now);
+  }
+
+  static RuntimeDispatchService minimal(
+      List<String> debug,
+      RouteDefinitionCache routeDefinitions,
+      java.util.function.Supplier<java.time.Instant> clock) {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView base = testConfigView(20, 20.0);
     when(configManager.current())
@@ -55,6 +68,7 @@ final class TestServices {
         configManager,
         null,
         new TrainConfigResolver(),
-        debug::add);
+        debug::add,
+        clock);
   }
 }

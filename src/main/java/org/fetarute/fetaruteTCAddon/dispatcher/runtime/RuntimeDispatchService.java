@@ -344,6 +344,14 @@ public final class RuntimeDispatchService {
   private static final Duration LIVE_FOOTPRINT_SAMPLE_INTERVAL = Duration.ofSeconds(2);
 
   /**
+   * 发车许可锁的最长持有时长——一把烂在手里的锁的兜底。
+   *
+   * <p>取 180 秒：库里最长配置停站 30 秒、均值 20.2 秒，6 倍余量，绝不会截断任何一次正常停站； 而实服那次卡死持续了 1735
+   * 秒。这不是调参旋钮，是防止单点故障掐死整条线的上限， 因此写死而不进配置——需要调它，说明真正该查的是"为什么三条释放路径都没走到"。
+   */
+  private static final Duration DEPARTURE_GATE_MAX_HOLD = Duration.ofSeconds(180);
+
+  /**
    * 每辆车最近一次的**实测边覆盖**（按车名键），Phase 4 的放行证据。
    *
    * <p>与车体指纹在同一次观测里一并算出，复用同一个 {@link #LIVE_FOOTPRINT_SAMPLE_INTERVAL} 节流——
@@ -1633,7 +1641,57 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return false;
     }
-    return departureGates.containsKey(key);
+    return !expireStaleDepartureGate(key);
+  }
+
+  /**
+   * 超时释放发车许可锁，并返回"该锁此刻已不存在"。
+   *
+   * <p>为什么必须有这道超时：这把锁**只有一个获取方**（AutoStation 的 {@code autostation_dwell}）， 释放写在 {@code
+   * AutoStationSignAction} 的三个分支里，三个都没走到锁就是永久的，而此前 {@code departureGates}
+   * 对**活着的**列车没有任何过期机制（只在车消失/销毁/改名时清理）。
+   *
+   * <p>实服第十五轮实测：SURC-WS-LN-3176 于 21:11:52 取锁，门在 21:12:07 就正常关闭了， 锁却一直没还——车停在 TPC 二站台 {@code
+   * routeIndex=17}，挡住 {@code NODE:SURC:SLL:TPC:2:004}， 被它挡住的快照 23 条，它自己 28.9 分钟到站 0 次。WS 线同期产出掉
+   * 57%，而 MT/DS 在同一小时里 分别只掉 14% 和 5%——**全网看到的"拥堵崩溃"其实是一辆车掐住了一条线**。 库里最长配置停站 30 秒、均值 20.2 秒，而这把为 20
+   * 秒设计的锁活了 1735 秒。
+   *
+   * <p>这不削弱安全：锁的职责是"停站期间别走"，而移动授权是独立的另一层——那辆车全程 {@code
+   * movementToken=ACTIVE}，本来就有权走。超时只是把一把烂在手里的锁还回去。
+   */
+  private boolean expireStaleDepartureGate(String key) {
+    DepartureGate gate = departureGates.get(key);
+    if (gate == null) {
+      return true;
+    }
+    Duration maxHold = departureGateMaxHold();
+    if (maxHold.isZero() || maxHold.isNegative()) {
+      return false;
+    }
+    Duration held = Duration.between(gate.acquiredAt(), clockNow());
+    if (held.isNegative() || held.compareTo(maxHold) < 0) {
+      return false;
+    }
+    if (!departureGates.remove(key, gate)) {
+      return false;
+    }
+    departureGateBlockers.remove(key);
+    debugLogger.accept(
+        "SMART_DEPARTURE_GATE_EXPIRED train="
+            + key
+            + " session="
+            + gate.sessionId()
+            + " reason="
+            + gate.reason()
+            + " heldSeconds="
+            + held.toSeconds()
+            + " maxHoldSeconds="
+            + maxHold.toSeconds());
+    return true;
+  }
+
+  private Duration departureGateMaxHold() {
+    return DEPARTURE_GATE_MAX_HOLD;
   }
 
   /**

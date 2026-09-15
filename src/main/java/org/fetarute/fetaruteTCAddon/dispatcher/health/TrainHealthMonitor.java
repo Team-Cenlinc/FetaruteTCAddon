@@ -86,6 +86,19 @@ public final class TrainHealthMonitor {
     private int progressRecoveryAttempts;
     private int deadlockStage;
 
+    /**
+     * 已派发但**尚未验证**的恢复动作的时刻；{@link Instant#EPOCH} 表示没有待验证的恢复。
+     *
+     * <p>此前 {@code tryFixProgressStuck} 返回 true 就直接发 {@code HealthAlert.fixed("进度停滞已修复")}， 但那个 true
+     * 的含义只是"派发了一个恢复动作"，不是"车动了"。实服第十五轮 SURC-WS-LN-3176 在 idx=17 上每隔约 6 秒就"告警→已修复→告警→已修复"翻一次，翻了 29
+     * 分钟， 而 {@code 持续=} 秒数一路从 182 涨到 1735——车一步没挪。 全局 411 次告警对 394 次"已修复"，这个比例因此是假的。
+     */
+    private Instant pendingRecoveryAt = Instant.EPOCH;
+
+    private boolean hasPendingRecovery() {
+      return !Instant.EPOCH.equals(pendingRecoveryAt);
+    }
+
     private void resetStall() {
       stallStage = 0;
       lastStallAttemptAt = Instant.EPOCH;
@@ -95,6 +108,7 @@ public final class TrainHealthMonitor {
       progressStage = 0;
       progressRecoveryAttempts = 0;
       lastProgressAttemptAt = Instant.EPOCH;
+      pendingRecoveryAt = Instant.EPOCH;
     }
 
     private void resetDeadlock() {
@@ -517,6 +531,7 @@ public final class TrainHealthMonitor {
     recoveryStates.keySet().removeIf(name -> !activeKeys.contains(name));
 
     int stallCount = 0;
+    int recoveryDispatchedCount = 0;
     int progressStuckCount = 0;
     int fixedCount = 0;
     List<StuckTrainCleanupPolicy.Candidate> stuckCleanupCandidates = new ArrayList<>();
@@ -568,6 +583,23 @@ public final class TrainHealthMonitor {
         continue; // 首次采样，跳过检测
       }
       if (progressed) {
+        // **只有到这里，才有资格说"恢复了"**——车的进度索引真的向前走了。
+        // 此前是在派发恢复动作那一刻就宣布已修复，于是一辆一步没挪的车能被宣布 29 分钟的"已修复"。
+        if (recovery.hasPendingRecovery()) {
+          long waitedSeconds =
+              Math.max(0L, Duration.between(recovery.pendingRecoveryAt, now).toSeconds());
+          fixedCount++;
+          alertBus.publish(
+              HealthAlert.fixed(
+                  HealthAlert.AlertType.PROGRESS_STUCK,
+                  trainName,
+                  "进度停滞已恢复: 恢复动作后 "
+                      + waitedSeconds
+                      + "秒 车辆重新推进 idx="
+                      + currentProgress
+                      + " signal="
+                      + currentSignal));
+        }
         recovery.resetProgress();
         recovery.resetDeadlock();
       }
@@ -645,7 +677,12 @@ public final class TrainHealthMonitor {
           fixed =
               tryFixMutualDeadlockEpisode(episode, observation, progressDuration, recovery, now);
           if (fixed) {
+            // 互卡路径保持"当场计入"：它的终局动作是销毁，那是**当场可验证的状态变化**
+            // （车没了），不是"派发了动作、等着看车动不动"。progress-stuck 那边不同，
+            // 那边派发的是 refresh/reissue/unlock，能不能生效要看车后来动没动。
+            // 本轮实服 SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED=0，这条路径没有可据以改动的证据。
             fixedCount++;
+            recoveryDispatchedCount++;
           }
         }
         String message =
@@ -703,29 +740,26 @@ public final class TrainHealthMonitor {
               tryFixProgressStuck(
                   trainName, currentSignal, progressDuration, recovery, now, smartRecoveryInput);
           if (fixed) {
-            fixedCount++;
+            recoveryDispatchedCount++;
+            if (!recovery.hasPendingRecovery()) {
+              // 只记"已派发、待验证"。真正的 fixedCount 在车重新推进那一刻才加。
+              recovery.pendingRecoveryAt = now;
+            }
           }
         }
+        // 无论是否派发了动作，这里都只是**告警**：车还没动。
         alertBus.publish(
-            fixed
-                ? HealthAlert.fixed(
-                    HealthAlert.AlertType.PROGRESS_STUCK,
-                    trainName,
-                    "进度停滞已修复: 持续="
-                        + progressDuration.toSeconds()
-                        + "秒 idx="
-                        + currentProgress
-                        + " signal="
-                        + currentSignal)
-                : HealthAlert.of(
-                    HealthAlert.AlertType.PROGRESS_STUCK,
-                    trainName,
-                    "进度停滞: 持续="
-                        + progressDuration.toSeconds()
-                        + "秒 idx="
-                        + currentProgress
-                        + " signal="
-                        + currentSignal));
+            HealthAlert.of(
+                HealthAlert.AlertType.PROGRESS_STUCK,
+                trainName,
+                (fixed ? "进度停滞已派发恢复动作: 持续=" : "进度停滞: 持续=")
+                    + progressDuration.toSeconds()
+                    + "秒 idx="
+                    + currentProgress
+                    + " signal="
+                    + currentSignal
+                    + " 恢复尝试="
+                    + recovery.progressRecoveryAttempts));
         collectStuckCleanupCandidate(
             trainName, progressDuration, recovery, now, stuckCleanupCandidates);
       } else if (progressed || progressDuration.compareTo(progressStuckThreshold) <= 0) {
@@ -740,7 +774,7 @@ public final class TrainHealthMonitor {
     traceSwitcherOccupantBlockingMany(active, now);
     pruneDeadlockEpisodes(activeKeys, now);
     pruneDeadlockFallbackEvidence(activeKeys, now);
-    return new CheckResult(stallCount, progressStuckCount, fixedCount);
+    return new CheckResult(stallCount, progressStuckCount, fixedCount, recoveryDispatchedCount);
   }
 
   /** 清除所有快照。 */
@@ -4050,7 +4084,20 @@ public final class TrainHealthMonitor {
   }
 
   /** 检查结果。 */
-  public record CheckResult(int stallCount, int progressStuckCount, int fixedCount) {
+  /**
+   * 一次健康检查的结果。
+   *
+   * <p>{@code fixedCount} 与 {@code recoveryDispatchedCount} 是**两件事**，此前被混为一谈：
+   * 前者是"车确实重新推进了"，后者是"派发了一个恢复动作"。派发不等于恢复——实服第十五轮 SURC-WS-LN-3176 在同一个 idx 上被反复"修好"了 29 分钟而一步没挪。
+   */
+  public record CheckResult(
+      int stallCount, int progressStuckCount, int fixedCount, int recoveryDispatchedCount) {
+
+    /** 兼容旧调用：未区分派发与恢复时，两者同值。 */
+    public CheckResult(int stallCount, int progressStuckCount, int fixedCount) {
+      this(stallCount, progressStuckCount, fixedCount, fixedCount);
+    }
+
     public int totalAnomalies() {
       return stallCount + progressStuckCount;
     }
