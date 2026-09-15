@@ -345,6 +345,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // RETURN 线路完全绕过拥堵闸门——实服 12 条线里有 4 条是 RETURN。
           // 这条豁免此前在日志里毫无痕迹。按 gateKey 去重，一条线至多一行。
           "SMART_SPAWN_CONGESTION_EXEMPT",
+          // 入库走行证明唯一的生效证据：计数直接等于"本该被 inside-stop-distance 硬停、
+          // 现在没被硬停"的次数。第十五轮 3 辆车被硬停在离段场一个节点处，最长 172 秒，
+          // 而它们 holds=[] blockedBy=[]。生产端按 (train, routeIndex) 去重。
+          "SMART_DEPOT_RUN_IN_PROVEN",
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。

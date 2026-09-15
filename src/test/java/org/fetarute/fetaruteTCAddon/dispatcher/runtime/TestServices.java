@@ -21,6 +21,11 @@ final class TestServices {
   private TestServices() {}
 
   static RuntimeDispatchService minimal(List<String> debug) {
+    return minimal(debug, mock(RouteDefinitionCache.class));
+  }
+
+  /** 需要对 RouteStop 序列做断言的用例（如入库走行证明）用这个变体注入自己的 cache。 */
+  static RuntimeDispatchService minimal(List<String> debug, RouteDefinitionCache routeDefinitions) {
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView base = testConfigView(20, 20.0);
     when(configManager.current())
@@ -42,7 +47,7 @@ final class TestServices {
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy()),
         mock(RailGraphService.class),
-        mock(RouteDefinitionCache.class),
+        routeDefinitions,
         new RouteProgressRegistry(),
         mock(SignNodeRegistry.class),
         mock(LayoverRegistry.class),

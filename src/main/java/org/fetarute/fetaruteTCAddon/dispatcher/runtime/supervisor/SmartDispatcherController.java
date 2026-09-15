@@ -447,8 +447,13 @@ public final class SmartDispatcherController {
   /**
    * 前方风险决策输入。
    *
-   * <p>{@code plannedRouteStopProven} 只接受运行时从当前规范 RouteDefinition 快照确认的非 {@code PASS}
-   * RouteStop。风险来源声称 route 末端但没有这项证明时，必须继续按硬停车边界处理，避免缺失路线证明绕过 Signal 的 fail-closed 授权链。
+   * <p>{@code plannedRouteStopProven} 接受两种证明，二者都必须来自运行时的规范快照： 当前索引之后存在非 {@code PASS}
+   * RouteStop；或剩余节点全是 {@code PASS} 且末端是图中登记的 {@code DEPOT}（入库走行）。风险来源声称 route
+   * 末端但两种证明都没有时，必须继续按硬停车边界处理， 避免缺失路线证明绕过 Signal 的 fail-closed 授权链。
+   *
+   * <p>加入第二种证明是因为 {@code *D} 路线在 {@code TERMINATE} 之后还有一段全 {@code PASS} 的入库走行， 原判据在那一段拿不到任何证明，于是车被
+   * {@code inside-stop-distance} 停在离段场一个节点的地方。 它拒绝的本意是"**裸** route
+   * 终点"——走完了却不知道那里有什么；而段场节点本身就是那个"知道"。
    */
   public record ForwardDecisionInput(
       String trainId,

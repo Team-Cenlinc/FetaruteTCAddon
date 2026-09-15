@@ -354,6 +354,9 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, LivePhysicalEdgeCoverage>
       livePhysicalEdgeCoverages = new java.util.concurrent.ConcurrentHashMap<>();
 
+  private final java.util.concurrent.ConcurrentMap<String, Boolean> depotRunInProofReported =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   /** 解锁预约创建时的车体方块指纹基线（按 reservationId 键）；缺失表示"当时无从判断"。 */
   private final java.util.concurrent.ConcurrentMap<String, Integer> smartUnlockFootprintBaselines =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -10308,20 +10311,31 @@ public final class RuntimeDispatchService {
               + input.train()
               + " reason="
               + result.reason()
-              + " coveredEdges="
-              + coverage.resources().size());
+              + " covered="
+              + coverage.resources().size()
+              + " "
+              + result.skipBreakdown());
       return null;
     }
     // 这条路径**唯一**的生效证据。既有回收机制十三轮成功率 0，
     // 所以一旦这条非零，就是 Phase 4 确实跑通了——归因干净。
+    //
+    // edges/nodes 分开报：NODE 半边是第十五轮新接的，只有分开数才知道它有没有在出力；
+    // despiteQueue 是"按旧规则本会被排队拦下、现在放行了"的条数，用来单独衡量那条规则改动。
     debugLogger.accept(
         "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
             + input.train()
             + " releasedCount="
             + result.releasedCount()
+            + " edges="
+            + result.releasedEdges()
+            + " nodes="
+            + result.releasedNodes()
+            + " despiteQueue="
+            + result.releasedDespiteQueue()
             + " resources="
             + result.released()
-            + " coveredEdges="
+            + " covered="
             + coverage.resources().size());
     return new SmartRecoveryActionResult(
         true,
@@ -14107,8 +14121,12 @@ public final class RuntimeDispatchService {
         stopAtNextWaypoint = shouldStopAtWaypoint(nextNode.get(), nextRouteStop.get());
       }
     }
-    boolean hasUpcomingPlannedRouteStop =
-        hasUpcomingPlannedRouteStop(route, currentIndex, nextRouteStop);
+    boolean routeStopProven = hasUpcomingPlannedRouteStop(route, currentIndex, nextRouteStop);
+    boolean depotRunInProven = !routeStopProven && hasProvenDepotRunIn(route, currentIndex, graph);
+    boolean plannedTerminusProven = routeStopProven || depotRunInProven;
+    if (depotRunInProven) {
+      traceDepotRunInProven(trainName, route, currentIndex);
+    }
     if (stopAtNextWaypoint) {
       authorityEnd = authorityEnd.withReason(AuthorityEndReason.DWELL_OR_STATION_STOP);
     }
@@ -14232,7 +14250,7 @@ public final class RuntimeDispatchService {
       approachOverrideBps = approachControl.limitBps();
     }
     boolean plannedStopAuthorityEnd =
-        isPlannedStopAuthorityEnd(authorityEnd, hasUpcomingPlannedRouteStop);
+        isPlannedStopAuthorityEnd(authorityEnd, plannedTerminusProven);
     if (runtimeSettings.movementAuthorityEnabled() && !stopAtNextWaypoint) {
       TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
       boolean authorityFromHardConstraint =
@@ -14370,7 +14388,7 @@ public final class RuntimeDispatchService {
             distanceOpt,
             movementAuthorityLimitBps,
             stopAtNextWaypoint,
-            hasUpcomingPlannedRouteStop);
+            plannedTerminusProven);
     nextAspect = smartDecision.aspect();
     movementAuthorityLimitBps = smartDecision.movementAuthorityLimitBps();
     distanceOpt = smartDecision.distanceOpt();
@@ -15325,6 +15343,9 @@ public final class RuntimeDispatchService {
     livePhysicalFootprintFingerprints.remove(normalizeTrainKey(trainName));
     livePhysicalFootprintSampledAt.remove(normalizeTrainKey(trainName));
     livePhysicalEdgeCoverages.remove(normalizeTrainKey(trainName));
+    // 入库证明的去重键带 routeIndex，一辆车会留下多条；车走了必须整簇清掉，否则按车队规模泄漏。
+    String depotProofPrefix = normalizeTrainKey(trainName) + "@";
+    depotRunInProofReported.keySet().removeIf(key -> key.startsWith(depotProofPrefix));
 
     Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.routeId());
     if (routeOpt.isEmpty()) {
@@ -25612,7 +25633,7 @@ public final class RuntimeDispatchService {
       OptionalLong distanceOpt,
       OptionalDouble movementAuthorityLimitBps,
       boolean stopAtNextWaypoint,
-      boolean hasUpcomingPlannedRouteStop) {
+      boolean plannedTerminusProven) {
     SignalAspect safeAspect = currentAspect == null ? SignalAspect.STOP : currentAspect;
     OptionalDouble safeAuthorityLimit =
         movementAuthorityLimitBps == null ? OptionalDouble.empty() : movementAuthorityLimitBps;
@@ -25649,7 +25670,7 @@ public final class RuntimeDispatchService {
             false,
             "none",
             authorityEnd == null ? AuthorityEndReason.NONE.name() : authorityEnd.reason().name(),
-            isPlannedStopAuthorityEnd(authorityEnd, hasUpcomingPlannedRouteStop));
+            isPlannedStopAuthorityEnd(authorityEnd, plannedTerminusProven));
     DispatchDecision dispatchDecision = smartDispatcherController.decideForwardSignal(input);
     traceSmartDispatcherActionObserved(trainName, mode, dispatchDecision);
     if (mode == SmartDispatcherMode.OBSERVE_ONLY) {
@@ -25848,6 +25869,72 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 报告"入库走行证明"生效——它是这条改动**唯一**的生效证据。
+   *
+   * <p>按 (train, routeIndex) 去重：一辆车在一个索引上至多一行，不随信号 tick 放大。 只在 RouteStop
+   * 证明缺席、而入库证明补上的时候才报，因此计数直接等于"本该被硬停、现在没被硬停"的次数。
+   */
+  private void traceDepotRunInProven(String trainName, RouteDefinition route, int currentIndex) {
+    String key = normalizeTrainKey(trainName) + "@" + currentIndex;
+    if (depotRunInProofReported.putIfAbsent(key, Boolean.TRUE) != null) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_DEPOT_RUN_IN_PROVEN train="
+            + trainName
+            + " route="
+            + (route == null || route.id() == null ? "-" : route.id())
+            + " index="
+            + currentIndex);
+  }
+
+  /**
+   * 判断剩余路线是否是一段**通往段场的入库走行**。
+   *
+   * <p>为什么需要这条独立的证明来源：实服的 {@code *D}（去段场）路线在 {@code TERMINATE} 之后还挂着一段 全 {@code PASS} 的入库走行，例如
+   *
+   * <pre>
+   *   MT-2O_ShortD  12 TERMINATE SURC:S:HHU:4 → 13 PASS SURC:D:HHU:1:001 → 14 PASS SURC:D:HHU:1
+   * </pre>
+   *
+   * 而 {@link #hasUpcomingPlannedRouteStop} 只认非 {@code PASS} 的 RouteStop，入库段一个都没有，于是 {@code
+   * plannedRouteStopProven} 为假、{@code shouldHardStop} 为真，车在离段场一个节点的地方被 {@code inside-stop-distance}
+   * 硬停住。第十五轮实测 3 辆车中招，最长 172 秒，而它们 {@code holds=[] blockedBy=[]}——什么都没持有、什么都没挡它。销毁兜底也救不了： {@code
+   * DEADLOCK_DESTROY_SKIPPED reason=BLOCKER_SNAPSHOT_MISSING}，它要求有 blocker 快照， 而这个形态恰恰没有 blocker。
+   *
+   * <p>这不是放宽 fail-closed，而是补上它真正想要的那种证据。原分支拒绝的是"**裸** route 终点"——
+   * 路线走完了而不知道那里有什么。段场节点本身就是那个"知道"：{@link NodeType#DEPOT} 是图里登记过的 物理终端设施，其证明力不弱于一条
+   * RouteStop。因此只有在**剩余节点全是 PASS 且末端确为 DEPOT** 时才成立；任一条件不满足（末端不是段场、中途还有非 PASS 停靠、图里查不到该节点）都退回原分支。
+   */
+  boolean hasProvenDepotRunIn(RouteDefinition route, int currentIndex, RailGraph graph) {
+    if (route == null || graph == null) {
+      return false;
+    }
+    List<NodeId> waypoints = route.waypoints();
+    if (waypoints == null || waypoints.isEmpty()) {
+      return false;
+    }
+    int lastIndex = waypoints.size() - 1;
+    if (currentIndex < 0 || currentIndex >= lastIndex) {
+      // 已在末端或越界：没有"剩余走行"可言，交回原分支处理。
+      return false;
+    }
+    // 剩余段里若还有任何非 PASS 停靠，那就是普通计划停靠场景，不该走这条证明。
+    boolean remainingAllPass =
+        routeDefinitions.listStops(route.id()).stream()
+            .filter(stop -> stop != null && stop.sequence() > currentIndex)
+            .allMatch(stop -> stop.passType() == RouteStopPassType.PASS);
+    if (!remainingAllPass) {
+      return false;
+    }
+    NodeId terminus = waypoints.get(lastIndex);
+    if (terminus == null) {
+      return false;
+    }
+    return graph.findNode(terminus).map(node -> node.type() == NodeType.DEPOT).orElse(false);
+  }
+
+  /**
    * 判断移动授权末端是否具有明确的计划停靠证明。
    *
    * <p>仅当当前 index 后存在非 {@code PASS} RouteStop 时，{@link AuthorityEndReason#ROUTE_STOP_OR_TERMINAL}
@@ -25855,9 +25942,9 @@ public final class RuntimeDispatchService {
    * STOP。没有 RouteStop 证明的裸 route 终点、路线/方向/硬资源/物理证据缺失仍按原有 fail-closed 分支处理。
    */
   private static boolean isPlannedStopAuthorityEnd(
-      AuthorityEnd authorityEnd, boolean hasUpcomingPlannedRouteStop) {
+      AuthorityEnd authorityEnd, boolean plannedTerminusProven) {
     return authorityEnd != null
-        && hasUpcomingPlannedRouteStop
+        && plannedTerminusProven
         && authorityEnd.reason() == AuthorityEndReason.ROUTE_STOP_OR_TERMINAL;
   }
 
@@ -28160,10 +28247,26 @@ public final class RuntimeDispatchService {
       return LivePhysicalEdgeCoverage.incomplete("cell-coverage-index-unavailable");
     }
     Set<OccupancyResource> covered = new LinkedHashSet<>();
+    int coveredEdges = 0;
     for (var cell : observation.cells().orElse(java.util.Set.of())) {
       for (var edgeId : interlocking.edgesForCell(cell)) {
-        covered.add(OccupancyResource.forEdge(edgeId));
+        if (covered.add(OccupancyResource.forEdge(edgeId))) {
+          coveredEdges++;
+        }
+        // 端点节点一并视为"车体可能压着"。
+        //
+        // 这是 NODE 侧唯一站得住的推导方向，而且方向很重要：它**放大**覆盖集合，
+        // 因此只会让释放判据更严、更少放行，不可能反过来把车压着的节点判成已空。
+        // 反向推导（"不是任何已覆盖区间的端点就算已离开"）依赖光栅化无缝隙这一未验证前提，
+        // 推错就是在车实际压着的节点上解除保护——共占红线。这里不走那条路：
+        // 判据仍然只有一个「资源不在覆盖集合里」，只是覆盖集合现在也含节点。
+        covered.add(OccupancyResource.forNode(edgeId.a()));
+        covered.add(OccupancyResource.forNode(edgeId.b()));
       }
+    }
+    if (coveredEdges <= 0) {
+      // 一条边都定位不到 ⇒ 车在哪儿无从判断 ⇒ 不能把"看不见"当成"已离开"。
+      return LivePhysicalEdgeCoverage.incomplete("no-edge-located-for-live-cells");
     }
     return LivePhysicalEdgeCoverage.complete(covered);
   }

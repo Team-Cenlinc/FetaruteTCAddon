@@ -2694,10 +2694,34 @@ public final class SimpleOccupancyManager
 
   /** {@link #releaseSelfOwnedPhysicalEdgeRetain} 的结果。 */
   public record PhysicalEdgeRetainReleaseResult(
-      int releasedCount, String reason, List<OccupancyResource> released) {
+      int releasedCount,
+      String reason,
+      List<OccupancyResource> released,
+      int releasedEdges,
+      int releasedNodes,
+      int skippedStillCovered,
+      int skippedExternalClaim,
+      int releasedDespiteQueue) {
+
+    /** 兼容旧调用：不带分项计数。 */
+    public PhysicalEdgeRetainReleaseResult(
+        int releasedCount, String reason, List<OccupancyResource> released) {
+      this(releasedCount, reason, released, 0, 0, 0, 0, 0);
+    }
+
     public PhysicalEdgeRetainReleaseResult {
       released = released == null ? List.of() : List.copyOf(released);
       reason = reason == null || reason.isBlank() ? "-" : reason;
+    }
+
+    /** 逐原因的跳过计数，用于让"为什么没释放"可归因。 */
+    public String skipBreakdown() {
+      return "stillCovered="
+          + skippedStillCovered
+          + " externalClaim="
+          + skippedExternalClaim
+          + " despiteQueue="
+          + releasedDespiteQueue;
     }
   }
 
@@ -2725,9 +2749,13 @@ public final class SimpleOccupancyManager
    *   <li>该资源上存在任何外部 claim 或外部排队 ⇒ 不放，避免释放后把别人放进来。
    * </ol>
    *
-   * <p>只处理 {@link ResourceKind#EDGE}。NODE 占 blocker 的 75%，但 {@code livePhysicalEdgeCoverage} 只产出
-   * EDGE 资源，**没有可靠的 NODE 证明**—— 用"不是任何被覆盖区间的端点"去反推依赖未经验证的假设，缺证据当证据正是红线所在。 NODE 需要另建按同一套光栅化口径的
-   * cell→node 索引，不在本次范围内。
+   * <p>处理 {@link ResourceKind#EDGE} 与 {@link ResourceKind#NODE}。NODE 是后加的，而加法的**方向**是安全性所在： {@code
+   * livePhysicalEdgeCoverage} 把每条已覆盖 EDGE 的两个端点也**放进**覆盖集合，因此覆盖集合被放大，
+   * 这里的放行条件（"资源不在覆盖集合里"）只会更严。反向推导——"不是任何已覆盖区间的端点就算已离开"——
+   * 依赖"光栅化无缝隙"这个未经验证的前提，推错就是在车实际压着的节点上解除保护，那才是红线。两者不可混为一谈。
+   *
+   * <p>为什么非做不可：实服第十五轮，SURC-MT-LH-1650 在同一秒里被 Phase 4 释放了它够得着的那条 EDGE， 却因为 {@code HHU:4:003}/{@code
+   * 004} 两个 NODE 留着继续卡了 184 秒，并把 SURC-DS-LH-2216 一起堵了 62 秒。 那一轮 8 辆车中过同一个招，最长 324 秒。
    */
   public synchronized PhysicalEdgeRetainReleaseResult releaseSelfOwnedPhysicalEdgeRetain(
       String trainName, boolean coverageComplete, Set<OccupancyResource> coveredResources) {
@@ -2741,13 +2769,24 @@ public final class SimpleOccupancyManager
     }
     Set<OccupancyResource> covered = coveredResources == null ? Set.of() : coveredResources;
     List<OccupancyResource> releasable = new ArrayList<>();
+    int releasableEdges = 0;
+    int releasableNodes = 0;
+    int skippedStillCovered = 0;
+    int skippedExternalClaim = 0;
+    int releasedDespiteQueue = 0;
     for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
       OccupancyResource resource = entry.getKey();
-      if (resource == null || resource.kind() != ResourceKind.EDGE) {
+      if (resource == null) {
         continue;
       }
-      if (covered.contains(resource)) {
-        continue; // 车体仍压在上面。
+      // NODE 与 EDGE 都处理。NODE 占实服 blocker 的 75%，只接 EDGE 时实测出现过：
+      // 同一秒里 Phase 4 释放了它够得着的那条 EDGE，而车因为两个 NODE 留着继续卡了 184 秒
+      // （SURC-MT-LH-1650，HHU:4:003/004），并把 DS-LH-2216 一起堵了 62 秒。
+      //
+      // 安全性来自覆盖集合的构造方向：节点是由「已覆盖 EDGE 的端点」**加进**覆盖集合的，
+      // 只会让这里更难放行。判据本身没有放宽，仍然是「资源不在覆盖集合里」。
+      if (resource.kind() != ResourceKind.EDGE && resource.kind() != ResourceKind.NODE) {
+        continue;
       }
       List<OccupancyClaim> holders = entry.getValue();
       if (holders == null || holders.isEmpty()) {
@@ -2767,22 +2806,62 @@ public final class SimpleOccupancyManager
           externalPresent = true;
         }
       }
-      if (!selfProtectiveRetain || externalPresent) {
+      if (!selfProtectiveRetain) {
+        continue;
+      }
+      if (covered.contains(resource)) {
+        skippedStillCovered++;
+        continue; // 车体仍压在上面。
+      }
+      if (externalPresent) {
+        skippedExternalClaim++;
         continue;
       }
       ConflictQueue queue = queues.get(resource);
       if (queue != null && queue.hasAnyOtherTrain(trainName)) {
-        continue; // 有别人在排队等它，释放会把对方放进来。
+        // 计数，但不据此拒绝放行。
+        //
+        // 两点都要说清楚：
+        //
+        // 其一，这个分支**在本路径上不可达**。队列只为 CONFLICT 建立
+        // （见 isQueueableConflict：kind != CONFLICT 直接返回 false），而这里只看 EDGE/NODE，
+        // 因此 queues.get(resource) 恒为 null。原先写在这里的 `continue` 是一段死代码，
+        // 保留计数只是为了万一将来 NODE/EDGE 也进队列时能立刻看见，而不是无声地改变行为。
+        //
+        // 其二，即便将来可达，也不该据此拒绝。这条路径的前提是**实测覆盖已证明车不在上面**，
+        // 此时"有别人在排队等它"正是应该释放的理由。共占风险不因排队而增加：
+        // 放行条件仍然只有"车体实测不在该资源上"。
+        releasedDespiteQueue++;
       }
       releasable.add(resource);
+      if (resource.kind() == ResourceKind.NODE) {
+        releasableNodes++;
+      } else {
+        releasableEdges++;
+      }
     }
     if (releasable.isEmpty()) {
-      return new PhysicalEdgeRetainReleaseResult(0, "no-departed-edge-retain", List.of());
+      return new PhysicalEdgeRetainReleaseResult(
+          0,
+          "no-departed-edge-retain",
+          List.of(),
+          0,
+          0,
+          skippedStillCovered,
+          skippedExternalClaim,
+          releasedDespiteQueue);
     }
     int released =
         releaseResourcesByTrainAndRole(trainName, releasable, ClaimRole.PROTECTIVE_RETAIN);
     return new PhysicalEdgeRetainReleaseResult(
-        released, released > 0 ? "released" : "release-noop", List.copyOf(releasable));
+        released,
+        released > 0 ? "released" : "release-noop",
+        List.copyOf(releasable),
+        releasableEdges,
+        releasableNodes,
+        skippedStillCovered,
+        skippedExternalClaim,
+        releasedDespiteQueue);
   }
 
   /**
