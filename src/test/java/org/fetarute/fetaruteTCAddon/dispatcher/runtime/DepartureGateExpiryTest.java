@@ -130,4 +130,36 @@ class DepartureGateExpiryTest {
         logs.stream().noneMatch(line -> line.startsWith("SMART_DEPARTURE_GATE_EXPIRED ")),
         () -> logs.toString());
   }
+
+  /**
+   * 笔记本合盖休眠后，发车门锁不得集体过期——它并没有真的握了那么久。
+   *
+   * <p>第二十一轮实服：用户合盖七分钟，唤醒后 {@code SMART_DEPARTURE_GATE_EXPIRED} 从唤醒前的 0 变成 <b>9</b>。九把锁同时过期，不是因为握了
+   * 180 秒，而是因为墙钟跳了。 合盖休眠是**常规操作**，不是偶发异常。
+   *
+   * <p>两个方向一起钉：冻结的那段不计数，但冻结**前**已握的时间不得被抄掉。 只钉前者的话，把锁整个重置也能蒙混过关。
+   */
+  @Test
+  void freezeRebaseKeepsGatesButPreservesTimeHeldBeforeIt() {
+    AtomicReference<Instant> now = new AtomicReference<>(T0);
+    List<String> logs = new ArrayList<>();
+    RuntimeDispatchService service = TestServices.minimal(logs, now::get);
+
+    service.acquireDepartureGate("train-A", "session-1", "autostation_dwell");
+    // 冻结前已经真实握了 120 秒（未超过 180）。
+    now.set(T0.plus(Duration.ofSeconds(120)));
+    assertTrue(service.hasDepartureGate("train-A"), "前置：120 秒仍在余量内");
+
+    // 合盖休眠 600 秒；调度层识别后调用重基。
+    service.rebaseAfterFreeze(Duration.ofSeconds(600));
+    now.set(T0.plus(Duration.ofSeconds(120 + 600)));
+    assertTrue(service.hasDepartureGate("train-A"), "冻结的 600 秒不得计入持锁时长——否则每把锁都会在唤醒瞬间集体过期");
+    assertTrue(
+        logs.stream().anyMatch(l -> l.startsWith("SMART_RUNTIME_CLOCK_DISCONTINUITY ")),
+        () -> "重基必须留痕：" + logs);
+
+    // 冻结前那 120 秒必须还在：再过 61 秒（120+61=181 > 180）就该过期。
+    now.set(T0.plus(Duration.ofSeconds(120 + 600 + 61)));
+    assertFalse(service.hasDepartureGate("train-A"), "冻结前已握的 120 秒不得被抄掉");
+  }
 }

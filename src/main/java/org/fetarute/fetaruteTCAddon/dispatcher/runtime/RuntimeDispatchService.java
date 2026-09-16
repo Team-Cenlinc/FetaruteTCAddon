@@ -1686,6 +1686,34 @@ public final class RuntimeDispatchService {
    *
    * <p>教训很直接：<b>超时判据不能依赖那条正卡着的代码路径</b>。把它做成读触发，等于假设 "卡住的车仍会被正常读取"，而卡住恰恰意味着某条路径不再执行。清扫不依赖任何分支。
    */
+  /**
+   * 把受墙钟驱动的运行时状态**向前平移** {@code gap}，用于服务器冻结（笔记本合盖休眠）后的补偿。
+   *
+   * <p>只由调度层调用——只有它知道“该跑而没跑”。
+   *
+   * <p><b>只平移会因超时而真正动手的那一项：发车门锁。</b>第二十一轮实服里，合盖七分钟后 {@code SMART_DEPARTURE_GATE_EXPIRED} 从唤醒前的 0
+   * 变成唤醒后的 <b>9</b>——九把锁同时过期， 不是因为真的握了 180 秒，而是因为墙钟跳了。
+   *
+   * <p>其余墙钟量（blocker 快照 TTL、各类冷却）跳变后的方向都是“过期/放行”， 本身 fail-closed
+   * 或无害，不在这里平移；平移它们反而会把已经不再成立的证据假装成新鲜的。
+   */
+  public void rebaseAfterFreeze(Duration gap) {
+    if (gap == null || gap.isZero() || gap.isNegative() || departureGates.isEmpty()) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_RUNTIME_CLOCK_DISCONTINUITY gapSeconds="
+            + gap.toSeconds()
+            + " rebasedDepartureGates="
+            + departureGates.size()
+            + " reason=server-freeze-or-clock-leap");
+    departureGates.replaceAll(
+        (key, gate) ->
+            gate == null
+                ? null
+                : new DepartureGate(gate.sessionId(), gate.acquiredAt().plus(gap), gate.reason()));
+  }
+
   private void sweepStaleDepartureGates() {
     if (departureGates.isEmpty()) {
       return;

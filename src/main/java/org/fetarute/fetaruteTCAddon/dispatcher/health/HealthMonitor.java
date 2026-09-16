@@ -215,6 +215,9 @@ public final class HealthMonitor {
     Duration gap = Duration.between(previous, now);
     if (gap.compareTo(SCHEDULER_FREEZE_THRESHOLD) > 0) {
       trainMonitor.rebaseAfterFreeze(gap);
+      if (dispatchService != null) {
+        dispatchService.rebaseAfterFreeze(gap);
+      }
     }
   }
 
