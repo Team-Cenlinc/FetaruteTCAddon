@@ -1690,7 +1690,12 @@ public final class SmartWaitForPlanner {
         + " ageMs="
         + edge.ageMs()
         + " activeForNormalAdmission="
-        + edge.activeForNormalAdmission();
+        + edge.activeForNormalAdmission()
+        // 进图的边也必须带这一位。否则日志里无法区分“这条边本来就新鲜”与
+        // “它已经超龄、是现场复核把它留下的”——而后者正是要验收的东西。
+        // 只在被拒的 trace 上带等于没带：复核过的边根本不会因 STALE_EDGE 被拒。
+        + " liveVerified="
+        + edge.liveVerified();
   }
 
   private static String inputEdgeRejectedTrace(
