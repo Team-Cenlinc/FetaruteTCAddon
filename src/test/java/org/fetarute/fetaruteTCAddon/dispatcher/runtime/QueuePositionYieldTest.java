@@ -60,7 +60,7 @@ class QueuePositionYieldTest {
   void yieldsOnlyWhenTheCycleIsProven() {
     // 成环：A 只被 B 的排队位挡着，而 B 被 A 持有的资源挡着。
     Optional<RuntimeDispatchService.QueueYieldTarget> proven =
-        RuntimeDispatchService.findProvenQueueCycle(
+        OccupancyClaimEvidence.findProvenQueueCycle(
             "train-A",
             Set.of(blocker("train-B", "CONFLICT:switcher:S643", "QUEUE_POSITION")),
             owner -> Set.of(blocker("train-A", "CONFLICT:switcher:S637", "MOVEMENT_REQUIRED")),
@@ -71,7 +71,7 @@ class QueuePositionYieldTest {
 
     // 不成环：排队者自己没被挡 —— 它排队是正当的，等它。
     assertFalse(
-        RuntimeDispatchService.findProvenQueueCycle(
+        OccupancyClaimEvidence.findProvenQueueCycle(
                 "train-A",
                 Set.of(blocker("train-B", "CONFLICT:switcher:S643", "QUEUE_POSITION")),
                 owner -> Set.of(),
@@ -81,7 +81,7 @@ class QueuePositionYieldTest {
 
     // 不成环：排队者被挡，但挡它的与 A 无关。
     assertFalse(
-        RuntimeDispatchService.findProvenQueueCycle(
+        OccupancyClaimEvidence.findProvenQueueCycle(
                 "train-A",
                 Set.of(blocker("train-B", "CONFLICT:switcher:S643", "QUEUE_POSITION")),
                 owner -> Set.of(blocker("train-C", "CONFLICT:switcher:S999", "MOVEMENT_REQUIRED")),
@@ -98,7 +98,7 @@ class QueuePositionYieldTest {
   @Test
   void refusesWhenAnyRealOccupancyAlsoBlocks() {
     assertFalse(
-        RuntimeDispatchService.findProvenQueueCycle(
+        OccupancyClaimEvidence.findProvenQueueCycle(
                 "train-A",
                 Set.of(
                     blocker("train-B", "CONFLICT:switcher:S643", "QUEUE_POSITION"),
@@ -112,11 +112,11 @@ class QueuePositionYieldTest {
   @Test
   void emptyInputsYieldNothing() {
     assertFalse(
-        RuntimeDispatchService.findProvenQueueCycle(
+        OccupancyClaimEvidence.findProvenQueueCycle(
                 "train-A", Set.of(), owner -> Set.of(), Set.of())
             .isPresent());
     assertFalse(
-        RuntimeDispatchService.findProvenQueueCycle(null, null, owner -> Set.of(), Set.of())
+        OccupancyClaimEvidence.findProvenQueueCycle(null, null, owner -> Set.of(), Set.of())
             .isPresent());
   }
 
@@ -165,7 +165,7 @@ class QueuePositionYieldTest {
     String first = null;
     for (int attempt = 0; attempt < 50; attempt++) {
       Optional<RuntimeDispatchService.QueueYieldTarget> target =
-          RuntimeDispatchService.findProvenQueueCycle(
+          OccupancyClaimEvidence.findProvenQueueCycle(
               "train-A",
               candidates,
               owner -> Set.of(blocker("train-A", "CONFLICT:switcher:S637", "MOVEMENT_REQUIRED")),

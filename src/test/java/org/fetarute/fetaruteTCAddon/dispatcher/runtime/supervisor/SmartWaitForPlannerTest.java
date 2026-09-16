@@ -690,6 +690,48 @@ class SmartWaitForPlannerTest {
                         && line.contains("staleEdges=1")));
   }
 
+  /**
+   * 经现场复核的边不该因为“旧”而被丢。
+   *
+   * <p>年龄量的是“多久没重新采样”，不是“这份证据还成不成立”。第十八轮实服里被丢掉的 172 条边
+   * <b>全部</b>属于已不在活跃集里的车，而停顿最久的两辆被丢的边比进图的还多（19/7、29/7）—— 越卡越久，死锁图对它越瞎。
+   *
+   * <p>两个方向必须同时钉住：复核过的留下，没复核的照旧丢。只断言前者会把 TTL 这道门整个废掉。
+   */
+  @Test
+  void liveVerifiedEdgeSurvivesTtlButUnverifiedOneStillDoesNot() {
+    SmartWaitForPlanner.PlanResult verified =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    liveVerifiedEdge(
+                        "WS-A", "WS-B", "CONFLICT:single:WS", CorridorDirection.A_TO_B, 600_000)),
+                Map.of("WS-A", state("WS-A", 20), "WS-B", state("WS-B", 40))));
+    assertTrue(
+        verified.traceLines().stream()
+            .noneMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_REJECTED")
+                        && line.contains("reason=STALE_EDGE")),
+        () -> "账本复核过的边不得按年龄丢弃：" + verified.traceLines());
+
+    SmartWaitForPlanner.PlanResult unverified =
+        planner.plan(
+            input(
+                enforceSettings(),
+                List.of(
+                    edge("WS-A", "WS-B", "CONFLICT:single:WS", CorridorDirection.A_TO_B, 600_000)),
+                Map.of("WS-A", state("WS-A", 20), "WS-B", state("WS-B", 40))));
+    assertTrue(
+        unverified.traceLines().stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_DISPATCH_INPUT_EDGE_REJECTED")
+                        && line.contains("reason=STALE_EDGE")),
+        () -> "没复核过的边必须照旧按 TTL 丢：" + unverified.traceLines());
+  }
+
   @Test
   void routeContextCannotReplaceUnknownSingleCorridorDirection() {
     SmartWaitForPlanner.PlanResult result =
@@ -1161,6 +1203,25 @@ class SmartWaitForPlannerTest {
         "test",
         direction,
         ageMs,
+        true);
+  }
+
+  /** 已用当前账本复核过的边（{@code liveVerified=true}）。 */
+  private static SmartWaitForPlanner.InputEdge liveVerifiedEdge(
+      String blocked, String blocker, String resource, CorridorDirection direction, long ageMs) {
+    return new SmartWaitForPlanner.InputEdge(
+        blocked,
+        blocker,
+        resource,
+        resourceKind(resource),
+        "HARD_OCCUPANCY",
+        "MOVEMENT_REQUIRED",
+        "MOVEMENT_REQUIRED",
+        "test",
+        direction,
+        Optional.empty(),
+        ageMs,
+        true,
         true);
   }
 

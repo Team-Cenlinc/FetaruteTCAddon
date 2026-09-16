@@ -20617,12 +20617,15 @@ class RuntimeDispatchServiceTest {
       Instant now,
       long topologyTtlMs)
       throws Exception {
+    // liveClaims 由调用方传入：本 tick 的同一份账本快照。这里给空列表，
+    // 等价于"没有任何 claim 能被现场复核"，于是边照旧按 TTL 年龄判定——
+    // 正是这些用例原本要钉的语义。
     java.lang.reflect.Method method =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "smartPlannerInputEdges", Map.class, Set.class, Instant.class, long.class);
+            "smartPlannerInputEdges", Map.class, Set.class, Instant.class, long.class, List.class);
     method.setAccessible(true);
     return (List<SmartWaitForPlanner.InputEdge>)
-        method.invoke(service, progress, activeTrainNames, now, topologyTtlMs);
+        method.invoke(service, progress, activeTrainNames, now, topologyTtlMs, List.of());
   }
 
   private static OccupancyDecision blockedBy(

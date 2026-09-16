@@ -64,7 +64,39 @@ public final class SmartWaitForPlanner {
       CorridorDirection direction,
       Optional<SwitcherMovementTopology.Classification> switcherMovement,
       long ageMs,
-      boolean activeForNormalAdmission) {
+      boolean activeForNormalAdmission,
+      boolean liveVerified) {
+
+    /** 旧调用点：未做现场复核的边，按 TTL 年龄处理。 */
+    public InputEdge(
+        String blockedTrain,
+        String blockerTrain,
+        String resource,
+        String resourceKind,
+        String relation,
+        String intent,
+        String role,
+        String source,
+        CorridorDirection direction,
+        Optional<SwitcherMovementTopology.Classification> switcherMovement,
+        long ageMs,
+        boolean activeForNormalAdmission) {
+      this(
+          blockedTrain,
+          blockerTrain,
+          resource,
+          resourceKind,
+          relation,
+          intent,
+          role,
+          source,
+          direction,
+          switcherMovement,
+          ageMs,
+          activeForNormalAdmission,
+          false);
+    }
+
     public InputEdge {
       blockedTrain = normalize(blockedTrain, "-");
       blockerTrain = normalize(blockerTrain, "-");
@@ -1619,7 +1651,14 @@ public final class SmartWaitForPlanner {
         return "inactive-for-normal-admission";
       }
     }
-    if (edge.ageMs() > settings.blockerSnapshotTtlMs()) {
+    // 年龄量的是“多久没重新采样”，不是“这份证据还成不成立”。对一辆**还卡在原地**的车，
+    // 它的边会因为没人再去看而变“旧”，并不是因为阻塞消失了——第十八轮实服里
+    // 被丢掉的 172 条边**全部**属于已不在活跃集里的车，而停顿最久的两辆被丢的边比进图的还多
+    // （19/7、29/7）。于是“越卡越久 → 死锁图对它越瞎”。
+    //
+    // 因此 liveVerified 的边不走年龄判据：调用方已经拿**当前账本**确认过 blocker 仍持有该资源。
+    // 这是更强的证据，不是更弱的；复核不了的边照旧按 TTL 丢掉。
+    if (!edge.liveVerified() && edge.ageMs() > settings.blockerSnapshotTtlMs()) {
       return "STALE_EDGE";
     }
     return "";
@@ -1665,6 +1704,7 @@ public final class SmartWaitForPlanner {
         "STALE_EDGE".equals(reason)
             ? " ageMs=" + safe.ageMs() + " ttlMs=" + settings.blockerSnapshotTtlMs()
             : "";
+    staleDetail = staleDetail + " liveVerified=" + safe.liveVerified();
     return "SMART_DISPATCH_INPUT_EDGE_REJECTED blockedTrain="
         + safe.blockedTrain()
         + " blockerTrain="

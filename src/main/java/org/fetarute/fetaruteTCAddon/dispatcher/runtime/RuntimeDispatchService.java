@@ -12,7 +12,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -1962,7 +1961,7 @@ public final class RuntimeDispatchService {
               + " holdsByRole="
               + byRole
               + " holds="
-              + summarizeResourceKeys(held$)
+              + OccupancyClaimEvidence.summarizeResourceKeys(held$)
               + " blockedBy="
               + state.blockers()
               + " departureGateBlockedBy="
@@ -1996,21 +1995,6 @@ public final class RuntimeDispatchService {
         + blockers;
   }
 
-  private static String summarizeResourceKeys(List<OccupancyClaim> claims) {
-    List<String> keys = new ArrayList<>();
-    for (OccupancyClaim claim : claims) {
-      if (claim == null || claim.resource() == null) {
-        continue;
-      }
-      if (keys.size() >= BLOCKING_SNAPSHOT_MAX_RESOURCES) {
-        keys.add("…+" + (claims.size() - BLOCKING_SNAPSHOT_MAX_RESOURCES));
-        break;
-      }
-      keys.add(claim.resource().key() + "@" + claim.role());
-    }
-    return keys.toString();
-  }
-
   private void traceSmartMinimalForwardPlanner(
       Set<String> activeTrainNames,
       Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
@@ -2038,7 +2022,8 @@ public final class RuntimeDispatchService {
                 config.allowReverse(),
                 config.allowTurnbackBeforeBoundary(),
                 config.oneActiveReservationPerCycle()),
-            smartPlannerInputEdges(progress, activeTrainNames, now, config.blockerSnapshotTtlMs()),
+            smartPlannerInputEdges(
+                progress, activeTrainNames, now, config.blockerSnapshotTtlMs(), liveClaims),
             smartPlannerTrainStates(
                 progress,
                 activeTrainNames,
@@ -2164,12 +2149,30 @@ public final class RuntimeDispatchService {
     return ConfigManager.SmartDispatcherPlannerSettings.defaults();
   }
 
+  /**
+   * @param liveClaims 本 tick 的同一份账本快照。必须由调用方传入，不得在这里重新 {@code snapshotClaims()}——同一 tick
+   *     内两次取可能拿到不同状态，等待图就会和同 tick 的其它判定对不上。
+   */
   private List<SmartWaitForPlanner.InputEdge> smartPlannerInputEdges(
       Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
       Set<String> activeTrainNames,
       Instant now,
-      long topologyTtlMs) {
+      long topologyTtlMs,
+      List<OccupancyClaim> liveClaims) {
     List<SmartWaitForPlanner.InputEdge> edges = new ArrayList<>();
+    // 现场持有索引：(列车规范名, 资源) → 该 claim 真的会挡人。每轮只建一次。
+    //
+    // 用它把“这条边还成不成立”从“多久没重新采样”里分出来——两者从来就不是同一个量，
+    // 而实服里被当成同一个在用：第十八轮 172 条被丢的边全部属于已不在活跃集里的车。
+    Set<String> liveHolds = new HashSet<>();
+    for (OccupancyClaim claim : liveClaims == null ? List.<OccupancyClaim>of() : liveClaims) {
+      if (claim == null
+          || claim.resource() == null
+          || !OccupancyClaimEvidence.blockingClaimRole(claim.role())) {
+        continue;
+      }
+      liveHolds.add(TrainNameNormalizer.normalizeKey(claim.trainName()) + "|" + claim.resource());
+    }
     for (Map.Entry<String, BlockerSnapshot> entry : blockerSnapshots.entrySet()) {
       BlockerSnapshot snapshot = entry.getValue();
       if (snapshot == null) {
@@ -2187,7 +2190,7 @@ public final class RuntimeDispatchService {
           continue;
         }
         String resource = blocker.resourceKey();
-        String resourceKind = resourceKindName(resource);
+        String resourceKind = OccupancyClaimEvidence.resourceKindName(resource);
         edges.add(
             new SmartWaitForPlanner.InputEdge(
                 blockedTrain,
@@ -2201,7 +2204,9 @@ public final class RuntimeDispatchService {
                 blocker.direction().orElse(CorridorDirection.UNKNOWN),
                 smartPlannerSwitcherMovement(blockedTrain, snapshot, blocker, now, topologyTtlMs),
                 ageMs,
-                smartPlannerEdgeActiveForNormalAdmission(blocker)));
+                smartPlannerEdgeActiveForNormalAdmission(blocker),
+                liveHolds.contains(
+                    TrainNameNormalizer.normalizeKey(blocker.trainName()) + "|" + resource)));
       }
     }
     return List.copyOf(edges);
@@ -2223,7 +2228,7 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     Optional<OccupancyResource> switcherConflict =
-        plannerSwitcherConflictResource(blocker.resourceKey());
+        OccupancyClaimEvidence.plannerSwitcherConflictResource(blocker.resourceKey());
     if (switcherConflict.isEmpty()) {
       return Optional.empty();
     }
@@ -2252,21 +2257,6 @@ public final class RuntimeDispatchService {
     long ageMs =
         Math.max(0L, Duration.between(snapshot.movementPlanSampledAt(), evaluatedAt).toMillis());
     return ageMs <= Math.max(1L, topologyTtlMs);
-  }
-
-  private static Optional<OccupancyResource> plannerSwitcherConflictResource(String resourceKey) {
-    if (resourceKey == null || resourceKey.isBlank()) {
-      return Optional.empty();
-    }
-    String normalized = resourceKey.trim();
-    if (normalized.startsWith("CONFLICT:switcher:")) {
-      return Optional.of(OccupancyResource.forConflict(normalized.substring("CONFLICT:".length())));
-    }
-    if (normalized.startsWith("NODE:SWITCHER:")) {
-      return Optional.of(
-          OccupancyResource.forConflict("switcher:" + normalized.substring("NODE:".length())));
-    }
-    return Optional.empty();
   }
 
   private Map<String, SmartWaitForPlanner.TrainState> smartPlannerTrainStates(
@@ -2535,13 +2525,6 @@ public final class RuntimeDispatchService {
     return key == null || key.isBlank() ? "-" : key;
   }
 
-  private static String resourceKindName(String resource) {
-    if (resource == null || resource.isBlank() || !resource.contains(":")) {
-      return "UNKNOWN";
-    }
-    return resource.substring(0, resource.indexOf(':')).toUpperCase(Locale.ROOT);
-  }
-
   private static String nodeText(NodeId node) {
     return node == null ? "-" : node.value();
   }
@@ -2605,7 +2588,7 @@ public final class RuntimeDispatchService {
       return;
     }
     if (plan.direction() == CorridorDirection.UNKNOWN
-        && planResources.stream().anyMatch(RuntimeDispatchService::isSingleConflict)) {
+        && planResources.stream().anyMatch(OccupancyClaimEvidence::isSingleConflict)) {
       debugLogger.accept(
           "SMART_DIRECTION_INVARIANT_BLOCKED train="
               + plan.train()
@@ -2830,7 +2813,7 @@ public final class RuntimeDispatchService {
       return SimpleOccupancyManager.OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER;
     }
     if (plan.direction() == CorridorDirection.UNKNOWN
-        && resources.stream().anyMatch(RuntimeDispatchService::isSingleConflict)) {
+        && resources.stream().anyMatch(OccupancyClaimEvidence::isSingleConflict)) {
       return "INSUFFICIENT_DIRECTION_EVIDENCE";
     }
     if (isHeadOnYieldPlan(plan) && plan.direction() == CorridorDirection.UNKNOWN) {
@@ -3442,7 +3425,7 @@ public final class RuntimeDispatchService {
       return;
     }
     if (plan.direction() == CorridorDirection.UNKNOWN
-        && reservation.resources().stream().anyMatch(RuntimeDispatchService::isSingleConflict)) {
+        && reservation.resources().stream().anyMatch(OccupancyClaimEvidence::isSingleConflict)) {
       traceSmartUnlockAuthorityRejected(reservation, "single-corridor-direction-missing");
       rollbackSmartUnlockReservation(reservation, "single-corridor-direction-missing");
       return;
@@ -4539,7 +4522,7 @@ public final class RuntimeDispatchService {
       return "-";
     }
     for (OccupancyResource resource : request.resourceList()) {
-      if (isSingleConflict(resource)) {
+      if (OccupancyClaimEvidence.isSingleConflict(resource)) {
         return resource.key();
       }
     }
@@ -4551,7 +4534,7 @@ public final class RuntimeDispatchService {
       return false;
     }
     for (OccupancyResource resource : request.resourceList()) {
-      if (!isSingleConflict(resource)) {
+      if (!OccupancyClaimEvidence.isSingleConflict(resource)) {
         continue;
       }
       if (singleRegionOppositeOrUnknownExternalBarrier(
@@ -4597,7 +4580,8 @@ public final class RuntimeDispatchService {
         continue;
       }
       for (OccupancyClaim claim : currentClaims) {
-        if (!externalOccupancyStopResourceStillHeld(trainName, blocker, claim)) {
+        if (!OccupancyClaimEvidence.externalOccupancyStopResourceStillHeld(
+            trainName, blocker, claim)) {
           continue;
         }
         return Optional.of(
@@ -4605,21 +4589,6 @@ public final class RuntimeDispatchService {
       }
     }
     return Optional.empty();
-  }
-
-  private static boolean externalOccupancyStopResourceStillHeld(
-      String trainName, RuntimeStopState.Blocker blocker, OccupancyClaim claim) {
-    if (blocker == null
-        || claim == null
-        || claim.resource() == null
-        || TrainNameNormalizer.sameLogicalTrain(trainName, claim.trainName())
-        || !blocker.resource().equals(claim.resource().toString())) {
-      return false;
-    }
-    return switch (claim.role()) {
-      case MOVEMENT_REQUIRED, PHYSICAL_FOOTPRINT, PROTECTIVE_RETAIN, HOLD_ONLY -> true;
-      case QUEUE_POSITION, LOOKAHEAD_PREVIEW, UNLOCK_RESERVATION -> false;
-    };
   }
 
   private static CorridorDirection requestedDirectionFor(
@@ -4636,12 +4605,6 @@ public final class RuntimeDispatchService {
         .map(context -> context.singleConflictDirections().get(resource.key()))
         .filter(direction -> direction != null && direction != CorridorDirection.UNKNOWN)
         .orElse(CorridorDirection.UNKNOWN);
-  }
-
-  private static boolean isSingleConflict(OccupancyResource resource) {
-    return resource != null
-        && resource.kind() == ResourceKind.CONFLICT
-        && resource.key().startsWith("single:");
   }
 
   private OccupancyRequest markDirectedRequest(
@@ -11365,12 +11328,12 @@ public final class RuntimeDispatchService {
         return queueYieldSkipped(input.train(), "not-queue-only-blocked");
       }
     }
-    Set<String> heldByBlocked = resourceKeysHeldBy(manager, input.train());
+    Set<String> heldByBlocked = OccupancyClaimEvidence.resourceKeysHeldBy(manager, input.train());
     if (heldByBlocked.isEmpty()) {
       return queueYieldSkipped(input.train(), "blocked-train-holds-nothing");
     }
     Optional<QueueYieldTarget> targetOpt =
-        findProvenQueueCycle(
+        OccupancyClaimEvidence.findProvenQueueCycle(
             input.train(),
             blocked.blockers(),
             owner -> {
@@ -11389,13 +11352,15 @@ public final class RuntimeDispatchService {
     }
     QueueYieldTarget target = targetOpt.get();
     String queueOwner = target.queueOwner();
-    Optional<OccupancyResource> resourceOpt = parseOccupancyResourceKey(target.resourceKey());
+    Optional<OccupancyResource> resourceOpt =
+        OccupancyClaimEvidence.parseOccupancyResourceKey(target.resourceKey());
     if (resourceOpt.isEmpty()) {
       return queueYieldSkipped(input.train(), "unparseable-resource-key");
     }
     // ③ 冷却。被割的车下一 tick 就会重新入队，环可能立刻复原；没有冷却就会
     //    退化成每 tick 割一次的抖动（参见已撤回的主动回收尾部保护）。
-    String cooldownKey = queuePositionYieldCooldownKey(target.resourceKey(), queueOwner);
+    String cooldownKey =
+        OccupancyClaimEvidence.queuePositionYieldCooldownKey(target.resourceKey(), queueOwner);
     Instant cooldownUntil = queuePositionYieldCooldowns.get(cooldownKey);
     if (cooldownUntil != null) {
       if (cooldownUntil.isAfter(now)) {
@@ -11506,145 +11471,8 @@ public final class RuntimeDispatchService {
     return configuredMs > 0L ? Duration.ofMillis(configuredMs) : BLOCKER_SNAPSHOT_TTL;
   }
 
-  private static String queuePositionYieldCooldownKey(String resourceKey, String queueOwner) {
-    return (resourceKey == null ? "-" : resourceKey)
-        + "|"
-        + TrainNameNormalizer.normalizeKey(queueOwner);
-  }
-
   /** {@link #findProvenQueueCycle} 找到的可割排队边。 */
   record QueueYieldTarget(String queueOwner, String resourceKey) {}
-
-  /**
-   * 在等待关系里找出一条**可证明成环**的排队边。
-   *
-   * <p>两条判据，都不涉及任何具体线路或拓扑：
-   *
-   * <ol>
-   *   <li>被卡列车 A 的 blocker <b>全部</b>是 {@code QUEUE_POSITION}——它没有被任何真实占用挡住。
-   *       只要还有一个真实占用挡着它，割队列既解不开问题，又白白牺牲别人的排队公平性。
-   *   <li>排队者 B 自己也被挡，且挡它的是 A 本身、或是 A 正持有的某个资源 ⇒ A→B→A 成环，<b>已证明</b>，不是超时猜测。
-   * </ol>
-   *
-   * @param blockedTrain 被卡的列车 A
-   * @param blockedBy A 的 blocker 集合
-   * @param blockersOf 查某列车自身 blocker 的入口
-   * @param heldByBlocked A 当前持有的资源 key（不含排队位次）
-   */
-  static Optional<QueueYieldTarget> findProvenQueueCycle(
-      String blockedTrain,
-      Set<DeadlockBlockerInfo> blockedBy,
-      java.util.function.Function<String, Set<DeadlockBlockerInfo>> blockersOf,
-      Set<String> heldByBlocked) {
-    if (blockedTrain == null || blockedBy == null || blockedBy.isEmpty() || blockersOf == null) {
-      return Optional.empty();
-    }
-    for (DeadlockBlockerInfo blocker : blockedBy) {
-      if (blocker == null || !"QUEUE_POSITION".equals(blocker.role())) {
-        return Optional.empty(); // 有真实占用挡着 ⇒ 不是纯排队反转，不动。
-      }
-    }
-    Set<String> held = heldByBlocked == null ? Set.of() : heldByBlocked;
-    // blockedBy 是 Set，迭代顺序不保证稳定。同一份网络状态必须永远割同一条边，
-    // 否则事后对着日志复盘会得到对不上的结论。
-    List<DeadlockBlockerInfo> ordered = new ArrayList<>();
-    for (DeadlockBlockerInfo blocker : blockedBy) {
-      if (blocker != null) {
-        ordered.add(blocker);
-      }
-    }
-    ordered.sort(
-        Comparator.comparing(
-                DeadlockBlockerInfo::resourceKey, Comparator.nullsLast(String::compareTo))
-            .thenComparing(
-                DeadlockBlockerInfo::ownerCanonical, Comparator.nullsLast(String::compareTo))
-            .thenComparing(
-                DeadlockBlockerInfo::trainName, Comparator.nullsLast(String::compareTo)));
-    for (DeadlockBlockerInfo blocker : ordered) {
-      String queueOwner = blocker.trainName();
-      if (queueOwner == null || queueOwner.isBlank()) {
-        continue;
-      }
-      Set<DeadlockBlockerInfo> ownerBlockers = blockersOf.apply(queueOwner);
-      if (ownerBlockers == null || ownerBlockers.isEmpty()) {
-        continue; // 排队者自己没被挡 ⇒ 它排队是正当的，等它。
-      }
-      boolean closesCycle =
-          ownerBlockers.stream()
-              .filter(Objects::nonNull)
-              .anyMatch(
-                  b ->
-                      TrainNameNormalizer.sameLogicalTrain(b.trainName(), blockedTrain)
-                          || held.contains(b.resourceKey()));
-      if (closesCycle) {
-        return Optional.of(new QueueYieldTarget(queueOwner, blocker.resourceKey()));
-      }
-    }
-    return Optional.empty();
-  }
-
-  /**
-   * 把 {@code OccupancyResource.toString()} 形式的 key 还原成资源。
-   *
-   * <p>格式是 {@code KIND:key}，与 {@code OccupancyResource.toString()} 一一对应。 无法识别的 kind 返回空 ——
-   * 宁可不动，也不要把一个猜出来的资源交给账本去改。
-   */
-  private static Optional<OccupancyResource> parseOccupancyResourceKey(String raw) {
-    if (raw == null || raw.isBlank()) {
-      return Optional.empty();
-    }
-    String trimmed = raw.trim();
-    int separator = trimmed.indexOf(':');
-    if (separator <= 0 || separator >= trimmed.length() - 1) {
-      return Optional.empty();
-    }
-    String kindText = trimmed.substring(0, separator);
-    String key = trimmed.substring(separator + 1);
-    for (ResourceKind kind : ResourceKind.values()) {
-      if (kind.name().equals(kindText)) {
-        return Optional.of(new OccupancyResource(kind, key));
-      }
-    }
-    return Optional.empty();
-  }
-
-  /**
-   * 某列车当前持有的、**能挡住别人**的资源 key。用于证明等待环的另一半。
-   *
-   * <p>“持有”在这里必须按**会不会挡住排队者**来定义，而不是“账本里有一条记录”。 否则会把一个**并不存在**的等待环判成已证明，继而去割一辆正当排队的车。
-   *
-   * <p>实际会踩到的是 {@link ClaimRole#UNLOCK_RESERVATION}：它**会**写进 claims，但 {@link
-   * ResourceIntent#UNLOCK_RESERVATION} 自己的文档写着「不得阻塞正常行车 admission」。 {@link
-   * ClaimRole#QUEUE_POSITION} 与 {@link ClaimRole#LOOKAHEAD_PREVIEW} 同样不挡人（后者目前根本 不会落入
-   * claims，列在这里只是不指望那个事实永远不变）。
-   */
-  private static Set<String> resourceKeysHeldBy(SimpleOccupancyManager manager, String trainName) {
-    Set<String> keys = new LinkedHashSet<>();
-    for (OccupancyClaim claim : manager.snapshotClaims()) {
-      if (claim == null || claim.resource() == null || !blockingClaimRole(claim.role())) {
-        continue;
-      }
-      if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
-        keys.add(claim.resource().toString());
-      }
-    }
-    return keys;
-  }
-
-  /**
-   * claim 角色是否真的会挡住另一辆车。
-   *
-   * <p>口径与 {@link #externalOccupancyStopResourceStillHeld} 完全一致——同一个问题不应当在同一个类里 有两套答案。
-   */
-  private static boolean blockingClaimRole(ClaimRole role) {
-    if (role == null) {
-      return false;
-    }
-    return switch (role) {
-      case MOVEMENT_REQUIRED, PHYSICAL_FOOTPRINT, PROTECTIVE_RETAIN, HOLD_ONLY -> true;
-      case QUEUE_POSITION, LOOKAHEAD_PREVIEW, UNLOCK_RESERVATION -> false;
-    };
-  }
 
   /**
    * 执行 Smart forward unlock / authority-token repair。
@@ -19622,15 +19450,17 @@ public final class RuntimeDispatchService {
       if (!normalizedRange.isBlank()) {
         int colon = normalizedRange.indexOf(':');
         if (colon < 0) {
-          OptionalInt single = parsePositiveInt(normalizedRange);
+          OptionalInt single = OccupancyClaimEvidence.parsePositiveInt(normalizedRange);
           if (single.isEmpty()) {
             return Optional.empty();
           }
           fromTrack = single.getAsInt();
           toTrack = single.getAsInt();
         } else {
-          OptionalInt from = parsePositiveInt(normalizedRange.substring(0, colon));
-          OptionalInt to = parsePositiveInt(normalizedRange.substring(colon + 1));
+          OptionalInt from =
+              OccupancyClaimEvidence.parsePositiveInt(normalizedRange.substring(0, colon));
+          OptionalInt to =
+              OccupancyClaimEvidence.parsePositiveInt(normalizedRange.substring(colon + 1));
           if (from.isEmpty() || to.isEmpty()) {
             return Optional.empty();
           }
@@ -19646,22 +19476,6 @@ public final class RuntimeDispatchService {
     int end = Math.max(fromTrack, toTrack);
     return Optional.of(
         new DynamicStopSpec(operatorCode, nodeType, nodeName, start, end, unbounded));
-  }
-
-  private static OptionalInt parsePositiveInt(String raw) {
-    if (raw == null) {
-      return OptionalInt.empty();
-    }
-    String trimmed = raw.trim();
-    if (trimmed.isEmpty()) {
-      return OptionalInt.empty();
-    }
-    try {
-      int value = Integer.parseInt(trimmed);
-      return value > 0 ? OptionalInt.of(value) : OptionalInt.empty();
-    } catch (NumberFormatException ex) {
-      return OptionalInt.empty();
-    }
   }
 
   /**
@@ -21705,7 +21519,7 @@ public final class RuntimeDispatchService {
     }
     Map<String, ConflictReleaseHint> topologyHints = new LinkedHashMap<>();
     for (OccupancyResource resource : request.resourceList()) {
-      if (isDirectionalSingleConflict(resource)) {
+      if (OccupancyClaimEvidence.isDirectionalSingleConflict(resource)) {
         if (!trainAlreadyHoldsResource(request.trainName(), resource)) {
           continue;
         }
@@ -21861,13 +21675,6 @@ public final class RuntimeDispatchService {
       }
     }
     return Optional.empty();
-  }
-
-  private static boolean isDirectionalSingleConflict(OccupancyResource resource) {
-    return resource != null
-        && resource.kind() == ResourceKind.CONFLICT
-        && resource.key().startsWith("single:")
-        && !resource.key().contains(":cycle:");
   }
 
   /**
@@ -23726,7 +23533,7 @@ public final class RuntimeDispatchService {
               "queue-head-arbitration",
               false));
     }
-    String reason = queueAdmissionBlockReason(preview);
+    String reason = OccupancyClaimEvidence.queueAdmissionBlockReason(preview);
     traceQueueOnlyAdmission(trainName, conflict, context.request(), false, reason);
     return Optional.of(
         smartAdmissionBlocked(
@@ -23760,13 +23567,6 @@ public final class RuntimeDispatchService {
             + " reason="
             + (reason == null || reason.isBlank() ? "-" : reason)
             + " wouldMutate=false didMutate=false");
-  }
-
-  private static String queueAdmissionBlockReason(OccupancyDecision preview) {
-    if (preview == null || preview.reason() == null || "none".equals(preview.reason())) {
-      return "queue-arbitration-wait";
-    }
-    return preview.reason();
   }
 
   private SmartAdmissionDecision smartHoldDecisionForContext(
@@ -23845,7 +23645,7 @@ public final class RuntimeDispatchService {
           || claim.role() == ClaimRole.UNLOCK_RESERVATION
           || TrainNameNormalizer.sameLogicalTrain(trainName, claim.trainName())
           || !resources.contains(claim.resource())
-          || !isSingleConflict(claim)) {
+          || !OccupancyClaimEvidence.isSingleConflict(claim)) {
         continue;
       }
       CorridorDirection held = claim.corridorDirection().orElse(CorridorDirection.UNKNOWN);
@@ -23946,7 +23746,7 @@ public final class RuntimeDispatchService {
         && claim.resource() != null
         && claim.role() != ClaimRole.UNLOCK_RESERVATION
         && TrainNameNormalizer.sameLogicalTrain(trainName, claim.trainName())
-        && isSingleConflict(claim);
+        && OccupancyClaimEvidence.isSingleConflict(claim);
   }
 
   private static boolean externalSingleDrainBarrierClaim(
@@ -23959,7 +23759,7 @@ public final class RuntimeDispatchService {
         || claim.role() == ClaimRole.UNLOCK_RESERVATION
         || TrainNameNormalizer.sameLogicalTrain(trainName, claim.trainName())
         || !claim.resource().equals(section)
-        || !isSingleConflict(claim)) {
+        || !OccupancyClaimEvidence.isSingleConflict(claim)) {
       return false;
     }
     CorridorDirection heldDirection = claim.corridorDirection().orElse(CorridorDirection.UNKNOWN);
@@ -26569,7 +26369,7 @@ public final class RuntimeDispatchService {
           speedDropDistance,
           OptionalLong.empty(),
           OptionalLong.empty(),
-          isSingleConflict(blocker) ? blockerDistance : OptionalLong.empty(),
+          OccupancyClaimEvidence.isSingleConflict(blocker) ? blockerDistance : OptionalLong.empty(),
           isSwitcherConflict(blocker) ? blockerDistance : OptionalLong.empty(),
           OptionalLong.empty(),
           source,
@@ -26853,7 +26653,7 @@ public final class RuntimeDispatchService {
     if (claim.role() == ClaimRole.QUEUE_POSITION) {
       return RiskSource.STALE_QUEUE;
     }
-    if (isSingleConflict(claim)) {
+    if (OccupancyClaimEvidence.isSingleConflict(claim)) {
       return RiskSource.ACTIVE_OPPOSITE_CONFLICT;
     }
     if (isSwitcherConflict(claim)) {
@@ -26975,13 +26775,6 @@ public final class RuntimeDispatchService {
       case ARTIFICIAL_WINDOW_LIMIT -> RiskSource.ARTIFICIAL_WINDOW_LIMIT;
       case NONE -> RiskSource.NONE;
     };
-  }
-
-  private static boolean isSingleConflict(OccupancyClaim claim) {
-    return claim != null
-        && claim.resource() != null
-        && claim.resource().kind() == ResourceKind.CONFLICT
-        && claim.resource().key().startsWith("single:");
   }
 
   private static boolean isSwitcherConflict(OccupancyClaim claim) {
