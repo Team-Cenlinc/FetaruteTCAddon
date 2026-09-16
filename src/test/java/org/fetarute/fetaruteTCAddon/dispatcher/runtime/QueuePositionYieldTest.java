@@ -326,6 +326,38 @@ class QueuePositionYieldTest {
     assertEquals("blocked-train-holds-nothing", result.reason());
   }
 
+  /**
+   * 每一个跳过出口都必须留下原因。
+   *
+   * <p>第十八轮实服这个动作一次都没落地，而日志里**分不出**它是根本没走到、还是走到了默默拒了—— 八个 {@code skipped(...)} 出口一条日志都没有，而 {@code
+   * candidate=false} 让调用方的 {@code SMART_RECOVERY_DECISION} 也不会打。“计数为 0”于是成了一个无法落地的结论。
+   *
+   * <p>这条用例钉的不是某一句文案，而是**跳过必须可观测**：拿两个走不同分支的场景， 各自的原因都要能从日志里读出来。
+   */
+  @Test
+  void everySkipLeavesItsReasonInTheLog() {
+    Fixture noCycle = new Fixture(SmartDispatcherMode.ENFORCE, ResourceIntent.UNLOCK_RESERVATION);
+    noCycle.service.applySmartQueuePositionYield(noCycle.blockedTrainInput());
+    assertTrue(
+        noCycle.debug.stream()
+            .anyMatch(
+                m ->
+                    m.startsWith("SMART_QUEUE_POSITION_YIELD_SKIPPED")
+                        && m.contains("reason=blocked-train-holds-nothing")),
+        () -> "跳过必须写明原因，实际日志：" + noCycle.debug);
+
+    Fixture stale = new Fixture(SmartDispatcherMode.ENFORCE);
+    stale.now = NOW.plusSeconds(15);
+    stale.service.applySmartQueuePositionYield(stale.blockedTrainInput());
+    assertTrue(
+        stale.debug.stream()
+            .anyMatch(
+                m ->
+                    m.startsWith("SMART_QUEUE_POSITION_YIELD_SKIPPED")
+                        && m.contains("reason=stale-blocker-snapshot")),
+        () -> "不同分支要给出不同原因，实际日志：" + stale.debug);
+  }
+
   // ---------- 夹具 ----------
 
   private static final String BLOCKED_TRAIN = "MT-LH-3340";
@@ -343,6 +375,7 @@ class QueuePositionYieldTest {
     private final SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    private final List<String> debug = new ArrayList<>();
     private final RuntimeDispatchService service;
     private Instant now = NOW;
 
@@ -351,7 +384,7 @@ class QueuePositionYieldTest {
     }
 
     Fixture(SmartDispatcherMode mode, ResourceIntent heldIntent) {
-      service = TestServices.minimal(new ArrayList<>(), manager, mode, () -> now);
+      service = TestServices.minimal(debug, manager, mode, () -> now);
       // A 真的持有 S637。
       assertTrue(
           manager.acquire(request(BLOCKED_TRAIN, HELD_RESOURCE, heldIntent)).allowed(),

@@ -11342,32 +11342,32 @@ public final class RuntimeDispatchService {
       return SmartRecoveryActionResult.skipped("missing-input");
     }
     if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
-      return SmartRecoveryActionResult.skipped("occupancy-manager-does-not-support-queue-yield");
+      return queueYieldSkipped(input.train(), "occupancy-manager-does-not-support-queue-yield");
     }
     Instant now = clockNow();
     String blockedKey = normalizeTrainKey(input.train());
     BlockerSnapshot blocked = blockerSnapshots.get(blockedKey);
     if (blocked == null || blocked.blockers().isEmpty()) {
-      return SmartRecoveryActionResult.skipped("no-blocker-snapshot");
+      return queueYieldSkipped(input.train(), "no-blocker-snapshot");
     }
     // ① 快照必须新鲜。等待环是从两份快照拼出来的，只要其中一份过期，
     //    “已证明成环”就降级成了猜测——而割的却是一辆可能正当排队的车。
     if (!blockerSnapshotFresh(blockedKey, blocked, now)) {
-      return SmartRecoveryActionResult.skipped("stale-blocker-snapshot");
+      return queueYieldSkipped(input.train(), "stale-blocker-snapshot");
     }
     if (!blockerSnapshotProgressCurrent(input.train(), blocked)) {
-      return SmartRecoveryActionResult.skipped("blocked-train-progressed");
+      return queueYieldSkipped(input.train(), "blocked-train-progressed");
     }
     // ② A 必须**只**被排队位次挡住。只要还有一个真实占用挡着它，割队列解不开问题，
     //    而且会白白牺牲别人的排队公平性。
     for (DeadlockBlockerInfo blocker : blocked.blockers()) {
       if (blocker == null || !"QUEUE_POSITION".equals(blocker.role())) {
-        return SmartRecoveryActionResult.skipped("not-queue-only-blocked");
+        return queueYieldSkipped(input.train(), "not-queue-only-blocked");
       }
     }
     Set<String> heldByBlocked = resourceKeysHeldBy(manager, input.train());
     if (heldByBlocked.isEmpty()) {
-      return SmartRecoveryActionResult.skipped("blocked-train-holds-nothing");
+      return queueYieldSkipped(input.train(), "blocked-train-holds-nothing");
     }
     Optional<QueueYieldTarget> targetOpt =
         findProvenQueueCycle(
@@ -11385,13 +11385,13 @@ public final class RuntimeDispatchService {
             },
             heldByBlocked);
     if (targetOpt.isEmpty()) {
-      return SmartRecoveryActionResult.skipped("no-proven-queue-cycle");
+      return queueYieldSkipped(input.train(), "no-proven-queue-cycle");
     }
     QueueYieldTarget target = targetOpt.get();
     String queueOwner = target.queueOwner();
     Optional<OccupancyResource> resourceOpt = parseOccupancyResourceKey(target.resourceKey());
     if (resourceOpt.isEmpty()) {
-      return SmartRecoveryActionResult.skipped("unparseable-resource-key");
+      return queueYieldSkipped(input.train(), "unparseable-resource-key");
     }
     // ③ 冷却。被割的车下一 tick 就会重新入队，环可能立刻复原；没有冷却就会
     //    退化成每 tick 割一次的抖动（参见已撤回的主动回收尾部保护）。
@@ -11408,7 +11408,7 @@ public final class RuntimeDispatchService {
                 + target.resourceKey()
                 + " remainingMs="
                 + Math.max(0L, Duration.between(now, cooldownUntil).toMillis()));
-        return SmartRecoveryActionResult.skipped("queue-yield-cooldown");
+        return queueYieldSkipped(input.train(), "queue-yield-cooldown");
       }
       queuePositionYieldCooldowns.remove(cooldownKey, cooldownUntil);
     }
@@ -11435,7 +11435,7 @@ public final class RuntimeDispatchService {
     SimpleOccupancyManager.QueuePositionYieldResult yield =
         manager.yieldQueuePosition(resourceOpt.get(), queueOwner);
     if (!yield.removed()) {
-      return SmartRecoveryActionResult.skipped("queue-yield-" + yield.reason());
+      return queueYieldSkipped(input.train(), "queue-yield-" + yield.reason());
     }
     queuePositionYieldCooldowns.put(cooldownKey, now.plus(QUEUE_POSITION_YIELD_COOLDOWN));
     debugLogger.accept(
@@ -11478,6 +11478,26 @@ public final class RuntimeDispatchService {
       return false;
     }
     return true;
+  }
+
+  /**
+   * 割排队位被跳过时的唯一出口，**路过必留痕**。
+   *
+   * <p>上一轮实服这个动作一次都没落地，而我无法从日志区分“根本没走到”与“走到了但默默拒了”—— 八个 {@code skipped(...)} 出口一条日志都没有。兼之 {@code
+   * SmartRecoveryActionResult.skipped} 的 {@code candidate=false}，调用方的 {@code
+   * SMART_RECOVERY_DECISION} 也不会打。
+   *
+   * <p>对照兄弟动作：{@code applySmartSelfOwnedStaleRetainRelease} 有 {@code SMART_UNLOCK_SKIPPED}。
+   * 这里补上同一条，否则“计数为 0”永远是个无法落地的结论。
+   */
+  private SmartRecoveryActionResult queueYieldSkipped(String trainName, String reason) {
+    debugLogger.accept(
+        "SMART_QUEUE_POSITION_YIELD_SKIPPED train="
+            + trainName
+            + " reason="
+            + reason
+            + " occupancyMutated=false");
+    return SmartRecoveryActionResult.skipped(reason);
   }
 
   /** 等待图与恢复层共用的 blocker 快照有效期。 */
