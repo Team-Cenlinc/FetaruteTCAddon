@@ -679,7 +679,13 @@ public final class SimpleOccupancyManager
       return traceDecision(
           "canEnter:blockers",
           request,
-          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
+          new OccupancyDecision(
+              false,
+              now,
+              SignalAspect.STOP,
+              List.copyOf(blockers),
+              false,
+              describeBlockingDecision("canenter-blockers", blockers)));
     }
 
     boolean queueBlocked = false;
@@ -743,7 +749,13 @@ public final class SimpleOccupancyManager
       return traceDecision(
           "canEnter:queue-blocked",
           request,
-          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
+          new OccupancyDecision(
+              false,
+              now,
+              SignalAspect.STOP,
+              List.copyOf(blockers),
+              false,
+              describeBlockingDecision("canenter-queue-blocked", blockers)));
     }
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
     return traceDecision(
@@ -3893,6 +3905,38 @@ public final class SimpleOccupancyManager
         && claim.role() != ClaimRole.PHYSICAL_FOOTPRINT
         && isKnownDirection(heldDirection)
         && heldDirection.get() != requestedDirection;
+  }
+
+  /**
+   * 把一次拒绝的**原因**写进 {@link OccupancyDecision#reason()}，而不是留给默认值 {@code "none"}。
+   *
+   * <p>{@code canEnter} 两条最通用的拒绝路径（blockers / queue-blocked）之前用的是不带 reason 的构造器。{@code
+   * traceDecision} 拿到了描述性标签，但那个标签**不进 decision**， 于是下游的 {@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState#occupancyHold} 只能报 {@code
+   * no-decision-reason}——它诚实地说“没人填过”，而问题在上游。
+   *
+   * <p><b>代价是真实发生过的。</b>第十九轮 {@code SURC-WS-LC-4801} 掉头堵死整条 WS 线 40 分钟， 而它的阻塞快照里占比最高的原因就是 {@code
+   * canenter-blocked:no-decision-reason}（113 次）—— 全轮卡得最久的车，它绝大多数次被拒的原因是空的。早在第七轮就记录过 394/417
+   * 是这个值。目标是**解锁疏通**而不是超时删车，而说不出为什么被拒就无从疏通。
+   *
+   * <p>只用 blocker 自身的角色与资源种类，不带列车名：原因字符串会进入去重键， 带上列车名会让它随车数爆炸。
+   */
+  private static String describeBlockingDecision(String prefix, List<OccupancyClaim> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      // 拒了却没有任何 blocker——这本身就是个要查的信号，不要静默掩过去。
+      return prefix + ":no-blockers-listed";
+    }
+    java.util.TreeSet<String> shapes = new java.util.TreeSet<>();
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      shapes.add(claim.resource().kind() + "/" + claim.role());
+    }
+    if (shapes.isEmpty()) {
+      return prefix + ":no-blockers-listed";
+    }
+    return prefix + ":" + String.join(",", shapes);
   }
 
   private boolean isSingleCorridorConflict(OccupancyResource resource) {

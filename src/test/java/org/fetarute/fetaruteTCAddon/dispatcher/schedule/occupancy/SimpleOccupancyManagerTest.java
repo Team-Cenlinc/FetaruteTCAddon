@@ -2452,7 +2452,15 @@ class SimpleOccupancyManagerTest {
     OccupancyDecision decision = manager.canEnter(followerWithFrontBlocker);
 
     assertFalse(decision.allowed());
-    assertEquals("none", decision.reason());
+    // 这条要钉的是“拒绝来自**通用 blockers 路径**（前方真实的 NODE/EDGE 占用），
+    // 而不是自持单线区续行被拒”。它原本用 reason=="none" 做代理——而那个 "none"
+    // 正是“没人填过原因”的默认值，实服里它把卡死车的主因变成了 no-decision-reason。
+    // 现在直接断言真正的意图，比原来更强。
+    assertTrue(
+        decision.reason().startsWith("canenter-blockers:"),
+        () -> "应当落在通用 blockers 路径，实际：" + decision.reason());
+    assertFalse(
+        decision.reason().contains("self-owned"), () -> "不得是自持单线区续行拒绝：" + decision.reason());
     assertTrue(
         decision.blockers().stream()
             .anyMatch(
