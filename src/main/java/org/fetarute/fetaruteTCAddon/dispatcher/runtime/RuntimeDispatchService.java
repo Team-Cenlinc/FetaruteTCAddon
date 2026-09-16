@@ -2172,7 +2172,7 @@ public final class RuntimeDispatchService {
     for (OccupancyClaim claim : liveClaims == null ? List.<OccupancyClaim>of() : liveClaims) {
       if (claim == null
           || claim.resource() == null
-          || !OccupancyClaimEvidence.blockingClaimRole(claim.role())) {
+          || !OccupancyClaimEvidence.obstructs(claim.role(), claim.resource())) {
         continue;
       }
       liveHolds.add(TrainNameNormalizer.normalizeKey(claim.trainName()) + "|" + claim.resource());

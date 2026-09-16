@@ -78,9 +78,13 @@ class WaitGraphLiveVerificationTest {
       assertFalse(
           edgeLiveVerified(claim(BLOCKER, CONTESTED, role)), () -> role + " 挡不住别人，不得据此认定等待边仍然成立");
     }
-    assertTrue(
+    // 注意：CONTESTED 是**抽象** switcher 冲突键。按仓库不变量，
+    // PROTECTIVE_RETAIN 在抽象 single:/switcher: 上是不挡人的区域保护，
+    // 只有在物理 NODE/EDGE 上才硬。这条断言最初写反了，
+    // 是 ObstructsTruthTableTest 的真值表把它抳出来的。
+    assertFalse(
         edgeLiveVerified(claim(BLOCKER, CONTESTED, ClaimRole.PROTECTIVE_RETAIN)),
-        "PROTECTIVE_RETAIN 会挡人，应当算已复核");
+        "抽象冲突键上的 PROTECTIVE_RETAIN 不挡人，不得算已复核");
   }
 
   /** 跑一遍真实的建边路径，返回那条边的 liveVerified。 */

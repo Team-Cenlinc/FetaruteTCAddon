@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
@@ -219,7 +220,7 @@ final class OccupancyClaimEvidence {
   static Set<String> resourceKeysHeldBy(SimpleOccupancyManager manager, String trainName) {
     Set<String> keys = new LinkedHashSet<>();
     for (OccupancyClaim claim : manager.snapshotClaims()) {
-      if (claim == null || claim.resource() == null || !blockingClaimRole(claim.role())) {
+      if (claim == null || claim.resource() == null || !obstructs(claim.role(), claim.resource())) {
         continue;
       }
       if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
@@ -232,16 +233,34 @@ final class OccupancyClaimEvidence {
   /**
    * claim 角色是否真的会挡住另一辆车。
    *
-   * <p>口径与 {@link #externalOccupancyStopResourceStillHeld} 完全一致——同一个问题不应当在同一个类里 有两套答案。
+   * <p><b>必须同时看角色和资源种类，只看角色是错的。</b>仓库不变量：在**抽象**的 {@code single:} / {@code switcher:} CONFLICT
+   * 资源上，{@link ClaimRole#PROTECTIVE_RETAIN} 与 {@link ClaimRole#HOLD_ONLY} 是不挡人的区域/尾部保护；只有在**物理**
+   * NODE/EDGE （含 interlocking 冲突）上它们才是硬的。{@code SimpleOccupancyManager.isAdvisoryVisibleClaim}
+   * 一直是这么判的，而本方法的第一版漏掉了资源这一维。
+   *
+   * <p>漏掉的后果是两处：{@link #resourceKeysHeldBy} 拿它证等待环——一个只在抽象 CONFLICT 上持有 PROTECTIVE_RETAIN
+   * 的车会被当成“挡着别人”，于是**证出一个不存在的环**， 继而去割一辆正当排队的车；等待图边的现场复核拿它判“这条边还成不成立”， 于是把已不成立的边留在图里。
+   *
+   * <p>这与 {@code 67ef652} 修掉的 {@code UNLOCK_RESERVATION} 是同一个缺陷——把「不是物理占用的 东西」当成了阻塞。当时只修了一个实例。
    */
-  static boolean blockingClaimRole(ClaimRole role) {
+  static boolean obstructs(ClaimRole role, OccupancyResource resource) {
     if (role == null) {
       return false;
     }
     return switch (role) {
-      case MOVEMENT_REQUIRED, PHYSICAL_FOOTPRINT, PROTECTIVE_RETAIN, HOLD_ONLY -> true;
+      case MOVEMENT_REQUIRED, PHYSICAL_FOOTPRINT -> true;
+        // 只在物理空间上硬；抽象冲突键上它们是区域/尾部保护，不挡人。
+      case PROTECTIVE_RETAIN, HOLD_ONLY -> physicalOccupancyResource(resource);
       case QUEUE_POSITION, LOOKAHEAD_PREVIEW, UNLOCK_RESERVATION -> false;
     };
+  }
+
+  /** 资源是否对应真实物理空间——与 {@code SimpleOccupancyManager} 同口径。 */
+  private static boolean physicalOccupancyResource(OccupancyResource resource) {
+    return resource != null
+        && (resource.kind() == ResourceKind.NODE
+            || resource.kind() == ResourceKind.EDGE
+            || OccupancyResourceResolver.isInterlockingConflict(resource));
   }
 
   static OptionalInt parsePositiveInt(String raw) {
