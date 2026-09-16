@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 30
+config-version: 31
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -254,6 +254,17 @@ spawn:
   #   - 与吞吐无相关，说明它没在衡量"再灌车就要崩"这件事。
   # 下一步该做的是让 score 可预测吞吐（或换一个能预测的量），而不是挪阈值。
   # 在那之前真正兜底的是上面那道 max-active-trains 硬上限，它不依赖这两个数。
+  # 拥堵评分里"全网算满"的参考车数。**默认与 max-active-trains 相等，但它们是两个不同的量**：
+  # 本项是"网络装多少车算满"（物理/经验量），max-active-trains 是"我们允许发多少车"（策略量）。
+  #
+  # 为什么要拆开：networkPressure = 在网车数 / 本参考值，是拥堵评分四分量里权重最高的一项之一。
+  # 合用一个数时，把 max-active-trains 从 16 提到 24 会**同时**抬高天花板并把软刹车调钝
+  # （分母变大 → networkPressure 从 14/16=0.875 掉到 14/24=0.58），一次改两件事，
+  # 密度实验就无法归因到底是"车更多"还是"刹车更松"起的作用。
+  #
+  # 要扫密度曲线：只动 max-active-trains，本项保持不变，软刹车的灵敏度才是可比的。
+  # 设为 0 表示没有全网压力信号，评分退回三分量旧权重。
+  congestion-network-reference-trains: 16
   congestion-hold-threshold: 0.58
   congestion-release-threshold: 0.48
 

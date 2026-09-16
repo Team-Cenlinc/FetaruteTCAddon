@@ -328,7 +328,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       int activeRouteTrains,
       int targetRouteTrains,
       int activeTrains,
-      int trainCap) {
+      /** “全网算满”的参考车数，**不是**准入上限。 */
+      int networkReference) {
 
     int busyResources() {
       return busyEdges + busyNodes;
@@ -1573,7 +1574,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             assessment.lineSignalPressure(),
             assessment.networkPressure(),
             assessment.activeTrains(),
-            assessment.trainCap()));
+            assessment.networkReference()));
   }
 
   /** 在网列车数：progress 条目数，与 SMART_DISPATCH_GLOBAL_SNAPSHOT 的 trains= 同源。 */
@@ -1714,7 +1715,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
               assessment.lineSignalPressure(),
               assessment.networkPressure(),
               assessment.activeTrains(),
-              assessment.trainCap());
+              assessment.networkReference());
       debugLogger.accept(
           "自动发车拥挤门控: line="
               + line.code()
@@ -1832,16 +1833,26 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             : clamp01((double) activeRouteTrains / (double) targetRouteTrains);
 
     // 【全网压力】此前评分的三个分量全部是"本 route 自己"的局部量，因此在全网堵死时
-    // 依然可以很低——实服 14 辆车时最高分 0.464，而阈值是 0.72。加入全网在网车数/上限
+    // 依然可以很低——实服 14 辆车时最高分 0.464，而阈值是 0.72。加入全网在网车数/参考值
     // 这一项，闸门才可能在撞上硬上限之前就平滑地开始拦车。
-    int trainCap = configManager.current().spawnSettings().maxActiveTrains();
+    //
+    // 分母用 congestion-network-reference-trains，**不是** max-active-trains。两者默认相等，
+    // 但是不同的量：前者是“网络装多少车算满”，后者是“我们允许发多少车”。
+    // 合用时把上限从 16 提到 24，会在抬高天花板的同时把软刹车也调钝
+    // （分母变大 → networkPressure 变小），一次改两件事，密度实验就无法归因。
+    ConfigManager.SpawnSettings congestionSettings = configManager.current().spawnSettings();
+    int networkReference = congestionSettings.congestionNetworkReferenceTrains();
     int activeTrains = activeTrainCount();
     double networkPressure =
-        trainCap <= 0 ? 0.0D : clamp01((double) activeTrains / (double) trainCap);
+        networkReference <= 0 ? 0.0D : clamp01((double) activeTrains / (double) networkReference);
 
     double score =
         combineCongestionScore(
-            occupancyRate, routeTrainPressure, lineSignalPressure, networkPressure, trainCap);
+            occupancyRate,
+            routeTrainPressure,
+            lineSignalPressure,
+            networkPressure,
+            networkReference);
     return new CongestionAssessment(
         score,
         occupancyRate,
@@ -1855,21 +1866,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         activeRouteTrains,
         targetRouteTrains,
         activeTrains,
-        trainCap);
+        networkReference);
   }
 
   /**
    * 拥挤度四分量的线性组合。
    *
-   * <p>trainCap &lt;= 0（准入控制关闭）时退回本改动之前的三分量旧权重，便于用一个配置项把判别口径 整体还原——这样"评分变了"和"准入控制生效了"两件事可以分别证伪。
+   * <p>networkReference &lt;= 0（没有全网压力信号）时退回本改动之前的三分量旧权重，便于用一个配置项
+   * 把判别口径整体还原——这样"评分变了"和"准入控制生效了"两件事可以分别证伪。
+   */
+  /**
+   * 合成拥堵分。
+   *
+   * @param networkReference “全网算满”的参考车数（{@code congestion-network-reference-trains}）。 为 0
+   *     表示没有全网压力信号，此时退回三分量权重。<b>不是</b>准入上限； 两者默认相等但语义不同，详见调用处注释。
    */
   static double combineCongestionScore(
       double occupancyRate,
       double routeTrainPressure,
       double lineSignalPressure,
       double networkPressure,
-      int trainCap) {
-    if (trainCap <= 0) {
+      int networkReference) {
+    if (networkReference <= 0) {
       return clamp01(
           occupancyRate * 0.55D + routeTrainPressure * 0.30D + lineSignalPressure * 0.15D);
     }

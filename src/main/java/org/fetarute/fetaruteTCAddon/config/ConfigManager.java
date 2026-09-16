@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 30;
+  private static final int EXPECTED_CONFIG_VERSION = 31;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -110,6 +110,15 @@ public final class ConfigManager {
   private static final long DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS = 86400L;
   private static final long DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS = 86400L;
   private static final int DEFAULT_SPAWN_MAX_ACTIVE_TRAINS = 16;
+
+  /**
+   * 拥堵评分里“全网算满”的参考车数。
+   *
+   * <p>默认与 {@link #DEFAULT_SPAWN_MAX_ACTIVE_TRAINS} 相等，但它们是**两个不同的量**：
+   * 前者是“网络装多少车就算满”（物理/经验量），后者是“我们允许发多少车”（策略量）。
+   */
+  private static final int DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS = 16;
+
   private static final double DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD = 0.58D;
   private static final double DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD = 0.48D;
   private final FetaruteTCAddon plugin;
@@ -699,6 +708,7 @@ public final class ConfigManager {
     long queuedTicketMaxAgeSeconds = DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS;
     long pendingLayoverMaxAgeSeconds = DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS;
     int maxActiveTrains = DEFAULT_SPAWN_MAX_ACTIVE_TRAINS;
+    int congestionNetworkReferenceTrains = DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS;
     double congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
     double congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
     if (section != null) {
@@ -762,6 +772,13 @@ public final class ConfigManager {
         logger.warning("spawn.max-active-trains 配置无效: " + maxActiveTrains);
         maxActiveTrains = DEFAULT_SPAWN_MAX_ACTIVE_TRAINS;
       }
+      congestionNetworkReferenceTrains =
+          section.getInt("congestion-network-reference-trains", congestionNetworkReferenceTrains);
+      if (congestionNetworkReferenceTrains < 0) {
+        logger.warning(
+            "spawn.congestion-network-reference-trains 配置无效: " + congestionNetworkReferenceTrains);
+        congestionNetworkReferenceTrains = DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS;
+      }
       congestionHoldThreshold =
           section.getDouble("congestion-hold-threshold", congestionHoldThreshold);
       congestionReleaseThreshold =
@@ -798,6 +815,7 @@ public final class ConfigManager {
         queuedTicketMaxAgeSeconds,
         pendingLayoverMaxAgeSeconds,
         maxActiveTrains,
+        congestionNetworkReferenceTrains,
         congestionHoldThreshold,
         congestionReleaseThreshold);
   }
@@ -1538,8 +1556,47 @@ public final class ConfigManager {
       long queuedTicketMaxAgeSeconds,
       long pendingLayoverMaxAgeSeconds,
       int maxActiveTrains,
+      int congestionNetworkReferenceTrains,
       double congestionHoldThreshold,
       double congestionReleaseThreshold) {
+
+    /**
+     * 兼容旧调用：未指定全网参考车数时，沿用在网列车上限。
+     *
+     * <p>这正是解耦前的旧行为，只保留给老调用点；新代码请显式传入。
+     */
+    public SpawnSettings(
+        boolean enabled,
+        int tickIntervalTicks,
+        int planRefreshTicks,
+        int maxSpawnPerTick,
+        int maxGeneratePerTick,
+        int maxBacklogPerService,
+        int retryDelayTicks,
+        int maxAttempts,
+        double layoverFallbackMultiplier,
+        long queuedTicketMaxAgeSeconds,
+        long pendingLayoverMaxAgeSeconds,
+        int maxActiveTrains,
+        double congestionHoldThreshold,
+        double congestionReleaseThreshold) {
+      this(
+          enabled,
+          tickIntervalTicks,
+          planRefreshTicks,
+          maxSpawnPerTick,
+          maxGeneratePerTick,
+          maxBacklogPerService,
+          retryDelayTicks,
+          maxAttempts,
+          layoverFallbackMultiplier,
+          queuedTicketMaxAgeSeconds,
+          pendingLayoverMaxAgeSeconds,
+          maxActiveTrains,
+          maxActiveTrains,
+          congestionHoldThreshold,
+          congestionReleaseThreshold);
+    }
 
     /** 兼容旧调用：未指定在网列车上限与拥挤阈值时沿用默认值。 */
     public SpawnSettings(

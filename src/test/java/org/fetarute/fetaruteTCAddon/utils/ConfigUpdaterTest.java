@@ -115,10 +115,26 @@ class ConfigUpdaterTest {
     String merged = runUpdate(template, existing);
 
     assertTrue(merged.contains("max-active-trains: 16"), "应补入在网列车上限");
+    assertTrue(merged.contains("congestion-network-reference-trains: 16"), "应补入全网参考车数（与准入上限解耦的那个）");
     assertTrue(merged.contains("congestion-hold-threshold: 0.58"), "应补入拥挤触发阈值");
     assertTrue(merged.contains("congestion-release-threshold: 0.48"), "应补入拥挤解除阈值");
-    assertTrue(merged.contains("config-version: 30"), "应升到新版本");
+    // 版本号从**模板**读，不写死：写死的话每次升版本都要改这条用例，
+    // 而它真正要钉的不是“等于 30”，是“合并后对齐模板且确实升了”。
+    int templateVersion = versionOf(template);
+    assertTrue(templateVersion > 29, "前置：模板版本应高于旧配置的 29");
+    assertTrue(
+        merged.contains("config-version: " + templateVersion), () -> "应升到模板版本 " + templateVersion);
     assertTrue(merged.contains("enabled: true"), "既有的自动发车开关不能被模板覆盖");
     assertTrue(merged.contains("max-attempts: 20"), "既有的重试次数不能被模板覆盖");
+  }
+
+  private static int versionOf(String yaml) {
+    for (String line : yaml.split("\n")) {
+      String trimmed = line.trim();
+      if (trimmed.startsWith("config-version:")) {
+        return Integer.parseInt(trimmed.substring("config-version:".length()).trim());
+      }
+    }
+    throw new IllegalStateException("模板里没有 config-version");
   }
 }

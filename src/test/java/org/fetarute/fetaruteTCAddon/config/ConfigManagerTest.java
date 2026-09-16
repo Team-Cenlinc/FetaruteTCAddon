@@ -343,4 +343,34 @@ class ConfigManagerTest {
     assertEquals(0.58, view.spawnSettings().congestionHoldThreshold());
     assertEquals(0.48, view.spawnSettings().congestionReleaseThreshold());
   }
+
+  /**
+   * 准入上限与拥堵评分参考值必须各读各的。
+   *
+   * <p>它们曾经是同一个数，于是把 {@code max-active-trains} 从 16 提到 24 会<b>同时</b> 抬高天花板并把软刹车调钝（networkPressure
+   * 的分母变大），密度实验无法归因。
+   *
+   * <p>这条钉的是**解析层**：只写 max-active-trains 时，参考值必须保持默认而不跟着跑。 （评分函数本身的解耦在 SpawnAdmissionControlTest
+   * 里。两层都要钉： 只钉记录类证明不了解析器没把两个值又接到一起。）
+   */
+  @Test
+  void congestionNetworkReferenceIsParsedIndependentlyOfTheAdmissionCap() {
+    YamlConfiguration onlyCap = new YamlConfiguration();
+    onlyCap.set("config-version", 31);
+    onlyCap.set("spawn.max-active-trains", 24);
+    ConfigManager.SpawnSettings raised =
+        ConfigManager.parse(onlyCap, Logger.getLogger("config-test")).spawnSettings();
+
+    assertEquals(24, raised.maxActiveTrains(), "准入上限应当读到 24");
+    assertEquals(16, raised.congestionNetworkReferenceTrains(), "只改准入上限时，全网参考车数必须继续用默认值 16");
+
+    YamlConfiguration both = new YamlConfiguration();
+    both.set("config-version", 31);
+    both.set("spawn.max-active-trains", 24);
+    both.set("spawn.congestion-network-reference-trains", 20);
+    ConfigManager.SpawnSettings explicit =
+        ConfigManager.parse(both, Logger.getLogger("config-test")).spawnSettings();
+    assertEquals(24, explicit.maxActiveTrains());
+    assertEquals(20, explicit.congestionNetworkReferenceTrains(), "显式写了就用写的值");
+  }
 }

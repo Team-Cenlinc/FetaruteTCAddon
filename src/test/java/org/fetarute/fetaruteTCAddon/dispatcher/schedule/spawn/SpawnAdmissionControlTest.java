@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -193,5 +194,52 @@ class SpawnAdmissionControlTest {
         Duration.ofSeconds(2),
         1,
         10);
+  }
+
+  /**
+   * 拥堵评分的分母必须与准入上限**解耦**。
+   *
+   * <p>两者曾经是同一个配置项，于是把 {@code max-active-trains} 从 16 提到 24 会<b>同时</b>做两件事：抬高天花板，并把软刹车调钝（分母变大 →
+   * networkPressure 变小）。 密度实验因此无法归因——分不清是"车更多"还是"刹车更松"起的作用。
+   *
+   * <p>这条钉的是：<b>只改准入上限时，评分必须一点不变</b>。
+   */
+  @Test
+  void admissionCapChangeDoesNotMoveTheCongestionScore() {
+    ConfigManager.SpawnSettings capSixteen = spawnSettings(16, 16);
+    ConfigManager.SpawnSettings capTwentyFour = spawnSettings(24, 16);
+
+    assertEquals(
+        capSixteen.congestionNetworkReferenceTrains(),
+        capTwentyFour.congestionNetworkReferenceTrains(),
+        "提高准入上限不得改变全网参考车数");
+    assertNotEquals(
+        capSixteen.maxActiveTrains(), capTwentyFour.maxActiveTrains(), "前置：两者的准入上限确实不同");
+
+    // 同一份现场（14 辆车）在两个上限下必须得到同一个分。
+    double pressureSixteen = 14.0D / capSixteen.congestionNetworkReferenceTrains();
+    double pressureTwentyFour = 14.0D / capTwentyFour.congestionNetworkReferenceTrains();
+    assertEquals(
+        SimpleTicketAssigner.combineCongestionScore(
+            0.4D, 0.3D, 0.2D, pressureSixteen, capSixteen.congestionNetworkReferenceTrains()),
+        SimpleTicketAssigner.combineCongestionScore(
+            0.4D, 0.3D, 0.2D, pressureTwentyFour, capTwentyFour.congestionNetworkReferenceTrains()),
+        1e-9,
+        "只改准入上限时，拥堵分必须纹丝不动");
+  }
+
+  /** 参考值为 0 = 没有全网压力信号，退回三分量旧权重。 */
+  @Test
+  void zeroNetworkReferenceFallsBackToThreeComponentWeights() {
+    assertEquals(
+        SimpleTicketAssigner.combineCongestionScore(0.4D, 0.6D, 0.2D, 1.0D, 0),
+        0.4D * 0.55D + 0.6D * 0.30D + 0.2D * 0.15D,
+        1e-9,
+        "参考值为 0 时全网分量必须被忽略");
+  }
+
+  private static ConfigManager.SpawnSettings spawnSettings(int cap, int networkReference) {
+    return new ConfigManager.SpawnSettings(
+        true, 20, 100, 2, 4, 8, 40, 3, 2.0D, 600L, 7200L, cap, networkReference, 0.58D, 0.48D);
   }
 }
