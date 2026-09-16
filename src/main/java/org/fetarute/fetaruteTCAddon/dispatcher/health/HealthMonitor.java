@@ -200,33 +200,19 @@ public final class HealthMonitor {
    *
    * <p>如果距离上次检查未超过 checkInterval，则跳过。
    */
-  /**
-   * 调度器卡顿检测。本任务由 {@code runTaskTimer(..., 20L, 20L)} 驱动，**每秒一次**； 两次之间墙钟跳了很久，只能是服务器冻住了——不是“车卡了这么久”。
-   *
-   * <p>检测必须在**这一层**：只有调度层知道“该跑而没跑”。放进 {@code TrainHealthMonitor.check} 是错的——那个方法被用例直接调用并以任意步长
-   * 推进时钟，会把正常的大步长误判成冻结（第一版就是这么写的，打红了 45 条用例）。
-   */
-  private void detectSchedulerFreeze(Instant now) {
-    Instant previous = lastTickAt;
-    lastTickAt = now;
-    if (Instant.EPOCH.equals(previous) || now == null || !now.isAfter(previous)) {
-      return;
-    }
-    Duration gap = Duration.between(previous, now);
-    if (gap.compareTo(SCHEDULER_FREEZE_THRESHOLD) > 0) {
-      trainMonitor.rebaseAfterFreeze(gap);
-      if (dispatchService != null) {
-        dispatchService.rebaseAfterFreeze(gap);
-      }
-    }
-  }
-
   public void tick() {
     if (!enabled) {
       return;
     }
     Instant now = Instant.now();
-    detectSchedulerFreeze(now);
+    // 检测收归 RuntimeDispatchService（它被所有定时任务共享），这里只负责取走自己那份。
+    if (dispatchService != null) {
+      dispatchService.observeSchedulerTick(now);
+      Duration freezeGap = dispatchService.drainPendingFreezeGap();
+      if (!freezeGap.isZero()) {
+        trainMonitor.rebaseAfterFreeze(freezeGap);
+      }
+    }
     if (Duration.between(lastCheckTime, now).compareTo(checkInterval) < 0) {
       return;
     }

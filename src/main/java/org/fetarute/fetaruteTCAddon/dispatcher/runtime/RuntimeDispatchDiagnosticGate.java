@@ -360,6 +360,12 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // “跑了但默默拒了”无法区分——而两者要采取的下一步完全相反。
           // 体量：生产端按 (train, reason) 去重，不随 tick 放大。
           "SMART_QUEUE_POSITION_YIELD_SKIPPED",
+          // 时钟跳变补偿的唯一生效证据。笔记本合盖是**常规操作**，而这条补偿拦的是
+          // “每一辆停着的车在唤醒瞬间集体越过死锁/清理阈值”——若销毁兜底开着就是大规模删车。
+          // 第二十二轮它不在名单上，于是全场 0 条，我无法区分“没触发”与“触发了但日志被砍”。
+          // 体量受限于“真的冻了几次”，正常运行长期为 0。
+          "SMART_HEALTH_CLOCK_DISCONTINUITY",
+          "SMART_RUNTIME_CLOCK_DISCONTINUITY",
           // 已在单线区内、出口在授权窗口外仍放行——那条放宽唯一的生效证据。
           // 同一形态连续三轮掐死 WS 线（74 分钟 / 449 秒 / 3260 秒）。
           "SMART_ALREADY_INSIDE_CONTINUE_ALLOWED",

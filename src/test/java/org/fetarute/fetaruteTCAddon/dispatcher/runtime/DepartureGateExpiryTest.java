@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -161,5 +162,53 @@ class DepartureGateExpiryTest {
     // 冻结前那 120 秒必须还在：再过 61 秒（120+61=181 > 180）就该过期。
     now.set(T0.plus(Duration.ofSeconds(120 + 600 + 61)));
     assertFalse(service.hasDepartureGate("train-A"), "冻结前已握的 120 秒不得被抄掉");
+  }
+
+  /**
+   * 时钟跳变检测必须在**读取触发的过期之前**生效，且同一次冻结只补偿一遍。
+   *
+   * <p>第二十二轮实服：补偿只接在健康监控的 tick 上，而发车门锁还会在 {@link RuntimeDispatchService#hasDepartureGate}
+   * <b>读取时</b>过期——那条路径由另一个定时任务 （{@code RuntimeSignalMonitor}）驱动，而 Bukkit 不保证两个任务的顺序。实测：空洞
+   * 16:46→16:50 之后，四把锁在 16:50:06–07 同时过期（heldSeconds 218/221/229/233， 恰好等于空洞时长）——健康监控的补偿根本没赶上。
+   *
+   * <p><b>用例必须全程按生产节奏推进。</b>我写错了两次：先是最后一段一下跳 61 秒， 后是前置一下跳 120 秒——两次都被当成冻结又补了一遍，于是门锁永远不过期。 生产里 tick
+   * 是秒级的，不会出现连续大跳。
+   */
+  @Test
+  void schedulerTickObservationCompensatesBeforeReadTriggeredExpiryAndOnlyOnce() {
+    AtomicReference<Instant> now = new AtomicReference<>(T0);
+    RuntimeDispatchService service = TestServices.minimal(new ArrayList<>(), now::get);
+
+    service.observeSchedulerTick(T0);
+    service.acquireDepartureGate("train-A", "session-1", "autostation_dwell");
+
+    // 真实握锁 120 秒，按 10 秒一拍推进（低于 15 秒阈值，不会误判）。
+    tickFor(service, now, 0, 120, 10);
+    assertTrue(service.hasDepartureGate("train-A"), "前置：120 秒仍在余量内");
+
+    // 合盖 600 秒。唤醒后的第一次 observeSchedulerTick 就该补偿。
+    now.set(T0.plus(Duration.ofSeconds(720)));
+    assertEquals(600L, service.observeSchedulerTick(now.get()).toSeconds(), "应当检测出 600 秒冻结");
+    assertTrue(service.hasDepartureGate("train-A"), "读取触发的过期必须看到已补偿的时间，否则门锁会在唤醒瞬间集体过期");
+
+    // 另一个任务紧接着也调一次：不得再补偿一遍。
+    assertEquals(Duration.ZERO, service.observeSchedulerTick(now.get()), "同一次冻结不得被两个任务各补一遍");
+
+    // 冻结前那 120 秒仍然算数：再跑 70 秒（120+70=190 > 180）就该过期。
+    tickFor(service, now, 720, 70, 10);
+    assertFalse(service.hasDepartureGate("train-A"), "冻结前已握的 120 秒不得被抄掉");
+  }
+
+  /** 按生产节奏推进时钟：每 {@code stepSeconds} 一拍，每拍都告诉调度器已经跳动。 */
+  private static void tickFor(
+      RuntimeDispatchService service,
+      AtomicReference<Instant> now,
+      long fromSeconds,
+      long spanSeconds,
+      long stepSeconds) {
+    for (long elapsed = stepSeconds; elapsed <= spanSeconds; elapsed += stepSeconds) {
+      now.set(T0.plus(Duration.ofSeconds(fromSeconds + elapsed)));
+      service.observeSchedulerTick(now.get());
+    }
   }
 }

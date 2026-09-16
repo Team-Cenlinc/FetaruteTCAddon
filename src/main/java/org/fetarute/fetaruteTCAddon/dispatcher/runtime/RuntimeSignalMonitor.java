@@ -143,6 +143,10 @@ public final class RuntimeSignalMonitor implements Runnable {
 
   @Override
   public void run() {
+    // 时钟跳变检测要在**本轮任何工作之前**：发车门锁会在 hasDepartureGate 读取时过期，
+    // 而那条路径就在本任务里。第二十二轮：健康监控的补偿没赶在它前面，
+    // 四把锁在唤醒后一秒内同时过期。
+    dispatchService.observeSchedulerTick(java.time.Instant.now());
     runWithFailClosedBoundary(
         "-", this::runGuardedCycle, dispatchService::failClosedAfterSignalReevaluationFailure);
   }

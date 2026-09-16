@@ -380,6 +380,14 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, String> queueYieldSkipReported =
       new java.util.concurrent.ConcurrentHashMap<>();
 
+  /** 上一次调度器真正跳动的时刻，由所有定时任务共享。 */
+  private final java.util.concurrent.atomic.AtomicReference<Instant> lastSchedulerTickAt =
+      new java.util.concurrent.atomic.AtomicReference<>(Instant.EPOCH);
+
+  /** 已检测到、但尚未被健康监控取走的冻结时长。 */
+  private final java.util.concurrent.atomic.AtomicReference<Duration> pendingFreezeGap =
+      new java.util.concurrent.atomic.AtomicReference<>(Duration.ZERO);
+
   /** key 是 (resourceKey, 排队者)，防止割排队位退化成每 tick 一次的抖动。 */
   private final java.util.concurrent.ConcurrentMap<String, Instant> queuePositionYieldCooldowns =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -569,6 +577,9 @@ public final class RuntimeDispatchService {
    * 在第十七轮实服上的败因（同一资源 93 分钟内反复释放 526 次）。
    */
   private static final Duration QUEUE_POSITION_YIELD_COOLDOWN = Duration.ofSeconds(60);
+
+  /** 调度周期最宽也是秒级；超过这个值只能是服务器冻住（笔记本合盖）。 */
+  private static final Duration SCHEDULER_FREEZE_THRESHOLD = Duration.ofSeconds(15);
 
   /**
    * Smart unlock winner 的最大临时队列加分。
@@ -1707,6 +1718,40 @@ public final class RuntimeDispatchService {
    * <p>其余墙钟量（blocker 快照 TTL、各类冷却）跳变后的方向都是“过期/放行”， 本身 fail-closed
    * 或无害，不在这里平移；平移它们反而会把已经不再成立的证据假装成新鲜的。
    */
+  /**
+   * 所有定时任务在每轮**最开头**调一次；第一个发现时钟跳变的人负责补偿。
+   *
+   * <p><b>为什么不能只放在健康监控里</b>：第二十二轮实服证明了那样不够。 发车门锁除了被健康监控的清扫回收，还会在 {@link #hasDepartureGate}
+   * **读取时**过期， 而那条路径由 {@code RuntimeSignalMonitor} 驱动——另一个定时任务。唤醒后谁先跑谁说了算， 而 Bukkit 不保证顺序。实测：空洞
+   * 16:46→16:50 之后紧接着四把锁在 16:50:06-07 同时过期 （heldSeconds 218/221/229/233，恰好等于空洞时长）——健康监控的补偿根本没赶上。
+   *
+   * <p>因此检测收到这里：只有一份 {@code lastSchedulerTickAt}，谁先调谁检测，不会重复补偿。 本类自己的状态当场补；健康监控那份存进 {@code
+   * pendingFreezeGap}，由它下一轮取走。
+   *
+   * @return 本次检测到的冻结时长；无冻结时为 {@link Duration#ZERO}
+   */
+  public Duration observeSchedulerTick(Instant now) {
+    if (now == null) {
+      return Duration.ZERO;
+    }
+    Instant previous = lastSchedulerTickAt.getAndSet(now);
+    if (Instant.EPOCH.equals(previous) || !now.isAfter(previous)) {
+      return Duration.ZERO;
+    }
+    Duration gap = Duration.between(previous, now);
+    if (gap.compareTo(SCHEDULER_FREEZE_THRESHOLD) <= 0) {
+      return Duration.ZERO;
+    }
+    rebaseAfterFreeze(gap);
+    pendingFreezeGap.accumulateAndGet(gap, Duration::plus);
+    return gap;
+  }
+
+  /** 取走并清空待补偿的冻结时长（健康监控用）。 */
+  public Duration drainPendingFreezeGap() {
+    return pendingFreezeGap.getAndSet(Duration.ZERO);
+  }
+
   public void rebaseAfterFreeze(Duration gap) {
     if (gap == null || gap.isZero() || gap.isNegative() || departureGates.isEmpty()) {
       return;
