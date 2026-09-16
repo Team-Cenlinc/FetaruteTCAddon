@@ -3069,7 +3069,12 @@ public final class TrainHealthMonitor {
       return false;
     }
     if (!result.applied()) {
-      return true;
+      // 候选但**没落地**也必须计数。原来这里无条件 return true，于是一个永远候选、
+      // 永远落不了地的动作会**永久卡住整条恢复链**，后面的动作永远轮不到。
+      // 无效分支（下面）本来就有计数放行机制，“没落地”比“落地了但无效”更弱，
+      // 没有理由反而享受无限期的优先权。
+      return countSafeCandidateFailure(
+          trainName, conflictKey, result, destroyContext, "not-applied");
     }
     RuntimeDispatchService.SmartRecoveryEffectiveness effectiveness = result.effectiveness();
     String resolvedConflict = safeConflictKey(conflictKey, effectiveness);
@@ -3087,6 +3092,24 @@ public final class TrainHealthMonitor {
       }
       return true;
     }
+    return countSafeCandidateFailure(trainName, conflictKey, result, destroyContext, "ineffective");
+  }
+
+  /**
+   * 记一次“这个候选没能解决问题”，并决定还要不要继续抢着恢复链。
+   *
+   * <p>两种失败走同一个计数器：{@code not-applied}（候选但根本没落地）与 {@code
+   * ineffective}（落地了但车没动）。此前只有后者计数，前者无条件保持优先权—— 于是一个永远候选、永远落不了地的动作能把排在它后面的动作永久饿死。
+   */
+  private boolean countSafeCandidateFailure(
+      String trainName,
+      String conflictKey,
+      RuntimeDispatchService.SmartRecoveryActionResult result,
+      boolean destroyContext,
+      String failureKind) {
+    RuntimeDispatchService.SmartRecoveryEffectiveness effectiveness = result.effectiveness();
+    String resolvedConflict = safeConflictKey(conflictKey, effectiveness);
+    String key = safeCandidateFailureKey(trainName, result.decision(), resolvedConflict);
     int count =
         safeCandidateFailureCounts.merge(
             key,
@@ -3100,6 +3123,8 @@ public final class TrainHealthMonitor {
             + result.decision()
             + " conflictKey="
             + resolvedConflict
+            + " failureKind="
+            + failureKind
             + " count="
             + count);
     if (destroyContext) {

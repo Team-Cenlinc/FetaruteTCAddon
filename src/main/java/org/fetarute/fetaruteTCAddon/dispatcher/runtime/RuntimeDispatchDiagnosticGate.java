@@ -353,6 +353,13 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 第十七轮 MT 两车在相邻道岔上互卡 2839/2700 秒、等待图检测到该环 1455 次，
           // 而当时三个已实现的恢复动作没有一个能割它。体量受限于"真的成环几次"。
           "SMART_QUEUE_POSITION_YIELDED",
+          // 割排队边**没有**发生时的原因。与上一条成对，缺一不可：
+          // 第十九轮 WS 被 SURC-WS-LC-4801 掉头堵死 40 分钟，而它正是这个动作要解的
+          // 形态（blocker 全是 QUEUE_POSITION，且与 SURC-WS-LH-1927 正好成环）。
+          // 当时这条 trace 不在名单上，全场只活下来 2 条，于是“动作没机会跑”与
+          // “跑了但默默拒了”无法区分——而两者要采取的下一步完全相反。
+          // 体量：生产端按 (train, reason) 去重，不随 tick 放大。
+          "SMART_QUEUE_POSITION_YIELD_SKIPPED",
           // 已在单线区内、出口在授权窗口外仍放行——那条放宽唯一的生效证据。
           // 同一形态连续三轮掐死 WS 线（74 分钟 / 449 秒 / 3260 秒）。
           "SMART_ALREADY_INSIDE_CONTINUE_ALLOWED",

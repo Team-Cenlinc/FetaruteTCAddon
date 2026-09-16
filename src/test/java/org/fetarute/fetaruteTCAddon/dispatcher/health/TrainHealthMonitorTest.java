@@ -3004,4 +3004,60 @@ class TrainHealthMonitorTest {
     // 判别点：卡着与恢复必须得到相反结果。恒真或恒假的实现会在这里失败。
     assertNotEquals(dispatched.fixedCount() > 0, recovered.fixedCount() > 0, "卡住与恢复必须相反");
   }
+
+  /**
+   * 一个永远候选、永远落不了地的动作，不得永久饿死排在它后面的动作。
+   *
+   * <p>第十九轮实服：WS 被 {@code SURC-WS-LC-4801} 掉头堵死 40 分钟、全线到站归零， 而它的 blocker <b>全部是</b> {@code
+   * QUEUE_POSITION}、与 {@code SURC-WS-LH-1927} 正好成环—— 恰好是排在链末的割排队位要解的形态。
+   *
+   * <p>旧逻辑里 {@code !result.applied()} 是<b>无条件</b> {@code return true}，且不计数；
+   * 而“落地了但无效”反而有计数放行机制。于是更弱的失败形式反而享受无限期优先权。
+   */
+  @Test
+  void neverAppliedCandidateMustNotStarveLaterRecoveryActions() {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "queue-position-inversion");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    // 第一个动作：永远候选，永远不落地。
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                false,
+                "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+                "candidate-but-never-applied",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .OCCUPANCY_MUTATION));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    // 反复试：每次都是同一个永不落地的候选。
+    for (int i = 1; i <= 6; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(65L + i * 30L));
+    }
+
+    verify(dispatchService, atLeastOnce()).applySmartQueuePositionYield(input);
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                line ->
+                    line.contains("SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT")
+                        && line.contains("failureKind=not-applied")),
+        () -> "“候选但未落地”必须计数，实际日志：" + debugLogs);
+  }
 }

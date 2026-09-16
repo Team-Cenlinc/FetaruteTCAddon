@@ -376,6 +376,10 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, Instant> smartUnlockNoReleaseCooldowns =
       new java.util.concurrent.ConcurrentHashMap<>();
 
+  /** 割排队位跳过原因的去重：列车键 → 最近一次已打印的 (train|reason)。 */
+  private final java.util.concurrent.ConcurrentMap<String, String> queueYieldSkipReported =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   /** key 是 (resourceKey, 排队者)，防止割排队位退化成每 tick 一次的抖动。 */
   private final java.util.concurrent.ConcurrentMap<String, Instant> queuePositionYieldCooldowns =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -11456,12 +11460,18 @@ public final class RuntimeDispatchService {
    * 这里补上同一条，否则“计数为 0”永远是个无法落地的结论。
    */
   private SmartRecoveryActionResult queueYieldSkipped(String trainName, String reason) {
-    debugLogger.accept(
-        "SMART_QUEUE_POSITION_YIELD_SKIPPED train="
-            + trainName
-            + " reason="
-            + reason
-            + " occupancyMutated=false");
+    // 按 (train, reason) 去重。这条已经进了诊断必留名单，而每 tick 都可能走到这里——
+    // 不去重就会把预算吃掉，把别的必留行挤掉，变成另一种形式的信息丢失。
+    // 同一辆车的原因**变了**才再印一次，这正好是要看的东西。
+    String key = normalizeTrainKey(trainName) + "|" + reason;
+    if (!key.equals(queueYieldSkipReported.put(normalizeTrainKey(trainName), key))) {
+      debugLogger.accept(
+          "SMART_QUEUE_POSITION_YIELD_SKIPPED train="
+              + trainName
+              + " reason="
+              + reason
+              + " occupancyMutated=false");
+    }
     return SmartRecoveryActionResult.skipped(reason);
   }
 
