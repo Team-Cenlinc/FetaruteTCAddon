@@ -91,10 +91,10 @@ final class OccupancyClaimEvidence {
         || !blocker.resource().equals(claim.resource().toString())) {
       return false;
     }
-    return switch (claim.role()) {
-      case MOVEMENT_REQUIRED, PHYSICAL_FOOTPRINT, PROTECTIVE_RETAIN, HOLD_ONLY -> true;
-      case QUEUE_POSITION, LOOKAHEAD_PREVIEW, UNLOCK_RESERVATION -> false;
-    };
+    // 走权威判据，不再自己写一套。这里曾经是只看角色的 switch，
+    // 于是抽象 single:/switcher: 上别人的 PROTECTIVE_RETAIN 会把本车的行车权**撤掉**
+    // （本路径 invalidatesAuthority=true）——同一个缺陷的第三个实例。
+    return obstructs(claim.role(), claim.resource());
   }
 
   static boolean isSingleConflict(OccupancyResource resource) {

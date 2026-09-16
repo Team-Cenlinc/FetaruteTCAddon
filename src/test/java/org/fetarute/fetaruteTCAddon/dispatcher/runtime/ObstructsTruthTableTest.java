@@ -2,10 +2,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.junit.jupiter.api.Test;
 
@@ -73,5 +75,51 @@ class ObstructsTruthTableTest {
     assertFalse(OccupancyClaimEvidence.obstructs(null, PHYSICAL_NODE));
     assertFalse(
         OccupancyClaimEvidence.obstructs(ClaimRole.PROTECTIVE_RETAIN, null), "资源未知时不得当成物理空间");
+  }
+
+  /**
+   * 停车阻塞判据必须走同一张真值表——它是同一缺陷的**第三个**实例，而且后果最重。
+   *
+   * <p>{@code externalOccupancyStopResourceStillHeld} 用在 {@code validateFinalSignalAuthorization}：
+   * 判定为真就 {@code invalidatesAuthority=true}——**撤销行车权**。它曾经是只看角色的 switch， 于是抽象 {@code
+   * single:}/{@code switcher:} 上别人的 {@code PROTECTIVE_RETAIN}（按仓库不变量不挡人） 会把本车的授权扔掉。第二十一轮实服中这条原因涉及
+   * 21 辆车。
+   */
+  @Test
+  void stopBlockerCheckSharesTheSameTruthTable() {
+    RuntimeStopState.Blocker abstractBlocker =
+        blockerOf(ABSTRACT_SINGLE, "other", ClaimRole.PROTECTIVE_RETAIN);
+    assertFalse(
+        OccupancyClaimEvidence.externalOccupancyStopResourceStillHeld(
+            "me", abstractBlocker, claimOf(ABSTRACT_SINGLE, "other", ClaimRole.PROTECTIVE_RETAIN)),
+        "抽象冲突键上的尾部保护不挡人，不得据此撤销行车权");
+
+    RuntimeStopState.Blocker physicalBlocker =
+        blockerOf(PHYSICAL_NODE, "other", ClaimRole.PROTECTIVE_RETAIN);
+    assertTrue(
+        OccupancyClaimEvidence.externalOccupancyStopResourceStillHeld(
+            "me", physicalBlocker, claimOf(PHYSICAL_NODE, "other", ClaimRole.PROTECTIVE_RETAIN)),
+        "物理空间上的尾部保护仍然是硬的——放宽不得越过这条");
+
+    assertFalse(
+        OccupancyClaimEvidence.externalOccupancyStopResourceStillHeld(
+            "me", physicalBlocker, claimOf(PHYSICAL_NODE, "me", ClaimRole.PROTECTIVE_RETAIN)),
+        "自己的 claim 不算外部阻塞");
+  }
+
+  private static RuntimeStopState.Blocker blockerOf(
+      OccupancyResource resource, String owner, ClaimRole role) {
+    return new RuntimeStopState.Blocker(resource.toString(), owner, role.name());
+  }
+
+  private static OccupancyClaim claimOf(OccupancyResource resource, String train, ClaimRole role) {
+    return new OccupancyClaim(
+        resource,
+        train,
+        java.util.Optional.empty(),
+        java.time.Instant.parse("2026-01-01T00:00:00Z"),
+        java.time.Duration.ZERO,
+        java.util.Optional.empty(),
+        role);
   }
 }

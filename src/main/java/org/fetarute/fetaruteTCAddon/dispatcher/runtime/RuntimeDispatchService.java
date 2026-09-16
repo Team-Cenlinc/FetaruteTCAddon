@@ -849,6 +849,16 @@ public final class RuntimeDispatchService {
       return new FinalSignalValidation(true, false, false, "-", "-");
     }
 
+    /**
+     * 停车明细用的完整原因：原因名 + 具体证据。
+     *
+     * <p>之前停车行只写 {@link #reason()}，而具体是哪个资源、什么角色在挡只进了 受预算门控的 trace。于是丢弃率高时只看得见“授权失败”，看不见为什么—— 而本路径
+     * {@code invalidatesAuthority=true}，是会撤销行车权的。
+     */
+    String detailedReason() {
+      return "-".equals(hardBarrierReason) ? reason : reason + ":" + hardBarrierReason;
+    }
+
     static FinalSignalValidation blocked(
         String reason,
         boolean hardBarrierPresent,
@@ -4616,8 +4626,10 @@ public final class RuntimeDispatchService {
             trainName, blocker, claim)) {
           continue;
         }
-        return Optional.of(
-            blocker.resource() + "@claim:" + claim.trainName() + ":" + claim.role().name());
+        // 只留资源+角色，**不带列车名**。这个字符串会进入必留的停车明细并参与去重，
+        // 带上车名会让基数随车数爆炸、吃掉诊断预算并挤掉别的必留行（本会话已踩过两次）。
+        // 资源+角色受拓扑限制，且已足以决定下一步；“是谁”可从资源生命周期 trace 查到。
+        return Optional.of(blocker.resource() + "@" + claim.role().name());
       }
     }
     return Optional.empty();
@@ -6314,7 +6326,7 @@ public final class RuntimeDispatchService {
               SignalAspect.STOP,
               decision.blockers(),
               false,
-              "final-authorization:" + validation.reason());
+              "final-authorization:" + validation.detailedReason());
       traceStructuredSignalFinalDecision(
           trainName,
           finalAuthorization,
@@ -15244,14 +15256,14 @@ public final class RuntimeDispatchService {
               SignalAspect.STOP,
               decision.blockers(),
               false,
-              "final-authorization:" + finalValidation.reason());
+              "final-authorization:" + finalValidation.detailedReason());
       traceStructuredSignalFinalDecision(
           trainName,
           finalAuthorization,
           SignalAspect.STOP,
           false,
           false,
-          "final-authorization:" + finalValidation.reason());
+          "final-authorization:" + finalValidation.detailedReason());
       applyHardStop(
           train,
           properties,
@@ -16003,7 +16015,11 @@ public final class RuntimeDispatchService {
         validateFinalSignalAuthorization(trainName, SignalAspect.PROCEED, finalAuthorization, true);
     if (!validation.allowed()) {
       holdLayoverAuthorityAfterFailedCommit(
-          trainHandle, properties, trainName, token, "final-authorization:" + validation.reason());
+          trainHandle,
+          properties,
+          trainName,
+          token,
+          "final-authorization:" + validation.detailedReason());
       traceStructuredSignalFinalDecision(
           trainName,
           finalAuthorization,
@@ -16011,7 +16027,8 @@ public final class RuntimeDispatchService {
           false,
           false,
           "layover-final-authorization:" + validation.reason());
-      return LayoverDispatchResult.failed(trainName, "final-authorization:" + validation.reason());
+      return LayoverDispatchResult.failed(
+          trainName, "final-authorization:" + validation.detailedReason());
     }
     if (!clearMovementInhibitorAfterFinalAuthorization(
         trainName, finalAuthorization, SignalAspect.PROCEED)) {
