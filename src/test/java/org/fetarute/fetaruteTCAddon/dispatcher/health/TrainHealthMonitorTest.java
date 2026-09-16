@@ -3060,4 +3060,48 @@ class TrainHealthMonitorTest {
                         && line.contains("failureKind=not-applied")),
         () -> "“候选但未落地”必须计数，实际日志：" + debugLogs);
   }
+
+  /**
+   * 服务器冻结的那段时间不得计入“卡了多久”，但冻结**前**已积累的停滞不得被抄掉。
+   *
+   * <p>实服第二十一轮：日志在 10:35→10:43 断了七分钟（HikariCP 同时报 thread starvation）。 恢复后的第一个 tick
+   * 里，六辆车<b>在同一瞬间</b> {@code 10:43:07} 全部跨过 300 秒 （最大 622s），而它们一分钟后就自己恢复了。那不是死锁，是墙钟在说谎。
+   *
+   * <p>危险不在诊断：{@code deadlock-threshold-seconds}=45、{@code stuck-cleanup-threshold-seconds}=600，
+   * 一次七分钟冻结会让**每一辆停着的车**同时越线——若销毁兜底开着就是大规模删车。
+   *
+   * <p>两个方向必须一起钉：只钉前者的话，把状态整个清空也能蒙混过关，而那是另一个方向的错。
+   */
+  @Test
+  void freezeRebaseDropsTheFrozenSpanButKeepsRealStallBeforeIt() {
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.PROCEED, 0.0)));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    monitor.setStallThreshold(Duration.ofSeconds(60));
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(3000));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(3000));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    // 冻结前已经真实静止 40 秒（未越过 60 秒阈值）。
+    assertEquals(0, monitor.check(Set.of("train1"), t0.plusSeconds(40)).stallCount());
+
+    // 服务器冻结 420 秒。调度层（HealthMonitor.tick）会调这个重基。
+    monitor.rebaseAfterFreeze(Duration.ofSeconds(420));
+
+    // 冻结的 420 秒不计数：此刻累计仍然只有 40 秒。
+    assertEquals(
+        0,
+        monitor.check(Set.of("train1"), t0.plusSeconds(40 + 420)).stallCount(),
+        "冻结的 420 秒不得被当成静止——否则每辆停着的车都会集体越线");
+
+    // 冻结前那 40 秒必须还在：再过 25 秒（40+25=65 > 60）就该报。
+    assertEquals(
+        1,
+        monitor.check(Set.of("train1"), t0.plusSeconds(40 + 420 + 25)).stallCount(),
+        "冻结前已积累的真实静止不得被抄掉");
+    assertTrue(
+        debugLogs.stream().anyMatch(l -> l.contains("SMART_HEALTH_CLOCK_DISCONTINUITY")),
+        "重基必须留痕迹");
+  }
 }

@@ -4122,6 +4122,62 @@ public final class TrainHealthMonitor {
     return trainKey.equals(firstTrainInPair(trainKey, blockerKey));
   }
 
+  /**
+   * 把本类持有的墙钟基准**向前平移** {@code gap}，用于服务器冻结后的补偿。
+   *
+   * <p><b>只能由调度层调用</b>（{@code HealthMonitor.tick}）——只有它知道“该跑而没跑”。 本类的 {@link #check}
+   * 是用例直接调的，它们以任意步长推进时钟， 把检测放在 {@code check} 里会把正常的大步长推进误判成冻结。
+   *
+   * <p><b>为什么是平移而不是清空</b>：清空会把冻结**前**已经积累的真实停滞也抄掉， 那是另一个方向的错。平移后，冻结前已卡 40 秒的车仍然是 40 秒。
+   *
+   * <p>实服第二十一轮：日志在 10:35→10:43 断了七分钟（HikariCP 同时报 {@code Thread starvation or clock leap
+   * detected}）。恢复后的第一个 tick 里，六辆车<b>在同一瞬间</b> {@code 10:43:07} 全部跨过 300 秒（最大 622s），而它们一分钟后就自己恢复了。
+   * 那不是死锁，是墙钟在说谎。而 {@code deadlock-threshold-seconds}=45、 {@code
+   * stuck-cleanup-threshold-seconds}=600，若销毁兜底开着，一次冻结就是一次大规模删车。
+   */
+  public void rebaseAfterFreeze(Duration gap) {
+    if (gap == null || gap.isZero() || gap.isNegative()) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_HEALTH_CLOCK_DISCONTINUITY gapSeconds="
+            + gap.toSeconds()
+            + " rebasedTrains="
+            + snapshots.size()
+            + " rebasedRecoveryStates="
+            + recoveryStates.size()
+            + " reason=server-freeze-or-clock-leap");
+    snapshots.replaceAll(
+        (name, snapshot) ->
+            snapshot == null
+                ? null
+                : new TrainSnapshot(
+                    snapshot.progressIndex(),
+                    snapshot.lastPassedGraphNodeId(),
+                    snapshot.signal(),
+                    snapshot.speedBpt(),
+                    shiftInstant(snapshot.captureTime(), gap),
+                    shiftInstant(snapshot.lastMoveTime(), gap),
+                    shiftInstant(snapshot.lastProgressTime(), gap)));
+    for (RecoveryState recovery : recoveryStates.values()) {
+      if (recovery == null) {
+        continue;
+      }
+      recovery.lastStallAttemptAt = shiftInstant(recovery.lastStallAttemptAt, gap);
+      recovery.lastProgressAttemptAt = shiftInstant(recovery.lastProgressAttemptAt, gap);
+      recovery.lastDeadlockAttemptAt = shiftInstant(recovery.lastDeadlockAttemptAt, gap);
+      recovery.pendingRecoveryAt = shiftInstant(recovery.pendingRecoveryAt, gap);
+    }
+    deadlockPairLastAttemptAt.replaceAll((key, at) -> shiftInstant(at, gap));
+    deadlockPairLastDestroyAt.replaceAll((key, at) -> shiftInstant(at, gap));
+    traceLastAt.replaceAll((key, at) -> shiftInstant(at, gap));
+  }
+
+  /** {@link Instant#EPOCH} 表示“从来没有过”，不得平移——平移了就变成一个假的近期时刻。 */
+  private static Instant shiftInstant(Instant at, Duration gap) {
+    return at == null || Instant.EPOCH.equals(at) ? at : at.plus(gap);
+  }
+
   private boolean canAttempt(Instant now, Instant lastAttemptAt) {
     if (now == null) {
       return false;
