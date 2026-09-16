@@ -18814,9 +18814,20 @@ public final class RuntimeDispatchService {
             trainName,
             "PROTECTIVE_RETAIN_HOLD",
             decision,
-            // releaseCandidate 上面刚算出来，却只写进了受预算门控的 STALE_PROTECTIVE_RETAIN_CANDIDATE。
-            // 停车行是必留的，结论必须落在这里——否则丢弃率高时只看得见"停了"，看不见"能不能放"。
-            "protective-retain:"
+            // 明细必须先说**什么挡着**，再说恢复状态。
+            //
+            // 之前这里只写 releaseCandidate（“no-self-retain-candidate”），而那说的是
+            // **恢复动作没找到可释放的自持保留**，不是阻塞原因——真正挡着的是别人压在
+            // 物理 NODE/EDGE 上的尾部保护。第二十轮它以 562 次占据阻塞榜首，而这个名字
+            // 把我整整骗了一轮：看上去像恢复层失效，实际上 Phase 4 一直在正常释放。
+            //
+            // 这正是本仓红线里禁止的那种写法：明细要么是原因，要么自报“我没有原因”，
+            // 不许拿别的东西伪装成结论。releaseCandidate 仍然保留（停车行是必留的，
+            // 而 STALE_PROTECTIVE_RETAIN_CANDIDATE 受预算门控），只是排到阻塞形态后面。
+            "protective-retain:blocked-by:"
+                + OccupancyClaimEvidence.describeBlockerShapes(
+                    decision == null ? List.of() : decision.blockers())
+                + ":"
                 + (releaseCandidate ? "release-candidate" : "no-self-retain-candidate"),
             now));
     updateSignalOrWarn(trainName, SignalAspect.STOP, now);

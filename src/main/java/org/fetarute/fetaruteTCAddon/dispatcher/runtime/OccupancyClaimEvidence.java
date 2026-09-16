@@ -280,4 +280,23 @@ final class OccupancyClaimEvidence {
         && claim.resource().kind() == ResourceKind.CONFLICT
         && claim.resource().key().startsWith("single:");
   }
+
+  /**
+   * 把一组 blocker 压成“形态”描述：{@code KIND/ROLE} 的有序去重集合。
+   *
+   * <p>用于停车明细。**不带列车名**——明细会进去重键，带上车名会让它随车数爆炸， 把诊断预算吃掉、挤掉别的必留行。
+   */
+  static String describeBlockerShapes(java.util.Collection<OccupancyClaim> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      return "no-blockers-listed";
+    }
+    java.util.TreeSet<String> shapes = new java.util.TreeSet<>();
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      shapes.add(claim.resource().kind() + "/" + claim.role());
+    }
+    return shapes.isEmpty() ? "no-blockers-listed" : String.join(",", shapes);
+  }
 }
