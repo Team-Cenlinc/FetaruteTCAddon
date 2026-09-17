@@ -305,6 +305,63 @@ final class OccupancyClaimEvidence {
    *
    * <p>用于停车明细。**不带列车名**——明细会进去重键，带上车名会让它随车数爆炸， 把诊断预算吃掉、挤掉别的必留行。
    */
+  /**
+   * 按**此刻**的 claim 重新核对停因里记下的 blocker 是否仍然成立。
+   *
+   * <p>为什么必须单独有这个量：{@code SMART_BLOCKING_SNAPSHOT} 的 {@code detail} 取自 {@link
+   * RuntimeStopState#detail()}，那是**停因建立时**存下来的字符串，只在停因发生 transition 时才重写。 实服 2026-09-17 一轮里 102
+   * 段长时间保持中有 100 段（98%）的 detail 全程一个字没变，中位持续 153 秒—— 也就是说，日志只回答了「它最初为什么停」，从不回答「它一百五十秒后为什么还停着」。
+   *
+   * <p>代价已经付过两次，两次都是**把入场理由当成了当前状态**：
+   *
+   * <ul>
+   *   <li>2026-09-14 第十轮：连续 106 条 {@code blockedBy=[]} 被读成「没有阻塞者」，实际是 45 分钟互锁环；
+   *   <li>2026-09-17 第二十三轮：一辆 MT 的 detail 连续 183 秒写着某条 EDGE 仍被 {@code PROTECTIVE_RETAIN} 扣着，
+   *       而资源生命周期（必留项，不会被预算吞掉）显示那条边在整段时间里**无人持有**。
+   * </ul>
+   *
+   * <p>因此这里**不覆盖** {@code detail}，而是并列输出一个当场重算的量——这正是 {@code departureGateBlockedBy}
+   * 立下的规矩：来源不同的两个量混进同一个字段，就是当初误导的根源。
+   *
+   * @param trainName 被挡住的列车名
+   * @param recorded 停因建立时记下的 blocker
+   * @param liveClaims 此刻的全部 claim
+   * @return 当前成因摘要；记下的 blocker 若已全部消失则明确说出来
+   */
+  static String describeLiveStopCause(
+      String trainName,
+      java.util.Collection<RuntimeStopState.Blocker> recorded,
+      java.util.Collection<OccupancyClaim> liveClaims) {
+    if (recorded == null || recorded.isEmpty()) {
+      return "no-recorded-blockers";
+    }
+    if (liveClaims == null) {
+      return "claims-unavailable";
+    }
+    List<OccupancyClaim> stillHeld = new ArrayList<>();
+    for (RuntimeStopState.Blocker blocker : recorded) {
+      if (blocker == null) {
+        continue;
+      }
+      for (OccupancyClaim claim : liveClaims) {
+        if (externalOccupancyStopResourceStillHeld(trainName, blocker, claim)) {
+          stillHeld.add(claim);
+          break;
+        }
+      }
+    }
+    if (stillHeld.isEmpty()) {
+      // 记下的阻塞者全没了，车却还停着——停因和现实脱钩，下一步该查授权链而不是查占用。
+      return "recorded-blockers-all-cleared:0/" + recorded.size();
+    }
+    return "still-held:"
+        + describeBlockerShapes(stillHeld)
+        + ":"
+        + stillHeld.size()
+        + "/"
+        + recorded.size();
+  }
+
   static String describeBlockerShapes(java.util.Collection<OccupancyClaim> blockers) {
     if (blockers == null || blockers.isEmpty()) {
       return "no-blockers-listed";

@@ -2051,6 +2051,11 @@ public final class RuntimeDispatchService {
               + OccupancyClaimEvidence.summarizeResourceKeys(held$)
               + " blockedBy="
               + state.blockers()
+              // detail 是**入场时**存下的字符串；liveCause 是拿此刻的 claim 当场重算的。
+              // 两者分列、互不覆盖——detail 回答「最初为什么停」，liveCause 回答「现在为什么还停着」。
+              + " liveCause="
+              + OccupancyClaimEvidence.describeLiveStopCause(
+                  state.trainName(), state.blockers(), liveClaims)
               + " departureGateBlockedBy="
               + departureGateBlockedByText(state.trainName(), now)
               + " selfRetainReleaseCandidate="
