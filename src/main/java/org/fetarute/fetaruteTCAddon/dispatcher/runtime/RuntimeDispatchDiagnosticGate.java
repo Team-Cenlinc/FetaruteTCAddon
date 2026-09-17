@@ -364,6 +364,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // “每一辆停着的车在唤醒瞬间集体越过死锁/清理阈值”——若销毁兜底开着就是大规模删车。
           // 第二十二轮它不在名单上，于是全场 0 条，我无法区分“没触发”与“触发了但日志被砍”。
           // 体量受限于“真的冻了几次”，正常运行长期为 0。
+          // 站台分配的候选与结果。MT 折返终点 PPK 有两台加十字渡线，却是 4:1 的偏用；
+          // 而“2 号台很少空”与“它空着但分配器偏爱 1 号”要采取的下一步完全相反。
+          // 按 (spec, 候选数, 空闲数, 选中) 去重，受拓扑限制。
+          "DYNAMIC_PLATFORM_DECISION",
           "SMART_HEALTH_CLOCK_DISCONTINUITY",
           "SMART_RUNTIME_CLOCK_DISCONTINUITY",
           // 已在单线区内、出口在授权窗口外仍放行——那条放宽唯一的生效证据。

@@ -75,6 +75,10 @@ public final class DynamicPlatformAllocator {
   /** 列车改名时保护跨两个 owner key 的原子迁移，避免把并发容器本身作为 monitor。 */
   private final Object allocationMigrationLock = new Object();
 
+  /** 站台分配决策的去重键集合；受拓扑限制，不随车数增长。 */
+  private final java.util.Set<String> allocationDecisionReported =
+      java.util.concurrent.ConcurrentHashMap.newKeySet();
+
   @SuppressFBWarnings(
       value = "EI_EXPOSE_REP2",
       justification = "OccupancyManager 是运行时共享服务句柄；动态站台分配必须读取同一占用状态，不能复制。")
@@ -568,7 +572,7 @@ public final class DynamicPlatformAllocator {
     }
     ApproachCandidate chosen =
         selectBestCandidateByDirection(trainName, currentNode, travelDir, freeCandidates, graph);
-
+    traceAllocationDecision(spec, candidates, freeCandidates, chosen);
     return Optional.ofNullable(chosen != null ? chosen.nodeId : null);
   }
 
@@ -735,6 +739,45 @@ public final class DynamicPlatformAllocator {
       Objects.requireNonNull(spec, "spec");
       Objects.requireNonNull(allocatedNode, "allocatedNode");
     }
+  }
+
+  /**
+   * 记录一次站台分配的**候选与结果**。
+   *
+   * <p><b>为什么必须有这条</b>：第二十二轮实服里，MT 的折返终点 PPK 有两个站台与十字渡线， 但 {@code S:PPK:1} 与 {@code S:PPK:2} 的
+   * claim 提及比接近 <b>4:1</b>，而 RVS/PTK/SPB 三站都均衡。 问题是我无法判定原因：是 2 号台很少空闲（那就是容量真的满了）， 还是它空着而分配器仍然偏爱 1
+   * 号（那就是白白损失一半终端容量）。 <b>两者要采取的下一步完全相反。</b>
+   *
+   * <p>原有的 {@code DYNAMIC(approach) 方向优选} 只在候选 &gt; 1 时才打，而实服日志里它
+   * <b>一条都没有</b>——这同时兼容于“从来只有一个候选”与“被诊断预算砍掉了”。 所以这条无条件记录，并把**空闲候选数**一并写出来。
+   *
+   * <p>体量：按 (站点范围, 候选数, 空闲数, 选中股道) 去重，受拓扑限制，不随车数增长。
+   */
+  private void traceAllocationDecision(
+      DynamicSpec spec,
+      List<ApproachCandidate> candidates,
+      List<ApproachCandidate> freeCandidates,
+      ApproachCandidate chosen) {
+    if (spec == null || candidates == null || freeCandidates == null) {
+      return;
+    }
+    String chosenNode = chosen == null ? "-" : chosen.nodeId.value();
+    String key =
+        formatSpec(spec) + "|" + candidates.size() + "|" + freeCandidates.size() + "|" + chosenNode;
+    if (!allocationDecisionReported.add(key)) {
+      return;
+    }
+    debugLogger.accept(
+        "DYNAMIC_PLATFORM_DECISION spec="
+            + formatSpec(spec)
+            + " candidates="
+            + candidates.size()
+            + " free="
+            + freeCandidates.size()
+            + " chosen="
+            + chosenNode
+            + " freeNodes="
+            + freeCandidates.stream().map(c -> c.nodeId.value()).toList());
   }
 
   private ApproachCandidate selectBestCandidateByDirection(
