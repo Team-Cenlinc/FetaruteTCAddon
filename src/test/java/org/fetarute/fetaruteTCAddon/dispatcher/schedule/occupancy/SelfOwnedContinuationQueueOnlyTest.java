@@ -122,4 +122,51 @@ class SelfOwnedContinuationQueueOnlyTest {
         Map.of(),
         Optional.of(context));
   }
+
+  /**
+   * 相位是显式参数之后，两个语境的差别必须在同一个夹具下直接对照。
+   *
+   * <p>之前这是两个只差一个词的方法（{@code ...Presence} 与 {@code ...ClaimPresence}），
+   * 而那个词说不出“入区还是续行”。本仓库每一次单线区死锁都是同一个错： <b>拿入区该算的东西去判续行</b>。同一座桥上已经四轮复发。
+   *
+   * <p>钉的不是某个方法名，而是**同一份现场下两个相位必须得出相反的结论**。
+   */
+  @Test
+  void theTwoPhasesDisagreeOnQueuedTrainsAndThatIsTheWholePoint() {
+    SimpleOccupancyManager manager = manager();
+    assertTrue(manager.acquire(request("holder", CorridorDirection.B_TO_A)).allowed());
+    assertFalse(
+        manager.acquire(request("opposite", CorridorDirection.A_TO_B)).allowed(),
+        "前置：对向车被拒并排队（没有 claim，只有队列位）");
+
+    // 续行：持有者向前——排队者不算存在，放行。
+    assertTrue(
+        manager.canEnter(request("holder", CorridorDirection.B_TO_A)).allowed(), "续行相位：排队者不算外部存在");
+
+    // 入区：同一份现场、同一个资源，方向未知的新车——排队者算存在，拦下。
+    assertFalse(
+        manager.canEnter(request("newcomer", CorridorDirection.UNKNOWN)).allowed(),
+        "入区相位：同一个排队者必须算存在");
+  }
+
+  /**
+   * 相位参数真正承重的分支：持有者**方向未知**时的续行。
+   *
+   * <p>写上一条用例时我以为已经钉住了相位，变异验证证明没有：把续行路径改成 ENTRY 相位 它依然全绿。原因是方向**已知**时走的是 {@code
+   * oppositeSingleAhead} 那一支， {@code externalSinglePresence} 根本不参与判定——它只在 {@code directionsKnown ==
+   * false} 时承重。
+   *
+   * <p>所以这条用一个**方向未知**的持有者：它的路径能离开该区、前方无真实阻塞， 挡它的只有一个排队者——必须放行。用 ENTRY 相位就会把它锁死。
+   */
+  @Test
+  void anUnknownDirectionHolderIsNotBlockedByAQueuedTrain() {
+    SimpleOccupancyManager manager = manager();
+    assertTrue(
+        manager.acquire(request("holder", CorridorDirection.UNKNOWN)).allowed(), "前置：方向未知的车先持有该区");
+    assertFalse(
+        manager.acquire(request("queued", CorridorDirection.A_TO_B)).allowed(), "前置：第二辆车被拒并排队");
+
+    OccupancyDecision continuation = manager.canEnter(request("holder", CorridorDirection.UNKNOWN));
+    assertTrue(continuation.allowed(), () -> "方向未知的持有者只被排队者挡着 —— 必须放行续行：" + continuation.reason());
+  }
 }

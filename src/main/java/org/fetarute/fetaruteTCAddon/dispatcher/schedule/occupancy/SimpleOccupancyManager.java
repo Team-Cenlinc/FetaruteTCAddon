@@ -3445,7 +3445,7 @@ public final class SimpleOccupancyManager
     if (resolveCorridorDirection(request, resource).isPresent()) {
       return Optional.empty();
     }
-    if (!hasExternalSinglePresence(request, resource)) {
+    if (!hasExternalSinglePresence(request, resource, SingleRegionPhase.ENTRY)) {
       return Optional.empty();
     }
     return Optional.of(
@@ -3939,6 +3939,14 @@ public final class SimpleOccupancyManager
     return prefix + ":" + String.join(",", shapes);
   }
 
+  /** 单线区判据的两个语境。把它做成**显式参数**而不是靠作者记得， 因为本仓库每一次单线区死锁都是同一个错：**拿入区该算的东西去判续行**。 */
+  private enum SingleRegionPhase {
+    /** 请求者**还没进区**：队列里有别人是真的要让的。 */
+    ENTRY,
+    /** 请求者**已经持有该区**：排队者没进来，也进不来。 */
+    CONTINUATION
+  }
+
   private boolean isSingleCorridorConflict(OccupancyResource resource) {
     return resource != null
         && resource.kind() == ResourceKind.CONFLICT
@@ -4126,9 +4134,11 @@ public final class SimpleOccupancyManager
     // 被拒才在排队——方向锁就在本车手里，它不可能在本车离开前进来。
     // 把它算成“存在”的后果是硬死锁：持有者出不去 → 队列永远不清 → 排队者也永远进不来，
     // 两边都输。入区（failClosedUnknownSingleConflictEntry）仍然数队列，那里不能放宽。
-    boolean externalSinglePresence = hasExternalSingleClaimPresence(request, resource);
+    boolean externalSinglePresence =
+        hasExternalSinglePresence(request, resource, SingleRegionPhase.CONTINUATION);
     boolean oppositeSingleAhead =
-        directionsKnown && hasOppositeLiveSingleClaimPresence(request, resource, requested.get());
+        directionsKnown
+            && hasOppositeSinglePresenceForContinuation(request, resource, requested.get());
     traceSmartSelfOwnedContinuation(
         request,
         resource,
@@ -4572,46 +4582,48 @@ public final class SimpleOccupancyManager
   }
 
   /**
-   * 已在区内的车续行时的“外部存在”：**只数 claim，不数队列**。
+   * 单线区上“外部存在”的唯一入口。**相位必须显式给出**。
    *
-   * <p>与 {@link #hasExternalSinglePresence} 的差别只在队列那一半，而那一半在续行语境下是错的： {@code
-   * physicalOccupancyText(QUEUE_POSITION)} 与 {@code reservedAuthorityText(QUEUE_POSITION)} 都是
-   * {@code "false"}——排队者既没占着物理空间，也没有行车权，它正是因为被拒才在排队。
+   * <p>两个相位的差别只有一处：**排队者算不算存在**。而这正是本仓库反复弄错的地方： 同一座桥 {@code
+   * single:section:bridge:SWITCHER:587~SWITCHER:705} 上，第九、十、十二、十九轮 四次报同一个原因字符串，最后一次把整条 WS 线堵死 40
+   * 分钟、到站归零。
    *
-   * <p><b>代价是真实发生过的。</b>同一座桥 {@code single:section:bridge:SWITCHER:587~SWITCHER:705} 上：第九轮 {@code
-   * WS-LC-2269}、 第十轮 {@code WS-LC-2008}、第十二轮 {@code WS-LC-9344}，第十九轮 {@code WS-LC-4801}——
-   * 最后这次它持着该区、同方向、{@code pathExitsZone=true}、{@code externalBlockerAhead=false}， 而 {@code
-   * externalSinglePresenceOwner=queue-only}，结果掉头堵死整条 WS 线 40 分钟、到站归零。
-   * 那个诊断字段当初就是为了区分这两种而加的，它的注释写明：挡住一辆**已在区内**的车的 若只是个尚未进入的排队者，<b>那是缺陷</b>。
-   *
-   * <p>入区路径（{@link #failClosedUnknownSingleConflictEntry}）仍用包含队列的那个版本：
-   * 对一辆**还没进区**的车来说，队列里有别人是真的要让的。
+   * <p>以前这里是两个只差一个词的方法（{@code ...Presence} 与 {@code ...ClaimPresence}），
+   * 而那个词说不出“入区还是续行”。现在相位是参数，调用点必须写出自己是哪一种。
    */
-  private boolean hasExternalSingleClaimPresence(
-      OccupancyRequest request, OccupancyResource resource) {
-    if (request == null || resource == null) {
+  private boolean hasExternalSinglePresence(
+      OccupancyRequest request, OccupancyResource resource, SingleRegionPhase phase) {
+    if (request == null || resource == null || phase == null) {
       return false;
     }
     List<OccupancyClaim> existing = claims.get(resource);
-    if (existing == null) {
-      return false;
-    }
-    for (OccupancyClaim claim : existing) {
-      if (claim != null
-          && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
-        return true;
+    if (existing != null) {
+      for (OccupancyClaim claim : existing) {
+        if (claim != null
+            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+          return true;
+        }
       }
     }
-    return false;
+    if (phase == SingleRegionPhase.CONTINUATION) {
+      // 排队者根本没进区，而且方向锁就在本车手里，它不可能在本车离开前进来。
+      // 把它算成屏障的后果是硬死锁：持有者出不去 → 队列永远不清 → 排队者也永远进不来。
+      return false;
+    }
+    ConflictQueue queue = queues.get(resource);
+    return queue != null && !queue.isEmpty() && queue.hasAnyOtherTrain(request.trainName());
   }
 
   /**
-   * 已在区内的车续行时的“对向存在”：同样**只数 claim**。
+   * 已在区内的车续行时的“对向存在”：**只数 claim**。
    *
-   * <p>理由与 {@link #hasExternalSingleClaimPresence} 完全相同。一个对向的**排队者**拿不到行车权，
-   * 因为方向锁正在本车手里；把它当成对向屏障只会把两辆车一起锁死。
+   * <p>名字里写明相位，理由与 {@link #hasExternalSinglePresence} 完全相同：一个对向的**排队者**
+   * 拿不到行车权（方向锁正在本车手里），把它当成对向屏障只会把两辆车一起锁死。
+   *
+   * <p>不提供 ENTRY 分支：入区的对向判据不在本类（在 {@code
+   * RuntimeDispatchService.singleRegionOppositeOrUnknownExternalBarrier}）。写一个没人调的分支 只会变成下一个被误用的候选。
    */
-  private boolean hasOppositeLiveSingleClaimPresence(
+  private boolean hasOppositeSinglePresenceForContinuation(
       OccupancyRequest request, OccupancyResource resource, CorridorDirection requestedDirection) {
     List<OccupancyClaim> existing = claims.get(resource);
     if (existing == null) {
@@ -4633,23 +4645,6 @@ public final class SimpleOccupancyManager
       }
     }
     return false;
-  }
-
-  private boolean hasExternalSinglePresence(OccupancyRequest request, OccupancyResource resource) {
-    if (request == null || resource == null) {
-      return false;
-    }
-    List<OccupancyClaim> existing = claims.get(resource);
-    if (existing != null) {
-      for (OccupancyClaim claim : existing) {
-        if (claim != null
-            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
-          return true;
-        }
-      }
-    }
-    ConflictQueue queue = queues.get(resource);
-    return queue != null && !queue.isEmpty() && queue.hasAnyOtherTrain(request.trainName());
   }
 
   /**
