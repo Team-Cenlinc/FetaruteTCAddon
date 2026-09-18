@@ -63,6 +63,25 @@ public final class RuntimeSignalMonitor implements Runnable {
   /** "脱管"列车被判定为异常前需连续被观测到的 tick 次数。 */
   private static final int STALE_THRESHOLD_TICKS = 60;
 
+  /**
+   * 停车列车即使占用版本没动，也至少这么久重评估一次。
+   *
+   * <p>占用版本驱动（见 {@link #heldRecheckDue}）覆盖「阻塞者释放了」这一主因；这条节拍是兜底，
+   * 覆盖停因不由占用变化解除的情形（发车门控到期、折返停站结束、上游进度写入等）。
+   *
+   * <p>取值依据：实服第二十四轮，阻塞者清空后的空等时长中位 141 秒、健康监控兜底中位 182 秒。 只要这个节拍远小于那两个数，兜底就不再是唯一出路；而开销上界是明确的——
+   * 每辆**停着的**车每 5 秒一次完整 tick，与车队规模同阶，不随 tick 放大。
+   */
+  private static final Duration HELD_TRAIN_RECHECK_INTERVAL = Duration.ofSeconds(5);
+
+  /** 停车列车上一次完整重评估时看到的占用版本。 */
+  private final java.util.Map<String, Long> heldRecheckVersions =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 停车列车上一次完整重评估的时刻。 */
+  private final java.util.Map<String, Instant> heldRecheckAt =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   public RuntimeSignalMonitor(
       RuntimeDispatchService dispatchService,
       EtaRuntimeSampler etaSampler,
@@ -208,17 +227,101 @@ public final class RuntimeSignalMonitor implements Runnable {
   /**
    * 判断周期巡检是否需要进入完整 Movement Authority 流程。
    *
-   * <p>首次观测必须完成一次恢复授权；运动中列车仍需持续控制。稳定静止的列车已经在上一轮写入 STOP/queue 状态，重复构建进路不能创造新的
-   * authority，只会重做方向解析并重新触碰占用状态。它们应等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估。
+   * <p>首次观测必须完成一次恢复授权；运动中列车仍需持续控制。稳定静止的列车已经在上一轮写入 STOP/queue 状态，重复构建进路**通常**不能创造新的
+   * authority，只会重做方向解析并重新触碰占用状态。
+   *
+   * <p><b>但「通常」不是「总是」，这里曾经漏掉了最要紧的一类。</b>原注释说静止列车 「应等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估」——实服 2026-09-17
+   * 第二十四轮证明这三个触发里**只有健康恢复真实存在**：{@code RuntimeStopState.retryTrigger()} 的值里写着 {@code
+   * PERIODIC_RECHECK}，而它全仓只被读两处（一条日志行、一个命令行展示）， 从不驱动任何重检；也没有任何「占用变化 → 重新评估」的监听。
+   *
+   * <p>后果是整个调度实际靠超时兜底运转：{@code PROGRESS_STUCK} 一轮触发 245 次、中位 182 秒。 同一轮 {@code
+   * PROTECTIVE_RETAIN_HOLD} 里 74.2% 的车「记下的阻塞者已全部消失」， 阻塞清空后仍空等中位 141 秒。**阻塞者已经释放时，重新构建进路恰恰能创造新的
+   * authority。**
+   *
+   * <p>因此补上第四个条件 {@code heldRecheckDue}（见 {@link #heldRecheckDue}）： 它不放宽任何判据，{@code
+   * canEnter}、终局授权校验、单线硬屏障一个不动， 只是让这些门在停车列车身上**被执行到**。
    *
    * @param previouslyMoving 上一次成功观测到的物理运动状态；首次为 {@code null}
    * @param currentlyMoving 本次物理运动状态
+   * @param heldRecheckDue 该车处于停车态且已到重评估条件（占用版本变化或兜底节拍到期）
    * @return 是否应执行完整信号与授权处理
    */
-  static boolean shouldRunFullSignalTick(Boolean previouslyMoving, boolean currentlyMoving) {
+  /**
+   * 判断一辆**停车中**的列车此刻是否该再走一次完整信号与授权流程。
+   *
+   * <p>两条触发，缺一不可地互补：
+   *
+   * <ol>
+   *   <li><b>占用版本变化</b>——主因。阻塞者释放时版本必然推进，于是「等资源释放」这句话 第一次真的有人执行。用版本而不是事件是有意的：本项目的事件流已被证明不完备 （{@code
+   *       SMART_RESOURCE_LIFECYCLE} 在某些移除路径上不发 release），版本号不会漏。
+   *   <li><b>兜底节拍</b>——{@link #HELD_TRAIN_RECHECK_INTERVAL}。覆盖停因不由占用变化解除的
+   *       情形（发车门控到期、折返停站结束等）。没有它，只靠事件驱动会留下同一个洞。
+   * </ol>
+   *
+   * <p>不在停车态的列车一律返回 {@code false}——正常行驶的判据完全不受影响， 静止且无停因的车（入库、待命）也不会被这条路径唤醒，开销上界仍是「停着的车数 × 节拍」。
+   *
+   * @param trainName 持久化的运行时列车名
+   * @param now 本次观测时刻
+   * @return 是否应为这辆停车列车执行一次完整重评估
+   */
+  private boolean heldRecheckDue(String trainName, Instant now) {
+    if (trainName == null || trainName.isBlank() || now == null) {
+      return false;
+    }
+    java.util.OptionalLong held = dispatchService.heldTrainOccupancyVersion(trainName);
+    if (held.isEmpty()) {
+      // 没有停因就没有要重评估的东西；顺手让状态随车收敛，不必等周期清理。
+      heldRecheckVersions.remove(trainName);
+      heldRecheckAt.remove(trainName);
+      return false;
+    }
+    long version = held.getAsLong();
+    boolean due =
+        heldRecheckDue(
+            heldRecheckVersions.get(trainName),
+            heldRecheckAt.get(trainName),
+            version,
+            now,
+            HELD_TRAIN_RECHECK_INTERVAL);
+    if (due) {
+      heldRecheckVersions.put(trainName, version);
+      heldRecheckAt.put(trainName, now);
+    }
+    return due;
+  }
+
+  /**
+   * 「这辆停车列车该不该重评估」的纯判据。
+   *
+   * <p>拆成纯函数是为了能单独钉住策略本身：实例侧那一半只做 map 读写， 而这里的三条分支各自对应一个真实成因，漏掉任何一条都会退回到「只能等 182 秒兜底」。
+   *
+   * @param lastVersion 上次重评估时看到的占用版本；从未评估过为 {@code null}
+   * @param lastAt 上次重评估时刻；从未评估过为 {@code null}
+   * @param version 当前占用版本
+   * @param now 当前时刻
+   * @param interval 兜底节拍
+   * @return 是否应重评估
+   */
+  static boolean heldRecheckDue(
+      Long lastVersion, Instant lastAt, long version, Instant now, Duration interval) {
+    // 首次见到这辆停车列车：必须评估一次，否则它要等到版本变化才有第一次机会。
+    if (lastVersion == null || lastAt == null) {
+      return true;
+    }
+    // 主因：占用版本推进 ⇒ 有 claim 变动过，「等资源释放」这句话在这里兑现。
+    if (lastVersion.longValue() != version) {
+      return true;
+    }
+    // 兜底：停因不由占用变化解除的情形（发车门控到期、折返停站结束等）。
+    return !now.isBefore(lastAt.plus(interval));
+  }
+
+  static boolean shouldRunFullSignalTick(
+      Boolean previouslyMoving, boolean currentlyMoving, boolean heldRecheckDue) {
     return previouslyMoving == null
         || currentlyMoving
-        || previouslyMoving.booleanValue() != currentlyMoving;
+        || previouslyMoving.booleanValue() != currentlyMoving
+        || heldRecheckDue;
   }
 
   /** 收集一份不会在预算续跑期间被新到列车替换的巡检候选快照。 */
@@ -276,6 +379,8 @@ public final class RuntimeSignalMonitor implements Runnable {
     dispatchService.cleanupOrphanOccupancyClaims(activeTrainNames);
     cleanupSnapshotStore(activeTrainNames);
     staleTrainTicks.keySet().removeIf(name -> !activeTrainNames.contains(name));
+    heldRecheckVersions.keySet().removeIf(name -> !activeTrainNames.contains(name));
+    heldRecheckAt.keySet().removeIf(name -> !activeTrainNames.contains(name));
     if (dwellRegistry != null) {
       dwellRegistry.retain(activeTrainNames);
     }
@@ -358,12 +463,15 @@ public final class RuntimeSignalMonitor implements Runnable {
     String trainName = candidate.trainName();
     boolean currentlyMoving = group.isMoving();
     Boolean previouslyMoving = lastObservedMovementByGroup.get(group);
-    if (shouldRunFullSignalTick(previouslyMoving, currentlyMoving)) {
+    // 停车态要按**持久化的运行时名**去查（停因就是按它记的），所以名字解析必须提前到判据之前。
+    // 这个解析是 static 且只读一个 tag，没有副作用，提前无代价。
+    String runtimeOwnerName = resolvePersistedRuntimeOwnerName(group, trainName);
+    if (shouldRunFullSignalTick(
+        previouslyMoving, currentlyMoving, heldRecheckDue(runtimeOwnerName, now))) {
       dispatchService.handleSignalTick(group);
       currentlyMoving = group.isMoving();
     }
     lastObservedMovementByGroup.put(group, currentlyMoving);
-    String runtimeOwnerName = resolvePersistedRuntimeOwnerName(group, trainName);
     if (runtimeOwnerName != null && !runtimeOwnerName.isBlank()) {
       detectStaleFtaTrain(group, runtimeOwnerName);
     }

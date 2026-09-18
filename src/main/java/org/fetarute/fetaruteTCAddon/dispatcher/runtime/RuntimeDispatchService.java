@@ -4648,6 +4648,34 @@ public final class RuntimeDispatchService {
    * @param trainName 请求发布信号的列车
    * @return 仍然阻塞时的稳定诊断文本；空值表示无须保留该 occupancy STOP
    */
+  /**
+   * 处于停车态的列车此刻对应的占用版本；不在停车态时返回空。
+   *
+   * <p>给周期巡检器判断「这辆停着的车要不要再评估一次」。{@link RuntimeSignalMonitor} 原本对 「刚才停、现在还停」的列车整个跳过完整信号
+   * tick，理由写在那个判据的注释里：停车列车 「应等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估」。
+   *
+   * <p>实服 2026-09-17 第二十四轮证明那三个补偿触发里**只有健康恢复真实存在**： {@code RuntimeStopState.retryTrigger()}（值里写着
+   * {@code PERIODIC_RECHECK}）全仓只被读两处—— 一条日志行和一个命令行展示，从不驱动任何重检；也没有任何「占用变化 → 重新评估」的监听。
+   * 于是停车列车实际只能等健康监控的 {@code PROGRESS_STUCK} 兜底，本轮触发 245 次、中位 182 秒。 而那一轮 {@code
+   * PROTECTIVE_RETAIN_HOLD} 里 74.2% 的车「记下的阻塞者已全部消失」， 清空后仍空等中位 141 秒——注释的前提「重复构建进路不能创造新的 authority」
+   * 在阻塞者已释放时恰恰不成立，而那正是绝大多数情形。
+   *
+   * <p>用**版本**而不是事件来驱动是有意的：本项目的事件流已被证明不完备 （{@code SMART_RESOURCE_LIFECYCLE} 在某些移除路径上不发 release），
+   * 而版本号在任何 claim 变更时都会推进，不会漏。
+   *
+   * <p>这里只回答「是否在停车态」与「当前版本」，节拍与去重留在巡检器侧： 判据不放宽任何门，只是让既有的门被执行到。
+   *
+   * @param trainName 列车名
+   * @return 在停车态时为当前占用版本，否则为空
+   */
+  public java.util.OptionalLong heldTrainOccupancyVersion(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty() || !activeStopStates.containsKey(key)) {
+      return java.util.OptionalLong.empty();
+    }
+    return java.util.OptionalLong.of(occupancyVersion());
+  }
+
   private Optional<String> activeOccupancyStopBlockerStillHeld(String trainName) {
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty()) {
