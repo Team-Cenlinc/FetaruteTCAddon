@@ -75,6 +75,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
   private final ConcurrentMap<TripKey, String> claims = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, DutyProgress> dutyProgress = new ConcurrentHashMap<>();
 
+  /** 列车 → 它属于哪个交路（哪份表、哪个 duty、哪一天）。出库票实体化时或首次绑定车次时建立。 */
+  private final ConcurrentMap<String, DutyKey> dutyBindings = new ConcurrentHashMap<>();
+
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
@@ -259,6 +262,101 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return false;
   }
 
+  /**
+   * 这辆待命车能不能接这张票。
+   *
+   * <p>票据认识 duty 之后，"接班"才有了硬定义：一个 duty 的第 N+1 班只能由跑完第 N 班的那辆车来接。 否则一张票会抓走终点上任何一辆顺手的车，
+   * 把别的交路的车拐跑，那条交路后面的班次就开了天窗——而时刻表侧看不出原因。
+   *
+   * <ul>
+   *   <li>车已经绑在某个交路上：只接同一交路的票。
+   *   <li>车没绑交路（刚出库、或自由运行）：可以接交路的首班和回库票，不能接续班——续班要等的是本交路那辆车，晚点就晚点跑。
+   * </ul>
+   *
+   * @param intent 票据的交路意图
+   * @param trainName 候选列车
+   * @return 允许返回 true；未启用按表运行时恒为 true
+   */
+  public boolean acceptsVehicle(TicketIntent intent, String trainName) {
+    Settings current = settings;
+    if (!current.enabled() || intent == null) {
+      return true;
+    }
+    String key = keyOf(trainName);
+    if (key == null) {
+      return true;
+    }
+    DutyKey bound = dutyBindings.get(key);
+    if (bound != null) {
+      if (bound.equals(intent.key())) {
+        return true;
+      }
+      debugLogger.accept(
+          "TIMETABLE_CANDIDATE_REJECT train="
+              + trainName
+              + " boundDuty="
+              + bound.describe()
+              + " ticketDuty="
+              + intent.key().describe()
+              + " reason=other-duty");
+      return false;
+    }
+    boolean continuation = intent.kind() == RouteOperationType.OPERATION && intent.tripIndex() > 0;
+    if (!continuation) {
+      return true;
+    }
+    debugLogger.accept(
+        "TIMETABLE_CANDIDATE_REJECT train="
+            + trainName
+            + " ticketDuty="
+            + intent.key().describe()
+            + " tripIndex="
+            + intent.tripIndex()
+            + " reason=unbound-cannot-continue-duty");
+    return false;
+  }
+
+  /**
+   * 把一辆车绑到某个交路上。
+   *
+   * <p>两个入口：出库票实体化了一辆车（发车侧回调）；列车在门控上首次绑定到带 duty 的车次。 已经绑在别的交路上时不覆盖——那是一辆被错派的车，覆盖只会把错误藏起来。
+   */
+  public void bindDuty(String trainName, DutyKey duty, String reason) {
+    if (!settings.enabled() || duty == null) {
+      return;
+    }
+    String key = keyOf(trainName);
+    if (key == null) {
+      return;
+    }
+    DutyKey previous = dutyBindings.putIfAbsent(key, duty);
+    if (previous == null) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_BOUND train="
+              + trainName
+              + " duty="
+              + duty.describe()
+              + " reason="
+              + reason);
+    } else if (!previous.equals(duty)) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_BIND_CONFLICT train="
+              + trainName
+              + " bound="
+              + previous.describe()
+              + " requested="
+              + duty.describe()
+              + " reason="
+              + reason);
+    }
+  }
+
+  /** 查询某辆车绑在哪个交路上。 */
+  public Optional<DutyKey> dutyBindingOf(String trainName) {
+    String key = keyOf(trainName);
+    return key == null ? Optional.empty() : Optional.ofNullable(dutyBindings.get(key));
+  }
+
   /** 查询某辆车当前的车次绑定。 */
   public Optional<TimetableAssignment> assignmentOf(String trainName) {
     String key = keyOf(trainName);
@@ -295,6 +393,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
     }
     dutyProgress.keySet().retainAll(keep);
+    dutyBindings.keySet().retainAll(keep);
   }
 
   /** 列车离开运行时管辖时释放绑定与交路进度。 */
@@ -304,6 +403,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return;
     }
     releaseAssignment(key, reason);
+    dutyBindings.remove(key);
     DutyProgress removed = dutyProgress.remove(key);
     if (removed != null) {
       debugLogger.accept(
@@ -529,6 +629,16 @@ public final class TimetableService implements ScheduledDeparturePlan {
             best.deviationSeconds());
     assignments.put(key, assignment);
     startOrAdvanceDuty(key, best.timetable(), best.trip());
+    Candidate chosen = best;
+    chosen
+        .trip()
+        .dutyId()
+        .ifPresent(
+            dutyId ->
+                bindDuty(
+                    event.trainName(),
+                    new DutyKey(chosen.timetable().id(), dutyId, chosen.serviceDate()),
+                    "trip-assigned"));
     debugLogger.accept(
         "TIMETABLE_ASSIGN train="
             + event.trainName()
@@ -599,7 +709,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   private void clearAssignments(String reason) {
-    if (assignments.isEmpty() && dutyProgress.isEmpty()) {
+    if (assignments.isEmpty() && dutyProgress.isEmpty() && dutyBindings.isEmpty()) {
       claims.clear();
       return;
     }
@@ -607,6 +717,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     assignments.clear();
     claims.clear();
     dutyProgress.clear();
+    dutyBindings.clear();
     debugLogger.accept("TIMETABLE_CLEAR assignments=" + size + " reason=" + reason);
   }
 
@@ -618,6 +729,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
         dutyProgress.remove(entry.getKey());
       }
     }
+    dutyBindings
+        .entrySet()
+        .removeIf(entry -> !next.byId().containsKey(entry.getValue().timetableId()));
   }
 
   private static String keyOf(String trainName) {
@@ -731,6 +845,54 @@ public final class TimetableService implements ScheduledDeparturePlan {
     /** 供票据 serviceTripId 与日志使用的稳定标识。 */
     public String code() {
       return duty.dutyCode() + "-" + kind.name();
+    }
+  }
+
+  /**
+   * 一个交路在某一天的身份。
+   *
+   * @param timetableId 所属时刻表
+   * @param dutyId 交路
+   * @param serviceDate 服务日期
+   */
+  public record DutyKey(UUID timetableId, UUID dutyId, LocalDate serviceDate) {
+    public DutyKey {
+      Objects.requireNonNull(timetableId, "timetableId");
+      Objects.requireNonNull(dutyId, "dutyId");
+      Objects.requireNonNull(serviceDate, "serviceDate");
+    }
+
+    /** 日志用简述。 */
+    public String describe() {
+      return dutyId + "@" + serviceDate;
+    }
+  }
+
+  /**
+   * 一张表定票据的交路意图：它属于哪个交路、是哪一种票、是第几班。
+   *
+   * @param timetableId 所属时刻表
+   * @param dutyId 交路
+   * @param serviceDate 服务日期
+   * @param kind CREATE / OPERATION / RETURN
+   * @param tripIndex 运营票在交路里的序号（0 为首班）；走行票为 0
+   */
+  public record TicketIntent(
+      UUID timetableId,
+      UUID dutyId,
+      LocalDate serviceDate,
+      RouteOperationType kind,
+      int tripIndex) {
+    public TicketIntent {
+      Objects.requireNonNull(timetableId, "timetableId");
+      Objects.requireNonNull(dutyId, "dutyId");
+      Objects.requireNonNull(serviceDate, "serviceDate");
+      kind = kind == null ? RouteOperationType.OPERATION : kind;
+      tripIndex = Math.max(0, tripIndex);
+    }
+
+    public DutyKey key() {
+      return new DutyKey(timetableId, dutyId, serviceDate);
     }
   }
 

@@ -352,6 +352,88 @@ class TimetableServiceTest {
   }
 
   /**
+   * 接班只能接本交路的车：绑在别的交路上的车不接；没绑交路的车能接首班和回库票，不能接续班。
+   *
+   * <p>这条规则是"接班没车就等，不新出库、不抓别人的车"在判定层的形态。
+   */
+  @Test
+  void continuationTicketsOnlyAcceptTheirOwnDutyVehicle() {
+    Timetable timetable = timetable(TimetableStatus.PUBLISHED);
+    TimetableService service = service(true, timetable);
+    UUID duty = timetable.duties().get(0).id();
+    java.time.LocalDate day = java.time.LocalDate.of(2026, 3, 2);
+    TimetableService.DutyKey mine = new TimetableService.DutyKey(TIMETABLE, duty, day);
+    TimetableService.DutyKey other =
+        new TimetableService.DutyKey(TIMETABLE, UUID.randomUUID(), day);
+    TimetableService.TicketIntent firstTrip =
+        new TimetableService.TicketIntent(TIMETABLE, duty, day, RouteOperationType.OPERATION, 0);
+    TimetableService.TicketIntent secondTrip =
+        new TimetableService.TicketIntent(TIMETABLE, duty, day, RouteOperationType.OPERATION, 1);
+    TimetableService.TicketIntent ret =
+        new TimetableService.TicketIntent(TIMETABLE, duty, day, RouteOperationType.RETURN, 0);
+
+    service.bindDuty("train-mine", mine, "test");
+    service.bindDuty("train-other", other, "test");
+
+    assertTrue(service.acceptsVehicle(firstTrip, "train-mine"));
+    assertTrue(service.acceptsVehicle(secondTrip, "train-mine"));
+    assertTrue(service.acceptsVehicle(ret, "train-mine"));
+    assertFalse(service.acceptsVehicle(firstTrip, "train-other"), "别的交路的车不能被拐走");
+    assertFalse(service.acceptsVehicle(secondTrip, "train-other"));
+    assertTrue(service.acceptsVehicle(firstTrip, "train-free"), "没绑交路的车可以接首班");
+    assertFalse(service.acceptsVehicle(secondTrip, "train-free"), "续班要等本交路的车，不能凭空接");
+    assertTrue(service.acceptsVehicle(ret, "train-free"), "没绑交路的车可以被回库票带走");
+  }
+
+  /** 门控上首次绑定到带 duty 的车次时，车也随之绑到交路上；下线后解绑。 */
+  @Test
+  void tripAssignmentBindsTheTrainToItsDuty() {
+    Timetable timetable = timetable(TimetableStatus.PUBLISHED);
+    TimetableService service = service(true, timetable);
+    UUID duty = timetable.duties().get(0).id();
+
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+
+    assertEquals(
+        Optional.of(
+            new TimetableService.DutyKey(TIMETABLE, duty, java.time.LocalDate.of(2026, 3, 2))),
+        service.dutyBindingOf("train-A"));
+    service.release("train-A", "destroyed");
+    assertTrue(service.dutyBindingOf("train-A").isEmpty());
+  }
+
+  /** 已经绑在一个交路上的车不会被另一次绑定覆盖：错派的车要暴露出来，不是藏起来。 */
+  @Test
+  void bindingDoesNotOverwriteAnExistingDuty() {
+    TimetableService service = service(true, timetable(TimetableStatus.PUBLISHED));
+    java.time.LocalDate day = java.time.LocalDate.of(2026, 3, 2);
+    TimetableService.DutyKey first =
+        new TimetableService.DutyKey(TIMETABLE, UUID.randomUUID(), day);
+    TimetableService.DutyKey second =
+        new TimetableService.DutyKey(TIMETABLE, UUID.randomUUID(), day);
+
+    service.bindDuty("train-A", first, "create");
+    service.bindDuty("train-A", second, "create-again");
+
+    assertEquals(Optional.of(first), service.dutyBindingOf("train-A"));
+  }
+
+  /** 未启用按表运行时判定完全透明。 */
+  @Test
+  void vehicleAcceptanceIsTransparentWhenDisabled() {
+    TimetableService service = service(false, timetable(TimetableStatus.PUBLISHED));
+    TimetableService.TicketIntent intent =
+        new TimetableService.TicketIntent(
+            TIMETABLE,
+            UUID.randomUUID(),
+            java.time.LocalDate.of(2026, 3, 2),
+            RouteOperationType.OPERATION,
+            3);
+
+    assertTrue(service.acceptsVehicle(intent, "anything"));
+  }
+
+  /**
    * 运行到服务窗口结束之后，受管辖列车数必须能降到 0。
    *
    * <p>逐趟推进整份时刻表，每辆车跑完自己的交路后复用即被否决；最后把所有车下线，绑定与交路进度应当清空。 这条断言回答的是"服务结束后网上还会不会留着车"。
