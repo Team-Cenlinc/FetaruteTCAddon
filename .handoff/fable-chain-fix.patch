@@ -1,0 +1,112 @@
+diff --git a/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitor.java b/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitor.java
+index c0bb1b8..14f7696 100644
+--- a/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitor.java
++++ b/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitor.java
+@@ -3079,7 +3079,13 @@ public final class TrainHealthMonitor {
+     RuntimeDispatchService.SmartRecoveryEffectiveness effectiveness = result.effectiveness();
+     String resolvedConflict = safeConflictKey(conflictKey, effectiveness);
+     String key = safeCandidateFailureKey(trainName, result.decision(), resolvedConflict);
+-    if (effectiveness.effective()) {
++    // "有效"必须是**测量**出来的。5 参构造器的 legacy 默认只是"applied ⇒ effective"的假定：
++    // 第二十六轮实服 SMART_PHYSICAL_EDGE_RETAIN_RELEASED 335 次里 98% 是同一辆车反复释放
++    // 同一组资源（下一 tick 就被重新拿回），每次都在这里被当成有效、把失败计数清零，
++    // 于是链永远停在第一步，割排队位那一步一次都没轮到。未测量 ≠ 有效，按 fail-closed 计数。
++    if (effectiveness.effective()
++        && !RuntimeDispatchService.SmartRecoveryEffectiveness.ASSUMED_EFFECTIVE_REASON.equals(
++            effectiveness.reason())) {
+       safeCandidateFailureCounts.remove(key);
+       if (destroyContext) {
+         debugLogger.accept(
+@@ -3092,7 +3098,12 @@ public final class TrainHealthMonitor {
+       }
+       return true;
+     }
+-    return countSafeCandidateFailure(trainName, conflictKey, result, destroyContext, "ineffective");
++    return countSafeCandidateFailure(
++        trainName,
++        conflictKey,
++        result,
++        destroyContext,
++        effectiveness.effective() ? "assumed-effective" : "ineffective");
+   }
+ 
+   /**
+diff --git a/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/runtime/RuntimeDispatchService.java b/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/runtime/RuntimeDispatchService.java
+index c5728f7..88a7985 100644
+--- a/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/runtime/RuntimeDispatchService.java
++++ b/src/main/java/org/fetarute/fetaruteTCAddon/dispatcher/runtime/RuntimeDispatchService.java
+@@ -9564,6 +9564,9 @@ public final class RuntimeDispatchService {
+       boolean sameStopReason,
+       String reason) {
+ 
++    /** 5 参构造器给出的"applied ⇒ effective"只是假定，不是测量；链执行器必须能把两者区分开。 */
++    public static final String ASSUMED_EFFECTIVE_REASON = "legacy-result-assumed-effective";
++
+     public SmartRecoveryEffectiveness {
+       action = action == null || action.isBlank() ? "SMART_RECOVERY_SKIPPED" : action.trim();
+       conflictKey = conflictKey == null || conflictKey.isBlank() ? "-" : conflictKey.trim();
+@@ -9588,7 +9591,7 @@ public final class RuntimeDispatchService {
+           false,
+           false,
+           false,
+-          applied ? "legacy-result-assumed-effective" : "not-applied");
++          applied ? ASSUMED_EFFECTIVE_REASON : "not-applied");
+     }
+   }
+ 
+diff --git a/src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitorTest.java b/src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitorTest.java
+index 2915f85..2c0f4b2 100644
+--- a/src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitorTest.java
++++ b/src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/health/TrainHealthMonitorTest.java
+@@ -3014,6 +3014,51 @@ class TrainHealthMonitorTest {
+    * <p>旧逻辑里 {@code !result.applied()} 是<b>无条件</b> {@code return true}，且不计数；
+    * 而“落地了但无效”反而有计数放行机制。于是更弱的失败形式反而享受无限期优先权。
+    */
++  /**
++   * [AB-fable] 第一步动作每次都「落地」、但 effectiveness 只是 legacy 假定（applied ⇒ effective），
++   * 而现场里那份释放下一 tick 就被重新拿回——第二十六轮 SMART_PHYSICAL_EDGE_RETAIN_RELEASED
++   * 335 次里 98% 是重复释放同一组资源。链不得因此永远停在第一步。
++   */
++  @Test
++  void assumedEffectiveButRepeatingCandidateMustNotStarveLaterRecoveryActions() {
++    RuntimeDispatchService.SmartRecoveryInput input =
++        smartRecoveryInput("train1", SignalAspect.STOP, true, "queue-position-inversion");
++    when(dispatchService.getTrainState("train1"))
++        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
++    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
++        .thenReturn(input);
++    // 第一个动作：每次都 applied=true，effectiveness 走 5 参构造器的 legacy 默认（假定有效）。
++    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(input))
++        .thenReturn(
++            new RuntimeDispatchService.SmartRecoveryActionResult(
++                true,
++                true,
++                "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
++                "physical-edge-retain-released:2",
++                org.fetarute
++                    .fetaruteTCAddon
++                    .dispatcher
++                    .runtime
++                    .supervisor
++                    .DispatchEffectClass
++                    .OCCUPANCY_MUTATION));
++    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
++    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
++
++    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
++    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
++    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
++
++    Instant t0 = Instant.now();
++    monitor.check(Set.of("train1"), t0);
++    // 车始终没动（state 的 index 恒为 0），同一个动作每次都"成功"。
++    for (int i = 1; i <= 6; i++) {
++      monitor.check(Set.of("train1"), t0.plusSeconds(65L + i * 30L));
++    }
++
++    verify(dispatchService, atLeastOnce()).applySmartQueuePositionYield(input);
++  }
++
+   @Test
+   void neverAppliedCandidateMustNotStarveLaterRecoveryActions() {
+     RuntimeDispatchService.SmartRecoveryInput input =

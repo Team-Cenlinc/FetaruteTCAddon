@@ -322,6 +322,9 @@ public final class TrainHealthMonitor {
   /** safe recovery 候选有效性失败计数，key=train/action/conflict。 */
   private final Map<String, Integer> safeCandidateFailureCounts = new ConcurrentHashMap<>();
 
+  /** 上一次为该 (train, action, conflict) 打印的失败计数签名；只在变化时再印。 */
+  private final Map<String, String> safeCandidateFailureReported = new ConcurrentHashMap<>();
+
   public TrainHealthMonitor(
       RuntimeDispatchService dispatchService,
       DwellRegistry dwellRegistry,
@@ -3079,8 +3082,23 @@ public final class TrainHealthMonitor {
     RuntimeDispatchService.SmartRecoveryEffectiveness effectiveness = result.effectiveness();
     String resolvedConflict = safeConflictKey(conflictKey, effectiveness);
     String key = safeCandidateFailureKey(trainName, result.decision(), resolvedConflict);
-    if (effectiveness.effective()) {
+    // "有效"必须是**测量**出来的。5 参构造器的 legacy 默认只是"applied ⇒ effective"的假定：
+    // 第二十六轮实服 SMART_PHYSICAL_EDGE_RETAIN_RELEASED 335 次里 98% 是同一辆车反复释放
+    // 同一组资源（下一 tick 就被重新拿回），每次都在这里被当成有效、把失败计数清零，
+    // 于是链永远停在第一步，割排队位那一步一次都没轮到。未测量 ≠ 有效，按 fail-closed 计数。
+    //
+    // **但这个判据同时服务两件性质相反的事，必须按上下文分开：**
+    //   destroyContext=false —— 恢复链要不要继续往下走。这里"假定有效"必须计数，否则链停在第一步。
+    //   destroyContext=true  —— 要不要**跳过销毁**。这里必须继续挡住：本项目的既定目标是
+    //                           解锁疏通而不是超时删车（deadlock-destroy / stuck-cleanup 长期为 false）。
+    // 若不分开，同一个改动会把销毁门槛从"永远够不到"降成"两次尝试"——链修好了，
+    // 却顺手改了安全姿态，而那是两个独立的决定。
+    boolean assumedEffectiveOnly =
+        RuntimeDispatchService.SmartRecoveryEffectiveness.ASSUMED_EFFECTIVE_REASON.equals(
+            effectiveness.reason());
+    if (effectiveness.effective() && (destroyContext || !assumedEffectiveOnly)) {
       safeCandidateFailureCounts.remove(key);
+      safeCandidateFailureReported.remove(key);
       if (destroyContext) {
         debugLogger.accept(
             "SMART_DESTROY_NOT_REACHED_SAFE_UNLOCK_EFFECTIVE train="
@@ -3092,7 +3110,12 @@ public final class TrainHealthMonitor {
       }
       return true;
     }
-    return countSafeCandidateFailure(trainName, conflictKey, result, destroyContext, "ineffective");
+    return countSafeCandidateFailure(
+        trainName,
+        conflictKey,
+        result,
+        destroyContext,
+        assumedEffectiveOnly ? "assumed-effective" : "ineffective");
   }
 
   /**
@@ -3116,17 +3139,23 @@ public final class TrainHealthMonitor {
             1,
             (oldValue, increment) ->
                 Math.min(SAFE_CANDIDATE_FAILURE_THRESHOLD, oldValue + increment));
-    debugLogger.accept(
-        "SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT train="
-            + trainName
-            + " action="
-            + result.decision()
-            + " conflictKey="
-            + resolvedConflict
-            + " failureKind="
-            + failureKind
-            + " count="
-            + count);
+    // 这条已进诊断必留名单（它是"链为什么没停在第一步"的唯一证据）。计数在阈值处饱和，
+    // 之后每次尝试都会再走到这里；按 (train, action, conflict, kind, count) 去重，
+    // 同一辆车只在计数或失败形态变化时再印，体量不随恢复尝试放大。
+    String signature = key + "|" + failureKind + "|" + count;
+    if (!signature.equals(safeCandidateFailureReported.put(key, signature))) {
+      debugLogger.accept(
+          "SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT train="
+              + trainName
+              + " action="
+              + result.decision()
+              + " conflictKey="
+              + resolvedConflict
+              + " failureKind="
+              + failureKind
+              + " count="
+              + count);
+    }
     if (destroyContext) {
       debugLogger.accept(
           "SMART_DESTROY_NOT_REACHED_SAFE_UNLOCK_INEFFECTIVE_CONTINUING train="

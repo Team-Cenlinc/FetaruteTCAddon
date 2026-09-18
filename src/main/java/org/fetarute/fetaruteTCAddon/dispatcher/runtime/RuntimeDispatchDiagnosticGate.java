@@ -367,6 +367,12 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // “跑了但默默拒了”无法区分——而两者要采取的下一步完全相反。
           // 体量：生产端按 (train, reason) 去重，不随 tick 放大。
           "SMART_QUEUE_POSITION_YIELD_SKIPPED",
+          // 恢复链"为什么没有停在第一步"的唯一证据。第二十六轮 Phase 4 释放 335 次里 98% 是
+          // 同一辆车反复释放同一组资源（下一 tick 被重新拿回），每次都被当成 effective 把计数清零，
+          // 割排队位那一步一次都没轮到；修法是把"假定有效"也计数，而这条就是计数的留痕。
+          // 它当时不在名单上，全轮 0 行——修好与否在日志里根本答不出。
+          // 体量：生产端按 (train, action, conflict, failureKind, count) 去重，计数在 2 饱和后不再印。
+          "SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT",
           // 时钟跳变补偿的唯一生效证据。笔记本合盖是**常规操作**，而这条补偿拦的是
           // “每一辆停着的车在唤醒瞬间集体越过死锁/清理阈值”——若销毁兜底开着就是大规模删车。
           // 第二十二轮它不在名单上，于是全场 0 条，我无法区分“没触发”与“触发了但日志被砍”。

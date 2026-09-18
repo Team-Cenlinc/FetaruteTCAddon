@@ -9564,6 +9564,9 @@ public final class RuntimeDispatchService {
       boolean sameStopReason,
       String reason) {
 
+    /** 5 参构造器给出的"applied ⇒ effective"只是假定，不是测量；链执行器必须能把两者区分开。 */
+    public static final String ASSUMED_EFFECTIVE_REASON = "legacy-result-assumed-effective";
+
     public SmartRecoveryEffectiveness {
       action = action == null || action.isBlank() ? "SMART_RECOVERY_SKIPPED" : action.trim();
       conflictKey = conflictKey == null || conflictKey.isBlank() ? "-" : conflictKey.trim();
@@ -9588,7 +9591,7 @@ public final class RuntimeDispatchService {
           false,
           false,
           false,
-          applied ? "legacy-result-assumed-effective" : "not-applied");
+          applied ? ASSUMED_EFFECTIVE_REASON : "not-applied");
     }
   }
 

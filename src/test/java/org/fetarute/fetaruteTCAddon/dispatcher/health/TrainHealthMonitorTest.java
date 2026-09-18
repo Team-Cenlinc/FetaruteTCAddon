@@ -367,6 +367,60 @@ class TrainHealthMonitorTest {
             : Optional.of(NodeId.of(lastPassedGraphNode)));
   }
 
+  /**
+   * 「假定有效」在销毁上下文里必须继续挡住销毁。
+   *
+   * <p>{@code shouldHoldForSafeCandidate} 同时服务两件性质相反的事：恢复链要不要继续往下走 （{@code
+   * destroyContext=false}），以及要不要**跳过销毁**（{@code destroyContext=true}）。
+   * 把「假定有效」计为失败是链那一侧需要的（否则链停在第一步，割排队位一次都轮不到）， 但同一个改动若不分上下文，会把销毁门槛从「永远够不到」降成「两次尝试」——
+   * 那是另一个独立的安全决定，而本项目的既定目标是解锁疏通、不是超时删车。
+   *
+   * <p>这一条钉住的就是那个耦合：安全候选每次都只是「假定有效」时，销毁仍必须永远不发生。
+   */
+  @Test
+  @DisplayName("假定有效不得降低销毁门槛")
+  void assumedEffectiveMustNotLowerTheDestroyBar() {
+    when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("trainA"))
+        .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+    when(dispatchService.getTrainState("trainB"))
+        .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+    stubConfirmedDeadlock("trainA", "trainB");
+    stubDefaultDestroyPrecheck();
+    // 安全候选每次都 applied=true，effectiveness 走 5 参构造器 ⇒ 永远只是「假定有效」。
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+                "physical-edge-retain-released:2",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .OCCUPANCY_MUTATION));
+
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(10));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockDestroyCooldown(Duration.ZERO);
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("trainA", "trainB"), t0);
+    // 远超销毁阈值，且安全候选反复「假定有效」——门槛若被降低，这里就会销毁。
+    for (int i = 1; i <= 12; i++) {
+      monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(30L * i));
+    }
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
   private void stubConfirmedDeadlock(String firstTrain, String secondTrain) {
     stubConfirmedDeadlock(
         firstTrain,
@@ -3014,6 +3068,60 @@ class TrainHealthMonitorTest {
    * <p>旧逻辑里 {@code !result.applied()} 是<b>无条件</b> {@code return true}，且不计数；
    * 而“落地了但无效”反而有计数放行机制。于是更弱的失败形式反而享受无限期优先权。
    */
+  /**
+   * [AB-fable] 第一步动作每次都「落地」、但 effectiveness 只是 legacy 假定（applied ⇒ effective）， 而现场里那份释放下一 tick
+   * 就被重新拿回——第二十六轮 SMART_PHYSICAL_EDGE_RETAIN_RELEASED 335 次里 98% 是重复释放同一组资源。链不得因此永远停在第一步。
+   */
+  @Test
+  void assumedEffectiveButRepeatingCandidateMustNotStarveLaterRecoveryActions() {
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "queue-position-inversion");
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 0, SignalAspect.STOP, 0.0)));
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    // 第一个动作：每次都 applied=true，effectiveness 走 5 参构造器的 legacy 默认（假定有效）。
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+                "physical-edge-retain-released:2",
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .supervisor
+                    .DispatchEffectClass
+                    .OCCUPANCY_MUTATION));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(10));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(20));
+    monitor.setDeadlockThreshold(Duration.ofSeconds(300));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    // 车始终没动（state 的 index 恒为 0），同一个动作每次都"成功"。
+    for (int i = 1; i <= 6; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(65L + i * 30L));
+    }
+
+    verify(dispatchService, atLeastOnce()).applySmartQueuePositionYield(input);
+    // 留痕必须存在（它进了必留名单），且按 (train, action, conflict, kind, count) 去重：
+    // 计数 1、2 各印一次，之后饱和不再印——七次 check 只能有两行。
+    long assumedLines =
+        debugLogs.stream()
+            .filter(
+                line ->
+                    line.contains("SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT train=train1")
+                        && line.contains("failureKind=assumed-effective"))
+            .count();
+    assertEquals(2L, assumedLines, () -> "实际日志：" + debugLogs);
+  }
+
   @Test
   void neverAppliedCandidateMustNotStarveLaterRecoveryActions() {
     RuntimeDispatchService.SmartRecoveryInput input =
