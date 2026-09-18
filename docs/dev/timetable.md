@@ -262,6 +262,20 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 前提：这些 route 本来就得是可发车服务（配了 depot 与 spawn 开关）。时刻表只提供"几点发车"，
 不提供"从哪发"。
 
+### 票据认识 duty
+
+每张表定票都带着交路意图（哪份表、哪个 duty、哪一天、哪种票、第几班），通过票据分配器上的三个钩子落地：
+
+| 钩子 | 规则 |
+| --- | --- |
+| 候选过滤 `acceptsVehicle` | 绑在某交路上的车只接同一交路的票；没绑交路的车能接首班和回库票，**不能接续班** |
+| 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），不走全局 max-age |
+| 派发回调 `onDispatched` | 出库票实体化的车、接了首班的车，立刻绑到交路上（`TIMETABLE_DUTY_BOUND`） |
+
+于是"接班没车"的语义是**等**：续班票在 pending 里等本交路那辆车到站（晚点就晚点跑），不抓别的交路的车，也不新出库；
+超过容差才作废。门控上首次绑定到带 duty 的车次时同样会建立交路绑定，所以自由运行的车一旦绑上表定车次，之后也只认自己的交路。
+绑定只在内存，重启后回到自由运行。
+
 ### 车次绑定
 
 列车与表定车次的绑定发生在**第一次问门控**时：取该 route 所有已发布时刻表里，在当前停靠点
@@ -312,9 +326,12 @@ planned segment duration   vs   actual segment duration
 | `TIMETABLE_ASSIGN` / `TIMETABLE_RELEASE` | 车次绑定与解绑 |
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
 | `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票被否决、车留在终点 |
+| `TIMETABLE_DUTY_BOUND` / `TIMETABLE_DUTY_BIND_CONFLICT` | 车绑到交路上 / 已绑别的交路（错派的车暴露在这里） |
+| `TIMETABLE_CANDIDATE_REJECT` | 某张票拒绝了某辆待命车：`other-duty` 或 `unbound-cannot-continue-duty` |
+| `TIMETABLE_SPAWN_DISPATCHED` | 表定票派给了哪辆车 |
 | `TIMETABLE_DUTY_RELEASED` | 交路进度随列车下线释放 |
 | `TIMETABLE_RELOAD` | 已发布时刻表缓存刷新 |
-| `TIMETABLE_SPAWN_TICKET` / `TIMETABLE_SPAWN_SKIP` | 表定出票（`kind=CREATE/OPERATION/RETURN`，带 duty）与跳过原因 |
+| `TIMETABLE_SPAWN_TICKET` / `TIMETABLE_SPAWN_SKIP` | 表定出票（`kind=CREATE/OPERATION/RETURN`，带 duty）与跳过/作废原因（`no-spawn-service`、`abandoned`） |
 | `SCHEDULED_DEPARTURE_HOLD` | 某辆车正因等待表定时刻被扣留 |
 | `SCHEDULED_DEPARTURE_HOLD_SKIPPED` | 早到幅度超上限，已放行（多半绑错了车次） |
 | `SCHEDULED_DEPARTURE_PLAN_FAILED` | 计划源抛异常，已按现状放行 |
@@ -334,8 +351,6 @@ planned segment duration   vs   actual segment duration
 
 - 冲突模型的边界：站台组容量取图里的物理股道数，不看各 route 的 DYNAMIC 范围（range 更窄时会少报）；单线区段只识别桥链，
   环内的会让、平交由边互斥兜底；车库容量视为无限；不建模授权窗口与制动距离。逐边时分按模型的逐边估算等比分摊到区段总时分上。
-- 出库/回库走行票和运营票之间没有"必须是同一辆车"的硬绑定：运营票复用起点的待命车时按既有的 layover 候选规则挑车。
-  下一阶段会给票据带上 duty 与序号，让"接班班次只能接本 duty 的车"成为硬规则。
 - 车次绑定与交路进度不持久化，重启后回到自由运行。
 - 仅由 code 定义（无 UUID）的交路不参与按表运行：绑定挂不回 Route。
 - 一条线路的多份已发布时刻表之间不做撞车仲裁，运营侧自查。

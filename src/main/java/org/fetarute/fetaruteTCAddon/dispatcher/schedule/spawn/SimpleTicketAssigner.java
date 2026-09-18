@@ -118,6 +118,18 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** RETURN 票的复用闸：交路还没跑完的车不准被回库票带走。默认恒放行。 */
   private volatile java.util.function.Predicate<String> returnReuseGate = trainName -> true;
 
+  /** 票据级候选过滤：这辆待命车能不能接这张票（时刻表用它把"接班"限定在本交路的车）。默认恒放行。 */
+  private volatile java.util.function.BiPredicate<SpawnTicket, String> layoverCandidateFilter =
+      (ticket, trainName) -> true;
+
+  /** 票据级到期时刻：过了它还挂在 pending 里的票直接作废。默认没有到期。 */
+  private volatile java.util.function.Function<SpawnTicket, Optional<Instant>> ticketExpiry =
+      ticket -> Optional.empty();
+
+  /** 派发成功回调：票据最终派给了哪辆车。默认什么都不做。 */
+  private volatile java.util.function.BiConsumer<SpawnTicket, String> dispatchListener =
+      (ticket, trainName) -> {};
+
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
   /** 列车最大运营圈数（达到后应优先分配 RETURN 回库）。 */
@@ -792,6 +804,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     try {
+      notifyDispatched(pending.ticket(), pending.trainName());
       spawnManager.complete(pending.ticket());
     } catch (RuntimeException | LinkageError failure) {
       debugLogger.accept(
@@ -1217,6 +1230,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnService service = ticket.service();
       long waitSeconds = java.time.Duration.between(pendingEntry.addedAt(), now).getSeconds();
       if (waitSeconds <= 0L) {
+        continue;
+      }
+
+      Optional<Instant> expiry = ticketExpiry.apply(ticket);
+      if (expiry.isPresent() && !now.isBefore(expiry.get())) {
+        if (preservePendingDispatchAttempt(ticket, "ticket-expiry")) {
+          continue;
+        }
+        removeIds.add(ticketId);
+        hardExpired++;
+        spawnManager.complete(ticket);
+        debugLogger.accept(
+            "票据到期作废: route="
+                + (service != null ? service.routeCode() : "?")
+                + " ticket="
+                + ticketId
+                + " expiry="
+                + expiry.get());
         continue;
       }
 
@@ -2430,6 +2461,52 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.returnReuseGate = gate == null ? trainName -> true : gate;
   }
 
+  /**
+   * 注册票据级候选过滤。
+   *
+   * <p>与两道闸的区别：闸只看列车（额度用完了没有），过滤同时看票（这张票属于哪个交路）。 过滤掉全部候选时票据进入 pending 等待，不会新出库。传入 {@code null}
+   * 恢复"恒放行"。
+   */
+  public void setLayoverCandidateFilter(
+      java.util.function.BiPredicate<SpawnTicket, String> filter) {
+    this.layoverCandidateFilter = filter == null ? (ticket, trainName) -> true : filter;
+  }
+
+  /**
+   * 注册票据级到期时刻。
+   *
+   * <p>pending 清理时先问它：到期的票直接作废并向 SpawnManager 报完成，不走全局的 max-age。 传入 {@code null} 恢复"没有到期"。
+   */
+  public void setTicketExpiry(java.util.function.Function<SpawnTicket, Optional<Instant>> expiry) {
+    this.ticketExpiry = expiry == null ? ticket -> Optional.empty() : expiry;
+  }
+
+  /**
+   * 注册派发成功回调。
+   *
+   * <p>在票据向 SpawnManager 报完成之前调用，带最终的列车名（复用时是改名后的名字）。传入 {@code null} 恢复空回调。
+   */
+  public void setDispatchListener(java.util.function.BiConsumer<SpawnTicket, String> listener) {
+    this.dispatchListener = listener == null ? (ticket, trainName) -> {} : listener;
+  }
+
+  private void notifyDispatched(SpawnTicket ticket, String trainName) {
+    if (ticket == null || trainName == null) {
+      return;
+    }
+    try {
+      dispatchListener.accept(ticket, trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "派发回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+  }
+
   private boolean tryReuseLayover(
       Optional<StorageProvider> providerOpt,
       SpawnTicket ticket,
@@ -2537,6 +2614,32 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         return false;
       }
     }
+    java.util.function.BiPredicate<SpawnTicket, String> filter = this.layoverCandidateFilter;
+    List<LayoverRegistry.LayoverCandidate> matching = new ArrayList<>(readyCandidates.size());
+    for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+      if (filter.test(ticket, candidate.trainName())) {
+        matching.add(candidate);
+      }
+    }
+    if (matching.size() != readyCandidates.size()) {
+      debugLogger.accept(
+          "Layover 候选被票据过滤: route="
+              + service.routeCode()
+              + " ticket="
+              + ticket.id()
+              + " rejected="
+              + (readyCandidates.size() - matching.size())
+              + " remaining="
+              + matching.size());
+    }
+    readyCandidates = matching;
+    if (readyCandidates.isEmpty()) {
+      // 本交路的车还没到：等它，不抓别人的车，也不新出库。到期由 ticketExpiry 决定。
+      if (!pendingAttempt) {
+        putPendingLayoverTicket(ticket, now);
+      }
+      return false;
+    }
     ServiceTicket serviceTicket =
         new ServiceTicket(
             ticketId,
@@ -2562,6 +2665,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       if (dispatch.dispatched()) {
         String committedTrainName = dispatch.trainName().orElseThrow();
         applyDispatchLifecycleTags(providerOpt, committedTrainName, service, operationType);
+        notifyDispatched(ticket, committedTrainName);
         spawnManager.complete(ticket);
         spawnSuccess.increment();
         pendingLayoverTickets.remove(ticket.id());
@@ -3183,6 +3287,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             context, reasonPrefix + "expected-spawn-physical-state-lost-before-complete");
         return false;
       }
+      notifyDispatched(context.ticket(), context.trainName());
       spawnManager.complete(context.ticket());
       clearCompletedMaterializedSpawnMarker(train, context.trainName());
     } catch (RuntimeException | LinkageError failure) {

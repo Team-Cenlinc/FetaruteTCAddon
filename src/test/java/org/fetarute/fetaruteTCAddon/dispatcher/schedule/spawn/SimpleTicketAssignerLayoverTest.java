@@ -119,6 +119,137 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).complete(any());
   }
 
+  /** 票据级过滤把唯一的候选拒掉：票据进 pending 等待，不派给别的车，也不新出库。 */
+  @Test
+  void candidateFilterKeepsTicketPendingInsteadOfTakingAnotherVehicle() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    LayoverRegistry.LayoverCandidate stranger =
+        new LayoverRegistry.LayoverCandidate(
+            "train-other-duty", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(stranger));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    assigner.setLayoverCandidateFilter((t, trainName) -> !trainName.equals("train-other-duty"));
+
+    assigner.tick(provider, Instant.now());
+
+    verify(runtimeDispatchService, never()).dispatchLayover(any(), any(ServiceTicket.class));
+    verify(spawnManager, never()).complete(any());
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+  }
+
+  /** 票据级到期：过了到期时刻还挂在 pending 的票被作废并报完成，不再等全局 max-age。 */
+  @Test
+  void expiredPendingTicketIsAbandoned() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.setTicketExpiry(t -> Optional.of(t0.plusSeconds(300)));
+
+    assigner.tick(provider, t0);
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    assigner.tick(provider, t0.plusSeconds(299));
+    verify(spawnManager, never()).complete(any());
+
+    assigner.tick(provider, t0.plusSeconds(300));
+
+    verify(spawnManager).complete(ticket);
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+  }
+
+  /** 复用成功时先回调派发结果（带改名后的列车名），再向 SpawnManager 报完成。 */
+  @Test
+  void dispatchListenerSeesTheCommittedTrainNameBeforeCompletion() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("train-1-renamed"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    List<String> seen = new ArrayList<>();
+    assigner.setDispatchListener(
+        (t, trainName) -> {
+          seen.add(t.id() + "->" + trainName);
+          verify(spawnManager, never()).complete(any());
+        });
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      assigner.tick(provider, Instant.now());
+    }
+
+    assertEquals(List.of(ticket.id() + "->train-1-renamed"), seen);
+    verify(spawnManager).complete(ticket);
+  }
+
   @Test
   void clearPendingTicketsPreservesTicketOwnedByDispatchAttempt() {
     UUID routeId = UUID.randomUUID();

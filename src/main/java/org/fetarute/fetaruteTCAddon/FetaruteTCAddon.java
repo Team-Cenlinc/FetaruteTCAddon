@@ -1194,6 +1194,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 镜像闸：按表发出的回库票只能带走交路已经跑完的车。
     simpleAssigner.setReturnReuseGate(
         timetableService == null ? null : timetableService::allowsReturn);
+    // 票据认识 duty：续班只接本交路的车、到期作废、派发后把车绑到交路上。
+    if (spawnManager
+        instanceof
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+        scheduled) {
+      simpleAssigner.setLayoverCandidateFilter(scheduled::acceptsCandidate);
+      simpleAssigner.setTicketExpiry(scheduled::expiryOf);
+      simpleAssigner.setDispatchListener(scheduled::onDispatched);
+    }
     if (etaService != null) {
       etaService.attachTicketSources(spawnManager, spawnTicketAssigner);
     }

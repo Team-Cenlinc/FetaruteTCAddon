@@ -11,8 +11,10 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService.TicketIntent;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
@@ -23,6 +25,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *
  * <p>为什么是装饰器而不是改 {@link StorageSpawnManager}：发车是这套系统里最难回滚的一段：
  * 一旦多发或漏发，纠正手段只有人工销毁列车。装饰器让“关掉按表运行”退化成不装配这一层， 而不是依赖一个布尔分支在几百行状态机里到处判断。
+ *
+ * <p>本层出的每张票都带着交路意图（哪个 duty、第几班），并通过三个钩子交给票据分配器：候选过滤（续班只能接本交路的车）、 到期作废（计划时刻 + assign-tolerance
+ * 还没车就放弃）、派发回调（把实体车绑到交路上）。
  *
  * <p><b>前提</b>：时刻表只提供“几点发车”，不提供“从哪发、算谁的”。出库点、线路/运营商 code 仍然取自 {@link StorageSpawnManager}
  * 的计划快照。因此一条 route 必须本来就是可发车服务（配了 depot 与 spawn 开关）， 时刻表才能驱动它——否则本层会跳过并留下审计记录，而不是猜一个 depot。
@@ -39,6 +44,15 @@ public final class TimetableSpawnManager
 
   private final ConcurrentLinkedQueue<SpawnTicket> retryQueue = new ConcurrentLinkedQueue<>();
   private final Set<UUID> ownedTickets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+  /** 本层出的票各自的交路意图；票派发成功或作废时移除。 */
+  private final java.util.concurrent.ConcurrentMap<UUID, TicketIntent> intents =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 票据的到期时刻：过了它还没派出去就作废，不再等。 */
+  private final java.util.concurrent.ConcurrentMap<UUID, Instant> expiries =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private final AtomicLong sequence = new AtomicLong();
   private final Set<UUID> missingServiceWarned = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -107,9 +121,71 @@ public final class TimetableSpawnManager
       return;
     }
     if (ownedTickets.remove(ticket.id())) {
+      expiries.remove(ticket.id());
+      TicketIntent intent = intents.remove(ticket.id());
+      if (intent != null) {
+        // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的。
+        debugLogger.accept(
+            "TIMETABLE_SPAWN_SKIP reason=abandoned kind="
+                + intent.kind().name()
+                + " duty="
+                + intent.key().describe()
+                + " tripIndex="
+                + intent.tripIndex()
+                + " ticket="
+                + ticket.id());
+      }
       return;
     }
     delegate.complete(ticket);
+  }
+
+  /**
+   * 发车侧问：这辆待命车能不能接这张票。不是本层的票一律放行。
+   *
+   * <p>这是"接班只能接本交路的车、没车就等"在发车侧的落点；判定本身在 {@link TimetableService#acceptsVehicle}。
+   */
+  public boolean acceptsCandidate(SpawnTicket ticket, String trainName) {
+    if (ticket == null || ticket.id() == null || timetableService == null) {
+      return true;
+    }
+    TicketIntent intent = intents.get(ticket.id());
+    return intent == null || timetableService.acceptsVehicle(intent, trainName);
+  }
+
+  /**
+   * 发车侧问：这张票等到什么时候就该放弃。不是本层的票没有到期时刻。
+   *
+   * <p>到期 = 计划时刻 + assign-tolerance：超过容差还没车，这一班就开天窗，再等下去只会让后面的班次跟着乱。
+   */
+  public Optional<Instant> expiryOf(SpawnTicket ticket) {
+    return ticket == null || ticket.id() == null
+        ? Optional.empty()
+        : Optional.ofNullable(expiries.get(ticket.id()));
+  }
+
+  /** 发车侧回调：本层的票派给了某辆车。把车绑到交路上，意图随之摘掉。 */
+  public void onDispatched(SpawnTicket ticket, String trainName) {
+    if (ticket == null || ticket.id() == null) {
+      return;
+    }
+    TicketIntent intent = intents.remove(ticket.id());
+    if (intent == null || timetableService == null) {
+      return;
+    }
+    timetableService.bindDuty(
+        trainName,
+        intent.key(),
+        "ticket-" + intent.kind().name().toLowerCase(java.util.Locale.ROOT));
+    debugLogger.accept(
+        "TIMETABLE_SPAWN_DISPATCHED kind="
+            + intent.kind().name()
+            + " duty="
+            + intent.key().describe()
+            + " tripIndex="
+            + intent.tripIndex()
+            + " train="
+            + trainName);
   }
 
   @Override
@@ -140,6 +216,8 @@ public final class TimetableSpawnManager
     int cleared = retryQueue.size();
     retryQueue.clear();
     ownedTickets.clear();
+    intents.clear();
+    expiries.clear();
     missingServiceWarned.clear();
     lastPoll = now;
     if (delegate instanceof SpawnResetSupport resetSupport) {
@@ -220,6 +298,10 @@ public final class TimetableSpawnManager
           .ifPresent(
               built -> {
                 trackTicket(built.id());
+                remember(
+                    built,
+                    new TicketIntent(
+                        leg.timetable().id(), leg.duty().id(), leg.serviceDate(), leg.kind(), 0));
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind="
@@ -239,6 +321,7 @@ public final class TimetableSpawnManager
           .ifPresent(
               built -> {
                 trackTicket(built.id());
+                intentOf(trip).ifPresent(intent -> remember(built, intent));
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind=OPERATION trip="
@@ -372,12 +455,38 @@ public final class TimetableSpawnManager
     return Optional.empty();
   }
 
+  /** 运营票的交路意图：它属于哪个 duty、是第几班。没有 duty 的票（不应出现）没有意图，按普通票处理。 */
+  private static Optional<TicketIntent> intentOf(TimetableService.DueTrip due) {
+    return due.trip()
+        .dutyId()
+        .flatMap(
+            dutyId ->
+                due.timetable()
+                    .duty(dutyId)
+                    .map(
+                        duty ->
+                            new TicketIntent(
+                                due.timetable().id(),
+                                dutyId,
+                                due.serviceDate(),
+                                RouteOperationType.OPERATION,
+                                Math.max(0, duty.tripIds().indexOf(due.trip().id())))));
+  }
+
+  private void remember(SpawnTicket ticket, TicketIntent intent) {
+    intents.put(ticket.id(), intent);
+    Duration tolerance = timetableService.settings().assignTolerance();
+    expiries.put(ticket.id(), ticket.dueAt().plus(tolerance));
+  }
+
   private void trackTicket(UUID ticketId) {
     if (ownedTickets.size() >= MAX_TRACKED_TICKETS) {
       // 上限被打到说明 assigner 长期既不 complete 也不 requeue；此时清空只会丢掉“这张是我的”这条信息，
       // 代价是后续 requeue 会误派给 delegate。相比无界增长，这是更可控的退化。
       debugLogger.accept("TIMETABLE_SPAWN_TRACK_RESET size=" + ownedTickets.size());
       ownedTickets.clear();
+      intents.clear();
+      expiries.clear();
     }
     ownedTickets.add(ticketId);
   }
