@@ -341,6 +341,13 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 这是本项目第一道真正的准入控制，它是否生效、以及车队实际稳在哪个数，
           // 只能从这条看。生产端按 (line|route, active:holding) 去重：
           // 稳态下 active 贴着 cap 不动，因此每条 route 至多几行，不随 tick 放大。
+          // 灯位决策的唯一去向记录。原本按 tick 产生（raw 约 5000 行/分钟），全被当作
+          // OTHER_DIAGNOSTIC 丢弃——实服 2026-09-17 一轮丢 572957 行，日志里只剩 1224 条零头，
+          // 于是用户看到的"绿灯突然变红、前面明明有空间"根本无法归因。
+          // 生产端已改为**只在灯位结果或理由变化时输出**，体量退化为"灯位真的变了几次"，
+          // 与车队规模同阶、不随 tick 放大。硬阻塞那条还带 advisorySignal/advisoryBlockers——
+          // 它区分"前瞻没看见"与"看见了却仍直接硬停"，这两者的改法完全不同。
+          "SIGNAL_ASPECT_STAGING",
           "SMART_SPAWN_FLEET_CAP",
           // RETURN 线路完全绕过拥堵闸门——实服 12 条线里有 4 条是 RETURN。
           // 这条豁免此前在日志里毫无痕迹。按 gateKey 去重，一条线至多一行。

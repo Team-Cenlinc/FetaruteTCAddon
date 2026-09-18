@@ -403,6 +403,15 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
 
   /**
+   * 灯位决策上一次输出的签名（按列车名），用于「只在变化时输出」。
+   *
+   * <p>{@code SIGNAL_ASPECT_STAGING} 按 tick 产生，raw 约 5000 行/分钟，此前全被诊断预算当作 {@code OTHER_DIAGNOSTIC}
+   * 丢弃（实服一轮丢 572957 行），于是灯位为什么变成红的**无法回答**。 按变化去重后体量退化为「灯位真的变了几次」，才能进必留名单。
+   */
+  private final java.util.concurrent.ConcurrentMap<String, String> aspectStagingSignatures =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
    * 发车门控最近一次拒绝时的阻塞者摘要（诊断专用，不参与任何判定）。
    *
    * <p>为什么需要它：{@code SMART_BLOCKING_SNAPSHOT} 的 {@code blockedBy} 取自 {@link
@@ -26041,10 +26050,27 @@ public final class RuntimeDispatchService {
             && advisoryDecision.blockers() != null
             && !advisoryDecision.blockers().isEmpty();
     if (hardBlocked) {
-      debugLogger.accept(
-          "SIGNAL_ASPECT_STAGING train="
-              + trainName
-              + " result=STOP reason=HARD_AUTHORITY_BLOCKED");
+      // 这一行回答的是「绿灯为什么没有预告就变红」：advisory* 是**同一时刻**前瞻判定的结果。
+      // advisorySignal=PROCEED 且 advisoryBlockers=0 → 前瞻确实什么都没看见（视野或时机问题）；
+      // advisory 已经看见阻塞却仍直接 STOP → 是分档塌掉，而不是没看见。两者的改法完全不同。
+      String detail =
+          " result=STOP reason=HARD_AUTHORITY_BLOCKED"
+              + " hardBlockers="
+              + OccupancyClaimEvidence.describeBlockerShapes(
+                  hardDecision == null ? null : hardDecision.blockers())
+              + " advisorySignal="
+              + (advisoryDecision == null ? "-" : String.valueOf(advisoryDecision.signal()))
+              + " advisoryAllowed="
+              + (advisoryDecision != null && advisoryDecision.allowed())
+              + " advisoryBlockers="
+              + (advisoryDecision == null || advisoryDecision.blockers() == null
+                  ? 0
+                  : advisoryDecision.blockers().size())
+              + " previousAspect="
+              + safeAspect;
+      if (OccupancyClaimEvidence.shouldEmitOnChange(aspectStagingSignatures, trainName, detail)) {
+        debugLogger.accept("SIGNAL_ASPECT_STAGING train=" + trainName + detail);
+      }
       return SignalAspect.STOP;
     }
     if (advisoryRisk) {
@@ -26052,24 +26078,25 @@ public final class RuntimeDispatchService {
           advisoryRisks == null || advisoryRisks.isEmpty()
               ? nearestBlockerResource(advisoryDecision)
               : String.valueOf(advisoryRisks.get(0).resource());
-      debugLogger.accept(
-          "SIGNAL_ASPECT_STAGING train="
-              + trainName
-              + " result=PROCEED_WITH_CAUTION reason=ADVISORY_CAUTION_SELECTED"
+      String detail =
+          " result=PROCEED_WITH_CAUTION reason=ADVISORY_CAUTION_SELECTED"
               + " advisoryRiskResource="
-              + resource);
+              + resource
+              + " previousAspect="
+              + safeAspect;
+      if (OccupancyClaimEvidence.shouldEmitOnChange(aspectStagingSignatures, trainName, detail)) {
+        debugLogger.accept("SIGNAL_ASPECT_STAGING train=" + trainName + detail);
+      }
       debugLogger.accept(
           "ADVISORY_RISK_TO_CAUTION train=" + trainName + " advisoryRiskResource=" + resource);
       return signalSeverity(SignalAspect.PROCEED_WITH_CAUTION) > signalSeverity(safeAspect)
           ? SignalAspect.PROCEED_WITH_CAUTION
           : safeAspect;
     }
-    debugLogger.accept(
-        "SIGNAL_ASPECT_STAGING train="
-            + trainName
-            + " result="
-            + safeAspect
-            + " reason=ADVISORY_CAUTION_SKIPPED");
+    String detail = " result=" + safeAspect + " reason=ADVISORY_CAUTION_SKIPPED";
+    if (OccupancyClaimEvidence.shouldEmitOnChange(aspectStagingSignatures, trainName, detail)) {
+      debugLogger.accept("SIGNAL_ASPECT_STAGING train=" + trainName + detail);
+    }
     return safeAspect;
   }
 

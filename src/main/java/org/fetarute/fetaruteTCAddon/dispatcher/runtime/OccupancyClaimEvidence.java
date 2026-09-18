@@ -411,6 +411,32 @@ final class OccupancyClaimEvidence {
         + recorded.size();
   }
 
+  /**
+   * 「只在变化时输出」的去重判据：签名与上次相同则返回 false。
+   *
+   * <p>给那些<b>按 tick 产生、但只有变化才有信息</b>的 trace 用。灯位决策就是这样： 实服 2026-09-17 一轮里 {@code OTHER_DIAGNOSTIC}
+   * 被诊断预算丢弃 <b>572957 行</b>， {@code SIGNAL_ASPECT_STAGING} 就淹在里面，日志里只剩 1224 条幸存零头——
+   * 于是「绿灯为什么突然变红」这个问题根本无法回答。
+   *
+   * <p>但直接把它设为必留会把日志撑爆（raw 约 5000 行/分钟）。按变化去重之后， 体量退化为「灯位真的变了几次」，与车队规模同阶、不随 tick 放大，
+   * 这样才能既进必留名单又不挤掉别的证据。
+   *
+   * <p>调用方自己持有 {@code lastByKey}，因此该函数保持无状态、可单独测。
+   *
+   * @param lastByKey 每个 key 上次输出的签名（会被就地更新）
+   * @param key 去重维度，通常是列车名
+   * @param signature 本次的签名；与上次不同才输出
+   * @return 是否应当输出
+   */
+  static boolean shouldEmitOnChange(
+      java.util.Map<String, String> lastByKey, String key, String signature) {
+    if (lastByKey == null || key == null || key.isBlank() || signature == null) {
+      // 拿不到去重状态时宁可输出：漏掉一次变化比多打一行代价大得多。
+      return true;
+    }
+    return !signature.equals(lastByKey.put(key, signature));
+  }
+
   static String describeBlockerShapes(java.util.Collection<OccupancyClaim> blockers) {
     if (blockers == null || blockers.isEmpty()) {
       return "no-blockers-listed";
