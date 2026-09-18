@@ -10,6 +10,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
@@ -328,6 +329,54 @@ final class OccupancyClaimEvidence {
    * @param liveClaims 此刻的全部 claim
    * @return 当前成因摘要；记下的 blocker 若已全部消失则明确说出来
    */
+  /**
+   * 从「按冲突键的方向表」里归约出这辆车唯一的走廊方向；归约不出就是 {@link CorridorDirection#UNKNOWN}。
+   *
+   * <p>为什么需要它：等待图的割环候选要用方向来判断「谁该让」。而 {@code RuntimeDispatchService.smartPlannerForwardDirection}
+   * 长期<b>无条件</b>返回 UNKNOWN， 于是候选永远选不出来。实服 2026-09-17 第二十六轮：等待图检测到环 1035 次 （3 对 WS 车占 1002 次），{@code
+   * SMART_DISPATCH_CYCLE_CANDIDATE} <b>0 次</b>， 全部以 {@code INSUFFICIENT_DIRECTION_EVIDENCE} 告终；车只能等
+   * {@code PROGRESS_STUCK} 在中位 592 秒后兜底，最长一辆卡了 1019 秒。
+   *
+   * <p>那个函数的注释本身是对的——方向只能取自 OccupancyRequest / MovementPlanSnapshot 的语义资源方向， 不能从 route 的
+   * current/next 硬推。问题在于<b>真正的来源从来没有接上去</b>， 而这两样东西一直就躺在 blocker 快照里。
+   *
+   * <p><b>{@code unresolvedDirectionKeys} 是这里的安全红线，不是可选优化。</b> {@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest} 的文档写明： 出现在该集合里的
+   * key 表示「证据本身矛盾或不足」，任何回退推断都不得再给出方向， 否则<b>换向后的列车会沿回退链取回自己的旧方向 claim，从而绕过对向屏障</b>。 本轮堵得最久的正是 CHT
+   * 折返站上的车——换向点恰恰是这条红线要防的场景。 因此：只要有<b>任何一个</b>相关 key 落在该集合里，整个归约直接返回 UNKNOWN。
+   *
+   * <p>缺键与「已判定不可确定」不同：缺键只说明该冲突不在本次计划内，跳过即可。
+   *
+   * @param directions 按单线冲突 key 的方向表
+   * @param unresolvedKeys 语义解析器已明确判定不可确定方向的 key
+   * @return 唯一且一致的方向；有矛盾、有 unresolved、或无证据时为 UNKNOWN
+   */
+  static CorridorDirection consistentCorridorDirection(
+      java.util.Map<String, CorridorDirection> directions, Set<String> unresolvedKeys) {
+    if (directions == null || directions.isEmpty()) {
+      return CorridorDirection.UNKNOWN;
+    }
+    CorridorDirection agreed = null;
+    for (java.util.Map.Entry<String, CorridorDirection> entry : directions.entrySet()) {
+      String key = entry.getKey();
+      CorridorDirection value = entry.getValue();
+      if (key == null || value == null || value == CorridorDirection.UNKNOWN) {
+        continue;
+      }
+      // 红线：该 key 已被判定"不可确定"，任何回退推断都不许再给方向。
+      if (unresolvedKeys != null && unresolvedKeys.contains(key)) {
+        return CorridorDirection.UNKNOWN;
+      }
+      if (agreed == null) {
+        agreed = value;
+      } else if (agreed != value) {
+        // 同一辆车在不同单线区里方向相反：证据自相矛盾，按 fail-closed 处理。
+        return CorridorDirection.UNKNOWN;
+      }
+    }
+    return agreed == null ? CorridorDirection.UNKNOWN : agreed;
+  }
+
   static String describeLiveStopCause(
       String trainName,
       java.util.Collection<RuntimeStopState.Blocker> recorded,

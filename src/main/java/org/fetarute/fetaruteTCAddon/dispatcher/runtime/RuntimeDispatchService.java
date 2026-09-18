@@ -2385,8 +2385,10 @@ public final class RuntimeDispatchService {
               trainName, now, movementPlanTtlMs, protectiveRetainClaims);
       SmartRecoveryInput input =
           smartRecoveryInput(trainName, Duration.ZERO, SignalAspect.STOP, liveClaims);
-      CorridorDirection inferredDirection = smartPlannerForwardDirection(input);
       Optional<CanonicalForwardPathEvidence> forwardPathEvidence = pathResolution.evidence();
+      // 方向只在前向证明成立时才取——那份证明已经过 TTL 与进度对齐校验。
+      CorridorDirection inferredDirection =
+          smartPlannerForwardDirection(input.train(), forwardPathEvidence.isPresent());
       String routeId =
           forwardPathEvidence
               .map(CanonicalForwardPathEvidence::routeId)
@@ -2571,10 +2573,46 @@ public final class RuntimeDispatchService {
         && !relation.equals("STALE_PROTECTIVE_CLAIM");
   }
 
-  private static CorridorDirection smartPlannerForwardDirection(SmartRecoveryInput input) {
-    // 单线方向必须来自 OccupancyRequest/MovementPlanSnapshot 的语义资源方向。
-    // route current/next 只能证明列车仍有前方目标，不能证明它在某个 single conflict 内的 A/B 方向。
-    return CorridorDirection.UNKNOWN;
+  /**
+   * 等待图用的前向走廊方向。
+   *
+   * <p>单线方向必须来自 OccupancyRequest/MovementPlanSnapshot 的语义资源方向：route 的 current/next
+   * 只能证明列车仍有前方目标，不能证明它在某个 single conflict 内的 A/B 方向。这句判断一直是对的， <b>但此前这里直接 {@code return
+   * UNKNOWN}，那个"真正的来源"从来没有接上去</b>—— 于是方向证据永远不足，割环候选永远选不出来。实服 2026-09-17 第二十六轮： 等待图检测到环 1035
+   * 次，{@code SMART_DISPATCH_CYCLE_CANDIDATE} <b>0 次</b>， 全部 {@code
+   * INSUFFICIENT_DIRECTION_EVIDENCE}；车只能等 {@code PROGRESS_STUCK} 在中位 592 秒后兜底，最长一辆在 CHT 折返站卡了 1019
+   * 秒、占死唯一站台。
+   *
+   * <p>三道守卫一个都不能省，缺任何一道都会把 fail-closed 变成"看起来在工作"：
+   *
+   * <ol>
+   *   <li><b>只在前向证明成立时取值</b>。{@code forwardPathEvidencePresent} 代表 movement plan 已通过 TTL、进度对齐与
+   *       routeId 校验（见 {@code derivePlannerForwardPathEvidence}）。 没有它就可能拿一份过期计划的方向去割环。
+   *   <li><b>{@code unresolvedDirectionKeys} 必须拿得到</b>。拿不到就返回 UNKNOWN——
+   *       集合缺席不等于"没有不可确定的键"，把缺证据当证据正是本仓反复栽的那一处。
+   *   <li><b>归约本身按红线处理换向</b>，见 {@link OccupancyClaimEvidence#consistentCorridorDirection}。
+   * </ol>
+   *
+   * @param trainName 列车名
+   * @param forwardPathEvidencePresent 该车的前向证明是否成立（已过 TTL 与进度对齐）
+   * @return 有一致语义证据时的走廊方向，否则 UNKNOWN
+   */
+  private CorridorDirection smartPlannerForwardDirection(
+      String trainName, boolean forwardPathEvidencePresent) {
+    if (!forwardPathEvidencePresent || trainName == null || trainName.isBlank()) {
+      return CorridorDirection.UNKNOWN;
+    }
+    BlockerSnapshot snapshot = blockerSnapshots.get(normalizeTrainKey(trainName));
+    if (snapshot == null || snapshot.movementPlan().isEmpty()) {
+      return CorridorDirection.UNKNOWN;
+    }
+    Optional<Set<String>> unresolved =
+        snapshot.blockedRequest().map(OccupancyRequest::unresolvedDirectionKeys);
+    if (unresolved.isEmpty()) {
+      return CorridorDirection.UNKNOWN;
+    }
+    return OccupancyClaimEvidence.consistentCorridorDirection(
+        snapshot.movementPlan().orElseThrow().singleConflictDirections(), unresolved.orElseThrow());
   }
 
   private static String smartPlannerDirectionFailureReason(
