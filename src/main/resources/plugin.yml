@@ -43,8 +43,20 @@ permissions:
       fetarute.train.config: true
       fetarute.train.debug: true
       fetarute.template: true
+      fetarute.timetable: true
+      fetarute.timetable.record: true
+      fetarute.timetable.manage: true
   fetarute.template:
     description: HUD 模板管理（/fta template）
+    default: op
+  fetarute.timetable:
+    description: 查看时刻表与按表运行状态（/fta timetable）
+    default: op
+  fetarute.timetable.record:
+    description: 录制实测运行时分（/fta timetable record）
+    default: op
+  fetarute.timetable.manage:
+    description: 编成、发布与删除时刻表（/fta timetable build|publish|delete）
     default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置

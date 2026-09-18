@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaSpeedCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaTimetableCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -433,6 +434,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
     new FtaHealthCommand(this).register(commandManager);
+    new FtaTimetableCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
