@@ -26573,11 +26573,16 @@ public final class RuntimeDispatchService {
       RiskSource source = riskSourceForBlocker(request, blocker);
       traceForwardRiskBlockerDetail(
           trainName, request, decision, blocker, source, freshness, blockerDistance, authorityEnd);
+      // 物理尾保的距离必须留下：准入到了那里一定硬停，前瞻要拿它算 caution 制动距离。
+      // 此前只有 LIVE 留距离，尾保的距离被清空后 nearestPlanningDistance 只剩限速点等别的量，
+      // 曾把 44 格外的限速点当成停车点判成 inside-stop-distance（第二十七轮 SURC-MT-LP-7027）。
+      boolean distanceActionable =
+          freshness == RiskFreshness.LIVE || freshness == RiskFreshness.PROTECTIVE_PHYSICAL;
       return new ForwardSignalRiskSnapshot(
           trainName,
-          freshness == RiskFreshness.LIVE ? blockerDistance : OptionalLong.empty(),
-          freshness == RiskFreshness.LIVE ? blockerDistance : OptionalLong.empty(),
-          freshness == RiskFreshness.LIVE ? blockerDistance : OptionalLong.empty(),
+          distanceActionable ? blockerDistance : OptionalLong.empty(),
+          distanceActionable ? blockerDistance : OptionalLong.empty(),
+          distanceActionable ? blockerDistance : OptionalLong.empty(),
           speedDropDistance,
           OptionalLong.empty(),
           OptionalLong.empty(),
@@ -26847,7 +26852,11 @@ public final class RuntimeDispatchService {
       return RiskFreshness.LIVE;
     }
     if (claim.role() == ClaimRole.PROTECTIVE_RETAIN || claim.role() == ClaimRole.HOLD_ONLY) {
-      return RiskFreshness.PROTECTIVE_ONLY;
+      // 「挡不挡」只认 obstructs 真值表：物理 NODE/EDGE 上的尾保准入会硬停，前瞻必须提前减速；
+      // 抽象 CONFLICT 上的尾保准入不拦，前瞻也只留痕。同一个 claim 两边判法必须一致。
+      return OccupancyClaimEvidence.obstructs(claim.role(), claim.resource())
+          ? RiskFreshness.PROTECTIVE_PHYSICAL
+          : RiskFreshness.PROTECTIVE_ONLY;
     }
     return RiskFreshness.STALE;
   }
@@ -26859,7 +26868,9 @@ public final class RuntimeDispatchService {
     if (claim.role() == ClaimRole.PHYSICAL_FOOTPRINT) {
       return RiskSource.HARD_BLOCKER;
     }
-    if (freshnessForClaim(claim) == RiskFreshness.PROTECTIVE_ONLY) {
+    RiskFreshness freshness = freshnessForClaim(claim);
+    if (freshness == RiskFreshness.PROTECTIVE_ONLY
+        || freshness == RiskFreshness.PROTECTIVE_PHYSICAL) {
       return RiskSource.PROTECTIVE_ONLY_CLAIM;
     }
     if (claim.role() == ClaimRole.QUEUE_POSITION) {

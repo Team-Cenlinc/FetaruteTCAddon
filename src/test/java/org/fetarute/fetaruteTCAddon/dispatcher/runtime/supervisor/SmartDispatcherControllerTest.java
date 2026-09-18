@@ -241,6 +241,41 @@ class SmartDispatcherControllerTest {
   }
 
   @Test
+  @DisplayName("物理 NODE/EDGE 上的尾保在 caution 制动距离内必须提前压黄灯，而不是等准入硬停")
+  void physicalProtectiveRetainAheadProducesCautionBeforeAdmissionHardStop() {
+    // 第二十七轮实服：硬停车 blocker 角色 PROTECTIVE_RETAIN 446 : MOVEMENT_REQUIRED 177，
+    // STOP 前一刻 44 次是 PROCEED。前瞻把尾保当 PROTECTIVE_ONLY 直接忽略，准入却把它当墙。
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.of(80),
+            OptionalLong.of(80),
+            OptionalLong.of(80),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            RiskSource.PROTECTIVE_ONLY_CLAIM,
+            RiskFreshness.PROTECTIVE_PHYSICAL,
+            "train-B",
+            "NODE:SURC:SPB:JBS:1:002",
+            false,
+            true,
+            true,
+            true,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(input("train-A", risk));
+
+    assertEquals(DispatchAction.PROCEED_WITH_CAUTION, decision.action());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.targetAspect());
+    assertNotEquals(SignalAspect.STOP, decision.targetAspect());
+  }
+
+  @Test
   @DisplayName("protective-only blocker 不发布无执行器的释放动作")
   void protectiveRetainBlockerDefersReleaseToCanonicalOccupancyChain() {
     SmartDispatcherController controller = new SmartDispatcherController(message -> {});

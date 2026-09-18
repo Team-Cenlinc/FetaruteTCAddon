@@ -352,7 +352,10 @@ public final class SmartDispatcherController {
       return decision;
     }
 
+    // PROTECTIVE_PHYSICAL 不在这里被忽略：准入会在它前面硬停，前瞻若不减速就是"绿灯直接跳红"。
+    // 它只走下面的限速分支；硬停判定（上面）与放行判定（准入侧）一个都不因它改变。
     if (risk.riskFreshness() != RiskFreshness.LIVE
+        && risk.riskFreshness() != RiskFreshness.PROTECTIVE_PHYSICAL
         && risk.riskSource() != RiskSource.NONE
         && risk.riskSource() != RiskSource.EDGE_SPEED_DROP
         && risk.riskSource() != RiskSource.STATION_STOP

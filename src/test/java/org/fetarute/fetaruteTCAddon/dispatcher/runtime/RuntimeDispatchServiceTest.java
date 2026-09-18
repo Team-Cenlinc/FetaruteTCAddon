@@ -8527,6 +8527,52 @@ class RuntimeDispatchServiceTest {
     };
   }
 
+  /**
+   * 「挡不挡」只认 obstructs 真值表：物理 NODE/EDGE 上的尾保是 PROTECTIVE_PHYSICAL（前瞻要减速）， 抽象 single:/switcher:
+   * 上的尾保仍是 PROTECTIVE_ONLY（只留痕），MOVEMENT_REQUIRED 是 LIVE。
+   */
+  @Test
+  void protectiveRetainFreshnessFollowsObstructsTruthTable() throws Exception {
+    OccupancyClaim nodeRetain =
+        new OccupancyClaim(
+            OccupancyResource.forNode(NodeId.of("SURC:SPB:JBS:1:002")),
+            "leader",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.PROTECTIVE_RETAIN);
+    OccupancyClaim conflictRetain =
+        new OccupancyClaim(
+            OccupancyResource.forConflict("single:section:bridge:A~B"),
+            "leader",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.PROTECTIVE_RETAIN);
+    OccupancyClaim nodeMovement =
+        new OccupancyClaim(
+            OccupancyResource.forNode(NodeId.of("SURC:SPB:JBS:1:002")),
+            "leader",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.MOVEMENT_REQUIRED);
+
+    assertEquals(RiskFreshness.PROTECTIVE_PHYSICAL, invokeFreshnessForClaim(nodeRetain));
+    assertEquals(RiskFreshness.PROTECTIVE_ONLY, invokeFreshnessForClaim(conflictRetain));
+    assertEquals(RiskFreshness.LIVE, invokeFreshnessForClaim(nodeMovement));
+  }
+
+  private static RiskFreshness invokeFreshnessForClaim(OccupancyClaim claim) throws Exception {
+    java.lang.reflect.Method method =
+        RuntimeDispatchService.class.getDeclaredMethod("freshnessForClaim", OccupancyClaim.class);
+    method.setAccessible(true);
+    return (RiskFreshness) method.invoke(null, claim);
+  }
+
   private static RiskSource invokeRiskSourceForBlocker(
       RuntimeDispatchService service, OccupancyRequest request, OccupancyClaim blocker)
       throws Exception {
