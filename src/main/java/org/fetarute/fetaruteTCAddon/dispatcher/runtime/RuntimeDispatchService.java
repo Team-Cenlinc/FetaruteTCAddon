@@ -552,7 +552,8 @@ public final class RuntimeDispatchService {
       new java.util.concurrent.ConcurrentHashMap<>();
 
   /** 已实际下发到 live/physical 信号层的最近 aspect，用于避免黄灯候选只停留在 trace 中。 */
-  private final java.util.concurrent.ConcurrentMap<String, SignalAspect> publishedPhysicalSignals =
+  // 包级可见：previousAspect 的两格判定（已发布 vs 从未发布）需要直接置位，理由同 recordStopState。
+  final java.util.concurrent.ConcurrentMap<String, SignalAspect> publishedPhysicalSignals =
       new java.util.concurrent.ConcurrentHashMap<>();
 
   private final java.util.Set<String> applyingEventSignals =
@@ -18367,7 +18368,11 @@ public final class RuntimeDispatchService {
     recordStopState(RuntimeStopState.stopContextMissing(trainName, now));
   }
 
-  private void recordStopState(RuntimeStopState state) {
+  // 包级可见而非私有：诊断字段 previousAspect 需要单独立用例，而本仓的测试缝惯例是
+  // 包级可见（见 OccupancyClaimEvidence.obstructs）。用反射会触发 SpotBugs
+  // DP_DO_INSIDE_DO_PRIVILEGED——大测试类里同样的反射之所以从没被报，
+  // 只是因为那个类大到被整类跳过分析。
+  void recordStopState(RuntimeStopState state) {
     if (state == null) {
       return;
     }
@@ -18386,11 +18391,26 @@ public final class RuntimeDispatchService {
       activeStopStates.put(key, previous);
       return;
     }
+    // previousAspect：停因记下的**这一刻**该车正在显示的物理灯位，也就是"变红之前是什么"。
+    //
+    // 为什么在这里而不是在灯位计算那边：`98cd49f` 把探针装在
+    // stageSignalAspectForAuthorityAndAdvisory 的 hardBlocked 分支上，实服第二十八轮
+    // SIGNAL_ASPECT_STAGING 共 513 行、**该分支 0 行**——硬停根本不走那条路，探针装在了
+    // 一个到不了的分支上（本仓反复出现的"守卫条件与真实永不相交"，这次是我自己犯的）。
+    // 而本条 trace 在必留名单上、同轮 4543 行带 STOP，是唯一稳定覆盖硬停的落点。
+    //
+    // 取值可靠性：八个 recordStopState 调用点全部**先记停因、后发信号**，
+    // 所以此刻 publishedPhysicalSignals 里还是旧值。直接读该表而不走
+    // currentPhysicalAspect，是因为后者在查不到时回退成 STOP，会把"从没发布过"
+    // 和"本来就是红的"混成同一个值——而这两者对本问题的答案完全相反。`-` = 从未发布。
+    SignalAspect previousAspect = publishedPhysicalSignals.get(key);
     debugLogger.accept(
         "SMART_STOP_LIFECYCLE event="
             + (previous == null ? "enter" : "transition")
             + " train="
             + state.trainName()
+            + " previousAspect="
+            + (previousAspect == null ? "-" : previousAspect.name())
             + " reasonCode="
             + state.reasonCode()
             + " detail="
@@ -26053,6 +26073,11 @@ public final class RuntimeDispatchService {
             && advisoryDecision.blockers() != null
             && !advisoryDecision.blockers().isEmpty();
     if (hardBlocked) {
+      // 【第二十八轮实测：这条分支到不了】SIGNAL_ASPECT_STAGING 全轮 513 行里
+      // result=STOP 0 行——硬停不走本方法。真正覆盖硬停的是 SMART_STOP_LIFECYCLE 的
+      // previousAspect 字段，要查「绿灯为什么突然变红」请看那里。本分支保留是因为
+      // 它一旦真的触发就说明多了一条新的硬停路径，那本身就是要查的信号。
+      //
       // 这一行回答的是「绿灯为什么没有预告就变红」：advisory* 是**同一时刻**前瞻判定的结果。
       // advisorySignal=PROCEED 且 advisoryBlockers=0 → 前瞻确实什么都没看见（视野或时机问题）；
       // advisory 已经看见阻塞却仍直接 STOP → 是分档塌掉，而不是没看见。两者的改法完全不同。
