@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 30;
+  private static final int EXPECTED_CONFIG_VERSION = 31;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -170,6 +170,8 @@ public final class ConfigManager {
     ConfigurationSection healthSection = config.getConfigurationSection("health");
     HealthSettings healthSettings = parseHealth(healthSection, logger);
     SmartDispatcherSettings smartDispatcherSettings = parseSmartDispatcher(config, logger);
+    ConfigurationSection timetableSection = config.getConfigurationSection("timetable");
+    TimetableSettings timetableSettings = parseTimetable(timetableSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -182,7 +184,86 @@ public final class ConfigManager {
         trainConfigSettings,
         reclaimSettings,
         smartDispatcherSettings,
-        healthSettings);
+        healthSettings,
+        timetableSettings);
+  }
+
+  /**
+   * 解析时刻表配置段。
+   *
+   * <p>所有开关默认关闭：装上这个版本的插件不应该改变任何一列现有列车的行为，必须由运营方显式打开。
+   */
+  private static TimetableSettings parseTimetable(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    if (section == null) {
+      return TimetableSettings.defaults();
+    }
+    TimetableSettings defaults = TimetableSettings.defaults();
+    boolean enabled = section.getBoolean("enabled", defaults.enabled());
+    boolean spawnEnabled = section.getBoolean("spawn-enabled", defaults.spawnEnabled());
+    int holdMaxSeconds =
+        readNonNegativeInt(
+            section, "hold-max-seconds", defaults.holdMaxSeconds(), "timetable", logger);
+    int assignToleranceSeconds =
+        readNonNegativeInt(
+            section,
+            "assign-tolerance-seconds",
+            defaults.assignToleranceSeconds(),
+            "timetable",
+            logger);
+    int maxCatchUpSeconds =
+        readNonNegativeInt(
+            section, "max-catch-up-seconds", defaults.maxCatchUpSeconds(), "timetable", logger);
+    int reloadIntervalSeconds =
+        Math.max(
+            1,
+            readNonNegativeInt(
+                section,
+                "reload-interval-seconds",
+                defaults.reloadIntervalSeconds(),
+                "timetable",
+                logger));
+    int recorderFlushIntervalSeconds =
+        Math.max(
+            1,
+            readNonNegativeInt(
+                section,
+                "recorder-flush-interval-seconds",
+                defaults.recorderFlushIntervalSeconds(),
+                "timetable",
+                logger));
+    String zone = section.getString("zone", defaults.zone());
+    if (zone != null && !zone.isBlank()) {
+      try {
+        java.time.ZoneId.of(zone.trim());
+      } catch (java.time.DateTimeException ex) {
+        logger.warning("timetable.zone 配置无效: " + zone + "，已回退为服务器默认时区");
+        zone = "";
+      }
+    }
+    return new TimetableSettings(
+        enabled,
+        spawnEnabled,
+        holdMaxSeconds,
+        assignToleranceSeconds,
+        maxCatchUpSeconds,
+        reloadIntervalSeconds,
+        recorderFlushIntervalSeconds,
+        zone == null ? "" : zone.trim());
+  }
+
+  private static int readNonNegativeInt(
+      ConfigurationSection section,
+      String key,
+      int fallback,
+      String sectionName,
+      java.util.logging.Logger logger) {
+    int value = section.getInt(key, fallback);
+    if (value < 0) {
+      logger.warning(sectionName + "." + key + " 配置无效: " + value + "，已回退为默认值");
+      return fallback;
+    }
+    return value;
   }
 
   /** 解析 Smart Dispatcher / Traffic Control Supervisor 配置段。 */
@@ -1338,12 +1419,45 @@ public final class ConfigManager {
       TrainConfigSettings trainConfigSettings,
       ReclaimSettings reclaimSettings,
       SmartDispatcherSettings smartDispatcherSettings,
-      HealthSettings healthSettings) {
+      HealthSettings healthSettings,
+      TimetableSettings timetableSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
               ? new SmartDispatcherSettings(DEFAULT_SMART_DISPATCHER_MODE)
               : smartDispatcherSettings;
+      timetableSettings =
+          timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
+    }
+
+    /** 兼容尚未感知时刻表配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          TimetableSettings.defaults());
     }
 
     /** 兼容仍按旧参数列表构造配置快照的测试夹具。 */
@@ -1372,6 +1486,55 @@ public final class ConfigManager {
           reclaimSettings,
           new SmartDispatcherSettings(DEFAULT_SMART_DISPATCHER_MODE),
           healthSettings);
+    }
+  }
+
+  /**
+   * 时刻表（录制 + 按表运行）配置。
+   *
+   * @param enabled 按表运行总开关；关闭时录制仍可用，但已发布的时刻表不会影响任何列车
+   * @param spawnEnabled 是否由时刻表接管发车出票；需要 {@code enabled} 一并打开
+   * @param holdMaxSeconds 早到列车最多被扣留多少秒；运行时还会再被调度层的安全上限封顶
+   * @param assignToleranceSeconds 列车与表定车次匹配时允许的最大偏差秒数
+   * @param maxCatchUpSeconds 发车侧单次轮询最多回补多长的时间窗口
+   * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
+   * @param recorderFlushIntervalSeconds 录制结果落库的间隔
+   * @param zone 时刻表默认时区；留空表示服务器默认时区
+   */
+  public record TimetableSettings(
+      boolean enabled,
+      boolean spawnEnabled,
+      int holdMaxSeconds,
+      int assignToleranceSeconds,
+      int maxCatchUpSeconds,
+      int reloadIntervalSeconds,
+      int recorderFlushIntervalSeconds,
+      String zone) {
+
+    public TimetableSettings {
+      holdMaxSeconds = Math.max(0, holdMaxSeconds);
+      assignToleranceSeconds = Math.max(0, assignToleranceSeconds);
+      maxCatchUpSeconds = Math.max(0, maxCatchUpSeconds);
+      reloadIntervalSeconds = Math.max(1, reloadIntervalSeconds);
+      recorderFlushIntervalSeconds = Math.max(1, recorderFlushIntervalSeconds);
+      zone = zone == null ? "" : zone.trim();
+    }
+
+    /** 全部关闭的默认值。 */
+    public static TimetableSettings defaults() {
+      return new TimetableSettings(false, false, 120, 300, 300, 60, 5, "");
+    }
+
+    /** 解析时区，留空时回退服务器默认。 */
+    public java.time.ZoneId resolveZone() {
+      if (zone.isBlank()) {
+        return java.time.ZoneId.systemDefault();
+      }
+      try {
+        return java.time.ZoneId.of(zone);
+      } catch (java.time.DateTimeException ignored) {
+        return java.time.ZoneId.systemDefault();
+      }
     }
   }
 

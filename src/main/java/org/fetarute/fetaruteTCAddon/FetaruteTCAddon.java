@@ -130,6 +130,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
   private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
+  private org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService
+      timetableService;
+  private org.bukkit.scheduler.BukkitTask timetableReloadTask;
   private SpeedSettingStickListener speedSettingStickListener;
   private TrainSnapshotStore trainSnapshotStore;
   private EtaRuntimeSampler etaRuntimeSampler;
@@ -165,6 +168,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initOccupancyManager();
     initRouteDefinitionCache();
     initRuntimeDispatch();
+    initTimetable();
     initSpawnScheduler();
     initReclaimManager();
     initHudTemplateService();
@@ -208,6 +212,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
       reclaimManager = null;
     }
     runtimeDispatchRecoveryComplete = false;
+    if (timetableReloadTask != null) {
+      timetableReloadTask.cancel();
+      timetableReloadTask = null;
+    }
     if (storageManager != null) {
       storageManager.shutdown();
     }
@@ -286,6 +294,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     initRouteDefinitionCache();
     initHealthMonitor();
+    initTimetable();
     initSpawnScheduler();
     if (spawnManager != null) {
       spawnManager.restoreForReplacement(
@@ -1057,6 +1066,79 @@ public final class FetaruteTCAddon extends JavaPlugin {
     debug("健康监控器已初始化: enabled=" + settings.enabled());
   }
 
+  /**
+   * 初始化按表运行。
+   *
+   * <p>服务跨 reload 复用同一个实例：运行期的车次绑定与交路进度只活在内存里，重建实例等于让 {@code /fta reload} 悄悄把全网列车的交路额度清零。reload
+   * 时只重挂配置与定时任务。
+   *
+   * <p>装配顺序也在这里定死：先挂计划源与扣留上限，再挂车辆复用闸。反过来会出现"已经开始按交路否决复用、 但扣留上限还是
+   * 0"的半装配窗口——那个窗口里车辆被拒绝接班却没有任何时刻约束，看起来像无故停运。
+   */
+  private void initTimetable() {
+    if (runtimeDispatchService == null || configManager == null) {
+      return;
+    }
+    if (timetableService == null) {
+      timetableService =
+          new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService(
+              java.time.Instant::now, loggerManager::debug);
+    }
+    ConfigManager.TimetableSettings settings = configManager.current().timetableSettings();
+    timetableService.applySettings(
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService.Settings(
+            settings.enabled(),
+            settings.spawnEnabled(),
+            java.time.Duration.ofSeconds(settings.holdMaxSeconds()),
+            java.time.Duration.ofSeconds(settings.assignToleranceSeconds()),
+            java.time.Duration.ofSeconds(settings.maxCatchUpSeconds()),
+            settings.resolveZone()));
+    runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
+    runtimeDispatchService
+        .stationStops()
+        .setMaxHold(
+            settings.enabled() ? java.time.Duration.ofSeconds(settings.holdMaxSeconds()) : null);
+    restartTimetableTasks(settings);
+    reloadPublishedTimetables();
+  }
+
+  private void restartTimetableTasks(ConfigManager.TimetableSettings settings) {
+    if (timetableReloadTask != null) {
+      timetableReloadTask.cancel();
+      timetableReloadTask = null;
+    }
+    long reloadTicks = Math.max(20L, settings.reloadIntervalSeconds() * 20L);
+    timetableReloadTask =
+        getServer()
+            .getScheduler()
+            .runTaskTimer(this, this::reloadPublishedTimetables, reloadTicks, reloadTicks);
+  }
+
+  /** 刷新已发布时刻表缓存，并把已经不在网的列车绑定与交路进度释放掉。 */
+  private void reloadPublishedTimetables() {
+    if (timetableService == null || storageManager == null || !storageManager.isReady()) {
+      return;
+    }
+    storageManager.provider().ifPresent(timetableService::reload);
+    java.util.List<String> activeNames = new ArrayList<>();
+    for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+      if (group == null || !group.isValid()) {
+        continue;
+      }
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties = group.getProperties();
+      if (properties != null && properties.getTrainName() != null) {
+        activeNames.add(properties.getTrainName());
+      }
+    }
+    timetableService.retain(activeNames);
+  }
+
+  /** 返回按表运行服务（若未初始化则为空）。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService>
+      getTimetableService() {
+    return Optional.ofNullable(timetableService);
+  }
+
   private void initSpawnScheduler() {
     if (configManager == null
         || storageManager == null
@@ -1076,11 +1158,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
             spawnSettings.maxGeneratePerTick(),
             Math.max(1, spawnSettings.maxSpawnPerTick()),
             java.time.Duration.ofSeconds(spawnSettings.queuedTicketMaxAgeSeconds()));
-    this.spawnManager = new StorageSpawnManager(managerSettings, loggerManager::debug);
+    SpawnManager baseSpawnManager = new StorageSpawnManager(managerSettings, loggerManager::debug);
+    // 按表运行打开时才套上装饰器：关闭状态下发车链路里完全看不到时刻表这一层。
+    this.spawnManager =
+        timetableService != null && configManager.current().timetableSettings().enabled()
+            ? new org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager(
+                baseSpawnManager, timetableService, loggerManager::debug)
+            : baseSpawnManager;
     TrainCartsDepotSpawner depotSpawner =
         new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
     depotSpawner.setOccupancyManager(occupancyManager);
-    this.spawnTicketAssigner =
+    SimpleTicketAssigner simpleAssigner =
         new SimpleTicketAssigner(
             spawnManager,
             depotSpawner,
@@ -1095,7 +1183,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofMillis(spawnSettings.retryDelayTicks() * 50L),
             spawnSettings.maxSpawnPerTick(),
             spawnSettings.maxAttempts());
+    this.spawnTicketAssigner = simpleAssigner;
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
+    // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
+    // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
+    simpleAssigner.setLayoverReuseGate(
+        timetableService == null ? null : timetableService::allowsLayoverReuse);
+    // 镜像闸：按表发出的回库票只能带走交路已经跑完的车。
+    simpleAssigner.setReturnReuseGate(
+        timetableService == null ? null : timetableService::allowsReturn);
     if (etaService != null) {
       etaService.attachTicketSources(spawnManager, spawnTicketAssigner);
     }

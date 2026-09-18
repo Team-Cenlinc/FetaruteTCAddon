@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.utils;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -117,7 +118,16 @@ class ConfigUpdaterTest {
     assertTrue(merged.contains("max-active-trains: 16"), "应补入在网列车上限");
     assertTrue(merged.contains("congestion-hold-threshold: 0.58"), "应补入拥挤触发阈值");
     assertTrue(merged.contains("congestion-release-threshold: 0.48"), "应补入拥挤解除阈值");
-    assertTrue(merged.contains("config-version: 30"), "应升到新版本");
+    // 版本号跟着模板走：这条断言要验证的是"合并后采用模板版本"，不是某个具体数字。
+    // 写死数字会让每次 config-version 递增都顺手改一次测试，久而久之就成了橡皮图章。
+    String templateVersionLine =
+        template
+            .lines()
+            .filter(line -> line.startsWith("config-version:"))
+            .findFirst()
+            .orElseThrow();
+    assertTrue(merged.contains(templateVersionLine), "应升到模板版本: " + templateVersionLine);
+    assertFalse(merged.contains("config-version: 29"), "旧版本号不应残留");
     assertTrue(merged.contains("enabled: true"), "既有的自动发车开关不能被模板覆盖");
     assertTrue(merged.contains("max-attempts: 20"), "既有的重试次数不能被模板覆盖");
   }

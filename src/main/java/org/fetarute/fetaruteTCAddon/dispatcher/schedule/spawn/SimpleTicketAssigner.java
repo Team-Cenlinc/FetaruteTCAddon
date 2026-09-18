@@ -107,6 +107,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       java.util.logging.Logger.getLogger("FetaruteTCAddon");
 
   /** 列车已完成运营圈数（按 OPERATION 票据发车成功累计）。 */
+  /**
+   * 车辆复用闸：回答"这辆车还能不能再接一班运营车次"。
+   *
+   * <p>默认恒放行，因此未装配时本类行为与之前完全一致。时刻表层会装上一个按车辆交路（duty）判定的实现， 用来保证"每辆车最终都会回库"——交路额度用完的车会被拒绝复用，从而落进
+   * {@code ReclaimManager} 的闲置回收窗口，由既有回收链路派 RETURN 票送它回库。本类不负责送车回库，只负责不再给它派活。
+   */
+  private volatile java.util.function.Predicate<String> layoverReuseGate = trainName -> true;
+
+  /** RETURN 票的复用闸：交路还没跑完的车不准被回库票带走。默认恒放行。 */
+  private volatile java.util.function.Predicate<String> returnReuseGate = trainName -> true;
+
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
   /** 列车最大运营圈数（达到后应优先分配 RETURN 回库）。 */
@@ -2397,6 +2408,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * <p>成功时会同步写入生命周期标签、清理 pending，并通知调度层刷新相关占用。
    */
+  /**
+   * 注册车辆复用闸。
+   *
+   * <p>传入 {@code null} 恢复"恒放行"。闸只作用于 OPERATION 票：RETURN 票必须仍然能复用列车， 否则被拒绝复用的车反而没有回家的手段。
+   *
+   * @param gate 给定列车名，返回是否允许再接一班运营车次
+   */
+  public void setLayoverReuseGate(java.util.function.Predicate<String> gate) {
+    this.layoverReuseGate = gate == null ? trainName -> true : gate;
+  }
+
+  /**
+   * 注册回库复用闸。
+   *
+   * <p>传入 {@code null} 恢复"恒放行"。闸只作用于 RETURN 票：它回答的是"这辆车现在能不能被送回车库"， 用来防止按表发出的回库票把正等着跑下一班的车抓走。
+   *
+   * @param gate 给定列车名，返回是否允许被回库票带走
+   */
+  public void setReturnReuseGate(java.util.function.Predicate<String> gate) {
+    this.returnReuseGate = gate == null ? trainName -> true : gate;
+  }
+
   private boolean tryReuseLayover(
       Optional<StorageProvider> providerOpt,
       SpawnTicket ticket,
@@ -2450,6 +2483,60 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     RouteOperationType operationType =
         resolveRouteOperationType(providerOpt, service.routeId())
             .orElse(RouteOperationType.OPERATION);
+    if (operationType == RouteOperationType.OPERATION) {
+      // 车辆交路额度用完的车不再接运营班次。这里只做否决，不改它的状态：
+      // 它会留在 layover 闲置，由 ReclaimManager 在既有的回收窗口里派 RETURN 票送它回库。
+      java.util.function.Predicate<String> gate = this.layoverReuseGate;
+      List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(readyCandidates.size());
+      for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+        if (gate.test(candidate.trainName())) {
+          allowed.add(candidate);
+        }
+      }
+      if (allowed.size() != readyCandidates.size()) {
+        debugLogger.accept(
+            "Layover 复用被车辆交路否决: route="
+                + service.routeCode()
+                + " denied="
+                + (readyCandidates.size() - allowed.size())
+                + " remaining="
+                + allowed.size());
+      }
+      readyCandidates = allowed;
+      if (readyCandidates.isEmpty()) {
+        if (!pendingAttempt) {
+          putPendingLayoverTicket(ticket, now);
+        }
+        return false;
+      }
+    }
+    if (operationType == RouteOperationType.RETURN) {
+      // 回库票只能带走交路已经跑完（或根本不在交路里）的车。否则按表发出的回库票会把
+      // 正在终点等着跑下一班的车送回车库，那一班就开了天窗，而时刻表侧看不出原因。
+      java.util.function.Predicate<String> gate = this.returnReuseGate;
+      List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(readyCandidates.size());
+      for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+        if (gate.test(candidate.trainName())) {
+          allowed.add(candidate);
+        }
+      }
+      if (allowed.size() != readyCandidates.size()) {
+        debugLogger.accept(
+            "Layover 回库被车辆交路否决: route="
+                + service.routeCode()
+                + " denied="
+                + (readyCandidates.size() - allowed.size())
+                + " remaining="
+                + allowed.size());
+      }
+      readyCandidates = allowed;
+      if (readyCandidates.isEmpty()) {
+        if (!pendingAttempt) {
+          putPendingLayoverTicket(ticket, now);
+        }
+        return false;
+      }
+    }
     ServiceTicket serviceTicket =
         new ServiceTicket(
             ticketId,
