@@ -82,6 +82,52 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.manager.acceptsCandidate(mock(SpawnTicket.class), "anyone"), "不是本层的票一律放行");
   }
 
+  /** 重试队列里的票同样到期作废：被 requeue 的出库票过了容差不会再被放出来。 */
+  @Test
+  void requeuedTicketsExpireToo() {
+    Fixture fixture = fixture();
+    SpawnTicket create = fixture.pollAll().get(0);
+    fixture.logs.clear();
+
+    fixture.manager.requeue(create.delayedUntil(create.dueAt().plusSeconds(10), "depot-busy"));
+    List<SpawnTicket> beforeExpiry =
+        fixture.manager.pollDueTickets(fixture.provider, create.dueAt().plusSeconds(60));
+    fixture.manager.requeue(create.delayedUntil(create.dueAt().plusSeconds(70), "depot-busy"));
+    List<SpawnTicket> afterExpiry =
+        fixture.manager.pollDueTickets(fixture.provider, create.dueAt().plusSeconds(301));
+
+    assertTrue(beforeExpiry.stream().anyMatch(t -> t.id().equals(create.id())), "容差内照常重试");
+    assertTrue(afterExpiry.stream().noneMatch(t -> t.id().equals(create.id())), "过了容差不再放出");
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(line -> line.contains("reason=abandoned") && line.contains("CREATE")),
+        () -> fixture.logs.toString());
+    assertTrue(fixture.manager.expiryOf(create).isEmpty(), "作废后不再跟踪");
+  }
+
+  /** 跨零点：00:20 那班的交路意图用服务日，与前一晚出库票绑的车对得上。 */
+  @Test
+  void overnightTripsShareTheServiceDayWithTheirCreateLeg() {
+    Fixture fixture = fixture(overnightTimetable());
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(22 * 3600));
+    List<SpawnTicket> tickets =
+        new ArrayList<>(
+            fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(26 * 3600)));
+    tickets.sort(
+        java.util.Comparator.comparing(SpawnTicket::dueAt)
+            .thenComparingLong(SpawnTicket::sequenceNumber));
+    SpawnTicket create = tickets.get(0);
+    SpawnTicket lateTrip = tickets.get(1);
+    assertEquals(CREATE_ROUTE, create.service().routeId());
+    assertEquals(DAY.plusSeconds(24 * 3600 + 20 * 60), lateTrip.dueAt(), "次日 00:20 发车");
+
+    fixture.manager.onDispatched(create, "train-night");
+
+    assertTrue(
+        fixture.manager.acceptsCandidate(lateTrip, "train-night"),
+        () -> "前一晚出库的车必须能接次日凌晨的班次: " + fixture.logs);
+  }
+
   /** 到期 = 计划时刻 + assign-tolerance；派发成功后不再有到期。 */
   @Test
   void expiryIsDueAtPlusAssignTolerance() {
@@ -133,6 +179,10 @@ class TimetableSpawnManagerTest {
   // ------------------------------------------------------------------ 夹具
 
   private static Fixture fixture() {
+    return fixture(timetable());
+  }
+
+  private static Fixture fixture(Timetable published) {
     List<String> logs = new ArrayList<>();
     TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
@@ -146,7 +196,7 @@ class TimetableSpawnManagerTest {
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);
-    when(repository.listPublished()).thenReturn(List.of(timetable()));
+    when(repository.listPublished()).thenReturn(List.of(published));
     service.reload(provider);
 
     SpawnManager delegate = mock(SpawnManager.class);
@@ -196,6 +246,45 @@ class TimetableSpawnManagerTest {
         code,
         Duration.ofSeconds(600),
         depot);
+  }
+
+  /** 跨零点：窗口 23:00→25:00，唯一一班 00:20 发（取模后 1200 秒），出库票 23:57，服务日是前一天。 */
+  private static Timetable overnightTimetable() {
+    UUID lateTrip = UUID.randomUUID();
+    Timetable base = timetable();
+    int departure = 24 * 3600 + 20 * 60;
+    return new Timetable(
+        TIMETABLE,
+        COMPANY,
+        OPERATOR,
+        LINE,
+        "NIGHT",
+        "跨零点",
+        TimetableStatus.PUBLISHED,
+        ZONE,
+        23 * 3600,
+        25 * 3600,
+        base.routePlans(),
+        List.of(
+            new TimetableTrip(lateTrip, TIMETABLE, ROUTE, 0, "R1-001", 20 * 60, Optional.of(DUTY))),
+        List.of(
+            new VehicleDuty(
+                DUTY,
+                TIMETABLE,
+                0,
+                "D001",
+                "OP:D:DEP:1",
+                "OP:D:DEP:1",
+                Optional.of(CREATE_ROUTE),
+                Optional.of(RETURN_ROUTE),
+                List.of(lateTrip),
+                departure - 180,
+                departure + 230 + 120,
+                departure + 230 + 120 + 90,
+                VehicleDuty.CloseReason.HORIZON_END)),
+        Optional.empty(),
+        DAY,
+        DAY);
   }
 
   /** 两班车、一个交路：出库 07:57，08:00 与 08:10 发，08:15:50 发回库票。 */

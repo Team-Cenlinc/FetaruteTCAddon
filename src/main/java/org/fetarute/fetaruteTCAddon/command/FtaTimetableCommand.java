@@ -318,6 +318,19 @@ public final class FtaTimetableCommand {
       sender.sendMessage(Component.text("首末班时刻格式应为 HH:mm。", NamedTextColor.RED));
       return;
     }
+    int serviceStart = start.orElse(TimetableBuildOptions.DEFAULT_SERVICE_START);
+    int serviceEnd = end.orElse(TimetableBuildOptions.DEFAULT_SERVICE_END);
+    if (serviceEnd <= serviceStart) {
+      sender.sendMessage(
+          Component.text(
+              "末班时刻不能早于首班：跨零点请写成 25:00 这样的形式（当前首班 "
+                  + TimetableCsvExporter.clock(serviceStart)
+                  + "，末班 "
+                  + TimetableCsvExporter.clock(serviceEnd)
+                  + "）。",
+              NamedTextColor.RED));
+      return;
+    }
 
     Optional<Timetable> existing =
         provider.timetables().findByLineAndCode(resolved.line().id(), code);
@@ -374,8 +387,8 @@ public final class FtaTimetableCommand {
             LineSpawnMetadata.parseGroups(resolved.line().metadata()));
     TimetableBuildOptions options =
         new TimetableBuildOptions(
-            start.orElse(TimetableBuildOptions.DEFAULT_SERVICE_START),
-            end.orElse(TimetableBuildOptions.DEFAULT_SERVICE_END),
+            serviceStart,
+            serviceEnd,
             Duration.ofSeconds(headway.seconds()),
             Duration.ofSeconds(flags.dwellSeconds()),
             new VehicleDutyPlanner.Limits(
@@ -398,7 +411,47 @@ public final class FtaTimetableCommand {
             travelTimeModel(),
             Optional.empty());
 
-    TimetableBuildResult result = new TimetableBuilder().build(input, options, Instant.now());
+    // 构建是纯 CPU 运算：时分积分、SWRR、派车、冲突扫描，目标间隔有冲突时还要向上搜索几十次。
+    // 输入全是不可变快照，放到异步线程跑，报告与落库回到主线程。
+    sender.sendMessage(Component.text("正在按路网编表…", NamedTextColor.GRAY));
+    Instant builtAt = Instant.now();
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              TimetableBuildResult result;
+              try {
+                result = new TimetableBuilder().build(input, options, builtAt);
+              } catch (RuntimeException ex) {
+                plugin
+                    .getServer()
+                    .getScheduler()
+                    .runTask(
+                        plugin,
+                        () ->
+                            sender.sendMessage(
+                                Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
+                return;
+              }
+              plugin
+                  .getServer()
+                  .getScheduler()
+                  .runTask(
+                      plugin,
+                      () -> finishBuild(sender, provider, resolved, result, options, headway));
+            });
+  }
+
+  /** 构建完成后的主线程收尾：报告、落库、给出发布入口。 */
+  private void finishBuild(
+      CommandSender sender,
+      StorageProvider provider,
+      ResolvedLine resolved,
+      TimetableBuildResult result,
+      TimetableBuildOptions options,
+      TimetableHeadwayDefaults.Choice headway) {
     sendBuildReport(sender, result, options, headway);
     if (result.timetable().isEmpty()) {
       return;

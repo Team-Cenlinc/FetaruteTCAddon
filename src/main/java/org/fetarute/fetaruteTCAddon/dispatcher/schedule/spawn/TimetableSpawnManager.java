@@ -43,14 +43,9 @@ public final class TimetableSpawnManager
   private final Consumer<String> debugLogger;
 
   private final ConcurrentLinkedQueue<SpawnTicket> retryQueue = new ConcurrentLinkedQueue<>();
-  private final Set<UUID> ownedTickets = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-  /** 本层出的票各自的交路意图；票派发成功或作废时移除。 */
-  private final java.util.concurrent.ConcurrentMap<UUID, TicketIntent> intents =
-      new java.util.concurrent.ConcurrentHashMap<>();
-
-  /** 票据的到期时刻：过了它还没派出去就作废，不再等。 */
-  private final java.util.concurrent.ConcurrentMap<UUID, Instant> expiries =
+  /** 本层出的票：归属、交路意图与到期时刻放在一起，派发成功或作废时整条移除。 */
+  private final java.util.concurrent.ConcurrentMap<UUID, OwnedTicket> ownedTickets =
       new java.util.concurrent.ConcurrentHashMap<>();
 
   private final AtomicLong sequence = new AtomicLong();
@@ -108,7 +103,7 @@ public final class TimetableSpawnManager
     if (ticket == null) {
       return;
     }
-    if (ownedTickets.contains(ticket.id())) {
+    if (ownedTickets.containsKey(ticket.id())) {
       retryQueue.add(ticket);
       return;
     }
@@ -120,24 +115,25 @@ public final class TimetableSpawnManager
     if (ticket == null) {
       return;
     }
-    if (ownedTickets.remove(ticket.id())) {
-      expiries.remove(ticket.id());
-      TicketIntent intent = intents.remove(ticket.id());
-      if (intent != null) {
-        // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的。
-        debugLogger.accept(
-            "TIMETABLE_SPAWN_SKIP reason=abandoned kind="
-                + intent.kind().name()
-                + " duty="
-                + intent.key().describe()
-                + " tripIndex="
-                + intent.tripIndex()
-                + " ticket="
-                + ticket.id());
-      }
+    OwnedTicket owned = ownedTickets.remove(ticket.id());
+    if (owned != null) {
+      // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的。
+      owned.intent().ifPresent(intent -> logAbandoned(ticket, intent));
       return;
     }
     delegate.complete(ticket);
+  }
+
+  private void logAbandoned(SpawnTicket ticket, TicketIntent intent) {
+    debugLogger.accept(
+        "TIMETABLE_SPAWN_SKIP reason=abandoned kind="
+            + intent.kind().name()
+            + " duty="
+            + intent.key().describe()
+            + " tripIndex="
+            + intent.tripIndex()
+            + " ticket="
+            + ticket.id());
   }
 
   /**
@@ -149,8 +145,12 @@ public final class TimetableSpawnManager
     if (ticket == null || ticket.id() == null || timetableService == null) {
       return true;
     }
-    TicketIntent intent = intents.get(ticket.id());
-    return intent == null || timetableService.acceptsVehicle(intent, trainName);
+    OwnedTicket owned = ownedTickets.get(ticket.id());
+    return owned == null
+        || owned
+            .intent()
+            .map(intent -> timetableService.acceptsVehicle(intent, trainName))
+            .orElse(true);
   }
 
   /**
@@ -159,9 +159,11 @@ public final class TimetableSpawnManager
    * <p>到期 = 计划时刻 + assign-tolerance：超过容差还没车，这一班就开天窗，再等下去只会让后面的班次跟着乱。
    */
   public Optional<Instant> expiryOf(SpawnTicket ticket) {
-    return ticket == null || ticket.id() == null
-        ? Optional.empty()
-        : Optional.ofNullable(expiries.get(ticket.id()));
+    if (ticket == null || ticket.id() == null) {
+      return Optional.empty();
+    }
+    OwnedTicket owned = ownedTickets.get(ticket.id());
+    return owned == null ? Optional.empty() : owned.expiry();
   }
 
   /** 发车侧回调：本层的票派给了某辆车。把车绑到交路上，意图随之摘掉。 */
@@ -169,10 +171,13 @@ public final class TimetableSpawnManager
     if (ticket == null || ticket.id() == null) {
       return;
     }
-    TicketIntent intent = intents.remove(ticket.id());
+    OwnedTicket owned = ownedTickets.get(ticket.id());
+    TicketIntent intent = owned == null ? null : owned.intent().orElse(null);
     if (intent == null || timetableService == null) {
       return;
     }
+    // 意图摘掉、到期作废：票已经派出去了，之后 complete 不再记 abandoned，也不会再被到期清理。
+    ownedTickets.put(ticket.id(), OwnedTicket.dispatched());
     timetableService.bindDuty(
         trainName,
         intent.key(),
@@ -216,8 +221,6 @@ public final class TimetableSpawnManager
     int cleared = retryQueue.size();
     retryQueue.clear();
     ownedTickets.clear();
-    intents.clear();
-    expiries.clear();
     missingServiceWarned.clear();
     lastPoll = now;
     if (delegate instanceof SpawnResetSupport resetSupport) {
@@ -275,6 +278,12 @@ public final class TimetableSpawnManager
     List<SpawnTicket> deferred = new ArrayList<>();
     SpawnTicket ticket;
     while ((ticket = retryQueue.poll()) != null) {
+      Optional<Instant> expiry = expiryOf(ticket);
+      if (expiry.isPresent() && !now.isBefore(expiry.get())) {
+        // 重试队列里的票同样受到期约束：过了容差还没派出去的出库/运营票，再发就是一辆没有班次可跑的车。
+        complete(ticket);
+        continue;
+      }
       if (ticket.notBefore().isAfter(now)) {
         deferred.add(ticket);
       } else {
@@ -297,11 +306,15 @@ public final class TimetableSpawnManager
       buildLegTicket(leg)
           .ifPresent(
               built -> {
-                trackTicket(built.id());
-                remember(
+                track(
                     built,
-                    new TicketIntent(
-                        leg.timetable().id(), leg.duty().id(), leg.serviceDate(), leg.kind(), 0));
+                    Optional.of(
+                        new TicketIntent(
+                            leg.timetable().id(),
+                            leg.duty().id(),
+                            leg.serviceDate(),
+                            leg.kind(),
+                            0)));
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind="
@@ -320,8 +333,7 @@ public final class TimetableSpawnManager
       buildTicket(trip)
           .ifPresent(
               built -> {
-                trackTicket(built.id());
-                intentOf(trip).ifPresent(intent -> remember(built, intent));
+                track(built, intentOf(trip));
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind=OPERATION trip="
@@ -468,26 +480,39 @@ public final class TimetableSpawnManager
                             new TicketIntent(
                                 due.timetable().id(),
                                 dutyId,
-                                due.serviceDate(),
+                                // 跨零点的班次落在下一个日历日，但它属于前一个服务日的交路：与出库/回库票同一口径。
+                                due.timetable().serviceDayOf(due.trip(), due.serviceDate()),
                                 RouteOperationType.OPERATION,
                                 Math.max(0, duty.tripIds().indexOf(due.trip().id())))));
   }
 
-  private void remember(SpawnTicket ticket, TicketIntent intent) {
-    intents.put(ticket.id(), intent);
-    Duration tolerance = timetableService.settings().assignTolerance();
-    expiries.put(ticket.id(), ticket.dueAt().plus(tolerance));
-  }
-
-  private void trackTicket(UUID ticketId) {
+  /** 登记一张本层的票：有交路意图的票同时带上到期时刻（计划时刻 + assign-tolerance）。 */
+  private void track(SpawnTicket ticket, Optional<TicketIntent> intent) {
     if (ownedTickets.size() >= MAX_TRACKED_TICKETS) {
       // 上限被打到说明 assigner 长期既不 complete 也不 requeue；此时清空只会丢掉“这张是我的”这条信息，
       // 代价是后续 requeue 会误派给 delegate。相比无界增长，这是更可控的退化。
       debugLogger.accept("TIMETABLE_SPAWN_TRACK_RESET size=" + ownedTickets.size());
       ownedTickets.clear();
-      intents.clear();
-      expiries.clear();
     }
-    ownedTickets.add(ticketId);
+    Optional<Instant> expiry =
+        intent.map(ignored -> ticket.dueAt().plus(timetableService.settings().assignTolerance()));
+    ownedTickets.put(ticket.id(), new OwnedTicket(intent, expiry));
+  }
+
+  /**
+   * 本层一张票的状态。
+   *
+   * @param intent 交路意图；派发后或没有 duty 的票为空
+   * @param expiry 到期时刻；派发后为空
+   */
+  private record OwnedTicket(Optional<TicketIntent> intent, Optional<Instant> expiry) {
+    private OwnedTicket {
+      intent = intent == null ? Optional.empty() : intent;
+      expiry = expiry == null ? Optional.empty() : expiry;
+    }
+
+    private static OwnedTicket dispatched() {
+      return new OwnedTicket(Optional.empty(), Optional.empty());
+    }
   }
 }
