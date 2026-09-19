@@ -254,6 +254,18 @@ public final class TimetableBuilder {
       List<NodeId> waypoints = route.definition().waypoints();
       String origin = waypoints.get(0).value();
       String terminal = waypoints.get(waypoints.size() - 1).value();
+      if (route.declaredAs().isPresent() && route.declaredAs().get() != route.operationType()) {
+        // 运营 route 的 metadata 指定它做出库/回库线路，但它本身不是那种类型：不能拿运营线路当回库线路用。
+        infeasible.add(
+            new TimetableBuildResult.InfeasibleRoute(
+                route.routeCode(),
+                "指定的出库/回库线路类型不符：被指定为 "
+                    + route.declaredAs().get().name()
+                    + "，实际是 "
+                    + route.operationType().name()));
+        continue;
+      }
+      boolean declared = route.declaredAs().isPresent();
       switch (route.operationType()) {
         case CREATE -> {
           if (!startsAtDepot(route.stops())) {
@@ -265,13 +277,17 @@ public final class TimetableBuilder {
           }
           createLegs.add(
               new VehicleDutyPlanner.Leg(
-                  route.routeId(), route.routeCode(), origin, timing.totalRunSeconds()));
+                  route.routeId(), route.routeCode(), origin, timing.totalRunSeconds(), declared));
           legStation.put(route.routeId(), terminal);
         }
         case RETURN -> {
           returnLegs.add(
               new VehicleDutyPlanner.Leg(
-                  route.routeId(), route.routeCode(), terminal, timing.totalRunSeconds()));
+                  route.routeId(),
+                  route.routeCode(),
+                  terminal,
+                  timing.totalRunSeconds(),
+                  declared));
           legStation.put(route.routeId(), origin);
         }
         case OPERATION -> operations.add(
@@ -696,6 +712,8 @@ public final class TimetableBuilder {
    * @param definition 已解析的交路定义
    * @param stops route 的停靠配置，索引与 waypoints 对齐
    * @param depotNodeId 出库点
+   * @param declaredAs 这条线路是被某条运营 route 在 metadata 里显式指定为出库（CREATE）或回库（RETURN）走行线路的 （见 {@link
+   *     TimetableRouteMetadata}），可能来自别的 operator；与 {@code operationType} 不符时判为不可行
    */
   public record RouteInput(
       UUID routeId,
@@ -704,7 +722,8 @@ public final class TimetableBuilder {
       int weight,
       RouteDefinition definition,
       List<RouteStop> stops,
-      Optional<String> depotNodeId) {
+      Optional<String> depotNodeId,
+      Optional<RouteOperationType> declaredAs) {
 
     public RouteInput {
       Objects.requireNonNull(routeId, "routeId");
@@ -713,6 +732,27 @@ public final class TimetableBuilder {
       routeCode = routeCode == null ? "" : routeCode.trim();
       stops = stops == null ? List.of() : List.copyOf(stops);
       depotNodeId = depotNodeId == null ? Optional.empty() : depotNodeId;
+      declaredAs = declaredAs == null ? Optional.empty() : declaredAs;
+    }
+
+    /** 本 operator 自己收集到的线路：没有被显式指定。 */
+    public RouteInput(
+        UUID routeId,
+        String routeCode,
+        RouteOperationType operationType,
+        int weight,
+        RouteDefinition definition,
+        List<RouteStop> stops,
+        Optional<String> depotNodeId) {
+      this(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          Optional.empty());
     }
 
     /** 运营 route 的便捷构造。 */

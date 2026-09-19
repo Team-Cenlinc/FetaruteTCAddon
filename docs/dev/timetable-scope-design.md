@@ -194,7 +194,11 @@ S1 已随滞留兜底新增 `reclaim.stranded-destroy-seconds`（模板里补上
 
 ### 3.4 route metadata 新键（E1）
 
-`timetable_create_route`、`timetable_return_route`：字符串 `<company>/<operator>/<line>/<route>`。写入方式沿用现有 `/fta route meta set`（无需新命令；实现者先确认该命令存在并支持任意键，不存在就在本文补记再实现）。
+`timetable_create_route`、`timetable_return_route`：字符串 `<company>/<operator>/<line>/<route>`。
+
+**补记（S4）**：仓库里没有通用的 `/fta route meta set`，route metadata 一律由 `/fta route set` 的具名 flag 写入。于是加了四个 flag：
+`--timetable-create-route <ref>`、`--timetable-create-route-clear`、`--timetable-return-route <ref>`、`--timetable-return-route-clear`。
+写入只校验格式（`TimetableRouteMetadata.parse`），不校验被引用线路存在——引用方未必有读外方 company 的权限，存在与否留给 build 报告。
 
 ---
 
@@ -500,7 +504,7 @@ public final class TimetableBuildAssembler {
 | S1 可观测 | D1 日志与计数；`TimetableFootprint` + `resourceKeysOf`；loader 的 `footprints/unscheduled`；build 报告「共用资源」一节；`docs/dev/timetable.md` 已知边界更新；**外加**用户要求的滞留兜底（E3 提前） | 报告能说出"与谁共用多少资源、对方有没有表"；除兜底外无行为变化 |
 | S2 重构 | ✅ `TimetableOccupancyProjector`、`TimetableBuildReportText`、`TripMatcher`、`DutyLedger` 抽出；builder 873→669、service 996→742（嵌套记录占了篇幅，未达 500） | 既有 `TimetableBuilderTest`/`TimetableServiceTest` 一行不改全绿 |
 | S3 邻表输入 | ✅ checker owner；`BuildInput.neighbors`；loader `project`；结果与基线；新表与仓储；publish 重检；`neighbors` 命令；不变量 2 改写进文档。实现偏差：命令层的组装仍在 `FtaTimetableCommand` 内（`NeighborInputs` 记录），没有抽 `TimetableBuildAssembler` | 矩阵里 A/B/C/D 用例全绿 |
-| S4 直通运转 | route metadata 显式走行线路；ReclaimManager 跨 operator 兜底；跨 operator 夹具 | E 用例全绿 |
+| S4 直通运转 | ✅ `TimetableRouteMetadata`（键、四段引用解析）；`RouteInput.declaredAs`；`Leg.declared` 优先；类型不符判不可行；命令层解析引用并预警无发车服务（E2）；`/fta route set` 四个 flag（§3.4 补记）。E3 已随 S1 交付。实现偏差：E1/E2 用例落在 `TimetableBuilderTest`（`declaredCrossOperatorReturnRouteBecomesALeg`、`declaredRouteOfWrongTypeIsInfeasible`）与 `VehicleDutyPlannerTest`（`declaredLegWinsOverShorterUndeclaredOne`），没有 `TimetableBuildAssembler` | E 用例全绿 |
 
 与既有路线图的关系：S1–S3 应在**阶段 5（临时加车）之前**——加车落库前要过的就是这套邻表检查，否则加车会绕开路权。
 阶段 6 PIDS、阶段 7 校准不受影响。阶段 8 回放校验是发现 §2.1 反例 1 那类漏项的地方。

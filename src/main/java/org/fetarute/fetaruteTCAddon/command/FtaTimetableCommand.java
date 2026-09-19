@@ -33,6 +33,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildResult;
@@ -40,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuild
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableCsvExporter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableHeadwayDefaults;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
@@ -359,7 +362,15 @@ public final class FtaTimetableCommand {
     List<TimetableBuilder.RouteInput> routeInputs = new ArrayList<>();
     RailGraph graph = null;
     boolean anyOperation = false;
-    for (Route route : collectRoutes(provider, resolved)) {
+    List<Route> routes = new ArrayList<>(collectRoutes(provider, resolved));
+    // 直通运转：运营 route 显式指定的外方出库/回库线路也进 build，并优先于本 operator 搜到的同站线路。
+    DeclaredRoutes declared = resolveDeclaredRoutes(sender, provider, routes);
+    for (Route extra : declared.routes()) {
+      if (routes.stream().noneMatch(route -> route.id().equals(extra.id()))) {
+        routes.add(extra);
+      }
+    }
+    for (Route route : routes) {
       Optional<RouteDefinition> definitionOpt = plugin.findRouteDefinitionById(route.id());
       if (definitionOpt.isEmpty()) {
         sender.sendMessage(
@@ -384,8 +395,10 @@ public final class FtaTimetableCommand {
               readWeight(route),
               definition,
               stops,
-              Optional.empty()));
+              Optional.empty(),
+              Optional.ofNullable(declared.typeOf().get(route.id()))));
     }
+    warnDeclaredWithoutSpawnService(sender, declared);
     if (!anyOperation) {
       sender.sendMessage(Component.text("该线路下没有可编表的 OPERATION route。", NamedTextColor.RED));
       return;
@@ -533,6 +546,82 @@ public final class FtaTimetableCommand {
         Component.text("已保存草稿：" + timetable.code(), NamedTextColor.DARK_AQUA)
             .append(Component.text(" [投入运行]", NamedTextColor.GREEN))
             .clickEvent(ClickEvent.suggestCommand(publishCommand)));
+  }
+
+  /**
+   * 运营 route 在 metadata 里显式指定的出库/回库走行线路（{@link TimetableRouteMetadata}）。
+   *
+   * @param routes 解析成功的线路（可能属于别的 operator / company）
+   * @param typeOf 每条线路被指定为的类型；同一条线路被同时指定为出库与回库时按先读到的算
+   */
+  private record DeclaredRoutes(List<Route> routes, Map<UUID, RouteOperationType> typeOf) {}
+
+  /** 解析本线路各运营 route 指定的走行线路：四段 code 逐级查库；找不到只警告不中断，因为没有它 build 也能照常做（只是该站班次可能被取消并说明原因）。 */
+  private static DeclaredRoutes resolveDeclaredRoutes(
+      CommandSender sender, StorageProvider provider, List<Route> routes) {
+    Map<UUID, Route> found = new java.util.LinkedHashMap<>();
+    Map<UUID, RouteOperationType> typeOf = new java.util.LinkedHashMap<>();
+    for (Route route : routes) {
+      if (route.operationType() != RouteOperationType.OPERATION) {
+        continue;
+      }
+      for (String key :
+          List.of(
+              TimetableRouteMetadata.KEY_CREATE_ROUTE, TimetableRouteMetadata.KEY_RETURN_ROUTE)) {
+        Optional<TimetableRouteMetadata.RouteRef> ref =
+            TimetableRouteMetadata.read(route.metadata(), key);
+        if (ref.isEmpty()) {
+          continue;
+        }
+        Optional<Route> target = findRouteByRef(provider, ref.get());
+        if (target.isEmpty()) {
+          sender.sendMessage(
+              Component.text(
+                  "运营线路 " + route.code() + " 指定的走行线路 " + ref.get().format() + " 不存在，忽略。",
+                  NamedTextColor.YELLOW));
+          continue;
+        }
+        found.putIfAbsent(target.get().id(), target.get());
+        typeOf.putIfAbsent(target.get().id(), TimetableRouteMetadata.typeOf(key));
+      }
+    }
+    return new DeclaredRoutes(List.copyOf(found.values()), Map.copyOf(typeOf));
+  }
+
+  /** {@code <company>/<operator>/<line>/<route>} 四段 code 逐级查库。 */
+  private static Optional<Route> findRouteByRef(
+      StorageProvider provider, TimetableRouteMetadata.RouteRef ref) {
+    return provider
+        .companies()
+        .findByCode(ref.company())
+        .flatMap(company -> provider.operators().findByCompanyAndCode(company.id(), ref.operator()))
+        .flatMap(operator -> provider.lines().findByOperatorAndCode(operator.id(), ref.line()))
+        .flatMap(line -> provider.routes().findByLineAndCode(line.id(), ref.route()));
+  }
+
+  /**
+   * 被指定的走行线路必须本身是可发车服务（所在 line 配了车库并开了发车），否则票发不出去 （运行时 {@code TIMETABLE_SPAWN_SKIP
+   * reason=no-spawn-service}）。编表时就提醒，别等到运营那天。
+   */
+  private void warnDeclaredWithoutSpawnService(CommandSender sender, DeclaredRoutes declared) {
+    if (declared.routes().isEmpty()) {
+      return;
+    }
+    Optional<SpawnPlan> plan = plugin.getSpawnManager().map(SpawnManager::snapshotPlan);
+    if (plan.isEmpty()) {
+      return;
+    }
+    for (Route route : declared.routes()) {
+      boolean served =
+          plan.get().services().stream()
+              .anyMatch(service -> service != null && route.id().equals(service.routeId()));
+      if (!served) {
+        sender.sendMessage(
+            Component.text(
+                "指定的走行线路 " + route.code() + " 不是可发车服务（所在线路未配置车库或未开启发车），按表运行时它的票会被跳过。",
+                NamedTextColor.YELLOW));
+      }
+    }
   }
 
   /**

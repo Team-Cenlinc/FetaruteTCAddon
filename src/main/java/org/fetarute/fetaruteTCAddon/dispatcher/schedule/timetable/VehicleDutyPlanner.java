@@ -461,8 +461,14 @@ public final class VehicleDutyPlanner {
    * @param routeCode 线路 code
    * @param depotNodeId 车库端节点
    * @param runSeconds 走行时分（秒）
+   * @param declared 运营 route 在 metadata 里显式指定了这条走行线路（直通运转）；同一站有多条时它优先
    */
-  public record Leg(UUID routeId, String routeCode, String depotNodeId, int runSeconds) {
+  public record Leg(
+      UUID routeId, String routeCode, String depotNodeId, int runSeconds, boolean declared) {
+    public Leg(UUID routeId, String routeCode, String depotNodeId, int runSeconds) {
+      this(routeId, routeCode, depotNodeId, runSeconds, false);
+    }
+
     public Leg {
       Objects.requireNonNull(routeId, "routeId");
       routeCode = routeCode == null ? "" : routeCode;
@@ -492,7 +498,7 @@ public final class VehicleDutyPlanner {
       return new Legs(Map.of(), Map.of());
     }
 
-    /** 从走行段列表建索引；同一站有多条时取走行最短的，并列按 routeCode——确定性。 */
+    /** 从走行段列表建索引；同一站有多条时先取显式指定的，再取走行最短的，并列按 routeCode 再按 routeId——确定性。 */
     public static Legs of(List<Leg> creates, List<Leg> returns, Map<UUID, String> stationByLeg) {
       Map<String, Leg> create = new LinkedHashMap<>();
       Map<String, Leg> ret = new LinkedHashMap<>();
@@ -508,7 +514,11 @@ public final class VehicleDutyPlanner {
       List<Leg> sorted =
           legs.stream()
               .filter(Objects::nonNull)
-              .sorted(Comparator.comparingInt(Leg::runSeconds).thenComparing(Leg::routeCode))
+              .sorted(
+                  Comparator.comparing((Leg leg) -> !leg.declared())
+                      .thenComparingInt(Leg::runSeconds)
+                      .thenComparing(Leg::routeCode)
+                      .thenComparing(leg -> leg.routeId().toString()))
               .toList();
       for (Leg leg : sorted) {
         String node = station == null ? null : station.get(leg.routeId());

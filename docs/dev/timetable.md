@@ -179,6 +179,29 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 
 决策与反例见 `timetable-scope-design.md`。
 
+### 直通运转：跨 operator 的出库/回库线路
+
+直通 route 的路径可以跑到别的 operator / company 的车站上（RouteStop 直接写裸节点 id，如 `CHT:S:X:1`），
+冲突足迹自然覆盖外方资源。缺的是两端的走行线路：`build` 只在本 operator 全部线路里找 CREATE/RETURN，
+终到外方车站的班次没有回库途径，会以 `NO_RETURN_ACCESS` 取消。运营 route 可以在 metadata 里显式指定：
+
+```
+/fta route set <company> <operator> <line> <route> --timetable-return-route CHT/SURN/NL/NL-RET
+/fta route set <company> <operator> <line> <route> --timetable-create-route CHT/SURN/NL/NL-CRT
+/fta route set ... --timetable-return-route-clear | --timetable-create-route-clear
+```
+
+键 `timetable_create_route` / `timetable_return_route`，值 `<company>/<operator>/<line>/<route>`（四段 code）。规则：
+
+- 被引用的线路与本 operator 搜到的取并集进 build；同一站有多条时**显式指定的优先**，再按走行最短。
+- 被引用的线路必须本身是对应类型（CREATE/RETURN），否则 build 报"指定的出库/回库线路类型不符"。
+- 被引用的线路必须是可发车服务（所在 line 配了车库、开了发车），否则 build 只警告，运行时该票 `TIMETABLE_SPAWN_SKIP reason=no-spawn-service`。
+- 引用不存在只警告不中断；写入时只校验格式（引用方未必有读外方 company 的权限）。
+- 车辆归属不需要新逻辑：外方 CREATE 实体化的车接我的运营票时标签会改写成我的 route；交路绑定与标签无关。
+- 兜底：该回收却派不出 RETURN 票的车（例如滞留在外方终点）先跨 operator 找 RETURN（首站按站点 code / 裸节点 id / DYNAMIC 都能匹配），
+  仍找不到则滞留超过 `reclaim.stranded-destroy-seconds`（默认 1800，0 关闭）销毁；有乘客或有进行中折返事务的不碰。
+- **不支持**一辆车跨两份表接班（duty 里混两份表的 trip）：直通运转的正确表达是"一条 route 属于一条 line，路径跑到别人的资源上"。
+
 ### 服务规划与车辆周转是两件事
 
 ```

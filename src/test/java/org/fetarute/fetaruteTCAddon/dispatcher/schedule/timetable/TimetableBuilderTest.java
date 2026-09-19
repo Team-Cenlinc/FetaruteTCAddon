@@ -39,6 +39,11 @@ class TimetableBuilderTest {
   private static final String B = "OP:S:B:1";
   private static final String C = "OP:S:C:1";
 
+  /** 外方（另一个 operator）的车站与车库：同一物理站台只有一个 id，直通 route 直接引用裸节点。 */
+  private static final String FOREIGN_X = "CHT:S:X:1";
+
+  private static final String FOREIGN_DEP = "CHT:D:DEP2:1";
+
   /** 同样输入构建两次，逐字段一致——包括 trip 与 duty 的主键。 */
   @Test
   void buildIsDeterministic() {
@@ -164,6 +169,93 @@ class TimetableBuilderTest {
     assertEquals(25, ret.totalRunSeconds());
     assertEquals(5 * 3600 + 20 + 120, first.returnSecondOfDay());
     assertEquals(5 * 3600 + 20 + 120 + 25, first.plannedEndSecondOfDay());
+  }
+
+  /**
+   * 直通运转：运营线路跑到外方车站 X 终到，本 operator 没有从 X 回库的线路；运营 route 的 metadata 显式指定外方的 RETURN 线路 X→DEP2
+   * 后，它作为回库走行进入交路，车在外方车库销毁。
+   */
+  @Test
+  void declaredCrossOperatorReturnRouteBecomesALeg() {
+    UUID ra = TimetableTestFixtures.routeId("RA");
+    UUID crt = TimetableTestFixtures.routeId("CRT");
+    UUID fret = TimetableTestFixtures.routeId("NL-RET");
+    List<TimetableBuilder.RouteInput> routes =
+        List.of(
+            operation(ra, "RA", 1, List.of(A, B, C, FOREIGN_X)),
+            new TimetableBuilder.RouteInput(
+                crt,
+                "CRT",
+                RouteOperationType.CREATE,
+                0,
+                TimetableTestFixtures.route("CRT", List.of(DEP, A)),
+                TimetableTestFixtures.createStops(crt, 2, DEP),
+                Optional.empty()),
+            new TimetableBuilder.RouteInput(
+                fret,
+                "NL-RET",
+                RouteOperationType.RETURN,
+                0,
+                TimetableTestFixtures.route("NL-RET", List.of(FOREIGN_X, FOREIGN_DEP)),
+                TimetableTestFixtures.returnStops(fret, 2, FOREIGN_DEP),
+                Optional.empty(),
+                Optional.of(RouteOperationType.RETURN)));
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            5 * 3600 + 1800,
+            Duration.ofSeconds(600),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 60),
+            "",
+            ZONE);
+
+    TimetableBuildResult result = build(new Fixture(throughRunningChain(), routes), options);
+
+    assertTrue(result.success(), () -> result.warnings().toString());
+    Timetable timetable = result.timetable().orElseThrow();
+    assertFalse(timetable.duties().isEmpty());
+    assertTrue(result.droppedTrips().isEmpty(), () -> result.droppedTrips().toString());
+    for (VehicleDuty duty : timetable.duties()) {
+      assertEquals(Optional.of(fret), duty.returnRouteId(), "回库走外方的 RETURN 线路");
+      assertEquals(FOREIGN_DEP, duty.endDepotNodeId(), "在外方车库销毁");
+    }
+  }
+
+  /** 指定的走行线路类型不符（把一条 CREATE 线路指定为回库线路）：判为不可行并说明原因，不拿它当回库线路用。 */
+  @Test
+  void declaredRouteOfWrongTypeIsInfeasible() {
+    UUID ra = TimetableTestFixtures.routeId("RA");
+    UUID crt = TimetableTestFixtures.routeId("CRT");
+    UUID wrong = TimetableTestFixtures.routeId("NL-CRT");
+    List<TimetableBuilder.RouteInput> routes =
+        List.of(
+            operation(ra, "RA", 1, List.of(A, B, C, FOREIGN_X)),
+            new TimetableBuilder.RouteInput(
+                crt,
+                "CRT",
+                RouteOperationType.CREATE,
+                0,
+                TimetableTestFixtures.route("CRT", List.of(DEP, A)),
+                TimetableTestFixtures.createStops(crt, 2, DEP),
+                Optional.empty()),
+            new TimetableBuilder.RouteInput(
+                wrong,
+                "NL-CRT",
+                RouteOperationType.CREATE,
+                0,
+                TimetableTestFixtures.route("NL-CRT", List.of(FOREIGN_DEP, FOREIGN_X)),
+                TimetableTestFixtures.createStops(wrong, 2, FOREIGN_DEP),
+                Optional.empty(),
+                Optional.of(RouteOperationType.RETURN)));
+
+    TimetableBuildResult result = build(new Fixture(throughRunningChain(), routes), options(600));
+
+    assertFalse(result.success());
+    assertTrue(
+        result.infeasibleRoutes().stream()
+            .anyMatch(r -> r.routeCode().equals("NL-CRT") && r.reason().contains("类型不符")),
+        () -> result.infeasibleRoutes().toString());
   }
 
   /** 线路没有任何出库途径时直接失败，而不是产出一张发不出车的表。 */
@@ -521,6 +613,14 @@ class TimetableBuilderTest {
       counts.merge(code, 1L, Long::sum);
     }
     return counts;
+  }
+
+  /** 直通链 DEP - A - B - C - X - DEP2：C 之后是外方的车站 X 与车库 DEP2。 */
+  private static RailGraph throughRunningChain() {
+    return TimetableTestFixtures.chain(
+        List.of(DEP, A, B, C, FOREIGN_X, FOREIGN_DEP),
+        new int[] {50, 100, 100, 100, 50},
+        new double[] {10.0, 10.0, 10.0, 10.0, 10.0});
   }
 
   /** 直链 DEP - A - B - C：车库段 50 blocks，站间各 100 blocks，全线 10 bps。 */

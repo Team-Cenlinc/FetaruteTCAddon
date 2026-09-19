@@ -418,4 +418,29 @@ class VehicleDutyPlannerTest {
     }
     return out;
   }
+
+  /** 同一站有多条走行线路时，运营 route 显式指定的那条优先于走行更短的；没有指定时仍取最短。 */
+  @Test
+  void declaredLegWinsOverShorterUndeclaredOne() {
+    UUID shortRoute =
+        UUID.nameUUIDFromBytes("short".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    UUID declaredRoute =
+        UUID.nameUUIDFromBytes("declared".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    VehicleDutyPlanner.Leg shorter = new VehicleDutyPlanner.Leg(shortRoute, "RET-A", DEPOT, 10);
+    VehicleDutyPlanner.Leg declared =
+        new VehicleDutyPlanner.Leg(declaredRoute, "RET-B", "CHT:D:DEP2:1", 30, true);
+    java.util.Map<UUID, String> station = java.util.Map.of(shortRoute, HUB, declaredRoute, HUB);
+
+    VehicleDutyPlanner.Legs withDeclared =
+        VehicleDutyPlanner.Legs.of(List.of(), List.of(shorter, declared), station);
+    VehicleDutyPlanner.Legs undeclared =
+        VehicleDutyPlanner.Legs.of(
+            List.of(),
+            List.of(
+                shorter, new VehicleDutyPlanner.Leg(declaredRoute, "RET-B", "CHT:D:DEP2:1", 30)),
+            station);
+
+    assertEquals(Optional.of(declared), withDeclared.returnLegAt(HUB));
+    assertEquals(Optional.of(shorter), undeclared.returnLegAt(HUB));
+  }
 }

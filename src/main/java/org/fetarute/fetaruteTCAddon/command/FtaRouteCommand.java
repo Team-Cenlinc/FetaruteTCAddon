@@ -57,6 +57,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -190,6 +191,23 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("\"<pattern>\"")))
             .build();
     var spawnClearFlag = CommandFlag.builder("spawn-clear").build();
+    // 直通运转：运营 route 显式指定从外方哪条线路出库/回库（timetable_create_route / timetable_return_route）。
+    var timetableCreateRouteFlag =
+        CommandFlag.<CommandSender>builder("timetable-create-route")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "timetable-create-route", StringParser.stringParser())
+                    .suggestionProvider(placeholderSuggestion("<company/operator/line/route>")))
+            .build();
+    var timetableCreateRouteClearFlag = CommandFlag.builder("timetable-create-route-clear").build();
+    var timetableReturnRouteFlag =
+        CommandFlag.<CommandSender>builder("timetable-return-route")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "timetable-return-route", StringParser.stringParser())
+                    .suggestionProvider(placeholderSuggestion("<company/operator/line/route>")))
+            .build();
+    var timetableReturnRouteClearFlag = CommandFlag.builder("timetable-return-route-clear").build();
     var spawnEnabledFlag =
         CommandFlag.<CommandSender>builder("spawn-enabled")
             .withComponent(
@@ -1565,6 +1583,10 @@ public final class FtaRouteCommand {
             .flag(distanceFlag)
             .flag(spawnFlag)
             .flag(spawnClearFlag)
+            .flag(timetableCreateRouteFlag)
+            .flag(timetableCreateRouteClearFlag)
+            .flag(timetableReturnRouteFlag)
+            .flag(timetableReturnRouteClearFlag)
             .flag(spawnEnabledFlag)
             .flag(spawnWeightFlag)
             .flag(spawnGroupFlag)
@@ -1598,6 +1620,10 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(distanceFlag)
                           || flags.hasFlag(spawnFlag)
                           || flags.hasFlag(spawnClearFlag)
+                          || flags.hasFlag(timetableCreateRouteFlag)
+                          || flags.hasFlag(timetableCreateRouteClearFlag)
+                          || flags.hasFlag(timetableReturnRouteFlag)
+                          || flags.hasFlag(timetableReturnRouteClearFlag)
                           || flags.hasFlag(spawnEnabledFlag)
                           || flags.hasFlag(spawnWeightFlag)
                           || flags.hasFlag(spawnGroupFlag)
@@ -1679,6 +1705,30 @@ public final class FtaRouteCommand {
                     } else {
                       metadata.put("spawn_weight", weight);
                     }
+                  }
+                  if (flags.hasFlag(timetableCreateRouteClearFlag)) {
+                    metadata.remove(TimetableRouteMetadata.KEY_CREATE_ROUTE);
+                  }
+                  if (flags.hasFlag(timetableReturnRouteClearFlag)) {
+                    metadata.remove(TimetableRouteMetadata.KEY_RETURN_ROUTE);
+                  }
+                  if (flags.hasFlag(timetableCreateRouteFlag)
+                      && !putTimetableRouteRef(
+                          sender,
+                          locale,
+                          metadata,
+                          TimetableRouteMetadata.KEY_CREATE_ROUTE,
+                          flags.getValue(timetableCreateRouteFlag, null))) {
+                    return;
+                  }
+                  if (flags.hasFlag(timetableReturnRouteFlag)
+                      && !putTimetableRouteRef(
+                          sender,
+                          locale,
+                          metadata,
+                          TimetableRouteMetadata.KEY_RETURN_ROUTE,
+                          flags.getValue(timetableReturnRouteFlag, null))) {
+                    return;
                   }
                   List<SpawnGroup> lineGroups =
                       new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
@@ -4468,6 +4518,28 @@ public final class FtaRouteCommand {
   }
 
   /** 从 route metadata 读取交路组。 */
+  /**
+   * 把 {@code <company>/<operator>/<line>/<route>} 写进 metadata；格式不对时提示并返回 false。
+   *
+   * <p>只校验格式不校验存在：被引用的线路可能属于别的 company，此时写入者未必有读它的权限，存在与否留给编表时报告。
+   */
+  private static boolean putTimetableRouteRef(
+      CommandSender sender,
+      LocaleManager locale,
+      Map<String, Object> metadata,
+      String key,
+      String raw) {
+    Optional<TimetableRouteMetadata.RouteRef> ref = TimetableRouteMetadata.parse(raw);
+    if (ref.isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "command.route.timetable-route.invalid", Map.of("value", String.valueOf(raw))));
+      return false;
+    }
+    metadata.put(key, ref.get().format());
+    return true;
+  }
+
   private static Optional<String> readSpawnGroup(Map<String, Object> metadata) {
     if (metadata == null || metadata.isEmpty()) {
       return Optional.empty();

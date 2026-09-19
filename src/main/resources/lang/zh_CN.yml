@@ -752,6 +752,8 @@ command:
         entry: "<gray>-</gray> <white><type></white> <dark_aqua><name></dark_aqua>"
 
   route:
+    timetable-route:
+      invalid: "<prefix> <red>走行线路引用格式不对，应为</red> <white><company>/<operator>/<line>/<route></white><gray>（收到 <white><value></white>）</gray>"
     create:
       success: "<prefix> <dark_aqua>运行图已创建：</dark_aqua><white><line></white><gray>/</gray><white><code></white>"
       exists: "<prefix> <red>运行图 code 已存在：</red><white><code></white>"
