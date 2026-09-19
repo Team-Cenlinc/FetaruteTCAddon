@@ -1096,6 +1096,25 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofSeconds(settings.maxCatchUpSeconds()),
             settings.resolveZone()));
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
+    // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
+    // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
+    runtimeDispatchService
+        .stationStops()
+        .setObserver(
+            new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver() {
+              @Override
+              public void onStationArrival(
+                  org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+
+              @Override
+              public void onStationDeparture(
+                  org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+
+              @Override
+              public void onTrainReleased(String trainName, String reason) {
+                timetableService.release(trainName, reason);
+              }
+            });
     runtimeDispatchService
         .stationStops()
         .setMaxHold(
@@ -1110,25 +1129,46 @@ public final class FetaruteTCAddon extends JavaPlugin {
       timetableReloadTask = null;
     }
     long reloadTicks = Math.max(20L, settings.reloadIntervalSeconds() * 20L);
+    // 读库放异步线程：TimetableService 的快照是 volatile 整体替换，绑定表是并发容器，不需要主线程。
     timetableReloadTask =
         getServer()
             .getScheduler()
-            .runTaskTimer(this, this::reloadPublishedTimetables, reloadTicks, reloadTicks);
+            .runTaskTimerAsynchronously(
+                this, this::reloadPublishedTimetables, reloadTicks, reloadTicks);
   }
 
-  /** 刷新已发布时刻表缓存，并把已经不在网的列车绑定与交路进度释放掉。 */
+  /**
+   * 刷新已发布时刻表缓存（可在任意线程调用），然后回主线程把已经不在网的列车兜底释放掉。
+   *
+   * <p>正常的释放走 StationStopObserver；这里的 retain 只是兜底，用调度层的规范列车名，与绑定表的键同一口径。
+   */
   private void reloadPublishedTimetables() {
     if (timetableService == null || storageManager == null || !storageManager.isReady()) {
       return;
     }
     storageManager.provider().ifPresent(timetableService::reload);
+    if (getServer().isPrimaryThread()) {
+      retainActiveTimetableTrains();
+    } else {
+      getServer().getScheduler().runTask(this, this::retainActiveTimetableTrains);
+    }
+  }
+
+  private void retainActiveTimetableTrains() {
+    if (timetableService == null || runtimeDispatchService == null) {
+      return;
+    }
     java.util.List<String> activeNames = new ArrayList<>();
     for (MinecartGroup group : MinecartGroupStore.getGroups()) {
       if (group == null || !group.isValid()) {
         continue;
       }
       com.bergerkiller.bukkit.tc.properties.TrainProperties properties = group.getProperties();
-      if (properties != null && properties.getTrainName() != null) {
+      if (properties == null) {
+        continue;
+      }
+      runtimeDispatchService.resolveTrackedTrainName(properties).ifPresent(activeNames::add);
+      if (properties.getTrainName() != null) {
         activeNames.add(properties.getTrainName());
       }
     }

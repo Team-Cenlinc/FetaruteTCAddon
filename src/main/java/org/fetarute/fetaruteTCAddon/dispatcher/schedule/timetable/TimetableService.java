@@ -158,10 +158,12 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (existing != null && !existing.routeId().equals(routeId)) {
       releaseAssignment(key, "route-changed");
       existing = null;
-    } else if (existing != null && event.stopIndex() == 0) {
+    } else if (existing != null
+        && event.stopIndex() == 0
+        && !stillWaitingAtOrigin(existing, event, current)) {
       // 回到起点就是新的一趟车。不在这里重新匹配的话，同一条 route 上连续接班的列车会一直用第一趟的时刻，
       // 交路进度也永远停在第一班——"每辆车最终都会回库"就失去了推进它的事件。
-      // 重新匹配可能仍然选中同一趟车（例如列车只是在起点停了两次），此时 lastTripId 相同，进度不会重复累加。
+      // 但"还在起点等点"不算回到起点：门控每秒问一次，扣留期间反复解绑重绑只会刷日志、扫全表。
       releaseAssignment(key, "new-circuit");
       existing = null;
     }
@@ -186,6 +188,29 @@ public final class TimetableService implements ScheduledDeparturePlan {
                         trip ->
                             timetable.scheduledDeparture(
                                 trip, event.stopIndex(), assignment.serviceDate())));
+  }
+
+  /**
+   * 这辆车是不是还在起点等它已经绑定的那趟车发车。
+   *
+   * <p>判据：绑定就是在起点建立的，且现在还没超过那趟车表定发车 + 容差。超过了就是下一圈回来了，该重新匹配。
+   */
+  private boolean stillWaitingAtOrigin(
+      TimetableAssignment existing, StationStopEvent event, Settings current) {
+    if (existing.assignedAtStopIndex() != 0) {
+      return false;
+    }
+    Optional<Instant> scheduled =
+        resolveTimetable(existing)
+            .flatMap(
+                timetable ->
+                    timetable
+                        .tripByCode(existing.tripCode())
+                        .flatMap(
+                            trip -> timetable.scheduledDeparture(trip, 0, existing.serviceDate())));
+    return scheduled
+        .map(at -> !event.at().isAfter(at.plus(current.assignTolerance())))
+        .orElse(false);
   }
 
   /**
@@ -270,7 +295,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    *
    * <ul>
    *   <li>车已经绑在某个交路上：只接同一交路的票。
-   *   <li>车没绑交路（刚出库、或自由运行）：可以接交路的首班和回库票，不能接续班——续班要等的是本交路那辆车，晚点就晚点跑。
+   *   <li>车没绑交路（自由运行）：只能接交路的首班——出库票实体化的车在派发回调里就已绑定，所以首班通常接的也是本交路的车；
+   *       续班要等的是本交路那辆车，晚点就晚点跑；回库票同样只带本交路的车，自由运行的车交给 ReclaimManager 的闲置回收。
    * </ul>
    *
    * @param intent 票据的交路意图
@@ -301,8 +327,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
               + " reason=other-duty");
       return false;
     }
-    boolean continuation = intent.kind() == RouteOperationType.OPERATION && intent.tripIndex() > 0;
-    if (!continuation) {
+    boolean firstTrip = intent.kind() == RouteOperationType.OPERATION && intent.tripIndex() == 0;
+    if (firstTrip) {
       return true;
     }
     debugLogger.accept(
@@ -310,9 +336,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
             + trainName
             + " ticketDuty="
             + intent.key().describe()
+            + " kind="
+            + intent.kind().name()
             + " tripIndex="
             + intent.tripIndex()
-            + " reason=unbound-cannot-continue-duty");
+            + " reason=unbound-only-first-trip");
     return false;
   }
 
@@ -637,7 +665,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
             dutyId ->
                 bindDuty(
                     event.trainName(),
-                    new DutyKey(chosen.timetable().id(), dutyId, chosen.serviceDate()),
+                    new DutyKey(
+                        chosen.timetable().id(),
+                        dutyId,
+                        chosen.timetable().serviceDayOf(chosen.trip(), chosen.serviceDate())),
                     "trip-assigned"));
     debugLogger.accept(
         "TIMETABLE_ASSIGN train="

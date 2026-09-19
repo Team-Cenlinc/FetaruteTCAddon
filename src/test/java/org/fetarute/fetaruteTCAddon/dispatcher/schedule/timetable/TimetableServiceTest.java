@@ -117,7 +117,12 @@ class TimetableServiceTest {
   }
 
   private static TimetableService service(boolean enabled, Timetable... published) {
-    TimetableService service = new TimetableService(Instant::now, message -> {});
+    return service(enabled, new ArrayList<>(), published);
+  }
+
+  private static TimetableService service(
+      boolean enabled, List<String> logs, Timetable... published) {
+    TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
         new TimetableService.Settings(
             enabled,
@@ -382,7 +387,102 @@ class TimetableServiceTest {
     assertFalse(service.acceptsVehicle(secondTrip, "train-other"));
     assertTrue(service.acceptsVehicle(firstTrip, "train-free"), "没绑交路的车可以接首班");
     assertFalse(service.acceptsVehicle(secondTrip, "train-free"), "续班要等本交路的车，不能凭空接");
-    assertTrue(service.acceptsVehicle(ret, "train-free"), "没绑交路的车可以被回库票带走");
+    assertFalse(service.acceptsVehicle(ret, "train-free"), "回库票只带本交路的车：抓走陌生车会让本交路跑完的车滞留在终点");
+  }
+
+  /**
+   * 在起点等点期间门控每秒问一次：绑定必须复用，不能每问一次就解绑重绑。
+   *
+   * <p>否则一次 150 秒的扣留就是 150 次全表扫描加 300 行日志；真正的 HOLD 行被淹没。
+   */
+  @Test
+  void holdingAtOriginReusesTheAssignmentInsteadOfRebindingEveryPoll() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = service(true, logs, timetable(TimetableStatus.PUBLISHED));
+    Instant early = Instant.parse("2026-03-02T07:58:30Z");
+
+    service.scheduledDepartureAt(event("train-A", 0, early));
+    service.scheduledDepartureAt(event("train-A", 0, early.plusSeconds(1)));
+    service.scheduledDepartureAt(event("train-A", 0, early.plusSeconds(2)));
+
+    assertEquals(
+        1,
+        logs.stream().filter(line -> line.startsWith("TIMETABLE_ASSIGN ")).count(),
+        logs::toString);
+    assertTrue(logs.stream().noneMatch(line -> line.contains("new-circuit")), logs::toString);
+    assertEquals(Optional.of("R1-001"), service.assignmentOf("train-A").map(a -> a.tripCode()));
+
+    // 下一圈回到起点（已经过了首班发车 + 容差）：这时才重新匹配到第二班。
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:10:05Z")));
+    assertEquals(Optional.of("R1-002"), service.assignmentOf("train-A").map(a -> a.tripCode()));
+  }
+
+  /**
+   * 跨零点的班次：发车时刻取模后落到下一个日历日，但它属于前一个服务日的交路。
+   *
+   * <p>绑定的 DutyKey 必须用服务日，否则出库票（服务日 D）绑的车与 00:20 那班（日历日 D+1）对不上。
+   */
+  @Test
+  void bindingAcrossMidnightUsesTheServiceDay() {
+    UUID dutyId = UUID.randomUUID();
+    UUID lateTrip = UUID.randomUUID();
+    List<TimetableStop> stops =
+        List.of(
+            new TimetableStop(0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0),
+            new TimetableStop(1, Optional.of("CCC"), Optional.of("OP:S:CCC:1"), 230, 230));
+    Timetable overnight =
+        new Timetable(
+            TIMETABLE,
+            COMPANY,
+            OPERATOR,
+            LINE,
+            "NIGHT",
+            "跨零点",
+            TimetableStatus.PUBLISHED,
+            ZONE,
+            23 * 3600,
+            25 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    ROUTE,
+                    "R1",
+                    1,
+                    stops,
+                    "OP:S:AAA:1",
+                    "OP:S:CCC:1",
+                    Optional.empty(),
+                    Optional.empty())),
+            List.of(
+                // 00:20 发车：取模后是 1200，早于窗口起点 23:00。
+                new TimetableTrip(
+                    lateTrip, TIMETABLE, ROUTE, 0, "R1-001", 20 * 60, Optional.of(dutyId))),
+            List.of(
+                new VehicleDuty(
+                    dutyId,
+                    TIMETABLE,
+                    0,
+                    "D001",
+                    "OP:D:DEP:1",
+                    "OP:D:DEP:1",
+                    Optional.empty(),
+                    Optional.empty(),
+                    List.of(lateTrip),
+                    24 * 3600 + 20 * 60 - 300,
+                    24 * 3600 + 20 * 60 + 230,
+                    24 * 3600 + 20 * 60 + 230,
+                    VehicleDuty.CloseReason.HORIZON_END)),
+            Optional.empty(),
+            Instant.parse("2026-03-01T00:00:00Z"),
+            Instant.parse("2026-03-01T00:00:00Z"));
+    TimetableService service = service(true, overnight);
+
+    service.scheduledDepartureAt(event("train-N", 0, Instant.parse("2026-03-03T00:20:05Z")));
+
+    assertEquals(
+        Optional.of(
+            new TimetableService.DutyKey(TIMETABLE, dutyId, java.time.LocalDate.of(2026, 3, 2))),
+        service.dutyBindingOf("train-N"),
+        "3 月 3 日 00:20 的班次属于 3 月 2 日的服务日");
   }
 
   /** 门控上首次绑定到带 duty 的车次时，车也随之绑到交路上；下线后解绑。 */

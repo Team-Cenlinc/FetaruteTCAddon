@@ -196,6 +196,24 @@ public record Timetable(
             stop -> trip.departureAt(serviceDate, zoneId).plusSeconds(stop.arrivalOffsetSeconds()));
   }
 
+  /**
+   * 某趟车在某个日历日发车时，它属于哪个<b>服务日</b>。
+   *
+   * <p>发车时刻存的是取模后的当日秒数，跨零点的班次会落到下一个日历日；而车辆交路的出库/回库时刻不取模，始终相对服务日。 两边要对上同一个
+   * duty，必须用同一个日期口径：首班发车时刻早于计划窗口起点的班次，服务日就是前一天。
+   *
+   * @param trip 车次
+   * @param calendarDate 该次发车实际落在的日历日
+   * @return 服务日
+   */
+  public LocalDate serviceDayOf(TimetableTrip trip, LocalDate calendarDate) {
+    Objects.requireNonNull(trip, "trip");
+    Objects.requireNonNull(calendarDate, "calendarDate");
+    return trip.departureSecondOfDay() < serviceStartSecondOfDay
+        ? calendarDate.minusDays(1)
+        : calendarDate;
+  }
+
   /** 返回替换了状态与更新时间的新实例。 */
   public Timetable withStatus(TimetableStatus nextStatus, Instant now) {
     Objects.requireNonNull(nextStatus, "nextStatus");
