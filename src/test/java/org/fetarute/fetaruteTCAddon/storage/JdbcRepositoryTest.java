@@ -51,6 +51,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverride
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.JdbcStorageProvider;
@@ -861,6 +867,222 @@ final class JdbcRepositoryTest {
     repository.deleteWorld(worldId);
     assertTrue(repository.listByWorld(worldId).isEmpty());
   }
+
+  /**
+   * 时刻表往返：表头、各 route 的时分档案（JSON 列）、发车表与车辆交路必须整体一致。
+   *
+   * <p>特别钉住两件事：
+   *
+   * <ul>
+   *   <li><b>时区</b>以文本存，读回来必须还是同一个 {@code ZoneId}。存错了不会报错，只会让整张表的时刻
+   *       整体平移几个小时，而那种偏移在现场看起来像"调度突然全线晚点"。
+   *   <li><b>车辆交路的回库端点</b>必须原样带回。它是"每辆车最终都会回库"这条不变量的物理落点， 在存储层丢掉等于这条不变量只在内存里成立。
+   * </ul>
+   */
+  @Test
+  void shouldPersistTimetableWithRoutePlansTripsAndDuties() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    UUID tripId = UUID.randomUUID();
+    UUID dutyId = UUID.randomUUID();
+    UUID createRouteId = UUID.randomUUID();
+    UUID returnRouteId = UUID.randomUUID();
+
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT1",
+            "测试表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("Asia/Shanghai"),
+            5 * 3600,
+            23 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    fixture.routeId(),
+                    "TTR",
+                    5,
+                    List.of(
+                        new TimetableStop(0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0),
+                        new TimetableStop(
+                            1, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 100, 130)),
+                    "OP:S:AAA:1",
+                    "OP:S:BBB:1",
+                    Optional.of("OP:D:DEP:1"),
+                    Optional.empty()),
+                new TimetableRoutePlan(
+                    returnRouteId,
+                    "TTRET",
+                    RouteOperationType.RETURN,
+                    7,
+                    List.of(
+                        new TimetableStop(0, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 0, 0),
+                        new TimetableStop(1, Optional.empty(), Optional.of("OP:D:DEP:1"), 40, 40)),
+                    "OP:S:BBB:1",
+                    "OP:D:DEP:1",
+                    Optional.empty(),
+                    Optional.empty())),
+            List.of(
+                new TimetableTrip(
+                    tripId,
+                    timetableId,
+                    fixture.routeId(),
+                    0,
+                    "TTR-001",
+                    8 * 3600,
+                    Optional.of(dutyId))),
+            List.of(
+                new VehicleDuty(
+                    dutyId,
+                    timetableId,
+                    0,
+                    "D001",
+                    "OP:D:DEP:1",
+                    "OP:D:DEP:1",
+                    Optional.of(createRouteId),
+                    Optional.of(returnRouteId),
+                    List.of(tripId),
+                    8 * 3600 - 300,
+                    8 * 3600 + 400,
+                    8 * 3600 + 900,
+                    VehicleDuty.CloseReason.MAX_TRIPS)),
+            Optional.of("备注"),
+            now,
+            now);
+
+    provider.timetables().save(timetable);
+    Timetable loaded = provider.timetables().findById(timetableId).orElseThrow();
+
+    assertEquals("TT1", loaded.code());
+    assertEquals(TimetableStatus.DRAFT, loaded.status());
+    assertEquals("Asia/Shanghai", loaded.zoneId().getId());
+    assertEquals(5 * 3600, loaded.serviceStartSecondOfDay());
+    assertEquals(2, loaded.routePlans().size());
+    assertEquals(5, loaded.routePlans().get(0).weight());
+    assertEquals(RouteOperationType.OPERATION, loaded.routePlans().get(0).kind());
+    assertEquals(RouteOperationType.RETURN, loaded.routePlans().get(1).kind());
+    assertEquals(0, loaded.routePlans().get(1).weight(), "非运营线路的 weight 恒为 0");
+    assertEquals(130, loaded.routePlans().get(0).stops().get(1).departureOffsetSeconds());
+    assertEquals(Optional.of("OP:D:DEP:1"), loaded.routePlans().get(0).depotNodeId());
+    assertEquals(1, loaded.trips().size());
+    assertEquals("TTR-001", loaded.trips().get(0).tripCode());
+    assertEquals(Optional.of(dutyId), loaded.trips().get(0).dutyId());
+    assertEquals(1, loaded.duties().size());
+    assertEquals("OP:D:DEP:1", loaded.duties().get(0).endDepotNodeId());
+    assertEquals(Optional.of(createRouteId), loaded.duties().get(0).createRouteId());
+    assertEquals(Optional.of(returnRouteId), loaded.duties().get(0).returnRouteId());
+    assertEquals(8 * 3600 - 300, loaded.duties().get(0).plannedStartSecondOfDay(), "出库可早于服务日");
+    assertEquals(8 * 3600 + 400, loaded.duties().get(0).returnSecondOfDay());
+    assertEquals(VehicleDuty.CloseReason.MAX_TRIPS, loaded.duties().get(0).closeReason());
+    assertEquals(List.of(tripId), loaded.duties().get(0).tripIds());
+    assertEquals(Optional.of("备注"), loaded.notes());
+
+    // 只有 PUBLISHED 才进运行时视图。
+    assertTrue(provider.timetables().listPublished().isEmpty());
+    provider.timetables().save(loaded.withStatus(TimetableStatus.PUBLISHED, now));
+    assertEquals(1, provider.timetables().listPublished().size());
+
+    // 重新保存必须整体替换子表，而不是累加。
+    provider
+        .timetables()
+        .save(
+            provider
+                .timetables()
+                .findById(timetableId)
+                .orElseThrow()
+                .withTripsAndDuties(List.of(), List.of()));
+    Timetable emptied = provider.timetables().findById(timetableId).orElseThrow();
+    assertTrue(emptied.trips().isEmpty());
+    assertTrue(emptied.duties().isEmpty());
+
+    provider.timetables().delete(timetableId);
+    assertTrue(provider.timetables().findById(timetableId).isEmpty());
+  }
+
+  /** 建起一条 company → operator → line → route 的最小链路，满足时刻表的外键。 */
+  private TimetableFixture seedRoute(StorageProvider provider) {
+    Instant now = Instant.now();
+    UUID ownerId = UUID.randomUUID();
+    provider
+        .playerIdentities()
+        .save(
+            new PlayerIdentity(
+                ownerId,
+                UUID.randomUUID(),
+                "Owner",
+                IdentityAuthType.ONLINE,
+                Optional.empty(),
+                Map.of(),
+                now,
+                now));
+    UUID companyId = UUID.randomUUID();
+    provider
+        .companies()
+        .save(
+            new Company(
+                companyId,
+                "TTC",
+                "Timetable Co",
+                Optional.empty(),
+                ownerId,
+                CompanyStatus.ACTIVE,
+                0L,
+                Map.of(),
+                now,
+                now));
+    Operator operator =
+        new Operator(
+            UUID.randomUUID(),
+            "TTOP",
+            companyId,
+            "Timetable Operator",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    provider.operators().save(operator);
+    Line line =
+        new Line(
+            UUID.randomUUID(),
+            "TTL",
+            operator.id(),
+            "Timetable Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(300),
+            Map.of(),
+            now,
+            now);
+    provider.lines().save(line);
+    Route route =
+        new Route(
+            UUID.randomUUID(),
+            "TTR",
+            line.id(),
+            "Timetable Route",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.of(5_000),
+            Optional.of(300),
+            Map.of(),
+            now,
+            now);
+    provider.routes().save(route);
+    return new TimetableFixture(companyId, operator.id(), line.id(), route.id());
+  }
+
+  private record TimetableFixture(UUID companyId, UUID operatorId, UUID lineId, UUID routeId) {}
 
   private StorageProvider setupProvider(Path dbFile) {
     ConfigManager.StorageSettings settings =

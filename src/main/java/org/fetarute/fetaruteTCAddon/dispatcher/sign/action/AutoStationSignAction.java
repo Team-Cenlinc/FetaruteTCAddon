@@ -595,7 +595,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             if (canDepart) {
               plugin
                   .getRuntimeDispatchService()
-                  .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+                  .ifPresent(
+                      dispatch -> {
+                        // 这里是列车真正开走的唯一时刻：门控放行、门锁松开、WaitState 结束。
+                        // 时刻表录制取的就是这个时刻，不是 checkDeparture 第一次被问的时刻。
+                        dispatch.stationStops().handleDeparture(group, definition);
+                        dispatch.releaseDepartureGate(trainName, stopSessionId);
+                      });
               exitOffsetState.restore();
               finalWaitState.stop();
               cancel();

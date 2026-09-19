@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 31
+config-version: 32
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -267,6 +267,41 @@ spawn:
   congestion-network-reference-trains: 16
   congestion-hold-threshold: 0.58
   congestion-release-threshold: 0.48
+
+# 时刻表：录制实测运行时分 → 编成时刻表 → 按表运行
+#
+# 这一段的所有开关默认关闭。打开 enabled 之前请先看 /fta timetable build 输出的
+# p90/median：那个比值就是"这条线到底有没有稳定的典型运行时分"的判据。
+# 比值大意味着同一个区间这次跑 60 秒、下次跑 600 秒——此时任何一份表定时分都是错的，
+# 按表运行只会让早到的车在站里空等，晚到的车照样晚，净效果是把运力又压低一截。
+# 正确顺序是先把离散度压下来，再编表。
+timetable:
+  # 按表运行总开关。关闭时录制照常可用，已发布的时刻表也只是数据，不影响任何一列车。
+  enabled: false
+  # 是否由时刻表接管发车出票（替代 spawn 段的 headway 出票）。需要 enabled 一并打开。
+  # 打开后，凡是有 PUBLISHED 时刻表的 route，headway 票会被拦下，改由表定时刻出票；
+  # 没有时刻表的 route 完全不受影响。
+  spawn-enabled: false
+  # 早到列车最多被扣留多少秒。
+  #
+  # 这个数字是安全阀而不是策略参数：它的作用是保证"按表运行"永远不会制造一辆假死车。
+  # 运行时还会再被调度层 150 秒的硬上限封顶（发车门锁本身 180 秒就会被回收，
+  # 扣留必须先于门锁结束，否则会进入"自己不动、也不再排队"的状态）。
+  # 早到幅度超过上限时直接放行并记一条审计——那种情况多半是匹配错了车次，不是真的早到。
+  hold-max-seconds: 120
+  # 列车与表定车次匹配时允许的最大偏差秒数。
+  # 偏差超过它就不绑定，该车自由运行。宁可少绑不可错绑：错绑会让车等一个不属于它的时刻。
+  assign-tolerance-seconds: 300
+  # 发车侧单次轮询最多回补多长的时间窗口（秒）。
+  # 服务器停了一整天再启动时，它保证不会把这一天的车一次性全部补发出来。
+  max-catch-up-seconds: 300
+  # 重新加载已发布时刻表的间隔（秒）。publish/unpublish 之后最多等这么久生效。
+  reload-interval-seconds: 60
+  # 录制结果落库的间隔（秒）。录制本身不落库，封存好的跑车在这个 tick 上批量写入。
+  recorder-flush-interval-seconds: 5
+  # 时刻表默认时区（如 Asia/Shanghai）。留空使用服务器默认时区。
+  # 时刻表存的是"当日秒数"，换算成绝对时间要靠它；改这个值会让全部已发布时刻表整体平移。
+  zone: ""
 
 train:
   # 默认车种（emu/dmu/diesel_push_pull/electric_loco）

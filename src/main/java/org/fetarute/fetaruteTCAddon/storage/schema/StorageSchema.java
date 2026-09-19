@@ -52,6 +52,14 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
     ddl.add(routeStops(dialect));
     ddl.add(index("route_stops_route", "route_stops", "route_id"));
+    ddl.add(timetables(dialect));
+    ddl.add(uniqueIndex("timetables_code", "timetables", "line_id, code"));
+    ddl.add(index("timetables_status", "timetables", "status"));
+    ddl.add(timetableTrips(dialect));
+    ddl.add(uniqueIndex("timetable_trips_code", "timetable_trips", "timetable_id, trip_code"));
+    ddl.add(index("timetable_trips_route", "timetable_trips", "route_id"));
+    ddl.add(timetableDuties(dialect));
+    ddl.add(uniqueIndex("timetable_duties_code", "timetable_duties", "timetable_id, duty_code"));
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
@@ -350,6 +358,121 @@ public final class StorageSchema {
         dialect.stringType(),
         table("routes"),
         table("stations"));
+  }
+
+  /**
+   * 时刻表表头，含各 route 的站间时分档案。
+   *
+   * <p>档案（{@code route_plans}）做成 JSON 而不是独立表，是因为它对时刻表是整体替换的：一条线路下几条
+   * route、每条二十来个停靠点，读写永远是整份，拆成子表只会多一次 join 和一套"半份档案"的失败模式。 发车表与车辆交路则相反——它们按趟增删、需要按编号唯一，所以各自单列成表。
+   */
+  private String timetables(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    operator_id %s NOT NULL,
+                    line_id %s NOT NULL,
+                    code %s NOT NULL,
+                    name %s NOT NULL,
+                    status %s NOT NULL,
+                    zone_id %s NOT NULL,
+                    service_start_second %s NOT NULL,
+                    service_end_second %s NOT NULL,
+                    route_plans %s NOT NULL,
+                    notes %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    FOREIGN KEY (line_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetables"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.textType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("lines"));
+  }
+
+  /** 发车表：一趟车一行，只存起点发车时刻与承担它的车辆交路。 */
+  private String timetableTrips(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    timetable_id %s NOT NULL,
+                    route_id %s NOT NULL,
+                    duty_id %s,
+                    sequence %s NOT NULL,
+                    trip_code %s NOT NULL,
+                    departure_second_of_day %s NOT NULL,
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_trips"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.intType(),
+        table("timetables"));
+  }
+
+  /**
+   * 车辆交路：一辆车从出库到回库之间承担的一串班次。
+   *
+   * <p>{@code end_depot_node_id} 是"每辆车最终都会回库"这条不变量的物理落点，因此是 NOT NULL—— 没有回库端点的 duty
+   * 是一条没有出口的链，不允许落库。{@code create_route_id}/{@code return_route_id} 是两端的走行线路， 为空表示首班/末班 route
+   * 本身从车库始发/以销毁收尾；{@code return_second} 是回库票的发出时刻。
+   */
+  private String timetableDuties(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    timetable_id %s NOT NULL,
+                    sequence %s NOT NULL,
+                    duty_code %s NOT NULL,
+                    start_depot_node_id %s NOT NULL,
+                    end_depot_node_id %s NOT NULL,
+                    create_route_id %s,
+                    return_route_id %s,
+                    trip_ids %s NOT NULL,
+                    planned_start_second %s NOT NULL,
+                    return_second %s NOT NULL,
+                    planned_end_second %s NOT NULL,
+                    close_reason %s NOT NULL,
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_duties"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.textType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        table("timetables"));
   }
 
   private String hudTemplates(SqlDialect dialect) {

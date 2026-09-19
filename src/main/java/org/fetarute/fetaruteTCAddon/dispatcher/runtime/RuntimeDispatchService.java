@@ -247,6 +247,13 @@ public final class RuntimeDispatchService {
   private Runnable startupRecoveryRequestedListener = () -> {};
 
   /**
+   * 车站停靠的观察者播报与发车计划扣留。
+   *
+   * <p>这两件事都不读占用、不改授权、不碰信号，因此整体放在协作者里；本类只负责在正确的时刻调用它。
+   */
+  private final StationStopCoordinator stationStopCoordinator;
+
+  /**
    * 请求下一 tick 进入唯一完整信号重评估入口。
    *
    * <p>Smart Dispatcher 只能通过该 wake-up 表达“优先重试某列车”的调度意图；它不得用 wait-for blocker 资源自行拼装或签发 Movement
@@ -1572,6 +1579,15 @@ public final class RuntimeDispatchService {
     if (occupancyManager instanceof SimpleOccupancyManager simpleOccupancyManager) {
       simpleOccupancyManager.setLiveBlockerSnapshotListener(this::updateLiveBlockerSnapshot);
     }
+    this.stationStopCoordinator =
+        new StationStopCoordinator(
+            this.debugLogger,
+            this.clock,
+            routeDefinitions,
+            this::isFtaManagedTrain,
+            this::resolveTrackedTrainName,
+            this::resolveRouteDefinition,
+            this::readRouteUuid);
     this.smartDispatcherController = new SmartDispatcherController(this.debugLogger);
     this.launchAuthorizationService =
         new LaunchAuthorizationService(
@@ -1636,6 +1652,16 @@ public final class RuntimeDispatchService {
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
   public void setLayoverListener(Consumer<LayoverRegistry.LayoverCandidate> listener) {
     this.layoverListener = listener != null ? listener : candidate -> {};
+  }
+
+  /**
+   * 返回车站停靠协作者：停靠事件播报与发车计划扣留都挂在它上面。
+   *
+   * <p>刻意只留一个访问器而不是三个 setter。{@code RuntimeDispatchService} 的方法数已经贴着 SpotBugs 跳过分析的上限（{@code
+   * SKIPPED_CLASS_TOO_BIG}），越过之后整个类不再被静态检查覆盖；每加一个方法都在花掉那点余量。
+   */
+  public StationStopCoordinator stationStops() {
+    return stationStopCoordinator;
   }
 
   /**
@@ -5164,6 +5190,12 @@ public final class RuntimeDispatchService {
     }
 
     Instant now = clockNow();
+    // 计划扣留放在申请任何占用之前：早到的车该等的是时刻，不该先把区间资源攥在手里再等。
+    // 这也保证了扣留期间它对别的车完全透明——除了自己不走，什么都没占。
+    if (stationStopCoordinator.holdsDeparture(
+        trainName, route, readRouteUuid(properties), currentIndex, definition.nodeId(), now)) {
+      return false;
+    }
     Optional<RailGraph> graphOpt = resolveGraph(train.worldId(), now);
     if (graphOpt.isEmpty()) {
       applySafetyStateUnavailableStop(
@@ -5570,6 +5602,9 @@ public final class RuntimeDispatchService {
     // 推进 routeIndex
     recordArrivalProgress(
         trainName, routeUuidOpt.orElse(null), route, currentIndex, currentNode, properties, now);
+    // 进度已提交，到达是既成事实，此时才通知观察者；提前通知会把“看见牌子”录成“到站”。
+    stationStopCoordinator.notifyStop(
+        true, trainName, route, routeUuidOpt, currentIndex, currentNode, now);
     debugLogger.accept(
         "Station 推进: train="
             + trainName
@@ -8568,6 +8603,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(resolvedTrainName);
     clearRuntimeCachesForTrain(resolvedTrainName);
+    stationStopCoordinator.notifyReleased(resolvedTrainName, "train-removed");
     refreshScheduledSurvivorAfterRemoval(resolvedTrainName, trainName);
   }
 
@@ -19269,6 +19305,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(trainName);
     clearRuntimeCachesForTrain(trainName);
+    stationStopCoordinator.notifyReleased(trainName, reason);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_INDEX);
     TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_UPDATED_AT);
     debugLogger.accept("调度销毁: reason=" + reason + " train=" + trainName);

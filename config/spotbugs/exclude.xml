@@ -536,4 +536,39 @@
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+
+    <!-- stationStops() 故意暴露协作者本体：装配方（主类）与调用方（AutoStation）都需要对它发指令，
+         而 RuntimeDispatchService 的方法数已贴着 SpotBugs 跳过分析的上限，不能为此再摊三个 setter。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService"/>
+        <Method name="stationStops"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- 时刻表 record 的集合字段已在 compact constructor 中经 List.copyOf/toList 固化，SpotBugs 仍报 EI -->
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- 发车装饰器持有 delegate 与时刻表服务引用，生命周期由主类管理 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTimetableCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRunRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
 </FindBugsFilter>

@@ -312,6 +312,45 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 - `SMART_MUTUAL_CONFLICT_OWNER_SET` 在赢家选择时记录每个 owner 的实时请求 priority 与来源、当前节点及 `PHYSICAL_FOOTPRINT/HOLD_ONLY` claim、active movement token 的 claimVersion/aspect/resources。证据缺失会写明 `unavailable:no-live-request` 或 `reason=no-token`，不得再用固定 `unknown` 掩盖仲裁输入。
 - Gate Queue 优先级默认按 `OPERATION > depot exit/CREATE > RETURN` 分类；`FTA_PRIORITY` 仍可人工覆盖。Depot spawn gate 不再固定加 `100`，其实际 priority 会出现在 `SMART_DEPOT_SPAWN_AUTHORITY_WINDOW`。
 
+## 类体积约束：不要再往 RuntimeDispatchService 里加方法
+
+`RuntimeDispatchService` 约三万行、994 个方法，已经贴着 SpotBugs 的单类分析上限。
+越线之后整个类被标记 `SKIPPED_CLASS_TOO_BIG` 并**完全跳过静态分析**——而它恰恰是全项目最需要被覆盖的类。
+
+实测边界（SpotBugs 4.8.6，effort=MAX）：**993 个方法通过，1000 个方法触发**。
+不是行数，是方法数；`javap -p <class> | grep -c '(.*);'` 可以直接数。
+
+因此往这个类里加能力时，做法是把逻辑放进独立协作者，只在它上面留一个访问器。
+`StationStopCoordinator` 与 `RuntimeDispatchService#stationStops()` 是现成范例：
+时刻表录制播报 + 计划扣留一共只在这个类上花掉一个方法的余量。
+
+加方法前先跑一次 `./gradlew spotbugsMain`，确认没有把余量花光。
+
+## 车站停靠事件与计划扣留
+
+`StationStopCoordinator` 承担两件不属于调度本身的事（它们不读占用、不改授权、不碰信号）：
+
+1. **停靠事实播报**：`StationStopObserver` 单向接收到站、发车、离开管辖三类事件。
+   调度层因此不依赖 timetable 包；观察者整体缺席时，调度行为不变一行。
+   当前没有已装配的消费者——这组 seam 是给将来做「表定时分 vs 实测时分」对表用的，
+   属于 validation/calibration，**不**参与时刻表构建。
+   - 到站：`handleStationArrival` 在 `recordArrivalProgress` 之后播报——进度已提交才算到达，
+     提前播报会把"看见牌子"录成"到站"。
+   - 发车：由 AutoStation 在拿到许可、松开门锁的同一时刻调用 `stationStops().handleDeparture(...)`。
+     不从 `checkDeparture` 的返回路径播报，因为那里有多条 `return true` 属于"不做门控"而非"真的发车"。
+2. **计划扣留**：`holdsDeparture` 在 `checkDeparture` 里、**申请任何占用之前**被问一次。
+   早到的车等到表定时刻再走；扣留期间它对别的车完全透明。
+   已到点/已晚点一律放行，扣留时长被 `HOLD_CEILING`（150 秒）硬封顶——必须低于发车门锁自身
+   180 秒的回收时限，否则列车会进入"自己不动、也不再为别人排队"的状态。
+
+另有一处与车辆生命周期相关的接入点：`SimpleTicketAssigner#setLayoverReuseGate`。
+时刻表层通过它否决"交路额度已用完"的列车继续接运营班次，被否决的车留在 layover 闲置，
+由既有的 `ReclaimManager` 在闲置回收窗口内派 RETURN 票送回库。闸默认恒放行，
+未装配时 layover 复用行为与之前完全一致；它只否决 OPERATION 票，RETURN 票不受影响——
+否则被否决的车反而没有回家的手段。
+
+详见 `docs/dev/timetable.md`。
+
 ## 已知限制
 - 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车；STOP 与 approach 均会按剩余距离计算制动曲线，但仍以 TrainCarts 动作队列执行最终物理运动。
