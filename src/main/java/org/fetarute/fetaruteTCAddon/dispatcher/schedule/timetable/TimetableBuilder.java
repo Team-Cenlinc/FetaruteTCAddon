@@ -66,9 +66,6 @@ public final class TimetableBuilder {
   /** 搜索可行 headway 时最多放宽到目标的多少倍。 */
   public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 4;
 
-  /** 取消班次的警告里最多列出多少个时刻。 */
-  private static final int DROPPED_TIMES_IN_WARNING = 6;
-
   private final TimetableTimingCalculator timingCalculator;
 
   public TimetableBuilder() {
@@ -106,7 +103,7 @@ public final class TimetableBuilder {
     int targetHeadway = (int) Math.max(1L, options.headway().toSeconds());
     Attempt target;
     try {
-      target = attempt(prepared, options);
+      target = attempt(prepared, options, input, builtAt);
     } catch (BuildFailure failure) {
       return TimetableBuildResult.failure(failure.getMessage(), prepared.infeasible());
     }
@@ -114,14 +111,18 @@ public final class TimetableBuilder {
     Attempt chosen = target;
     List<String> warnings = new ArrayList<>();
     if (!target.conflicts().clean()) {
-      String summary = summarizeConflicts(target.conflicts(), targetHeadway);
+      String summary =
+          TimetableBuildReportText.summarizeConflicts(target.conflicts(), targetHeadway);
       if (options.strictConflicts()) {
         List<String> reasons = new ArrayList<>();
         reasons.add(summary + "；严格模式下不回退");
-        reasons.addAll(describeConflicts(target.conflicts(), options));
+        reasons.addAll(
+            TimetableBuildReportText.describeConflicts(
+                target.conflicts(), options.serviceStartSecondOfDay()));
         return TimetableBuildResult.failure(String.join("\n", reasons), prepared.infeasible());
       }
-      Optional<Attempt> fallback = searchFeasibleHeadway(prepared, options, targetHeadway);
+      Optional<Attempt> fallback =
+          searchFeasibleHeadway(prepared, options, targetHeadway, input, builtAt);
       if (fallback.isEmpty()) {
         return TimetableBuildResult.failure(
             summary
@@ -132,7 +133,9 @@ public final class TimetableBuilder {
       }
       chosen = fallback.get();
       warnings.add(summary + "，已回退到最小可行间隔 " + chosen.headwaySeconds() + "s（--strict 可改为构建失败）");
-      warnings.addAll(describeConflicts(target.conflicts(), options));
+      warnings.addAll(
+          TimetableBuildReportText.describeConflicts(
+              target.conflicts(), options.serviceStartSecondOfDay()));
     }
 
     // ---- 5. 汇总与判据 ---------------------------------------------------
@@ -150,33 +153,16 @@ public final class TimetableBuilder {
     for (TimetableBuildResult.InfeasibleRoute route : prepared.infeasible()) {
       warnings.add("route " + route.routeCode() + " 排除：" + route.reason());
     }
-    warnings.addAll(describeDropped(chosen.dropped()));
+    warnings.addAll(TimetableBuildReportText.describeDropped(chosen.dropped()));
+    List<VehicleDuty> duties = chosen.timetable().duties();
     VehicleDutyPlanner.Result finalDuties =
-        new VehicleDutyPlanner.Result(
-            chosen.duties(), List.of(), chosen.duties().size(), List.of());
+        new VehicleDutyPlanner.Result(duties, List.of(), duties.size(), List.of());
     if (!finalDuties.allDutiesReturnToStorage()) {
       // 理论上 VehicleDuty 的构造器已经挡住了这种情况；留一条断言式警告，避免静默降级。
       warnings.add("存在没有回库端点的 duty，这是一个不应发生的状态");
     }
 
-    Timetable timetable =
-        new Timetable(
-            input.timetableId(),
-            input.companyId(),
-            input.operatorId(),
-            input.lineId(),
-            input.code(),
-            input.name(),
-            TimetableStatus.DRAFT,
-            options.zoneId(),
-            options.serviceStartSecondOfDay(),
-            options.serviceEndSecondOfDay(),
-            prepared.plans(),
-            chosen.trips(),
-            chosen.duties(),
-            input.notes(),
-            builtAt,
-            builtAt);
+    Timetable timetable = chosen.timetable();
 
     int longestTrip =
         prepared.operationPlans().stream()
@@ -188,7 +174,7 @@ public final class TimetableBuilder {
         chosen.shares(),
         prepared.infeasible(),
         chosen.dropped(),
-        chosen.duties().size(),
+        duties.size(),
         finalDuties.spawnedVehicles(),
         finalDuties.peakConcurrentVehicles(),
         finalDuties.maxTripsInAnyDuty(),
@@ -313,7 +299,8 @@ public final class TimetableBuilder {
   // ------------------------------------------------------------ 第 2–4 步
 
   /** 按 {@code options.headway()} 排班、派车、查冲突。排不出任何班次时抛 {@link BuildFailure}。 */
-  private Attempt attempt(Prepared prepared, TimetableBuildOptions options) {
+  private Attempt attempt(
+      Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
     UUID timetableId = prepared.timetableId();
     int slots = options.slotCount();
     long headwaySeconds = Math.max(1L, options.headway().toSeconds());
@@ -336,7 +323,6 @@ public final class TimetableBuilder {
     // 派车前的班次用临时主键：取消一部分之后要重新编号，主键由最终车次号派生。
     List<VehicleDutyPlanner.PlannedTrip> plannedTrips = new ArrayList<>(assignment.size());
     Map<UUID, WeightedTripAllocator.Allocation> allocationByProvisional = new HashMap<>();
-    Map<UUID, VehicleDutyPlanner.PlannedTrip> tripByProvisional = new HashMap<>();
     for (int i = 0; i < assignment.size(); i++) {
       WeightedTripAllocator.Allocation allocation = assignment.get(i);
       OperationPlan op = prepared.operations().get(allocation.candidateIndex());
@@ -358,7 +344,6 @@ public final class TimetableBuilder {
               op.startsAtDepot(),
               op.endsAtDepot());
       plannedTrips.add(trip);
-      tripByProvisional.put(provisional, trip);
     }
 
     VehicleDutyPlanner.Result planned =
@@ -377,7 +362,6 @@ public final class TimetableBuilder {
     // 只保留派上车的班次，按最终车次号重新派生主键，再把 duty 里的引用换过来。
     Map<String, Integer> perRouteCounter = new LinkedHashMap<>();
     Map<UUID, UUID> finalByProvisional = new HashMap<>();
-    Map<UUID, String> codeByProvisional = new HashMap<>();
     List<TimetableTrip> trips = new ArrayList<>(plannedTrips.size());
     List<WeightedTripAllocator.Allocation> keptAllocations = new ArrayList<>(plannedTrips.size());
     List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
@@ -407,7 +391,6 @@ public final class TimetableBuilder {
               Locale.ROOT, "%s%s-%03d", options.tripCodePrefix(), plan.routeCode(), serial);
       UUID tripId = deterministicTripId(timetableId, tripCode);
       finalByProvisional.put(provisional.tripId(), tripId);
-      codeByProvisional.put(provisional.tripId(), tripCode);
       trips.add(
           new TimetableTrip(
               tripId,
@@ -424,32 +407,9 @@ public final class TimetableBuilder {
       throw new BuildFailure("排定的班次没有一趟能配上出库与回库线路：检查 CREATE/RETURN 线路是否覆盖各起终点");
     }
 
-    // ---- 4. 查冲突：全部运行 + 站台待命，时刻仍相对窗口起点 -------------------
-    List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
-    List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
-    for (VehicleDutyPlanner.PlannedTrip provisional : plannedTrips) {
-      String code = codeByProvisional.get(provisional.tripId());
-      if (code == null) {
-        continue;
-      }
-      WeightedTripAllocator.Allocation allocation =
-          allocationByProvisional.get(provisional.tripId());
-      movements.add(
-          new TimetableConflictChecker.Movement(
-              code,
-              operationPlans.get(allocation.candidateIndex()).routeId(),
-              provisional.departureSeconds()));
-    }
+    // ---- 4. 查冲突：把成品表投影成全部运行 + 站台待命，零点 = 计划窗口起点 ------------
     List<VehicleDuty> duties = new ArrayList<>(planned.duties().size());
     for (VehicleDuty duty : planned.duties()) {
-      collectDutyOccupancy(
-          duty,
-          tripByProvisional,
-          allocationByProvisional,
-          operationPlans,
-          prepared.profiles(),
-          movements,
-          stays);
       List<UUID> finalTripIds = new ArrayList<>(duty.tripIds().size());
       for (UUID provisional : duty.tripIds()) {
         UUID finalId = finalByProvisional.get(provisional);
@@ -473,121 +433,38 @@ public final class TimetableBuilder {
               shiftToServiceDay(duty.plannedEndSecondOfDay(), options),
               duty.closeReason()));
     }
+    Timetable timetable =
+        new Timetable(
+            input.timetableId(),
+            input.companyId(),
+            input.operatorId(),
+            input.lineId(),
+            input.code(),
+            input.name(),
+            TimetableStatus.DRAFT,
+            options.zoneId(),
+            options.serviceStartSecondOfDay(),
+            options.serviceEndSecondOfDay(),
+            prepared.plans(),
+            trips,
+            duties,
+            input.notes(),
+            builtAt,
+            builtAt);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        TimetableOccupancyProjector.project(
+            timetable, prepared.profiles(), options.serviceStartSecondOfDay());
     TimetableConflictChecker.Report conflicts =
         TimetableConflictChecker.check(
             prepared.graphIndex(),
             prepared.profiles(),
-            movements,
-            stays,
+            occupancy.movements(),
+            occupancy.stays(),
             (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds()));
 
     List<WeightedTripAllocator.ShareReport> shares =
         WeightedTripAllocator.report(prepared.candidates(), keptAllocations);
-    return new Attempt(
-        (int) headwaySeconds,
-        List.copyOf(trips),
-        List.copyOf(duties),
-        List.copyOf(dropped),
-        shares,
-        conflicts);
-  }
-
-  /**
-   * 一个 duty 在冲突模型里的贡献：两段走行是运行，到站等首班、两班之间折返、末班到发回库票是站台待命。
-   *
-   * <p>待命必须按 duty 建模而不是按班次：同一辆车"到站 → 折返 → 再发车"是一段连续占用，拆成两个班次各自的到发区间 会在中间留出一个并不存在的空档。
-   */
-  private static void collectDutyOccupancy(
-      VehicleDuty duty,
-      Map<UUID, VehicleDutyPlanner.PlannedTrip> tripByProvisional,
-      Map<UUID, WeightedTripAllocator.Allocation> allocationByProvisional,
-      List<TimetableRoutePlan> operationPlans,
-      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      List<TimetableConflictChecker.Movement> movements,
-      List<TimetableConflictChecker.Stay> stays) {
-    List<VehicleDutyPlanner.PlannedTrip> chain = new ArrayList<>(duty.tripIds().size());
-    List<TimetableConflictChecker.RouteProfile> chainProfiles = new ArrayList<>();
-    for (UUID provisional : duty.tripIds()) {
-      VehicleDutyPlanner.PlannedTrip trip = tripByProvisional.get(provisional);
-      WeightedTripAllocator.Allocation allocation = allocationByProvisional.get(provisional);
-      if (trip == null || allocation == null) {
-        continue;
-      }
-      TimetableConflictChecker.RouteProfile profile =
-          profiles.get(operationPlans.get(allocation.candidateIndex()).routeId());
-      if (profile == null) {
-        continue;
-      }
-      chain.add(trip);
-      chainProfiles.add(profile);
-    }
-    if (chain.isEmpty()) {
-      return;
-    }
-    VehicleDutyPlanner.PlannedTrip first = chain.get(0);
-    VehicleDutyPlanner.PlannedTrip last = chain.get(chain.size() - 1);
-    duty.createRouteId()
-        .ifPresent(
-            routeId -> {
-              movements.add(
-                  new TimetableConflictChecker.Movement(
-                      duty.dutyCode() + "-CREATE", routeId, duty.plannedStartSecondOfDay()));
-              TimetableConflictChecker.RouteProfile create = profiles.get(routeId);
-              int arrival =
-                  duty.plannedStartSecondOfDay()
-                      + (create == null ? 0 : lastArrival(create.stops()));
-              chainProfiles
-                  .get(0)
-                  .origin()
-                  .ifPresent(
-                      platform ->
-                          stays.add(
-                              new TimetableConflictChecker.Stay(
-                                  duty.dutyCode(),
-                                  platform,
-                                  Math.min(arrival, first.departureSeconds()),
-                                  first.departureSeconds())));
-            });
-    for (int i = 0; i + 1 < chain.size(); i++) {
-      VehicleDutyPlanner.PlannedTrip current = chain.get(i);
-      VehicleDutyPlanner.PlannedTrip next = chain.get(i + 1);
-      int arrival = current.departureSeconds() + current.durationSeconds();
-      int index = i;
-      chainProfiles
-          .get(index)
-          .terminal()
-          .ifPresent(
-              platform ->
-                  stays.add(
-                      new TimetableConflictChecker.Stay(
-                          duty.dutyCode(),
-                          platform,
-                          arrival,
-                          Math.max(arrival, next.departureSeconds()))));
-    }
-    duty.returnRouteId()
-        .ifPresent(
-            routeId -> {
-              movements.add(
-                  new TimetableConflictChecker.Movement(
-                      duty.dutyCode() + "-RETURN", routeId, duty.returnSecondOfDay()));
-              int arrival = last.departureSeconds() + last.durationSeconds();
-              chainProfiles
-                  .get(chainProfiles.size() - 1)
-                  .terminal()
-                  .ifPresent(
-                      platform ->
-                          stays.add(
-                              new TimetableConflictChecker.Stay(
-                                  duty.dutyCode(),
-                                  platform,
-                                  arrival,
-                                  Math.max(arrival, duty.returnSecondOfDay()))));
-            });
-  }
-
-  private static int lastArrival(List<TimetableStop> stops) {
-    return stops.isEmpty() ? 0 : stops.get(stops.size() - 1).arrivalOffsetSeconds();
+    return new Attempt((int) headwaySeconds, timetable, List.copyOf(dropped), shares, conflicts);
   }
 
   /**
@@ -596,14 +473,19 @@ public final class TimetableBuilder {
    * <p>只放宽 headway、不挪动单个班次：表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成， 因此"建议值"是一个可以直接写回配置的数，而不是一次性的手工调整。
    */
   private Optional<Attempt> searchFeasibleHeadway(
-      Prepared prepared, TimetableBuildOptions options, int targetHeadway) {
+      Prepared prepared,
+      TimetableBuildOptions options,
+      int targetHeadway,
+      BuildInput input,
+      Instant builtAt) {
     int limit = targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER;
     for (int headway = targetHeadway + HEADWAY_SEARCH_STEP_SECONDS;
         headway <= limit;
         headway += HEADWAY_SEARCH_STEP_SECONDS) {
       Attempt candidate;
       try {
-        candidate = attempt(prepared, options.withHeadway(Duration.ofSeconds(headway)));
+        candidate =
+            attempt(prepared, options.withHeadway(Duration.ofSeconds(headway)), input, builtAt);
       } catch (BuildFailure ignored) {
         continue;
       }
@@ -612,49 +494,6 @@ public final class TimetableBuilder {
       }
     }
     return Optional.empty();
-  }
-
-  private static String summarizeConflicts(
-      TimetableConflictChecker.Report report, int targetHeadway) {
-    StringBuilder kinds = new StringBuilder();
-    report
-        .countByKind()
-        .forEach(
-            (kind, count) -> {
-              if (kinds.length() > 0) {
-                kinds.append("、");
-              }
-              kinds.append(describe(kind)).append(' ').append(count);
-            });
-    return "目标间隔 " + targetHeadway + "s 有 " + report.conflicts().size() + " 处冲突（" + kinds + "）";
-  }
-
-  /** 冲突明细，最多列前几条；时刻换算成当日时钟。 */
-  private static List<String> describeConflicts(
-      TimetableConflictChecker.Report report, TimetableBuildOptions options) {
-    List<String> out = new ArrayList<>();
-    int shown = Math.min(report.conflicts().size(), TimetableBuildResult.CONFLICT_DETAIL_LIMIT);
-    for (int i = 0; i < shown; i++) {
-      out.add(
-          "  · "
-              + report
-                  .conflicts()
-                  .get(i)
-                  .describe(seconds -> clock(options.serviceStartSecondOfDay() + seconds)));
-    }
-    if (report.conflicts().size() > shown) {
-      out.add("  · … 另有 " + (report.conflicts().size() - shown) + " 处");
-    }
-    return out;
-  }
-
-  private static String describe(TimetableConflictChecker.Kind kind) {
-    return switch (kind) {
-      case TRACK -> "区间";
-      case PLATFORM -> "站台";
-      case SINGLE_LINE -> "单线对向";
-      case JUNCTION -> "道岔";
-    };
   }
 
   /** 首站带 CRET 指令：列车在这条 route 上从车库实体化，与发车侧 {@code startsWithCret} 判法一致。 */
@@ -683,50 +522,8 @@ public final class TimetableBuilder {
     return options.serviceStartSecondOfDay() + relativeSeconds;
   }
 
-  /** 报告里的时刻统一走导出器的格式：跨零点带 +1，早于零点带 -1，不会把前一夜的出库票显示成当天深夜。 */
   private static String clock(int secondOfDay) {
     return TimetableCsvExporter.clock(secondOfDay);
-  }
-
-  /** 取消的班次按 route + 原因归组，每组列出前几个时刻。 */
-  private static List<String> describeDropped(List<TimetableBuildResult.DroppedTrip> dropped) {
-    Map<String, List<TimetableBuildResult.DroppedTrip>> groups = new LinkedHashMap<>();
-    for (TimetableBuildResult.DroppedTrip trip : dropped) {
-      groups
-          .computeIfAbsent(trip.routeCode() + "|" + trip.reason(), key -> new ArrayList<>())
-          .add(trip);
-    }
-    List<String> out = new ArrayList<>(groups.size());
-    for (List<TimetableBuildResult.DroppedTrip> group : groups.values()) {
-      TimetableBuildResult.DroppedTrip first = group.get(0);
-      StringBuilder times = new StringBuilder();
-      for (int i = 0; i < Math.min(group.size(), DROPPED_TIMES_IN_WARNING); i++) {
-        if (i > 0) {
-          times.append(", ");
-        }
-        times.append(group.get(i).departureText());
-      }
-      if (group.size() > DROPPED_TIMES_IN_WARNING) {
-        times.append(" …");
-      }
-      out.add(
-          String.format(
-              Locale.ROOT,
-              "route %s 取消 %d 班（%s）: %s",
-              first.routeCode(),
-              group.size(),
-              describe(first.reason()),
-              times));
-    }
-    return out;
-  }
-
-  private static String describe(VehicleDutyPlanner.UnassignedReason reason) {
-    return switch (reason) {
-      case NO_CREATE_ACCESS -> "起点没有 CREATE 线路，也没有接得上的待命车";
-      case NO_RETURN_ACCESS -> "终点没有 RETURN 线路，后面也接不上能回库的班次";
-      case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
-    };
   }
 
   /**
@@ -757,8 +554,7 @@ public final class TimetableBuilder {
   /** 按某个 headway 排出来的一份完整计划及其冲突报告。 */
   private record Attempt(
       int headwaySeconds,
-      List<TimetableTrip> trips,
-      List<VehicleDuty> duties,
+      Timetable timetable,
       List<TimetableBuildResult.DroppedTrip> dropped,
       List<WeightedTripAllocator.ShareReport> shares,
       TimetableConflictChecker.Report conflicts) {}

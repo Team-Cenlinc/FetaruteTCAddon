@@ -17,8 +17,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -62,34 +60,23 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 匹配车次时允许回看/前看的服务日，用于覆盖跨零点的班次。 */
   private static final List<Integer> SERVICE_DATE_OFFSETS = List.of(-1, 0, 1);
 
-  /** 绑定表上限：远超任何一条线的实际运营规模，命中说明清理没生效。 */
-  private static final int MAX_ASSIGNMENTS = 1024;
-
   private final Supplier<Instant> clock;
   private final Consumer<String> debugLogger;
 
   private volatile Settings settings = Settings.disabled();
   private volatile Snapshot snapshot = Snapshot.empty();
 
-  private final ConcurrentMap<String, TimetableAssignment> assignments = new ConcurrentHashMap<>();
-  private final ConcurrentMap<TripKey, String> claims = new ConcurrentHashMap<>();
-  private final ConcurrentMap<String, DutyProgress> dutyProgress = new ConcurrentHashMap<>();
+  /** 车次绑定与 trip 占用。 */
+  private final TripMatcher matcher;
 
-  /** 列车 → 它属于哪个交路（哪份表、哪个 duty、哪一天）。出库票实体化时或首次绑定车次时建立。 */
-  private final ConcurrentMap<String, DutyKey> dutyBindings = new ConcurrentHashMap<>();
-
-  /** 绑不上车次的累计次数：跨线干扰 → 晚点 → 退回自由运行这条链，以前在数字上完全看不见。 */
-  private final java.util.concurrent.atomic.AtomicLong assignMisses =
-      new java.util.concurrent.atomic.AtomicLong();
-
-  /** 同一辆车同一停靠点同一原因的 MISS 日志节流：门控每秒问一次，不节流会刷屏。 */
-  private final ConcurrentMap<String, Instant> missLoggedAt = new ConcurrentHashMap<>();
-
-  private static final Duration MISS_LOG_INTERVAL = Duration.ofSeconds(60);
+  /** 交路进度、交路归属与三道闸。 */
+  private final DutyLedger ledger;
 
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
+    this.matcher = new TripMatcher(this.debugLogger);
+    this.ledger = new DutyLedger(this.debugLogger);
   }
 
   /** 更新配置；关闭时会立刻清空绑定，避免留下"已经不生效但还显示着"的状态。 */
@@ -161,19 +148,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return Optional.empty();
     }
     UUID routeId = event.routeUuid().orElse(null);
-    TimetableAssignment existing = assignments.get(key);
+    TimetableAssignment existing = matcher.get(key).orElse(null);
     // 解绑判定必须先于"本 route 有没有表"的判定：改派到一条没有时刻表的交路同样是换了任务，
     // 此时若把旧绑定留着，等这辆车绕回原交路时会拿上一圈的车次继续算时刻，而它已经是下一圈了。
     if (existing != null && !existing.routeId().equals(routeId)) {
-      releaseAssignment(key, "route-changed");
+      matcher.release(key, "route-changed");
       existing = null;
     } else if (existing != null
         && event.stopIndex() == 0
-        && !stillWaitingAtOrigin(existing, event, current)) {
+        && !matcher.stillWaitingAtOrigin(existing, event, current, snapshot)) {
       // 回到起点就是新的一趟车。不在这里重新匹配的话，同一条 route 上连续接班的列车会一直用第一趟的时刻，
       // 交路进度也永远停在第一班——"每辆车最终都会回库"就失去了推进它的事件。
       // 但"还在起点等点"不算回到起点：门控每秒问一次，扣留期间反复解绑重绑只会刷日志、扫全表。
-      releaseAssignment(key, "new-circuit");
+      matcher.release(key, "new-circuit");
       existing = null;
     }
     if (routeId == null) {
@@ -200,29 +187,6 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 这辆车是不是还在起点等它已经绑定的那趟车发车。
-   *
-   * <p>判据：绑定就是在起点建立的，且现在还没超过那趟车表定发车 + 容差。超过了就是下一圈回来了，该重新匹配。
-   */
-  private boolean stillWaitingAtOrigin(
-      TimetableAssignment existing, StationStopEvent event, Settings current) {
-    if (existing.assignedAtStopIndex() != 0) {
-      return false;
-    }
-    Optional<Instant> scheduled =
-        resolveTimetable(existing)
-            .flatMap(
-                timetable ->
-                    timetable
-                        .tripByCode(existing.tripCode())
-                        .flatMap(
-                            trip -> timetable.scheduledDeparture(trip, 0, existing.serviceDate())));
-    return scheduled
-        .map(at -> !event.at().isAfter(at.plus(current.assignTolerance())))
-        .orElse(false);
-  }
-
-  /**
    * 这辆车还能不能被复用去跑下一班运营车次。
    *
    * <p>这是车辆交路边界在运行期的唯一执行点，也是"每辆车最终都会回库"这条不变量不被 "恰好还有下一班"绕过的保证。语义刻意只有一条：<b>duty 的班次余额用完了就不准再接</b>。
@@ -238,27 +202,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     String key = keyOf(trainName);
-    if (key == null) {
-      return true;
-    }
-    DutyProgress progress = dutyProgress.get(key);
-    if (progress == null) {
-      return true;
-    }
-    if (!progress.exhausted()) {
-      return true;
-    }
-    debugLogger.accept(
-        "TIMETABLE_DUTY_CLOSED train="
-            + trainName
-            + " duty="
-            + progress.dutyCode()
-            + " trips="
-            + progress.assignedTrips()
-            + "/"
-            + progress.plannedTrips()
-            + " action=deny-reuse-return-to-storage");
-    return false;
+    return key == null || ledger.allowsLayoverReuse(key, trainName);
   }
 
   /**
@@ -276,24 +220,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     String key = keyOf(trainName);
-    if (key == null) {
-      return true;
-    }
-    DutyProgress progress = dutyProgress.get(key);
-    if (progress == null || progress.exhausted()) {
-      return true;
-    }
-    debugLogger.accept(
-        "TIMETABLE_RETURN_DENIED train="
-            + trainName
-            + " duty="
-            + progress.dutyCode()
-            + " trips="
-            + progress.assignedTrips()
-            + "/"
-            + progress.plannedTrips()
-            + " action=keep-for-next-trip");
-    return false;
+    return key == null || ledger.allowsReturn(key, trainName);
   }
 
   /**
@@ -318,39 +245,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     String key = keyOf(trainName);
-    if (key == null) {
-      return true;
-    }
-    DutyKey bound = dutyBindings.get(key);
-    if (bound != null) {
-      if (bound.equals(intent.key())) {
-        return true;
-      }
-      debugLogger.accept(
-          "TIMETABLE_CANDIDATE_REJECT train="
-              + trainName
-              + " boundDuty="
-              + bound.describe()
-              + " ticketDuty="
-              + intent.key().describe()
-              + " reason=other-duty");
-      return false;
-    }
-    boolean firstTrip = intent.kind() == RouteOperationType.OPERATION && intent.tripIndex() == 0;
-    if (firstTrip) {
-      return true;
-    }
-    debugLogger.accept(
-        "TIMETABLE_CANDIDATE_REJECT train="
-            + trainName
-            + " ticketDuty="
-            + intent.key().describe()
-            + " kind="
-            + intent.kind().name()
-            + " tripIndex="
-            + intent.tripIndex()
-            + " reason=unbound-only-first-trip");
-    return false;
+    return key == null || ledger.acceptsVehicle(intent, key, trainName);
   }
 
   /**
@@ -363,52 +258,29 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return;
     }
     String key = keyOf(trainName);
-    if (key == null) {
-      return;
-    }
-    DutyKey previous = dutyBindings.putIfAbsent(key, duty);
-    if (previous == null) {
-      debugLogger.accept(
-          "TIMETABLE_DUTY_BOUND train="
-              + trainName
-              + " duty="
-              + duty.describe()
-              + " reason="
-              + reason);
-    } else if (!previous.equals(duty)) {
-      debugLogger.accept(
-          "TIMETABLE_DUTY_BIND_CONFLICT train="
-              + trainName
-              + " bound="
-              + previous.describe()
-              + " requested="
-              + duty.describe()
-              + " reason="
-              + reason);
+    if (key != null) {
+      ledger.bind(trainName, key, duty, reason);
     }
   }
 
   /** 查询某辆车绑在哪个交路上。 */
   public Optional<DutyKey> dutyBindingOf(String trainName) {
-    String key = keyOf(trainName);
-    return key == null ? Optional.empty() : Optional.ofNullable(dutyBindings.get(key));
+    return ledger.bindingOf(keyOf(trainName));
   }
 
   /** 查询某辆车当前的车次绑定。 */
   public Optional<TimetableAssignment> assignmentOf(String trainName) {
-    String key = keyOf(trainName);
-    return key == null ? Optional.empty() : Optional.ofNullable(assignments.get(key));
+    return matcher.get(keyOf(trainName));
   }
 
   /** 查询某辆车的交路进度。 */
   public Optional<DutyProgress> dutyProgressOf(String trainName) {
-    String key = keyOf(trainName);
-    return key == null ? Optional.empty() : Optional.ofNullable(dutyProgress.get(key));
+    return ledger.progressOf(keyOf(trainName));
   }
 
   /** 全部绑定快照。 */
   public List<TimetableAssignment> assignments() {
-    return List.copyOf(assignments.values());
+    return List.copyOf(matcher.assignments());
   }
 
   /** 保留仍在网的列车绑定，其余释放。由运行时清理 tick 调用。 */
@@ -424,13 +296,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
         keep.add(key);
       }
     }
-    for (String key : List.copyOf(assignments.keySet())) {
-      if (!keep.contains(key)) {
-        releaseAssignment(key, "train-gone");
-      }
-    }
-    dutyProgress.keySet().retainAll(keep);
-    dutyBindings.keySet().retainAll(keep);
+    matcher.retain(keep);
+    ledger.retain(keep);
   }
 
   /** 列车离开运行时管辖时释放绑定与交路进度。 */
@@ -439,22 +306,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (key == null) {
       return;
     }
-    releaseAssignment(key, reason);
-    dutyBindings.remove(key);
-    DutyProgress removed = dutyProgress.remove(key);
-    if (removed != null) {
-      debugLogger.accept(
-          "TIMETABLE_DUTY_RELEASED train="
-              + trainName
-              + " duty="
-              + removed.dutyCode()
-              + " trips="
-              + removed.assignedTrips()
-              + "/"
-              + removed.plannedTrips()
-              + " reason="
-              + reason);
-    }
+    matcher.release(key, reason);
+    ledger.release(key, trainName, reason);
   }
 
   /**
@@ -579,14 +432,14 @@ public final class TimetableService implements ScheduledDeparturePlan {
   public StatusSnapshot status() {
     Instant now = clock.get();
     List<DeviationEntry> deviations = new ArrayList<>();
-    for (TimetableAssignment assignment : assignments.values()) {
+    for (TimetableAssignment assignment : matcher.assignments()) {
       Optional<Timetable> timetableOpt = resolveTimetable(assignment);
       Optional<TimetableTrip> tripOpt =
           timetableOpt.flatMap(timetable -> timetable.tripByCode(assignment.tripCode()));
       if (tripOpt.isEmpty()) {
         continue;
       }
-      DutyProgress progress = dutyProgress.get(keyOf(assignment.trainName()));
+      DutyProgress progress = ledger.progressOf(keyOf(assignment.trainName())).orElse(null);
       deviations.add(
           new DeviationEntry(
               assignment.trainName(),
@@ -602,7 +455,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
         settings.spawnEnabled(),
         snapshot.timetables().size(),
         snapshot.byRoute().size(),
-        assignMisses.get(),
+        matcher.assignMisses(),
         List.copyOf(deviations));
   }
 
@@ -612,174 +465,33 @@ public final class TimetableService implements ScheduledDeparturePlan {
       List<Timetable> timetables,
       StationStopEvent event,
       Settings current) {
-    if (assignments.size() >= MAX_ASSIGNMENTS) {
-      debugLogger.accept(
-          "TIMETABLE_ASSIGN_SKIP reason=assignment-limit train=" + event.trainName());
+    Optional<TripMatcher.Match> matched = matcher.match(key, routeId, timetables, event, current);
+    if (matched.isEmpty()) {
       return Optional.empty();
     }
-    Instant now = event.at();
-    long tolerance = current.assignTolerance().toSeconds();
-    Candidate best = null;
-    // 绑不上时要能说出"离得最近的那趟是谁、差多少"，否则日志上只剩 ASSIGN 变少，归因不了。
-    String nearestCode = null;
-    long nearestDeviation = Long.MAX_VALUE;
-    int candidates = 0;
-    int claimedByOthers = 0;
-    for (Timetable timetable : timetables) {
-      for (TimetableTrip trip : timetable.trips()) {
-        if (!trip.routeId().equals(routeId)) {
-          continue;
-        }
-        for (int offset : SERVICE_DATE_OFFSETS) {
-          LocalDate date = LocalDate.ofInstant(now, timetable.zoneId()).plusDays(offset);
-          Optional<Instant> scheduled = timetable.scheduledDeparture(trip, event.stopIndex(), date);
-          if (scheduled.isEmpty()) {
-            continue;
-          }
-          candidates++;
-          long deviation = Duration.between(scheduled.get(), now).toSeconds();
-          if (Math.abs(deviation) < Math.abs(nearestDeviation)) {
-            nearestDeviation = deviation;
-            nearestCode = trip.tripCode();
-          }
-          if (Math.abs(deviation) > tolerance) {
-            continue;
-          }
-          TripKey tripKey = new TripKey(timetable.id(), trip.id(), date);
-          String holder = claims.get(tripKey);
-          if (holder != null && !holder.equals(key)) {
-            claimedByOthers++;
-            continue;
-          }
-          if (best == null || Math.abs(deviation) < Math.abs(best.deviationSeconds())) {
-            best = new Candidate(timetable, trip, date, tripKey, deviation);
-          }
-        }
-      }
-    }
-    if (best == null) {
-      String reason =
-          candidates == 0 ? "no-trips" : claimedByOthers > 0 ? "all-claimed" : "out-of-tolerance";
-      recordMiss(event, routeId, reason, nearestCode, nearestDeviation, tolerance, candidates);
-      return Optional.empty();
-    }
-    String existingHolder = claims.putIfAbsent(best.tripKey(), key);
-    if (existingHolder != null && !existingHolder.equals(key)) {
-      return Optional.empty();
-    }
-    TimetableAssignment assignment =
-        new TimetableAssignment(
-            event.trainName(),
-            best.timetable().id(),
-            best.trip().id(),
-            best.trip().tripCode(),
-            routeId,
-            best.trip().dutyId(),
-            best.serviceDate(),
-            now,
-            event.stopIndex(),
-            best.deviationSeconds());
-    assignments.put(key, assignment);
-    startOrAdvanceDuty(key, best.timetable(), best.trip());
-    Candidate chosen = best;
-    chosen
+    TripMatcher.Match match = matched.get();
+    ledger.startOrAdvance(key, match.timetable(), match.trip());
+    match
         .trip()
         .dutyId()
         .ifPresent(
             dutyId ->
-                bindDuty(
+                ledger.bind(
                     event.trainName(),
+                    key,
                     new DutyKey(
-                        chosen.timetable().id(),
+                        match.timetable().id(),
                         dutyId,
-                        chosen.timetable().serviceDayOf(chosen.trip(), chosen.serviceDate())),
+                        match
+                            .timetable()
+                            .serviceDayOf(match.trip(), match.assignment().serviceDate())),
                     "trip-assigned"));
-    debugLogger.accept(
-        "TIMETABLE_ASSIGN train="
-            + event.trainName()
-            + " trip="
-            + best.trip().tripCode()
-            + " duty="
-            + best.trip().dutyId().map(UUID::toString).orElse("-")
-            + " plannedDeparture="
-            + best.trip().departureText()
-            + " stopIndex="
-            + event.stopIndex()
-            + " deviationSeconds="
-            + best.deviationSeconds());
-    return Optional.of(assignment);
-  }
-
-  /** 记一次绑定失败：计数不节流，日志按 {@code train + stopIndex + reason} 每分钟一条。 */
-  private void recordMiss(
-      StationStopEvent event,
-      UUID routeId,
-      String reason,
-      String nearestCode,
-      long nearestDeviation,
-      long tolerance,
-      int candidates) {
-    assignMisses.incrementAndGet();
-    String throttleKey = keyOf(event.trainName()) + "#" + event.stopIndex() + "#" + reason;
-    Instant last = missLoggedAt.get(throttleKey);
-    if (last != null && Duration.between(last, event.at()).compareTo(MISS_LOG_INTERVAL) < 0) {
-      return;
-    }
-    missLoggedAt.put(throttleKey, event.at());
-    if (missLoggedAt.size() > MAX_ASSIGNMENTS) {
-      missLoggedAt.clear();
-    }
-    debugLogger.accept(
-        "TIMETABLE_ASSIGN_MISS train="
-            + event.trainName()
-            + " route="
-            + routeId
-            + " stopIndex="
-            + event.stopIndex()
-            + " nearest="
-            + (nearestCode == null ? "-" : nearestCode + "@" + nearestDeviation + "s")
-            + " tolerance="
-            + tolerance
-            + " candidates="
-            + candidates
-            + " reason="
-            + reason);
+    return Optional.of(match.assignment());
   }
 
   /** 自启动以来绑定失败的累计次数。 */
   public long assignMisses() {
-    return assignMisses.get();
-  }
-
-  /**
-   * 建立或推进这辆车的交路进度。
-   *
-   * <p>计的是"已经被指派了几班"，而不是"已经跑完几班"：对"还能不能再接一班"这个问题来说， 正在跑的那一班同样占用额度。用"跑完"计数则需要一个可靠的完成事件，而同一条 route
-   * 连续接班时 并不会产生解绑，那个事件根本不存在——那正是上一版会漏计的地方。
-   *
-   * <p>换了 duty 就是换了一轮周转：旧进度作废，新 duty 从第一班重新计。
-   */
-  private void startOrAdvanceDuty(String key, Timetable timetable, TimetableTrip trip) {
-    UUID dutyId = trip.dutyId().orElse(null);
-    if (dutyId == null) {
-      dutyProgress.remove(key);
-      return;
-    }
-    Optional<VehicleDuty> dutyOpt = timetable.duty(dutyId);
-    if (dutyOpt.isEmpty()) {
-      dutyProgress.remove(key);
-      return;
-    }
-    VehicleDuty duty = dutyOpt.get();
-    DutyProgress previous = dutyProgress.get(key);
-    if (previous == null || !previous.dutyId().equals(dutyId)) {
-      dutyProgress.put(
-          key, new DutyProgress(dutyId, duty.dutyCode(), duty.tripCount(), 1, trip.id()));
-      return;
-    }
-    if (!previous.lastTripId().equals(trip.id())) {
-      dutyProgress.put(key, previous.withTrip(trip.id()));
-    }
+    return matcher.assignMisses();
   }
 
   private Optional<Timetable> resolveTimetable(TimetableAssignment assignment) {
@@ -789,45 +501,21 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return Optional.ofNullable(snapshot.byId().get(assignment.timetableId()));
   }
 
-  private void releaseAssignment(String key, String reason) {
-    TimetableAssignment removed = assignments.remove(key);
-    if (removed == null) {
-      return;
-    }
-    claims.remove(new TripKey(removed.timetableId(), removed.tripId(), removed.serviceDate()), key);
-    debugLogger.accept(
-        "TIMETABLE_RELEASE train="
-            + removed.trainName()
-            + " trip="
-            + removed.tripCode()
-            + " reason="
-            + reason);
-  }
-
   private void clearAssignments(String reason) {
-    if (assignments.isEmpty() && dutyProgress.isEmpty() && dutyBindings.isEmpty()) {
-      claims.clear();
+    if (matcher.isEmpty() && ledger.isEmpty()) {
+      matcher.clear();
       return;
     }
-    int size = assignments.size();
-    assignments.clear();
-    claims.clear();
-    dutyProgress.clear();
-    dutyBindings.clear();
+    int size = matcher.clear();
+    ledger.clear();
     debugLogger.accept("TIMETABLE_CLEAR assignments=" + size + " reason=" + reason);
   }
 
   /** 时刻表被删除或下架后，残留的占用必须一起清掉，否则那趟车会永远"已被占用"。 */
   private void dropClaimsOutsideSnapshot(Snapshot next) {
-    for (Map.Entry<String, TimetableAssignment> entry : List.copyOf(assignments.entrySet())) {
-      if (!next.byId().containsKey(entry.getValue().timetableId())) {
-        releaseAssignment(entry.getKey(), "timetable-unpublished");
-        dutyProgress.remove(entry.getKey());
-      }
-    }
-    dutyBindings
-        .entrySet()
-        .removeIf(entry -> !next.byId().containsKey(entry.getValue().timetableId()));
+    Set<String> released = new HashSet<>();
+    matcher.dropOutside(next.byId().keySet(), released::add);
+    ledger.dropOutside(next.byId().keySet(), released);
   }
 
   private static String keyOf(String trainName) {
@@ -838,24 +526,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return trimmed.isEmpty() ? null : trimmed.toLowerCase(Locale.ROOT);
   }
 
-  private record Candidate(
-      Timetable timetable,
-      TimetableTrip trip,
-      LocalDate serviceDate,
-      TripKey tripKey,
-      long deviationSeconds) {}
-
-  private record TripKey(UUID timetableId, UUID tripId, LocalDate serviceDate) {}
-
   /** 已发布时刻表的只读索引。 */
-  private record Snapshot(
+  record Snapshot(
       List<Timetable> timetables, Map<UUID, Timetable> byId, Map<UUID, List<Timetable>> byRoute) {
 
-    private static Snapshot empty() {
+    static Snapshot empty() {
       return new Snapshot(List.of(), Map.of(), Map.of());
     }
 
-    private static Snapshot of(List<Timetable> published) {
+    static Snapshot of(List<Timetable> published) {
       List<Timetable> kept =
           published == null
               ? List.of()
