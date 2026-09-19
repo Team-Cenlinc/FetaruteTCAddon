@@ -78,6 +78,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 列车 → 它属于哪个交路（哪份表、哪个 duty、哪一天）。出库票实体化时或首次绑定车次时建立。 */
   private final ConcurrentMap<String, DutyKey> dutyBindings = new ConcurrentHashMap<>();
 
+  /** 绑不上车次的累计次数：跨线干扰 → 晚点 → 退回自由运行这条链，以前在数字上完全看不见。 */
+  private final java.util.concurrent.atomic.AtomicLong assignMisses =
+      new java.util.concurrent.atomic.AtomicLong();
+
+  /** 同一辆车同一停靠点同一原因的 MISS 日志节流：门控每秒问一次，不节流会刷屏。 */
+  private final ConcurrentMap<String, Instant> missLoggedAt = new ConcurrentHashMap<>();
+
+  private static final Duration MISS_LOG_INTERVAL = Duration.ofSeconds(60);
+
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
@@ -593,6 +602,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
         settings.spawnEnabled(),
         snapshot.timetables().size(),
         snapshot.byRoute().size(),
+        assignMisses.get(),
         List.copyOf(deviations));
   }
 
@@ -610,6 +620,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
     Instant now = event.at();
     long tolerance = current.assignTolerance().toSeconds();
     Candidate best = null;
+    // 绑不上时要能说出"离得最近的那趟是谁、差多少"，否则日志上只剩 ASSIGN 变少，归因不了。
+    String nearestCode = null;
+    long nearestDeviation = Long.MAX_VALUE;
+    int candidates = 0;
+    int claimedByOthers = 0;
     for (Timetable timetable : timetables) {
       for (TimetableTrip trip : timetable.trips()) {
         if (!trip.routeId().equals(routeId)) {
@@ -621,13 +636,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
           if (scheduled.isEmpty()) {
             continue;
           }
+          candidates++;
           long deviation = Duration.between(scheduled.get(), now).toSeconds();
+          if (Math.abs(deviation) < Math.abs(nearestDeviation)) {
+            nearestDeviation = deviation;
+            nearestCode = trip.tripCode();
+          }
           if (Math.abs(deviation) > tolerance) {
             continue;
           }
           TripKey tripKey = new TripKey(timetable.id(), trip.id(), date);
           String holder = claims.get(tripKey);
           if (holder != null && !holder.equals(key)) {
+            claimedByOthers++;
             continue;
           }
           if (best == null || Math.abs(deviation) < Math.abs(best.deviationSeconds())) {
@@ -637,6 +658,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
     }
     if (best == null) {
+      String reason =
+          candidates == 0 ? "no-trips" : claimedByOthers > 0 ? "all-claimed" : "out-of-tolerance";
+      recordMiss(event, routeId, reason, nearestCode, nearestDeviation, tolerance, candidates);
       return Optional.empty();
     }
     String existingHolder = claims.putIfAbsent(best.tripKey(), key);
@@ -684,6 +708,47 @@ public final class TimetableService implements ScheduledDeparturePlan {
             + " deviationSeconds="
             + best.deviationSeconds());
     return Optional.of(assignment);
+  }
+
+  /** 记一次绑定失败：计数不节流，日志按 {@code train + stopIndex + reason} 每分钟一条。 */
+  private void recordMiss(
+      StationStopEvent event,
+      UUID routeId,
+      String reason,
+      String nearestCode,
+      long nearestDeviation,
+      long tolerance,
+      int candidates) {
+    assignMisses.incrementAndGet();
+    String throttleKey = keyOf(event.trainName()) + "#" + event.stopIndex() + "#" + reason;
+    Instant last = missLoggedAt.get(throttleKey);
+    if (last != null && Duration.between(last, event.at()).compareTo(MISS_LOG_INTERVAL) < 0) {
+      return;
+    }
+    missLoggedAt.put(throttleKey, event.at());
+    if (missLoggedAt.size() > MAX_ASSIGNMENTS) {
+      missLoggedAt.clear();
+    }
+    debugLogger.accept(
+        "TIMETABLE_ASSIGN_MISS train="
+            + event.trainName()
+            + " route="
+            + routeId
+            + " stopIndex="
+            + event.stopIndex()
+            + " nearest="
+            + (nearestCode == null ? "-" : nearestCode + "@" + nearestDeviation + "s")
+            + " tolerance="
+            + tolerance
+            + " candidates="
+            + candidates
+            + " reason="
+            + reason);
+  }
+
+  /** 自启动以来绑定失败的累计次数。 */
+  public long assignMisses() {
+    return assignMisses.get();
   }
 
   /**
@@ -952,6 +1017,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param spawnEnabled 是否由时刻表驱动发车
    * @param publishedTimetables 已发布时刻表数
    * @param managedRoutes 受管辖的 route 数
+   * @param assignMisses 自启动以来绑不上车次的累计次数（详情看 {@code TIMETABLE_ASSIGN_MISS} 日志）
    * @param deviations 当前绑定的列车偏差
    */
   public record StatusSnapshot(
@@ -959,6 +1025,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       boolean spawnEnabled,
       int publishedTimetables,
       int managedRoutes,
+      long assignMisses,
       List<DeviationEntry> deviations) {}
 
   /**

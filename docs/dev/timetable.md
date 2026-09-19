@@ -219,7 +219,9 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 输入全是不可变快照。末班早于首班会被命令拒绝并提示写成 `25:00` 这样的跨零点形式。
 
 `build` 的输出不是一句"成功"，而是一份可解释的报告：班次数、运营/出库/回库 route 数、计划窗口（含实际使用的间隔，
-目标间隔有冲突被放宽时会标出）、冲突检查结果（无冲突，或目标间隔下的冲突数与明细）、
+目标间隔有冲突被放宽时会标出）、冲突检查结果（无冲突，或目标间隔下的冲突数与明细）、**共用资源**（哪些已发布的表、
+哪些没有表的线路与本表共用区间/站台/单线/道岔，各多少个——足迹按展开后的路径算，不按申报的停靠点；目前只报告不联合排布，
+设计见 `timetable-scope-design.md`）、
 交路数、**全天出库次数与峰值同时在线车数**、**目标服务比例 vs 实际服务比例**、最长一趟车、单交路最多班次与最长在线、
 "所有交路都以回库收尾"这一行，以及**被取消的班次**（按 route 与原因归组，列出时刻）。
 
@@ -333,6 +335,8 @@ planned segment duration   vs   actual segment duration
 | 前缀 | 含义 |
 | --- | --- |
 | `TIMETABLE_ASSIGN` / `TIMETABLE_RELEASE` | 车次绑定与解绑 |
+| `TIMETABLE_ASSIGN_MISS` | 绑不上车次：最近的车次与偏差、容差、原因（`out-of-tolerance` / `all-claimed` / `no-trips`）；同车同站同原因一分钟一条，`/fta timetable status` 有累计计数 |
+| `RECLAIM_STRANDED_DESTROY` / `RECLAIM_STRANDED_SKIP` | 该回收却派不出 RETURN 票的待命车滞留超过 `reclaim.stranded-destroy-seconds` 被销毁 / 因有乘客或折返事务进行中而跳过 |
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
 | `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票被否决、车留在终点 |
 | `TIMETABLE_DUTY_BOUND` / `TIMETABLE_DUTY_BIND_CONFLICT` | 车绑到交路上 / 已绑别的交路（错派的车暴露在这里） |
@@ -347,6 +351,9 @@ planned segment duration   vs   actual segment duration
 
 现场看到"一辆车停在站里不动"时，先看有没有 `SCHEDULED_DEPARTURE_HOLD`：
 有就是正常等点，没有就与时刻表无关。
+
+看到"`TIMETABLE_ASSIGN` 变少、车都在自由跑"时，先看 `TIMETABLE_ASSIGN_MISS`：`out-of-tolerance` 且偏差为正说明车晚到超过容差
+（多半是跨线干扰或前车晚点），`no-trips` 说明这条 route 在表里没有这个停靠点的车次，`all-claimed` 说明同一趟车已被别的车绑走。
 
 看到"某辆车一直不回库"时，看 `TIMETABLE_DUTY_CLOSED`：
 应当在它跑满交路额度那一刻出现；没出现说明它根本没绑到表定车次（自由运行），
@@ -363,6 +370,13 @@ planned segment duration   vs   actual segment duration
 - 车次绑定与交路进度不持久化，重启后回到自由运行。
 - 仅由 code 定义（无 UUID）的交路不参与按表运行：绑定挂不回 Route。
 - 一条线路的多份已发布时刻表之间不做撞车仲裁，运营侧自查。
+- **跨线 / 跨 operator / 跨 company 的资源共用尚未进入冲突检查**：`build` 只看本线路自己的运行，两条线共用一段线路、
+  一个站台或一个道岔时，各自 build 都会报"无冲突"，两张表都乐观。直通运转（一条 route 跑到别的 operator 的资源上）
+  同样只检查自己。设计见 `docs/dev/timetable-scope-design.md`（作用域 = 足迹相交的已发布邻表、路权先到先得、publish 重检）。
+- 直通 route 的出库/回库线路只在本 operator 的线路里找；终点在外方时会因 `NO_RETURN_ACCESS` 取消班次（自己在本 operator
+  名下定义一条首站为外方节点、末站 DSTY 回自己车库的 RETURN 可以绕开）。运行时 `ReclaimManager` 的兜底回收已改为先本 operator
+  再全部 operator、按节点匹配首站；仍然派不出 RETURN 的车滞留超过 `reclaim.stranded-destroy-seconds` 后销毁（无乘客、无折返事务时）。
+- 不支持一辆车跨两份时刻表接班（duty 只属于一份表）。
 - `build` 目前用 `DynamicTravelTimeModel` 的默认加减速参数（1.0 / 1.2 bps²），
   尚未按列车类型区分；接 `TrainConfigResolver` 是后续工作。
 - 进站 approaching 限速尚未接入 `build`（ETA 运行时已启用），因此表定时分会比实际略乐观一点点。

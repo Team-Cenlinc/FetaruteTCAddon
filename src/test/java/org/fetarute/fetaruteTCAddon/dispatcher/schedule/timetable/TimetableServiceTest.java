@@ -534,6 +534,32 @@ class TimetableServiceTest {
   }
 
   /**
+   * 绑不上车次必须留痕：日志说出最近的车次与偏差，计数不节流，日志一分钟一条。
+   *
+   * <p>这是"跨线干扰 → 晚点 → 超过容差 → 静默退回自由运行"这条链的可归因点。
+   */
+  @Test
+  void assignMissIsLoggedWithNearestTripAndThrottled() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = service(true, logs, timetable(TimetableStatus.PUBLISHED));
+    // 08:00 那班晚了 20 分钟才到起点：容差 300 秒，绑不上。
+    Instant late = Instant.parse("2026-03-02T08:20:00Z");
+
+    assertTrue(service.scheduledDepartureAt(event("train-late", 0, late)).isEmpty());
+    assertTrue(service.scheduledDepartureAt(event("train-late", 0, late.plusSeconds(1))).isEmpty());
+    assertTrue(
+        service.scheduledDepartureAt(event("train-late", 0, late.plusSeconds(61))).isEmpty());
+
+    List<String> misses =
+        logs.stream().filter(line -> line.startsWith("TIMETABLE_ASSIGN_MISS ")).toList();
+    assertEquals(2, misses.size(), () -> "同一组合一分钟只记一条: " + misses);
+    assertTrue(misses.get(0).contains("nearest=R1-002@600s"), misses.get(0));
+    assertTrue(misses.get(0).contains("reason=out-of-tolerance"), misses.get(0));
+    assertEquals(3, service.assignMisses(), "计数不节流");
+    assertEquals(3, service.status().assignMisses());
+  }
+
+  /**
    * 运行到服务窗口结束之后，受管辖列车数必须能降到 0。
    *
    * <p>逐趟推进整份时刻表，每辆车跑完自己的交路后复用即被否决；最后把所有车下线，绑定与交路进度应当清空。 这条断言回答的是"服务结束后网上还会不会留着车"。

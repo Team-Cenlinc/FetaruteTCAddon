@@ -4,11 +4,13 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -127,6 +129,68 @@ public final class TimetableConflictChecker {
     return List.copyOf(out);
   }
 
+  /**
+   * 一条 route 跑一遍会触及的全部资源键：边、穿越的道岔与车站股道、单线区段、每个停靠点的站台（组 + 具体股道）。
+   *
+   * <p>这是"足迹"的唯一出处：作用域判定问"两份表有没有共用资源"，用的键必须和这里投影占用时拼出来的键一字不差， 否则会出现"足迹说不相交、冲突检查却撞上"或反过来的假象。所以
+   * {@link #project} 也只能通过下面这几个 {@code *Key} 方法拼键。
+   */
+  public static Set<String> resourceKeysOf(RouteProfile profile, GraphIndex index) {
+    Objects.requireNonNull(profile, "profile");
+    GraphIndex graphIndex = index == null ? GraphIndex.of(null) : index;
+    Set<String> keys = new LinkedHashSet<>();
+    for (TimetableTimingCalculator.SegmentTiming segment : profile.segments()) {
+      for (RailEdge edge : segment.edges()) {
+        keys.add(edgeKey(edge));
+        if (graphIndex.sections() != null) {
+          graphIndex
+              .sections()
+              .sectionInfoForEdge(edge.id())
+              .ifPresent(info -> keys.add(singleLineKey(info.key())));
+        }
+      }
+      List<NodeId> nodes = segment.nodes();
+      for (int k = 1; k + 1 < nodes.size(); k++) {
+        NodeId node = nodes.get(k);
+        NodeType type = graphIndex.nodeTypes().get(node);
+        if (type == NodeType.SWITCHER) {
+          keys.add(junctionKey(node));
+        } else if (type == NodeType.STATION) {
+          keys.addAll(platformKeys(new Platform(node.value(), groupOf(node.value()), false)));
+        }
+      }
+    }
+    for (Platform platform : profile.platforms()) {
+      keys.addAll(platformKeys(platform));
+    }
+    return Set.copyOf(keys);
+  }
+
+  static String edgeKey(RailEdge edge) {
+    EdgeId edgeId = edge.id();
+    return "edge:" + edgeId.a().value() + "~" + edgeId.b().value();
+  }
+
+  static String junctionKey(NodeId node) {
+    return "junction:" + node.value();
+  }
+
+  static String singleLineKey(String sectionKey) {
+    return "single:" + sectionKey;
+  }
+
+  /** 站台的两层键：站台组一层抓"车比股道多"，具体股道一层抓"同一股道被两辆车用"；DYNAMIC 停靠只有组一层。 */
+  static List<String> platformKeys(Platform platform) {
+    List<String> keys = new ArrayList<>(2);
+    if (!platform.group().isBlank()) {
+      keys.add("platform-group:" + platform.group());
+    }
+    if (!platform.dynamic() && !platform.nodeId().isBlank()) {
+      keys.add("platform:" + platform.nodeId());
+    }
+    return keys;
+  }
+
   private static void project(
       Movement movement,
       RouteProfile profile,
@@ -140,9 +204,7 @@ public final class TimetableConflictChecker {
       // 边：互斥。
       for (int k = 0; k < edges.size(); k++) {
         RailEdge edge = edges.get(k);
-        EdgeId edgeId = edge.id();
-        String key = "edge:" + edgeId.a().value() + "~" + edgeId.b().value();
-        resource(resources, key, Kind.TRACK, 1)
+        resource(resources, edgeKey(edge), Kind.TRACK, 1)
             .add(movement.code(), base + segment.enterOffset(k), base + segment.exitOffset(k), 0);
       }
       // 路径中间穿越的节点：道岔两次通过之间要留间隔；不停靠而经过的车站股道也是一次占用——
@@ -153,8 +215,7 @@ public final class TimetableConflictChecker {
         NodeType type = nodeTypes.get(node);
         int at = base + segment.nodeOffsets().get(k);
         if (type == NodeType.SWITCHER) {
-          resource(resources, "junction:" + node.value(), Kind.JUNCTION, 1)
-              .add(movement.code(), at, at, 0);
+          resource(resources, junctionKey(node), Kind.JUNCTION, 1).add(movement.code(), at, at, 0);
         } else if (type == NodeType.STATION) {
           addPlatform(
               resources,
@@ -180,7 +241,7 @@ public final class TimetableConflictChecker {
             continue;
           }
           if (currentKey != null) {
-            resource(resources, "single:" + currentKey, Kind.SINGLE_LINE, 1)
+            resource(resources, singleLineKey(currentKey), Kind.SINGLE_LINE, 1)
                 .add(movement.code(), enter, exit, direction);
           }
           currentKey = key;
@@ -192,7 +253,7 @@ public final class TimetableConflictChecker {
           }
         }
         if (currentKey != null) {
-          resource(resources, "single:" + currentKey, Kind.SINGLE_LINE, 1)
+          resource(resources, singleLineKey(currentKey), Kind.SINGLE_LINE, 1)
               .add(movement.code(), enter, exit, direction);
         }
       }
@@ -225,13 +286,12 @@ public final class TimetableConflictChecker {
     if (platform == null) {
       return;
     }
-    if (!platform.group().isBlank()) {
-      int capacity = Math.max(1, platformCapacity.getOrDefault(platform.group(), 1));
-      resource(resources, "platform-group:" + platform.group(), Kind.PLATFORM, capacity)
-          .add(code, from, to, 0);
-    }
-    if (!platform.dynamic() && !platform.nodeId().isBlank()) {
-      resource(resources, "platform:" + platform.nodeId(), Kind.PLATFORM, 1).add(code, from, to, 0);
+    for (String key : platformKeys(platform)) {
+      int capacity =
+          key.startsWith("platform-group:")
+              ? Math.max(1, platformCapacity.getOrDefault(platform.group(), 1))
+              : 1;
+      resource(resources, key, Kind.PLATFORM, capacity).add(code, from, to, 0);
     }
   }
 

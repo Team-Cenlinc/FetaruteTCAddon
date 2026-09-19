@@ -37,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuilder;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableCsvExporter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableHeadwayDefaults;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
@@ -47,6 +48,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDutyPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.WeightedTripAllocator;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableNeighborhoodLoader;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -411,6 +414,10 @@ public final class FtaTimetableCommand {
             travelTimeModel(),
             Optional.empty());
 
+    // 邻表输入在主线程读库（已发布表、无表线路的 route 与停靠），足迹计算与 build 一起进异步线程。
+    NeighborInputs neighborInputs = collectNeighborInputs(provider, resolved, routeInputs);
+    RailGraph graphSnapshot = graph;
+
     // 构建是纯 CPU 运算：时分积分、SWRR、派车、冲突扫描，目标间隔有冲突时还要向上搜索几十次。
     // 输入全是不可变快照，放到异步线程跑，报告与落库回到主线程。
     sender.sendMessage(Component.text("正在按路网编表…", NamedTextColor.GRAY));
@@ -422,8 +429,10 @@ public final class FtaTimetableCommand {
             plugin,
             () -> {
               TimetableBuildResult result;
+              NeighborReport neighborReport;
               try {
                 result = new TimetableBuilder().build(input, options, builtAt);
+                neighborReport = neighborInputs.report(graphSnapshot, input.timetableId());
               } catch (RuntimeException ex) {
                 plugin
                     .getServer()
@@ -435,12 +444,16 @@ public final class FtaTimetableCommand {
                                 Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
                 return;
               }
+              TimetableBuildResult built = result;
+              NeighborReport neighbors = neighborReport;
               plugin
                   .getServer()
                   .getScheduler()
                   .runTask(
                       plugin,
-                      () -> finishBuild(sender, provider, resolved, result, options, headway));
+                      () ->
+                          finishBuild(
+                              sender, provider, resolved, built, options, headway, neighbors));
             });
   }
 
@@ -451,8 +464,10 @@ public final class FtaTimetableCommand {
       ResolvedLine resolved,
       TimetableBuildResult result,
       TimetableBuildOptions options,
-      TimetableHeadwayDefaults.Choice headway) {
+      TimetableHeadwayDefaults.Choice headway,
+      NeighborReport neighbors) {
     sendBuildReport(sender, result, options, headway);
+    sendNeighborReport(sender, neighbors);
     if (result.timetable().isEmpty()) {
       return;
     }
@@ -502,6 +517,167 @@ public final class FtaTimetableCommand {
       }
     }
     return List.copyOf(out.values());
+  }
+
+  /**
+   * 邻表足迹计算需要的输入：全部在主线程读好，异步线程只做纯运算。
+   *
+   * @param published 已发布时刻表
+   * @param displayCodeById 已发布时刻表的显示码
+   * @param mine 我这份表的 route
+   * @param unscheduled 本世界里不属于任何已发布表、也不属于我这条 line 的 route
+   * @param stopsByRoute 上述全部 route 的停靠配置
+   * @param definitions 上述全部 route 的交路定义（主线程解析好，异步线程不碰缓存）
+   * @param travelTimeModel 行程时间模型
+   * @param lineId 我这条 line
+   * @param myDisplayCode 我这份表的显示码
+   */
+  private record NeighborInputs(
+      List<Timetable> published,
+      Map<UUID, String> displayCodeById,
+      List<TimetableNeighborhoodLoader.RouteCandidate> mine,
+      List<TimetableNeighborhoodLoader.RouteCandidate> unscheduled,
+      Map<UUID, List<RouteStop>> stopsByRoute,
+      Map<UUID, RouteDefinition> definitions,
+      RailTravelTimeModel travelTimeModel,
+      UUID lineId,
+      String myDisplayCode) {
+
+    NeighborReport report(RailGraph graph, UUID timetableId) {
+      TimetableNeighborhoodLoader loader =
+          new TimetableNeighborhoodLoader(
+              new org.fetarute
+                  .fetaruteTCAddon
+                  .dispatcher
+                  .schedule
+                  .timetable
+                  .TimetableTimingCalculator(),
+              travelTimeModel,
+              routeId -> Optional.ofNullable(definitions.get(routeId)),
+              routeId -> stopsByRoute.getOrDefault(routeId, List.of()),
+              timetable -> displayCodeById.getOrDefault(timetable.id(), timetable.code()));
+      TimetableConflictChecker.GraphIndex index = TimetableConflictChecker.GraphIndex.of(graph);
+      TimetableFootprint footprint =
+          loader.footprintOf(timetableId, myDisplayCode, mine, graph, index);
+      return new NeighborReport(
+          loader.footprints(published, lineId, graph, index, footprint),
+          loader.unscheduled(unscheduled, graph, index, footprint));
+    }
+  }
+
+  private record NeighborReport(
+      List<TimetableNeighborhoodLoader.FootprintNeighbor> scheduled,
+      List<TimetableNeighborhoodLoader.UnscheduledNeighbor> unscheduled) {}
+
+  /** 主线程读库：已发布表及其显示码、无表线路的 route、全部相关 route 的停靠配置。 */
+  private NeighborInputs collectNeighborInputs(
+      StorageProvider provider,
+      ResolvedLine resolved,
+      List<TimetableBuilder.RouteInput> routeInputs) {
+    String myDisplayCode =
+        resolved.company().code() + "/" + resolved.operator().code() + "/" + resolved.line().code();
+    Map<UUID, List<RouteStop>> stopsByRoute = new java.util.HashMap<>();
+    Map<UUID, RouteDefinition> definitions = new java.util.HashMap<>();
+    List<TimetableNeighborhoodLoader.RouteCandidate> mine = new ArrayList<>();
+    for (TimetableBuilder.RouteInput route : routeInputs) {
+      stopsByRoute.put(route.routeId(), route.stops());
+      definitions.put(route.routeId(), route.definition());
+      mine.add(
+          new TimetableNeighborhoodLoader.RouteCandidate(
+              route.routeId(), route.routeCode(), myDisplayCode));
+    }
+    List<Timetable> published = provider.timetables().listPublished();
+    Map<UUID, String> displayCodeById = new java.util.HashMap<>();
+    java.util.Set<UUID> scheduledLines = new java.util.HashSet<>();
+    for (Timetable timetable : published) {
+      scheduledLines.add(timetable.lineId());
+      displayCodeById.put(
+          timetable.id(), displayCodeOf(provider, timetable) + "/" + timetable.code());
+      for (UUID routeId : timetable.routeIds()) {
+        stopsByRoute.computeIfAbsent(routeId, id -> sortedStops(provider, id));
+        plugin.findRouteDefinitionById(routeId).ifPresent(def -> definitions.put(routeId, def));
+      }
+    }
+    List<TimetableNeighborhoodLoader.RouteCandidate> unscheduled = new ArrayList<>();
+    for (Company company : provider.companies().listAll()) {
+      for (Operator operator : provider.operators().listByCompany(company.id())) {
+        for (Line line : provider.lines().listByOperator(operator.id())) {
+          if (line.id().equals(resolved.line().id()) || scheduledLines.contains(line.id())) {
+            continue;
+          }
+          String lineCode = company.code() + "/" + operator.code() + "/" + line.code();
+          for (Route route : provider.routes().listByLine(line.id())) {
+            stopsByRoute.computeIfAbsent(route.id(), id -> sortedStops(provider, id));
+            plugin
+                .findRouteDefinitionById(route.id())
+                .ifPresent(def -> definitions.put(route.id(), def));
+            unscheduled.add(
+                new TimetableNeighborhoodLoader.RouteCandidate(route.id(), route.code(), lineCode));
+          }
+        }
+      }
+    }
+    return new NeighborInputs(
+        published,
+        displayCodeById,
+        mine,
+        unscheduled,
+        stopsByRoute,
+        definitions,
+        travelTimeModel(),
+        resolved.line().id(),
+        myDisplayCode);
+  }
+
+  private static List<RouteStop> sortedStops(StorageProvider provider, UUID routeId) {
+    return provider.routeStops().listByRoute(routeId).stream()
+        .filter(Objects::nonNull)
+        .sorted(Comparator.comparingInt(RouteStop::sequence))
+        .toList();
+  }
+
+  private static String displayCodeOf(StorageProvider provider, Timetable timetable) {
+    String company =
+        provider.companies().findById(timetable.companyId()).map(Company::code).orElse("?");
+    String operator =
+        provider.operators().findById(timetable.operatorId()).map(Operator::code).orElse("?");
+    String line = provider.lines().findById(timetable.lineId()).map(Line::code).orElse("?");
+    return company + "/" + operator + "/" + line;
+  }
+
+  /** 「共用资源」一节：有表的邻表会参与检查（下一阶段），无表的只能报告——它们按 headway 发车，干扰单向。 */
+  private static void sendNeighborReport(CommandSender sender, NeighborReport neighbors) {
+    if (neighbors == null) {
+      return;
+    }
+    if (neighbors.scheduled().isEmpty() && neighbors.unscheduled().isEmpty()) {
+      sender.sendMessage(Component.text("  共用资源: 没有别的线路与本表共用区间、站台、单线或道岔", NamedTextColor.GREEN));
+      return;
+    }
+    sender.sendMessage(Component.text("  共用资源:", NamedTextColor.GRAY));
+    for (TimetableNeighborhoodLoader.FootprintNeighbor neighbor : neighbors.scheduled()) {
+      sender.sendMessage(
+          Component.text(
+              "    "
+                  + neighbor.displayCode()
+                  + " 共用 "
+                  + neighbor.sharedResources()
+                  + " 个资源，已发布——本表未与它做联合排布，两张表各自乐观",
+              NamedTextColor.YELLOW));
+      for (String warning : neighbor.warnings()) {
+        sender.sendMessage(Component.text("      · " + warning, NamedTextColor.DARK_GRAY));
+      }
+    }
+    for (TimetableNeighborhoodLoader.UnscheduledNeighbor neighbor : neighbors.unscheduled()) {
+      sender.sendMessage(
+          Component.text(
+              "    "
+                  + neighbor.displayCode()
+                  + " 共用 "
+                  + neighbor.sharedResources()
+                  + " 个资源，无已发布时刻表——它按 headway 发车，干扰单向，无法联合排布",
+              NamedTextColor.YELLOW));
+    }
   }
 
   private void sendBuildReport(
@@ -885,6 +1061,7 @@ public final class FtaTimetableCommand {
     sender.sendMessage(field("时刻表驱动发车", status.spawnEnabled() ? "开" : "关"));
     sender.sendMessage(field("已发布时刻表", String.valueOf(status.publishedTimetables())));
     sender.sendMessage(field("受管辖 route", String.valueOf(status.managedRoutes())));
+    sender.sendMessage(field("绑定失败累计", status.assignMisses() + "（详情看 TIMETABLE_ASSIGN_MISS 日志）"));
     if (status.deviations().isEmpty()) {
       sender.sendMessage(Component.text("  当前没有列车绑定到表定车次。", NamedTextColor.GRAY));
       return;

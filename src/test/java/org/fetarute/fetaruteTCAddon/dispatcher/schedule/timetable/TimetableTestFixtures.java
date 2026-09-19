@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 
 /** 时刻表用例共用的最小路网与 route 夹具。 */
-final class TimetableTestFixtures {
+public final class TimetableTestFixtures {
 
   private TimetableTestFixtures() {}
 
@@ -33,7 +33,7 @@ final class TimetableTestFixtures {
    * @param lengths 每段的 blocks 长度（size = nodeIds.size() - 1）
    * @param speeds 每段的限速（blocks/s）
    */
-  static RailGraph chain(List<String> nodeIds, int[] lengths, double[] speeds) {
+  public static RailGraph chain(List<String> nodeIds, int[] lengths, double[] speeds) {
     Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
     for (int i = 0; i < nodeIds.size(); i++) {
       NodeId id = NodeId.of(nodeIds.get(i));
@@ -54,7 +54,7 @@ final class TimetableTestFixtures {
   }
 
   /** 造一条按节点序列定义的交路。 */
-  static RouteDefinition route(String code, List<String> nodeIds) {
+  public static RouteDefinition route(String code, List<String> nodeIds) {
     List<NodeId> waypoints = nodeIds.stream().map(NodeId::of).toList();
     return new RouteDefinition(RouteId.of(code), waypoints, Optional.empty());
   }
@@ -64,7 +64,7 @@ final class TimetableTestFixtures {
    *
    * <p>用它而不是常速模型，是为了让"改路网限速就改表定时分"这件事在用例里真的被驱动—— 常速模型会让任何路网都得到同样的时分，那样就测不到"时分来自路网"这条不变量。
    */
-  static org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel
+  public static org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel
       perEdgeSpeedModel() {
     return (graph, edge, from, to) -> {
       if (edge == null || edge.lengthBlocks() <= 0 || edge.baseSpeedLimit() <= 0.0) {
@@ -80,7 +80,7 @@ final class TimetableTestFixtures {
    *
    * <p>末站不标 TERMINATE 的 route 按运行时规则算作"以销毁收尾"，那是回库线路的形态，不是运营线路的。
    */
-  static List<RouteStop> stops(UUID routeId, int count, Integer dwellSeconds) {
+  public static List<RouteStop> stops(UUID routeId, int count, Integer dwellSeconds) {
     List<RouteStop> out = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
       boolean last = i == count - 1;
@@ -98,7 +98,7 @@ final class TimetableTestFixtures {
   }
 
   /** 造出库线路的停靠配置：首站带 {@code CRET <depot>} 指令，末站 TERMINATE（到首站后待命）。 */
-  static List<RouteStop> createStops(UUID routeId, int count, String depotNodeId) {
+  public static List<RouteStop> createStops(UUID routeId, int count, String depotNodeId) {
     List<RouteStop> out = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
       boolean last = i == count - 1;
@@ -116,7 +116,7 @@ final class TimetableTestFixtures {
   }
 
   /** 造回库线路的停靠配置：末站带 {@code DSTY <depot>} 指令，到车库即销毁。 */
-  static List<RouteStop> returnStops(UUID routeId, int count, String depotNodeId) {
+  public static List<RouteStop> returnStops(UUID routeId, int count, String depotNodeId) {
     List<RouteStop> out = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
       boolean last = i == count - 1;
@@ -134,7 +134,7 @@ final class TimetableTestFixtures {
   }
 
   /** 按 code 派生稳定的 route UUID。 */
-  static UUID routeId(String code) {
+  public static UUID routeId(String code) {
     return UUID.nameUUIDFromBytes(code.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 }
