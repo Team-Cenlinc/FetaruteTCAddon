@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -25,7 +24,7 @@ public final class TimetableRouteMetadata {
 
   private TimetableRouteMetadata() {}
 
-  /** 一条走行线路的四段 code 引用；各段已去空白、转大写，与 code 的存储形态一致。 */
+  /** 一条走行线路的四段 code 引用；各段只去空白，大小写按 code 存储原样——仓储按 code 精确匹配，不能替用户改写。 */
   public record RouteRef(String company, String operator, String line, String route) {
     public RouteRef {
       company = normalize(company);
@@ -43,7 +42,7 @@ public final class TimetableRouteMetadata {
     }
 
     private static String normalize(String raw) {
-      return raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+      return raw == null ? "" : raw.trim();
     }
   }
 

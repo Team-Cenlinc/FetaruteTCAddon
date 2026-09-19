@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 
 /**
@@ -137,7 +138,19 @@ public record TimetableBuildResult(
       int sharedResources,
       int conflictsAtTarget,
       boolean stale,
-      boolean zoneApproximated) {}
+      boolean zoneApproximated) {
+
+    /** 由一份邻表与"目标间隔下与它的外部冲突数"组成；build 与 neighbors 命令共用。 */
+    public static NeighborSummary of(NeighborTimetable neighbor, int conflictsAtTarget) {
+      Objects.requireNonNull(neighbor, "neighbor");
+      return new NeighborSummary(
+          neighbor.displayCode(),
+          neighbor.sharedResources(),
+          conflictsAtTarget,
+          neighbor.staleAgainstGraph(),
+          neighbor.zoneApproximated());
+    }
+  }
 
   /**
    * 排不进计划的 route。

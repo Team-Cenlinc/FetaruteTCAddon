@@ -36,6 +36,20 @@ public record TimetableBaseline(
     conflictsAtTarget = Math.max(0, conflictsAtTarget);
   }
 
+  /** 由一份邻表与"目标间隔下与它的外部冲突数"组成；build 与 publish 重检共用。 */
+  public static TimetableBaseline of(
+      UUID timetableId, NeighborTimetable neighbor, int conflictsAtTarget) {
+    Objects.requireNonNull(neighbor, "neighbor");
+    return new TimetableBaseline(
+        timetableId,
+        neighbor.timetableId(),
+        neighbor.displayCode(),
+        neighbor.updatedAt(),
+        neighbor.sharedResources(),
+        conflictsAtTarget,
+        neighbor.staleAgainstGraph());
+  }
+
   /** 这条基线还对得上当前的邻表吗（同一份表、同一次更新）。 */
   public boolean matches(NeighborTimetable neighbor) {
     return neighbor != null

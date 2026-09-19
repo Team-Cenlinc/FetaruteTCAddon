@@ -4517,7 +4517,6 @@ public final class FtaRouteCommand {
     return quoteCommandArgument(raw);
   }
 
-  /** 从 route metadata 读取交路组。 */
   /**
    * 把 {@code <company>/<operator>/<line>/<route>} 写进 metadata；格式不对时提示并返回 false。
    *
@@ -4540,6 +4539,7 @@ public final class FtaRouteCommand {
     return true;
   }
 
+  /** 从 route metadata 读取交路组。 */
   private static Optional<String> readSpawnGroup(Map<String, Object> metadata) {
     if (metadata == null || metadata.isEmpty()) {
       return Optional.empty();

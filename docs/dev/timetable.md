@@ -172,8 +172,10 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 - **路权先到先得**：邻表的运行在检查里是不可移动的事实，搜索最小可行 headway 时只放宽我的；邻表之间的冲突不报。
 - 同 line 的已发布表不算邻表（替代关系）；无表的线路只报告不检查（它按 headway 发车，干扰单向）。
 - build 落 `fta_timetable_baselines`：每份邻表的 id + updatedAt + 共用资源数 + 目标间隔下的冲突数。
-- **publish 重检**：邻表集合与基线不一致时，投影我的表与当前邻表重扫外部冲突；有冲突拒绝发布（`TIMETABLE_PUBLISH_REJECTED`），
-  无冲突更新基线再发。unpublish / delete 不级联——别人是避让着我编的，我消失只会让约束变少。
+- **publish 重检**：邻表集合与基线不一致时，投影我的表（路径按当前图、时刻按落库值，与邻表同一口径）与当前邻表重扫外部冲突；
+  有冲突拒绝发布（`TIMETABLE_PUBLISH_REJECTED`），无冲突更新基线再发。重检在异步线程，收尾前回读一次表，期间被重新 build 或删除就拒绝。
+  找不到图快照时：有基线则拒绝（无法重检），没有基线则跳过重检直接发。改状态的 save 不动基线，只有 build / 重检 / 删表会写它。
+  unpublish / delete 不级联——别人是避让着我编的，我消失只会让约束变少。
 - `/fta timetable neighbors` 只读列出邻表、基线是否仍一致、当前外部冲突。
 - `fta_operators.priority` 不参与编表：它是运行时占用排队的点数优势，编表期没有队列可排。
 
@@ -196,7 +198,9 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 - 被引用的线路与本 operator 搜到的取并集进 build；同一站有多条时**显式指定的优先**，再按走行最短。
 - 被引用的线路必须本身是对应类型（CREATE/RETURN），否则 build 报"指定的出库/回库线路类型不符"。
 - 被引用的线路必须是可发车服务（所在 line 配了车库、开了发车），否则 build 只警告，运行时该票 `TIMETABLE_SPAWN_SKIP reason=no-spawn-service`。
-- 引用不存在只警告不中断；写入时只校验格式（引用方未必有读外方 company 的权限）。
+- 引用不存在只警告不中断；写入时只校验格式（引用方未必有读外方 company 的权限）；四段 code 大小写按存储原样匹配。
+- **外方线路不受本表管辖**：它在 `route_plans` 里标 `external`，进足迹、进交路，但不进 `managedRouteIds()`——
+  它所在线路自己的 headway 票照常发，我的表只是借它出库/回库。
 - 车辆归属不需要新逻辑：外方 CREATE 实体化的车接我的运营票时标签会改写成我的 route；交路绑定与标签无关。
 - 兜底：该回收却派不出 RETURN 票的车（例如滞留在外方终点）先跨 operator 找 RETURN（首站按站点 code / 裸节点 id / DYNAMIC 都能匹配），
   仍找不到则滞留超过 `reclaim.stranded-destroy-seconds`（默认 1800，0 关闭）销毁；有乘客或有进行中折返事务的不碰。

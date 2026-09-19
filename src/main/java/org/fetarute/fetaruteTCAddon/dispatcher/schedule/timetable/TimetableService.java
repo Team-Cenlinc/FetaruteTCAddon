@@ -543,7 +543,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Map<UUID, List<Timetable>> byRoute = new LinkedHashMap<>();
       for (Timetable timetable : kept) {
         byId.put(timetable.id(), timetable);
-        for (UUID routeId : timetable.routeIds()) {
+        for (UUID routeId : timetable.managedRouteIds()) {
           byRoute.computeIfAbsent(routeId, key -> new ArrayList<>()).add(timetable);
         }
       }

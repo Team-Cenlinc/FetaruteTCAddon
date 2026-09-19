@@ -8,20 +8,20 @@ import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.junit.jupiter.api.Test;
 
-/** 走行线路引用的字符串形态：四段 code、去空白、转大写；段数不对就不是引用。 */
+/** 走行线路引用的字符串形态：四段 code、只去空白、大小写原样（仓储按 code 精确匹配）；段数不对就不是引用。 */
 class TimetableRouteMetadataTest {
 
   @Test
-  void parsesFourSegmentsAndNormalizes() {
+  void parsesFourSegmentsAndKeepsCase() {
     Optional<TimetableRouteMetadata.RouteRef> ref =
-        TimetableRouteMetadata.parse(" cht / surn / nl / nl-ret ");
+        TimetableRouteMetadata.parse(" cht / SURN / nl / nl-ret ");
 
     assertTrue(ref.isPresent());
-    assertEquals("CHT", ref.get().company());
+    assertEquals("cht", ref.get().company(), "code 按存储原样，不能替用户改大小写");
     assertEquals("SURN", ref.get().operator());
-    assertEquals("NL", ref.get().line());
-    assertEquals("NL-RET", ref.get().route());
-    assertEquals("CHT/SURN/NL/NL-RET", ref.get().format());
+    assertEquals("nl", ref.get().line());
+    assertEquals("nl-ret", ref.get().route());
+    assertEquals("cht/SURN/nl/nl-ret", ref.get().format());
   }
 
   @Test

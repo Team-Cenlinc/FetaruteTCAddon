@@ -183,22 +183,8 @@ public final class TimetableBuilder {
     List<TimetableBaseline> baselines = new ArrayList<>();
     for (NeighborTimetable neighbor : input.neighbors()) {
       int conflictsWith = externalByOwner.getOrDefault(neighbor.displayCode(), 0);
-      neighborSummaries.add(
-          new TimetableBuildResult.NeighborSummary(
-              neighbor.displayCode(),
-              neighbor.sharedResources(),
-              conflictsWith,
-              neighbor.staleAgainstGraph(),
-              neighbor.zoneApproximated()));
-      baselines.add(
-          new TimetableBaseline(
-              input.timetableId(),
-              neighbor.timetableId(),
-              neighbor.displayCode(),
-              neighbor.updatedAt(),
-              neighbor.sharedResources(),
-              conflictsWith,
-              neighbor.staleAgainstGraph()));
+      neighborSummaries.add(TimetableBuildResult.NeighborSummary.of(neighbor, conflictsWith));
+      baselines.add(TimetableBaseline.of(input.timetableId(), neighbor, conflictsWith));
       for (String warning : neighbor.warnings()) {
         warnings.add("邻表 " + neighbor.displayCode() + "：" + warning);
       }
@@ -303,7 +289,8 @@ public final class TimetableBuilder {
               origin,
               terminal,
               route.depotNodeId(),
-              Optional.empty());
+              Optional.empty(),
+              route.external());
       plans.add(plan);
       profiles.put(
           route.routeId(),
@@ -714,6 +701,7 @@ public final class TimetableBuilder {
    * @param depotNodeId 出库点
    * @param declaredAs 这条线路是被某条运营 route 在 metadata 里显式指定为出库（CREATE）或回库（RETURN）走行线路的 （见 {@link
    *     TimetableRouteMetadata}），可能来自别的 operator；与 {@code operationType} 不符时判为不可行
+   * @param external 属于别的 operator：进足迹、进交路，但不受本表管辖（见 {@link TimetableRoutePlan#external()}）
    */
   public record RouteInput(
       UUID routeId,
@@ -723,7 +711,8 @@ public final class TimetableBuilder {
       RouteDefinition definition,
       List<RouteStop> stops,
       Optional<String> depotNodeId,
-      Optional<RouteOperationType> declaredAs) {
+      Optional<RouteOperationType> declaredAs,
+      boolean external) {
 
     public RouteInput {
       Objects.requireNonNull(routeId, "routeId");
@@ -733,6 +722,28 @@ public final class TimetableBuilder {
       stops = stops == null ? List.of() : List.copyOf(stops);
       depotNodeId = depotNodeId == null ? Optional.empty() : depotNodeId;
       declaredAs = declaredAs == null ? Optional.empty() : declaredAs;
+    }
+
+    /** 本 operator 范围内的线路（可能被显式指定）。 */
+    public RouteInput(
+        UUID routeId,
+        String routeCode,
+        RouteOperationType operationType,
+        int weight,
+        RouteDefinition definition,
+        List<RouteStop> stops,
+        Optional<String> depotNodeId,
+        Optional<RouteOperationType> declaredAs) {
+      this(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          false);
     }
 
     /** 本 operator 自己收集到的线路：没有被显式指定。 */

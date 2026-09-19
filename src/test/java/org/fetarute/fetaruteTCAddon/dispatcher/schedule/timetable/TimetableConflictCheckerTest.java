@@ -267,6 +267,43 @@ class TimetableConflictCheckerTest {
     assertEquals(2, withMine.externalByOwner().size(), "与两份邻表各撞一次");
   }
 
+  /** 两股道站台：两份邻表各占一股，我夹在中间——超容量的冲突要归到我头上，不能因为最早那个是邻表就当没看见。 */
+  @Test
+  void capacityOverflowBetweenTwoNeighborsIsChargedToMe() {
+    String b1 = "OP:S:B:1";
+    String b2 = "OP:S:B:2";
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(A, b1, b2, C), new int[] {100, 10, 100}, new double[] {10.0, 10.0, 10.0});
+    Profiles profiles = new Profiles(graph);
+    TimetableConflictChecker.Platform track1 =
+        new TimetableConflictChecker.Platform(b1, TimetableConflictChecker.groupOf(b1), false);
+    TimetableConflictChecker.Platform track2 =
+        new TimetableConflictChecker.Platform(b2, TimetableConflictChecker.groupOf(b2), false);
+    Optional<String> x = Optional.of("C/O/X/TT");
+    Optional<String> y = Optional.of("C/O/Y/TT");
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            graph,
+            profiles.map,
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("X-001", track1, 0, 20, x),
+                new TimetableConflictChecker.Stay("D001", track2, 2, 22),
+                new TimetableConflictChecker.Stay("Y-001", track1, 4, 24, y)),
+            0);
+
+    assertFalse(report.external().isEmpty(), () -> report.conflicts().toString());
+    assertTrue(
+        report.external().stream()
+            .anyMatch(
+                c ->
+                    c.kind() == TimetableConflictChecker.Kind.PLATFORM
+                        && (c.first().equals("D001") || c.second().equals("D001"))),
+        () -> report.conflicts().toString());
+  }
+
   // ------------------------------------------------------------------ 夹具
 
   private static TimetableConflictChecker.Movement move(String code, UUID route, int start) {

@@ -148,7 +148,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
     // 依赖外键级联在这里是不够的：SQLite 只有在 PRAGMA foreign_keys=ON 时才级联，
     // 而这条删除是运营命令直接触发的，必须无论方言与连接设置都把子表清干净。
     try (var connection = openConnection()) {
-      deleteChildren(connection, id);
+      deleteChildren(
+          connection, id, List.of("timetable_trips", "timetable_duties", "timetable_baselines"));
       try (var statement =
           connection.prepareStatement("DELETE FROM " + table("timetables") + " WHERE id = ?")) {
         setUuid(statement, 1, id);
@@ -160,9 +161,13 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
     }
   }
 
+  /**
+   * 整体替换发车表与交路。基线<b>不</b>在这里动：它由 build / publish 重检单独写入（{@link #replaceBaselines}）， 改个状态的 save
+   * 不能把它抹掉。
+   */
   private void replaceChildren(ConnectionResource connection, Timetable timetable)
       throws SQLException {
-    deleteChildren(connection, timetable.id());
+    deleteChildren(connection, timetable.id(), List.of("timetable_trips", "timetable_duties"));
     if (!timetable.trips().isEmpty()) {
       String sql =
           "INSERT INTO "
@@ -213,8 +218,9 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
     }
   }
 
-  private void deleteChildren(ConnectionResource connection, UUID timetableId) throws SQLException {
-    for (String child : List.of("timetable_trips", "timetable_duties", "timetable_baselines")) {
+  private void deleteChildren(
+      ConnectionResource connection, UUID timetableId, List<String> children) throws SQLException {
+    for (String child : children) {
       try (var statement =
           connection.prepareStatement("DELETE FROM " + table(child) + " WHERE timetable_id = ?")) {
         setUuid(statement, 1, timetableId);
@@ -482,7 +488,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               plan.originNodeId(),
               plan.terminalNodeId(),
               plan.depotNodeId().orElse(null),
-              stops));
+              stops,
+              plan.external() ? Boolean.TRUE : null));
     }
     return gson.toJson(dtos);
   }
@@ -525,7 +532,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               dto.origin(),
               dto.terminal(),
               Optional.ofNullable(dto.depot()),
-              Optional.empty()));
+              Optional.empty(),
+              Boolean.TRUE.equals(dto.external())));
     }
     return List.copyOf(out);
   }
@@ -544,7 +552,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
       String origin,
       String terminal,
       String depot,
-      List<StopDto> stops) {}
+      List<StopDto> stops,
+      Boolean external) {}
 
   private record StopDto(int seq, String station, String node, int arr, int dep) {}
 }

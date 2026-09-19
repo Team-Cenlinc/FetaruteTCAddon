@@ -666,18 +666,22 @@ public final class TimetableConflictChecker {
       return out;
     }
 
-    /** 容量 n：同时在场的占用超过 n 就冲突；报的是新来的与最早那一个。 */
+    /**
+     * 容量 n：同时在场的占用超过 n 就冲突；报的是新来的与在场里最早的那个<b>可归责</b>的占用。
+     *
+     * <p>"可归责"指不是两份邻表之间的对：新来的若是邻表，就找在场的我；新来的若是我，在场里谁都算。 只拿在场最早的那个比会被两份邻表夹住——它们之间的重叠不报，我夹在中间的占用就被漏掉。
+     */
     private List<Conflict> scanCapacity(List<Occupation> sorted, int separation) {
       List<Conflict> out = new ArrayList<>();
       List<Occupation> active = new ArrayList<>();
       for (Occupation next : sorted) {
         active.removeIf(current -> current.to() + separation <= next.from());
         if (active.size() >= capacity) {
-          Occupation earliest =
-              active.stream().min(Comparator.comparingInt(Occupation::from)).orElseThrow();
-          if (!earliest.code().equals(next.code()) && !earliest.bothExternal(next)) {
-            out.add(conflict(earliest, next));
-          }
+          active.stream()
+              .filter(current -> !current.code().equals(next.code()))
+              .filter(current -> !current.bothExternal(next))
+              .min(Comparator.comparingInt(Occupation::from))
+              .ifPresent(partner -> out.add(conflict(partner, next)));
         }
         active.add(next);
       }

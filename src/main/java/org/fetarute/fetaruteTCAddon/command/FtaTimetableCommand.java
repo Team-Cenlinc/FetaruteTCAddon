@@ -42,16 +42,19 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuild
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableCsvExporter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableHeadwayDefaults;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTimingCalculator;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDutyPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.WeightedTripAllocator;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableNeighborhoodLoader;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -365,9 +368,12 @@ public final class FtaTimetableCommand {
     List<Route> routes = new ArrayList<>(collectRoutes(provider, resolved));
     // 直通运转：运营 route 显式指定的外方出库/回库线路也进 build，并优先于本 operator 搜到的同站线路。
     DeclaredRoutes declared = resolveDeclaredRoutes(sender, provider, routes);
+    // 本 operator 范围之外的走行线路：借用它出库/回库，但它不受本表管辖（它所在线路自己的 headway 票照常发）。
+    java.util.Set<UUID> externalRoutes = new java.util.HashSet<>();
     for (Route extra : declared.routes()) {
       if (routes.stream().noneMatch(route -> route.id().equals(extra.id()))) {
         routes.add(extra);
+        externalRoutes.add(extra.id());
       }
     }
     for (Route route : routes) {
@@ -396,7 +402,8 @@ public final class FtaTimetableCommand {
               definition,
               stops,
               Optional.empty(),
-              Optional.ofNullable(declared.typeOf().get(route.id()))));
+              Optional.ofNullable(declared.typeOf().get(route.id())),
+              externalRoutes.contains(route.id())));
     }
     warnDeclaredWithoutSpawnService(sender, declared);
     if (!anyOperation) {
@@ -672,36 +679,37 @@ public final class FtaTimetableCommand {
       Map<UUID, RouteDefinition> definitions,
       RailTravelTimeModel travelTimeModel,
       UUID lineId,
-      String myDisplayCode) {
+      String myDisplayCode,
+      TimetableNeighborhoodLoader loader) {
 
-    TimetableNeighborhoodLoader loader() {
+    /** 主线程读好的 stops / definitions 变成 loader；同一份输入只建一个 loader，它内部缓存重算结果。 */
+    static TimetableNeighborhoodLoader loaderOf(
+        Map<UUID, RouteDefinition> definitions,
+        Map<UUID, List<RouteStop>> stopsByRoute,
+        Map<UUID, String> displayCodeById,
+        RailTravelTimeModel travelTimeModel) {
       return new TimetableNeighborhoodLoader(
-          new org.fetarute
-              .fetaruteTCAddon
-              .dispatcher
-              .schedule
-              .timetable
-              .TimetableTimingCalculator(),
+          new TimetableTimingCalculator(),
           travelTimeModel,
           routeId -> Optional.ofNullable(definitions.get(routeId)),
           routeId -> stopsByRoute.getOrDefault(routeId, List.of()),
           timetable -> displayCodeById.getOrDefault(timetable.id(), timetable.code()));
     }
 
+    /** build 用：我的 route 还没有落库时分，按当前图算足迹。 */
     TimetableFootprint footprint(
         RailGraph graph, TimetableConflictChecker.GraphIndex index, UUID timetableId) {
-      return loader().footprintOf(timetableId, myDisplayCode, mine, graph, index);
+      return loader.footprintOf(timetableId, myDisplayCode, mine, graph, index);
     }
 
-    /** 我自己各 route 的投影（当前图、当前时分），供 publish 重检与 neighbors 命令投影我的表。 */
+    /** 已落库的表用：路径按当前图、时刻按落库值，检查的是将要运行的那张表。 */
     Map<UUID, TimetableConflictChecker.RouteProfile> myProfiles(
-        RailGraph graph, TimetableConflictChecker.GraphIndex index) {
-      return loader().profilesOf(mine, graph, index);
+        Timetable timetable, RailGraph graph, TimetableConflictChecker.GraphIndex index) {
+      return loader.rebasedProfilesOf(timetable, graph, index);
     }
 
     NeighborReport report(
         RailGraph graph, TimetableConflictChecker.GraphIndex index, TimetableFootprint footprint) {
-      TimetableNeighborhoodLoader loader = loader();
       return new NeighborReport(
           loader.footprints(published, lineId, graph, index, footprint),
           loader.unscheduled(unscheduled, graph, index, footprint));
@@ -728,17 +736,16 @@ public final class FtaTimetableCommand {
         int serviceStartSecondOfDay,
         int horizonSeconds,
         ZoneId zone) {
-      return loader()
-          .project(
-              published,
-              lineId,
-              graph,
-              index,
-              footprint,
-              serviceStartSecondOfDay,
-              horizonSeconds,
-              zone,
-              java.time.LocalDate.now(zone));
+      return loader.project(
+          published,
+          lineId,
+          graph,
+          index,
+          footprint,
+          serviceStartSecondOfDay,
+          horizonSeconds,
+          zone,
+          java.time.LocalDate.now(zone));
     }
   }
 
@@ -809,6 +816,7 @@ public final class FtaTimetableCommand {
         }
       }
     }
+    RailTravelTimeModel model = travelTimeModel();
     return new NeighborInputs(
         published,
         displayCodeById,
@@ -816,9 +824,10 @@ public final class FtaTimetableCommand {
         unscheduled,
         stopsByRoute,
         definitions,
-        travelTimeModel(),
+        model,
         resolved.line().id(),
-        displayCodeOf(resolved));
+        displayCodeOf(resolved),
+        NeighborInputs.loaderOf(definitions, stopsByRoute, displayCodeById, model));
   }
 
   /** 已落库的表的 route 集合，供 publish 重检与 neighbors 命令。 */
@@ -839,13 +848,13 @@ public final class FtaTimetableCommand {
    * <p>基线全部对得上就不需要重扫——邻表没变，build 时的结论仍然成立。
    */
   private static ScopeCheck scopeCheck(
-      NeighborInputs inputs,
-      RailGraph graph,
-      Timetable timetable,
-      List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
-          stored) {
+      NeighborInputs inputs, RailGraph graph, Timetable timetable, List<TimetableBaseline> stored) {
     TimetableConflictChecker.GraphIndex index = TimetableConflictChecker.GraphIndex.of(graph);
-    TimetableFootprint footprint = inputs.footprint(graph, index, timetable.id());
+    // 我的表已经落库：投影用落库时分（与邻表同一口径），足迹直接从这份投影算，不再按当前图另算一遍。
+    Map<UUID, TimetableConflictChecker.RouteProfile> profiles =
+        new java.util.HashMap<>(inputs.myProfiles(timetable, graph, index));
+    TimetableFootprint footprint =
+        TimetableFootprint.of(timetable.id(), inputs.myDisplayCode(), profiles.values(), index);
     NeighborReport report = inputs.report(graph, index, footprint);
     List<NeighborTimetable> neighbors =
         inputs.project(
@@ -859,12 +868,9 @@ public final class FtaTimetableCommand {
         neighbors.size() == stored.size()
             && neighbors.stream()
                 .allMatch(neighbor -> stored.stream().anyMatch(b -> b.matches(neighbor)));
-    Map<UUID, TimetableConflictChecker.RouteProfile> profiles =
-        new java.util.HashMap<>(inputs.myProfiles(graph, index));
-    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector.Occupancy
-        mine =
-            org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector
-                .project(timetable, profiles, timetable.serviceStartSecondOfDay());
+    TimetableOccupancyProjector.Occupancy mine =
+        TimetableOccupancyProjector.project(
+            timetable, profiles, timetable.serviceStartSecondOfDay());
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>(mine.movements());
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>(mine.stays());
     for (NeighborTimetable neighbor : neighbors) {
@@ -878,22 +884,13 @@ public final class FtaTimetableCommand {
     return new ScopeCheck(neighbors, report, baselinesMatch, conflicts);
   }
 
-  private static List<
-          org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
-      baselinesOf(Timetable timetable, ScopeCheck check) {
+  private static List<TimetableBaseline> baselinesOf(Timetable timetable, ScopeCheck check) {
     Map<String, Integer> byOwner = check.conflicts().externalByOwner();
-    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline> out =
-        new ArrayList<>();
+    List<TimetableBaseline> out = new ArrayList<>();
     for (NeighborTimetable neighbor : check.neighbors()) {
       out.add(
-          new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline(
-              timetable.id(),
-              neighbor.timetableId(),
-              neighbor.displayCode(),
-              neighbor.updatedAt(),
-              neighbor.sharedResources(),
-              byOwner.getOrDefault(neighbor.displayCode(), 0),
-              neighbor.staleAgainstGraph()));
+          TimetableBaseline.of(
+              timetable.id(), neighbor, byOwner.getOrDefault(neighbor.displayCode(), 0)));
     }
     return out;
   }
@@ -1158,8 +1155,8 @@ public final class FtaTimetableCommand {
             TimetableCsvExporter.clock(timetable.serviceStartSecondOfDay())
                 + " → "
                 + TimetableCsvExporter.clock(timetable.serviceEndSecondOfDay())));
-    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
-        baselines = providerOpt.get().timetables().listBaselines(timetable.id());
+    List<TimetableBaseline> baselines =
+        providerOpt.get().timetables().listBaselines(timetable.id());
     sender.sendMessage(
         field(
             "邻表基线",
@@ -1329,16 +1326,24 @@ public final class FtaTimetableCommand {
     }
     // 发布前重检：邻表集合较 build 时有变化就重新扫一遍外部冲突。谁后发布谁避让，没有 --force。
     ResolvedLine line = new ResolvedLine(resolved.company(), resolved.operator(), resolved.line());
+    List<TimetableBaseline> stored = provider.timetables().listBaselines(timetable.id());
     RailGraph graph = graphForTimetable(timetable);
     if (graph == null) {
-      sender.sendMessage(Component.text("找不到覆盖这条线路的调度图快照，无法做发布前重检。", NamedTextColor.RED));
+      if (!stored.isEmpty()) {
+        sender.sendMessage(
+            Component.text(
+                "找不到覆盖这条线路的调度图快照，无法对照 " + stored.size() + " 份邻表基线重检；请先 /fta graph build。",
+                NamedTextColor.RED));
+        return;
+      }
+      // build 时没有邻表：没有需要重检的路权约束，不该因为图快照还没建而把线路卡在 DRAFT。
+      sender.sendMessage(Component.text("找不到调度图快照，跳过发布前重检（build 时没有邻表基线）。", NamedTextColor.YELLOW));
+      applyStatus(sender, provider, timetable, TimetableStatus.PUBLISHED);
       return;
     }
     NeighborInputs inputs =
         collectNeighborInputs(
             provider, line, routesOf(timetable, displayCodeOf(line)), Map.of(), Map.of());
-    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
-        stored = provider.timetables().listBaselines(timetable.id());
     sender.sendMessage(Component.text("正在对照已发布邻表重检…", NamedTextColor.GRAY));
     plugin
         .getServer()
@@ -1354,9 +1359,24 @@ public final class FtaTimetableCommand {
             });
   }
 
-  /** 发布重检的主线程收尾：基线没变直接发；变了且有外部冲突则拒绝；变了但无冲突则更新基线再发。 */
+  /**
+   * 发布重检的主线程收尾：基线没变直接发；变了且有外部冲突则拒绝；变了但无冲突则更新基线再发。
+   *
+   * <p>重检在异步线程跑了一会儿，期间表可能被重新 build 或删除；save 会整体重写发车表与交路，所以必须回读一次， 变了就拒绝而不是把重检前的旧表写回去。
+   */
   private void finishPublish(
-      CommandSender sender, StorageProvider provider, Timetable timetable, ScopeCheck check) {
+      CommandSender sender, StorageProvider provider, Timetable checked, ScopeCheck check) {
+    Optional<Timetable> current = provider.timetables().findById(checked.id());
+    if (current.isEmpty()) {
+      sender.sendMessage(Component.text("时刻表在重检期间被删除，取消发布。", NamedTextColor.RED));
+      return;
+    }
+    Timetable timetable = current.get();
+    if (!timetable.updatedAt().equals(checked.updatedAt())) {
+      sender.sendMessage(
+          Component.text("时刻表在重检期间被修改（例如重新 build），请重新 publish。", NamedTextColor.RED));
+      return;
+    }
     if (!check.baselinesMatch()) {
       List<TimetableConflictChecker.Conflict> external = check.conflicts().external();
       if (!external.isEmpty()) {
@@ -1434,8 +1454,7 @@ public final class FtaTimetableCommand {
     NeighborInputs inputs =
         collectNeighborInputs(
             provider, line, routesOf(timetable, displayCodeOf(line)), Map.of(), Map.of());
-    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
-        stored = provider.timetables().listBaselines(timetable.id());
+    List<TimetableBaseline> stored = provider.timetables().listBaselines(timetable.id());
     plugin
         .getServer()
         .getScheduler()
@@ -1467,12 +1486,8 @@ public final class FtaTimetableCommand {
                         Map<String, Integer> byOwner = check.conflicts().externalByOwner();
                         for (NeighborTimetable neighbor : check.neighbors()) {
                           summaries.add(
-                              new TimetableBuildResult.NeighborSummary(
-                                  neighbor.displayCode(),
-                                  neighbor.sharedResources(),
-                                  byOwner.getOrDefault(neighbor.displayCode(), 0),
-                                  neighbor.staleAgainstGraph(),
-                                  neighbor.zoneApproximated()));
+                              TimetableBuildResult.NeighborSummary.of(
+                                  neighbor, byOwner.getOrDefault(neighbor.displayCode(), 0)));
                         }
                         sendNeighborReport(sender, check.report(), summaries);
                         sendExternalConflicts(

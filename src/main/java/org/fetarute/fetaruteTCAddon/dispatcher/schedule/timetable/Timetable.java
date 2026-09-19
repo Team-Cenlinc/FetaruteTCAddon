@@ -110,9 +110,17 @@ public record Timetable(
     return status == TimetableStatus.PUBLISHED;
   }
 
-  /** 本时刻表覆盖的 route 集合。 */
+  /** 本时刻表覆盖的 route 集合（含外方走行线路）。 */
   public List<UUID> routeIds() {
     return routePlans.stream().map(TimetableRoutePlan::routeId).toList();
+  }
+
+  /** 受本表管辖的 route：发布后它们的 headway 票会被拦下改按表发车。外方的走行线路不在其中——那是别人线路的资源， 我只是借它出库/回库，不能把人家自己的发车也拦掉。 */
+  public List<UUID> managedRouteIds() {
+    return routePlans.stream()
+        .filter(plan -> !plan.external())
+        .map(TimetableRoutePlan::routeId)
+        .toList();
   }
 
   /** 按 route 查计划。 */

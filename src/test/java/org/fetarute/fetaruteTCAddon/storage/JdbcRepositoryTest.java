@@ -1004,6 +1004,62 @@ final class JdbcRepositoryTest {
     assertTrue(provider.timetables().findById(timetableId).isEmpty());
   }
 
+  /** 外方走行线路的标记随 route_plans 的 JSON 落库、读回；旧 JSON 没有这个字段时按 false。 */
+  @Test
+  void shouldRoundTripExternalRoutePlanFlag() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    UUID foreignRoute = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT3",
+            "直通表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    fixture.routeId(),
+                    "RA",
+                    RouteOperationType.OPERATION,
+                    1,
+                    List.of(),
+                    "OP:S:A:1",
+                    "CHT:S:X:1",
+                    Optional.empty(),
+                    Optional.empty()),
+                new TimetableRoutePlan(
+                    foreignRoute,
+                    "NL-RET",
+                    RouteOperationType.RETURN,
+                    0,
+                    List.of(),
+                    "CHT:S:X:1",
+                    "CHT:D:DEP2:1",
+                    Optional.empty(),
+                    Optional.empty(),
+                    true)),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+
+    provider.timetables().save(timetable);
+    Timetable loaded = provider.timetables().findById(timetableId).orElseThrow();
+
+    assertFalse(loaded.routePlan(fixture.routeId()).orElseThrow().external());
+    assertTrue(loaded.routePlan(foreignRoute).orElseThrow().external());
+    assertEquals(List.of(fixture.routeId()), loaded.managedRouteIds());
+  }
+
   /** 邻表基线随表落库、整体替换、随表删除：publish 重检靠它判断邻表变没变。 */
   @Test
   void shouldReplaceAndListTimetableBaselines() {
@@ -1045,6 +1101,12 @@ final class JdbcRepositoryTest {
     assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "整体替换：空列表清空基线");
 
     provider.timetables().replaceBaselines(timetableId, List.of(baseline));
+    provider.timetables().save(timetable.withStatus(TimetableStatus.PUBLISHED, now.plusSeconds(1)));
+    assertEquals(
+        List.of(baseline),
+        provider.timetables().listBaselines(timetableId),
+        "改状态的 save 只重写发车表与交路，基线要留着");
+
     provider.timetables().delete(timetableId);
     assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "删表时基线随之删除");
   }

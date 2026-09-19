@@ -199,7 +199,8 @@ class TimetableBuilderTest {
                 TimetableTestFixtures.route("NL-RET", List.of(FOREIGN_X, FOREIGN_DEP)),
                 TimetableTestFixtures.returnStops(fret, 2, FOREIGN_DEP),
                 Optional.empty(),
-                Optional.of(RouteOperationType.RETURN)));
+                Optional.of(RouteOperationType.RETURN),
+                true));
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             5 * 3600,
@@ -220,6 +221,10 @@ class TimetableBuilderTest {
       assertEquals(Optional.of(fret), duty.returnRouteId(), "回库走外方的 RETURN 线路");
       assertEquals(FOREIGN_DEP, duty.endDepotNodeId(), "在外方车库销毁");
     }
+    assertTrue(timetable.routePlan(fret).orElseThrow().external(), "外方线路在计划里标 external");
+    assertTrue(timetable.routeIds().contains(fret), "它进足迹与交路");
+    assertFalse(timetable.managedRouteIds().contains(fret), "但不受本表管辖：外方线路自己的 headway 票照常发");
+    assertTrue(timetable.managedRouteIds().contains(crt));
   }
 
   /** 指定的走行线路类型不符（把一条 CREATE 线路指定为回库线路）：判为不可行并说明原因，不拿它当回库线路用。 */

@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +42,12 @@ public final class TimetableNeighborhoodLoader {
   private final Function<UUID, Optional<RouteDefinition>> routeDefinitions;
   private final Function<UUID, List<RouteStop>> routeStops;
   private final Function<Timetable, String> displayCodes;
+
+  /**
+   * 同一次命令里 footprints / project / rebasedProfilesOf 会对同一批 route 反复求时分；缓存在实例上， 一个 loader
+   * 只服务一次命令、一张图。键是 {@code timetableId:routeId}（同一条外方走行线路可能出现在两份表里、落库时分不同）。
+   */
+  private final Map<String, Optional<Rebased>> rebasedCache = new HashMap<>();
 
   /**
    * @param timingCalculator 与 build 同一个计时器：足迹用的路径就是它算出的逐边路径
@@ -89,9 +96,9 @@ public final class TimetableNeighborhoodLoader {
       List<String> warnings = new ArrayList<>();
       List<TimetableConflictChecker.RouteProfile> profiles = new ArrayList<>();
       for (TimetableRoutePlan plan : timetable.routePlans()) {
-        profileOf(plan.routeId(), plan.routeCode(), graph, index)
+        rebasedProfileOf(timetable.id(), plan, graph, index)
             .ifPresentOrElse(
-                profiles::add,
+                rebased -> profiles.add(rebased.profile()),
                 () -> warnings.add("route " + plan.routeCode() + " 在当前图上不可达或未加载，足迹按空计"));
       }
       String displayCode = displayCodes.apply(timetable);
@@ -205,7 +212,7 @@ public final class TimetableNeighborhoodLoader {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new LinkedHashMap<>();
       boolean stale = false;
       for (TimetableRoutePlan plan : timetable.routePlans()) {
-        Optional<Rebased> rebased = rebasedProfileOf(plan, graph, index);
+        Optional<Rebased> rebased = rebasedProfileOf(timetable.id(), plan, graph, index);
         if (rebased.isEmpty()) {
           warnings.add("route " + plan.routeCode() + " 在当前图上不可达或未加载，足迹按空计");
           continue;
@@ -298,6 +305,15 @@ public final class TimetableNeighborhoodLoader {
    * <p>每个区段的逐边节点时刻按重算比例等比缩放进落库的 [发车, 到达] 区间；落库与重算的站间时分不一致就标 stale。
    */
   private Optional<Rebased> rebasedProfileOf(
+      UUID timetableId,
+      TimetableRoutePlan plan,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index) {
+    return rebasedCache.computeIfAbsent(
+        timetableId + ":" + plan.routeId(), key -> computeRebased(plan, graph, index));
+  }
+
+  private Optional<Rebased> computeRebased(
       TimetableRoutePlan plan, RailGraph graph, TimetableConflictChecker.GraphIndex index) {
     Optional<RouteDefinition> definition = routeDefinitions.apply(plan.routeId());
     if (definition.isEmpty() || graph == null) {
@@ -348,15 +364,17 @@ public final class TimetableNeighborhoodLoader {
 
   private record Rebased(TimetableConflictChecker.RouteProfile profile, boolean stale) {}
 
-  /** 一组 route 的投影（当前图、当前时分）；算不出来的略过。 */
-  public Map<UUID, TimetableConflictChecker.RouteProfile> profilesOf(
-      List<RouteCandidate> routes, RailGraph graph, TimetableConflictChecker.GraphIndex index) {
+  /**
+   * 一份已落库的表各 route 的投影：路径按当前图重算、时刻用落库值——和邻表同一口径。publish 重检与 neighbors 命令投影"我的表"时用它，
+   * 这样检查的就是将要运行的那张表，而不是按当前图重算出来的另一张。算不出来的 route 略过。
+   */
+  public Map<UUID, TimetableConflictChecker.RouteProfile> rebasedProfilesOf(
+      Timetable timetable, RailGraph graph, TimetableConflictChecker.GraphIndex index) {
+    Objects.requireNonNull(timetable, "timetable");
     Map<UUID, TimetableConflictChecker.RouteProfile> out = new LinkedHashMap<>();
-    for (RouteCandidate route : routes == null ? List.<RouteCandidate>of() : routes) {
-      if (route != null) {
-        profileOf(route.routeId(), route.routeCode(), graph, index)
-            .ifPresent(profile -> out.put(route.routeId(), profile));
-      }
+    for (TimetableRoutePlan plan : timetable.routePlans()) {
+      rebasedProfileOf(timetable.id(), plan, graph, index)
+          .ifPresent(rebased -> out.put(plan.routeId(), rebased.profile()));
     }
     return Map.copyOf(out);
   }
