@@ -247,7 +247,7 @@ class TimetableBuilderTest {
     Timetable timetable = result.timetable().orElseThrow();
 
     assertEquals(1, result.droppedTrips().size(), "停在 C 的最后一班 RA 必须被取消");
-    assertEquals("05:40", result.droppedTrips().get(0).departureText());
+    assertEquals("05:40:00", result.droppedTrips().get(0).departureText());
     assertEquals(
         VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS,
         result.droppedTrips().get(0).reason());

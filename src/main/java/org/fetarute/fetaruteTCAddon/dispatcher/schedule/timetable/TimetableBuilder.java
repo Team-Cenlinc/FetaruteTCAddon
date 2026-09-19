@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -301,7 +300,7 @@ public final class TimetableBuilder {
     }
     return new Prepared(
         timetableId,
-        input.graph(),
+        TimetableConflictChecker.GraphIndex.of(input.graph()),
         List.copyOf(plans),
         List.copyOf(operations),
         operationPlans,
@@ -476,7 +475,7 @@ public final class TimetableBuilder {
     }
     TimetableConflictChecker.Report conflicts =
         TimetableConflictChecker.check(
-            prepared.graph(),
+            prepared.graphIndex(),
             prepared.profiles(),
             movements,
             stays,
@@ -684,9 +683,9 @@ public final class TimetableBuilder {
     return options.serviceStartSecondOfDay() + relativeSeconds;
   }
 
+  /** 报告里的时刻统一走导出器的格式：跨零点带 +1，早于零点带 -1，不会把前一夜的出库票显示成当天深夜。 */
   private static String clock(int secondOfDay) {
-    return LocalTime.ofSecondOfDay(Math.floorMod(secondOfDay, TimetableTrip.SECONDS_PER_DAY))
-        .toString();
+    return TimetableCsvExporter.clock(secondOfDay);
   }
 
   /** 取消的班次按 route + 原因归组，每组列出前几个时刻。 */
@@ -746,7 +745,7 @@ public final class TimetableBuilder {
   /** 第 1 步的产物：与 headway 无关的一切。 */
   private record Prepared(
       UUID timetableId,
-      RailGraph graph,
+      TimetableConflictChecker.GraphIndex graphIndex,
       List<TimetableRoutePlan> plans,
       List<OperationPlan> operations,
       List<TimetableRoutePlan> operationPlans,

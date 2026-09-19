@@ -63,12 +63,31 @@ public final class TimetableConflictChecker {
       List<Movement> movements,
       List<Stay> stays,
       int separationSeconds) {
+    return check(GraphIndex.of(graph), profiles, movements, stays, separationSeconds);
+  }
+
+  /**
+   * 用预先建好的图索引检查。build 在搜索可行 headway 时会反复调用本方法，图索引只依赖图，应当只建一次。
+   *
+   * @param index 图索引
+   * @param profiles 各 route 的逐边时分与站台资源
+   * @param movements 全部运行
+   * @param stays 站台待命
+   * @param separationSeconds 相邻占用之间的最小间隔
+   * @return 冲突报告
+   */
+  public static Report check(
+      GraphIndex index,
+      Map<UUID, RouteProfile> profiles,
+      List<Movement> movements,
+      List<Stay> stays,
+      int separationSeconds) {
     Objects.requireNonNull(profiles, "profiles");
+    GraphIndex graphIndex = index == null ? GraphIndex.of(null) : index;
     int separation = Math.max(0, separationSeconds);
-    Map<String, Integer> platformCapacity = graph == null ? Map.of() : platformCapacity(graph);
-    SingleLineSectionIndex sections =
-        graph == null ? null : SingleLineSectionIndex.fromGraph(graph);
-    Map<NodeId, NodeType> nodeTypes = graph == null ? Map.of() : nodeTypes(graph);
+    Map<String, Integer> platformCapacity = graphIndex.platformCapacity();
+    SingleLineSectionIndex sections = graphIndex.sections();
+    Map<NodeId, NodeType> nodeTypes = graphIndex.nodeTypes();
 
     Map<String, Resource> resources = new LinkedHashMap<>();
     for (Movement movement : movements == null ? List.<Movement>of() : movements) {
@@ -275,6 +294,37 @@ public final class TimetableConflictChecker {
   }
 
   // ------------------------------------------------------------------ 模型
+
+  /**
+   * 只依赖图的那部分输入：单线区段索引、站台组股道数、节点类型。
+   *
+   * <p>单线索引要跑一遍迭代 Tarjan 找桥，在大图上是十几到几十毫秒；headway 搜索最多几十上百次 attempt，不能每次重建。
+   *
+   * @param sections 单线区段索引；无图时为 null
+   * @param platformCapacity 站台组 → 股道数
+   * @param nodeTypes 节点 → 类型
+   */
+  public record GraphIndex(
+      SingleLineSectionIndex sections,
+      Map<String, Integer> platformCapacity,
+      Map<NodeId, NodeType> nodeTypes) {
+
+    public GraphIndex {
+      platformCapacity = platformCapacity == null ? Map.of() : Map.copyOf(platformCapacity);
+      nodeTypes = nodeTypes == null ? Map.of() : Map.copyOf(nodeTypes);
+    }
+
+    /** 从图快照建索引；{@code null} 图得到空索引（只剩边互斥）。 */
+    public static GraphIndex of(RailGraph graph) {
+      if (graph == null) {
+        return new GraphIndex(null, Map.of(), Map.of());
+      }
+      return new GraphIndex(
+          SingleLineSectionIndex.fromGraph(graph),
+          TimetableConflictChecker.platformCapacity(graph),
+          TimetableConflictChecker.nodeTypes(graph));
+    }
+  }
 
   /** 冲突类型。 */
   public enum Kind {

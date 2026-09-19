@@ -215,6 +215,9 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 （只有一个组就用它；多个组按频率合并 `1 / Σ(1/b_i)`，因为时刻表以整条线路为单位排班、再按 route weight 切分份额），
 都没有才用 300 秒。baseline 是目标不是硬约束：排出来有冲突时回退到最小可行间隔（见上文第二层）。报告里有一行"间隔来源"。
 
+`build` 的计算部分（时分、排班、派车、冲突扫描与 headway 搜索）在异步线程执行，报告与落库回到主线程；
+输入全是不可变快照。末班早于首班会被命令拒绝并提示写成 `25:00` 这样的跨零点形式。
+
 `build` 的输出不是一句"成功"，而是一份可解释的报告：班次数、运营/出库/回库 route 数、计划窗口（含实际使用的间隔，
 目标间隔有冲突被放宽时会标出）、冲突检查结果（无冲突，或目标间隔下的冲突数与明细）、
 交路数、**全天出库次数与峰值同时在线车数**、**目标服务比例 vs 实际服务比例**、最长一趟车、单交路最多班次与最长在线、
@@ -268,13 +271,19 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 
 | 钩子 | 规则 |
 | --- | --- |
-| 候选过滤 `acceptsVehicle` | 绑在某交路上的车只接同一交路的票；没绑交路的车能接首班和回库票，**不能接续班** |
-| 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），不走全局 max-age |
+| 候选过滤 `acceptsVehicle` | 绑在某交路上的车只接同一交路的票；没绑交路的车只能接**首班**，续班与回库票都不接 |
+| 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），pending 与重试队列都适用，不走全局 max-age |
 | 派发回调 `onDispatched` | 出库票实体化的车、接了首班的车，立刻绑到交路上（`TIMETABLE_DUTY_BOUND`） |
 
 于是"接班没车"的语义是**等**：续班票在 pending 里等本交路那辆车到站（晚点就晚点跑），不抓别的交路的车，也不新出库；
 超过容差才作废。门控上首次绑定到带 duty 的车次时同样会建立交路绑定，所以自由运行的车一旦绑上表定车次，之后也只认自己的交路。
-绑定只在内存，重启后回到自由运行。
+自由运行的车不会被表定回库票带走（否则本交路跑完的车会滞留在终点），它们仍由 `ReclaimManager` 的闲置回收处理。
+
+交路身份里的**服务日**统一按计划窗口算：跨零点的班次取模后落在下一个日历日，但它属于前一个服务日的交路
+（`Timetable#serviceDayOf`），与出库/回库票同一口径。
+
+列车销毁或改派时，运行时通过 `StationStopObserver#onTrainReleased` 立刻释放它的绑定、交路进度与 trip 占用；
+定时 `retain` 只是兜底，用的是调度层的规范列车名。绑定只在内存，重启后回到自由运行。
 
 ### 车次绑定
 
@@ -299,7 +308,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 | `hold-max-seconds` | `120` | 早到扣留上限，运行时再被 150 秒硬上限封顶 |
 | `assign-tolerance-seconds` | `300` | 车次绑定允许的最大偏差 |
 | `max-catch-up-seconds` | `300` | 发车侧单次轮询的回补窗口上限 |
-| `reload-interval-seconds` | `60` | publish/unpublish 后最多多久生效 |
+| `reload-interval-seconds` | `60` | publish/unpublish 后最多多久生效（读库在异步线程，兜底 retain 回主线程） |
 | `zone` | `""` | 时刻表默认时区，留空用服务器默认 |
 
 ## 遥测（未来的 calibration，不是构建输入）
@@ -327,7 +336,7 @@ planned segment duration   vs   actual segment duration
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
 | `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票被否决、车留在终点 |
 | `TIMETABLE_DUTY_BOUND` / `TIMETABLE_DUTY_BIND_CONFLICT` | 车绑到交路上 / 已绑别的交路（错派的车暴露在这里） |
-| `TIMETABLE_CANDIDATE_REJECT` | 某张票拒绝了某辆待命车：`other-duty` 或 `unbound-cannot-continue-duty` |
+| `TIMETABLE_CANDIDATE_REJECT` | 某张票拒绝了某辆待命车：`other-duty` 或 `unbound-only-first-trip` |
 | `TIMETABLE_SPAWN_DISPATCHED` | 表定票派给了哪辆车 |
 | `TIMETABLE_DUTY_RELEASED` | 交路进度随列车下线释放 |
 | `TIMETABLE_RELOAD` | 已发布时刻表缓存刷新 |
