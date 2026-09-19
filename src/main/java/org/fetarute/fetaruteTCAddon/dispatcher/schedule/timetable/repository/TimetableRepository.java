@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 
 /**
  * 时刻表仓库。
@@ -30,4 +31,10 @@ public interface TimetableRepository {
 
   /** 删除时刻表及其发车表与车辆交路。 */
   void delete(UUID id);
+
+  /** 替换一份表的邻表基线（build 与 publish 重检后写入）。 */
+  void replaceBaselines(UUID timetableId, List<TimetableBaseline> baselines);
+
+  /** 读一份表的邻表基线。 */
+  List<TimetableBaseline> listBaselines(UUID timetableId);
 }

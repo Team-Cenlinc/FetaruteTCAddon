@@ -10,6 +10,8 @@
 ```
 时刻表是从路网「算」出来的，不是从历史跑车记录「录」出来的。
 
+同一份网络状态 + 同一份配置 + 同一组已发布邻表，永远产出同一张表，包括 trip/duty 主键。
+
 weight 是目标服务比例，不是每次发车的抽签概率。
 
 每辆实体车都有有限的交路，并且最终必须回库。
@@ -34,9 +36,11 @@ route 定义 + 调度图限速 + 运营参数  →  build  →  publish  →  �
 | 服务比例 | Route metadata 的 `spawn_weight` |
 | 首末班 / 间隔 / 交路上限 | `build` 的参数 |
 
-**同一份网络状态 + 同一份配置，永远产出同一张表**，包括 trip 与 duty 的主键——
+**同一份网络状态 + 同一份配置 + 同一组已发布邻表，永远产出同一张表**，包括 trip 与 duty 的主键——
 它们由 `timetableId + code` 名字派生，不用随机 UUID，否则"构建两次结果一致"这条性质
 在字段层面成立、在主键层面不成立，而主键会进数据库、会被引用、会出现在导出里。
+邻表集合是 build 的显式输入而不是隐含状态：报告列出它，`fta_timetable_baselines` 落库它（每条邻表以 `timetableId + updatedAt` 标识）。
+换一组邻表可以换出不同的表，这是路权先到先得的定义，不是不确定性。
 
 计算时分时逐段用**该段自己的限速**积分，不用全线平均速度。对一条前半段 20 bps、
 后半段 5 bps 的线，平均速度会把全程时分少算三分之一以上，而表定时分一旦偏乐观，
@@ -158,6 +162,23 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 这一层刻意**不**建模授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；将来的回放校验（阶段 8）如果发现
 本模型漏了约束，修的是本模型，不是让 build 去依赖回放。
 
+### 跨线：邻表与路权
+
+两条线共用一段线路、一个站台或一个道岔时，各自只查自己会得到两张都乐观的表。所以 build 的检查作用域是
+**足迹相交的已发布邻表**（世界维，跨 operator 与 company；足迹按展开后的路径算）：
+
+- 邻表的运行由 `TimetableOccupancyProjector` 投影成与我同一零点的运行与待命（路径按当前图重算、时刻用它落库的值；
+  不一致时标"基于旧图"仍参与），服务日按 -1/0/+1 展开并裁剪到我的窗口附近；时区不同按当日零点偏移换算并标记。
+- **路权先到先得**：邻表的运行在检查里是不可移动的事实，搜索最小可行 headway 时只放宽我的；邻表之间的冲突不报。
+- 同 line 的已发布表不算邻表（替代关系）；无表的线路只报告不检查（它按 headway 发车，干扰单向）。
+- build 落 `fta_timetable_baselines`：每份邻表的 id + updatedAt + 共用资源数 + 目标间隔下的冲突数。
+- **publish 重检**：邻表集合与基线不一致时，投影我的表与当前邻表重扫外部冲突；有冲突拒绝发布（`TIMETABLE_PUBLISH_REJECTED`），
+  无冲突更新基线再发。unpublish / delete 不级联——别人是避让着我编的，我消失只会让约束变少。
+- `/fta timetable neighbors` 只读列出邻表、基线是否仍一致、当前外部冲突。
+- `fta_operators.priority` 不参与编表：它是运行时占用排队的点数优势，编表期没有队列可排。
+
+决策与反例见 `timetable-scope-design.md`。
+
 ### 服务规划与车辆周转是两件事
 
 ```
@@ -202,6 +223,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>]
         [--separation <sec>] [--strict]
         [--name "<name>"] [--prefix <p>] [--zone <zoneId>]
+/fta timetable neighbors <company> <operator> <line> <code>
 /fta timetable list <company> <operator> <line>
 /fta timetable info <company> <operator> <line> <code> [page]
 /fta timetable duties <company> <operator> <line> <code> [page]
@@ -344,6 +366,7 @@ planned segment duration   vs   actual segment duration
 | `TIMETABLE_SPAWN_DISPATCHED` | 表定票派给了哪辆车 |
 | `TIMETABLE_DUTY_RELEASED` | 交路进度随列车下线释放 |
 | `TIMETABLE_RELOAD` | 已发布时刻表缓存刷新 |
+| `TIMETABLE_PUBLISH_REJECTED` | 发布重检发现与已发布邻表冲突，拒绝发布 |
 | `TIMETABLE_SPAWN_TICKET` / `TIMETABLE_SPAWN_SKIP` | 表定出票（`kind=CREATE/OPERATION/RETURN`，带 duty）与跳过/作废原因（`no-spawn-service`、`abandoned`） |
 | `SCHEDULED_DEPARTURE_HOLD` | 某辆车正因等待表定时刻被扣留 |
 | `SCHEDULED_DEPARTURE_HOLD_SKIPPED` | 早到幅度超上限，已放行（多半绑错了车次） |
@@ -370,9 +393,8 @@ planned segment duration   vs   actual segment duration
 - 车次绑定与交路进度不持久化，重启后回到自由运行。
 - 仅由 code 定义（无 UUID）的交路不参与按表运行：绑定挂不回 Route。
 - 一条线路的多份已发布时刻表之间不做撞车仲裁，运营侧自查。
-- **跨线 / 跨 operator / 跨 company 的资源共用尚未进入冲突检查**：`build` 只看本线路自己的运行，两条线共用一段线路、
-  一个站台或一个道岔时，各自 build 都会报"无冲突"，两张表都乐观。直通运转（一条 route 跑到别的 operator 的资源上）
-  同样只检查自己。设计见 `docs/dev/timetable-scope-design.md`（作用域 = 足迹相交的已发布邻表、路权先到先得、publish 重检）。
+- 跨线检查只覆盖**已发布**的邻表；仍按 headway 发车的线路只报告不检查。publish 重检用的间隔裕量是默认 30 秒，
+  不是 build 时传的 `--separation`（选项不落库）。邻表的站台组容量取图里的物理股道数。
 - 直通 route 的出库/回库线路只在本 operator 的线路里找；终点在外方时会因 `NO_RETURN_ACCESS` 取消班次（自己在本 operator
   名下定义一条首站为外方节点、末站 DSTY 回自己车库的 RETURN 可以绕开）。运行时 `ReclaimManager` 的兜底回收已改为先本 operator
   再全部 operator、按节点匹配首站；仍然派不出 RETURN 的车滞留超过 `reclaim.stranded-destroy-seconds` 后销毁（无乘客、无折返事务时）。

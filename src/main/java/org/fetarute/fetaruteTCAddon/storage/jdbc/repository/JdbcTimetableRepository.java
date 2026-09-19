@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 
@@ -213,12 +214,82 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
   }
 
   private void deleteChildren(ConnectionResource connection, UUID timetableId) throws SQLException {
-    for (String child : List.of("timetable_trips", "timetable_duties")) {
+    for (String child : List.of("timetable_trips", "timetable_duties", "timetable_baselines")) {
       try (var statement =
           connection.prepareStatement("DELETE FROM " + table(child) + " WHERE timetable_id = ?")) {
         setUuid(statement, 1, timetableId);
         statement.executeUpdate();
       }
+    }
+  }
+
+  @Override
+  public void replaceBaselines(UUID timetableId, List<TimetableBaseline> baselines) {
+    Objects.requireNonNull(timetableId, "timetableId");
+    String insert =
+        "INSERT INTO "
+            + table("timetable_baselines")
+            + " (timetable_id, neighbor_timetable_id, neighbor_code, neighbor_updated_at,"
+            + " shared_resources, conflicts_at_target, stale_against_graph)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?)";
+    try (var connection = openConnection()) {
+      try (var statement =
+          connection.prepareStatement(
+              "DELETE FROM " + table("timetable_baselines") + " WHERE timetable_id = ?")) {
+        setUuid(statement, 1, timetableId);
+        statement.executeUpdate();
+      }
+      if (baselines != null && !baselines.isEmpty()) {
+        try (var statement = connection.prepareStatement(insert)) {
+          for (TimetableBaseline baseline : baselines) {
+            setUuid(statement, 1, timetableId);
+            setUuid(statement, 2, baseline.neighborTimetableId());
+            statement.setString(3, baseline.neighborCode());
+            setInstant(statement, 4, baseline.neighborUpdatedAt());
+            statement.setInt(5, baseline.sharedResources());
+            statement.setInt(6, baseline.conflictsAtTarget());
+            statement.setInt(7, baseline.staleAgainstGraph() ? 1 : 0);
+            statement.addBatch();
+          }
+          statement.executeBatch();
+        }
+      }
+      connection.commitIfNecessary();
+    } catch (SQLException ex) {
+      throw new StorageException("保存时刻表基线失败", ex);
+    }
+  }
+
+  @Override
+  public List<TimetableBaseline> listBaselines(UUID timetableId) {
+    if (timetableId == null) {
+      return List.of();
+    }
+    String sql =
+        "SELECT timetable_id, neighbor_timetable_id, neighbor_code, neighbor_updated_at,"
+            + " shared_resources, conflicts_at_target, stale_against_graph FROM "
+            + table("timetable_baselines")
+            + " WHERE timetable_id = ? ORDER BY neighbor_code ASC";
+    List<TimetableBaseline> out = new ArrayList<>();
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, timetableId);
+      try (var rs = statement.executeQuery()) {
+        while (rs.next()) {
+          out.add(
+              new TimetableBaseline(
+                  requireUuid(rs, "timetable_id"),
+                  requireUuid(rs, "neighbor_timetable_id"),
+                  rs.getString("neighbor_code"),
+                  readInstant(rs, "neighbor_updated_at"),
+                  readRequiredInt(rs, "shared_resources"),
+                  readRequiredInt(rs, "conflicts_at_target"),
+                  readRequiredInt(rs, "stale_against_graph") != 0));
+        }
+      }
+      return List.copyOf(out);
+    } catch (SQLException ex) {
+      throw new StorageException("读取时刻表基线失败", ex);
     }
   }
 

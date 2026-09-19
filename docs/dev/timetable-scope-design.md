@@ -498,8 +498,8 @@ public final class TimetableBuildAssembler {
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | S1 可观测 | D1 日志与计数；`TimetableFootprint` + `resourceKeysOf`；loader 的 `footprints/unscheduled`；build 报告「共用资源」一节；`docs/dev/timetable.md` 已知边界更新；**外加**用户要求的滞留兜底（E3 提前） | 报告能说出"与谁共用多少资源、对方有没有表"；除兜底外无行为变化 |
-| S2 重构 | `TimetableOccupancyProjector`、`TimetableBuildReportText`、`TripMatcher`、`DutyLedger` 抽出；builder < 600 行、service < 500 行 | 既有 `TimetableBuilderTest`/`TimetableServiceTest` 一行不改全绿 |
-| S3 邻表输入 | checker owner；`BuildInput.neighbors`；loader `project`；结果与基线；新表与仓储；publish 重检；`neighbors` 命令；不变量 2 改写进文档 | 矩阵里 A/B/C/D 用例全绿；`config-version` 仍 32 |
+| S2 重构 | ✅ `TimetableOccupancyProjector`、`TimetableBuildReportText`、`TripMatcher`、`DutyLedger` 抽出；builder 873→669、service 996→742（嵌套记录占了篇幅，未达 500） | 既有 `TimetableBuilderTest`/`TimetableServiceTest` 一行不改全绿 |
+| S3 邻表输入 | ✅ checker owner；`BuildInput.neighbors`；loader `project`；结果与基线；新表与仓储；publish 重检；`neighbors` 命令；不变量 2 改写进文档。实现偏差：命令层的组装仍在 `FtaTimetableCommand` 内（`NeighborInputs` 记录），没有抽 `TimetableBuildAssembler` | 矩阵里 A/B/C/D 用例全绿 |
 | S4 直通运转 | route metadata 显式走行线路；ReclaimManager 跨 operator 兜底；跨 operator 夹具 | E 用例全绿 |
 
 与既有路线图的关系：S1–S3 应在**阶段 5（临时加车）之前**——加车落库前要过的就是这套邻表检查，否则加车会绕开路权。

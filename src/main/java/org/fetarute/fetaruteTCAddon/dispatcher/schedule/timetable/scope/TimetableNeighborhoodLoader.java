@@ -2,6 +2,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -17,8 +19,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTimingCalculator;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 
 /**
  * 决定"谁算邻表"的唯一地方：把已发布的时刻表与没有表的线路展开成足迹，筛出与我共用资源的。
@@ -160,6 +165,200 @@ public final class TimetableNeighborhoodLoader {
             .reversed()
             .thenComparing(UnscheduledNeighbor::displayCode));
     return List.copyOf(out);
+  }
+
+  /**
+   * 把与我足迹相交的已发布表投影成冲突模型里的运行：零点 = 我的计划窗口起点，服务日按 -1/0/+1 展开并裁剪到我的窗口附近。
+   *
+   * <p>邻表的路径用当前图重算，时刻用它落库的站间时分（那是它实际在跑的时刻）；两者不一致时标 {@code staleAgainstGraph}
+   * 并警告，但仍然参与检查。时区不同按参考日的零点偏移换算并标 {@code zoneApproximated}。
+   *
+   * @param published 全部已发布时刻表
+   * @param excludeLineId 我这条 line：它名下的全部表都不算邻表
+   * @param graph 我的路径所在世界的图
+   * @param index 图索引
+   * @param mine 我的足迹
+   * @param myServiceStartSecondOfDay 我的零点
+   * @param myHorizonSeconds 我的计划窗口长度
+   * @param myZone 我的时区
+   * @param referenceDate 时区换算用的参考日
+   */
+  public List<NeighborTimetable> project(
+      List<Timetable> published,
+      UUID excludeLineId,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index,
+      TimetableFootprint mine,
+      int myServiceStartSecondOfDay,
+      int myHorizonSeconds,
+      ZoneId myZone,
+      LocalDate referenceDate) {
+    Objects.requireNonNull(mine, "mine");
+    List<NeighborTimetable> out = new ArrayList<>();
+    for (Timetable timetable : published == null ? List.<Timetable>of() : published) {
+      if (timetable == null
+          || !timetable.published()
+          || (excludeLineId != null && excludeLineId.equals(timetable.lineId()))) {
+        continue;
+      }
+      List<String> warnings = new ArrayList<>();
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new LinkedHashMap<>();
+      boolean stale = false;
+      for (TimetableRoutePlan plan : timetable.routePlans()) {
+        Optional<Rebased> rebased = rebasedProfileOf(plan, graph, index);
+        if (rebased.isEmpty()) {
+          warnings.add("route " + plan.routeCode() + " 在当前图上不可达或未加载，足迹按空计");
+          continue;
+        }
+        profiles.put(plan.routeId(), rebased.get().profile());
+        if (rebased.get().stale()) {
+          stale = true;
+          warnings.add("route " + plan.routeCode() + " 落库时分与当前图重算不一致（邻表基于旧图）");
+        }
+      }
+      String displayCode = displayCodes.apply(timetable);
+      TimetableFootprint footprint =
+          TimetableFootprint.of(timetable.id(), displayCode, profiles.values(), index);
+      int shared = mine.sharedWith(footprint);
+      if (shared == 0) {
+        continue;
+      }
+      boolean zoneApproximated = !timetable.zoneId().equals(myZone);
+      int zoneOffset =
+          zoneApproximated
+              ? (int)
+                  Duration.between(
+                          referenceDate.atStartOfDay(myZone).toInstant(),
+                          referenceDate.atStartOfDay(timetable.zoneId()).toInstant())
+                      .getSeconds()
+              : 0;
+      TimetableOccupancyProjector.Occupancy base =
+          TimetableOccupancyProjector.project(
+              timetable, profiles, myServiceStartSecondOfDay, Optional.of(displayCode));
+      List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
+      List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
+      int lower = -TimetableTrip.SECONDS_PER_DAY / 24;
+      int upper = myHorizonSeconds + TimetableTrip.SECONDS_PER_DAY / 24;
+      for (int day = -1; day <= 1; day++) {
+        int shift = day * TimetableTrip.SECONDS_PER_DAY + zoneOffset;
+        for (TimetableConflictChecker.Movement movement : base.movements()) {
+          int start = movement.startSeconds() + shift;
+          int run =
+              Optional.ofNullable(profiles.get(movement.routeId()))
+                  .map(profile -> lastArrival(profile.stops()))
+                  .orElse(0);
+          if (overlaps(start, start + run, lower, upper)) {
+            movements.add(
+                new TimetableConflictChecker.Movement(
+                    movement.code(), movement.routeId(), start, movement.owner()));
+          }
+        }
+        for (TimetableConflictChecker.Stay stay : base.stays()) {
+          int from = stay.from() + shift;
+          int to = stay.to() + shift;
+          if (overlaps(from, to, lower, upper)) {
+            stays.add(
+                new TimetableConflictChecker.Stay(
+                    stay.code(), stay.platform(), from, to, stay.owner()));
+          }
+        }
+      }
+      out.add(
+          new NeighborTimetable(
+              timetable.id(),
+              displayCode,
+              timetable.updatedAt(),
+              timetable.zoneId(),
+              shared,
+              stale,
+              zoneApproximated,
+              profiles,
+              movements,
+              stays,
+              warnings));
+    }
+    out.sort(
+        Comparator.comparingInt(NeighborTimetable::sharedResources)
+            .reversed()
+            .thenComparing(NeighborTimetable::displayCode));
+    return List.copyOf(out);
+  }
+
+  private static boolean overlaps(int from, int to, int lower, int upper) {
+    return to >= lower && from <= upper;
+  }
+
+  private static int lastArrival(List<TimetableStop> stops) {
+    return stops.isEmpty() ? 0 : stops.get(stops.size() - 1).arrivalOffsetSeconds();
+  }
+
+  /**
+   * 邻表一条 route 的投影：路径与逐边比例来自当前图，站间时刻来自落库值。
+   *
+   * <p>每个区段的逐边节点时刻按重算比例等比缩放进落库的 [发车, 到达] 区间；落库与重算的站间时分不一致就标 stale。
+   */
+  private Optional<Rebased> rebasedProfileOf(
+      TimetableRoutePlan plan, RailGraph graph, TimetableConflictChecker.GraphIndex index) {
+    Optional<RouteDefinition> definition = routeDefinitions.apply(plan.routeId());
+    if (definition.isEmpty() || graph == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = routeStops.apply(plan.routeId());
+    TimetableTimingCalculator.TimingResult timing =
+        timingCalculator.compute(graph, travelTimeModel, definition.get(), stops, Duration.ZERO);
+    if (!timing.ok() || timing.segments().size() != plan.stops().size() - 1) {
+      return Optional.empty();
+    }
+    boolean stale = false;
+    List<TimetableTimingCalculator.SegmentTiming> segments = new ArrayList<>();
+    for (TimetableTimingCalculator.SegmentTiming segment : timing.segments()) {
+      TimetableStop from = plan.stops().get(segment.fromStop());
+      TimetableStop to = plan.stops().get(segment.toStop());
+      int persistedRun = to.arrivalOffsetSeconds() - from.departureOffsetSeconds();
+      int recomputedRun = segment.exitOffset(segment.edges().size() - 1) - segment.enterOffset(0);
+      if (persistedRun != recomputedRun) {
+        stale = true;
+      }
+      List<Integer> offsets = new ArrayList<>(segment.nodeOffsets().size());
+      int base = segment.enterOffset(0);
+      for (int k = 0; k < segment.nodeOffsets().size(); k++) {
+        int relative = segment.nodeOffsets().get(k) - base;
+        int scaled =
+            recomputedRun <= 0
+                ? 0
+                : (int) Math.round((double) relative * persistedRun / recomputedRun);
+        offsets.add(from.departureOffsetSeconds() + scaled);
+      }
+      offsets.set(offsets.size() - 1, to.arrivalOffsetSeconds());
+      segments.add(
+          new TimetableTimingCalculator.SegmentTiming(
+              segment.fromStop(), segment.toStop(), segment.nodes(), segment.edges(), offsets));
+    }
+    return Optional.of(
+        new Rebased(
+            new TimetableConflictChecker.RouteProfile(
+                plan.routeId(),
+                plan.routeCode(),
+                plan.stops(),
+                segments,
+                TimetableConflictChecker.platformsOf(
+                    plan.stops(), stops, definition.get().waypoints())),
+            stale));
+  }
+
+  private record Rebased(TimetableConflictChecker.RouteProfile profile, boolean stale) {}
+
+  /** 一组 route 的投影（当前图、当前时分）；算不出来的略过。 */
+  public Map<UUID, TimetableConflictChecker.RouteProfile> profilesOf(
+      List<RouteCandidate> routes, RailGraph graph, TimetableConflictChecker.GraphIndex index) {
+    Map<UUID, TimetableConflictChecker.RouteProfile> out = new LinkedHashMap<>();
+    for (RouteCandidate route : routes == null ? List.<RouteCandidate>of() : routes) {
+      if (route != null) {
+        profileOf(route.routeId(), route.routeCode(), graph, index)
+            .ifPresent(profile -> out.put(route.routeId(), profile));
+      }
+    }
+    return Map.copyOf(out);
   }
 
   /** 我自己的足迹：由 build 输入的 route 集合展开。 */

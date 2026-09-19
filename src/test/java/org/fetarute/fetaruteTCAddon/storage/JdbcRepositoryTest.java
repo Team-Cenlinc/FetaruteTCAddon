@@ -1004,6 +1004,51 @@ final class JdbcRepositoryTest {
     assertTrue(provider.timetables().findById(timetableId).isEmpty());
   }
 
+  /** 邻表基线随表落库、整体替换、随表删除：publish 重检靠它判断邻表变没变。 */
+  @Test
+  void shouldReplaceAndListTimetableBaselines() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT2",
+            "基线表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(timetable);
+    UUID neighborId = UUID.randomUUID();
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline baseline =
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline(
+            timetableId, neighborId, "C1/SURC/MT/MT-TT", now.plusSeconds(60), 31, 2, true);
+
+    provider.timetables().replaceBaselines(timetableId, List.of(baseline));
+    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
+        loaded = provider.timetables().listBaselines(timetableId);
+
+    assertEquals(List.of(baseline), loaded);
+
+    provider.timetables().replaceBaselines(timetableId, List.of());
+    assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "整体替换：空列表清空基线");
+
+    provider.timetables().replaceBaselines(timetableId, List.of(baseline));
+    provider.timetables().delete(timetableId);
+    assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "删表时基线随之删除");
+  }
+
   /** 建起一条 company → operator → line → route 的最小链路，满足时刻表的外键。 */
   private TimetableFixture seedRoute(StorageProvider provider) {
     Instant now = Instant.now();

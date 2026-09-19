@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 
 /**
  * 构建结果：时刻表本体 + 这份计划到底做到了什么。
@@ -29,7 +30,9 @@ import java.util.Optional;
  * @param longestTripSeconds 最长一趟车的全程时分（秒）
  * @param targetHeadwaySeconds 运营方要求的 headway
  * @param effectiveHeadwaySeconds 最终成表用的 headway；有冲突并回退时大于目标
- * @param conflictsAtTarget 目标 headway 下查出的冲突（回退后的表没有冲突）
+ * @param conflictsAtTarget 目标 headway 下查出的冲突（含内部与外部；回退后的表没有冲突）
+ * @param neighbors 参与检查的邻表摘要
+ * @param baselines 邻表基线（成功时非空；无邻表为空）
  * @param warnings 构建过程中的提示
  */
 public record TimetableBuildResult(
@@ -47,6 +50,8 @@ public record TimetableBuildResult(
     int targetHeadwaySeconds,
     int effectiveHeadwaySeconds,
     List<TimetableConflictChecker.Conflict> conflictsAtTarget,
+    List<NeighborSummary> neighbors,
+    List<TimetableBaseline> baselines,
     List<String> warnings) {
 
   /** 报告里最多展开多少条冲突明细。 */
@@ -58,7 +63,19 @@ public record TimetableBuildResult(
     infeasibleRoutes = infeasibleRoutes == null ? List.of() : List.copyOf(infeasibleRoutes);
     droppedTrips = droppedTrips == null ? List.of() : List.copyOf(droppedTrips);
     conflictsAtTarget = conflictsAtTarget == null ? List.of() : List.copyOf(conflictsAtTarget);
+    neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
+    baselines = baselines == null ? List.of() : List.copyOf(baselines);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
+  }
+
+  /** 目标 headway 下与邻表撞上的冲突。 */
+  public List<TimetableConflictChecker.Conflict> externalConflictsAtTarget() {
+    return conflictsAtTarget.stream().filter(TimetableConflictChecker.Conflict::external).toList();
+  }
+
+  /** 目标 headway 下自己内部的冲突。 */
+  public List<TimetableConflictChecker.Conflict> internalConflictsAtTarget() {
+    return conflictsAtTarget.stream().filter(c -> !c.external()).toList();
   }
 
   /** 目标 headway 是否被放宽了。 */
@@ -101,8 +118,26 @@ public record TimetableBuildResult(
         0,
         0,
         List.of(),
+        List.of(),
+        List.of(),
         List.of(Objects.requireNonNullElse(reason, "构建失败")));
   }
+
+  /**
+   * 一份邻表在报告里的摘要。
+   *
+   * @param displayCode 显示码
+   * @param sharedResources 共用资源数
+   * @param conflictsAtTarget 目标间隔下与它的外部冲突数
+   * @param stale 邻表基于旧图
+   * @param zoneApproximated 时区不同，按参考日偏移换算
+   */
+  public record NeighborSummary(
+      String displayCode,
+      int sharedResources,
+      int conflictsAtTarget,
+      boolean stale,
+      boolean zoneApproximated) {}
 
   /**
    * 排不进计划的 route。

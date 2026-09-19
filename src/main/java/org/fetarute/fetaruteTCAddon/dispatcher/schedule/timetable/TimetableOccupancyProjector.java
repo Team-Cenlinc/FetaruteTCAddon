@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -33,8 +34,22 @@ public final class TimetableOccupancyProjector {
       Timetable timetable,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       int zeroSecondOfDay) {
+    return project(timetable, profiles, zeroSecondOfDay, Optional.empty());
+  }
+
+  /**
+   * 展开占用并标上归属。
+   *
+   * @param owner 邻表的显示码；空 = 自己。带归属的运行在冲突检查里是不可移动的路权事实
+   */
+  public static Occupancy project(
+      Timetable timetable,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      int zeroSecondOfDay,
+      Optional<String> owner) {
     Objects.requireNonNull(timetable, "timetable");
     Objects.requireNonNull(profiles, "profiles");
+    Optional<String> tag = owner == null ? Optional.empty() : owner;
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
     Map<UUID, TimetableTrip> tripsById = new HashMap<>();
@@ -45,11 +60,12 @@ public final class TimetableOccupancyProjector {
             new TimetableConflictChecker.Movement(
                 trip.tripCode(),
                 trip.routeId(),
-                relativeDeparture(timetable, trip, zeroSecondOfDay)));
+                relativeDeparture(timetable, trip, zeroSecondOfDay),
+                tag));
       }
     }
     for (VehicleDuty duty : timetable.duties()) {
-      projectDuty(timetable, duty, tripsById, profiles, zeroSecondOfDay, movements, stays);
+      projectDuty(timetable, duty, tripsById, profiles, zeroSecondOfDay, tag, movements, stays);
     }
     return new Occupancy(List.copyOf(movements), List.copyOf(stays));
   }
@@ -70,6 +86,7 @@ public final class TimetableOccupancyProjector {
       Map<UUID, TimetableTrip> tripsById,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       int zero,
+      Optional<String> owner,
       List<TimetableConflictChecker.Movement> movements,
       List<TimetableConflictChecker.Stay> stays) {
     List<TimetableTrip> chain = new ArrayList<>(duty.tripIds().size());
@@ -95,7 +112,7 @@ public final class TimetableOccupancyProjector {
             routeId -> {
               movements.add(
                   new TimetableConflictChecker.Movement(
-                      duty.dutyCode() + "-CREATE", routeId, dutyStart));
+                      duty.dutyCode() + "-CREATE", routeId, dutyStart, owner));
               TimetableConflictChecker.RouteProfile create = profiles.get(routeId);
               int arrival = dutyStart + (create == null ? 0 : lastArrival(create.stops()));
               chainProfiles
@@ -108,7 +125,8 @@ public final class TimetableOccupancyProjector {
                                   duty.dutyCode(),
                                   platform,
                                   Math.min(arrival, firstDeparture),
-                                  firstDeparture)));
+                                  firstDeparture,
+                                  owner)));
             });
     for (int i = 0; i + 1 < chain.size(); i++) {
       int arrival =
@@ -122,7 +140,11 @@ public final class TimetableOccupancyProjector {
               platform ->
                   stays.add(
                       new TimetableConflictChecker.Stay(
-                          duty.dutyCode(), platform, arrival, Math.max(arrival, nextDeparture))));
+                          duty.dutyCode(),
+                          platform,
+                          arrival,
+                          Math.max(arrival, nextDeparture),
+                          owner)));
     }
     int lastIndex = chain.size() - 1;
     duty.returnRouteId()
@@ -130,7 +152,7 @@ public final class TimetableOccupancyProjector {
             routeId -> {
               movements.add(
                   new TimetableConflictChecker.Movement(
-                      duty.dutyCode() + "-RETURN", routeId, returnAt));
+                      duty.dutyCode() + "-RETURN", routeId, returnAt, owner));
               int arrival =
                   relativeDeparture(timetable, chain.get(lastIndex), zero)
                       + lastArrival(chainProfiles.get(lastIndex).stops());
@@ -144,7 +166,8 @@ public final class TimetableOccupancyProjector {
                                   duty.dutyCode(),
                                   platform,
                                   arrival,
-                                  Math.max(arrival, returnAt))));
+                                  Math.max(arrival, returnAt),
+                                  owner)));
             });
   }
 

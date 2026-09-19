@@ -21,6 +21,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 
 /**
  * 从运行网络生成时刻表。
@@ -132,7 +134,14 @@ public final class TimetableBuilder {
             prepared.infeasible());
       }
       chosen = fallback.get();
-      warnings.add(summary + "，已回退到最小可行间隔 " + chosen.headwaySeconds() + "s（--strict 可改为构建失败）");
+      warnings.add(
+          summary
+              + "，已回退到最小可行间隔 "
+              + chosen.headwaySeconds()
+              + "s（--strict 可改为构建失败）"
+              + (target.conflicts().external().isEmpty()
+                  ? ""
+                  : "；其中 " + target.conflicts().external().size() + " 处是与已发布邻表的冲突，只能挪自己"));
       warnings.addAll(
           TimetableBuildReportText.describeConflicts(
               target.conflicts(), options.serviceStartSecondOfDay()));
@@ -169,6 +178,31 @@ public final class TimetableBuilder {
             .mapToInt(TimetableRoutePlan::totalRunSeconds)
             .max()
             .orElse(0);
+    Map<String, Integer> externalByOwner = target.conflicts().externalByOwner();
+    List<TimetableBuildResult.NeighborSummary> neighborSummaries = new ArrayList<>();
+    List<TimetableBaseline> baselines = new ArrayList<>();
+    for (NeighborTimetable neighbor : input.neighbors()) {
+      int conflictsWith = externalByOwner.getOrDefault(neighbor.displayCode(), 0);
+      neighborSummaries.add(
+          new TimetableBuildResult.NeighborSummary(
+              neighbor.displayCode(),
+              neighbor.sharedResources(),
+              conflictsWith,
+              neighbor.staleAgainstGraph(),
+              neighbor.zoneApproximated()));
+      baselines.add(
+          new TimetableBaseline(
+              input.timetableId(),
+              neighbor.timetableId(),
+              neighbor.displayCode(),
+              neighbor.updatedAt(),
+              neighbor.sharedResources(),
+              conflictsWith,
+              neighbor.staleAgainstGraph()));
+      for (String warning : neighbor.warnings()) {
+        warnings.add("邻表 " + neighbor.displayCode() + "：" + warning);
+      }
+    }
     return new TimetableBuildResult(
         Optional.of(timetable),
         chosen.shares(),
@@ -184,6 +218,8 @@ public final class TimetableBuilder {
         targetHeadway,
         chosen.headwaySeconds(),
         target.conflicts().conflicts(),
+        List.copyOf(neighborSummaries),
+        List.copyOf(baselines),
         List.copyOf(warnings));
   }
 
@@ -454,12 +490,21 @@ public final class TimetableBuilder {
     TimetableOccupancyProjector.Occupancy occupancy =
         TimetableOccupancyProjector.project(
             timetable, prepared.profiles(), options.serviceStartSecondOfDay());
+    // 邻表的运行原样加入：搜索可行 headway 时只重排我的，它们一动不动——这就是路权先到先得。
+    Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new HashMap<>(prepared.profiles());
+    List<TimetableConflictChecker.Movement> movements = new ArrayList<>(occupancy.movements());
+    List<TimetableConflictChecker.Stay> stays = new ArrayList<>(occupancy.stays());
+    for (NeighborTimetable neighbor : input.neighbors()) {
+      neighbor.profiles().forEach(profiles::putIfAbsent);
+      movements.addAll(neighbor.movements());
+      stays.addAll(neighbor.stays());
+    }
     TimetableConflictChecker.Report conflicts =
         TimetableConflictChecker.check(
             prepared.graphIndex(),
-            prepared.profiles(),
-            occupancy.movements(),
-            occupancy.stays(),
+            profiles,
+            movements,
+            stays,
             (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds()));
 
     List<WeightedTripAllocator.ShareReport> shares =
@@ -581,6 +626,7 @@ public final class TimetableBuilder {
    * @param graph 调度图快照
    * @param travelTimeModel 行程时间模型
    * @param notes 备注
+   * @param neighbors 已投影到我零点的邻表：它们的运行是不可移动的路权事实，只有我的运行会为了避让它们放宽 headway
    */
   public record BuildInput(
       UUID timetableId,
@@ -592,7 +638,8 @@ public final class TimetableBuilder {
       List<RouteInput> routes,
       RailGraph graph,
       RailTravelTimeModel travelTimeModel,
-      Optional<String> notes) {
+      Optional<String> notes,
+      List<NeighborTimetable> neighbors) {
 
     public BuildInput {
       Objects.requireNonNull(timetableId, "timetableId");
@@ -601,6 +648,33 @@ public final class TimetableBuilder {
       Objects.requireNonNull(lineId, "lineId");
       routes = routes == null ? List.of() : List.copyOf(routes);
       notes = notes == null ? Optional.empty() : notes;
+      neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
+    }
+
+    /** 没有邻表的构建（单元测试与不需要作用域的场景）。 */
+    public BuildInput(
+        UUID timetableId,
+        UUID companyId,
+        UUID operatorId,
+        UUID lineId,
+        String code,
+        String name,
+        List<RouteInput> routes,
+        RailGraph graph,
+        RailTravelTimeModel travelTimeModel,
+        Optional<String> notes) {
+      this(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          travelTimeModel,
+          notes,
+          List.of());
     }
 
     /** 按 route code 稳定排序，保证分配器的 tie-break 与输入顺序无关。 */

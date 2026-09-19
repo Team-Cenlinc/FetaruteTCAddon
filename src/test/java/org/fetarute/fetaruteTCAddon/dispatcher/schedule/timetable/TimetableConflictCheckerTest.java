@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -236,6 +237,34 @@ class TimetableConflictCheckerTest {
             30);
 
     assertTrue(report.clean(), () -> report.conflicts().toString());
+  }
+
+  /** 邻表之间的冲突不属于我：两方都带 owner 的对不报；一方是我的照报，并带上对方的 owner。 */
+  @Test
+  void conflictsBetweenTwoNeighborsAreNotReportedButMineAgainstNeighborIs() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(List.of(A, B), new int[] {100}, new double[] {10.0});
+    Profiles profiles = new Profiles(graph);
+    UUID r1 = profiles.add("R1", List.of(A, B));
+    TimetableConflictChecker.Movement mine = move("T1", r1, 0);
+    TimetableConflictChecker.Movement theirsA =
+        new TimetableConflictChecker.Movement("X-001", r1, 2, Optional.of("C/O/X/TT"));
+    TimetableConflictChecker.Movement theirsB =
+        new TimetableConflictChecker.Movement("Y-001", r1, 4, Optional.of("C/O/Y/TT"));
+
+    TimetableConflictChecker.Report onlyNeighbors =
+        TimetableConflictChecker.check(
+            graph, profiles.map, List.of(theirsA, theirsB), List.of(), 0);
+    TimetableConflictChecker.Report withMine =
+        TimetableConflictChecker.check(
+            graph, profiles.map, List.of(mine, theirsA, theirsB), List.of(), 0);
+
+    assertTrue(onlyNeighbors.clean(), () -> "邻表之间的冲突不该报: " + onlyNeighbors.conflicts());
+    assertFalse(withMine.external().isEmpty(), () -> withMine.conflicts().toString());
+    assertTrue(withMine.internal().isEmpty());
+    assertTrue(
+        withMine.external().stream().allMatch(c -> c.otherOwner().isPresent()), "外部冲突要带上对方的 owner");
+    assertEquals(2, withMine.externalByOwner().size(), "与两份邻表各撞一次");
   }
 
   // ------------------------------------------------------------------ 夹具

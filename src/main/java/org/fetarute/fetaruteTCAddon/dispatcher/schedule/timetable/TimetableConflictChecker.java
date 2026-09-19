@@ -101,7 +101,13 @@ public final class TimetableConflictChecker {
     }
     for (Stay stay : stays == null ? List.<Stay>of() : stays) {
       addPlatform(
-          resources, platformCapacity, stay.platform(), stay.code(), stay.from(), stay.to());
+          resources,
+          platformCapacity,
+          stay.platform(),
+          stay.code(),
+          stay.from(),
+          stay.to(),
+          stay.owner());
     }
 
     List<Conflict> conflicts = new ArrayList<>();
@@ -205,7 +211,12 @@ public final class TimetableConflictChecker {
       for (int k = 0; k < edges.size(); k++) {
         RailEdge edge = edges.get(k);
         resource(resources, edgeKey(edge), Kind.TRACK, 1)
-            .add(movement.code(), base + segment.enterOffset(k), base + segment.exitOffset(k), 0);
+            .add(
+                movement.code(),
+                base + segment.enterOffset(k),
+                base + segment.exitOffset(k),
+                0,
+                movement.owner());
       }
       // 路径中间穿越的节点：道岔两次通过之间要留间隔；不停靠而经过的车站股道也是一次占用——
       // 一辆在单股道车站待命的车必须能挡住从它身上碾过去的对向车。
@@ -215,7 +226,8 @@ public final class TimetableConflictChecker {
         NodeType type = nodeTypes.get(node);
         int at = base + segment.nodeOffsets().get(k);
         if (type == NodeType.SWITCHER) {
-          resource(resources, junctionKey(node), Kind.JUNCTION, 1).add(movement.code(), at, at, 0);
+          resource(resources, junctionKey(node), Kind.JUNCTION, 1)
+              .add(movement.code(), at, at, 0, movement.owner());
         } else if (type == NodeType.STATION) {
           addPlatform(
               resources,
@@ -223,7 +235,8 @@ public final class TimetableConflictChecker {
               new Platform(node.value(), groupOf(node.value()), false),
               movement.code(),
               at,
-              at);
+              at,
+              movement.owner());
         }
       }
       // 单线区段：连续落在同一 section 的边合并成一个带方向的占用区间。
@@ -242,7 +255,7 @@ public final class TimetableConflictChecker {
           }
           if (currentKey != null) {
             resource(resources, singleLineKey(currentKey), Kind.SINGLE_LINE, 1)
-                .add(movement.code(), enter, exit, direction);
+                .add(movement.code(), enter, exit, direction, movement.owner());
           }
           currentKey = key;
           current = info.orElse(null);
@@ -254,7 +267,7 @@ public final class TimetableConflictChecker {
         }
         if (currentKey != null) {
           resource(resources, singleLineKey(currentKey), Kind.SINGLE_LINE, 1)
-              .add(movement.code(), enter, exit, direction);
+              .add(movement.code(), enter, exit, direction, movement.owner());
         }
       }
     }
@@ -272,7 +285,8 @@ public final class TimetableConflictChecker {
           platform,
           movement.code(),
           base + stop.arrivalOffsetSeconds(),
-          base + stop.departureOffsetSeconds());
+          base + stop.departureOffsetSeconds(),
+          movement.owner());
     }
   }
 
@@ -282,7 +296,8 @@ public final class TimetableConflictChecker {
       Platform platform,
       String code,
       int from,
-      int to) {
+      int to,
+      Optional<String> owner) {
     if (platform == null) {
       return;
     }
@@ -291,7 +306,7 @@ public final class TimetableConflictChecker {
           key.startsWith("platform-group:")
               ? Math.max(1, platformCapacity.getOrDefault(platform.group(), 1))
               : 1;
-      resource(resources, key, Kind.PLATFORM, capacity).add(code, from, to, 0);
+      resource(resources, key, Kind.PLATFORM, capacity).add(code, from, to, 0, owner);
     }
   }
 
@@ -451,11 +466,18 @@ public final class TimetableConflictChecker {
    * @param code 展示用标识（车次号或 duty 走行代号）
    * @param routeId 跑的 route
    * @param startSeconds 首站发车时刻（相对统一零点）
+   * @param owner 属于哪份邻表（显示码）；空 = 自己
    */
-  public record Movement(String code, UUID routeId, int startSeconds) {
+  public record Movement(String code, UUID routeId, int startSeconds, Optional<String> owner) {
     public Movement {
       code = code == null ? "" : code;
       Objects.requireNonNull(routeId, "routeId");
+      owner = owner == null ? Optional.empty() : owner.filter(text -> !text.isBlank());
+    }
+
+    /** 自己的运行。 */
+    public Movement(String code, UUID routeId, int startSeconds) {
+      this(code, routeId, startSeconds, Optional.empty());
     }
   }
 
@@ -466,14 +488,21 @@ public final class TimetableConflictChecker {
    * @param platform 站台资源
    * @param from 开始
    * @param to 结束
+   * @param owner 属于哪份邻表（显示码）；空 = 自己
    */
-  public record Stay(String code, Platform platform, int from, int to) {
+  public record Stay(String code, Platform platform, int from, int to, Optional<String> owner) {
     public Stay {
       code = code == null ? "" : code;
       Objects.requireNonNull(platform, "platform");
       if (to < from) {
         throw new IllegalArgumentException("待命区间结束不能早于开始");
       }
+      owner = owner == null ? Optional.empty() : owner.filter(text -> !text.isBlank());
+    }
+
+    /** 自己的待命。 */
+    public Stay(String code, Platform platform, int from, int to) {
+      this(code, platform, from, to, Optional.empty());
     }
   }
 
@@ -497,7 +526,24 @@ public final class TimetableConflictChecker {
       int firstFrom,
       int firstTo,
       int secondFrom,
-      int secondTo) {
+      int secondTo,
+      Optional<String> firstOwner,
+      Optional<String> secondOwner) {
+
+    public Conflict {
+      firstOwner = firstOwner == null ? Optional.empty() : firstOwner;
+      secondOwner = secondOwner == null ? Optional.empty() : secondOwner;
+    }
+
+    /** 一方是邻表：我不能挪它，只能挪自己。 */
+    public boolean external() {
+      return firstOwner.isPresent() || secondOwner.isPresent();
+    }
+
+    /** 对方邻表的显示码；内部冲突为空。 */
+    public Optional<String> otherOwner() {
+      return firstOwner.isPresent() ? firstOwner : secondOwner;
+    }
 
     /** 供报告使用的一行描述；时刻由调用方按需换算。 */
     public String describe(java.util.function.IntFunction<String> clock) {
@@ -506,12 +552,16 @@ public final class TimetableConflictChecker {
           "%s %s: %s [%s–%s] 与 %s [%s–%s]",
           kind.name(),
           resource,
-          first,
+          label(first, firstOwner),
           clock.apply(firstFrom),
           clock.apply(firstTo),
-          second,
+          label(second, secondOwner),
           clock.apply(secondFrom),
           clock.apply(secondTo));
+    }
+
+    private static String label(String code, Optional<String> owner) {
+      return owner.map(text -> text + " " + code).orElse(code);
     }
   }
 
@@ -530,6 +580,25 @@ public final class TimetableConflictChecker {
       return conflicts.isEmpty();
     }
 
+    /** 双方都是自己的冲突。 */
+    public List<Conflict> internal() {
+      return conflicts.stream().filter(conflict -> !conflict.external()).toList();
+    }
+
+    /** 与邻表撞上的冲突。 */
+    public List<Conflict> external() {
+      return conflicts.stream().filter(Conflict::external).toList();
+    }
+
+    /** 外部冲突按对方邻表计数。 */
+    public Map<String, Integer> externalByOwner() {
+      Map<String, Integer> out = new LinkedHashMap<>();
+      for (Conflict conflict : conflicts) {
+        conflict.otherOwner().ifPresent(owner -> out.merge(owner, 1, Integer::sum));
+      }
+      return out;
+    }
+
     /** 按类型计数。 */
     public Map<Kind, Integer> countByKind() {
       Map<Kind, Integer> out = new LinkedHashMap<>();
@@ -542,7 +611,13 @@ public final class TimetableConflictChecker {
 
   // ------------------------------------------------------------------ 扫描
 
-  private record Occupation(String code, int from, int to, int direction) {}
+  private record Occupation(String code, int from, int to, int direction, Optional<String> owner) {
+
+    /** 邻表之间的冲突不属于我：它们在各自发布时已经被检查过，报出来只会淹没我的问题。 */
+    boolean bothExternal(Occupation other) {
+      return owner.isPresent() && other.owner.isPresent();
+    }
+  }
 
   private static final class Resource {
     private final String key;
@@ -556,8 +631,8 @@ public final class TimetableConflictChecker {
       this.capacity = Math.max(1, capacity);
     }
 
-    private void add(String code, int from, int to, int direction) {
-      occupations.add(new Occupation(code, from, Math.max(from, to), direction));
+    private void add(String code, int from, int to, int direction, Optional<String> owner) {
+      occupations.add(new Occupation(code, from, Math.max(from, to), direction, owner));
     }
 
     private List<Conflict> scan(int separation) {
@@ -570,19 +645,23 @@ public final class TimetableConflictChecker {
       };
     }
 
-    /** 容量 1：后一个占用必须在前面所有占用结束 + separation 之后开始。 */
+    /**
+     * 容量 1：后一个占用必须在前面所有占用结束 + separation 之后开始。
+     *
+     * <p>要和所有仍在场的占用比而不是只和最晚离开的那个比：两份邻表之间的重叠不报，若只看最晚的那个， 夹在中间的邻表占用会把我与后一份邻表的冲突挡掉。
+     */
     private List<Conflict> scanExclusive(List<Occupation> sorted, int separation) {
       List<Conflict> out = new ArrayList<>();
-      Occupation latest = null;
+      List<Occupation> active = new ArrayList<>();
       for (Occupation next : sorted) {
-        if (latest != null
-            && !latest.code().equals(next.code())
-            && next.from() < latest.to() + separation) {
-          out.add(conflict(latest, next));
+        active.removeIf(current -> current.to() + separation <= next.from());
+        for (Occupation current : active) {
+          if (!current.code().equals(next.code()) && !current.bothExternal(next)) {
+            out.add(conflict(current, next));
+            break;
+          }
         }
-        if (latest == null || next.to() > latest.to()) {
-          latest = next;
-        }
+        active.add(next);
       }
       return out;
     }
@@ -596,7 +675,7 @@ public final class TimetableConflictChecker {
         if (active.size() >= capacity) {
           Occupation earliest =
               active.stream().min(Comparator.comparingInt(Occupation::from)).orElseThrow();
-          if (!earliest.code().equals(next.code())) {
+          if (!earliest.code().equals(next.code()) && !earliest.bothExternal(next)) {
             out.add(conflict(earliest, next));
           }
         }
@@ -616,7 +695,7 @@ public final class TimetableConflictChecker {
               current.direction() == 0
                   || next.direction() == 0
                   || current.direction() != next.direction();
-          if (opposite && !current.code().equals(next.code())) {
+          if (opposite && !current.code().equals(next.code()) && !current.bothExternal(next)) {
             out.add(conflict(current, next));
             break;
           }
@@ -635,7 +714,9 @@ public final class TimetableConflictChecker {
           first.from(),
           first.to(),
           second.from(),
-          second.to());
+          second.to(),
+          first.owner(),
+          second.owner());
     }
   }
 }
