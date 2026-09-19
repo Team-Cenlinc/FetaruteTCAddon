@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -499,6 +500,184 @@ class ReclaimManagerTest {
 
     assertEquals(0, ReclaimManager.countActiveGroups(groups));
     assertEquals(0, ReclaimManager.countActiveGroups(null));
+  }
+
+  /**
+   * 兜底：该回收却派不出 RETURN 票的车，滞留超过阈值就销毁；有乘客的不碰。
+   *
+   * <p>train-a 停在没有任何 RETURN 线路能出发的终点，闲置早已超时。第一轮记下滞留起点，阈值到了才销毁； 同一场景换成有乘客的车，永远不销毁。
+   */
+  @Test
+  void performReclaimCheckDestroysStrandedTrainAfterThresholdUnlessPassengers() {
+    Instant t0 = Instant.parse("2026-03-01T08:00:00Z");
+    UUID routeId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, stationId);
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    // 终点 ZZZ 没有任何 RETURN 线路从这里出发。
+    layoverRegistry.register(
+        "train-a",
+        "surn:s:zzz:1",
+        NodeId.of("SURN:S:ZZZ:1"),
+        t0.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    List<String> destroyed = new java.util.ArrayList<>();
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(t0);
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
+    when(configManager.current()).thenReturn(view);
+    when(view.reclaimSettings())
+        .thenReturn(new ConfigManager.ReclaimSettings(true, 3600, 100, 60, 600));
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin,
+            layoverRegistry,
+            ticketAssigner,
+            configManager,
+            null,
+            () -> 0,
+            trainName -> false,
+            (trainName, reason) -> destroyed.add(trainName + ":" + reason),
+            clock::get);
+
+    manager.performReclaimCheck();
+    assertTrue(destroyed.isEmpty(), "第一轮只记滞留起点");
+    clock.set(t0.plusSeconds(599));
+    manager.performReclaimCheck();
+    assertTrue(destroyed.isEmpty(), "未到阈值");
+    clock.set(t0.plusSeconds(600));
+    manager.performReclaimCheck();
+    assertEquals(List.of("train-a:reclaim-stranded"), destroyed);
+    verify(ticketAssigner, never()).forceAssign(any(), any(), any());
+
+    // 有乘客：同样滞留同样超阈值，但不销毁。
+    LayoverRegistry withPassengers = new LayoverRegistry();
+    withPassengers.register(
+        "train-p",
+        "surn:s:zzz:1",
+        NodeId.of("SURN:S:ZZZ:1"),
+        t0.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    List<String> destroyedWithPassengers = new java.util.ArrayList<>();
+    ReclaimManager guarded =
+        new ReclaimManager(
+            plugin,
+            withPassengers,
+            ticketAssigner,
+            configManager,
+            null,
+            () -> 0,
+            trainName -> true,
+            (trainName, reason) -> destroyedWithPassengers.add(trainName),
+            clock::get);
+    guarded.performReclaimCheck();
+    clock.set(t0.plusSeconds(5000));
+    guarded.performReclaimCheck();
+    assertTrue(destroyedWithPassengers.isEmpty(), "载客的车不能被兜底销毁");
+  }
+
+  /** 直通车滞留在别的运营商的终点：本运营商没有从那里出发的 RETURN，外方有一条首站写裸节点 id 的 RETURN——要认得出并派给它。 */
+  @Test
+  void performReclaimCheckFallsBackToForeignOperatorReturnRouteMatchedByNodeId() {
+    Instant now = Instant.now();
+    UUID ownRouteId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(ownRouteId, stationId);
+    // 外方运营商 SURN 及其 RETURN：首站是裸节点 SURN:S:XXX:1，不引用站点主数据。
+    Instant ts = Instant.parse("2026-02-01T00:00:00Z");
+    UUID companyId = provider.companies().listAll().get(0).id();
+    UUID foreignOperatorId = UUID.randomUUID();
+    UUID foreignLineId = UUID.randomUUID();
+    UUID foreignRouteId = UUID.randomUUID();
+    Operator foreign =
+        new Operator(
+            foreignOperatorId,
+            "SURN",
+            companyId,
+            "SURN",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    Line foreignLine =
+        new Line(
+            foreignLineId,
+            "NL",
+            foreignOperatorId,
+            "North",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(100),
+            Map.of(),
+            ts,
+            ts);
+    Route foreignReturn =
+        new Route(
+            foreignRouteId,
+            "NL-RET",
+            foreignLineId,
+            "Return",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.RETURN,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            ts,
+            ts);
+    RouteStop foreignFirst =
+        new RouteStop(
+            foreignRouteId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:S:XXX:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    Operator own = provider.operators().findByCompanyAndCode(companyId, "SURC").orElseThrow();
+    List<Operator> operators = List.of(own, foreign);
+    when(provider.operators().listByCompany(companyId)).thenReturn(operators);
+    when(provider.lines().listByOperator(foreignOperatorId)).thenReturn(List.of(foreignLine));
+    when(provider.routes().listByLine(foreignLineId)).thenReturn(List.of(foreignReturn));
+    when(provider.routeStops().listByRoute(foreignRouteId)).thenReturn(List.of(foreignFirst));
+
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-thru"), any())).thenReturn(true);
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-thru",
+        "surn:s:xxx:2",
+        NodeId.of("SURN:S:XXX:2"),
+        now.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+
+    manager.performReclaimCheck();
+
+    org.mockito.ArgumentCaptor<ServiceTicket> captor =
+        org.mockito.ArgumentCaptor.forClass(ServiceTicket.class);
+    verify(ticketAssigner).forceAssign(eq(provider), eq("train-thru"), captor.capture());
+    assertEquals(foreignRouteId, captor.getValue().routeId(), "应当派给外方的 RETURN（同站不同股道也算匹配）");
   }
 
   private static ConfigManager mockConfigManager() {

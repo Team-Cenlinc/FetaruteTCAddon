@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 32;
+  private static final int EXPECTED_CONFIG_VERSION = 33;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -752,6 +752,7 @@ public final class ConfigManager {
     long maxIdleSeconds = 300;
     int maxActiveTrains = 50;
     long checkIntervalSeconds = 60;
+    long strandedDestroySeconds = ReclaimSettings.DEFAULT_STRANDED_DESTROY_SECONDS;
 
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
@@ -770,8 +771,14 @@ public final class ConfigManager {
         logger.warning("reclaim.check-interval-seconds 配置无效: " + checkIntervalSeconds);
         checkIntervalSeconds = 60;
       }
+      strandedDestroySeconds = section.getLong("stranded-destroy-seconds", strandedDestroySeconds);
+      if (strandedDestroySeconds < 0) {
+        logger.warning("reclaim.stranded-destroy-seconds 配置无效: " + strandedDestroySeconds);
+        strandedDestroySeconds = ReclaimSettings.DEFAULT_STRANDED_DESTROY_SECONDS;
+      }
     }
-    return new ReclaimSettings(enabled, maxIdleSeconds, maxActiveTrains, checkIntervalSeconds);
+    return new ReclaimSettings(
+        enabled, maxIdleSeconds, maxActiveTrains, checkIntervalSeconds, strandedDestroySeconds);
   }
 
   /** 解析 spawn 配置段。 */
@@ -1690,9 +1697,36 @@ public final class ConfigManager {
   }
 
   /** 车辆回收配置（ReclaimPolicy）。 */
+  /**
+   * 闲置回收配置。
+   *
+   * @param strandedDestroySeconds 待命车闲置超时后一直找不到可用 RETURN 线路（例如直通车滞留在外方终点）持续多久就销毁；0 关闭兜底
+   */
   public record ReclaimSettings(
-      boolean enabled, long maxIdleSeconds, int maxActiveTrains, long checkIntervalSeconds) {
+      boolean enabled,
+      long maxIdleSeconds,
+      int maxActiveTrains,
+      long checkIntervalSeconds,
+      long strandedDestroySeconds) {
+
+    /** 默认滞留 30 分钟后销毁：比闲置回收窗口长得多，给折返事务与晚到的回库票留足时间。 */
+    public static final long DEFAULT_STRANDED_DESTROY_SECONDS = 1800L;
+
+    /** 不带滞留销毁阈值的构造，取默认值。 */
+    public ReclaimSettings(
+        boolean enabled, long maxIdleSeconds, int maxActiveTrains, long checkIntervalSeconds) {
+      this(
+          enabled,
+          maxIdleSeconds,
+          maxActiveTrains,
+          checkIntervalSeconds,
+          DEFAULT_STRANDED_DESTROY_SECONDS);
+    }
+
     public ReclaimSettings {
+      if (strandedDestroySeconds < 0) {
+        throw new IllegalArgumentException("strandedDestroySeconds 不能为负");
+      }
       if (maxIdleSeconds <= 0) {
         throw new IllegalArgumentException("maxIdleSeconds 必须为正数");
       }
