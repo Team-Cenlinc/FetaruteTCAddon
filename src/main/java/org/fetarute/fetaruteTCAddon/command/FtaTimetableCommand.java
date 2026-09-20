@@ -27,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
@@ -37,10 +38,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildReportText;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableCsvExporter;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableEdgeSpeeds;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableHeadwayDefaults;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
@@ -363,7 +366,7 @@ public final class FtaTimetableCommand {
     }
 
     List<TimetableBuilder.RouteInput> routeInputs = new ArrayList<>();
-    RailGraph graph = null;
+    WorldGraph graph = null;
     boolean anyOperation = false;
     List<Route> routes = new ArrayList<>(collectRoutes(provider, resolved));
     // 直通运转：运营 route 显式指定的外方出库/回库线路也进 build，并优先于本 operator 搜到的同站线路。
@@ -450,10 +453,10 @@ public final class FtaTimetableCommand {
           new TimetableNeighborhoodLoader.RouteCandidate(
               route.routeId(), route.routeCode(), myDisplayCode));
     }
+    RailGraph graphSnapshot = graph.graph();
+    RailTravelTimeModel model = travelTimeModel(graph.worldId());
     NeighborInputs neighborInputs =
-        collectNeighborInputs(provider, resolved, myRoutes, myStops, myDefinitions);
-    RailGraph graphSnapshot = graph;
-    RailTravelTimeModel model = travelTimeModel();
+        collectNeighborInputs(provider, resolved, myRoutes, myStops, myDefinitions, model);
 
     // 构建是纯 CPU 运算：时分积分、SWRR、派车、冲突扫描，目标间隔有冲突时还要向上搜索几十次。
     // 输入全是不可变快照，放到异步线程跑，报告与落库回到主线程。
@@ -774,7 +777,8 @@ public final class FtaTimetableCommand {
       ResolvedLine resolved,
       List<TimetableNeighborhoodLoader.RouteCandidate> mine,
       Map<UUID, List<RouteStop>> knownStops,
-      Map<UUID, RouteDefinition> knownDefinitions) {
+      Map<UUID, RouteDefinition> knownDefinitions,
+      RailTravelTimeModel model) {
     Map<UUID, List<RouteStop>> stopsByRoute = new java.util.HashMap<>(knownStops);
     Map<UUID, RouteDefinition> definitions = new java.util.HashMap<>(knownDefinitions);
     for (TimetableNeighborhoodLoader.RouteCandidate route : mine) {
@@ -816,7 +820,6 @@ public final class FtaTimetableCommand {
         }
       }
     }
-    RailTravelTimeModel model = travelTimeModel();
     return new NeighborInputs(
         published,
         displayCodeById,
@@ -880,7 +883,12 @@ public final class FtaTimetableCommand {
     }
     TimetableConflictChecker.Report conflicts =
         TimetableConflictChecker.check(
-            index, profiles, movements, stays, TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS);
+            index,
+            profiles,
+            movements,
+            stays,
+            TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
+            TimetableConflictChecker.vehicleOf(timetable));
     return new ScopeCheck(neighbors, report, baselinesMatch, conflicts);
   }
 
@@ -1053,6 +1061,13 @@ public final class FtaTimetableCommand {
           Component.text(
               "  冲突检查: 目标间隔下 " + result.conflictsAtTarget().size() + " 处冲突，明细见下方警告",
               NamedTextColor.YELLOW));
+    }
+    for (String line :
+        TimetableBuildReportText.describeTerminals(
+            result.terminals(), result.shifts(), options.dutyLimits().turnaroundSeconds())) {
+      sender.sendMessage(
+          Component.text(
+              "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
     }
     sender.sendMessage(field("车辆交路", String.valueOf(result.dutyCount())));
     sender.sendMessage(
@@ -1327,8 +1342,8 @@ public final class FtaTimetableCommand {
     // 发布前重检：邻表集合较 build 时有变化就重新扫一遍外部冲突。谁后发布谁避让，没有 --force。
     ResolvedLine line = new ResolvedLine(resolved.company(), resolved.operator(), resolved.line());
     List<TimetableBaseline> stored = provider.timetables().listBaselines(timetable.id());
-    RailGraph graph = graphForTimetable(timetable);
-    if (graph == null) {
+    WorldGraph worldGraph = graphForTimetable(timetable);
+    if (worldGraph == null) {
       if (!stored.isEmpty()) {
         sender.sendMessage(
             Component.text(
@@ -1341,9 +1356,15 @@ public final class FtaTimetableCommand {
       applyStatus(sender, provider, timetable, TimetableStatus.PUBLISHED);
       return;
     }
+    RailGraph graph = worldGraph.graph();
     NeighborInputs inputs =
         collectNeighborInputs(
-            provider, line, routesOf(timetable, displayCodeOf(line)), Map.of(), Map.of());
+            provider,
+            line,
+            routesOf(timetable, displayCodeOf(line)),
+            Map.of(),
+            Map.of(),
+            travelTimeModel(worldGraph.worldId()));
     sender.sendMessage(Component.text("正在对照已发布邻表重检…", NamedTextColor.GRAY));
     plugin
         .getServer()
@@ -1421,9 +1442,9 @@ public final class FtaTimetableCommand {
   }
 
   /** 从表里任意一条 route 的定义找到它所在世界的图快照。 */
-  private RailGraph graphForTimetable(Timetable timetable) {
+  private WorldGraph graphForTimetable(Timetable timetable) {
     for (TimetableRoutePlan plan : timetable.routePlans()) {
-      Optional<RailGraph> graph =
+      Optional<WorldGraph> graph =
           plugin.findRouteDefinitionById(plan.routeId()).flatMap(this::resolveGraph);
       if (graph.isPresent()) {
         return graph.get();
@@ -1431,6 +1452,9 @@ public final class FtaTimetableCommand {
     }
     return null;
   }
+
+  /** 图快照连同它所属的世界：限速覆盖表按世界存，编表要拿对世界的那份。 */
+  private record WorldGraph(UUID worldId, RailGraph graph) {}
 
   /** 只读：列出与本表共用资源的邻表、基线是否仍对得上、当前外部冲突。 */
   private void handleNeighbors(CommandContext<CommandSender> ctx) {
@@ -1446,14 +1470,20 @@ public final class FtaTimetableCommand {
     }
     Timetable timetable = resolved.timetable();
     ResolvedLine line = new ResolvedLine(resolved.company(), resolved.operator(), resolved.line());
-    RailGraph graph = graphForTimetable(timetable);
-    if (graph == null) {
+    WorldGraph worldGraph = graphForTimetable(timetable);
+    if (worldGraph == null) {
       sender.sendMessage(Component.text("找不到覆盖这条线路的调度图快照。", NamedTextColor.RED));
       return;
     }
+    RailGraph graph = worldGraph.graph();
     NeighborInputs inputs =
         collectNeighborInputs(
-            provider, line, routesOf(timetable, displayCodeOf(line)), Map.of(), Map.of());
+            provider,
+            line,
+            routesOf(timetable, displayCodeOf(line)),
+            Map.of(),
+            Map.of(),
+            travelTimeModel(worldGraph.worldId()));
     List<TimetableBaseline> stored = provider.timetables().listBaselines(timetable.id());
     plugin
         .getServer()
@@ -1589,7 +1619,11 @@ public final class FtaTimetableCommand {
    * <p>复用 ETA 模块的 {@code DynamicTravelTimeModel}：它按<b>每条边的实际限速</b>加减速积分， 因此一条穿越多个限速区间的 route
    * 不会被一个全线平均速度抹平。不另起一套平行模型，是为了让 "表定时分"和"运行时 ETA"永远出自同一套算法。
    */
-  private RailTravelTimeModel travelTimeModel() {
+  /**
+   * 编表用的行程时间模型：默认加减速参数 + 该世界的永久限速覆盖（{@link TimetableEdgeSpeeds}）。 图里的边基础限速多半是
+   * 0，不接覆盖表全线就按默认速度算，时分会慢两到三倍。
+   */
+  private RailTravelTimeModel travelTimeModel(UUID worldId) {
     double fallback = FALLBACK_SPEED_BPS;
     if (plugin.getConfigManager() != null && plugin.getConfigManager().current() != null) {
       double configured =
@@ -1599,17 +1633,25 @@ public final class FtaTimetableCommand {
       }
     }
     return new DynamicTravelTimeModel(
-        DynamicTravelTimeModel.TrainMotionParams.defaults(), fallback);
+        DynamicTravelTimeModel.TrainMotionParams.defaults(),
+        fallback,
+        ApproachingConfig.disabled(),
+        TimetableEdgeSpeeds.resolver(
+            worldId == null ? Map.of() : plugin.getRailGraphService().edgeOverrides(worldId)));
   }
 
   /** 找到覆盖这条交路全部节点的调度图快照。 */
-  private Optional<RailGraph> resolveGraph(RouteDefinition definition) {
+  private Optional<WorldGraph> resolveGraph(RouteDefinition definition) {
     List<NodeId> waypoints = definition.waypoints();
     return plugin
         .getRailGraphService()
         .findWorldIdForPath(waypoints)
-        .flatMap(worldId -> plugin.getRailGraphService().getSnapshot(worldId))
-        .map(snapshot -> snapshot.graph());
+        .flatMap(
+            worldId ->
+                plugin
+                    .getRailGraphService()
+                    .getSnapshot(worldId)
+                    .map(snapshot -> new WorldGraph(worldId, snapshot.graph())));
   }
 
   /** 读取 route 的目标服务比例权重；未配置时按 1 处理。 */
