@@ -69,6 +69,8 @@ public record TimetableBuildResult(
     List<String> phaseNotes,
     List<ConflictAbsorption.Residual> absorbable,
     List<ConflictAbsorption.Residual> unabsorbable,
+    List<String> resourcePhaseNotes,
+    List<PhasePlanner.Residue> residues,
     List<String> warnings) {
 
   /** 报告里最多展开多少条冲突明细。 */
@@ -76,6 +78,8 @@ public record TimetableBuildResult(
 
   public TimetableBuildResult {
     absorbable = absorbable == null ? List.of() : List.copyOf(absorbable);
+    resourcePhaseNotes = resourcePhaseNotes == null ? List.of() : List.copyOf(resourcePhaseNotes);
+    residues = residues == null ? List.of() : List.copyOf(residues);
     unabsorbable = unabsorbable == null ? List.of() : List.copyOf(unabsorbable);
     timetable = timetable == null ? Optional.empty() : timetable;
     shares = shares == null ? List.of() : List.copyOf(shares);
@@ -142,6 +146,8 @@ public record TimetableBuildResult(
         0,
         0,
         0,
+        List.of(),
+        List.of(),
         List.of(),
         List.of(),
         List.of(),

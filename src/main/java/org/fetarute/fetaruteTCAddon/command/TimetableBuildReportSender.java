@@ -116,6 +116,13 @@ final class TimetableBuildReportSender {
               "  冲突检查: 目标间隔下 " + result.conflictsAtTarget().size() + " 处冲突，明细见下方警告",
               NamedTextColor.YELLOW));
     }
+    for (String line :
+        TimetableBuildReportText.describeResourcePhases(result.resourcePhaseNotes())) {
+      sender.sendMessage(Component.text(line, NamedTextColor.GRAY));
+    }
+    for (String line : TimetableBuildReportText.describeResidues(result.residues())) {
+      sender.sendMessage(Component.text(line, NamedTextColor.DARK_GRAY));
+    }
     // 残余两行：运行时能让的与让不掉的分开说。判定这张表行不行的只有后者。
     for (String line :
         TimetableBuildReportText.describeResiduals(

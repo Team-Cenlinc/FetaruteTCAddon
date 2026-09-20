@@ -244,6 +244,8 @@ public final class TimetableBuilder {
         // 残余取最终选中的那一次：报告说的是"这张表发布后运行时要让几次车"。
         chosen.absorbable(),
         chosen.unabsorbable(),
+        chosen.resourceNotes(),
+        chosen.residues(),
         List.copyOf(warnings));
   }
 
@@ -444,6 +446,7 @@ public final class TimetableBuilder {
       Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
     UUID timetableId = prepared.timetableId();
     int horizon = options.horizonSeconds();
+    int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
     List<TimetableRoutePlan> operationPlans = prepared.operationPlans();
     Map<UUID, Integer> candidateIndexByRoute = new HashMap<>();
     for (int i = 0; i < operationPlans.size(); i++) {
@@ -468,12 +471,25 @@ public final class TimetableBuilder {
             prepared.runByRoute(),
             options.dutyLimits().turnaround(),
             horizon);
+    // ---- 2.5 第三层：前两层只看端点，沿线哪里交会、咽喉上出库流与回库流什么时候相遇它们看不见。
+    // 给每个方向选一个 δ，用同一套冲突模型按周期评估。
+    phases =
+        ResourcePhasePlanner.refine(
+            phases,
+            groups,
+            intervalByGroup,
+            periodicTemplates(prepared, groups, intervalByGroup, options),
+            prepared.profiles(),
+            prepared.graphIndex(),
+            separation,
+            options.repair().maxWaitSeconds(),
+            options.dutyLimits().maxIdleSeconds());
     List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
     List<Placed> placed = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : groups) {
       int interval = intervalByGroup.get(group.name());
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
-        int phase = phases.phaseByDirection().getOrDefault(direction.key(), 0);
+        int phase = phases.effectivePhaseOf(direction.key());
         // 可行性：这一班必须在计划窗口内跑完。全程时分长的 route 因此会在窗口末尾被自然挤出，
         // 而它的 deficit 留在分配器里——这正是"约束恢复后能追回份额"的机制。
         WeightedTripAllocator.FeasibilityCheck feasibility =
@@ -616,7 +632,6 @@ public final class TimetableBuilder {
         endingAtDepot.add(op.route().routeId());
       }
     }
-    int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
     TerminalSerializer.Result serialized =
         TerminalSerializer.serialize(
             new TerminalSerializer.Input(
@@ -789,7 +804,10 @@ public final class TimetableBuilder {
         serialized.terminals(),
         Map.copyOf(intervalByGroup),
         PhasePlanner.interleaves(grids),
-        phases.notes());
+        phases.notes(),
+        phases.resourceNotes(),
+        PhasePlanner.residues(
+            groups, intervalByGroup, prepared.runByRoute(), options.dutyLimits().turnaround()));
   }
 
   /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
@@ -912,6 +930,51 @@ public final class TimetableBuilder {
     return TurnaroundTable.ofStops(stopsByRoute, (int) options.defaultDwell().toSeconds());
   }
 
+  /**
+   * 各方向的周期模板：第三层拿它按周期铺开评估相位。
+   *
+   * <p>「单班交路」的判据是 {@code maxTripsPerDuty == 1}，或这个方向的班次从车库始发（出库班跑一趟就回库， DS 与 MT-2
+   * 就是这个形态）。这类流的回库走行每周期都会经过车库咽喉，不放进模板就看不见 WS 那 189 处冲突。
+   */
+  private static Map<String, PeriodicTemplate> periodicTemplates(
+      Prepared prepared,
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervalByGroup,
+      TimetableBuildOptions options) {
+    Map<UUID, String> terminalByRoute = new HashMap<>();
+    Map<UUID, Boolean> startsAtDepotByRoute = new HashMap<>();
+    for (TimetableRoutePlan plan : prepared.plans()) {
+      terminalByRoute.put(plan.routeId(), plan.terminalNodeId());
+    }
+    for (OperationPlan op : prepared.operations()) {
+      startsAtDepotByRoute.put(op.route().routeId(), op.startsAtDepot());
+    }
+    Map<String, PeriodicTemplate> out = new LinkedHashMap<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      int interval = intervalByGroup.getOrDefault(group.name(), 0);
+      if (interval <= 0) {
+        continue;
+      }
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        boolean singleTrip =
+            options.dutyLimits().maxTripsPerDuty() == 1
+                || direction.routeIds().stream()
+                    .anyMatch(id -> startsAtDepotByRoute.getOrDefault(id, false));
+        out.put(
+            direction.key(),
+            PeriodicTemplate.of(
+                direction,
+                interval,
+                prepared.runByRoute(),
+                prepared.legs(),
+                options.dutyLimits().turnaround(),
+                terminalByRoute,
+                singleTrip));
+      }
+    }
+    return out;
+  }
+
   private record OperationPlan(RouteInput route, boolean startsAtDepot, boolean endsAtDepot) {}
 
   /** 第 1 步的产物：与 headway 无关的一切。 */
@@ -942,7 +1005,9 @@ public final class TimetableBuilder {
       List<TerminalSerializer.TerminalReport> terminals,
       Map<String, Integer> intervals,
       List<PhasePlanner.Interleave> interleaves,
-      List<String> phaseNotes) {
+      List<String> phaseNotes,
+      List<String> resourceNotes,
+      List<PhasePlanner.Residue> residues) {
 
     /** 成功判据：只看运行时让不掉的那些。可吸收残余照常发布，运行时会在让车点等一会儿。 */
     boolean clean() {

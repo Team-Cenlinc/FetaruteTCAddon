@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,12 +37,92 @@ public final class PhasePlanner {
   public record Phases(
       Map<String, Integer> phaseByDirection,
       Map<String, Integer> offsetByGroup,
-      List<String> notes) {
+      Map<String, Integer> deltaByDirection,
+      List<String> notes,
+      List<String> resourceNotes) {
     public Phases {
       phaseByDirection = phaseByDirection == null ? Map.of() : Map.copyOf(phaseByDirection);
       offsetByGroup = offsetByGroup == null ? Map.of() : Map.copyOf(offsetByGroup);
+      deltaByDirection = deltaByDirection == null ? Map.of() : Map.copyOf(deltaByDirection);
       notes = notes == null ? List.of() : List.copyOf(notes);
+      resourceNotes = resourceNotes == null ? List.of() : List.copyOf(resourceNotes);
     }
+
+    /** 前两层的结果：第三层还没跑过。 */
+    public Phases(
+        Map<String, Integer> phaseByDirection,
+        Map<String, Integer> offsetByGroup,
+        List<String> notes) {
+      this(phaseByDirection, offsetByGroup, Map.of(), notes, List.of());
+    }
+
+    /** 这个方向最终的相位：锚定/交错给的，加上第三层的端点多等。 */
+    public int effectivePhaseOf(String directionKey) {
+      return phaseByDirection.getOrDefault(directionKey, 0)
+          + deltaByDirection.getOrDefault(directionKey, 0);
+    }
+  }
+
+  /**
+   * 往返对的相位余数：{@code (走行 + 折返) mod 间隔}。
+   *
+   * <p><b>只进报告，不参与决策。</b>实测（290–430 逐档扫 WS）余数与冲突数没有关系——余数 5 有 1909 处、 余数 185 一处也没有、余数 265 有 1129
+   * 处。据它跳档会跳掉 420 这种干净档。
+   *
+   * @param forwardKey 正向方向键
+   * @param reverseKey 反向方向键
+   * @param runSeconds 正向走行（方向内最短的候选）
+   * @param turnaroundSeconds 该 route 的折返
+   * @param intervalSeconds 这一组的间隔
+   * @param residue 余数
+   */
+  public record Residue(
+      String forwardKey,
+      String reverseKey,
+      int runSeconds,
+      int turnaroundSeconds,
+      int intervalSeconds,
+      int residue) {}
+
+  /** 各往返对的余数，按正向键排序。 */
+  public static List<Residue> residues(
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervalByGroup,
+      Map<UUID, Integer> runSecondsByRoute,
+      TurnaroundTable turnarounds) {
+    List<Residue> out = new ArrayList<>();
+    if (groups == null) {
+      return out;
+    }
+    for (ServiceGroupClassifier.Group group : groups) {
+      int interval = intervalByGroup.getOrDefault(group.name(), 0);
+      if (interval <= 0) {
+        continue;
+      }
+      Map<String, ServiceGroupClassifier.Direction> byKey = new LinkedHashMap<>();
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        byKey.put(direction.key(), direction);
+      }
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        ServiceGroupClassifier.Direction reverse = byKey.get(direction.reverseKey());
+        if (reverse == null || direction.key().compareTo(reverse.key()) > 0) {
+          continue;
+        }
+        UUID anchor = minRunRoute(direction, runSecondsByRoute);
+        int run = minRun(direction, runSecondsByRoute);
+        int turnaround = turnarounds == null ? 0 : turnarounds.secondsFor(anchor);
+        out.add(
+            new Residue(
+                direction.key(),
+                reverse.key(),
+                run,
+                turnaround,
+                interval,
+                Math.floorMod(run + turnaround, interval)));
+      }
+    }
+    out.sort(Comparator.comparing(Residue::forwardKey));
+    return List.copyOf(out);
   }
 
   /**

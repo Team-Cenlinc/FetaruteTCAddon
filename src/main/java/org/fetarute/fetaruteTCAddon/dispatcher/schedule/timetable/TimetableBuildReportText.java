@@ -114,6 +114,45 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /** 第三层选了哪些 δ；一个都没选时说清楚"评估过但没有更好的"，而不是默不作声。 */
+  public static List<String> describeResourcePhases(List<String> resourceNotes) {
+    if (resourceNotes == null || resourceNotes.isEmpty()) {
+      return List.of();
+    }
+    List<String> out = new ArrayList<>();
+    out.add("  资源相位: " + resourceNotes.get(0));
+    for (int i = 1; i < resourceNotes.size(); i++) {
+      out.add("    · " + resourceNotes.get(i));
+    }
+    return out;
+  }
+
+  /**
+   * 往返对余数：<b>只报告，不参与决策</b>。
+   *
+   * <p>实测（WS 290–430 逐档）余数与冲突数无关：余数 5 有 1909 处、余数 185 一处没有、余数 265 有 1129 处。 据它跳档会跳掉 420
+   * 这种干净档，所以这一行是给人看的，不是给搜索用的。
+   */
+  public static List<String> describeResidues(List<PhasePlanner.Residue> residues) {
+    if (residues == null || residues.isEmpty()) {
+      return List.of();
+    }
+    List<String> out = new ArrayList<>();
+    for (PhasePlanner.Residue residue : residues) {
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "  往返对 %s / %s：走行 %d + 折返 %d ≡ %ds（间隔 %d）",
+              residue.forwardKey(),
+              residue.reverseKey(),
+              residue.runSeconds(),
+              residue.turnaroundSeconds(),
+              residue.residue(),
+              residue.intervalSeconds()));
+    }
+    return out;
+  }
+
   /** 判决的中文说法。 */
   private static String describe(ConflictAbsorption.Verdict verdict) {
     return switch (verdict) {
