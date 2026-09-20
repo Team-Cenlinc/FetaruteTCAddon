@@ -34,13 +34,23 @@ public final class TimetableTestFixtures {
    * @param speeds 每段的限速（blocks/s）
    */
   public static RailGraph chain(List<String> nodeIds, int[] lengths, double[] speeds) {
+    List<NodeType> types = new ArrayList<>(nodeIds.size());
+    for (int i = 0; i < nodeIds.size(); i++) {
+      types.add(NodeType.STATION);
+    }
+    return chain(nodeIds, types, lengths, speeds);
+  }
+
+  /** 带节点类型的直链：路径点写 WAYPOINT、车库写 DEPOT，站台组容量与站台映射才与实服一致（chain 默认全部 STATION， 会把进站路径点也算成一股道）。 */
+  public static RailGraph chain(
+      List<String> nodeIds, List<NodeType> types, int[] lengths, double[] speeds) {
     Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
     for (int i = 0; i < nodeIds.size(); i++) {
       NodeId id = NodeId.of(nodeIds.get(i));
       nodes.put(
           id,
           new SignRailNode(
-              id, NodeType.STATION, new Vector(i, 64.0, 0.0), Optional.empty(), Optional.empty()));
+              id, types.get(i), new Vector(i, 64.0, 0.0), Optional.empty(), Optional.empty()));
     }
     Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
     for (int i = 0; i + 1 < nodeIds.size(); i++) {

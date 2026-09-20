@@ -102,6 +102,89 @@ public final class TimetableBuildReportText {
       case NO_CREATE_ACCESS -> "起点没有 CREATE 线路，也没有接得上的待命车";
       case NO_RETURN_ACCESS -> "终点没有 RETURN 线路，后面也接不上能回库的班次";
       case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
+      case STUB_SATURATED -> "单股道端点排队过长，等到端点空出来交路已超上限或越过计划窗口";
     };
+  }
+
+  /** 「结构下界」与「端点串行」两行；没有容量 1 的端点时为空。 */
+  public static List<String> describeTerminals(
+      List<TerminalSerializer.TerminalReport> terminals,
+      List<TimetableBuildResult.TripShift> shifts,
+      int turnaroundSeconds) {
+    List<String> out = new ArrayList<>();
+    if (terminals == null || terminals.isEmpty()) {
+      return out;
+    }
+    long delayed =
+        shifts.stream().filter(s -> s.actualSecondOfDay() > s.nominalSecondOfDay()).count();
+    long advanced = shifts.size() - delayed;
+    int maxDelay =
+        shifts.stream()
+            .mapToInt(s -> s.actualSecondOfDay() - s.nominalSecondOfDay())
+            .max()
+            .orElse(0);
+    for (TerminalSerializer.TerminalReport terminal : terminals) {
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "结构下界: %s（单股道）每次折返占用 ≥ %ds（进站 %d + 折返 %d + 出站 %d + 裕量 %d，按 --turnaround %d 计），按权重每 %d 班经过 %.1f 次 → 全线间隔下界 %ds",
+              terminal.group(),
+              terminal.visitCostSeconds(),
+              terminal.approachInSeconds(),
+              turnaroundSeconds,
+              terminal.approachOutSeconds(),
+              terminal.separationSeconds(),
+              turnaroundSeconds,
+              terminal.cycleTrips(),
+              terminal.visitsPerCycle(),
+              terminal.headwayFloorSeconds()));
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "端点串行: %s 经过 %d 次、占用 %.0f%%%s；%d 班偏离网格（延后 %d / 提前 %d，最大 +%ds）；无处等待 %d 班；截断 %d 班",
+              terminal.group(),
+              terminal.visits(),
+              terminal.utilization() * 100.0D,
+              terminal.utilization() > 1.0D ? "（超过 100%，目标间隔本身在结构上不可能）" : "",
+              shifts.size(),
+              delayed,
+              advanced,
+              Math.max(0, maxDelay),
+              terminal.nowhereToWait(),
+              terminal.truncated()));
+    }
+    return out;
+  }
+
+  /**
+   * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名剩余冲突最多的资源。
+   * 两种情况下运营者要做的事不同：前者改折返/权重/股道，后者改裕量或等下一轮把咽喉也串行。
+   */
+  public static String describeSearchFailure(
+      int targetHeadway,
+      int limitHeadway,
+      TimetableConflictChecker.Report conflictsAtTarget,
+      List<TerminalSerializer.TerminalReport> terminals,
+      int turnaroundSeconds) {
+    for (TerminalSerializer.TerminalReport terminal : terminals) {
+      if (terminal.utilization() > 1.0D) {
+        return String.format(
+            Locale.ROOT,
+            "目标间隔 %ds 下端点 %s（单股道）利用率 %.0f%%（每次折返占用 %ds，按 --turnaround %d 计）：目标本身在结构上不可能；放宽到 %ds 仍找不到无冲突的间隔。可做的事：核对 --turnaround 是否远大于终到站的 dwell、降低经过该端点的 route 权重、或增加股道",
+            targetHeadway,
+            terminal.group(),
+            terminal.utilization() * 100.0D,
+            terminal.visitCostSeconds(),
+            turnaroundSeconds,
+            limitHeadway);
+      }
+    }
+    return "目标间隔 "
+        + targetHeadway
+        + "s 在放宽到 "
+        + limitHeadway
+        + "s 的范围内没有找到无冲突的间隔；剩余冲突集中在 "
+        + String.join("、", conflictsAtTarget.topResources(3))
+        + "。检查单线区段、站台数量与折返时间";
   }
 }

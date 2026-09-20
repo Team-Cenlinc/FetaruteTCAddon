@@ -304,7 +304,114 @@ class TimetableConflictCheckerTest {
         () -> report.conflicts().toString());
   }
 
+  /**
+   * 进站路径点不是站台：{@code OP:S:X:1:001} 命名在 X 的命名空间下，但它是 WAYPOINT。按名字解析会让经过它的车占用 {@code
+   * platform-group:OP:S:X}，与站台上待命的车"撞"上；按节点类型解析则不登记。
+   */
+  @Test
+  void approachWaypointIsNotAPlatform() {
+    String x = "OP:S:X:1";
+    String approach = "OP:S:X:1:001";
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    nodes.put(NodeId.of(A), station(A));
+    nodes.put(NodeId.of(approach), waypoint(approach));
+    nodes.put(NodeId.of(x), station(x));
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    edge(edges, A, approach, 100);
+    edge(edges, approach, x, 100);
+    RailGraph graph = new SimpleRailGraph(nodes, edges, Set.of());
+    TimetableConflictChecker.GraphIndex index = TimetableConflictChecker.GraphIndex.of(graph);
+    UUID routeId = TimetableTestFixtures.routeId("R");
+    RouteDefinition route = TimetableTestFixtures.route("R", List.of(A, approach, x));
+    List<RouteStop> stops = TimetableTestFixtures.stops(routeId, 3, 0);
+    TimetableTimingCalculator.TimingResult timing =
+        new TimetableTimingCalculator()
+            .compute(graph, TimetableTestFixtures.perEdgeSpeedModel(), route, stops, Duration.ZERO);
+    TimetableConflictChecker.Platform platformX =
+        new TimetableConflictChecker.Platform(x, TimetableConflictChecker.groupOf(x), false);
+    // 别的车正在 X 站台待命；T1 在 10 s 经过进站路径点、20 s 到 X（终点占用由 Stay 负责，这里不给它 Stay）。
+    List<TimetableConflictChecker.Stay> stays =
+        List.of(new TimetableConflictChecker.Stay("D002", platformX, 15, 100));
+
+    TimetableConflictChecker.RouteProfile byName =
+        new TimetableConflictChecker.RouteProfile(
+            routeId,
+            "R",
+            timing.stops(),
+            timing.segments(),
+            TimetableConflictChecker.platformsOf(timing.stops(), stops, route.waypoints()));
+    TimetableConflictChecker.RouteProfile byType =
+        new TimetableConflictChecker.RouteProfile(
+            routeId,
+            "R",
+            timing.stops(),
+            timing.segments(),
+            TimetableConflictChecker.platformsOf(
+                timing.stops(), stops, route.waypoints(), index.nodeTypes()));
+
+    assertTrue(byType.platforms().get(1).absent(), "路径点不是站台");
+    assertFalse(byType.platforms().get(2).absent(), "X 是站台");
+    TimetableConflictChecker.Report named =
+        TimetableConflictChecker.check(
+            index, Map.of(routeId, byName), List.of(move("T1", routeId, 0)), stays, 30);
+    TimetableConflictChecker.Report typed =
+        TimetableConflictChecker.check(
+            index, Map.of(routeId, byType), List.of(move("T1", routeId, 0)), stays, 30);
+    assertFalse(named.clean(), "按名字解析：路径点占了站台组，与待命的车撞上");
+    assertTrue(typed.clean(), () -> typed.conflicts().toString());
+  }
+
+  /** 同一辆车不撞自己：待命（duty 号）与它自己的班次、回库走行（车次号 / Dxxx-RETURN）是同一辆车。 */
+  @Test
+  void aVehicleDoesNotConflictWithItsOwnLegsAndTrips() {
+    String x = "OP:S:X:1";
+    String approach = "OP:S:X:1:001";
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(A, approach, x), new int[] {100, 100}, new double[] {10.0, 10.0});
+    Profiles profiles = new Profiles(graph);
+    UUID in = profiles.add("IN", List.of(A, approach, x));
+    UUID ret = profiles.add("RET", List.of(x, approach, A));
+    TimetableConflictChecker.Platform platformX =
+        new TimetableConflictChecker.Platform(x, TimetableConflictChecker.groupOf(x), false);
+    // 车 D001：T1 进站（10 s 过路径点、20 s 到 X），待命到 200，回库走行 200 s 发车、210 s 过路径点。
+    List<TimetableConflictChecker.Movement> movements =
+        List.of(move("T1", in, 0), move("D001-RETURN", ret, 200));
+    List<TimetableConflictChecker.Stay> stays =
+        List.of(new TimetableConflictChecker.Stay("D001", platformX, 20, 200));
+    java.util.function.Function<String, String> vehicleOf =
+        code -> code.equals("T1") || code.equals("D001-RETURN") ? "D001" : code;
+
+    // chain 夹具把路径点也造成 STATION，站台组 X 会有 2 股道；这里按 CHT 的形态把它钉成 1。
+    TimetableConflictChecker.GraphIndex base = TimetableConflictChecker.GraphIndex.of(graph);
+    TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(
+            base.sections(), Map.of(TimetableConflictChecker.groupOf(x), 1), base.nodeTypes());
+
+    TimetableConflictChecker.Report byCode =
+        TimetableConflictChecker.check(index, profiles.map, movements, stays, 30);
+    TimetableConflictChecker.Report byVehicle =
+        TimetableConflictChecker.check(index, profiles.map, movements, stays, 30, vehicleOf);
+    TimetableConflictChecker.Report otherVehicle =
+        TimetableConflictChecker.check(
+            index,
+            profiles.map,
+            movements,
+            stays,
+            30,
+            code -> code.equals("D001-RETURN") ? "D002" : vehicleOf.apply(code));
+
+    assertFalse(byCode.clean(), "只按 code：车在撞自己");
+    assertTrue(byVehicle.clean(), () -> byVehicle.conflicts().toString());
+    assertFalse(otherVehicle.clean(), "换成别的车的回库走行就是真冲突");
+  }
+
   // ------------------------------------------------------------------ 夹具
+
+  private static RailNode waypoint(String id) {
+    return new SignRailNode(
+        NodeId.of(id), NodeType.WAYPOINT, new Vector(0, 64, 0), Optional.empty(), Optional.empty());
+  }
 
   private static TimetableConflictChecker.Movement move(String code, UUID route, int start) {
     return new TimetableConflictChecker.Movement(code, route, start);

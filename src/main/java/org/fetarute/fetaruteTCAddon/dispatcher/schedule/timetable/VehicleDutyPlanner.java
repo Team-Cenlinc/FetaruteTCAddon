@@ -602,7 +602,9 @@ public final class VehicleDutyPlanner {
     /** 终点没有 RETURN 线路，且后面接不上能回库的班次。 */
     NO_RETURN_ACCESS,
     /** 单独这一班连同出库、回库走行就已经超过 duty 的时长上限。 */
-    EXCEEDS_DUTY_LIMITS
+    EXCEEDS_DUTY_LIMITS,
+    /** 单股道端点排队：等端点空出来会让交路超过时长上限或越过计划窗口，从这一班起截断交路。 */
+    STUB_SATURATED
   }
 
   /**

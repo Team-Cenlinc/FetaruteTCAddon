@@ -34,6 +34,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param conflictsAtTarget 目标 headway 下查出的冲突（含内部与外部；回退后的表没有冲突）
  * @param neighbors 参与检查的邻表摘要
  * @param baselines 邻表基线（成功时非空；无邻表为空）
+ * @param shifts 因端点串行偏离名义时隙的班次
+ * @param terminals 容量 1 端点的报告（经过次数、占用、结构下界）
  * @param warnings 构建过程中的提示
  */
 public record TimetableBuildResult(
@@ -53,6 +55,8 @@ public record TimetableBuildResult(
     List<TimetableConflictChecker.Conflict> conflictsAtTarget,
     List<NeighborSummary> neighbors,
     List<TimetableBaseline> baselines,
+    List<TripShift> shifts,
+    List<TerminalSerializer.TerminalReport> terminals,
     List<String> warnings) {
 
   /** 报告里最多展开多少条冲突明细。 */
@@ -66,6 +70,8 @@ public record TimetableBuildResult(
     conflictsAtTarget = conflictsAtTarget == null ? List.of() : List.copyOf(conflictsAtTarget);
     neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
     baselines = baselines == null ? List.of() : List.copyOf(baselines);
+    shifts = shifts == null ? List.of() : List.copyOf(shifts);
+    terminals = terminals == null ? List.of() : List.copyOf(terminals);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
   }
 
@@ -121,8 +127,24 @@ public record TimetableBuildResult(
         List.of(),
         List.of(),
         List.of(),
+        List.of(),
+        List.of(),
         List.of(Objects.requireNonNullElse(reason, "构建失败")));
   }
+
+  /**
+   * 一班偏离名义时隙：端点串行把它延后（等端点空出来、或本车就绪晚了）或提前（续班锚在车上）。
+   *
+   * @param tripCode 最终车次号
+   * @param nominalSecondOfDay 名义时隙（网格）
+   * @param actualSecondOfDay 实际发车
+   * @param reason 原因
+   */
+  public record TripShift(
+      String tripCode,
+      int nominalSecondOfDay,
+      int actualSecondOfDay,
+      TerminalSerializer.Shift.Reason reason) {}
 
   /**
    * 一份邻表在报告里的摘要。

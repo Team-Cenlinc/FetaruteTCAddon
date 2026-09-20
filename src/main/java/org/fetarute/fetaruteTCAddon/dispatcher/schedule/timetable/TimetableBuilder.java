@@ -6,12 +6,13 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -128,9 +129,13 @@ public final class TimetableBuilder {
       if (fallback.isEmpty()) {
         return TimetableBuildResult.failure(
             summary
-                + "；放宽到 "
-                + targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER
-                + "s 仍找不到无冲突的间隔，检查单线区段、站台数量与折返时间",
+                + "；"
+                + TimetableBuildReportText.describeSearchFailure(
+                    targetHeadway,
+                    targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
+                    target.conflicts(),
+                    target.terminals(),
+                    options.dutyLimits().turnaroundSeconds()),
             prepared.infeasible());
       }
       chosen = fallback.get();
@@ -145,6 +150,17 @@ public final class TimetableBuilder {
       warnings.addAll(
           TimetableBuildReportText.describeConflicts(
               target.conflicts(), options.serviceStartSecondOfDay()));
+    }
+
+    for (TerminalSerializer.TerminalReport terminal : target.terminals()) {
+      if (terminal.utilization() > 1.0D) {
+        warnings.add(
+            String.format(
+                Locale.ROOT,
+                "端点 %s（单股道）在目标间隔下利用率 %.0f%%：目标间隔本身在结构上不可能，放宽后的表才排得开",
+                terminal.group(),
+                terminal.utilization() * 100.0D));
+      }
     }
 
     // ---- 5. 汇总与判据 ---------------------------------------------------
@@ -206,6 +222,8 @@ public final class TimetableBuilder {
         target.conflicts().conflicts(),
         List.copyOf(neighborSummaries),
         List.copyOf(baselines),
+        chosen.shifts(),
+        chosen.terminals(),
         List.copyOf(warnings));
   }
 
@@ -219,6 +237,9 @@ public final class TimetableBuilder {
     UUID timetableId = input.timetableId();
     List<TimetableRoutePlan> plans = new ArrayList<>();
     List<OperationPlan> operations = new ArrayList<>();
+    // 图索引只建一次：站台映射要用节点类型，冲突扫描要用容量与单线区段。
+    TimetableConflictChecker.GraphIndex graphIndex =
+        TimetableConflictChecker.GraphIndex.of(input.graph());
     List<VehicleDutyPlanner.Leg> createLegs = new ArrayList<>();
     List<VehicleDutyPlanner.Leg> returnLegs = new ArrayList<>();
     Map<UUID, String> legStation = new HashMap<>();
@@ -299,7 +320,8 @@ public final class TimetableBuilder {
               route.routeCode(),
               timing.stops(),
               timing.segments(),
-              TimetableConflictChecker.platformsOf(timing.stops(), route.stops(), waypoints)));
+              TimetableConflictChecker.platformsOf(
+                  timing.stops(), route.stops(), waypoints, graphIndex.nodeTypes())));
     }
     if (operations.isEmpty()) {
       throw new BuildFailure("没有任何运营 route 能算出计划时分");
@@ -325,7 +347,7 @@ public final class TimetableBuilder {
     }
     return new Prepared(
         timetableId,
-        TimetableConflictChecker.GraphIndex.of(input.graph()),
+        graphIndex,
         List.copyOf(plans),
         List.copyOf(operations),
         operationPlans,
@@ -398,65 +420,43 @@ public final class TimetableBuilder {
       }
     }
 
-    // 只保留派上车的班次，按最终车次号重新派生主键，再把 duty 里的引用换过来。
-    Map<String, Integer> perRouteCounter = new LinkedHashMap<>();
-    Map<UUID, UUID> finalByProvisional = new HashMap<>();
-    List<TimetableTrip> trips = new ArrayList<>(plannedTrips.size());
-    List<WeightedTripAllocator.Allocation> keptAllocations = new ArrayList<>(plannedTrips.size());
+    // ---- 3. 只保留派上车的班次，其余取消并说明原因。编号要等端点串行之后再做：串行会改时刻、也会改先后。
+    Map<UUID, Integer> nominalByProvisional = new HashMap<>();
+    List<TimetableTrip> provisionalTrips = new ArrayList<>(plannedTrips.size());
     List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
-    int emitted = 0;
     for (VehicleDutyPlanner.PlannedTrip provisional : plannedTrips) {
       WeightedTripAllocator.Allocation allocation =
           allocationByProvisional.get(provisional.tripId());
       TimetableRoutePlan plan = operationPlans.get(allocation.candidateIndex());
-      int departureSecondOfDay =
-          Math.floorMod(
-              options.serviceStartSecondOfDay() + provisional.departureSeconds(),
-              TimetableTrip.SECONDS_PER_DAY);
       VehicleDutyPlanner.UnassignedTrip missing = unassigned.get(provisional.tripId());
       if (missing != null || !dutyByProvisional.containsKey(provisional.tripId())) {
         dropped.add(
             new TimetableBuildResult.DroppedTrip(
                 plan.routeCode(),
-                clock(departureSecondOfDay),
+                clock(secondOfDay(provisional.departureSeconds(), options)),
                 missing == null
                     ? VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS
                     : missing.reason()));
         continue;
       }
-      int serial = perRouteCounter.merge(plan.routeCode(), 1, Integer::sum);
-      String tripCode =
-          String.format(
-              Locale.ROOT, "%s%s-%03d", options.tripCodePrefix(), plan.routeCode(), serial);
-      UUID tripId = deterministicTripId(timetableId, tripCode);
-      finalByProvisional.put(provisional.tripId(), tripId);
-      trips.add(
+      nominalByProvisional.put(provisional.tripId(), provisional.departureSeconds());
+      // 临时表的时刻约定：零点 + 相对秒，不取模；串行只在相对秒上算，取模留给编号。
+      provisionalTrips.add(
           new TimetableTrip(
-              tripId,
+              provisional.tripId(),
               timetableId,
               plan.routeId(),
-              emitted,
-              tripCode,
-              departureSecondOfDay,
+              provisionalTrips.size(),
+              provisional.tripCode(),
+              shiftToServiceDay(provisional.departureSeconds(), options),
               Optional.of(dutyByProvisional.get(provisional.tripId()))));
-      keptAllocations.add(allocation);
-      emitted++;
     }
-    if (trips.isEmpty()) {
+    if (provisionalTrips.isEmpty()) {
       throw new BuildFailure("排定的班次没有一趟能配上出库与回库线路：检查 CREATE/RETURN 线路是否覆盖各起终点");
     }
-
-    // ---- 4. 查冲突：把成品表投影成全部运行 + 站台待命，零点 = 计划窗口起点 ------------
-    List<VehicleDuty> duties = new ArrayList<>(planned.duties().size());
+    List<VehicleDuty> provisionalDuties = new ArrayList<>(planned.duties().size());
     for (VehicleDuty duty : planned.duties()) {
-      List<UUID> finalTripIds = new ArrayList<>(duty.tripIds().size());
-      for (UUID provisional : duty.tripIds()) {
-        UUID finalId = finalByProvisional.get(provisional);
-        if (finalId != null) {
-          finalTripIds.add(finalId);
-        }
-      }
-      duties.add(
+      provisionalDuties.add(
           new VehicleDuty(
               duty.id(),
               duty.timetableId(),
@@ -466,30 +466,87 @@ public final class TimetableBuilder {
               duty.endDepotNodeId(),
               duty.createRouteId(),
               duty.returnRouteId(),
-              finalTripIds,
+              duty.tripIds(),
               shiftToServiceDay(duty.plannedStartSecondOfDay(), options),
               shiftToServiceDay(duty.returnSecondOfDay(), options),
               shiftToServiceDay(duty.plannedEndSecondOfDay(), options),
               duty.closeReason()));
     }
+    Timetable provisionalTable =
+        timetableOf(input, options, prepared, provisionalTrips, provisionalDuties, builtAt);
+
+    // ---- 3.5 端点串行：容量 1 的端点按资源串行，只改时刻不增减班次（排队超限时截断交路并上报）。
+    Set<UUID> endingAtDepot = new HashSet<>();
+    for (OperationPlan op : prepared.operations()) {
+      if (op.endsAtDepot()) {
+        endingAtDepot.add(op.route().routeId());
+      }
+    }
+    int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
+    TerminalSerializer.Result serialized =
+        TerminalSerializer.serialize(
+            new TerminalSerializer.Input(
+                provisionalTable,
+                prepared.profiles(),
+                prepared.graphIndex(),
+                options.serviceStartSecondOfDay(),
+                horizon,
+                options.dutyLimits().turnaroundSeconds(),
+                separation,
+                prepared.legs(),
+                options.dutyLimits(),
+                endingAtDepot,
+                prepared.candidates(),
+                operationPlans,
+                input.neighbors()));
+    for (UUID truncated : serialized.truncatedTripIds()) {
+      WeightedTripAllocator.Allocation allocation = allocationByProvisional.get(truncated);
+      if (allocation == null) {
+        continue;
+      }
+      dropped.add(
+          new TimetableBuildResult.DroppedTrip(
+              operationPlans.get(allocation.candidateIndex()).routeCode(),
+              clock(secondOfDay(nominalByProvisional.getOrDefault(truncated, 0), options)),
+              VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+    }
+    if (serialized.timetable().trips().isEmpty()) {
+      throw new BuildFailure("端点排队超限，没有一班能在计划窗口内跑完：检查折返时间、端点权重与股道数");
+    }
+
+    // ---- 3.6 按实际发车顺序编号、派生主键、替换 duty 引用 ----------------------------
+    TimetableTripNumbering.Numbered numbered =
+        TimetableTripNumbering.number(
+            timetableId, options, serialized.timetable(), nominalByProvisional);
+    List<WeightedTripAllocator.Allocation> keptAllocations =
+        new ArrayList<>(serialized.timetable().trips().size());
+    for (TimetableTrip trip : serialized.timetable().trips()) {
+      WeightedTripAllocator.Allocation allocation = allocationByProvisional.get(trip.id());
+      if (allocation != null) {
+        keptAllocations.add(allocation);
+      }
+    }
     Timetable timetable =
-        new Timetable(
-            input.timetableId(),
-            input.companyId(),
-            input.operatorId(),
-            input.lineId(),
-            input.code(),
-            input.name(),
-            TimetableStatus.DRAFT,
-            options.zoneId(),
-            options.serviceStartSecondOfDay(),
-            options.serviceEndSecondOfDay(),
-            prepared.plans(),
-            trips,
-            duties,
-            input.notes(),
-            builtAt,
-            builtAt);
+        timetableOf(input, options, prepared, numbered.trips(), numbered.duties(), builtAt);
+    Map<UUID, String> codeByFinalId = new HashMap<>();
+    for (TimetableTrip trip : timetable.trips()) {
+      codeByFinalId.put(trip.id(), trip.tripCode());
+    }
+    List<TimetableBuildResult.TripShift> shifts = new ArrayList<>(serialized.shifts().size());
+    for (TerminalSerializer.Shift shift : serialized.shifts()) {
+      UUID finalId = numbered.finalByProvisional().get(shift.tripId());
+      if (finalId == null) {
+        continue;
+      }
+      shifts.add(
+          new TimetableBuildResult.TripShift(
+              codeByFinalId.getOrDefault(finalId, "?"),
+              secondOfDay(shift.nominalSeconds(), options),
+              secondOfDay(shift.actualSeconds(), options),
+              shift.reason()));
+    }
+
+    // ---- 4. 查冲突：把成品表投影成全部运行 + 站台待命，零点 = 计划窗口起点 ------------
     TimetableOccupancyProjector.Occupancy occupancy =
         TimetableOccupancyProjector.project(
             timetable, prepared.profiles(), options.serviceStartSecondOfDay());
@@ -508,11 +565,52 @@ public final class TimetableBuilder {
             profiles,
             movements,
             stays,
-            (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds()));
+            separation,
+            TimetableConflictChecker.vehicleOf(timetable));
 
     List<WeightedTripAllocator.ShareReport> shares =
         WeightedTripAllocator.report(prepared.candidates(), keptAllocations);
-    return new Attempt((int) headwaySeconds, timetable, List.copyOf(dropped), shares, conflicts);
+    return new Attempt(
+        (int) headwaySeconds,
+        timetable,
+        List.copyOf(dropped),
+        shares,
+        conflicts,
+        List.copyOf(shifts),
+        serialized.terminals());
+  }
+
+  /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
+  private static Timetable timetableOf(
+      BuildInput input,
+      TimetableBuildOptions options,
+      Prepared prepared,
+      List<TimetableTrip> trips,
+      List<VehicleDuty> duties,
+      Instant builtAt) {
+    return new Timetable(
+        input.timetableId(),
+        input.companyId(),
+        input.operatorId(),
+        input.lineId(),
+        input.code(),
+        input.name(),
+        TimetableStatus.DRAFT,
+        options.zoneId(),
+        options.serviceStartSecondOfDay(),
+        options.serviceEndSecondOfDay(),
+        prepared.plans(),
+        trips,
+        duties,
+        input.notes(),
+        builtAt,
+        builtAt);
+  }
+
+  /** 相对秒换成当日秒数（取模）。 */
+  private static int secondOfDay(int relativeSeconds, TimetableBuildOptions options) {
+    return Math.floorMod(
+        options.serviceStartSecondOfDay() + relativeSeconds, TimetableTrip.SECONDS_PER_DAY);
   }
 
   /**
@@ -574,17 +672,6 @@ public final class TimetableBuilder {
     return TimetableCsvExporter.clock(secondOfDay);
   }
 
-  /**
-   * 由时刻表 ID 与车次号派生稳定的 trip UUID。
-   *
-   * <p>用 {@code randomUUID} 会让"同样输入构建两次结果一致"这条性质只在字段层面成立、在主键层面不成立， 而主键会进数据库、会被 duty
-   * 引用，也会出现在导出里。名字派生让整份产物逐字节可复现。
-   */
-  private static UUID deterministicTripId(UUID timetableId, String tripCode) {
-    return UUID.nameUUIDFromBytes(
-        ("trip:" + timetableId + ":" + tripCode).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-  }
-
   private record OperationPlan(RouteInput route, boolean startsAtDepot, boolean endsAtDepot) {}
 
   /** 第 1 步的产物：与 headway 无关的一切。 */
@@ -605,7 +692,9 @@ public final class TimetableBuilder {
       Timetable timetable,
       List<TimetableBuildResult.DroppedTrip> dropped,
       List<WeightedTripAllocator.ShareReport> shares,
-      TimetableConflictChecker.Report conflicts) {}
+      TimetableConflictChecker.Report conflicts,
+      List<TimetableBuildResult.TripShift> shifts,
+      List<TerminalSerializer.TerminalReport> terminals) {}
 
   /** 构建失败：只带原因，不可行 route 清单由调用方持有。 */
   private static final class BuildFailure extends RuntimeException {

@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -84,7 +85,25 @@ public final class TimetableConflictChecker {
       List<Movement> movements,
       List<Stay> stays,
       int separationSeconds) {
+    return check(index, profiles, movements, stays, separationSeconds, Function.identity());
+  }
+
+  /**
+   * 冲突扫描，带车辆身份。
+   *
+   * <p>{@code vehicleOf} 把占用的 code 映射成车辆标识（通常是 duty 号）：同一辆车的待命（code 是 duty 号）与它自己的班次 （code
+   * 是车次号）、出库/回库走行（{@code Dxxx-CREATE/RETURN}）之间不报冲突。不传时按 code 自身，
+   * 那会让每辆在端点折返的车都"撞上自己"——进站经过站台组内的路径点与随后的待命只差几秒。 邻表的占用不经过这个映射：两份邻表之间本来就不报，邻表与我之间的 code 不可能是同一辆车。
+   */
+  public static Report check(
+      GraphIndex index,
+      Map<UUID, RouteProfile> profiles,
+      List<Movement> movements,
+      List<Stay> stays,
+      int separationSeconds,
+      Function<String, String> vehicleOf) {
     Objects.requireNonNull(profiles, "profiles");
+    Function<String, String> vehicles = vehicleOf == null ? Function.identity() : vehicleOf;
     GraphIndex graphIndex = index == null ? GraphIndex.of(null) : index;
     int separation = Math.max(0, separationSeconds);
     Map<String, Integer> platformCapacity = graphIndex.platformCapacity();
@@ -112,7 +131,7 @@ public final class TimetableConflictChecker {
 
     List<Conflict> conflicts = new ArrayList<>();
     for (Resource resource : resources.values()) {
-      conflicts.addAll(resource.scan(separation));
+      conflicts.addAll(resource.scan(separation, vehicles));
     }
     conflicts.sort(
         Comparator.comparingInt(Conflict::firstFrom)
@@ -125,11 +144,33 @@ public final class TimetableConflictChecker {
   /** 从 route 的停靠配置得出每个停靠点的站台资源。 */
   public static List<Platform> platformsOf(
       List<TimetableStop> stops, List<RouteStop> routeStops, List<NodeId> waypoints) {
+    return platformsOf(stops, routeStops, waypoints, Map.of());
+  }
+
+  /**
+   * 站台映射：只有图里类型为 STATION / DEPOT 的节点才是站台。
+   *
+   * <p>路径点常常命名在站台的命名空间下（{@code OP:S:CHT:3:003} 是 CHT 三号道的进站路径点），按名字解析会把它算进站台组 {@code
+   * OP:S:CHT}，而站台组容量只数真站台——占用与容量口径不一致，一辆车在进站路径上也在消耗站台容量。 DYNAMIC 停靠只有组一层，节点 id 是占位串，不查类型。{@code
+   * nodeTypes} 为空（没有图）时退回按名字解析。
+   */
+  public static List<Platform> platformsOf(
+      List<TimetableStop> stops,
+      List<RouteStop> routeStops,
+      List<NodeId> waypoints,
+      Map<NodeId, NodeType> nodeTypes) {
     List<Platform> out = new ArrayList<>(stops.size());
     for (int i = 0; i < stops.size(); i++) {
       String nodeId = waypoints != null && i < waypoints.size() ? waypoints.get(i).value() : "";
       RouteStop routeStop = routeStops != null && i < routeStops.size() ? routeStops.get(i) : null;
       boolean dynamic = routeStop != null && DynamicStopMatcher.isDynamicStop(routeStop);
+      if (!dynamic && nodeTypes != null && !nodeTypes.isEmpty() && !nodeId.isBlank()) {
+        NodeType type = nodeTypes.get(NodeId.of(nodeId));
+        if (type != NodeType.STATION && type != NodeType.DEPOT) {
+          out.add(Platform.none());
+          continue;
+        }
+      }
       out.add(new Platform(nodeId, groupOf(nodeId), dynamic));
     }
     return List.copyOf(out);
@@ -433,16 +474,18 @@ public final class TimetableConflictChecker {
       platforms = platforms == null ? List.of() : List.copyOf(platforms);
     }
 
-    /** 首站站台。 */
+    /** 首站站台；首站不是站台节点时为空。 */
     public Optional<Platform> origin() {
-      return platforms.isEmpty() ? Optional.empty() : Optional.of(platforms.get(0));
+      return platforms.isEmpty()
+          ? Optional.empty()
+          : Optional.of(platforms.get(0)).filter(platform -> !platform.absent());
     }
 
-    /** 末站站台。 */
+    /** 末站站台；末站不是站台节点时为空。 */
     public Optional<Platform> terminal() {
       return platforms.isEmpty()
           ? Optional.empty()
-          : Optional.of(platforms.get(platforms.size() - 1));
+          : Optional.of(platforms.get(platforms.size() - 1)).filter(platform -> !platform.absent());
     }
   }
 
@@ -457,6 +500,15 @@ public final class TimetableConflictChecker {
     public Platform {
       nodeId = nodeId == null ? "" : nodeId.trim();
       group = group == null ? "" : group.trim();
+    }
+
+    /** 占位：这个停靠点不是站台（路径点、道岔），不登记任何站台资源。 */
+    public static Platform none() {
+      return new Platform("", "", false);
+    }
+
+    public boolean absent() {
+      return nodeId.isBlank() && group.isBlank();
     }
   }
 
@@ -599,6 +651,22 @@ public final class TimetableConflictChecker {
       return out;
     }
 
+    /** 冲突最多的前几个资源键（含类型），供失败文案点名瓶颈。 */
+    public List<String> topResources(int limit) {
+      Map<String, Integer> counts = new LinkedHashMap<>();
+      for (Conflict conflict : conflicts) {
+        counts.merge(conflict.kind().name() + " " + conflict.resource(), 1, Integer::sum);
+      }
+      return counts.entrySet().stream()
+          .sorted(
+              Map.Entry.<String, Integer>comparingByValue()
+                  .reversed()
+                  .thenComparing(Map.Entry.comparingByKey()))
+          .limit(Math.max(0, limit))
+          .map(entry -> entry.getKey() + "×" + entry.getValue())
+          .toList();
+    }
+
     /** 按类型计数。 */
     public Map<Kind, Integer> countByKind() {
       Map<Kind, Integer> out = new LinkedHashMap<>();
@@ -609,13 +677,44 @@ public final class TimetableConflictChecker {
     }
   }
 
+  /**
+   * 一份表的车辆身份映射：车次号 → 它所属 duty 的 dutyCode；{@code Dxxx-CREATE} / {@code Dxxx-RETURN} → {@code Dxxx}；
+   * duty 号 → 自身；查不到的 code 原样返回。供 {@link #check(GraphIndex, Map, List, List, int, Function)} 使用。
+   */
+  public static Function<String, String> vehicleOf(Timetable timetable) {
+    Objects.requireNonNull(timetable, "timetable");
+    Map<UUID, String> dutyCodeById = new HashMap<>();
+    Map<String, String> byCode = new HashMap<>();
+    for (VehicleDuty duty : timetable.duties()) {
+      dutyCodeById.put(duty.id(), duty.dutyCode());
+      byCode.put(duty.dutyCode(), duty.dutyCode());
+      byCode.put(duty.dutyCode() + "-CREATE", duty.dutyCode());
+      byCode.put(duty.dutyCode() + "-RETURN", duty.dutyCode());
+    }
+    for (TimetableTrip trip : timetable.trips()) {
+      trip.dutyId()
+          .map(dutyCodeById::get)
+          .ifPresent(dutyCode -> byCode.put(trip.tripCode(), dutyCode));
+    }
+    Map<String, String> frozen = Map.copyOf(byCode);
+    return code -> frozen.getOrDefault(code, code);
+  }
+
   // ------------------------------------------------------------------ 扫描
 
-  private record Occupation(String code, int from, int to, int direction, Optional<String> owner) {
+  /**
+   * @param vehicle 车辆身份：{@code owner|vehicleOf(code)}。同一辆车的占用之间不报冲突；带上 owner 是因为邻表的车次号可能与我的同名。
+   */
+  private record Occupation(
+      String code, int from, int to, int direction, Optional<String> owner, String vehicle) {
 
     /** 邻表之间的冲突不属于我：它们在各自发布时已经被检查过，报出来只会淹没我的问题。 */
     boolean bothExternal(Occupation other) {
       return owner.isPresent() && other.owner.isPresent();
+    }
+
+    boolean sameVehicle(Occupation other) {
+      return vehicle.equals(other.vehicle);
     }
   }
 
@@ -632,11 +731,25 @@ public final class TimetableConflictChecker {
     }
 
     private void add(String code, int from, int to, int direction, Optional<String> owner) {
-      occupations.add(new Occupation(code, from, Math.max(from, to), direction, owner));
+      occupations.add(new Occupation(code, from, Math.max(from, to), direction, owner, ""));
     }
 
-    private List<Conflict> scan(int separation) {
-      List<Occupation> sorted = new ArrayList<>(occupations);
+    private List<Conflict> scan(int separation, Function<String, String> vehicleOf) {
+      List<Occupation> sorted = new ArrayList<>(occupations.size());
+      for (Occupation occupation : occupations) {
+        String vehicle =
+            occupation.owner().isPresent()
+                ? occupation.owner().get() + "|" + occupation.code()
+                : "|" + vehicleOf.apply(occupation.code());
+        sorted.add(
+            new Occupation(
+                occupation.code(),
+                occupation.from(),
+                occupation.to(),
+                occupation.direction(),
+                occupation.owner(),
+                vehicle));
+      }
       sorted.sort(Comparator.comparingInt(Occupation::from).thenComparing(Occupation::code));
       return switch (kind) {
         case TRACK, JUNCTION -> scanExclusive(sorted, separation);
@@ -656,7 +769,7 @@ public final class TimetableConflictChecker {
       for (Occupation next : sorted) {
         active.removeIf(current -> current.to() + separation <= next.from());
         for (Occupation current : active) {
-          if (!current.code().equals(next.code()) && !current.bothExternal(next)) {
+          if (!current.sameVehicle(next) && !current.bothExternal(next)) {
             out.add(conflict(current, next));
             break;
           }
@@ -678,7 +791,7 @@ public final class TimetableConflictChecker {
         active.removeIf(current -> current.to() + separation <= next.from());
         if (active.size() >= capacity) {
           active.stream()
-              .filter(current -> !current.code().equals(next.code()))
+              .filter(current -> !current.sameVehicle(next))
               .filter(current -> !current.bothExternal(next))
               .min(Comparator.comparingInt(Occupation::from))
               .ifPresent(partner -> out.add(conflict(partner, next)));
@@ -699,7 +812,7 @@ public final class TimetableConflictChecker {
               current.direction() == 0
                   || next.direction() == 0
                   || current.direction() != next.direction();
-          if (opposite && !current.code().equals(next.code()) && !current.bothExternal(next)) {
+          if (opposite && !current.sameVehicle(next) && !current.bothExternal(next)) {
             out.add(conflict(current, next));
             break;
           }

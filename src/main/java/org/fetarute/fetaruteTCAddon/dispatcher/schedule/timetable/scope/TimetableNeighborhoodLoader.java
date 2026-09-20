@@ -358,7 +358,7 @@ public final class TimetableNeighborhoodLoader {
                 plan.stops(),
                 segments,
                 TimetableConflictChecker.platformsOf(
-                    plan.stops(), stops, definition.get().waypoints())),
+                    plan.stops(), stops, definition.get().waypoints(), index.nodeTypes())),
             stale));
   }
 
@@ -415,7 +415,7 @@ public final class TimetableNeighborhoodLoader {
             timing.stops(),
             timing.segments(),
             TimetableConflictChecker.platformsOf(
-                timing.stops(), stops, definition.get().waypoints())));
+                timing.stops(), stops, definition.get().waypoints(), index.nodeTypes())));
   }
 
   /**

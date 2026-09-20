@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
@@ -168,6 +169,11 @@ public final class TimetableTimingCalculator {
     return (int) Math.min(Integer.MAX_VALUE, (millis + 500L) / 1000L);
   }
 
+  /**
+   * 停站时长：PASS 路径点不停站，永远是 0——兜底值只给"停靠却没配 dwell"的站。
+   *
+   * <p>否则一条 route 上每个路径点都会被算成一次 {@code --dwell} 长的停站：全程时分被虚增一到三成， 冲突检查里每个路径点还会多出一段假的站台占用。
+   */
   private static long resolveDwellSeconds(List<RouteStop> stops, int index, long fallback) {
     if (stops == null || index < 0 || index >= stops.size()) {
       return fallback;
@@ -175,6 +181,9 @@ public final class TimetableTimingCalculator {
     RouteStop stop = stops.get(index);
     if (stop == null) {
       return fallback;
+    }
+    if (stop.passType() == RouteStopPassType.PASS) {
+      return 0L;
     }
     return stop.dwellSeconds().filter(value -> value >= 0).map(Long::valueOf).orElse(fallback);
   }

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
@@ -161,6 +162,57 @@ class TimetableTimingCalculatorTest {
                 Duration.ofSeconds(25));
 
     assertEquals(35, result.stops().get(1).departureOffsetSeconds(), "到达 10 + 缺省停站 25");
+  }
+
+  /** PASS 路径点不停站：即便它没配 dwell、即便给了兜底值，到达即离开；兜底只作用于没配 dwell 的 STOP。 */
+  @Test
+  void passStopsHaveZeroDwellRegardlessOfFallback() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"),
+            new int[] {100, 100},
+            new double[] {10.0, 10.0});
+    RouteDefinition route =
+        TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"));
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
+        List.of(
+            new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+                ROUTE,
+                0,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP,
+                Optional.empty()),
+            new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+                ROUTE,
+                1,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.PASS,
+                Optional.empty()),
+            new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+                ROUTE,
+                2,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE,
+                Optional.empty()));
+
+    TimetableTimingCalculator.TimingResult result =
+        new TimetableTimingCalculator()
+            .compute(
+                graph,
+                RailTravelTimeModels.constantSpeed(10.0),
+                route,
+                stops,
+                Duration.ofSeconds(25));
+
+    assertEquals(10, result.stops().get(1).arrivalOffsetSeconds());
+    assertEquals(10, result.stops().get(1).departureOffsetSeconds(), "PASS 到达即离开，兜底 25 不作用于它");
+    assertEquals(20, result.stops().get(2).arrivalOffsetSeconds(), "全程时分不含路径点的假停站");
   }
 
   /** 秒级四舍五入：33.4 秒进 33，33.6 秒进 34，且同样输入永远给同样结果。 */
