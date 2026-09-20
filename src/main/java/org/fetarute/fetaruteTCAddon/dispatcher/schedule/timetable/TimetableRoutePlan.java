@@ -28,8 +28,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
  * @param terminalNodeId 终点节点
  * @param depotNodeId 出库点；为空时由线路 depot pool 决定
  * @param notes 构建期说明（例如为什么这条 route 被降级）
- * @param external 别的 operator 的走行线路（直通运转里显式指定的外方出库/回库）：进冲突足迹、进交路，但<b>不受本表管辖</b>—— 它所在线路自己的 headway
- *     票照常发
+ * @param external <b>不受本表管辖的走行线路</b>：别的线的，或别的 operator 的（直通运转里显式指定的外方出库/回库）。 它进冲突足迹、进交路，但它所在线路自己的
+ *     headway 票照常发
  */
 public record TimetableRoutePlan(
     UUID routeId,

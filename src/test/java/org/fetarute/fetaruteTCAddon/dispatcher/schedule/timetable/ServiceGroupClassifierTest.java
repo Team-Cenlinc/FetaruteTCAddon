@@ -98,6 +98,97 @@ class ServiceGroupClassifierTest {
     assertTrue(classification.warnings().get(0).contains("yard"));
   }
 
+  /**
+   * 方向键取<b>乘客首末站</b>：车库与走行路径点不是站。
+   *
+   * <p>按首末路径点取会把往返拆成两个互不相识的方向（出库端在车库、入库端在车库），于是往返对锚不到一起、 组间也找不到共用起点。实测里 MT-1N_Short 与 MT-1N_ShortR
+   * 就是这么被拆开、把进站流量算成两倍的。
+   */
+  @Test
+  void directionKeysUsePassengerEndpoints() {
+    // 出库班：路径点是 DEP → A → B，首个停靠是车库（CRET），方向起点应当是 A 而不是车库。
+    TimetableBuilder.RouteInput depotStart = create("DS1", List.of(DEP, A, B), null);
+    assertEquals("OP:S:A", ServiceGroupClassifier.originGroupOf(depotStart));
+    assertEquals("OP:S:B", ServiceGroupClassifier.terminalGroupOf(depotStart));
+
+    // 末站是走行路径点（不是车站）时，终点取最后一个落在车站上的停靠。
+    UUID id = TimetableTestFixtures.routeId("RW");
+    List<RouteStop> stops =
+        List.of(
+            stop(id, 0, RouteStopPassType.STOP),
+            stop(id, 1, RouteStopPassType.STOP),
+            stop(id, 2, RouteStopPassType.TERMINATE));
+    TimetableBuilder.RouteInput toWaypoint =
+        new TimetableBuilder.RouteInput(
+            id,
+            "RW",
+            RouteOperationType.OPERATION,
+            1,
+            TimetableTestFixtures.route("RW", List.of(A, B, "OP:A:B:1:003")),
+            stops,
+            Optional.empty());
+    assertEquals("OP:S:A", ServiceGroupClassifier.originGroupOf(toWaypoint));
+    assertEquals("OP:S:B", ServiceGroupClassifier.terminalGroupOf(toWaypoint), "路径点不是站");
+  }
+
+  /** 从车库始发和从站台始发的两条 route 归到同一个方向：它们对乘客是同一条"从 A 到 C"。 */
+  @Test
+  void depotStartAndSidingStartShareADirection() {
+    TimetableBuilder.RouteInput fromDepot = create("DS2", List.of(DEP, A, B, C), null);
+    TimetableBuilder.RouteInput fromPlatform = operation("RA", List.of(A, B, C), null);
+
+    assertEquals(
+        ServiceGroupClassifier.originGroupOf(fromPlatform),
+        ServiceGroupClassifier.originGroupOf(fromDepot));
+    assertEquals(
+        ServiceGroupClassifier.terminalGroupOf(fromPlatform),
+        ServiceGroupClassifier.terminalGroupOf(fromDepot));
+
+    ServiceGroupClassifier.Classification classification =
+        ServiceGroupClassifier.classify(List.of(fromDepot, fromPlatform));
+    assertEquals(1, classification.groups().size());
+    assertEquals(
+        1,
+        classification.groups().get(0).directions().size(),
+        "两条 route 对乘客是同一个方向，应当共用一张子网格按 weight 切份额");
+  }
+
+  /**
+   * 车库端不是站：出库走行 DEP→A 的两端都落在 A 上——车库不参与"从哪到哪"。
+   *
+   * <p>纯走行不进方向表（它们在 {@code pureLegs} 里），所以两端同键无害；这条钉的是"车库不是站"这条规则本身。
+   */
+  @Test
+  void depotEndIsNotAStation() {
+    TimetableBuilder.RouteInput leg = create("CRT", List.of(DEP, A), null);
+
+    assertEquals("OP:S:A", ServiceGroupClassifier.originGroupOf(leg), "车库端跳过，取第一个车站");
+    assertEquals("OP:S:A", ServiceGroupClassifier.terminalGroupOf(leg));
+  }
+
+  /** 一个落在车站上的停靠都没有（全是 PASS 的走行链）：退回首末路径点，与旧行为一致。 */
+  @Test
+  void routesWithoutAnyStationStopFallBackToWaypoints() {
+    UUID id = TimetableTestFixtures.routeId("RL");
+    List<RouteStop> allPassing =
+        List.of(
+            stop(id, 0, RouteStopPassType.PASS),
+            stop(id, 1, RouteStopPassType.PASS),
+            stop(id, 2, RouteStopPassType.PASS));
+    TimetableBuilder.RouteInput leg =
+        new TimetableBuilder.RouteInput(
+            id,
+            "RL",
+            RouteOperationType.RETURN,
+            0,
+            TimetableTestFixtures.route("RL", List.of(A, B, DEP)),
+            allPassing,
+            Optional.empty());
+
+    assertEquals("OP:S:A", ServiceGroupClassifier.originGroupOf(leg));
+    assertEquals("OP:D:DEP", ServiceGroupClassifier.terminalGroupOf(leg), "退回末路径点");
+  }
+
   private static TimetableBuilder.RouteInput operation(
       String code, List<String> nodes, String group) {
     return operation(code, nodes, group, 1);

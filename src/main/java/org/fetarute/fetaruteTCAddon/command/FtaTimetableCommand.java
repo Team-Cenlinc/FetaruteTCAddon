@@ -106,6 +106,9 @@ public final class FtaTimetableCommand {
   /** 报告里最多列出几条让车明细。 */
   private static final int YIELD_DETAIL_LIMIT = 5;
 
+  /** 「不设闲置上限」：一整天，计划窗口内等价于永不回收。回收关着时用它。 */
+  private static final int NO_IDLE_LIMIT_SECONDS = 86_400;
+
   /** 注册 {@code /fta timetable} 子命令与补全。 */
   public void register(CommandManager<CommandSender> manager) {
     SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
@@ -128,7 +131,8 @@ public final class FtaTimetableCommand {
                     .suggestionProvider(groupHeadwaySuggestions()))
             .asRepeatable()
             .build();
-    var maxWaitFlag = intFlag("max-wait", "<seconds>", 0, 3600);
+    var maxWaitFlag = intFlag("max-wait", "<seconds>", 0, 1800);
+    var maxIdleFlag = intFlag("max-idle", "<seconds>", 30, 86400);
     var dwellFlag = intFlag("dwell", "<seconds>", 0, 600);
     var maxTripsFlag = intFlag("max-trips", "<trips>", 1, 64);
     var maxDutyFlag = intFlag("max-duty-minutes", "<minutes>", 1, 1440);
@@ -166,6 +170,7 @@ public final class FtaTimetableCommand {
             .flag(turnaroundFlag)
             .flag(separationFlag)
             .flag(maxWaitFlag)
+            .flag(maxIdleFlag)
             .flag(strictFlag)
             .flag(nameFlag)
             .flag(prefixFlag)
@@ -192,6 +197,7 @@ public final class FtaTimetableCommand {
                                 separationFlag,
                                 TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
                             ctx.flags().getValue(maxWaitFlag).orElse(null),
+                            ctx.flags().getValue(maxIdleFlag).orElse(null),
                             ctx.flags().isPresent(strictFlag),
                             ctx.flags().getValue(nameFlag).orElse(null),
                             ctx.flags().getValue(prefixFlag).orElse(null),
@@ -323,7 +329,7 @@ public final class FtaTimetableCommand {
     sender.sendMessage(
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
-                + " --max-duty-minutes --turnaround --separation --max-wait --strict --name --prefix --zone",
+                + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict --name --prefix --zone",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
     sender.sendMessage(hint("详情", "/fta timetable info <company> <operator> <line> <code>"));
@@ -475,7 +481,8 @@ public final class FtaTimetableCommand {
                 // 不传 --turnaround 就不存在全线折返数：builder 按各 route 终到站的 dwell 建表。
                 flags.turnaroundSeconds() == null
                     ? TurnaroundTable.none()
-                    : TurnaroundTable.fixed(flags.turnaroundSeconds())),
+                    : TurnaroundTable.fixed(flags.turnaroundSeconds()),
+                resolveMaxIdleSeconds(flags.maxIdleSeconds())),
             flags.tripCodePrefix() == null ? "" : flags.tripCodePrefix(),
             zone,
             Duration.ofSeconds(flags.separationSeconds()),
@@ -849,6 +856,10 @@ public final class FtaTimetableCommand {
     }
     if (limits.turnaround().fixed()) {
       command.append(" --turnaround ").append(limits.turnaround().fallbackSeconds());
+    }
+    if (limits.maxIdleSeconds() != VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS) {
+      // 重建命令带上它：缺省值来自 reclaim.max-idle-seconds，与默认常数不同的一律显式写出，免得重建换了个数。
+      command.append(" --max-idle ").append(limits.maxIdleSeconds());
     }
     if (options.separation().toSeconds() != TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS) {
       command.append(" --separation ").append(options.separation().toSeconds());
@@ -2153,34 +2164,59 @@ public final class FtaTimetableCommand {
    */
 
   /**
-   * 让车参数：{@code --max-wait} 缺省 60 s，且永远不超过 {@code timetable.hold-max-seconds}——那是运行时真能把早到的车扣留的上限，
-   * 表上写了扣不住的等待等于没写。累计上限跟 assign-tolerance：超过它车次就对不上了。
+   * 让车参数：{@code --max-wait} 缺省取 {@code timetable.assign-tolerance-seconds}，上限 1800 s。
+   *
+   * <p>它<b>不再</b>被 {@code timetable.hold-max-seconds} 封顶。{@code hold-max} 约束的是"早到的车在站台被扣多久"，
+   * 超了运行时直接放行；而车在资源前排队是占用队列的事，无界。两者不是同一种等待，用前者去限制后者会把大量 现实可行的表判成不可行——实测 WS 在这条封顶下把 60 s
+   * 以上的让车全判成了真冲突。 报告里仍用 hold-max 区分让车发生在哪：{@code ≤ hold-max} 是站台扣留，超过的那部分由资源前的排队兑现。
+   *
+   * <p>累计上限跟 assign-tolerance（超过它车次就对不上了），但不小于单步上限——否则第一处让车就会把交路截断。
    */
   private TimetableBuildOptions.Repair repairOptions(CommandSender sender, Integer requested) {
     ConfigManager.TimetableSettings settings =
         plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
             ? plugin.getConfigManager().current().timetableSettings()
             : ConfigManager.TimetableSettings.defaults();
-    int holdMax = settings.holdMaxSeconds();
-    int maxWait =
-        requested == null
-            ? Math.min(TimetableBuildOptions.Repair.DEFAULT_MAX_WAIT_SECONDS, holdMax)
-            : requested;
-    if (maxWait > holdMax) {
+    int tolerance = settings.assignToleranceSeconds();
+    int maxWait = requested == null ? tolerance : requested;
+    if (maxWait > TimetableBuildOptions.Repair.MAX_WAIT_CEILING_SECONDS) {
       sender.sendMessage(
           Component.text(
               "--max-wait "
                   + maxWait
-                  + " 超过 timetable.hold-max-seconds="
-                  + holdMax
-                  + "，按 "
-                  + holdMax
-                  + " 计：运行时最多只能把早到的车扣留这么久。",
+                  + " 超过上限 "
+                  + TimetableBuildOptions.Repair.MAX_WAIT_CEILING_SECONDS
+                  + " s，按上限计。",
               NamedTextColor.YELLOW));
-      maxWait = holdMax;
+      maxWait = TimetableBuildOptions.Repair.MAX_WAIT_CEILING_SECONDS;
     }
     return new TimetableBuildOptions.Repair(
-        Duration.ofSeconds(maxWait), Duration.ofSeconds(settings.assignToleranceSeconds()));
+        Duration.ofSeconds(maxWait), Duration.ofSeconds(tolerance));
+  }
+
+  /**
+   * 端点闲置上限：不传时取 {@code reclaim.max-idle-seconds}。
+   *
+   * <p>编表侧必须和运行时用同一个数——运行时待命超过它就派回库票，编表却让车在端点干等到下一个时隙的话， 表上那段待命占用是假的，还会把站台判成冲突（实测 MT 有车在 PPK 等了 19
+   * 分钟，运行时 5 分钟就收走了）。
+   */
+  private int resolveMaxIdleSeconds(Integer requested) {
+    if (requested != null) {
+      return requested;
+    }
+    if (plugin.getConfigManager() != null && plugin.getConfigManager().current() != null) {
+      ConfigManager.ReclaimSettings reclaim = plugin.getConfigManager().current().reclaimSettings();
+      if (!reclaim.enabled()) {
+        // 回收关着：运行时的待命车不会被收走，会一直等到下一班。编表也必须让它等，
+        // 否则会把运行时实际跑得了的班次当成"没有车"取消掉。
+        return NO_IDLE_LIMIT_SECONDS;
+      }
+      long configured = reclaim.maxIdleSeconds();
+      if (configured > 0 && configured <= NO_IDLE_LIMIT_SECONDS) {
+        return (int) configured;
+      }
+    }
+    return VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS;
   }
 
   /** {@code --group-headway} 的补全：本线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。 */
@@ -2652,6 +2688,7 @@ public final class FtaTimetableCommand {
       Integer turnaroundSeconds,
       int separationSeconds,
       Integer maxWaitSeconds,
+      Integer maxIdleSeconds,
       boolean strict,
       String name,
       String tripCodePrefix,

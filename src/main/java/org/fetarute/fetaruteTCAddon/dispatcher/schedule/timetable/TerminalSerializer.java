@@ -422,8 +422,11 @@ public final class TerminalSerializer {
         returnAt = lastArrival + returnDelayOf(returnDelay, d);
         end = returnAt;
       } else {
+        // 串行改了时刻不改归属：回库仍按派车器那条"回自己出库的库"的规则选，两边必须一致。
         VehicleDutyPlanner.Leg leg =
-            lastPlan == null ? null : legs.returnLegAt(lastPlan.terminalNodeId()).orElse(null);
+            lastPlan == null
+                ? null
+                : legs.returnLegAt(lastPlan.terminalNodeId(), duty.startDepotNodeId()).orElse(null);
         if (leg == null) {
           continue; // truncateFrom 已保证可回库；到这里是防御
         }

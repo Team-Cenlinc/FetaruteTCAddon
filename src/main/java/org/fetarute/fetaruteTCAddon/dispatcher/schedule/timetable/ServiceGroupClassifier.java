@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
@@ -205,14 +206,75 @@ public final class ServiceGroupClassifier {
         .orElse(DEFAULT_GROUP);
   }
 
+  /**
+   * 起点站台组：第一个<b>落在车站上的停靠点</b>（STOP / TERMINATE；DYNAMIC 取它的目标站）；都找不到才退回首路径点。
+   *
+   * <p>方向是乘客看到的"从哪到哪"，<b>车库与走行路径点不是站</b>。按首末路径点取会把同一条线的往返拆成互不相识的两个方向：
+   * 出库端从车库出发、入库端到车库结束，两者的键都不是站，于是往返对锚不到一起，第二层的组间错开也找不到共用起点。 MT-1N_Short 与 MT-1N_ShortR
+   * 就是这么被拆成两个方向、把进站流量算成两倍的。
+   */
   static String originGroupOf(TimetableBuilder.RouteInput route) {
-    List<NodeId> waypoints = route.definition().waypoints();
-    return stationGroupOf(waypoints.get(0).value());
+    return passengerEndpointGroup(route, true);
   }
 
+  /** 终点站台组：最后一个落在车站上的停靠点；规则同 {@link #originGroupOf}。 */
   static String terminalGroupOf(TimetableBuilder.RouteInput route) {
+    return passengerEndpointGroup(route, false);
+  }
+
+  /**
+   * 乘客端点的站台组。
+   *
+   * @param route 待分类的 route
+   * @param fromStart true 取第一个、false 取最后一个
+   */
+  private static String passengerEndpointGroup(
+      TimetableBuilder.RouteInput route, boolean fromStart) {
+    List<RouteStop> stops = route.stops();
     List<NodeId> waypoints = route.definition().waypoints();
-    return stationGroupOf(waypoints.get(waypoints.size() - 1).value());
+    if (stops != null && !stops.isEmpty()) {
+      int size = stops.size();
+      for (int i = 0; i < size; i++) {
+        int index = fromStart ? i : size - 1 - i;
+        RouteStop stop = stops.get(index);
+        if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+          continue;
+        }
+        String group =
+            stationGroupOfStop(stop, index < waypoints.size() ? waypoints.get(index).value() : "");
+        if (!group.isBlank()) {
+          return group;
+        }
+      }
+    }
+    // 一个像样的停靠点都没有（纯走行 route）：退回首末路径点，与旧行为一致。
+    NodeId fallback = fromStart ? waypoints.get(0) : waypoints.get(waypoints.size() - 1);
+    return stationGroupOf(fallback.value());
+  }
+
+  /**
+   * 一个停靠点落在哪个<b>车站</b>站台组上；落在车库、走行路径点或解析不出时返回空串。
+   *
+   * <p>DYNAMIC 停靠的节点 id 是占位，真正的站在 {@code DYNAMIC:} 规范里，按同一形状（{@code 运营商:S:站名}）拼出来，
+   * 才能和具体股道的节点落到同一个键上。
+   */
+  private static String stationGroupOfStop(RouteStop stop, String waypointNodeId) {
+    if (DynamicStopMatcher.isDynamicStop(stop)) {
+      String group =
+          DynamicStopMatcher.parseDynamicSpec(stop)
+              .map(spec -> spec.operatorCode() + ":" + spec.nodeType() + ":" + spec.nodeName())
+              .orElse("");
+      if (isStationGroup(group)) {
+        return group;
+      }
+    }
+    String group = TimetableConflictChecker.groupOf(waypointNodeId);
+    return isStationGroup(group) ? group : "";
+  }
+
+  /** 车站站台组：{@code 运营商:S:站名}。车库（{@code :D:}）不是站——车在库里不算"从这儿开往那儿"。 */
+  private static boolean isStationGroup(String group) {
+    return group != null && group.split(":").length == 3 && group.split(":")[1].equals("S");
   }
 
   /** 站台组；解析不出（车库、DYNAMIC 占位）时用节点 id 本身，保证同一节点永远同一键。 */

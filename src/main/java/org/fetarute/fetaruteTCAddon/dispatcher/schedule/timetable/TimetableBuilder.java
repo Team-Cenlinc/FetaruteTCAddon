@@ -11,10 +11,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -313,6 +315,8 @@ public final class TimetableBuilder {
         continue;
       }
       boolean declared = route.declaredAs().isPresent();
+      // 归属决定它是"我的班次"还是"我借来的走行"：别的线的带客 CREATE/RETURN 只做交路两头。
+      boolean owned = input.owns(route.routeId());
       runByRoute.put(route.routeId(), timing.totalRunSeconds());
       switch (route.operationType()) {
         case CREATE -> {
@@ -323,8 +327,9 @@ public final class TimetableBuilder {
                     route.routeCode(), "CREATE 线路首站没有 CRET 指令，无法实体化列车"));
             continue;
           }
-          if (ServiceGroupClassifier.carriesPassengers(route)) {
+          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
             // 带客的出库班是班次：上它所属组的子网格，从车库实体化（与 OPERATION + CRET 同一条路径）；不再当走行段。
+            // 别的线的带客出库班不在此列——我只是借它出库，把它排成我的班次会连人家自己的 headway 票一起拦掉。
             operations.add(new OperationPlan(route, true, endsAtDepot(route.stops())));
             break;
           }
@@ -334,7 +339,7 @@ public final class TimetableBuilder {
           legStation.put(route.routeId(), terminal);
         }
         case RETURN -> {
-          if (ServiceGroupClassifier.carriesPassengers(route)) {
+          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
             // 带客的回库班：仍由派车器在交路收尾处生成（到达 + 折返），但落 trip 行给 PIDS 与导出。
             passengerReturns.add(route.routeId());
           }
@@ -347,8 +352,17 @@ public final class TimetableBuilder {
                   declared));
           legStation.put(route.routeId(), origin);
         }
-        case OPERATION -> operations.add(
-            new OperationPlan(route, startsAtDepot(route.stops()), endsAtDepot(route.stops())));
+        case OPERATION -> {
+          if (!owned) {
+            // 今天不会出现（命令层只收本线的 OPERATION）；真出现了说明调用方搞错了归属，说清楚而不是排进表里。
+            infeasible.add(
+                new TimetableBuildResult.InfeasibleRoute(
+                    route.routeCode(), "运营线路不属于本时刻表的线路，不能排进本表"));
+            continue;
+          }
+          operations.add(
+              new OperationPlan(route, startsAtDepot(route.stops()), endsAtDepot(route.stops())));
+        }
       }
       TimetableRoutePlan plan =
           new TimetableRoutePlan(
@@ -361,7 +375,8 @@ public final class TimetableBuilder {
               terminal,
               route.depotNodeId(),
               Optional.empty(),
-              route.external());
+              // 借来的走行线路一律标 external：它所在线路自己的 headway 票不能被我拦掉。
+              route.external() || !owned);
       plans.add(plan);
       profiles.put(
           route.routeId(),
@@ -513,8 +528,17 @@ public final class TimetableBuilder {
       plannedTrips.add(trip);
     }
 
+    // 各起点上的名义发车时刻：派车器用它回答"这辆车在终点还要等多久才有下一班"，
+    // 等过头的按 IDLE_LIMIT 回库，与运行时的闲置回收同一条规则。
+    Map<String, NavigableSet<Integer>> nextSlotByOrigin = new HashMap<>();
+    for (VehicleDutyPlanner.PlannedTrip trip : plannedTrips) {
+      nextSlotByOrigin
+          .computeIfAbsent(trip.originNodeId(), key -> new TreeSet<>())
+          .add(trip.departureSeconds());
+    }
     VehicleDutyPlanner.Result planned =
-        VehicleDutyPlanner.plan(timetableId, plannedTrips, prepared.legs(), options.dutyLimits());
+        VehicleDutyPlanner.plan(
+            timetableId, plannedTrips, prepared.legs(), options.dutyLimits(), nextSlotByOrigin);
     Map<UUID, VehicleDutyPlanner.UnassignedTrip> unassigned = new HashMap<>();
     for (VehicleDutyPlanner.UnassignedTrip trip : planned.unassigned()) {
       unassigned.put(trip.tripId(), trip);
@@ -1013,6 +1037,16 @@ public final class TimetableBuilder {
     /** 这条 route 的车池：多线联编时是它所属的线，单线时是本表的线。 */
     String poolOf(UUID routeId) {
       return lineByRoute.getOrDefault(routeId, lineId).toString();
+    }
+
+    /**
+     * 这条 route 归本次构建管辖吗。
+     *
+     * <p>{@code lineByRoute} 为空表示"全部归我"——只有单元测试会这样，生产路径（单线与联编）都由命令层填满。 不在表里的是<b>借来的走行线路</b>：别的线或别的
+     * operator 的，进足迹、进交路，但不进受管辖集合。
+     */
+    boolean owns(UUID routeId) {
+      return lineByRoute.isEmpty() || lineByRoute.containsKey(routeId);
     }
 
     /** 没有邻表的构建（单元测试与不需要作用域的场景）。 */

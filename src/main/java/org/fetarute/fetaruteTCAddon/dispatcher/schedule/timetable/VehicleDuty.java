@@ -121,11 +121,19 @@ public record VehicleDuty(
     NO_COMPATIBLE_NEXT,
 
     /** 末班 route 本身以销毁收尾（DSTY），列车不进入复用池。 */
-    ROUTE_ENDS_AT_DEPOT;
+    ROUTE_ENDS_AT_DEPOT,
+
+    /**
+     * 在端点等不到下一班：距离下一个能接的班次超过闲置上限，按计划回库。
+     *
+     * <p>与运行时 {@code ReclaimManager} 的"待命超过 {@code reclaim.max-idle-seconds} 就派回库票"是同一条规则。
+     * 没有这条时编表会让车在终点干等到下一个时隙——实测 MT 有车在 PPK 等了 19 分钟，而运行时 5 分钟就把它收走了， 于是表上那段待命占用是假的，还把站台判成了冲突。
+     */
+    IDLE_LIMIT;
 
     /** 该原因是否来自硬上限（而非"恰好没有下一班"）。 */
     public boolean bounded() {
-      return this == MAX_TRIPS || this == MAX_DURATION;
+      return this == MAX_TRIPS || this == MAX_DURATION || this == IDLE_LIMIT;
     }
 
     /** 宽松解析，供存储读取使用。 */

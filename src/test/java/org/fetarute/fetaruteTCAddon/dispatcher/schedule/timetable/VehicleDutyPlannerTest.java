@@ -190,11 +190,12 @@ class VehicleDutyPlannerTest {
   @Test
   void turnaroundIsRespectedWhenChaining() {
     // 每趟 600 秒、间隔 601 秒：上一班刚结束下一班就要发车，折返 180 秒装不下；隔一班才接得上。
+    // 隔班意味着在端点等 422 秒，超过默认闲置上限；这条用例考的是折返不是闲置，所以把闲置上限放开。
     List<VehicleDutyPlanner.PlannedTrip> trips = loopTrips(6, 601, 600);
 
     VehicleDutyPlanner.Result result =
         VehicleDutyPlanner.plan(
-            TIMETABLE, trips, hubLegs(), new VehicleDutyPlanner.Limits(4, 7200, 180));
+            TIMETABLE, trips, hubLegs(), new VehicleDutyPlanner.Limits(4, 7200, 180, 3600));
 
     assertEquals(2, result.duties().size(), "两辆车隔班轮换，而不是一辆车瞬间掉头");
     Map<UUID, VehicleDutyPlanner.PlannedTrip> byId = new java.util.HashMap<>();
@@ -327,7 +328,7 @@ class VehicleDutyPlannerTest {
             new VehicleDutyPlanner.PlannedTrip(
                 id("B"), null, "B", DEPOT, HUB, 900, 300, true, false));
     VehicleDutyPlanner.Legs legs =
-        new VehicleDutyPlanner.Legs(
+        VehicleDutyPlanner.Legs.simple(
             Map.of(),
             Map.of(HUB, new VehicleDutyPlanner.Leg(RETURN_ROUTE, "RET", DEPOT, RETURN_RUN)));
 
@@ -412,9 +413,89 @@ class VehicleDutyPlannerTest {
 
   // ------------------------------------------------------------------ 夹具
 
+  /**
+   * 在端点等过头的车不许接下一班：它早该回库了。
+   *
+   * <p>运行时 {@code ReclaimManager} 待命超过 {@code reclaim.max-idle-seconds} 就派回库票。编表不跟这条规则的话，
+   * 表上会出现一辆在终点干等十几分钟的车，而那段待命占用是假的——实测 MT 有车在 PPK 等了 19 分钟，把站台判成了冲突。
+   */
+  @Test
+  void hostIdleBeyondLimitIsNotReused() {
+    // 每趟 300 秒、间隔 1200 秒：跑完要在端点等 900 秒才有下一班，超过 300 秒的闲置上限。
+    List<VehicleDutyPlanner.PlannedTrip> trips = loopTrips(4, 1200, 300);
+
+    VehicleDutyPlanner.Result tight =
+        VehicleDutyPlanner.plan(
+            TIMETABLE, trips, hubLegs(), new VehicleDutyPlanner.Limits(4, 7200, 0, 300));
+    VehicleDutyPlanner.Result loose =
+        VehicleDutyPlanner.plan(
+            TIMETABLE, trips, hubLegs(), new VehicleDutyPlanner.Limits(4, 7200, 0, 3600));
+
+    assertEquals(4, tight.duties().size(), "等不起就各自回库，一班一辆车");
+    assertEquals(1, loose.duties().size(), "闲置上限放开时仍是一辆车串到底");
+    assertTrue(tight.allDutiesReturnToStorage());
+  }
+
+  /** 闲置收口要写明原因：接完这一班之后下一个时隙太远，按计划回库而不是挂到窗口末尾。 */
+  @Test
+  void dutyClosesWithIdleLimitWhenNextSlotIsTooFar() {
+    List<VehicleDutyPlanner.PlannedTrip> trips = loopTrips(3, 1200, 300);
+    // 各起点的名义时隙：派车器靠它回答"下一班最早什么时候"。
+    Map<String, java.util.NavigableSet<Integer>> slots =
+        Map.of(HUB, new java.util.TreeSet<>(List.of(0, 1200, 2400)));
+
+    VehicleDutyPlanner.Result result =
+        VehicleDutyPlanner.plan(
+            TIMETABLE, trips, hubLegs(), new VehicleDutyPlanner.Limits(4, 7200, 0, 300), slots);
+
+    assertTrue(
+        result.duties().stream()
+            .anyMatch(duty -> duty.closeReason() == VehicleDuty.CloseReason.IDLE_LIMIT),
+        "应当有交路以 IDLE_LIMIT 收口");
+    assertTrue(VehicleDuty.CloseReason.IDLE_LIMIT.bounded(), "闲置上限是硬上限，不是'恰好没有下一班'");
+  }
+
+  /** 同一站有多条回库线路时，车回自己出库的那个库——不按走行最短抢别人的库。 */
+  @Test
+  void returnLegPrefersTheOriginDepot() {
+    String otherDepot = "OP:D:OTHER:1";
+    UUID nearRoute = id("RET-NEAR");
+    UUID homeRoute = id("RET-HOME");
+    // 近的那条回 OTHER 库（走行 10），远的那条回本车库 DEPOT（走行 90）。
+    VehicleDutyPlanner.Legs legs =
+        new VehicleDutyPlanner.Legs(
+            Map.of(HUB, new VehicleDutyPlanner.Leg(CREATE_ROUTE, "CRT", DEPOT, CREATE_RUN)),
+            Map.of(
+                HUB,
+                List.of(
+                    new VehicleDutyPlanner.Leg(nearRoute, "RET-NEAR", otherDepot, 10),
+                    new VehicleDutyPlanner.Leg(homeRoute, "RET-HOME", DEPOT, 90))));
+
+    assertEquals(nearRoute, legs.returnLegAt(HUB).orElseThrow().routeId(), "无偏好时仍是走行最短");
+    assertEquals(homeRoute, legs.returnLegAt(HUB, DEPOT).orElseThrow().routeId(), "带偏好时回自己出库的那个库");
+    assertEquals(
+        nearRoute, legs.returnLegAt(HUB, "OP:D:OTHER:2").orElseThrow().routeId(), "偏好按车库组算，不看股道号");
+  }
+
+  /** 两条回库线路通向同一个车库组时，偏好不起作用，仍按"显式指定 > 走行最短"。 */
+  @Test
+  void declaredStillBeatsShorterWhenDepotsTie() {
+    UUID shortRoute = id("RET-SHORT");
+    UUID declaredRoute = id("RET-DECLARED");
+    VehicleDutyPlanner.Legs legs =
+        VehicleDutyPlanner.Legs.of(
+            List.of(),
+            List.of(
+                new VehicleDutyPlanner.Leg(shortRoute, "RET-SHORT", DEPOT, 10, false),
+                new VehicleDutyPlanner.Leg(declaredRoute, "RET-DECLARED", DEPOT, 90, true)),
+            Map.of(shortRoute, HUB, declaredRoute, HUB));
+
+    assertEquals(declaredRoute, legs.returnLegAt(HUB, DEPOT).orElseThrow().routeId());
+  }
+
   /** HUB 既能出库也能回库。 */
   private static VehicleDutyPlanner.Legs hubLegs() {
-    return new VehicleDutyPlanner.Legs(
+    return VehicleDutyPlanner.Legs.simple(
         Map.of(HUB, new VehicleDutyPlanner.Leg(CREATE_ROUTE, "CRT", DEPOT, CREATE_RUN)),
         Map.of(HUB, new VehicleDutyPlanner.Leg(RETURN_ROUTE, "RET", DEPOT, RETURN_RUN)));
   }

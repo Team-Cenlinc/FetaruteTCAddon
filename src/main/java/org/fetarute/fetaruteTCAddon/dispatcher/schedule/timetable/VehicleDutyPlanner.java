@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -58,6 +59,26 @@ public final class VehicleDutyPlanner {
    * @return 打包结果
    */
   public static Result plan(UUID timetableId, List<PlannedTrip> trips, Legs legs, Limits limits) {
+    return plan(timetableId, trips, legs, limits, Map.of());
+  }
+
+  /**
+   * 指派车辆并封装 duty。
+   *
+   * @param timetableId 所属时刻表
+   * @param trips 已按发车时刻升序排定的班次
+   * @param legs 各站的出库/回库走行段
+   * @param limits 硬上限
+   * @param nextSlotByOrigin 各起点上后续班次的名义发车时刻（升序）；封口判据用它回答"下一班最早什么时候"。
+   *     为空时退化为不按闲置上限收口的旧行为——只关心班次链的用例可以不传。
+   * @return 打包结果
+   */
+  public static Result plan(
+      UUID timetableId,
+      List<PlannedTrip> trips,
+      Legs legs,
+      Limits limits,
+      Map<String, NavigableSet<Integer>> nextSlotByOrigin) {
     Objects.requireNonNull(timetableId, "timetableId");
     Objects.requireNonNull(limits, "limits");
     Legs access = legs == null ? Legs.none() : legs;
@@ -100,7 +121,7 @@ public final class VehicleDutyPlanner {
       // 接完这一班立刻判断还能不能再接：能不能"再接一班"是 duty 的封口条件，
       // 放到下一班到来时再判会让边界依赖于"恰好还有没有下一班"，那就不是硬上限了。
       VehicleDuty.CloseReason reason =
-          closeReasonAfter(host, access, limits, minTripDuration, minClosingTail);
+          closeReasonAfter(host, access, limits, minTripDuration, minClosingTail, nextSlotByOrigin);
       if (reason != null) {
         host.seal(reason);
         closed.add(host);
@@ -187,6 +208,10 @@ public final class VehicleDutyPlanner {
       }
       if (duty.readyAtSeconds > trip.departureSeconds()) {
         // readyAt 已经含折返时间，因此这一条同时覆盖了"来不及掉头"。
+        continue;
+      }
+      if (trip.departureSeconds() - duty.readyAtSeconds > limits.maxIdleSeconds()) {
+        // 这辆车在端点已经等过头了：运行时的闲置回收早把它送回库，编表不能让它凭空等到下一个时隙。
         continue;
       }
       if (duty.tripCount() + 1 > limits.maxTripsPerDuty()) {
@@ -282,7 +307,12 @@ public final class VehicleDutyPlanner {
    * 就没有任何后续班次接得上了，此时封口的原因确实是时长上限，而不是"恰好没有下一班"。 用一个更松的下界（比如只算折返）会让 duty 一直挂着开放状态到窗口末尾，收尾原因也就变得没有信息量。
    */
   private static VehicleDuty.CloseReason closeReasonAfter(
-      OpenDuty duty, Legs access, Limits limits, int minTripDuration, int minClosingTail) {
+      OpenDuty duty,
+      Legs access,
+      Limits limits,
+      int minTripDuration,
+      int minClosingTail,
+      Map<String, NavigableSet<Integer>> nextSlotByOrigin) {
     PlannedTrip last = duty.lastTrip();
     if (last.endsAtDepot()) {
       return VehicleDuty.CloseReason.ROUTE_ENDS_AT_DEPOT;
@@ -299,7 +329,29 @@ public final class VehicleDutyPlanner {
     if (minimumTail - duty.startSeconds > limits.maxDutyDurationSeconds()) {
       return VehicleDuty.CloseReason.MAX_DURATION;
     }
+    if (idleBeyondLimit(duty, limits, nextSlotByOrigin)) {
+      return VehicleDuty.CloseReason.IDLE_LIMIT;
+    }
     return null;
+  }
+
+  /**
+   * 这辆车在当前终点要等多久才有下一班：超过闲置上限就该回库。
+   *
+   * <p>没有传时隙表时一律返回 false——退化成旧行为，而不是把所有 duty 都按闲置收口。
+   */
+  private static boolean idleBeyondLimit(
+      OpenDuty duty, Limits limits, Map<String, NavigableSet<Integer>> nextSlotByOrigin) {
+    if (nextSlotByOrigin == null || nextSlotByOrigin.isEmpty()) {
+      return false;
+    }
+    NavigableSet<Integer> slots = nextSlotByOrigin.get(duty.lastTerminal);
+    if (slots == null || slots.isEmpty()) {
+      // 这个终点上没有任何后续发车：等下去也等不到，交给"接不上"的常规收口。
+      return false;
+    }
+    Integer next = slots.ceiling(duty.readyAtSeconds);
+    return next == null || next - duty.readyAtSeconds > limits.maxIdleSeconds();
   }
 
   /**
@@ -391,9 +443,10 @@ public final class VehicleDutyPlanner {
         returnAt = arrival;
         end = arrival;
       } else {
+        // 回自己出库的那个库：startDepot 是这条交路的出库点。
         Leg leg =
             access
-                .returnLegAt(last.terminalNodeId())
+                .returnLegAt(last.terminalNodeId(), startDepot)
                 .orElseThrow(
                     () -> new IllegalStateException("duty 停在没有回库线路的终点: " + last.terminalNodeId()));
         endDepot = leg.depotNodeId();
@@ -531,13 +584,36 @@ public final class VehicleDutyPlanner {
    * 全线的出库/回库走行段索引。
    *
    * @param createByStation 按首站节点索引的 CREATE 段
-   * @param returnByStation 按末站节点索引的 RETURN 段
+   * @param returnCandidates 按末站节点索引的<b>全部</b> RETURN 段，组内已按"显式指定 &gt; 走行最短"排序
    */
-  public record Legs(Map<String, Leg> createByStation, Map<String, Leg> returnByStation) {
+  public record Legs(Map<String, Leg> createByStation, Map<String, List<Leg>> returnCandidates) {
 
     public Legs {
       createByStation = createByStation == null ? Map.of() : Map.copyOf(createByStation);
-      returnByStation = returnByStation == null ? Map.of() : Map.copyOf(returnByStation);
+      Map<String, List<Leg>> frozen = new LinkedHashMap<>();
+      if (returnCandidates != null) {
+        returnCandidates.forEach(
+            (station, legs) -> {
+              if (station != null && legs != null && !legs.isEmpty()) {
+                frozen.put(station, List.copyOf(legs));
+              }
+            });
+      }
+      returnCandidates = Map.copyOf(frozen);
+    }
+
+    /** 同一站只有一条回库线路的简单形态：用例与只关心存在性的调用方用它。 */
+    public static Legs simple(Map<String, Leg> createByStation, Map<String, Leg> returnByStation) {
+      Map<String, List<Leg>> candidates = new LinkedHashMap<>();
+      if (returnByStation != null) {
+        returnByStation.forEach(
+            (station, leg) -> {
+              if (station != null && leg != null) {
+                candidates.put(station, List.of(leg));
+              }
+            });
+      }
+      return new Legs(createByStation, candidates);
     }
 
     /** 没有任何走行段：只有自带 CRET/DSTY 的 route 能成 duty。 */
@@ -548,18 +624,28 @@ public final class VehicleDutyPlanner {
     /** 从走行段列表建索引；同一站有多条时先取显式指定的，再取走行最短的，并列按 routeCode 再按 routeId——确定性。 */
     public static Legs of(List<Leg> creates, List<Leg> returns, Map<UUID, String> stationByLeg) {
       Map<String, Leg> create = new LinkedHashMap<>();
-      Map<String, Leg> ret = new LinkedHashMap<>();
+      Map<String, List<Leg>> ret = new LinkedHashMap<>();
       index(create, creates, stationByLeg);
-      index(ret, returns, stationByLeg);
+      indexAll(ret, returns, stationByLeg);
       return new Legs(create, ret);
     }
 
-    private static void index(Map<String, Leg> out, List<Leg> legs, Map<UUID, String> station) {
-      if (legs == null) {
-        return;
+    /** 回库段按站收全部候选，组内保持 {@link #index} 的确定性序；选哪一条留到 {@link #returnLegAt} 按车库偏好决定。 */
+    private static void indexAll(
+        Map<String, List<Leg>> out, List<Leg> legs, Map<UUID, String> station) {
+      for (Leg leg : sortDeterministically(legs)) {
+        String node = station == null ? null : station.get(leg.routeId());
+        if (node == null || node.isBlank()) {
+          continue;
+        }
+        out.computeIfAbsent(node, key -> new ArrayList<>()).add(leg);
       }
-      List<Leg> sorted =
-          legs.stream()
+    }
+
+    private static List<Leg> sortDeterministically(List<Leg> legs) {
+      return legs == null
+          ? List.of()
+          : legs.stream()
               .filter(Objects::nonNull)
               .sorted(
                   Comparator.comparing((Leg leg) -> !leg.declared())
@@ -567,6 +653,10 @@ public final class VehicleDutyPlanner {
                       .thenComparing(Leg::routeCode)
                       .thenComparing(leg -> leg.routeId().toString()))
               .toList();
+    }
+
+    private static void index(Map<String, Leg> out, List<Leg> legs, Map<UUID, String> station) {
+      List<Leg> sorted = sortDeterministically(legs);
       for (Leg leg : sorted) {
         String node = station == null ? null : station.get(leg.routeId());
         if (node == null || node.isBlank()) {
@@ -580,13 +670,49 @@ public final class VehicleDutyPlanner {
       return Optional.ofNullable(createByStation.get(stationNodeId));
     }
 
+    /** 不带偏好的回库段：只回答"这个终点能不能回库"，与 {@link #closable} 同一口径。 */
     public Optional<Leg> returnLegAt(String stationNodeId) {
-      return Optional.ofNullable(returnByStation.get(stationNodeId));
+      return returnLegAt(stationNodeId, null);
+    }
+
+    /**
+     * 带车库偏好的回库段：<b>回自己出库的那个车库</b>的优先，其次显式指定的，再次走行最短。
+     *
+     * <p>按最短选会让一条线的车全部涌进离终点最近的那个库——实测里 MT 从 OFL 终到的车全回了 HHU，
+     * 于是别的线的回库走行在同一段咽喉上和它们撞。回原库是运营常识，也让每条线的回库流各走各的。
+     *
+     * @param stationNodeId 终到节点
+     * @param preferredDepotNodeId 本交路的出库车库节点；为空时退化为无偏好
+     */
+    public Optional<Leg> returnLegAt(String stationNodeId, String preferredDepotNodeId) {
+      List<Leg> candidates = returnCandidates.get(stationNodeId);
+      if (candidates == null || candidates.isEmpty()) {
+        return Optional.empty();
+      }
+      String preferredGroup = depotGroupOf(preferredDepotNodeId);
+      if (!preferredGroup.isEmpty()) {
+        for (Leg leg : candidates) {
+          if (depotGroupOf(leg.depotNodeId()).equals(preferredGroup)) {
+            return Optional.of(leg);
+          }
+        }
+      }
+      // 候选已按"显式指定 > 走行最短"排好序，第一条就是无偏好时的答案。
+      return Optional.of(candidates.get(0));
+    }
+
+    /** 车库组：{@code 运营商:D:库名}，解析不出时用节点 id 本身，保证同一个库永远同一个键。 */
+    private static String depotGroupOf(String nodeId) {
+      if (nodeId == null || nodeId.isBlank()) {
+        return "";
+      }
+      String group = TimetableConflictChecker.groupOf(nodeId);
+      return group.isBlank() ? nodeId.trim() : group;
     }
 
     /** 这一班跑完之后，这辆车能不能回库。 */
     boolean closable(PlannedTrip trip) {
-      return trip.endsAtDepot() || returnByStation.containsKey(trip.terminalNodeId());
+      return trip.endsAtDepot() || returnCandidates.containsKey(trip.terminalNodeId());
     }
 
     /** 这一班跑完到回到车库还要多久（含折返）。前提是 {@link #closable}。 */
@@ -594,7 +720,7 @@ public final class VehicleDutyPlanner {
       if (trip.endsAtDepot()) {
         return 0;
       }
-      Leg leg = returnByStation.get(trip.terminalNodeId());
+      Leg leg = returnLegAt(trip.terminalNodeId()).orElse(null);
       return leg == null ? 0 : limits.turnaround().secondsFor(trip.routeId()) + leg.runSeconds();
     }
 
@@ -620,25 +746,51 @@ public final class VehicleDutyPlanner {
    * @param maxTripsPerDuty 单个 duty 最多承担多少班次
    * @param maxDutyDurationSeconds 单个 duty 最长在线时间（秒），含出库与回库走行
    * @param turnaround 折返时间表，见 {@link TurnaroundTable}——它不是上限，是从 route 定义算出来的物理量
+   * @param maxIdleSeconds 在端点等下一班的上限，超过就回库；与运行时 {@code reclaim.max-idle-seconds} 同一条规则
    */
   public record Limits(
-      int maxTripsPerDuty, int maxDutyDurationSeconds, TurnaroundTable turnaround) {
+      int maxTripsPerDuty,
+      int maxDutyDurationSeconds,
+      TurnaroundTable turnaround,
+      int maxIdleSeconds) {
 
-    /** 默认上限：4 趟 / 2 小时在线。折返<b>没有</b>默认值——它来自各 route 终到站的 dwell。 */
+    /** 默认上限：4 趟 / 2 小时在线 / 端点闲置 5 分钟。折返<b>没有</b>默认值——它来自各 route 终到站的 dwell。 */
     public static final int DEFAULT_MAX_TRIPS = 4;
 
     public static final int DEFAULT_MAX_DURATION_SECONDS = 7200;
+
+    /** 与 {@code reclaim.max-idle-seconds} 的默认值一致；命令层会用实服配置覆盖它。 */
+    public static final int DEFAULT_MAX_IDLE_SECONDS = 300;
 
     public Limits {
       maxTripsPerDuty = maxTripsPerDuty > 0 ? maxTripsPerDuty : DEFAULT_MAX_TRIPS;
       maxDutyDurationSeconds =
           maxDutyDurationSeconds > 0 ? maxDutyDurationSeconds : DEFAULT_MAX_DURATION_SECONDS;
       turnaround = turnaround == null ? TurnaroundTable.none() : turnaround;
+      maxIdleSeconds = maxIdleSeconds > 0 ? maxIdleSeconds : DEFAULT_MAX_IDLE_SECONDS;
+    }
+
+    /** 折返表 + 默认闲置上限。 */
+    public Limits(int maxTripsPerDuty, int maxDutyDurationSeconds, TurnaroundTable turnaround) {
+      this(maxTripsPerDuty, maxDutyDurationSeconds, turnaround, DEFAULT_MAX_IDLE_SECONDS);
     }
 
     /** 折返用显式全线值：等价于 {@link TurnaroundTable#fixed}，供 {@code --turnaround} 与用例使用。 */
     public Limits(int maxTripsPerDuty, int maxDutyDurationSeconds, int fixedTurnaroundSeconds) {
       this(maxTripsPerDuty, maxDutyDurationSeconds, TurnaroundTable.fixed(fixedTurnaroundSeconds));
+    }
+
+    /** 带闲置上限的显式折返值，供用例把既有期望钉在"不回收"的旧行为上（{@code maxIdle} 给很大）。 */
+    public Limits(
+        int maxTripsPerDuty,
+        int maxDutyDurationSeconds,
+        int fixedTurnaroundSeconds,
+        int maxIdleSeconds) {
+      this(
+          maxTripsPerDuty,
+          maxDutyDurationSeconds,
+          TurnaroundTable.fixed(fixedTurnaroundSeconds),
+          maxIdleSeconds);
     }
 
     public static Limits defaults() {

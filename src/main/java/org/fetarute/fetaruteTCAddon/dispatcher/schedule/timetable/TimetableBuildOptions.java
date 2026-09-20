@@ -40,13 +40,23 @@ public record TimetableBuildOptions(
   /**
    * 让车修复参数。
    *
-   * @param maxWait 单处让车上限；零关闭修复。默认 60 s，不能超过运行时的 {@code timetable.hold-max-seconds}（那是车真能被扣留的上限）
-   * @param tolerance 同一班累计让车上限，超过即截断交路；对应运行时的 assign-tolerance
+   * @param maxWait 单处让车上限；零关闭修复。默认 300 s，上限 1800 s
+   * @param tolerance 同一班累计让车上限，超过即截断交路；对应运行时的 assign-tolerance，且不小于 {@code maxWait}
    */
   public record Repair(Duration maxWait, Duration tolerance) {
 
-    /** 默认单处让车上限。 */
-    public static final int DEFAULT_MAX_WAIT_SECONDS = 60;
+    /**
+     * 默认单处让车上限，与 {@code timetable.assign-tolerance-seconds} 的默认值一致。
+     *
+     * <p>这里曾经是 60 s，并且被 {@code timetable.hold-max-seconds} 封顶，理由写的是"那是车真能被扣留的上限"。
+     * 那是把两种等待混为一谈了：{@code hold-max} 约束的是<b>早到的车在站台被扣多久</b>（超了就 {@code HOLD_SKIPPED} 放行），
+     * 而车在资源前排队等待由占用队列做，运行时无界。表上写 300 s 的让车，运行时的行为是"站台扣一段 + 资源前等一段"， 车次绑定按表定时刻 ± tolerance
+     * 判偏差，仍然绑得上。
+     */
+    public static final int DEFAULT_MAX_WAIT_SECONDS = 300;
+
+    /** 单处让车的上限：运行时唯一可能销毁一辆等待列车的阈值（{@code stuck-cleanup-passenger-threshold-seconds}）。 */
+    public static final int MAX_WAIT_CEILING_SECONDS = 1800;
 
     /** 默认累计上限，与 {@code timetable.assign-tolerance-seconds} 的默认值一致。 */
     public static final int DEFAULT_TOLERANCE_SECONDS = 300;
@@ -56,10 +66,17 @@ public record TimetableBuildOptions(
           maxWait == null || maxWait.isNegative()
               ? Duration.ofSeconds(DEFAULT_MAX_WAIT_SECONDS)
               : maxWait;
+      if (maxWait.toSeconds() > MAX_WAIT_CEILING_SECONDS) {
+        maxWait = Duration.ofSeconds(MAX_WAIT_CEILING_SECONDS);
+      }
       tolerance =
           tolerance == null || tolerance.isNegative()
               ? Duration.ofSeconds(DEFAULT_TOLERANCE_SECONDS)
               : tolerance;
+      if (tolerance.compareTo(maxWait) < 0) {
+        // 累计上限小于单步上限时，第一处让车就会把交路截断——那不是"容差"，是配置写错了。
+        tolerance = maxWait;
+      }
     }
 
     public static Repair defaults() {

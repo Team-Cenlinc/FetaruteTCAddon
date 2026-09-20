@@ -131,7 +131,13 @@ public final class TimetableSetBuilder {
     List<Member> members = input.members();
     if (members.size() == 1) {
       Member only = members.get(0);
-      TimetableBuilder.BuildInput single = withNeighbors(only.input(), input.neighbors(), Map.of());
+      // 单线也要填归属：不填的话 builder 认为"全部 route 都归我"，别的线的带客走行会被当成我的班次排进表。
+      Map<UUID, UUID> ownership = new HashMap<>();
+      for (UUID routeId : only.ownRouteIds()) {
+        ownership.put(routeId, only.input().lineId());
+      }
+      TimetableBuilder.BuildInput single =
+          withNeighbors(only.input(), input.neighbors(), ownership);
       TimetableBuildResult result = new TimetableBuilder().build(single, options, builtAt);
       Map<UUID, Timetable> tables = new LinkedHashMap<>();
       Map<UUID, List<TimetableBaseline>> baselines = new LinkedHashMap<>();

@@ -631,6 +631,86 @@ class TimetableBuilderTest {
 
   // ------------------------------------------------------------------ 夹具
 
+  /**
+   * 别的线的带客出库班只当走行段用，并标 external——不排成我的班次，也不进受管辖集合。
+   *
+   * <p>编表时 CREATE/RETURN 的搜索范围是本 operator 全部线路（为了找出库/回库途径），而"中途有 STOP 的 CREATE/RETURN
+   * 是班次"这条规则一叠加，别的线的带客出库班就被排进了我的表。实测里给 WS 编表会把 DS 与 MT 的 带客 CREATE 一起排进去，发布后连人家自己的 headway 票都拦掉。
+   */
+  @Test
+  void foreignPassengerCreateIsOnlyALegAndMarkedExternal() {
+    UUID ra = TimetableTestFixtures.routeId("RA");
+    UUID foreign = TimetableTestFixtures.routeId("FOREIGN-DS");
+    UUID ret = TimetableTestFixtures.routeId("RET");
+    UUID crt = TimetableTestFixtures.routeId("CRT");
+    // 外线的带客出库班：DEP→A→B，中途有 STOP，自己看是班次。
+    TimetableBuilder.RouteInput foreignCreate =
+        new TimetableBuilder.RouteInput(
+            foreign,
+            "FOREIGN-DS",
+            RouteOperationType.CREATE,
+            1,
+            TimetableTestFixtures.route("FOREIGN-DS", List.of(DEP, A, B)),
+            TimetableTestFixtures.createStops(foreign, 3, DEP),
+            Optional.empty());
+    List<TimetableBuilder.RouteInput> routes = new ArrayList<>();
+    routes.add(operation(ra, "RA", 1, List.of(A, B, C)));
+    routes.add(foreignCreate);
+    // 本线自己的出库/回库走行：没有它们 RA 开不了交路，验不到"外线带客班只当走行"这件事。
+    routes.addAll(legs());
+
+    Timetable owned = buildOwning(routes, Map.of(ra, LINE, ret, LINE));
+
+    TimetableRoutePlan foreignPlan = owned.routePlan(foreign).orElseThrow();
+    assertTrue(foreignPlan.external(), "别的线的走行线路必须标 external");
+    assertTrue(
+        owned.trips().stream().noneMatch(trip -> trip.routeId().equals(foreign)), "它不该被排成本表的班次");
+    assertTrue(owned.trips().stream().anyMatch(trip -> trip.routeId().equals(ra)), "本线的班次照排");
+    assertTrue(owned.routePlan(crt).orElseThrow().external(), "借来的纯走行同样标 external");
+  }
+
+  /** 受管辖集合排除借来的走行线路：发布之后不能去拦别人线路自己的 headway 票。 */
+  @Test
+  void managedRouteIdsExcludeForeignLegs() {
+    UUID ra = TimetableTestFixtures.routeId("RA");
+    UUID crt = TimetableTestFixtures.routeId("CRT");
+    UUID ret = TimetableTestFixtures.routeId("RET");
+    List<TimetableBuilder.RouteInput> routes = new ArrayList<>();
+    routes.add(operation(ra, "RA", 1, List.of(A, B, C)));
+    routes.addAll(legs());
+
+    Timetable owned = buildOwning(routes, Map.of(ra, LINE));
+
+    assertTrue(owned.managedRouteIds().contains(ra), "本线的运营线路受管辖");
+    assertFalse(owned.managedRouteIds().contains(crt), "借来的出库线路不受管辖");
+    assertFalse(owned.managedRouteIds().contains(ret), "借来的回库线路不受管辖");
+    assertTrue(owned.routeIds().contains(crt), "但它仍然在本表的足迹与交路里");
+  }
+
+  /** 按给定归属构建：不在 {@code lineByRoute} 里的 route 是借来的走行线路。 */
+  private static Timetable buildOwning(
+      List<TimetableBuilder.RouteInput> routes, Map<UUID, UUID> lineByRoute) {
+    TimetableBuildResult result =
+        new TimetableBuilder()
+            .build(
+                new TimetableBuilder.BuildInput(
+                    TIMETABLE,
+                    COMPANY,
+                    OPERATOR,
+                    LINE,
+                    "TT-OWN",
+                    "归属测试",
+                    routes,
+                    chain(),
+                    TimetableTestFixtures.perEdgeSpeedModel(),
+                    Optional.empty(),
+                    List.of(),
+                    lineByRoute),
+                options(600),
+                BUILT_AT);
+    return result.timetable().orElseThrow();
+  }
+
   private static TimetableBuildResult build(Fixture fixture, TimetableBuildOptions options) {
     return new TimetableBuilder()
         .build(
