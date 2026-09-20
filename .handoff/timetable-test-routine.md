@@ -1,31 +1,45 @@
-# 时刻表测试 routine（jar 2f24f48）
+# 时刻表测试 routine
+
+**适用版本**：`wip/dynamic-dispatch-stabilization`，跨线作用域 S1–S4 + P0/P1 + 限速覆盖 + Q1/Q2/Q3 + 折返改为终到站 dwell。
+上一版 routine（建立在 `--turnaround` 默认 180 秒之上）作废，期望数字全变了，原因见下。
 
 实服：`../fetarute_experimental`。company `FTAS` / operator `SURC` / 线路 `WS`(4 route) `MT`(6) `DS`(2)。
 
-**2026-09-19 实测更新**：这张网上**没有干净的线**。WS 的 build 报告给出 WS↔DS 共用 **243** 处、
-WS↔MT 共用 **229** 处。此前从申报停靠点只统计出 18 处、且 WS 一处都没有——那是下界，足迹按展开后的
-路径算，量级差十倍以上。**下面凡是"拿某条线当独立对照组"的设计都已作废**（原 L4 的前提）。
-
-**已知瓶颈**：`SURC:S:CHT:3` 是 CHT 在图里唯一的 STATION 节点（容量 1），而 WS 的三条运营 route
-（`WS-1L_ShortC` 末站 / `WS-2C_FullR` 首站 / `WS-2N_FullR` 末站）加回库 route `WS-1C_ShortD` 首站
-**全部**以它为端点。叠加"待命按 duty 建模"（车在端点等下一班的整段时间都占股道），WS 在 120s 目标间隔下
-有 2160 处冲突，站台占 840，放宽到 4 倍上限 480s 仍不可行。这是拓扑问题，不是参数问题。
-
-每一阶段给「做什么 / 期望 / **判别量** / 失败看哪」。判别量是能证明这层真生效的那个数——
-只看"没报错"会漏掉"功能根本没跑起来"这一类失败，这在这个项目上已经栽过。
+每阶段给「做什么 / 期望 / **判别量** / 失败看哪」。判别量是能证明这一层真生效的那个数——
+只看"没报错"会漏掉"功能根本没跑起来"，这在本项目已经栽过不止一次。
 
 ---
 
-## L0 代码层（已完成，2026-09-19）
+## 这一版和上一版的四个关键差异
+
+1. **折返不再是 180 秒常数**。按各 route 终到停靠点的 dwell 逐条取（`TurnaroundTable`），
+   `--turnaround` 降级为显式全线覆盖。WS 两条终到 CHT 的 route 没配 dwell → 走 `--dwell` 兜底 **20 秒**。
+   离线复核里这一个参数就占了 CHT 九成占用，所以**所有与冲突数、可行间隔有关的期望都要重新建立**。
+2. **行程时分变了**。build 此前没接 `EdgeSpeedResolver`，边基础限速为 0 时全线按默认 8 bps 算，慢两到三倍；
+   现在读 `fta_rail_edge_overrides` 的**永久**限速（临时限速与封锁带截止时刻，为了确定性不进表）。
+3. **三个模型缺陷已修**（PASS 路径点不再算停站、进站路径点不再消耗站台容量、同一辆车不再撞自己）。
+   旧报告里那 2160 处冲突有相当部分是伪冲突，不要拿它当基准。
+4. **命令面变了**：`<line>` 接受逗号列表、多了 `--group-headway` / `--max-wait`、publish 变成整组语义、
+   报告多了五类行与一排动作按钮。
+
+## 已知瓶颈（编表前先知道）
+
+`SURC:S:CHT:3` 是 CHT 在图里唯一的 STATION 节点（容量 1），WS 三条运营 route 加回库 route **全部**以它为端点。
+P1 的端点串行会把容量 1 的端点当串行资源处理，CHT 的冲突应当**按构造归零**，代价是班次被延后。
+离线复核（折返 20 + PASS 修正，但**未套限速覆盖**）给出的预期是：`--max-trips 4` 时约 **180 s** 可行，
+`--max-trips 7` 时约 **240–300 s**。实服接了限速覆盖，时分不同，这两个数只是量级参考，不是验收线。
+
+---
+
+## L0 代码层
 
 ```
-219 suites / 2002 tests / 0 failures / 0 errors / 0 skipped
+230 suites / 2062 tests / 0 failures / 0 errors / 0 skipped
 SpotBugs main 0 / test 0
-gitCommit=2f24f48  sourceFingerprint=562167555aac
 ```
 
-重跑：`./gradlew clean check shadowJar`，然后解 `build/test-results/test/*.xml` 看 failures，
-**不要只看 `BUILD SUCCESSFUL`**。
+重跑：`./gradlew spotlessApply clean check shadowJar`，然后解 `build/test-results/test/*.xml` 看 failures，
+**不要只看 `BUILD SUCCESSFUL`**。jar 指纹在 `build-info.properties` 的 `gitCommit`。
 
 ---
 
@@ -43,29 +57,23 @@ cp "$D/plugins/FetaruteTCAddon/config.yml" "$D/plugins/FetaruteTCAddon/config.ym
 cp build/libs/FetaruteTCAddon-0.0.2.jar "$D/plugins/FetaruteTCAddon-0.0.2.jar"
 ```
 
-起服。
+起服，然后 `/fta graph build`（L6 的发布重检要图快照，没有会被拒）。
 
 ### 期望
 
-- 日志里 `SMART_RUNTIME_BUILD_FINGERPRINT ... gitCommit=2f24f48`
+- `SMART_RUNTIME_BUILD_FINGERPRINT ... gitCommit=<本地 HEAD>`
 - `config.yml` 的 `config-version` 变成 `33`，多出 `reclaim:` 段（`enabled: false`）
-- `timetable:` 段全部默认关（`enabled: false` / `spawn-enabled: false`）
-- 库里多出 4 张表
+- `timetable:` 段全部默认关
 
 ### 判别量
 
 ```bash
 sqlite3 $D/plugins/FetaruteTCAddon/data/fetarute.sqlite \
   "select name from sqlite_master where type='table' and name like 'fta_timetable%';"
-# 期望 4 行：fta_timetables / fta_timetable_trips / fta_timetable_duties / fta_timetable_baselines
+# 期望 4 行，含 fta_timetable_baselines
 ```
 
-**`fta_timetable_baselines` 必须在**。它缺席 = 跑的是旧 jar，后面 L5/L6 全部无效。
-不要靠"某个新命令存在与否"判断版本——用 fingerprint。
-
-### 失败看哪
-
-`grep -i "timetable\|schema\|SQLITE_ERROR" $D/logs/latest.log | head -40`
+`fta_timetable_baselines` 缺席 = 跑的是旧 jar，L5/L6 全部无效。**用 fingerprint 判断版本，不要用"某命令在不在"。**
 
 ---
 
@@ -76,231 +84,232 @@ sqlite3 $D/plugins/FetaruteTCAddon/data/fetarute.sqlite \
 ### 做什么
 
 ```
-/fta graph build                     ← 先确保有图快照，否则 L5 的重检会被跳过
-/fta timetable build FTAS SURC WS WS-D1 --start 06:00 --end 23:00
-/fta timetable info FTAS SURC WS WS-D1
-/fta timetable duties FTAS SURC WS WS-D1
-/fta timetable export FTAS SURC WS WS-D1 200
-/fta timetable neighbors FTAS SURC WS WS-D1
+/fta timetable build FTAS SURC WS WS-D1 --start 05:00 --end 24:00
+/fta timetable info    FTAS SURC WS WS-D1
+/fta timetable duties  FTAS SURC WS WS-D1
+/fta timetable export  FTAS SURC WS WS-D1 200
 ```
 
 然后**原样再 build 一次**（同 code、同参数），再 export 一次。
 
-### 期望
+> `--end 24:00` 是 24 小时。`--end` 是"末班必须**跑完**"的时刻，不是末班发车时刻；
+> `--start 00:00 --end 00:00` 会被拒（`serviceEnd <= serviceStart`），跨零点写 `25:00` 这类形式。
 
-报告里逐项过一遍：班次数、计划窗口、**间隔来源**（哪来的 baseline）、冲突检查结果、
-**共用资源**、交路数、全天出库次数与峰值同时在线车数、目标 vs 实际服务比例、
-"所有交路都以回库收尾"、被取消的班次。
+### 期望：报告要逐项看的行
+
+| 行 | 看什么 |
+| --- | --- |
+| 交路组间隔 / 相位 / 合成间隔 | 每组每方向一张子网格；往返对锚定的相位说明 |
+| **结构下界** | 每次折返占用 = 进站 + 折返 + 出站 + 裕量，**「折返取 …」要写「终到站 dwell」** |
+| **端点串行** | CHT 的经过次数、占用百分比、偏离网格班次数、无处等待、截断 |
+| **让车** | N 处已写进表（涉及 M 班，最长 +Xs，`--max-wait` Ys） |
+| 共用资源 | 与 DS / MT 各共用多少处 |
+| 冲突检查 | 目标间隔下的冲突数与明细 |
+| 取消班次 | 按 route 与原因归组（注意新原因 `STUB_SATURATED`） |
+| 交路数 / 峰值同时在线 / 目标 vs 实际服务比例 / 所有交路都以回库收尾 | 同旧版 |
 
 ### 判别量
 
-1. **确定性**：两次 export 必须**逐字节相同**，包括 trip/duty 主键。
-   把两次输出存文件 `diff` 一下。不同 = 不变量 2 破了，后面全部不用测了。
-2. **回库行**：必须是"所有交路都以回库收尾"。不是 = `VehicleDutyPlanner` 有问题。
-3. **被取消的班次**：如果大面积 `NO_RETURN_ACCESS` / `NO_CREATE_ACCESS`，说明 WS 缺出库或回库途径，
-   先修线路定义再往下走。
-4. **共用资源**：已实测为 DS 243 / MT 229，都标"无已发布时刻表——它按 headway 发车，干扰单向"。
-   这是"只报告不检查"的正常形态。报 0 才是异常。
-5. **目标间隔**：WS 的线路级 baseline 是 120s（`fta_lines.spawn_freq_baseline_sec`），
-   而搜索上限是**目标的 4 倍**。不手动传 `--headway` 的话搜索范围只有 120–480，
-   对 WS 这条线肯定不够。先用 `--headway 1800` 把窗口撑开，再谈可行性。
+1. **确定性**：两次 export **逐字节相同**，含 trip/duty 主键。不同 = 不变量 2 破了，后面不用测。
+2. **折返来源**：「结构下界」那行必须写 **`折返取 终到站 dwell 20s`** 一类字样。
+   写成 `--turnaround 180` 说明跑的是旧 jar；写 `终到站 dwell` 但数字明显偏大说明 route 的 dwell 配大了。
+3. **CHT 不在冲突里**：端点串行之后 CHT 的站台/单线冲突应当为 0。仍然有 = 串行没生效。
+4. **回库行**：必须是"所有交路都以回库收尾"。
+5. **共用资源 > 0**：WS 与 DS/MT 实测共用 243 / 229 处。报 0 才是异常。
 
 ### 失败看哪
 
-`build` 在异步线程算、主线程报。报告没出来但也没报错，看控制台异常栈。
+报告没出来也没报错：build 在异步线程算、主线程报，看控制台异常栈。
 
 ---
 
-## L3 线内冲突与 headway 回退（MT，六条 route 互相压）
+## L3 折返来源与结构下界（本轮改动的正面验证）
+
+### 做什么
+
+同一条线、同一参数，跑三次，只改折返来源：
+
+```
+/fta timetable build FTAS SURC WS WS-T1                      ← 折返 = 终到站 dwell（默认路径）
+/fta timetable build FTAS SURC WS WS-T2 --turnaround 180     ← 显式覆盖成旧默认值
+/fta timetable build FTAS SURC WS WS-T3 --dwell 60           ← 抬高兜底 dwell（CHT 两条 route 没配 dwell）
+```
+
+### 判别量（这一层最重要）
+
+| | WS-T1 | WS-T2 | WS-T3 |
+| --- | --- | --- | --- |
+| 「折返取」 | 终到站 dwell | `--turnaround 180` | 终到站 dwell 60s（CHT 侧） |
+| 结构下界 | 最小 | 明显更大 | 介于两者之间 |
+| 端点占用 % | 最低 | 最高 | 中间 |
+
+**T2 的端点占用应当显著高于 T1**（离线复核是九倍量级）。两者一样 = 折返表没接上，`--turnaround` 或 dwell 有一边没生效。
+
+T3 用来确认兜底路径：CHT 那两条 route 的终到点**没配 dwell**，所以 `--dwell` 直接决定它们的折返。
+T3 的下界不动 = 兜底没走通。
+
+> 顺带：`--turnaround` 现在只在**显式传了**的时候才出现在报告的重建命令里。T1 的 [按放宽后的间隔重建] 按钮
+> 生成的命令里不该有 `--turnaround`。
+
+---
+
+## L4 线内冲突与 headway 搜索（MT，六条 route 互相压）
 
 ### 做什么
 
 ```
-/fta timetable build FTAS SURC MT MT-D1 --start 06:00 --end 23:00
-```
-
-再用一个**明知太密**的间隔跑一次，和一个 `--strict`：
-
-```
+/fta timetable build FTAS SURC MT MT-D1
 /fta timetable build FTAS SURC MT MT-D2 --headway 60
 /fta timetable build FTAS SURC MT MT-D3 --headway 60 --strict
+/fta timetable build FTAS SURC MT MT-D4 --group-headway MT-1_Short=150 --group-headway MT-2_Fueya=120
 ```
 
-### 期望
-
-- `MT-D1`：间隔来源那行说明默认值从哪来（线路 `spawnFreqBaselineSec` → 交路组 baseline → 300）
-- `MT-D2`：目标 60 秒有冲突 → 回退到最小可行间隔，报告标出"目标间隔下的冲突明细"
-- `MT-D3`：**构建失败**，不落库
+MT 的组名在 `fta_lines.metadata` 里：`MT-1_Short`(baseline 150) 与 `MT-2_Fueya`(120)。
 
 ### 判别量
 
-- `MT-D2` 的"实际使用的间隔" > 60，且列出了目标间隔下的冲突数。
-  如果 60 秒就直接通过无冲突，**怀疑冲突检查没跑**——MT 六条 route 共用股道，60 秒不可能干净。
-- `MT-D3` 必须失败。成功了说明 `--strict` 没接上。
-- `/fta timetable list FTAS SURC MT` 里不应有 `MT-D3`。
+- `MT-D1` 的「间隔来源」说明默认从哪来（线路级 `spawn_freq_baseline_sec=120` 优先）。
+- `MT-D2`：目标 60 秒应有冲突 → 回退，报告标出目标间隔下的冲突明细。60 秒直接干净要怀疑检查没跑。
+- `MT-D3` **必须失败**且不落库（`/fta timetable list` 里没有它）。
+  注意 `--strict` 现在**只对真冲突失败**——能靠让车写进表的不算。
+- `MT-D4`：报告的「交路组间隔」要分别显示两个组的值，不是一个全线数。
+- **搜索上限是目标的 4 倍**。目标给小了搜索窗口跟着小；不确定量级时先 `--headway 1800` 把窗口撑开。
 
 ---
 
-## L4 跨线：共用资源报告（DS 未发布时）
+## L5 跨线：共用资源与路权先到先得
 
-这一层验的是 S1：**没有表的邻居只报告、不检查**。
+### L5a 邻表未发布时只报告不检查
 
-### 做什么
+确认 DS 没有 PUBLISHED，然后 `/fta timetable build FTAS SURC MT MT-N1`。
+记下**实际使用的间隔**（`H_before`）与共用资源数。
 
-保证 DS **没有已发布**时刻表，然后（`--headway` 要给足，否则搜索窗口撑不开，报告会停在"仍找不到无冲突的间隔"）：
+期望：DS 那行写「无已发布时刻表——它按 headway 发车，干扰单向，无法联合排布」，**外部冲突那行不出现**。
 
-```
-/fta timetable list FTAS SURC DS          ← 确认没有 PUBLISHED
-/fta timetable build FTAS SURC MT MT-N1
-```
-
-记下报告里两个数：**共用资源那几行**，和**实际使用的间隔**（记作 `H_before`）。
-
-### 期望
-
-报告出现类似：
+### L5b 邻表发布后进入检查
 
 ```
-  共用资源:
-    ... DS（无时刻表） 共用 N 处区间/站台/单线/道岔
-```
-
-外部冲突那行**不出现**（DS 没发布，不进检查）。
-
-### 判别量
-
-共用资源数 **N > 0**。N = 0 说明足迹展开有问题——库里已经能查到 18 个共用申报点，
-而足迹是按展开后的路径算的，只会更多不会更少。
-
----
-
-## L5 跨线：路权先到先得（核心）
-
-这一层验 S3：**已发布的邻表作为不可移动的事实进入检查**。
-
-### 做什么
-
-```
-/fta timetable build FTAS SURC DS DS-P1
+/fta timetable build   FTAS SURC DS DS-P1
 /fta timetable publish FTAS SURC DS DS-P1        ← DS 先占路权
-/fta timetable build FTAS SURC MT MT-N2          ← 同 L4 的参数，唯一变量是 DS 发布了
+/fta timetable build   FTAS SURC MT MT-N2        ← 同 L5a 参数，唯一变量是 DS 发布了
 ```
 
-### 期望
-
-`MT-N2` 的报告里 DS-P1 作为**已发布邻表**出现，并且出现
-
-```
-  外部冲突（目标间隔下，与已发布邻表）: ...
-```
-
-### 判别量（这一层最重要的一个）
-
-```
-H_after（MT-N2 实际间隔）  vs  H_before（MT-N1 实际间隔）
-```
-
-**共用资源 N > 0 且 H_after == H_before 且外部冲突为 0 —— 要怀疑邻表根本没进检查。**
-不是绝对证据（DS 只有 2 条 route，班次稀疏时真的可能不冲突），但必须去查一眼：
+### 判别量（整套 routine 里最值钱的两个之一）
 
 ```bash
 sqlite3 $D/plugins/FetaruteTCAddon/data/fetarute.sqlite \
-  "select timetable_id, neighbor_code, shared_resources, conflicts_at_target, stale_against_graph
+  "select neighbor_code, shared_resources, conflicts_at_target, stale_against_graph
    from fta_timetable_baselines;"
 ```
 
-`MT-N2` 必须有一行指向 DS-P1，`shared_resources > 0`。**这行是"邻表真的被读到了"的唯一硬证据**。
+`MT-N2` 必须有一行指向 `DS-P1` 且 `shared_resources > 0`。**这是"邻表真被读到了"的唯一硬证据**——
+报告文本可能骗人，这张表不会。
 
-想更强地逼出冲突：给 MT 一个很密的 `--headway`，共用段上必然撞。
+再看 `H_after` vs `H_before`：共用资源 > 0 却两次完全一样、外部冲突为 0，要回到上面那条 SQL 确认。
+（DS 只有 2 条 route，稀疏时真的可能不撞；想逼出冲突就给 MT 一个很密的 `--headway`。）
 
-### 另一个方向的判别量
+### L5c 多线联编（Q3 新增）
 
-反过来再 build 一次 DS（此时 MT 未发布）：DS 的报告里 MT 应该是"无时刻表"那类，
-**不进检查**——证明"同一组邻表"确实只算已发布的。
+```
+/fta timetable build FTAS SURC MT,DS MD-1
+```
+
+期望：**一份报告**、逐线给 [详情] [交路] [导出]、一个 [整组投入运行]；两条线**互不算邻表**（一起编的线共享相位与让车）。
+
+判别量：`fta_timetables` 里应当出现**两张**表（MT 一张、DS 一张），`updatedAt` 相同，且**互相记了基线**。
+只出一张 = 拆表没做对。另外 duty 号每表都从 `D001` 起，车池不跨线（一辆车不会同时跑 MT 和 DS）。
 
 ---
 
-## L6 publish 重检拒绝（S3 的闸门 + 刚修的基线 bug 回归）
+## L6 publish 重检与基线回归
 
 ### 做什么
 
 顺序很重要：
 
 ```
-1. 确保 DS 无已发布表（unpublish DS-P1）
-2. /fta timetable build FTAS SURC MT MT-G1          ← 此时基线里没有 DS
-3. /fta timetable publish FTAS SURC DS DS-P1        ← 邻表集合变了
-4. /fta timetable publish FTAS SURC MT MT-G1        ← 应当被拦
+1. unpublish DS-P1（确保 DS 无已发布表）
+2. /fta timetable build   FTAS SURC MT MT-G1      ← 此时基线里没有 DS
+3. /fta timetable publish FTAS SURC DS DS-P1      ← 邻表集合变了
+4. /fta timetable publish FTAS SURC MT MT-G1      ← 应当被拦
 ```
 
-### 期望
+期望第 4 步：`TIMETABLE_PUBLISH_REJECTED：邻表自 build 以来有变化，与已发布邻表有 N 处冲突`，`MT-G1` 仍是 DRAFT。
+若重检发现无冲突则提示「邻表有变化但无冲突，已更新基线」并正常发布——也是合法结果。
 
-第 4 步：控制台出现 `TIMETABLE_PUBLISH_REJECTED：邻表自 build 以来有变化，与已发布邻表有 N 处冲突`，
-**发布被拒绝**，`MT-G1` 仍是 DRAFT。
-
-若重检发现无冲突，则提示"邻表有变化但无冲突，已更新基线"并正常发布——也是合法结果，
-但那时要回到 L5 的判别量确认它是真的算过。
-
-### 判别量
-
-- `/fta timetable list FTAS SURC MT` 里 `MT-G1` 状态未变成 PUBLISHED
-- `fta_timetable_baselines` 里 `MT-G1` 的那几行**没有被清空**
-
-### 基线不被 save 抹掉（2f24f48 修的 bug，必须回归）
+### 基线不被 save 抹掉（`2f24f48` 修的 bug，必须回归）
 
 ```
-5. /fta timetable publish  FTAS SURC WS WS-D1      ← 任意一次状态变更
-6. /fta timetable unpublish FTAS SURC WS WS-D1
-7. /fta timetable neighbors FTAS SURC WS WS-D1
+/fta timetable publish   FTAS SURC WS WS-D1
+/fta timetable unpublish FTAS SURC WS WS-D1
+/fta timetable neighbors FTAS SURC WS WS-D1
 ```
 
-**期望**：neighbors 里基线那行仍然是"与当前邻表一致"或"已过期"，**不能变成
-"无（build 时没有邻表，或基线尚未落库）"**。变成"无"= 状态变更把基线冲掉了，这个 bug 回来了。
+**判别量**：基线那行仍是「与当前邻表一致」或「已过期」，**不能变成「无（build 时没有邻表，或基线尚未落库）」**。
+变成"无"就是状态变更又把基线冲掉了。也可直接看 `select count(*) from fta_timetable_baselines;` 前后不减。
 
-同样可直接查表：状态变更前后 `select count(*) from fta_timetable_baselines;` 不应变小。
+### 整组发布（Q3）
+
+`publish FTAS SURC MT,DS MD-1`：任一张撞上外部邻表则**整组不发**，成功时两张同一时刻发布并互记基线。
+判别量：失败时两张都还是 DRAFT，不能一张发了一张没发。
 
 ### 预期中的坑（不是 bug，别误报）
 
-- `--separation` **不落库**，publish 重检固定用默认 30 秒。你 build 时用了 `--separation 60`，
-  重检结果和 build 报告不一致是正常的。
-- 找不到图快照时：有基线→拒绝发布并提示先 `/fta graph build`；没有基线→跳过重检直接发。
+- `--separation` **不落库**，publish 重检固定用默认 30 秒，和 build 报告对不上是正常的。
+- 没有图快照时：有基线→拒绝并提示先 `/fta graph build`；无基线→跳过重检直接发。
 - `unpublish` / `delete` **不级联**通知别人。
 
 ---
 
-## 别踩：`--spawn-weight 0` 不等于停开某条 route
+## L7 让车写进表（Q2 新增）
 
-写 `<= 0` 会**删掉** `spawn_weight` 这个键（`FtaRouteCommand` 写入路径），而读取端键缺失时**默认回 1**
-（`FtaTimetableCommand#readWeight`）。想用它把某条 route 从表里摘出去做隔离实验，实际效果是把权重悄悄改成 1。
+### 做什么
+
+```
+/fta timetable build FTAS SURC WS WS-Y1 --max-wait 0     ← 关闭修复，冲突原样上报
+/fta timetable build FTAS SURC WS WS-Y2                  ← 默认 60
+/fta timetable build FTAS SURC WS WS-Y3 --max-wait 120   ← 封顶 timetable.hold-max-seconds（默认 120）
+```
+
+### 判别量
+
+- `WS-Y1` 的报告写「让车: 关闭（`--max-wait 0`），冲突原样上报」，冲突数应当 **≥** Y2。
+- `WS-Y2` 写「让车: N 处已写进表（涉及 M 班，最长 +Xs）」，且**总冲突数比 Y1 少**。一样多 = 修复没生效。
+- `--max-wait` 超过 `timetable.hold-max-seconds` 会被封顶——因为运行时扣留不了那么久，
+  表里写了车也等不到。传 300 看看是不是被夹回 120。
 
 ---
 
-## L7 直通运转 / 外方引用（现有网络只能测半程）
+## 别踩的两个坑
 
-你现在只有一个 operator，**跨 operator 闭环测不了**。能测的是引用解析与校验：
+- **`--spawn-weight 0` 不等于停开某条 route**：写 `<= 0` 会删掉 `spawn_weight` 键，而读取端键缺失时**默认回 1**。
+- **别拿旧报告的冲突数当基准**：P0 修掉伪冲突之前的数字（例如那张 2160 处的截图）已经没有可比性。
+
+---
+
+## L8 直通运转 / 外方引用（现有网络只能测半程）
+
+只有一个 operator，跨 operator 闭环测不了。能测引用解析与校验：
 
 ```
 /fta route set FTAS SURC MT MT-2F_Short --timetable-return-route FTAS/SURC/DS/DS-1F_Full
-    → 期望：DS-1F_Full 不是 RETURN 类型 → build 时报"指定的回库线路类型不符"
+    → DS-1F_Full 不是 RETURN 类型 → build 时报"指定的回库线路类型不符"
 /fta route set FTAS SURC MT MT-2F_Short --timetable-return-route FTAS/SURC/XX/NOPE
-    → 期望：写入成功（只校验格式），build 时只警告不中断
+    → 写入成功（只校验格式），build 时只警告不中断
 /fta route set FTAS SURC MT MT-2F_Short --timetable-return-route 乱写
-    → 期望：命令层拒绝，提示格式应为 <company>/<operator>/<line>/<route>
+    → 命令层拒绝，提示格式应为 <company>/<operator>/<line>/<route>
 /fta route set FTAS SURC MT MT-2F_Short --timetable-return-route-clear
-    → 清掉，别把脏数据留到后面的阶段
 ```
 
-**判别量**：大小写按原样存。写 `FTAS/SURC/DS/ds-1f_full` 再读回来必须还是小写那个串
-（仓储按 code 精确匹配，被改大小写就永远匹配不上）。
+**判别量**：大小写按原样存。写 `FTAS/SURC/DS/ds-1f_full` 读回来必须还是小写那串（仓储按 code 精确匹配）。
 
-要测完整闭环，得先造第二个 operator + 一条终到它车站的 route + 它名下的 RETURN 线路。
-那是一整套地面工程，建议单独排一轮，别混在这次。
+完整闭环要先造第二个 operator + 终到它车站的 route + 它名下的 RETURN 线路，单独排一轮。
 
 ---
 
-## L8 按表运行（要改配置 + 重启）
+## L9 按表运行（要改配置 + 重启）
 
-前面全过了再做这一层。**只发布一条线的表**——MT 和 DS 同时按表跑属于 L5 没验完就上强度。
+前面全过了再做。**只发布一条线的表**。
 
 ```yaml
 timetable:
@@ -308,69 +317,50 @@ timetable:
   spawn-enabled: true
 ```
 
-重启，确认那条线的表是 PUBLISHED。
-
 ### 期望的 trace 顺序（`debug.enabled: true`）
 
 ```
-TIMETABLE_RELOAD                              表被读进来了
-TIMETABLE_SPAWN_TICKET kind=CREATE duty=…      出库票，早于首班「走行+折返」
-TIMETABLE_SPAWN_DISPATCHED                     票派给了哪辆车
-TIMETABLE_DUTY_BOUND                           车绑到交路
-TIMETABLE_ASSIGN                               车绑到具体车次
-SCHEDULED_DEPARTURE_HOLD                       早到的车在等点
-TIMETABLE_DUTY_CLOSED                          交路额度用完
-TIMETABLE_SPAWN_TICKET kind=RETURN duty=…      回库票
+TIMETABLE_RELOAD                             表被读进来了
+TIMETABLE_SPAWN_TICKET kind=CREATE duty=…     出库票
+TIMETABLE_SPAWN_DISPATCHED                    票派给了哪辆车
+TIMETABLE_DUTY_BOUND                          车绑到交路
+TIMETABLE_ASSIGN                              车绑到具体车次
+SCHEDULED_DEPARTURE_HOLD                      早到的车在等点
+TIMETABLE_DUTY_CLOSED                         交路额度用完
+TIMETABLE_SPAWN_TICKET kind=RETURN duty=…     回库票
 ```
 
 ### 判别量
 
-- `TIMETABLE_ASSIGN` 的条数应当**随时间稳定增长**。增长停滞 = 车退回自由运行了 → 直接看 L9。
-- `TIMETABLE_DUTY_BIND_CONFLICT` 应当**为 0**。非 0 = 有车绑错交路。
-- 每个 `TIMETABLE_DUTY_CLOSED` 后面应当跟得到一条同 duty 的 `kind=RETURN`。
-  跟不到就看是不是 `TIMETABLE_SPAWN_SKIP reason=no-spawn-service`。
+- `TIMETABLE_ASSIGN` 条数**随时间稳定增长**。停滞 = 车退回自由运行 → 看 L10。
+- `TIMETABLE_DUTY_BIND_CONFLICT` **为 0**。
+- 每个 `TIMETABLE_DUTY_CLOSED` 后跟得到同 duty 的 `kind=RETURN`；跟不到看是不是
+  `TIMETABLE_SPAWN_SKIP reason=no-spawn-service`。
+- **折返的现场校验**：某辆车在 CHT 终到后，下一班的实际发车应当约等于「到达 + 该 route 终到站 dwell」，
+  不再是「到达 + 180」。这是本轮改动在实车上的唯一可观察点。
 
 ### 不该出现
 
-- `SCHEDULED_DEPARTURE_HOLD_SKIPPED`（早到幅度超上限）——多半是绑错车次
-- `SCHEDULED_DEPARTURE_PLAN_FAILED`——计划源抛异常
+`SCHEDULED_DEPARTURE_HOLD_SKIPPED`（早到超上限，多半绑错车次）、`SCHEDULED_DEPARTURE_PLAN_FAILED`（计划源抛异常）。
 
 ---
 
-## L9 绑不上车次的可归因性（新做的 D1，值得主动逼一次）
+## L10 绑不上车次的可归因性
 
-以前跨线干扰会让车静默退回自由运行，日志上只表现为 `TIMETABLE_ASSIGN` 变少。现在应该问得出原因。
+把容差调到明显不够（`timetable.assign-tolerance-seconds: 5`），重启，跑一会儿。
 
-### 做什么
+期望大量 `TIMETABLE_ASSIGN_MISS ... reason=out-of-tolerance`，`/fta timetable status` 的「绑定失败累计」持续上涨。
 
-把容差调到明显不够：
+**判别量**：那个累计数 > 0 且在涨。恒为 0 = 计数器没接上。
 
-```yaml
-timetable:
-  assign-tolerance-seconds: 5
-```
-
-重启，跑一会儿。
-
-### 期望
-
-大量 `TIMETABLE_ASSIGN_MISS ... reason=out-of-tolerance`，带最近车次与偏差。
-`/fta timetable status` 的"绑定失败累计"持续上涨。
-
-### 判别量
-
-`status` 里那个累计数 **> 0 且在涨**。恒为 0 = 计数器没接上，D1 白做了。
-
-三个 reason 的含义：`out-of-tolerance`（偏差超容差，正偏差=晚到）、
-`no-trips`（这条 route 在表里没有这个停靠点的车次）、`all-claimed`（同一趟被别的车绑走了）。
-
-测完**记得把容差改回 300**。
+三个 reason：`out-of-tolerance`（偏差超容差，正偏差 = 晚到）、`no-trips`（这条 route 在表里没有这个停靠点的车次）、
+`all-claimed`（同一趟被别的车绑走）。测完**改回 300**。
 
 ---
 
-## L10 滞留销毁兜底（破坏性，可选，放最后）
+## L11 滞留销毁兜底（破坏性，可选，放最后）
 
-⚠️ 这一层**会销毁列车**。在你确认不心疼车的时候做。
+⚠️ **会销毁列车**。
 
 ```yaml
 reclaim:
@@ -378,30 +368,23 @@ reclaim:
   stranded-destroy-seconds: 120     ← 临时调小才观察得到，默认 1800
 ```
 
-### 期望
+期望 `RECLAIM_STRANDED_DESTROY`；有乘客或有进行中折返事务的记 `RECLAIM_STRANDED_SKIP`
+（`reason=has-passengers` / `reason=dispatch-attempt-in-progress`）。
 
-派不出 RETURN 票、又滞留超时的待命车被销毁，日志 `RECLAIM_STRANDED_DESTROY`；
-有乘客或有进行中折返事务的车被跳过，`RECLAIM_STRANDED_SKIP`。
-
-### 判别量
-
-`RECLAIM_STRANDED_SKIP` 必须真的出现过至少一次（找一辆车坐上去，别让它被销毁）。
-只有 DESTROY 没有 SKIP，说明"有乘客不碰"这条保护没验到。
-
-测完把 `stranded-destroy-seconds` 改回 1800，`reclaim.enabled` 按你原本的意愿设。
+**判别量**：`RECLAIM_STRANDED_SKIP` 必须真的出现过至少一次（找辆车坐上去）。只有 DESTROY 没有 SKIP，
+说明"有乘客不碰"这条保护根本没验到。测完改回 1800。
 
 ---
 
 ## 出事了怎么回到干净状态
 
 ```bash
-# 停服后
-D=../fetarute_experimental
+D=../fetarute_experimental   # 先停服
 cp "$D/plugins/FetaruteTCAddon/data/fetarute.sqlite.bak-XXXX" "$D/plugins/FetaruteTCAddon/data/fetarute.sqlite"
 cp "$D/plugins/FetaruteTCAddon/config.yml.bak-XXXX" "$D/plugins/FetaruteTCAddon/config.yml"
 ```
 
-只想清时刻表、不想回滚整个库：
+只清时刻表：
 
 ```sql
 delete from fta_timetable_baselines;
@@ -410,14 +393,12 @@ delete from fta_timetable_trips;
 delete from fta_timetables;
 ```
 
-（有 `ON DELETE CASCADE`，删 `fta_timetables` 理论上够，但显式删四张更保险。）
-
 ---
 
 ## 建议的执行顺序
 
-一次坐下来能做完 L1–L6，这六层不改配置、不重启、不碰实体车，是纯"算 + 落库"的验证，
-也是这次改动的主体。L7 只做校验半程。L8–L10 各要一次重启，分开做。
+L1–L7 一次坐下来能做完：不改配置、不重启、不碰实体车，是纯"算 + 落库"的验证，也是这几轮改动的主体。
+L8 只做校验半程。L9–L11 各要一次重启，分开做。
 
-L5 的 `H_before` vs `H_after` 和 `fta_timetable_baselines` 那条查询，是整套 routine 里
-最值钱的两个判别量——跨线这一整轮的成败就压在它们上面。
+整套里最值钱的两个判别量：**L3 的 T1/T2 端点占用对比**（证明折返改动真的生效）和
+**L5 的 `fta_timetable_baselines` 查询**（证明跨线邻表真的被读到）。
