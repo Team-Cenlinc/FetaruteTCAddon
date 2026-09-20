@@ -1,0 +1,545 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.logging.Logger;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
+import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+
+/**
+ * 临时诊断：对实服库的副本离线跑当前的 build 算法，看 MT/DS/WS 能排到什么程度。不提交。
+ *
+ * <p>与实服口径的差别只有一个：这里不经过命令层的权限与补全，其余（图、限速覆盖、route 定义、停靠配置、权重、交路组）全部取自库。
+ */
+@org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.OrderAnnotation.class)
+class LiveNetworkProbeTest {
+
+
+  private static synchronized void log(String line) {
+    System.out.println(line);
+    try {
+      Files.writeString(LOG, line + "\n", java.nio.charset.StandardCharsets.UTF_8,
+          java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+    } catch (java.io.IOException ignored) {
+      // 诊断日志写不进去就只留 stdout
+    }
+  }
+
+  private static final Path DB =
+      Path.of(
+          "<实服库副本路径>/live.sqlite");
+  private static final UUID WORLD = UUID.fromString("eff6cf56-8e8c-4288-818b-52b1c5ceab60");
+  private static final Path LOG = DB.resolveSibling("probe.log");
+
+  private record Env(
+      StorageProvider provider,
+      RouteDefinitionCache cache,
+      Company company,
+      Operator operator,
+      Map<String, Line> lines,
+      List<Route> operatorLegs,
+      RailGraph graph,
+      RailTravelTimeModel model) {}
+
+  private static Env env() throws Exception {
+    Assumptions.assumeTrue(Files.exists(DB), "no live db copy");
+    StorageProvider provider = setupProvider(DB);
+    List<RailNodeRecord> nodes = provider.railNodes().listByWorld(WORLD);
+    List<RailEdgeRecord> edges = provider.railEdges().listByWorld(WORLD);
+    RailGraph graph =
+        RailGraphService.buildGraphFromRecords(
+            nodes, edges, provider.railInterlockingSnapshots().findByWorld(WORLD));
+    RouteDefinitionCache cache = new RouteDefinitionCache(msg -> {});
+    cache.reload(provider);
+    Map<EdgeId, RailEdgeOverrideRecord> overrides = new HashMap<>();
+    for (RailEdgeOverrideRecord record : provider.railEdgeOverrides().listByWorld(WORLD)) {
+      overrides.put(record.edgeId(), record);
+    }
+    RailTravelTimeModel model =
+        new DynamicTravelTimeModel(
+            DynamicTravelTimeModel.TrainMotionParams.defaults(),
+            8.0,
+            ApproachingConfig.disabled(),
+            TimetableEdgeSpeeds.resolver(overrides));
+    Company company = provider.companies().findByCode("FTAS").orElseThrow();
+    Operator operator =
+        provider.operators().findByCompanyAndCode(company.id(), "SURC").orElseThrow();
+    Map<String, Line> lines = new LinkedHashMap<>();
+    for (String code : List.of("WS", "MT", "DS")) {
+      lines.put(code, provider.lines().findByOperatorAndCode(operator.id(), code).orElseThrow());
+    }
+    List<Route> operatorLegs = new ArrayList<>();
+    for (Line line : provider.lines().listByOperator(operator.id())) {
+      for (Route r : provider.routes().listByLine(line.id())) {
+        if (r.operationType() != RouteOperationType.OPERATION) {
+          operatorLegs.add(r);
+        }
+      }
+    }
+    log("PROBE overrides=" + overrides.size() + " nodes=" + nodes.size() + " edges=" + edges.size());
+    return new Env(provider, cache, company, operator, lines, operatorLegs, graph, model);
+  }
+
+  private static Member member(Env e, String line, boolean pureLegsOnly) {
+    return memberOf(e.provider(), e.cache(), e.company(), e.operator(), e.lines().get(line), e.operatorLegs(), e.graph(), e.model(), pureLegsOnly);
+  }
+
+  /** 一次 attempt 的完整产物（反射进 prepare/attempt，绕过搜索，严格失败也拿得到冲突列表）。 */
+  private record Probe(
+      int headway,
+      Timetable timetable,
+      TimetableConflictChecker.Report conflicts,
+      List<ResourceRepair.Yield> yields,
+      List<TimetableBuildResult.TripShift> shifts,
+      List<TimetableBuildResult.DroppedTrip> dropped,
+      List<TerminalSerializer.TerminalReport> terminals,
+      List<String> phaseNotes,
+      TurnaroundTable turnarounds,
+      String failure,
+      long millis) {}
+
+  @SuppressWarnings("unchecked")
+  private static Probe attemptOf(Member member, int headway, int maxWait) throws Exception {
+    TimetableBuildOptions options = optionsOf(headway, true, 4, maxWait);
+    TimetableBuilder builder = new TimetableBuilder();
+    java.lang.reflect.Method resolve =
+        TimetableBuilder.class.getDeclaredMethod(
+            "resolveTurnarounds", TimetableBuilder.BuildInput.class, TimetableBuildOptions.class);
+    resolve.setAccessible(true);
+    TurnaroundTable turnarounds = (TurnaroundTable) resolve.invoke(null, member.input(), options);
+    TimetableBuildOptions resolved = options.withTurnaround(turnarounds);
+    java.lang.reflect.Method prepare =
+        TimetableBuilder.class.getDeclaredMethod(
+            "prepare", TimetableBuilder.BuildInput.class, TimetableBuildOptions.class, List.class);
+    prepare.setAccessible(true);
+    long t0 = System.nanoTime();
+    Object prepared;
+    try {
+      prepared = prepare.invoke(builder, member.input(), resolved, new ArrayList<>());
+    } catch (java.lang.reflect.InvocationTargetException ex) {
+      return new Probe(headway, null, TimetableConflictChecker.Report.none(), List.of(), List.of(), List.of(), List.of(), List.of(), turnarounds, "prepare: " + ex.getCause().getMessage(), 0);
+    }
+    java.lang.reflect.Method attempt =
+        TimetableBuilder.class.getDeclaredMethod(
+            "attempt", prepared.getClass(), TimetableBuildOptions.class, TimetableBuilder.BuildInput.class, Instant.class);
+    attempt.setAccessible(true);
+    Object a;
+    try {
+      a = attempt.invoke(builder, prepared, resolved, member.input(), Instant.parse("2026-09-20T00:00:00Z"));
+    } catch (java.lang.reflect.InvocationTargetException ex) {
+      return new Probe(headway, null, TimetableConflictChecker.Report.none(), List.of(), List.of(), List.of(), List.of(), List.of(), turnarounds, "attempt: " + ex.getCause().getMessage(), (System.nanoTime() - t0) / 1_000_000L);
+    }
+    long millis = (System.nanoTime() - t0) / 1_000_000L;
+    return new Probe(
+        headway,
+        (Timetable) field(a, "timetable"),
+        (TimetableConflictChecker.Report) field(a, "conflicts"),
+        (List<ResourceRepair.Yield>) field(a, "yields"),
+        (List<TimetableBuildResult.TripShift>) field(a, "shifts"),
+        (List<TimetableBuildResult.DroppedTrip>) field(a, "dropped"),
+        (List<TerminalSerializer.TerminalReport>) field(a, "terminals"),
+        (List<String>) field(a, "phaseNotes"),
+        turnarounds,
+        null,
+        millis);
+  }
+
+  private static Object field(Object record, String accessor) throws Exception {
+    java.lang.reflect.Method m = record.getClass().getDeclaredMethod(accessor);
+    m.setAccessible(true);
+    return m.invoke(record);
+  }
+
+  private static String clock(int relative) {
+    return TimetableCsvExporter.clock(5 * 3600 + relative);
+  }
+
+  private static void summary(String label, Probe p) {
+    if (p.failure() != null) {
+      log(String.format("  %s h=%-5d 失败 (%d ms): %s", label, p.headway(), p.millis(), p.failure()));
+      return;
+    }
+    Map<String, Integer> kinds = new LinkedHashMap<>();
+    for (TimetableConflictChecker.Conflict c : p.conflicts().conflicts()) {
+      kinds.merge(c.kind().name(), 1, Integer::sum);
+    }
+    log(String.format(
+        "  %s h=%-5d 班次 %-4d 交路 %-3d 取消 %-3d 冲突 %-5d %s 让车 %-4d (最长 +%ds) 偏离 %-4d (%d ms) 折返 %s",
+        label, p.headway(), p.timetable().trips().size(), p.timetable().duties().size(), p.dropped().size(),
+        p.conflicts().conflicts().size(), kinds, p.yields().size(), ResourceRepair.maxWait(p.yields()), p.shifts().size(), p.millis(), p.turnarounds().describe()));
+    if (!p.conflicts().clean()) {
+      log("        top " + p.conflicts().topResources(6));
+    }
+  }
+
+  private static String routeOf(String code) {
+    if (code.matches("D\\d+")) {
+      return "待命";
+    }
+    if (code.matches("D\\d+-CREATE")) {
+      return "出库走行";
+    }
+    if (code.matches("D\\d+-RETURN")) {
+      return "回库走行";
+    }
+    int dash = code.lastIndexOf('-');
+    return dash > 0 ? code.substring(0, dash) : code;
+  }
+
+  private static void pairs(Probe p, int limit) {
+    Map<String, Integer> pairs = new java.util.TreeMap<>();
+    for (TimetableConflictChecker.Conflict c : p.conflicts().conflicts()) {
+      pairs.merge(c.kind().name() + " " + routeOf(c.first()) + " × " + routeOf(c.second()), 1, Integer::sum);
+    }
+    log("        route 对（前 " + limit + "）：");
+    pairs.entrySet().stream().sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).limit(limit)
+        .forEach(en -> log("          " + en.getValue() + "  " + en.getKey()));
+  }
+
+  private static void table(Probe p, int maxDuties) {
+    Timetable t = p.timetable();
+    Map<UUID, TimetableTrip> byId = new HashMap<>();
+    t.trips().forEach(x -> byId.put(x.id(), x));
+    log("        相位: " + p.phaseNotes());
+    for (TimetableRoutePlan plan : t.routePlans()) {
+      log(String.format("        plan %-14s %-9s %s→%s 全程 %ds 停靠 %d 折返 %ds", plan.routeCode(), plan.kind(), shortNode(plan.originNodeId()), shortNode(plan.terminalNodeId()), plan.totalRunSeconds(), plan.stops().size(), p.turnarounds().secondsFor(plan.routeId())));
+    }
+    int shown = 0;
+    for (VehicleDuty d : t.duties()) {
+      if (shown++ >= maxDuties) {
+        log("        … 另有 " + (t.duties().size() - maxDuties) + " 条交路");
+        break;
+      }
+      StringBuilder sb = new StringBuilder();
+      sb.append(String.format("        %s 出库 %s(%s) ", d.dutyCode(), clock(d.plannedStartSecondOfDay() - 18000), d.createRouteId().flatMap(t::routePlan).map(TimetableRoutePlan::routeCode).orElse("-")));
+      for (UUID id : d.tripIds()) {
+        TimetableTrip trip = byId.get(id);
+        if (trip == null) continue;
+        int run = t.routePlan(trip.routeId()).map(TimetableRoutePlan::totalRunSeconds).orElse(0);
+        sb.append(String.format("| %s %s→%s ", trip.tripCode(), clock(trip.departureSecondOfDay() - 18000), clock(trip.departureSecondOfDay() - 18000 + run)));
+      }
+      sb.append(String.format("| 回库 %s(%s) %s", clock(d.returnSecondOfDay() - 18000), d.returnRouteId().flatMap(t::routePlan).map(TimetableRoutePlan::routeCode).orElse("-"), d.closeReason()));
+      log(sb.toString());
+    }
+    int c = 0;
+    for (TimetableConflictChecker.Conflict conflict : p.conflicts().conflicts()) {
+      if (c++ >= 10) break;
+      log("          · " + conflict.describe(s -> clock(s)));
+    }
+  }
+
+  /** 步骤 1：MT 在 1200 s 为什么失败——整张表倒出来看。 */
+  @Test
+  @org.junit.jupiter.api.Order(1)
+  void step1MtAt1200() throws Exception {
+    Env e = env();
+    for (boolean pure : new boolean[] {true, false}) {
+      log("\n=== STEP1 MT@1200 pureLegsOnly=" + pure);
+      Member m = member(e, "MT", pure);
+      Probe p = attemptOf(m, 1200, 60);
+      summary("MT", p);
+      if (p.failure() == null) {
+        pairs(p, 25);
+        table(p, pure ? 14 : 6);
+      }
+    }
+    log("\n=== STEP1b MT 纯走行各档");
+    for (int h : new int[] {1800, 1500, 1200, 900, 600, 420}) {
+      Probe p = attemptOf(member(e, "MT", true), h, 60);
+      summary("MT-pure", p);
+    }
+  }
+
+  /** 步骤 2a：MT@1200 的等待预算。 */
+  @Test
+  @org.junit.jupiter.api.Order(2)
+  void step2MtMaxWait() throws Exception {
+    Env e = env();
+    log("\n=== STEP2a MT@1200 max-wait 扫描（纯走行）");
+    for (int maxWait : new int[] {0, 60, 300, 600, 1800}) {
+      Probe p = attemptOf(member(e, "MT", true), 1200, maxWait);
+      summary("MT maxWait=" + maxWait, p);
+      if (p.failure() == null && !p.conflicts().clean()) {
+        pairs(p, 8);
+      }
+    }
+  }
+
+  /** 步骤 3：相位共振——WS 扫 290–430。 */
+  @Test
+  @org.junit.jupiter.api.Order(3)
+  void step3WsResonanceScan() throws Exception {
+    Env e = env();
+    log("\n=== STEP3 WS 扫描 290–430（纯走行，max-wait 60）");
+    for (int h = 290; h <= 430; h += 10) {
+      Probe p = attemptOf(member(e, "WS", true), h, 60);
+      summary(String.format("WS 2C余数=%-3d 2N余数=%-3d", Math.floorMod(575 + 30, h), Math.floorMod(582 + 20, h)), p);
+      if (p.failure() == null && !p.conflicts().clean()) {
+        pairs(p, 6);
+      }
+    }
+  }
+
+  /** 步骤 2b：WS@300 的等待预算（慢）。 */
+  @Test
+  @org.junit.jupiter.api.Order(4)
+  void step2WsMaxWait() throws Exception {
+    Env e = env();
+    log("\n=== STEP2b WS@300 max-wait 扫描（纯走行）");
+    for (int maxWait : new int[] {0, 60, 300, 600, 1800}) {
+      Probe p = attemptOf(member(e, "WS", true), 300, maxWait);
+      summary("WS maxWait=" + maxWait, p);
+      if (p.failure() == null && !p.conflicts().clean()) {
+        pairs(p, 8);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ 运行
+
+  private static void runOne(Member member, int headway, boolean strict, int maxTrips) {
+    TimetableBuildOptions options = optionsOf(headway, strict, maxTrips);
+    long started = System.nanoTime();
+    TimetableBuildResult result =
+        new TimetableBuilder().build(member.input(), options, Instant.parse("2026-09-20T00:00:00Z"));
+    report(member.lineCode(), headway, result, System.nanoTime() - started);
+  }
+
+  private static String shortNode(String nodeId) {
+    return nodeId == null ? "?" : nodeId.replace("SURC:", "");
+  }
+
+  private static void report(
+      String label, int headway, TimetableBuildResult result, long nanos) {
+    long ms = nanos / 1_000_000L;
+    if (result.timetable().isEmpty()) {
+      log(
+          String.format(
+              "  h=%-5d 失败 (%d ms) %s",
+              headway, ms, String.join(" | ", result.warnings())));
+      return;
+    }
+    Timetable table = result.timetable().orElseThrow();
+    StringBuilder shares = new StringBuilder();
+    for (WeightedTripAllocator.ShareReport share : result.shares()) {
+      shares
+          .append(share.key())
+          .append(String.format("=%.0f/%.0f%% ", share.targetShare() * 100, share.achievedShare() * 100));
+    }
+    log(
+        String.format(
+            "  h=%-5d → 实际 %-5d 班次 %-4d 交路 %-3d 峰值车 %-3d 取消 %-4d 冲突 %-4d 让车 %-3d (%d ms)",
+            headway,
+            result.effectiveHeadwaySeconds(),
+            table.trips().size(),
+            result.dutyCount(),
+            result.peakConcurrentVehicles(),
+            result.droppedTrips().size(),
+            result.conflictsAtTarget().size(),
+            result.yields().size(),
+            ms));
+    log("        份额 " + shares.toString().trim());
+    for (TerminalSerializer.TerminalReport t : result.terminals()) {
+      log(
+          String.format(
+              "        端点 %s 经过 %d 次 占用 %.0f%% 无处等待 %d 截断 %d",
+              t.group(), t.visits(), t.utilization() * 100, t.nowhereToWait(), t.truncated()));
+    }
+    Map<String, Integer> byReason = new LinkedHashMap<>();
+    for (TimetableBuildResult.DroppedTrip d : result.droppedTrips()) {
+      byReason.merge(d.reason().name(), 1, Integer::sum);
+    }
+    if (!byReason.isEmpty()) {
+      log("        取消原因 " + byReason);
+    }
+  }
+
+  // ------------------------------------------------------------------ 夹具
+
+  private record Member(
+      TimetableBuilder.BuildInput input, String lineCode, Set<UUID> ownRouteIds) {}
+
+  private static Member memberOf(
+      StorageProvider provider,
+      RouteDefinitionCache cache,
+      Company company,
+      Operator operator,
+      Line line,
+      List<Route> operatorLegs,
+      RailGraph graph,
+      RailTravelTimeModel model,
+      boolean pureLegsOnly) {
+    Map<UUID, Route> routes = new LinkedHashMap<>();
+    Set<UUID> own = new java.util.LinkedHashSet<>();
+    for (Route r : provider.routes().listByLine(line.id())) {
+      routes.put(r.id(), r);
+      own.add(r.id());
+    }
+    for (Route r : operatorLegs) {
+      if (pureLegsOnly && !own.contains(r.id()) && hasIntermediateStop(provider, r)) {
+        // 别的线的「带客」CREATE/RETURN：Q1 会把它当班次排进我的表。这一档把它排除，量污染有多大。
+        continue;
+      }
+      routes.putIfAbsent(r.id(), r);
+    }
+    List<TimetableBuilder.RouteInput> inputs = new ArrayList<>();
+    for (Route route : routes.values()) {
+      RouteDefinition def = cache.findById(route.id()).orElse(null);
+      if (def == null) {
+        log("  SKIP no definition: " + route.code());
+        continue;
+      }
+      List<RouteStop> stops =
+          provider.routeStops().listByRoute(route.id()).stream()
+              .sorted(Comparator.comparingInt(RouteStop::sequence))
+              .toList();
+      inputs.add(
+          new TimetableBuilder.RouteInput(
+              route.id(),
+              route.code(),
+              route.operationType(),
+              readWeight(route),
+              def,
+              stops,
+              Optional.empty(),
+              Optional.empty(),
+              false,
+              readGroup(route)));
+    }
+    UUID timetableId =
+        UUID.nameUUIDFromBytes(
+            ("PROBE-" + line.code()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    TimetableBuilder.BuildInput input =
+        new TimetableBuilder.BuildInput(
+            timetableId,
+            company.id(),
+            operator.id(),
+            line.id(),
+            "PROBE-" + line.code(),
+            "probe",
+            inputs,
+            graph,
+            model,
+            Optional.empty());
+    return new Member(input, line.code(), own);
+  }
+
+  private static TimetableBuildOptions optionsOf(int headway, boolean strict, int maxTrips) {
+    return optionsOf(headway, strict, maxTrips, TimetableBuildOptions.Repair.DEFAULT_MAX_WAIT_SECONDS);
+  }
+
+  private static TimetableBuildOptions optionsOf(int headway, boolean strict, int maxTrips, int maxWait) {
+    return new TimetableBuildOptions(
+        5 * 3600,
+        24 * 3600,
+        Duration.ofSeconds(headway),
+        Duration.ofSeconds(TimetableBuildOptions.DEFAULT_DWELL_SECONDS),
+        new VehicleDutyPlanner.Limits(
+            maxTrips, VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS,
+            TurnaroundTable.none()),
+        "",
+        ZoneId.of("UTC"),
+        Duration.ofSeconds(TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
+        strict,
+        Map.of(),
+        new TimetableBuildOptions.Repair(
+            Duration.ofSeconds(maxWait), Duration.ofSeconds(Math.max(300, maxWait))));
+  }
+
+  /** 中途有 STOP 的 CREATE/RETURN 是带客 route（与 ServiceGroupClassifier 同一判据）。 */
+  private static boolean hasIntermediateStop(StorageProvider provider, Route route) {
+    List<RouteStop> stops =
+        provider.routeStops().listByRoute(route.id()).stream()
+            .sorted(Comparator.comparingInt(RouteStop::sequence))
+            .toList();
+    for (int i = 1; i + 1 < stops.size(); i++) {
+      if (stops.get(i).passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static int readWeight(Route route) {
+    Object raw = route.metadata() == null ? null : route.metadata().get("spawn_weight");
+    if (raw instanceof Number number) {
+      return Math.max(0, number.intValue());
+    }
+    return 1;
+  }
+
+  private static Optional<String> readGroup(Route route) {
+    Object raw = route.metadata() == null ? null : route.metadata().get("spawn_group");
+    return raw instanceof String text && !text.isBlank() ? Optional.of(text) : Optional.empty();
+  }
+
+  private static StorageProvider setupProvider(Path dbFile) {
+    ConfigManager.StorageSettings settings =
+        new ConfigManager.StorageSettings(
+            ConfigManager.StorageBackend.SQLITE,
+            new ConfigManager.SqliteSettings(dbFile.toString()),
+            Optional.empty(),
+            new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
+    ConfigManager.ConfigView view =
+        new ConfigManager.ConfigView(
+            33,
+            false,
+            "zh_CN",
+            settings,
+            new ConfigManager.GraphSettings(8.0, 6, 2),
+            new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
+            new ConfigManager.RuntimeSettings(
+                10, 10, 2, 1, 1, 3, 4.0, 6.0, 3.5, true, SpeedCurveType.PHYSICS, 1.0, 0.0, 0.2, 60,
+                true, true, 2.0, 8.0, 0.15, 1.0, 1.0, 3, true, 10, Optional.empty(), false, 10,
+                Optional.empty(), false, 10, Optional.empty()),
+            new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
+            new ConfigManager.TrainConfigSettings(
+                "emu",
+                new ConfigManager.TrainTypeSettings(0.8, 1.0),
+                new ConfigManager.TrainTypeSettings(0.7, 0.9),
+                new ConfigManager.TrainTypeSettings(0.6, 0.8),
+                new ConfigManager.TrainTypeSettings(0.9, 1.1)),
+            new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L, 1800L),
+            null,
+            ConfigManager.HealthSettings.defaults(),
+            null);
+    StorageManager manager =
+        new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
+    manager.apply(view);
+    return manager.provider().orElseThrow();
+  }
+}

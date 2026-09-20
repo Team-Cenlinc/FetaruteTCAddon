@@ -1,0 +1,347 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.logging.Logger;
+import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
+import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+
+/**
+ * 临时诊断：对实服库的副本离线跑当前的 build 算法，看 MT/DS/WS 能排到什么程度。不提交。
+ *
+ * <p>与实服口径的差别只有一个：这里不经过命令层的权限与补全，其余（图、限速覆盖、route 定义、停靠配置、权重、交路组）全部取自库。
+ */
+class LiveNetworkProbeTest {
+
+  private static final Path DB =
+      Path.of(
+          "/private/tmp/claude-501/-Users-acatine-Documents-CodeLib-FetaruteTCAddon/"
+              + "0122053d-1efe-4260-aa21-6882aed14d5e/scratchpad/live.sqlite");
+  private static final UUID WORLD = UUID.fromString("eff6cf56-8e8c-4288-818b-52b1c5ceab60");
+
+  @Test
+  void probe() throws Exception {
+    Assumptions.assumeTrue(Files.exists(DB), "no live db copy");
+    StorageProvider provider = setupProvider(DB);
+    List<RailNodeRecord> nodes = provider.railNodes().listByWorld(WORLD);
+    List<RailEdgeRecord> edges = provider.railEdges().listByWorld(WORLD);
+    RailGraph graph =
+        RailGraphService.buildGraphFromRecords(
+            nodes, edges, provider.railInterlockingSnapshots().findByWorld(WORLD));
+    RouteDefinitionCache cache = new RouteDefinitionCache(msg -> {});
+    cache.reload(provider);
+
+    Map<EdgeId, RailEdgeOverrideRecord> overrides = new HashMap<>();
+    for (RailEdgeOverrideRecord record : provider.railEdgeOverrides().listByWorld(WORLD)) {
+      overrides.put(record.edgeId(), record);
+    }
+    RailTravelTimeModel model =
+        new DynamicTravelTimeModel(
+            DynamicTravelTimeModel.TrainMotionParams.defaults(),
+            8.0,
+            ApproachingConfig.disabled(),
+            TimetableEdgeSpeeds.resolver(overrides));
+    System.out.println("PROBE overrides=" + overrides.size() + " nodes=" + nodes.size()
+        + " edges=" + edges.size());
+
+    Company company = provider.companies().findByCode("FTAS").orElseThrow();
+    Operator operator =
+        provider.operators().findByCompanyAndCode(company.id(), "SURC").orElseThrow();
+
+    Map<String, Line> lines = new LinkedHashMap<>();
+    for (String code : List.of("WS", "MT", "DS")) {
+      lines.put(code, provider.lines().findByOperatorAndCode(operator.id(), code).orElseThrow());
+    }
+
+    // 本 operator 的全部走行线路（CREATE/RETURN），与命令层的搜索范围一致。
+    List<Route> operatorLegs = new ArrayList<>();
+    for (Line line : provider.lines().listByOperator(operator.id())) {
+      for (Route r : provider.routes().listByLine(line.id())) {
+        if (r.operationType() != RouteOperationType.OPERATION) {
+          operatorLegs.add(r);
+        }
+      }
+    }
+
+    // 共振检验：直接算时分，不 build。往返对的反向相位 = (正向走行 + 折返) mod 间隔，接近 0 就是两个方向同相。
+    TimetableTimingCalculator calc = new TimetableTimingCalculator();
+    for (String code : List.of("WS", "MT", "DS")) {
+      System.out.println("\n########## " + code + " 各 route 走行时分与相位余数");
+      Line line = lines.get(code);
+      for (Route route : provider.routes().listByLine(line.id())) {
+        RouteDefinition def = cache.findById(route.id()).orElse(null);
+        if (def == null) {
+          continue;
+        }
+        List<RouteStop> stops =
+            provider.routeStops().listByRoute(route.id()).stream()
+                .sorted(Comparator.comparingInt(RouteStop::sequence))
+                .toList();
+        TimetableTimingCalculator.TimingResult timing =
+            calc.compute(graph, model, def, stops, Duration.ofSeconds(20));
+        if (!timing.ok()) {
+          System.out.println("  " + route.code() + " 算不出：" + timing.failure().orElse("?"));
+          continue;
+        }
+        List<TimetableStop> profile = timing.stops();
+        int run = profile.get(profile.size() - 1).arrivalOffsetSeconds();
+        int turn = TimetableTimingCalculator.terminalDwellSeconds(stops, 20);
+        StringBuilder mods = new StringBuilder();
+        for (int h : new int[] {300, 420, 600, 900, 1200}) {
+          int m = Math.floorMod(run + turn, h);
+          int dist = Math.min(m, h - m);
+          mods.append(String.format(" %d:%d%s", h, m, dist < 45 ? "◀" : ""));
+        }
+        System.out.println(
+            String.format(
+                "  %-16s %-9s 走行 %-5d 折返 %-4d 相位余数%s",
+                route.code(), route.operationType(), run, turn, mods));
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ 运行
+
+  private static void runOne(Member member, int headway, boolean strict, int maxTrips) {
+    TimetableBuildOptions options = optionsOf(headway, strict, maxTrips);
+    long started = System.nanoTime();
+    TimetableBuildResult result =
+        new TimetableBuilder().build(member.input(), options, Instant.parse("2026-09-20T00:00:00Z"));
+    report(member.lineCode(), headway, result, System.nanoTime() - started);
+  }
+
+  private static String shortNode(String nodeId) {
+    return nodeId == null ? "?" : nodeId.replace("SURC:", "");
+  }
+
+  private static void report(
+      String label, int headway, TimetableBuildResult result, long nanos) {
+    long ms = nanos / 1_000_000L;
+    if (result.timetable().isEmpty()) {
+      System.out.println(
+          String.format(
+              "  h=%-5d 失败 (%d ms) %s",
+              headway, ms, String.join(" | ", result.warnings())));
+      return;
+    }
+    Timetable table = result.timetable().orElseThrow();
+    StringBuilder shares = new StringBuilder();
+    for (WeightedTripAllocator.ShareReport share : result.shares()) {
+      shares
+          .append(share.key())
+          .append(String.format("=%.0f/%.0f%% ", share.targetShare() * 100, share.achievedShare() * 100));
+    }
+    System.out.println(
+        String.format(
+            "  h=%-5d → 实际 %-5d 班次 %-4d 交路 %-3d 峰值车 %-3d 取消 %-4d 冲突 %-4d 让车 %-3d (%d ms)",
+            headway,
+            result.effectiveHeadwaySeconds(),
+            table.trips().size(),
+            result.dutyCount(),
+            result.peakConcurrentVehicles(),
+            result.droppedTrips().size(),
+            result.conflictsAtTarget().size(),
+            result.yields().size(),
+            ms));
+    System.out.println("        份额 " + shares.toString().trim());
+    for (TerminalSerializer.TerminalReport t : result.terminals()) {
+      System.out.println(
+          String.format(
+              "        端点 %s 经过 %d 次 占用 %.0f%% 无处等待 %d 截断 %d",
+              t.group(), t.visits(), t.utilization() * 100, t.nowhereToWait(), t.truncated()));
+    }
+    Map<String, Integer> byReason = new LinkedHashMap<>();
+    for (TimetableBuildResult.DroppedTrip d : result.droppedTrips()) {
+      byReason.merge(d.reason().name(), 1, Integer::sum);
+    }
+    if (!byReason.isEmpty()) {
+      System.out.println("        取消原因 " + byReason);
+    }
+  }
+
+  // ------------------------------------------------------------------ 夹具
+
+  private record Member(
+      TimetableBuilder.BuildInput input, String lineCode, Set<UUID> ownRouteIds) {}
+
+  private static Member memberOf(
+      StorageProvider provider,
+      RouteDefinitionCache cache,
+      Company company,
+      Operator operator,
+      Line line,
+      List<Route> operatorLegs,
+      RailGraph graph,
+      RailTravelTimeModel model,
+      boolean pureLegsOnly) {
+    Map<UUID, Route> routes = new LinkedHashMap<>();
+    Set<UUID> own = new java.util.LinkedHashSet<>();
+    for (Route r : provider.routes().listByLine(line.id())) {
+      routes.put(r.id(), r);
+      own.add(r.id());
+    }
+    for (Route r : operatorLegs) {
+      if (pureLegsOnly && !own.contains(r.id()) && hasIntermediateStop(provider, r)) {
+        // 别的线的「带客」CREATE/RETURN：Q1 会把它当班次排进我的表。这一档把它排除，量污染有多大。
+        continue;
+      }
+      routes.putIfAbsent(r.id(), r);
+    }
+    List<TimetableBuilder.RouteInput> inputs = new ArrayList<>();
+    for (Route route : routes.values()) {
+      RouteDefinition def = cache.findById(route.id()).orElse(null);
+      if (def == null) {
+        System.out.println("  SKIP no definition: " + route.code());
+        continue;
+      }
+      List<RouteStop> stops =
+          provider.routeStops().listByRoute(route.id()).stream()
+              .sorted(Comparator.comparingInt(RouteStop::sequence))
+              .toList();
+      inputs.add(
+          new TimetableBuilder.RouteInput(
+              route.id(),
+              route.code(),
+              route.operationType(),
+              readWeight(route),
+              def,
+              stops,
+              Optional.empty(),
+              Optional.empty(),
+              false,
+              readGroup(route)));
+    }
+    UUID timetableId =
+        UUID.nameUUIDFromBytes(
+            ("PROBE-" + line.code()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    TimetableBuilder.BuildInput input =
+        new TimetableBuilder.BuildInput(
+            timetableId,
+            company.id(),
+            operator.id(),
+            line.id(),
+            "PROBE-" + line.code(),
+            "probe",
+            inputs,
+            graph,
+            model,
+            Optional.empty());
+    return new Member(input, line.code(), own);
+  }
+
+  private static TimetableBuildOptions optionsOf(int headway, boolean strict, int maxTrips) {
+    return new TimetableBuildOptions(
+        5 * 3600,
+        24 * 3600,
+        Duration.ofSeconds(headway),
+        Duration.ofSeconds(TimetableBuildOptions.DEFAULT_DWELL_SECONDS),
+        new VehicleDutyPlanner.Limits(
+            maxTrips, VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS,
+            TurnaroundTable.none()),
+        "",
+        ZoneId.of("UTC"),
+        Duration.ofSeconds(TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
+        strict,
+        Map.of(),
+        new TimetableBuildOptions.Repair(
+            Duration.ofSeconds(TimetableBuildOptions.Repair.DEFAULT_MAX_WAIT_SECONDS),
+            Duration.ofSeconds(300)));
+  }
+
+  /** 中途有 STOP 的 CREATE/RETURN 是带客 route（与 ServiceGroupClassifier 同一判据）。 */
+  private static boolean hasIntermediateStop(StorageProvider provider, Route route) {
+    List<RouteStop> stops =
+        provider.routeStops().listByRoute(route.id()).stream()
+            .sorted(Comparator.comparingInt(RouteStop::sequence))
+            .toList();
+    for (int i = 1; i + 1 < stops.size(); i++) {
+      if (stops.get(i).passType() == org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static int readWeight(Route route) {
+    Object raw = route.metadata() == null ? null : route.metadata().get("spawn_weight");
+    if (raw instanceof Number number) {
+      return Math.max(0, number.intValue());
+    }
+    return 1;
+  }
+
+  private static Optional<String> readGroup(Route route) {
+    Object raw = route.metadata() == null ? null : route.metadata().get("spawn_group");
+    return raw instanceof String text && !text.isBlank() ? Optional.of(text) : Optional.empty();
+  }
+
+  private static StorageProvider setupProvider(Path dbFile) {
+    ConfigManager.StorageSettings settings =
+        new ConfigManager.StorageSettings(
+            ConfigManager.StorageBackend.SQLITE,
+            new ConfigManager.SqliteSettings(dbFile.toString()),
+            Optional.empty(),
+            new ConfigManager.PoolSettings(5, 30000, 600000, 1800000));
+    ConfigManager.ConfigView view =
+        new ConfigManager.ConfigView(
+            33,
+            false,
+            "zh_CN",
+            settings,
+            new ConfigManager.GraphSettings(8.0, 6, 2),
+            new ConfigManager.AutoStationSettings("BLOCK_NOTE_BLOCK_BELL", 1.0f, 1.2f),
+            new ConfigManager.RuntimeSettings(
+                10, 10, 2, 1, 1, 3, 4.0, 6.0, 3.5, true, SpeedCurveType.PHYSICS, 1.0, 0.0, 0.2, 60,
+                true, true, 2.0, 8.0, 0.15, 1.0, 1.0, 3, true, 10, Optional.empty(), false, 10,
+                Optional.empty(), false, 10, Optional.empty()),
+            new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
+            new ConfigManager.TrainConfigSettings(
+                "emu",
+                new ConfigManager.TrainTypeSettings(0.8, 1.0),
+                new ConfigManager.TrainTypeSettings(0.7, 0.9),
+                new ConfigManager.TrainTypeSettings(0.6, 0.8),
+                new ConfigManager.TrainTypeSettings(0.9, 1.1)),
+            new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L, 1800L),
+            null,
+            ConfigManager.HealthSettings.defaults(),
+            null);
+    StorageManager manager =
+        new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));
+    manager.apply(view);
+    return manager.provider().orElseThrow();
+  }
+}
