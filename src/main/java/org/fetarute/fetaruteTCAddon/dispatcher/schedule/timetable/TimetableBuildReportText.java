@@ -220,11 +220,16 @@ public final class TimetableBuildReportText {
     return text.toString();
   }
 
-  /** 「结构下界」与「端点串行」两行；没有容量 1 的端点时为空。 */
+  /**
+   * 「结构下界」与「端点串行」两行；没有容量 1 的端点时为空。
+   *
+   * <p>折返秒数<b>从该端点的占用成本里反推</b>而不是另外传一个数：打印出来的必须就是算下界时用的那个， 否则报告会和它自己解释的算式对不上。来源（终到站 dwell 还是 {@code
+   * --turnaround} 覆盖）由 {@code turnarounds} 说明。
+   */
   public static List<String> describeTerminals(
       List<TerminalSerializer.TerminalReport> terminals,
       List<TimetableBuildResult.TripShift> shifts,
-      int turnaroundSeconds) {
+      TurnaroundTable turnarounds) {
     List<String> out = new ArrayList<>();
     if (terminals == null || terminals.isEmpty()) {
       return out;
@@ -241,14 +246,14 @@ public final class TimetableBuildReportText {
       out.add(
           String.format(
               Locale.ROOT,
-              "结构下界: %s（单股道）每次折返占用 ≥ %ds（进站 %d + 折返 %d + 出站 %d + 裕量 %d，按 --turnaround %d 计），按权重每 %d 班经过 %.1f 次 → 全线间隔下界 %ds",
+              "结构下界: %s（单股道）每次折返占用 ≥ %ds（进站 %d + 折返 %d + 出站 %d + 裕量 %d，折返取 %s），按权重每 %d 班经过 %.1f 次 → 全线间隔下界 %ds",
               terminal.group(),
               terminal.visitCostSeconds(),
               terminal.approachInSeconds(),
-              turnaroundSeconds,
+              turnaroundOf(terminal),
               terminal.approachOutSeconds(),
               terminal.separationSeconds(),
-              turnaroundSeconds,
+              turnarounds.describe(),
               terminal.cycleTrips(),
               terminal.visitsPerCycle(),
               terminal.headwayFloorSeconds()));
@@ -270,6 +275,16 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /** 从端点占用成本里反推本端点用的折返秒数：成本 = 进站 + 折返 + 出站 + 裕量。 */
+  private static int turnaroundOf(TerminalSerializer.TerminalReport terminal) {
+    return Math.max(
+        0,
+        terminal.visitCostSeconds()
+            - terminal.approachInSeconds()
+            - terminal.approachOutSeconds()
+            - terminal.separationSeconds());
+  }
+
   /**
    * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名剩余冲突最多的资源。
    * 两种情况下运营者要做的事不同：前者改折返/权重/股道，后者改裕量或等下一轮把咽喉也串行。
@@ -279,17 +294,17 @@ public final class TimetableBuildReportText {
       int limitHeadway,
       TimetableConflictChecker.Report conflictsAtTarget,
       List<TerminalSerializer.TerminalReport> terminals,
-      int turnaroundSeconds) {
+      TurnaroundTable turnarounds) {
     for (TerminalSerializer.TerminalReport terminal : terminals) {
       if (terminal.utilization() > 1.0D) {
         return String.format(
             Locale.ROOT,
-            "目标间隔 %ds 下端点 %s（单股道）利用率 %.0f%%（每次折返占用 %ds，按 --turnaround %d 计）：目标本身在结构上不可能；放宽到 %ds 仍找不到无冲突的间隔。可做的事：核对 --turnaround 是否远大于终到站的 dwell、降低经过该端点的 route 权重、或增加股道",
+            "目标间隔 %ds 下端点 %s（单股道）利用率 %.0f%%（每次折返占用 %ds，折返取 %s）：目标本身在结构上不可能；放宽到 %ds 仍找不到无冲突的间隔。可做的事：核对终到站的 dwell 是否偏大或 --turnaround 是否设得太长、降低经过该端点的 route 权重、或增加股道",
             targetHeadway,
             terminal.group(),
             terminal.utilization() * 100.0D,
             terminal.visitCostSeconds(),
-            turnaroundSeconds,
+            turnarounds.describe(),
             limitHeadway);
       }
     }

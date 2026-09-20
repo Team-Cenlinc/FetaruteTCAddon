@@ -34,7 +34,11 @@ class PhasePlannerTest {
 
     PhasePlanner.Phases phases =
         PhasePlanner.plan(
-            List.of(group), Map.of("default", 600), Map.of(RA, 500, RB, 500), 180, 3600);
+            List.of(group),
+            Map.of("default", 600),
+            Map.of(RA, 500, RB, 500),
+            TurnaroundTable.fixed(180),
+            3600);
 
     assertEquals(0, phases.phaseByDirection().get("OP:S:A→OP:S:C"));
     assertEquals((500 + 180) % 600, phases.phaseByDirection().get("OP:S:C→OP:S:A"));
@@ -50,7 +54,12 @@ class PhasePlannerTest {
             "default", List.of(direction("OP:S:A", "OP:S:C", "RA", RA)), List.of());
 
     PhasePlanner.Phases phases =
-        PhasePlanner.plan(List.of(group), Map.of("default", 600), Map.of(RA, 500), 180, 3600);
+        PhasePlanner.plan(
+            List.of(group),
+            Map.of("default", 600),
+            Map.of(RA, 500),
+            TurnaroundTable.fixed(180),
+            3600);
 
     assertEquals(Map.of("OP:S:A→OP:S:C", 0), phases.phaseByDirection());
     assertTrue(phases.notes().isEmpty());
@@ -71,7 +80,7 @@ class PhasePlannerTest {
             List.of(full, shortTurn),
             Map.of("full", 600, "short", 600),
             Map.of(RA, 500, RS, 200),
-            180,
+            TurnaroundTable.fixed(180),
             3600);
 
     assertEquals(0, phases.phaseByDirection().get("OP:S:A→OP:S:C"));
@@ -96,7 +105,7 @@ class PhasePlannerTest {
             List.of(full, shortTurn),
             Map.of("full", 600, "short", 300),
             Map.of(RA, 500, RS, 200),
-            180,
+            TurnaroundTable.fixed(180),
             3600);
 
     assertEquals(150, phases.offsetByGroup().get("short"));

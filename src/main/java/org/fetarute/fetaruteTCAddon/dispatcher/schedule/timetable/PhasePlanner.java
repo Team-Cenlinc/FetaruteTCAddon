@@ -62,14 +62,14 @@ public final class PhasePlanner {
    * @param groups 分类结果里的组（按名字排序）
    * @param intervalByGroup 每组的间隔（秒）
    * @param runSecondsByRoute 每条 route 的全程时分
-   * @param turnaroundSeconds 折返
+   * @param turnarounds 折返时间表
    * @param horizonSeconds 计划窗口长度
    */
   public static Phases plan(
       List<ServiceGroupClassifier.Group> groups,
       Map<String, Integer> intervalByGroup,
       Map<UUID, Integer> runSecondsByRoute,
-      int turnaroundSeconds,
+      TurnaroundTable turnarounds,
       int horizonSeconds) {
     Objects.requireNonNull(groups, "groups");
     Map<String, Integer> phases = new TreeMap<>();
@@ -85,7 +85,7 @@ public final class PhasePlanner {
       int interval = Math.max(1, intervalByGroup.getOrDefault(group.name(), 1));
       // 第一层：组内相对相位（偏移 0 时的相位），往返对锚定。
       Map<String, Integer> relative =
-          anchorReturnPairs(group, interval, runSecondsByRoute, turnaroundSeconds, notes);
+          anchorReturnPairs(group, interval, runSecondsByRoute, turnarounds, notes);
       // 第二层：整体偏移。
       int offset = 0;
       List<String> sharedOrigins = new ArrayList<>();
@@ -187,7 +187,7 @@ public final class PhasePlanner {
       ServiceGroupClassifier.Group group,
       int interval,
       Map<UUID, Integer> runSecondsByRoute,
-      int turnaroundSeconds,
+      TurnaroundTable turnarounds,
       List<String> notes) {
     Map<String, Integer> relative = new LinkedHashMap<>();
     Map<String, ServiceGroupClassifier.Direction> byKey = new LinkedHashMap<>();
@@ -206,7 +206,10 @@ public final class PhasePlanner {
         continue;
       }
       relative.put(direction.key(), 0);
+      // 折返取正向里<b>走行最短那条 route</b> 自己的：锚定用的是同一趟车，走行与折返必须来自同一条线路。
+      UUID anchorRoute = minRunRoute(direction, runSecondsByRoute);
       int run = minRun(direction, runSecondsByRoute);
+      int turnaroundSeconds = turnarounds.secondsFor(anchorRoute);
       int anchored = Math.floorMod(run + turnaroundSeconds, interval);
       relative.put(reverse.key(), anchored);
       notes.add(
@@ -225,6 +228,21 @@ public final class PhasePlanner {
               + "s");
     }
     return relative;
+  }
+
+  /** 方向内走行最短的那条 route；相位与折返都以它为锚。 */
+  private static UUID minRunRoute(
+      ServiceGroupClassifier.Direction direction, Map<UUID, Integer> runSecondsByRoute) {
+    UUID best = null;
+    int min = Integer.MAX_VALUE;
+    for (UUID routeId : direction.routeIds()) {
+      Integer run = runSecondsByRoute.get(routeId);
+      if (run != null && run < min) {
+        min = run;
+        best = routeId;
+      }
+    }
+    return best;
   }
 
   private static int minRun(

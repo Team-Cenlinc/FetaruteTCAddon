@@ -64,15 +64,15 @@ class VehicleDutyPlannerTest {
     List<VehicleDutyPlanner.PlannedTrip> samePool =
         List.of(
             new VehicleDutyPlanner.PlannedTrip(
-                id("T1"), "T1", HUB, HUB, 0, 600, false, false, "WS"),
+                id("T1"), null, "T1", HUB, HUB, 0, 600, false, false, "WS"),
             new VehicleDutyPlanner.PlannedTrip(
-                id("T2"), "T2", HUB, HUB, 900, 600, false, false, "WS"));
+                id("T2"), null, "T2", HUB, HUB, 900, 600, false, false, "WS"));
     List<VehicleDutyPlanner.PlannedTrip> twoPools =
         List.of(
             new VehicleDutyPlanner.PlannedTrip(
-                id("T1"), "T1", HUB, HUB, 0, 600, false, false, "WS"),
+                id("T1"), null, "T1", HUB, HUB, 0, 600, false, false, "WS"),
             new VehicleDutyPlanner.PlannedTrip(
-                id("T2"), "T2", HUB, HUB, 900, 600, false, false, "MT"));
+                id("T2"), null, "T2", HUB, HUB, 900, 600, false, false, "MT"));
 
     assertEquals(
         1, VehicleDutyPlanner.plan(TIMETABLE, samePool, hubLegs(), limits).duties().size());
@@ -183,7 +183,7 @@ class VehicleDutyPlannerTest {
     assertEquals(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS, limits.maxTripsPerDuty());
     assertEquals(
         VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS, limits.maxDutyDurationSeconds());
-    assertEquals(0, limits.turnaroundSeconds());
+    assertEquals(0, limits.turnaround().secondsFor(null), "负折返夹到 0");
   }
 
   /** 折返时间不够时不会把班次塞进同一个 duty，而是另开一辆车。 */
@@ -323,8 +323,9 @@ class VehicleDutyPlannerTest {
   void selfCreatingRouteOpensItsOwnDuty() {
     List<VehicleDutyPlanner.PlannedTrip> trips =
         List.of(
-            new VehicleDutyPlanner.PlannedTrip(id("A"), "A", DEPOT, HUB, 0, 300, true, false),
-            new VehicleDutyPlanner.PlannedTrip(id("B"), "B", DEPOT, HUB, 900, 300, true, false));
+            new VehicleDutyPlanner.PlannedTrip(id("A"), null, "A", DEPOT, HUB, 0, 300, true, false),
+            new VehicleDutyPlanner.PlannedTrip(
+                id("B"), null, "B", DEPOT, HUB, 900, 300, true, false));
     VehicleDutyPlanner.Legs legs =
         new VehicleDutyPlanner.Legs(
             Map.of(),
@@ -348,7 +349,8 @@ class VehicleDutyPlannerTest {
     List<VehicleDutyPlanner.PlannedTrip> trips =
         List.of(
             trip("T0", HUB, HUB, 0, 300),
-            new VehicleDutyPlanner.PlannedTrip(id("T1"), "T1", HUB, DEPOT, 600, 300, false, true),
+            new VehicleDutyPlanner.PlannedTrip(
+                id("T1"), null, "T1", HUB, DEPOT, 600, 300, false, true),
             trip("T2", HUB, HUB, 1200, 300));
     VehicleDutyPlanner.Legs legs =
         new VehicleDutyPlanner.Legs(

@@ -236,7 +236,6 @@ class ResourceRepairTest {
         index,
         0,
         3600,
-        TURNAROUND,
         SEPARATION,
         maxWait,
         tolerance,

@@ -202,7 +202,7 @@ public final class VehicleDutyPlanner {
       int tail =
           closable
               ? access.closingTail(trip, limits)
-              : limits.turnaroundSeconds() + minTripDuration + minClosingTail;
+              : limits.turnaround().minimumSeconds() + minTripDuration + minClosingTail;
       int endIfAccepted = trip.departureSeconds() + trip.durationSeconds() + tail;
       if (endIfAccepted - duty.startSeconds > limits.maxDutyDurationSeconds()) {
         continue;
@@ -237,7 +237,7 @@ public final class VehicleDutyPlanner {
     int tail =
         closable
             ? access.closingTail(trip, limits)
-            : limits.turnaroundSeconds() + minTripDuration + minClosingTail;
+            : limits.turnaround().minimumSeconds() + minTripDuration + minClosingTail;
     int end = trip.departureSeconds() + trip.durationSeconds() + tail;
     if (end - start > limits.maxDutyDurationSeconds()) {
       return closable ? UnassignedReason.EXCEEDS_DUTY_LIMITS : UnassignedReason.NO_RETURN_ACCESS;
@@ -263,9 +263,15 @@ public final class VehicleDutyPlanner {
         trip.pool());
   }
 
-  /** 出库要提前：车库到首站的走行 + 到站后的就绪时间，否则首班必然晚点。 */
+  /**
+   * 出库要提前：车库到首站的走行 + 到站后的就绪时间，否则首班必然晚点。
+   *
+   * <p>就绪时间取 <b>CREATE 线路自己</b>终到站的 dwell——车是按那条线路到的首站，能不能走由那条线路的停靠配置决定。
+   */
   private static int openingStart(PlannedTrip trip, Leg create, Limits limits) {
-    return trip.departureSeconds() - create.runSeconds() - limits.turnaroundSeconds();
+    return trip.departureSeconds()
+        - create.runSeconds()
+        - limits.turnaround().secondsFor(create.routeId());
   }
 
   /**
@@ -289,7 +295,7 @@ public final class VehicleDutyPlanner {
       return null;
     }
     int minimumTail =
-        duty.endSeconds + limits.turnaroundSeconds() + minTripDuration + minClosingTail;
+        duty.endSeconds + limits.turnaround().minimumSeconds() + minTripDuration + minClosingTail;
     if (minimumTail - duty.startSeconds > limits.maxDutyDurationSeconds()) {
       return VehicleDuty.CloseReason.MAX_DURATION;
     }
@@ -356,8 +362,8 @@ public final class VehicleDutyPlanner {
       PlannedTrip last = lastTrip();
       lastTerminal = last.terminalNodeId();
       endSeconds = last.departureSeconds() + last.durationSeconds();
-      // 到达之后还要折返才能再发车；readyAt 不含折返就等于允许车辆瞬间掉头。
-      readyAtSeconds = endSeconds + limits.turnaroundSeconds();
+      // 到达之后要等本班终到站的停站结束才能再发车，与运行时 readyAt = 到达 + 终到站 dwell 同一口径。
+      readyAtSeconds = endSeconds + limits.turnaround().secondsFor(last.routeId());
     }
 
     private PlannedTrip lastTrip() {
@@ -392,7 +398,7 @@ public final class VehicleDutyPlanner {
                     () -> new IllegalStateException("duty 停在没有回库线路的终点: " + last.terminalNodeId()));
         endDepot = leg.depotNodeId();
         returnRouteId = Optional.of(leg.routeId());
-        returnAt = arrival + limits.turnaroundSeconds();
+        returnAt = arrival + limits.turnaround().secondsFor(last.routeId());
         end = returnAt + leg.runSeconds();
       }
       String dutyCode = String.format(Locale.ROOT, "D%03d", sequence + 1);
@@ -417,6 +423,7 @@ public final class VehicleDutyPlanner {
    * 待指派的一趟车。
    *
    * @param tripId 班次 UUID
+   * @param routeId 这一班跑的 route；折返时间按它查 {@link TurnaroundTable}。为 {@code null} 时走表的兜底值
    * @param tripCode 班次号，用于确定性排序
    * @param originNodeId 起点节点
    * @param terminalNodeId 终点节点
@@ -428,6 +435,7 @@ public final class VehicleDutyPlanner {
    */
   public record PlannedTrip(
       UUID tripId,
+      UUID routeId,
       String tripCode,
       String originNodeId,
       String terminalNodeId,
@@ -451,6 +459,7 @@ public final class VehicleDutyPlanner {
     /** 单线（不分车池）的班次。 */
     public PlannedTrip(
         UUID tripId,
+        UUID routeId,
         String tripCode,
         String originNodeId,
         String terminalNodeId,
@@ -460,6 +469,7 @@ public final class VehicleDutyPlanner {
         boolean endsAtDepot) {
       this(
           tripId,
+          routeId,
           tripCode,
           originNodeId,
           terminalNodeId,
@@ -470,7 +480,7 @@ public final class VehicleDutyPlanner {
           "");
     }
 
-    /** 普通站间班次：起点终点都是车站。 */
+    /** 普通站间班次：起点终点都是车站。折返走 {@link TurnaroundTable} 的兜底值。 */
     public PlannedTrip(
         UUID tripId,
         String tripCode,
@@ -480,6 +490,7 @@ public final class VehicleDutyPlanner {
         int durationSeconds) {
       this(
           tripId,
+          null,
           tripCode,
           originNodeId,
           terminalNodeId,
@@ -584,7 +595,7 @@ public final class VehicleDutyPlanner {
         return 0;
       }
       Leg leg = returnByStation.get(trip.terminalNodeId());
-      return leg == null ? 0 : limits.turnaroundSeconds() + leg.runSeconds();
+      return leg == null ? 0 : limits.turnaround().secondsFor(trip.routeId()) + leg.runSeconds();
     }
 
     /** 所有可能的收尾里最短的一种，用作"还装不装得下"的下界。 */
@@ -608,26 +619,30 @@ public final class VehicleDutyPlanner {
    *
    * @param maxTripsPerDuty 单个 duty 最多承担多少班次
    * @param maxDutyDurationSeconds 单个 duty 最长在线时间（秒），含出库与回库走行
-   * @param turnaroundSeconds 终端折返时间（秒），同时用作出库到站后的就绪时间
+   * @param turnaround 折返时间表，见 {@link TurnaroundTable}——它不是上限，是从 route 定义算出来的物理量
    */
-  public record Limits(int maxTripsPerDuty, int maxDutyDurationSeconds, int turnaroundSeconds) {
+  public record Limits(
+      int maxTripsPerDuty, int maxDutyDurationSeconds, TurnaroundTable turnaround) {
 
-    /** 默认上限：4 趟 / 2 小时在线 / 折返 3 分钟。 */
+    /** 默认上限：4 趟 / 2 小时在线。折返<b>没有</b>默认值——它来自各 route 终到站的 dwell。 */
     public static final int DEFAULT_MAX_TRIPS = 4;
 
     public static final int DEFAULT_MAX_DURATION_SECONDS = 7200;
-    public static final int DEFAULT_TURNAROUND_SECONDS = 180;
 
     public Limits {
       maxTripsPerDuty = maxTripsPerDuty > 0 ? maxTripsPerDuty : DEFAULT_MAX_TRIPS;
       maxDutyDurationSeconds =
           maxDutyDurationSeconds > 0 ? maxDutyDurationSeconds : DEFAULT_MAX_DURATION_SECONDS;
-      turnaroundSeconds = Math.max(0, turnaroundSeconds);
+      turnaround = turnaround == null ? TurnaroundTable.none() : turnaround;
+    }
+
+    /** 折返用显式全线值：等价于 {@link TurnaroundTable#fixed}，供 {@code --turnaround} 与用例使用。 */
+    public Limits(int maxTripsPerDuty, int maxDutyDurationSeconds, int fixedTurnaroundSeconds) {
+      this(maxTripsPerDuty, maxDutyDurationSeconds, TurnaroundTable.fixed(fixedTurnaroundSeconds));
     }
 
     public static Limits defaults() {
-      return new Limits(
-          DEFAULT_MAX_TRIPS, DEFAULT_MAX_DURATION_SECONDS, DEFAULT_TURNAROUND_SECONDS);
+      return new Limits(DEFAULT_MAX_TRIPS, DEFAULT_MAX_DURATION_SECONDS, TurnaroundTable.none());
     }
   }
 

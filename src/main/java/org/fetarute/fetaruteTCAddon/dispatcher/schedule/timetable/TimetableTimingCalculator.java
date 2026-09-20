@@ -174,6 +174,24 @@ public final class TimetableTimingCalculator {
    *
    * <p>否则一条 route 上每个路径点都会被算成一次 {@code --dwell} 长的停站：全程时分被虚增一到三成， 冲突检查里每个路径点还会多出一段假的站台占用。
    */
+  /**
+   * 终到停靠点的停站时长：车按这条 route 到达终点后，多久能再发车。
+   *
+   * <p>行程时分把末站的 dwell 记作 0（班次到这儿就结束了，它不属于走行时间），于是这个字段一直没有消费者。 {@link TurnaroundTable}
+   * 是它的第一个读者——折返时间不是另立的常数，就是 route 定义里写着的这个数。 解析规则与行程时分共用同一个方法，不另开一套：PASS 不停站算 0，停靠却没配 dwell 的用兜底值。
+   *
+   * @param stops route 的停靠配置，按 sequence 升序
+   * @param fallbackSeconds 停靠却没配 dwell 时的兜底值（{@code --dwell}）
+   * @return 终到点停站秒数；没有停靠配置时返回兜底值
+   */
+  public static int terminalDwellSeconds(List<RouteStop> stops, int fallbackSeconds) {
+    long fallback = Math.max(0, fallbackSeconds);
+    if (stops == null || stops.isEmpty()) {
+      return (int) fallback;
+    }
+    return (int) Math.max(0L, resolveDwellSeconds(stops, stops.size() - 1, fallback));
+  }
+
   private static long resolveDwellSeconds(List<RouteStop> stops, int index, long fallback) {
     if (stops == null || index < 0 || index >= stops.size()) {
       return fallback;

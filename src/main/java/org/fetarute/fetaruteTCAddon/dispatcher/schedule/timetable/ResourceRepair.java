@@ -41,7 +41,6 @@ public final class ResourceRepair {
    * @param index 图索引
    * @param zeroSecondOfDay 零点
    * @param horizonSeconds 计划窗口长度
-   * @param turnaroundSeconds 折返
    * @param separationSeconds 裕量
    * @param maxWaitSeconds 单处让车上限；0 关闭修复（只扫一遍报冲突）
    * @param toleranceSeconds 同一班累计让车上限，超过即截断
@@ -56,7 +55,6 @@ public final class ResourceRepair {
       TimetableConflictChecker.GraphIndex index,
       int zeroSecondOfDay,
       int horizonSeconds,
-      int turnaroundSeconds,
       int separationSeconds,
       int maxWaitSeconds,
       int toleranceSeconds,
@@ -455,7 +453,7 @@ public final class ResourceRepair {
           startDelay,
           returnDelay,
           input.zeroSecondOfDay(),
-          input.turnaroundSeconds(),
+          input.limits().turnaround(),
           input.routesEndingAtDepot(),
           input.legs());
     }
@@ -589,7 +587,7 @@ public final class ResourceRepair {
                     plan,
                     duty,
                     input.horizonSeconds(),
-                    input.turnaroundSeconds(),
+                    input.limits().turnaround().secondsFor(trip.routeId()),
                     input.routesEndingAtDepot(),
                     input.legs(),
                     input.limits(),
@@ -618,7 +616,8 @@ public final class ResourceRepair {
         if (j + 1 >= kept[d]) {
           break;
         }
-        int ready = dep + plan.totalRunSeconds() + input.turnaroundSeconds();
+        int ready =
+            dep + plan.totalRunSeconds() + input.limits().turnaround().secondsFor(trip.routeId());
         TimetableTrip next = chain.get(j + 1);
         int nextDep = actual.getOrDefault(next.id(), nominal.get(next.id()));
         delta = ready - nextDep;

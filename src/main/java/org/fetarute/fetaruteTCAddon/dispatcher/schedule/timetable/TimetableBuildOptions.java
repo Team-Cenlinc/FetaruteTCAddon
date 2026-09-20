@@ -268,6 +268,33 @@ public record TimetableBuildOptions(
   }
 
   /**
+   * 换一张折返时间表，其余不变。
+   *
+   * <p>命令层只知道用户有没有传 {@code --turnaround}；各 route 终到站的 dwell 要等 builder 拿到停靠配置才算得出来。 于是 builder 在
+   * {@code prepare} 之后用本方法把表补上——显式覆盖（{@link TurnaroundTable#fixed}）时不动。
+   *
+   * @param turnarounds 折返时间表
+   */
+  public TimetableBuildOptions withTurnaround(TurnaroundTable turnarounds) {
+    if (turnarounds == null || dutyLimits.turnaround().equals(turnarounds)) {
+      return this;
+    }
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        new VehicleDutyPlanner.Limits(
+            dutyLimits.maxTripsPerDuty(), dutyLimits.maxDutyDurationSeconds(), turnarounds),
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair);
+  }
+
+  /**
    * 计划窗口内的发车时隙数量。
    *
    * <p>含首班与末班两端，因此是 {@code horizon / headway + 1}；上限由 {@link #MAX_TRIPS} 夹住。

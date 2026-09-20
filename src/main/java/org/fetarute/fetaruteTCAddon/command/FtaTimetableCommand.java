@@ -57,6 +57,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatu
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTimingCalculator;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TurnaroundTable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDutyPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.WeightedTripAllocator;
@@ -185,10 +186,7 @@ public final class FtaTimetableCommand {
                                 ctx,
                                 maxDutyFlag,
                                 VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS / 60),
-                            intValue(
-                                ctx,
-                                turnaroundFlag,
-                                VehicleDutyPlanner.Limits.DEFAULT_TURNAROUND_SECONDS),
+                            ctx.flags().getValue(turnaroundFlag).orElse(null),
                             intValue(
                                 ctx,
                                 separationFlag,
@@ -472,7 +470,12 @@ public final class FtaTimetableCommand {
             Duration.ofSeconds(headway.seconds()),
             Duration.ofSeconds(flags.dwellSeconds()),
             new VehicleDutyPlanner.Limits(
-                flags.maxTripsPerDuty(), flags.maxDutyMinutes() * 60, flags.turnaroundSeconds()),
+                flags.maxTripsPerDuty(),
+                flags.maxDutyMinutes() * 60,
+                // 不传 --turnaround 就不存在全线折返数：builder 按各 route 终到站的 dwell 建表。
+                flags.turnaroundSeconds() == null
+                    ? TurnaroundTable.none()
+                    : TurnaroundTable.fixed(flags.turnaroundSeconds())),
             flags.tripCodePrefix() == null ? "" : flags.tripCodePrefix(),
             zone,
             Duration.ofSeconds(flags.separationSeconds()),
@@ -844,8 +847,8 @@ public final class FtaTimetableCommand {
     if (limits.maxDutyDurationSeconds() != VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS) {
       command.append(" --max-duty-minutes ").append(limits.maxDutyDurationSeconds() / 60);
     }
-    if (limits.turnaroundSeconds() != VehicleDutyPlanner.Limits.DEFAULT_TURNAROUND_SECONDS) {
-      command.append(" --turnaround ").append(limits.turnaroundSeconds());
+    if (limits.turnaround().fixed()) {
+      command.append(" --turnaround ").append(limits.turnaround().fallbackSeconds());
     }
     if (options.separation().toSeconds() != TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS) {
       command.append(" --separation ").append(options.separation().toSeconds());
@@ -1406,7 +1409,7 @@ public final class FtaTimetableCommand {
     }
     for (String line :
         TimetableBuildReportText.describeTerminals(
-            result.terminals(), result.shifts(), options.dutyLimits().turnaroundSeconds())) {
+            result.terminals(), result.shifts(), options.dutyLimits().turnaround())) {
       sender.sendMessage(
           Component.text(
               "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
@@ -2631,7 +2634,7 @@ public final class FtaTimetableCommand {
    * @param dwellSeconds 缺省停站时长
    * @param maxTripsPerDuty 单个车辆交路最多班次
    * @param maxDutyMinutes 单个车辆交路最长在线分钟
-   * @param turnaroundSeconds 终端折返时间
+   * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
    * @param name 时刻表展示名
@@ -2646,7 +2649,7 @@ public final class FtaTimetableCommand {
       int dwellSeconds,
       int maxTripsPerDuty,
       int maxDutyMinutes,
-      int turnaroundSeconds,
+      Integer turnaroundSeconds,
       int separationSeconds,
       Integer maxWaitSeconds,
       boolean strict,

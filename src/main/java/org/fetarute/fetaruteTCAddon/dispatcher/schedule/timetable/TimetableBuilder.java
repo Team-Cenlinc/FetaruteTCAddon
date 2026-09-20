@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -88,9 +89,12 @@ public final class TimetableBuilder {
    * @param now 构建时间
    * @return 构建结果
    */
-  public TimetableBuildResult build(BuildInput input, TimetableBuildOptions options, Instant now) {
+  public TimetableBuildResult build(
+      BuildInput input, TimetableBuildOptions requested, Instant now) {
     Objects.requireNonNull(input, "input");
-    Objects.requireNonNull(options, "options");
+    Objects.requireNonNull(requested, "requested");
+    // 折返时间不是常数：没有 --turnaround 覆盖时按各 route 终到停靠点的 dwell 算（唯一来源是 route 定义）。
+    TimetableBuildOptions options = requested.withTurnaround(resolveTurnarounds(input, requested));
     Instant builtAt = now == null ? Instant.now() : now;
 
     // ---- 1. 算时分（与 headway 无关，只做一次） ------------------------------
@@ -136,7 +140,7 @@ public final class TimetableBuilder {
                     targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
                     target.conflicts(),
                     target.terminals(),
-                    options.dutyLimits().turnaroundSeconds()),
+                    options.dutyLimits().turnaround()),
             prepared.infeasible());
       }
       chosen = fallback.get();
@@ -443,7 +447,7 @@ public final class TimetableBuilder {
             groups,
             intervalByGroup,
             prepared.runByRoute(),
-            options.dutyLimits().turnaroundSeconds(),
+            options.dutyLimits().turnaround(),
             horizon);
     List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
     List<Placed> placed = new ArrayList<>();
@@ -497,6 +501,7 @@ public final class TimetableBuilder {
       VehicleDutyPlanner.PlannedTrip trip =
           new VehicleDutyPlanner.PlannedTrip(
               provisional,
+              plan.routeId(),
               String.format(Locale.ROOT, "%s@%06d", plan.routeCode(), departureSeconds),
               plan.originNodeId(),
               plan.terminalNodeId(),
@@ -592,7 +597,6 @@ public final class TimetableBuilder {
                 prepared.graphIndex(),
                 options.serviceStartSecondOfDay(),
                 horizon,
-                options.dutyLimits().turnaroundSeconds(),
                 separation,
                 prepared.legs(),
                 options.dutyLimits(),
@@ -624,7 +628,6 @@ public final class TimetableBuilder {
                 prepared.graphIndex(),
                 options.serviceStartSecondOfDay(),
                 horizon,
-                options.dutyLimits().turnaroundSeconds(),
                 separation,
                 options.repair().maxWaitSeconds(),
                 options.repair().toleranceSeconds(),
@@ -848,6 +851,25 @@ public final class TimetableBuilder {
 
   private static String clock(int secondOfDay) {
     return TimetableCsvExporter.clock(secondOfDay);
+  }
+
+  /**
+   * 折返时间表：{@code --turnaround} 显式覆盖时原样保留，否则按各 route 终到停靠点的 dwell 建表。
+   *
+   * <p>dwell 的解析走 {@link TimetableTimingCalculator#terminalDwellSeconds}，与行程时分同一套规则—— 折返不是新造的事实，就是
+   * route 定义里那个一直没有消费者的数。
+   */
+  private static TurnaroundTable resolveTurnarounds(
+      BuildInput input, TimetableBuildOptions options) {
+    TurnaroundTable requested = options.dutyLimits().turnaround();
+    if (requested.fixed()) {
+      return requested;
+    }
+    Map<UUID, List<RouteStop>> stopsByRoute = new LinkedHashMap<>();
+    for (RouteInput route : input.sortedRoutes()) {
+      stopsByRoute.put(route.routeId(), route.stops());
+    }
+    return TurnaroundTable.ofStops(stopsByRoute, (int) options.defaultDwell().toSeconds());
   }
 
   private record OperationPlan(RouteInput route, boolean startsAtDepot, boolean endsAtDepot) {}

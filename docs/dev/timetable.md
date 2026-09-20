@@ -211,10 +211,24 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 顺序是 SWRR → 派车 → 端点串行 → 编号 → 冲突检查，每个候选 headway 都这样跑一遍。串行不增减班次，份额仍由 SWRR 与派车决定；
 "短窗口不饿死"在班次序列上仍成立，在发车**间距**上不再承诺——单股道端点始发的 route 间隔会不规整，这是拓扑的价格，不加配置。
 
-报告里多两行：`结构下界`（每次折返占用 = 进站 + 折返 + 出站 + 裕量，按权重满额时的全线间隔下界，明写所用的 `--turnaround`）
+报告里多两行：`结构下界`（每次折返占用 = 进站 + 折返 + 出站 + 裕量，按权重满额时的全线间隔下界，明写折返取自哪里）
 与 `端点串行`（经过次数、占用百分比、偏离网格的班次数与最大偏移、无处等待、截断）。占用超过 100% 时目标间隔本身在结构上不可能，
-搜索失败的文案会这样说，并建议核对 `--turnaround` 是否远大于终到站的 dwell；否则文案点名剩余冲突最多的三个资源。
-**`--turnaround` 是编表参数不是物理事实**：运行时终到即待命、起点只停 dwell，默认 180 s 远大于物理折返，它一个参数就能占掉端点九成的容量。
+搜索失败的文案会这样说；否则文案点名剩余冲突最多的三个资源。
+
+### 折返时间来自 route 定义，不是常数
+
+**折返没有默认值。** 它按 route 逐条取**终到停靠点的 dwell**（`TurnaroundTable`），解析与行程时分共用
+`TimetableTimingCalculator#terminalDwellSeconds`：PASS 不停站算 0，停靠却没配 dwell 的用 `--dwell` 兜底。
+同一个站台被快车停 20 秒、慢车停 30 秒终到时，两条 route 各按各的算，不会被压成一个数。
+
+这样做是为了对齐运行时的唯一真值：`RuntimeDispatchService` 注册待命车时写的是 `readyAt = 到达 + 终到站 dwell`
+（dwell 为 0 时立即就绪），运行时**没有任何最短折返**。此处曾经是一个默认 180 秒的常数 `DEFAULT_TURNAROUND_SECONDS`，
+它在运行时侧并不存在，属于编表侧独有的第三个事实源——实测中它一项就占掉了单股道端点九成的容量。
+
+`--turnaround <sec>` 保留，但语义是**显式全线覆盖**（运营方要求"每个端点至少留这么久"时用），不是默认值。
+不传它的时候系统里不存在一个全线折返数，报告里写"折返取 终到站 dwell 20–30s"；传了则写"折返取 --turnaround 90s"。
+
+"需要等更久"不由这个量表达：端点串行与让车修复会在资源要求时把发车往后推。折返只回答"物理上最早什么时候能走"。
 
 车库咽喉（车库到正线之间的单线桥链）不是站台组，本轮**不串行**；它是端点串行之后剩余冲突的主要来源。
 
@@ -339,7 +353,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 /fta timetable build <company> <operator> <line>[,<line>…] <code>
         [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
-        [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>]
+        [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站 dwell）]
         [--separation <sec>] [--max-wait <sec>] [--strict]
         [--name "<name>"] [--prefix <p>] [--zone <zoneId>]
 /fta timetable neighbors <company> <operator> <line> <code>

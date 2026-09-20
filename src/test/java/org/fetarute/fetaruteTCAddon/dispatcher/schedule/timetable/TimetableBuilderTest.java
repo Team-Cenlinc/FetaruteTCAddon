@@ -172,6 +172,64 @@ class TimetableBuilderTest {
   }
 
   /**
+   * 不传 {@code --turnaround} 时折返来自各 route 终到停靠点的 dwell，没配 dwell 的那条走 {@code --dwell} 兜底。
+   *
+   * <p>这条守的是"编表侧不另立事实源"：运行时的待命就绪时刻是 {@code 到达 + 终到站 dwell}，编表必须算出同一个数。 从前这里是一个凭空的 180
+   * 秒常数，它把端点占用系统性地放大了。
+   */
+  @Test
+  void turnaroundComesFromEachRouteTerminalDwell() {
+    UUID ra = TimetableTestFixtures.routeId("RA");
+    UUID crt = TimetableTestFixtures.routeId("CRT");
+    UUID ret = TimetableTestFixtures.routeId("RET");
+    List<TimetableBuilder.RouteInput> routes =
+        List.of(
+            new TimetableBuilder.RouteInput(
+                ra,
+                "RA",
+                1,
+                TimetableTestFixtures.route("RA", List.of(A, B, C)),
+                // 中途不停站，终到 C 停 30 秒——折返应当正好是这 30 秒。
+                List.of(stop(ra, 0, 0, false), stop(ra, 1, 0, false), stop(ra, 2, 30, true)),
+                Optional.empty()),
+            new TimetableBuilder.RouteInput(
+                crt,
+                "CRT",
+                RouteOperationType.CREATE,
+                0,
+                TimetableTestFixtures.route("CRT", List.of(DEP, A)),
+                // 出库线路的终到点没配 dwell：走 --dwell 兜底的 7 秒。
+                List.of(cret(crt, 0, DEP), stop(crt, 1, null, true)),
+                Optional.empty()),
+            new TimetableBuilder.RouteInput(
+                ret,
+                "RET",
+                RouteOperationType.RETURN,
+                0,
+                TimetableTestFixtures.route("RET", List.of(C, DEP)),
+                TimetableTestFixtures.returnStops(ret, 2, DEP),
+                Optional.empty()));
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            23 * 3600,
+            Duration.ofSeconds(600),
+            Duration.ofSeconds(7),
+            // 折返没有显式覆盖：builder 应当按 route 定义建表。
+            new VehicleDutyPlanner.Limits(1, 5400, TurnaroundTable.none()),
+            "",
+            ZONE);
+
+    Timetable timetable = build(new Fixture(chain(), routes), options).timetable().orElseThrow();
+    VehicleDuty first = timetable.duties().get(0);
+
+    assertEquals(
+        5 * 3600 - 5 - 7, first.plannedStartSecondOfDay(), "出库提前 = 走行 5 + CREATE 终到 dwell 兜底 7");
+    assertEquals(5 * 3600 + 20 + 30, first.returnSecondOfDay(), "回库票 = 到达 + 运营 route 终到 dwell 30");
+    assertEquals(5 * 3600 + 20 + 30 + 25, first.plannedEndSecondOfDay());
+  }
+
+  /**
    * 直通运转：运营线路跑到外方车站 X 终到，本 operator 没有从 X 回库的线路；运营 route 的 metadata 显式指定外方的 RETURN 线路 X→DEP2
    * 后，它作为回库走行进入交路，车在外方车库销毁。
    */
@@ -692,6 +750,34 @@ class TimetableBuilderTest {
     routes.add(operation(routeId, "RA", 1, List.of(A, B, C)));
     routes.addAll(legs());
     return new Fixture(chain(speedBps), routes);
+  }
+
+  /** 单个停靠点：{@code dwellSeconds} 为 null 表示没配，交给 {@code --dwell} 兜底。 */
+  private static org.fetarute.fetaruteTCAddon.company.model.RouteStop stop(
+      UUID routeId, int sequence, Integer dwellSeconds, boolean terminate) {
+    return new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+        routeId,
+        sequence,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.ofNullable(dwellSeconds),
+        terminate
+            ? org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
+            : org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP,
+        Optional.empty());
+  }
+
+  /** 出库线路的首站：带 {@code CRET <depot>} 指令。 */
+  private static org.fetarute.fetaruteTCAddon.company.model.RouteStop cret(
+      UUID routeId, int sequence, String depotNodeId) {
+    return new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+        routeId,
+        sequence,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of(0),
+        org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP,
+        Optional.of("CRET " + depotNodeId));
   }
 
   private record Fixture(RailGraph graph, List<TimetableBuilder.RouteInput> routes) {}

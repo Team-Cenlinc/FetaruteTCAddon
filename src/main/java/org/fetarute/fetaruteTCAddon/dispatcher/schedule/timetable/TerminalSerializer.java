@@ -50,7 +50,6 @@ public final class TerminalSerializer {
    * @param index 图索引
    * @param zeroSecondOfDay 零点 = 计划窗口起点
    * @param horizonSeconds 计划窗口长度
-   * @param turnaroundSeconds 折返
    * @param separationSeconds 裕量
    * @param legs 出库/回库走行段
    * @param limits 交路硬上限
@@ -65,7 +64,6 @@ public final class TerminalSerializer {
       TimetableConflictChecker.GraphIndex index,
       int zeroSecondOfDay,
       int horizonSeconds,
-      int turnaroundSeconds,
       int separationSeconds,
       VehicleDutyPlanner.Legs legs,
       VehicleDutyPlanner.Limits limits,
@@ -172,7 +170,7 @@ public final class TerminalSerializer {
     }
     Set<String> terminalSet = new HashSet<>(terminals);
     int zero = input.zeroSecondOfDay();
-    int turnaround = input.turnaroundSeconds();
+    TurnaroundTable turnarounds = input.limits().turnaround();
     int separation = Math.max(0, input.separationSeconds());
 
     List<VehicleDuty> duties = table.duties();
@@ -216,6 +214,8 @@ public final class TerminalSerializer {
       TimetableTrip trip = chain.get(i);
       TimetableRoutePlan plan = table.routePlan(trip.routeId()).orElse(null);
       TimetableConflictChecker.RouteProfile profile = input.profiles().get(trip.routeId());
+      // 折返按<b>本班次自己的</b> route 取：同一股道上快车停 20 秒、慢车停 30 秒是两个数。
+      int turnaround = turnarounds.secondsFor(trip.routeId());
       if (plan == null || profile == null) {
         // 没有投影的 route 不参与串行：照名义时隙记，链继续。
         actual.put(trip.id(), trip.departureSecondOfDay() - zero);
@@ -260,7 +260,7 @@ public final class TerminalSerializer {
               plan,
               duty,
               input.horizonSeconds(),
-              input.turnaroundSeconds(),
+              turnaround,
               input.routesEndingAtDepot(),
               input.legs(),
               input.limits(),
@@ -306,7 +306,7 @@ public final class TerminalSerializer {
             null,
             null,
             zero,
-            turnaround,
+            turnarounds,
             input.routesEndingAtDepot(),
             input.legs());
 
@@ -357,7 +357,7 @@ public final class TerminalSerializer {
       int[] startDelay,
       int[] returnDelay,
       int zero,
-      int turnaround,
+      TurnaroundTable turnarounds,
       Set<UUID> routesEndingAtDepot,
       VehicleDutyPlanner.Legs legs) {
     List<VehicleDuty> duties = table.duties();
@@ -429,7 +429,8 @@ public final class TerminalSerializer {
         }
         endDepot = leg.depotNodeId();
         returnRouteId = Optional.of(leg.routeId());
-        returnAt = lastArrival + turnaround + returnDelayOf(returnDelay, d);
+        returnAt =
+            lastArrival + turnarounds.secondsFor(last.routeId()) + returnDelayOf(returnDelay, d);
         end = returnAt + leg.runSeconds();
       }
       rewritten.add(
@@ -768,12 +769,16 @@ public final class TerminalSerializer {
     for (String group : groups) {
       int in = 0;
       int outRun = 0;
+      int turnaround = 0;
       double visits = 0.0D;
       for (TimetableConflictChecker.RouteProfile profile : operationProfiles) {
         boolean origin = profile.origin().map(p -> group.equals(p.group())).orElse(false);
         boolean terminal = profile.terminal().map(p -> group.equals(p.group())).orElse(false);
         if (terminal) {
           in = Math.max(in, approachIn(profile, group, input.index().sections()));
+          // 折返与进出站走行同口径取最大值：下界要对这个端点上最慢的那条 route 也成立。
+          turnaround =
+              Math.max(turnaround, input.limits().turnaround().secondsFor(profile.routeId()));
         }
         if (origin) {
           outRun = Math.max(outRun, approachOut(profile, group, input.index().sections()));
@@ -781,7 +786,7 @@ public final class TerminalSerializer {
         int weight = weightOf(input, profile.routeId());
         visits += weight * ((origin ? 1 : 0) + (terminal ? 1 : 0)) / 2.0D;
       }
-      int cost = in + input.turnaroundSeconds() + outRun + Math.max(0, input.separationSeconds());
+      int cost = in + turnaround + outRun + Math.max(0, input.separationSeconds());
       int floor = totalWeight <= 0L ? 0 : (int) Math.ceil(visits * cost / totalWeight);
       out.put(group, new Floor(in, outRun, cost, (int) totalWeight, visits, floor));
     }

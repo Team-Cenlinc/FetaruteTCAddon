@@ -28,7 +28,7 @@ class TimetableBuildReportTextTest {
                     "RA-002", 100, 160, TerminalSerializer.Shift.Reason.WAIT_FOR_TERMINAL),
                 new TimetableBuildResult.TripShift(
                     "RX-001", 300, 80, TerminalSerializer.Shift.Reason.ANCHORED_TO_VEHICLE)),
-            60);
+            TurnaroundTable.fixed(60));
 
     assertEquals(2, lines.size());
     assertTrue(lines.get(0).startsWith("结构下界: OP:S:X"), lines.get(0));
@@ -39,7 +39,9 @@ class TimetableBuildReportTextTest {
     assertTrue(lines.get(1).contains("超过 100%"), lines.get(1));
     assertTrue(lines.get(1).contains("2 班偏离网格（延后 1 / 提前 1，最大 +60s）"), lines.get(1));
     assertTrue(lines.get(1).contains("无处等待 1 班；截断 3 班"), lines.get(1));
-    assertTrue(TimetableBuildReportText.describeTerminals(List.of(), List.of(), 60).isEmpty());
+    assertTrue(
+        TimetableBuildReportText.describeTerminals(List.of(), List.of(), TurnaroundTable.fixed(60))
+            .isEmpty());
   }
 
   @Test
@@ -53,9 +55,11 @@ class TimetableBuildReportTextTest {
                 conflict("single:s")));
 
     String structural =
-        TimetableBuildReportText.describeSearchFailure(120, 480, report, List.of(SATURATED), 60);
+        TimetableBuildReportText.describeSearchFailure(
+            120, 480, report, List.of(SATURATED), TurnaroundTable.fixed(60));
     String search =
-        TimetableBuildReportText.describeSearchFailure(120, 480, report, List.of(RELAXED), 60);
+        TimetableBuildReportText.describeSearchFailure(
+            120, 480, report, List.of(RELAXED), TurnaroundTable.fixed(60));
 
     assertTrue(structural.contains("结构上不可能"), structural);
     assertTrue(
