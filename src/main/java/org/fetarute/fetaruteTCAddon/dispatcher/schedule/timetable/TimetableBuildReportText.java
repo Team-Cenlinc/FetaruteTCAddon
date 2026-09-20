@@ -102,8 +102,67 @@ public final class TimetableBuildReportText {
       case NO_CREATE_ACCESS -> "起点没有 CREATE 线路，也没有接得上的待命车";
       case NO_RETURN_ACCESS -> "终点没有 RETURN 线路，后面也接不上能回库的班次";
       case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
-      case STUB_SATURATED -> "单股道端点排队过长，等到端点空出来交路已超上限或越过计划窗口";
+      case STUB_SATURATED -> "端点排队或让车累计超限，等到能发车时交路已超上限或越过计划窗口";
     };
+  }
+
+  /** 让车一行："让车: N 处已写进表（涉及 M 班，最长 +Xs，--max-wait Ys；对邻表 K 处）"。 */
+  public static String describeYields(List<ResourceRepair.Yield> yields, int maxWaitSeconds) {
+    if (maxWaitSeconds <= 0) {
+      return "让车: 关闭（--max-wait 0），冲突原样上报";
+    }
+    if (yields == null || yields.isEmpty()) {
+      return "让车: 无（--max-wait " + maxWaitSeconds + "s）";
+    }
+    long external = yields.stream().filter(ResourceRepair.Yield::external).count();
+    Map<TimetableConflictChecker.Kind, Integer> byKind = new LinkedHashMap<>();
+    for (ResourceRepair.Yield yield : yields) {
+      byKind.merge(yield.kind(), 1, Integer::sum);
+    }
+    StringBuilder kinds = new StringBuilder();
+    byKind.forEach(
+        (kind, count) -> {
+          if (kinds.length() > 0) {
+            kinds.append("、");
+          }
+          kinds.append(describe(kind)).append(' ').append(count);
+        });
+    return String.format(
+        Locale.ROOT,
+        "让车: %d 处已写进表（涉及 %d 班，最长 +%ds，--max-wait %ds）%s；%s",
+        yields.size(),
+        ResourceRepair.movedCount(yields),
+        ResourceRepair.maxWait(yields),
+        maxWaitSeconds,
+        external > 0 ? "，其中对邻表让车 " + external + " 处" : "",
+        kinds);
+  }
+
+  /** 让车明细，最多前几条："· 站台 platform:OP:S:A:1: RA-002 让 D001 +40s（05:05:00）"。 */
+  public static List<String> describeYieldDetails(
+      List<ResourceRepair.Yield> yields, int serviceStartSecondOfDay, int limit) {
+    List<String> out = new ArrayList<>();
+    if (yields == null || yields.isEmpty()) {
+      return out;
+    }
+    int shown = Math.min(yields.size(), Math.max(0, limit));
+    for (int i = 0; i < shown; i++) {
+      ResourceRepair.Yield yield = yields.get(i);
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "· %s %s: %s 让 %s +%ds（%s）",
+              describe(yield.kind()),
+              yield.resource(),
+              yield.second(),
+              yield.firstOwner().map(owner -> owner + " " + yield.first()).orElse(yield.first()),
+              yield.waitSeconds(),
+              TimetableCsvExporter.clock(serviceStartSecondOfDay + yield.atSeconds())));
+    }
+    if (yields.size() > shown) {
+      out.add("· … 另有 " + (yields.size() - shown) + " 处");
+    }
+    return out;
   }
 
   /** 每个交路组一行：目标间隔（来源）→ 实际间隔。 */

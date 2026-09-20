@@ -27,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -34,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
@@ -99,6 +101,9 @@ public final class FtaTimetableCommand {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
   }
 
+  /** 报告里最多列出几条让车明细。 */
+  private static final int YIELD_DETAIL_LIMIT = 5;
+
   /** 注册 {@code /fta timetable} 子命令与补全。 */
   public void register(CommandManager<CommandSender> manager) {
     SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
@@ -113,7 +118,15 @@ public final class FtaTimetableCommand {
     var startFlag = stringFlag("start", "<HH:mm>");
     var endFlag = stringFlag("end", "<HH:mm>");
     var headwayFlag = intFlag("headway", "<seconds>", 10, 7200);
-    var groupHeadwayFlag = stringFlag("group-headway", "\"<group>=<sec>,...\"");
+    var groupHeadwayFlag =
+        CommandFlag.<CommandSender>builder("group-headway")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "group-headway", StringParser.quotedStringParser())
+                    .suggestionProvider(groupHeadwaySuggestions()))
+            .asRepeatable()
+            .build();
+    var maxWaitFlag = intFlag("max-wait", "<seconds>", 0, 3600);
     var dwellFlag = intFlag("dwell", "<seconds>", 0, 600);
     var maxTripsFlag = intFlag("max-trips", "<trips>", 1, 64);
     var maxDutyFlag = intFlag("max-duty-minutes", "<minutes>", 1, 1440);
@@ -150,6 +163,7 @@ public final class FtaTimetableCommand {
             .flag(maxDutyFlag)
             .flag(turnaroundFlag)
             .flag(separationFlag)
+            .flag(maxWaitFlag)
             .flag(strictFlag)
             .flag(nameFlag)
             .flag(prefixFlag)
@@ -160,7 +174,7 @@ public final class FtaTimetableCommand {
                         ctx,
                         new BuildFlags(
                             ctx.flags().getValue(headwayFlag).orElse(null),
-                            ctx.flags().getValue(groupHeadwayFlag).orElse(null),
+                            new ArrayList<>(ctx.flags().getAll(groupHeadwayFlag)),
                             ctx.flags().getValue(startFlag).orElse(null),
                             ctx.flags().getValue(endFlag).orElse(null),
                             intValue(ctx, dwellFlag, TimetableBuildOptions.DEFAULT_DWELL_SECONDS),
@@ -178,6 +192,7 @@ public final class FtaTimetableCommand {
                                 ctx,
                                 separationFlag,
                                 TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
+                            ctx.flags().getValue(maxWaitFlag).orElse(null),
                             ctx.flags().isPresent(strictFlag),
                             ctx.flags().getValue(nameFlag).orElse(null),
                             ctx.flags().getValue(prefixFlag).orElse(null),
@@ -307,8 +322,8 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("编表", "/fta timetable build <company> <operator> <line> <code>"));
     sender.sendMessage(
         Component.text(
-            "    可选: --headway --start --end --dwell --max-trips --max-duty-minutes --turnaround"
-                + " --separation --strict --name --prefix --zone",
+            "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
+                + " --max-duty-minutes --turnaround --separation --max-wait --strict --name --prefix --zone",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
     sender.sendMessage(hint("详情", "/fta timetable info <company> <operator> <line> <code>"));
@@ -472,7 +487,8 @@ public final class FtaTimetableCommand {
             zone,
             Duration.ofSeconds(flags.separationSeconds()),
             flags.strict(),
-            groupIntervals);
+            groupIntervals,
+            repairOptions(sender, flags.maxWaitSeconds()));
 
     UUID timetableId = existing.map(Timetable::id).orElseGet(UUID::randomUUID);
     String timetableName = flags.name() == null ? code : flags.name();
@@ -587,9 +603,8 @@ public final class FtaTimetableCommand {
       return;
     }
     Timetable timetable = result.timetable().get();
-    String publishCommand =
-        "/fta timetable publish "
-            + resolved.company().code()
+    String target =
+        resolved.company().code()
             + " "
             + resolved.operator().code()
             + " "
@@ -597,9 +612,108 @@ public final class FtaTimetableCommand {
             + " "
             + timetable.code();
     sender.sendMessage(
-        Component.text("已保存草稿：" + timetable.code(), NamedTextColor.DARK_AQUA)
-            .append(Component.text(" [投入运行]", NamedTextColor.GREEN))
-            .clickEvent(ClickEvent.suggestCommand(publishCommand)));
+        Component.text("已保存草稿：" + timetable.code() + " ", NamedTextColor.DARK_AQUA)
+            .append(
+                CommandUx.actions(
+                    CommandUx.suggestAction(
+                        "[投入运行]", "/fta timetable publish " + target, "填入 publish 命令，回车后按表运行"),
+                    CommandUx.runAction("[详情]", "/fta timetable info " + target, "查看班次"),
+                    CommandUx.runAction("[交路]", "/fta timetable duties " + target, "查看每条车辆交路"),
+                    CommandUx.runAction("[导出]", "/fta timetable export " + target, "导出 CSV"))));
+    if (result.headwayRelaxed()) {
+      sender.sendMessage(
+          Component.text("  目标间隔被放宽 ", NamedTextColor.GRAY)
+              .append(
+                  CommandUx.suggestAction(
+                      "[按放宽后的间隔重建]",
+                      rebuildCommand(resolved, timetable, options, result),
+                      "把放宽后的各组间隔填成 --group-headway 再建一次；无冲突就是可以写回配置的值")));
+      for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
+        if (ServiceGroupClassifier.DEFAULT_GROUP.equals(group.group())
+            || group.effectiveSeconds() == group.targetSeconds()) {
+          continue;
+        }
+        sender.sendMessage(
+            Component.text("    ", NamedTextColor.GRAY)
+                .append(
+                    CommandUx.suggestAction(
+                        "[写回 " + group.group() + " baseline " + group.effectiveSeconds() + "s]",
+                        "/fta route group set "
+                            + resolved.company().code()
+                            + " "
+                            + resolved.operator().code()
+                            + " "
+                            + resolved.line().code()
+                            + " "
+                            + CommandUx.quoteCommandArgument(group.group())
+                            + " --baseline "
+                            + group.effectiveSeconds(),
+                        "把这个交路组的 baselineSec 改成放宽后的间隔，下次不传 --headway 也是它")));
+      }
+    }
+  }
+
+  /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
+  private static String rebuildCommand(
+      ResolvedLine resolved,
+      Timetable timetable,
+      TimetableBuildOptions options,
+      TimetableBuildResult result) {
+    StringBuilder command =
+        new StringBuilder("/fta timetable build ")
+            .append(resolved.company().code())
+            .append(' ')
+            .append(resolved.operator().code())
+            .append(' ')
+            .append(resolved.line().code())
+            .append(' ')
+            .append(timetable.code());
+    for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
+      command
+          .append(" --group-headway ")
+          .append(CommandUx.quoteCommandArgument(group.group() + "=" + group.effectiveSeconds()));
+    }
+    if (result.groupIntervals().isEmpty()) {
+      command.append(" --headway ").append(result.effectiveHeadwaySeconds());
+    }
+    if (options.serviceStartSecondOfDay() != TimetableBuildOptions.DEFAULT_SERVICE_START) {
+      command
+          .append(" --start ")
+          .append(TimetableCsvExporter.clock(options.serviceStartSecondOfDay()));
+    }
+    if (options.serviceEndSecondOfDay() != TimetableBuildOptions.DEFAULT_SERVICE_END) {
+      command.append(" --end ").append(TimetableCsvExporter.clock(options.serviceEndSecondOfDay()));
+    }
+    if (options.defaultDwell().toSeconds() != TimetableBuildOptions.DEFAULT_DWELL_SECONDS) {
+      command.append(" --dwell ").append(options.defaultDwell().toSeconds());
+    }
+    VehicleDutyPlanner.Limits limits = options.dutyLimits();
+    if (limits.maxTripsPerDuty() != VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS) {
+      command.append(" --max-trips ").append(limits.maxTripsPerDuty());
+    }
+    if (limits.maxDutyDurationSeconds() != VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS) {
+      command.append(" --max-duty-minutes ").append(limits.maxDutyDurationSeconds() / 60);
+    }
+    if (limits.turnaroundSeconds() != VehicleDutyPlanner.Limits.DEFAULT_TURNAROUND_SECONDS) {
+      command.append(" --turnaround ").append(limits.turnaroundSeconds());
+    }
+    if (options.separation().toSeconds() != TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS) {
+      command.append(" --separation ").append(options.separation().toSeconds());
+    }
+    if (options.repair().maxWaitSeconds()
+        != TimetableBuildOptions.Repair.DEFAULT_MAX_WAIT_SECONDS) {
+      command.append(" --max-wait ").append(options.repair().maxWaitSeconds());
+    }
+    if (options.strictConflicts()) {
+      command.append(" --strict");
+    }
+    if (!options.tripCodePrefix().isBlank()) {
+      command.append(" --prefix ").append(options.tripCodePrefix());
+    }
+    if (!timetable.name().equals(timetable.code())) {
+      command.append(" --name ").append(CommandUx.quoteCommandArgument(timetable.name()));
+    }
+    return command.toString();
   }
 
   /**
@@ -1122,6 +1236,17 @@ public final class FtaTimetableCommand {
           Component.text(
               "  冲突检查: 目标间隔下 " + result.conflictsAtTarget().size() + " 处冲突，明细见下方警告",
               NamedTextColor.YELLOW));
+    }
+    sender.sendMessage(
+        Component.text(
+            "  "
+                + TimetableBuildReportText.describeYields(
+                    result.yields(), options.repair().maxWaitSeconds()),
+            result.yields().isEmpty() ? NamedTextColor.GRAY : NamedTextColor.AQUA));
+    for (String line :
+        TimetableBuildReportText.describeYieldDetails(
+            result.yields(), options.serviceStartSecondOfDay(), YIELD_DETAIL_LIMIT)) {
+      sender.sendMessage(Component.text("    " + line, NamedTextColor.DARK_GRAY));
     }
     for (String line :
         TimetableBuildReportText.describeTerminals(
@@ -1726,16 +1851,94 @@ public final class FtaTimetableCommand {
   }
 
   /**
-   * 解析 {@code --group-headway "A=150,B=300"}；格式不对时提示并返回 null。
+   * 解析 {@code --group-headway A=150 --group-headway B=300}（也接受一个值里逗号分隔）；格式不对时提示并返回 null。
    *
    * <p>组名按 metadata 原样匹配，不改大小写；秒数必须为正。
    */
-  private static Map<String, Integer> parseGroupHeadways(CommandSender sender, String raw) {
+
+  /**
+   * 让车参数：{@code --max-wait} 缺省 60 s，且永远不超过 {@code timetable.hold-max-seconds}——那是运行时真能把早到的车扣留的上限，
+   * 表上写了扣不住的等待等于没写。累计上限跟 assign-tolerance：超过它车次就对不上了。
+   */
+  private TimetableBuildOptions.Repair repairOptions(CommandSender sender, Integer requested) {
+    ConfigManager.TimetableSettings settings =
+        plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
+            ? plugin.getConfigManager().current().timetableSettings()
+            : ConfigManager.TimetableSettings.defaults();
+    int holdMax = settings.holdMaxSeconds();
+    int maxWait =
+        requested == null
+            ? Math.min(TimetableBuildOptions.Repair.DEFAULT_MAX_WAIT_SECONDS, holdMax)
+            : requested;
+    if (maxWait > holdMax) {
+      sender.sendMessage(
+          Component.text(
+              "--max-wait "
+                  + maxWait
+                  + " 超过 timetable.hold-max-seconds="
+                  + holdMax
+                  + "，按 "
+                  + holdMax
+                  + " 计：运行时最多只能把早到的车扣留这么久。",
+              NamedTextColor.YELLOW));
+      maxWait = holdMax;
+    }
+    return new TimetableBuildOptions.Repair(
+        Duration.ofSeconds(maxWait), Duration.ofSeconds(settings.assignToleranceSeconds()));
+  }
+
+  /** {@code --group-headway} 的补全：本线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。 */
+  private SuggestionProvider<CommandSender> groupHeadwaySuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          if (prefix.startsWith("\"")) {
+            prefix = prefix.substring(1);
+          }
+          final String matchPrefix = prefix;
+          List<String> out = new ArrayList<>();
+          if (matchPrefix.isBlank()) {
+            out.add("<group>=<seconds>");
+          }
+          resolveLineForSuggestion(ctx)
+              .ifPresent(
+                  pair -> {
+                    List<String> names = new ArrayList<>();
+                    for (SpawnGroup group : LineSpawnMetadata.parseGroups(pair.line().metadata())) {
+                      names.add(group.name());
+                    }
+                    if (names.isEmpty()) {
+                      names.add(ServiceGroupClassifier.DEFAULT_GROUP);
+                    }
+                    for (String name : names) {
+                      String candidate = name + "=";
+                      if (matches(candidate, matchPrefix)) {
+                        out.add(candidate);
+                      }
+                    }
+                  });
+          return out;
+        });
+  }
+
+  private static Map<String, Integer> parseGroupHeadways(
+      CommandSender sender, List<String> entries) {
     Map<String, Integer> out = new java.util.TreeMap<>();
-    if (raw == null || raw.isBlank()) {
+    if (entries == null || entries.isEmpty()) {
       return out;
     }
-    for (String part : raw.split(",")) {
+    List<String> parts = new ArrayList<>();
+    for (String entry : entries) {
+      if (entry == null || entry.isBlank()) {
+        continue;
+      }
+      for (String part : entry.split(",")) {
+        if (!part.isBlank()) {
+          parts.add(part);
+        }
+      }
+    }
+    for (String part : parts) {
       String[] kv = part.trim().split("=", 2);
       Integer seconds = null;
       if (kv.length == 2 && !kv[0].isBlank()) {
@@ -2077,7 +2280,7 @@ public final class FtaTimetableCommand {
    */
   private record BuildFlags(
       Integer headwaySeconds,
-      String groupHeadways,
+      List<String> groupHeadways,
       String start,
       String end,
       int dwellSeconds,
@@ -2085,6 +2288,7 @@ public final class FtaTimetableCommand {
       int maxDutyMinutes,
       int turnaroundSeconds,
       int separationSeconds,
+      Integer maxWaitSeconds,
       boolean strict,
       String name,
       String tripCodePrefix,

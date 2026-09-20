@@ -195,7 +195,11 @@ public final class TimetableBuilder {
             .mapToInt(TimetableRoutePlan::totalRunSeconds)
             .max()
             .orElse(0);
-    Map<String, Integer> externalByOwner = target.conflicts().externalByOwner();
+    // 与某份邻表的"接触"= 目标间隔下与它的真冲突 + 给它让的车：基线要记下所有影响过我的表。
+    Map<String, Integer> externalByOwner = new HashMap<>(target.conflicts().externalByOwner());
+    for (ResourceRepair.Yield yield : target.yields()) {
+      yield.firstOwner().ifPresent(owner -> externalByOwner.merge(owner, 1, Integer::sum));
+    }
     List<TimetableBuildResult.NeighborSummary> neighborSummaries = new ArrayList<>();
     List<TimetableBaseline> baselines = new ArrayList<>();
     for (NeighborTimetable neighbor : input.neighbors()) {
@@ -224,6 +228,7 @@ public final class TimetableBuilder {
         List.copyOf(neighborSummaries),
         List.copyOf(baselines),
         chosen.shifts(),
+        chosen.yields(),
         chosen.terminals(),
         groupIntervals(target, chosen),
         chosen.interleaves(),
@@ -609,10 +614,42 @@ public final class TimetableBuilder {
       throw new BuildFailure("端点排队超限，没有一班能在计划窗口内跑完：检查折返时间、端点权重与股道数");
     }
 
+    // ---- 3.7 让车写进表：其余资源上的冲突，后车整趟延后不超过 --max-wait 的写进表；超过的留作真冲突交给搜索。
+    ResourceRepair.Result repaired =
+        ResourceRepair.repair(
+            new ResourceRepair.Input(
+                serialized.timetable(),
+                prepared.profiles(),
+                prepared.graphIndex(),
+                options.serviceStartSecondOfDay(),
+                horizon,
+                options.dutyLimits().turnaroundSeconds(),
+                separation,
+                options.repair().maxWaitSeconds(),
+                options.repair().toleranceSeconds(),
+                prepared.legs(),
+                options.dutyLimits(),
+                endingAtDepot,
+                input.neighbors()));
+    for (UUID truncated : repaired.truncatedTripIds()) {
+      WeightedTripAllocator.Allocation allocation = allocationByProvisional.get(truncated);
+      if (allocation == null) {
+        continue;
+      }
+      dropped.add(
+          new TimetableBuildResult.DroppedTrip(
+              operationPlans.get(allocation.candidateIndex()).routeCode(),
+              clock(secondOfDay(nominalByProvisional.getOrDefault(truncated, 0), options)),
+              VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+    }
+    if (repaired.timetable().trips().isEmpty()) {
+      throw new BuildFailure("让车累计超限，没有一班能在计划窗口内跑完：检查裕量、折返时间与 --max-wait");
+    }
+
     // ---- 3.6 按实际发车顺序编号、派生主键、替换 duty 引用 ----------------------------
     TimetableTripNumbering.Numbered numbered =
         TimetableTripNumbering.number(
-            timetableId, options, serialized.timetable(), nominalByProvisional);
+            timetableId, options, repaired.timetable(), nominalByProvisional);
     Map<UUID, String> routeCodeById = new HashMap<>();
     for (TimetableRoutePlan plan : prepared.plans()) {
       routeCodeById.put(plan.routeId(), plan.routeCode());
@@ -631,8 +668,18 @@ public final class TimetableBuilder {
     for (TimetableTrip trip : timetable.trips()) {
       codeByFinalId.put(trip.id(), trip.tripCode());
     }
-    List<TimetableBuildResult.TripShift> shifts = new ArrayList<>(serialized.shifts().size());
-    for (TerminalSerializer.Shift shift : serialized.shifts()) {
+    Map<String, String> finalCodeByProvisionalCode = new HashMap<>();
+    for (TimetableTrip trip : repaired.timetable().trips()) {
+      UUID finalId = numbered.finalByProvisional().get(trip.id());
+      if (finalId != null) {
+        finalCodeByProvisionalCode.put(trip.tripCode(), codeByFinalId.getOrDefault(finalId, "?"));
+      }
+    }
+    List<ResourceRepair.Yield> yields =
+        ResourceRepair.renamed(repaired.yields(), finalCodeByProvisionalCode);
+    List<TerminalSerializer.Shift> allShifts = mergeShifts(serialized.shifts(), repaired.shifts());
+    List<TimetableBuildResult.TripShift> shifts = new ArrayList<>(allShifts.size());
+    for (TerminalSerializer.Shift shift : allShifts) {
       UUID finalId = numbered.finalByProvisional().get(shift.tripId());
       if (finalId == null) {
         continue;
@@ -694,6 +741,7 @@ public final class TimetableBuilder {
         List.copyOf(shares),
         conflicts,
         List.copyOf(shifts),
+        yields,
         serialized.terminals(),
         Map.copyOf(intervalByGroup),
         PhasePlanner.interleaves(grids),
@@ -826,10 +874,37 @@ public final class TimetableBuilder {
       List<WeightedTripAllocator.ShareReport> shares,
       TimetableConflictChecker.Report conflicts,
       List<TimetableBuildResult.TripShift> shifts,
+      List<ResourceRepair.Yield> yields,
       List<TerminalSerializer.TerminalReport> terminals,
       Map<String, Integer> intervals,
       List<PhasePlanner.Interleave> interleaves,
       List<String> phaseNotes) {}
+
+  /**
+   * 端点串行与让车修复两轮偏离合成一份：名义时隙取第一轮的（网格），实际发车取最后一轮的，原因取后一轮改过它的那个。 一班在两轮里都动过时只报一条，否则"偏离网格 N 班"会把同一班数两次。
+   */
+  static List<TerminalSerializer.Shift> mergeShifts(
+      List<TerminalSerializer.Shift> first, List<TerminalSerializer.Shift> second) {
+    Map<UUID, TerminalSerializer.Shift> merged = new java.util.LinkedHashMap<>();
+    for (TerminalSerializer.Shift shift : first) {
+      merged.put(shift.tripId(), shift);
+    }
+    for (TerminalSerializer.Shift shift : second) {
+      TerminalSerializer.Shift earlier = merged.get(shift.tripId());
+      merged.put(
+          shift.tripId(),
+          new TerminalSerializer.Shift(
+              shift.tripId(),
+              earlier == null ? shift.nominalSeconds() : earlier.nominalSeconds(),
+              shift.actualSeconds(),
+              shift.reason()));
+    }
+    List<TerminalSerializer.Shift> out = new ArrayList<>(merged.values());
+    out.sort(
+        Comparator.comparingInt(TerminalSerializer.Shift::actualSeconds)
+            .thenComparing(shift -> shift.tripId().toString()));
+    return out;
+  }
 
   /** 一个格子连同它所属的方向：份额按方向报，主键与交路按全局候选下标找。 */
   private record Placed(GroupGrid.Slot slot, ServiceGroupClassifier.Direction direction) {}

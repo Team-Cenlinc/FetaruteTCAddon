@@ -22,8 +22,8 @@ import org.junit.jupiter.api.Test;
 /**
  * 路权先到先得：邻表的运行是不可移动的事实，build 只能挪自己。
  *
- * <p>路网直链 DEP–A–B–C，我的 RA 跑 A→C。邻表（另一条线、另一个运营商）有一趟车在相对 300 秒时占 A–B 边： 目标 300 秒一班时我的第二班正好撞上，放宽到 340
- * 秒才躲开（间隔裕量 30 秒）。
+ * <p>路网直链 DEP–A–B–C，我的 RA 跑 A→C。邻表（另一条线、另一个运营商）有一趟车在相对 300 秒时占 A–B 边 10 秒： 目标 300 秒一班时我的第二班正好撞上。
+ * 让车写进表之后，默认 --max-wait 60 装得下这 40 秒（10 + 裕量 30），第二班延后到 340 发；把让车关掉或上限压到 30 以下，才回到"放宽到 340 才躲开"。
  */
 class TimetableBuilderNeighborsTest {
 
@@ -51,17 +51,67 @@ class TimetableBuilderNeighborsTest {
     assertEquals(first.duties(), second.duties());
   }
 
-  /** 与邻表撞上时只放宽我的 headway；邻表的运行在冲突记录里一动不动；基线记下了对方。 */
+  /** 撞上邻表、等待在 --max-wait 之内：让车写进表——我的第二班延后 40 s，目标间隔不放宽，邻表原样，基线记下了对方。 */
   @Test
-  void externalConflictRelaxesMyHeadwayAndNeverMovesTheNeighbor() {
+  void externalConflictUnderMaxWaitIsYieldedIntoTheTable() {
     NeighborTimetable neighbor = neighborAt(300);
 
-    TimetableBuildResult result = build(List.of(neighbor), 300);
+    TimetableBuildResult result =
+        build(List.of(neighbor), 300, TimetableBuildOptions.Repair.defaults(), false);
+
+    assertTrue(result.success(), () -> result.warnings().toString());
+    assertFalse(result.headwayRelaxed(), "40 s 的让车装得下，不该放宽");
+    assertTrue(result.conflictsAtTarget().isEmpty(), () -> result.conflictsAtTarget().toString());
+    assertEquals(1, result.yields().size());
+    ResourceRepair.Yield yield = result.yields().get(0);
+    assertTrue(yield.external());
+    assertEquals(Optional.of(NEIGHBOR), yield.firstOwner());
+    assertEquals("NB-001", yield.first());
+    assertEquals("RA-002", yield.second());
+    assertEquals(40, yield.waitSeconds());
+    Timetable timetable = result.timetable().orElseThrow();
+    assertEquals(5 * 3600 + 340, timetable.trips().get(1).departureSecondOfDay());
+    assertEquals(1, result.shifts().size());
+    assertEquals(TerminalSerializer.Shift.Reason.YIELDED, result.shifts().get(0).reason());
+    // 邻表被记为影响过我的表：让车也算接触。
+    assertEquals(1, result.neighbors().size());
+    assertEquals(1, result.neighbors().get(0).conflictsAtTarget());
+    assertEquals(1, result.baselines().size());
+    assertEquals(neighbor.timetableId(), result.baselines().get(0).neighborTimetableId());
+  }
+
+  /** 严格模式只对真冲突失败：只有让车的表照常成表。 */
+  @Test
+  void strictModeAcceptsATableThatOnlyYields() {
+    TimetableBuildResult result =
+        build(List.of(neighborAt(300)), 300, TimetableBuildOptions.Repair.defaults(), true);
+
+    assertTrue(result.success(), () -> result.warnings().toString());
+    assertEquals(1, result.yields().size());
+  }
+
+  /**
+   * 让车上限装不下（30 < 40）时回到放宽：目标 300 下那 40 s 是真冲突，只放宽我的 headway；放宽到 310 之后差的 30 s 又能让了——
+   * 搜索找的是"让车装得下"的最小间隔。邻表的运行在冲突记录里一动不动；基线记下了对方。
+   */
+  @Test
+  void externalConflictOverMaxWaitRelaxesMyHeadwayAndNeverMovesTheNeighbor() {
+    NeighborTimetable neighbor = neighborAt(300);
+
+    TimetableBuildResult result =
+        build(
+            List.of(neighbor),
+            300,
+            new TimetableBuildOptions.Repair(Duration.ofSeconds(30), Duration.ofSeconds(300)),
+            false);
 
     assertTrue(result.success(), () -> result.warnings().toString());
     assertTrue(result.headwayRelaxed(), "目标 300s 与邻表撞上，必须放宽");
     assertTrue(
-        result.effectiveHeadwaySeconds() >= 340,
+        result.yields().stream().allMatch(yield -> yield.waitSeconds() <= 30),
+        () -> result.yields().toString());
+    assertTrue(
+        result.effectiveHeadwaySeconds() >= 310,
         () -> String.valueOf(result.effectiveHeadwaySeconds()));
     assertFalse(result.externalConflictsAtTarget().isEmpty());
     assertTrue(
@@ -139,6 +189,14 @@ class TimetableBuilderNeighborsTest {
   }
 
   private TimetableBuildResult build(List<NeighborTimetable> neighbors, int headway) {
+    return build(neighbors, headway, TimetableBuildOptions.Repair.none(), false);
+  }
+
+  private TimetableBuildResult build(
+      List<NeighborTimetable> neighbors,
+      int headway,
+      TimetableBuildOptions.Repair repair,
+      boolean strict) {
     UUID ra = TimetableTestFixtures.routeId("RA");
     UUID crt = TimetableTestFixtures.routeId("CRT");
     UUID ret = TimetableTestFixtures.routeId("RET");
@@ -177,7 +235,11 @@ class TimetableBuilderNeighborsTest {
             Duration.ofSeconds(0),
             new VehicleDutyPlanner.Limits(1, 5400, 60),
             "",
-            ZONE);
+            ZONE,
+            Duration.ofSeconds(TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
+            strict,
+            Map.of(),
+            repair);
     return new TimetableBuilder()
         .build(
             new TimetableBuilder.BuildInput(

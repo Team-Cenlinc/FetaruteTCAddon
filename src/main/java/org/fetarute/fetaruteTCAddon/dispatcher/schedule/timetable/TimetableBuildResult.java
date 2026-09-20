@@ -35,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param neighbors 参与检查的邻表摘要
  * @param baselines 邻表基线（成功时非空；无邻表为空）
  * @param shifts 因端点串行偏离名义时隙的班次
+ * @param yields 让车清单：已写进表的延后（对邻表让的带 owner）
  * @param terminals 容量 1 端点的报告（经过次数、占用、结构下界）
  * @param groupIntervals 各交路组的目标间隔与实际间隔
  * @param interleaves 共用起点站台组上的合成间隔
@@ -60,6 +61,7 @@ public record TimetableBuildResult(
     List<NeighborSummary> neighbors,
     List<TimetableBaseline> baselines,
     List<TripShift> shifts,
+    List<ResourceRepair.Yield> yields,
     List<TerminalSerializer.TerminalReport> terminals,
     List<GroupInterval> groupIntervals,
     List<PhasePlanner.Interleave> interleaves,
@@ -136,6 +138,7 @@ public record TimetableBuildResult(
         0,
         0,
         0,
+        List.of(),
         List.of(),
         List.of(),
         List.of(),

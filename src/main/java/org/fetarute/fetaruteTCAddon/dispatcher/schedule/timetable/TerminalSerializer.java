@@ -96,7 +96,9 @@ public final class TerminalSerializer {
       /** 起点是单股道端点，发车锚在车上（到达 + 折返）。 */
       ANCHORED_TO_VEHICLE,
       /** 本车上一班延后了，就绪晚于名义时隙。 */
-      VEHICLE_READY
+      VEHICLE_READY,
+      /** 让车：与前车在某个资源上撞了，整趟延后到前车离开之后（{@link ResourceRepair}）。 */
+      YIELDED
     }
   }
 
@@ -173,22 +175,8 @@ public final class TerminalSerializer {
     int turnaround = input.turnaroundSeconds();
     int separation = Math.max(0, input.separationSeconds());
 
-    Map<UUID, TimetableTrip> tripsById = new HashMap<>();
-    for (TimetableTrip trip : table.trips()) {
-      tripsById.put(trip.id(), trip);
-    }
     List<VehicleDuty> duties = table.duties();
-    List<List<TimetableTrip>> chains = new ArrayList<>(duties.size());
-    for (VehicleDuty duty : duties) {
-      List<TimetableTrip> chain = new ArrayList<>();
-      for (UUID id : duty.tripIds()) {
-        TimetableTrip trip = tripsById.get(id);
-        if (trip != null) {
-          chain.add(trip);
-        }
-      }
-      chains.add(chain);
-    }
+    List<List<TimetableTrip>> chains = chainsOf(table);
 
     Map<String, List<int[]>> bookings = new TreeMap<>();
     for (String group : terminals) {
@@ -266,8 +254,27 @@ public final class TerminalSerializer {
           }
         }
       }
-      if (dep != nominal && exceedsLimits(d, i, dep, plan, duty, input, zero)) {
-        truncateFrom(d, i, chains, kept, actual, truncated, input, table);
+      if (dep != nominal
+          && exceedsLimits(
+              dep,
+              plan,
+              duty,
+              input.horizonSeconds(),
+              input.turnaroundSeconds(),
+              input.routesEndingAtDepot(),
+              input.legs(),
+              input.limits(),
+              zero)) {
+        truncateFrom(
+            i,
+            chains.get(d),
+            d,
+            kept,
+            actual,
+            truncated,
+            input.routesEndingAtDepot(),
+            input.legs(),
+            table);
         if (stat != null) {
           stat[3] = stat[3] + (chain.size() - i);
         }
@@ -289,7 +296,71 @@ public final class TerminalSerializer {
       advance(d, chain, next, ready, table, input, queue, zero, terminalSet, nextReady);
     }
 
-    // ---- 改写表 ------------------------------------------------------------
+    Timetable out =
+        rewrite(
+            table,
+            chains,
+            kept,
+            actual,
+            truncated,
+            null,
+            null,
+            zero,
+            turnaround,
+            input.routesEndingAtDepot(),
+            input.legs());
+
+    List<TerminalReport> reports = new ArrayList<>(terminals.size());
+    Map<String, Floor> floors = floors(input, operationProfiles, terminals);
+    for (String group : terminals) {
+      int[] stat = stats.getOrDefault(group, new int[4]);
+      Floor floor = floors.get(group);
+      reports.add(
+          new TerminalReport(
+              group,
+              stat[0],
+              stat[1],
+              input.horizonSeconds() <= 0 ? 0.0D : (double) stat[1] / input.horizonSeconds(),
+              floor.in(),
+              floor.out(),
+              separation,
+              floor.visitCost(),
+              floor.cycleTrips(),
+              floor.visitsPerCycle(),
+              floor.headwayFloor(),
+              stat[2],
+              stat[3]));
+    }
+    shifts.sort(
+        Comparator.comparingInt(Shift::actualSeconds)
+            .thenComparing(shift -> shift.tripId().toString()));
+    return new Result(out, shifts, new ArrayList<>(truncated), reports);
+  }
+
+  /**
+   * 把改过的时刻写回表：trips 按 {@code actual}，duties 的 plannedStart / returnSecond / plannedEnd 跟着首末班走；
+   * 截断的交路少了尾段并重新找回库线路。 串行与让车修复共用这一段，因为"改时刻不增减班次、交路仍要收口"的规则只能有一份。
+   *
+   * @param chains 每条 duty 的班次链（与 duties 对齐）
+   * @param kept 每条链保留的班次数
+   * @param actual 临时 id → 实际发车（相对秒）；没有的照原时刻
+   * @param truncated 被截掉的班次 id，不落表
+   * @param startDelay 每条 duty 出库票额外延后的秒数（可为 null）
+   * @param returnDelay 每条 duty 回库票额外延后的秒数（可为 null）
+   */
+  static Timetable rewrite(
+      Timetable table,
+      List<List<TimetableTrip>> chains,
+      int[] kept,
+      Map<UUID, Integer> actual,
+      Set<UUID> truncated,
+      int[] startDelay,
+      int[] returnDelay,
+      int zero,
+      int turnaround,
+      Set<UUID> routesEndingAtDepot,
+      VehicleDutyPlanner.Legs legs) {
+    List<VehicleDuty> duties = table.duties();
     List<TimetableTrip> trips = new ArrayList<>(table.trips().size());
     for (TimetableTrip trip : table.trips()) {
       if (truncated.contains(trip.id())) {
@@ -342,25 +413,23 @@ public final class TerminalSerializer {
         int oldLastArrival =
             (last.departureSecondOfDay() - zero)
                 + (lastPlan == null ? 0 : lastPlan.totalRunSeconds());
-        int delta = lastArrival - oldLastArrival;
+        int delta = lastArrival - oldLastArrival + returnDelayOf(returnDelay, d);
         returnAt = duty.returnSecondOfDay() - zero + delta;
         end = duty.plannedEndSecondOfDay() - zero + delta;
-      } else if (lastPlan != null && input.routesEndingAtDepot().contains(last.routeId())) {
+      } else if (lastPlan != null && routesEndingAtDepot.contains(last.routeId())) {
         endDepot = lastPlan.terminalNodeId();
         returnRouteId = Optional.empty();
-        returnAt = lastArrival;
-        end = lastArrival;
+        returnAt = lastArrival + returnDelayOf(returnDelay, d);
+        end = returnAt;
       } else {
         VehicleDutyPlanner.Leg leg =
-            lastPlan == null
-                ? null
-                : input.legs().returnLegAt(lastPlan.terminalNodeId()).orElse(null);
+            lastPlan == null ? null : legs.returnLegAt(lastPlan.terminalNodeId()).orElse(null);
         if (leg == null) {
           continue; // truncateFrom 已保证可回库；到这里是防御
         }
         endDepot = leg.depotNodeId();
         returnRouteId = Optional.of(leg.routeId());
-        returnAt = lastArrival + turnaround;
+        returnAt = lastArrival + turnaround + returnDelayOf(returnDelay, d);
         end = returnAt + leg.runSeconds();
       }
       rewritten.add(
@@ -374,7 +443,7 @@ public final class TerminalSerializer {
               duty.createRouteId(),
               returnRouteId,
               ids,
-              duty.plannedStartSecondOfDay() + firstDelta,
+              duty.plannedStartSecondOfDay() + firstDelta + returnDelayOf(startDelay, d),
               zero + returnAt,
               zero + end,
               truncatedDuty ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT : duty.closeReason()));
@@ -398,31 +467,31 @@ public final class TerminalSerializer {
             table.createdAt(),
             table.updatedAt());
 
-    List<TerminalReport> reports = new ArrayList<>(terminals.size());
-    Map<String, Floor> floors = floors(input, operationProfiles, terminals);
-    for (String group : terminals) {
-      int[] stat = stats.getOrDefault(group, new int[4]);
-      Floor floor = floors.get(group);
-      reports.add(
-          new TerminalReport(
-              group,
-              stat[0],
-              stat[1],
-              input.horizonSeconds() <= 0 ? 0.0D : (double) stat[1] / input.horizonSeconds(),
-              floor.in(),
-              floor.out(),
-              separation,
-              floor.visitCost(),
-              floor.cycleTrips(),
-              floor.visitsPerCycle(),
-              floor.headwayFloor(),
-              stat[2],
-              stat[3]));
+    return out;
+  }
+
+  private static int returnDelayOf(int[] delays, int d) {
+    return delays == null || d >= delays.length ? 0 : Math.max(0, delays[d]);
+  }
+
+  /** 每条 duty 的班次链，与 {@code table.duties()} 对齐；引用不到的 trip id 跳过。 */
+  static List<List<TimetableTrip>> chainsOf(Timetable table) {
+    Map<UUID, TimetableTrip> tripsById = new HashMap<>();
+    for (TimetableTrip trip : table.trips()) {
+      tripsById.put(trip.id(), trip);
     }
-    shifts.sort(
-        Comparator.comparingInt(Shift::actualSeconds)
-            .thenComparing(shift -> shift.tripId().toString()));
-    return new Result(out, shifts, new ArrayList<>(truncated), reports);
+    List<List<TimetableTrip>> chains = new ArrayList<>(table.duties().size());
+    for (VehicleDuty duty : table.duties()) {
+      List<TimetableTrip> chain = new ArrayList<>();
+      for (UUID id : duty.tripIds()) {
+        TimetableTrip trip = tripsById.get(id);
+        if (trip != null) {
+          chain.add(trip);
+        }
+      }
+      chains.add(chain);
+    }
+    return chains;
   }
 
   /** 把下一班入队；没有下一班时什么都不做。 */
@@ -471,46 +540,51 @@ public final class TerminalSerializer {
   }
 
   /** 延后之后这一班还装不装得下：越过计划窗口，或连同收尾超过交路时长上限。 */
-  private static boolean exceedsLimits(
-      int d, int i, int dep, TimetableRoutePlan plan, VehicleDuty duty, Input input, int zero) {
-    if (dep >= input.horizonSeconds()) {
+  static boolean exceedsLimits(
+      int dep,
+      TimetableRoutePlan plan,
+      VehicleDuty duty,
+      int horizonSeconds,
+      int turnaroundSeconds,
+      Set<UUID> routesEndingAtDepot,
+      VehicleDutyPlanner.Legs legs,
+      VehicleDutyPlanner.Limits limits,
+      int zero) {
+    if (dep >= horizonSeconds) {
       return true;
     }
     int tail;
-    if (input.routesEndingAtDepot().contains(plan.routeId())) {
+    if (routesEndingAtDepot.contains(plan.routeId())) {
       tail = 0;
     } else {
       tail =
-          input
-              .legs()
-              .returnLegAt(plan.terminalNodeId())
-              .map(leg -> input.turnaroundSeconds() + leg.runSeconds())
-              .orElse(input.turnaroundSeconds());
+          legs.returnLegAt(plan.terminalNodeId())
+              .map(leg -> turnaroundSeconds + leg.runSeconds())
+              .orElse(turnaroundSeconds);
     }
     int dutyStart = duty.plannedStartSecondOfDay() - zero;
-    return dep + plan.totalRunSeconds() + tail - dutyStart
-        > input.limits().maxDutyDurationSeconds();
+    return dep + plan.totalRunSeconds() + tail - dutyStart > limits.maxDutyDurationSeconds();
   }
 
   /** 从第 i 班起截断交路，再往前退到一个能回库的终点为止（与派车器窗口末尾的处理同一条规则）。 */
-  private static void truncateFrom(
-      int d,
+  static void truncateFrom(
       int i,
-      List<List<TimetableTrip>> chains,
+      List<TimetableTrip> chain,
+      int d,
       int[] kept,
       Map<UUID, Integer> actual,
       Set<UUID> truncated,
-      Input input,
+      Set<UUID> routesEndingAtDepot,
+      VehicleDutyPlanner.Legs legs,
       Timetable table) {
-    List<TimetableTrip> chain = chains.get(d);
     int keep = i;
     while (keep > 0) {
       TimetableTrip last = chain.get(keep - 1);
       TimetableRoutePlan plan = table.routePlan(last.routeId()).orElse(null);
       boolean closable =
           plan != null
-              && (input.routesEndingAtDepot().contains(last.routeId())
-                  || input.legs().returnLegAt(plan.terminalNodeId()).isPresent());
+              && (routesEndingAtDepot.contains(last.routeId())
+                  || legs.returnLegAt(plan.terminalNodeId()).isPresent());
       if (closable) {
         break;
       }

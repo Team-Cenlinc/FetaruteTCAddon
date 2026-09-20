@@ -22,6 +22,7 @@ import java.util.TreeMap;
  * @param separation 冲突检查里相邻占用之间的最小间隔（边、道岔、站台）
  * @param strictConflicts 目标 headway 排出来有冲突时：{@code true} 构建失败；{@code false} 回退到最小可行 headway 并警告
  * @param groupIntervals 交路组 → 该组每个方向的发车间隔（秒）；没列出的组用 {@code headway}
+ * @param repair 让车修复参数（单处上限、累计上限）
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -33,7 +34,53 @@ public record TimetableBuildOptions(
     ZoneId zoneId,
     Duration separation,
     boolean strictConflicts,
-    Map<String, Integer> groupIntervals) {
+    Map<String, Integer> groupIntervals,
+    Repair repair) {
+
+  /**
+   * 让车修复参数。
+   *
+   * @param maxWait 单处让车上限；零关闭修复。默认 60 s，不能超过运行时的 {@code timetable.hold-max-seconds}（那是车真能被扣留的上限）
+   * @param tolerance 同一班累计让车上限，超过即截断交路；对应运行时的 assign-tolerance
+   */
+  public record Repair(Duration maxWait, Duration tolerance) {
+
+    /** 默认单处让车上限。 */
+    public static final int DEFAULT_MAX_WAIT_SECONDS = 60;
+
+    /** 默认累计上限，与 {@code timetable.assign-tolerance-seconds} 的默认值一致。 */
+    public static final int DEFAULT_TOLERANCE_SECONDS = 300;
+
+    public Repair {
+      maxWait =
+          maxWait == null || maxWait.isNegative()
+              ? Duration.ofSeconds(DEFAULT_MAX_WAIT_SECONDS)
+              : maxWait;
+      tolerance =
+          tolerance == null || tolerance.isNegative()
+              ? Duration.ofSeconds(DEFAULT_TOLERANCE_SECONDS)
+              : tolerance;
+    }
+
+    public static Repair defaults() {
+      return new Repair(
+          Duration.ofSeconds(DEFAULT_MAX_WAIT_SECONDS),
+          Duration.ofSeconds(DEFAULT_TOLERANCE_SECONDS));
+    }
+
+    /** 关闭修复：冲突原样上报。 */
+    public static Repair none() {
+      return new Repair(Duration.ZERO, Duration.ofSeconds(DEFAULT_TOLERANCE_SECONDS));
+    }
+
+    public int maxWaitSeconds() {
+      return (int) Math.min(Integer.MAX_VALUE, maxWait.toSeconds());
+    }
+
+    public int toleranceSeconds() {
+      return (int) Math.min(Integer.MAX_VALUE, tolerance.toSeconds());
+    }
+  }
 
   /** 默认首班 05:00。 */
   public static final int DEFAULT_SERVICE_START = 5 * 3600;
@@ -86,6 +133,33 @@ public record TimetableBuildOptions(
           });
     }
     groupIntervals = Collections.unmodifiableMap(intervals);
+    repair = repair == null ? Repair.defaults() : repair;
+  }
+
+  /** 没有让车参数的构造：默认 60 s / 300 s。 */
+  public TimetableBuildOptions(
+      int serviceStartSecondOfDay,
+      int serviceEndSecondOfDay,
+      Duration headway,
+      Duration defaultDwell,
+      VehicleDutyPlanner.Limits dutyLimits,
+      String tripCodePrefix,
+      ZoneId zoneId,
+      Duration separation,
+      boolean strictConflicts,
+      Map<String, Integer> groupIntervals) {
+    this(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        Repair.defaults());
   }
 
   /** 没有按组间隔的构造：所有组都用兜底间隔。 */
@@ -168,7 +242,24 @@ public record TimetableBuildOptions(
         zoneId,
         separation,
         strictConflicts,
-        intervals);
+        intervals,
+        repair);
+  }
+
+  /** 换让车参数，其余不变。 */
+  public TimetableBuildOptions withRepair(Repair nextRepair) {
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        nextRepair);
   }
 
   /** 计划窗口长度（秒）。 */
