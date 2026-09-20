@@ -36,6 +36,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param baselines 邻表基线（成功时非空；无邻表为空）
  * @param shifts 因端点串行偏离名义时隙的班次
  * @param terminals 容量 1 端点的报告（经过次数、占用、结构下界）
+ * @param groupIntervals 各交路组的目标间隔与实际间隔
+ * @param interleaves 共用起点站台组上的合成间隔
+ * @param dutyShapes 交路形状：跑几班的交路各有多少条
+ * @param phaseNotes 相位选择的说明
  * @param warnings 构建过程中的提示
  */
 public record TimetableBuildResult(
@@ -57,6 +61,10 @@ public record TimetableBuildResult(
     List<TimetableBaseline> baselines,
     List<TripShift> shifts,
     List<TerminalSerializer.TerminalReport> terminals,
+    List<GroupInterval> groupIntervals,
+    List<PhasePlanner.Interleave> interleaves,
+    List<DutyShape> dutyShapes,
+    List<String> phaseNotes,
     List<String> warnings) {
 
   /** 报告里最多展开多少条冲突明细。 */
@@ -72,6 +80,10 @@ public record TimetableBuildResult(
     baselines = baselines == null ? List.of() : List.copyOf(baselines);
     shifts = shifts == null ? List.of() : List.copyOf(shifts);
     terminals = terminals == null ? List.of() : List.copyOf(terminals);
+    groupIntervals = groupIntervals == null ? List.of() : List.copyOf(groupIntervals);
+    interleaves = interleaves == null ? List.of() : List.copyOf(interleaves);
+    dutyShapes = dutyShapes == null ? List.of() : List.copyOf(dutyShapes);
+    phaseNotes = phaseNotes == null ? List.of() : List.copyOf(phaseNotes);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
   }
 
@@ -129,8 +141,29 @@ public record TimetableBuildResult(
         List.of(),
         List.of(),
         List.of(),
+        List.of(),
+        List.of(),
+        List.of(),
+        List.of(),
         List.of(Objects.requireNonNullElse(reason, "构建失败")));
   }
+
+  /**
+   * 一个交路组的间隔：目标是配置/命令给的，实际是搜索放宽后的（没放宽时相等）。
+   *
+   * @param group 组名
+   * @param targetSeconds 目标间隔
+   * @param effectiveSeconds 实际间隔
+   */
+  public record GroupInterval(String group, int targetSeconds, int effectiveSeconds) {}
+
+  /**
+   * 交路形状：跑 {@code trips} 班的交路有 {@code duties} 条。
+   *
+   * @param trips 一条交路里的班次数（不含回库班）
+   * @param duties 这种形状的交路条数
+   */
+  public record DutyShape(int trips, int duties) {}
 
   /**
    * 一班偏离名义时隙：端点串行把它延后（等端点空出来、或本车就绪晚了）或提前（续班锚在车上）。

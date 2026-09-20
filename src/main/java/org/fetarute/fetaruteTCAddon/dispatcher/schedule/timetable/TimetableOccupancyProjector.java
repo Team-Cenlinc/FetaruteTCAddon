@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 
 /**
  * 把一份时刻表（班次 + 车辆交路）连同各 route 的投影，展开成冲突模型里的运行与站台待命。
@@ -55,7 +56,13 @@ public final class TimetableOccupancyProjector {
     Map<UUID, TimetableTrip> tripsById = new HashMap<>();
     for (TimetableTrip trip : timetable.trips()) {
       tripsById.put(trip.id(), trip);
-      if (profiles.containsKey(trip.routeId())) {
+      // 带客的回库班有 trip 行，但它的运行由 duty 的回库走行投影（同一辆车、同一时刻），这里不再投一遍。
+      boolean returnTrip =
+          timetable
+              .routePlan(trip.routeId())
+              .map(plan -> plan.kind() == RouteOperationType.RETURN)
+              .orElse(false);
+      if (profiles.containsKey(trip.routeId()) && !returnTrip) {
         movements.add(
             new TimetableConflictChecker.Movement(
                 trip.tripCode(),

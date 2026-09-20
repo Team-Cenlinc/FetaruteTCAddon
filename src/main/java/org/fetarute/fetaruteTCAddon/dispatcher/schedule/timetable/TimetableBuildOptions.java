@@ -2,7 +2,10 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.Collections;
+import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * 构建时刻表的参数。
@@ -11,13 +14,14 @@ import java.util.Objects;
  *
  * @param serviceStartSecondOfDay 首班发车时刻（当日秒数）
  * @param serviceEndSecondOfDay 末班发车时刻（相对同一服务日的秒数，可超过一天表示跨零点）
- * @param headway 全线基准发车间隔；它决定总班次数，各 route 的份额再由 weight 切分
+ * @param headway 兜底发车间隔：交路组没有自己的间隔时用它；每个方向按各自的间隔铺规整子网格，weight 只在同方向多 route 之间切份额
  * @param defaultDwell RouteStop 未配置停站时长时的缺省值
  * @param dutyLimits 车辆交路硬上限
  * @param tripCodePrefix 车次号前缀
  * @param zoneId 发车时刻所用时区
  * @param separation 冲突检查里相邻占用之间的最小间隔（边、道岔、站台）
  * @param strictConflicts 目标 headway 排出来有冲突时：{@code true} 构建失败；{@code false} 回退到最小可行 headway 并警告
+ * @param groupIntervals 交路组 → 该组每个方向的发车间隔（秒）；没列出的组用 {@code headway}
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -28,7 +32,8 @@ public record TimetableBuildOptions(
     String tripCodePrefix,
     ZoneId zoneId,
     Duration separation,
-    boolean strictConflicts) {
+    boolean strictConflicts,
+    Map<String, Integer> groupIntervals) {
 
   /** 默认首班 05:00。 */
   public static final int DEFAULT_SERVICE_START = 5 * 3600;
@@ -71,6 +76,46 @@ public record TimetableBuildOptions(
         separation == null || separation.isNegative()
             ? Duration.ofSeconds(DEFAULT_SEPARATION_SECONDS)
             : separation;
+    Map<String, Integer> intervals = new TreeMap<>();
+    if (groupIntervals != null) {
+      groupIntervals.forEach(
+          (group, seconds) -> {
+            if (group != null && !group.isBlank() && seconds != null && seconds > 0) {
+              intervals.put(group, seconds);
+            }
+          });
+    }
+    groupIntervals = Collections.unmodifiableMap(intervals);
+  }
+
+  /** 没有按组间隔的构造：所有组都用兜底间隔。 */
+  public TimetableBuildOptions(
+      int serviceStartSecondOfDay,
+      int serviceEndSecondOfDay,
+      Duration headway,
+      Duration defaultDwell,
+      VehicleDutyPlanner.Limits dutyLimits,
+      String tripCodePrefix,
+      ZoneId zoneId,
+      Duration separation,
+      boolean strictConflicts) {
+    this(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        Map.of());
+  }
+
+  /** 某个组的间隔：配了用配的，没配用兜底。 */
+  public int intervalFor(String group) {
+    Integer configured = group == null ? null : groupIntervals.get(group);
+    return configured != null ? configured : (int) Math.max(1L, headway.toSeconds());
   }
 
   /** 不带冲突检查参数的构造：默认间隔、有冲突时回退而不是失败。 */
@@ -106,8 +151,13 @@ public record TimetableBuildOptions(
         zoneId);
   }
 
-  /** 换一个 headway，其余不变。 */
+  /** 换一个兜底 headway、清掉按组间隔，其余不变。 */
   public TimetableBuildOptions withHeadway(Duration nextHeadway) {
+    return withIntervals(nextHeadway, Map.of());
+  }
+
+  /** 换兜底间隔与按组间隔，其余不变。搜索放宽时按同一比例改这两样。 */
+  public TimetableBuildOptions withIntervals(Duration nextHeadway, Map<String, Integer> intervals) {
     return new TimetableBuildOptions(
         serviceStartSecondOfDay,
         serviceEndSecondOfDay,
@@ -117,7 +167,8 @@ public record TimetableBuildOptions(
         tripCodePrefix,
         zoneId,
         separation,
-        strictConflicts);
+        strictConflicts,
+        intervals);
   }
 
   /** 计划窗口长度（秒）。 */

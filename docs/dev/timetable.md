@@ -74,6 +74,10 @@ weight 是 objective 而不是硬约束，优先级是：
 
 排不满时 `build` 会同时报出目标份额与实际份额并警告，而不是偷偷生成不合理的班次。
 
+weight 的作用域是**同一交路组、同一方向**的带客 route 之间。组与组之间不比 weight，比的是各自的**间隔**
+（见下文「按组频率」）；纯走行 route（出库 `DEP→A`、回库 `A→DEP` 这种中途没有 STOP 的 CREATE/RETURN）没有 weight，
+它们不是班次。
+
 ### 3. 每辆车都有有限交路
 
 不要只想成 `Trip → Trip → Trip → …`。运行计划的抽象是**车辆交路（vehicle duty / circulation block）**：
@@ -167,6 +171,25 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 同一天还修了第四条：build 的行程时间模型此前不看 `fta_rail_edge_overrides`，而图里的边基础限速多半是 0，全线按默认 8 bps 算，
 时分比实际慢两到三倍。现在 `TimetableEdgeSpeeds` 把该世界的**永久**限速覆盖接进模型；临时限速与封锁带截止时刻，进表会破坏确定性，不看。
 "同一份网络状态"因此包含永久限速覆盖：改了限速要重新 build。
+
+### 按组频率：每组每方向一张子网格
+
+班次不是从"全线一张网格、SWRR 把格子分给各 route"来的——那样每条 route 的间隔是 360/240/240 这种没规律的数，
+端点上的等待全是相位余数。乘客要的是"这个方向每 N 秒一班"，所以**间隔是方向的属性**，weight 只在同方向多 route 之间切份额：
+
+1. **分类**（`ServiceGroupClassifier`）：每条 route 按 metadata 的 `spawn_group` 归组，没配的一律进 `default` 组（一条线没分组就是一个组，
+   往返对才能锚在一起；按起点站推导是错的——正向从 A 出发、反向从 B 出发会被拆成两组，谁也锚不到谁）。
+   OPERATION 永远是班次；CREATE/RETURN 中途至少一个 STOP 的也是班次（DS 那种 `CREATE → RETURN` 完整生灭的一对和 WS 用
+   `OPERATION + CRET` 写的出库班是同一回事），中途没有 STOP 的是纯走行，只做交路的两头。
+   带客的 CREATE 从车库实体化（必须有 CRET）、上网格；带客的 RETURN 仍由派车器在交路收尾处生成，但落 trip 行、挂在交路上
+   （不进 `duty.tripIds`，运行时仍出走行票；投影与 `tripsBetween` 都跳过它，占用只算一次）。
+2. **子网格**（`GroupGrid`）：同组内起终点站台组相同的带客 route 是一个**方向**，发车 = `相位 + k × 组间隔`；同方向多 route 按 SWRR 分格。
+3. **相位**（`PhasePlanner`）两层，顺序固定：先**往返对锚定**——反向相位 = 正向走行 + 折返（对间隔取模），一辆车到端点折返完正好是下一班的时隙，端点零等待；
+   再**组间交错**——组按名字排序，第一组相位 0，后面每组在 `[0, 间隔)` 上以 10 s 步长扫描一个整体偏移，目标是共用起点站台组上相邻发车的
+   最大间隔最小、并列时最小间隔最大（否则"两组同时发车"与"均匀错开"会打平）、再并列取最小偏移。大小交路的价值全在这一层。
+4. **搜索**：目标间隔有冲突时把**所有组的间隔按同一比例放宽**（步长与上限按最小间隔算），大小交路的比例不变。
+
+全部确定：组、方向、候选都按稳定键排序，没有随机源。
 
 ### 单股道端点：按资源串行
 
@@ -284,7 +307,8 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 
 ```
 /fta timetable build <company> <operator> <line> <code>
-        [--headway <sec>] [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
+        [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
+        [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>]
         [--separation <sec>] [--strict]
         [--name "<name>"] [--prefix <p>] [--zone <zoneId>]
@@ -298,9 +322,10 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 /fta timetable status
 ```
 
-`--headway` 不填时从线路的 baseline 频率出发：线路级 `spawnFreqBaselineSec` 优先，其次线路 metadata 里的交路组 baseline
-（只有一个组就用它；多个组按频率合并 `1 / Σ(1/b_i)`，因为时刻表以整条线路为单位排班、再按 route weight 切分份额），
-都没有才用 300 秒。baseline 是目标不是硬约束：排出来有冲突时回退到最小可行间隔（见上文第二层）。报告里有一行"间隔来源"。
+间隔按**交路组**解析，每组一个数，优先级：`--group-headway` 里点名的 > `--headway`（给全部组）> 该组在线路 metadata 里的
+`spawn_groups[].baselineSec` > 线路级 `spawnFreqBaselineSec` > 300 秒。组名按 metadata 原样匹配，没配 `spawn_group` 的 route 归 `default` 组。
+baseline 是目标不是硬约束：排出来有冲突时所有组按同一比例放宽到最小可行间隔（见上文第二层）。报告里每组一行"交路组 X: 每方向 N s（来源）"，
+被放宽时后面带"→ 放宽到"。
 
 `build` 的计算部分（时分、排班、派车、冲突扫描与 headway 搜索）在异步线程执行，报告与落库回到主线程；
 输入全是不可变快照。末班早于首班会被命令拒绝并提示写成 `25:00` 这样的跨零点形式。
@@ -310,12 +335,14 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 哪些没有表的线路与本表共用区间/站台/单线/道岔，各多少个——足迹按展开后的路径算，不按申报的停靠点；目前只报告不联合排布，
 设计见 `timetable-scope-design.md`）、
 交路数、**全天出库次数与峰值同时在线车数**、**目标服务比例 vs 实际服务比例**、最长一趟车、单交路最多班次与最长在线、
-"所有交路都以回库收尾"这一行，**结构下界**与**端点串行**两行（有单股道端点时），以及**被取消的班次**（按 route 与原因归组，列出时刻；
-原因除缺出库/回库线路外还有 `STUB_SATURATED`：端点排队超限）。
+"所有交路都以回库收尾"这一行，**结构下界**与**端点串行**两行（有单股道端点时），**相位**说明（哪些往返对锚定了、哪些组在共用起点上交错了、偏移多少）、
+**合成间隔**（共用起点站台组上叠加各组之后相邻发车的 min/med/max）、**交路形状**（跑 N 班的交路 M 条——出入库班配得多不多看这一行），
+以及**被取消的班次**（按 route 与原因归组，列出时刻；原因除缺出库/回库线路外还有 `STUB_SATURATED`：端点排队超限）。
 
 峰值同时在线车数是将来与 operator 车数上限比较的量；duty 总数不是——一天 40 个 duty 可能只需要 6 辆车。
 
-`RouteOperationType.OPERATION` 进发车表；CREATE/RETURN 提供车辆交路两端的走行，不进发车表，但同样落在 `route_plans` 里。
+`RouteOperationType.OPERATION` 进发车表；中途有 STOP 的 CREATE/RETURN 也进（带客的出库班、回库班）；中途没有 STOP 的 CREATE/RETURN
+只提供车辆交路两端的走行，不进发车表，但同样落在 `route_plans` 里。
 `duties` 子命令会显示每个交路经哪条线路出库、哪条线路几点回库。
 
 权限：`fetarute.timetable`（只读）、`fetarute.timetable.manage`（编表/发布/删除）。
@@ -457,6 +484,8 @@ planned segment duration   vs   actual segment duration
 - 冲突模型的边界：站台组容量取图里的物理股道数，不看各 route 的 DYNAMIC 范围（range 更窄时会少报）；单线区段只识别桥链，
   环内的会让、平交由边互斥兜底；车库容量视为无限；不建模授权窗口与制动距离。逐边时分按模型的逐边估算等比分摊到区段总时分上。
 - 端点串行只覆盖容量为 1 的站台组；车库咽喉（单线桥链）与多股道车站不串行。名义时隙不落库，只在 build 报告里。
+- 相位只做两层（往返对锚定、组间按共用起点扫描），不做多组联合的全局最优；扫描目标只看共用**起点**站台组，不看共用区间与终点。
+- 带客的 RETURN 班有 trip 行但运行时仍出走行票（回库票），不出运营票；它的 trip 行只为 PIDS、导出与冲突模型里的车辆身份。
 - 车次绑定与交路进度不持久化，重启后回到自由运行。
 - 仅由 code 定义（无 UUID）的交路不参与按表运行：绑定挂不回 Route。
 - 同一条线路可以同时有多份 PUBLISHED 时刻表——publish 不拦，它们互为替代所以也不进对方的邻表检查。

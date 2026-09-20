@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildReportText;
@@ -112,6 +113,7 @@ public final class FtaTimetableCommand {
     var startFlag = stringFlag("start", "<HH:mm>");
     var endFlag = stringFlag("end", "<HH:mm>");
     var headwayFlag = intFlag("headway", "<seconds>", 10, 7200);
+    var groupHeadwayFlag = stringFlag("group-headway", "\"<group>=<sec>,...\"");
     var dwellFlag = intFlag("dwell", "<seconds>", 0, 600);
     var maxTripsFlag = intFlag("max-trips", "<trips>", 1, 64);
     var maxDutyFlag = intFlag("max-duty-minutes", "<minutes>", 1, 1440);
@@ -140,6 +142,7 @@ public final class FtaTimetableCommand {
                 StringParser.quotedStringParser(),
                 CommandSuggestionProviders.placeholder("<code>"))
             .flag(headwayFlag)
+            .flag(groupHeadwayFlag)
             .flag(startFlag)
             .flag(endFlag)
             .flag(dwellFlag)
@@ -157,6 +160,7 @@ public final class FtaTimetableCommand {
                         ctx,
                         new BuildFlags(
                             ctx.flags().getValue(headwayFlag).orElse(null),
+                            ctx.flags().getValue(groupHeadwayFlag).orElse(null),
                             ctx.flags().getValue(startFlag).orElse(null),
                             ctx.flags().getValue(endFlag).orElse(null),
                             intValue(ctx, dwellFlag, TimetableBuildOptions.DEFAULT_DWELL_SECONDS),
@@ -395,8 +399,7 @@ public final class FtaTimetableCommand {
               .filter(Objects::nonNull)
               .sorted(Comparator.comparingInt(RouteStop::sequence))
               .toList();
-      anyOperation |= route.operationType() == RouteOperationType.OPERATION;
-      routeInputs.add(
+      TimetableBuilder.RouteInput routeInput =
           new TimetableBuilder.RouteInput(
               route.id(),
               route.code(),
@@ -406,11 +409,20 @@ public final class FtaTimetableCommand {
               stops,
               Optional.empty(),
               Optional.ofNullable(declared.typeOf().get(route.id())),
-              externalRoutes.contains(route.id())));
+              externalRoutes.contains(route.id()),
+              readSpawnGroup(route));
+      // 带客的出库班（CREATE 且中途有停站）也是班次：DS 那种只有 CREATE + RETURN 的线一样能编表。
+      anyOperation |=
+          route.operationType() == RouteOperationType.OPERATION
+              || (route.operationType() == RouteOperationType.CREATE
+                  && ServiceGroupClassifier.carriesPassengers(routeInput));
+      routeInputs.add(routeInput);
     }
     warnDeclaredWithoutSpawnService(sender, declared);
     if (!anyOperation) {
-      sender.sendMessage(Component.text("该线路下没有可编表的 OPERATION route。", NamedTextColor.RED));
+      sender.sendMessage(
+          Component.text(
+              "该线路下没有可编表的班次：既没有 OPERATION route，也没有带客的 CREATE route。", NamedTextColor.RED));
       return;
     }
     if (graph == null) {
@@ -419,12 +431,35 @@ public final class FtaTimetableCommand {
       return;
     }
 
-    // baseline 频率是运营目标，时刻表从它出发；命令显式给了 --headway 才覆盖。
+    // 每个交路组一个间隔：--headway 覆盖全部 > --group-headway 逐组 > 组 baseline > 线路 baseline > 默认。
+    // 没有分到任何组的班次用兜底间隔（同一套优先级，不看组）。
     TimetableHeadwayDefaults.Choice headway =
         TimetableHeadwayDefaults.resolve(
             Optional.ofNullable(flags.headwaySeconds()),
             resolved.line().spawnFreqBaselineSec(),
             LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+    Map<String, Integer> explicitByGroup = parseGroupHeadways(sender, flags.groupHeadways());
+    if (explicitByGroup == null) {
+      return;
+    }
+    List<String> groupNames =
+        ServiceGroupClassifier.classify(routeInputs).groups().stream()
+            .map(ServiceGroupClassifier.Group::name)
+            .toList();
+    Map<String, TimetableHeadwayDefaults.Choice> groupChoices =
+        TimetableHeadwayDefaults.resolveGroups(
+            Optional.ofNullable(flags.headwaySeconds()),
+            explicitByGroup,
+            resolved.line().spawnFreqBaselineSec(),
+            LineSpawnMetadata.parseGroups(resolved.line().metadata()),
+            groupNames);
+    Map<String, Integer> groupIntervals = new java.util.TreeMap<>();
+    Map<String, String> groupSources = new java.util.TreeMap<>();
+    groupChoices.forEach(
+        (group, choice) -> {
+          groupIntervals.put(group, choice.seconds());
+          groupSources.put(group, choice.description());
+        });
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             serviceStart,
@@ -436,7 +471,8 @@ public final class FtaTimetableCommand {
             flags.tripCodePrefix() == null ? "" : flags.tripCodePrefix(),
             zone,
             Duration.ofSeconds(flags.separationSeconds()),
-            flags.strict());
+            flags.strict(),
+            groupIntervals);
 
     UUID timetableId = existing.map(Timetable::id).orElseGet(UUID::randomUUID);
     String timetableName = flags.name() == null ? code : flags.name();
@@ -512,7 +548,14 @@ public final class FtaTimetableCommand {
                       plugin,
                       () ->
                           finishBuild(
-                              sender, provider, resolved, built, options, headway, neighbors));
+                              sender,
+                              provider,
+                              resolved,
+                              built,
+                              options,
+                              headway,
+                              neighbors,
+                              groupSources));
             });
   }
 
@@ -524,8 +567,9 @@ public final class FtaTimetableCommand {
       TimetableBuildResult result,
       TimetableBuildOptions options,
       TimetableHeadwayDefaults.Choice headway,
-      NeighborReport neighbors) {
-    sendBuildReport(sender, result, options, headway);
+      NeighborReport neighbors,
+      Map<String, String> groupSources) {
+    sendBuildReport(sender, result, options, headway, groupSources);
     sendNeighborReport(sender, neighbors, result.neighbors());
     sendExternalConflicts(
         sender,
@@ -1013,7 +1057,8 @@ public final class FtaTimetableCommand {
       CommandSender sender,
       TimetableBuildResult result,
       TimetableBuildOptions options,
-      TimetableHeadwayDefaults.Choice headway) {
+      TimetableHeadwayDefaults.Choice headway,
+      Map<String, String> groupSources) {
     sender.sendMessage(Component.text("===== 构建报告 =====", NamedTextColor.DARK_AQUA));
     if (!result.success()) {
       for (String warning : result.warnings()) {
@@ -1050,7 +1095,23 @@ public final class FtaTimetableCommand {
                 + (result.headwayRelaxed()
                     ? "（目标 " + result.targetHeadwaySeconds() + "s 有冲突，已放宽）"
                     : "")));
-    sender.sendMessage(field("间隔来源", headway.description() + "：" + headway.seconds() + "s"));
+    if (result.groupIntervals().isEmpty()) {
+      sender.sendMessage(field("间隔来源", headway.description() + "：" + headway.seconds() + "s"));
+    }
+    for (String line :
+        TimetableBuildReportText.describeGroups(result.groupIntervals(), groupSources)) {
+      sender.sendMessage(Component.text("  " + line, NamedTextColor.GRAY));
+    }
+    for (String note : result.phaseNotes()) {
+      sender.sendMessage(Component.text("  相位: " + note, NamedTextColor.DARK_GRAY));
+    }
+    for (String line : TimetableBuildReportText.describeInterleaves(result.interleaves())) {
+      sender.sendMessage(Component.text("  " + line, NamedTextColor.GRAY));
+    }
+    sender.sendMessage(
+        Component.text(
+            "  " + TimetableBuildReportText.describeDutyShapes(result.dutyShapes()),
+            NamedTextColor.GRAY));
     if (result.conflictsAtTarget().isEmpty()) {
       sender.sendMessage(
           Component.text(
@@ -1654,6 +1715,48 @@ public final class FtaTimetableCommand {
                     .map(snapshot -> new WorldGraph(worldId, snapshot.graph())));
   }
 
+  /** route metadata 的交路组名；没配返回空，编表时按起点站台组推导。 */
+  private static Optional<String> readSpawnGroup(Route route) {
+    Object raw = route.metadata() == null ? null : route.metadata().get("spawn_group");
+    if (raw == null) {
+      return Optional.empty();
+    }
+    String group = String.valueOf(raw).trim();
+    return group.isBlank() ? Optional.empty() : Optional.of(group);
+  }
+
+  /**
+   * 解析 {@code --group-headway "A=150,B=300"}；格式不对时提示并返回 null。
+   *
+   * <p>组名按 metadata 原样匹配，不改大小写；秒数必须为正。
+   */
+  private static Map<String, Integer> parseGroupHeadways(CommandSender sender, String raw) {
+    Map<String, Integer> out = new java.util.TreeMap<>();
+    if (raw == null || raw.isBlank()) {
+      return out;
+    }
+    for (String part : raw.split(",")) {
+      String[] kv = part.trim().split("=", 2);
+      Integer seconds = null;
+      if (kv.length == 2 && !kv[0].isBlank()) {
+        try {
+          seconds = Integer.parseInt(kv[1].trim());
+        } catch (NumberFormatException ignored) {
+          seconds = null;
+        }
+      }
+      if (seconds == null || seconds <= 0) {
+        sender.sendMessage(
+            Component.text(
+                "--group-headway 格式应为 <组名>=<秒>[,<组名>=<秒>...]，秒数为正：" + part.trim(),
+                NamedTextColor.RED));
+        return null;
+      }
+      out.put(kv[0].trim(), seconds);
+    }
+    return out;
+  }
+
   /** 读取 route 的目标服务比例权重；未配置时按 1 处理。 */
   private static int readWeight(Route route) {
     Object raw = route.metadata() == null ? null : route.metadata().get("spawn_weight");
@@ -1974,6 +2077,7 @@ public final class FtaTimetableCommand {
    */
   private record BuildFlags(
       Integer headwaySeconds,
+      String groupHeadways,
       String start,
       String end,
       int dwellSeconds,

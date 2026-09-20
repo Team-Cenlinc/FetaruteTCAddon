@@ -63,6 +63,36 @@ public final class TimetableTestFixtures {
     return new SimpleRailGraph(nodes, edges, Set.of());
   }
 
+  /** 一条边：两端节点、长度（blocks）、限速（blocks/s）。 */
+  public record Edge(String from, String to, int length, double speed) {}
+
+  /** 任意拓扑的路网：节点按给定类型，边按列表；支持同一车站多股道、分叉。 */
+  public static RailGraph graph(Map<String, NodeType> nodeTypes, List<Edge> edgeList) {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    int i = 0;
+    for (Map.Entry<String, NodeType> entry : nodeTypes.entrySet()) {
+      NodeId id = NodeId.of(entry.getKey());
+      nodes.put(
+          id,
+          new SignRailNode(
+              id,
+              entry.getValue(),
+              new Vector(i++, 64.0, 0.0),
+              Optional.empty(),
+              Optional.empty()));
+    }
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    for (Edge edge : edgeList) {
+      NodeId from = NodeId.of(edge.from());
+      NodeId to = NodeId.of(edge.to());
+      EdgeId edgeId = EdgeId.undirected(from, to);
+      edges.put(
+          edgeId,
+          new RailEdge(edgeId, from, to, edge.length(), edge.speed(), true, Optional.empty()));
+    }
+    return new SimpleRailGraph(nodes, edges, Set.of());
+  }
+
   /** 造一条按节点序列定义的交路。 */
   public static RouteDefinition route(String code, List<String> nodeIds) {
     List<NodeId> waypoints = nodeIds.stream().map(NodeId::of).toList();

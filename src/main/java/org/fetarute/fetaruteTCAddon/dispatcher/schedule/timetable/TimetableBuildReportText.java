@@ -106,6 +106,61 @@ public final class TimetableBuildReportText {
     };
   }
 
+  /** 每个交路组一行：目标间隔（来源）→ 实际间隔。 */
+  public static List<String> describeGroups(
+      List<TimetableBuildResult.GroupInterval> intervals, Map<String, String> sources) {
+    List<String> out = new ArrayList<>();
+    for (TimetableBuildResult.GroupInterval interval : intervals) {
+      String source = sources == null ? null : sources.get(interval.group());
+      out.add(
+          "交路组 "
+              + interval.group()
+              + ": 每方向 "
+              + interval.targetSeconds()
+              + "s"
+              + (source == null ? "" : "（" + source + "）")
+              + (interval.effectiveSeconds() != interval.targetSeconds()
+                  ? " → 放宽到 " + interval.effectiveSeconds() + "s"
+                  : ""));
+    }
+    return out;
+  }
+
+  /** 共用起点上的合成间隔：大小交路交错得好不好，看这一行。 */
+  public static List<String> describeInterleaves(List<PhasePlanner.Interleave> interleaves) {
+    List<String> out = new ArrayList<>();
+    for (PhasePlanner.Interleave interleave : interleaves) {
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "合成间隔 %s: %d 班，相邻 min %ds / med %ds / max %ds",
+              interleave.originGroup(),
+              interleave.departures(),
+              interleave.minGap(),
+              interleave.medianGap(),
+              interleave.maxGap()));
+    }
+    return out;
+  }
+
+  /** 交路形状："跑 N 班的交路 M 条"，出入库班配得多不多看这一行。 */
+  public static String describeDutyShapes(List<TimetableBuildResult.DutyShape> shapes) {
+    if (shapes == null || shapes.isEmpty()) {
+      return "交路形状: 无";
+    }
+    StringBuilder text = new StringBuilder("交路形状: ");
+    for (int i = 0; i < shapes.size(); i++) {
+      if (i > 0) {
+        text.append("，");
+      }
+      text.append(shapes.get(i).trips())
+          .append(" 班 × ")
+          .append(shapes.get(i).duties())
+          .append(" 条");
+    }
+    return text.toString();
+  }
+
   /** 「结构下界」与「端点串行」两行；没有容量 1 的端点时为空。 */
   public static List<String> describeTerminals(
       List<TerminalSerializer.TerminalReport> terminals,

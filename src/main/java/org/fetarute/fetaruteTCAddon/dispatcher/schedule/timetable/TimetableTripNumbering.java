@@ -107,6 +107,73 @@ final class TimetableTripNumbering {
   }
 
   /**
+   * 带客的回库班落 trip 行：交路以带客的 RETURN 线路收尾时，回库票的发出时刻就是这一班的发车。
+   *
+   * <p>它不进 {@code duty.tripIds()}——交路进度与回库票仍按走行段处理（运行时出的是走行票，不再出运营票）；这一行只为 PIDS、导出与
+   * 冲突模型里的车辆身份（dutyId 指向所属交路）。序号按发车时刻、再按 duty 号，与运营班次各自连续。
+   *
+   * @param passengerReturns 带客的 RETURN 线路
+   * @param routeCodeById route code
+   */
+  static List<TimetableTrip> appendReturnTrips(
+      UUID timetableId,
+      TimetableBuildOptions options,
+      List<TimetableTrip> trips,
+      List<VehicleDuty> duties,
+      java.util.Set<UUID> passengerReturns,
+      Map<UUID, String> routeCodeById) {
+    if (passengerReturns.isEmpty()) {
+      return trips;
+    }
+    List<VehicleDuty> ordered =
+        duties.stream()
+            .filter(duty -> duty.returnRouteId().map(passengerReturns::contains).orElse(false))
+            .sorted(
+                Comparator.comparingInt(VehicleDuty::returnSecondOfDay)
+                    .thenComparing(VehicleDuty::dutyCode))
+            .toList();
+    if (ordered.isEmpty()) {
+      return trips;
+    }
+    Map<String, Integer> perRouteCounter = new LinkedHashMap<>();
+    List<TimetableTrip> out = new ArrayList<>(trips);
+    for (VehicleDuty duty : ordered) {
+      UUID routeId = duty.returnRouteId().orElseThrow();
+      String routeCode = routeCodeById.getOrDefault(routeId, "?");
+      int serial = perRouteCounter.merge(routeCode, 1, Integer::sum);
+      String tripCode =
+          String.format(Locale.ROOT, "%s%s-%03d", options.tripCodePrefix(), routeCode, serial);
+      out.add(
+          new TimetableTrip(
+              deterministicTripId(timetableId, tripCode),
+              timetableId,
+              routeId,
+              0,
+              tripCode,
+              Math.floorMod(duty.returnSecondOfDay(), TimetableTrip.SECONDS_PER_DAY),
+              java.util.Optional.of(duty.id())));
+    }
+    // 序号按当日秒数重排：回库班插进运营班次之间，顺序对人可读，主键不受影响。
+    out.sort(
+        Comparator.comparingInt(TimetableTrip::departureSecondOfDay)
+            .thenComparing(TimetableTrip::tripCode));
+    List<TimetableTrip> renumbered = new ArrayList<>(out.size());
+    for (int i = 0; i < out.size(); i++) {
+      TimetableTrip trip = out.get(i);
+      renumbered.add(
+          new TimetableTrip(
+              trip.id(),
+              trip.timetableId(),
+              trip.routeId(),
+              i,
+              trip.tripCode(),
+              trip.departureSecondOfDay(),
+              trip.dutyId()));
+    }
+    return List.copyOf(renumbered);
+  }
+
+  /**
    * 由时刻表 ID 与车次号派生稳定的 trip UUID。
    *
    * <p>主键会进数据库、会被 duty 引用、会出现在导出里，随机化会让"同样输入构建两次结果一致"这条性质在主键层面失效。

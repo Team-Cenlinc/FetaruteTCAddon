@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -102,14 +103,15 @@ public final class TimetableBuilder {
       return TimetableBuildResult.failure(failure.getMessage(), List.copyOf(infeasible));
     }
 
-    // ---- 2–4. 按目标 headway 排一次 --------------------------------------
-    int targetHeadway = (int) Math.max(1L, options.headway().toSeconds());
+    // ---- 2–4. 按目标间隔排一次 --------------------------------------
     Attempt target;
     try {
       target = attempt(prepared, options, input, builtAt);
     } catch (BuildFailure failure) {
       return TimetableBuildResult.failure(failure.getMessage(), prepared.infeasible());
     }
+    // 报告与搜索都以"最小的组间隔"为标量：放宽时所有组等比。
+    int targetHeadway = target.headwaySeconds();
 
     Attempt chosen = target;
     List<String> warnings = new ArrayList<>();
@@ -124,8 +126,7 @@ public final class TimetableBuilder {
                 target.conflicts(), options.serviceStartSecondOfDay()));
         return TimetableBuildResult.failure(String.join("\n", reasons), prepared.infeasible());
       }
-      Optional<Attempt> fallback =
-          searchFeasibleHeadway(prepared, options, targetHeadway, input, builtAt);
+      Optional<Attempt> fallback = searchFeasibleHeadway(prepared, options, target, input, builtAt);
       if (fallback.isEmpty()) {
         return TimetableBuildResult.failure(
             summary
@@ -224,7 +225,35 @@ public final class TimetableBuilder {
         List.copyOf(baselines),
         chosen.shifts(),
         chosen.terminals(),
+        groupIntervals(target, chosen),
+        chosen.interleaves(),
+        dutyShapes(chosen.timetable()),
+        chosen.phaseNotes(),
         List.copyOf(warnings));
+  }
+
+  private static List<TimetableBuildResult.GroupInterval> groupIntervals(
+      Attempt target, Attempt chosen) {
+    List<TimetableBuildResult.GroupInterval> out = new ArrayList<>();
+    target
+        .intervals()
+        .forEach(
+            (group, seconds) ->
+                out.add(
+                    new TimetableBuildResult.GroupInterval(
+                        group, seconds, chosen.intervals().getOrDefault(group, seconds))));
+    return List.copyOf(out);
+  }
+
+  /** 交路形状：跑几班的交路各有多少条；运营者看它判断出入库班配得多不多。 */
+  private static List<TimetableBuildResult.DutyShape> dutyShapes(Timetable timetable) {
+    Map<Integer, Integer> counts = new TreeMap<>();
+    for (VehicleDuty duty : timetable.duties()) {
+      counts.merge(duty.tripIds().size(), 1, Integer::sum);
+    }
+    List<TimetableBuildResult.DutyShape> out = new ArrayList<>();
+    counts.forEach((trips, duties) -> out.add(new TimetableBuildResult.DutyShape(trips, duties)));
+    return List.copyOf(out);
   }
 
   // ------------------------------------------------------------ 第 1 步
@@ -244,6 +273,8 @@ public final class TimetableBuilder {
     List<VehicleDutyPlanner.Leg> returnLegs = new ArrayList<>();
     Map<UUID, String> legStation = new HashMap<>();
     Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new HashMap<>();
+    Set<UUID> passengerReturns = new HashSet<>();
+    Map<UUID, Integer> runByRoute = new HashMap<>();
     for (RouteInput route : input.sortedRoutes()) {
       TimetableTimingCalculator.TimingResult timing =
           timingCalculator.compute(
@@ -273,6 +304,7 @@ public final class TimetableBuilder {
         continue;
       }
       boolean declared = route.declaredAs().isPresent();
+      runByRoute.put(route.routeId(), timing.totalRunSeconds());
       switch (route.operationType()) {
         case CREATE -> {
           if (!startsAtDepot(route.stops())) {
@@ -282,12 +314,21 @@ public final class TimetableBuilder {
                     route.routeCode(), "CREATE 线路首站没有 CRET 指令，无法实体化列车"));
             continue;
           }
+          if (ServiceGroupClassifier.carriesPassengers(route)) {
+            // 带客的出库班是班次：上它所属组的子网格，从车库实体化（与 OPERATION + CRET 同一条路径）；不再当走行段。
+            operations.add(new OperationPlan(route, true, endsAtDepot(route.stops())));
+            break;
+          }
           createLegs.add(
               new VehicleDutyPlanner.Leg(
                   route.routeId(), route.routeCode(), origin, timing.totalRunSeconds(), declared));
           legStation.put(route.routeId(), terminal);
         }
         case RETURN -> {
+          if (ServiceGroupClassifier.carriesPassengers(route)) {
+            // 带客的回库班：仍由派车器在交路收尾处生成（到达 + 折返），但落 trip 行给 PIDS 与导出。
+            passengerReturns.add(route.routeId());
+          }
           returnLegs.add(
               new VehicleDutyPlanner.Leg(
                   route.routeId(),
@@ -338,13 +379,21 @@ public final class TimetableBuilder {
     }
     List<TimetableRoutePlan> operationPlans =
         operations.stream().map(op -> planOf(plans, op.route().routeId())).toList();
+    // 候选权重取 RouteInput 的：TimetableRoutePlan 对 CREATE 类型把 weight 归零，而带客的出库班要按它配的权重切份额。
     List<WeightedTripAllocator.Candidate> candidates =
-        operationPlans.stream()
-            .map(plan -> new WeightedTripAllocator.Candidate(plan.routeCode(), plan.weight()))
+        operations.stream()
+            .map(
+                op ->
+                    new WeightedTripAllocator.Candidate(
+                        op.route().routeCode(), op.route().weight()))
             .toList();
     if (candidates.stream().allMatch(candidate -> candidate.weight() <= 0)) {
       throw new BuildFailure("所有运营 route 的 weight 都不是正数，无法分配服务比例");
     }
+    // 只对进发车表的 route 分组分方向：走行段不上网格。
+    List<RouteInput> scheduled = operations.stream().map(OperationPlan::route).toList();
+    ServiceGroupClassifier.Classification classification =
+        ServiceGroupClassifier.classify(scheduled);
     return new Prepared(
         timetableId,
         graphIndex,
@@ -354,46 +403,92 @@ public final class TimetableBuilder {
         candidates,
         VehicleDutyPlanner.Legs.of(createLegs, returnLegs, legStation),
         Map.copyOf(profiles),
-        List.copyOf(infeasible));
+        List.copyOf(infeasible),
+        classification,
+        Set.copyOf(passengerReturns),
+        Map.copyOf(runByRoute));
   }
 
   // ------------------------------------------------------------ 第 2–4 步
 
-  /** 按 {@code options.headway()} 排班、派车、查冲突。排不出任何班次时抛 {@link BuildFailure}。 */
+  /** 每组每方向铺子网格、选相位、派车、串行、编号、查冲突。排不出任何班次时抛 {@link BuildFailure}。 */
   private Attempt attempt(
       Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
     UUID timetableId = prepared.timetableId();
-    int slots = options.slotCount();
-    long headwaySeconds = Math.max(1L, options.headway().toSeconds());
     int horizon = options.horizonSeconds();
     List<TimetableRoutePlan> operationPlans = prepared.operationPlans();
+    Map<UUID, Integer> candidateIndexByRoute = new HashMap<>();
+    for (int i = 0; i < operationPlans.size(); i++) {
+      candidateIndexByRoute.put(operationPlans.get(i).routeId(), i);
+    }
 
-    // 可行性：这一班必须在计划窗口内跑完。全程时分长的 route 因此会在窗口末尾被自然挤出，
-    // 而它的 deficit 留在分配器里——这正是"约束恢复后能追回份额"的机制。
-    WeightedTripAllocator.FeasibilityCheck feasibility =
-        (slot, index, assigned) -> {
-          long departure = slot * headwaySeconds;
-          return departure + operationPlans.get(index).totalRunSeconds() <= horizon;
-        };
-    List<WeightedTripAllocator.Allocation> assignment =
-        WeightedTripAllocator.allocate(prepared.candidates(), slots, feasibility);
-    if (assignment.isEmpty()) {
-      throw new BuildFailure("计划窗口内排不下任何班次：检查 headway、首末班时刻与全程时分");
+    // ---- 2. 每个交路组每个方向一张规整子网格；相位先锚定往返对，再在共用起点上交错各组。 ----
+    List<ServiceGroupClassifier.Group> groups = prepared.classification().groups();
+    Map<String, Integer> intervalByGroup = new TreeMap<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      intervalByGroup.put(group.name(), options.intervalFor(group.name()));
+    }
+    long headwaySeconds =
+        intervalByGroup.values().stream()
+            .mapToInt(Integer::intValue)
+            .min()
+            .orElse((int) Math.max(1L, options.headway().toSeconds()));
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            groups,
+            intervalByGroup,
+            prepared.runByRoute(),
+            options.dutyLimits().turnaroundSeconds(),
+            horizon);
+    List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
+    List<Placed> placed = new ArrayList<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      int interval = intervalByGroup.get(group.name());
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        int phase = phases.phaseByDirection().getOrDefault(direction.key(), 0);
+        // 可行性：这一班必须在计划窗口内跑完。全程时分长的 route 因此会在窗口末尾被自然挤出，
+        // 而它的 deficit 留在分配器里——这正是"约束恢复后能追回份额"的机制。
+        WeightedTripAllocator.FeasibilityCheck feasibility =
+            (slot, index, assigned) -> {
+              UUID routeId = direction.routeIds().get(index);
+              Integer run = prepared.runByRoute().get(routeId);
+              return candidateIndexByRoute.containsKey(routeId)
+                  && phase + (long) slot * interval + (run == null ? 0 : run) <= horizon;
+            };
+        GroupGrid.DirectionGrid grid =
+            GroupGrid.of(direction, interval, phase, horizon, feasibility);
+        grids.add(grid);
+        for (GroupGrid.Slot slot : grid.slots()) {
+          placed.add(new Placed(slot, direction));
+        }
+      }
+    }
+    placed.sort(
+        Comparator.comparingInt((Placed p) -> p.slot().departureSeconds())
+            .thenComparing(
+                p ->
+                    operationPlans.get(candidateIndexByRoute.get(p.slot().routeId())).routeCode()));
+    if (placed.isEmpty()) {
+      throw new BuildFailure("计划窗口内排不下任何班次：检查间隔、首末班时刻与全程时分");
     }
 
     // 派车前的班次用临时主键：取消一部分之后要重新编号，主键由最终车次号派生。
-    List<VehicleDutyPlanner.PlannedTrip> plannedTrips = new ArrayList<>(assignment.size());
+    List<VehicleDutyPlanner.PlannedTrip> plannedTrips = new ArrayList<>(placed.size());
     Map<UUID, WeightedTripAllocator.Allocation> allocationByProvisional = new HashMap<>();
-    for (int i = 0; i < assignment.size(); i++) {
-      WeightedTripAllocator.Allocation allocation = assignment.get(i);
-      OperationPlan op = prepared.operations().get(allocation.candidateIndex());
-      TimetableRoutePlan plan = operationPlans.get(allocation.candidateIndex());
-      int departureSeconds = (int) (allocation.slot() * headwaySeconds);
+    Map<UUID, Placed> placedByProvisional = new HashMap<>();
+    for (int i = 0; i < placed.size(); i++) {
+      Placed item = placed.get(i);
+      int candidateIndex = candidateIndexByRoute.get(item.slot().routeId());
+      OperationPlan op = prepared.operations().get(candidateIndex);
+      TimetableRoutePlan plan = operationPlans.get(candidateIndex);
+      int departureSeconds = item.slot().departureSeconds();
       UUID provisional =
           UUID.nameUUIDFromBytes(
               ("provisional:" + timetableId + ":" + i)
                   .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-      allocationByProvisional.put(provisional, allocation);
+      allocationByProvisional.put(
+          provisional, new WeightedTripAllocator.Allocation(item.slot().slot(), candidateIndex));
+      placedByProvisional.put(provisional, item);
       VehicleDutyPlanner.PlannedTrip trip =
           new VehicleDutyPlanner.PlannedTrip(
               provisional,
@@ -518,16 +613,20 @@ public final class TimetableBuilder {
     TimetableTripNumbering.Numbered numbered =
         TimetableTripNumbering.number(
             timetableId, options, serialized.timetable(), nominalByProvisional);
-    List<WeightedTripAllocator.Allocation> keptAllocations =
-        new ArrayList<>(serialized.timetable().trips().size());
-    for (TimetableTrip trip : serialized.timetable().trips()) {
-      WeightedTripAllocator.Allocation allocation = allocationByProvisional.get(trip.id());
-      if (allocation != null) {
-        keptAllocations.add(allocation);
-      }
+    Map<UUID, String> routeCodeById = new HashMap<>();
+    for (TimetableRoutePlan plan : prepared.plans()) {
+      routeCodeById.put(plan.routeId(), plan.routeCode());
     }
+    List<TimetableTrip> withReturns =
+        TimetableTripNumbering.appendReturnTrips(
+            timetableId,
+            options,
+            numbered.trips(),
+            numbered.duties(),
+            prepared.passengerReturns(),
+            routeCodeById);
     Timetable timetable =
-        timetableOf(input, options, prepared, numbered.trips(), numbered.duties(), builtAt);
+        timetableOf(input, options, prepared, withReturns, numbered.duties(), builtAt);
     Map<UUID, String> codeByFinalId = new HashMap<>();
     for (TimetableTrip trip : timetable.trips()) {
       codeByFinalId.put(trip.id(), trip.tripCode());
@@ -568,16 +667,37 @@ public final class TimetableBuilder {
             separation,
             TimetableConflictChecker.vehicleOf(timetable));
 
-    List<WeightedTripAllocator.ShareReport> shares =
-        WeightedTripAllocator.report(prepared.candidates(), keptAllocations);
+    // 份额按方向报：weight 只在同方向多 route 之间切，跨方向、跨组比没有意义。
+    Map<String, List<WeightedTripAllocator.Allocation>> keptByDirection = new TreeMap<>();
+    for (TimetableTrip trip : serialized.timetable().trips()) {
+      Placed item = placedByProvisional.get(trip.id());
+      if (item != null) {
+        keptByDirection
+            .computeIfAbsent(item.direction().key(), key -> new ArrayList<>())
+            .add(
+                new WeightedTripAllocator.Allocation(
+                    item.slot().slot(), item.slot().candidateIndex()));
+      }
+    }
+    List<WeightedTripAllocator.ShareReport> shares = new ArrayList<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        shares.addAll(
+            WeightedTripAllocator.report(
+                direction.candidates(), keptByDirection.getOrDefault(direction.key(), List.of())));
+      }
+    }
     return new Attempt(
         (int) headwaySeconds,
         timetable,
         List.copyOf(dropped),
-        shares,
+        List.copyOf(shares),
         conflicts,
         List.copyOf(shifts),
-        serialized.terminals());
+        serialized.terminals(),
+        Map.copyOf(intervalByGroup),
+        PhasePlanner.interleaves(grids),
+        phases.notes());
   }
 
   /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
@@ -621,17 +741,26 @@ public final class TimetableBuilder {
   private Optional<Attempt> searchFeasibleHeadway(
       Prepared prepared,
       TimetableBuildOptions options,
-      int targetHeadway,
+      Attempt target,
       BuildInput input,
       Instant builtAt) {
+    int targetHeadway = target.headwaySeconds();
     int limit = targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER;
+    long fallbackHeadway = Math.max(1L, options.headway().toSeconds());
     for (int headway = targetHeadway + HEADWAY_SEARCH_STEP_SECONDS;
         headway <= limit;
         headway += HEADWAY_SEARCH_STEP_SECONDS) {
+      // 所有组等比放宽：最小的组间隔走到 headway，其余按同一比例——组间比例不变，回写时才对得上。
+      double factor = (double) headway / targetHeadway;
+      Map<String, Integer> scaled = new TreeMap<>();
+      target
+          .intervals()
+          .forEach((group, base) -> scaled.put(group, (int) Math.round(base * factor)));
+      TimetableBuildOptions relaxed =
+          options.withIntervals(Duration.ofSeconds(Math.round(fallbackHeadway * factor)), scaled);
       Attempt candidate;
       try {
-        candidate =
-            attempt(prepared, options.withHeadway(Duration.ofSeconds(headway)), input, builtAt);
+        candidate = attempt(prepared, relaxed, input, builtAt);
       } catch (BuildFailure ignored) {
         continue;
       }
@@ -684,7 +813,10 @@ public final class TimetableBuilder {
       List<WeightedTripAllocator.Candidate> candidates,
       VehicleDutyPlanner.Legs legs,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      List<TimetableBuildResult.InfeasibleRoute> infeasible) {}
+      List<TimetableBuildResult.InfeasibleRoute> infeasible,
+      ServiceGroupClassifier.Classification classification,
+      Set<UUID> passengerReturns,
+      Map<UUID, Integer> runByRoute) {}
 
   /** 按某个 headway 排出来的一份完整计划及其冲突报告。 */
   private record Attempt(
@@ -694,7 +826,13 @@ public final class TimetableBuilder {
       List<WeightedTripAllocator.ShareReport> shares,
       TimetableConflictChecker.Report conflicts,
       List<TimetableBuildResult.TripShift> shifts,
-      List<TerminalSerializer.TerminalReport> terminals) {}
+      List<TerminalSerializer.TerminalReport> terminals,
+      Map<String, Integer> intervals,
+      List<PhasePlanner.Interleave> interleaves,
+      List<String> phaseNotes) {}
+
+  /** 一个格子连同它所属的方向：份额按方向报，主键与交路按全局候选下标找。 */
+  private record Placed(GroupGrid.Slot slot, ServiceGroupClassifier.Direction direction) {}
 
   /** 构建失败：只带原因，不可行 route 清单由调用方持有。 */
   private static final class BuildFailure extends RuntimeException {
@@ -791,6 +929,8 @@ public final class TimetableBuilder {
    * @param declaredAs 这条线路是被某条运营 route 在 metadata 里显式指定为出库（CREATE）或回库（RETURN）走行线路的 （见 {@link
    *     TimetableRouteMetadata}），可能来自别的 operator；与 {@code operationType} 不符时判为不可行
    * @param external 属于别的 operator：进足迹、进交路，但不受本表管辖（见 {@link TimetableRoutePlan#external()}）
+   * @param spawnGroup 交路组（route metadata 的 spawn_group）；空则进 {@link
+   *     ServiceGroupClassifier#DEFAULT_GROUP}
    */
   public record RouteInput(
       UUID routeId,
@@ -801,7 +941,8 @@ public final class TimetableBuilder {
       List<RouteStop> stops,
       Optional<String> depotNodeId,
       Optional<RouteOperationType> declaredAs,
-      boolean external) {
+      boolean external,
+      Optional<String> spawnGroup) {
 
     public RouteInput {
       Objects.requireNonNull(routeId, "routeId");
@@ -811,6 +952,34 @@ public final class TimetableBuilder {
       stops = stops == null ? List.of() : List.copyOf(stops);
       depotNodeId = depotNodeId == null ? Optional.empty() : depotNodeId;
       declaredAs = declaredAs == null ? Optional.empty() : declaredAs;
+      spawnGroup =
+          spawnGroup == null
+              ? Optional.empty()
+              : spawnGroup.map(String::trim).filter(g -> !g.isBlank());
+    }
+
+    /** 没有交路组信息的构造：进默认组。 */
+    public RouteInput(
+        UUID routeId,
+        String routeCode,
+        RouteOperationType operationType,
+        int weight,
+        RouteDefinition definition,
+        List<RouteStop> stops,
+        Optional<String> depotNodeId,
+        Optional<RouteOperationType> declaredAs,
+        boolean external) {
+      this(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          Optional.empty());
     }
 
     /** 本 operator 范围内的线路（可能被显式指定）。 */

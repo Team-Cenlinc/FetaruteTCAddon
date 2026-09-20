@@ -1,0 +1,258 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.TreeMap;
+import java.util.UUID;
+
+/**
+ * 相位：每个方向的子网格从几秒开始。
+ *
+ * <p>两层，顺序固定。第一层<b>往返对锚定</b>：同组内起终点互换的一对方向，反向的相位 = 正向相位 + 正向走行 + 折返（对反向间隔取模）——
+ * 一辆车到达端点折返完正好是下一班的时隙，端点零等待。第二层<b>组间交错</b>：组按名字排序，第一组相位 0；后面每一组在 {@code [0, 最小间隔)} 上以 10 s
+ * 步长扫描一个整体偏移，目标是<b>共用起点站台组上相邻发车的最大间隔最小</b>，并列时<b>最小间隔最大</b>（否则两组同时发车与均匀错开会打平）， 再并列取最小偏移。
+ * 大小交路的价值全在这一层：Full 与 Short 在共用区间上错开，乘客感受到的是叠加后的间隔。
+ *
+ * <p>全部确定：组、方向、候选都按稳定键排序，扫描步长固定，没有随机源。
+ */
+public final class PhasePlanner {
+
+  /** 扫描步长。 */
+  public static final int SCAN_STEP_SECONDS = 10;
+
+  private PhasePlanner() {}
+
+  /**
+   * 相位结果。
+   *
+   * @param phaseByDirection 方向键 → 相位
+   * @param offsetByGroup 组 → 整体偏移（第二层的选择，供报告）
+   * @param notes 说明（哪些方向锚定了、哪些组按共用起点交错了）
+   */
+  public record Phases(
+      Map<String, Integer> phaseByDirection,
+      Map<String, Integer> offsetByGroup,
+      List<String> notes) {
+    public Phases {
+      phaseByDirection = phaseByDirection == null ? Map.of() : Map.copyOf(phaseByDirection);
+      offsetByGroup = offsetByGroup == null ? Map.of() : Map.copyOf(offsetByGroup);
+      notes = notes == null ? List.of() : List.copyOf(notes);
+    }
+  }
+
+  /**
+   * 共用起点站台组上的合成间隔。
+   *
+   * @param originGroup 起点站台组
+   * @param departures 叠加后的发车数
+   * @param minGap 最小相邻间隔
+   * @param medianGap 中位相邻间隔
+   * @param maxGap 最大相邻间隔
+   */
+  public record Interleave(
+      String originGroup, int departures, int minGap, int medianGap, int maxGap) {}
+
+  /**
+   * 选相位。
+   *
+   * @param groups 分类结果里的组（按名字排序）
+   * @param intervalByGroup 每组的间隔（秒）
+   * @param runSecondsByRoute 每条 route 的全程时分
+   * @param turnaroundSeconds 折返
+   * @param horizonSeconds 计划窗口长度
+   */
+  public static Phases plan(
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervalByGroup,
+      Map<UUID, Integer> runSecondsByRoute,
+      int turnaroundSeconds,
+      int horizonSeconds) {
+    Objects.requireNonNull(groups, "groups");
+    Map<String, Integer> phases = new TreeMap<>();
+    Map<String, Integer> offsets = new TreeMap<>();
+    List<String> notes = new ArrayList<>();
+    // 已放好的组在各起点站台组上的发车时刻，供后面的组交错。
+    Map<String, List<Integer>> placedByOrigin = new TreeMap<>();
+
+    for (ServiceGroupClassifier.Group group : groups) {
+      if (group.directions().isEmpty()) {
+        continue;
+      }
+      int interval = Math.max(1, intervalByGroup.getOrDefault(group.name(), 1));
+      // 第一层：组内相对相位（偏移 0 时的相位），往返对锚定。
+      Map<String, Integer> relative =
+          anchorReturnPairs(group, interval, runSecondsByRoute, turnaroundSeconds, notes);
+      // 第二层：整体偏移。
+      int offset = 0;
+      List<String> sharedOrigins = new ArrayList<>();
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        if (placedByOrigin.containsKey(direction.originGroup())
+            && !sharedOrigins.contains(direction.originGroup())) {
+          sharedOrigins.add(direction.originGroup());
+        }
+      }
+      if (!sharedOrigins.isEmpty()) {
+        int bestOffset = 0;
+        int bestGap = Integer.MAX_VALUE;
+        int bestTightest = -1;
+        for (int candidate = 0; candidate < interval; candidate += SCAN_STEP_SECONDS) {
+          int worst = 0;
+          int tightest = Integer.MAX_VALUE;
+          for (String origin : sharedOrigins) {
+            List<Integer> merged = new ArrayList<>(placedByOrigin.get(origin));
+            for (ServiceGroupClassifier.Direction direction : group.directions()) {
+              if (direction.originGroup().equals(origin)) {
+                int phase = Math.floorMod(relative.get(direction.key()) + candidate, interval);
+                for (int t = phase; t <= horizonSeconds; t += interval) {
+                  merged.add(t);
+                }
+              }
+            }
+            int[] gaps = gapRange(merged);
+            tightest = Math.min(tightest, gaps[0]);
+            worst = Math.max(worst, gaps[1]);
+          }
+          if (worst < bestGap || (worst == bestGap && tightest > bestTightest)) {
+            bestGap = worst;
+            bestTightest = tightest;
+            bestOffset = candidate;
+          }
+        }
+        offset = bestOffset;
+        notes.add(
+            "交路组 "
+                + group.name()
+                + " 在共用起点 "
+                + String.join("、", sharedOrigins)
+                + " 上交错，偏移 "
+                + offset
+                + "s，最大合成间隔 "
+                + bestGap
+                + "s");
+      }
+      offsets.put(group.name(), offset);
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        int phase = Math.floorMod(relative.get(direction.key()) + offset, interval);
+        phases.put(direction.key(), phase);
+        List<Integer> departures =
+            placedByOrigin.computeIfAbsent(direction.originGroup(), key -> new ArrayList<>());
+        for (int t = phase; t <= horizonSeconds; t += interval) {
+          departures.add(t);
+        }
+      }
+    }
+    return new Phases(phases, offsets, notes);
+  }
+
+  /** 由生成好的子网格算各起点站台组的合成间隔，供报告；只列有两条以上发车的起点。 */
+  public static List<Interleave> interleaves(List<GroupGrid.DirectionGrid> grids) {
+    Map<String, List<Integer>> byOrigin = new TreeMap<>();
+    for (GroupGrid.DirectionGrid grid : grids) {
+      List<Integer> departures =
+          byOrigin.computeIfAbsent(grid.direction().originGroup(), key -> new ArrayList<>());
+      for (GroupGrid.Slot slot : grid.slots()) {
+        departures.add(slot.departureSeconds());
+      }
+    }
+    List<Interleave> out = new ArrayList<>();
+    byOrigin.forEach(
+        (origin, departures) -> {
+          if (departures.size() < 2) {
+            return;
+          }
+          List<Integer> sorted = new ArrayList<>(departures);
+          Collections.sort(sorted);
+          List<Integer> gaps = new ArrayList<>(sorted.size() - 1);
+          for (int i = 1; i < sorted.size(); i++) {
+            gaps.add(sorted.get(i) - sorted.get(i - 1));
+          }
+          Collections.sort(gaps);
+          out.add(
+              new Interleave(
+                  origin,
+                  sorted.size(),
+                  gaps.get(0),
+                  gaps.get(gaps.size() / 2),
+                  gaps.get(gaps.size() - 1)));
+        });
+    return List.copyOf(out);
+  }
+
+  /** 往返对锚定：起终点互换的两个方向里，键较小的为正向、相位 0；反向相位 = 正向走行（方向内最短的候选）+ 折返，对间隔取模。 没有配对的方向相位 0。 */
+  private static Map<String, Integer> anchorReturnPairs(
+      ServiceGroupClassifier.Group group,
+      int interval,
+      Map<UUID, Integer> runSecondsByRoute,
+      int turnaroundSeconds,
+      List<String> notes) {
+    Map<String, Integer> relative = new LinkedHashMap<>();
+    Map<String, ServiceGroupClassifier.Direction> byKey = new LinkedHashMap<>();
+    for (ServiceGroupClassifier.Direction direction : group.directions()) {
+      byKey.put(direction.key(), direction);
+    }
+    for (ServiceGroupClassifier.Direction direction : group.directions()) {
+      if (relative.containsKey(direction.key())) {
+        continue;
+      }
+      ServiceGroupClassifier.Direction reverse = byKey.get(direction.reverseKey());
+      if (reverse == null || direction.key().compareTo(reverse.key()) > 0) {
+        if (reverse == null) {
+          relative.put(direction.key(), 0);
+        }
+        continue;
+      }
+      relative.put(direction.key(), 0);
+      int run = minRun(direction, runSecondsByRoute);
+      int anchored = Math.floorMod(run + turnaroundSeconds, interval);
+      relative.put(reverse.key(), anchored);
+      notes.add(
+          "交路组 "
+              + group.name()
+              + " 往返对 "
+              + direction.key()
+              + " / "
+              + reverse.key()
+              + " 锚定：反向相位 = 走行 "
+              + run
+              + " + 折返 "
+              + turnaroundSeconds
+              + " ≡ "
+              + anchored
+              + "s");
+    }
+    return relative;
+  }
+
+  private static int minRun(
+      ServiceGroupClassifier.Direction direction, Map<UUID, Integer> runSecondsByRoute) {
+    int min = Integer.MAX_VALUE;
+    for (UUID routeId : direction.routeIds()) {
+      Integer run = runSecondsByRoute.get(routeId);
+      if (run != null) {
+        min = Math.min(min, run);
+      }
+    }
+    return min == Integer.MAX_VALUE ? 0 : min;
+  }
+
+  /** 相邻发车的 {最小, 最大} 间隔；不足两条发车时都是 0。 */
+  private static int[] gapRange(List<Integer> departures) {
+    if (departures.size() < 2) {
+      return new int[] {0, 0};
+    }
+    List<Integer> sorted = new ArrayList<>(departures);
+    Collections.sort(sorted);
+    int min = Integer.MAX_VALUE;
+    int max = 0;
+    for (int i = 1; i < sorted.size(); i++) {
+      int gap = sorted.get(i) - sorted.get(i - 1);
+      min = Math.min(min, gap);
+      max = Math.max(max, gap);
+    }
+    return new int[] {min, max};
+  }
+}

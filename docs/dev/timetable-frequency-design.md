@@ -12,12 +12,12 @@
 
 | 题 | 决策（一句话） |
 | --- | --- |
-| A1 | 分类落在 **route** 上，不在组上：**带客 route**（中途有 STOP，不论类型）是班次，上子网格；**纯走行 route**（只有 PASS）只做交路的两头。CREATE/RETURN/CRET/DSTY 只决定车的生灭。不加配置键；"作业组"这个角色不存在 |
+| A1 | 分类落在 **route** 上，不在组上：**带客 route**（OPERATION，或中途有 STOP 的 CREATE/RETURN）是班次，上子网格；**纯走行 route**（中途没有 STOP 的 CREATE/RETURN）只做交路的两头。CREATE/RETURN/CRET/DSTY 只决定车的生灭。不加配置键；"作业组"这个角色不存在。实现时的修正：OPERATION 不看中途——`A→B` 两站的小交路本来就没有中途 |
 | A2 | **已确认（用户 2026-09-19）**：MT-2、DS 那种 CREATE→RETURN 完整生灭的 route 对也是交路的一员——带客的 CREATE 按 `OPERATION + CRET` 处理、带客的 RETURN 按 `OPERATION + DSTY` 处理，落 trip 行、运行时出运营票；一个交路可以只有这两班。「RETURN 不落 trip 行」细化为「**不带客的**走行不落 trip 行」 |
 | B1 | 频率来源改为**每个服务组一个间隔**：`spawn_groups[].baselineSec` = 该组每个**方向**多久一班；组内同方向多条 route 按 weight 切份额。线路级 `spawn_freq_baseline_sec` 只在组没配时兜底 |
 | B2 | 组的间隔作用于组内**全部带客 route**，含带客的出入库班（WS_Short 150 = 1L 每 150 s 从车库发一班到 CHT）。纯走行由派车器在交路两头生成，没有频率。车辆流量由此**完全由配置决定**：注入多于 Full 需要的车就形成 `出库班 → 回库` 的短交路，报告按交路形状（几个来回）计数 |
 | C1 | 每个服务组的每个方向一张**规整子网格**（周期 = 组间隔 × Σw / w_route），代替全线一张 SWRR 网格；SWRR 只保留在同方向多 route 的份额切分上 |
-| C2 | **相位**分两层：往返对的相位差 = 走行 + 折返（锚定，端点零等待）；组与组之间在共用起点站上按"最大间隔最小"扫描选相位（10 s 步长，并列取最小），确定性 |
+| C2 | **相位**分两层：往返对的相位差 = 走行 + 折返（锚定，端点零等待）；组与组之间在共用起点站上按"最大间隔最小、并列时最小间隔最大、再并列取最小偏移"扫描选相位（10 s 步长），确定性。只看最大间隔时 600/300 两组"同时发车"与"错开 150"打平，实现时补了第二键 |
 | C3 | 大小交路 = 两个服务组在共用区间上的交错；报告新增"共用区间合成间隔 min/med/max"，机制不做特殊处理 |
 | D1 | **让车写进表**：把 P1 的端点串行推广为按资源的"只延后"修复——冲突的后车整趟延后隐含等待量、沿交路链传播、再查，直到干净；单处延后 > `--max-wait`（默认 60）才是真冲突 |
 | D2 | 真冲突仍由搜索消解：把**所有服务组的间隔按同一比例放宽**（步长 = 最小间隔的 10 s，上限 4 倍），报告按组列出回退后的间隔 |
@@ -53,7 +53,8 @@
    `RETURN` 或 `DSTY` 收尾 → 这一班跑完车就销毁（`endsAtDepot`，`ROUTE_ENDS_AT_DEPOT`）。
 2. **纯走行 route**：只有 PASS。只做交路的两头（今天的 `Legs`），不落 trip 行，时刻由派车器推出（首班发车 − 走行 − 折返 / 末班到达 + 折返）。
 3. 组只是"共用一个间隔的一批带客 route"；一个组里全是纯走行 route 时它没有间隔，配了只警告。
-4. 没配 `spawn_group` 的 route：沿用运行时出票器的规则按起点推导（`StorageSpawnManager` Javadoc 第二条），编表不另起一套。
+4. 没配 `spawn_group` 的 route：一律进 `default` 组。（设计稿原本写"按起点推导"，实现时证伪：正向从 A 出发、反向从 B 出发会被拆成两组，
+   往返对锚不到一起，`TimetableBuilderStubTerminalTest` 的 RB 时隙全部错位、派车器与串行互相拆台。一条线没分组就是一个组。）
 
 **理由**：用户的建模里 MT-2 与 DS 就是 `CREATE → RETURN` 完整生灭的交路，它们是交路的一员而不是"作业"；WS 用 `OPERATION + CRET` 表达同一件事。
 按类型分角色会把这两种写法拆成两类，按"带不带客"分则统一。派车器已经支持两头进库的交路（`startsAtDepot` / `endsAtDepot`），
@@ -350,7 +351,7 @@ public final class TimetableHeadwayDefaults {
 | 阶段 | 内容 | 验收（实服判别量） |
 | --- | --- | --- |
 | **Q0 确认** | A2 已由用户确认；剩 B1 的"每方向"语义与 E1 范围 | 本文 §11 清空 |
-| **Q1 分组 + 子网格 + 相位** | 分类器、`GroupGrid`、`PhasePlanner`、按组的 headway 默认、A2、报告行；派车与 P1 修复不变 | WS 不传 `--headway`：2C/2N 各 150 s 恒定间隔；CHT 上 2N 到达与 2C 发车相位差 = 走行 + 折返，端点串行的"偏离网格"班次数降到接近 0；DS 能编出表 |
+| **Q1 分组 + 子网格 + 相位（已落地，2026-09-19）** | 分类器、`GroupGrid`、`PhasePlanner`、按组的 headway 默认、A2、报告行；派车与 P1 修复不变。命令面暂为 `--group-headway "组=秒,…"`，`--headway` 仍是一个数给全部组 | WS 不传 `--headway`：2C/2N 各 150 s 恒定间隔；CHT 上 2N 到达与 2C 发车相位差 = 走行 + 折返，端点串行的"偏离网格"班次数降到接近 0；DS 能编出表 |
 | **Q2 让车写进表** | `ResourceRepair` 吸收 `TerminalSerializer`；`--max-wait`；等比放宽；失败文案按组 | 默认参数的 WS：目标下"让车 N 处、真冲突 0"，不放宽；`export` 里能看到被延后的班次 |
 | **Q3 多线联编** | `TimetableSetBuilder`、多线命令、整组发布 | `build FTAS SURC WS,MT X`：两张表同 code、互为基线、共用资源上的合成间隔在报告里；`publish` 整组 |
 | **Q4 回写与清理** | `route group set --baseline` 的建议值提示；`timetable.md` 全部措辞；删掉线路级 baseline 作为建议值的说法 | 文档与报告一致 |
@@ -396,3 +397,17 @@ public final class TimetableHeadwayDefaults {
    多出来的车走 `1L → 1C` 短交路（§2.2）。
 3. ~~`--max-wait` 默认 60~~ 已同意，上限跟 `hold-max-seconds`。
 4. **E1** 的范围：先做同 operator 内的多线；跨 operator 仍走邻表。
+
+---
+
+## 12. 实现状态（2026-09-19）
+
+- **Q1 已落地**：`ServiceGroupClassifier` / `GroupGrid` / `PhasePlanner` 新增；`TimetableBuilder.attempt` 按组按方向出格、相位两层、搜索等比放宽；
+  `TimetableBuildOptions.groupIntervals` + `TimetableHeadwayDefaults.resolveGroups`；`TimetableBuildResult` 加 `groupIntervals / interleaves / dutyShapes / phaseNotes`；
+  带客 CREATE 上网格、带客 RETURN 落 trip 行（`TimetableTripNumbering.appendReturnTrips`，投影与 `tripsBetween` 跳过）；命令 `--group-headway`。
+  与设计稿的两处出入见 §0 A1、§2.1 第 4 条、§0 C2。`TimetableBuildOptions` 没按 §4 改成 `Map<String, Duration>`，而是在原 `headway` 之外加 `Map<String, Integer> groupIntervals`，
+  少动一层调用方。
+- **Q2 未做**：`ResourceRepair` / `--max-wait` 还没有；`TerminalSerializer` 原样保留。
+- **Q3 未做**：多线联编。
+- 未验实服：Q1 的验收量（WS 2C/2N 各 150 s、CHT 偏离网格班次数、DS 能编出表）要拿 `.handoff/WsChtDiagnosisTest.java.txt` 对 `../fetarute_experimental` 跑一遍。
+

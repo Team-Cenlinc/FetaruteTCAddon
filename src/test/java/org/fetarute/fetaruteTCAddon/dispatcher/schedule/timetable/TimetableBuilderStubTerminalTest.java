@@ -18,9 +18,9 @@ import org.junit.jupiter.api.Test;
 /**
  * 端到端：多条 route 共用一个单股道端点——CHT 的抽象形态。
  *
- * <p>直链 {@code DEP – A:1 – A:2 – M – XJ – X}：A 两股道，M 一股道中间站，XJ 是 X 的进站路径点（WAYPOINT），X 单股道尽头。 RA
- * A:1→X、RB X→A:1 往返，出库 DEP→A:1，回库 A:1→DEP。间隔 60 s 时网格模型在 X 的岔线上必然撞（上一班还没出来、下一班已经进来）； 串行之后 X
- * 上不该再有任何冲突。
+ * <p>直链 {@code DEP – A:1 – A:2 – M – XJ – X}：A 两股道，M 一股道中间站，XJ 是 X 的进站路径点（WAYPOINT），X 单股道尽头。 RA 与
+ * RS 同方向 A:1→X（RS 在 M 多停 30 s，是"慢车"），RB X→A:1，出库 DEP→A:1，回库 A:1→DEP。相位按最快的 RA 锚定 RB，RS 的车到 X 比时隙晚
+ * 30 s， 网格模型在 X 上必然撞；串行之后 X 上不该再有任何冲突，而且必有 RB 班次锚在车上偏离了网格。
  */
 class TimetableBuilderStubTerminalTest {
 
@@ -46,19 +46,22 @@ class TimetableBuilderStubTerminalTest {
           new int[] {50, 10, 100, 100, 50},
           new double[] {10.0, 10.0, 10.0, 10.0, 10.0});
 
-  /** 串行后 X 上没有任何冲突；报告里有它的端点行；有班次偏离了网格。 */
+  /** 串行后 X 上没有任何冲突；报告里有它的端点行；往返对锚定了相位；慢车之后的 RB 偏离了网格。 */
   @Test
   void stubTerminalIsCleanAfterSerialization() {
-    TimetableBuildResult result = build(60);
+    TimetableBuildResult result = build(180);
 
     assertTrue(result.success(), () -> result.warnings().toString());
+    assertTrue(
+        result.phaseNotes().stream().anyMatch(note -> note.contains("锚定")),
+        () -> result.phaseNotes().toString());
     assertTrue(
         result.conflictsAtTarget().stream().noneMatch(c -> c.resource().contains("OP:S:X")),
         () -> result.conflictsAtTarget().toString());
     assertEquals(1, result.terminals().size());
     assertEquals("OP:S:X", result.terminals().get(0).group());
     assertTrue(result.terminals().get(0).visits() > 0);
-    assertFalse(result.shifts().isEmpty(), "续班锚在车上，必有班次偏离网格");
+    assertFalse(result.shifts().isEmpty(), "慢车到得晚，续班锚在车上，必有班次偏离网格");
     assertTrue(
         result.shifts().stream()
             .anyMatch(s -> s.reason() == TerminalSerializer.Shift.Reason.ANCHORED_TO_VEHICLE));
@@ -67,8 +70,8 @@ class TimetableBuilderStubTerminalTest {
   /** 两次 build 逐字段相等：实际时刻、车次号、主键、偏离清单、端点报告。 */
   @Test
   void serializedBuildIsDeterministic() {
-    TimetableBuildResult first = build(60);
-    TimetableBuildResult second = build(60);
+    TimetableBuildResult first = build(180);
+    TimetableBuildResult second = build(180);
 
     assertEquals(first.timetable().orElseThrow().trips(), second.timetable().orElseThrow().trips());
     assertEquals(
@@ -80,7 +83,7 @@ class TimetableBuilderStubTerminalTest {
   /** 车次号按实际发车顺序：同 route 的 001 永远早于 002，主键由车次号派生。 */
   @Test
   void tripCodesFollowActualDepartureOrder() {
-    Timetable timetable = build(60).timetable().orElseThrow();
+    Timetable timetable = build(180).timetable().orElseThrow();
 
     for (TimetableRoutePlan plan : timetable.routePlans()) {
       List<TimetableTrip> ofRoute =
@@ -101,7 +104,7 @@ class TimetableBuilderStubTerminalTest {
   /** 不变量 4 不受串行影响：每条交路都以回库收尾，回库票不早于末班实际到达 + 折返。 */
   @Test
   void everyDutyStillReturnsToStorageAfterSerialization() {
-    TimetableBuildResult result = build(60);
+    TimetableBuildResult result = build(180);
     Timetable timetable = result.timetable().orElseThrow();
 
     assertTrue(result.allDutiesReturnToStorage());
@@ -121,13 +124,14 @@ class TimetableBuilderStubTerminalTest {
   /** 份额由 SWRR 与派车决定，串行不增减班次：实际份额与班次数对得上。 */
   @Test
   void sharesMatchEmittedTrips() {
-    TimetableBuildResult result = build(60);
+    TimetableBuildResult result = build(180);
 
     int reported = result.shares().stream().mapToInt(s -> s.assignedTrips()).sum();
     assertEquals(result.timetable().orElseThrow().trips().size(), reported);
   }
 
   private TimetableBuildResult build(int headwaySeconds) {
+    UUID rs = TimetableTestFixtures.routeId("RS");
     UUID ra = TimetableTestFixtures.routeId("RA");
     UUID rb = TimetableTestFixtures.routeId("RB");
     UUID crt = TimetableTestFixtures.routeId("CRT");
@@ -140,6 +144,13 @@ class TimetableBuilderStubTerminalTest {
                 1,
                 TimetableTestFixtures.route("RA", List.of(A1, M, X)),
                 TimetableTestFixtures.stops(ra, 3, 0),
+                Optional.empty()),
+            new TimetableBuilder.RouteInput(
+                rs,
+                "RS",
+                1,
+                TimetableTestFixtures.route("RS", List.of(A1, M, X)),
+                TimetableTestFixtures.stops(rs, 3, 30),
                 Optional.empty()),
             new TimetableBuilder.RouteInput(
                 rb,

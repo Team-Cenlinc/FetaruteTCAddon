@@ -300,8 +300,8 @@ class TimetableBuilderTest {
   /**
    * 终点没有回库线路的班次不会被硬排：取消并逐条报告，份额按保留的班次重算。
    *
-   * <p>RA: A→C、RB: C→A，回库线路只有 A→DEP。RA 的班次只有接上 RB 回到 A 才能收口。 窗口刚好装下 5 班（RA RB RA RB RA），最后那班 RA 停在
-   * C 且后面没有 RB，必须被取消。
+   * <p>RA: A→C、RB: C→A，回库线路只有 A→DEP。RA 的班次只有接上 RB 回到 A 才能收口。 每方向 600 s 一班，RB 锚在 RA 到达 + 折返上：窗口装下
+   * RA×5、RB×4， 最后那班 RA（05:40）停在 C 且后面没有 RB，必须被取消。
    */
   @Test
   void tripsWithoutReturnAccessAreDroppedAndReported() {
@@ -348,7 +348,7 @@ class TimetableBuilderTest {
     assertEquals(
         VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS,
         result.droppedTrips().get(0).reason());
-    assertEquals(4, timetable.trips().size());
+    assertEquals(8, timetable.trips().size());
     assertTrue(
         result.droppedTrips().stream()
             .allMatch(

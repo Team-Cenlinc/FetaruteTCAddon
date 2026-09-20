@@ -347,6 +347,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
     List<DueTrip> out = new ArrayList<>();
     for (Timetable timetable : snapshot.timetables()) {
       for (TimetableTrip trip : timetable.trips()) {
+        // 带客的回库班有 trip 行，但它由 duty 的回库走行票出车，这里不再出运营票。
+        boolean returnTrip =
+            timetable
+                .routePlan(trip.routeId())
+                .map(plan -> plan.kind() == RouteOperationType.RETURN)
+                .orElse(false);
+        if (returnTrip) {
+          continue;
+        }
         for (int offset : SERVICE_DATE_OFFSETS) {
           LocalDate date = LocalDate.ofInstant(to, timetable.zoneId()).plusDays(offset);
           Instant departure = trip.departureAt(date, timetable.zoneId());
