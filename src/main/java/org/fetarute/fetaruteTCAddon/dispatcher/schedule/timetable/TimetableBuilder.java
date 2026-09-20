@@ -503,7 +503,8 @@ public final class TimetableBuilder {
               departureSeconds,
               plan.totalRunSeconds(),
               op.startsAtDepot(),
-              op.endsAtDepot());
+              op.endsAtDepot(),
+              input.poolOf(plan.routeId()));
       plannedTrips.add(trip);
     }
 
@@ -932,6 +933,7 @@ public final class TimetableBuilder {
    * @param travelTimeModel 行程时间模型
    * @param notes 备注
    * @param neighbors 已投影到我零点的邻表：它们的运行是不可移动的路权事实，只有我的运行会为了避让它们放宽 headway
+   * @param lineByRoute 多线联编时每条 route 属于哪条线（车池）；没列出的按 {@code lineId}。单线为空
    */
   public record BuildInput(
       UUID timetableId,
@@ -944,7 +946,8 @@ public final class TimetableBuilder {
       RailGraph graph,
       RailTravelTimeModel travelTimeModel,
       Optional<String> notes,
-      List<NeighborTimetable> neighbors) {
+      List<NeighborTimetable> neighbors,
+      Map<UUID, UUID> lineByRoute) {
 
     public BuildInput {
       Objects.requireNonNull(timetableId, "timetableId");
@@ -954,6 +957,40 @@ public final class TimetableBuilder {
       routes = routes == null ? List.of() : List.copyOf(routes);
       notes = notes == null ? Optional.empty() : notes;
       neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
+      lineByRoute = lineByRoute == null ? Map.of() : Map.copyOf(lineByRoute);
+    }
+
+    /** 单线构建：所有 route 同一车池。 */
+    public BuildInput(
+        UUID timetableId,
+        UUID companyId,
+        UUID operatorId,
+        UUID lineId,
+        String code,
+        String name,
+        List<RouteInput> routes,
+        RailGraph graph,
+        RailTravelTimeModel travelTimeModel,
+        Optional<String> notes,
+        List<NeighborTimetable> neighbors) {
+      this(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          travelTimeModel,
+          notes,
+          neighbors,
+          Map.of());
+    }
+
+    /** 这条 route 的车池：多线联编时是它所属的线，单线时是本表的线。 */
+    String poolOf(UUID routeId) {
+      return lineByRoute.getOrDefault(routeId, lineId).toString();
     }
 
     /** 没有邻表的构建（单元测试与不需要作用域的场景）。 */

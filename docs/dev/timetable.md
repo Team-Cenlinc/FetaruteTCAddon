@@ -237,6 +237,20 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 放宽一步之后差的那点又能让了，所以放宽后的表上通常还有几处让车。报告一行"让车: N 处已写进表（涉及 M 班，最长 +x s，--max-wait y s；对邻表 K 处）"，
 下面列前几处明细；导出里看到的就是让过之后的时刻。让车永远只延后不提前。
 
+### 多线联编：同一 operator 下几条线一次编表
+
+`build <company> <operator> WS,MT <code>`：几条线的 route 合成一次 `TimetableBuilder.build`（`TimetableSetBuilder`）——交路组按 `线/组` 分组，
+相位的第二层在共用起点上跨线交错，冲突检查与让车修复天然覆盖全部线，搜索的等比放宽作用于全部组；派车按**车池**（每条线一个）接班，
+一辆车不跨线（不变量「一辆车不跨两份表」不变）。编完按 route 归属拆成每线一张表：主键按各表自己的 id 重新派生，duty 号每表从 D001 起，
+`updatedAt` 全部等于 `builtAt`；每张表的基线互相引用（id + updatedAt），外部邻表的基线原样复制。一起编的线互相不算邻表；跨 operator 仍只能做邻表。
+
+`publish <company> <operator> WS,MT <code>`：整组发布——逐张过重检（成员互不算邻表），任一张与外部邻表撞上则整组不发；发布时几张表同一个时刻，
+互相的基线也记这个时刻。`unpublish` / `delete` 同样接受逗号列表。`info` / `duties` / `export` / `neighbors` 仍按单线。
+报告是联编的一份（冲突、让车、相位、份额都是全部线一起的），随后逐线给出落库与查看入口。
+
+约束：同一世界、同一时区、同一计划窗口、同一 code；`--group-headway` 在联编时既接受 `full=150`（凡有 full 组的线都用）也接受 `WS/full=150`。
+单线是它的一元情况：与直接单线构建逐字段一致，组键不加前缀。
+
 ### 跨线：邻表与路权
 
 两条线共用一段线路、一个站台或一个道岔时，各自只查自己会得到两张都乐观的表。所以 build 的检查作用域是
@@ -322,7 +336,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 ## 命令
 
 ```
-/fta timetable build <company> <operator> <line> <code>
+/fta timetable build <company> <operator> <line>[,<line>…] <code>
         [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>]
@@ -332,8 +346,8 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 /fta timetable list <company> <operator> <line>
 /fta timetable info <company> <operator> <line> <code> [page]
 /fta timetable duties <company> <operator> <line> <code> [page]
-/fta timetable publish|unpublish <company> <operator> <line> <code>
-/fta timetable delete <company> <operator> <line> <code> --confirm
+/fta timetable publish|unpublish <company> <operator> <line>[,<line>…] <code>
+/fta timetable delete <company> <operator> <line>[,<line>…] <code> --confirm
 /fta timetable export <company> <operator> <line> <code> [limit]
 /fta timetable status
 ```
@@ -506,6 +520,8 @@ planned segment duration   vs   actual segment duration
 - 端点串行只覆盖容量为 1 的站台组；车库咽喉（单线桥链）与多股道车站不串行。名义时隙不落库，只在 build 报告里。
 - 相位只做两层（往返对锚定、组间按共用起点扫描），不做多组联合的全局最优；扫描目标只看共用**起点**站台组，不看共用区间与终点。
 - 带客的 RETURN 班有 trip 行但运行时仍出走行票（回库票），不出运营票；它的 trip 行只为 PIDS、导出与冲突模型里的车辆身份。
+- 多线联编只在同一 operator 内；成员表的互相基线里 `sharedResources` 记 0（没有单独算足迹交集）。`neighbors` 命令按单线看时，
+  同组的另一张表会被列为邻表——这是对的，它已发布、又与我共用资源。
 - 让车只延后不提前；累计上限只算让车修复这一轮的延后，端点串行自己的偏离不计入。回滚判据是"冲突总数不减或真冲突变多"，
   所以一处让车哪怕能换来别处两处更小的冲突也不做——宁可留给搜索放宽。让车明细里的前车若是待命，显示的是 duty 号。
 - 车次绑定与交路进度不持久化，重启后回到自由运行。

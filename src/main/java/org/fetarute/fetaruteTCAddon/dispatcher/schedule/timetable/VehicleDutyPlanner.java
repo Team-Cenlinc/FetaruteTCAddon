@@ -168,7 +168,7 @@ public final class VehicleDutyPlanner {
    * <p>条件缺一不可：位置对得上（上一班的终点就是这一班的起点）、时间来得及（含折返时间）、
    * 接下后仍不越过硬上限、并且接下之后这辆车仍然回得了库（终点有回库线路，或还有余量再跑一班到有回库线路的终点）。 都满足时取"最早就绪"的那一个，并列时按 duty 序号——完全确定。
    *
-   * <p>从车库始发的班次（CRET）永远不接在别的 duty 后面：它的出库票会实体化一辆新车，接不了待命列车。
+   * <p>从车库始发的班次（CRET）永远不接在别的 duty 后面：它的出库票会实体化一辆新车，接不了待命列车。 不同车池（多线联编时的不同线路）之间也永远不接。
    */
   private static OpenDuty selectHost(
       List<OpenDuty> open,
@@ -182,7 +182,7 @@ public final class VehicleDutyPlanner {
     }
     OpenDuty best = null;
     for (OpenDuty duty : open) {
-      if (!duty.lastTerminal.equals(trip.originNodeId())) {
+      if (!duty.lastTerminal.equals(trip.originNodeId()) || !duty.pool.equals(trip.pool())) {
         continue;
       }
       if (duty.readyAtSeconds > trip.departureSeconds()) {
@@ -251,11 +251,16 @@ public final class VehicleDutyPlanner {
   /** 在这一班上开一个新 duty。前提是 {@link #openBlocker} 返回 null。 */
   private static OpenDuty open(int sequence, PlannedTrip trip, Legs access, Limits limits) {
     if (trip.startsAtDepot()) {
-      return new OpenDuty(sequence, trip.originNodeId(), Optional.empty(), trip.departureSeconds());
+      return new OpenDuty(
+          sequence, trip.originNodeId(), Optional.empty(), trip.departureSeconds(), trip.pool());
     }
     Leg leg = access.createLegAt(trip.originNodeId()).orElseThrow();
     return new OpenDuty(
-        sequence, leg.depotNodeId(), Optional.of(leg.routeId()), openingStart(trip, leg, limits));
+        sequence,
+        leg.depotNodeId(),
+        Optional.of(leg.routeId()),
+        openingStart(trip, leg, limits),
+        trip.pool());
   }
 
   /** 出库要提前：车库到首站的走行 + 到站后的就绪时间，否则首班必然晚点。 */
@@ -296,7 +301,7 @@ public final class VehicleDutyPlanner {
    *
    * <p>理由同 trip：主键会进数据库、会被 trip 引用、会出现在导出里，随机化会让"同样输入构建两次结果一致" 这条性质在主键层面失效。
    */
-  private static UUID deterministicDutyId(UUID timetableId, String dutyCode) {
+  static UUID deterministicDutyId(UUID timetableId, String dutyCode) {
     return UUID.nameUUIDFromBytes(
         ("duty:" + timetableId + ":" + dutyCode).getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
@@ -308,6 +313,7 @@ public final class VehicleDutyPlanner {
     private final String startDepot;
     private final Optional<UUID> createRouteId;
     private final int startSeconds;
+    private final String pool;
     private final List<PlannedTrip> trips = new ArrayList<>();
     private String lastTerminal;
     private int endSeconds;
@@ -315,11 +321,16 @@ public final class VehicleDutyPlanner {
     private VehicleDuty.CloseReason closeReason;
 
     private OpenDuty(
-        int sequence, String startDepot, Optional<UUID> createRouteId, int startSeconds) {
+        int sequence,
+        String startDepot,
+        Optional<UUID> createRouteId,
+        int startSeconds,
+        String pool) {
       this.sequence = sequence;
       this.startDepot = startDepot;
       this.createRouteId = createRouteId;
       this.startSeconds = startSeconds;
+      this.pool = pool;
       this.lastTerminal = "";
       this.endSeconds = startSeconds;
       this.readyAtSeconds = startSeconds;
@@ -413,6 +424,7 @@ public final class VehicleDutyPlanner {
    * @param durationSeconds 全程时分（秒）
    * @param startsAtDepot route 首站就是车库（CRET）：出库票即运营票，不能接在别的 duty 后面
    * @param endsAtDepot route 以销毁收尾（DSTY）：跑完即回库，后面不能再接班
+   * @param pool 车池：只有同一车池的班次才能接在同一条交路上。多线联编时每条线一个车池——一辆车不跨线接班；单线为空串
    */
   public record PlannedTrip(
       UUID tripId,
@@ -422,9 +434,11 @@ public final class VehicleDutyPlanner {
       int departureSeconds,
       int durationSeconds,
       boolean startsAtDepot,
-      boolean endsAtDepot) {
+      boolean endsAtDepot,
+      String pool) {
 
     public PlannedTrip {
+      pool = pool == null ? "" : pool;
       Objects.requireNonNull(tripId, "tripId");
       tripCode = tripCode == null ? "" : tripCode;
       originNodeId = originNodeId == null ? "" : originNodeId;
@@ -432,6 +446,28 @@ public final class VehicleDutyPlanner {
       if (durationSeconds < 0) {
         throw new IllegalArgumentException("durationSeconds 不能为负");
       }
+    }
+
+    /** 单线（不分车池）的班次。 */
+    public PlannedTrip(
+        UUID tripId,
+        String tripCode,
+        String originNodeId,
+        String terminalNodeId,
+        int departureSeconds,
+        int durationSeconds,
+        boolean startsAtDepot,
+        boolean endsAtDepot) {
+      this(
+          tripId,
+          tripCode,
+          originNodeId,
+          terminalNodeId,
+          departureSeconds,
+          durationSeconds,
+          startsAtDepot,
+          endsAtDepot,
+          "");
     }
 
     /** 普通站间班次：起点终点都是车站。 */

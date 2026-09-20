@@ -57,6 +57,31 @@ class VehicleDutyPlannerTest {
     assertEquals(4, result.maxTripsInAnyDuty(), "上限就是 4，应当真的用满");
   }
 
+  /** 车池：同池才能接班——多线联编时每条线一个车池，一辆车不跨线。位置、时间都接得上的两班，池不同就是两条交路。 */
+  @Test
+  void differentPoolsNeverShareADuty() {
+    VehicleDutyPlanner.Limits limits = VehicleDutyPlanner.Limits.defaults();
+    List<VehicleDutyPlanner.PlannedTrip> samePool =
+        List.of(
+            new VehicleDutyPlanner.PlannedTrip(
+                id("T1"), "T1", HUB, HUB, 0, 600, false, false, "WS"),
+            new VehicleDutyPlanner.PlannedTrip(
+                id("T2"), "T2", HUB, HUB, 900, 600, false, false, "WS"));
+    List<VehicleDutyPlanner.PlannedTrip> twoPools =
+        List.of(
+            new VehicleDutyPlanner.PlannedTrip(
+                id("T1"), "T1", HUB, HUB, 0, 600, false, false, "WS"),
+            new VehicleDutyPlanner.PlannedTrip(
+                id("T2"), "T2", HUB, HUB, 900, 600, false, false, "MT"));
+
+    assertEquals(
+        1, VehicleDutyPlanner.plan(TIMETABLE, samePool, hubLegs(), limits).duties().size());
+    VehicleDutyPlanner.Result split =
+        VehicleDutyPlanner.plan(TIMETABLE, twoPools, hubLegs(), limits);
+    assertEquals(2, split.duties().size());
+    assertTrue(split.unassigned().isEmpty());
+  }
+
   /** 每一趟车都恰好属于且只属于一个 duty：没有孤儿班次，也没有被两辆车同时承担的班次。 */
   @Test
   void everyTripBelongsToExactlyOneDuty() {

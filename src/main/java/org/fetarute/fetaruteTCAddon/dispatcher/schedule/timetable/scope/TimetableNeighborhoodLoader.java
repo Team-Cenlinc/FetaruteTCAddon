@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -85,12 +86,21 @@ public final class TimetableNeighborhoodLoader {
       RailGraph graph,
       TimetableConflictChecker.GraphIndex index,
       TimetableFootprint mine) {
+    return footprints(published, excludeSet(excludeLineId), graph, index, mine);
+  }
+
+  /** 同上，排除多条线（多线联编：一起编的线互相不算邻表）。 */
+  public List<FootprintNeighbor> footprints(
+      List<Timetable> published,
+      Set<UUID> excludeLineIds,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index,
+      TimetableFootprint mine) {
     Objects.requireNonNull(mine, "mine");
+    Set<UUID> excluded = excludeLineIds == null ? Set.of() : excludeLineIds;
     List<FootprintNeighbor> out = new ArrayList<>();
     for (Timetable timetable : published == null ? List.<Timetable>of() : published) {
-      if (timetable == null
-          || !timetable.published()
-          || (excludeLineId != null && excludeLineId.equals(timetable.lineId()))) {
+      if (timetable == null || !timetable.published() || excluded.contains(timetable.lineId())) {
         continue;
       }
       List<String> warnings = new ArrayList<>();
@@ -200,12 +210,34 @@ public final class TimetableNeighborhoodLoader {
       int myHorizonSeconds,
       ZoneId myZone,
       LocalDate referenceDate) {
+    return project(
+        published,
+        excludeSet(excludeLineId),
+        graph,
+        index,
+        mine,
+        myServiceStartSecondOfDay,
+        myHorizonSeconds,
+        myZone,
+        referenceDate);
+  }
+
+  /** 同上，排除多条线（多线联编：一起编的线互相不算邻表）。 */
+  public List<NeighborTimetable> project(
+      List<Timetable> published,
+      Set<UUID> excludeLineIds,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index,
+      TimetableFootprint mine,
+      int myServiceStartSecondOfDay,
+      int myHorizonSeconds,
+      ZoneId myZone,
+      LocalDate referenceDate) {
     Objects.requireNonNull(mine, "mine");
+    Set<UUID> excluded = excludeLineIds == null ? Set.of() : excludeLineIds;
     List<NeighborTimetable> out = new ArrayList<>();
     for (Timetable timetable : published == null ? List.<Timetable>of() : published) {
-      if (timetable == null
-          || !timetable.published()
-          || (excludeLineId != null && excludeLineId.equals(timetable.lineId()))) {
+      if (timetable == null || !timetable.published() || excluded.contains(timetable.lineId())) {
         continue;
       }
       List<String> warnings = new ArrayList<>();
@@ -428,6 +460,10 @@ public final class TimetableNeighborhoodLoader {
    * @param sharedKeys 共用的资源键
    * @param warnings 展开足迹时的问题（route 不可达等）
    */
+  private static Set<UUID> excludeSet(UUID lineId) {
+    return lineId == null ? Set.of() : Set.of(lineId);
+  }
+
   public record FootprintNeighbor(
       UUID timetableId,
       String displayCode,

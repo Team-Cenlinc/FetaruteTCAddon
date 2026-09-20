@@ -52,6 +52,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccup
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableSetBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTimingCalculator;
@@ -319,7 +320,8 @@ public final class FtaTimetableCommand {
 
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(Component.text("===== /fta timetable =====", NamedTextColor.DARK_AQUA));
-    sender.sendMessage(hint("编表", "/fta timetable build <company> <operator> <line> <code>"));
+    sender.sendMessage(
+        hint("编表", "/fta timetable build <company> <operator> <line>[,<line>…] <code>"));
     sender.sendMessage(
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
@@ -329,11 +331,15 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("详情", "/fta timetable info <company> <operator> <line> <code>"));
     sender.sendMessage(hint("车辆交路", "/fta timetable duties <company> <operator> <line> <code>"));
     sender.sendMessage(hint("邻表", "/fta timetable neighbors <company> <operator> <line> <code>"));
-    sender.sendMessage(hint("投入运行", "/fta timetable publish <company> <operator> <line> <code>"));
-    sender.sendMessage(hint("撤出运行", "/fta timetable unpublish <company> <operator> <line> <code>"));
+    sender.sendMessage(
+        hint("投入运行", "/fta timetable publish <company> <operator> <line>[,<line>…] <code>"));
+    sender.sendMessage(
+        hint("撤出运行", "/fta timetable unpublish <company> <operator> <line>[,<line>…] <code>"));
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
     sender.sendMessage(hint("运行态", "/fta timetable status"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
+    sender.sendMessage(
+        Component.text("同一 operator 下几条线写成 WS,MT 可以一起编表：共享相位与让车，每线一张表、整组发布。", NamedTextColor.GRAY));
   }
 
   private void handleBuild(CommandContext<CommandSender> ctx, BuildFlags flags) {
@@ -343,8 +349,8 @@ public final class FtaTimetableCommand {
       return;
     }
     StorageProvider provider = providerOpt.get();
-    ResolvedLine resolved = resolveLine(ctx, provider, true);
-    if (resolved == null) {
+    List<ResolvedLine> lines = resolveLines(ctx, provider, true);
+    if (lines == null) {
       return;
     }
     String code = ((String) ctx.get("code")).trim();
@@ -377,16 +383,239 @@ public final class FtaTimetableCommand {
       return;
     }
 
-    Optional<Timetable> existing =
-        provider.timetables().findByLineAndCode(resolved.line().id(), code);
-    if (existing.filter(Timetable::published).isPresent()) {
-      sender.sendMessage(Component.text("该时刻表正在运行中，请先 unpublish 再重新 build。", NamedTextColor.RED));
+    // 每条线各自收集 route（含本 operator 的走行线路）；几条线一起编时它们必须在同一个世界。
+    boolean joint = lines.size() > 1;
+    List<LineRoutes> members = new ArrayList<>();
+    WorldGraph graph = null;
+    for (ResolvedLine resolved : lines) {
+      Optional<Timetable> existing =
+          provider.timetables().findByLineAndCode(resolved.line().id(), code);
+      if (existing.filter(Timetable::published).isPresent()) {
+        sender.sendMessage(
+            Component.text(
+                resolved.line().code() + "/" + code + " 正在运行中，请先 unpublish 再重新 build。",
+                NamedTextColor.RED));
+        return;
+      }
+      LineRoutes member =
+          collectRouteInputs(sender, provider, resolved, existing.map(Timetable::id));
+      if (member == null) {
+        return;
+      }
+      if (graph == null) {
+        graph = member.graph();
+      } else if (member.graph() != null && !member.graph().worldId().equals(graph.worldId())) {
+        sender.sendMessage(
+            Component.text(
+                "联编的几条线必须在同一个世界：" + resolved.line().code() + " 不在。", NamedTextColor.RED));
+        return;
+      }
+      members.add(member);
+    }
+    if (graph == null) {
+      sender.sendMessage(
+          Component.text("找不到覆盖这些线路的调度图快照，请先 /fta graph build。", NamedTextColor.RED));
       return;
     }
 
+    // 每个交路组一个间隔：--group-headway 点名的 > --headway（全部组）> 组 baseline > 线路 baseline > 默认。
+    // 多线联编时组键带线前缀（WS/full），--group-headway 既接受 full=150（凡有 full 组的线都用）也接受 WS/full=150。
+    Map<String, Integer> explicitByGroup = parseGroupHeadways(sender, flags.groupHeadways());
+    if (explicitByGroup == null) {
+      return;
+    }
+    Map<String, Integer> groupIntervals = new java.util.TreeMap<>();
+    Map<String, String> groupSources = new java.util.TreeMap<>();
+    TimetableHeadwayDefaults.Choice headway = null;
+    for (LineRoutes member : members) {
+      Line line = member.line().line();
+      TimetableHeadwayDefaults.Choice lineChoice =
+          TimetableHeadwayDefaults.resolve(
+              Optional.ofNullable(flags.headwaySeconds()),
+              line.spawnFreqBaselineSec(),
+              LineSpawnMetadata.parseGroups(line.metadata()));
+      if (headway == null) {
+        headway = lineChoice;
+      }
+      List<String> groupNames =
+          ServiceGroupClassifier.classify(member.inputs()).groups().stream()
+              .map(ServiceGroupClassifier.Group::name)
+              .toList();
+      Map<String, Integer> explicitForLine = new java.util.TreeMap<>();
+      explicitByGroup.forEach(
+          (key, seconds) -> {
+            int slash = key.indexOf('/');
+            if (slash < 0) {
+              explicitForLine.put(key, seconds);
+            } else if (key.substring(0, slash).equalsIgnoreCase(line.code())) {
+              explicitForLine.put(key.substring(slash + 1), seconds);
+            }
+          });
+      Map<String, TimetableHeadwayDefaults.Choice> groupChoices =
+          TimetableHeadwayDefaults.resolveGroups(
+              Optional.ofNullable(flags.headwaySeconds()),
+              explicitForLine,
+              line.spawnFreqBaselineSec(),
+              LineSpawnMetadata.parseGroups(line.metadata()),
+              groupNames);
+      groupChoices.forEach(
+          (group, choice) -> {
+            String key = TimetableSetBuilder.groupKey(line.code(), Optional.of(group), joint);
+            groupIntervals.put(key, choice.seconds());
+            groupSources.put(key, choice.description());
+          });
+    }
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            serviceStart,
+            serviceEnd,
+            Duration.ofSeconds(headway.seconds()),
+            Duration.ofSeconds(flags.dwellSeconds()),
+            new VehicleDutyPlanner.Limits(
+                flags.maxTripsPerDuty(), flags.maxDutyMinutes() * 60, flags.turnaroundSeconds()),
+            flags.tripCodePrefix() == null ? "" : flags.tripCodePrefix(),
+            zone,
+            Duration.ofSeconds(flags.separationSeconds()),
+            flags.strict(),
+            groupIntervals,
+            repairOptions(sender, flags.maxWaitSeconds()));
+    String timetableName = flags.name() == null ? code : flags.name();
+
+    // 邻表输入在主线程读库（已发布表、无表线路的 route 与停靠），足迹计算、邻表投影与 build 一起进异步线程。
+    // 一起编的几条线互相不算邻表——它们在同一次相位选择与修复里。
+    Map<UUID, List<RouteStop>> myStops = new java.util.HashMap<>();
+    Map<UUID, RouteDefinition> myDefinitions = new java.util.HashMap<>();
+    List<TimetableNeighborhoodLoader.RouteCandidate> myRoutes = new ArrayList<>();
+    List<UUID> lineIds = new ArrayList<>();
+    List<TimetableSetBuilder.Member> setMembers = new ArrayList<>();
+    RailGraph graphSnapshot = graph.graph();
+    RailTravelTimeModel model = travelTimeModel(graph.worldId());
+    for (LineRoutes member : members) {
+      String display = displayCodeOf(member.line());
+      lineIds.add(member.line().line().id());
+      for (TimetableBuilder.RouteInput route : member.inputs()) {
+        myStops.put(route.routeId(), route.stops());
+        myDefinitions.put(route.routeId(), route.definition());
+        if (member.ownRouteIds().contains(route.routeId())
+            || myRoutes.stream().noneMatch(c -> c.routeId().equals(route.routeId()))) {
+          myRoutes.add(
+              new TimetableNeighborhoodLoader.RouteCandidate(
+                  route.routeId(), route.routeCode(), display));
+        }
+      }
+      setMembers.add(
+          new TimetableSetBuilder.Member(
+              new TimetableBuilder.BuildInput(
+                  member.timetableId(),
+                  member.line().company().id(),
+                  member.line().operator().id(),
+                  member.line().line().id(),
+                  code,
+                  timetableName,
+                  member.inputs(),
+                  graphSnapshot,
+                  model,
+                  Optional.empty()),
+              member.line().line().code(),
+              display,
+              member.ownRouteIds()));
+    }
+    UUID footprintId =
+        joint ? TimetableSetBuilder.jointTimetableId(code, lineIds) : members.get(0).timetableId();
+    NeighborInputs neighborInputs =
+        collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
+
+    // 构建是纯 CPU 运算：时分积分、SWRR、派车、串行、让车、冲突扫描，目标间隔有真冲突时还要向上搜索几十次。
+    // 输入全是不可变快照，放到异步线程跑，报告与落库回到主线程。
+    sender.sendMessage(
+        Component.text(
+            joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY));
+    Instant builtAt = Instant.now();
+    TimetableHeadwayDefaults.Choice headwayChoice = headway;
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              TimetableSetBuilder.SetResult result;
+              NeighborReport neighborReport;
+              try {
+                TimetableConflictChecker.GraphIndex index =
+                    TimetableConflictChecker.GraphIndex.of(graphSnapshot);
+                TimetableFootprint footprint =
+                    neighborInputs.footprint(graphSnapshot, index, footprintId);
+                neighborReport = neighborInputs.report(graphSnapshot, index, footprint);
+                List<NeighborTimetable> neighbors =
+                    neighborInputs.project(graphSnapshot, index, footprint, options);
+                result =
+                    new TimetableSetBuilder()
+                        .build(
+                            new TimetableSetBuilder.SetInput(setMembers, neighbors),
+                            options,
+                            builtAt);
+              } catch (RuntimeException ex) {
+                plugin
+                    .getServer()
+                    .getScheduler()
+                    .runTask(
+                        plugin,
+                        () ->
+                            sender.sendMessage(
+                                Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
+                return;
+              }
+              TimetableSetBuilder.SetResult built = result;
+              NeighborReport neighbors = neighborReport;
+              plugin
+                  .getServer()
+                  .getScheduler()
+                  .runTask(
+                      plugin,
+                      () ->
+                          finishBuild(
+                              sender,
+                              provider,
+                              lines,
+                              built,
+                              options,
+                              headwayChoice,
+                              neighbors,
+                              groupSources));
+            });
+  }
+
+  /**
+   * 一条线在 build 里的输入。
+   *
+   * @param line 线路
+   * @param inputs 参与的 route（含本 operator 的走行线路与显式指定的外方线路）
+   * @param ownRouteIds 属于这条线的 route（车池与拆表归属）
+   * @param graph 覆盖这条线的图快照
+   * @param timetableId 这条线这份表的 id（已有草稿则沿用）
+   */
+  private record LineRoutes(
+      ResolvedLine line,
+      List<TimetableBuilder.RouteInput> inputs,
+      java.util.Set<UUID> ownRouteIds,
+      WorldGraph graph,
+      UUID timetableId) {}
+
+  /** 收集一条线参与 build 的 route；没有可编表的班次或缺定义时提示并返回 null。 */
+  private LineRoutes collectRouteInputs(
+      CommandSender sender,
+      StorageProvider provider,
+      ResolvedLine resolved,
+      Optional<UUID> existingId) {
     List<TimetableBuilder.RouteInput> routeInputs = new ArrayList<>();
     WorldGraph graph = null;
     boolean anyOperation = false;
+    java.util.Set<UUID> own = new java.util.HashSet<>();
+    for (Route route : provider.routes().listByLine(resolved.line().id())) {
+      if (route != null) {
+        own.add(route.id());
+      }
+    }
     List<Route> routes = new ArrayList<>(collectRoutes(provider, resolved));
     // 直通运转：运营 route 显式指定的外方出库/回库线路也进 build，并优先于本 operator 搜到的同站线路。
     DeclaredRoutes declared = resolveDeclaredRoutes(sender, provider, routes);
@@ -428,163 +657,35 @@ public final class FtaTimetableCommand {
               readSpawnGroup(route));
       // 带客的出库班（CREATE 且中途有停站）也是班次：DS 那种只有 CREATE + RETURN 的线一样能编表。
       anyOperation |=
-          route.operationType() == RouteOperationType.OPERATION
-              || (route.operationType() == RouteOperationType.CREATE
-                  && ServiceGroupClassifier.carriesPassengers(routeInput));
+          own.contains(route.id())
+              && (route.operationType() == RouteOperationType.OPERATION
+                  || (route.operationType() == RouteOperationType.CREATE
+                      && ServiceGroupClassifier.carriesPassengers(routeInput)));
       routeInputs.add(routeInput);
     }
     warnDeclaredWithoutSpawnService(sender, declared);
     if (!anyOperation) {
       sender.sendMessage(
           Component.text(
-              "该线路下没有可编表的班次：既没有 OPERATION route，也没有带客的 CREATE route。", NamedTextColor.RED));
-      return;
+              resolved.line().code() + " 下没有可编表的班次：既没有 OPERATION route，也没有带客的 CREATE route。",
+              NamedTextColor.RED));
+      return null;
     }
-    if (graph == null) {
-      sender.sendMessage(
-          Component.text("找不到覆盖这条线路的调度图快照，请先 /fta graph build。", NamedTextColor.RED));
-      return;
-    }
-
-    // 每个交路组一个间隔：--headway 覆盖全部 > --group-headway 逐组 > 组 baseline > 线路 baseline > 默认。
-    // 没有分到任何组的班次用兜底间隔（同一套优先级，不看组）。
-    TimetableHeadwayDefaults.Choice headway =
-        TimetableHeadwayDefaults.resolve(
-            Optional.ofNullable(flags.headwaySeconds()),
-            resolved.line().spawnFreqBaselineSec(),
-            LineSpawnMetadata.parseGroups(resolved.line().metadata()));
-    Map<String, Integer> explicitByGroup = parseGroupHeadways(sender, flags.groupHeadways());
-    if (explicitByGroup == null) {
-      return;
-    }
-    List<String> groupNames =
-        ServiceGroupClassifier.classify(routeInputs).groups().stream()
-            .map(ServiceGroupClassifier.Group::name)
-            .toList();
-    Map<String, TimetableHeadwayDefaults.Choice> groupChoices =
-        TimetableHeadwayDefaults.resolveGroups(
-            Optional.ofNullable(flags.headwaySeconds()),
-            explicitByGroup,
-            resolved.line().spawnFreqBaselineSec(),
-            LineSpawnMetadata.parseGroups(resolved.line().metadata()),
-            groupNames);
-    Map<String, Integer> groupIntervals = new java.util.TreeMap<>();
-    Map<String, String> groupSources = new java.util.TreeMap<>();
-    groupChoices.forEach(
-        (group, choice) -> {
-          groupIntervals.put(group, choice.seconds());
-          groupSources.put(group, choice.description());
-        });
-    TimetableBuildOptions options =
-        new TimetableBuildOptions(
-            serviceStart,
-            serviceEnd,
-            Duration.ofSeconds(headway.seconds()),
-            Duration.ofSeconds(flags.dwellSeconds()),
-            new VehicleDutyPlanner.Limits(
-                flags.maxTripsPerDuty(), flags.maxDutyMinutes() * 60, flags.turnaroundSeconds()),
-            flags.tripCodePrefix() == null ? "" : flags.tripCodePrefix(),
-            zone,
-            Duration.ofSeconds(flags.separationSeconds()),
-            flags.strict(),
-            groupIntervals,
-            repairOptions(sender, flags.maxWaitSeconds()));
-
-    UUID timetableId = existing.map(Timetable::id).orElseGet(UUID::randomUUID);
-    String timetableName = flags.name() == null ? code : flags.name();
-
-    // 邻表输入在主线程读库（已发布表、无表线路的 route 与停靠），足迹计算、邻表投影与 build 一起进异步线程。
-    Map<UUID, List<RouteStop>> myStops = new java.util.HashMap<>();
-    Map<UUID, RouteDefinition> myDefinitions = new java.util.HashMap<>();
-    List<TimetableNeighborhoodLoader.RouteCandidate> myRoutes = new ArrayList<>();
-    String myDisplayCode = displayCodeOf(resolved);
-    for (TimetableBuilder.RouteInput route : routeInputs) {
-      myStops.put(route.routeId(), route.stops());
-      myDefinitions.put(route.routeId(), route.definition());
-      myRoutes.add(
-          new TimetableNeighborhoodLoader.RouteCandidate(
-              route.routeId(), route.routeCode(), myDisplayCode));
-    }
-    RailGraph graphSnapshot = graph.graph();
-    RailTravelTimeModel model = travelTimeModel(graph.worldId());
-    NeighborInputs neighborInputs =
-        collectNeighborInputs(provider, resolved, myRoutes, myStops, myDefinitions, model);
-
-    // 构建是纯 CPU 运算：时分积分、SWRR、派车、冲突扫描，目标间隔有冲突时还要向上搜索几十次。
-    // 输入全是不可变快照，放到异步线程跑，报告与落库回到主线程。
-    sender.sendMessage(Component.text("正在按路网编表…", NamedTextColor.GRAY));
-    Instant builtAt = Instant.now();
-    plugin
-        .getServer()
-        .getScheduler()
-        .runTaskAsynchronously(
-            plugin,
-            () -> {
-              TimetableBuildResult result;
-              NeighborReport neighborReport;
-              try {
-                TimetableConflictChecker.GraphIndex index =
-                    TimetableConflictChecker.GraphIndex.of(graphSnapshot);
-                TimetableFootprint footprint =
-                    neighborInputs.footprint(graphSnapshot, index, timetableId);
-                neighborReport = neighborInputs.report(graphSnapshot, index, footprint);
-                List<NeighborTimetable> neighbors =
-                    neighborInputs.project(graphSnapshot, index, footprint, options);
-                TimetableBuilder.BuildInput input =
-                    new TimetableBuilder.BuildInput(
-                        timetableId,
-                        resolved.company().id(),
-                        resolved.operator().id(),
-                        resolved.line().id(),
-                        code,
-                        timetableName,
-                        routeInputs,
-                        graphSnapshot,
-                        model,
-                        Optional.empty(),
-                        neighbors);
-                result = new TimetableBuilder().build(input, options, builtAt);
-              } catch (RuntimeException ex) {
-                plugin
-                    .getServer()
-                    .getScheduler()
-                    .runTask(
-                        plugin,
-                        () ->
-                            sender.sendMessage(
-                                Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
-                return;
-              }
-              TimetableBuildResult built = result;
-              NeighborReport neighbors = neighborReport;
-              plugin
-                  .getServer()
-                  .getScheduler()
-                  .runTask(
-                      plugin,
-                      () ->
-                          finishBuild(
-                              sender,
-                              provider,
-                              resolved,
-                              built,
-                              options,
-                              headway,
-                              neighbors,
-                              groupSources));
-            });
+    return new LineRoutes(
+        resolved, routeInputs, own, graph, existingId.orElseGet(UUID::randomUUID));
   }
 
-  /** 构建完成后的主线程收尾：报告、落库、给出发布入口。 */
+  /** 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。 */
   private void finishBuild(
       CommandSender sender,
       StorageProvider provider,
-      ResolvedLine resolved,
-      TimetableBuildResult result,
+      List<ResolvedLine> lines,
+      TimetableSetBuilder.SetResult set,
       TimetableBuildOptions options,
       TimetableHeadwayDefaults.Choice headway,
       NeighborReport neighbors,
       Map<String, String> groupSources) {
+    TimetableBuildResult result = set.joint();
     sendBuildReport(sender, result, options, headway, groupSources);
     sendNeighborReport(sender, neighbors, result.neighbors());
     sendExternalConflicts(
@@ -592,45 +693,84 @@ public final class FtaTimetableCommand {
         result.externalConflictsAtTarget(),
         options.serviceStartSecondOfDay(),
         result.headwayRelaxed());
-    if (result.timetable().isEmpty()) {
+    if (!set.success()) {
       return;
     }
-    try {
-      provider.timetables().save(result.timetable().get());
-      provider.timetables().replaceBaselines(result.timetable().get().id(), result.baselines());
-    } catch (StorageException ex) {
-      sender.sendMessage(Component.text("保存时刻表失败：" + ex.getMessage(), NamedTextColor.RED));
-      return;
+    List<Timetable> saved = new ArrayList<>();
+    for (ResolvedLine line : lines) {
+      Timetable timetable = set.tables().get(line.line().id());
+      if (timetable == null) {
+        sender.sendMessage(
+            Component.text(line.line().code() + " 没有拆出表来，这是一个不应发生的状态。", NamedTextColor.RED));
+        return;
+      }
+      try {
+        provider.timetables().save(timetable);
+        provider
+            .timetables()
+            .replaceBaselines(
+                timetable.id(), set.baselines().getOrDefault(line.line().id(), List.of()));
+      } catch (StorageException ex) {
+        sender.sendMessage(
+            Component.text(
+                "保存 " + line.line().code() + " 的时刻表失败：" + ex.getMessage(), NamedTextColor.RED));
+        return;
+      }
+      saved.add(timetable);
     }
-    Timetable timetable = result.timetable().get();
+    ResolvedLine first = lines.get(0);
+    String code = saved.get(0).code();
+    String lineArg = lineArgumentOf(lines);
     String target =
-        resolved.company().code()
-            + " "
-            + resolved.operator().code()
-            + " "
-            + resolved.line().code()
-            + " "
-            + timetable.code();
+        first.company().code() + " " + first.operator().code() + " " + lineArg + " " + code;
     sender.sendMessage(
-        Component.text("已保存草稿：" + timetable.code() + " ", NamedTextColor.DARK_AQUA)
+        Component.text(
+                (lines.size() > 1 ? "已保存草稿（" + lines.size() + " 张，互为基线）：" : "已保存草稿：")
+                    + lineArg
+                    + "/"
+                    + code
+                    + " ",
+                NamedTextColor.DARK_AQUA)
             .append(
-                CommandUx.actions(
-                    CommandUx.suggestAction(
-                        "[投入运行]", "/fta timetable publish " + target, "填入 publish 命令，回车后按表运行"),
-                    CommandUx.runAction("[详情]", "/fta timetable info " + target, "查看班次"),
-                    CommandUx.runAction("[交路]", "/fta timetable duties " + target, "查看每条车辆交路"),
-                    CommandUx.runAction("[导出]", "/fta timetable export " + target, "导出 CSV"))));
+                CommandUx.suggestAction(
+                    lines.size() > 1 ? "[整组投入运行]" : "[投入运行]",
+                    "/fta timetable publish " + target,
+                    lines.size() > 1
+                        ? "填入 publish 命令：几张表一起重检、一起发布，任一张拒绝则整组不发"
+                        : "填入 publish 命令，回车后按表运行")));
+    for (ResolvedLine line : lines) {
+      String single =
+          first.company().code()
+              + " "
+              + first.operator().code()
+              + " "
+              + line.line().code()
+              + " "
+              + code;
+      sender.sendMessage(
+          Component.text("  " + line.line().code() + " ", NamedTextColor.GRAY)
+              .append(
+                  CommandUx.actions(
+                      CommandUx.runAction("[详情]", "/fta timetable info " + single, "查看班次"),
+                      CommandUx.runAction("[交路]", "/fta timetable duties " + single, "查看每条车辆交路"),
+                      CommandUx.runAction("[导出]", "/fta timetable export " + single, "导出 CSV"))));
+    }
     if (result.headwayRelaxed()) {
       sender.sendMessage(
           Component.text("  目标间隔被放宽 ", NamedTextColor.GRAY)
               .append(
                   CommandUx.suggestAction(
                       "[按放宽后的间隔重建]",
-                      rebuildCommand(resolved, timetable, options, result),
+                      rebuildCommand(first, lineArg, saved.get(0), options, result),
                       "把放宽后的各组间隔填成 --group-headway 再建一次；无冲突就是可以写回配置的值")));
       for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
-        if (ServiceGroupClassifier.DEFAULT_GROUP.equals(group.group())
-            || group.effectiveSeconds() == group.targetSeconds()) {
+        if (group.effectiveSeconds() == group.targetSeconds()) {
+          continue;
+        }
+        int slash = group.group().indexOf('/');
+        String lineCode = slash < 0 ? first.line().code() : group.group().substring(0, slash);
+        String groupName = slash < 0 ? group.group() : group.group().substring(slash + 1);
+        if (ServiceGroupClassifier.DEFAULT_GROUP.equals(groupName)) {
           continue;
         }
         sender.sendMessage(
@@ -639,13 +779,13 @@ public final class FtaTimetableCommand {
                     CommandUx.suggestAction(
                         "[写回 " + group.group() + " baseline " + group.effectiveSeconds() + "s]",
                         "/fta route group set "
-                            + resolved.company().code()
+                            + first.company().code()
                             + " "
-                            + resolved.operator().code()
+                            + first.operator().code()
                             + " "
-                            + resolved.line().code()
+                            + lineCode
                             + " "
-                            + CommandUx.quoteCommandArgument(group.group())
+                            + CommandUx.quoteCommandArgument(groupName)
                             + " --baseline "
                             + group.effectiveSeconds(),
                         "把这个交路组的 baselineSec 改成放宽后的间隔，下次不传 --headway 也是它")));
@@ -653,19 +793,29 @@ public final class FtaTimetableCommand {
     }
   }
 
+  /** 几条线在命令里的写法：逗号分隔，不加引号（line code 里没有空格）。 */
+  private static String lineArgumentOf(List<ResolvedLine> lines) {
+    List<String> codes = new ArrayList<>();
+    for (ResolvedLine line : lines) {
+      codes.add(line.line().code());
+    }
+    return String.join(",", codes);
+  }
+
   /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
   private static String rebuildCommand(
-      ResolvedLine resolved,
+      ResolvedLine first,
+      String lineArg,
       Timetable timetable,
       TimetableBuildOptions options,
       TimetableBuildResult result) {
     StringBuilder command =
         new StringBuilder("/fta timetable build ")
-            .append(resolved.company().code())
+            .append(first.company().code())
             .append(' ')
-            .append(resolved.operator().code())
+            .append(first.operator().code())
             .append(' ')
-            .append(resolved.line().code())
+            .append(lineArg)
             .append(' ')
             .append(timetable.code());
     for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
@@ -828,7 +978,7 @@ public final class FtaTimetableCommand {
    * @param stopsByRoute 上述全部 route 的停靠配置
    * @param definitions 上述全部 route 的交路定义（主线程解析好，异步线程不碰缓存）
    * @param travelTimeModel 行程时间模型
-   * @param lineId 我这条 line
+   * @param lineIds 我这几条 line（联编时不止一条）：它们名下的表互相不算邻表
    * @param myDisplayCode 我这份表的显示码
    */
   private record NeighborInputs(
@@ -839,7 +989,7 @@ public final class FtaTimetableCommand {
       Map<UUID, List<RouteStop>> stopsByRoute,
       Map<UUID, RouteDefinition> definitions,
       RailTravelTimeModel travelTimeModel,
-      UUID lineId,
+      java.util.Set<UUID> lineIds,
       String myDisplayCode,
       TimetableNeighborhoodLoader loader) {
 
@@ -872,7 +1022,7 @@ public final class FtaTimetableCommand {
     NeighborReport report(
         RailGraph graph, TimetableConflictChecker.GraphIndex index, TimetableFootprint footprint) {
       return new NeighborReport(
-          loader.footprints(published, lineId, graph, index, footprint),
+          loader.footprints(published, lineIds, graph, index, footprint),
           loader.unscheduled(unscheduled, graph, index, footprint));
     }
 
@@ -899,7 +1049,7 @@ public final class FtaTimetableCommand {
         ZoneId zone) {
       return loader.project(
           published,
-          lineId,
+          lineIds,
           graph,
           index,
           footprint,
@@ -932,7 +1082,7 @@ public final class FtaTimetableCommand {
   /** 主线程读库：已发布表及其显示码、无表线路的 route、全部相关 route 的停靠配置与交路定义。 */
   private NeighborInputs collectNeighborInputs(
       StorageProvider provider,
-      ResolvedLine resolved,
+      List<ResolvedLine> lines,
       List<TimetableNeighborhoodLoader.RouteCandidate> mine,
       Map<UUID, List<RouteStop>> knownStops,
       Map<UUID, RouteDefinition> knownDefinitions,
@@ -946,6 +1096,12 @@ public final class FtaTimetableCommand {
             .findRouteDefinitionById(route.routeId())
             .ifPresent(def -> definitions.put(route.routeId(), def));
       }
+    }
+    java.util.Set<UUID> lineIds = new java.util.LinkedHashSet<>();
+    List<String> displayCodes = new ArrayList<>();
+    for (ResolvedLine resolved : lines) {
+      lineIds.add(resolved.line().id());
+      displayCodes.add(displayCodeOf(resolved));
     }
     List<Timetable> published = provider.timetables().listPublished();
     Map<UUID, String> displayCodeById = new java.util.HashMap<>();
@@ -963,7 +1119,7 @@ public final class FtaTimetableCommand {
     for (Company company : provider.companies().listAll()) {
       for (Operator operator : provider.operators().listByCompany(company.id())) {
         for (Line line : provider.lines().listByOperator(operator.id())) {
-          if (line.id().equals(resolved.line().id()) || scheduledLines.contains(line.id())) {
+          if (lineIds.contains(line.id()) || scheduledLines.contains(line.id())) {
             continue;
           }
           String lineCode = company.code() + "/" + operator.code() + "/" + line.code();
@@ -986,8 +1142,8 @@ public final class FtaTimetableCommand {
         stopsByRoute,
         definitions,
         model,
-        resolved.line().id(),
-        displayCodeOf(resolved),
+        lineIds,
+        String.join("+", displayCodes),
         NeighborInputs.loaderOf(definitions, stopsByRoute, displayCodeById, model));
   }
 
@@ -1512,45 +1668,75 @@ public final class FtaTimetableCommand {
       return;
     }
     StorageProvider provider = providerOpt.get();
-    ResolvedTimetable resolved = resolveTimetable(ctx, provider, true);
-    if (resolved == null) {
+    List<ResolvedLine> lines = resolveLines(ctx, provider, true);
+    if (lines == null) {
       return;
     }
-    Timetable timetable = resolved.timetable();
+    String code = ((String) ctx.get("code")).trim();
+    List<Timetable> tables = new ArrayList<>();
+    for (ResolvedLine line : lines) {
+      Optional<Timetable> timetable =
+          provider.timetables().findByLineAndCode(line.line().id(), code);
+      if (timetable.isEmpty()) {
+        sender.sendMessage(
+            Component.text("未找到时刻表：" + line.line().code() + "/" + code, NamedTextColor.RED));
+        return;
+      }
+      tables.add(timetable.get());
+    }
     if (next != TimetableStatus.PUBLISHED) {
-      applyStatus(sender, provider, timetable, next);
+      for (Timetable timetable : tables) {
+        applyStatus(sender, provider, timetable, next);
+      }
       return;
     }
-    if (timetable.trips().isEmpty()) {
-      sender.sendMessage(Component.text("这份时刻表一趟车都没有，publish 之后这条线会发不出车。", NamedTextColor.RED));
-      return;
-    }
-    // 发布前重检：邻表集合较 build 时有变化就重新扫一遍外部冲突。谁后发布谁避让，没有 --force。
-    ResolvedLine line = new ResolvedLine(resolved.company(), resolved.operator(), resolved.line());
-    List<TimetableBaseline> stored = provider.timetables().listBaselines(timetable.id());
-    WorldGraph worldGraph = graphForTimetable(timetable);
-    if (worldGraph == null) {
-      if (!stored.isEmpty()) {
+    for (Timetable timetable : tables) {
+      if (timetable.trips().isEmpty()) {
         sender.sendMessage(
             Component.text(
-                "找不到覆盖这条线路的调度图快照，无法对照 " + stored.size() + " 份邻表基线重检；请先 /fta graph build。",
+                timetable.code()
+                    + "（"
+                    + lineCodeOf(lines, timetable)
+                    + "）一趟车都没有，publish 之后这条线会发不出车。",
                 NamedTextColor.RED));
+        return;
+      }
+    }
+    // 发布前重检：邻表集合较 build 时有变化就重新扫一遍外部冲突。谁后发布谁避让，没有 --force。
+    // 几张表一起发时互相不算邻表（它们本来就是一起编的），任一张与外部邻表撞上则整组不发。
+    Map<UUID, List<TimetableBaseline>> stored = new java.util.LinkedHashMap<>();
+    for (Timetable timetable : tables) {
+      stored.put(timetable.id(), provider.timetables().listBaselines(timetable.id()));
+    }
+    WorldGraph worldGraph = graphForTimetable(tables.get(0));
+    if (worldGraph == null) {
+      boolean anyBaseline = stored.values().stream().anyMatch(list -> !list.isEmpty());
+      if (anyBaseline) {
+        sender.sendMessage(
+            Component.text("找不到覆盖这条线路的调度图快照，无法对照邻表基线重检；请先 /fta graph build。", NamedTextColor.RED));
         return;
       }
       // build 时没有邻表：没有需要重检的路权约束，不该因为图快照还没建而把线路卡在 DRAFT。
       sender.sendMessage(Component.text("找不到调度图快照，跳过发布前重检（build 时没有邻表基线）。", NamedTextColor.YELLOW));
-      applyStatus(sender, provider, timetable, TimetableStatus.PUBLISHED);
+      publishAll(sender, provider, tables, Map.of(), Map.of());
       return;
     }
     RailGraph graph = worldGraph.graph();
-    NeighborInputs inputs =
-        collectNeighborInputs(
-            provider,
-            line,
-            routesOf(timetable, displayCodeOf(line)),
-            Map.of(),
-            Map.of(),
-            travelTimeModel(worldGraph.worldId()));
+    RailTravelTimeModel model = travelTimeModel(worldGraph.worldId());
+    Map<UUID, NeighborInputs> inputsById = new java.util.LinkedHashMap<>();
+    for (int i = 0; i < tables.size(); i++) {
+      Timetable timetable = tables.get(i);
+      ResolvedLine line = lines.get(i);
+      inputsById.put(
+          timetable.id(),
+          collectNeighborInputs(
+              provider,
+              lines,
+              routesOf(timetable, displayCodeOf(line)),
+              Map.of(),
+              Map.of(),
+              model));
+    }
     sender.sendMessage(Component.text("正在对照已发布邻表重检…", NamedTextColor.GRAY));
     plugin
         .getServer()
@@ -1558,33 +1744,64 @@ public final class FtaTimetableCommand {
         .runTaskAsynchronously(
             plugin,
             () -> {
-              ScopeCheck check = scopeCheck(inputs, graph, timetable, stored);
+              Map<UUID, ScopeCheck> checks = new java.util.LinkedHashMap<>();
+              for (Timetable timetable : tables) {
+                checks.put(
+                    timetable.id(),
+                    scopeCheck(
+                        inputsById.get(timetable.id()),
+                        graph,
+                        timetable,
+                        stored.getOrDefault(timetable.id(), List.of())));
+              }
               plugin
                   .getServer()
                   .getScheduler()
-                  .runTask(plugin, () -> finishPublish(sender, provider, timetable, check));
+                  .runTask(plugin, () -> finishPublish(sender, provider, tables, checks, stored));
             });
   }
 
+  private static String lineCodeOf(List<ResolvedLine> lines, Timetable timetable) {
+    for (ResolvedLine line : lines) {
+      if (line.line().id().equals(timetable.lineId())) {
+        return line.line().code();
+      }
+    }
+    return "";
+  }
+
   /**
-   * 发布重检的主线程收尾：基线没变直接发；变了且有外部冲突则拒绝；变了但无冲突则更新基线再发。
+   * 发布重检的主线程收尾：基线没变直接发；变了且有外部冲突则拒绝（整组）；变了但无冲突则更新基线再发。
    *
    * <p>重检在异步线程跑了一会儿，期间表可能被重新 build 或删除；save 会整体重写发车表与交路，所以必须回读一次， 变了就拒绝而不是把重检前的旧表写回去。
    */
   private void finishPublish(
-      CommandSender sender, StorageProvider provider, Timetable checked, ScopeCheck check) {
-    Optional<Timetable> current = provider.timetables().findById(checked.id());
-    if (current.isEmpty()) {
-      sender.sendMessage(Component.text("时刻表在重检期间被删除，取消发布。", NamedTextColor.RED));
-      return;
+      CommandSender sender,
+      StorageProvider provider,
+      List<Timetable> checked,
+      Map<UUID, ScopeCheck> checks,
+      Map<UUID, List<TimetableBaseline>> stored) {
+    List<Timetable> tables = new ArrayList<>();
+    for (Timetable before : checked) {
+      Optional<Timetable> current = provider.timetables().findById(before.id());
+      if (current.isEmpty()) {
+        sender.sendMessage(Component.text(before.code() + " 在重检期间被删除，取消发布。", NamedTextColor.RED));
+        return;
+      }
+      if (!current.get().updatedAt().equals(before.updatedAt())) {
+        sender.sendMessage(
+            Component.text(
+                before.code() + " 在重检期间被修改（例如重新 build），请重新 publish。", NamedTextColor.RED));
+        return;
+      }
+      tables.add(current.get());
     }
-    Timetable timetable = current.get();
-    if (!timetable.updatedAt().equals(checked.updatedAt())) {
-      sender.sendMessage(
-          Component.text("时刻表在重检期间被修改（例如重新 build），请重新 publish。", NamedTextColor.RED));
-      return;
-    }
-    if (!check.baselinesMatch()) {
+    boolean rejected = false;
+    for (Timetable timetable : tables) {
+      ScopeCheck check = checks.get(timetable.id());
+      if (check.baselinesMatch()) {
+        continue;
+      }
       List<TimetableConflictChecker.Conflict> external = check.conflicts().external();
       if (!external.isEmpty()) {
         sender.sendMessage(
@@ -1594,17 +1811,73 @@ public final class FtaTimetableCommand {
                     + " 处冲突，拒绝发布。请重新 build 避让后再发布。",
                 NamedTextColor.RED));
         sendExternalConflicts(sender, external, timetable.serviceStartSecondOfDay(), false);
-        return;
+        rejected = true;
       }
-      try {
-        provider.timetables().replaceBaselines(timetable.id(), baselinesOf(timetable, check));
-      } catch (StorageException ex) {
-        sender.sendMessage(Component.text("更新基线失败：" + ex.getMessage(), NamedTextColor.RED));
-        return;
-      }
-      sender.sendMessage(Component.text("邻表有变化但无冲突，已更新基线。", NamedTextColor.GRAY));
     }
-    applyStatus(sender, provider, timetable, TimetableStatus.PUBLISHED);
+    if (rejected) {
+      if (tables.size() > 1) {
+        sender.sendMessage(Component.text("整组一张都没有发布。", NamedTextColor.RED));
+      }
+      return;
+    }
+    publishAll(sender, provider, tables, checks, stored);
+  }
+
+  /** 把几张表一起置为 PUBLISHED：同一个时刻，互相的基线也记这个时刻（它们从此互为已发布邻表，updatedAt 要对得上）；外部邻表的基线按重检结果更新。 */
+  private void publishAll(
+      CommandSender sender,
+      StorageProvider provider,
+      List<Timetable> tables,
+      Map<UUID, ScopeCheck> checks,
+      Map<UUID, List<TimetableBaseline>> stored) {
+    Instant now = Instant.now();
+    java.util.Set<UUID> setIds = new java.util.HashSet<>();
+    for (Timetable timetable : tables) {
+      setIds.add(timetable.id());
+    }
+    for (Timetable timetable : tables) {
+      ScopeCheck check = checks.get(timetable.id());
+      boolean refresh = tables.size() > 1 || (check != null && !check.baselinesMatch());
+      if (refresh) {
+        List<TimetableBaseline> baselines =
+            check == null ? new ArrayList<>() : new ArrayList<>(baselinesOf(timetable, check));
+        for (TimetableBaseline old : stored.getOrDefault(timetable.id(), List.of())) {
+          if (setIds.contains(old.neighborTimetableId())) {
+            baselines.add(
+                new TimetableBaseline(
+                    timetable.id(),
+                    old.neighborTimetableId(),
+                    old.neighborCode(),
+                    now,
+                    old.sharedResources(),
+                    old.conflictsAtTarget(),
+                    old.staleAgainstGraph()));
+          }
+        }
+        try {
+          provider.timetables().replaceBaselines(timetable.id(), baselines);
+        } catch (StorageException ex) {
+          sender.sendMessage(Component.text("更新基线失败：" + ex.getMessage(), NamedTextColor.RED));
+          return;
+        }
+        if (check != null && !check.baselinesMatch()) {
+          sender.sendMessage(
+              Component.text(timetable.code() + "：邻表有变化但无冲突，已更新基线。", NamedTextColor.GRAY));
+        }
+      }
+      provider.timetables().save(timetable.withStatus(TimetableStatus.PUBLISHED, now));
+    }
+    plugin.getTimetableService().ifPresent(service -> service.reload(provider));
+    for (Timetable timetable : tables) {
+      sender.sendMessage(Component.text(timetable.code() + " → PUBLISHED", NamedTextColor.GREEN));
+    }
+    boolean enabled =
+        plugin.getTimetableService().map(service -> service.settings().enabled()).orElse(false);
+    if (!enabled) {
+      sender.sendMessage(
+          Component.text(
+              "注意：config.yml 的 timetable.enabled 仍为 false，这份表暂时不会影响任何列车。", NamedTextColor.YELLOW));
+    }
   }
 
   private void applyStatus(
@@ -1665,7 +1938,7 @@ public final class FtaTimetableCommand {
     NeighborInputs inputs =
         collectNeighborInputs(
             provider,
-            line,
+            List.of(line),
             routesOf(timetable, displayCodeOf(line)),
             Map.of(),
             Map.of(),
@@ -1722,18 +1995,38 @@ public final class FtaTimetableCommand {
       return;
     }
     StorageProvider provider = providerOpt.get();
-    ResolvedTimetable resolved = resolveTimetable(ctx, provider, true);
-    if (resolved == null) {
+    List<ResolvedLine> lines = resolveLines(ctx, provider, true);
+    if (lines == null) {
       return;
+    }
+    String code = ((String) ctx.get("code")).trim();
+    List<Timetable> tables = new ArrayList<>();
+    for (ResolvedLine line : lines) {
+      Optional<Timetable> timetable =
+          provider.timetables().findByLineAndCode(line.line().id(), code);
+      if (timetable.isEmpty()) {
+        sender.sendMessage(
+            Component.text("未找到时刻表：" + line.line().code() + "/" + code, NamedTextColor.RED));
+        return;
+      }
+      tables.add(timetable.get());
     }
     if (!confirmed) {
       sender.sendMessage(locale().component("command.common.confirm-required"));
       return;
     }
-    provider.timetables().delete(resolved.timetable().id());
+    for (Timetable timetable : tables) {
+      provider.timetables().delete(timetable.id());
+    }
     plugin.getTimetableService().ifPresent(service -> service.reload(provider));
     sender.sendMessage(
-        Component.text("已删除时刻表 " + resolved.timetable().code(), NamedTextColor.DARK_AQUA));
+        Component.text(
+            "已删除时刻表 "
+                + lineArgumentOf(lines)
+                + "/"
+                + code
+                + (tables.size() > 1 ? "（" + tables.size() + " 张）" : ""),
+            NamedTextColor.DARK_AQUA));
   }
 
   private void handleExport(CommandContext<CommandSender> ctx) {
@@ -2036,6 +2329,62 @@ public final class FtaTimetableCommand {
     return new ResolvedLine(company, operatorOpt.get(), lineOpt.get());
   }
 
+  /**
+   * 解析 {@code <line>} 参数：逗号分隔的一到多条线，全部在同一 company/operator 下；重复的去掉，顺序保留。 build / publish /
+   * unpublish / delete 用它；单线命令仍走 {@link #resolveLine}。
+   */
+  private List<ResolvedLine> resolveLines(
+      CommandContext<CommandSender> ctx, StorageProvider provider, boolean requireManage) {
+    CommandSender sender = ctx.sender();
+    LocaleManager locale = locale();
+    CompanyQueryService query = new CompanyQueryService(provider);
+    String companyArg = ((String) ctx.get("company")).trim();
+    Optional<Company> companyOpt = query.findCompany(companyArg);
+    if (companyOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component("command.company.info.not-found", Map.of("company", companyArg)));
+      return null;
+    }
+    Company company = companyOpt.get();
+    boolean allowed =
+        requireManage
+            ? canManageCompany(sender, provider, company.id())
+            : canReadCompany(sender, provider, company.id());
+    if (!allowed) {
+      sender.sendMessage(locale.component("error.no-permission"));
+      return null;
+    }
+    String operatorArg = ((String) ctx.get("operator")).trim();
+    Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
+    if (operatorOpt.isEmpty()) {
+      sender.sendMessage(
+          locale.component("command.operator.not-found", Map.of("operator", operatorArg)));
+      return null;
+    }
+    Operator operator = operatorOpt.get();
+    List<ResolvedLine> out = new ArrayList<>();
+    java.util.Set<UUID> seen = new java.util.HashSet<>();
+    for (String part : ((String) ctx.get("line")).split(",")) {
+      String lineArg = part.trim();
+      if (lineArg.isEmpty()) {
+        continue;
+      }
+      Optional<Line> lineOpt = query.findLine(operator.id(), lineArg);
+      if (lineOpt.isEmpty()) {
+        sender.sendMessage(locale.component("command.line.not-found", Map.of("line", lineArg)));
+        return null;
+      }
+      if (seen.add(lineOpt.get().id())) {
+        out.add(new ResolvedLine(company, operator, lineOpt.get()));
+      }
+    }
+    if (out.isEmpty()) {
+      sender.sendMessage(locale.component("command.line.not-found", Map.of("line", "")));
+      return null;
+    }
+    return out;
+  }
+
   private ResolvedTimetable resolveTimetable(
       CommandContext<CommandSender> ctx, StorageProvider provider, boolean requireManage) {
     ResolvedLine line = resolveLine(ctx, provider, requireManage);
@@ -2098,12 +2447,22 @@ public final class FtaTimetableCommand {
         });
   }
 
+  /** 线路补全：支持逗号分隔的多条线——光标在最后一段上补全，前面已选的原样保留、不再重复建议。 */
   private SuggestionProvider<CommandSender> lineSuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
-          String prefix = normalizePrefix(input);
+          String token = input == null ? "" : input.lastRemainingToken().trim();
+          int comma = token.lastIndexOf(',');
+          String head = comma < 0 ? "" : token.substring(0, comma + 1);
+          String prefix = (comma < 0 ? token : token.substring(comma + 1)).toLowerCase(Locale.ROOT);
+          java.util.Set<String> chosen = new java.util.HashSet<>();
+          for (String part : head.split(",")) {
+            if (!part.isBlank()) {
+              chosen.add(part.trim().toLowerCase(Locale.ROOT));
+            }
+          }
           List<String> out = new ArrayList<>();
-          if (prefix.isBlank()) {
+          if (prefix.isBlank() && head.isEmpty()) {
             out.add("<line>");
           }
           resolveOperatorForSuggestion(ctx)
@@ -2112,8 +2471,9 @@ public final class FtaTimetableCommand {
                       pair.provider().lines().listByOperator(pair.operator().id()).stream()
                           .map(Line::code)
                           .filter(code -> matches(code, prefix))
+                          .filter(code -> !chosen.contains(code.toLowerCase(Locale.ROOT)))
                           .limit(SUGGESTION_LIMIT)
-                          .forEach(out::add));
+                          .forEach(code -> out.add(head + code)));
           return out;
         });
   }

@@ -353,7 +353,7 @@ public final class TimetableHeadwayDefaults {
 | **Q0 确认** | A2 已由用户确认；剩 B1 的"每方向"语义与 E1 范围 | 本文 §11 清空 |
 | **Q1 分组 + 子网格 + 相位（已落地，2026-09-19）** | 分类器、`GroupGrid`、`PhasePlanner`、按组的 headway 默认、A2、报告行；派车与 P1 修复不变。命令面暂为 `--group-headway "组=秒,…"`，`--headway` 仍是一个数给全部组 | WS 不传 `--headway`：2C/2N 各 150 s 恒定间隔；CHT 上 2N 到达与 2C 发车相位差 = 走行 + 折返，端点串行的"偏离网格"班次数降到接近 0；DS 能编出表 |
 | **Q2 让车写进表（已落地，2026-09-19）** | `ResourceRepair` 接在 `TerminalSerializer` 之后（未吸收，复用其改写/截断）；`--max-wait`；等比放宽；回滚判据 | 默认参数的 WS：目标下"让车 N 处、真冲突 0"，不放宽；`export` 里能看到被延后的班次 |
-| **Q3 多线联编** | `TimetableSetBuilder`、多线命令、整组发布 | `build FTAS SURC WS,MT X`：两张表同 code、互为基线、共用资源上的合成间隔在报告里；`publish` 整组 |
+| **Q3 多线联编（已落地，2026-09-19）** | `TimetableSetBuilder`、车池、多线命令、整组发布 | `build FTAS SURC WS,MT X`：两张表同 code、互为基线、共用资源上的合成间隔在报告里；`publish` 整组 |
 | **Q4 回写与清理** | `route group set --baseline` 的建议值提示；`timetable.md` 全部措辞；删掉线路级 baseline 作为建议值的说法 | 文档与报告一致 |
 
 ---
@@ -413,5 +413,8 @@ public final class TimetableHeadwayDefaults {
   9 个用例一行没改；(2) 多了一条**回滚判据**：一处让车若使冲突总数不减或真冲突变多就回滚并判为真冲突（否则修 A 站台的让车会把 X 端点推出新冲突，
   `TimetableBuilderStubTerminalTest` 就是这么发现的）；(3) 累计上限只算让车这一轮，串行自己的偏离不计入；(4) 命令面的动作按钮
   （`[投入运行] [详情] [交路] [导出]`、`[按放宽后的间隔重建]`、`[写回 <组> baseline]`）与可重复的 `--group-headway`（带组名补全）一并做了。
-- **Q3 未做**：多线联编。
+- **Q3 已落地（2026-09-19）**：`TimetableSetBuilder`（合成一次 `TimetableBuilder.build` 再按 route 归属拆表）、`VehicleDutyPlanner.PlannedTrip.pool`
+  （车池：每条线一个，一辆车不跨线）、`BuildInput.lineByRoute`、`TimetableNeighborhoodLoader` 的多线排除；命令 `build/publish/unpublish/delete`
+  的 `<line>` 接受逗号列表（补全跟着最后一段走），整组发布同一时刻并互记基线。与设计稿的出入：`SetResult` 不是 `Map<lineId, TimetableBuildResult>` 而是
+  一份联编报告 + 每线一张表 + 每线一份基线——报告本来就是全部线一起的，拆开只会重复；`--headway` 没加 `组=秒` 语法，用 `--group-headway`（可重复）。
 - 未验实服：Q1 的验收量（WS 2C/2N 各 150 s、CHT 偏离网格班次数、DS 能编出表）要拿 `.handoff/WsChtDiagnosisTest.java.txt` 对 `../fetarute_experimental` 跑一遍。
