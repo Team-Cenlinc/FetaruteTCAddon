@@ -10,7 +10,7 @@
 ```
 时刻表是从路网「算」出来的，不是从历史跑车记录「录」出来的。
 
-同一份网络状态 + 同一份配置 + 同一组已发布邻表，永远产出同一张表，包括 trip/duty 主键。
+同一份网络状态 + 同一份配置 + 同一组已发布邻表，永远产出同一张表——包括每一班的实际发车时刻、车次序号与 trip/duty 主键。
 
 weight 是目标服务比例，不是每次发车的抽签概率。
 
@@ -156,8 +156,44 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 从它身上碾过去的对向回库车。
 
 **目标 headway 有冲突时**，build 从目标向上以 10 秒为步长搜索**最小可行 headway**（最多放宽到目标的 4 倍），
-默认回退到它并在报告里列出目标间隔下的冲突明细；`--strict` 则构建失败。搜索只放宽 headway、不挪动单个班次：
-表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成，因此建议值是一个可以直接写回配置的数。
+默认回退到它并在报告里列出目标间隔下的冲突明细；`--strict` 则构建失败。搜索仍只放宽 headway；但每次尝试内部，
+容量为 1 的端点会把经过它的班次按资源串行（见下一节）。表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成，
+因此建议值仍是一个可以直接写回配置的数；端点上偏离网格的班次在报告里单独列出。
+
+冲突扫描按**车辆**豁免自撞：待命的 code 是 duty 号、班次是车次号、走行是 `Dxxx-CREATE/RETURN`，它们是同一辆车，
+之间不报冲突（`TimetableConflictChecker.vehicleOf`）。站台映射只认图里类型为 STATION / DEPOT 的节点：命名在站台命名空间下的
+路径点（`OP:S:CHT:3:003`）不是站台，不消耗站台组容量。PASS 路径点不停站，`--dwell` 兜底只作用于没配 dwell 的 STOP。
+这三条是 2026-09-19 修的模型缺陷，修之前任何 headway 都过不去（每次折返都在"撞自己"）。
+同一天还修了第四条：build 的行程时间模型此前不看 `fta_rail_edge_overrides`，而图里的边基础限速多半是 0，全线按默认 8 bps 算，
+时分比实际慢两到三倍。现在 `TimetableEdgeSpeeds` 把该世界的**永久**限速覆盖接进模型；临时限速与封锁带截止时刻，进表会破坏确定性，不看。
+"同一份网络状态"因此包含永久限速覆盖：改了限速要重新 build。
+
+### 单股道端点：按资源串行
+
+一根股道的尽头站（支线端点）进出共用同一段岔线，一次折返就是一次独占：进站走行、折返、出站走行。全局网格把发车钉在 headway
+的整数倍上，车到了端点却要等下一个格子，这段等待整段算作站台占用，端点立刻就满了——而且等待量是随 headway 跳动的相位余数，
+放宽 headway 救不回来。所以 build 把**容量为 1 且是某条运营 route 起点或终点的站台组**当成串行资源（`TerminalSerializer`）：
+
+- **进站班次**：到达 = max(名义到达, 端点空闲时刻 + 进站走行)，差值加到这一班的发车上——整趟延后，在它的起点等。**只延后，永不提前。**
+  起点本身也是单股道端点时无处可等：不延后、照常登记、报告里计"无处等待"，交给冲突检查报出来。
+- **续班**（起点在端点的同交路下一班）：发车 = 到达 + 折返，不等网格；可能早于也可能晚于名义时隙。
+- **其余班次**：发车 = max(名义时隙, 本车就绪)，与从前相同。
+- **邻表**在端点的待命是预订：我的进站只能落在空档里，邻表的运行一动不动（路权语义与跨线一节一致）。
+- 进站/出站走行按**单线区段索引**算（从进入端点所在桥链起到到达为止），与冲突模型里对向互斥的那一段同一口径；
+  端点前的边不在任何单线区段时退回按站台组命名算。
+- 延后让交路超过时长上限或越过计划窗口时，从那一班起截断交路、退到能回库的终点，截掉的班次以 `STUB_SATURATED` 进"取消班次"。
+- 串行是确定性的事件过程：事件按（最早可发时刻，车次号）排序，端点空闲表按站台组键排序，邻表预订按（起始时刻，车次号）排序。
+  车次序号在串行**之后**按（实际发车，名义发车，临时 code）派生（`TimetableTripNumbering`），主键仍由 `timetableId + tripCode` 名字派生。
+
+顺序是 SWRR → 派车 → 端点串行 → 编号 → 冲突检查，每个候选 headway 都这样跑一遍。串行不增减班次，份额仍由 SWRR 与派车决定；
+"短窗口不饿死"在班次序列上仍成立，在发车**间距**上不再承诺——单股道端点始发的 route 间隔会不规整，这是拓扑的价格，不加配置。
+
+报告里多两行：`结构下界`（每次折返占用 = 进站 + 折返 + 出站 + 裕量，按权重满额时的全线间隔下界，明写所用的 `--turnaround`）
+与 `端点串行`（经过次数、占用百分比、偏离网格的班次数与最大偏移、无处等待、截断）。占用超过 100% 时目标间隔本身在结构上不可能，
+搜索失败的文案会这样说，并建议核对 `--turnaround` 是否远大于终到站的 dwell；否则文案点名剩余冲突最多的三个资源。
+**`--turnaround` 是编表参数不是物理事实**：运行时终到即待命、起点只停 dwell，默认 180 s 远大于物理折返，它一个参数就能占掉端点九成的容量。
+
+车库咽喉（车库到正线之间的单线桥链）不是站台组，本轮**不串行**；它是端点串行之后剩余冲突的主要来源。
 
 这一层刻意**不**建模授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；将来的回放校验（阶段 8）如果发现
 本模型漏了约束，修的是本模型，不是让 build 去依赖回放。
@@ -215,8 +251,9 @@ RouteTrip B ─┼─ weight/timing               └─────────
 RouteTrip C ─┘   决定"跑什么"                        决定"谁来跑"
 ```
 
-顺序不可交换：先定班次，再派车。绝不允许"某终点恰好停着一辆车，于是多发这条线"——
-那会让车辆周转反过来扭曲服务比例，而这种扭曲在运营上是看不见的。
+顺序不可交换：先定班次（存在、顺序与名义时隙）、再派车（谁来跑）、最后按资源定实际时刻（几点开）。
+第三步只在容量为 1 的端点上偏离名义时隙：续班锚在车上，进站班次只能延后、不能提前；其余班次仍在网格上。
+绝不允许"某终点恰好停着一辆车，于是多发这条线"——那会让车辆周转反过来扭曲服务比例，而这种扭曲在运营上是看不见的。
 
 ## 数据模型
 
@@ -234,9 +271,10 @@ RouteTrip C ─┘   决定"跑什么"                        决定"谁来跑"
 
 | 表 | 内容 |
 | --- | --- |
-| `fta_timetables` | 表头 + `route_plans`（JSON，整体读写；每条带 `kind`＝OPERATION/CREATE/RETURN） |
+| `fta_timetables` | 表头 + `route_plans`（JSON，整体读写；每条带 `kind`＝OPERATION/CREATE/RETURN，借用的外方走行线路带 `external`＝true，旧数据缺省 false） |
 | `fta_timetable_trips` | 发车表，一趟一行，`(timetable_id, trip_code)` 唯一；只有 OPERATION |
 | `fta_timetable_duties` | 车辆交路：`end_depot_node_id` NOT NULL，`create_route_id`/`return_route_id` 可空（两端 route 自带 CRET/DSTY 时），`return_second` 是回库票发出时刻 |
+| `fta_timetable_baselines` | build 当时读到的邻表身份（`neighbor_timetable_id` + `neighbor_code` + `neighbor_updated_at`）与共用资源数、目标间隔下的冲突数。publish 重检靠它判断邻表集合有没有变；**只由 build / publish 重检 / delete 写**，改状态的 save 不碰它 |
 
 `end_depot_node_id` 是 NOT NULL 的：没有回库端点的 duty 是一条没有出口的链，不允许落库。
 duty 的 `planned_start_second` 可以是负数（出库早于服务日零点），`planned_end_second` 可以超过一天（跨零点）。
@@ -272,7 +310,8 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 哪些没有表的线路与本表共用区间/站台/单线/道岔，各多少个——足迹按展开后的路径算，不按申报的停靠点；目前只报告不联合排布，
 设计见 `timetable-scope-design.md`）、
 交路数、**全天出库次数与峰值同时在线车数**、**目标服务比例 vs 实际服务比例**、最长一趟车、单交路最多班次与最长在线、
-"所有交路都以回库收尾"这一行，以及**被取消的班次**（按 route 与原因归组，列出时刻）。
+"所有交路都以回库收尾"这一行，**结构下界**与**端点串行**两行（有单股道端点时），以及**被取消的班次**（按 route 与原因归组，列出时刻；
+原因除缺出库/回库线路外还有 `STUB_SATURATED`：端点排队超限）。
 
 峰值同时在线车数是将来与 operator 车数上限比较的量；duty 总数不是——一天 40 个 duty 可能只需要 6 辆车。
 
@@ -350,7 +389,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 
 ## 配置
 
-见 `config.yml` 的 `timetable:` 段，所有开关默认关闭。
+见 `config.yml` 的 `timetable:` 段，所有开关默认关闭。直通车滞留兜底用的 `reclaim.stranded-destroy-seconds` 不在本段，它属于 `reclaim:` 段（整段默认 `enabled: false`），见 `reclaim-policy.md`。
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -385,7 +424,7 @@ planned segment duration   vs   actual segment duration
 | --- | --- |
 | `TIMETABLE_ASSIGN` / `TIMETABLE_RELEASE` | 车次绑定与解绑 |
 | `TIMETABLE_ASSIGN_MISS` | 绑不上车次：最近的车次与偏差、容差、原因（`out-of-tolerance` / `all-claimed` / `no-trips`）；同车同站同原因一分钟一条，`/fta timetable status` 有累计计数 |
-| `RECLAIM_STRANDED_DESTROY` / `RECLAIM_STRANDED_SKIP` | 该回收却派不出 RETURN 票的待命车滞留超过 `reclaim.stranded-destroy-seconds` 被销毁 / 因有乘客或折返事务进行中而跳过 |
+| `RECLAIM_STRANDED_DESTROY` / `RECLAIM_STRANDED_DESTROY_FAILED` / `RECLAIM_STRANDED_SKIP` | 该回收却派不出 RETURN 票的待命车滞留超过 `reclaim.stranded-destroy-seconds` 被销毁 / 销毁失败 / 跳过（`reason=has-passengers` 或 `reason=dispatch-attempt-in-progress`）。完整策略见 `reclaim-policy.md` |
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
 | `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票被否决、车留在终点 |
 | `TIMETABLE_DUTY_BOUND` / `TIMETABLE_DUTY_BIND_CONFLICT` | 车绑到交路上 / 已绑别的交路（错派的车暴露在这里） |
@@ -417,14 +456,19 @@ planned segment duration   vs   actual segment duration
 
 - 冲突模型的边界：站台组容量取图里的物理股道数，不看各 route 的 DYNAMIC 范围（range 更窄时会少报）；单线区段只识别桥链，
   环内的会让、平交由边互斥兜底；车库容量视为无限；不建模授权窗口与制动距离。逐边时分按模型的逐边估算等比分摊到区段总时分上。
+- 端点串行只覆盖容量为 1 的站台组；车库咽喉（单线桥链）与多股道车站不串行。名义时隙不落库，只在 build 报告里。
 - 车次绑定与交路进度不持久化，重启后回到自由运行。
 - 仅由 code 定义（无 UUID）的交路不参与按表运行：绑定挂不回 Route。
-- 一条线路的多份已发布时刻表之间不做撞车仲裁，运营侧自查。
+- 同一条线路可以同时有多份 PUBLISHED 时刻表——publish 不拦，它们互为替代所以也不进对方的邻表检查。
+  但运行时是一对多消费（route → 时刻表列表）：**两份的表定票都会发、车次匹配会在两份里找**。
+  因此同一条线同时只应发布一份，这条没有机制保证，靠运营侧自律。
 - 跨线检查只覆盖**已发布**的邻表；仍按 headway 发车的线路只报告不检查。publish 重检用的间隔裕量是默认 30 秒，
   不是 build 时传的 `--separation`（选项不落库）。邻表的站台组容量取图里的物理股道数。
-- 直通 route 的出库/回库线路只在本 operator 的线路里找；终点在外方时会因 `NO_RETURN_ACCESS` 取消班次（自己在本 operator
-  名下定义一条首站为外方节点、末站 DSTY 回自己车库的 RETURN 可以绕开）。运行时 `ReclaimManager` 的兜底回收已改为先本 operator
-  再全部 operator、按节点匹配首站；仍然派不出 RETURN 的车滞留超过 `reclaim.stranded-destroy-seconds` 后销毁（无乘客、无折返事务时）。
+- 直通 route 的出库/回库线路**自动搜索**的范围只有本 operator 的线路。跑到外方终点的班次有两条出路：运营 route 用
+  `timetable_create_route` / `timetable_return_route` 显式指定外方线路（与自动搜到的取并集，同一站有多条时显式指定的优先，
+  再按走行最短），或者在本 operator 名下自己定义一条首站为外方节点、末站 DSTY 回自己车库的 RETURN。两条都没有，
+  才会以 `NO_RETURN_ACCESS` 取消班次。运行时 `ReclaimManager` 的兜底回收先在本 operator 找、再扩到全部 operator，
+  首站按节点匹配；仍然派不出 RETURN 的车滞留超过 `reclaim.stranded-destroy-seconds` 后销毁（无乘客、无折返事务时）。
 - 不支持一辆车跨两份时刻表接班（duty 只属于一份表）。
 - `build` 目前用 `DynamicTravelTimeModel` 的默认加减速参数（1.0 / 1.2 bps²），
   尚未按列车类型区分；接 `TrainConfigResolver` 是后续工作。

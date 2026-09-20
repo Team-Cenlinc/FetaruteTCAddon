@@ -15,16 +15,25 @@
 - **低优先级调度**：回收票据的优先级设为 `-10`（普通客运为 `0`，VIP/Depot发车可能更高），确保回收列车不会抢占正常客运列车的线路资源（Fairness）。
 - **强制发车**：通过 `TicketAssigner.forceAssign` 绕过常规发车计划，直接尝试申请占用。
 - **标签复位**：RETURN 或 CREATE 再次发车后，`FTA_OP_TRIPS` 会重置为 `0`，`FTA_OP_MAX` 继续沿用 route/group 的配置结果，供下一轮运营判断。
+- **RETURN 搜索范围**：先在本运营商的线路里找，找不到再扩到全部运营商；候选 RETURN 的首站按站点 code、裸节点 id
+  与 DYNAMIC 规范三种写法匹配。直通车停在外方终点时，靠这一步才找得到能带它回去的线路。
+- **滞留销毁兜底**：仍然派不出 RETURN 票的待命车，从第一次判定该回收起计时，超过 `reclaim.stranded-destroy-seconds`
+  （默认 1800，`0` 关闭）走 `destroyTrainByName` 销毁，日志 `RECLAIM_STRANDED_DESTROY`（失败记 `RECLAIM_STRANDED_DESTROY_FAILED`）。
+  **有乘客**（`reason=has-passengers`）或**有进行中的折返事务**（`reason=dispatch-attempt-in-progress`）的车不碰，记 `RECLAIM_STRANDED_SKIP`。
+  一旦这辆车成功派到 RETURN 票，计时清零。
 
 ## 配置项
 在 `config.yml` 的 `reclaim` 段落：
 ```yaml
 reclaim:
-  enabled: true                  # 是否启用回收策略
+  enabled: false                 # 是否启用回收策略（模板与代码默认都是关）
   max-idle-seconds: 300          # 待命超过多少秒触发回收
-  max-active-trains: 50          # 全服最大活跃列车数
+  max-active-trains: 50          # 压力模式阈值：全服活跃列车数超过它就每轮回收一辆闲置车
   check-interval-seconds: 60     # 检查周期
+  stranded-destroy-seconds: 1800 # 兜底：该回收却一直派不出 RETURN 票的待命车，滞留超过它就销毁；0 关闭
 ```
+
+`reclaim.max-active-trains` 是**出口侧**的压力阈值，与 `spawn.max-active-trains` 的入口侧准入不是一回事，两者互不替代。
 
 ## 优先级与公平性 (Fairness)
 调度占用请求现已支持优先级（Priority）：
@@ -35,7 +44,8 @@ reclaim:
 当多列车竞争同一资源（如单线区间、道岔）时，`OccupancyManager` 的排队队列（Queue）会优先放行高优先级列车；优先级相同时按“先到先得”（FIFO）处理。
 
 ## 状态边界
-- `ReclaimManager` 只处理 `LayoverRegistry` 里的待命列车，不会主动销毁正在运行的列车，也不会直接改写 signal。
+- `ReclaimManager` 只处理 `LayoverRegistry` 里的待命列车，不会碰正在运行的列车，也不会直接改写 signal。
+  **但它会销毁待命列车**：上面的滞留兜底是回收侧唯一一处销毁动作，触发条件是"该回收 + 长期派不出 RETURN 票 + 无乘客 + 无进行中折返事务"。
 - Reclaim 只按不可变 ticketId 重试自己创建且 routeId 一致的 RETURN attempt；Layover 的位置、readyAt 或 TrainCarts 名称刷新不会改变事务身份。若候选已被普通运营折返等其他 dispatch attempt 认领，本轮跳过，不能复用其 ticketId 改派 RETURN；同站同 tick 的两列车也各自持有独立票据。
 - 若某条匹配 RETURN route 在建立 attempt 前即被预检拒绝，会清理该临时 ticket 并继续尝试下一条匹配 route；一旦 handoff attempt 已建立，则固定在原 route 上稳定重试，避免双事务。
 - 运营商优先通过候选的 `FTA_ROUTE_ID -> Line -> Operator` 精确回溯；旧数据缺少 route UUID 时，只有全库恰好一个同 code Operator 才允许回退。不同公司使用相同 Operator code 时不会再按遍历顺序误选 RETURN route。
