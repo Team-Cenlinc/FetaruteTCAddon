@@ -67,12 +67,16 @@ public record TimetableBuildResult(
     List<PhasePlanner.Interleave> interleaves,
     List<DutyShape> dutyShapes,
     List<String> phaseNotes,
+    List<ConflictAbsorption.Residual> absorbable,
+    List<ConflictAbsorption.Residual> unabsorbable,
     List<String> warnings) {
 
   /** 报告里最多展开多少条冲突明细。 */
   public static final int CONFLICT_DETAIL_LIMIT = 8;
 
   public TimetableBuildResult {
+    absorbable = absorbable == null ? List.of() : List.copyOf(absorbable);
+    unabsorbable = unabsorbable == null ? List.of() : List.copyOf(unabsorbable);
     timetable = timetable == null ? Optional.empty() : timetable;
     shares = shares == null ? List.of() : List.copyOf(shares);
     infeasibleRoutes = infeasibleRoutes == null ? List.of() : List.copyOf(infeasibleRoutes);
@@ -138,6 +142,8 @@ public record TimetableBuildResult(
         0,
         0,
         0,
+        List.of(),
+        List.of(),
         List.of(),
         List.of(),
         List.of(),

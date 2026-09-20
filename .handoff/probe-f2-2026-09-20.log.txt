@@ -1,0 +1,27 @@
+PROBE overrides=445 nodes=519 edges=511
+
+=== F2 验收：WS 与 MT 的残余分列（纯走行，max-wait 默认 300）
+  WS h=300   班次 904  交路 228 取消 6   冲突 1909  {TRACK=863, SINGLE_LINE=453, JUNCTION=593} 让车 71   (最长 +24s) 偏离 666  (57185 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×441, JUNCTION junction:SWITCHER:Towny:545:74:1014×174, TRACK edge:SWITCHER:Towny:545:74:1014~SWITCHER:Towny:558:74:1014×174, TRACK edge:SURC:D:LWN:1:005~SWITCHER:Towny:587:74:1028×165, JUNCTION junction:SWITCHER:Towny:558:74:1014×156, TRACK edge:SWITCHER:Towny:558:74:1014~SWITCHER:Towny:587:74:1028×100]
+        残余 可吸收 1720 不可吸收 189   {STUB_TERMINAL=189}  最长可吸收等待 37s
+  WS h=360   班次 752  交路 190 取消 5   冲突 801   {TRACK=310, SINGLE_LINE=274, JUNCTION=217} 让车 90   (最长 +24s) 偏离 526  (21105 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×220, JUNCTION junction:SWITCHER:Towny:705:74:1172×91, TRACK edge:SURC:D:LWN:1:002~SWITCHER:Towny:705:74:1172×91, SINGLE_LINE single:single:section:bridge:SURC:S:CHT:3~SWITCHER:Towny:-137:90:368×54, JUNCTION junction:SWITCHER:Towny:545:74:1014×33, JUNCTION junction:SWITCHER:Towny:558:74:1014×33]
+        残余 可吸收 738  不可吸收 63    {STUB_TERMINAL=63}  最长可吸收等待 38s
+  WS h=420   班次 644  交路 162 取消 5   冲突 0     {} 让车 12   (最长 +24s) 偏离 467  (258 ms) 折返 终到站 dwell 0–30s
+        残余 可吸收 0    不可吸收 0     {}  最长可吸收等待 0s
+  WS h=600   班次 228  交路 114 取消 228 冲突 0     {} 让车 0    (最长 +0s) 偏离 0    (16 ms) 折返 终到站 dwell 0–30s
+        残余 可吸收 0    不可吸收 0     {}  最长可吸收等待 0s
+  MT h=1200  班次 172  交路 86  取消 85  冲突 0     {} 让车 58   (最长 +10s) 偏离 29   (305 ms) 折返 终到站 dwell 0–20s
+        残余 可吸收 0    不可吸收 0     {}  最长可吸收等待 0s
+
+=== STEP3 WS 扫描 290–430（纯走行，max-wait 60）
+  WS 2C余数=25  2N余数=22  h=290   班次 934  交路 236 取消 6   冲突 791   {TRACK=360, JUNCTION=233, SINGLE_LINE=198} 让车 34   (最长 +24s) 偏离 690  (22415 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×192, JUNCTION junction:SWITCHER:Towny:545:74:1014×77, TRACK edge:SWITCHER:Towny:545:74:1014~SWITCHER:Towny:558:74:1014×77, JUNCTION junction:SWITCHER:Towny:558:74:1014×74, TRACK edge:SWITCHER:Towny:558:74:1014~SWITCHER:Towny:587:74:1028×42, TRACK edge:SURC:D:LWN:1:003~SURC:D:LWN:1:004×41]
+  WS 2C余数=5   2N余数=2   h=300   班次 904  交路 228 取消 6   冲突 1909  {TRACK=863, SINGLE_LINE=453, JUNCTION=593} 让车 71   (最长 +24s) 偏离 666  (56972 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×441, JUNCTION junction:SWITCHER:Towny:545:74:1014×174, TRACK edge:SWITCHER:Towny:545:74:1014~SWITCHER:Towny:558:74:1014×174, TRACK edge:SURC:D:LWN:1:005~SWITCHER:Towny:587:74:1028×165, JUNCTION junction:SWITCHER:Towny:558:74:1014×156, TRACK edge:SWITCHER:Towny:558:74:1014~SWITCHER:Towny:587:74:1028×100]
+  WS 2C余数=295 2N余数=292 h=310   班次 872  交路 220 取消 5   冲突 1196  {SINGLE_LINE=291, TRACK=536, JUNCTION=369} 让车 44   (最长 +20s) 偏离 638  (32061 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×283, JUNCTION junction:SWITCHER:Towny:545:74:1014×100, JUNCTION junction:SWITCHER:Towny:558:74:1014×100, TRACK edge:SWITCHER:Towny:545:74:1014~SWITCHER:Towny:558:74:1014×100, JUNCTION junction:SWITCHER:Towny:705:74:1172×77, TRACK edge:SURC:D:LWN:1:002~SWITCHER:Towny:684:74:1115×77]
+  WS 2C余数=285 2N余数=282 h=320   班次 846  交路 213 取消 5   冲突 1023  {SINGLE_LINE=253, TRACK=460, JUNCTION=310} 让车 5    (最长 +14s) 偏离 627  (24834 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×253, TRACK edge:SURC:D:LWN:1:004~SURC:D:LWN:1:005×104, TRACK edge:SURC:D:LWN:1:005~SWITCHER:Towny:587:74:1028×104, JUNCTION junction:SWITCHER:Towny:545:74:1014×103, JUNCTION junction:SWITCHER:Towny:558:74:1014×103, TRACK edge:SWITCHER:Towny:545:74:1014~SWITCHER:Towny:558:74:1014×103]
+  WS 2C余数=275 2N余数=272 h=330   班次 820  交路 207 取消 5   冲突 738   {SINGLE_LINE=206, TRACK=307, JUNCTION=225} 让车 116  (最长 +24s) 偏离 607  (20106 ms) 折返 终到站 dwell 0–30s
+        top [SINGLE_LINE single:single:section:bridge:SWITCHER:Towny:587:74:1028~SWITCHER:Towny:705:74:1172×198, JUNCTION junction:SWITCHER:Towny:545:74:1014×59, JUNCTION junction:SWITCHER:Towny:558:74:1014×59, TRACK edge:SWITCHER:Towny:545:74:1014~SWITCHER:Towny:558:74:1014×59, JUNCTION junction:SWITCHER:Towny:705:74:1172×47, TRACK edge:SURC:D:LWN:1:002~SWITCHER:Towny:705:74:1172×47]

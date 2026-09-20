@@ -121,9 +121,10 @@ public final class TimetableBuilder {
 
     Attempt chosen = target;
     List<String> warnings = new ArrayList<>();
-    if (!target.conflicts().clean()) {
+    // 只有"运行时也让不掉"的残余才算目标间隔不可行；可吸收的那些照常发布。
+    if (!target.clean()) {
       String summary =
-          TimetableBuildReportText.summarizeConflicts(target.conflicts(), targetHeadway);
+          TimetableBuildReportText.summarizeUnabsorbable(target.unabsorbable(), targetHeadway);
       if (options.strictConflicts()) {
         List<String> reasons = new ArrayList<>();
         reasons.add(summary + "；严格模式下不回退");
@@ -240,6 +241,9 @@ public final class TimetableBuilder {
         chosen.interleaves(),
         dutyShapes(chosen.timetable()),
         chosen.phaseNotes(),
+        // 残余取最终选中的那一次：报告说的是"这张表发布后运行时要让几次车"。
+        chosen.absorbable(),
+        chosen.unabsorbable(),
         List.copyOf(warnings));
   }
 
@@ -742,6 +746,17 @@ public final class TimetableBuilder {
             separation,
             TimetableConflictChecker.vehicleOf(timetable));
 
+    // 残余分类：让车修复之后剩下的每一处，判运行时能不能让、在哪让、让多久。
+    // 成功判据从"零冲突"改成"零不可吸收残余"——运行时对这类冲突的处理本来就是后车在资源前等。
+    List<ConflictAbsorption.Residual> residuals =
+        ConflictAbsorption.classify(
+            conflicts,
+            timetable,
+            occupancy,
+            prepared.graphIndex(),
+            separation,
+            options.repair().maxWaitSeconds());
+
     // 份额按方向报：weight 只在同方向多 route 之间切，跨方向、跨组比没有意义。
     Map<String, List<WeightedTripAllocator.Allocation>> keptByDirection = new TreeMap<>();
     for (TimetableTrip trip : serialized.timetable().trips()) {
@@ -768,6 +783,7 @@ public final class TimetableBuilder {
         List.copyOf(dropped),
         List.copyOf(shares),
         conflicts,
+        residuals,
         List.copyOf(shifts),
         yields,
         serialized.terminals(),
@@ -840,7 +856,7 @@ public final class TimetableBuilder {
       } catch (BuildFailure ignored) {
         continue;
       }
-      if (candidate.conflicts().clean()) {
+      if (candidate.clean()) {
         return Optional.of(candidate);
       }
     }
@@ -920,12 +936,27 @@ public final class TimetableBuilder {
       List<TimetableBuildResult.DroppedTrip> dropped,
       List<WeightedTripAllocator.ShareReport> shares,
       TimetableConflictChecker.Report conflicts,
+      List<ConflictAbsorption.Residual> residuals,
       List<TimetableBuildResult.TripShift> shifts,
       List<ResourceRepair.Yield> yields,
       List<TerminalSerializer.TerminalReport> terminals,
       Map<String, Integer> intervals,
       List<PhasePlanner.Interleave> interleaves,
-      List<String> phaseNotes) {}
+      List<String> phaseNotes) {
+
+    /** 成功判据：只看运行时让不掉的那些。可吸收残余照常发布，运行时会在让车点等一会儿。 */
+    boolean clean() {
+      return ConflictAbsorption.unabsorbable(residuals).isEmpty();
+    }
+
+    List<ConflictAbsorption.Residual> unabsorbable() {
+      return ConflictAbsorption.unabsorbable(residuals);
+    }
+
+    List<ConflictAbsorption.Residual> absorbable() {
+      return ConflictAbsorption.absorbable(residuals);
+    }
+  }
 
   /**
    * 端点串行与让车修复两轮偏离合成一份：名义时隙取第一轮的（网格），实际发车取最后一轮的，原因取后一轮改过它的那个。 一班在两轮里都动过时只报一条，否则"偏离网格 N 班"会把同一班数两次。

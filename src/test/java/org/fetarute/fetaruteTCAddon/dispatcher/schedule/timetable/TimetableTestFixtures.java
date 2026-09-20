@@ -1,5 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -8,6 +11,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -171,6 +175,56 @@ public final class TimetableTestFixtures {
               last ? Optional.of("DSTY " + depotNodeId) : Optional.empty()));
     }
     return out;
+  }
+
+  /**
+   * 一张只有一趟车的最小时刻表：够回答"这个车次的起点在哪"。
+   *
+   * <p>{@link ConflictAbsorption} 只从成品表里读"后车所在交路"与"它的起点站台组"，不需要完整的表。
+   *
+   * @param tripCode 车次号
+   * @param originNodeId 起点节点
+   */
+  public static Timetable singleTripTimetable(String tripCode, String originNodeId) {
+    UUID timetableId = UUID.nameUUIDFromBytes("fixture".getBytes(StandardCharsets.UTF_8));
+    UUID routeId = routeId(tripCode);
+    TimetableRoutePlan plan =
+        new TimetableRoutePlan(
+            routeId,
+            tripCode,
+            RouteOperationType.OPERATION,
+            1,
+            List.of(),
+            originNodeId,
+            originNodeId,
+            Optional.empty(),
+            Optional.empty());
+    TimetableTrip trip =
+        new TimetableTrip(
+            UUID.nameUUIDFromBytes(tripCode.getBytes(StandardCharsets.UTF_8)),
+            timetableId,
+            routeId,
+            0,
+            tripCode,
+            0,
+            Optional.empty());
+    return new Timetable(
+        timetableId,
+        UUID.nameUUIDFromBytes("company".getBytes(StandardCharsets.UTF_8)),
+        UUID.nameUUIDFromBytes("operator".getBytes(StandardCharsets.UTF_8)),
+        UUID.nameUUIDFromBytes("line".getBytes(StandardCharsets.UTF_8)),
+        "FIXTURE",
+        "夹具",
+        TimetableStatus.DRAFT,
+        ZoneId.of("UTC"),
+        0,
+        86_400,
+        List.of(plan),
+        List.of(trip),
+        List.of(),
+        Optional.empty(),
+        Instant.EPOCH,
+        Instant.EPOCH);
   }
 
   /** 按 code 派生稳定的 route UUID。 */

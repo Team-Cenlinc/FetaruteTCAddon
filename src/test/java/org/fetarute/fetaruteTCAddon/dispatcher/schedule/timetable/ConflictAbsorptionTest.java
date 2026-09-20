@@ -1,0 +1,227 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+/**
+ * 残余分类：运行时能不能让、在哪让、让多久。
+ *
+ * <p>成功判据从"零冲突"改成"零不可吸收残余"之后，这个判决直接决定一张表发不发得出去，所以六个判决各钉一例， 并钉住"同一份输入两次分类结果相同"——build 与 publish
+ * 重检各算一遍，两边不一致就是 bug。
+ */
+class ConflictAbsorptionTest {
+
+  private static final String STUB = "OP:S:STUB";
+  private static final String WIDE = "OP:S:WIDE";
+  private static final int SEPARATION = 30;
+  private static final int MAX_WAIT = 300;
+
+  /** 容量：STUB 一股道、WIDE 两股道。 */
+  private static final TimetableConflictChecker.GraphIndex INDEX =
+      new TimetableConflictChecker.GraphIndex(null, Map.of(STUB, 1, WIDE, 2), Map.of());
+
+  /** 一方是已发布邻表：路权先到先得，我挪不动它。 */
+  @Test
+  void neighbourConflictsAreNeverAbsorbable() {
+    TimetableConflictChecker.Conflict conflict =
+        new TimetableConflictChecker.Conflict(
+            TimetableConflictChecker.Kind.TRACK,
+            "edge:A~B",
+            "NB-001",
+            "RA-001",
+            0,
+            60,
+            50,
+            110,
+            Optional.of("FTAS/SURC/DS"),
+            Optional.empty());
+
+    ConflictAbsorption.Residual residual = only(conflict);
+
+    assertEquals(ConflictAbsorption.Verdict.EXTERNAL, residual.verdict());
+    assertFalse(residual.absorbable());
+  }
+
+  /** 让车点是容量 1 的端点：在这里等就是堵死岔线。 */
+  @Test
+  void waitingOnACapacityOneTerminalIsNotAbsorbable() {
+    ConflictAbsorption.Residual onGroup = only(conflictOn("platform-group:" + STUB, 60, 50));
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, onGroup.verdict());
+
+    ConflictAbsorption.Residual onTrack = only(conflictOn("platform:" + STUB + ":3", 60, 50));
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, onTrack.verdict(), "具体股道同样算");
+
+    ConflictAbsorption.Residual onBridge =
+        only(conflictOn("single:bridge:" + STUB + ":3~SWITCHER:1:2:3", 60, 50));
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, onBridge.verdict(), "端点的进站单线同样算");
+  }
+
+  /** 预计等待超过单步上限：与让车修复同一个预算。 */
+  @Test
+  void waitBeyondMaxWaitIsNotAbsorbable() {
+    // first 到 600 秒离开、second 200 秒就要进：等 600 + 30 − 200 = 430 s。
+    ConflictAbsorption.Residual residual = only(conflictOn("edge:A~B", 600, 200));
+
+    assertEquals(ConflictAbsorption.Verdict.OVER_MAX_WAIT, residual.verdict());
+    assertEquals(430, residual.waitSeconds());
+  }
+
+  /** 双线区间上等一小会儿：运行时天天在做，可吸收。 */
+  @Test
+  void shortWaitOnAnOrdinaryResourceIsAbsorbable() {
+    ConflictAbsorption.Residual residual = only(conflictOn("edge:A~B", 60, 50));
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+    assertEquals(40, residual.waitSeconds(), "60 + 30 − 50");
+    assertTrue(residual.absorbable());
+  }
+
+  /** 单线对向本身可吸收：运行时按区段互斥，后车在区段外等。 */
+  @Test
+  void singleLineOppositionIsAbsorbableWhenItIsNotAStub() {
+    ConflictAbsorption.Residual residual =
+        only(conflictOn("single:bridge:" + WIDE + ":1~" + WIDE + ":2", 60, 50));
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 让车点在那一刻站满了：没地方等。 */
+  @Test
+  void noRoomAtTheWaitingPointIsNotAbsorbable() {
+    // WIDE 两股道，两辆车已经在 [0, 500) 待命；后车 RA-001 的起点就是 WIDE。
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("D001", platform, 0, 500, Optional.empty()),
+                new TimetableConflictChecker.Stay("D002", platform, 0, 500, Optional.empty())));
+
+    List<ConflictAbsorption.Residual> residuals =
+        ConflictAbsorption.classify(
+            report(conflictOn("edge:A~B", 60, 50)),
+            timetableWithOriginAt(WIDE),
+            occupancy,
+            INDEX,
+            SEPARATION,
+            MAX_WAIT);
+
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residuals.get(0).verdict());
+    assertEquals(Optional.of(WIDE), residuals.get(0).waitingPoint());
+  }
+
+  /** 让车点还有空位时同样的冲突就是可吸收的——两条用例只差站台上有几辆车。 */
+  @Test
+  void roomAtTheWaitingPointMakesItAbsorbable() {
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(new TimetableConflictChecker.Stay("D001", platform, 0, 500, Optional.empty())));
+
+    List<ConflictAbsorption.Residual> residuals =
+        ConflictAbsorption.classify(
+            report(conflictOn("edge:A~B", 60, 50)),
+            timetableWithOriginAt(WIDE),
+            occupancy,
+            INDEX,
+            SEPARATION,
+            MAX_WAIT);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(0).verdict());
+  }
+
+  /** 同一份输入分两次，判决与顺序都必须一致：build 与 publish 重检各算一遍，不一致就是 bug。 */
+  @Test
+  void classificationIsDeterministic() {
+    TimetableConflictChecker.Report report =
+        new TimetableConflictChecker.Report(
+            List.of(
+                conflictOn("edge:A~B", 60, 50),
+                conflictOn("platform-group:" + STUB, 60, 50),
+                conflictOn("edge:C~D", 900, 100)));
+
+    List<ConflictAbsorption.Residual> first =
+        ConflictAbsorption.classify(report, null, null, INDEX, SEPARATION, MAX_WAIT);
+    List<ConflictAbsorption.Residual> second =
+        ConflictAbsorption.classify(report, null, null, INDEX, SEPARATION, MAX_WAIT);
+
+    assertEquals(first, second);
+    assertEquals(
+        List.of(
+            ConflictAbsorption.Verdict.ABSORBABLE,
+            ConflictAbsorption.Verdict.STUB_TERMINAL,
+            ConflictAbsorption.Verdict.OVER_MAX_WAIT),
+        first.stream().map(ConflictAbsorption.Residual::verdict).toList());
+  }
+
+  /** 计数与筛选：报告与成功判据都靠它们。 */
+  @Test
+  void countingAndFilteringSplitTheTwoKinds() {
+    List<ConflictAbsorption.Residual> residuals =
+        ConflictAbsorption.classify(
+            new TimetableConflictChecker.Report(
+                List.of(
+                    conflictOn("edge:A~B", 60, 50),
+                    conflictOn("edge:C~D", 60, 50),
+                    conflictOn("platform-group:" + STUB, 60, 50))),
+            null,
+            null,
+            INDEX,
+            SEPARATION,
+            MAX_WAIT);
+
+    assertEquals(2, ConflictAbsorption.absorbable(residuals).size());
+    assertEquals(1, ConflictAbsorption.unabsorbable(residuals).size());
+    assertEquals(
+        Map.of(
+            ConflictAbsorption.Verdict.ABSORBABLE, 2,
+            ConflictAbsorption.Verdict.STUB_TERMINAL, 1),
+        ConflictAbsorption.countByVerdict(residuals));
+  }
+
+  // ------------------------------------------------------------------ 夹具
+
+  private static ConflictAbsorption.Residual only(TimetableConflictChecker.Conflict conflict) {
+    return ConflictAbsorption.classify(report(conflict), null, null, INDEX, SEPARATION, MAX_WAIT)
+        .get(0);
+  }
+
+  private static TimetableConflictChecker.Report report(
+      TimetableConflictChecker.Conflict conflict) {
+    return new TimetableConflictChecker.Report(List.of(conflict));
+  }
+
+  /** 内部冲突：后车恒为 second，等待 = firstTo + 裕量 − secondFrom。 */
+  private static TimetableConflictChecker.Conflict conflictOn(
+      String resource, int firstTo, int secondFrom) {
+    return new TimetableConflictChecker.Conflict(
+        resource.startsWith("platform")
+            ? TimetableConflictChecker.Kind.PLATFORM
+            : resource.startsWith("single")
+                ? TimetableConflictChecker.Kind.SINGLE_LINE
+                : TimetableConflictChecker.Kind.TRACK,
+        resource,
+        "RB-001",
+        "RA-001",
+        0,
+        firstTo,
+        secondFrom,
+        secondFrom + 60,
+        Optional.empty(),
+        Optional.empty());
+  }
+
+  /** 一张只够回答"RA-001 的起点在哪"的表。 */
+  private static Timetable timetableWithOriginAt(String group) {
+    return TimetableTestFixtures.singleTripTimetable("RA-001", group + ":1");
+  }
+}

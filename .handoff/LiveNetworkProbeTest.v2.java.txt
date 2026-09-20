@@ -129,6 +129,7 @@ class LiveNetworkProbeTest {
       List<TerminalSerializer.TerminalReport> terminals,
       List<String> phaseNotes,
       TurnaroundTable turnarounds,
+      List<ConflictAbsorption.Residual> residuals,
       String failure,
       long millis) {}
 
@@ -151,7 +152,7 @@ class LiveNetworkProbeTest {
     try {
       prepared = prepare.invoke(builder, member.input(), resolved, new ArrayList<>());
     } catch (java.lang.reflect.InvocationTargetException ex) {
-      return new Probe(headway, null, TimetableConflictChecker.Report.none(), List.of(), List.of(), List.of(), List.of(), List.of(), turnarounds, "prepare: " + ex.getCause().getMessage(), 0);
+      return new Probe(headway, null, TimetableConflictChecker.Report.none(), List.of(), List.of(), List.of(), List.of(), List.of(), turnarounds, List.of(), "prepare: " + ex.getCause().getMessage(), 0);
     }
     java.lang.reflect.Method attempt =
         TimetableBuilder.class.getDeclaredMethod(
@@ -161,7 +162,7 @@ class LiveNetworkProbeTest {
     try {
       a = attempt.invoke(builder, prepared, resolved, member.input(), Instant.parse("2026-09-20T00:00:00Z"));
     } catch (java.lang.reflect.InvocationTargetException ex) {
-      return new Probe(headway, null, TimetableConflictChecker.Report.none(), List.of(), List.of(), List.of(), List.of(), List.of(), turnarounds, "attempt: " + ex.getCause().getMessage(), (System.nanoTime() - t0) / 1_000_000L);
+      return new Probe(headway, null, TimetableConflictChecker.Report.none(), List.of(), List.of(), List.of(), List.of(), List.of(), turnarounds, List.of(), "attempt: " + ex.getCause().getMessage(), (System.nanoTime() - t0) / 1_000_000L);
     }
     long millis = (System.nanoTime() - t0) / 1_000_000L;
     return new Probe(
@@ -174,6 +175,7 @@ class LiveNetworkProbeTest {
         (List<TerminalSerializer.TerminalReport>) field(a, "terminals"),
         (List<String>) field(a, "phaseNotes"),
         turnarounds,
+        (List<ConflictAbsorption.Residual>) field(a, "residuals"),
         null,
         millis);
   }
@@ -186,6 +188,22 @@ class LiveNetworkProbeTest {
 
   private static String clock(int relative) {
     return TimetableCsvExporter.clock(5 * 3600 + relative);
+  }
+
+  private static void summaryWithResiduals(String label, Probe p) {
+    summary(label, p);
+    if (p.failure() != null) {
+      return;
+    }
+    List<ConflictAbsorption.Residual> ok = ConflictAbsorption.absorbable(p.residuals());
+    List<ConflictAbsorption.Residual> no = ConflictAbsorption.unabsorbable(p.residuals());
+    log(
+        String.format(
+            "        残余 可吸收 %-4d 不可吸收 %-4d  %s  最长可吸收等待 %ds",
+            ok.size(),
+            no.size(),
+            ConflictAbsorption.countByVerdict(no),
+            ok.stream().mapToInt(ConflictAbsorption.Residual::waitSeconds).max().orElse(0)));
   }
 
   private static void summary(String label, Probe p) {
@@ -304,13 +322,15 @@ class LiveNetworkProbeTest {
   @org.junit.jupiter.api.Order(3)
   void step3WsResonanceScan() throws Exception {
     Env e = env();
+    log("\n=== F2 验收：WS 与 MT 的残余分列（纯走行，max-wait 默认 300）");
+    for (int h : new int[] {300, 360, 420, 600}) {
+      summaryWithResiduals("WS", attemptOf(member(e, "WS", true), h, 300));
+    }
+    summaryWithResiduals("MT", attemptOf(member(e, "MT", true), 1200, 300));
     log("\n=== STEP3 WS 扫描 290–430（纯走行，max-wait 60）");
     for (int h = 290; h <= 430; h += 10) {
       Probe p = attemptOf(member(e, "WS", true), h, 60);
       summary(String.format("WS 2C余数=%-3d 2N余数=%-3d", Math.floorMod(575 + 30, h), Math.floorMod(582 + 20, h)), p);
-      if (p.failure() == null && !p.conflicts().clean()) {
-        pairs(p, 6);
-      }
     }
   }
 

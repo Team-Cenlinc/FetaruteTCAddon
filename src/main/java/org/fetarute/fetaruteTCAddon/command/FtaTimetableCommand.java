@@ -41,7 +41,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildReportText;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
@@ -60,7 +59,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TurnaroundTable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDutyPlanner;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.WeightedTripAllocator;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableFootprint;
@@ -104,7 +102,7 @@ public final class FtaTimetableCommand {
   }
 
   /** 报告里最多列出几条让车明细。 */
-  private static final int YIELD_DETAIL_LIMIT = 5;
+  static final int YIELD_DETAIL_LIMIT = 5;
 
   /** 「不设闲置上限」：一整天，计划窗口内等价于永不回收。回收关着时用它。 */
   private static final int NO_IDLE_LIMIT_SECONDS = 86_400;
@@ -696,10 +694,10 @@ public final class FtaTimetableCommand {
       NeighborReport neighbors,
       Map<String, String> groupSources) {
     TimetableBuildResult result = set.joint();
-    sendBuildReport(sender, result, options, headway, groupSources);
-    sendNeighborReport(sender, neighbors, result.neighbors());
-    sendExternalConflicts(
-        sender,
+    TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
+    report.sendBuildReport(result, options, headway, groupSources);
+    report.sendNeighborReport(neighbors, result.neighbors());
+    report.sendExternalConflicts(
         result.externalConflictsAtTarget(),
         options.serviceStartSecondOfDay(),
         result.headwayRelaxed());
@@ -728,79 +726,7 @@ public final class FtaTimetableCommand {
       }
       saved.add(timetable);
     }
-    ResolvedLine first = lines.get(0);
-    String code = saved.get(0).code();
-    String lineArg = lineArgumentOf(lines);
-    String target =
-        first.company().code() + " " + first.operator().code() + " " + lineArg + " " + code;
-    sender.sendMessage(
-        Component.text(
-                (lines.size() > 1 ? "已保存草稿（" + lines.size() + " 张，互为基线）：" : "已保存草稿：")
-                    + lineArg
-                    + "/"
-                    + code
-                    + " ",
-                NamedTextColor.DARK_AQUA)
-            .append(
-                CommandUx.suggestAction(
-                    lines.size() > 1 ? "[整组投入运行]" : "[投入运行]",
-                    "/fta timetable publish " + target,
-                    lines.size() > 1
-                        ? "填入 publish 命令：几张表一起重检、一起发布，任一张拒绝则整组不发"
-                        : "填入 publish 命令，回车后按表运行")));
-    for (ResolvedLine line : lines) {
-      String single =
-          first.company().code()
-              + " "
-              + first.operator().code()
-              + " "
-              + line.line().code()
-              + " "
-              + code;
-      sender.sendMessage(
-          Component.text("  " + line.line().code() + " ", NamedTextColor.GRAY)
-              .append(
-                  CommandUx.actions(
-                      CommandUx.runAction("[详情]", "/fta timetable info " + single, "查看班次"),
-                      CommandUx.runAction("[交路]", "/fta timetable duties " + single, "查看每条车辆交路"),
-                      CommandUx.runAction("[导出]", "/fta timetable export " + single, "导出 CSV"))));
-    }
-    if (result.headwayRelaxed()) {
-      sender.sendMessage(
-          Component.text("  目标间隔被放宽 ", NamedTextColor.GRAY)
-              .append(
-                  CommandUx.suggestAction(
-                      "[按放宽后的间隔重建]",
-                      rebuildCommand(first, lineArg, saved.get(0), options, result),
-                      "把放宽后的各组间隔填成 --group-headway 再建一次；无冲突就是可以写回配置的值")));
-      for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
-        if (group.effectiveSeconds() == group.targetSeconds()) {
-          continue;
-        }
-        int slash = group.group().indexOf('/');
-        String lineCode = slash < 0 ? first.line().code() : group.group().substring(0, slash);
-        String groupName = slash < 0 ? group.group() : group.group().substring(slash + 1);
-        if (ServiceGroupClassifier.DEFAULT_GROUP.equals(groupName)) {
-          continue;
-        }
-        sender.sendMessage(
-            Component.text("    ", NamedTextColor.GRAY)
-                .append(
-                    CommandUx.suggestAction(
-                        "[写回 " + group.group() + " baseline " + group.effectiveSeconds() + "s]",
-                        "/fta route group set "
-                            + first.company().code()
-                            + " "
-                            + first.operator().code()
-                            + " "
-                            + lineCode
-                            + " "
-                            + CommandUx.quoteCommandArgument(groupName)
-                            + " --baseline "
-                            + group.effectiveSeconds(),
-                        "把这个交路组的 baselineSec 改成放宽后的间隔，下次不传 --headway 也是它")));
-      }
-    }
+    report.sendSavedActions(lines, saved, lineArgumentOf(lines), options, result);
   }
 
   /** 几条线在命令里的写法：逗号分隔，不加引号（line code 里没有空格）。 */
@@ -810,74 +736,6 @@ public final class FtaTimetableCommand {
       codes.add(line.line().code());
     }
     return String.join(",", codes);
-  }
-
-  /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
-  private static String rebuildCommand(
-      ResolvedLine first,
-      String lineArg,
-      Timetable timetable,
-      TimetableBuildOptions options,
-      TimetableBuildResult result) {
-    StringBuilder command =
-        new StringBuilder("/fta timetable build ")
-            .append(first.company().code())
-            .append(' ')
-            .append(first.operator().code())
-            .append(' ')
-            .append(lineArg)
-            .append(' ')
-            .append(timetable.code());
-    for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
-      command
-          .append(" --group-headway ")
-          .append(CommandUx.quoteCommandArgument(group.group() + "=" + group.effectiveSeconds()));
-    }
-    if (result.groupIntervals().isEmpty()) {
-      command.append(" --headway ").append(result.effectiveHeadwaySeconds());
-    }
-    if (options.serviceStartSecondOfDay() != TimetableBuildOptions.DEFAULT_SERVICE_START) {
-      command
-          .append(" --start ")
-          .append(TimetableCsvExporter.clock(options.serviceStartSecondOfDay()));
-    }
-    if (options.serviceEndSecondOfDay() != TimetableBuildOptions.DEFAULT_SERVICE_END) {
-      command.append(" --end ").append(TimetableCsvExporter.clock(options.serviceEndSecondOfDay()));
-    }
-    if (options.defaultDwell().toSeconds() != TimetableBuildOptions.DEFAULT_DWELL_SECONDS) {
-      command.append(" --dwell ").append(options.defaultDwell().toSeconds());
-    }
-    VehicleDutyPlanner.Limits limits = options.dutyLimits();
-    if (limits.maxTripsPerDuty() != VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS) {
-      command.append(" --max-trips ").append(limits.maxTripsPerDuty());
-    }
-    if (limits.maxDutyDurationSeconds() != VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS) {
-      command.append(" --max-duty-minutes ").append(limits.maxDutyDurationSeconds() / 60);
-    }
-    if (limits.turnaround().fixed()) {
-      command.append(" --turnaround ").append(limits.turnaround().fallbackSeconds());
-    }
-    if (limits.maxIdleSeconds() != VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS) {
-      // 重建命令带上它：缺省值来自 reclaim.max-idle-seconds，与默认常数不同的一律显式写出，免得重建换了个数。
-      command.append(" --max-idle ").append(limits.maxIdleSeconds());
-    }
-    if (options.separation().toSeconds() != TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS) {
-      command.append(" --separation ").append(options.separation().toSeconds());
-    }
-    if (options.repair().maxWaitSeconds()
-        != TimetableBuildOptions.Repair.DEFAULT_MAX_WAIT_SECONDS) {
-      command.append(" --max-wait ").append(options.repair().maxWaitSeconds());
-    }
-    if (options.strictConflicts()) {
-      command.append(" --strict");
-    }
-    if (!options.tripCodePrefix().isBlank()) {
-      command.append(" --prefix ").append(options.tripCodePrefix());
-    }
-    if (!timetable.name().equals(timetable.code())) {
-      command.append(" --name ").append(CommandUx.quoteCommandArgument(timetable.name()));
-    }
-    return command.toString();
   }
 
   /**
@@ -1074,7 +932,7 @@ public final class FtaTimetableCommand {
     }
   }
 
-  private record NeighborReport(
+  record NeighborReport(
       List<TimetableNeighborhoodLoader.FootprintNeighbor> scheduled,
       List<TimetableNeighborhoodLoader.UnscheduledNeighbor> unscheduled) {}
 
@@ -1245,227 +1103,6 @@ public final class FtaTimetableCommand {
         provider.operators().findById(timetable.operatorId()).map(Operator::code).orElse("?");
     String line = provider.lines().findById(timetable.lineId()).map(Line::code).orElse("?");
     return company + "/" + operator + "/" + line;
-  }
-
-  /** 「共用资源」一节：有表的邻表参与了检查（列冲突数），无表的只能报告——它们按 headway 发车，干扰单向。 */
-  private static void sendNeighborReport(
-      CommandSender sender,
-      NeighborReport neighbors,
-      List<TimetableBuildResult.NeighborSummary> summaries) {
-    if (neighbors == null) {
-      return;
-    }
-    if (neighbors.scheduled().isEmpty() && neighbors.unscheduled().isEmpty()) {
-      sender.sendMessage(Component.text("  共用资源: 没有别的线路与本表共用区间、站台、单线或道岔", NamedTextColor.GREEN));
-      return;
-    }
-    Map<String, TimetableBuildResult.NeighborSummary> byCode = new java.util.HashMap<>();
-    for (TimetableBuildResult.NeighborSummary summary : summaries) {
-      byCode.put(summary.displayCode(), summary);
-    }
-    sender.sendMessage(Component.text("  共用资源:", NamedTextColor.GRAY));
-    for (TimetableNeighborhoodLoader.FootprintNeighbor neighbor : neighbors.scheduled()) {
-      TimetableBuildResult.NeighborSummary summary = byCode.get(neighbor.displayCode());
-      String verdict =
-          summary == null
-              ? "已发布，本次未参与检查"
-              : summary.conflictsAtTarget() == 0
-                  ? "已发布，已避让，目标间隔下无冲突"
-                  : "已发布，目标间隔下与它冲突 " + summary.conflictsAtTarget() + " 处（只能挪自己）";
-      String flags =
-          (summary != null && summary.stale() ? "，对方表基于旧图" : "")
-              + (summary != null && summary.zoneApproximated() ? "，时区不同按当日偏移换算" : "");
-      sender.sendMessage(
-          Component.text(
-              "    "
-                  + neighbor.displayCode()
-                  + " 共用 "
-                  + neighbor.sharedResources()
-                  + " 个资源，"
-                  + verdict
-                  + flags,
-              summary != null && summary.conflictsAtTarget() == 0
-                  ? NamedTextColor.WHITE
-                  : NamedTextColor.YELLOW));
-      for (String warning : neighbor.warnings()) {
-        sender.sendMessage(Component.text("      · " + warning, NamedTextColor.DARK_GRAY));
-      }
-    }
-    for (TimetableNeighborhoodLoader.UnscheduledNeighbor neighbor : neighbors.unscheduled()) {
-      sender.sendMessage(
-          Component.text(
-              "    "
-                  + neighbor.displayCode()
-                  + " 共用 "
-                  + neighbor.sharedResources()
-                  + " 个资源，无已发布时刻表——它按 headway 发车，干扰单向，无法联合排布",
-              NamedTextColor.YELLOW));
-    }
-  }
-
-  /** 「外部冲突」一节：与已发布邻表撞上的，建议只有四种——我不能挪别人。 */
-  private static void sendExternalConflicts(
-      CommandSender sender,
-      List<TimetableConflictChecker.Conflict> external,
-      int serviceStartSecondOfDay,
-      boolean relaxed) {
-    if (external.isEmpty()) {
-      return;
-    }
-    sender.sendMessage(
-        Component.text("  外部冲突（目标间隔下，与已发布邻表）: " + external.size() + " 处", NamedTextColor.YELLOW));
-    int shown = Math.min(external.size(), TimetableBuildResult.CONFLICT_DETAIL_LIMIT);
-    for (int i = 0; i < shown; i++) {
-      sender.sendMessage(
-          Component.text(
-              "    · "
-                  + external
-                      .get(i)
-                      .describe(
-                          seconds -> TimetableCsvExporter.clock(serviceStartSecondOfDay + seconds)),
-              NamedTextColor.GRAY));
-    }
-    if (external.size() > shown) {
-      sender.sendMessage(
-          Component.text("    · … 另有 " + (external.size() - shown) + " 处", NamedTextColor.GRAY));
-    }
-    sender.sendMessage(
-        Component.text(
-            "    可做的事: "
-                + (relaxed ? "目标间隔已自动放宽；" : "")
-                + "加大 --separation / 换股道（改 DYNAMIC 范围或站台）/ 与对方运营方协商由其 unpublish 重编",
-            NamedTextColor.DARK_GRAY));
-  }
-
-  private void sendBuildReport(
-      CommandSender sender,
-      TimetableBuildResult result,
-      TimetableBuildOptions options,
-      TimetableHeadwayDefaults.Choice headway,
-      Map<String, String> groupSources) {
-    sender.sendMessage(Component.text("===== 构建报告 =====", NamedTextColor.DARK_AQUA));
-    if (!result.success()) {
-      for (String warning : result.warnings()) {
-        sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.RED));
-      }
-      for (TimetableBuildResult.InfeasibleRoute route : result.infeasibleRoutes()) {
-        sender.sendMessage(
-            Component.text("  ! " + route.routeCode() + "：" + route.reason(), NamedTextColor.RED));
-      }
-      return;
-    }
-    Timetable timetable = result.timetable().orElseThrow();
-    long operations = timetable.routePlans().stream().filter(TimetableRoutePlan::operation).count();
-    long creates =
-        timetable.routePlans().stream()
-            .filter(plan -> plan.kind() == RouteOperationType.CREATE)
-            .count();
-    long returns =
-        timetable.routePlans().stream()
-            .filter(plan -> plan.kind() == RouteOperationType.RETURN)
-            .count();
-    sender.sendMessage(field("班次", String.valueOf(result.tripCount())));
-    sender.sendMessage(
-        field("route", "运营 " + operations + "，出库线路 " + creates + "，回库线路 " + returns));
-    sender.sendMessage(
-        field(
-            "计划窗口",
-            TimetableCsvExporter.clock(options.serviceStartSecondOfDay())
-                + " → "
-                + TimetableCsvExporter.clock(options.serviceEndSecondOfDay())
-                + "，间隔 "
-                + result.effectiveHeadwaySeconds()
-                + "s"
-                + (result.headwayRelaxed()
-                    ? "（目标 " + result.targetHeadwaySeconds() + "s 有冲突，已放宽）"
-                    : "")));
-    if (result.groupIntervals().isEmpty()) {
-      sender.sendMessage(field("间隔来源", headway.description() + "：" + headway.seconds() + "s"));
-    }
-    for (String line :
-        TimetableBuildReportText.describeGroups(result.groupIntervals(), groupSources)) {
-      sender.sendMessage(Component.text("  " + line, NamedTextColor.GRAY));
-    }
-    for (String note : result.phaseNotes()) {
-      sender.sendMessage(Component.text("  相位: " + note, NamedTextColor.DARK_GRAY));
-    }
-    for (String line : TimetableBuildReportText.describeInterleaves(result.interleaves())) {
-      sender.sendMessage(Component.text("  " + line, NamedTextColor.GRAY));
-    }
-    sender.sendMessage(
-        Component.text(
-            "  " + TimetableBuildReportText.describeDutyShapes(result.dutyShapes()),
-            NamedTextColor.GRAY));
-    if (result.conflictsAtTarget().isEmpty()) {
-      sender.sendMessage(
-          Component.text(
-              "  冲突检查: 无冲突（区间/站台/单线/道岔，间隔裕量 " + options.separation().toSeconds() + "s）",
-              NamedTextColor.GREEN));
-    } else {
-      sender.sendMessage(
-          Component.text(
-              "  冲突检查: 目标间隔下 " + result.conflictsAtTarget().size() + " 处冲突，明细见下方警告",
-              NamedTextColor.YELLOW));
-    }
-    sender.sendMessage(
-        Component.text(
-            "  "
-                + TimetableBuildReportText.describeYields(
-                    result.yields(), options.repair().maxWaitSeconds()),
-            result.yields().isEmpty() ? NamedTextColor.GRAY : NamedTextColor.AQUA));
-    for (String line :
-        TimetableBuildReportText.describeYieldDetails(
-            result.yields(), options.serviceStartSecondOfDay(), YIELD_DETAIL_LIMIT)) {
-      sender.sendMessage(Component.text("    " + line, NamedTextColor.DARK_GRAY));
-    }
-    for (String line :
-        TimetableBuildReportText.describeTerminals(
-            result.terminals(), result.shifts(), options.dutyLimits().turnaround())) {
-      sender.sendMessage(
-          Component.text(
-              "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
-    }
-    sender.sendMessage(field("车辆交路", String.valueOf(result.dutyCount())));
-    sender.sendMessage(
-        field(
-            "计划用车",
-            "全天 " + result.plannedVehicles() + " 次出库，峰值同时在线 " + result.peakConcurrentVehicles()));
-    if (!result.droppedTrips().isEmpty()) {
-      sender.sendMessage(
-          Component.text(
-              "  取消班次: " + result.droppedTrips().size() + "（起终点缺出库/回库线路，详见下方警告）",
-              NamedTextColor.YELLOW));
-    }
-
-    sender.sendMessage(Component.text("  目标服务比例 / 实际:", NamedTextColor.GRAY));
-    for (WeightedTripAllocator.ShareReport share : result.shares()) {
-      NamedTextColor color =
-          share.deviationPercentPoints() > TimetableBuilder.SHARE_WARN_PERCENT_POINTS
-              ? NamedTextColor.YELLOW
-              : NamedTextColor.WHITE;
-      sender.sendMessage(
-          Component.text(
-              String.format(
-                  Locale.ROOT,
-                  "    %s (w=%d)  目标 %.1f%%  实际 %.1f%%  班次 %d",
-                  share.key(),
-                  share.weight(),
-                  share.targetShare() * 100.0D,
-                  share.achievedShare() * 100.0D,
-                  share.assignedTrips()),
-              color));
-    }
-
-    sender.sendMessage(field("最长一趟车", result.longestTripSeconds() + "s"));
-    sender.sendMessage(field("单交路最多班次", String.valueOf(result.maxTripsInAnyDuty())));
-    sender.sendMessage(field("单交路最长在线", result.maxDutyDurationSeconds() + "s"));
-    sender.sendMessage(
-        Component.text(
-            "  所有交路都以回库收尾: " + (result.allDutiesReturnToStorage() ? "是" : "否"),
-            result.allDutiesReturnToStorage() ? NamedTextColor.GREEN : NamedTextColor.RED));
-    for (String warning : result.warnings()) {
-      sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.YELLOW));
-    }
   }
 
   private void handleList(CommandContext<CommandSender> ctx) {
@@ -1824,7 +1461,8 @@ public final class FtaTimetableCommand {
                     + external.size()
                     + " 处冲突，拒绝发布。请重新 build 避让后再发布。",
                 NamedTextColor.RED));
-        sendExternalConflicts(sender, external, timetable.serviceStartSecondOfDay(), false);
+        new TimetableBuildReportSender(sender, holdMaxSeconds())
+            .sendExternalConflicts(external, timetable.serviceStartSecondOfDay(), false);
         rejected = true;
       }
     }
@@ -1992,9 +1630,10 @@ public final class FtaTimetableCommand {
                               TimetableBuildResult.NeighborSummary.of(
                                   neighbor, byOwner.getOrDefault(neighbor.displayCode(), 0)));
                         }
-                        sendNeighborReport(sender, check.report(), summaries);
-                        sendExternalConflicts(
-                            sender,
+                        TimetableBuildReportSender neighborReport =
+                            new TimetableBuildReportSender(sender, holdMaxSeconds());
+                        neighborReport.sendNeighborReport(check.report(), summaries);
+                        neighborReport.sendExternalConflicts(
                             check.conflicts().external(),
                             timetable.serviceStartSecondOfDay(),
                             false);
@@ -2192,6 +1831,14 @@ public final class FtaTimetableCommand {
     }
     return new TimetableBuildOptions.Repair(
         Duration.ofSeconds(maxWait), Duration.ofSeconds(tolerance));
+  }
+
+  /** 站台扣留上限：报告里用它区分让车发生在站台还是资源前。 */
+  private int holdMaxSeconds() {
+    if (plugin.getConfigManager() != null && plugin.getConfigManager().current() != null) {
+      return plugin.getConfigManager().current().timetableSettings().holdMaxSeconds();
+    }
+    return ConfigManager.TimetableSettings.defaults().holdMaxSeconds();
   }
 
   /**
@@ -2627,7 +2274,7 @@ public final class FtaTimetableCommand {
     return input == null ? "" : input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
   }
 
-  private static Component field(String key, String value) {
+  static Component field(String key, String value) {
     return Component.text("  " + key + ": ", NamedTextColor.GRAY)
         .append(Component.text(value, NamedTextColor.WHITE));
   }
@@ -2650,7 +2297,7 @@ public final class FtaTimetableCommand {
     return CommandStorageProviders.providerIfReady(plugin);
   }
 
-  private record ResolvedLine(Company company, Operator operator, Line line) {}
+  record ResolvedLine(Company company, Operator operator, Line line) {}
 
   private record ResolvedTimetable(
       Company company, Operator operator, Line line, Timetable timetable) {}

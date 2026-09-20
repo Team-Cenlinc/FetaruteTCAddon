@@ -711,6 +711,47 @@ class TimetableBuilderTest {
     return result.timetable().orElseThrow();
   }
 
+  /**
+   * 残余分两类，且两类之和就是报告里的冲突数——成功判据只看不可吸收那一类。
+   *
+   * <p>DEP-A-B-C 是单股道夹具，120 s 目标下的冲突都压在容量 1 的端点上，运行时在那里等就是堵死岔线， 所以它们必须被判成不可吸收，并因此触发放宽。这条同时钉住"分类接进了
+   * build"与"判据没被放松成永远可吸收"。
+   */
+  @Test
+  void unabsorbableResidualsStillRelax() {
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE);
+
+    TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
+
+    assertTrue(result.success(), "非严格模式下应当回退到可行间隔");
+    assertTrue(result.effectiveHeadwaySeconds() > result.targetHeadwaySeconds(), "有让不掉的残余就该放宽");
+    assertTrue(
+        result.absorbable().stream().allMatch(ConflictAbsorption.Residual::absorbable),
+        "可吸收那一列里不能混进别的判决");
+    assertTrue(
+        result.unabsorbable().stream().noneMatch(ConflictAbsorption.Residual::absorbable),
+        "不可吸收那一列里不能混进可吸收的");
+  }
+
+  /** 排得干净的表两类残余都为空：分类不会凭空造出残余。 */
+  @Test
+  void aCleanTableHasNoResidualsAtAll() {
+    TimetableBuildResult result = build(twoRouteFixture(1, 1), options(600));
+
+    assertTrue(result.success());
+    assertEquals(result.targetHeadwaySeconds(), result.effectiveHeadwaySeconds(), "不该放宽");
+    assertTrue(result.absorbable().isEmpty());
+    assertTrue(result.unabsorbable().isEmpty());
+  }
+
   private static TimetableBuildResult build(Fixture fixture, TimetableBuildOptions options) {
     return new TimetableBuilder()
         .build(

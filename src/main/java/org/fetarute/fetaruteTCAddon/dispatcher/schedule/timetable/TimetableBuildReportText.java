@@ -35,6 +35,97 @@ public final class TimetableBuildReportText {
     return "目标间隔 " + targetHeadway + "s 有 " + report.conflicts().size() + " 处冲突（" + kinds + "）";
   }
 
+  /** 目标间隔下"运行时也让不掉"的那些：这才是判定不可行的量。 */
+  public static String summarizeUnabsorbable(
+      List<ConflictAbsorption.Residual> unabsorbable, int targetHeadway) {
+    StringBuilder reasons = new StringBuilder();
+    ConflictAbsorption.countByVerdict(unabsorbable)
+        .forEach(
+            (verdict, count) -> {
+              if (reasons.length() > 0) {
+                reasons.append("、");
+              }
+              reasons.append(describe(verdict)).append(' ').append(count);
+            });
+    return "目标间隔 " + targetHeadway + "s 有 " + unabsorbable.size() + " 处运行时让不掉的冲突（" + reasons + "）";
+  }
+
+  /**
+   * 残余两行：可吸收的与不可吸收的。
+   *
+   * @param absorbable 可吸收残余
+   * @param unabsorbable 不可吸收残余
+   * @param holdMaxSeconds 站台扣留上限：用来区分让车发生在站台还是资源前
+   * @param serviceStartSecondOfDay 零点，明细里的相对秒换算成时钟用
+   * @param detailLimit 明细最多列几条
+   */
+  public static List<String> describeResiduals(
+      List<ConflictAbsorption.Residual> absorbable,
+      List<ConflictAbsorption.Residual> unabsorbable,
+      int holdMaxSeconds,
+      int serviceStartSecondOfDay,
+      int detailLimit) {
+    List<String> out = new ArrayList<>();
+    if (absorbable.isEmpty() && unabsorbable.isEmpty()) {
+      return out;
+    }
+    if (!absorbable.isEmpty()) {
+      int longest =
+          absorbable.stream().mapToInt(ConflictAbsorption.Residual::waitSeconds).max().orElse(0);
+      long beyondHold = absorbable.stream().filter(r -> r.waitSeconds() > holdMaxSeconds).count();
+      long trips = absorbable.stream().map(ConflictAbsorption.Residual::mover).distinct().count();
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "  残余冲突: %d 处可吸收（最长预计等待 %ds；其中 %d 处超过 hold-max %ds，运行时在资源前等；涉及 %d 班）",
+              absorbable.size(),
+              longest,
+              beyondHold,
+              holdMaxSeconds,
+              trips));
+      int shown = Math.min(absorbable.size(), Math.max(0, detailLimit));
+      for (int i = 0; i < shown; i++) {
+        ConflictAbsorption.Residual residual = absorbable.get(i);
+        out.add(
+            String.format(
+                Locale.ROOT,
+                "    · %s 等 %ds 于 %s（%s）",
+                residual.mover(),
+                residual.waitSeconds(),
+                residual.waitingPoint().orElse("资源前"),
+                residual.conflict().resource()));
+      }
+      if (absorbable.size() > shown) {
+        out.add("    · … 另有 " + (absorbable.size() - shown) + " 处");
+      }
+    }
+    if (!unabsorbable.isEmpty()) {
+      StringBuilder reasons = new StringBuilder();
+      ConflictAbsorption.countByVerdict(unabsorbable)
+          .forEach(
+              (verdict, count) -> {
+                if (reasons.length() > 0) {
+                  reasons.append(" / ");
+                }
+                reasons.append(describe(verdict)).append(' ').append(count);
+              });
+      out.add(String.format(Locale.ROOT, "  不可吸收: %d 处（%s）", unabsorbable.size(), reasons));
+    }
+    return out;
+  }
+
+  /** 判决的中文说法。 */
+  private static String describe(ConflictAbsorption.Verdict verdict) {
+    return switch (verdict) {
+      case ABSORBABLE -> "可吸收";
+      case EXTERNAL -> "邻表";
+      case STUB_TERMINAL -> "容量 1 端点";
+      case OVER_MAX_WAIT -> "超过 max-wait";
+      case NO_WAITING_CAPACITY -> "让车点无容量";
+      case CHAIN_TOO_DEEP -> "连锁过深";
+    };
+  }
+
   /** 冲突明细，最多列前几条；相对秒数换算成当日时钟。 */
   public static List<String> describeConflicts(
       TimetableConflictChecker.Report report, int serviceStartSecondOfDay) {
