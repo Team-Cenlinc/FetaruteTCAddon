@@ -204,6 +204,17 @@ public final class FtaTimetableCommand {
         manager
             .commandBuilder("fta")
             .literal("timetable")
+            .literal("config")
+            .permission("fetarute.timetable")
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("line", StringParser.quotedStringParser(), lineSuggestions)
+            .handler(this::handleConfig));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("timetable")
             .literal("list")
             .permission("fetarute.timetable")
             .required("company", StringParser.quotedStringParser(), companySuggestions)
@@ -1110,6 +1121,165 @@ public final class FtaTimetableCommand {
         provider.operators().findById(timetable.operatorId()).map(Operator::code).orElse("?");
     String line = provider.lines().findById(timetable.lineId()).map(Line::code).orElse("?");
     return company + "/" + operator + "/" + line;
+  }
+
+  /**
+   * 编表参数一览：每项的<b>生效值</b>与<b>来源</b>，并给出改它的入口。
+   *
+   * <p>参数散在三处——命令行 flag、交路组 metadata、{@code config.yml}——而且各自的优先级链不一样。最难受的
+   * 不是选项多，是不知道某个值到底从哪来、改哪里才生效：在交路组上配了 {@code maxOperationTrips} 却按默认值
+   * 排表，症状会是「大交路的班次被大量取消」，离病因十万八千里。所以这里把来源和入口一起摆出来。
+   *
+   * <p>能持久化的给 {@code [改]}（写进交路组，之后每次构建都算数），只有 flag 的给 {@code [本次覆盖]}。
+   * 两者的区别本身就是信息：点了才发现只能临时覆盖的那些，就是还缺持久化位置的。
+   */
+  private void handleConfig(CommandContext<CommandSender> ctx) {
+    CommandSender sender = ctx.sender();
+    Optional<StorageProvider> providerOpt = readyProvider(sender);
+    if (providerOpt.isEmpty()) {
+      return;
+    }
+    StorageProvider provider = providerOpt.get();
+    ResolvedLine resolved = resolveLine(ctx, provider, false);
+    if (resolved == null) {
+      return;
+    }
+    Line line = resolved.line();
+    List<SpawnGroup> groups = LineSpawnMetadata.parseGroups(line.metadata());
+    // 命令参数认的是 code 不是 name，与报告里的重建命令同一口径。
+    String scope =
+        resolved.company().code()
+            + " "
+            + resolved.operator().code()
+            + " "
+            + CommandUx.quoteCommandArgument(line.code());
+    // build 的第四个位置参数是时刻表 code：线路已经有表就拿最新那张的，没有就留占位让用户填。
+    String tableCode =
+        provider.timetables().listByLine(line.id()).stream()
+            .map(Timetable::code)
+            .findFirst()
+            .map(CommandUx::quoteCommandArgument)
+            .orElse("<code>");
+    String buildPrefix = "/fta timetable build " + scope + " " + tableCode;
+    String groupPrefix = "/fta route group set " + scope + " ";
+
+    sender.sendMessage(
+        Component.text("===== 编表参数 " + line.code() + " =====", NamedTextColor.DARK_AQUA));
+
+    if (groups.isEmpty()) {
+      sender.sendMessage(
+          configRow(
+              "发车间隔",
+              line.spawnFreqBaselineSec().map(seconds -> seconds + "s").orElse("300s"),
+              line.spawnFreqBaselineSec().isPresent() ? "线路 baseline" : "默认",
+              CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --headway ", "只对这一次构建生效")));
+    }
+    for (SpawnGroup group : groups) {
+      String value =
+          group
+              .baselineSeconds()
+              .map(seconds -> seconds + "s")
+              .orElseGet(() -> line.spawnFreqBaselineSec().map(s -> s + "s").orElse("300s"));
+      String from =
+          group.baselineSeconds().isPresent()
+              ? "交路组 baseline"
+              : line.spawnFreqBaselineSec().isPresent() ? "线路 baseline" : "默认";
+      sender.sendMessage(
+          configRow(
+              "发车间隔 " + group.name(),
+              value,
+              from,
+              CommandUx.suggestAction(
+                  "[改]",
+                  groupPrefix + CommandUx.quoteCommandArgument(group.name()) + " --baseline ",
+                  "写进交路组，之后每次构建都算数")));
+    }
+
+    MaxTripsChoice maxTrips = resolveMaxTrips(null, groups);
+    Component maxTripsAction =
+        groups.isEmpty()
+            ? CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-trips ", "只对这一次构建生效")
+            : CommandUx.suggestAction(
+                "[改]",
+                groupPrefix
+                    + CommandUx.quoteCommandArgument(groups.get(0).name())
+                    + " --max-trips ",
+                "写进交路组，之后每次构建都算数");
+    sender.sendMessage(
+        configRow("交路上限", maxTrips.trips() + " 班/交路", maxTrips.description(), maxTripsAction));
+
+    int maxIdle = resolveMaxIdleSeconds(null);
+    sender.sendMessage(
+        configRow(
+            "端点闲置上限",
+            maxIdle >= NO_IDLE_LIMIT_SECONDS ? "不限" : maxIdle + "s",
+            "config.yml 的 reclaim.max-idle-seconds",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-idle ", "只对这一次构建生效")));
+
+    ConfigManager.TimetableSettings settings =
+        plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
+            ? plugin.getConfigManager().current().timetableSettings()
+            : ConfigManager.TimetableSettings.defaults();
+    sender.sendMessage(
+        configRow(
+            "单处让车上限",
+            settings.assignToleranceSeconds() + "s",
+            "config.yml 的 timetable.assign-tolerance-seconds",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-wait ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
+            "占用裕量",
+            TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS + "s",
+            "默认（无持久化位置）",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --separation ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
+            "缺省停站",
+            TimetableBuildOptions.DEFAULT_DWELL_SECONDS + "s",
+            "默认（无持久化位置）",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --dwell ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
+            "交路最长在线",
+            VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS / 60 + " 分钟",
+            "默认（无持久化位置）",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-duty-minutes ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
+            "折返时间",
+            "按各 route 终到站 dwell",
+            "默认（无持久化位置）",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --turnaround ", "给全线钉一个固定值")));
+
+    for (SpawnGroup group : groups) {
+      int interval =
+          group.baselineSeconds().orElseGet(() -> line.spawnFreqBaselineSec().orElse(300));
+      if (interval > maxIdle) {
+        sender.sendMessage(
+            Component.text(
+                "  ! 交路组 "
+                    + group.name()
+                    + " 的间隔 "
+                    + interval
+                    + "s 超过端点闲置上限 "
+                    + maxIdle
+                    + "s：车等不到下一班就会回库，这个组的交路会整体断掉"
+                    + "（症状是班次被大量取消、报 NO_CREATE_ACCESS）。",
+                NamedTextColor.YELLOW));
+      }
+    }
+
+    sender.sendMessage(
+        Component.text("  ")
+            .append(CommandUx.suggestAction("[按这些参数构建]", buildPrefix, "不带任何覆盖 flag")));
+  }
+
+  /** 参数表的一行：名称、生效值、来源、动作。 */
+  private static Component configRow(String name, String value, String source, Component action) {
+    return Component.text("  " + name + ": ", NamedTextColor.GRAY)
+        .append(Component.text(value, NamedTextColor.WHITE))
+        .append(Component.text("  (" + source + ")  ", NamedTextColor.DARK_GRAY))
+        .append(action);
   }
 
   private void handleList(CommandContext<CommandSender> ctx) {
