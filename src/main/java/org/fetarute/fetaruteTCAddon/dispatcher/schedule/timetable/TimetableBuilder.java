@@ -773,8 +773,10 @@ public final class TimetableBuilder {
             options.repair().maxWaitSeconds());
 
     // 份额按方向报：weight 只在同方向多 route 之间切，跨方向、跨组比没有意义。
+    // 数的必须是<b>让车修复之后</b>还留在表上的班次：端点串行之后让车还会再截断一批，按串行后的表数会把
+    // 已经取消的班次算进份额，报告与表对不上（`sharesMatchEmittedTrips` 钉住这一条）。
     Map<String, List<WeightedTripAllocator.Allocation>> keptByDirection = new TreeMap<>();
-    for (TimetableTrip trip : serialized.timetable().trips()) {
+    for (TimetableTrip trip : repaired.timetable().trips()) {
       Placed item = placedByProvisional.get(trip.id());
       if (item != null) {
         keptByDirection

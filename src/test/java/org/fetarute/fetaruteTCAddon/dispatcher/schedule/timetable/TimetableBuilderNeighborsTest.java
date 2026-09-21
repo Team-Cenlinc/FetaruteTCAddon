@@ -27,6 +27,12 @@ import org.junit.jupiter.api.Test;
  */
 class TimetableBuilderNeighborsTest {
 
+  /**
+   * 本类的场景按 30 秒裕量设计（让车 40 s、上限 30 装不下、放宽到 310），所以显式钉住，不跟随 {@link
+   * TimetableBuildOptions#DEFAULT_SEPARATION_SECONDS}——默认值改了这些用例测的东西不该跟着变。
+   */
+  private static final int SEPARATION = 30;
+
   private static final Instant BUILT_AT = Instant.parse("2026-03-01T00:00:00Z");
   private static final ZoneId ZONE = ZoneId.of("UTC");
   private static final String DEP = "OP:D:DEP:1";
@@ -236,7 +242,7 @@ class TimetableBuilderNeighborsTest {
             new VehicleDutyPlanner.Limits(1, 5400, 60),
             "",
             ZONE,
-            Duration.ofSeconds(TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
+            Duration.ofSeconds(SEPARATION),
             strict,
             Map.of(),
             repair);
