@@ -470,7 +470,8 @@ public final class TimetableBuilder {
             intervalByGroup,
             prepared.runByRoute(),
             options.dutyLimits().turnaround(),
-            horizon);
+            horizon,
+            stopCalls(groups, prepared));
     // ---- 2.5 第三层：前两层只看端点，沿线哪里交会、咽喉上出库流与回库流什么时候相遇它们看不见。
     // 给每个方向选一个 δ，用同一套冲突模型按周期评估。
     phases =
@@ -930,6 +931,59 @@ public final class TimetableBuilder {
       stopsByRoute.put(route.routeId(), route.stops());
     }
     return TurnaroundTable.ofStops(stopsByRoute, (int) options.defaultDwell().toSeconds());
+  }
+
+  /**
+   * 各方向沿途的合流点，供第二层在<b>共用区段</b>上交错，而不只是共用起点。
+   *
+   * <p>合流键是 {@code 本站台组→下一站台组}：带上走向才能把反向的车排除掉（乘客在某站等的是往一个方向去的车）；
+   * 用站台组而不是具体股道，是因为同一车站同方向的几股道对乘客可以互换。终到站不产生键——乘客不在终点上车。
+   *
+   * <p>取方向里第一条候选 route 作代表（候选已按 code 排序，确定）：同方向的几条 route 走同一条线，差别只在 停不停某些小站，用哪条算合流点都一样。
+   */
+  private static Map<String, List<PhasePlanner.StopCall>> stopCalls(
+      List<ServiceGroupClassifier.Group> groups, Prepared prepared) {
+    Map<String, List<PhasePlanner.StopCall>> out = new LinkedHashMap<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        if (direction.routeIds().isEmpty()) {
+          continue;
+        }
+        TimetableConflictChecker.RouteProfile profile =
+            prepared.profiles().get(direction.routeIds().get(0));
+        if (profile == null) {
+          continue;
+        }
+        List<PhasePlanner.StopCall> calls = new ArrayList<>();
+        int count = Math.min(profile.platforms().size(), profile.stops().size());
+        for (int i = 0; i < count; i++) {
+          String here = groupAt(profile, i);
+          if (here.isBlank()) {
+            continue;
+          }
+          String next = "";
+          for (int j = i + 1; j < count && next.isBlank(); j++) {
+            String candidate = groupAt(profile, j);
+            next = candidate.equals(here) ? "" : candidate;
+          }
+          if (next.isBlank()) {
+            continue; // 终到站：乘客不在这里上车，不算合流点
+          }
+          calls.add(
+              new PhasePlanner.StopCall(
+                  here + "→" + next, profile.stops().get(i).departureOffsetSeconds()));
+        }
+        if (!calls.isEmpty()) {
+          out.put(direction.key(), List.copyOf(calls));
+        }
+      }
+    }
+    return out;
+  }
+
+  private static String groupAt(TimetableConflictChecker.RouteProfile profile, int index) {
+    TimetableConflictChecker.Platform platform = profile.platforms().get(index);
+    return platform.absent() ? "" : platform.group();
   }
 
   /**

@@ -138,6 +138,30 @@ public final class PhasePlanner {
       String originGroup, int departures, int minGap, int medianGap, int maxGap) {}
 
   /**
+   * 一个方向沿途的一次停靠，用来找"哪些车在同一个站台上按同一个走向合流"。
+   *
+   * @param key 合流键：{@code 本站台组→下一站台组}。带上下一站是为了区分方向——乘客在某站等的是往某个方向去的车，
+   *     反向的车停在对面站台，不该被算进合成间隔。用站台组而不是具体股道，是因为同一个车站同方向的几股道对乘客 是可以互换的（大交路停 1 道、小交路停 2 道，乘客照样两班都能坐）
+   * @param offsetSeconds 从本方向发车起算，在这一站发车的偏移
+   */
+  public record StopCall(String key, int offsetSeconds) {
+    public StopCall {
+      key = key == null ? "" : key;
+      offsetSeconds = Math.max(0, offsetSeconds);
+    }
+  }
+
+  /** 旧签名：只按共用起点交错。 */
+  public static Phases plan(
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervalByGroup,
+      Map<UUID, Integer> runSecondsByRoute,
+      TurnaroundTable turnarounds,
+      int horizonSeconds) {
+    return plan(groups, intervalByGroup, runSecondsByRoute, turnarounds, horizonSeconds, Map.of());
+  }
+
+  /**
    * 选相位。
    *
    * @param groups 分类结果里的组（按名字排序）
@@ -145,19 +169,26 @@ public final class PhasePlanner {
    * @param runSecondsByRoute 每条 route 的全程时分
    * @param turnarounds 折返时间表
    * @param horizonSeconds 计划窗口长度
+   * @param callsByDirection 方向键 → 沿途合流点；空表示退回只按共用起点交错
    */
   public static Phases plan(
       List<ServiceGroupClassifier.Group> groups,
       Map<String, Integer> intervalByGroup,
       Map<UUID, Integer> runSecondsByRoute,
       TurnaroundTable turnarounds,
-      int horizonSeconds) {
+      int horizonSeconds,
+      Map<String, List<StopCall>> callsByDirection) {
     Objects.requireNonNull(groups, "groups");
     Map<String, Integer> phases = new TreeMap<>();
     Map<String, Integer> offsets = new TreeMap<>();
     List<String> notes = new ArrayList<>();
-    // 已放好的组在各起点站台组上的发车时刻，供后面的组交错。
-    Map<String, List<Integer>> placedByOrigin = new TreeMap<>();
+    Map<String, List<StopCall>> calls = callsByDirection == null ? Map.of() : callsByDirection;
+    // 已放好的组在各<b>合流点</b>（站台组 + 走向）上的发车时刻，供后面的组交错。
+    //
+    // 原来只按"共用起点站台组"匹配，于是两组只要不在同一个站始发就永远不会被拿来比。实测 WS 的小交路从
+    // 林湾车库始发、大交路从克罗顿高地与南渡始发，三个起点互不相同，两组在长达六站的重合区段上从未被错开过——
+    // 240/240 的表在重合段是"两班隔 55 秒挤在一起、再空 185 秒"，而不是均匀的 120 秒。改成沿途每一站都算合流点。
+    Map<String, List<List<Integer>>> placedByStop = new TreeMap<>();
 
     for (ServiceGroupClassifier.Group group : groups) {
       if (group.directions().isEmpty()) {
@@ -169,31 +200,33 @@ public final class PhasePlanner {
           anchorReturnPairs(group, interval, runSecondsByRoute, turnarounds, notes);
       // 第二层：整体偏移。
       int offset = 0;
-      List<String> sharedOrigins = new ArrayList<>();
+      List<String> shared = new ArrayList<>();
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
-        if (placedByOrigin.containsKey(direction.originGroup())
-            && !sharedOrigins.contains(direction.originGroup())) {
-          sharedOrigins.add(direction.originGroup());
+        for (StopCall call : stopsOf(direction, calls)) {
+          if (placedByStop.containsKey(call.key()) && !shared.contains(call.key())) {
+            shared.add(call.key());
+          }
         }
       }
-      if (!sharedOrigins.isEmpty()) {
+      if (!shared.isEmpty()) {
         int bestOffset = 0;
         int bestGap = Integer.MAX_VALUE;
         int bestTightest = -1;
         for (int candidate = 0; candidate < interval; candidate += SCAN_STEP_SECONDS) {
           int worst = 0;
           int tightest = Integer.MAX_VALUE;
-          for (String origin : sharedOrigins) {
-            List<Integer> merged = new ArrayList<>(placedByOrigin.get(origin));
+          for (String stop : shared) {
+            List<List<Integer>> streams = new ArrayList<>(placedByStop.get(stop));
             for (ServiceGroupClassifier.Direction direction : group.directions()) {
-              if (direction.originGroup().equals(origin)) {
-                int phase = Math.floorMod(relative.get(direction.key()) + candidate, interval);
-                for (int t = phase; t <= horizonSeconds; t += interval) {
-                  merged.add(t);
+              for (StopCall call : stopsOf(direction, calls)) {
+                if (!call.key().equals(stop)) {
+                  continue;
                 }
+                int phase = Math.floorMod(relative.get(direction.key()) + candidate, interval);
+                streams.add(streamOf(phase + call.offsetSeconds(), interval, horizonSeconds));
               }
             }
-            int[] gaps = gapRange(merged);
+            int[] gaps = gapRange(streams);
             tightest = Math.min(tightest, gaps[0]);
             worst = Math.max(worst, gaps[1]);
           }
@@ -207,8 +240,9 @@ public final class PhasePlanner {
         notes.add(
             "交路组 "
                 + group.name()
-                + " 在共用起点 "
-                + String.join("、", sharedOrigins)
+                + " 在共用合流点 "
+                + String.join("、", shared.size() > 3 ? shared.subList(0, 3) : shared)
+                + (shared.size() > 3 ? " 等 " + shared.size() + " 处" : "")
                 + " 上交错，偏移 "
                 + offset
                 + "s，最大合成间隔 "
@@ -219,14 +253,26 @@ public final class PhasePlanner {
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         int phase = Math.floorMod(relative.get(direction.key()) + offset, interval);
         phases.put(direction.key(), phase);
-        List<Integer> departures =
-            placedByOrigin.computeIfAbsent(direction.originGroup(), key -> new ArrayList<>());
-        for (int t = phase; t <= horizonSeconds; t += interval) {
-          departures.add(t);
+        for (StopCall call : stopsOf(direction, calls)) {
+          placedByStop
+              .computeIfAbsent(call.key(), key -> new ArrayList<>())
+              .add(streamOf(phase + call.offsetSeconds(), interval, horizonSeconds));
         }
       }
     }
     return new Phases(phases, offsets, notes);
+  }
+
+  /** 一个方向的合流点；没给停靠点信息时退回「起点站台组，偏移 0」，与只按共用起点交错的老行为一致。 */
+  private static List<StopCall> stopsOf(
+      ServiceGroupClassifier.Direction direction, Map<String, List<StopCall>> calls) {
+    List<StopCall> out = calls.get(direction.key());
+    if (out != null && !out.isEmpty()) {
+      return out;
+    }
+    return direction.originGroup().isBlank()
+        ? List.of()
+        : List.of(new StopCall(direction.originGroup(), 0));
   }
 
   /** 由生成好的子网格算各起点站台组的合成间隔，供报告；只列有两条以上发车的起点。 */
@@ -339,16 +385,55 @@ public final class PhasePlanner {
   }
 
   /** 相邻发车的 {最小, 最大} 间隔；不足两条发车时都是 0。 */
-  private static int[] gapRange(List<Integer> departures) {
-    if (departures.size() < 2) {
+  /** 一条周期流在窗口内的时刻。 */
+  private static List<Integer> streamOf(int first, int interval, int horizonSeconds) {
+    List<Integer> out = new ArrayList<>();
+    for (int t = first; t <= horizonSeconds; t += Math.max(1, interval)) {
+      out.add(t);
+    }
+    return out;
+  }
+
+  /**
+   * 几条周期流合起来的最小与最大间隔。
+   *
+   * <p>只在<b>所有流都覆盖的区间</b>里算。各条流的首班时刻能差出很远（大交路从线路另一头开过来，小交路几分钟前
+   * 才出库），直接把展开后的序列拼起来，开头和末尾那段"只有一条流"会冒出一个整整一个间隔大的空档，把真正的 合成间隔淹掉——扫描于是看哪个偏移都一样差，只能靠第二判据瞎选。
+   */
+  private static int[] gapRange(List<List<Integer>> streams) {
+    int from = Integer.MIN_VALUE;
+    int to = Integer.MAX_VALUE;
+    int present = 0;
+    for (List<Integer> stream : streams) {
+      if (stream == null || stream.isEmpty()) {
+        continue;
+      }
+      present++;
+      from = Math.max(from, stream.get(0));
+      to = Math.min(to, stream.get(stream.size() - 1));
+    }
+    if (present == 0 || from > to) {
       return new int[] {0, 0};
     }
-    List<Integer> sorted = new ArrayList<>(departures);
-    Collections.sort(sorted);
+    List<Integer> merged = new ArrayList<>();
+    for (List<Integer> stream : streams) {
+      if (stream == null) {
+        continue;
+      }
+      for (int t : stream) {
+        if (t >= from && t <= to) {
+          merged.add(t);
+        }
+      }
+    }
+    if (merged.size() < 2) {
+      return new int[] {0, 0};
+    }
+    Collections.sort(merged);
     int min = Integer.MAX_VALUE;
     int max = 0;
-    for (int i = 1; i < sorted.size(); i++) {
-      int gap = sorted.get(i) - sorted.get(i - 1);
+    for (int i = 1; i < merged.size(); i++) {
+      int gap = merged.get(i) - merged.get(i - 1);
       min = Math.min(min, gap);
       max = Math.max(max, gap);
     }
