@@ -190,6 +190,53 @@ class ConflictAbsorptionTest {
 
   // ------------------------------------------------------------------ 夹具
 
+  /**
+   * 冲突落在容量 1 端点的进站单线上，但后车还停在有容量的起点没发车：不是堵死岔线，可吸收。
+   *
+   * <p>让车是"整趟延后"——后车在自己的起点多站几秒，并不会开到冲突点去等。实测 WS 在 120 s 间隔下剩的 五处残余全是这个形态（撞在 CHT 进站单线上、后车停在林湾车库、等
+   * 1–10 秒），按资源一刀切会把它们判成 不可吸收，白白卡住更密的间隔。
+   */
+  @Test
+  void conflictOnAStubApproachIsAbsorbableWhenTheFollowerWaitsElsewhere() {
+    TimetableConflictChecker.Conflict conflict =
+        conflictOn("single:bridge:" + STUB + ":3~SWITCHER:1:2:3", 60, 50);
+
+    // 后车 RA-001 的起点是两股道的 WIDE：它在那里等，冲突落在 STUB 的进站单线上不该判死。
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflict),
+                TimetableTestFixtures.singleTripTimetable("RA-001", WIDE + ":1"),
+                new TimetableOccupancyProjector.Occupancy(List.of(), List.of()),
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+    assertEquals(Optional.of(WIDE), residual.waitingPoint());
+    assertEquals(40, residual.waitSeconds(), "60 + 30 − 50");
+  }
+
+  /** 后车的起点<b>就是</b>那个单股道端点：这时确实只能在那里等，仍判不可吸收。 */
+  @Test
+  void conflictOnAStubApproachStaysUnabsorbableWhenTheFollowerWaitsThere() {
+    TimetableConflictChecker.Conflict conflict =
+        conflictOn("single:bridge:" + STUB + ":3~SWITCHER:1:2:3", 60, 50);
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflict),
+                TimetableTestFixtures.singleTripTimetable("RA-001", STUB + ":3"),
+                new TimetableOccupancyProjector.Occupancy(List.of(), List.of()),
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, residual.verdict());
+    assertEquals(Optional.of(STUB), residual.waitingPoint());
+  }
+
   private static ConflictAbsorption.Residual only(TimetableConflictChecker.Conflict conflict) {
     return ConflictAbsorption.classify(report(conflict), null, null, INDEX, SEPARATION, MAX_WAIT)
         .get(0);

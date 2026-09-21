@@ -28,7 +28,8 @@ import java.util.UUID;
  *
  * <ol>
  *   <li><b>邻表</b>：一方是已发布邻表 → 不可吸收。我挪不动它，路权先到先得。
- *   <li><b>容量 1 的端点</b>：让车发生在只有一股道的站台，或它的进站单线桥链上 → 不可吸收。在这里等就是堵死岔线。
+ *   <li><b>容量 1 的端点</b>：<b>后车要等的地方</b>只有一股道 → 不可吸收，在这里等就是堵死岔线。判不出后车在哪等时
+ *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
  *   <li><b>让车点没有容量</b>：后车要等的地方在那一刻已经站满 → 不可吸收。
  *   <li><b>连锁过深</b>：这一等会把后续两班以上顶掉 → 不可吸收。
@@ -174,9 +175,18 @@ public final class ConflictAbsorption {
     wait = Math.max(0, wait);
     Optional<String> waitingPoint = context.waitingPointOf(mover);
 
-    // 2. 容量 1 的端点：在这里等就是堵死岔线。
-    if (context.isStubResource(conflict.resource())
-        || waitingPoint.map(context::isStubGroup).orElse(false)) {
+    // 2. 容量 1 的端点：后车要在只有一股道的地方等，那才是堵死岔线。
+    //
+    // 判据先看「后车在哪等」，而不是冲突落在哪个资源上：让车是"整趟延后"，车在自己的起点多站，
+    // 并不会开到冲突点去等。实测 WS 有一批残余撞在 CHT 的进站单线上，可后车还停在林湾车库里没发车，
+    // 晚发一两秒就完事——按资源一刀切会把这种判成不可吸收，白白卡住更密的间隔。
+    //
+    // 只有连后车在哪等都判不出来时（相位第三层评估时手上没有成品表），才退回按资源保守判。
+    boolean waitsOnStub =
+        waitingPoint.isPresent()
+            ? context.isStubGroup(waitingPoint.get())
+            : context.isStubResource(conflict.resource());
+    if (waitsOnStub) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.STUB_TERMINAL);
     }
     // 3. 预算：与让车修复同一个上限。
