@@ -2,10 +2,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 
@@ -54,44 +56,160 @@ public final class TimetableOccupancyProjector {
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
     Map<UUID, TimetableTrip> tripsById = new HashMap<>();
+    Set<UUID> returnRouteIds = returnRouteIdsOf(timetable);
+    int serviceStart = timetable.serviceStartSecondOfDay();
     for (TimetableTrip trip : timetable.trips()) {
       tripsById.put(trip.id(), trip);
-      // 带客的回库班有 trip 行，但它的运行由 duty 的回库走行投影（同一辆车、同一时刻），这里不再投一遍。
-      boolean returnTrip =
-          timetable
-              .routePlan(trip.routeId())
-              .map(plan -> plan.kind() == RouteOperationType.RETURN)
-              .orElse(false);
-      if (profiles.containsKey(trip.routeId()) && !returnTrip) {
-        movements.add(
-            new TimetableConflictChecker.Movement(
-                trip.tripCode(),
-                trip.routeId(),
-                relativeDeparture(timetable, trip, zeroSecondOfDay),
-                tag));
-      }
+      addTripMovement(
+          trip, profiles, returnRouteIds, serviceStart, zeroSecondOfDay, tag, movements);
     }
     for (VehicleDuty duty : timetable.duties()) {
-      projectDuty(timetable, duty, tripsById, profiles, zeroSecondOfDay, tag, movements, stays);
+      appendDutyLegs(
+          duty, tripsById, profiles, serviceStart, zeroSecondOfDay, tag, movements, stays);
     }
     return new Occupancy(List.copyOf(movements), List.copyOf(stays));
   }
 
+  /**
+   * 只展开一个 duty 的占用：它的班次运行、两段走行与站台待命。
+   *
+   * <p>让车修复每施加一处只改一条交路，用它换掉 {@link OccupationIndex} 里那一辆车的占用，不必重投影整张表。 产物必须与 {@link #project} 里属于这个
+   * duty 的那些条目逐条相同——不同的只是次序，而冲突扫描已经与次序无关。
+   *
+   * <p>不属于任何 duty 的班次不在这里：它们的时刻不会被让车改动，也就不必重投影。
+   *
+   * @param timetable 当前表
+   * @param duty 要展开的交路；它的班次按 {@link VehicleDuty#tripIds()} 取
+   * @param profiles 各 route 的投影（含 CREATE/RETURN）
+   * @param zeroSecondOfDay 零点
+   */
+  public static Occupancy projectDuty(
+      Timetable timetable,
+      VehicleDuty duty,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      int zeroSecondOfDay) {
+    Objects.requireNonNull(timetable, "timetable");
+    Objects.requireNonNull(duty, "duty");
+    Objects.requireNonNull(profiles, "profiles");
+    Set<UUID> wanted = new HashSet<>(duty.tripIds());
+    List<TimetableTrip> trips = new ArrayList<>(wanted.size());
+    for (TimetableTrip trip : timetable.trips()) {
+      if (wanted.contains(trip.id())) {
+        trips.add(trip);
+      }
+    }
+    return projectDuty(
+        duty,
+        trips,
+        profiles,
+        returnRouteIdsOf(timetable),
+        timetable.serviceStartSecondOfDay(),
+        zeroSecondOfDay);
+  }
+
+  /**
+   * 只展开一个 duty 的占用，班次直接给进来。
+   *
+   * <p>让车修复的增量重扫走这一条：它手上已经有改写好的交路与班次，为了查几行而重建一整张 {@link Timetable} 是纯浪费——光把九百多个班次重排一遍就够贵了。
+   *
+   * @param duty 交路（时刻已改写）
+   * @param trips 它的班次，时刻已改写；顺序无关，按 {@link VehicleDuty#tripIds()} 取用
+   * @param profiles 各 route 的投影（含 CREATE/RETURN）
+   * @param returnRouteIds 以 RETURN 收尾的 route：这些班次的运行由回库走行投影，不再单独投一遍
+   * @param serviceStartSecondOfDay 计划窗口起点，判跨零点用
+   * @param zeroSecondOfDay 零点
+   */
+  public static Occupancy projectDuty(
+      VehicleDuty duty,
+      List<TimetableTrip> trips,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      Set<UUID> returnRouteIds,
+      int serviceStartSecondOfDay,
+      int zeroSecondOfDay) {
+    Objects.requireNonNull(duty, "duty");
+    Objects.requireNonNull(profiles, "profiles");
+    Map<UUID, TimetableTrip> tripsById = new HashMap<>();
+    for (TimetableTrip trip : trips == null ? List.<TimetableTrip>of() : trips) {
+      tripsById.put(trip.id(), trip);
+    }
+    Set<UUID> returns = returnRouteIds == null ? Set.of() : returnRouteIds;
+    List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
+    List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
+    for (UUID tripId : duty.tripIds()) {
+      TimetableTrip trip = tripsById.get(tripId);
+      if (trip != null) {
+        addTripMovement(
+            trip,
+            profiles,
+            returns,
+            serviceStartSecondOfDay,
+            zeroSecondOfDay,
+            Optional.empty(),
+            movements);
+      }
+    }
+    appendDutyLegs(
+        duty,
+        tripsById,
+        profiles,
+        serviceStartSecondOfDay,
+        zeroSecondOfDay,
+        Optional.empty(),
+        movements,
+        stays);
+    return new Occupancy(movements, stays);
+  }
+
+  /** 表里以 RETURN 收尾的 route：它们的班次行不单独投影运行。 */
+  public static Set<UUID> returnRouteIdsOf(Timetable timetable) {
+    Set<UUID> out = new HashSet<>();
+    for (TimetableRoutePlan plan : timetable.routePlans()) {
+      if (plan.kind() == RouteOperationType.RETURN) {
+        out.add(plan.routeId());
+      }
+    }
+    return out;
+  }
+
+  /** 一班车的运行。带客的回库班有 trip 行，但它的运行由 duty 的回库走行投影（同一辆车、同一时刻），这里不再投一遍。 */
+  private static void addTripMovement(
+      TimetableTrip trip,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      Set<UUID> returnRouteIds,
+      int serviceStartSecondOfDay,
+      int zeroSecondOfDay,
+      Optional<String> owner,
+      List<TimetableConflictChecker.Movement> movements) {
+    if (profiles.containsKey(trip.routeId()) && !returnRouteIds.contains(trip.routeId())) {
+      movements.add(
+          new TimetableConflictChecker.Movement(
+              trip.tripCode(),
+              trip.routeId(),
+              relativeDeparture(trip, serviceStartSecondOfDay, zeroSecondOfDay),
+              owner));
+    }
+  }
+
   /** 班次相对零点的发车秒数：早于窗口起点的当日秒数属于下一个日历日。 */
   static int relativeDeparture(Timetable timetable, TimetableTrip trip, int zeroSecondOfDay) {
+    return relativeDeparture(trip, timetable.serviceStartSecondOfDay(), zeroSecondOfDay);
+  }
+
+  private static int relativeDeparture(
+      TimetableTrip trip, int serviceStartSecondOfDay, int zeroSecondOfDay) {
     int departure = trip.departureSecondOfDay();
-    if (departure < timetable.serviceStartSecondOfDay()) {
+    if (departure < serviceStartSecondOfDay) {
       departure += TimetableTrip.SECONDS_PER_DAY;
     }
     return departure - zeroSecondOfDay;
   }
 
   /** 一个 duty 的贡献：两段走行是运行，到站等首班、两班之间折返、末班到发回库票是站台待命。 */
-  private static void projectDuty(
-      Timetable timetable,
+  private static void appendDutyLegs(
       VehicleDuty duty,
       Map<UUID, TimetableTrip> tripsById,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      int serviceStart,
       int zero,
       Optional<String> owner,
       List<TimetableConflictChecker.Movement> movements,
@@ -111,7 +229,7 @@ public final class TimetableOccupancyProjector {
     if (chain.isEmpty()) {
       return;
     }
-    int firstDeparture = relativeDeparture(timetable, chain.get(0), zero);
+    int firstDeparture = relativeDeparture(chain.get(0), serviceStart, zero);
     int dutyStart = duty.plannedStartSecondOfDay() - zero;
     int returnAt = duty.returnSecondOfDay() - zero;
     duty.createRouteId()
@@ -137,9 +255,9 @@ public final class TimetableOccupancyProjector {
             });
     for (int i = 0; i + 1 < chain.size(); i++) {
       int arrival =
-          relativeDeparture(timetable, chain.get(i), zero)
+          relativeDeparture(chain.get(i), serviceStart, zero)
               + lastArrival(chainProfiles.get(i).stops());
-      int nextDeparture = relativeDeparture(timetable, chain.get(i + 1), zero);
+      int nextDeparture = relativeDeparture(chain.get(i + 1), serviceStart, zero);
       chainProfiles
           .get(i)
           .terminal()
@@ -161,7 +279,7 @@ public final class TimetableOccupancyProjector {
                   new TimetableConflictChecker.Movement(
                       duty.dutyCode() + "-RETURN", routeId, returnAt, owner));
               int arrival =
-                  relativeDeparture(timetable, chain.get(lastIndex), zero)
+                  relativeDeparture(chain.get(lastIndex), serviceStart, zero)
                       + lastArrival(chainProfiles.get(lastIndex).stops());
               chainProfiles
                   .get(lastIndex)

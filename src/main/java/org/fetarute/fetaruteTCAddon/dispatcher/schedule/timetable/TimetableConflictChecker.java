@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -102,43 +104,164 @@ public final class TimetableConflictChecker {
       List<Stay> stays,
       int separationSeconds,
       Function<String, String> vehicleOf) {
-    Objects.requireNonNull(profiles, "profiles");
-    Function<String, String> vehicles = vehicleOf == null ? Function.identity() : vehicleOf;
-    GraphIndex graphIndex = index == null ? GraphIndex.of(null) : index;
-    int separation = Math.max(0, separationSeconds);
-    Map<String, Integer> platformCapacity = graphIndex.platformCapacity();
-    SingleLineSectionIndex sections = graphIndex.sections();
-    Map<NodeId, NodeType> nodeTypes = graphIndex.nodeTypes();
-
+    // 桶用 LinkedHashMap 而不是 TreeMap：资源键是七十来字符的长串，TreeMap 每次查桶要做十来次全串比较，
+    // 而增量重扫一次 attempt 要查近三百万次。遍历序仍是确定的（投影序），报告的序由 CONFLICT_ORDER 自己保证。
     Map<String, Resource> resources = new LinkedHashMap<>();
+    projectInto(resources, index, profiles, movements, stays, vehicleOf);
+    return scanResources(resources.values(), separationSeconds);
+  }
+
+  // ------------------------------------------------------------------ 投影与扫描的两半
+
+  /**
+   * 投影：把运行与待命摊进资源桶。{@link #check} 与 {@link OccupationIndex} 共用这一段——占用怎么算只能有一份实现，
+   * 否则"全扫说撞、增量说不撞"这种事会出现在同一份表上。
+   *
+   * <p>车辆身份在这里就算好存进 {@link Occupation}，不留到扫描时再算：增量索引要按车移除占用，现算的身份没法拿来比。
+   *
+   * @param resources 落点，已有的桶会被追加
+   * @return 这次投影碰到的资源键——增量替换靠它知道该重扫哪些资源
+   */
+  static Set<String> projectInto(
+      Map<String, Resource> resources,
+      GraphIndex index,
+      Map<UUID, RouteProfile> profiles,
+      List<Movement> movements,
+      List<Stay> stays,
+      Function<String, String> vehicleOf) {
+    Objects.requireNonNull(profiles, "profiles");
+    GraphIndex graphIndex = index == null ? GraphIndex.of(null) : index;
+    Sink sink =
+        new Sink(
+            resources,
+            new LinkedHashSet<>(),
+            vehicleOf == null ? Function.identity() : vehicleOf,
+            graphIndex.platformCapacity());
     for (Movement movement : movements == null ? List.<Movement>of() : movements) {
       RouteProfile profile = profiles.get(movement.routeId());
       if (profile == null) {
         continue;
       }
-      project(movement, profile, resources, sections, nodeTypes, platformCapacity);
+      project(movement, profile, sink, graphIndex.sections(), graphIndex.nodeTypes());
     }
     for (Stay stay : stays == null ? List.<Stay>of() : stays) {
-      addPlatform(
-          resources,
-          platformCapacity,
-          stay.platform(),
-          stay.code(),
-          stay.from(),
-          stay.to(),
-          stay.owner());
+      addPlatform(sink, stay.platform(), stay.code(), stay.from(), stay.to(), stay.owner());
+    }
+    return sink.touched();
+  }
+
+  /** 扫描：给定资源逐个扫，合成一张报告。 */
+  static Report scanResources(Collection<Resource> resources, int separationSeconds) {
+    int separation = Math.max(0, separationSeconds);
+    List<Conflict> conflicts = new ArrayList<>();
+    Active active = new Active();
+    for (Resource resource : resources) {
+      conflicts.addAll(resource.scan(separation, active));
+    }
+    return report(conflicts);
+  }
+
+  /**
+   * 扫描时"仍在场"的占用，一个可复用的缓冲。
+   *
+   * <p>原本是每扫一个资源新建一个 {@code ArrayList}，再对每一条占用调一次 {@code removeIf}——那个 lambda 捕获了后车，
+   * 于是<b>每条占用都要新造一个 lambda 对象</b>。全表扫一遍还能忍，增量重扫一次 attempt 要扫近三百万个资源桶，
+   * 这些短命对象就成了大头（实测占总耗时的七成）。改成手写的原地压缩，扫描本身一个对象都不分配。
+   */
+  private static final class Active {
+    private Occupation[] items = new Occupation[16];
+    private int size;
+
+    void reset() {
+      size = 0;
     }
 
-    List<Conflict> conflicts = new ArrayList<>();
-    for (Resource resource : resources.values()) {
-      conflicts.addAll(resource.scan(separation, vehicles));
+    /** 送走已经腾空的：{@code to + separation <= from} 的不再在场。判据与原来逐字一致。 */
+    void expire(int separation, int from) {
+      int kept = 0;
+      for (int i = 0; i < size; i++) {
+        if (items[i].to() + separation > from) {
+          items[kept++] = items[i];
+        }
+      }
+      size = kept;
     }
-    conflicts.sort(
-        Comparator.comparingInt(Conflict::firstFrom)
-            .thenComparing(Conflict::resource)
-            .thenComparing(Conflict::first)
-            .thenComparing(Conflict::second));
+
+    void add(Occupation occupation) {
+      if (size == items.length) {
+        items = java.util.Arrays.copyOf(items, size * 2);
+      }
+      items[size++] = occupation;
+    }
+
+    int size() {
+      return size;
+    }
+
+    Occupation get(int index) {
+      return items[index];
+    }
+  }
+
+  /** 把按资源分好组的冲突并成一张全表报告：排序与 {@link #scanResources} 同一个。 */
+  static Report mergeConflicts(Collection<List<Conflict>> byResource) {
+    List<Conflict> conflicts = new ArrayList<>();
+    for (List<Conflict> group : byResource) {
+      conflicts.addAll(group);
+    }
+    return report(conflicts);
+  }
+
+  private static Report report(List<Conflict> conflicts) {
+    conflicts.sort(CONFLICT_ORDER);
     return new Report(List.copyOf(conflicts));
+  }
+
+  /**
+   * 冲突的全序。
+   *
+   * <p>原本只比 {@code (firstFrom, resource, first, second)}，其余靠资源遍历序与桶内插入序兜底。增量重扫两样都保不住——
+   * 换一辆车会把它的占用挪到桶尾，只扫一部分资源又不经过完整的遍历序。所以把剩下的字段也比完：并列的两处冲突字段全同， 报哪一处都是同一条记录，报告因此与遍历顺序无关。
+   */
+  static final Comparator<Conflict> CONFLICT_ORDER =
+      Comparator.comparingInt(Conflict::firstFrom)
+          .thenComparing(Conflict::resource)
+          .thenComparing(Conflict::first)
+          .thenComparing(Conflict::second)
+          .thenComparingInt(Conflict::firstTo)
+          .thenComparingInt(Conflict::secondFrom)
+          .thenComparingInt(Conflict::secondTo)
+          .thenComparing(conflict -> conflict.firstOwner().orElse(""))
+          .thenComparing(conflict -> conflict.secondOwner().orElse(""))
+          .thenComparing(conflict -> conflict.kind().name());
+
+  /** 车辆身份：邻表的占用按 {@code owner|code}（邻表的车次号可能与我的同名），我自己的按 {@code |duty 号}。 */
+  static String vehicleKey(
+      String code, Optional<String> owner, Function<String, String> vehicleOf) {
+    return owner.isPresent() ? owner.get() + "|" + code : "|" + vehicleOf.apply(code);
+  }
+
+  /** 投影的落点：资源表、这次碰过的键、车辆身份映射与站台组容量。 */
+  private record Sink(
+      Map<String, Resource> resources,
+      Set<String> touched,
+      Function<String, String> vehicleOf,
+      Map<String, Integer> platformCapacity) {
+
+    void add(
+        String key,
+        Kind kind,
+        int capacity,
+        String code,
+        int from,
+        int to,
+        int direction,
+        Optional<String> owner) {
+      touched.add(key);
+      resources
+          .computeIfAbsent(key, k -> new Resource(k, kind, capacity))
+          .add(code, from, to, direction, owner, vehicleKey(code, owner, vehicleOf));
+    }
   }
 
   /** 从 route 的停靠配置得出每个停靠点的站台资源。 */
@@ -241,23 +364,24 @@ public final class TimetableConflictChecker {
   private static void project(
       Movement movement,
       RouteProfile profile,
-      Map<String, Resource> resources,
+      Sink sink,
       SingleLineSectionIndex sections,
-      Map<NodeId, NodeType> nodeTypes,
-      Map<String, Integer> platformCapacity) {
+      Map<NodeId, NodeType> nodeTypes) {
     int base = movement.startSeconds();
     for (TimetableTimingCalculator.SegmentTiming segment : profile.segments()) {
       List<RailEdge> edges = segment.edges();
       // 边：互斥。
       for (int k = 0; k < edges.size(); k++) {
         RailEdge edge = edges.get(k);
-        resource(resources, edgeKey(edge), Kind.TRACK, 1)
-            .add(
-                movement.code(),
-                base + segment.enterOffset(k),
-                base + segment.exitOffset(k),
-                0,
-                movement.owner());
+        sink.add(
+            edgeKey(edge),
+            Kind.TRACK,
+            1,
+            movement.code(),
+            base + segment.enterOffset(k),
+            base + segment.exitOffset(k),
+            0,
+            movement.owner());
       }
       // 路径中间穿越的节点：道岔两次通过之间要留间隔；不停靠而经过的车站股道也是一次占用——
       // 一辆在单股道车站待命的车必须能挡住从它身上碾过去的对向车。
@@ -267,12 +391,11 @@ public final class TimetableConflictChecker {
         NodeType type = nodeTypes.get(node);
         int at = base + segment.nodeOffsets().get(k);
         if (type == NodeType.SWITCHER) {
-          resource(resources, junctionKey(node), Kind.JUNCTION, 1)
-              .add(movement.code(), at, at, 0, movement.owner());
+          sink.add(
+              junctionKey(node), Kind.JUNCTION, 1, movement.code(), at, at, 0, movement.owner());
         } else if (type == NodeType.STATION) {
           addPlatform(
-              resources,
-              platformCapacity,
+              sink,
               new Platform(node.value(), groupOf(node.value()), false),
               movement.code(),
               at,
@@ -295,8 +418,15 @@ public final class TimetableConflictChecker {
             continue;
           }
           if (currentKey != null) {
-            resource(resources, singleLineKey(currentKey), Kind.SINGLE_LINE, 1)
-                .add(movement.code(), enter, exit, direction, movement.owner());
+            sink.add(
+                singleLineKey(currentKey),
+                Kind.SINGLE_LINE,
+                1,
+                movement.code(),
+                enter,
+                exit,
+                direction,
+                movement.owner());
           }
           currentKey = key;
           current = info.orElse(null);
@@ -307,8 +437,15 @@ public final class TimetableConflictChecker {
           }
         }
         if (currentKey != null) {
-          resource(resources, singleLineKey(currentKey), Kind.SINGLE_LINE, 1)
-              .add(movement.code(), enter, exit, direction, movement.owner());
+          sink.add(
+              singleLineKey(currentKey),
+              Kind.SINGLE_LINE,
+              1,
+              movement.code(),
+              enter,
+              exit,
+              direction,
+              movement.owner());
         }
       }
     }
@@ -321,8 +458,7 @@ public final class TimetableConflictChecker {
         continue;
       }
       addPlatform(
-          resources,
-          platformCapacity,
+          sink,
           platform,
           movement.code(),
           base + stop.arrivalOffsetSeconds(),
@@ -332,28 +468,17 @@ public final class TimetableConflictChecker {
   }
 
   private static void addPlatform(
-      Map<String, Resource> resources,
-      Map<String, Integer> platformCapacity,
-      Platform platform,
-      String code,
-      int from,
-      int to,
-      Optional<String> owner) {
+      Sink sink, Platform platform, String code, int from, int to, Optional<String> owner) {
     if (platform == null) {
       return;
     }
     for (String key : platformKeys(platform)) {
       int capacity =
           key.startsWith("platform-group:")
-              ? Math.max(1, platformCapacity.getOrDefault(platform.group(), 1))
+              ? Math.max(1, sink.platformCapacity().getOrDefault(platform.group(), 1))
               : 1;
-      resource(resources, key, Kind.PLATFORM, capacity).add(code, from, to, 0, owner);
+      sink.add(key, Kind.PLATFORM, capacity, code, from, to, 0, owner);
     }
-  }
-
-  private static Resource resource(
-      Map<String, Resource> resources, String key, Kind kind, int capacity) {
-    return resources.computeIfAbsent(key, k -> new Resource(k, kind, capacity));
   }
 
   /** 方向：沿 section 节点序列的正向为 +1、反向为 −1；判不出来记 0，与任何方向都视为对向（保守）。 */
@@ -705,7 +830,7 @@ public final class TimetableConflictChecker {
   /**
    * @param vehicle 车辆身份：{@code owner|vehicleOf(code)}。同一辆车的占用之间不报冲突；带上 owner 是因为邻表的车次号可能与我的同名。
    */
-  private record Occupation(
+  record Occupation(
       String code, int from, int to, int direction, Optional<String> owner, String vehicle) {
 
     /** 邻表之间的冲突不属于我：它们在各自发布时已经被检查过，报出来只会淹没我的问题。 */
@@ -718,7 +843,21 @@ public final class TimetableConflictChecker {
     }
   }
 
-  private static final class Resource {
+  /**
+   * 桶内的全序。
+   *
+   * <p>原本只比 {@code (from, code)}，并列的靠插入序兜底。增量索引换一辆车会把它的占用挪到桶尾，插入序保不住了——
+   * 所以把剩下的字段也比完。并列的两条占用字段全同（{@code vehicle} 里带着 owner），取哪一条报出来都是同一条 {@link Conflict}，
+   * 插在并列的哪一侧也就无所谓。
+   */
+  private static final Comparator<Occupation> OCCUPATION_ORDER =
+      Comparator.comparingInt(Occupation::from)
+          .thenComparing(Occupation::code)
+          .thenComparingInt(Occupation::to)
+          .thenComparingInt(Occupation::direction)
+          .thenComparing(Occupation::vehicle);
+
+  static final class Resource {
     private final String key;
     private final Kind kind;
     private final int capacity;
@@ -730,31 +869,41 @@ public final class TimetableConflictChecker {
       this.capacity = Math.max(1, capacity);
     }
 
-    private void add(String code, int from, int to, int direction, Optional<String> owner) {
-      occupations.add(new Occupation(code, from, Math.max(from, to), direction, owner, ""));
+    /** 按 {@link #OCCUPATION_ORDER} 插进去，桶因此始终有序：扫描不必再排，增量重扫每步省掉一次全桶排序。 */
+    private void add(
+        String code, int from, int to, int direction, Optional<String> owner, String vehicle) {
+      Occupation occupation =
+          new Occupation(code, from, Math.max(from, to), direction, owner, vehicle);
+      int at = Collections.binarySearch(occupations, occupation, OCCUPATION_ORDER);
+      occupations.add(at < 0 ? -at - 1 : at, occupation);
     }
 
-    private List<Conflict> scan(int separation, Function<String, String> vehicleOf) {
-      List<Occupation> sorted = new ArrayList<>(occupations.size());
-      for (Occupation occupation : occupations) {
-        String vehicle =
-            occupation.owner().isPresent()
-                ? occupation.owner().get() + "|" + occupation.code()
-                : "|" + vehicleOf.apply(occupation.code());
-        sorted.add(
-            new Occupation(
-                occupation.code(),
-                occupation.from(),
-                occupation.to(),
-                occupation.direction(),
-                occupation.owner(),
-                vehicle));
+    /** 这个桶里都有哪些车：建"车 → 资源键"反向索引用。 */
+    List<Occupation> occupations() {
+      return occupations;
+    }
+
+    /**
+     * 精确撤掉这些占用，每条撤一份。
+     *
+     * <p>桶是有序的，按 {@link #OCCUPATION_ORDER} 二分找。并列的几条字段全同（{@code vehicle} 里带着 owner），
+     * 撤哪一条都一样，所以二分落在并列区间的哪个位置都不要紧。
+     */
+    void removeAll(List<Occupation> gone) {
+      for (Occupation occupation : gone) {
+        int at = Collections.binarySearch(occupations, occupation, OCCUPATION_ORDER);
+        if (at >= 0) {
+          occupations.remove(at);
+        }
       }
-      sorted.sort(Comparator.comparingInt(Occupation::from).thenComparing(Occupation::code));
+    }
+
+    private List<Conflict> scan(int separation, Active active) {
+      active.reset();
       return switch (kind) {
-        case TRACK, JUNCTION -> scanExclusive(sorted, separation);
-        case PLATFORM -> scanCapacity(sorted, separation);
-        case SINGLE_LINE -> scanDirectional(sorted, separation);
+        case TRACK, JUNCTION -> scanExclusive(occupations, separation, active);
+        case PLATFORM -> scanCapacity(occupations, separation, active);
+        case SINGLE_LINE -> scanDirectional(occupations, separation, active);
       };
     }
 
@@ -763,20 +912,22 @@ public final class TimetableConflictChecker {
      *
      * <p>要和所有仍在场的占用比而不是只和最晚离开的那个比：两份邻表之间的重叠不报，若只看最晚的那个， 夹在中间的邻表占用会把我与后一份邻表的冲突挡掉。
      */
-    private List<Conflict> scanExclusive(List<Occupation> sorted, int separation) {
-      List<Conflict> out = new ArrayList<>();
-      List<Occupation> active = new ArrayList<>();
-      for (Occupation next : sorted) {
-        active.removeIf(current -> current.to() + separation <= next.from());
-        for (Occupation current : active) {
+    private List<Conflict> scanExclusive(List<Occupation> sorted, int separation, Active active) {
+      List<Conflict> out = null;
+      for (int i = 0; i < sorted.size(); i++) {
+        Occupation next = sorted.get(i);
+        active.expire(separation, next.from());
+        for (int k = 0; k < active.size(); k++) {
+          Occupation current = active.get(k);
           if (!current.sameVehicle(next) && !current.bothExternal(next)) {
+            out = out == null ? new ArrayList<>() : out;
             out.add(conflict(current, next));
             break;
           }
         }
         active.add(next);
       }
-      return out;
+      return out == null ? List.of() : out;
     }
 
     /**
@@ -784,42 +935,54 @@ public final class TimetableConflictChecker {
      *
      * <p>"可归责"指不是两份邻表之间的对：新来的若是邻表，就找在场的我；新来的若是我，在场里谁都算。 只拿在场最早的那个比会被两份邻表夹住——它们之间的重叠不报，我夹在中间的占用就被漏掉。
      */
-    private List<Conflict> scanCapacity(List<Occupation> sorted, int separation) {
-      List<Conflict> out = new ArrayList<>();
-      List<Occupation> active = new ArrayList<>();
-      for (Occupation next : sorted) {
-        active.removeIf(current -> current.to() + separation <= next.from());
+    private List<Conflict> scanCapacity(List<Occupation> sorted, int separation, Active active) {
+      List<Conflict> out = null;
+      for (int i = 0; i < sorted.size(); i++) {
+        Occupation next = sorted.get(i);
+        active.expire(separation, next.from());
         if (active.size() >= capacity) {
-          active.stream()
-              .filter(current -> !current.sameVehicle(next))
-              .filter(current -> !current.bothExternal(next))
-              .min(Comparator.comparingInt(Occupation::from))
-              .ifPresent(partner -> out.add(conflict(partner, next)));
+          // 在场里最早的那个可归责的；并列取先遇到的，与原来 Stream.min 的取法一致。
+          Occupation partner = null;
+          for (int k = 0; k < active.size(); k++) {
+            Occupation current = active.get(k);
+            if (current.sameVehicle(next) || current.bothExternal(next)) {
+              continue;
+            }
+            if (partner == null || current.from() < partner.from()) {
+              partner = current;
+            }
+          }
+          if (partner != null) {
+            out = out == null ? new ArrayList<>() : out;
+            out.add(conflict(partner, next));
+          }
         }
         active.add(next);
       }
-      return out;
+      return out == null ? List.of() : out;
     }
 
     /** 对向互斥：不同方向（或方向未知）的占用不能重叠；同向追踪交给边互斥。 */
-    private List<Conflict> scanDirectional(List<Occupation> sorted, int separation) {
-      List<Conflict> out = new ArrayList<>();
-      List<Occupation> active = new ArrayList<>();
-      for (Occupation next : sorted) {
-        active.removeIf(current -> current.to() + separation <= next.from());
-        for (Occupation current : active) {
+    private List<Conflict> scanDirectional(List<Occupation> sorted, int separation, Active active) {
+      List<Conflict> out = null;
+      for (int i = 0; i < sorted.size(); i++) {
+        Occupation next = sorted.get(i);
+        active.expire(separation, next.from());
+        for (int k = 0; k < active.size(); k++) {
+          Occupation current = active.get(k);
           boolean opposite =
               current.direction() == 0
                   || next.direction() == 0
                   || current.direction() != next.direction();
           if (opposite && !current.sameVehicle(next) && !current.bothExternal(next)) {
+            out = out == null ? new ArrayList<>() : out;
             out.add(conflict(current, next));
             break;
           }
         }
         active.add(next);
       }
-      return out;
+      return out == null ? List.of() : out;
     }
 
     private Conflict conflict(Occupation first, Occupation second) {

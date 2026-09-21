@@ -1,9 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -24,8 +26,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Neighbor
  * <p>邻表的占用是不可移动的前车：撞上邻表时无论谁先到，挪的都是我。{@link TerminalSerializer} 是本机制在容量 1 端点上的特例，先跑；这里接着处理它不管的
  * 区间、道岔、单线与多股道车站。
  *
- * <p>让车会在别处制造新冲突（连锁）。每施加一处就重扫一遍；冲突总数没有减少、或真冲突（超过上限、挪不动的）比施加前多了，这一处<b>回滚</b>并判为真冲突——
- * 修复只朝一个方向走：每一步都让冲突少一处，端点串行排好的东西不会被让车拆掉，循环必然终止。
+ * <p>让车会在别处制造新冲突（连锁）。判据按<b>连锁段</b>走而不是按单步：施加一处之后，这一步新冒出来的冲突若全部可修就接着修， 最多 {@value #CHAIN_LIMIT}
+ * 步；段末与段初比 {@code (真冲突数, 冲突总数)}，没变好就<b>整段回滚</b>，开段的那一处判为真冲突。
+ * 单步判据会把"一串小让车各挪二十秒"的每一步都拒掉——每一步单独看都不减少冲突，合起来才减少；实测 WS@300 的一千九百处残余没有一处是预算问题，全是这个。
+ * 段末仍要求冲突总数严格减少，所以修复只朝一个方向走，循环必然终止。
+ *
+ * <p>重扫是增量的（{@link OccupationIndex}）：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源。 返回的 {@code remaining}
+ * 另外做一次全量重扫，与 builder 最后那一遍同一口径。
  *
  * <p>确定性：冲突按检查器的稳定序取第一处可修的；延后量由时刻算出；不引入随机源、不依赖哈希遍历序。
  */
@@ -132,8 +139,24 @@ public final class ResourceRepair {
     }
   }
 
+  /** 连锁段深度上限：一处让车最多带出五步跟进修复。再深的连锁不是让车能解决的，是相位问题，交给第三层。 */
+  public static final int CHAIN_LIMIT = 6;
+
+  /** 重扫方式。增量是生产路径；全量是它的参照物，只在等价性用例里走到。 */
+  enum Rescan {
+    /** 只重投影被改的那条交路、只重扫它碰过的资源。 */
+    INCREMENTAL,
+    /** 每次都把整张表重新投影再全扫。 */
+    FULL
+  }
+
   /** 修复主入口。{@code maxWaitSeconds == 0} 时只扫一遍冲突、原样返回表。 */
   public static Result repair(Input input) {
+    return repair(input, Rescan.INCREMENTAL);
+  }
+
+  /** 带重扫方式的入口：两种方式必须得到逐字段相同的产物，{@code incrementalRepairEqualsFullRescan} 钉住这一条。 */
+  static Result repair(Input input, Rescan mode) {
     Objects.requireNonNull(input, "input");
     Timetable table = input.provisional();
     int zero = input.zeroSecondOfDay();
@@ -184,43 +207,51 @@ public final class ResourceRepair {
             tripByCode,
             dutyByCode);
 
-    int cap = 4 * table.trips().size() + 8;
-    Timetable current = state.rewrite();
-    TimetableConflictChecker.Report report = scan(input, allProfiles, current);
-    for (int iteration = 0; input.maxWaitSeconds() > 0 && iteration < cap; iteration++) {
-      Optional<Move> next = pickMove(input, report, unrepairable, state);
-      if (next.isEmpty()) {
+    Rescanner rescanner = new Rescanner(input, allProfiles, mode, state.rewrite());
+    // 上界按"起始冲突数"而不只按班次数：连锁段的每一步都计入，光有班次那一项装不下一串连锁。
+    int cap = 2 * rescanner.total() + 4 * table.trips().size();
+    int steps = 0;
+    while (input.maxWaitSeconds() > 0 && steps < cap) {
+      Optional<Move> opener = pickMove(input, rescanner, unrepairable, state);
+      if (opener.isEmpty()) {
         break;
       }
-      Move move = next.get();
-      int realBefore = realCount(input, report, state);
+      int realBefore = realCount(input, rescanner, state);
+      int totalBefore = rescanner.total();
       State.Snapshot snapshot = state.snapshot();
-      if (!state.apply(move)) {
+      List<Yield> segment = new ArrayList<>();
+      Set<Integer> movedDuties = new LinkedHashSet<>();
+      Move move = opener.get();
+      boolean aborted = false;
+      for (int depth = 0; depth < CHAIN_LIMIT && move != null; depth++) {
+        steps++;
+        int d = state.dutyOf(move.mover());
+        if (d < 0 || !state.apply(move)) {
+          // 这一步挪不动。施加到一半的状态没法就地评估，整段作废。
+          aborted = true;
+          break;
+        }
+        movedDuties.add(d);
+        List<TimetableConflictChecker.Conflict> fresh = rescanner.afterMove(state, d);
+        segment.add(yieldOf(move));
+        move = chainFollowUp(input, fresh, unrepairable, state);
+      }
+      boolean better =
+          !aborted
+              && realCount(input, rescanner, state) <= realBefore
+              && rescanner.total() < totalBefore;
+      if (!better) {
+        // 整段没让表变好（别处多出了冲突，或把别处推成了真冲突）：回滚，开段的那一处算真冲突。
         state.restore(snapshot);
-        unrepairable.add(move.key());
+        for (int d : movedDuties) {
+          rescanner.afterMove(state, d);
+        }
+        unrepairable.add(opener.get().key());
         continue;
       }
-      Timetable candidate = state.rewrite();
-      TimetableConflictChecker.Report after = scan(input, allProfiles, candidate);
-      if (realCount(input, after, state) > realBefore
-          || after.conflicts().size() >= report.conflicts().size()) {
-        // 这一处让车没让表变好（别处多出了冲突，或把别处推成了真冲突）：回滚，它自己算真冲突。
-        state.restore(snapshot);
-        unrepairable.add(move.key());
-        continue;
-      }
-      yields.add(
-          new Yield(
-              move.conflict().kind(),
-              move.conflict().resource(),
-              move.leader(),
-              move.leaderOwner(),
-              move.mover(),
-              move.waitSeconds(),
-              move.moverFrom()));
-      current = candidate;
-      report = after;
+      yields.addAll(segment);
     }
+    Timetable current = state.rewrite();
 
     List<TerminalSerializer.Shift> shifts = new ArrayList<>();
     for (int d = 0; d < duties.size(); d++) {
@@ -243,7 +274,9 @@ public final class ResourceRepair {
         Comparator.comparingInt(TerminalSerializer.Shift::actualSeconds)
             .thenComparing(shift -> shift.tripId().toString()));
     yields.sort(Comparator.comparingInt(Yield::atSeconds).thenComparing(Yield::resource));
-    return new Result(current, shifts, yields, new ArrayList<>(truncated), report);
+    // 交出去的残余永远来自一次全量重扫：增量只用来在修复过程里做取舍，报出去的数不该依赖它有没有漂移。
+    return new Result(
+        current, shifts, yields, new ArrayList<>(truncated), scan(input, allProfiles, current));
   }
 
   /** 把当前表投影成运行 + 待命，连同邻表一起查一遍。与 builder 最后那一遍检查同一口径。 */
@@ -335,36 +368,239 @@ public final class ResourceRepair {
         || !state.canMove(move.mover());
   }
 
-  private static int realCount(Input input, TimetableConflictChecker.Report report, State state) {
+  private static int realCount(Input input, Rescanner rescanner, State state) {
     int count = 0;
-    for (TimetableConflictChecker.Conflict conflict : report.conflicts()) {
-      Optional<Move> move = moveFor(input, conflict);
-      if (move.isPresent() && real(input, move.get(), state)) {
-        count++;
+    for (List<TimetableConflictChecker.Conflict> group : rescanner.conflicts()) {
+      for (TimetableConflictChecker.Conflict conflict : group) {
+        Optional<Move> move = moveFor(input, conflict);
+        if (move.isPresent() && real(input, move.get(), state)) {
+          count++;
+        }
       }
     }
     return count;
   }
 
-  /** 按检查器的稳定序取第一处可修的冲突：后车是我、延后量不超过上限、不在"已判为真冲突"的名单里。 */
+  /**
+   * 按检查器的稳定序取第一处可修的冲突：后车是我、延后量不超过上限、不在"已判为真冲突"的名单里。
+   *
+   * <p>不把全表冲突排一遍：上千条冲突每开一段排一次纯属白排。先一趟挑出序最小的那处可修的，再把序排在它之前的真冲突记进名单——
+   * 与"按序逐条看过去、碰到真冲突就记下、碰到可修的就停"逐字等价，只是省掉了排序。
+   */
   private static Optional<Move> pickMove(
-      Input input, TimetableConflictChecker.Report report, Set<String> unrepairable, State state) {
-    for (TimetableConflictChecker.Conflict conflict : report.conflicts()) {
-      Optional<Move> candidate = moveFor(input, conflict);
-      if (candidate.isEmpty()) {
-        continue;
+      Input input, Rescanner rescanner, Set<String> unrepairable, State state) {
+    Move best = null;
+    TimetableConflictChecker.Conflict bestAt = null;
+    List<TimetableConflictChecker.Conflict> reals = new ArrayList<>();
+    List<String> realKeys = new ArrayList<>();
+    for (List<TimetableConflictChecker.Conflict> group : rescanner.conflicts()) {
+      for (TimetableConflictChecker.Conflict conflict : group) {
+        Optional<Move> candidate = moveFor(input, conflict);
+        if (candidate.isEmpty()) {
+          continue;
+        }
+        Move move = candidate.get();
+        if (unrepairable.contains(move.key())) {
+          continue;
+        }
+        if (real(input, move, state)) {
+          reals.add(conflict);
+          realKeys.add(move.key());
+          continue;
+        }
+        if (bestAt == null
+            || TimetableConflictChecker.CONFLICT_ORDER.compare(conflict, bestAt) < 0) {
+          bestAt = conflict;
+          best = move;
+        }
       }
-      Move move = candidate.get();
-      if (unrepairable.contains(move.key())) {
-        continue;
-      }
-      if (real(input, move, state)) {
-        unrepairable.add(move.key());
-        continue;
-      }
-      return Optional.of(move);
     }
-    return Optional.empty();
+    for (int i = 0; i < reals.size(); i++) {
+      if (bestAt == null
+          || TimetableConflictChecker.CONFLICT_ORDER.compare(reals.get(i), bestAt) < 0) {
+        unrepairable.add(realKeys.get(i));
+      }
+    }
+    return Optional.ofNullable(best);
+  }
+
+  /**
+   * 连锁段的下一步。
+   *
+   * <p>只看这一步<b>新冒出来</b>的冲突：全部可修（后车是我、延后量在上限内、不在真冲突名单里）就接着修它们里按检查器序的第一处。
+   * 有一处修不了就收段——不在这里判死，交给段末的判据决定要不要整段回滚，因为后面几步很可能把它一起消掉。 没有新增说明这一段已经收敛，同样收段。
+   */
+  private static Move chainFollowUp(
+      Input input,
+      List<TimetableConflictChecker.Conflict> fresh,
+      Set<String> unrepairable,
+      State state) {
+    Move first = null;
+    for (TimetableConflictChecker.Conflict conflict : fresh) {
+      Optional<Move> candidate = moveFor(input, conflict);
+      if (candidate.isEmpty()
+          || unrepairable.contains(candidate.get().key())
+          || real(input, candidate.get(), state)) {
+        return null;
+      }
+      if (first == null) {
+        first = candidate.get();
+      }
+    }
+    return first;
+  }
+
+  private static Yield yieldOf(Move move) {
+    return new Yield(
+        move.conflict().kind(),
+        move.conflict().resource(),
+        move.leader(),
+        move.leaderOwner(),
+        move.mover(),
+        move.waitSeconds(),
+        move.moverFrom());
+  }
+
+  /**
+   * 修复循环的重扫。
+   *
+   * <p>增量：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源，别的资源沿用上一次的结果。冲突按资源存着 （{@code
+   * byResource}）而不是存成一张排好序的报告：全表上千条冲突，每一步合并加排序的开销比重扫本身还大，
+   * 而循环真正要的只有三样——总数、全体（数真冲突用）、<b>这一步新冒出来的那几条</b>。 只有被碰过的资源上的冲突会变，差集也就只能出在那里。
+   *
+   * <p>全量：每一步把整张表重新投影再全扫。它是增量的参照物，生产路径不走。
+   *
+   * <p>车辆身份取自修复开始时的那张表，之后不再重算：让车只改时刻不改班次归属，截断只会让 code 连同它的占用一起从表上消失， 还留在表上的 code 映射到的交路号不会变。
+   */
+  private static final class Rescanner {
+    private final Input input;
+    private final Map<UUID, TimetableConflictChecker.RouteProfile> allProfiles;
+    private final Rescan mode;
+    private final java.util.function.Function<String, String> vehicleOf;
+    private final Set<UUID> returnRouteIds;
+    private final int serviceStartSecondOfDay;
+    private final Map<String, List<TimetableConflictChecker.Conflict>> byResource = new HashMap<>();
+    private OccupationIndex occupations;
+    private int total;
+
+    Rescanner(
+        Input input,
+        Map<UUID, TimetableConflictChecker.RouteProfile> allProfiles,
+        Rescan mode,
+        Timetable initial) {
+      this.input = input;
+      this.allProfiles = allProfiles;
+      this.mode = mode;
+      this.vehicleOf = TimetableConflictChecker.vehicleOf(initial);
+      this.returnRouteIds = TimetableOccupancyProjector.returnRouteIdsOf(initial);
+      this.serviceStartSecondOfDay = initial.serviceStartSecondOfDay();
+      replaceAll(
+          mode == Rescan.FULL ? scan(input, allProfiles, initial).conflicts() : rebuild(initial));
+    }
+
+    /** 当前全表冲突总数。 */
+    int total() {
+      return total;
+    }
+
+    /** 当前全表冲突，按资源分组、组内有序；全表的序要靠 {@link TimetableConflictChecker#CONFLICT_ORDER} 自己比。 */
+    Collection<List<TimetableConflictChecker.Conflict>> conflicts() {
+      return byResource.values();
+    }
+
+    /**
+     * 第 {@code d} 条交路改了时刻之后重扫。
+     *
+     * @return 这一步<b>新冒出来</b>的冲突，按检查器序
+     */
+    List<TimetableConflictChecker.Conflict> afterMove(State state, int d) {
+      if (mode == Rescan.FULL) {
+        return replaceAll(scan(input, allProfiles, state.rewrite()).conflicts());
+      }
+      TerminalSerializer.RewrittenDuty rewritten = state.rewriteOne(d);
+      if (rewritten == null && state.alive(d)) {
+        // 交路还该在表上却不见了（rewriteDuty 的防御分支）：它的班次留在表上但归属没了，增量表达不了，退回整表重建。
+        return replaceAll(rebuild(state.rewrite()));
+      }
+      List<TimetableConflictChecker.Movement> movements = List.of();
+      List<TimetableConflictChecker.Stay> stays = List.of();
+      if (rewritten != null) {
+        TimetableOccupancyProjector.Occupancy occupancy =
+            TimetableOccupancyProjector.projectDuty(
+                rewritten.duty(),
+                rewritten.trips(),
+                input.profiles(),
+                returnRouteIds,
+                serviceStartSecondOfDay,
+                input.zeroSecondOfDay());
+        movements = occupancy.movements();
+        stays = occupancy.stays();
+      }
+      Set<String> keys =
+          occupations.replaceVehicle(
+              TimetableConflictChecker.vehicleKey(state.dutyCodeOf(d), Optional.empty(), vehicleOf),
+              movements,
+              stays);
+      Set<TimetableConflictChecker.Conflict> old = new HashSet<>();
+      int removed = 0;
+      for (String key : keys) {
+        List<TimetableConflictChecker.Conflict> group = byResource.remove(key);
+        if (group != null) {
+          old.addAll(group);
+          removed += group.size();
+        }
+      }
+      List<TimetableConflictChecker.Conflict> rescanned =
+          occupations.scan(keys, input.separationSeconds()).conflicts();
+      group(rescanned);
+      total += rescanned.size() - removed;
+      return freshOf(rescanned, old);
+    }
+
+    /** 整表换一遍冲突，并交回相对上一次新冒出来的那些。 */
+    private List<TimetableConflictChecker.Conflict> replaceAll(
+        List<TimetableConflictChecker.Conflict> all) {
+      Set<TimetableConflictChecker.Conflict> old = new HashSet<>();
+      for (List<TimetableConflictChecker.Conflict> group : byResource.values()) {
+        old.addAll(group);
+      }
+      byResource.clear();
+      group(all);
+      total = all.size();
+      return freshOf(all, old);
+    }
+
+    private static List<TimetableConflictChecker.Conflict> freshOf(
+        List<TimetableConflictChecker.Conflict> scanned,
+        Set<TimetableConflictChecker.Conflict> old) {
+      List<TimetableConflictChecker.Conflict> fresh = new ArrayList<>();
+      for (TimetableConflictChecker.Conflict conflict : scanned) {
+        if (!old.contains(conflict)) {
+          fresh.add(conflict);
+        }
+      }
+      return fresh;
+    }
+
+    /** 整表重建索引，交回全表冲突。 */
+    private List<TimetableConflictChecker.Conflict> rebuild(Timetable current) {
+      TimetableOccupancyProjector.Occupancy occupancy =
+          TimetableOccupancyProjector.project(current, input.profiles(), input.zeroSecondOfDay());
+      List<TimetableConflictChecker.Movement> movements = new ArrayList<>(occupancy.movements());
+      List<TimetableConflictChecker.Stay> stays = new ArrayList<>(occupancy.stays());
+      for (NeighborTimetable neighbor : input.neighbors()) {
+        movements.addAll(neighbor.movements());
+        stays.addAll(neighbor.stays());
+      }
+      occupations = OccupationIndex.of(input.index(), allProfiles, movements, stays, vehicleOf);
+      return occupations.scanAll(input.separationSeconds()).conflicts();
+    }
+
+    private void group(List<TimetableConflictChecker.Conflict> conflicts) {
+      for (TimetableConflictChecker.Conflict conflict : conflicts) {
+        byResource.computeIfAbsent(conflict.resource(), key -> new ArrayList<>()).add(conflict);
+      }
+    }
   }
 
   /** 修复过程中的可变状态：链、保留数、实际时刻、截断集合。 */
@@ -450,6 +686,42 @@ public final class ResourceRepair {
           kept,
           actual,
           truncated,
+          startDelay,
+          returnDelay,
+          input.zeroSecondOfDay(),
+          input.limits().turnaround(),
+          input.routesEndingAtDepot(),
+          input.legs());
+    }
+
+    /** 这个 code 归哪条交路：让车只改一条交路的时刻，增量重扫要按它换占用。挪不动的东西返回 −1。 */
+    int dutyOf(String code) {
+      UUID tripId = tripByCode.get(code);
+      if (tripId != null) {
+        int[] pos = position.get(tripId);
+        return pos == null ? -1 : pos[0];
+      }
+      return dutyIndexOf(code);
+    }
+
+    /** 这条交路还有班次留在表上。 */
+    boolean alive(int d) {
+      return d >= 0 && d < kept.length && kept[d] > 0;
+    }
+
+    String dutyCodeOf(int d) {
+      return table.duties().get(d).dutyCode();
+    }
+
+    /** 第 d 条交路改写之后的样子；整条不落表时为 {@code null}。增量重扫只要这一条，不必重建整张表。 */
+    TerminalSerializer.RewrittenDuty rewriteOne(int d) {
+      return TerminalSerializer.rewriteDuty(
+          table,
+          chains.get(d),
+          d,
+          table.duties().get(d),
+          kept,
+          actual,
           startDelay,
           returnDelay,
           input.zeroSecondOfDay(),

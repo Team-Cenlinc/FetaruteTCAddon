@@ -366,91 +366,27 @@ public final class TerminalSerializer {
       if (truncated.contains(trip.id())) {
         continue;
       }
-      Integer dep = actual.get(trip.id());
-      trips.add(
-          dep == null
-              ? trip
-              : new TimetableTrip(
-                  trip.id(),
-                  trip.timetableId(),
-                  trip.routeId(),
-                  trip.sequence(),
-                  trip.tripCode(),
-                  zero + dep,
-                  trip.dutyId()));
+      trips.add(retimed(trip, actual, zero));
     }
     List<VehicleDuty> rewritten = new ArrayList<>(duties.size());
     for (int d = 0; d < duties.size(); d++) {
-      VehicleDuty duty = duties.get(d);
-      List<TimetableTrip> chain = chains.get(d);
-      if (chain.isEmpty()) {
-        rewritten.add(duty);
-        continue;
+      RewrittenDuty one =
+          rewriteDuty(
+              table,
+              chains.get(d),
+              d,
+              duties.get(d),
+              kept,
+              actual,
+              startDelay,
+              returnDelay,
+              zero,
+              turnarounds,
+              routesEndingAtDepot,
+              legs);
+      if (one != null) {
+        rewritten.add(one.duty());
       }
-      if (kept[d] <= 0) {
-        continue; // 整条交路都被截掉：它没有一班能跑，不落表
-      }
-      List<TimetableTrip> keptChain = chain.subList(0, kept[d]);
-      TimetableTrip first = keptChain.get(0);
-      TimetableTrip last = keptChain.get(keptChain.size() - 1);
-      int firstDelta =
-          actual.getOrDefault(first.id(), first.departureSecondOfDay() - zero)
-              - (first.departureSecondOfDay() - zero);
-      List<UUID> ids = new ArrayList<>(keptChain.size());
-      for (TimetableTrip trip : keptChain) {
-        ids.add(trip.id());
-      }
-      TimetableRoutePlan lastPlan = table.routePlan(last.routeId()).orElse(null);
-      int lastArrival =
-          actual.getOrDefault(last.id(), last.departureSecondOfDay() - zero)
-              + (lastPlan == null ? 0 : lastPlan.totalRunSeconds());
-      boolean truncatedDuty = kept[d] < chain.size();
-      String endDepot = duty.endDepotNodeId();
-      Optional<UUID> returnRouteId = duty.returnRouteId();
-      int returnAt;
-      int end;
-      if (!truncatedDuty) {
-        int oldLastArrival =
-            (last.departureSecondOfDay() - zero)
-                + (lastPlan == null ? 0 : lastPlan.totalRunSeconds());
-        int delta = lastArrival - oldLastArrival + returnDelayOf(returnDelay, d);
-        returnAt = duty.returnSecondOfDay() - zero + delta;
-        end = duty.plannedEndSecondOfDay() - zero + delta;
-      } else if (lastPlan != null && routesEndingAtDepot.contains(last.routeId())) {
-        endDepot = lastPlan.terminalNodeId();
-        returnRouteId = Optional.empty();
-        returnAt = lastArrival + returnDelayOf(returnDelay, d);
-        end = returnAt;
-      } else {
-        // 串行改了时刻不改归属：回库仍按派车器那条"回自己出库的库"的规则选，两边必须一致。
-        VehicleDutyPlanner.Leg leg =
-            lastPlan == null
-                ? null
-                : legs.returnLegAt(lastPlan.terminalNodeId(), duty.startDepotNodeId()).orElse(null);
-        if (leg == null) {
-          continue; // truncateFrom 已保证可回库；到这里是防御
-        }
-        endDepot = leg.depotNodeId();
-        returnRouteId = Optional.of(leg.routeId());
-        returnAt =
-            lastArrival + turnarounds.secondsFor(last.routeId()) + returnDelayOf(returnDelay, d);
-        end = returnAt + leg.runSeconds();
-      }
-      rewritten.add(
-          new VehicleDuty(
-              duty.id(),
-              duty.timetableId(),
-              duty.sequence(),
-              duty.dutyCode(),
-              duty.startDepotNodeId(),
-              endDepot,
-              duty.createRouteId(),
-              returnRouteId,
-              ids,
-              duty.plannedStartSecondOfDay() + firstDelta + returnDelayOf(startDelay, d),
-              zero + returnAt,
-              zero + end,
-              truncatedDuty ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT : duty.closeReason()));
     }
     Timetable out =
         new Timetable(
@@ -472,6 +408,119 @@ public final class TerminalSerializer {
             table.updatedAt());
 
     return out;
+  }
+
+  /**
+   * 一条交路改写之后的样子。
+   *
+   * @param duty 改写后的交路
+   * @param trips 它保留下来的班次，时刻已按 {@code actual} 改过
+   */
+  record RewrittenDuty(VehicleDuty duty, List<TimetableTrip> trips) {}
+
+  /**
+   * 改写一条交路。{@link #rewrite} 与让车修复的增量重扫共用这一段：修复每施加一处只改一条交路， 为了重投影它而把整张表（九百多个班次、要排序）重建一遍是纯浪费。
+   *
+   * @return {@code null} 表示这条交路整条不落表：全被截掉，或者退到头也找不到回库线路
+   */
+  static RewrittenDuty rewriteDuty(
+      Timetable table,
+      List<TimetableTrip> chain,
+      int d,
+      VehicleDuty duty,
+      int[] kept,
+      Map<UUID, Integer> actual,
+      int[] startDelay,
+      int[] returnDelay,
+      int zero,
+      TurnaroundTable turnarounds,
+      Set<UUID> routesEndingAtDepot,
+      VehicleDutyPlanner.Legs legs) {
+    if (chain.isEmpty()) {
+      return new RewrittenDuty(duty, List.of());
+    }
+    if (kept[d] <= 0) {
+      return null; // 整条交路都被截掉：它没有一班能跑，不落表
+    }
+    List<TimetableTrip> keptChain = chain.subList(0, kept[d]);
+    TimetableTrip first = keptChain.get(0);
+    TimetableTrip last = keptChain.get(keptChain.size() - 1);
+    int firstDelta =
+        actual.getOrDefault(first.id(), first.departureSecondOfDay() - zero)
+            - (first.departureSecondOfDay() - zero);
+    List<UUID> ids = new ArrayList<>(keptChain.size());
+    List<TimetableTrip> rows = new ArrayList<>(keptChain.size());
+    for (TimetableTrip trip : keptChain) {
+      ids.add(trip.id());
+      rows.add(retimed(trip, actual, zero));
+    }
+    TimetableRoutePlan lastPlan = table.routePlan(last.routeId()).orElse(null);
+    int lastArrival =
+        actual.getOrDefault(last.id(), last.departureSecondOfDay() - zero)
+            + (lastPlan == null ? 0 : lastPlan.totalRunSeconds());
+    boolean truncatedDuty = kept[d] < chain.size();
+    String endDepot = duty.endDepotNodeId();
+    Optional<UUID> returnRouteId = duty.returnRouteId();
+    int returnAt;
+    int end;
+    if (!truncatedDuty) {
+      int oldLastArrival =
+          (last.departureSecondOfDay() - zero)
+              + (lastPlan == null ? 0 : lastPlan.totalRunSeconds());
+      int delta = lastArrival - oldLastArrival + returnDelayOf(returnDelay, d);
+      returnAt = duty.returnSecondOfDay() - zero + delta;
+      end = duty.plannedEndSecondOfDay() - zero + delta;
+    } else if (lastPlan != null && routesEndingAtDepot.contains(last.routeId())) {
+      endDepot = lastPlan.terminalNodeId();
+      returnRouteId = Optional.empty();
+      returnAt = lastArrival + returnDelayOf(returnDelay, d);
+      end = returnAt;
+    } else {
+      // 串行改了时刻不改归属：回库仍按派车器那条"回自己出库的库"的规则选，两边必须一致。
+      VehicleDutyPlanner.Leg leg =
+          lastPlan == null
+              ? null
+              : legs.returnLegAt(lastPlan.terminalNodeId(), duty.startDepotNodeId()).orElse(null);
+      if (leg == null) {
+        return null; // truncateFrom 已保证可回库；到这里是防御
+      }
+      endDepot = leg.depotNodeId();
+      returnRouteId = Optional.of(leg.routeId());
+      returnAt =
+          lastArrival + turnarounds.secondsFor(last.routeId()) + returnDelayOf(returnDelay, d);
+      end = returnAt + leg.runSeconds();
+    }
+    return new RewrittenDuty(
+        new VehicleDuty(
+            duty.id(),
+            duty.timetableId(),
+            duty.sequence(),
+            duty.dutyCode(),
+            duty.startDepotNodeId(),
+            endDepot,
+            duty.createRouteId(),
+            returnRouteId,
+            ids,
+            duty.plannedStartSecondOfDay() + firstDelta + returnDelayOf(startDelay, d),
+            zero + returnAt,
+            zero + end,
+            truncatedDuty ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT : duty.closeReason()),
+        rows);
+  }
+
+  /** 班次按 {@code actual} 改时刻；没改过的原样返回。 */
+  private static TimetableTrip retimed(TimetableTrip trip, Map<UUID, Integer> actual, int zero) {
+    Integer dep = actual.get(trip.id());
+    return dep == null
+        ? trip
+        : new TimetableTrip(
+            trip.id(),
+            trip.timetableId(),
+            trip.routeId(),
+            trip.sequence(),
+            trip.tripCode(),
+            zero + dep,
+            trip.dutyId());
   }
 
   private static int returnDelayOf(int[] delays, int d) {
