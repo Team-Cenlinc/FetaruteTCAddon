@@ -183,8 +183,7 @@ public final class FtaTimetableCommand {
                             ctx.flags().getValue(startFlag).orElse(null),
                             ctx.flags().getValue(endFlag).orElse(null),
                             intValue(ctx, dwellFlag, TimetableBuildOptions.DEFAULT_DWELL_SECONDS),
-                            intValue(
-                                ctx, maxTripsFlag, VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS),
+                            ctx.flags().getValue(maxTripsFlag).orElse(null),
                             intValue(
                                 ctx,
                                 maxDutyFlag,
@@ -467,6 +466,12 @@ public final class FtaTimetableCommand {
             groupSources.put(key, choice.description());
           });
     }
+    List<SpawnGroup> spawnGroups = new ArrayList<>();
+    for (LineRoutes member : members) {
+      spawnGroups.addAll(LineSpawnMetadata.parseGroups(member.line().line().metadata()));
+    }
+    MaxTripsChoice maxTrips = resolveMaxTrips(flags.maxTripsPerDuty(), spawnGroups);
+    String maxTripsSource = maxTrips.description();
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             serviceStart,
@@ -474,7 +479,7 @@ public final class FtaTimetableCommand {
             Duration.ofSeconds(headway.seconds()),
             Duration.ofSeconds(flags.dwellSeconds()),
             new VehicleDutyPlanner.Limits(
-                flags.maxTripsPerDuty(),
+                maxTrips.trips(),
                 flags.maxDutyMinutes() * 60,
                 // 不传 --turnaround 就不存在全线折返数：builder 按各 route 终到站的 dwell 建表。
                 flags.turnaroundSeconds() == null
@@ -589,7 +594,8 @@ public final class FtaTimetableCommand {
                               options,
                               headwayChoice,
                               neighbors,
-                              groupSources));
+                              groupSources,
+                              maxTripsSource));
             });
   }
 
@@ -692,10 +698,11 @@ public final class FtaTimetableCommand {
       TimetableBuildOptions options,
       TimetableHeadwayDefaults.Choice headway,
       NeighborReport neighbors,
-      Map<String, String> groupSources) {
+      Map<String, String> groupSources,
+      String maxTripsSource) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
-    report.sendBuildReport(result, options, headway, groupSources);
+    report.sendBuildReport(result, options, headway, groupSources, maxTripsSource);
     report.sendNeighborReport(neighbors, result.neighbors());
     report.sendExternalConflicts(
         result.externalConflictsAtTarget(),
@@ -1787,6 +1794,41 @@ public final class FtaTimetableCommand {
   }
 
   /** route metadata 的交路组名；没配返回空，编表时按起点站台组推导。 */
+  /**
+   * 交路上限的来源。
+   *
+   * @param trips 生效的单交路最多班次
+   * @param description 来源说明，进报告
+   */
+  record MaxTripsChoice(int trips, String description) {}
+
+  /**
+   * 解析单个交路最多几班：{@code --max-trips} > 交路组的 {@code maxOperationTrips} > 默认。
+   *
+   * <p>与发车间隔同一条优先级链。此前这个值只认 flag，在组上配了 {@code maxOperationTrips} 也白配——而它一旦 偏小，症状是「大交路的班次被大量取消、报
+   * NO_CREATE_ACCESS」，离病因很远：交路接不下去，车只好提前回库， 后面那些从中途站始发的班次就没车可用了。
+   *
+   * <p>多个组时取<b>最大值</b>：一条交路可以跨组接班（小交路进城、接大交路跑全程），按某一个组的上限卡它没有 道理，取最大才不会把长交路误伤。联编多线时同理，跨线取最大。
+   */
+  static MaxTripsChoice resolveMaxTrips(Integer flag, List<SpawnGroup> groups) {
+    if (flag != null) {
+      return new MaxTripsChoice(flag, "--max-trips");
+    }
+    int best = 0;
+    String from = "";
+    for (SpawnGroup group : groups == null ? List.<SpawnGroup>of() : groups) {
+      Optional<Integer> configured = group.maxOperationTrips();
+      if (configured.isPresent() && configured.get() > best) {
+        best = configured.get();
+        from = group.name();
+      }
+    }
+    if (best > 0) {
+      return new MaxTripsChoice(best, "交路组 " + from + " 的 maxOperationTrips");
+    }
+    return new MaxTripsChoice(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS, "默认");
+  }
+
   private static Optional<String> readSpawnGroup(Route route) {
     Object raw = route.metadata() == null ? null : route.metadata().get("spawn_group");
     if (raw == null) {
@@ -2315,7 +2357,7 @@ public final class FtaTimetableCommand {
    * @param start 首班时刻 {@code HH:mm}
    * @param end 末班时刻 {@code HH:mm}
    * @param dwellSeconds 缺省停站时长
-   * @param maxTripsPerDuty 单个车辆交路最多班次
+   * @param maxTripsPerDuty 单个车辆交路最多班次；未显式给出时为 {@code null}，由交路组的 {@code maxOperationTrips} 决定
    * @param maxDutyMinutes 单个车辆交路最长在线分钟
    * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
@@ -2330,7 +2372,7 @@ public final class FtaTimetableCommand {
       String start,
       String end,
       int dwellSeconds,
-      int maxTripsPerDuty,
+      Integer maxTripsPerDuty,
       int maxDutyMinutes,
       Integer turnaroundSeconds,
       int separationSeconds,

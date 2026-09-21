@@ -49,7 +49,8 @@ final class TimetableBuildReportSender {
       TimetableBuildResult result,
       TimetableBuildOptions options,
       TimetableHeadwayDefaults.Choice headway,
-      Map<String, String> groupSources) {
+      Map<String, String> groupSources,
+      String maxTripsSource) {
     sender.sendMessage(Component.text("===== 构建报告 =====", NamedTextColor.DARK_AQUA));
     if (!result.success()) {
       for (String warning : result.warnings()) {
@@ -95,6 +96,9 @@ final class TimetableBuildReportSender {
         TimetableBuildReportText.describeGroups(result.groupIntervals(), groupSources)) {
       sender.sendMessage(Component.text("  " + line, NamedTextColor.GRAY));
     }
+    sender.sendMessage(
+        FtaTimetableCommand.field(
+            "交路上限", options.dutyLimits().maxTripsPerDuty() + " 班/交路（" + maxTripsSource + "）"));
     for (String note : result.phaseNotes()) {
       sender.sendMessage(Component.text("  相位: " + note, NamedTextColor.DARK_GRAY));
     }
