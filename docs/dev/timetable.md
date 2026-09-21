@@ -150,7 +150,7 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 
 | 资源 | 来源 | 规则 |
 | --- | --- | --- |
-| 区间（边） | 逐边时分 `SegmentTiming` | 互斥，不分方向；相邻占用之间要留 `--separation`（默认 30 秒） |
+| 区间（边） | 逐边时分 `SegmentTiming` | 互斥，不分方向；相邻占用之间要留 `--separation`（默认 15 秒） |
 | 站台 | 停靠、待命、不停靠经过 | 按容量：具体股道容量 1；站台组 `OP:S:NAME` 容量 = 图里该站的股道数 |
 | 单线区段 | `SingleLineSectionIndex`（与运行时同一份桥链索引） | 对向互斥；同向追踪交给边互斥 |
 | 道岔 | 路径穿越的 SWITCHER 节点 | 两次通过之间要留 separation |
@@ -354,8 +354,9 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
         [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站 dwell）]
-        [--separation <sec>] [--max-wait <sec>] [--strict]
+        [--separation <sec>] [--max-wait <sec>] [--max-idle <sec>] [--strict]
         [--name "<name>"] [--prefix <p>] [--zone <zoneId>]
+/fta timetable config <company> <operator> <line>          # 参数一览：生效值、来源与改它的入口
 /fta timetable neighbors <company> <operator> <line> <code>
 /fta timetable list <company> <operator> <line>
 /fta timetable info <company> <operator> <line> <code> [page]
@@ -368,6 +369,17 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 
 间隔按**交路组**解析，每组一个数，优先级：`--group-headway <组>=<秒>`（可重复，也接受逗号分隔；补全给出本线的组名）里点名的 > `--headway`（给全部组）> 该组在线路 metadata 里的
 `spawn_groups[].baselineSec` > 线路级 `spawnFreqBaselineSec` > 300 秒。组名按 metadata 原样匹配，没配 `spawn_group` 的 route 归 `default` 组。
+
+交路上限走同一条链：`--max-trips` > 交路组的 `spawn_groups[].maxOperationTrips`（多个组、联编多线时取**最大值**——
+一条交路可以跨组接班，按某一个组的上限卡它没有道理）> 4。这个值偏小时的症状离病因很远：交路接不下去、车跑完一个
+往返就回库，于是从中途站始发的班次没车可用，报成一大批 `NO_CREATE_ACCESS` 取消。
+
+**另一条同样隐蔽的**：任何交路组的间隔都必须 ≤ 端点闲置上限（`--max-idle`，缺省读 `reclaim.max-idle-seconds`），
+否则车等不到下一班就回库，那个组的交路会整体断掉——而 build 仍会报成功（成功判据只看不可吸收残余，不管
+「一整组班次全军覆没」）。`/fta timetable config` 会在这种配置下直接警告。
+
+各参数当前的生效值与来源用 `/fta timetable config <company> <operator> <line>` 看：参数散在命令行 flag、
+交路组 metadata、`config.yml` 三处，这条命令把「某个值到底从哪来、改哪里才生效」一次列清楚。
 baseline 是目标不是硬约束：排出来有冲突时所有组按同一比例放宽到最小可行间隔（见上文第二层）。报告里每组一行"交路组 X: 每方向 N s（来源）"，
 被放宽时后面带"→ 放宽到"。
 
@@ -543,7 +555,7 @@ planned segment duration   vs   actual segment duration
 - 同一条线路可以同时有多份 PUBLISHED 时刻表——publish 不拦，它们互为替代所以也不进对方的邻表检查。
   但运行时是一对多消费（route → 时刻表列表）：**两份的表定票都会发、车次匹配会在两份里找**。
   因此同一条线同时只应发布一份，这条没有机制保证，靠运营侧自律。
-- 跨线检查只覆盖**已发布**的邻表；仍按 headway 发车的线路只报告不检查。publish 重检用的间隔裕量是默认 30 秒，
+- 跨线检查只覆盖**已发布**的邻表；仍按 headway 发车的线路只报告不检查。publish 重检用的间隔裕量是默认 15 秒，
   不是 build 时传的 `--separation`（选项不落库）。邻表的站台组容量取图里的物理股道数。
 - 直通 route 的出库/回库线路**自动搜索**的范围只有本 operator 的线路。跑到外方终点的班次有两条出路：运营 route 用
   `timetable_create_route` / `timetable_return_route` 显式指定外方线路（与自动搜到的取并集，同一站有多条时显式指定的优先，
