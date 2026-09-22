@@ -237,6 +237,55 @@ class ConflictAbsorptionTest {
     assertEquals(Optional.of(STUB), residual.waitingPoint());
   }
 
+  /**
+   * 后车是<b>出库走行</b>：车还在库里没发出来，让车点是车库、容量不限，冲突落在岔线端点的进站单线上也不该判死。
+   *
+   * <p>这一类占用的 code 是 {@code Dxxx-CREATE}，{@code Context} 给它记的让车点是空串。空串必须与"判不出"
+   * 分开——两者都当成判不出的话，每一处这种残余都会退回按资源保守判，正好把本判据要修的那一类原样留下。 实测 WS 在 120 s 间隔下有 26 处残余走的就是这条退路。
+   */
+  @Test
+  void aFollowerStillInTheDepotIsAbsorbableEvenOnAStubApproach() {
+    TimetableConflictChecker.Conflict conflict =
+        conflictOn("single:bridge:" + STUB + ":3~SWITCHER:1:2:3", 60, 50, "D001-CREATE");
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflict),
+                TimetableTestFixtures.singleTripTimetable("RA-001", WIDE + ":1", "D001"),
+                new TimetableOccupancyProjector.Occupancy(List.of(), List.of()),
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+    assertEquals(Optional.of(""), residual.waitingPoint(), "空串＝车库，不是判不出");
+  }
+
+  /**
+   * 后车是<b>待命</b>（code 就是交路号）：车已经停在某个站台上，不在车库。
+   *
+   * <p>这时让车点判不出具体是哪个站台，必须退回按资源保守判——冲突落在容量 1 的端点上就仍判不可吸收。 把待命也当成"在车库等"会把这类判成可吸收，运行时那辆车真的会堵死岔线。
+   */
+  @Test
+  void aFollowerOnAPlatformIsNotTreatedAsWaitingInTheDepot() {
+    TimetableConflictChecker.Conflict conflict =
+        conflictOn("single:bridge:" + STUB + ":3~SWITCHER:1:2:3", 60, 50, "D001");
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflict),
+                TimetableTestFixtures.singleTripTimetable("RA-001", WIDE + ":1", "D001"),
+                new TimetableOccupancyProjector.Occupancy(List.of(), List.of()),
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, residual.verdict());
+    assertEquals(Optional.empty(), residual.waitingPoint(), "判不出，不是车库");
+  }
+
   private static ConflictAbsorption.Residual only(TimetableConflictChecker.Conflict conflict) {
     return ConflictAbsorption.classify(report(conflict), null, null, INDEX, SEPARATION, MAX_WAIT)
         .get(0);
@@ -250,6 +299,12 @@ class ConflictAbsorptionTest {
   /** 内部冲突：后车恒为 second，等待 = firstTo + 裕量 − secondFrom。 */
   private static TimetableConflictChecker.Conflict conflictOn(
       String resource, int firstTo, int secondFrom) {
+    return conflictOn(resource, firstTo, secondFrom, "RA-001");
+  }
+
+  /** 同上，另外指定后车的 code：出入库走行是 {@code Dxxx-CREATE / -RETURN}，待命是交路号。 */
+  private static TimetableConflictChecker.Conflict conflictOn(
+      String resource, int firstTo, int secondFrom, String second) {
     return new TimetableConflictChecker.Conflict(
         resource.startsWith("platform")
             ? TimetableConflictChecker.Kind.PLATFORM
@@ -258,7 +313,7 @@ class ConflictAbsorptionTest {
                 : TimetableConflictChecker.Kind.TRACK,
         resource,
         "RB-001",
-        "RA-001",
+        second,
         0,
         firstTo,
         secondFrom,

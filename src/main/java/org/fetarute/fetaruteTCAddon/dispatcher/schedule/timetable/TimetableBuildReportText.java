@@ -92,7 +92,7 @@ public final class TimetableBuildReportText {
                 "    · %s 等 %ds 于 %s（%s）",
                 residual.mover(),
                 residual.waitSeconds(),
-                residual.waitingPoint().orElse("资源前"),
+                waitingPointText(residual),
                 residual.conflict().resource()));
       }
       if (absorbable.size() > shown) {
@@ -154,6 +154,14 @@ public final class TimetableBuildReportText {
   }
 
   /** 判决的中文说法。 */
+  /** 让车点的显示：空串是车库，缺席是判不出——两者不是一回事，报告里别混成一句。 */
+  private static String waitingPointText(ConflictAbsorption.Residual residual) {
+    return residual
+        .waitingPoint()
+        .map(group -> group.isBlank() ? "车库" : group)
+        .orElse("资源前（让车点判不出）");
+  }
+
   private static String describe(ConflictAbsorption.Verdict verdict) {
     return switch (verdict) {
       case ABSORBABLE -> "可吸收";

@@ -181,6 +181,7 @@ public final class ConflictAbsorption {
     // 并不会开到冲突点去等。实测 WS 有一批残余撞在 CHT 的进站单线上，可后车还停在林湾车库里没发车，
     // 晚发一两秒就完事——按资源一刀切会把这种判成不可吸收，白白卡住更密的间隔。
     //
+    // 车库（空串）算"知道在哪等"，不算"判不出"：车在库里等不堵任何人。
     // 只有连后车在哪等都判不出来时（相位第三层评估时手上没有成品表），才退回按资源保守判。
     boolean waitsOnStub =
         waitingPoint.isPresent()
@@ -259,8 +260,12 @@ public final class ConflictAbsorption {
               chain.put(trip.tripCode(), List.copyOf(departures.subList(i, departures.size())));
             }
           }
-          // 待命与走行的 code 是交路号：让车点是车库，容量视为无限（空串表示不限）。
-          waitingPoint.put(duty.dutyCode(), "");
+          // 出库走行的 code 是「交路号-CREATE」：车还在库里，晚发就是在库里多停一会儿，容量不限（空串）。
+          //
+          // 待命（code 就是交路号）与回库走行不能这么算：那时车已经停在某个站台上，让车点是那个站台
+          // 而不是车库。判不出具体是哪一处就留成"判不出"，退回按资源保守判——容量 1 的端点必须继续
+          // 落在不可吸收里，否则运行时那辆车就真的堵死岔线了。
+          waitingPoint.put(duty.dutyCode() + "-CREATE", "");
         }
       }
 
@@ -277,17 +282,19 @@ public final class ConflictAbsorption {
       return new Context(waitingPoint, stays, capacity, stubs, chain);
     }
 
-    /** 后车要在哪里等：班次等在它的起点站台组，待命与走行等在车库（空串）。判不出来时为空。 */
+    /**
+     * 后车要在哪里等。
+     *
+     * <p>三种答案必须分开：具体站台组；<b>空串是车库</b>（容量不限，一定不是岔线端点）；{@code Optional.empty()}
+     * 才是判不出。此前空串与判不出都返回空，于是每一处后车是待命或出入库走行的残余都退回按资源判—— 而那正是本判据要修掉的那一类：车还在车库里没发车，却因为冲突落在进站单线上被判成堵死。
+     */
     Optional<String> waitingPointOf(String code) {
-      String group = waitingPointByCode.get(code);
-      if (group == null) {
-        return Optional.empty();
-      }
-      return group.isBlank() ? Optional.empty() : Optional.of(group);
+      return Optional.ofNullable(waitingPointByCode.get(code));
     }
 
+    /** 容量 1 的站台组。车库（空串）不是站台组，永远不算岔线端点。 */
     boolean isStubGroup(String group) {
-      return stubGroups.contains(group);
+      return group != null && !group.isBlank() && stubGroups.contains(group);
     }
 
     /** 资源本身就在容量 1 的端点上：站台组、具体股道，或名字里带该端点节点的单线桥链。 */
@@ -314,6 +321,10 @@ public final class ConflictAbsorption {
 
     /** 让车点在这一刻还有没有空位：容量减去那一刻已经在待命的车。 */
     boolean hasRoom(String group, int atSecond) {
+      if (group == null || group.isBlank()) {
+        // 车库：容量不限，车在库里多待一会儿不占别人的地方。
+        return true;
+      }
       int capacity = capacityByGroup.getOrDefault(group, 1);
       int occupied = 0;
       for (int[] window : staysByGroup.getOrDefault(group, List.of())) {

@@ -186,6 +186,19 @@ public final class TimetableTestFixtures {
    * @param originNodeId 起点节点
    */
   public static Timetable singleTripTimetable(String tripCode, String originNodeId) {
+    return singleTripTimetable(tripCode, originNodeId, null);
+  }
+
+  /**
+   * 同上，另外挂一条交路。
+   *
+   * <p>残余分类里，待命与出入库走行的占用 code 是<b>交路号</b>而不是车次号，让车点因此是车库（容量不限）。 没有交路的表测不到这一类——{@code
+   * ConflictAbsorptionTest} 的车库用例靠这个重载。
+   *
+   * @param dutyCode 交路号；{@code null} 表示不挂交路
+   */
+  public static Timetable singleTripTimetable(
+      String tripCode, String originNodeId, String dutyCode) {
     UUID timetableId = UUID.nameUUIDFromBytes("fixture".getBytes(StandardCharsets.UTF_8));
     UUID routeId = routeId(tripCode);
     TimetableRoutePlan plan =
@@ -221,11 +234,30 @@ public final class TimetableTestFixtures {
         86_400,
         List.of(plan),
         List.of(trip),
-        List.of(),
+        dutyCode == null
+            ? List.of()
+            : List.of(
+                new VehicleDuty(
+                    UUID.nameUUIDFromBytes(dutyCode.getBytes(StandardCharsets.UTF_8)),
+                    timetableId,
+                    0,
+                    dutyCode,
+                    DEPOT_NODE_ID,
+                    DEPOT_NODE_ID,
+                    Optional.empty(),
+                    Optional.empty(),
+                    List.of(trip.id()),
+                    0,
+                    600,
+                    600,
+                    VehicleDuty.CloseReason.HORIZON_END)),
         Optional.empty(),
         Instant.EPOCH,
         Instant.EPOCH);
   }
+
+  /** 夹具的车库节点：出入库走行的起讫点。 */
+  private static final String DEPOT_NODE_ID = "OP:D:DEPOT:1";
 
   /** 按 code 派生稳定的 route UUID。 */
   public static UUID routeId(String code) {
