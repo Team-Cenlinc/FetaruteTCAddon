@@ -191,7 +191,7 @@ public final class ResourceRepair {
     Set<UUID> truncated = new TreeSet<>();
     Map<UUID, TerminalSerializer.Shift.Reason> reasons = new HashMap<>();
     List<Yield> yields = new ArrayList<>();
-    Set<String> unrepairable = new HashSet<>();
+    Set<MoveKey> unrepairable = new HashSet<>();
     State state =
         new State(
             input,
@@ -208,16 +208,22 @@ public final class ResourceRepair {
             tripByCode,
             dutyByCode);
 
-    Rescanner rescanner = new Rescanner(input, allProfiles, mode, state.rewrite());
+    // maxWait == 0 是"只扫一遍冲突、原样返回表"的口径，别为它白建一份索引：Rescanner 的构造要把整张表
+    // 投影一遍再全扫，而下面的循环一步都不会走，最后的 remaining 又会自己再全扫一遍。
+    Rescanner rescanner =
+        input.maxWaitSeconds() > 0
+            ? new Rescanner(input, allProfiles, mode, state.rewrite())
+            : null;
     // 上界按"起始冲突数"而不只按班次数：连锁段的每一步都计入，光有班次那一项装不下一串连锁。
-    int cap = 2 * rescanner.total() + 4 * table.trips().size();
+    int cap = rescanner == null ? 0 : 2 * rescanner.total() + 4 * table.trips().size();
     int steps = 0;
-    while (input.maxWaitSeconds() > 0 && steps < cap) {
-      Optional<Move> opener = pickMove(input, rescanner, unrepairable, state);
+    while (rescanner != null && steps < cap) {
+      Pick pick = pickMove(input, rescanner, unrepairable, state);
+      Optional<Move> opener = pick.opener();
       if (opener.isEmpty()) {
         break;
       }
-      int realBefore = realCount(input, rescanner, state);
+      int realBefore = pick.realCount();
       int totalBefore = rescanner.total();
       State.Snapshot snapshot = state.snapshot();
       Set<Integer> movedDuties = new LinkedHashSet<>();
@@ -339,18 +345,24 @@ public final class ResourceRepair {
       Optional<String> leaderOwner,
       int waitSeconds) {
 
-    String key() {
-      return conflict.resource()
-          + "|"
-          + conflict.first()
-          + "|"
-          + conflict.second()
-          + "|"
-          + conflict.firstFrom()
-          + "|"
-          + conflict.secondFrom();
+    MoveKey key() {
+      return new MoveKey(
+          conflict.resource(),
+          conflict.first(),
+          conflict.second(),
+          conflict.firstFrom(),
+          conflict.secondFrom());
     }
   }
+
+  /**
+   * 让车的身份：同一处冲突第二次被挑中时认得出来。
+   *
+   * <p>原来是把这五个字段拼成一个七八十字符的串。名单每轮要查上千次，每次都现拼一个新串、再把整串哈希 一遍；而 {@code resource} 本身是共享实例，它的哈希早就算好了。换成
+   * record 之后语义一字不变， 开销只剩五个字段的比较。
+   */
+  private record MoveKey(
+      String resource, String first, String second, int firstFrom, int secondFrom) {}
 
   /** 一处冲突对应的让车：后车是我就挪后车；后车是邻表就挪先到的我。双方都是邻表没有可挪的。 */
   private static Optional<Move> moveFor(Input input, TimetableConflictChecker.Conflict conflict) {
@@ -436,12 +448,13 @@ public final class ResourceRepair {
    * <p>不把全表冲突排一遍：上千条冲突每开一段排一次纯属白排。先一趟挑出序最小的那处可修的，再把序排在它之前的真冲突记进名单——
    * 与"按序逐条看过去、碰到真冲突就记下、碰到可修的就停"逐字等价，只是省掉了排序。
    */
-  private static Optional<Move> pickMove(
-      Input input, Rescanner rescanner, Set<String> unrepairable, State state) {
+  private static Pick pickMove(
+      Input input, Rescanner rescanner, Set<MoveKey> unrepairable, State state) {
     Move best = null;
     TimetableConflictChecker.Conflict bestAt = null;
-    List<TimetableConflictChecker.Conflict> reals = new ArrayList<>();
-    List<String> realKeys = new ArrayList<>();
+    int reals = 0;
+    List<TimetableConflictChecker.Conflict> blocked = new ArrayList<>();
+    List<MoveKey> blockedKeys = new ArrayList<>();
     for (List<TimetableConflictChecker.Conflict> group : rescanner.conflicts()) {
       for (TimetableConflictChecker.Conflict conflict : group) {
         Optional<Move> candidate = moveFor(input, conflict);
@@ -449,12 +462,17 @@ public final class ResourceRepair {
           continue;
         }
         Move move = candidate.get();
+        // 真冲突先数、再看名单：段初的这个数要与段末的 realCount 同一口径，而 realCount 不看名单。
+        boolean isReal = real(input, move, state);
+        if (isReal) {
+          reals++;
+        }
         if (unrepairable.contains(move.key())) {
           continue;
         }
-        if (real(input, move, state)) {
-          reals.add(conflict);
-          realKeys.add(move.key());
+        if (isReal) {
+          blocked.add(conflict);
+          blockedKeys.add(move.key());
           continue;
         }
         if (bestAt == null
@@ -464,14 +482,22 @@ public final class ResourceRepair {
         }
       }
     }
-    for (int i = 0; i < reals.size(); i++) {
+    for (int i = 0; i < blocked.size(); i++) {
       if (bestAt == null
-          || TimetableConflictChecker.CONFLICT_ORDER.compare(reals.get(i), bestAt) < 0) {
-        unrepairable.add(realKeys.get(i));
+          || TimetableConflictChecker.CONFLICT_ORDER.compare(blocked.get(i), bestAt) < 0) {
+        unrepairable.add(blockedKeys.get(i));
       }
     }
-    return Optional.ofNullable(best);
+    return new Pick(Optional.ofNullable(best), reals);
   }
+
+  /**
+   * 挑出来的那一处，连同这一刻的真冲突数。
+   *
+   * <p>两样是同一趟遍历的产物：{@code pickMove} 本来就要对每一处冲突算一遍 {@code real}，把结果扔掉、 紧接着再让 {@code realCount}
+   * 把同样的活重做一遍，等于每轮白走一趟全表（WS@300 是上千条冲突 × 几千轮）。
+   */
+  private record Pick(Optional<Move> opener, int realCount) {}
 
   /**
    * 连锁段的下一步。
@@ -482,7 +508,7 @@ public final class ResourceRepair {
   private static Move chainFollowUp(
       Input input,
       List<TimetableConflictChecker.Conflict> fresh,
-      Set<String> unrepairable,
+      Set<MoveKey> unrepairable,
       State state) {
     Move first = null;
     for (TimetableConflictChecker.Conflict conflict : fresh) {

@@ -156,7 +156,14 @@ public final class ResourcePhasePlanner {
    * @param interval 该组间隔
    * @param reverse 是不是往返对里的反向（它的 δ 是端点多等，有上限）
    */
-  private record Direction(String key, int interval, boolean reverse) {}
+  /**
+   * @param originGroup 起点站台组：残余判据要的"后车在哪等"就是它
+   */
+  private record Direction(String key, int interval, boolean reverse, String originGroup) {
+    Direction {
+      originGroup = originGroup == null ? "" : originGroup;
+    }
+  }
 
   private static List<Direction> orderOf(
       List<ServiceGroupClassifier.Group> groups,
@@ -171,7 +178,7 @@ public final class ResourcePhasePlanner {
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         // 锚定给了非零相位的就是反向：它的 δ 是车在端点多等，受闲置上限约束。
         boolean reverse = phases.phaseByDirection().getOrDefault(direction.key(), 0) != 0;
-        out.add(new Direction(direction.key(), interval, reverse));
+        out.add(new Direction(direction.key(), interval, reverse, direction.originGroup()));
       }
     }
     return List.copyOf(out);
@@ -188,6 +195,8 @@ public final class ResourcePhasePlanner {
       int separationSeconds,
       int maxWaitSeconds) {
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
+    // 每条流从哪个站台组始发——这就是残余判据要的"后车在哪等"。手上没有成品表，但这一条是知道的。
+    Map<String, String> waitingPoints = new LinkedHashMap<>();
     for (Direction direction : order) {
       PeriodicTemplate template = templates.get(direction.key());
       if (template == null) {
@@ -196,16 +205,25 @@ public final class ResourcePhasePlanner {
       int phase =
           phases.phaseByDirection().getOrDefault(direction.key(), 0)
               + delta.getOrDefault(direction.key(), 0);
-      movements.addAll(template.unroll(phase, CYCLES));
+      List<TimetableConflictChecker.Movement> unrolled = template.unroll(phase, CYCLES);
+      // 起点站台组判不出来的就不记：留成"判不出"退回按资源保守判，别让空串被当成车库。
+      if (!direction.originGroup().isBlank()) {
+        for (TimetableConflictChecker.Movement movement : unrolled) {
+          waitingPoints.putIfAbsent(movement.code(), direction.originGroup());
+        }
+      }
+      movements.addAll(unrolled);
     }
     if (movements.isEmpty()) {
       return new Score(0, 0, 0L);
     }
     TimetableConflictChecker.Report report =
         TimetableConflictChecker.check(index, profiles, movements, List.of(), separationSeconds);
-    // 这里没有成品表与投影：分类只用得上"邻表 / 容量 1 端点 / 超预算"三条，足够把咽喉那类挑出来。
+    // 与 builder 的成功判据同一把尺子：都按"后车在哪等"判，而不是按冲突落在哪个资源上。
+    // 这里没有成品表，但每条流的始发站台组是知道的，足够喂进同一条判据。
     List<ConflictAbsorption.Residual> residuals =
-        ConflictAbsorption.classify(report, null, null, index, separationSeconds, maxWaitSeconds);
+        ConflictAbsorption.classify(
+            report, waitingPoints, index, separationSeconds, maxWaitSeconds);
     int unabsorbable = ConflictAbsorption.unabsorbable(residuals).size();
     long wait = residuals.stream().mapToLong(ConflictAbsorption.Residual::waitSeconds).sum();
     return new Score(unabsorbable, report.conflicts().size(), wait);

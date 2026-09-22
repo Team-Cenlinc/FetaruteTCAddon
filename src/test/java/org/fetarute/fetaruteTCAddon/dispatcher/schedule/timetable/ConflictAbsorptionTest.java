@@ -286,6 +286,33 @@ class ConflictAbsorptionTest {
     assertEquals(Optional.empty(), residual.waitingPoint(), "判不出，不是车库");
   }
 
+  /**
+   * 相位第三层用的重载：手上没有成品表，但每条流从哪个站台组始发是知道的。
+   *
+   * <p>第三层的职责就是把不可吸收的那些消掉，它挑 δ 用的尺子必须与最终的成功判据同一把。此前它只能传 {@code null}，于是每一处都落到按资源保守判——比 build 严，挑出来的
+   * δ 未必是 build 眼里最好的那个。
+   */
+  @Test
+  void waitingPointsOnlyContextUsesTheSameCriterionAsTheBuild() {
+    TimetableConflictChecker.Conflict conflict =
+        conflictOn("single:bridge:" + STUB + ":3~SWITCHER:1:2:3", 60, 50, "full→north#0");
+
+    assertEquals(
+        ConflictAbsorption.Verdict.ABSORBABLE,
+        ConflictAbsorption.classify(
+                report(conflict), Map.of("full→north#0", WIDE), INDEX, SEPARATION, MAX_WAIT)
+            .get(0)
+            .verdict(),
+        "知道后车从两股道的 WIDE 始发，与成品表那条路径同一个结论");
+
+    assertEquals(
+        ConflictAbsorption.Verdict.STUB_TERMINAL,
+        ConflictAbsorption.classify(report(conflict), Map.of(), INDEX, SEPARATION, MAX_WAIT)
+            .get(0)
+            .verdict(),
+        "判不出从哪来就退回按资源保守判");
+  }
+
   private static ConflictAbsorption.Residual only(TimetableConflictChecker.Conflict conflict) {
     return ConflictAbsorption.classify(report(conflict), null, null, INDEX, SEPARATION, MAX_WAIT)
         .get(0);

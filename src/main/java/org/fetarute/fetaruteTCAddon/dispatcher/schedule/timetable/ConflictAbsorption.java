@@ -115,7 +115,40 @@ public final class ConflictAbsorption {
     if (report == null || report.conflicts().isEmpty()) {
       return List.of();
     }
-    Context context = Context.of(timetable, occupancy, index);
+    return classify(
+        Context.of(timetable, occupancy, index), report, separationSeconds, maxWaitSeconds);
+  }
+
+  /**
+   * 手上没有成品表、但知道每个 code 从哪个站台组始发时的分类。
+   *
+   * <p>相位第三层走这条：它按周期模板铺开的是"流"，没有成品表，可它<b>知道</b>每条流的始发站台组——
+   * 那正是判据第二条要的"后车在哪等"。不给的话每一处都会落到按资源保守判，于是第三层挑 δ 用的是一把
+   * 比成功判据更严的尺子，而它的职责恰恰是把不可吸收的那些消掉。同一处冲突两层算出不同的结论， 设计里写明了就是 bug。
+   *
+   * @param waitingPointByCode code → 后车要等的站台组；空串表示车库（容量不限）
+   */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Map<String, String> waitingPointByCode,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds) {
+    if (report == null || report.conflicts().isEmpty()) {
+      return List.of();
+    }
+    return classify(
+        Context.ofWaitingPoints(waitingPointByCode, index),
+        report,
+        separationSeconds,
+        maxWaitSeconds);
+  }
+
+  private static List<Residual> classify(
+      Context context,
+      TimetableConflictChecker.Report report,
+      int separationSeconds,
+      int maxWaitSeconds) {
     int separation = Math.max(0, separationSeconds);
     int maxWait = Math.max(0, maxWaitSeconds);
     List<Residual> out = new ArrayList<>(report.conflicts().size());
@@ -280,6 +313,29 @@ public final class ConflictAbsorption {
         }
       }
       return new Context(waitingPoint, stays, capacity, stubs, chain);
+    }
+
+    /**
+     * 只有让车点的上下文：容量与岔线端点仍从图索引来，待命与连锁没有依据，按"没有"算。
+     *
+     * <p>少了待命就判不出"让车点满没满"，少了交路链就判不出连锁深度——这两条都只会让判决更宽松， 而第三层本来就只用来在几个 δ 之间做相对比较，不是最终的成功判据。
+     */
+    static Context ofWaitingPoints(
+        Map<String, String> waitingPointByCode, TimetableConflictChecker.GraphIndex index) {
+      Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
+      Set<String> stubs = new HashSet<>();
+      capacity.forEach(
+          (group, tracks) -> {
+            if (tracks != null && tracks <= 1) {
+              stubs.add(group);
+            }
+          });
+      return new Context(
+          waitingPointByCode == null ? Map.of() : Map.copyOf(waitingPointByCode),
+          Map.of(),
+          capacity,
+          stubs,
+          Map.of());
     }
 
     /**
