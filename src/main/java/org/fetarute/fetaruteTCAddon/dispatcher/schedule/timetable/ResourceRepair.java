@@ -27,9 +27,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Neighbor
  * 区间、道岔、单线与多股道车站。
  *
  * <p>让车会在别处制造新冲突（连锁）。判据按<b>连锁段</b>走而不是按单步：施加一处之后，这一步新冒出来的冲突若全部可修就接着修， 最多 {@value #CHAIN_LIMIT}
- * 步；段末与段初比 {@code (真冲突数, 冲突总数)}，没变好就<b>整段回滚</b>，开段的那一处判为真冲突。
+ * 步；段末与段初比 {@code (真冲突数, 冲突总数)}，段末不合格时先退到<b>冲突最少的那个前缀</b>再判一次——
+ * 一串让车常常前几步换来好处、后几步又还回去，整段一刀切会把已经到手的那部分白扔；前缀也不合格才整段回滚。
  * 单步判据会把"一串小让车各挪二十秒"的每一步都拒掉——每一步单独看都不减少冲突，合起来才减少；实测 WS@300 的一千九百处残余没有一处是预算问题，全是这个。
- * 段末仍要求冲突总数严格减少，所以修复只朝一个方向走，循环必然终止。
+ * 段末仍要求冲突总数严格减少，所以修复只朝一个方向走，循环必然终止。 回滚时判死的是<b>挪不动的那一步</b>（没有就是开段的那一处），而不是无差别地怪开段。
  *
  * <p>重扫是增量的（{@link OccupationIndex}）：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源。 返回的 {@code remaining}
  * 另外做一次全量重扫，与 builder 最后那一遍同一口径。
@@ -219,37 +220,56 @@ public final class ResourceRepair {
       int realBefore = realCount(input, rescanner, state);
       int totalBefore = rescanner.total();
       State.Snapshot snapshot = state.snapshot();
-      List<Yield> segment = new ArrayList<>();
       Set<Integer> movedDuties = new LinkedHashSet<>();
+      List<Move> applied = new ArrayList<>();
       Move move = opener.get();
-      boolean aborted = false;
+      Move failed = null;
+      // 冲突总数最少的那个前缀。段末不合格时退到这里再判一次：一串让车常常是前几步换来了好处、
+      // 后几步又还回去，整段一刀切会把已经到手的那部分一起扔掉。
+      int bestPrefix = 0;
+      int bestTotal = totalBefore;
       for (int depth = 0; depth < CHAIN_LIMIT && move != null; depth++) {
         steps++;
         int d = state.dutyOf(move.mover());
         if (d < 0 || !state.apply(move)) {
-          // 这一步挪不动。施加到一半的状态没法就地评估，整段作废。
-          aborted = true;
+          // 这一步挪不动（累计让车超限、交路超时，或找不到对应的那一班）。施加到一半的状态没法就地
+          // 评估，整段作废——但要判死的是挪不动的这一步，不是开段的那一处，见下面的 unrepairable。
+          failed = move;
           break;
         }
         movedDuties.add(d);
+        applied.add(move);
         List<TimetableConflictChecker.Conflict> fresh = rescanner.afterMove(state, d);
-        segment.add(yieldOf(move));
+        if (rescanner.total() < bestTotal) {
+          bestTotal = rescanner.total();
+          bestPrefix = applied.size();
+        }
         move = chainFollowUp(input, fresh, unrepairable, state);
       }
-      boolean better =
-          !aborted
-              && realCount(input, rescanner, state) <= realBefore
-              && rescanner.total() < totalBefore;
-      if (!better) {
-        // 整段没让表变好（别处多出了冲突，或把别处推成了真冲突）：回滚，开段的那一处算真冲突。
-        state.restore(snapshot);
-        for (int d : movedDuties) {
-          rescanner.afterMove(state, d);
+      int accepted =
+          failed == null && accepts(input, rescanner, state, realBefore, totalBefore)
+              ? applied.size()
+              : 0;
+      if (accepted == 0 && bestPrefix > 0 && bestPrefix < applied.size()) {
+        // 整段不合格，前缀未必不合格：退回段初，只重放冲突最少的那个前缀再判一次。
+        rollback(rescanner, state, snapshot, movedDuties);
+        movedDuties.clear();
+        replay(rescanner, state, applied, bestPrefix, movedDuties);
+        if (accepts(input, rescanner, state, realBefore, totalBefore)) {
+          accepted = bestPrefix;
         }
-        unrepairable.add(opener.get().key());
+      }
+      if (accepted == 0) {
+        rollback(rescanner, state, snapshot, movedDuties);
+        // 判死挪不动的那一步，而不是开段的那一处：开段的那处本来可能修得了，把它判死等于白丢一处修复；
+        // 而下一轮重新开段时 chainFollowUp 会直接跳过已判死的这一步，段自然在那里收住，不会再撞一次。
+        // 名单每回滚一次必定净增一条（能走到这里的那一步一定还不在名单里），所以循环照旧必然终止。
+        unrepairable.add(failed != null ? failed.key() : opener.get().key());
         continue;
       }
-      yields.addAll(segment);
+      for (int i = 0; i < accepted; i++) {
+        yields.add(yieldOf(applied.get(i)));
+      }
     }
     Timetable current = state.rewrite();
 
@@ -366,6 +386,35 @@ public final class ResourceRepair {
     return move.waitSeconds() <= 0
         || move.waitSeconds() > input.maxWaitSeconds()
         || !state.canMove(move.mover());
+  }
+
+  /** 段末判据：冲突总数严格减少（保证循环只朝一个方向走），且真冲突不增加。总数便宜，先算它。 */
+  private static boolean accepts(
+      Input input, Rescanner rescanner, State state, int realBefore, int totalBefore) {
+    return rescanner.total() < totalBefore && realCount(input, rescanner, state) <= realBefore;
+  }
+
+  /** 退回段初：状态与索引一起退，被动过的每条交路逐条重投影。 */
+  private static void rollback(
+      Rescanner rescanner, State state, State.Snapshot snapshot, Set<Integer> movedDuties) {
+    state.restore(snapshot);
+    for (int d : movedDuties) {
+      rescanner.afterMove(state, d);
+    }
+  }
+
+  /** 从段初重放前 {@code count} 步。段初刚被 {@link #rollback} 还原过，重放与当初逐步施加等价。 */
+  private static void replay(
+      Rescanner rescanner, State state, List<Move> applied, int count, Set<Integer> movedDuties) {
+    for (int i = 0; i < count; i++) {
+      Move move = applied.get(i);
+      int d = state.dutyOf(move.mover());
+      if (d < 0 || !state.apply(move)) {
+        return;
+      }
+      movedDuties.add(d);
+      rescanner.afterMove(state, d);
+    }
   }
 
   private static int realCount(Input input, Rescanner rescanner, State state) {
