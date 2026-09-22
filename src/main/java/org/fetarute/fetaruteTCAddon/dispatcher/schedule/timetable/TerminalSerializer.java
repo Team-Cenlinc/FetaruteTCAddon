@@ -838,6 +838,9 @@ public final class TerminalSerializer {
         int weight = weightOf(input, profile.routeId());
         visits += weight * ((origin ? 1 : 0) + (terminal ? 1 : 0)) / 2.0D;
       }
+      // 这里的 separation 与冲突扫描里是同一个物理量：后车能进这股道之前，前车走清之后要留的空档。
+      // 所以它跟着默认值一起从 30 降到了 15，端点利用率的分母也就跟着松了——报告里"利用率超过 100%，
+      // 结构上不可能"这句话会比以前晚一档才说出口。改这个默认值的人要知道它同时动了这两处。
       int cost = in + turnaround + outRun + Math.max(0, input.separationSeconds());
       int floor = totalWeight <= 0L ? 0 : (int) Math.ceil(visits * cost / totalWeight);
       out.put(group, new Floor(in, outRun, cost, (int) totalWeight, visits, floor));

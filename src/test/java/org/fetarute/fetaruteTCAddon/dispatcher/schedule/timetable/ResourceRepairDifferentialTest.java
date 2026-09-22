@@ -218,7 +218,7 @@ class ResourceRepairDifferentialTest {
       int returnAt = lastArrival + TURNAROUND;
       Trip last = duty.trips().get(duty.trips().size() - 1);
       String terminal = plans.get(last.routeId()).terminalNodeId();
-      UUID returnRoute = terminal.equals(C2) ? ret2 : terminal.equals(C1) ? ret : ret;
+      UUID returnRoute = terminal.equals(C2) ? ret2 : ret;
       boolean returnable = terminal.equals(C1) || terminal.equals(C2);
       vehicleDuties.add(
           new VehicleDuty(

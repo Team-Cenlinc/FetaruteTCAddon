@@ -71,43 +71,6 @@ public final class TimetableOccupancyProjector {
   }
 
   /**
-   * 只展开一个 duty 的占用：它的班次运行、两段走行与站台待命。
-   *
-   * <p>让车修复每施加一处只改一条交路，用它换掉 {@link OccupationIndex} 里那一辆车的占用，不必重投影整张表。 产物必须与 {@link #project} 里属于这个
-   * duty 的那些条目逐条相同——不同的只是次序，而冲突扫描已经与次序无关。
-   *
-   * <p>不属于任何 duty 的班次不在这里：它们的时刻不会被让车改动，也就不必重投影。
-   *
-   * @param timetable 当前表
-   * @param duty 要展开的交路；它的班次按 {@link VehicleDuty#tripIds()} 取
-   * @param profiles 各 route 的投影（含 CREATE/RETURN）
-   * @param zeroSecondOfDay 零点
-   */
-  public static Occupancy projectDuty(
-      Timetable timetable,
-      VehicleDuty duty,
-      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      int zeroSecondOfDay) {
-    Objects.requireNonNull(timetable, "timetable");
-    Objects.requireNonNull(duty, "duty");
-    Objects.requireNonNull(profiles, "profiles");
-    Set<UUID> wanted = new HashSet<>(duty.tripIds());
-    List<TimetableTrip> trips = new ArrayList<>(wanted.size());
-    for (TimetableTrip trip : timetable.trips()) {
-      if (wanted.contains(trip.id())) {
-        trips.add(trip);
-      }
-    }
-    return projectDuty(
-        duty,
-        trips,
-        profiles,
-        returnRouteIdsOf(timetable),
-        timetable.serviceStartSecondOfDay(),
-        zeroSecondOfDay);
-  }
-
-  /**
    * 只展开一个 duty 的占用，班次直接给进来。
    *
    * <p>让车修复的增量重扫走这一条：它手上已经有改写好的交路与班次，为了查几行而重建一整张 {@link Timetable} 是纯浪费——光把九百多个班次重排一遍就够贵了。

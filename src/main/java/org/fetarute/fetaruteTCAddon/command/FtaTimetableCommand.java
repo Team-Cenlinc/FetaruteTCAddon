@@ -484,7 +484,18 @@ public final class FtaTimetableCommand {
     }
     MaxTripsChoice maxTrips = resolveMaxTrips(flags.maxTripsPerDuty(), spawnGroups);
     String maxTripsSource = maxTrips.description();
-    String maxTripsWarning = maxTripsMismatchWarning(spawnGroups).orElse("");
+    List<String> buildWarnings = new ArrayList<>();
+    maxTripsMismatchWarning(spawnGroups).ifPresent(buildWarnings::add);
+    // --separation 不随表保存，而 publish 重检写死按默认值复算（见 scopeCheck）。两个数不一样时，
+    // 同一张表在 build 与 publish 会被两把尺子量——设计里写明了两次分类必须一致，所以至少要说出来。
+    if (flags.separationSeconds() != TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS) {
+      buildWarnings.add(
+          "这次用的 --separation "
+              + flags.separationSeconds()
+              + "s 不会随表保存：publish 重检按默认的 "
+              + TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS
+              + "s 复算，两次判据可能不一致。要长期生效得改默认值，不能只靠这个 flag。");
+    }
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             serviceStart,
@@ -609,7 +620,7 @@ public final class FtaTimetableCommand {
                               neighbors,
                               groupSources,
                               maxTripsSource,
-                              maxTripsWarning));
+                              buildWarnings));
             });
   }
 
@@ -714,12 +725,12 @@ public final class FtaTimetableCommand {
       NeighborReport neighbors,
       Map<String, String> groupSources,
       String maxTripsSource,
-      String maxTripsWarning) {
+      List<String> warnings) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(result, options, headway, groupSources, maxTripsSource);
-    if (!maxTripsWarning.isBlank()) {
-      sender.sendMessage(Component.text("  ! " + maxTripsWarning, NamedTextColor.YELLOW));
+    for (String warning : warnings) {
+      sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.YELLOW));
     }
     report.sendNeighborReport(neighbors, result.neighbors());
     report.sendExternalConflicts(
@@ -2006,7 +2017,6 @@ public final class FtaTimetableCommand {
                     .map(snapshot -> new WorldGraph(worldId, snapshot.graph())));
   }
 
-  /** route metadata 的交路组名；没配返回空，编表时按起点站台组推导。 */
   /**
    * 交路上限的来源。
    *
@@ -2107,6 +2117,7 @@ public final class FtaTimetableCommand {
             + " 重排。");
   }
 
+  /** route metadata 的交路组名；没配返回空，编表时按起点站台组推导。 */
   private static Optional<String> readSpawnGroup(Route route) {
     Object raw = route.metadata() == null ? null : route.metadata().get("spawn_group");
     if (raw == null) {

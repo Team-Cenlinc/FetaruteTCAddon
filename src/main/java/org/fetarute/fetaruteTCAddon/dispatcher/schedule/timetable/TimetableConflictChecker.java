@@ -203,15 +203,6 @@ public final class TimetableConflictChecker {
     }
   }
 
-  /** 把按资源分好组的冲突并成一张全表报告：排序与 {@link #scanResources} 同一个。 */
-  static Report mergeConflicts(Collection<List<Conflict>> byResource) {
-    List<Conflict> conflicts = new ArrayList<>();
-    for (List<Conflict> group : byResource) {
-      conflicts.addAll(group);
-    }
-    return report(conflicts);
-  }
-
   private static Report report(List<Conflict> conflicts) {
     conflicts.sort(CONFLICT_ORDER);
     return new Report(List.copyOf(conflicts));
@@ -878,7 +869,7 @@ public final class TimetableConflictChecker {
       occupations.add(at < 0 ? -at - 1 : at, occupation);
     }
 
-    /** 这个桶里都有哪些车：建"车 → 资源键"反向索引用。 */
+    /** 桶里的占用，按 {@link #OCCUPATION_ORDER} 有序。{@link OccupationIndex} 拿它来按值精确撤销。 */
     List<Occupation> occupations() {
       return occupations;
     }

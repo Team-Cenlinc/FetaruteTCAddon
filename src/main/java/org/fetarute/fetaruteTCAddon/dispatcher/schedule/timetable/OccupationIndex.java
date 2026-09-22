@@ -107,6 +107,15 @@ public final class OccupationIndex {
     List<TimetableConflictChecker.Movement> next =
         movements == null ? List.of() : List.copyOf(movements);
     List<TimetableConflictChecker.Stay> nextStays = stays == null ? List.of() : List.copyOf(stays);
+    // 交进来的每一条都必须真的属于 vehicle。不属于的话，它在 of() 里是按自己的身份归档的，这里却按
+    // vehicle 归档：下次换车做差集时两边对不上，撤不掉的占用会永远留在桶里变成幽灵冲突——而且不抛
+    // 异常、不报错，只是让修复循环拿着一张假账做取舍。宁可当场炸掉。
+    for (TimetableConflictChecker.Movement movement : next) {
+      requireOwnedBy(vehicle, movement.code(), movement.owner());
+    }
+    for (TimetableConflictChecker.Stay stay : nextStays) {
+      requireOwnedBy(vehicle, stay.code(), stay.owner());
+    }
     Projection last = projected.getOrDefault(vehicle, Projection.EMPTY);
     Set<String> touched =
         new LinkedHashSet<>(
@@ -195,6 +204,13 @@ public final class OccupationIndex {
           new Projection(
               List.copyOf(byVehicle.getOrDefault(vehicle, List.of())),
               List.copyOf(staysByVehicle.getOrDefault(vehicle, List.of()))));
+    }
+  }
+
+  private void requireOwnedBy(String vehicle, String code, Optional<String> owner) {
+    String actual = keyOf(code, owner);
+    if (!vehicle.equals(actual)) {
+      throw new IllegalArgumentException("占用 " + code + " 的车辆身份是 " + actual + "，不是 " + vehicle);
     }
   }
 
