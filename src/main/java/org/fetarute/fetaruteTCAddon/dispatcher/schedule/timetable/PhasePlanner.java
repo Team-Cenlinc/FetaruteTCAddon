@@ -151,16 +151,6 @@ public final class PhasePlanner {
     }
   }
 
-  /** 旧签名：只按共用起点交错。 */
-  public static Phases plan(
-      List<ServiceGroupClassifier.Group> groups,
-      Map<String, Integer> intervalByGroup,
-      Map<UUID, Integer> runSecondsByRoute,
-      TurnaroundTable turnarounds,
-      int horizonSeconds) {
-    return plan(groups, intervalByGroup, runSecondsByRoute, turnarounds, horizonSeconds, Map.of());
-  }
-
   /**
    * 选相位。
    *
@@ -189,6 +179,9 @@ public final class PhasePlanner {
     // 林湾车库始发、大交路从克罗顿高地与南渡始发，三个起点互不相同，两组在长达六站的重合区段上从未被错开过——
     // 240/240 的表在重合段是"两班隔 55 秒挤在一起、再空 185 秒"，而不是均匀的 120 秒。改成沿途每一站都算合流点。
     Map<String, List<List<Integer>>> placedByStop = new TreeMap<>();
+    // 算不出沿途合流点、只能按起点交错的方向。它们与算得出的那些方向永远对不上（键的形状不同，
+    // 见 stopsOf），于是会悄悄退出第二层——所以要记一条 note 说出来。
+    List<String> withoutCalls = new ArrayList<>();
 
     for (ServiceGroupClassifier.Group group : groups) {
       if (group.directions().isEmpty()) {
@@ -202,6 +195,10 @@ public final class PhasePlanner {
       int offset = 0;
       List<String> shared = new ArrayList<>();
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        List<StopCall> own = calls.get(direction.key());
+        if (!calls.isEmpty() && (own == null || own.isEmpty())) {
+          withoutCalls.add(direction.key());
+        }
         for (StopCall call : stopsOf(direction, calls)) {
           if (placedByStop.containsKey(call.key()) && !shared.contains(call.key())) {
             shared.add(call.key());
@@ -215,6 +212,7 @@ public final class PhasePlanner {
         for (int candidate = 0; candidate < interval; candidate += SCAN_STEP_SECONDS) {
           int worst = 0;
           int tightest = Integer.MAX_VALUE;
+          int measured = 0;
           for (String stop : shared) {
             List<List<Integer>> streams = new ArrayList<>(placedByStop.get(stop));
             for (ServiceGroupClassifier.Direction direction : group.directions()) {
@@ -227,8 +225,15 @@ public final class PhasePlanner {
               }
             }
             int[] gaps = gapRange(streams);
+            if (gaps == NOT_MEASURABLE) {
+              continue; // 这个合流点量不出来（窗口太短、只有一条流），不参与打分
+            }
+            measured++;
             tightest = Math.min(tightest, gaps[0]);
             worst = Math.max(worst, gaps[1]);
+          }
+          if (measured == 0) {
+            continue; // 这个候选偏移一个合流点都量不出来，没有可比性
           }
           if (worst < bestGap || (worst == bestGap && tightest > bestTightest)) {
             bestGap = worst;
@@ -260,10 +265,19 @@ public final class PhasePlanner {
         }
       }
     }
+    if (!withoutCalls.isEmpty()) {
+      notes.add("这些方向算不出沿途合流点，只按起点交错，不会与算得出的方向互相错开：" + String.join("、", withoutCalls));
+    }
     return new Phases(phases, offsets, notes);
   }
 
-  /** 一个方向的合流点；没给停靠点信息时退回「起点站台组，偏移 0」，与只按共用起点交错的老行为一致。 */
+  /**
+   * 一个方向的合流点；没给停靠点信息时退回「起点站台组，偏移 0」，与只按共用起点交错的老行为一致。
+   *
+   * <p>注意这条退路的键是<b>光秃秃的站台组</b>，而正常路径的键是 {@code 本站台组→下一站台组}，两者永远
+   * 对不上。所以退路上的方向只跟同样走退路的方向交错，跟算得出合流点的方向不会。这是有意的——连它在哪 停靠都不知道，就没有依据说它和谁在同一个站台上合流——但不能悄悄发生，{@link
+   * #plan} 会为此记一条 note。
+   */
   private static List<StopCall> stopsOf(
       ServiceGroupClassifier.Direction direction, Map<String, List<StopCall>> calls) {
     List<StopCall> out = calls.get(direction.key());
@@ -384,7 +398,9 @@ public final class PhasePlanner {
     return min == Integer.MAX_VALUE ? 0 : min;
   }
 
-  /** 相邻发车的 {最小, 最大} 间隔；不足两条发车时都是 0。 */
+  /** {@link #gapRange} 量不出来时的回答：与"间隔为 0"必须分开，见那里的说明。 */
+  private static final int[] NOT_MEASURABLE = {0, 0};
+
   /** 一条周期流在窗口内的时刻。 */
   private static List<Integer> streamOf(int first, int interval, int horizonSeconds) {
     List<Integer> out = new ArrayList<>();
@@ -396,6 +412,9 @@ public final class PhasePlanner {
 
   /**
    * 几条周期流合起来的最小与最大间隔。
+   *
+   * <p>量不出来时交回 {@link #NOT_MEASURABLE} 而不是 {@code {0, 0}}：扫描按"最大间隔最小"选偏移， 而 0 是最小的可能值——把量不出来当成
+   * 0，等于给这个候选判了满分，它会盖过真正交错得好的那些。
    *
    * <p>只在<b>所有流都覆盖的区间</b>里算。各条流的首班时刻能差出很远（大交路从线路另一头开过来，小交路几分钟前
    * 才出库），直接把展开后的序列拼起来，开头和末尾那段"只有一条流"会冒出一个整整一个间隔大的空档，把真正的 合成间隔淹掉——扫描于是看哪个偏移都一样差，只能靠第二判据瞎选。
@@ -412,8 +431,10 @@ public final class PhasePlanner {
       from = Math.max(from, stream.get(0));
       to = Math.min(to, stream.get(stream.size() - 1));
     }
-    if (present == 0 || from > to) {
-      return new int[] {0, 0};
+    // 宽度为 0 的公共区间同样量不出来：各流的首末班正好重合时，合起来只有一个时刻，相邻间隔算出来是
+    // 0——而 0 是"最大间隔最小"这个目标下的满分。也就是说"所有车同时发"会拿到最好的分数。
+    if (present == 0 || from >= to) {
+      return NOT_MEASURABLE;
     }
     List<Integer> merged = new ArrayList<>();
     for (List<Integer> stream : streams) {
@@ -427,7 +448,7 @@ public final class PhasePlanner {
       }
     }
     if (merged.size() < 2) {
-      return new int[] {0, 0};
+      return NOT_MEASURABLE;
     }
     Collections.sort(merged);
     int min = Integer.MAX_VALUE;

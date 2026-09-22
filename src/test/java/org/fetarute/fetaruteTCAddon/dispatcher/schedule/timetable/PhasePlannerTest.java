@@ -38,7 +38,8 @@ class PhasePlannerTest {
             Map.of("default", 600),
             Map.of(RA, 500, RB, 500),
             TurnaroundTable.fixed(180),
-            3600);
+            3600,
+            Map.of());
 
     assertEquals(0, phases.phaseByDirection().get("OP:S:A→OP:S:C"));
     assertEquals((500 + 180) % 600, phases.phaseByDirection().get("OP:S:C→OP:S:A"));
@@ -59,7 +60,8 @@ class PhasePlannerTest {
             Map.of("default", 600),
             Map.of(RA, 500),
             TurnaroundTable.fixed(180),
-            3600);
+            3600,
+            Map.of());
 
     assertEquals(Map.of("OP:S:A→OP:S:C", 0), phases.phaseByDirection());
     assertTrue(phases.notes().isEmpty());
@@ -81,7 +83,8 @@ class PhasePlannerTest {
             Map.of("full", 600, "short", 600),
             Map.of(RA, 500, RS, 200),
             TurnaroundTable.fixed(180),
-            3600);
+            3600,
+            Map.of());
 
     assertEquals(0, phases.phaseByDirection().get("OP:S:A→OP:S:C"));
     assertEquals(300, phases.phaseByDirection().get("OP:S:A→OP:S:B"));
@@ -106,9 +109,109 @@ class PhasePlannerTest {
             Map.of("full", 600, "short", 300),
             Map.of(RA, 500, RS, 200),
             TurnaroundTable.fixed(180),
-            3600);
+            3600,
+            Map.of());
 
     assertEquals(150, phases.offsetByGroup().get("short"));
+  }
+
+  /**
+   * 起点各不相同、却在沿途重合的两组，要按<b>合流点</b>交错——这正是只按共用起点做不到的那件事。
+   *
+   * <p>大交路 A→D、小交路 B→D，两组都在 C 停靠、都往 D 去，于是共用合流点 {@code OP:S:C→OP:S:D}。 起点一个是 A 一个是
+   * B，老的"共用起点"判据在这里一个共用点都找不到，两组永远不会被错开。
+   */
+  @Test
+  void groupsWithDifferentOriginsAreInterleavedAtASharedMergePoint() {
+    ServiceGroupClassifier.Group full =
+        new ServiceGroupClassifier.Group(
+            "full", List.of(direction("OP:S:A", "OP:S:D", "RA", RA)), List.of());
+    ServiceGroupClassifier.Group shortTurn =
+        new ServiceGroupClassifier.Group(
+            "short", List.of(direction("OP:S:B", "OP:S:D", "RS", RS)), List.of());
+    // 两组到 C 的走行时分都是 400s：不把小交路推开，两班就在 C 同时发车。
+    Map<String, List<PhasePlanner.StopCall>> calls =
+        Map.of(
+            "OP:S:A→OP:S:D",
+                List.of(
+                    new PhasePlanner.StopCall("OP:S:A→OP:S:C", 0),
+                    new PhasePlanner.StopCall("OP:S:C→OP:S:D", 400)),
+            "OP:S:B→OP:S:D",
+                List.of(
+                    new PhasePlanner.StopCall("OP:S:B→OP:S:C", 0),
+                    new PhasePlanner.StopCall("OP:S:C→OP:S:D", 400)));
+
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            List.of(full, shortTurn),
+            Map.of("full", 600, "short", 600),
+            Map.of(RA, 500, RS, 200),
+            TurnaroundTable.fixed(180),
+            3600,
+            calls);
+
+    // 两班都在发车后 400s 到 C，要在 C 上把 600s 均分，小交路得整体推半个间隔。
+    assertEquals(300, phases.offsetByGroup().get("short"));
+    assertTrue(
+        phases.notes().stream().anyMatch(note -> note.contains("合流点")), phases.notes().toString());
+  }
+
+  /**
+   * 窗口太短、合流点上量不出两条发车时，这个候选偏移不能当成"最大间隔 0"——0 是最好的分数， 量不出来的候选会因此盖掉真正交错得好的那些。
+   *
+   * <p>这里窗口 600s、间隔 600s，每条流在公共区间里至多一个点，所有候选都量不出来：此时不该有任何一个 候选凭 0 分胜出，偏移保持 0。
+   */
+  @Test
+  void anUnmeasurableMergePointDoesNotScoreAsAPerfectOffset() {
+    ServiceGroupClassifier.Group full =
+        new ServiceGroupClassifier.Group(
+            "full", List.of(direction("OP:S:A", "OP:S:D", "RA", RA)), List.of());
+    ServiceGroupClassifier.Group shortTurn =
+        new ServiceGroupClassifier.Group(
+            "short", List.of(direction("OP:S:B", "OP:S:D", "RS", RS)), List.of());
+    Map<String, List<PhasePlanner.StopCall>> calls =
+        Map.of(
+            "OP:S:A→OP:S:D", List.of(new PhasePlanner.StopCall("OP:S:C→OP:S:D", 400)),
+            "OP:S:B→OP:S:D", List.of(new PhasePlanner.StopCall("OP:S:C→OP:S:D", 100)));
+
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            List.of(full, shortTurn),
+            Map.of("full", 600, "short", 600),
+            Map.of(RA, 500, RS, 200),
+            TurnaroundTable.fixed(180),
+            600,
+            calls);
+
+    assertEquals(0, phases.offsetByGroup().get("short"));
+  }
+
+  /** 算不出沿途合流点的方向会退回只按起点交错，与算得出的方向对不上——这件事必须说出来。 */
+  @Test
+  void aDirectionWithoutMergePointsIsCalledOutInTheNotes() {
+    ServiceGroupClassifier.Group full =
+        new ServiceGroupClassifier.Group(
+            "full", List.of(direction("OP:S:A", "OP:S:D", "RA", RA)), List.of());
+    ServiceGroupClassifier.Group shortTurn =
+        new ServiceGroupClassifier.Group(
+            "short", List.of(direction("OP:S:B", "OP:S:D", "RS", RS)), List.of());
+    // 只给大交路算出了合流点，小交路没有。
+    Map<String, List<PhasePlanner.StopCall>> calls =
+        Map.of("OP:S:A→OP:S:D", List.of(new PhasePlanner.StopCall("OP:S:C→OP:S:D", 400)));
+
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            List.of(full, shortTurn),
+            Map.of("full", 600, "short", 600),
+            Map.of(RA, 500, RS, 200),
+            TurnaroundTable.fixed(180),
+            3600,
+            calls);
+
+    assertTrue(
+        phases.notes().stream()
+            .anyMatch(note -> note.contains("算不出沿途合流点") && note.contains("OP:S:B→OP:S:D")),
+        phases.notes().toString());
   }
 
   /** 交错报告：按起点站台组叠加各子网格的发车，给出最小/中位/最大相邻间隔；只有一条发车的起点不列。 */

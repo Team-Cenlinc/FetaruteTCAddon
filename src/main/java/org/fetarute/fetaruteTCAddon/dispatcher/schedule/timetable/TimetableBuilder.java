@@ -946,11 +946,16 @@ public final class TimetableBuilder {
     Map<String, List<PhasePlanner.StopCall>> out = new LinkedHashMap<>();
     for (ServiceGroupClassifier.Group group : groups) {
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
-        if (direction.routeIds().isEmpty()) {
-          continue;
+        // 挨个试这个方向下的 route，而不是只认第一条：第一条要是没有投影（被筛掉、或者时分算不出来），
+        // 整个方向就没有合流点了，于是它在相位第二层上与谁都对不上、也不会有任何提示。
+        TimetableConflictChecker.RouteProfile profile = null;
+        for (UUID routeId : direction.routeIds()) {
+          TimetableConflictChecker.RouteProfile candidate = prepared.profiles().get(routeId);
+          if (candidate != null) {
+            profile = candidate;
+            break;
+          }
         }
-        TimetableConflictChecker.RouteProfile profile =
-            prepared.profiles().get(direction.routeIds().get(0));
         if (profile == null) {
           continue;
         }

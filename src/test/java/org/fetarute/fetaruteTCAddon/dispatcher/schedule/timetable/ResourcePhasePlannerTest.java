@@ -187,7 +187,8 @@ class ResourcePhasePlannerTest {
             Map.of(group.name(), interval),
             runByRoute,
             TurnaroundTable.fixed(40),
-            7200);
+            7200,
+            Map.of());
     String reverseKey =
         phases.phaseByDirection().entrySet().stream()
             .filter(entry -> entry.getValue() != 0)
