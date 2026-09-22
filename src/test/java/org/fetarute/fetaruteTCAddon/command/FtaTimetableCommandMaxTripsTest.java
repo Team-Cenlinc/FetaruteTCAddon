@@ -45,6 +45,34 @@ class FtaTimetableCommandMaxTripsTest {
     assertEquals(8, choice.trips());
     assertTrue(choice.description().contains("Full"), choice.description());
     assertTrue(choice.description().contains("maxOperationTrips"), choice.description());
+    assertEquals(Optional.of("Full"), choice.group(), "面板的 [改] 要指向值真正来源的那个组，不是第一个组");
+  }
+
+  /** 组 metadata 认到 1000，编表这边的 flag 只认到 64：从组配置走进来时受同一个上界。 */
+  @Test
+  void groupConfigurationIsCappedAtTheFlagCeiling() {
+    FtaTimetableCommand.MaxTripsChoice choice =
+        FtaTimetableCommand.resolveMaxTrips(null, List.of(group("Full", 1000)));
+
+    assertEquals(FtaTimetableCommand.MAX_TRIPS_CEILING, choice.trips());
+    assertTrue(choice.description().contains("收到上限"), choice.description());
+  }
+
+  /** 各组配得不一样时给出提醒：编表取最大，运行时按组各自的 FTA_OP_MAX 回收，配得小的那个组排出来的 交路比车跑得完的长，后面几班到点没车。 */
+  @Test
+  void mismatchedGroupsAreWarnedAbout() {
+    assertTrue(
+        FtaTimetableCommand.maxTripsMismatchWarning(List.of(group("Short", 4), group("Full", 8)))
+            .orElse("")
+            .contains("Short"),
+        "要点名配得小的那个组");
+    assertTrue(
+        FtaTimetableCommand.maxTripsMismatchWarning(List.of(group("Short", 8), group("Full", 8)))
+            .isEmpty(),
+        "配成一样就不该提醒");
+    assertTrue(
+        FtaTimetableCommand.maxTripsMismatchWarning(List.of(group("Short", null))).isEmpty(),
+        "一个都没配也不该提醒");
   }
 
   /** 组上没配的不参与比较；一个都没配就回落到默认。 */

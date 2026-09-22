@@ -132,7 +132,7 @@ public final class FtaTimetableCommand {
     var maxWaitFlag = intFlag("max-wait", "<seconds>", 0, 1800);
     var maxIdleFlag = intFlag("max-idle", "<seconds>", 30, 86400);
     var dwellFlag = intFlag("dwell", "<seconds>", 0, 600);
-    var maxTripsFlag = intFlag("max-trips", "<trips>", 1, 64);
+    var maxTripsFlag = intFlag("max-trips", "<trips>", 1, MAX_TRIPS_CEILING);
     var maxDutyFlag = intFlag("max-duty-minutes", "<minutes>", 1, 1440);
     var turnaroundFlag = intFlag("turnaround", "<seconds>", 0, 3600);
     var separationFlag = intFlag("separation", "<seconds>", 0, 3600);
@@ -339,6 +339,7 @@ public final class FtaTimetableCommand {
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
                 + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict --name --prefix --zone",
             NamedTextColor.DARK_GRAY));
+    sender.sendMessage(hint("参数一览", "/fta timetable config <company> <operator> <line>"));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
     sender.sendMessage(hint("详情", "/fta timetable info <company> <operator> <line> <code>"));
     sender.sendMessage(hint("车辆交路", "/fta timetable duties <company> <operator> <line> <code>"));
@@ -483,6 +484,7 @@ public final class FtaTimetableCommand {
     }
     MaxTripsChoice maxTrips = resolveMaxTrips(flags.maxTripsPerDuty(), spawnGroups);
     String maxTripsSource = maxTrips.description();
+    String maxTripsWarning = maxTripsMismatchWarning(spawnGroups).orElse("");
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             serviceStart,
@@ -606,7 +608,8 @@ public final class FtaTimetableCommand {
                               headwayChoice,
                               neighbors,
                               groupSources,
-                              maxTripsSource));
+                              maxTripsSource,
+                              maxTripsWarning));
             });
   }
 
@@ -710,10 +713,14 @@ public final class FtaTimetableCommand {
       TimetableHeadwayDefaults.Choice headway,
       NeighborReport neighbors,
       Map<String, String> groupSources,
-      String maxTripsSource) {
+      String maxTripsSource,
+      String maxTripsWarning) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(result, options, headway, groupSources, maxTripsSource);
+    if (!maxTripsWarning.isBlank()) {
+      sender.sendMessage(Component.text("  ! " + maxTripsWarning, NamedTextColor.YELLOW));
+    }
     report.sendNeighborReport(neighbors, result.neighbors());
     report.sendExternalConflicts(
         result.externalConflictsAtTarget(),
@@ -1144,6 +1151,32 @@ public final class FtaTimetableCommand {
     if (resolved == null) {
       return;
     }
+    // 取最新那张表的 code 会把这条线路的每张表连同它们的发车表与交路整个读出来（WS 一张就是九百多个
+    // 班次），放在主线程上做会卡一跳。读在异步线程，渲染回主线程。
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              // build 的第四个位置参数是时刻表 code：线路已经有表就拿最新那张的，没有就留占位让用户填。
+              // listByLine 按 code 字典序排，findFirst 拿到的是字典序第一张而不是最新那张——面板给出的
+              // 每一条命令都会指向它，点下去就把别的表重建了。按 updatedAt 取最大才是"最新"。
+              String tableCode =
+                  provider.timetables().listByLine(resolved.line().id()).stream()
+                      .max(Comparator.comparing(Timetable::updatedAt))
+                      .map(Timetable::code)
+                      .map(CommandUx::quoteCommandArgument)
+                      .orElse("<code>");
+              plugin
+                  .getServer()
+                  .getScheduler()
+                  .runTask(plugin, () -> sendConfigPanel(sender, resolved, tableCode));
+            });
+  }
+
+  /** 把参数面板发出去。{@code tableCode} 由 {@link #handleConfig} 在异步线程上取好。 */
+  private void sendConfigPanel(CommandSender sender, ResolvedLine resolved, String tableCode) {
     Line line = resolved.line();
     List<SpawnGroup> groups = LineSpawnMetadata.parseGroups(line.metadata());
     // 命令参数认的是 code 不是 name，与报告里的重建命令同一口径。
@@ -1153,67 +1186,67 @@ public final class FtaTimetableCommand {
             + resolved.operator().code()
             + " "
             + CommandUx.quoteCommandArgument(line.code());
-    // build 的第四个位置参数是时刻表 code：线路已经有表就拿最新那张的，没有就留占位让用户填。
-    String tableCode =
-        provider.timetables().listByLine(line.id()).stream()
-            .map(Timetable::code)
-            .findFirst()
-            .map(CommandUx::quoteCommandArgument)
-            .orElse("<code>");
     String buildPrefix = "/fta timetable build " + scope + " " + tableCode;
     String groupPrefix = "/fta route group set " + scope + " ";
 
     sender.sendMessage(
         Component.text("===== 编表参数 " + line.code() + " =====", NamedTextColor.DARK_AQUA));
 
+    // 发车间隔走 build 用的同一个解析器。面板自己再推一条链的话，两边迟早算出不同的数，
+    // 而"这个值到底从哪来"正是这个面板存在的唯一理由。
+    Map<String, TimetableHeadwayDefaults.Choice> intervals =
+        TimetableHeadwayDefaults.resolveGroups(
+            Optional.empty(),
+            Map.of(),
+            line.spawnFreqBaselineSec(),
+            groups,
+            groups.stream().map(SpawnGroup::name).toList());
     if (groups.isEmpty()) {
+      TimetableHeadwayDefaults.Choice headway =
+          TimetableHeadwayDefaults.resolve(Optional.empty(), line.spawnFreqBaselineSec(), groups);
       sender.sendMessage(
           configRow(
               "发车间隔",
-              line.spawnFreqBaselineSec().map(seconds -> seconds + "s").orElse("300s"),
-              line.spawnFreqBaselineSec().isPresent() ? "线路 baseline" : "默认",
+              headway.seconds() + "s",
+              headway.description(),
               CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --headway ", "只对这一次构建生效")));
     }
-    for (SpawnGroup group : groups) {
-      String value =
-          group
-              .baselineSeconds()
-              .map(seconds -> seconds + "s")
-              .orElseGet(() -> line.spawnFreqBaselineSec().map(s -> s + "s").orElse("300s"));
-      String from =
-          group.baselineSeconds().isPresent()
-              ? "交路组 baseline"
-              : line.spawnFreqBaselineSec().isPresent() ? "线路 baseline" : "默认";
-      sender.sendMessage(
-          configRow(
-              "发车间隔 " + group.name(),
-              value,
-              from,
-              CommandUx.suggestAction(
-                  "[改]",
-                  groupPrefix + CommandUx.quoteCommandArgument(group.name()) + " --baseline ",
-                  "写进交路组，之后每次构建都算数")));
-    }
+    intervals.forEach(
+        (name, choice) ->
+            sender.sendMessage(
+                configRow(
+                    "发车间隔 " + name,
+                    choice.seconds() + "s",
+                    choice.description(),
+                    CommandUx.suggestAction(
+                        "[改]",
+                        groupPrefix + CommandUx.quoteCommandArgument(name) + " --baseline ",
+                        "写进交路组，之后每次构建都算数"))));
 
     MaxTripsChoice maxTrips = resolveMaxTrips(null, groups);
+    // [改] 指向值<b>真正来源</b>的那个组。原来固定指第一个组：来源写着 Full、按钮却改 Short，
+    // 而取的又是最大值，于是改 Short 根本不动生效值——点了等于没点。
     Component maxTripsAction =
-        groups.isEmpty()
-            ? CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-trips ", "只对这一次构建生效")
-            : CommandUx.suggestAction(
-                "[改]",
-                groupPrefix
-                    + CommandUx.quoteCommandArgument(groups.get(0).name())
-                    + " --max-trips ",
-                "写进交路组，之后每次构建都算数");
+        maxTrips
+            .group()
+            .map(
+                name ->
+                    CommandUx.suggestAction(
+                        "[改]",
+                        groupPrefix + CommandUx.quoteCommandArgument(name) + " --max-trips ",
+                        "写进交路组，之后每次构建都算数"))
+            .orElseGet(
+                () ->
+                    CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-trips ", "只对这一次构建生效"));
     sender.sendMessage(
         configRow("交路上限", maxTrips.trips() + " 班/交路", maxTrips.description(), maxTripsAction));
 
-    int maxIdle = resolveMaxIdleSeconds(null);
+    MaxIdleChoice idle = resolveMaxIdle(null);
     sender.sendMessage(
         configRow(
             "端点闲置上限",
-            maxIdle >= NO_IDLE_LIMIT_SECONDS ? "不限" : maxIdle + "s",
-            "config.yml 的 reclaim.max-idle-seconds",
+            idle.seconds() >= NO_IDLE_LIMIT_SECONDS ? "不限" : idle.seconds() + "s",
+            idle.description(),
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-idle ", "只对这一次构建生效")));
 
     ConfigManager.TimetableSettings settings =
@@ -1251,10 +1284,20 @@ public final class FtaTimetableCommand {
             "默认（无持久化位置）",
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --turnaround ", "给全线钉一个固定值")));
 
+    maxTripsMismatchWarning(groups)
+        .ifPresent(
+            text -> sender.sendMessage(Component.text("  ! " + text, NamedTextColor.YELLOW)));
     for (SpawnGroup group : groups) {
       int interval =
-          group.baselineSeconds().orElseGet(() -> line.spawnFreqBaselineSec().orElse(300));
-      if (interval > maxIdle) {
+          intervals
+              .getOrDefault(
+                  group.name(),
+                  new TimetableHeadwayDefaults.Choice(
+                      TimetableBuildOptions.DEFAULT_HEADWAY_SECONDS,
+                      TimetableHeadwayDefaults.Source.DEFAULT,
+                      "默认值"))
+              .seconds();
+      if (interval > idle.seconds()) {
         sender.sendMessage(
             Component.text(
                 "  ! 交路组 "
@@ -1262,7 +1305,7 @@ public final class FtaTimetableCommand {
                     + " 的间隔 "
                     + interval
                     + "s 超过端点闲置上限 "
-                    + maxIdle
+                    + idle.seconds()
                     + "s：车等不到下一班就会回库，这个组的交路会整体断掉"
                     + "（症状是班次被大量取消、报 NO_CREATE_ACCESS）。",
                 NamedTextColor.YELLOW));
@@ -1970,7 +2013,14 @@ public final class FtaTimetableCommand {
    * @param trips 生效的单交路最多班次
    * @param description 来源说明，进报告
    */
-  record MaxTripsChoice(int trips, String description) {}
+  record MaxTripsChoice(int trips, String description, Optional<String> group) {
+    MaxTripsChoice {
+      group = group == null ? Optional.empty() : group;
+    }
+  }
+
+  /** 交路上限的上界：与 {@code --max-trips} 的取值范围共用一个数，组配置不能绕过它。 */
+  static final int MAX_TRIPS_CEILING = 64;
 
   /**
    * 解析单个交路最多几班：{@code --max-trips} > 交路组的 {@code maxOperationTrips} > 默认。
@@ -1982,7 +2032,7 @@ public final class FtaTimetableCommand {
    */
   static MaxTripsChoice resolveMaxTrips(Integer flag, List<SpawnGroup> groups) {
     if (flag != null) {
-      return new MaxTripsChoice(flag, "--max-trips");
+      return new MaxTripsChoice(clampMaxTrips(flag), "--max-trips", Optional.empty());
     }
     int best = 0;
     String from = "";
@@ -1994,9 +2044,67 @@ public final class FtaTimetableCommand {
       }
     }
     if (best > 0) {
-      return new MaxTripsChoice(best, "交路组 " + from + " 的 maxOperationTrips");
+      int capped = clampMaxTrips(best);
+      return new MaxTripsChoice(
+          capped,
+          "交路组 " + from + " 的 maxOperationTrips" + (capped == best ? "" : "（已收到上限 " + capped + "）"),
+          Optional.of(from));
     }
-    return new MaxTripsChoice(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS, "默认");
+    return new MaxTripsChoice(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS, "默认", Optional.empty());
+  }
+
+  /**
+   * 收进 {@code --max-trips} 的取值范围。
+   *
+   * <p>{@code /fta route group set --max-trips} 认到 1000（它那边是运行时的每车上限），编表这边的 flag 只认到 {@value
+   * #MAX_TRIPS_CEILING}。组配置走进来时得受同一个上界，否则等于从旁边绕过了 flag 的校验， 排出一条几百班的交路。
+   */
+  private static int clampMaxTrips(int trips) {
+    return Math.max(1, Math.min(MAX_TRIPS_CEILING, trips));
+  }
+
+  /**
+   * 各组 {@code maxOperationTrips} 不一致时的提醒。
+   *
+   * <p>编表只有<b>一个</b>全局上限（取各组最大，见 {@link #resolveMaxTrips}），运行时却是<b>按组</b>卡的： {@code
+   * SimpleTicketAssigner} 把该班所属组的 {@code maxOperationTrips} 写进车的 {@code FTA_OP_MAX}， {@code
+   * ReclaimManager} 一到数就回收。于是配得小的那个组，排出来的交路比车实际跑得完的长，后面几班到点 没车——症状又是「班次被大量取消」，离病因很远。
+   *
+   * <p>取最大是有意的（一条交路可以跨组接班，按最小卡会把长交路误伤），所以这里只提醒，不改排表。
+   */
+  static Optional<String> maxTripsMismatchWarning(List<SpawnGroup> groups) {
+    int max = 0;
+    int min = Integer.MAX_VALUE;
+    String smallest = "";
+    for (SpawnGroup group : groups == null ? List.<SpawnGroup>of() : groups) {
+      Optional<Integer> configured = group.maxOperationTrips();
+      if (configured.isEmpty() || configured.get() <= 0) {
+        continue;
+      }
+      max = Math.max(max, configured.get());
+      if (configured.get() < min) {
+        min = configured.get();
+        smallest = group.name();
+      }
+    }
+    if (max <= 0 || min >= max) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        "交路组 "
+            + smallest
+            + " 的 maxOperationTrips 是 "
+            + min
+            + "，而编表按各组最大值 "
+            + max
+            + " 排：运行时 "
+            + smallest
+            + " 的车跑到第 "
+            + min
+            + " 班就会被回收，后面的班次到点没车（症状是班次被大量取消）。"
+            + "要么把两个组配成一样，要么这次带 --max-trips "
+            + min
+            + " 重排。");
   }
 
   private static Optional<String> readSpawnGroup(Route route) {
@@ -2060,22 +2168,35 @@ public final class FtaTimetableCommand {
    * 分钟，运行时 5 分钟就收走了）。
    */
   private int resolveMaxIdleSeconds(Integer requested) {
+    return resolveMaxIdle(requested).seconds();
+  }
+
+  /** 端点闲置上限的生效值与来源。 */
+  record MaxIdleChoice(int seconds, String description) {}
+
+  /**
+   * 同上，另外交回来源。
+   *
+   * <p>三个分支来源各不相同，面板不能一律写成「config.yml 的 reclaim.max-idle-seconds」：
+   * 回收关着的时候值是"不限"，与那个键没有关系，照着去改那个键不会有任何变化。
+   */
+  private MaxIdleChoice resolveMaxIdle(Integer requested) {
     if (requested != null) {
-      return requested;
+      return new MaxIdleChoice(requested, "--max-idle");
     }
     if (plugin.getConfigManager() != null && plugin.getConfigManager().current() != null) {
       ConfigManager.ReclaimSettings reclaim = plugin.getConfigManager().current().reclaimSettings();
       if (!reclaim.enabled()) {
         // 回收关着：运行时的待命车不会被收走，会一直等到下一班。编表也必须让它等，
         // 否则会把运行时实际跑得了的班次当成"没有车"取消掉。
-        return NO_IDLE_LIMIT_SECONDS;
+        return new MaxIdleChoice(NO_IDLE_LIMIT_SECONDS, "config.yml 的 reclaim.enabled 关着");
       }
       long configured = reclaim.maxIdleSeconds();
       if (configured > 0 && configured <= NO_IDLE_LIMIT_SECONDS) {
-        return (int) configured;
+        return new MaxIdleChoice((int) configured, "config.yml 的 reclaim.max-idle-seconds");
       }
     }
-    return VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS;
+    return new MaxIdleChoice(VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS, "默认");
   }
 
   /** {@code --group-headway} 的补全：本线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。 */
