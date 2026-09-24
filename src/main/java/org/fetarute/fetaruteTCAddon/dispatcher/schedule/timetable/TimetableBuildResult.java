@@ -37,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param shifts 因端点串行偏离名义时隙的班次
  * @param yields 让车清单：已写进表的延后（对邻表让的带 owner）
  * @param terminals 容量 1 端点的报告（经过次数、占用、结构下界）
+ * @param throats 车库咽喉的报告（出入库经过次数、占用、出库在库内等了几班）
  * @param groupIntervals 各交路组的目标间隔与实际间隔
  * @param interleaves 共用起点站台组上的合成间隔
  * @param dutyShapes 交路形状：跑几班的交路各有多少条
@@ -63,6 +64,7 @@ public record TimetableBuildResult(
     List<TripShift> shifts,
     List<ResourceRepair.Yield> yields,
     List<TerminalSerializer.TerminalReport> terminals,
+    List<TerminalSerializer.ThroatReport> throats,
     List<GroupInterval> groupIntervals,
     List<PhasePlanner.Interleave> interleaves,
     List<DutyShape> dutyShapes,
@@ -90,6 +92,7 @@ public record TimetableBuildResult(
     baselines = baselines == null ? List.of() : List.copyOf(baselines);
     shifts = shifts == null ? List.of() : List.copyOf(shifts);
     terminals = terminals == null ? List.of() : List.copyOf(terminals);
+    throats = throats == null ? List.of() : List.copyOf(throats);
     groupIntervals = groupIntervals == null ? List.of() : List.copyOf(groupIntervals);
     interleaves = interleaves == null ? List.of() : List.copyOf(interleaves);
     dutyShapes = dutyShapes == null ? List.of() : List.copyOf(dutyShapes);
@@ -146,6 +149,7 @@ public record TimetableBuildResult(
         0,
         0,
         0,
+        List.of(),
         List.of(),
         List.of(),
         List.of(),

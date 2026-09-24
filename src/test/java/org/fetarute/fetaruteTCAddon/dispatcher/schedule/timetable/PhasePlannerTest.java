@@ -273,7 +273,17 @@ class PhasePlannerTest {
   /** 远端多等不能超过"间隔 − 远端一次折返的占用"：再久下一班到远端时上一辆车还占着那股道。 */
   @Test
   void farEndWaitIsCappedByTheFarEndOccupancy() {
-    PhasePlanner.Phases phases = planWsLike(120);
+    // 远端 Z 一次折返占 120 秒，端点 A 仍是 55。
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            wsLikeGroups(),
+            Map.of("full", 150, "short", 150),
+            Map.of(RA, 575, RB, 582, RS, 226),
+            TurnaroundTable.fixed(20),
+            3600,
+            Map.of(),
+            new PhasePlanner.Topology(
+                Set.of("OP:S:A"), (g, a, d) -> g.equals("OP:S:Z") ? 120 : 55));
 
     PhasePlanner.Connection connection = phases.connections().get(0);
     assertEquals(30, connection.farEndWaitSeconds(), "上限 150 − 120 = 30，取上限内错开最远的");
@@ -323,6 +333,59 @@ class PhasePlannerTest {
     assertTrue(without.connections().isEmpty());
     assertEquals((575 + 20) % 150, without.phaseByDirection().get("OP:S:Z→OP:S:A"), "没有接续就没有远端多等");
     assertEquals(1, withShape.connections().size());
+  }
+
+  /**
+   * 远端多等同时看车库咽喉：只看端点时选 78 秒（端点两次折返间隙 20），可那样喂车方向出库与反向车回库在咽喉上重叠 12 秒——
+   * 咽喉一串行，出库车在库里一等就晚到端点。两边都看时取两个间隙里较小的最大：94 秒，端点与咽喉各留 4 秒。
+   *
+   * <p>几何照 WS@150：出库在发车后 6–62 秒占咽喉（已含裕量），回库在反向车到端点后 199–252 秒占咽喉；端点每次折返占 55 秒。
+   */
+  @Test
+  void farEndWaitBalancesTheTerminalAndTheDepotThroat() {
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            wsLikeGroups(),
+            Map.of("full", 150, "short", 150),
+            Map.of(RA, 575, RB, 582, RS, 226),
+            TurnaroundTable.fixed(20),
+            3600,
+            Map.of(),
+            new PhasePlanner.Topology(
+                Set.of("OP:S:A"),
+                (g, a, d) -> 55,
+                (feeder, back) ->
+                    java.util.Optional.of(new PhasePlanner.ThroatWindows(6, 62, 199, 252))));
+
+    PhasePlanner.Connection connection = phases.connections().get(0);
+    assertEquals(94, connection.farEndWaitSeconds());
+    int feederDeparture = 54;
+    int feederArrival = 130;
+    int backArrival = 127 + 94;
+    assertEquals(
+        4,
+        PhasePlanner.arcGap(feederArrival, feederArrival + 55, backArrival, backArrival + 55, 150));
+    assertEquals(
+        4,
+        PhasePlanner.arcGap(
+            feederDeparture + 6, feederDeparture + 62, backArrival + 199, backArrival + 252, 150));
+    // 只看端点的那个 78 秒：咽喉重叠 12 秒。
+    assertEquals(
+        -12,
+        PhasePlanner.arcGap(
+            feederDeparture + 6, feederDeparture + 62, 127 + 78 + 199, 127 + 78 + 252, 150));
+  }
+
+  /** 圆周上两段弧的间隙：不相交时取两侧较小的空档，相交时是负的重叠秒数，跨零点照算。 */
+  @Test
+  void arcGapHandlesWrapAround() {
+    assertEquals(10, PhasePlanner.arcGap(0, 50, 60, 100, 150));
+    assertEquals(-20, PhasePlanner.arcGap(0, 50, 30, 80, 150));
+    assertEquals(
+        20,
+        PhasePlanner.arcGap(130, 160, 40, 110, 150),
+        "130–160 跨零点到 10，与 40 隔 30、110 到 130 隔 20");
+    assertEquals(-5, PhasePlanner.arcGap(100, 150, 145, 170, 150));
   }
 
   private static List<ServiceGroupClassifier.Group> wsLikeGroups() {

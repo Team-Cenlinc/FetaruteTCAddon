@@ -123,6 +123,40 @@ class TerminalSerializerTest {
     assertEquals(10, dep.get("RL@0"), "后到的排在它后面，只晚 10 秒");
   }
 
+  /**
+   * 车库咽喉：回库优先，出库在车库里等空档。
+   *
+   * <p>DEP–A 那条边是出库（RO：DEP→A→XJ→X）与回库（RD：X→XJ→A→DEP）共用的咽喉。D002 的车跑完 RB 在 X 折返后走 RD 回库： 回库票 20 + 折返
+   * 60 = 80 秒发，100–110 秒在咽喉上，加裕量占到 140。D001 名义 95 秒出库，95–135 会撞上它，于是在车库里等到 140。
+   */
+  @Test
+  void outboundWaitsInTheDepotForTheInboundToClearTheThroat() {
+    UUID ro = profile("RO", List.of(DEPOT, A1, X_APPROACH, X));
+    UUID rd = profile("RD", List.of(X, X_APPROACH, A1, DEPOT));
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RO@95", ro, 95)), 95, Optional.of(ret)),
+            duty("D002", List.of(trip("RB@0", rb, 0)), 0, Optional.of(rd)));
+
+    TerminalSerializer.Result result = TerminalSerializer.serialize(input(provisional, List.of()));
+
+    Map<String, Integer> dep = departures(result.timetable());
+    assertEquals(0, dep.get("RB@0"), "回库那一路不挪");
+    assertEquals(140, dep.get("RO@95"), "出库在车库里等回库车过完咽喉");
+    assertTrue(
+        result.shifts().stream()
+            .anyMatch(shift -> shift.reason() == TerminalSerializer.Shift.Reason.WAIT_FOR_THROAT));
+    assertEquals(1, result.throats().size());
+    TerminalSerializer.ThroatReport throat = result.throats().get(0);
+    assertEquals("OP:D:DEP", throat.depot());
+    assertEquals(1, throat.edges());
+    assertEquals(1, throat.outbound());
+    assertEquals(1, throat.inbound());
+    assertEquals(1, throat.waited());
+    assertEquals(45, throat.maxWaitSeconds());
+    assertEquals(0, throat.inboundOverlaps());
+  }
+
   /** 交路时刻跟着改：延后的首班让出库提前量不变（plannedStart 同步后移），回库票 = 末班实际到达 + 折返。 */
   @Test
   void dutyTimesFollowTheShiftedTrips() {
@@ -463,6 +497,8 @@ class TerminalSerializerTest {
     }
     nodes.put(NodeId.of(X_APPROACH), node(X_APPROACH, NodeType.WAYPOINT));
     nodes.put(NodeId.of(DEPOT), node(DEPOT, NodeType.DEPOT));
+    // 车库两股道：否则一股道的车库会被当成容量 1 的端点。
+    nodes.put(NodeId.of("OP:D:DEP:2"), node("OP:D:DEP:2", NodeType.DEPOT));
     nodes.put(NodeId.of(FAR_AWAY), node(FAR_AWAY, NodeType.WAYPOINT));
     Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
     edge(edges, A1, X_APPROACH, 100);

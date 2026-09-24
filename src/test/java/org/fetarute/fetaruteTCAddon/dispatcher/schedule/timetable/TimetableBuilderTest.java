@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -500,11 +501,18 @@ class TimetableBuilderTest {
     assertFalse(result.conflictsAtTarget().isEmpty());
     assertTrue(result.warnings().stream().anyMatch(text -> text.contains("已回退到最小可行间隔")));
     Timetable timetable = result.timetable().orElseThrow();
+    // 比名义时隙：DEP–A 是出库与回库共用的车库咽喉，第二趟的出库要等第一趟的回库车过完，实际发车会晚几秒。
+    Map<String, Integer> nominal = new HashMap<>();
+    for (TimetableBuildResult.TripShift shift : result.shifts()) {
+      nominal.put(shift.tripCode(), shift.nominalSecondOfDay());
+    }
+    TimetableTrip first = timetable.trips().get(0);
+    TimetableTrip second = timetable.trips().get(1);
     assertEquals(
         result.effectiveHeadwaySeconds(),
-        timetable.trips().get(1).departureSecondOfDay()
-            - timetable.trips().get(0).departureSecondOfDay(),
-        "发车表按回退后的间隔铺开");
+        nominal.getOrDefault(second.tripCode(), second.departureSecondOfDay())
+            - nominal.getOrDefault(first.tripCode(), first.departureSecondOfDay()),
+        "发车表的名义时隙按回退后的间隔铺开");
 
     // 用回退后的间隔再建一次：不该再有冲突，这就是"最小可行"的定义。
     TimetableBuildResult rebuilt =

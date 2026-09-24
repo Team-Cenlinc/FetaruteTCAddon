@@ -96,6 +96,8 @@ public final class TerminalSerializer {
     public enum Reason {
       /** 终点是单股道端点，等它空出来。 */
       WAIT_FOR_TERMINAL,
+      /** 出库要等车库咽喉空出来：在车库里等，整趟延后。 */
+      WAIT_FOR_THROAT,
       /** 起点是单股道端点，发车锚在车上（到达 + 折返）。 */
       ANCHORED_TO_VEHICLE,
       /** 本车上一班延后了，就绪晚于名义时隙。 */
@@ -138,25 +140,55 @@ public final class TerminalSerializer {
       int truncated) {}
 
   /**
+   * 一座车库咽喉的统计。
+   *
+   * @param depot 车库站台组
+   * @param edges 咽喉的边数（出库与回库共用的那段）
+   * @param outbound 出库经过次数
+   * @param inbound 回库经过次数
+   * @param occupiedSeconds 占用秒数（含裕量）
+   * @param utilization 占用 / 计划窗口
+   * @param waited 为等咽喉而在车库里延后的出库班次
+   * @param maxWaitSeconds 其中最长的一次
+   * @param inboundOverlaps 回库撞上已排好的出库（回库优先，但已排的不再挪，交给冲突检查）
+   */
+  public record ThroatReport(
+      String depot,
+      int edges,
+      int outbound,
+      int inbound,
+      int occupiedSeconds,
+      double utilization,
+      int waited,
+      int maxWaitSeconds,
+      int inboundOverlaps) {}
+
+  /**
    * 输出。
    *
    * @param timetable 时刻已改写的表（trips、duties 的 plannedStart / returnSecond / plannedEnd 跟着变；截断的交路少了尾段）
    * @param shifts 偏离名义时隙的班次
    * @param truncatedTripIds 被截断的班次（临时 id）
    * @param terminals 各端点报告，按组键排序
+   * @param throats 各车库咽喉报告，按车库键排序
    */
   public record Result(
       Timetable timetable,
       List<Shift> shifts,
       List<UUID> truncatedTripIds,
-      List<TerminalReport> terminals) {
+      List<TerminalReport> terminals,
+      List<ThroatReport> throats) {
     public Result {
       Objects.requireNonNull(timetable, "timetable");
       shifts = shifts == null ? List.of() : List.copyOf(shifts);
       truncatedTripIds = truncatedTripIds == null ? List.of() : List.copyOf(truncatedTripIds);
       terminals = terminals == null ? List.of() : List.copyOf(terminals);
+      throats = throats == null ? List.of() : List.copyOf(throats);
     }
   }
+
+  /** 端点与咽喉互相推的轮数上限：推一处可能让另一处重新撞上，来回几轮就该收敛；到上限仍没收敛的交给冲突检查。 */
+  static final int MAX_SLIDE_ROUNDS = 16;
 
   /** 串行主入口。没有容量 1 的端点时原样返回。 */
   public static Result serialize(Input input) {
@@ -170,8 +202,9 @@ public final class TerminalSerializer {
       }
     }
     List<String> terminals = terminalGroups(input.index(), operationProfiles);
-    if (terminals.isEmpty()) {
-      return new Result(table, List.of(), List.of(), List.of());
+    DepotThroats throats = throatsOf(input);
+    if (terminals.isEmpty() && throats.isEmpty()) {
+      return new Result(table, List.of(), List.of(), List.of(), List.of());
     }
     Set<String> terminalSet = new HashSet<>(terminals);
     int zero = input.zeroSecondOfDay();
@@ -186,6 +219,14 @@ public final class TerminalSerializer {
       bookings.put(group, neighborBookings(input.neighbors(), group, separation));
     }
     Map<String, int[]> stats = new TreeMap<>(); // visits, occupied, nowhereToWait, truncated
+    // 车库咽喉也是一张预订表：回库优先（它来自已经跑完的交路，挪不动也不该挪），出库在车库里等空档。
+    Map<String, List<int[]>> throatBookings = new TreeMap<>();
+    Map<String, int[]> throatStats =
+        new TreeMap<>(); // out, in, occupied, waited, maxWait, overlaps
+    for (String depot : throats.depots()) {
+      throatBookings.put(depot, new ArrayList<>());
+      throatStats.put(depot, new int[6]);
+    }
 
     int[] next = new int[duties.size()];
     int[] ready = new int[duties.size()];
@@ -237,24 +278,60 @@ public final class TerminalSerializer {
       boolean terminalIsStub = terminalSet.contains(terminalGroup);
       int[] stat = null;
       int in = 0;
+      int outRun = 0;
       if (terminalIsStub) {
         stat = stats.computeIfAbsent(terminalGroup, key -> new int[4]);
         in = approachIn(profile, terminalGroup, input.index().sections());
-        boolean hasNext = i + 1 < chain.size();
-        int out = outRunOf(chain, i, hasNext, duty, input, terminalGroup);
-        int earliest =
-            slideAfterBookings(
-                bookings.get(terminalGroup), arrival, in, turnaround + out + separation);
-        if (earliest > arrival) {
-          if (originTerminal) {
-            // 起点也是单股道端点：延后就是占着起点不走，只会把冲突搬家。不延后，照常登记，交给冲突检查报出来。
-            stat[2]++;
-          } else {
-            dep += earliest - arrival;
-            arrival = earliest;
-            reason = Shift.Reason.WAIT_FOR_TERMINAL;
+        outRun = outRunOf(chain, i, i + 1 < chain.size(), duty, input, terminalGroup);
+      }
+      // 交路的第一班若要出库（本班从车库始发，或交路挂着 CREATE 走行），出库那段咽喉占用跟着这一班走。
+      Optional<DepotThroats.Passage> outbound =
+          i == 0 ? outboundPassage(throats, trip, duty) : Optional.empty();
+      int outboundBase = i == 0 ? outboundBase(throats, trip, duty) : 0;
+      boolean nowhereToWait = false;
+      int throatWait = 0;
+      // 咽喉与端点互相推：出库晚了到端点也晚，端点再推又可能撞回咽喉，来回直到两边都放得下。
+      for (int round = 0; round < MAX_SLIDE_ROUNDS; round++) {
+        boolean moved = false;
+        if (outbound.isPresent()) {
+          DepotThroats.Passage passage = outbound.get();
+          int enter = dep + outboundBase + passage.enterOffset();
+          int slid =
+              slideAfterBookings(
+                  throatBookings.get(passage.depot()),
+                  enter,
+                  0,
+                  passage.exitOffset() - passage.enterOffset() + separation);
+          if (slid > enter) {
+            dep += slid - enter;
+            throatWait += slid - enter;
+            reason = Shift.Reason.WAIT_FOR_THROAT;
+            moved = true;
           }
         }
+        arrival = dep + plan.totalRunSeconds();
+        if (terminalIsStub) {
+          int earliest =
+              slideAfterBookings(
+                  bookings.get(terminalGroup), arrival, in, turnaround + outRun + separation);
+          if (earliest > arrival) {
+            if (originTerminal) {
+              // 起点也是单股道端点：延后就是占着起点不走，只会把冲突搬家。不延后，照常登记，交给冲突检查报出来。
+              nowhereToWait = true;
+            } else {
+              dep += earliest - arrival;
+              arrival = earliest;
+              reason = Shift.Reason.WAIT_FOR_TERMINAL;
+              moved = true;
+            }
+          }
+        }
+        if (!moved) {
+          break;
+        }
+      }
+      if (nowhereToWait) {
+        stat[2]++;
       }
       if (dep != nominal
           && exceedsLimits(
@@ -288,12 +365,27 @@ public final class TerminalSerializer {
       }
       int nextReady = arrival + turnaround;
       if (terminalIsStub) {
-        boolean hasNext = i + 1 < chain.size();
-        int out = outRunOf(chain, i, hasNext, duty, input, terminalGroup);
-        int cost = in + turnaround + out + separation;
+        int cost = in + turnaround + outRun + separation;
         stat[0]++;
         stat[1] += cost;
-        book(bookings.get(terminalGroup), arrival - in, nextReady + out + separation);
+        book(bookings.get(terminalGroup), arrival - in, nextReady + outRun + separation);
+      }
+      if (outbound.isPresent()) {
+        DepotThroats.Passage passage = outbound.get();
+        int[] throatStat = throatStats.get(passage.depot());
+        int from = dep + outboundBase + passage.enterOffset();
+        int to = dep + outboundBase + passage.exitOffset() + separation;
+        book(throatBookings.get(passage.depot()), from, to);
+        throatStat[0]++;
+        throatStat[2] += to - from;
+        if (throatWait > 0) {
+          throatStat[3]++;
+          throatStat[4] = Math.max(throatStat[4], throatWait);
+        }
+      }
+      if (i + 1 >= kept[d]) {
+        // 交路收尾：回库那段咽喉占用在这里就定了（末班到达 + 折返发回库票，与改写交路同一口径）。
+        bookInbound(throats, trip, duty, dep, nextReady, separation, throatBookings, throatStats);
       }
       advance(d, chain, next, ready, table, input, queue, zero, terminalSet, nextReady);
     }
@@ -333,10 +425,25 @@ public final class TerminalSerializer {
               stat[2],
               stat[3]));
     }
+    List<ThroatReport> throatReports = new ArrayList<>(throats.depots().size());
+    for (String depot : throats.depots()) {
+      int[] t = throatStats.get(depot);
+      throatReports.add(
+          new ThroatReport(
+              depot,
+              throats.edgeCount(depot),
+              t[0],
+              t[1],
+              t[2],
+              input.horizonSeconds() <= 0 ? 0.0D : (double) t[2] / input.horizonSeconds(),
+              t[3],
+              t[4],
+              t[5]));
+    }
     shifts.sort(
         Comparator.comparingInt(Shift::actualSeconds)
             .thenComparing(shift -> shift.tripId().toString()));
-    return new Result(out, shifts, new ArrayList<>(truncated), reports);
+    return new Result(out, shifts, new ArrayList<>(truncated), reports, throatReports);
   }
 
   /**
@@ -547,6 +654,66 @@ public final class TerminalSerializer {
       chains.add(chain);
     }
     return chains;
+  }
+
+  private static DepotThroats throatsOf(Input input) {
+    List<UUID> operationRoutes = new ArrayList<>();
+    for (TimetableRoutePlan plan : input.operationPlans()) {
+      operationRoutes.add(plan.routeId());
+    }
+    return DepotThroats.of(input.profiles(), operationRoutes, input.legs());
+  }
+
+  /** 交路首班的出库咽喉占用：本班从车库始发时是它自己，否则是交路挂的 CREATE 走行。 */
+  private static Optional<DepotThroats.Passage> outboundPassage(
+      DepotThroats throats, TimetableTrip trip, VehicleDuty duty) {
+    Optional<DepotThroats.Passage> own = throats.outbound(trip.routeId());
+    if (own.isPresent()) {
+      return own;
+    }
+    return duty.createRouteId().flatMap(throats::outbound);
+  }
+
+  /**
+   * 出库走行相对首班发车的偏移：本班自己出库时是 0；CREATE 走行在首班之前发出，提前量取临时表里的原值—— 首班延后时出库票同步后移（见 {@link #rewrite}），提前量不变。
+   */
+  private static int outboundBase(DepotThroats throats, TimetableTrip trip, VehicleDuty duty) {
+    if (throats.outbound(trip.routeId()).isPresent()) {
+      return 0;
+    }
+    return duty.plannedStartSecondOfDay() - trip.departureSecondOfDay();
+  }
+
+  /**
+   * 登记交路收尾的回库咽喉占用。回库优先：它来自一辆已经跑完的车，不挪；与已排好的出库撞上时照样登记并计数，交给冲突检查。
+   * 按到达排队时，会与它撞上的出库班次（咽喉在出库路上的前段、端点在后段）通常还没处理，会自己让开。
+   */
+  private static void bookInbound(
+      DepotThroats throats,
+      TimetableTrip trip,
+      VehicleDuty duty,
+      int departure,
+      int returnDeparture,
+      int separation,
+      Map<String, List<int[]>> throatBookings,
+      Map<String, int[]> throatStats) {
+    Optional<DepotThroats.Passage> own = throats.inbound(trip.routeId());
+    Optional<DepotThroats.Passage> passage =
+        own.isPresent() ? own : duty.returnRouteId().flatMap(throats::inbound);
+    if (passage.isEmpty()) {
+      return;
+    }
+    int base = own.isPresent() ? departure : returnDeparture;
+    int from = base + passage.get().enterOffset();
+    int to = base + passage.get().exitOffset() + separation;
+    List<int[]> bookings = throatBookings.get(passage.get().depot());
+    int[] stat = throatStats.get(passage.get().depot());
+    if (slideAfterBookings(bookings, from, 0, to - from) != from) {
+      stat[5]++;
+    }
+    book(bookings, from, to);
+    stat[1]++;
+    stat[2] += to - from;
   }
 
   /** 把下一班入队；没有下一班时什么都不做。 */

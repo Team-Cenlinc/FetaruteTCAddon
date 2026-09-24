@@ -161,6 +161,16 @@ public final class TimetableBuilder {
               target.conflicts(), options.serviceStartSecondOfDay()));
     }
 
+    for (TerminalSerializer.ThroatReport throat : target.throats()) {
+      if (throat.utilization() > 1.0D) {
+        warnings.add(
+            String.format(
+                Locale.ROOT,
+                "车库 %s 的咽喉（出入段共用的单线）在目标间隔下利用率 %.0f%%：出库与回库挤不下，目标间隔本身在结构上不可能",
+                throat.depot(),
+                throat.utilization() * 100.0D));
+      }
+    }
     for (TerminalSerializer.TerminalReport terminal : target.terminals()) {
       if (terminal.utilization() > 1.0D) {
         warnings.add(
@@ -238,6 +248,7 @@ public final class TimetableBuilder {
         chosen.shifts(),
         chosen.yields(),
         chosen.terminals(),
+        chosen.throats(),
         groupIntervals(target, chosen),
         chosen.interleaves(),
         dutyShapes(chosen.timetable()),
@@ -816,6 +827,7 @@ public final class TimetableBuilder {
         List.copyOf(shifts),
         yields,
         serialized.terminals(),
+        serialized.throats(),
         Map.copyOf(intervalByGroup),
         PhasePlanner.interleaves(grids),
         phases.notes(),
@@ -1018,14 +1030,19 @@ public final class TimetableBuilder {
     return List.copyOf(out);
   }
 
-  /** 相位层要的路网形状：容量 1 的端点（与端点串行同一份判定），以及远端一次折返的占用（与端点串行同一个成本公式： 进站走行 + 折返 + 出站走行 + 裕量）。 */
+  /**
+   * 相位层要的路网形状：容量 1 的端点（与端点串行同一份判定）、一次折返的占用（与端点串行同一个成本公式： 进站走行 + 折返 + 出站走行 +
+   * 裕量；没有下一班时离开走的是回库线路），以及车库咽喉的几何（与端点串行同一份咽喉判定）。
+   */
   private static PhasePlanner.Topology topologyOf(
       Prepared prepared,
       List<TimetableRoutePlan> operationPlans,
       TimetableBuildOptions options,
       int separation) {
     List<TimetableConflictChecker.RouteProfile> operationProfiles = new ArrayList<>();
+    List<UUID> operationRoutes = new ArrayList<>();
     for (TimetableRoutePlan plan : operationPlans) {
+      operationRoutes.add(plan.routeId());
       TimetableConflictChecker.RouteProfile profile = prepared.profiles().get(plan.routeId());
       if (profile != null) {
         operationProfiles.add(profile);
@@ -1033,20 +1050,62 @@ public final class TimetableBuilder {
     }
     Set<String> stubs =
         new HashSet<>(TerminalSerializer.terminalGroups(prepared.graphIndex(), operationProfiles));
+    Map<UUID, TimetableRoutePlan> planById = new HashMap<>();
+    for (TimetableRoutePlan plan : prepared.plans()) {
+      planById.put(plan.routeId(), plan);
+    }
     TurnaroundTable turnarounds = options.dutyLimits().turnaround();
+    SingleLineSectionIndex sections = prepared.graphIndex().sections();
+    VehicleDutyPlanner.Legs legs = prepared.legs();
     PhasePlanner.FarEndCost cost =
         (group, arriving, departing) -> {
+          UUID leaving =
+              departing != null
+                  ? departing
+                  : returnAfter(planById.get(arriving), null, legs).orElse(null);
           TimetableConflictChecker.RouteProfile in =
               arriving == null ? null : prepared.profiles().get(arriving);
           TimetableConflictChecker.RouteProfile out =
-              departing == null ? null : prepared.profiles().get(departing);
-          SingleLineSectionIndex sections = prepared.graphIndex().sections();
+              leaving == null ? null : prepared.profiles().get(leaving);
           return (in == null ? 0 : TerminalSerializer.approachIn(in, group, sections))
               + (arriving == null ? 0 : turnarounds.secondsFor(arriving))
               + (out == null ? 0 : TerminalSerializer.approachOut(out, group, sections))
               + Math.max(0, separation);
         };
-    return new PhasePlanner.Topology(stubs, cost);
+    DepotThroats throats = DepotThroats.of(prepared.profiles(), operationRoutes, legs);
+    PhasePlanner.ThroatGeometry geometry =
+        (feederRoute, backRoute) -> {
+          Optional<DepotThroats.Passage> out = throats.outbound(feederRoute);
+          TimetableRoutePlan feederPlan = planById.get(feederRoute);
+          Optional<DepotThroats.Passage> in =
+              returnAfter(
+                      planById.get(backRoute),
+                      feederPlan == null ? null : feederPlan.originNodeId(),
+                      legs)
+                  .flatMap(throats::inbound);
+          if (out.isEmpty() || in.isEmpty() || !out.get().depot().equals(in.get().depot())) {
+            return Optional.empty();
+          }
+          int turnaround = turnarounds.secondsFor(backRoute);
+          int sep = Math.max(0, separation);
+          return Optional.of(
+              new PhasePlanner.ThroatWindows(
+                  out.get().enterOffset(),
+                  out.get().exitOffset() + sep,
+                  turnaround + in.get().enterOffset(),
+                  turnaround + in.get().exitOffset() + sep));
+        };
+    return new PhasePlanner.Topology(stubs, cost, geometry);
+  }
+
+  /** 这条 route 跑完之后回库走的线路：与派车器同一条选法（优先回出库的那座车库）。 */
+  private static Optional<UUID> returnAfter(
+      TimetableRoutePlan plan, String preferredDepotNodeId, VehicleDutyPlanner.Legs legs) {
+    if (plan == null) {
+      return Optional.empty();
+    }
+    return legs.returnLegAt(plan.terminalNodeId(), preferredDepotNodeId)
+        .map(VehicleDutyPlanner.Leg::routeId);
   }
 
   /** 按车接续：被接 route → 喂车 route，交给派车器优先选喂车方向的车。 */
@@ -1133,6 +1192,7 @@ public final class TimetableBuilder {
       List<TimetableBuildResult.TripShift> shifts,
       List<ResourceRepair.Yield> yields,
       List<TerminalSerializer.TerminalReport> terminals,
+      List<TerminalSerializer.ThroatReport> throats,
       Map<String, Integer> intervals,
       List<PhasePlanner.Interleave> interleaves,
       List<String> phaseNotes,

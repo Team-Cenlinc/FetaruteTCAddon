@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -116,20 +117,44 @@ public final class PhasePlanner {
   }
 
   /**
+   * 喂车方向出库、与被接往返对反向车回库，各占车库咽喉的时段（出口都已含裕量）。
+   *
+   * @param outEnter 喂车方向进入咽喉，相对它的发车
+   * @param outExit 喂车方向离开咽喉 + 裕量，相对它的发车
+   * @param inEnter 反向车回库进入咽喉，相对它到达端点（含端点折返）
+   * @param inExit 反向车回库离开咽喉 + 裕量，相对它到达端点
+   */
+  public record ThroatWindows(int outEnter, int outExit, int inEnter, int inExit) {}
+
+  /** 车库咽喉的几何：喂车方向从车库出库、被接往返对的反向车在端点折返后回同一座车库时，两段咽喉占用的时段； 不经过同一个咽喉时为空。 */
+  @FunctionalInterface
+  public interface ThroatGeometry {
+    Optional<ThroatWindows> windows(UUID feederRoute, UUID backRoute);
+  }
+
+  /**
    * 相位层需要知道的路网形状。
    *
    * @param stubTerminals 容量 1 的端点站台组（{@link TerminalSerializer#terminalGroups} 的结果）
-   * @param farEndCost 远端占用
+   * @param farEndCost 一次折返的占用（远端多等的上限、端点两次折返的间距都用它）；离开的 route 为空时取回库线路
+   * @param throatGeometry 车库咽喉的几何；远端多等要同时让端点与咽喉都错得开
    */
-  public record Topology(Set<String> stubTerminals, FarEndCost farEndCost) {
+  public record Topology(
+      Set<String> stubTerminals, FarEndCost farEndCost, ThroatGeometry throatGeometry) {
     public Topology {
       stubTerminals = stubTerminals == null ? Set.of() : Set.copyOf(stubTerminals);
       farEndCost = farEndCost == null ? (group, arriving, departing) -> 0 : farEndCost;
+      throatGeometry = throatGeometry == null ? (feeder, back) -> Optional.empty() : throatGeometry;
+    }
+
+    /** 不看车库咽喉。 */
+    public Topology(Set<String> stubTerminals, FarEndCost farEndCost) {
+      this(stubTerminals, farEndCost, null);
     }
 
     /** 不知道路网形状：不做跨组按车接续，行为与只有两层时相同。 */
     public static Topology none() {
-      return new Topology(Set.of(), null);
+      return new Topology(Set.of(), null, null);
     }
   }
 
@@ -409,7 +434,7 @@ public final class PhasePlanner {
               placed,
               runSecondsByRoute,
               turnarounds,
-              shape.farEndCost(),
+              shape,
               notes));
     }
     if (!withoutCalls.isEmpty()) {
@@ -549,7 +574,11 @@ public final class PhasePlanner {
   }
 
   /**
-   * 周期余数落点：被接方向往返对的反向车在远端多等 {@code w}，使它回到端点的时刻与喂车方向到站错开最远 （两次折返各占端点差不多一样久，错开半个周期时两边间距都最大）。
+   * 周期余数落点：被接方向往返对的反向车在远端多等 {@code w}，挑让端点上两次折返、车库咽喉上出库与回库都错得最开的那个。
+   *
+   * <p>端点上：喂车方向那次折返占 {@code [到站, 到站 + 占用)}，反向车那次同理（离开走的是回库线路）；两段在一个周期里的最小间隙。
+   * 咽喉上：喂车方向出库那段与反向车折返后回库那段的最小间隙（出入段分线、或根本不经过同一个咽喉时不看）。 取两个间隙里较小的那个最大，并列取较小的 {@code w}。
+   * 只看端点会把咽喉挤到正好贴着：实测 WS@150 端点 75/75 而咽喉间隙 0，咽喉一串行，库里多等几秒的出库车晚到端点，全天积成滞后。
    *
    * <p>{@code w} 的上限 = 间隔 − 远端一次折返的占用：多等得再久，下一班到远端时上一辆车还占着那股道。 没有反向（被接方向不回这个端点）时什么都不做。
    */
@@ -560,7 +589,7 @@ public final class PhasePlanner {
       Map<String, ServiceGroupClassifier.Direction> placed,
       Map<UUID, Integer> runSecondsByRoute,
       TurnaroundTable turnarounds,
-      FarEndCost farEndCost,
+      Topology topology,
       List<String> notes) {
     ServiceGroupClassifier.Direction fed = placed.get(connection.fedKey());
     ServiceGroupClassifier.Direction feeder = placed.get(connection.feederKey());
@@ -568,22 +597,49 @@ public final class PhasePlanner {
     if (feeder == null || back == null || !back.terminalGroup().equals(connection.terminal())) {
       return connection;
     }
+    UUID feederRoute = minRunRoute(feeder, runSecondsByRoute);
+    UUID fedRoute = minRunRoute(fed, runSecondsByRoute);
+    UUID backRoute = minRunRoute(back, runSecondsByRoute);
+    int feederDeparture = phases.get(feeder.key());
     int feederArrival =
-        Math.floorMod(phases.get(feeder.key()) + minRun(feeder, runSecondsByRoute), interval);
+        Math.floorMod(feederDeparture + minRun(feeder, runSecondsByRoute), interval);
     int arrival = Math.floorMod(phases.get(back.key()) + minRun(back, runSecondsByRoute), interval);
-    int cost =
-        farEndCost.occupiedSeconds(
-            fed.terminalGroup(),
-            minRunRoute(fed, runSecondsByRoute),
-            minRunRoute(back, runSecondsByRoute));
-    int maxWait = Math.max(0, interval - cost);
+    FarEndCost cost = topology.farEndCost();
+    int feederVisit = cost.occupiedSeconds(connection.terminal(), feederRoute, fedRoute);
+    int backVisit = cost.occupiedSeconds(connection.terminal(), backRoute, null);
+    Optional<ThroatWindows> throat = topology.throatGeometry().windows(feederRoute, backRoute);
+    int farCost = cost.occupiedSeconds(fed.terminalGroup(), fedRoute, backRoute);
+    int maxWait = Math.max(0, interval - farCost);
     int best = 0;
-    int bestDistance = -1;
+    int bestScore = Integer.MIN_VALUE;
+    int bestTerminalGap = 0;
+    int bestThroatGap = 0;
     for (int w = 0; w <= maxWait; w++) {
-      int distance = circularDistance(arrival + w, feederArrival, interval);
-      if (distance > bestDistance) {
-        bestDistance = distance;
+      int backArrival = arrival + w;
+      int terminalGap =
+          arcGap(
+              feederArrival,
+              feederArrival + feederVisit,
+              backArrival,
+              backArrival + backVisit,
+              interval);
+      int throatGap =
+          throat
+              .map(
+                  t ->
+                      arcGap(
+                          feederDeparture + t.outEnter(),
+                          feederDeparture + t.outExit(),
+                          backArrival + t.inEnter(),
+                          backArrival + t.inExit(),
+                          interval))
+              .orElse(Integer.MAX_VALUE);
+      int score = Math.min(terminalGap, throatGap);
+      if (score > bestScore) {
+        bestScore = score;
         best = w;
+        bestTerminalGap = terminalGap;
+        bestThroatGap = throatGap;
       }
     }
     phases.put(back.key(), Math.floorMod(phases.get(back.key()) + best, interval));
@@ -596,16 +652,18 @@ public final class PhasePlanner {
             + "s（上限 "
             + maxWait
             + "s = 间隔 − 远端占用 "
-            + cost
-            + "s），回到 "
+            + farCost
+            + "s）：回到 "
             + connection.terminal()
             + " 与 "
             + connection.feederKey()
             + " 到站相距 "
-            + bestDistance
-            + "s（原 "
-            + circularDistance(arrival, feederArrival, interval)
-            + "s）");
+            + circularDistance(arrival + best, feederArrival, interval)
+            + "s、两次折返间隙 "
+            + bestTerminalGap
+            + "s"
+            + (throat.isPresent() ? "，车库咽喉上出库与回库间隙 " + bestThroatGap + "s" : "")
+            + (bestScore < 0 ? "（上限内错不开，这个间隔下端点或咽喉必有冲突）" : ""));
     return new Connection(
         connection.terminal(),
         connection.feederKey(),
@@ -614,6 +672,25 @@ public final class PhasePlanner {
         connection.feederRoutes(),
         connection.fedRoutes(),
         best);
+  }
+
+  /** 圆周（周长 = 间隔）上两段弧之间的最小间隙；负数是重叠的秒数。 */
+  static int arcGap(int aFrom, int aTo, int bFrom, int bTo, int period) {
+    int lengthA = aTo - aFrom;
+    int lengthB = bTo - bFrom;
+    if (lengthA + lengthB >= period) {
+      return period - lengthA - lengthB;
+    }
+    int aThenB = Math.floorMod(bFrom - aTo, period);
+    int bThenA = Math.floorMod(aFrom - bTo, period);
+    int startGap = Math.floorMod(bFrom - aFrom, period);
+    if (startGap < lengthA) {
+      return -Math.min(lengthA - startGap, lengthB);
+    }
+    if (period - startGap < lengthB) {
+      return -Math.min(lengthB - (period - startGap), lengthA);
+    }
+    return Math.min(aThenB, bThenA);
   }
 
   private static int circularDistance(int a, int b, int interval) {

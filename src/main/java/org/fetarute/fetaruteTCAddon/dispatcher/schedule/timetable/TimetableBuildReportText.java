@@ -413,6 +413,30 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /** 「车库咽喉」一行：出库与回库共用的那段单线上各过了几次、占用多少、出库在车库里等了几班。 没有咽喉（出入段分线或没有出入库）时为空。 */
+  public static List<String> describeThroats(List<TerminalSerializer.ThroatReport> throats) {
+    List<String> out = new ArrayList<>();
+    if (throats == null) {
+      return out;
+    }
+    for (TerminalSerializer.ThroatReport throat : throats) {
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "车库咽喉: %s（出入段共用 %d 条边）出库 %d 次、回库 %d 次、占用 %.0f%%%s；出库在库内等 %d 班（最长 +%ds）；回库撞上已排出库 %d 次",
+              throat.depot(),
+              throat.edges(),
+              throat.outbound(),
+              throat.inbound(),
+              throat.utilization() * 100.0D,
+              throat.utilization() > 1.0D ? "（超过 100%，目标间隔本身在结构上不可能）" : "",
+              throat.waited(),
+              throat.maxWaitSeconds(),
+              throat.inboundOverlaps()));
+    }
+    return out;
+  }
+
   /** 从端点占用成本里反推本端点用的折返秒数：成本 = 进站 + 折返 + 出站 + 裕量。 */
   private static int turnaroundOf(TerminalSerializer.TerminalReport terminal) {
     return Math.max(
