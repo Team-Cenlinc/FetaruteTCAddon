@@ -1,10 +1,12 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 
@@ -101,12 +103,14 @@ public final class ResourcePhasePlanner {
     }
     Map<String, Integer> delta = new LinkedHashMap<>();
     List<String> notes = new ArrayList<>();
-    for (Direction direction : order) {
-      int limit = direction.reverse() ? Math.max(0, maxIdleSeconds) : direction.interval();
+    for (Unit unit : unitsOf(order, groups, phases.connections())) {
+      int limit = unit.reverse() ? Math.max(0, maxIdleSeconds) : unit.interval();
       Score best = null;
       int bestDelta = 0;
       for (int candidate = 0; candidate <= limit; candidate += SCAN_STEP_SECONDS) {
-        delta.put(direction.key(), candidate);
+        for (String key : unit.keys()) {
+          delta.put(key, candidate);
+        }
         Score score =
             score(
                 order,
@@ -123,14 +127,16 @@ public final class ResourcePhasePlanner {
           bestDelta = candidate;
         }
       }
-      delta.put(direction.key(), bestDelta);
+      for (String key : unit.keys()) {
+        delta.put(key, bestDelta);
+      }
       if (bestDelta > 0) {
         notes.add(
             String.format(
                 Locale.ROOT,
                 "%s %s %ds（周期评估：让不掉的 %d 处、共 %d 处）",
-                direction.key(),
-                direction.reverse() ? "端点多等" : "整组平移",
+                String.join(" + ", unit.keys()),
+                unit.reverse() ? "端点多等" : (unit.keys().size() > 1 ? "按车接续链整体平移" : "整组平移"),
                 bestDelta,
                 best == null ? 0 : best.unabsorbable(),
                 best == null ? 0 : best.total()));
@@ -144,7 +150,8 @@ public final class ResourcePhasePlanner {
         phases.offsetByGroup(),
         Map.copyOf(delta),
         phases.notes(),
-        List.copyOf(notes));
+        List.copyOf(notes),
+        phases.connections());
   }
 
   // ------------------------------------------------------------------ 内部
@@ -182,6 +189,93 @@ public final class ResourcePhasePlanner {
       }
     }
     return List.copyOf(out);
+  }
+
+  /**
+   * 一次一起取 δ 的方向。
+   *
+   * @param keys 方向键；多于一个时是一条按车接续链，整体平移
+   * @param interval 间隔
+   * @param reverse 单个往返对反向方向：δ 是端点多等，上限是闲置上限
+   */
+  private record Unit(List<String> keys, int interval, boolean reverse) {}
+
+  /**
+   * 按车接续把几个方向的相位钉在一起（喂车方向到站 + 折返 = 被接方向发车；被接方向的往返对反向在远端多等）， 单独给其中任何一个 δ
+   * 都会把接续拆开——实测拆开之后派车器改接另一辆车，交路形态整个翻掉。所以接续链上的方向 （含它们各自的往返对）并成一个单元，只能一起平移；其余方向照旧一个一个定。
+   */
+  private static List<Unit> unitsOf(
+      List<Direction> order,
+      List<ServiceGroupClassifier.Group> groups,
+      List<PhasePlanner.Connection> connections) {
+    Map<String, String> parent = new LinkedHashMap<>();
+    for (Direction direction : order) {
+      parent.put(direction.key(), direction.key());
+    }
+    Set<String> linked = new HashSet<>();
+    for (PhasePlanner.Connection connection : connections) {
+      union(parent, connection.feederKey(), connection.fedKey());
+      linked.add(connection.feederKey());
+    }
+    if (!linked.isEmpty()) {
+      for (ServiceGroupClassifier.Group group : groups) {
+        for (ServiceGroupClassifier.Direction direction : group.directions()) {
+          union(parent, direction.key(), direction.reverseKey());
+        }
+      }
+    }
+    Set<String> linkedRoots = new HashSet<>();
+    for (String key : linked) {
+      if (parent.containsKey(key)) {
+        linkedRoots.add(find(parent, key));
+      }
+    }
+    List<Unit> out = new ArrayList<>();
+    Map<String, List<String>> chains = new LinkedHashMap<>();
+    for (Direction direction : order) {
+      String root = find(parent, direction.key());
+      if (!linkedRoots.contains(root)) {
+        out.add(new Unit(List.of(direction.key()), direction.interval(), direction.reverse()));
+        continue;
+      }
+      List<String> chain = chains.get(root);
+      if (chain == null) {
+        chain = new ArrayList<>();
+        chains.put(root, chain);
+        // 占住它在遍历序里第一次出现的位置，整条链在这里一起定。
+        out.add(new Unit(chain, direction.interval(), false));
+      }
+      chain.add(direction.key());
+    }
+    List<Unit> frozen = new ArrayList<>(out.size());
+    for (Unit unit : out) {
+      frozen.add(new Unit(List.copyOf(unit.keys()), unit.interval(), unit.reverse()));
+    }
+    return List.copyOf(frozen);
+  }
+
+  private static void union(Map<String, String> parent, String a, String b) {
+    if (!parent.containsKey(a) || !parent.containsKey(b)) {
+      return;
+    }
+    String ra = find(parent, a);
+    String rb = find(parent, b);
+    if (!ra.equals(rb)) {
+      // 键小的当根：结果与遍历序无关。
+      if (ra.compareTo(rb) < 0) {
+        parent.put(rb, ra);
+      } else {
+        parent.put(ra, rb);
+      }
+    }
+  }
+
+  private static String find(Map<String, String> parent, String key) {
+    String root = key;
+    while (!parent.get(root).equals(root)) {
+      root = parent.get(root);
+    }
+    return root;
   }
 
   /** 把所有方向按当前 δ 铺开，过一遍冲突模型，按可吸收/不可吸收打分。 */

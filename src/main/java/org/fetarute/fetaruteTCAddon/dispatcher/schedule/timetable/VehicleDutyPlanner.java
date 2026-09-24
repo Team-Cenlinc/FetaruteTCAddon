@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -79,8 +80,29 @@ public final class VehicleDutyPlanner {
       Legs legs,
       Limits limits,
       Map<String, NavigableSet<Integer>> nextSlotByOrigin) {
+    return plan(timetableId, trips, legs, limits, nextSlotByOrigin, Map.of());
+  }
+
+  /**
+   * 指派车辆并封装 duty，按相位层定下的接续优先选车。
+   *
+   * <p>相位层按车接续时（例如小交路 1L 到端点折返后接大交路 2C），被接那一班的时刻就是为喂车方向的车排的。
+   * 若仍按"最早就绪优先"选车，端点上先到、本该回库的别路车（2N）会把这一班抢走， 喂车方向的车只好等下一班——开班时抢一次，之后每一辆都晚一个周期接上，全天推后而且排不掉 （实测
+   * WS@150 就是两次抢车换来全天 300 秒）。所以接续的被接班次先在喂车方向的车里挑，挑不到才退回全体候选。
+   *
+   * @param preferredFeeders 被接 route → 喂车 route 集合；空表示不按接续偏好
+   * @see #plan(UUID, List, Legs, Limits, Map)
+   */
+  public static Result plan(
+      UUID timetableId,
+      List<PlannedTrip> trips,
+      Legs legs,
+      Limits limits,
+      Map<String, NavigableSet<Integer>> nextSlotByOrigin,
+      Map<UUID, Set<UUID>> preferredFeeders) {
     Objects.requireNonNull(timetableId, "timetableId");
     Objects.requireNonNull(limits, "limits");
+    Map<UUID, Set<UUID>> feedersByRoute = preferredFeeders == null ? Map.of() : preferredFeeders;
     Legs access = legs == null ? Legs.none() : legs;
     List<PlannedTrip> ordered =
         trips == null
@@ -105,7 +127,8 @@ public final class VehicleDutyPlanner {
     int dutySequence = 0;
 
     for (PlannedTrip trip : ordered) {
-      OpenDuty host = selectHost(open, trip, access, limits, minTripDuration, minClosingTail);
+      OpenDuty host =
+          selectHost(open, trip, access, limits, minTripDuration, minClosingTail, feedersByRoute);
       if (host == null) {
         UnassignedReason blocker =
             openBlocker(trip, access, limits, minTripDuration, minClosingTail);
@@ -187,7 +210,8 @@ public final class VehicleDutyPlanner {
    * 选择能接下这一班的已开 duty。
    *
    * <p>条件缺一不可：位置对得上（上一班的终点就是这一班的起点）、时间来得及（含折返时间）、
-   * 接下后仍不越过硬上限、并且接下之后这辆车仍然回得了库（终点有回库线路，或还有余量再跑一班到有回库线路的终点）。 都满足时取"最早就绪"的那一个，并列时按 duty 序号——完全确定。
+   * 接下后仍不越过硬上限、并且接下之后这辆车仍然回得了库（终点有回库线路，或还有余量再跑一班到有回库线路的终点）。 都满足时先看接续偏好（上一班是这一班的喂车 route），
+   * 再取"最早就绪"的那一个，并列时按 duty 序号——完全确定。
    *
    * <p>从车库始发的班次（CRET）永远不接在别的 duty 后面：它的出库票会实体化一辆新车，接不了待命列车。 不同车池（多线联编时的不同线路）之间也永远不接。
    */
@@ -197,11 +221,15 @@ public final class VehicleDutyPlanner {
       Legs access,
       Limits limits,
       int minTripDuration,
-      int minClosingTail) {
+      int minClosingTail,
+      Map<UUID, Set<UUID>> preferredFeeders) {
     if (trip.startsAtDepot()) {
       return null;
     }
+    Set<UUID> feeders =
+        trip.routeId() == null ? Set.of() : preferredFeeders.getOrDefault(trip.routeId(), Set.of());
     OpenDuty best = null;
+    boolean bestPreferred = false;
     for (OpenDuty duty : open) {
       if (!duty.lastTerminal.equals(trip.originNodeId()) || !duty.pool.equals(trip.pool())) {
         continue;
@@ -232,10 +260,16 @@ public final class VehicleDutyPlanner {
       if (endIfAccepted - duty.startSeconds > limits.maxDutyDurationSeconds()) {
         continue;
       }
+      UUID lastRoute = duty.lastTrip().routeId();
+      boolean preferred = lastRoute != null && feeders.contains(lastRoute);
       if (best == null
-          || duty.readyAtSeconds < best.readyAtSeconds
-          || (duty.readyAtSeconds == best.readyAtSeconds && duty.sequence < best.sequence)) {
+          || (preferred && !bestPreferred)
+          || (preferred == bestPreferred
+              && (duty.readyAtSeconds < best.readyAtSeconds
+                  || (duty.readyAtSeconds == best.readyAtSeconds
+                      && duty.sequence < best.sequence)))) {
         best = duty;
+        bestPreferred = preferred;
       }
     }
     return best;

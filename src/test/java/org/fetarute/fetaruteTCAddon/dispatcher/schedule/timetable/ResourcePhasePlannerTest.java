@@ -121,6 +121,42 @@ class ResourcePhasePlannerTest {
     assertTrue(after.resourceNotes().get(0).contains("零偏移"), after.resourceNotes().get(0));
   }
 
+  /** 按车接续把几个方向钉在一起，第三层只能让它们一起平移：单独给其中一个 δ 会把接续拆开， 实测拆开之后派车器改接另一辆车，交路形态整个翻掉。 */
+  @Test
+  void connectedDirectionsMoveTogether() {
+    Fixture fixture = opposingPair(600);
+    List<String> keys = List.copyOf(fixture.phases().phaseByDirection().keySet());
+    PhasePlanner.Connection connection =
+        new PhasePlanner.Connection(
+            "OP:S:A", keys.get(1), keys.get(0), "", List.of(), List.of(), 0);
+    PhasePlanner.Phases connected =
+        new PhasePlanner.Phases(
+            fixture.phases().phaseByDirection(),
+            fixture.phases().offsetByGroup(),
+            Map.of(),
+            fixture.phases().notes(),
+            List.of(),
+            List.of(connection));
+
+    PhasePlanner.Phases after =
+        ResourcePhasePlanner.refine(
+            connected,
+            fixture.groups(),
+            fixture.intervals(),
+            fixture.templates(),
+            fixture.profiles(),
+            index(),
+            SEPARATION,
+            MAX_WAIT,
+            300);
+
+    assertEquals(
+        after.deltaByDirection().get(keys.get(0)),
+        after.deltaByDirection().get(keys.get(1)),
+        "接续链上的方向 δ 必须相同");
+    assertEquals(List.of(connection), after.connections(), "接续关系原样交给派车器");
+  }
+
   /** 往返对余数只进报告：算得出来，但不参与任何决策。 */
   @Test
   void residuesAreReportedNotActedOn() {

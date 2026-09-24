@@ -30,10 +30,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Neighbor
  *   <li>进站班次：到达要等端点空出来，差值加到这一班的发车上——整趟延后，在它的起点等。<b>只延后，永不提前。</b>
  *   <li>续班（起点在端点的同交路下一班）：发车 = 到达 + 折返，不等网格；可能早于也可能晚于它的名义时隙。
  *   <li>其余班次：发车 = max(名义时隙, 本车就绪)，与今天相同。
- *   <li>邻表在端点的占用是预订：我的进站只能落在空档里，邻表的运行一动不动。
+ *   <li>邻表在端点的占用同样是预订：我的进站只能落在空档里，邻表的运行一动不动。
  * </ul>
  *
- * <p>确定性：事件按（最早可发时刻，车次 code）排序；端点空闲表按站台组键排序；不引入随机源，也不依赖哈希遍历序。
+ * <p>端点是一张<b>预订表</b>，不是一个"空闲时刻"：每次折返登记一段占用 {@code [到达 − 进站走行, 到达 + 折返 + 出站走行 + 裕量)}，
+ * 进站班次落在不与任何预订相交的最早空档里。事件按<b>到达终点的时刻</b>排队，端点先到先进。 这两条缺一不可：曾经事件按发车时刻排、端点只记一个只进不退的空闲时刻， 于是全程长的车（WS 的
+ * 2N，从南渡开来 582 秒）发车早、先被处理，把克罗顿高地的空闲时刻推到十分钟后； 全程短的 1L（226 秒）晚发却先到，只能排到它后面——实际端点是空的。 每个周期都这样，全天每一班 1L
+ * 推后 276 秒，而且相位层怎么排都会被覆盖。
+ *
+ * <p>确定性：事件按（到达终点时刻，车次 code）排序；预订表按起点排序；不引入随机源，也不依赖哈希遍历序。
  * 延后让交路超过时长上限或越过计划窗口时，从那一班起截断交路并如实上报，而不是排一班到不了的车。
  *
  * <p>只处理站台组容量为 1 且是某条 OPERATION route 起点或终点的组；车库咽喉、多股道车站一律不碰。
@@ -180,7 +185,6 @@ public final class TerminalSerializer {
     for (String group : terminals) {
       bookings.put(group, neighborBookings(input.neighbors(), group, separation));
     }
-    Map<String, Integer> freeAt = new TreeMap<>();
     Map<String, int[]> stats = new TreeMap<>(); // visits, occupied, nowhereToWait, truncated
 
     int[] next = new int[duties.size()];
@@ -202,7 +206,7 @@ public final class TerminalSerializer {
       }
       int nominal = chain.get(0).departureSecondOfDay() - zero;
       ready[d] = nominal;
-      queue.add(new Event(nominal, chain.get(0).tripCode(), d));
+      queue.add(new Event(nominal + runOf(table, chain.get(0)), chain.get(0).tripCode(), d));
     }
 
     while (!queue.isEmpty()) {
@@ -236,13 +240,11 @@ public final class TerminalSerializer {
       if (terminalIsStub) {
         stat = stats.computeIfAbsent(terminalGroup, key -> new int[4]);
         in = approachIn(profile, terminalGroup, input.index().sections());
-        int earliest =
-            Math.max(arrival, freeAt.getOrDefault(terminalGroup, Integer.MIN_VALUE / 2) + in);
         boolean hasNext = i + 1 < chain.size();
         int out = outRunOf(chain, i, hasNext, duty, input, terminalGroup);
-        earliest =
+        int earliest =
             slideAfterBookings(
-                bookings.get(terminalGroup), earliest, in, turnaround + out + separation);
+                bookings.get(terminalGroup), arrival, in, turnaround + out + separation);
         if (earliest > arrival) {
           if (originTerminal) {
             // 起点也是单股道端点：延后就是占着起点不走，只会把冲突搬家。不延后，照常登记，交给冲突检查报出来。
@@ -291,7 +293,7 @@ public final class TerminalSerializer {
         int cost = in + turnaround + out + separation;
         stat[0]++;
         stat[1] += cost;
-        freeAt.put(terminalGroup, nextReady + out + separation);
+        book(bookings.get(terminalGroup), arrival - in, nextReady + out + separation);
       }
       advance(d, chain, next, ready, table, input, queue, zero, terminalSet, nextReady);
     }
@@ -570,7 +572,21 @@ public final class TerminalSerializer {
         plan != null && terminalSet.contains(TimetableConflictChecker.groupOf(plan.originNodeId()));
     int nominal = trip.departureSecondOfDay() - zero;
     int key = originTerminal ? nextReady : Math.max(nominal, nextReady);
-    queue.add(new Event(key, trip.tripCode(), d));
+    queue.add(new Event(key + runOf(table, trip), trip.tripCode(), d));
+  }
+
+  /** 全程时分；没有投影的 route 记 0。事件按到达终点的时刻排队，端点才是先到先进。 */
+  private static int runOf(Timetable table, TimetableTrip trip) {
+    return table.routePlan(trip.routeId()).map(TimetableRoutePlan::totalRunSeconds).orElse(0);
+  }
+
+  /** 把一次占用按起点插进端点的预订表，保持按起点有序。 */
+  private static void book(List<int[]> bookings, int from, int to) {
+    int at = bookings.size();
+    while (at > 0 && bookings.get(at - 1)[0] > from) {
+      at--;
+    }
+    bookings.add(at, new int[] {from, to});
   }
 
   /** 这一班之后离开端点的走行：续班的出站走行，或回库线路的出站走行。 */
@@ -650,7 +666,7 @@ public final class TerminalSerializer {
     kept[d] = keep;
   }
 
-  /** 邻表预订：把 {@code earliest} 起的一次占用窗口滑到不与任何预订相交的位置；只往后滑。 */
+  /** 把 {@code earliest} 起的一次占用窗口滑到不与任何预订（邻表的与本表已排的）相交的位置；只往后滑。 */
   static int slideAfterBookings(List<int[]> bookings, int earliest, int in, int afterArrival) {
     if (bookings == null || bookings.isEmpty()) {
       return earliest;

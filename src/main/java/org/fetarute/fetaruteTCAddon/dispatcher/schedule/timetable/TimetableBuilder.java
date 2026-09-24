@@ -21,6 +21,7 @@ import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -464,22 +465,27 @@ public final class TimetableBuilder {
             .mapToInt(Integer::intValue)
             .min()
             .orElse((int) Math.max(1L, options.headway().toSeconds()));
+    // 只有真正上网格的方向才有相位：带客回库班由派车器在交路收尾处生成（到达 + 折返），不是周期流。
+    // 留在相位层里它会被当成一条幻影流——与反向配成往返对去锚定别人，还参与合流点打分。
+    List<ServiceGroupClassifier.Group> gridGroups =
+        gridGroupsOf(groups, candidateIndexByRoute.keySet());
     PhasePlanner.Phases phases =
         PhasePlanner.plan(
-            groups,
+            gridGroups,
             intervalByGroup,
             prepared.runByRoute(),
             options.dutyLimits().turnaround(),
             horizon,
-            stopCalls(groups, prepared));
+            stopCalls(gridGroups, prepared),
+            topologyOf(prepared, operationPlans, options, separation));
     // ---- 2.5 第三层：前两层只看端点，沿线哪里交会、咽喉上出库流与回库流什么时候相遇它们看不见。
-    // 给每个方向选一个 δ，用同一套冲突模型按周期评估。
+    // 给每个方向选一个 δ，用同一套冲突模型按周期评估；按车接续链整体平移，不拆开。
     phases =
         ResourcePhasePlanner.refine(
             phases,
-            groups,
+            gridGroups,
             intervalByGroup,
-            periodicTemplates(prepared, groups, intervalByGroup, options),
+            periodicTemplates(prepared, gridGroups, intervalByGroup, options),
             prepared.profiles(),
             prepared.graphIndex(),
             separation,
@@ -487,7 +493,7 @@ public final class TimetableBuilder {
             options.dutyLimits().maxIdleSeconds());
     List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
     List<Placed> placed = new ArrayList<>();
-    for (ServiceGroupClassifier.Group group : groups) {
+    for (ServiceGroupClassifier.Group group : gridGroups) {
       int interval = intervalByGroup.get(group.name());
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         int phase = phases.effectivePhaseOf(direction.key());
@@ -559,7 +565,12 @@ public final class TimetableBuilder {
     }
     VehicleDutyPlanner.Result planned =
         VehicleDutyPlanner.plan(
-            timetableId, plannedTrips, prepared.legs(), options.dutyLimits(), nextSlotByOrigin);
+            timetableId,
+            plannedTrips,
+            prepared.legs(),
+            options.dutyLimits(),
+            nextSlotByOrigin,
+            preferredFeeders(phases.connections()));
     Map<UUID, VehicleDutyPlanner.UnassignedTrip> unassigned = new HashMap<>();
     for (VehicleDutyPlanner.UnassignedTrip trip : planned.unassigned()) {
       unassigned.put(trip.tripId(), trip);
@@ -810,7 +821,7 @@ public final class TimetableBuilder {
         phases.notes(),
         phases.resourceNotes(),
         PhasePlanner.residues(
-            groups, intervalByGroup, prepared.runByRoute(), options.dutyLimits().turnaround()));
+            gridGroups, intervalByGroup, prepared.runByRoute(), options.dutyLimits().turnaround()));
   }
 
   /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
@@ -989,6 +1000,64 @@ public final class TimetableBuilder {
   private static String groupAt(TimetableConflictChecker.RouteProfile profile, int index) {
     TimetableConflictChecker.Platform platform = profile.platforms().get(index);
     return platform.absent() ? "" : platform.group();
+  }
+
+  /** 每组只留下至少有一条 route 真正上网格的方向。 */
+  private static List<ServiceGroupClassifier.Group> gridGroupsOf(
+      List<ServiceGroupClassifier.Group> groups, Set<UUID> gridRoutes) {
+    List<ServiceGroupClassifier.Group> out = new ArrayList<>(groups.size());
+    for (ServiceGroupClassifier.Group group : groups) {
+      List<ServiceGroupClassifier.Direction> directions = new ArrayList<>();
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        if (direction.routeIds().stream().anyMatch(gridRoutes::contains)) {
+          directions.add(direction);
+        }
+      }
+      out.add(new ServiceGroupClassifier.Group(group.name(), directions, group.pureLegs()));
+    }
+    return List.copyOf(out);
+  }
+
+  /** 相位层要的路网形状：容量 1 的端点（与端点串行同一份判定），以及远端一次折返的占用（与端点串行同一个成本公式： 进站走行 + 折返 + 出站走行 + 裕量）。 */
+  private static PhasePlanner.Topology topologyOf(
+      Prepared prepared,
+      List<TimetableRoutePlan> operationPlans,
+      TimetableBuildOptions options,
+      int separation) {
+    List<TimetableConflictChecker.RouteProfile> operationProfiles = new ArrayList<>();
+    for (TimetableRoutePlan plan : operationPlans) {
+      TimetableConflictChecker.RouteProfile profile = prepared.profiles().get(plan.routeId());
+      if (profile != null) {
+        operationProfiles.add(profile);
+      }
+    }
+    Set<String> stubs =
+        new HashSet<>(TerminalSerializer.terminalGroups(prepared.graphIndex(), operationProfiles));
+    TurnaroundTable turnarounds = options.dutyLimits().turnaround();
+    PhasePlanner.FarEndCost cost =
+        (group, arriving, departing) -> {
+          TimetableConflictChecker.RouteProfile in =
+              arriving == null ? null : prepared.profiles().get(arriving);
+          TimetableConflictChecker.RouteProfile out =
+              departing == null ? null : prepared.profiles().get(departing);
+          SingleLineSectionIndex sections = prepared.graphIndex().sections();
+          return (in == null ? 0 : TerminalSerializer.approachIn(in, group, sections))
+              + (arriving == null ? 0 : turnarounds.secondsFor(arriving))
+              + (out == null ? 0 : TerminalSerializer.approachOut(out, group, sections))
+              + Math.max(0, separation);
+        };
+    return new PhasePlanner.Topology(stubs, cost);
+  }
+
+  /** 按车接续：被接 route → 喂车 route，交给派车器优先选喂车方向的车。 */
+  private static Map<UUID, Set<UUID>> preferredFeeders(List<PhasePlanner.Connection> connections) {
+    Map<UUID, Set<UUID>> out = new HashMap<>();
+    for (PhasePlanner.Connection connection : connections) {
+      for (UUID fed : connection.fedRoutes()) {
+        out.computeIfAbsent(fed, key -> new HashSet<>()).addAll(connection.feederRoutes());
+      }
+    }
+    return out;
   }
 
   /**

@@ -82,6 +82,46 @@ class VehicleDutyPlannerTest {
     assertTrue(split.unassigned().isEmpty());
   }
 
+  /**
+   * 按车接续：被接那一班先在喂车 route 的车里挑。
+   *
+   * <p>HUB 上停着两辆车：B（980 秒就绪）与 F（1180 秒就绪），都赶得上 1200 秒的 X。按"最早就绪优先"X 会被 B 抢走，F 只能等下一班——
+   * 开班时抢一次，之后每一辆都晚一个周期接上。 相位层声明 X 是给 F 的 route 排的，就该由 F 来接；B 照常回库。不声明时仍是最早就绪优先。
+   */
+  @Test
+  void connectionFeederIsPreferredOverAnEarlierReadyVehicle() {
+    VehicleDutyPlanner.Limits limits = new VehicleDutyPlanner.Limits(4, 7200, 180);
+    UUID back = id("RB");
+    UUID feeder = id("RF");
+    UUID fed = id("RX");
+    List<VehicleDutyPlanner.PlannedTrip> trips =
+        List.of(
+            new VehicleDutyPlanner.PlannedTrip(
+                id("B1"), back, "B1", HUB, HUB, 200, 600, false, false, ""),
+            new VehicleDutyPlanner.PlannedTrip(
+                id("F1"), feeder, "F1", HUB, HUB, 400, 600, false, false, ""),
+            new VehicleDutyPlanner.PlannedTrip(
+                id("X1"), fed, "X1", HUB, HUB, 1200, 600, false, false, ""));
+
+    VehicleDutyPlanner.Result fifo =
+        VehicleDutyPlanner.plan(TIMETABLE, trips, hubLegs(), limits, Map.of(), Map.of());
+    VehicleDutyPlanner.Result preferred =
+        VehicleDutyPlanner.plan(
+            TIMETABLE, trips, hubLegs(), limits, Map.of(), Map.of(fed, Set.of(feeder)));
+
+    assertTrue(dutyHolding(fifo, "B1").tripIds().contains(id("X1")), "不声明接续：最早就绪的 B 接");
+    VehicleDuty withX = dutyHolding(preferred, "X1");
+    assertTrue(withX.tripIds().contains(id("F1")), "声明接续：喂车 route 的 F 接");
+    assertEquals(1, dutyHolding(preferred, "B1").tripCount(), "B 不再接班，照常回库");
+  }
+
+  private static VehicleDuty dutyHolding(VehicleDutyPlanner.Result result, String tripCode) {
+    return result.duties().stream()
+        .filter(duty -> duty.tripIds().contains(id(tripCode)))
+        .findFirst()
+        .orElseThrow();
+  }
+
   /** 每一趟车都恰好属于且只属于一个 duty：没有孤儿班次，也没有被两辆车同时承担的班次。 */
   @Test
   void everyTripBelongsToExactlyOneDuty() {

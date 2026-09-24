@@ -44,6 +44,7 @@ class TerminalSerializerTest {
   private static final String X_APPROACH = "OP:W:XJ:1";
   private static final String X = "OP:S:X:1";
   private static final String DEPOT = "OP:D:DEP:1";
+  private static final String FAR_AWAY = "OP:W:FAR:1";
   private static final int TURNAROUND = 60;
   private static final int SEPARATION = 30;
 
@@ -98,6 +99,28 @@ class TerminalSerializerTest {
     assertEquals(2 * (10 + TURNAROUND + 10 + SEPARATION), report.occupiedSeconds());
     assertEquals(0, report.nowhereToWait());
     assertEquals(0, report.truncated());
+  }
+
+  /**
+   * 端点先到先进：全程长的车早发、晚到，不能挡住晚发、先到的车。
+   *
+   * <p>RL 从 200 秒外开来，0 发、220 到；RB 100 发、120 到。曾经事件按发车时刻排，RL 先被处理，把 X 的空闲时刻推到 320， RB 只能排到它后面（发车推到
+   * 310）——而 X 在 120 时明明是空的。实服 WS 就是这样：2N 从南渡开来先发，小交路 1L 晚发先到，全天每班推后 276 秒。
+   */
+  @Test
+  void theTerminalServesTrainsInArrivalOrder() {
+    UUID rl = profile("RL", List.of(FAR_AWAY, B2, X_APPROACH, X));
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RL@0", rl, 0)), 0, Optional.of(ret)),
+            duty("D002", List.of(trip("RB@100", rb, 100)), 100, Optional.of(ret)));
+
+    TerminalSerializer.Result result = TerminalSerializer.serialize(input(provisional, List.of()));
+
+    Map<String, Integer> dep = departures(result.timetable());
+    assertEquals(100, dep.get("RB@100"), "先到的不等");
+    // RB 占 X 到 120 + 折返 60 + 出站 10 + 裕量 30 = 220；RL 的到达要 ≥ 220 + 进站 10 = 230，发车 10。
+    assertEquals(10, dep.get("RL@0"), "后到的排在它后面，只晚 10 秒");
   }
 
   /** 交路时刻跟着改：延后的首班让出库提前量不变（plannedStart 同步后移），回库票 = 末班实际到达 + 折返。 */
@@ -440,6 +463,7 @@ class TerminalSerializerTest {
     }
     nodes.put(NodeId.of(X_APPROACH), node(X_APPROACH, NodeType.WAYPOINT));
     nodes.put(NodeId.of(DEPOT), node(DEPOT, NodeType.DEPOT));
+    nodes.put(NodeId.of(FAR_AWAY), node(FAR_AWAY, NodeType.WAYPOINT));
     Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
     edge(edges, A1, X_APPROACH, 100);
     edge(edges, A2, X_APPROACH, 100);
@@ -448,6 +472,7 @@ class TerminalSerializerTest {
     edge(edges, X_APPROACH, X, 100);
     edge(edges, X_APPROACH, "OP:S:Y:1", 100);
     edge(edges, DEPOT, A1, 100);
+    edge(edges, FAR_AWAY, B2, 2000);
     return new SimpleRailGraph(nodes, edges, Set.of());
   }
 

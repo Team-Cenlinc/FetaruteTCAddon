@@ -3,10 +3,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 
@@ -17,6 +19,12 @@ import java.util.UUID;
  * 一辆车到达端点折返完正好是下一班的时隙，端点零等待。第二层<b>组间交错</b>：组按名字排序，第一组相位 0；后面每一组在 {@code [0, 最小间隔)} 上以 10 s
  * 步长扫描一个整体偏移，目标是<b>共用起点站台组上相邻发车的最大间隔最小</b>，并列时<b>最小间隔最大</b>（否则两组同时发车与均匀错开会打平）， 再并列取最小偏移。
  * 大小交路的价值全在这一层：Full 与 Short 在共用区间上错开，乘客感受到的是叠加后的间隔。
+ *
+ * <p>第二层有一个例外：<b>跨组按车接续</b>。某组的一个方向终到容量 1 的端点，而先放好的别组方向正从这个端点始发、 且那一端不是它自己往返对的锚定端（没有车喂它）——例如 WS
+ * 的小交路 1L 到克罗顿高地后接大交路 2C——这时本组的相位由车决定，不由乘客间隔决定：到站 + 折返正好是那一班的发车。
+ * 按乘客间隔扫出来的偏移会把周期余数留在单股道端点上，车在那里要么空等占着股道，要么被串行器整批推后。
+ * 锚定之后，被接那一班所在往返对的反向车在<b>远端</b>多等一段（受远端单股道一个周期容得下的时间限制），
+ * 让它回到端点的时刻与喂车方向到站错开半个周期——这就是现实排班里"周转余量放在能力富余的那一端"。 接续关系随结果交给派车器（优先用喂车方向的车接）与第三层（整条锚定链一起平移，不拆开）。
  *
  * <p>全部确定：组、方向、候选都按稳定键排序，扫描步长固定，没有随机源。
  */
@@ -32,34 +40,96 @@ public final class PhasePlanner {
    *
    * @param phaseByDirection 方向键 → 相位
    * @param offsetByGroup 组 → 整体偏移（第二层的选择，供报告）
+   * @param deltaByDirection 第三层给的 δ
    * @param notes 说明（哪些方向锚定了、哪些组按共用起点交错了）
+   * @param resourceNotes 第三层的说明
+   * @param connections 跨组按车接续（按组名、方向键排序）
    */
   public record Phases(
       Map<String, Integer> phaseByDirection,
       Map<String, Integer> offsetByGroup,
       Map<String, Integer> deltaByDirection,
       List<String> notes,
-      List<String> resourceNotes) {
+      List<String> resourceNotes,
+      List<Connection> connections) {
     public Phases {
       phaseByDirection = phaseByDirection == null ? Map.of() : Map.copyOf(phaseByDirection);
       offsetByGroup = offsetByGroup == null ? Map.of() : Map.copyOf(offsetByGroup);
       deltaByDirection = deltaByDirection == null ? Map.of() : Map.copyOf(deltaByDirection);
       notes = notes == null ? List.of() : List.copyOf(notes);
       resourceNotes = resourceNotes == null ? List.of() : List.copyOf(resourceNotes);
+      connections = connections == null ? List.of() : List.copyOf(connections);
     }
 
-    /** 前两层的结果：第三层还没跑过。 */
+    /** 前两层的结果：第三层还没跑过，也没有跨组接续。 */
     public Phases(
         Map<String, Integer> phaseByDirection,
         Map<String, Integer> offsetByGroup,
         List<String> notes) {
-      this(phaseByDirection, offsetByGroup, Map.of(), notes, List.of());
+      this(phaseByDirection, offsetByGroup, Map.of(), notes, List.of(), List.of());
     }
 
     /** 这个方向最终的相位：锚定/交错给的，加上第三层的端点多等。 */
     public int effectivePhaseOf(String directionKey) {
       return phaseByDirection.getOrDefault(directionKey, 0)
           + deltaByDirection.getOrDefault(directionKey, 0);
+    }
+  }
+
+  /**
+   * 一次跨组按车接续：喂车方向的车在端点折返后接被接方向的下一班。
+   *
+   * @param terminal 接续发生的端点站台组（容量 1）
+   * @param feederKey 喂车方向键（终到该端点）
+   * @param fedKey 被接方向键（从该端点始发）
+   * @param backKey 被接方向往返对里的反向（回到该端点的那一路）；没有时为空串
+   * @param feederRoutes 喂车方向的 route
+   * @param fedRoutes 被接方向的 route
+   * @param farEndWaitSeconds 反向车在远端多等的秒数（周期余数落点）
+   */
+  public record Connection(
+      String terminal,
+      String feederKey,
+      String fedKey,
+      String backKey,
+      List<UUID> feederRoutes,
+      List<UUID> fedRoutes,
+      int farEndWaitSeconds) {
+    public Connection {
+      terminal = terminal == null ? "" : terminal;
+      feederKey = feederKey == null ? "" : feederKey;
+      fedKey = fedKey == null ? "" : fedKey;
+      backKey = backKey == null ? "" : backKey;
+      feederRoutes = feederRoutes == null ? List.of() : List.copyOf(feederRoutes);
+      fedRoutes = fedRoutes == null ? List.of() : List.copyOf(fedRoutes);
+      farEndWaitSeconds = Math.max(0, farEndWaitSeconds);
+    }
+  }
+
+  /**
+   * 远端一次折返的占用（不含多等）：进站走行 + 折返 + 出站走行 + 裕量。远端多等的上限 = 间隔 − 它， 否则下一班到达时上一辆车还占着那股道。与 {@link
+   * TerminalSerializer} 的端点占用同一口径。
+   */
+  @FunctionalInterface
+  public interface FarEndCost {
+    int occupiedSeconds(String group, UUID arrivingRoute, UUID departingRoute);
+  }
+
+  /**
+   * 相位层需要知道的路网形状。
+   *
+   * @param stubTerminals 容量 1 的端点站台组（{@link TerminalSerializer#terminalGroups} 的结果）
+   * @param farEndCost 远端占用
+   */
+  public record Topology(Set<String> stubTerminals, FarEndCost farEndCost) {
+    public Topology {
+      stubTerminals = stubTerminals == null ? Set.of() : Set.copyOf(stubTerminals);
+      farEndCost = farEndCost == null ? (group, arriving, departing) -> 0 : farEndCost;
+    }
+
+    /** 不知道路网形状：不做跨组按车接续，行为与只有两层时相同。 */
+    public static Topology none() {
+      return new Topology(Set.of(), null);
     }
   }
 
@@ -152,14 +222,9 @@ public final class PhasePlanner {
   }
 
   /**
-   * 选相位。
+   * 选相位（不知道路网形状，不做跨组按车接续）。
    *
-   * @param groups 分类结果里的组（按名字排序）
-   * @param intervalByGroup 每组的间隔（秒）
-   * @param runSecondsByRoute 每条 route 的全程时分
-   * @param turnarounds 折返时间表
-   * @param horizonSeconds 计划窗口长度
-   * @param callsByDirection 方向键 → 沿途合流点；空表示退回只按共用起点交错
+   * @see #plan(List, Map, Map, TurnaroundTable, int, Map, Topology)
    */
   public static Phases plan(
       List<ServiceGroupClassifier.Group> groups,
@@ -168,7 +233,37 @@ public final class PhasePlanner {
       TurnaroundTable turnarounds,
       int horizonSeconds,
       Map<String, List<StopCall>> callsByDirection) {
+    return plan(
+        groups,
+        intervalByGroup,
+        runSecondsByRoute,
+        turnarounds,
+        horizonSeconds,
+        callsByDirection,
+        Topology.none());
+  }
+
+  /**
+   * 选相位。
+   *
+   * @param groups 分类结果里的组（按名字排序）；只应包含真正上网格的方向——由派车器在交路收尾处生成的带客回库班不是周期流， 放进来会被当成一条幻影流参与锚定与交错
+   * @param intervalByGroup 每组的间隔（秒）
+   * @param runSecondsByRoute 每条 route 的全程时分
+   * @param turnarounds 折返时间表
+   * @param horizonSeconds 计划窗口长度
+   * @param callsByDirection 方向键 → 沿途合流点；空表示退回只按共用起点交错
+   * @param topology 路网形状：容量 1 的端点与远端占用，用于跨组按车接续
+   */
+  public static Phases plan(
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervalByGroup,
+      Map<UUID, Integer> runSecondsByRoute,
+      TurnaroundTable turnarounds,
+      int horizonSeconds,
+      Map<String, List<StopCall>> callsByDirection,
+      Topology topology) {
     Objects.requireNonNull(groups, "groups");
+    Topology shape = topology == null ? Topology.none() : topology;
     Map<String, Integer> phases = new TreeMap<>();
     Map<String, Integer> offsets = new TreeMap<>();
     List<String> notes = new ArrayList<>();
@@ -182,6 +277,11 @@ public final class PhasePlanner {
     // 算不出沿途合流点、只能按起点交错的方向。它们与算得出的那些方向永远对不上（键的形状不同，
     // 见 stopsOf），于是会悄悄退出第二层——所以要记一条 note 说出来。
     List<String> withoutCalls = new ArrayList<>();
+    // 跨组按车接续要回看已经放好的方向：它的相位、间隔，以及它的起点是不是自己往返对的锚定端（那一端已经有车喂）。
+    Map<String, ServiceGroupClassifier.Direction> placed = new LinkedHashMap<>();
+    Map<String, Integer> placedIntervals = new LinkedHashMap<>();
+    Set<String> reverseAnchored = new HashSet<>();
+    List<Connection> connections = new ArrayList<>();
 
     for (ServiceGroupClassifier.Group group : groups) {
       if (group.directions().isEmpty()) {
@@ -191,8 +291,39 @@ public final class PhasePlanner {
       // 第一层：组内相对相位（偏移 0 时的相位），往返对锚定。
       Map<String, Integer> relative =
           anchorReturnPairs(group, interval, runSecondsByRoute, turnarounds, notes);
+      reverseAnchored.addAll(reverseKeysOf(group));
+      // 第二层的例外：本组有方向能按车接到先放好的别组方向上，整组偏移由车决定，不再按合流点扫描。
+      Anchor anchor =
+          vehicleAnchorOf(
+              group,
+              interval,
+              relative,
+              phases,
+              placed,
+              placedIntervals,
+              reverseAnchored,
+              shape.stubTerminals(),
+              runSecondsByRoute,
+              turnarounds);
       // 第二层：整体偏移。
-      int offset = 0;
+      int offset = anchor == null ? 0 : anchor.offset();
+      if (anchor != null) {
+        connections.add(anchor.connection());
+        notes.add(
+            "交路组 "
+                + group.name()
+                + " 按车接续："
+                + anchor.connection().feederKey()
+                + " 到 "
+                + anchor.connection().terminal()
+                + " 折返 "
+                + anchor.feederTurnaround()
+                + "s 后接 "
+                + anchor.connection().fedKey()
+                + "，偏移 "
+                + offset
+                + "s（不按合流点交错）");
+      }
       List<String> shared = new ArrayList<>();
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         List<StopCall> own = calls.get(direction.key());
@@ -205,7 +336,7 @@ public final class PhasePlanner {
           }
         }
       }
-      if (!shared.isEmpty()) {
+      if (anchor == null && !shared.isEmpty()) {
         int bestOffset = 0;
         int bestGap = Integer.MAX_VALUE;
         int bestTightest = -1;
@@ -258,6 +389,8 @@ public final class PhasePlanner {
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         int phase = Math.floorMod(relative.get(direction.key()) + offset, interval);
         phases.put(direction.key(), phase);
+        placed.put(direction.key(), direction);
+        placedIntervals.put(direction.key(), interval);
         for (StopCall call : stopsOf(direction, calls)) {
           placedByStop
               .computeIfAbsent(call.key(), key -> new ArrayList<>())
@@ -265,10 +398,24 @@ public final class PhasePlanner {
         }
       }
     }
+    // 周期余数挪到远端：被接那一班的往返对反向车在远端多等，回到端点时与喂车方向到站错开最远。
+    List<Connection> placedConnections = new ArrayList<>(connections.size());
+    for (Connection connection : connections) {
+      placedConnections.add(
+          placeRemainderAtFarEnd(
+              connection,
+              intervalOfConnection(connection, placedIntervals),
+              phases,
+              placed,
+              runSecondsByRoute,
+              turnarounds,
+              shape.farEndCost(),
+              notes));
+    }
     if (!withoutCalls.isEmpty()) {
       notes.add("这些方向算不出沿途合流点，只按起点交错，不会与算得出的方向互相错开：" + String.join("、", withoutCalls));
     }
-    return new Phases(phases, offsets, notes);
+    return new Phases(phases, offsets, Map.of(), notes, List.of(), placedConnections);
   }
 
   /**
@@ -321,6 +468,157 @@ public final class PhasePlanner {
                   gaps.get(gaps.size() - 1)));
         });
     return List.copyOf(out);
+  }
+
+  /**
+   * 一次按车接续定下的整组偏移。
+   *
+   * @param connection 接续关系（远端多等尚未定）
+   * @param offset 本组因此取的整体偏移
+   * @param feederTurnaround 喂车方向在端点的折返
+   */
+  private record Anchor(Connection connection, int offset, int feederTurnaround) {}
+
+  /** 组内往返对里被锚定的反向方向：它的起点就是锚定端，那一端已经有本对的车喂。 */
+  private static Set<String> reverseKeysOf(ServiceGroupClassifier.Group group) {
+    Set<String> present = new HashSet<>();
+    for (ServiceGroupClassifier.Direction direction : group.directions()) {
+      present.add(direction.key());
+    }
+    Set<String> keys = new HashSet<>();
+    for (ServiceGroupClassifier.Direction direction : group.directions()) {
+      if (present.contains(direction.reverseKey())
+          && direction.key().compareTo(direction.reverseKey()) > 0) {
+        keys.add(direction.key());
+      }
+    }
+    return keys;
+  }
+
+  /**
+   * 本组里第一个能按车接到先放好方向上的喂车方向：它终到容量 1 的端点，先放好的别组方向从同一端点始发、同一间隔， 且那一端不是被接方向自己往返对的锚定端。容量 1
+   * 的端点只有一股道，终到与始发必然是同一个节点，派车器接得上。
+   *
+   * <p>只取第一个：一组只有一个整体偏移，两处接续要求不同偏移时后者照常由派车器按就绪顺序接。
+   */
+  private static Anchor vehicleAnchorOf(
+      ServiceGroupClassifier.Group group,
+      int interval,
+      Map<String, Integer> relative,
+      Map<String, Integer> phases,
+      Map<String, ServiceGroupClassifier.Direction> placed,
+      Map<String, Integer> placedIntervals,
+      Set<String> reverseAnchored,
+      Set<String> stubTerminals,
+      Map<UUID, Integer> runSecondsByRoute,
+      TurnaroundTable turnarounds) {
+    if (stubTerminals.isEmpty() || placed.isEmpty()) {
+      return null;
+    }
+    for (ServiceGroupClassifier.Direction feeder : group.directions()) {
+      String terminal = feeder.terminalGroup();
+      if (!stubTerminals.contains(terminal)) {
+        continue;
+      }
+      for (ServiceGroupClassifier.Direction fed : placed.values()) {
+        if (!fed.originGroup().equals(terminal)
+            || placedIntervals.getOrDefault(fed.key(), -1) != interval
+            || reverseAnchored.contains(fed.key())) {
+          continue;
+        }
+        UUID feederRoute = minRunRoute(feeder, runSecondsByRoute);
+        int turnaround =
+            feederRoute == null || turnarounds == null ? 0 : turnarounds.secondsFor(feederRoute);
+        int wanted =
+            Math.floorMod(
+                phases.get(fed.key()) - turnaround - minRun(feeder, runSecondsByRoute), interval);
+        int offset = Math.floorMod(wanted - relative.get(feeder.key()), interval);
+        return new Anchor(
+            new Connection(
+                terminal, feeder.key(), fed.key(), "", feeder.routeIds(), fed.routeIds(), 0),
+            offset,
+            turnaround);
+      }
+    }
+    return null;
+  }
+
+  private static int intervalOfConnection(
+      Connection connection, Map<String, Integer> placedIntervals) {
+    return Math.max(1, placedIntervals.getOrDefault(connection.fedKey(), 1));
+  }
+
+  /**
+   * 周期余数落点：被接方向往返对的反向车在远端多等 {@code w}，使它回到端点的时刻与喂车方向到站错开最远 （两次折返各占端点差不多一样久，错开半个周期时两边间距都最大）。
+   *
+   * <p>{@code w} 的上限 = 间隔 − 远端一次折返的占用：多等得再久，下一班到远端时上一辆车还占着那股道。 没有反向（被接方向不回这个端点）时什么都不做。
+   */
+  private static Connection placeRemainderAtFarEnd(
+      Connection connection,
+      int interval,
+      Map<String, Integer> phases,
+      Map<String, ServiceGroupClassifier.Direction> placed,
+      Map<UUID, Integer> runSecondsByRoute,
+      TurnaroundTable turnarounds,
+      FarEndCost farEndCost,
+      List<String> notes) {
+    ServiceGroupClassifier.Direction fed = placed.get(connection.fedKey());
+    ServiceGroupClassifier.Direction feeder = placed.get(connection.feederKey());
+    ServiceGroupClassifier.Direction back = fed == null ? null : placed.get(fed.reverseKey());
+    if (feeder == null || back == null || !back.terminalGroup().equals(connection.terminal())) {
+      return connection;
+    }
+    int feederArrival =
+        Math.floorMod(phases.get(feeder.key()) + minRun(feeder, runSecondsByRoute), interval);
+    int arrival = Math.floorMod(phases.get(back.key()) + minRun(back, runSecondsByRoute), interval);
+    int cost =
+        farEndCost.occupiedSeconds(
+            fed.terminalGroup(),
+            minRunRoute(fed, runSecondsByRoute),
+            minRunRoute(back, runSecondsByRoute));
+    int maxWait = Math.max(0, interval - cost);
+    int best = 0;
+    int bestDistance = -1;
+    for (int w = 0; w <= maxWait; w++) {
+      int distance = circularDistance(arrival + w, feederArrival, interval);
+      if (distance > bestDistance) {
+        bestDistance = distance;
+        best = w;
+      }
+    }
+    phases.put(back.key(), Math.floorMod(phases.get(back.key()) + best, interval));
+    notes.add(
+        back.key()
+            + " 在 "
+            + fed.terminalGroup()
+            + " 多等 "
+            + best
+            + "s（上限 "
+            + maxWait
+            + "s = 间隔 − 远端占用 "
+            + cost
+            + "s），回到 "
+            + connection.terminal()
+            + " 与 "
+            + connection.feederKey()
+            + " 到站相距 "
+            + bestDistance
+            + "s（原 "
+            + circularDistance(arrival, feederArrival, interval)
+            + "s）");
+    return new Connection(
+        connection.terminal(),
+        connection.feederKey(),
+        connection.fedKey(),
+        back.key(),
+        connection.feederRoutes(),
+        connection.fedRoutes(),
+        best);
+  }
+
+  private static int circularDistance(int a, int b, int interval) {
+    int diff = Math.floorMod(a - b, interval);
+    return Math.min(diff, interval - diff);
   }
 
   /** 往返对锚定：起终点互换的两个方向里，键较小的为正向、相位 0；反向相位 = 正向走行（方向内最短的候选）+ 折返，对间隔取模。 没有配对的方向相位 0。 */

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -234,5 +235,117 @@ class PhasePlannerTest {
     assertEquals(7, a.departures());
     assertEquals(200, a.minGap());
     assertEquals(400, a.maxGap());
+  }
+
+  // ------------------------------------------------------------------ 跨组按车接续
+
+  /**
+   * 仿 WS：大交路 A↔Z 在 A 是单股道端点，A→Z 是正向（它的起点 A 没有本对的车喂）；小交路 M→A 到 A 折返后接 A→Z。
+   *
+   * <p>小交路的相位由车决定：到站 226 + 折返 20 正好是 A→Z 的发车（0），即 (0 − 20 − 226) mod 150 = 54，不按合流点扫。 然后 Z→A
+   * 在远端多等，让它回到 A 与小交路到站错开半个周期：原本相距 3 秒，多等 78 秒后相距 75 秒。
+   */
+  @Test
+  void feederIsAnchoredToTheFedDirectionAtAStubTerminal() {
+    PhasePlanner.Phases phases = planWsLike(55);
+
+    assertEquals(0, phases.phaseByDirection().get("OP:S:A→OP:S:Z"));
+    assertEquals(54, phases.phaseByDirection().get("OP:S:M→OP:S:A"), "到站 + 折返 = 被接那一班发车");
+    assertEquals(54, phases.offsetByGroup().get("short"));
+    // 锚定给的 (575 + 20) mod 150 = 145，再多等 78。
+    assertEquals((145 + 78) % 150, phases.phaseByDirection().get("OP:S:Z→OP:S:A"));
+    assertEquals(1, phases.connections().size());
+    PhasePlanner.Connection connection = phases.connections().get(0);
+    assertEquals("OP:S:A", connection.terminal());
+    assertEquals("OP:S:M→OP:S:A", connection.feederKey());
+    assertEquals("OP:S:A→OP:S:Z", connection.fedKey());
+    assertEquals("OP:S:Z→OP:S:A", connection.backKey());
+    assertEquals(List.of(RS), connection.feederRoutes());
+    assertEquals(List.of(RA), connection.fedRoutes());
+    assertEquals(78, connection.farEndWaitSeconds());
+    int feederArrival = Math.floorMod(54 + 226, 150);
+    int backArrival = Math.floorMod(phases.phaseByDirection().get("OP:S:Z→OP:S:A") + 582, 150);
+    assertEquals(75, Math.floorMod(backArrival - feederArrival, 150), "两次折返错开半个周期");
+    assertTrue(
+        phases.notes().stream().anyMatch(note -> note.contains("按车接续")), phases.notes().toString());
+  }
+
+  /** 远端多等不能超过"间隔 − 远端一次折返的占用"：再久下一班到远端时上一辆车还占着那股道。 */
+  @Test
+  void farEndWaitIsCappedByTheFarEndOccupancy() {
+    PhasePlanner.Phases phases = planWsLike(120);
+
+    PhasePlanner.Connection connection = phases.connections().get(0);
+    assertEquals(30, connection.farEndWaitSeconds(), "上限 150 − 120 = 30，取上限内错开最远的");
+    assertEquals((145 + 30) % 150, phases.phaseByDirection().get("OP:S:Z→OP:S:A"));
+  }
+
+  /** 被接方向的起点若是它自己往返对的锚定端（本对的车已经喂它），就不做跨组接续，小交路照旧按合流点交错。 */
+  @Test
+  void noConnectionWhereTheFedOriginIsAlreadyFedByItsOwnPair() {
+    // 端点叫 Z：Z→A 的键比 A→Z 大，于是它是反向，起点 Z 已经由 A→Z 的车喂。
+    ServiceGroupClassifier.Group full =
+        new ServiceGroupClassifier.Group(
+            "full",
+            List.of(
+                direction("OP:S:A", "OP:S:Z", "RA", RA), direction("OP:S:Z", "OP:S:A", "RB", RB)),
+            List.of());
+    ServiceGroupClassifier.Group shortTurn =
+        new ServiceGroupClassifier.Group(
+            "short", List.of(direction("OP:S:M", "OP:S:Z", "RS", RS)), List.of());
+
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            List.of(full, shortTurn),
+            Map.of("full", 150, "short", 150),
+            Map.of(RA, 575, RB, 582, RS, 226),
+            TurnaroundTable.fixed(20),
+            3600,
+            Map.of(),
+            new PhasePlanner.Topology(Set.of("OP:S:Z"), (g, a, d) -> 55));
+
+    assertTrue(phases.connections().isEmpty(), phases.notes().toString());
+  }
+
+  /** 不给路网形状时与只有两层的旧行为逐字段相同：没有接续，没有远端多等。 */
+  @Test
+  void withoutTopologyThereAreNoConnections() {
+    PhasePlanner.Phases withShape = planWsLike(55);
+    PhasePlanner.Phases without =
+        PhasePlanner.plan(
+            wsLikeGroups(),
+            Map.of("full", 150, "short", 150),
+            Map.of(RA, 575, RB, 582, RS, 226),
+            TurnaroundTable.fixed(20),
+            3600,
+            Map.of());
+
+    assertTrue(without.connections().isEmpty());
+    assertEquals((575 + 20) % 150, without.phaseByDirection().get("OP:S:Z→OP:S:A"), "没有接续就没有远端多等");
+    assertEquals(1, withShape.connections().size());
+  }
+
+  private static List<ServiceGroupClassifier.Group> wsLikeGroups() {
+    ServiceGroupClassifier.Group full =
+        new ServiceGroupClassifier.Group(
+            "full",
+            List.of(
+                direction("OP:S:A", "OP:S:Z", "RA", RA), direction("OP:S:Z", "OP:S:A", "RB", RB)),
+            List.of());
+    ServiceGroupClassifier.Group shortTurn =
+        new ServiceGroupClassifier.Group(
+            "short", List.of(direction("OP:S:M", "OP:S:A", "RS", RS)), List.of());
+    return List.of(full, shortTurn);
+  }
+
+  private static PhasePlanner.Phases planWsLike(int farEndOccupancy) {
+    return PhasePlanner.plan(
+        wsLikeGroups(),
+        Map.of("full", 150, "short", 150),
+        Map.of(RA, 575, RB, 582, RS, 226),
+        TurnaroundTable.fixed(20),
+        3600,
+        Map.of(),
+        new PhasePlanner.Topology(Set.of("OP:S:A"), (g, a, d) -> farEndOccupancy));
   }
 }
