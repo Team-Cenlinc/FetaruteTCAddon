@@ -14,10 +14,12 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -69,7 +71,7 @@ public final class TimetableBuilder {
   public static final double SHARE_WARN_PERCENT_POINTS = 5.0D;
 
   /** 搜索可行 headway 时的步长（秒）。 */
-  public static final int HEADWAY_SEARCH_STEP_SECONDS = 10;
+  public static final int HEADWAY_SEARCH_STEP_SECONDS = 5;
 
   /** 搜索可行 headway 时最多放宽到目标的多少倍。 */
   public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 4;
@@ -134,7 +136,9 @@ public final class TimetableBuilder {
                 target.conflicts(), options.serviceStartSecondOfDay()));
         return TimetableBuildResult.failure(String.join("\n", reasons), prepared.infeasible());
       }
-      Optional<Attempt> fallback = searchFeasibleHeadway(prepared, options, target, input, builtAt);
+      List<String> searchNotes = new ArrayList<>();
+      Optional<Attempt> fallback =
+          searchFeasibleHeadway(prepared, options, target, input, builtAt, searchNotes);
       if (fallback.isEmpty()) {
         return TimetableBuildResult.failure(
             summary
@@ -148,6 +152,7 @@ public final class TimetableBuilder {
             prepared.infeasible());
       }
       chosen = fallback.get();
+      warnings.addAll(searchNotes);
       warnings.add(
           summary
               + "，已回退到最小可行间隔 "
@@ -480,15 +485,7 @@ public final class TimetableBuilder {
     // 留在相位层里它会被当成一条幻影流——与反向配成往返对去锚定别人，还参与合流点打分。
     List<ServiceGroupClassifier.Group> gridGroups =
         gridGroupsOf(groups, candidateIndexByRoute.keySet());
-    PhasePlanner.Phases phases =
-        PhasePlanner.plan(
-            gridGroups,
-            intervalByGroup,
-            prepared.runByRoute(),
-            options.dutyLimits().turnaround(),
-            horizon,
-            stopCalls(gridGroups, prepared),
-            topologyOf(prepared, operationPlans, options, separation));
+    PhasePlanner.Phases phases = planPhases(prepared, options, intervalByGroup, gridGroups);
     // ---- 2.5 第三层：前两层只看端点，沿线哪里交会、咽喉上出库流与回库流什么时候相遇它们看不见。
     // 给每个方向选一个 δ，用同一套冲突模型按周期评估；按车接续链整体平移，不拆开。
     phases =
@@ -870,41 +867,141 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 从目标 headway 向上逐步放宽，找第一个排出来没有冲突的间隔。
+   * 目标间隔有冲突时往上找最小可行间隔，所有组等比放宽。
    *
-   * <p>只放宽 headway、不挪动单个班次：表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成， 因此"建议值"是一个可以直接写回配置的数，而不是一次性的手工调整。
+   * <p>可行性不随间隔单调：实测 WS 135 可行、140 不可行、150 又可行。原来按 10 秒一档往上搜，从 120 直接跳到 150，漏掉 135。 现在分两层：
+   *
+   * <ul>
+   *   <li><b>结构预筛，逐秒</b>：有跨组按车接续时，每一秒都只跑一遍相位层（毫秒级），端点或车库咽喉在远端多等的上限内错不开的 间隔直接跳过，不做完整构建；
+   *   <li><b>完整构建</b>：只在 {@value #HEADWAY_SEARCH_STEP_SECONDS} 秒一档的格点上，以及预筛里每一段"错得开"区间的第一秒上做。
+   *       可行窗口只有一两秒宽时也找得到它的起点。
+   * </ul>
+   *
+   * 没有按车接续的线路没有东西可预筛，只走格点。按升序试，第一个干净的就是答案。
+   *
+   * <p>只放宽间隔、不挪动单个班次：表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成，因此找到的间隔是一个可以直接写回配置的数， 而不是一次性的手工调整。
+   *
+   * @param searchNotes 搜索过程的说明（跳过了哪些结构上不可行的间隔），进报告
    */
   private Optional<Attempt> searchFeasibleHeadway(
       Prepared prepared,
       TimetableBuildOptions options,
       Attempt target,
       BuildInput input,
-      Instant builtAt) {
+      Instant builtAt,
+      List<String> searchNotes) {
     int targetHeadway = target.headwaySeconds();
-    int limit = targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER;
-    long fallbackHeadway = Math.max(1L, options.headway().toSeconds());
-    for (int headway = targetHeadway + HEADWAY_SEARCH_STEP_SECONDS;
-        headway <= limit;
-        headway += HEADWAY_SEARCH_STEP_SECONDS) {
-      // 所有组等比放宽：最小的组间隔走到 headway，其余按同一比例——组间比例不变，回写时才对得上。
-      double factor = (double) headway / targetHeadway;
-      Map<String, Integer> scaled = new TreeMap<>();
-      target
-          .intervals()
-          .forEach((group, base) -> scaled.put(group, (int) Math.round(base * factor)));
-      TimetableBuildOptions relaxed =
-          options.withIntervals(Duration.ofSeconds(Math.round(fallbackHeadway * factor)), scaled);
+    boolean structural = structuralClearance(prepared, options).isPresent();
+    HeadwayCandidates candidates =
+        new HeadwayCandidates(
+            targetHeadway,
+            targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
+            HEADWAY_SEARCH_STEP_SECONDS,
+            structural
+                ? headway -> {
+                  OptionalInt clearance =
+                      structuralClearance(prepared, relaxedOptions(options, target, headway));
+                  return clearance.isEmpty() || clearance.getAsInt() >= 0;
+                }
+                : null);
+    for (OptionalInt next = candidates.next(); next.isPresent(); next = candidates.next()) {
       Attempt candidate;
       try {
-        candidate = attempt(prepared, relaxed, input, builtAt);
+        candidate =
+            attempt(prepared, relaxedOptions(options, target, next.getAsInt()), input, builtAt);
       } catch (BuildFailure ignored) {
         continue;
       }
       if (candidate.clean()) {
+        if (candidates.skipped() > 0) {
+          searchNotes.add(
+              String.format(
+                  Locale.ROOT,
+                  "搜索逐秒预筛：%d–%ds 之间 %d 档间隔端点或车库咽喉在结构上错不开，没有逐一构建",
+                  candidates.skippedFrom(),
+                  candidates.skippedTo(),
+                  candidates.skipped()));
+        }
         return Optional.of(candidate);
       }
     }
     return Optional.empty();
+  }
+
+  /** 搜索要完整构建的间隔，升序、惰性：有结构预筛时逐秒问一遍，预筛不过的跳过（计数）；过了的只在格点上、 以及每一段"过"的区间的第一秒上交出去。没有预筛时只交格点。 */
+  static final class HeadwayCandidates {
+    private final int limit;
+    private final int step;
+    private final int target;
+    private final IntPredicate structuralPass;
+    private int headway;
+    private boolean previousPassed;
+    private int skipped;
+    private int skippedFrom;
+    private int skippedTo;
+
+    /**
+     * @param target 目标间隔（不含：它已经试过）
+     * @param limit 上限（含）
+     * @param step 格点步长
+     * @param structuralPass 结构预筛；为 null 时没有预筛
+     */
+    HeadwayCandidates(int target, int limit, int step, IntPredicate structuralPass) {
+      this.target = target;
+      this.limit = limit;
+      this.step = Math.max(1, step);
+      this.structuralPass = structuralPass;
+      this.headway = target;
+    }
+
+    OptionalInt next() {
+      while (headway < limit) {
+        headway++;
+        boolean onLattice = (headway - target) % step == 0;
+        if (structuralPass == null) {
+          if (onLattice) {
+            return OptionalInt.of(headway);
+          }
+          continue;
+        }
+        boolean passed = structuralPass.test(headway);
+        boolean islandStart = passed && !previousPassed;
+        previousPassed = passed;
+        if (!passed) {
+          skipped++;
+          skippedFrom = skippedFrom == 0 ? headway : skippedFrom;
+          skippedTo = headway;
+          continue;
+        }
+        if (onLattice || islandStart) {
+          return OptionalInt.of(headway);
+        }
+      }
+      return OptionalInt.empty();
+    }
+
+    int skipped() {
+      return skipped;
+    }
+
+    int skippedFrom() {
+      return skippedFrom;
+    }
+
+    int skippedTo() {
+      return skippedTo;
+    }
+  }
+
+  /** 所有组等比放宽：最小的组间隔走到 {@code headway}，其余按同一比例——组间比例不变，回写时才对得上。 */
+  private static TimetableBuildOptions relaxedOptions(
+      TimetableBuildOptions options, Attempt target, int headway) {
+    int targetHeadway = target.headwaySeconds();
+    double factor = (double) headway / targetHeadway;
+    long fallbackHeadway = Math.max(1L, options.headway().toSeconds());
+    Map<String, Integer> scaled = new TreeMap<>();
+    target.intervals().forEach((group, base) -> scaled.put(group, (int) Math.round(base * factor)));
+    return options.withIntervals(Duration.ofSeconds(Math.round(fallbackHeadway * factor)), scaled);
   }
 
   /** 首站带 CRET 指令：列车在这条 route 上从车库实体化，与发车侧 {@code startsWithCret} 判法一致。 */
@@ -1012,6 +1109,43 @@ public final class TimetableBuilder {
   private static String groupAt(TimetableConflictChecker.RouteProfile profile, int index) {
     TimetableConflictChecker.Platform platform = profile.platforms().get(index);
     return platform.absent() ? "" : platform.group();
+  }
+
+  /** 前两层相位与跨组接续：{@link #attempt} 与搜索的结构预筛共用，同一组间隔两边算出同一个相位。 */
+  private static PhasePlanner.Phases planPhases(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      Map<String, Integer> intervalByGroup,
+      List<ServiceGroupClassifier.Group> gridGroups) {
+    int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
+    return PhasePlanner.plan(
+        gridGroups,
+        intervalByGroup,
+        prepared.runByRoute(),
+        options.dutyLimits().turnaround(),
+        options.horizonSeconds(),
+        stopCalls(gridGroups, prepared),
+        topologyOf(prepared, prepared.operationPlans(), options, separation));
+  }
+
+  /**
+   * 结构预筛：只跑相位层（毫秒级），给出按车接续在端点与车库咽喉上留下的最小间隙；没有按车接续时为空。
+   * 负数说明远端多等在上限内怎么挑都错不开——这个间隔下端点或咽喉必有冲突，不用完整构建就知道。
+   */
+  private static OptionalInt structuralClearance(Prepared prepared, TimetableBuildOptions options) {
+    Map<String, Integer> intervalByGroup = new TreeMap<>();
+    for (ServiceGroupClassifier.Group group : prepared.classification().groups()) {
+      intervalByGroup.put(group.name(), options.intervalFor(group.name()));
+    }
+    Set<UUID> gridRoutes = new HashSet<>();
+    for (TimetableRoutePlan plan : prepared.operationPlans()) {
+      gridRoutes.add(plan.routeId());
+    }
+    List<ServiceGroupClassifier.Group> gridGroups =
+        gridGroupsOf(prepared.classification().groups(), gridRoutes);
+    return planPhases(prepared, options, intervalByGroup, gridGroups).connections().stream()
+        .mapToInt(PhasePlanner.Connection::clearanceSeconds)
+        .min();
   }
 
   /** 每组只留下至少有一条 route 真正上网格的方向。 */

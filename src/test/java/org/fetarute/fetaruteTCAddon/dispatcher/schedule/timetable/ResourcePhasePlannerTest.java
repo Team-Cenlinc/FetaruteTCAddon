@@ -128,7 +128,7 @@ class ResourcePhasePlannerTest {
     List<String> keys = List.copyOf(fixture.phases().phaseByDirection().keySet());
     PhasePlanner.Connection connection =
         new PhasePlanner.Connection(
-            "OP:S:A", keys.get(1), keys.get(0), "", List.of(), List.of(), 0);
+            "OP:S:A", keys.get(1), keys.get(0), "", List.of(), List.of(), 0, Integer.MAX_VALUE);
     PhasePlanner.Phases connected =
         new PhasePlanner.Phases(
             fixture.phases().phaseByDirection(),

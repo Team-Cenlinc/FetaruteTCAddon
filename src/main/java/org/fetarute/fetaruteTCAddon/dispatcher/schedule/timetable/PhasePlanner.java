@@ -87,6 +87,8 @@ public final class PhasePlanner {
    * @param feederRoutes 喂车方向的 route
    * @param fedRoutes 被接方向的 route
    * @param farEndWaitSeconds 反向车在远端多等的秒数（周期余数落点）
+   * @param clearanceSeconds 选定多等之后，端点上两次折返、车库咽喉上出库与回库两处间隙里较小的那个；负数 = 上限内错不开，
+   *     这个间隔下端点或咽喉必有冲突（搜索用它逐秒预筛）；没有反向车可调时为 {@link Integer#MAX_VALUE}
    */
   public record Connection(
       String terminal,
@@ -95,7 +97,8 @@ public final class PhasePlanner {
       String backKey,
       List<UUID> feederRoutes,
       List<UUID> fedRoutes,
-      int farEndWaitSeconds) {
+      int farEndWaitSeconds,
+      int clearanceSeconds) {
     public Connection {
       terminal = terminal == null ? "" : terminal;
       feederKey = feederKey == null ? "" : feederKey;
@@ -560,7 +563,14 @@ public final class PhasePlanner {
         int offset = Math.floorMod(wanted - relative.get(feeder.key()), interval);
         return new Anchor(
             new Connection(
-                terminal, feeder.key(), fed.key(), "", feeder.routeIds(), fed.routeIds(), 0),
+                terminal,
+                feeder.key(),
+                fed.key(),
+                "",
+                feeder.routeIds(),
+                fed.routeIds(),
+                0,
+                Integer.MAX_VALUE),
             offset,
             turnaround);
       }
@@ -671,7 +681,8 @@ public final class PhasePlanner {
         back.key(),
         connection.feederRoutes(),
         connection.fedRoutes(),
-        best);
+        best,
+        bestScore);
   }
 
   /** 圆周（周长 = 间隔）上两段弧之间的最小间隙；负数是重叠的秒数。 */
