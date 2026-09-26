@@ -259,6 +259,27 @@ class TimetableServiceTest {
     assertTrue(service.managedRoutes().isEmpty());
   }
 
+  /** ETA 与公开 API 轮询用的计划时刻查询：只读，不能顺手建立绑定。 */
+  @Test
+  void plannedTimeQueriesAreReadOnly() {
+    TimetableService service = service(true, timetable(TimetableStatus.PUBLISHED));
+
+    assertTrue(service.plannedDepartureOf("train-A", 1).isEmpty());
+    assertTrue(service.assignments().isEmpty(), "未绑定时查询不能建立绑定");
+
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+    assertEquals(
+        Optional.of(Instant.parse("2026-03-02T08:02:10Z")),
+        service.plannedDepartureOf("TRAIN-A", 1),
+        "列车名大小写不敏感");
+    assertEquals(
+        Optional.of(Instant.parse("2026-03-02T08:01:40Z")), service.plannedArrivalOf("train-a", 1));
+    assertEquals(1, service.assignments().size());
+
+    service.applySettings(TimetableService.Settings.disabled());
+    assertTrue(service.plannedDepartureOf("train-A", 1).isEmpty());
+  }
+
   /** 总开关关闭时立刻清空绑定。 */
   @Test
   void disablingClearsAssignments() {

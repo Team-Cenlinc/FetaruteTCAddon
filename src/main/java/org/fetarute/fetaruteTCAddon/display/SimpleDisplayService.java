@@ -8,6 +8,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.actionbar.ActionBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.scoreboard.ScoreboardTrainHudManager;
@@ -91,6 +92,13 @@ public final class SimpleDisplayService implements DisplayService {
     if (view == null || view.runtimeSettings() == null) {
       return;
     }
+    // 三块 HUD 共用一个中英文切换周期（见 HudLanguageRotation），不取各模板自己的轮播周期。
+    HudLanguageRotation.setLanguagePeriodTicks(
+        plugin
+            .getConfig()
+            .getLong(
+                "runtime.hud.language-rotate-ticks",
+                HudLanguageRotation.DEFAULT_LANGUAGE_PERIOD_TICKS));
 
     if (!view.runtimeSettings().hudBossBarEnabled()) {
       // skip

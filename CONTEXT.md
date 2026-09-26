@@ -29,3 +29,8 @@ _Avoid_: HUD 上下行方向、Minecart 朝向
 **授权交接（Authority Handoff）**：
 列车停稳折返时，把与新窗口重叠的旧方向 claim 原子替换为反向 Movement Plan 的硬授权；外部 blocker 存在时完整保留旧状态，成功时未获 rear-clear 证明的旧进站 edge/咽喉/道口继续作为 Physical Footprint，直到正常推进释放。列车显示名变化必须迁移同一份授权 owner，不能通过 `releaseByTrain` 重新取得。
 _Avoid_: 普通 claim refresh、健康恢复清理
+
+**扣停（Hold）**：
+面向展示与估算的概念：列车处于非例行停车（信号、占用、授权、尾保、安全状态不可用等），或例行停站/门控已超出正常站内用时。
+由 `EtaService#currentHold` 统一判定，ETA 顺延与公开 API 扣停事件共用；不参与控车。开始时刻跨运行时停车状态替换连续计算。
+_Avoid_: 计划扣留（那是时刻表让早到列车在站等点，属于例行停车）、STOP 生命周期（那是控车侧状态，换原因就重置）

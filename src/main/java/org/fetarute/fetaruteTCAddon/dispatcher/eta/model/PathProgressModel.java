@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
@@ -25,10 +26,26 @@ public final class PathProgressModel {
 
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
 
-  public record PathProgress(List<NodeId> remainingNodes, List<RailEdge> remainingEdges) {
+  /**
+   * 剩余路径。
+   *
+   * @param remainingNodes 剩余节点（首个为列车刚经过的节点）
+   * @param remainingEdges 剩余边
+   * @param firstEdgeRemainingBlocks 列车已在首边上行驶了一段时首边的剩余长度；为空表示按整条边计
+   */
+  public record PathProgress(
+      List<NodeId> remainingNodes,
+      List<RailEdge> remainingEdges,
+      OptionalDouble firstEdgeRemainingBlocks) {
     public PathProgress {
       remainingNodes = remainingNodes == null ? List.of() : List.copyOf(remainingNodes);
       remainingEdges = remainingEdges == null ? List.of() : List.copyOf(remainingEdges);
+      firstEdgeRemainingBlocks =
+          firstEdgeRemainingBlocks == null ? OptionalDouble.empty() : firstEdgeRemainingBlocks;
+    }
+
+    public PathProgress(List<NodeId> remainingNodes, List<RailEdge> remainingEdges) {
+      this(remainingNodes, remainingEdges, OptionalDouble.empty());
     }
 
     public int remainingEdgeCount() {

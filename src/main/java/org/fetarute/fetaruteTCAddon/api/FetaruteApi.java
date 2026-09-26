@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.api.occupancy.OccupancyApi;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
+import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
 
 /**
@@ -55,11 +56,13 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
  * @see OperatorApi
  * @see LineApi
  * @see EtaApi
+ * @see TimetableApi
+ * @see org.fetarute.fetaruteTCAddon.api.event
  */
 public final class FetaruteApi {
 
   /** 当前 API 版本（语义版本）。 */
-  public static final String API_VERSION = "1.2.0";
+  public static final String API_VERSION = "1.4.0";
 
   private static volatile FetaruteApi instance;
 
@@ -71,6 +74,7 @@ public final class FetaruteApi {
   private final OperatorApi operatorApi;
   private final LineApi lineApi;
   private final EtaApi etaApi;
+  private final TimetableApi timetableApi;
 
   private FetaruteApi(
       GraphApi graphApi,
@@ -80,7 +84,8 @@ public final class FetaruteApi {
       StationApi stationApi,
       OperatorApi operatorApi,
       LineApi lineApi,
-      EtaApi etaApi) {
+      EtaApi etaApi,
+      TimetableApi timetableApi) {
     this.graphApi = graphApi;
     this.trainApi = trainApi;
     this.routeApi = routeApi;
@@ -89,6 +94,7 @@ public final class FetaruteApi {
     this.operatorApi = operatorApi;
     this.lineApi = lineApi;
     this.etaApi = etaApi;
+    this.timetableApi = timetableApi;
   }
 
   /**
@@ -200,6 +206,15 @@ public final class FetaruteApi {
   }
 
   /**
+   * 时刻表 API：已发布时刻表、车次、站点计划到发、列车当前车次（1.4.0）。
+   *
+   * @return 时刻表 API
+   */
+  public TimetableApi timetables() {
+    return timetableApi;
+  }
+
+  /**
    * 当前 API 版本。
    *
    * @return 语义版本字符串
@@ -223,6 +238,7 @@ public final class FetaruteApi {
    * @param operatorApi 运营商 API 实现
    * @param lineApi 线路 API 实现
    * @param etaApi ETA API 实现
+   * @param timetableApi 时刻表 API 实现
    */
   public static void initialize(
       GraphApi graphApi,
@@ -232,10 +248,33 @@ public final class FetaruteApi {
       StationApi stationApi,
       OperatorApi operatorApi,
       LineApi lineApi,
-      EtaApi etaApi) {
+      EtaApi etaApi,
+      TimetableApi timetableApi) {
     instance =
         new FetaruteApi(
-            graphApi, trainApi, routeApi, occupancyApi, stationApi, operatorApi, lineApi, etaApi);
+            graphApi,
+            trainApi,
+            routeApi,
+            occupancyApi,
+            stationApi,
+            operatorApi,
+            lineApi,
+            etaApi,
+            timetableApi);
+  }
+
+  /** 兼容 1.3 及以前的初始化入口（无时刻表 API）。 */
+  public static void initialize(
+      GraphApi graphApi,
+      TrainApi trainApi,
+      RouteApi routeApi,
+      OccupancyApi occupancyApi,
+      StationApi stationApi,
+      OperatorApi operatorApi,
+      LineApi lineApi,
+      EtaApi etaApi) {
+    initialize(
+        graphApi, trainApi, routeApi, occupancyApi, stationApi, operatorApi, lineApi, etaApi, null);
   }
 
   /** 销毁 API 实例（仅供 {@link FetaruteTCAddon} 调用）。 */

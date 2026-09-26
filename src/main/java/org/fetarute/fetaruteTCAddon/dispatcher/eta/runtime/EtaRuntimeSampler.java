@@ -7,11 +7,14 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
@@ -32,13 +35,32 @@ public final class EtaRuntimeSampler {
   /** 每 tick 20 次，velocity magnitude 转 blocks/second 的系数。 */
   private static final double VELOCITY_TO_BPS = 20.0;
 
+  /** 行驶距离积分时单次采样间隔的上限（毫秒）。 */
+  static final long MAX_INTEGRATION_GAP_MILLIS = 2000L;
+
   private final RouteProgressRegistry progressRegistry;
   private final TrainSnapshotStore snapshotStore;
+  private final Function<String, Optional<RuntimeStopState>> stopStates;
+  private final java.util.function.Consumer<String> debugLogger;
 
   public EtaRuntimeSampler(
       RouteProgressRegistry progressRegistry, TrainSnapshotStore snapshotStore) {
+    this(progressRegistry, snapshotStore, null, null);
+  }
+
+  /**
+   * @param stopStates 列车当前 STOP 生命周期（用于推进扣停时间线；为 null 时不记录扣停）
+   * @param debugLogger 调试日志（可为 null）
+   */
+  public EtaRuntimeSampler(
+      RouteProgressRegistry progressRegistry,
+      TrainSnapshotStore snapshotStore,
+      Function<String, Optional<RuntimeStopState>> stopStates,
+      java.util.function.Consumer<String> debugLogger) {
     this.progressRegistry = progressRegistry;
     this.snapshotStore = snapshotStore;
+    this.stopStates = stopStates == null ? name -> Optional.empty() : stopStates;
+    this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
   }
 
   /**
@@ -114,11 +136,23 @@ public final class EtaRuntimeSampler {
       }
     }
 
+    Instant sampledAt = now != null ? now : Instant.now();
+    TrainRuntimeSnapshot previous = snapshotStore.getSnapshot(trainName).orElse(null);
+    OptionalDouble traveled = accumulateTraveled(previous, lastPassedNodeId, speedBps, sampledAt);
+    TrainRuntimeSnapshot.HoldTimeline timeline =
+        advanceTimeline(
+            previous,
+            entry.routeId(),
+            entry.currentIndex(),
+            dwellRemainingSec,
+            safeStopState(trainName),
+            sampledAt);
+
     snapshotStore.update(
         trainName,
         new TrainRuntimeSnapshot(
             tick,
-            now != null ? now : Instant.now(),
+            sampledAt,
             group.getWorld() != null ? group.getWorld().getUID() : new java.util.UUID(0L, 0L),
             entry.routeUuid() != null ? entry.routeUuid() : new java.util.UUID(0L, 0L),
             entry.routeId(),
@@ -130,7 +164,90 @@ public final class EtaRuntimeSampler {
             TrainTagHelper.readTagValue(group.getProperties(), "FTA_TICKET_ID"),
             speedBps,
             distanceToNext,
-            edgeLength));
+            edgeLength,
+            traveled,
+            timeline));
+  }
+
+  /**
+   * 推进扣停时间线。
+   *
+   * <ul>
+   *   <li>{@code holdSince}：只要仍处于非例行停车，就沿用上一次的开始时刻——运行时停车状态换原因、换阻挡者时 会整体替换，但对乘客而言是同一次被扣。
+   *   <li>{@code dwellEndedAt}：同一站上停站计时从“有”变“无”的那一刻；重新开始计时或离开该站即清空。
+   * </ul>
+   */
+  static TrainRuntimeSnapshot.HoldTimeline advanceTimeline(
+      TrainRuntimeSnapshot previous,
+      RouteId routeId,
+      int routeIndex,
+      Optional<Integer> dwellRemainingSec,
+      Optional<RuntimeStopState> stopState,
+      Instant now) {
+    TrainRuntimeSnapshot.HoldTimeline last =
+        previous == null ? TrainRuntimeSnapshot.HoldTimeline.EMPTY : previous.holdTimeline();
+    boolean held = stopState != null && stopState.filter(s -> !s.routineStop()).isPresent();
+    Optional<Instant> holdSince =
+        held ? Optional.of(last.holdSince().orElse(now)) : Optional.empty();
+
+    boolean dwelling =
+        dwellRemainingSec != null && dwellRemainingSec.filter(s -> s > 0).isPresent();
+    boolean sameStop =
+        previous != null
+            && previous.routeIndex() == routeIndex
+            && previous.routeId().equals(routeId);
+    Optional<Instant> dwellEndedAt = Optional.empty();
+    if (!dwelling && sameStop) {
+      if (last.dwellEndedAt().isPresent()) {
+        dwellEndedAt = last.dwellEndedAt();
+      } else if (previous.dwellRemainingSec().filter(s -> s > 0).isPresent()) {
+        dwellEndedAt = Optional.of(now);
+      }
+    }
+    return new TrainRuntimeSnapshot.HoldTimeline(holdSince, dwellEndedAt);
+  }
+
+  private Optional<RuntimeStopState> safeStopState(String trainName) {
+    try {
+      Optional<RuntimeStopState> state = stopStates.apply(trainName);
+      return state == null ? Optional.empty() : state;
+    } catch (RuntimeException ex) {
+      // 采样跑在逐列车 fail-closed 边界里：展示用的读取失败绝不能漏出去触发控车侧的停车保护。
+      debugLogger.accept("ETA_SAMPLER_STOP_STATE_FAILED train=" + trainName + " error=" + ex);
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * 自上一个经过节点起已行驶的距离（blocks），按相邻两次采样的平均速度积分。
+   *
+   * <p>ETA 只知道“上一个经过的节点”，不知道列车在这条边上走了多远；不补这一段，列车在一条边上行驶时 ETA 基本不动，过节点时再突跳。
+   * 节点变化即清零，误差只在一条边内累积。采样间隔按最多 {@link #MAX_INTEGRATION_GAP_MILLIS} 计，
+   * 避免采样中断（区块卸载、服务器卡顿）后一次积出一大段不存在的距离。
+   */
+  static OptionalDouble accumulateTraveled(
+      TrainRuntimeSnapshot previous,
+      Optional<NodeId> lastPassedNodeId,
+      OptionalDouble speedBps,
+      Instant now) {
+    if (lastPassedNodeId == null || lastPassedNodeId.isEmpty()) {
+      return OptionalDouble.empty();
+    }
+    if (previous == null
+        || previous.lastPassedNodeId().isEmpty()
+        || !previous.lastPassedNodeId().get().equals(lastPassedNodeId.get())
+        || previous.traveledSinceLastPassedBlocks().isEmpty()) {
+      return OptionalDouble.of(0.0);
+    }
+    double base = previous.traveledSinceLastPassedBlocks().getAsDouble();
+    long gapMillis =
+        Math.min(
+            MAX_INTEGRATION_GAP_MILLIS,
+            Math.max(0L, now.toEpochMilli() - previous.updatedAt().toEpochMilli()));
+    double v0 = previous.currentSpeedBps().orElse(0.0);
+    double v1 = speedBps == null ? v0 : speedBps.orElse(v0);
+    double delta = Math.max(0.0, (v0 + v1) / 2.0) * gapMillis / 1000.0;
+    return OptionalDouble.of(base + delta);
   }
 
   /** 从 MinecartGroup 采样速度（blocks per second）。 */

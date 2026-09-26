@@ -49,14 +49,32 @@ public final class TravelTimeModel {
    */
   public Optional<Integer> estimateTravelSec(
       RailGraph graph, List<NodeId> nodes, List<RailEdge> edges, OptionalDouble initialSpeedBps) {
+    return estimateTravelSec(graph, nodes, edges, initialSpeedBps, OptionalDouble.empty());
+  }
+
+  /**
+   * 估算剩余路段的行程时间（含初速，首边可只算剩余部分）。
+   *
+   * @param firstEdgeRemainingBlocks 首边剩余长度；为空按整条边计。仅动态模型支持，其它模型忽略
+   * @return travelSec，无法估算则 empty
+   */
+  public Optional<Integer> estimateTravelSec(
+      RailGraph graph,
+      List<NodeId> nodes,
+      List<RailEdge> edges,
+      OptionalDouble initialSpeedBps,
+      OptionalDouble firstEdgeRemainingBlocks) {
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(nodes, "nodes");
     Objects.requireNonNull(edges, "edges");
 
     Optional<Duration> dt;
-    if (travelTimeModel instanceof DynamicTravelTimeModel dynamic && initialSpeedBps.isPresent()) {
-      // 使用动态模型的初速支持
-      dt = dynamic.pathTravelTimeWithInitialSpeed(graph, nodes, edges, initialSpeedBps);
+    if (travelTimeModel instanceof DynamicTravelTimeModel dynamic
+        && (initialSpeedBps.isPresent() || firstEdgeRemainingBlocks.isPresent())) {
+      // 使用动态模型的初速与首边剩余长度支持
+      dt =
+          dynamic.pathTravelTimeWithInitialSpeed(
+              graph, nodes, edges, initialSpeedBps, firstEdgeRemainingBlocks);
     } else {
       dt = travelTimeModel.pathTravelTime(graph, nodes, edges);
     }

@@ -273,6 +273,59 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return matcher.get(keyOf(trainName));
   }
 
+  /**
+   * 只读查询：已绑定车次的列车在某个停靠点的计划发车时刻。
+   *
+   * <p>与 {@link #scheduledDepartureAt} 不同：不建立、不解除绑定，也不写日志——ETA 与公开 API 可以放心轮询。
+   * 未启用按表运行、或列车尚未绑定车次时为空。
+   *
+   * @param trainName 列车名（大小写不敏感）
+   * @param stopIndex 停靠序号（与运行时进度索引同义）
+   * @return 计划发车时刻
+   */
+  public Optional<Instant> plannedDepartureOf(String trainName, int stopIndex) {
+    if (!settings.enabled()) {
+      return Optional.empty();
+    }
+    return assignmentOf(trainName)
+        .flatMap(
+            assignment ->
+                resolveTimetable(assignment)
+                    .flatMap(
+                        timetable ->
+                            timetable
+                                .tripByCode(assignment.tripCode())
+                                .flatMap(
+                                    trip ->
+                                        timetable.scheduledDeparture(
+                                            trip, stopIndex, assignment.serviceDate()))));
+  }
+
+  /**
+   * 只读查询：已绑定车次的列车在某个停靠点的计划到达时刻。语义同 {@link #plannedDepartureOf}。
+   *
+   * @param trainName 列车名（大小写不敏感）
+   * @param stopIndex 停靠序号
+   * @return 计划到达时刻
+   */
+  public Optional<Instant> plannedArrivalOf(String trainName, int stopIndex) {
+    if (!settings.enabled()) {
+      return Optional.empty();
+    }
+    return assignmentOf(trainName)
+        .flatMap(
+            assignment ->
+                resolveTimetable(assignment)
+                    .flatMap(
+                        timetable ->
+                            timetable
+                                .tripByCode(assignment.tripCode())
+                                .flatMap(
+                                    trip ->
+                                        timetable.scheduledArrival(
+                                            trip, stopIndex, assignment.serviceDate()))));
+  }
+
   /** 查询某辆车的交路进度。 */
   public Optional<DutyProgress> dutyProgressOf(String trainName) {
     return ledger.progressOf(keyOf(trainName));

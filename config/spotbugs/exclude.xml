@@ -453,6 +453,14 @@
         <Package name="org.fetarute.fetaruteTCAddon.api.eta"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
 
     <!-- API 内部实现存储外部服务引用，生命周期由插件主类管理 -->
     <Match>
