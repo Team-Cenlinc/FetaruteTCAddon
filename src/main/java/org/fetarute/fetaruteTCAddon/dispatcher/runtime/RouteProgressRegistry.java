@@ -49,6 +49,19 @@ public final class RouteProgressRegistry {
   }
 
   /**
+   * 列车的物理位置：最后经过的图节点。
+   *
+   * <p>与 {@link RouteProgressEntry#currentIndex()} 指向的交路路径点不是同一个量——同一对路径点之间的两列车路径点相同，
+   * 只有这里能分出谁在前。没有进度或尚未记录经过节点时返回空，调用方必须把它当作"位置未知"，不能拿路径点顶替。
+   *
+   * @param trainName 列车名
+   * @return 最后经过的图节点
+   */
+  public Optional<NodeId> lastPassedGraphNode(String trainName) {
+    return get(trainName).flatMap(RouteProgressEntry::lastPassedGraphNode);
+  }
+
+  /**
    * 根据 tags 初始化列车进度。
    *
    * <p>当 tag 缺失时回退为 0。

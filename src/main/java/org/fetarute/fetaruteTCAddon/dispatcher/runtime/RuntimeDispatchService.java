@@ -1598,8 +1598,14 @@ public final class RuntimeDispatchService {
             this.debugLogger);
     this.movementAuthorizationCoordinator =
         new MovementAuthorizationCoordinator(occupancyManager, this.debugLogger);
+    // 选台按物理先后裁定：需要容量等待登记与列车物理位置，见 DynamicPlatformAllocator 类注释。
     this.dynamicAllocator =
-        new DynamicPlatformAllocator(routeDefinitions, occupancyManager, this.debugLogger);
+        new DynamicPlatformAllocator(
+            routeDefinitions,
+            occupancyManager,
+            this.debugLogger,
+            dynamicCapacityWaits,
+            this.progressRegistry::lastPassedGraphNode);
     this.dynamicDestinationResolver =
         new DynamicDestinationResolver(dynamicAllocator, railGraphService, this.debugLogger);
     this.shortestPathDistanceCache =
@@ -29080,7 +29086,14 @@ public final class RuntimeDispatchService {
                         .filter(node -> DynamicStopMatcher.matches(node, spec.get()))
                         .map(OccupancyResource::forNode)
                         .toList());
-    dynamicCapacityWaits.register(trainName, route.id(), currentIndex, targetIndex, resources);
+    // 等待位置取物理位置（最后经过的图节点），不取路径点；未知时记 null，不参与选台的物理先后裁定。
+    dynamicCapacityWaits.register(
+        trainName,
+        route.id(),
+        currentIndex,
+        targetIndex,
+        resources,
+        progressRegistry.lastPassedGraphNode(trainName).orElse(null));
   }
 
   /**

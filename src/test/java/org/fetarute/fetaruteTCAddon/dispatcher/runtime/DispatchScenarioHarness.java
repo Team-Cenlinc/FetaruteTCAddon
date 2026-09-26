@@ -120,7 +120,8 @@ final class DispatchScenarioHarness {
       List.of(
           "SMART_LIVE_BLOCKER_SNAPSHOT_UPDATED",
           "SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED",
-          "SMART_WAIT_FOR_GRAPH");
+          "SMART_WAIT_FOR_GRAPH",
+          "DYNAMIC_PLATFORM_ORDER_WITHHELD");
 
   /** 只保留最近 N 行的 debug 汇聚点，同时把每一行原样转发给当前 tick 的待检缓冲。 */
   static final class BoundedLog {

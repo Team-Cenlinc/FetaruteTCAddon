@@ -381,6 +381,11 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 而“2 号台很少空”与“它空着但分配器偏爱 1 号”要采取的下一步完全相反。
           // 按 (spec, 候选数, 空闲数, 选中) 去重，受拓扑限制。
           "DYNAMIC_PLATFORM_DECISION",
+          // 选台物理先后规则（前车在咽喉等台时不许后车订走最后一个空台）唯一的生效证据。
+          // 修复前的形态是"前车 no-available-platform、blockers 为空"，被吞掉就又回到无从归因。
+          // 体量：只在"前车正在等、该台又空着"的那一刻触发，前车下一次评估即取走该台；
+          // 生产端再按 (列车, 候选, 挡路者, 起点) 变化去重。
+          "DYNAMIC_PLATFORM_ORDER_WITHHELD",
           "SMART_HEALTH_CLOCK_DISCONTINUITY",
           "SMART_RUNTIME_CLOCK_DISCONTINUITY",
           // 已在单线区内、出口在授权窗口外仍放行——那条放宽唯一的生效证据。
