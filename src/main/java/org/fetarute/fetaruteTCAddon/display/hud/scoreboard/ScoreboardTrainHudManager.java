@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
@@ -252,7 +253,8 @@ public final class ScoreboardTrainHudManager implements Listener {
             terminalArriving,
             nowMillis);
     TrainFrameDelta frameDelta = updateTrainFrame(trainName, context, state);
-    Optional<ScoreboardHudTemplate.Page> pageOpt = template.resolvePage(state, tickCounter);
+    Optional<ScoreboardHudTemplate.Page> pageOpt =
+        template.resolvePage(state, HudLanguageRotation.nowTicks());
     String title = resolveTitle(template, pageOpt, placeholders);
     List<String> resolvedLines =
         renderPage(pageOpt, trainName, context, placeholders, state, frameDelta, tickCounter);

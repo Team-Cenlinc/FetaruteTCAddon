@@ -66,7 +66,7 @@ if (!FetaruteApi.isCompatible(this, "1.0.0")) {
 
 ## API 模块
 
-FetaruteApi 提供八个子模块：
+FetaruteApi 提供九个子模块，另有一组 Bukkit 事件（见“事件”一节）：
 
 | 模块 | 方法 | 功能 |
 |------|------|------|
@@ -78,6 +78,7 @@ FetaruteApi 提供八个子模块：
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表 |
+| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0） |
 
 ---
 
@@ -244,12 +245,11 @@ api.routes().getRoute(routeUuid).ifPresent(detail -> {
 
 ### EOR 与 EOP 区别
 
-- **EOR (End of Route)**: 路线物理终点，即 `waypoints` 列表的最后一个节点
-- **EOP (End of Operation)**: 运营终点，即最后一个 Station 类型的停靠点（跳过 PASS 类型）
+- **EOR (End of Route)**: 线路终点，即交路的最后一个节点（常为车库或折返线）；车库时 `endOfRouteName` 为 `LWN Depot`
+- **EOP (End of Operation)**: 退出营运前的最后一个车站，即最后停靠的车站；回库途中只通过的车站、折返线上的 TERM 都不算
 
-大多数情况下 EOR 和 EOP 相同，但以下场景可能不同：
-- 路线末尾有回库/折返点（Depot/Waypoint）
-- 终点站后有咽喉节点
+两者与 HUD `dest_eor` / `dest_eop`、站牌同一口径（`RouteTerminals`）。以实服 `WS-1C_ShortD`（回库交路）为例：
+EOP 是 `SURC:S:HHU:3`，EOR 是车库 `SURC:D:LWN:1`。
 
 方向牌/信息屏通常显示 **EOP**。
 
@@ -474,6 +474,81 @@ api.eta().getRuntimeSnapshot("train-1").ifPresent(snap -> {
 
 ---
 
+## TimetableApi - 时刻表（1.4.0）
+
+只读，数据来自内存中已发布时刻表的快照，查询不访问数据库。返回的 `Instant` 已按时刻表自身时区与服务日换算好。
+
+### 站点计划发车
+
+```java
+TimetableApi tt = api.timetables();
+for (TimetableApi.Departure d :
+    tt.departuresAt(operatorId, "HHU", Instant.now(), Duration.ofMinutes(15), 8)) {
+    System.out.println(d.tripCode() + " " + d.plannedDeparture() + (d.terminating() ? " 终到" : ""));
+}
+```
+
+只列在该站停车的车次（通过站不列），多张已发布时刻表合并后按计划发车时刻排序；窗口上限 24 小时。
+
+### 列车当前车次与偏差
+
+```java
+tt.getAssignment("SURC-WS-LC-1037").ifPresent(a -> {
+    System.out.println("车次 " + a.tripCode() + " 交路 " + a.dutyCode().orElse("-"));
+    a.currentDelaySeconds().ifPresent(d -> System.out.println("晚点 " + d + " 秒"));
+});
+```
+
+`currentDelaySeconds` 取本车次最近一次实际到站或发车（同交路上一趟车的记录不算），与该站计划到达/发车相减（正数为晚点）；
+`projectedDelaySeconds` 按 ETA 预计到达下一个停车点、与计划到达相减——列车在区间被扣停时它会随之增长，
+而 `currentDelaySeconds` 要到下一次到发才更新；`initialDeviationSeconds` 是绑定车次时的偏差。
+按表运行未启用（`enabled() == false`）时已发布时刻表仍可查询，但不会有车次绑定。
+
+### 时刻表内容
+
+`listPublished()` / `listByLine(lineId)` 返回概要，`getTimetable(id)` 返回交路时分（各站相对起点发车的到发偏移）、
+按发车时刻排序的车次、车辆交路（出库→依次运行的车次→回库）。
+
+---
+
+## 事件（1.4.0）
+
+以下均为同步 Bukkit 事件，在事实发生后的**下一个 tick** 由主线程统一发出：调度路径里只入队，不直接调用外部代码，
+监听器抛异常或耗时都不影响调度。事件只读、不可取消。某类事件没有监听器时连事件对象都不创建。
+
+| 事件 | 时机 |
+|------|------|
+| `TrainArriveStationEvent` | 进度推进到本站（可能仍在制动/对标，停稳后才开门） |
+| `TrainDepartStationEvent` | 拿到发车许可、松开门锁离站 |
+| `TrainHoldEvent` | 被扣停（信号、占用、授权、尾保等，或停站/门控超时；正常停站、按表等点、折返待命、终点作业不算），含原因与阻塞者；与 ETA 顺延同一判定 |
+| `TrainHoldReleasedEvent` | 扣停解除，含持续时长 |
+| `TrainSignalChangeEvent` | 信号显示变化 |
+| `TrainReleasedEvent` | 离开运行时管辖（销毁、回库、改派、异常清理） |
+| `TrainHealthAlertEvent` | 健康监控告警（沿用告警总线的一分钟限流） |
+| `TimetableTripAssignedEvent` | 绑定到时刻表车次 |
+
+扣停、信号、车次绑定三类没有现成的变化回调，每 tick 对比一次采样快照，同一 tick 内的来回变化会被合并。
+同一次扣停期间换原因会再发一次 `TrainHoldEvent`（`getSince()` 不变），解除事件的时长覆盖整次扣停。每 tick 最多发出 256 个事件，
+积压超过 4096 个时丢弃新事件。
+
+```java
+public class BoardListener implements Listener {
+    @EventHandler
+    public void onArrive(TrainArriveStationEvent event) {
+        getLogger().info(event.getTrainName() + " 到达 " + event.getNodeId());
+    }
+
+    @EventHandler
+    public void onHold(TrainHoldEvent event) {
+        getLogger().info(event.getTrainName() + " 被扣停: " + event.getReasonCode());
+    }
+}
+```
+
+请监听具体事件类；抽象基类 `TrainStationEvent` 不能直接监听。
+
+---
+
 ## 线程安全
 
 **所有 API 返回的数据都是不可变快照**，可安全在任意线程使用：
@@ -529,7 +604,8 @@ LineApi.LineStatus: PLANNING, ACTIVE, MAINTENANCE, UNKNOWN
 
 // ETA
 EtaApi.Confidence: HIGH, MED, LOW
-EtaApi.Reason: NO_VEHICLE, NO_ROUTE, NO_TARGET, NO_PATH, THROAT, SINGLELINE, PLATFORM, DEPOT_GATE, WAIT
+EtaApi.Reason: NO_VEHICLE, NO_ROUTE, NO_TARGET, NO_PATH, THROAT, SINGLELINE, PLATFORM, DEPOT_GATE, WAIT,
+               HOLD（被扣停，ETA 已按扣停时长顺延）, OVERDUE（班次已过计划发车仍未发出）
 
 // 资源类型
 OccupancyApi.ResourceType: NODE, EDGE, CONFLICT
@@ -613,6 +689,8 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.4.0 | 新增 `TimetableApi` 与 `api.event` 事件；`EtaApi.Reason` 增加 `HOLD`、`OVERDUE`，ETA 随扣停与票据超时顺延；`TerminalInfo` 的 EOP 与 HUD/站牌同一口径，没有载客车站时为空（不再回退为 EOR）；EOR 仍为交路最后一个节点，车库时名称为 `LWN Depot`、折返线时为它之前最近的车站；
+`EtaApi.BoardRow.destination`（站牌主目的地）改取运营终点，回库车越过运营终点后为“回库”；`EtaApi.Reason.WAIT` 收窄为可预知的等待（按表等点、票据未到点），占用/信号等待改报 `HOLD`；修正版本常量（此前代码停留在 1.2.0，`isCompatible(..., "1.3.0")` 会误判为不兼容） |
 | 1.3.0 | RouteApi: StopInfo 增加 `dynamic` 字段；RouteDetail 增加 `TerminalInfo`（EOR/EOP）；移除 `PassType.DYNAMIC` |
 | 1.2.0 | 新增 OperatorApi / LineApi / EtaApi |
 | 1.1.0 | 新增 StationApi：站点信息查询；新增 API 单元测试 |

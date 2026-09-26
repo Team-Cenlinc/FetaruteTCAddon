@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
@@ -62,7 +63,6 @@ public final class ActionBarTrainHudManager implements Listener {
   private final HudStateTracker stateTracker = new HudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
   private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
   private final Set<UUID> showingPlayers = new HashSet<>();
-  private long tickCounter = 0L;
 
   public ActionBarTrainHudManager(
       FetaruteTCAddon plugin,
@@ -104,8 +104,6 @@ public final class ActionBarTrainHudManager implements Listener {
   }
 
   public void tick() {
-    int intervalTicks = resolveIntervalTicks();
-    tickCounter += intervalTicks;
     Set<String> activeTrains = new HashSet<>();
     Set<UUID> currentPlayers = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
@@ -201,7 +199,7 @@ public final class ActionBarTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
-    String templateLine = template.resolveLine(state, tickCounter).orElse("");
+    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
     player.sendActionBar(title);
     showingPlayers.add(player.getUniqueId());
@@ -295,14 +293,6 @@ public final class ActionBarTrainHudManager implements Listener {
     float value = (float) parsed.getAsDouble();
     float clamped = clampProgress(value);
     contextResolver.applyProgressPlaceholders(placeholders, clamped);
-  }
-
-  private int resolveIntervalTicks() {
-    if (configManager != null && configManager.current() != null) {
-      int interval = configManager.current().runtimeSettings().hudActionBarTickIntervalTicks();
-      return Math.max(1, interval);
-    }
-    return 1;
   }
 
   private String localeTextOrDefault(String key, String fallback) {

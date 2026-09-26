@@ -274,6 +274,18 @@ public record RuntimeStopState(
         trainName, reasonCode, detail, releaseCondition, retryTrigger, List.of(), false, now);
   }
 
+  /**
+   * 释放条件是否属于例行停车：停站/门控、折返待命、终点作业。其余（信号、占用、授权、尾保、安全状态不可用等）都是扣停。
+   *
+   * <p>只看释放条件：门控停车在停站结束后仍是例行停车，是否已经“滞留”要结合停站计时与计划发车另行判断 （见 {@code
+   * EtaService#currentHold}）。只供展示与估算，不参与控车判定。
+   */
+  public boolean routineStop() {
+    return releaseCondition == ReleaseCondition.PLANNED_STOP_COMPLETED
+        || releaseCondition == ReleaseCondition.LAYOVER_READY_AND_AUTHORITY_REISSUED
+        || releaseCondition == ReleaseCondition.TERMINAL_LIFECYCLE_COMPLETED;
+  }
+
   /** 判断两次刷新是否属于同一条 STOP 生命周期。 */
   public boolean sameLifecycle(RuntimeStopState other) {
     return other != null

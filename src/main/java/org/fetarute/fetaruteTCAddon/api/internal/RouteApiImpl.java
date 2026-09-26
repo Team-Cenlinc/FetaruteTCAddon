@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -15,6 +16,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
@@ -113,51 +115,47 @@ public final class RouteApiImpl implements RouteApi {
         info, List.copyOf(waypoints), List.copyOf(stops), terminal, totalDistance);
   }
 
-  /**
-   * 解析终点信息（EOR/EOP）。
-   *
-   * <p>EOR (End of Route): waypoints 列表的最后一个节点。 EOP (End of Operation): 最后一个 Station 类型的停靠点（跳过 PASS
-   * 类型）。
-   */
+  /** 解析终点信息：EOR 为交路最后一个节点，EOP 为车次终点站（与 HUD、站牌同一口径，见 {@link RouteTerminals}）。 */
   private TerminalInfo resolveTerminalInfo(RouteDefinition def, List<RouteStop> stops) {
-    // 解析 EOR（路线物理终点）
-    String eorNodeId = "";
-    Optional<String> eorName = Optional.empty();
+    StopRef eor = new StopRef("", Optional.empty());
     if (!def.waypoints().isEmpty()) {
-      NodeId lastWaypoint = def.waypoints().get(def.waypoints().size() - 1);
-      eorNodeId = lastWaypoint.value();
-      eorName = resolveStationName(lastWaypoint.value());
+      String last = def.waypoints().get(def.waypoints().size() - 1).value();
+      eor = new StopRef(last, resolveEndOfRouteName(stops, last));
     }
-
-    // 解析 EOP（运营终点）：从后往前找最后一个非 PASS 的 Station 类型 stop
-    String eopNodeId = "";
-    Optional<String> eopName = Optional.empty();
-    for (int i = stops.size() - 1; i >= 0; i--) {
-      RouteStop stop = stops.get(i);
-      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
-        continue;
-      }
-      // 检查是否为 Station 类型（AutoStation）
-      String nodeId = resolveStopNodeId(stop);
-      if (nodeId.isEmpty()) {
-        continue;
-      }
-      if (!isStationTypeNode(nodeId, stop)) {
-        continue;
-      }
-      eopNodeId = nodeId;
-      eopName = resolveStopStationName(stop, nodeId);
-      break;
-    }
-
-    // 若未找到 EOP，回退到 EOR
-    if (eopNodeId.isEmpty()) {
-      eopNodeId = eorNodeId;
-      eopName = eorName;
-    }
-
-    return new TerminalInfo(eorNodeId, eorName, eopNodeId, eopName);
+    // 没有载客车站时 EOP 为空：不拿 EOR 顶替，调用方要能分辨“这条交路不载客”。
+    StopRef eop = resolveStopRef(stops, RouteTerminals.endOfOperationIndex(stops));
+    return new TerminalInfo(eor.nodeId(), eor.name(), eop.nodeId(), eop.name());
   }
+
+  /** EOR 的显示名：车库「LWN Depot」；折返线、区间点取它之前最近的车站（与 HUD、站牌同一规则）。 */
+  private Optional<String> resolveEndOfRouteName(List<RouteStop> stops, String lastNodeId) {
+    if (!stops.isEmpty()) {
+      Optional<RouteTerminals.StationRef> depot =
+          RouteTerminals.depotRef(stops.get(stops.size() - 1));
+      if (depot.isPresent()) {
+        return Optional.of(RouteTerminals.depotCodeLabel(depot.get().stationCode()));
+      }
+      StopRef label = resolveStopRef(stops, RouteTerminals.endOfRouteLabelIndex(stops));
+      if (label.name().isPresent()) {
+        return label.name();
+      }
+    }
+    return resolveStationName(lastNodeId);
+  }
+
+  private StopRef resolveStopRef(List<RouteStop> stops, OptionalInt index) {
+    if (index.isEmpty()) {
+      return new StopRef("", Optional.empty());
+    }
+    RouteStop stop = stops.get(index.getAsInt());
+    String nodeId = resolveStopNodeId(stop);
+    if (nodeId.isEmpty()) {
+      return new StopRef("", Optional.empty());
+    }
+    return new StopRef(nodeId, resolveStopStationName(stop, nodeId));
+  }
+
+  private record StopRef(String nodeId, Optional<String> name) {}
 
   /**
    * 解析 RouteStop 的 nodeId。
@@ -174,26 +172,6 @@ public final class RouteApiImpl implements RouteApi {
       return dynamicSpec.get().toPlaceholderNodeId();
     }
     return "";
-  }
-
-  /**
-   * 判断 nodeId 是否为 Station 类型节点。
-   *
-   * <p>Station 格式：{@code OP:S:NAME:TRACK}（4 段，第二段为 S）。 同时检查 DYNAMIC spec 的 nodeType。
-   */
-  private boolean isStationTypeNode(String nodeId, RouteStop stop) {
-    // 先检查 DYNAMIC spec
-    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-        DynamicStopMatcher.parseDynamicSpec(stop);
-    if (dynamicSpec.isPresent()) {
-      return dynamicSpec.get().isStation();
-    }
-    // 检查 nodeId 格式
-    if (nodeId == null || nodeId.isBlank()) {
-      return false;
-    }
-    String[] parts = nodeId.split(":");
-    return parts.length >= 3 && "S".equalsIgnoreCase(parts[1]);
   }
 
   /**

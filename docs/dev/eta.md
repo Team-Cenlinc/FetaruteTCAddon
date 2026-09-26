@@ -13,8 +13,8 @@
 - **回送参与**：RETURN 线路会进入 SpawnPlan 并参与站牌预测；TicketAssigner 对 RETURN 仅尝试 Layover 复用，不从 Depot 生成列车
 - **站牌目的地展示**：优先解析站点名称并显示为 `name (operator:station)`，缺失时回退到原始 destination 文本
 - **站牌调试字段**：每行会输出 RouteId，便于核对线路解析结果
-- **站牌终点区分**：End of Route 为最后一个站台（PASS 也算），End of Operation 为最后一个 STOP/TERM 的站台，空则回退到 End of Route
-- **回送线路**：当 RouteOperationType=RETURN 时，End of Operation 固定显示为 `回库 / Not in Service`（ID=`OUT_OF_SERVICE`；End of Route 保持原样）
+- **站牌终点区分**：选站口径统一由 `RouteTerminals` 定义（HUD、站牌、公开 API、列车命名共用）。End of Route 为交路的最后一个节点（常为车库或折返线；车库显示为 `LWN Depot`，ID 为 `OP:D:LWN`，与同代码车站 `OP:LWN` 区分），End of Operation 为退出营运前的最后一个车站——最后停靠的车站（回库途中只通过的车站、折返线上的 TERM 都不算），空则回退到 End of Route
+- **回送线路**：当 RouteOperationType=RETURN 时，列车**到达该站时**若已越过运营终点，End of Operation 显示为 `回库 / Not in Service`（ID=`OUT_OF_SERVICE`）；运营终点及之前的站显示终点站名——站台乘客与车上看到的是同一个终点
 - **站牌查询输入**：`/fta eta board` 使用 `<operator> <stationCode>`（stationCode 允许跨 operator 重名，默认 horizon=10 分钟）
 
 ## 核心类
@@ -26,11 +26,37 @@
 - `dispatcher/eta/runtime/EtaRuntimeSampler`：采样器（TrainCarts -> SnapshotStore）。
 - `dispatcher/schedule/spawn/SpawnForecastSupport`：未出票服务预测（供站牌展示）。
 
-## WaitEstimator（分钟级 delay 估算）
-当前实现支持：`queuePos × intervalSec + switchPenaltySec`。
-- `queuePos` 来自 `OccupancyQueueSupport#snapshotQueues`（若可用）。
-- `intervalSec` 来自 `HeadwayRule#headwayFor`（按资源返回 headway）。
-- `earliestTime` 仅作为“下限保护”，避免估算过小，但不作为主要来源（避免抖动）。
+## 等待与延误（扣停感知）
+
+ETA 的等待只看运行时**真实**停车状态（`RuntimeDispatchService#getActiveStopState`），不再用占用预判（lookahead preview）——
+那套预判与现行准入口径不一致，车被扣住时报“无需等待”，畅通时又会误报阻塞，让 HUD 在进站时丢掉“即将到站”。
+
+| 情形 | 计入 ETA 的等待 | 状态文本 |
+|---|---|---|
+| 正常停站（停站计时未到期） | 停站剩余秒数（计入 dwell） | 正常 |
+| 时刻表早到等点 | 计划发车 − 现在（与站内扣留同口径：早于计划超过扣留上限不等） | 正常，原因 `WAIT` |
+| 扣停（信号、占用、授权、尾保等） | 已扣秒数，上限 300 秒（“扣多久估多久”，解除后回落） | 满 1 分钟 `Delayed N m`，原因 `HOLD` + 阻塞类别 |
+| 停站超时（门控卡住） | 停站计时结束（按表早到则计划发车）后超过 5 秒仍未发车，从超时那一刻起按扣停处理 | 同上 |
+| 票据已过计划发车仍未发出 | 已超秒数，上限同扣停 | 满 1 分钟 `Delayed N m`，原因 `OVERDUE` |
+
+被扣停时不报 Arriving，置信度 LOW。阻塞类别沿用原净空模型标签：站台节点 `PLATFORM`、道岔冲突 `THROAT`、单线走廊 `SINGLELINE`。
+
+“已扣多久”不能用运行时停车状态的 `enteredAt` 量：停车状态在原因、明细或阻挡者变化时整体替换、起点随之重置
+（停站期间明细每秒都在变）。采样器另记两个跨替换连续成立的时刻（`TrainRuntimeSnapshot#holdTimeline`）：
+连续非例行停车的开始时刻、本站停站计时结束的时刻。是否扣停由 `EtaService#currentHold` 统一判定，公开 API 的扣停事件读同一个结果。
+
+`EtaReason.WAIT` 的含义随之收窄：1.4.0 起只表示可预知的等待（按表等点、票据尚未到点）；占用、信号造成的等待改报 `HOLD`。
+
+## 边内进度
+
+采样器按相邻两次采样的平均速度积分“自上一个经过节点起已行驶的距离”（`TrainRuntimeSnapshot#traveledSinceLastPassedBlocks`），
+经过新节点即清零，单次积分间隔按最多 2 秒计。ETA 从剩余路径前端扣掉这段距离——否则列车在一条边上行驶时 ETA 基本不动，过节点时再突跳。
+
+## 其它口径
+- 票据（未发车）ETA 同样计入中途停站时间。
+- 无限速边的默认速度取 `graph.default-speed-blocks-per-second`，与控车同一个配置值。
+- 实服第二十七轮 1067 段实测：站内“进站到发车”中位 24 秒（停站配置 20 秒），行车实测比模型快约 13%，两者大致抵消，
+  因此加减速参数保持不变；偏早与卡住的主因是扣停与票据超时未计入、以及边内进度缺失。
 
 ## 集成点（运行时）
 建议在 `RuntimeSignalMonitor` 中，对每一辆列车：

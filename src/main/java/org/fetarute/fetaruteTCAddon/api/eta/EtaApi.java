@@ -87,7 +87,12 @@ public interface EtaApi {
     SINGLELINE,
     PLATFORM,
     DEPOT_GATE,
-    WAIT
+    /** 可预知的等待（按表等点、票据尚未到点）。1.4.0 起占用/信号造成的等待改报 {@link #HOLD}。 */
+    WAIT,
+    /** 列车正被运行时扣停，ETA 已按扣停时长顺延（1.4.0）。 */
+    HOLD,
+    /** 班次已过计划发车时刻仍未发出，ETA 已顺延（1.4.0）。 */
+    OVERDUE
   }
 
   /** ETA 目标。 */

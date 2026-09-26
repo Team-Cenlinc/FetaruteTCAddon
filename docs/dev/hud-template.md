@@ -38,7 +38,9 @@ AT_LAST_STATION: <template line>
 - 可选后缀 `_n` 表示轮播顺序（按数字升序轮播）
 - 若模板内没有任何状态行，则保持“整段文本作为单行标题”的兼容行为
 - 若某状态未定义，会优先回退到 `DEFAULT`，再回退到“无前缀模板行”
-- AT_STATION 以运行时 `dwellRemainingSec > 0` 判定，IDLE 为非停站静止（临时停车）
+- AT_STATION 表示“在站”：从到站（进度推进到本站）起，到拿到发车许可为止；停站计时（`dwellRemainingSec > 0`）也算。
+  只看停站计时会有两个空档——计时要等停稳若干 tick 才开始、计时到期后还要关门过门控——HUD 会在空档里按“已推进的下一站”闪一下，
+  或把站台上关门的车显示成临时停车。IDLE 为站外静止（临时停车）
 - ON_LAYOVER 表示终到后折返/待命，优先级高于 AT_LAST_STATION/AT_STATION
 - AT_LAST_STATION 表示停在终点站（EOP），优先级高于 AT_STATION
 - 兼容旧模板的 `STOP`/`LAYOVER`/`TERMINAL_ARRIVING` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`/`TERM_ARRIVING`
@@ -47,6 +49,16 @@ AT_LAST_STATION: <template line>
 ```text
 rotate_ticks: 40
 ```
+
+### 双语轮播（BossBar / ActionBar / Scoreboard 同步）
+
+三块显示共用同一个时钟和同一个中英文切换周期 `runtime.hud.language-rotate-ticks`（默认 60），并且**先定语言、再轮播**：
+同一语言有多行时，每轮到这种语言换下一行。因此某个状态的行数不同（如 `DEPARTING` 两行中文一行英文）、
+或各模板的 `rotate_ticks` / `page_duration_ticks` 不同，都不会让横栏与侧边栏一块中文一块英文。
+只有一种语言的状态仍按模板自己的周期轮播。
+
+语言按行内容自动识别，不需要改模板：去掉 MiniMessage 标签与 `{占位符}` 后含汉字为第一语言，只有拉丁字母为第二语言；
+都没有时看占位符名（`*_lang2`、`*_en_US` 为第二语言，`*_zh_CN` 为第一语言），其余视为通用行（两种语言下都可出现）。
 
 ## BossBar 进度表达式（可选）
 BossBar 进度条支持由模板表达式驱动（ActionBar 不使用进度）：
@@ -121,14 +133,20 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{current_station_code}` → `CEN`
 - `current_station_lang2`：当前站第二语言名（缺失为 `-`）
   - 例：`{current_station_lang2}` → `Central`
-- `dest_eor`：End of Route（最后一个站点，PASS 也算；缺失回退 `-`）
+终点口径统一由 `RouteTerminals` 定义，HUD、站牌、公开 API、列车命名共用同一套选站规则：
+
+- `dest_eor`：End of Route（交路的最后一个节点，常为车库或折返线；缺失回退 `-`）
+  - 车库显示为同代码车站名接「车库」：`SURC:D:LWN:1` → `林湾车库`，`_lang2` → `Lym Won Depot`，`_code` → `LWN`；
+    没有同代码车站时用站码（`LWN车库` / `LWN Depot`）
+  - 折返线、区间点显示它之前最近的车站：`SURC:OFL:MLU:2:004`（OFL 后折返）→ OFL，而不是车根本不去的 MLU
   - 例：`To {dest_eor}` → `To Central`
 - `dest_eor_code`：End of Route code
   - 例：`{dest_eor_code}` → `CEN`
 - `dest_eor_lang2`：End of Route 第二语言名（缺失为 `-`）
   - 例：`{dest_eor_lang2}` → `Central`
-- `dest_eop`：End of Operation（最后一个 STOP/TERM；无则回退到 `dest_eor`）
-  - 例：`To {dest_eop}` → `To Depot`
+- `dest_eop`：End of Operation（退出营运前的最后一个车站：最后停靠的车站，回库途中只通过的车站与折返线上的 TERM 都不算；无则回退到 `dest_eor`）
+  - RETURN（回库）线路：越过运营终点之前显示终点站名，之后显示 `回库`（`_code` 为 `OUT_OF_SERVICE`，`_lang2` 为 `Not in Service`）
+  - 例：`To {dest_eop}` → `To HHU`
 - `dest_eop_code`：End of Operation code
   - 例：`{dest_eop_code}` → `DEP`
 - `dest_eop_lang2`：End of Operation 第二语言名（缺失为 `-`）
@@ -144,8 +162,10 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 
 ### ETA 字段
 - `eta_status`：ETA 状态短文本（Arriving/3m/Delayed 5m 等）
+  - 列车被扣停（信号、占用、授权等）满 1 分钟显示 `Delayed N m`，N 为已扣分钟数；被扣停时不显示 Arriving
   - 例：`ETA {eta_status}` → `ETA 3m`
 - `eta_minutes`：ETA 分钟数（四舍五入；无 ETA 为 `-`）
+  - 被扣停时按“已扣多久就估计还要多久”顺延（上限 5 分钟），扣停解除后回落
   - 例：`{eta_minutes}m` → `3m`
 
 ### 速度字段
@@ -230,7 +250,7 @@ pages:
 
 ### 顶层字段说明
 - `lines`：每页固定行数（最大 15）。
-- `page_duration_ticks`：分页轮播间隔（ticks）。
+- `page_duration_ticks`：分页轮播间隔（ticks），用于单语状态与同一语言内的多页；中英文页按全局 `language-rotate-ticks` 与 BossBar/ActionBar 同步切换（见“双语轮播”）。
 - `title`：Scoreboard 标题（MiniMessage，占位符同 BossBar/ActionBar；建议在 page 内单独配置）。
 - `pages`：按 HUD 状态分组的页面。
 

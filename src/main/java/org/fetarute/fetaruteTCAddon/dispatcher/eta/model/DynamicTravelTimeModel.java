@@ -138,6 +138,21 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
    */
   public Optional<Duration> pathTravelTimeWithInitialSpeed(
       RailGraph graph, List<NodeId> nodes, List<RailEdge> edges, OptionalDouble initialSpeedBps) {
+    return pathTravelTimeWithInitialSpeed(
+        graph, nodes, edges, initialSpeedBps, OptionalDouble.empty());
+  }
+
+  /**
+   * 估算路径行程时间，首边可只算剩余部分。
+   *
+   * @param firstEdgeRemainingBlocks 列车已在首边上行驶了一段时，首边剩余的长度；为空按整条边计
+   */
+  public Optional<Duration> pathTravelTimeWithInitialSpeed(
+      RailGraph graph,
+      List<NodeId> nodes,
+      List<RailEdge> edges,
+      OptionalDouble initialSpeedBps,
+      OptionalDouble firstEdgeRemainingBlocks) {
     Objects.requireNonNull(nodes, "nodes");
     Objects.requireNonNull(edges, "edges");
     if (edges.isEmpty()) {
@@ -177,7 +192,11 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
         vEnd = Math.min(edgeTargetSpeed, nextSpeed);
       }
 
-      double seconds = computeTravelTimeWithSpeeds(edge.lengthBlocks(), v0, edgeTargetSpeed, vEnd);
+      double length = edge.lengthBlocks();
+      if (i == 0 && firstEdgeRemainingBlocks != null && firstEdgeRemainingBlocks.isPresent()) {
+        length = Math.max(0.0, Math.min(length, firstEdgeRemainingBlocks.getAsDouble()));
+      }
+      double seconds = computeTravelTimeWithSpeeds(length, v0, edgeTargetSpeed, vEnd);
       if (!Double.isFinite(seconds) || seconds < 0.0) {
         return Optional.empty();
       }
@@ -227,7 +246,14 @@ public final class DynamicTravelTimeModel implements RailTravelTimeModel {
    */
   public double computeTravelTimeWithSpeeds(
       int lengthBlocks, double initialSpeedBps, double targetSpeedBps, double finalSpeedBps) {
-    if (lengthBlocks <= 0) {
+    return computeTravelTimeWithSpeeds(
+        (double) lengthBlocks, initialSpeedBps, targetSpeedBps, finalSpeedBps);
+  }
+
+  /** 同上，长度可为小数（首边只算剩余部分时）。 */
+  public double computeTravelTimeWithSpeeds(
+      double lengthBlocks, double initialSpeedBps, double targetSpeedBps, double finalSpeedBps) {
+    if (!(lengthBlocks > 0.0)) {
       return 0.0;
     }
     double accel = motionParams.accelBps2();

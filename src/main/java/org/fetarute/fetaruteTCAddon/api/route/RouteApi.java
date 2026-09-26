@@ -113,11 +113,11 @@ public interface RouteApi {
       int totalDistanceBlocks) {}
 
   /**
-   * 终点信息（End of Route / End of Operation）。
+   * 终点信息（End of Route / End of Operation），与 HUD、站牌同一口径。
    *
    * <ul>
-   *   <li><b>EOR (End of Route)</b>: 路线物理终点，即 waypoints 列表的最后一个节点
-   *   <li><b>EOP (End of Operation)</b>: 运营终点，即最后一个 Station 类型的停靠点（跳过 PASS 类型）
+   *   <li><b>EOR (End of Route)</b>: 线路终点，即交路的最后一个节点（常为车库或折返线）
+   *   <li><b>EOP (End of Operation)</b>: 运营终点，即车次最后停靠的车站（跳过 PASS；折返线上的 TERM 不算）。方向牌显示它
    * </ul>
    *
    * <p>对于大多数路线，EOR 和 EOP 通常相同。但在以下场景可能不同：
@@ -127,9 +127,9 @@ public interface RouteApi {
    *   <li>终点站后有咽喉节点
    * </ul>
    *
-   * @param endOfRouteNodeId EOR 节点 ID（路线物理终点）
+   * @param endOfRouteNodeId EOR 节点 ID（交路最后一个节点）
    * @param endOfRouteName EOR 站点名称
-   * @param endOfOperationNodeId EOP 节点 ID（运营终点）
+   * @param endOfOperationNodeId EOP 节点 ID（车次终点站）
    * @param endOfOperationName EOP 站点名称（用于方向牌显示）
    */
   record TerminalInfo(

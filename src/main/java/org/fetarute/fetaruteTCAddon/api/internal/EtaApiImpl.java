@@ -144,6 +144,8 @@ public final class EtaApiImpl implements EtaApi {
       case PLATFORM -> Reason.PLATFORM;
       case DEPOT_GATE -> Reason.DEPOT_GATE;
       case WAIT -> Reason.WAIT;
+      case HOLD -> Reason.HOLD;
+      case OVERDUE -> Reason.OVERDUE;
     };
   }
 

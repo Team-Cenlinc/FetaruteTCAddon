@@ -53,6 +53,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
@@ -15841,8 +15842,9 @@ public final class RuntimeDispatchService {
     NodeId startNode = candidate.locationNodeId();
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
     Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
+    // 车名首字母取站码，与出车命名（SimpleTicketAssigner）一致；取站名会在中文站名下得到汉字首字。
     String regeneratedTrainName =
-        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::name).orElse(null));
+        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
 
     // 首站匹配：支持 TerminalKey 匹配和 DYNAMIC 匹配
     NodeId routeFirstNode = route.waypoints().get(0);
@@ -30474,17 +30476,10 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 解析 Route 的终点站信息（End of Operation）。
+   * 解析折返复用后的命名终点（车名首字母与 {@code FTA_DEST_*} 标签）。
    *
-   * <p>优先级：
-   *
-   * <ol>
-   *   <li>TERMINATE 类型的 stop
-   *   <li>最后一个 STOP 类型的 stop
-   *   <li>最后一个 stop
-   * </ol>
-   *
-   * <p>支持 DYNAMIC stop：从 DYNAMIC 规范中提取站点信息。
+   * <p>与出车命名同一口径（{@link RouteDestinationResolver}）：TERMINATE 优先，落在折返线等非车站节点时退回前一个载客站。
+   * 此前这里是一份独立实现，TERMINATE 落在折返线上时会把原始节点 ID 写进标签、车名首字母取成运营商前缀。
    *
    * @param route RouteDefinition
    * @return 终点站信息（name, code）
@@ -30493,67 +30488,19 @@ public final class RuntimeDispatchService {
     if (route == null || routeDefinitions == null) {
       return Optional.empty();
     }
-    List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    if (stops.isEmpty()) {
-      return Optional.empty();
-    }
-
-    // 找到终点 stop
-    RouteStop candidate = null;
-    for (RouteStop stop : stops) {
-      if (stop != null && stop.passType() == RouteStopPassType.TERMINATE) {
-        candidate = stop;
-      }
-    }
-    if (candidate == null) {
-      for (RouteStop stop : stops) {
-        if (stop != null && stop.passType() == RouteStopPassType.STOP) {
-          candidate = stop;
-        }
-      }
-    }
-    if (candidate == null) {
-      candidate = stops.get(stops.size() - 1);
-    }
-
-    // 优先从 stationId 解析
-    UUID stationId = candidate.stationId().orElse(null);
-    if (stationId != null && storageManager != null && storageManager.isReady()) {
-      Optional<org.fetarute.fetaruteTCAddon.company.model.Station> stationOpt =
-          storageManager.provider().flatMap(p -> p.stations().findById(stationId));
-      if (stationOpt.isPresent()) {
-        org.fetarute.fetaruteTCAddon.company.model.Station station = stationOpt.get();
-        return Optional.of(new DestinationDisplayInfo(station.name(), station.code()));
-      }
-    }
-
-    // 尝试从 DYNAMIC 规范解析
-    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-        DynamicStopMatcher.parseDynamicSpec(candidate);
-    if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
-      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
-      // 直接使用 DYNAMIC 规范中的 nodeName 作为显示名称
-      // 注：完整的站点名称查询需要 operatorId，这里简化处理
-      return Optional.of(new DestinationDisplayInfo(spec.nodeName(), spec.nodeName()));
-    }
-
-    // 从 waypointNodeId 解析
-    if (candidate.waypointNodeId().isPresent()) {
-      String nodeId = candidate.waypointNodeId().get();
-      // 尝试解析站点格式 OP:S:STATION:TRACK
-      String[] parts = nodeId.split(":", -1);
-      if (parts.length >= 4 && "S".equalsIgnoreCase(parts[1])) {
-        String stationName = parts[2];
-        // 直接使用解析出的站点名称
-        return Optional.of(new DestinationDisplayInfo(stationName, stationName));
-      }
-      return Optional.of(new DestinationDisplayInfo(nodeId, nodeId));
-    }
-
-    // fallback: 使用 route name
-    return route
-        .metadata()
-        .map(meta -> new DestinationDisplayInfo(meta.serviceId(), meta.serviceId()));
+    // 本类贴着 SpotBugs 的方法数上限：lambda 会编译成合成方法，这里只留一个。
+    String fallback =
+        route
+            .metadata()
+            .map(org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata::serviceId)
+            .orElse(route.id().value());
+    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> provider =
+        storageManager != null && storageManager.isReady()
+            ? storageManager.provider()
+            : Optional.empty();
+    return RouteDestinationResolver.resolve(
+            routeDefinitions.listStops(route.id()), provider, fallback, fallback)
+        .map(dest -> new DestinationDisplayInfo(dest.name(), dest.code()));
   }
 
   /**

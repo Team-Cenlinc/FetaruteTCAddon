@@ -28,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
@@ -63,7 +64,6 @@ public final class BossBarTrainHudManager implements Listener {
   private final HudStateTracker stateTracker = new HudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
   private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
   private final Map<UUID, BossBar> bars = new HashMap<>();
-  private long tickCounter = 0L;
 
   public BossBarTrainHudManager(
       FetaruteTCAddon plugin,
@@ -105,8 +105,6 @@ public final class BossBarTrainHudManager implements Listener {
   }
 
   public void tick() {
-    int intervalTicks = resolveIntervalTicks();
-    tickCounter += intervalTicks;
     Set<String> activeTrains = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
       Optional<MinecartGroup> groupOpt = contextResolver.resolveGroup(player);
@@ -195,7 +193,7 @@ public final class BossBarTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
-    String templateLine = template.resolveLine(state, tickCounter).orElse("");
+    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
 
     BossBar bar =
@@ -304,14 +302,6 @@ public final class BossBarTrainHudManager implements Listener {
     float clamped = clampProgress(value);
     contextResolver.applyProgressPlaceholders(placeholders, clamped);
     return clamped;
-  }
-
-  private int resolveIntervalTicks() {
-    if (configManager != null && configManager.current() != null) {
-      int interval = configManager.current().runtimeSettings().hudBossBarTickIntervalTicks();
-      return Math.max(1, interval);
-    }
-    return 1;
   }
 
   private float clampProgress(float progress) {

@@ -56,6 +56,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
@@ -121,6 +123,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
   private DwellRegistry dwellRegistry;
+  private StationStopObserverHub stationStopHub;
+  private StationPresenceTracker stationPresence;
+  private org.fetarute.fetaruteTCAddon.api.internal.ApiEventBridge apiEventBridge;
+  private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus apiEventAlertBus;
+  private org.bukkit.scheduler.BukkitTask apiEventTask;
   private RuntimeDispatchService runtimeDispatchService;
   private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
   private boolean runtimeDispatchRecoveryComplete;
@@ -193,6 +200,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   @Override
   public void onDisable() {
+    stopApiEvents();
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     beginRuntimeDispatchShutdown();
     unregisterSignActions();
@@ -614,6 +622,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
             storageManager,
             new TrainConfigResolver(),
             runtimeDispatchDiagnostics());
+    // 停靠事件的唯一出口：时刻表、HUD 在站判定、公开 API 事件都从这里按名字挂载。
+    this.stationStopHub = new StationStopObserverHub(loggerManager::debug);
+    this.stationPresence = new StationPresenceTracker();
+    stationStopHub.register("station-presence", stationPresence);
+    runtimeDispatchService.stationStops().setObserver(stationStopHub);
     runtimeDispatchRecoveryComplete = false;
     beginRuntimeDispatchRecovery("plugin-enable");
     runtimeDispatchService.setStartupRecoveryRequestedListener(
@@ -925,45 +938,29 @@ public final class FetaruteTCAddon extends JavaPlugin {
   }
 
   private void initEtaService() {
-    if (railGraphService == null
-        || routeDefinitionCache == null
-        || occupancyManager == null
-        || headwayRule == null
-        || routeProgressRegistry == null) {
+    if (railGraphService == null || routeDefinitionCache == null || routeProgressRegistry == null) {
       return;
     }
     if (trainSnapshotStore == null) {
       trainSnapshotStore = new TrainSnapshotStore();
     }
-    etaRuntimeSampler = new EtaRuntimeSampler(routeProgressRegistry, trainSnapshotStore);
-    etaService =
-        new EtaService(
+    etaRuntimeSampler =
+        new EtaRuntimeSampler(
+            routeProgressRegistry,
             trainSnapshotStore,
-            railGraphService,
-            routeDefinitionCache,
-            occupancyManager,
-            headwayRule,
-            () ->
-                configManager != null
-                    ? configManager.current().runtimeSettings().lookaheadEdges()
-                    : 2,
-            () ->
-                configManager != null
-                    ? configManager.current().runtimeSettings().minClearEdges()
-                    : 0,
-            () ->
-                configManager != null
-                    ? configManager.current().runtimeSettings().rearGuardEdges()
-                    : 0,
-            () ->
-                configManager != null
-                    ? configManager.current().runtimeSettings().switcherZoneEdges()
-                    : 2);
+            runtimeDispatchService != null ? runtimeDispatchService::getActiveStopState : null,
+            loggerManager::debug);
+    etaService = new EtaService(trainSnapshotStore, railGraphService, routeDefinitionCache);
     if (layoverRegistry != null) {
       etaService.attachLayoverRegistry(layoverRegistry);
     }
     if (storageManager != null && storageManager.isReady()) {
       etaService.attachStorageProvider(storageManager.provider().orElse(null));
+    }
+    // ETA 的等待只看运行时真实停车状态（信号、占用、授权、尾保等），扣多久顺延多久。
+    etaService.attachDebugLogger(loggerManager::debug);
+    if (runtimeDispatchService != null) {
+      etaService.attachRuntimeStopStates(runtimeDispatchService::getActiveStopState);
     }
   }
 
@@ -1009,6 +1006,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public Optional<DwellRegistry> getDwellRegistry() {
     return Optional.ofNullable(dwellRegistry);
+  }
+
+  /** 返回列车在站记录（只供显示与估算使用，不参与控车）。 */
+  public Optional<StationPresenceTracker> getStationPresence() {
+    return Optional.ofNullable(stationPresence);
+  }
+
+  /** 返回停靠事件分发器（若运行时未初始化则为空）。 */
+  public Optional<StationStopObserverHub> getStationStopHub() {
+    return Optional.ofNullable(stationStopHub);
   }
 
   /** 返回健康监控器（若未初始化则为空）。 */
@@ -1098,27 +1105,38 @@ public final class FetaruteTCAddon extends JavaPlugin {
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
     // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
     // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
-    runtimeDispatchService
-        .stationStops()
-        .setObserver(
-            new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver() {
-              @Override
-              public void onStationArrival(
-                  org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+    stationStopHub.register(
+        "timetable",
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver() {
+          @Override
+          public void onStationArrival(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
 
-              @Override
-              public void onStationDeparture(
-                  org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+          @Override
+          public void onStationDeparture(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
 
-              @Override
-              public void onTrainReleased(String trainName, String reason) {
-                timetableService.release(trainName, reason);
-              }
-            });
+          @Override
+          public void onTrainReleased(String trainName, String reason) {
+            timetableService.release(trainName, reason);
+          }
+        });
     runtimeDispatchService
         .stationStops()
         .setMaxHold(
             settings.enabled() ? java.time.Duration.ofSeconds(settings.holdMaxSeconds()) : null);
+    // ETA 与站内扣留同一口径：早到的车在站内等点的时间计入 ETA，上限同扣留上限（含 150 秒硬顶）。
+    if (etaService != null) {
+      etaService.attachPlannedDepartures(
+          settings.enabled() ? timetableService::plannedDepartureOf : null,
+          settings.enabled()
+              ? java.time.Duration.ofSeconds(
+                  Math.min(
+                      settings.holdMaxSeconds(),
+                      org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
+                          .HOLD_CEILING.toSeconds()))
+              : null);
+    }
     restartTimetableTasks(settings);
     reloadPublishedTimetables();
   }
@@ -1173,6 +1191,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       }
     }
     timetableService.retain(activeNames);
+    if (stationPresence != null) {
+      stationPresence.retain(java.util.Set.copyOf(activeNames));
+    }
   }
 
   /** 返回按表运行服务（若未初始化则为空）。 */
@@ -1403,6 +1424,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   /** 初始化外部 API 模块，供外部插件访问调度数据。 */
   private void initApi() {
+    // 先停旧的事件桥：下面任何一处提前返回都不能留下上一轮的桥与定时任务。
+    stopApiEvents();
     if (railGraphService == null
         || trainSnapshotStore == null
         || routeProgressRegistry == null
@@ -1444,9 +1467,76 @@ public final class FetaruteTCAddon extends JavaPlugin {
         etaService != null
             ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(etaService)
             : null;
+    org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi timetableApi =
+        new org.fetarute.fetaruteTCAddon.api.internal.TimetableApiImpl(
+            () -> Optional.ofNullable(timetableService),
+            this::getStationPresence,
+            () -> Optional.ofNullable(etaService));
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.initialize(
-        graphApi, trainApi, routeApi, occupancyApi, stationApi, operatorApi, lineApi, etaApi);
+        graphApi,
+        trainApi,
+        routeApi,
+        occupancyApi,
+        stationApi,
+        operatorApi,
+        lineApi,
+        etaApi,
+        timetableApi);
+    startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");
+  }
+
+  /**
+   * 启动公开 API 事件桥（启用与重载时调用，先停掉旧的）。
+   *
+   * <p>桥只从停靠事件、告警总线与只读快照取事实，下一 tick 统一发出 Bukkit 事件；不在调度路径里调用外部代码。
+   */
+  private void startApiEvents() {
+    stopApiEvents();
+    if (trainSnapshotStore == null) {
+      return;
+    }
+    TrainSnapshotStore snapshots = trainSnapshotStore;
+    EtaService eta = etaService;
+    apiEventBridge =
+        new org.fetarute.fetaruteTCAddon.api.internal.ApiEventBridge(
+            getServer().getPluginManager()::callEvent,
+            org.fetarute.fetaruteTCAddon.api.internal.ApiEventBridge::anyRegistered,
+            () -> java.util.List.copyOf(snapshots.snapshot().keySet()),
+            eta != null ? eta::currentHold : null,
+            name ->
+                snapshots
+                    .getSnapshot(name)
+                    .flatMap(
+                        org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot
+                            ::signalAspect),
+            name ->
+                timetableService != null ? timetableService.assignmentOf(name) : Optional.empty(),
+            java.time.Instant::now,
+            loggerManager::debug);
+    if (stationStopHub != null) {
+      stationStopHub.register("api-events", apiEventBridge);
+    }
+    if (healthMonitor != null) {
+      apiEventAlertBus = healthMonitor.alertBus();
+      apiEventAlertBus.subscribe(apiEventBridge);
+    }
+    apiEventTask = getServer().getScheduler().runTaskTimer(this, apiEventBridge::tick, 1L, 1L);
+  }
+
+  private void stopApiEvents() {
+    if (apiEventTask != null) {
+      apiEventTask.cancel();
+      apiEventTask = null;
+    }
+    if (stationStopHub != null) {
+      stationStopHub.unregister("api-events");
+    }
+    if (apiEventAlertBus != null && apiEventBridge != null) {
+      apiEventAlertBus.unsubscribe(apiEventBridge);
+    }
+    apiEventAlertBus = null;
+    apiEventBridge = null;
   }
 }
