@@ -12,6 +12,7 @@ import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 折返原子交接后的旧车体防护生命周期。
@@ -351,10 +352,18 @@ final class TurnbackFootprintGuardRegistry {
     }
   }
 
-  /** 已取得列尾离开旧进路证据、可解除 sidecar 保护的 handoff 前旧资源集合。 */
+  /**
+   * 已取得列尾离开旧进路证据、可解除 sidecar 保护的 handoff 前旧资源集合。
+   *
+   * <p>{@code resources} 按 {@link OccupancyResource#STABLE_ORDER} 排列：它按序交给占用管理器释放，释放事件的先后决定等待容量的列车
+   * 被唤醒、重新取得资源的先后。来源集合的顺序不可信（资源 hash 含枚举），所以这里显式排序而不是保留插入序。
+   */
   record Release(Set<OccupancyResource> resources) {
     Release {
-      resources = resources == null ? Set.of() : Set.copyOf(resources);
+      resources =
+          resources == null
+              ? Set.of()
+              : StableCollections.copySorted(resources, OccupancyResource.STABLE_ORDER);
     }
   }
 }

@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
@@ -8,6 +10,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 单个世界图快照的不可变联锁状态。
@@ -302,13 +305,17 @@ public final class RailInterlockingState {
    * 一次完整车体对稀疏联锁区的观察结果。
    *
    * @param complete catalog 与车体证据是否足以安全收缩既有物理 claim
-   * @param occupiedZoneKeys 当前车体实际覆盖的 Zone；完整空集合表示车体位于普通轨道
+   * @param occupiedZoneKeys 当前车体实际覆盖的 Zone；完整空集合表示车体位于普通轨道。按字符串自然序排列，下游据此生成的资源顺序因而与 JVM 无关（{@code
+   *     Set.copyOf} 的顺序每个 JVM 随机一次）
    */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "构造器已经 StableCollections 复制为不可修改的有序视图；SpotBugs 只认得 Set.copyOf，看不穿这层复制。")
   public record LiveZoneObservation(boolean complete, Set<String> occupiedZoneKeys) {
 
     public LiveZoneObservation {
       Objects.requireNonNull(occupiedZoneKeys, "occupiedZoneKeys");
-      occupiedZoneKeys = Set.copyOf(occupiedZoneKeys);
+      occupiedZoneKeys = StableCollections.copySorted(occupiedZoneKeys, Comparator.naturalOrder());
       if (!complete && !occupiedZoneKeys.isEmpty()) {
         throw new IllegalArgumentException("不完整现场观察不能携带可用于释放的 Zone 结论");
       }

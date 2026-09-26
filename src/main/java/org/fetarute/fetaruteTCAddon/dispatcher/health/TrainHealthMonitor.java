@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.health;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -27,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 列车健康监控器：检测列车运行异常并尝试自动修复。
@@ -172,7 +174,7 @@ public final class TrainHealthMonitor {
       lastBlockerSnapshot =
           blockerSnapshot == null || blockerSnapshot.isEmpty()
               ? Set.of()
-              : Set.copyOf(blockerSnapshot);
+              : StableCollections.copyInInsertionOrder(blockerSnapshot);
     }
 
     private String survivor() {
@@ -454,13 +456,18 @@ public final class TrainHealthMonitor {
    * <p>该入口用于人工介入（例如命令行触发），不等待 progress stuck 阈值，也不受恢复冷却限制。STOP 闭塞只会重新刷新信号并复下发硬 STOP，不会重发
    * destination 或 relaunch，避免人工修复绕过红灯运动抑制。
    *
+   * <p>逐车处理顺序与 {@link #check(Set, Instant)} 相同：按列车名自然序。
+   *
    * @param activeTrains 当前存活列车集合
    * @param now 当前时间（为空时使用当前时刻）
    * @return 成功执行的互卡解锁次数（按列车对计数）
    */
   public int forceUnlockNow(Set<String> activeTrains, Instant now) {
     Instant effectiveNow = now != null ? now : Instant.now();
-    Set<String> active = activeTrains == null ? Set.of() : Set.copyOf(activeTrains);
+    Set<String> active =
+        activeTrains == null
+            ? Set.of()
+            : StableCollections.copySorted(activeTrains, Comparator.naturalOrder());
     Set<String> activeKeys = new java.util.HashSet<>();
     for (String trainName : active) {
       String key = keyOf(trainName);
@@ -512,6 +519,10 @@ public final class TrainHealthMonitor {
   /**
    * 执行一次健康检查。
    *
+   * <p><b>逐车处理顺序</b>：按列车名自然序（{@link String#compareTo}）。同一 tick 内先处理到的列车先做修复/兜底 destroy，
+   * 两车同时满足互卡兜底条件时谁先动手就取决于这个顺序；此前用 {@code Set.copyOf}，顺序每个 JVM 随机一次。按名字排序也让生产（调用方传 {@code
+   * HashSet}）与回归骨架（传插入序集合）对同一组列车给出同一顺序。规则见 {@link StableCollections}。
+   *
    * @param activeTrains 当前存活的列车名集合
    * @param now 当前时间
    * @return 检查结果
@@ -520,7 +531,10 @@ public final class TrainHealthMonitor {
     if (now == null) {
       now = Instant.now();
     }
-    Set<String> active = activeTrains == null ? Set.of() : Set.copyOf(activeTrains);
+    Set<String> active =
+        activeTrains == null
+            ? Set.of()
+            : StableCollections.copySorted(activeTrains, Comparator.naturalOrder());
     Set<String> activeKeys = new java.util.HashSet<>();
     for (String trainName : active) {
       String key = keyOf(trainName);
@@ -2761,7 +2775,7 @@ public final class TrainHealthMonitor {
         switchers.add(resource);
       }
     }
-    return Set.copyOf(switchers);
+    return StableCollections.copyInInsertionOrder(switchers);
   }
 
   private boolean hasEpisodeFor(String trainName) {

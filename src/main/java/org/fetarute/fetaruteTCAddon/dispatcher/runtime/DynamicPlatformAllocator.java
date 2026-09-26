@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -52,6 +53,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNorma
  *   <li>优先选择未被占用的站台
  *   <li>若所有站台都被占用，不生成 materialized destination，由运行时保持在入口等待
  * </ul>
+ *
+ * <h2>物理先后</h2>
+ *
+ * <p>站台按列车<b>实际能到达的先后</b>给出：若另一列正在等待同站容量的列车停在本车通往某候选站台的进站路中间，该站台对本车不可用——
+ * 新订不给，已缓存的预订也在复核时撤回。否则后车订走最后一个空台后，前车没有台开不走、后车被前车挡着也到不了台，形成调度看不见的互卡（预订不是 claim，前车停因里没有 blocker）。
+ *
+ * <p>两车的位置都取物理位置（{@link RouteProgressRegistry#lastPassedGraphNode}），不取交路路径点：同一对路径点之间的车路径点相同，
+ * 分不出先后。<b>任一方位置未知时本规则不生效</b>——拿路径点顶替会把身后的车误判成挡路者，两车可能互相拒绝；两边都是精确位置时，
+ * 最短路长度对称，两车不可能互为对方进站路上的障碍。本规则只会撤回或拒绝预订，从不发放预订，也不触碰任何占用或授权。
  */
 public final class DynamicPlatformAllocator {
 
@@ -68,6 +78,15 @@ public final class DynamicPlatformAllocator {
   private final RouteDefinitionCache routeDefinitions;
   private final OccupancyManager occupancyManager;
   private final Consumer<String> debugLogger;
+
+  /** 容量等待登记；为 null 时物理先后规则不生效。 */
+  private final DynamicCapacityWaitRegistry capacityWaits;
+
+  /** 列车物理位置（最后经过的图节点）；为 null 或返回空时视为位置未知。 */
+  private final Function<String, Optional<NodeId>> physicalPosition;
+
+  /** 物理先后裁定的最近一次输出签名（按请求列车），只在变化时输出，体量受在场车数限制。 */
+  private final Map<String, String> orderWithheldReported = new ConcurrentHashMap<>();
 
   /** 已分配记录：trainName -> (routeId:stopSequence) -> 带定义证据的分配。 */
   private final Map<String, Map<String, CachedAllocation>> allocations = new ConcurrentHashMap<>();
@@ -86,9 +105,29 @@ public final class DynamicPlatformAllocator {
       RouteDefinitionCache routeDefinitions,
       OccupancyManager occupancyManager,
       Consumer<String> debugLogger) {
+    this(routeDefinitions, occupancyManager, debugLogger, null, null);
+  }
+
+  /**
+   * 带物理先后规则的构造器。
+   *
+   * @param capacityWaits 运行时的容量等待登记
+   * @param physicalPosition 按列车名查询物理位置（最后经过的图节点）
+   */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP2",
+      justification = "OccupancyManager 与容量等待登记都是运行时共享状态；选台必须读取同一份，不能复制。")
+  DynamicPlatformAllocator(
+      RouteDefinitionCache routeDefinitions,
+      OccupancyManager occupancyManager,
+      Consumer<String> debugLogger,
+      DynamicCapacityWaitRegistry capacityWaits,
+      Function<String, Optional<NodeId>> physicalPosition) {
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.occupancyManager = occupancyManager;
     this.debugLogger = debugLogger != null ? debugLogger : s -> {};
+    this.capacityWaits = capacityWaits;
+    this.physicalPosition = physicalPosition;
   }
 
   /**
@@ -450,6 +489,7 @@ public final class DynamicPlatformAllocator {
     if (previousKey.equals(currentKey)) {
       return true;
     }
+    orderWithheldReported.remove(previousKey);
     synchronized (allocationMigrationLock) {
       Map<String, CachedAllocation> previous = allocations.get(previousKey);
       if (previous == null || previous.isEmpty()) {
@@ -475,6 +515,7 @@ public final class DynamicPlatformAllocator {
   public void clearAllocations(String trainName) {
     if (trainName != null) {
       allocations.remove(TrainNameNormalizer.normalizeKey(trainName));
+      orderWithheldReported.remove(TrainNameNormalizer.normalizeKey(trainName));
     }
   }
 
@@ -555,7 +596,10 @@ public final class DynamicPlatformAllocator {
       }
 
       boolean physicallyFree = !isExternallyOccupied(candidate, trainName);
-      boolean free = physicallyFree && !isReservedByOtherTrain(candidate, trainName);
+      boolean free =
+          physicallyFree
+              && !isReservedByOtherTrain(candidate, trainName)
+              && waiterAheadOnApproach(trainName, candidate, graph).isEmpty();
       candidates.add(new ApproachCandidate(candidate, free, pathOpt.get().nodes()));
     }
 
@@ -721,7 +765,69 @@ public final class DynamicPlatformAllocator {
       return false;
     }
     return !isExternallyOccupied(cached.allocatedNode(), trainName)
-        && !isReservedByOtherTrain(cached.allocatedNode(), trainName);
+        && !isReservedByOtherTrain(cached.allocatedNode(), trainName)
+        && waiterAheadOnApproach(trainName, cached.allocatedNode(), graph).isEmpty();
+  }
+
+  /**
+   * 物理先后规则：找出一列停在本车通往 {@code candidate} 的进站路中间、且正在等待同一站台容量的其它列车。
+   *
+   * <p>规则与取位口径见类注释"物理先后"一节。进站路径从本车物理位置起算，只看中间节点：起点是本车自己，终点是站台本身（站台被占由 {@link #isExternallyOccupied}
+   * 负责）。
+   *
+   * @return 挡在前面的等待列车名；没有、或任一方位置未知时为空
+   */
+  private Optional<String> waiterAheadOnApproach(
+      String trainName, NodeId candidate, RailGraph graph) {
+    if (capacityWaits == null || physicalPosition == null || candidate == null || graph == null) {
+      return Optional.empty();
+    }
+    OccupancyResource resource = OccupancyResource.forNode(candidate);
+    if (!capacityWaits.hasOtherWaiterFor(trainName, resource)) {
+      return Optional.empty();
+    }
+    Optional<NodeId> position = physicalPosition.apply(trainName);
+    if (position == null || position.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RailGraphPath> approach =
+        new RailGraphPathFinder()
+            .shortestPath(
+                graph, position.get(), candidate, RailGraphPathFinder.Options.shortestDistance());
+    if (approach.isEmpty() || approach.get().nodes().size() < 3) {
+      return Optional.empty();
+    }
+    List<NodeId> nodes = approach.get().nodes();
+    Optional<String> waiter =
+        capacityWaits.waiterWithin(trainName, resource, nodes.subList(1, nodes.size() - 1));
+    waiter.ifPresent(ahead -> reportOrderWithheld(trainName, candidate, ahead, position.get()));
+    return waiter;
+  }
+
+  /**
+   * 物理先后裁定拒绝或撤回预订时留痕。
+   *
+   * <p>它是规则生效的唯一证据，诊断门把它列为必留（{@code RuntimeDispatchDiagnosticGate}）；按 (候选, 挡路者, 起点) 变化去重，同一裁定在后车逐
+   * tick 重评估时不重复输出。
+   */
+  private void reportOrderWithheld(
+      String trainName, NodeId candidate, String waitingAhead, NodeId from) {
+    String signature = candidate.value() + "|" + waitingAhead + "|" + from.value();
+    String previous =
+        orderWithheldReported.put(TrainNameNormalizer.normalizeKey(trainName), signature);
+    if (signature.equals(previous)) {
+      return;
+    }
+    debugLogger.accept(
+        "DYNAMIC_PLATFORM_ORDER_WITHHELD train="
+            + trainName
+            + " candidate="
+            + candidate.value()
+            + " waitingAhead="
+            + waitingAhead
+            + " from="
+            + from.value()
+            + " reason=waiting-train-ahead-on-approach");
   }
 
   private record ApproachCandidate(NodeId nodeId, boolean free, List<NodeId> pathNodes) {

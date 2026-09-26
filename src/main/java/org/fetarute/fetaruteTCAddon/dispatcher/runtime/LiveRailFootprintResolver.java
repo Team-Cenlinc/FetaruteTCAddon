@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -10,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSuppor
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 将列车各车厢的实时轨道方块映射为稀疏物理联锁区资源。
@@ -62,11 +65,18 @@ public final class LiveRailFootprintResolver {
   /**
    * 一次现场映射结果。
    *
+   * <p><b>顺序</b>：{@code resources} 按 {@link OccupancyResource#STABLE_ORDER}、{@code
+   * occupiedZoneKeys} 按字符串自然序排列。这些资源会并入停车保持请求，决定它们在占用账本里的插入先后，进而决定 blocker 与唤醒的先后；来源集合的顺序不可信（资源
+   * hash 含枚举，{@code Set.copyOf} 的顺序每个 JVM 随机一次），所以显式排序。
+   *
    * @param complete catalog 与本轮完整车体证据是否可用于安全收缩物理 claim
    * @param resources 车体实际覆盖的稀疏联锁资源
    * @param occupiedZoneKeys 车体实际覆盖的 Zone key
    * @param reason 不完整原因；完整结果固定为 {@code complete}
    */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "构造器已经 StableCollections 复制为不可修改的有序视图；SpotBugs 只认得 Set.copyOf，看不穿这层复制。")
   public record Resolution(
       boolean complete,
       Set<OccupancyResource> resources,
@@ -76,8 +86,8 @@ public final class LiveRailFootprintResolver {
     public Resolution {
       Objects.requireNonNull(resources, "resources");
       Objects.requireNonNull(occupiedZoneKeys, "occupiedZoneKeys");
-      resources = Set.copyOf(resources);
-      occupiedZoneKeys = Set.copyOf(occupiedZoneKeys);
+      resources = StableCollections.copySorted(resources, OccupancyResource.STABLE_ORDER);
+      occupiedZoneKeys = StableCollections.copySorted(occupiedZoneKeys, Comparator.naturalOrder());
       reason = reason == null || reason.isBlank() ? "unknown" : reason.trim();
       if (!complete && (!resources.isEmpty() || !occupiedZoneKeys.isEmpty())) {
         throw new IllegalArgumentException("不完整现场观察不能携带可用于释放的联锁结论");

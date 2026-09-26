@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEve
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyQueueChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 基于内存 Map 的占用管理器，适合作为“最小可用版本”。
@@ -1514,11 +1515,13 @@ public final class SimpleOccupancyManager
         detachSwitcherSignatures(switcherClaimSignatures, trainName);
     Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> detachedQueueSignatures =
         detachSwitcherSignatures(switcherQueueSignatures, trainName);
+    // 保留摘下时的顺序：恢复时空队列会按这个顺序重新插回 queues（LinkedHashMap），而 queues 的顺序决定
+    // snapshotQueues() 与唤醒先后。Map.copyOf 的顺序每个 JVM 随机一次，见 StableCollections。
     return new DetachedAuthorityState(
         List.copyOf(detachedClaims),
-        Map.copyOf(detachedQueues),
-        Map.copyOf(detachedClaimSignatures),
-        Map.copyOf(detachedQueueSignatures));
+        StableCollections.copyInInsertionOrder(detachedQueues),
+        StableCollections.copyInInsertionOrder(detachedClaimSignatures),
+        StableCollections.copyInInsertionOrder(detachedQueueSignatures));
   }
 
   private void restoreAuthorityState(DetachedAuthorityState state) {

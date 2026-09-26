@@ -35,6 +35,14 @@ public final class RouteProgressRegistry {
   private final ConcurrentMap<String, RouteProgressEntry> entries = new ConcurrentHashMap<>();
   private final AtomicLong version = new AtomicLong();
 
+  /**
+   * 当前交路索引的<b>实际到达节点</b>（按列车 key）。
+   *
+   * <p>{@code lastPassedGraphNode} 会随列车驶过每个图节点被覆盖，车头出站之后就不再记得"是从哪条股道出来的"；而身后保护需要这个事实把后向路径钉在实际股道上（见
+   * {@link #arrivalNodeAt}）。只由带现场证据的到达写入，推进到别的索引或换交路时作废。
+   */
+  private final ConcurrentMap<String, ArrivalAnchor> arrivalAnchors = new ConcurrentHashMap<>();
+
   /** 返回进度快照版本。每次 route index、lastPassedGraphNode 或 signal 提交都会递增。 */
   public long version() {
     return version.get();
@@ -46,6 +54,46 @@ public final class RouteProgressRegistry {
       return Optional.empty();
     }
     return Optional.ofNullable(entries.get(key));
+  }
+
+  /**
+   * 列车的物理位置：最后经过的图节点。
+   *
+   * <p>与 {@link RouteProgressEntry#currentIndex()} 指向的交路路径点不是同一个量——同一对路径点之间的两列车路径点相同，
+   * 只有这里能分出谁在前。没有进度或尚未记录经过节点时返回空，调用方必须把它当作"位置未知"，不能拿路径点顶替。
+   *
+   * @param trainName 列车名
+   * @return 最后经过的图节点
+   */
+  public Optional<NodeId> lastPassedGraphNode(String trainName) {
+    return get(trainName).flatMap(RouteProgressEntry::lastPassedGraphNode);
+  }
+
+  /**
+   * 列车在 {@code currentIndex} 这个交路路径点上实际到达的图节点。
+   *
+   * <p>DYNAMIC 站台就是选台结果、普通站就是声明站台——总之是列车真正走过的那一条。只有到达证据与当前进度属于同一交路、同一索引时才返回；
+   * 否则（没有到达证据的初始化/移交、已推进到别的索引、换了交路）返回空，调用方必须按"未知"处理，不能拿路径点顶替。
+   *
+   * @param trainName 列车名
+   * @param currentIndex 调用方所用的交路索引
+   * @return 该索引上的实际到达节点
+   */
+  public Optional<NodeId> arrivalNodeAt(String trainName, int currentIndex) {
+    String key = keyOf(trainName);
+    if (key == null) {
+      return Optional.empty();
+    }
+    ArrivalAnchor anchor = arrivalAnchors.get(key);
+    RouteProgressEntry entry = entries.get(key);
+    if (anchor == null
+        || entry == null
+        || anchor.currentIndex() != currentIndex
+        || entry.currentIndex() != currentIndex
+        || !anchor.routeId().equals(entry.routeId())) {
+      return Optional.empty();
+    }
+    return Optional.of(anchor.node());
   }
 
   /**
@@ -172,6 +220,12 @@ public final class RouteProgressRegistry {
     if (existing == null) {
       return false;
     }
+    ArrivalAnchor anchor = arrivalAnchors.remove(oldKey);
+    if (anchor != null) {
+      arrivalAnchors.put(newKey, anchor);
+    } else {
+      arrivalAnchors.remove(newKey);
+    }
     RouteProgressEntry migrated =
         new RouteProgressEntry(
             normalizedNewName,
@@ -256,6 +310,7 @@ public final class RouteProgressRegistry {
     if (key == null) {
       return;
     }
+    arrivalAnchors.remove(key);
     if (entries.remove(key) != null) {
       version.incrementAndGet();
     }
@@ -306,9 +361,23 @@ public final class RouteProgressRegistry {
         new RouteProgressEntry(
             normalizedName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);
     entries.put(key, entry);
+    // 到达锚点与 lastPassed 同一口径：有现场证据就记下；没有证据时只有"同交路、同索引"才沿用旧锚点。
+    if (arrivedNode.isPresent()) {
+      arrivalAnchors.put(key, new ArrivalAnchor(routeId, boundedIndex, arrivedNode.get()));
+    } else {
+      ArrivalAnchor previousAnchor = arrivalAnchors.get(key);
+      if (previousAnchor != null
+          && (previousAnchor.currentIndex() != boundedIndex
+              || !previousAnchor.routeId().equals(routeId))) {
+        arrivalAnchors.remove(key, previousAnchor);
+      }
+    }
     version.incrementAndGet();
     return entry;
   }
+
+  /** 一次带现场证据的到达：交路、索引与实际节点。 */
+  private record ArrivalAnchor(RouteId routeId, int currentIndex, NodeId node) {}
 
   private static String requireTrainName(String trainName) {
     if (trainName == null || trainName.isBlank()) {

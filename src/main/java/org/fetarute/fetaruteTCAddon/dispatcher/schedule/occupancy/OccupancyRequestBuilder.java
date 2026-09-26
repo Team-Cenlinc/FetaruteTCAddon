@@ -57,6 +57,25 @@ public final class OccupancyRequestBuilder {
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
   private final java.util.function.Consumer<String> debugLogger;
 
+  /** 身后保护的实际到达锚点；为 null 时不钉，行为与改动前一致。 */
+  private final RearGuardAnchor rearGuardAnchor;
+
+  /**
+   * 查询列车在某个交路索引上实际到达的图节点，用于把身后保护钉在实际走过的股道上。
+   *
+   * <p>运行时实现是 {@code RouteProgressRegistry#arrivalNodeAt}：没有同交路、同索引的到达证据时返回空。
+   */
+  @FunctionalInterface
+  public interface RearGuardAnchor {
+
+    /**
+     * @param trainName 列车名
+     * @param currentIndex 请求所用的交路索引
+     * @return 该索引上的实际到达节点；未知时为空
+     */
+    Optional<NodeId> arrivalNode(String trainName, int currentIndex);
+  }
+
   public OccupancyRequestBuilder(
       RailGraph graph,
       int lookaheadEdges,
@@ -125,7 +144,8 @@ public final class OccupancyRequestBuilder {
         maxLookaheadEdges,
         minRearGuardDistanceBlocks,
         0L,
-        debugLogger);
+        debugLogger,
+        null);
   }
 
   private OccupancyRequestBuilder(
@@ -138,8 +158,10 @@ public final class OccupancyRequestBuilder {
       int maxLookaheadEdges,
       long minRearGuardDistanceBlocks,
       long minConflictExitDistanceBlocks,
-      java.util.function.Consumer<String> debugLogger) {
+      java.util.function.Consumer<String> debugLogger,
+      RearGuardAnchor rearGuardAnchor) {
     this.graph = Objects.requireNonNull(graph, "graph");
+    this.rearGuardAnchor = rearGuardAnchor;
     this.semanticDirectionResolver = new SemanticCorridorDirectionResolver(this.graph);
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     if (lookaheadEdges <= 0) {
@@ -201,7 +223,36 @@ public final class OccupancyRequestBuilder {
         maxLookaheadEdges,
         minRearGuardDistanceBlocks,
         distanceBlocks,
-        debugLogger);
+        debugLogger,
+        rearGuardAnchor);
+  }
+
+  /**
+   * 返回把身后保护钉在实际到达股道上的新构建器。
+   *
+   * <p>车头离开当前路径点后，调用方会把该路径点改写成车头所在节点，身后保护只能再按"上一路径点 → 车头"的最短路重建，
+   * 实际走过的股道就此丢失：等长时按平局规则选、不等长时短的那条永远赢，于是从 2 道出站的车在 1 道上留保护、2 道上的 claim 反而被释放。设置锚点后，后向路径改为"上一路径点 →
+   * 实际到达节点 → 车头"，见 {@link #resolveRearGuardNodes}。
+   *
+   * @param anchor 实际到达节点查询；null 表示不钉
+   * @return 保留当前全部设置、仅替换锚点的新构建器
+   */
+  public OccupancyRequestBuilder withRearGuardAnchor(RearGuardAnchor anchor) {
+    if (anchor == rearGuardAnchor) {
+      return this;
+    }
+    return new OccupancyRequestBuilder(
+        graph,
+        effectiveLookaheadEdges,
+        0,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        minConflictExitDistanceBlocks,
+        debugLogger,
+        anchor);
   }
 
   /**
@@ -428,7 +479,7 @@ public final class OccupancyRequestBuilder {
       debugLogger.accept("构建请求失败: resolveEdges 返回空 (边未找到?) nodes=" + expandedNodes);
       return Optional.empty();
     }
-    List<NodeId> rearNodes = resolveRearGuardNodes(nodes, currentIndex);
+    List<NodeId> rearNodes = resolveRearGuardNodes(trainName, nodes, currentIndex);
     List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
     List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
     Set<OccupancyResource> resources = new LinkedHashSet<>();
@@ -923,7 +974,7 @@ public final class OccupancyRequestBuilder {
       addResource(
           resources, intents, OccupancyResource.forNode(currentNode), ResourceIntent.HOLD_ONLY);
     }
-    List<NodeId> rearNodes = resolveRearGuardNodes(nodes, currentIndex);
+    List<NodeId> rearNodes = resolveRearGuardNodes(trainName, nodes, currentIndex);
     List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
     List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
     appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
@@ -1063,7 +1114,7 @@ public final class OccupancyRequestBuilder {
     }
 
     if (routeNodes != null && currentIndex >= 0 && currentIndex < routeNodes.size()) {
-      List<NodeId> rearNodes = resolveRearGuardNodes(routeNodes, currentIndex);
+      List<NodeId> rearNodes = resolveRearGuardNodes(trainName, routeNodes, currentIndex);
       List<NodeId> rearExpanded = expandRearGuardNodes(rearNodes);
       List<RailEdge> rearEdges = resolveRearGuardEdges(rearExpanded);
       appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
@@ -1321,7 +1372,48 @@ public final class OccupancyRequestBuilder {
     return Map.copyOf(inherited);
   }
 
-  private List<NodeId> resolveRearGuardNodes(List<NodeId> nodes, int currentIndex) {
+  /**
+   * 身后保护的路径点序列（尚未展开）。
+   *
+   * <p><b>钉实际股道</b>：设置了 {@link RearGuardAnchor}、且当前索引上的实际到达节点不是车头（即调用方已把当前路径点改写成车头所在节点）
+   * 时，在上一路径点与车头之间插入该到达节点，使后向路径经过列车实际走过的股道。插入后的展开失败，或展开结果有重复节点（例如折返后车头已回到到达节点之前），则退回原序列——
+   * 本方法只决定"沿哪条股道"，不扩大也不缩短身后保护的长度。
+   */
+  private List<NodeId> resolveRearGuardNodes(
+      String trainName, List<NodeId> nodes, int currentIndex) {
+    List<NodeId> rear = resolveRearGuardWaypoints(nodes, currentIndex);
+    if (rearGuardAnchor == null || trainName == null || rear.size() < 2) {
+      return rear;
+    }
+    Optional<NodeId> anchor = rearGuardAnchor.arrivalNode(trainName, currentIndex);
+    if (anchor == null || anchor.isEmpty()) {
+      return rear;
+    }
+    NodeId head = rear.get(rear.size() - 1);
+    NodeId arrived = anchor.get();
+    if (arrived.equals(head) || rear.contains(arrived)) {
+      return rear;
+    }
+    List<NodeId> pinned = new ArrayList<>(rear.subList(0, rear.size() - 1));
+    pinned.add(arrived);
+    pinned.add(head);
+    List<NodeId> expanded = expandPathNodes(pinned);
+    if (expanded.isEmpty() || expanded.size() != new HashSet<>(expanded).size()) {
+      debugLogger.accept(
+          "rear-guard 钉点回退: 经实际到达节点无法展开为简单路径 train="
+              + trainName
+              + " arrived="
+              + arrived.value()
+              + " head="
+              + head.value()
+              + " rear="
+              + rear);
+      return rear;
+    }
+    return List.copyOf(pinned);
+  }
+
+  private List<NodeId> resolveRearGuardWaypoints(List<NodeId> nodes, int currentIndex) {
     if (rearGuardEdges <= 0 && minRearGuardDistanceBlocks <= 0L) {
       return List.of();
     }
