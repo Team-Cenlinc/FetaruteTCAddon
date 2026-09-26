@@ -857,6 +857,10 @@ final class DispatchScenarioHarness {
               clock,
               releaseEvents,
               healthMonitor);
+      // drain 预算必须读场景时钟：它在一个 tick 内不前进，同一批次总能排空。若读 System.nanoTime，
+      // 冷 JVM 的第一遍运行里一次完整授权就可能吃掉 5ms，把同批第二辆车推到下一 tick——同一场景
+      // 两遍运行随之分叉（实测每遍推迟 0～4 次不等）。预算耗尽后的分批行为由
+      // RuntimeSignalReevaluationSchedulerTest 正面覆盖，这里不需要再靠墙钟去碰。
       RuntimeSignalReevaluationScheduler scheduler =
           new RuntimeSignalReevaluationScheduler(
               nextTickTasks::add,
@@ -865,7 +869,11 @@ final class DispatchScenarioHarness {
                 if (target != null) {
                   service.handleSignalTick(target, false);
                 }
-              });
+              },
+              (trainName, error) -> {},
+              message -> {},
+              Duration.ofMillis(5),
+              () -> Duration.between(SCENARIO_EPOCH, clock.get()).toNanos());
       RuntimeDispatchRequestProvider provider =
           new RuntimeDispatchRequestProvider(occupancy, service::trainsWaitingForDynamicCapacity);
       new SignalEvaluator(eventBus, provider, scheduler::request).start();

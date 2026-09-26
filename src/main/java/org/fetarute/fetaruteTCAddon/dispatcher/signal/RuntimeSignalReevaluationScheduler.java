@@ -89,6 +89,9 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
    * <p>预算仅防止一个已经有限的事实变更批次独占 Bukkit tick，绝不用于吞掉或隐藏重复 wake-up。剩余列车会被原样保留到下一 tick；持续相同事实的
    * 自我重排必须由授权链自身收敛。
    *
+   * <p>生产一律用上面的构造器（{@link System#nanoTime()} + 默认预算），行为与本构造器公开前完全一致。它公开只为让回归骨架注入与场景时钟同源的
+   * 时间：预算按墙钟计时时，冷 JVM 里一次完整授权就可能吃掉整份预算，把同批后面的列车推到下一 tick——同一场景两遍运行的放行顺序随之分叉。
+   *
    * @param nextTickScheduler 下一 tick 调度适配器
    * @param reevaluationAttempt 完整运行时重评估入口
    * @param failureHandler 单列车重评估失败后的 fail-closed 回调
@@ -96,7 +99,7 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
    * @param drainWorkBudget 单次 drain 最多开始工作的时间预算
    * @param nanoTime 单调时间来源
    */
-  RuntimeSignalReevaluationScheduler(
+  public RuntimeSignalReevaluationScheduler(
       NextTickScheduler nextTickScheduler,
       Consumer<String> reevaluationAttempt,
       BiConsumer<String, Throwable> failureHandler,

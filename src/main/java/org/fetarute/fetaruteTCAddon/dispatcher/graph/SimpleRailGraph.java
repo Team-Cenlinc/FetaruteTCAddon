@@ -1,8 +1,12 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -11,7 +15,24 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlocki
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
-/** 线程安全的不可变调度图快照实现。 */
+/**
+ * 线程安全的不可变调度图快照实现。
+ *
+ * <h2>遍历顺序（跨进程确定）</h2>
+ *
+ * <ul>
+ *   <li>{@link #nodes()} 按 {@link NodeId} 自然序；
+ *   <li>{@link #edges()} 按 {@code edgesById} 键（{@link EdgeId}）的自然序；
+ *   <li>{@link #edgesFrom(NodeId)} 是 {@link #edges()} 中与该节点相邻者的子序列，顺序相同（对规范化 {@link EdgeId} 等价于按
+ *       另一端点的 {@link NodeId} 自然序）。
+ * </ul>
+ *
+ * <p>为什么不能用 {@code Set.copyOf}/{@code Map.copyOf}：JDK 不可变集合的遍历顺序取决于 {@code
+ * ImmutableCollections.SALT32L}，每个 JVM 启动时随机一次。于是凡是"先遍历到谁就选谁"的消费方（最短路的等长平局、冲突走廊/单线 section
+ * 的代表节点等）会在每次重启后换一个结果，而同一进程内又完全稳定——测试里只表现为"场景结局随进程二选一"。
+ *
+ * <p>本顺序只为可复现而定，不表达运营偏好；需要选择语义的地方（选台、路径平局）必须在消费方显式写出规则，而不是依赖这里的顺序。
+ */
 public final class SimpleRailGraph
     implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
 
@@ -44,8 +65,8 @@ public final class SimpleRailGraph
     Objects.requireNonNull(nodesById, "nodesById");
     Objects.requireNonNull(edgesById, "edgesById");
     Objects.requireNonNull(blockedEdges, "blockedEdges");
-    this.nodesById = Map.copyOf(nodesById);
-    this.edgesById = Map.copyOf(edgesById);
+    this.nodesById = sortedByKey(nodesById);
+    this.edgesById = sortedByKey(edgesById);
     this.blockedEdges = Set.copyOf(blockedEdges);
     this.interlockingState = Objects.requireNonNull(interlockingState, "interlockingState");
     this.edgesFrom = buildAdjacency(this.nodesById, this.edgesById);
@@ -171,21 +192,45 @@ public final class SimpleRailGraph
     return index.sectionInfoForEdge(edgeId);
   }
 
-  /** 构建邻接表（无向图）。 */
+  /**
+   * 按键的自然序复制为不可变 map：查找仍是 O(1)，遍历顺序与 JVM 无关。
+   *
+   * <p>与此前的 {@code Map.copyOf} 一样拒绝 null 键/值。
+   */
+  private static <K extends Comparable<K>, V> Map<K, V> sortedByKey(Map<K, V> source) {
+    List<K> keys = new ArrayList<>(source.size());
+    for (Map.Entry<K, V> entry : source.entrySet()) {
+      keys.add(Objects.requireNonNull(entry.getKey(), "key"));
+      Objects.requireNonNull(entry.getValue(), "value");
+    }
+    Collections.sort(keys);
+    Map<K, V> sorted = new LinkedHashMap<>(Math.max(16, (int) (keys.size() / 0.75f) + 1));
+    for (K key : keys) {
+      sorted.put(key, source.get(key));
+    }
+    return Collections.unmodifiableMap(sorted);
+  }
+
+  /**
+   * 构建邻接表（无向图）。
+   *
+   * <p>按 {@code edges} 的遍历顺序（已按 {@link EdgeId} 自然序）逐条挂到两端，因此每个节点的邻接集合天然是 {@link #edges()}
+   * 的子序列，不需要再排序。
+   */
   private static Map<NodeId, Set<RailEdge>> buildAdjacency(
       Map<NodeId, RailNode> nodes, Map<EdgeId, RailEdge> edges) {
     Map<NodeId, Set<RailEdge>> adjacency = new HashMap<>();
     for (NodeId nodeId : nodes.keySet()) {
-      adjacency.put(nodeId, new HashSet<>());
+      adjacency.put(nodeId, new LinkedHashSet<>());
     }
     for (RailEdge edge : edges.values()) {
-      adjacency.computeIfAbsent(edge.from(), ignored -> new HashSet<>()).add(edge);
-      adjacency.computeIfAbsent(edge.to(), ignored -> new HashSet<>()).add(edge);
+      adjacency.computeIfAbsent(edge.from(), ignored -> new LinkedHashSet<>()).add(edge);
+      adjacency.computeIfAbsent(edge.to(), ignored -> new LinkedHashSet<>()).add(edge);
     }
     Map<NodeId, Set<RailEdge>> frozen = new HashMap<>();
     for (Map.Entry<NodeId, Set<RailEdge>> entry : adjacency.entrySet()) {
-      frozen.put(entry.getKey(), Set.copyOf(entry.getValue()));
+      frozen.put(entry.getKey(), Collections.unmodifiableSet(entry.getValue()));
     }
-    return Map.copyOf(frozen);
+    return Collections.unmodifiableMap(frozen);
   }
 }
