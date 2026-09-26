@@ -17,6 +17,7 @@ import java.util.TreeSet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SwitcherMovementTopology;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * Smart Dispatcher 的 wait-for graph planner。
@@ -461,13 +462,20 @@ public final class SmartWaitForPlanner {
     }
   }
 
+  /**
+   * 一个被识别出的等待形态。
+   *
+   * <p>{@code trains}/{@code blockers} 保留构造方给出的顺序——调用方都已按 {@link #TEXT_ORDER} 排好（{@code
+   * sortedSet}、{@code TreeSet}、单元素集合）。下游有"第一个非当前持有者"、按 blockers 顺序生成候选等依赖顺序的选择，用 {@code Set.copyOf}
+   * 会把排好的顺序换成每个 JVM 随机一次的顺序。规则见 {@link StableCollections}。
+   */
   private record Pattern(
       String id, String type, Set<String> trains, Set<String> blockers, boolean hardCycle) {
     private Pattern {
       id = normalize(id, "-");
       type = normalize(type, "UNKNOWN");
-      trains = trains == null ? Set.of() : Set.copyOf(trains);
-      blockers = blockers == null ? Set.of() : Set.copyOf(blockers);
+      trains = trains == null ? Set.of() : StableCollections.copyInInsertionOrder(trains);
+      blockers = blockers == null ? Set.of() : StableCollections.copyInInsertionOrder(blockers);
     }
   }
 

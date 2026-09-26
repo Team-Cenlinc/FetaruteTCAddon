@@ -127,6 +127,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassif
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalPublicationGate;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 运行时调度编排器。
@@ -9302,13 +9303,22 @@ public final class RuntimeDispatchService {
    * 互卡诊断用 blocker 快照。
    *
    * <p>保留 conflict/direction，供 HealthMonitor 只在“同一 single conflict 且双方方向已知相反”时进入自动 destroy。
+   *
+   * <p><b>顺序</b>：{@link #blockers()} 与 {@link #trainNames()} 保留快照写入时的顺序，即占用判定给出 blocker
+   * 的顺序（请求路径顺序，路径上最近者在前）。健康监控里"第一个合格 blocker"决定互卡配对、conflictKey 与兜底 destroy 的对象，因此不能用 {@code
+   * Set.copyOf}——它的遍历顺序每个 JVM 随机一次，且 {@link DeadlockBlockerInfo} 含枚举、hash 本身也随进程变。规则见 {@link
+   * StableCollections}。
    */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "构造器已经 StableCollections 复制为不可修改的有序视图；SpotBugs 只认得 Set.copyOf，看不穿这层复制。")
   public record DeadlockBlockerSnapshot(Set<DeadlockBlockerInfo> blockers, Instant sampledAt) {
     public DeadlockBlockerSnapshot {
-      blockers = blockers == null ? Set.of() : Set.copyOf(blockers);
+      blockers = blockers == null ? Set.of() : StableCollections.copyInInsertionOrder(blockers);
       sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
     }
 
+    /** blocker 列车名，按 {@link #blockers()} 中首次出现的顺序。 */
     public Set<String> trainNames() {
       Set<String> names = new LinkedHashSet<>();
       for (DeadlockBlockerInfo blocker : blockers) {
@@ -9316,7 +9326,7 @@ public final class RuntimeDispatchService {
           names.add(blocker.trainName());
         }
       }
-      return Set.copyOf(names);
+      return StableCollections.copyInInsertionOrder(names);
     }
   }
 
@@ -9652,6 +9662,12 @@ public final class RuntimeDispatchService {
   /** 单轮 planner 中按逻辑列车与精确 route 定位保护性尾部 claim 的键。 */
   private record ProtectiveRetainClaimKey(String trainKey, RouteId routeId) {}
 
+  /**
+   * 每车最近一次被拒绝时的 blocker 快照。
+   *
+   * <p>{@code blockers} 保留写入顺序（占用判定的请求路径顺序）：它原样流入 {@link DeadlockBlockerSnapshot}、wait-for 规划器的输入边与
+   * {@code recentBlockerTrains}，下游有"第一个合格者赢"的选择，见 {@link DeadlockBlockerSnapshot} 的顺序说明。
+   */
   private record BlockerSnapshot(
       Set<DeadlockBlockerInfo> blockers,
       Instant sampledAt,
@@ -9660,7 +9676,7 @@ public final class RuntimeDispatchService {
       Optional<MovementPlanSnapshot> movementPlan,
       Instant movementPlanSampledAt) {
     private BlockerSnapshot {
-      blockers = blockers == null ? Set.of() : Set.copyOf(blockers);
+      blockers = blockers == null ? Set.of() : StableCollections.copyInInsertionOrder(blockers);
       sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
       progressWindow = progressWindow == null ? BlockerProgressWindow.unknown() : progressWindow;
       blockedRequest = blockedRequest == null ? Optional.empty() : blockedRequest;
@@ -9695,7 +9711,7 @@ public final class RuntimeDispatchService {
           names.add(blocker.trainName());
         }
       }
-      return Set.copyOf(names);
+      return StableCollections.copyInInsertionOrder(names);
     }
   }
 

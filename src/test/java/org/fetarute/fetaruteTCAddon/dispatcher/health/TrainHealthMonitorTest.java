@@ -3212,4 +3212,32 @@ class TrainHealthMonitorTest {
         debugLogs.stream().anyMatch(l -> l.contains("SMART_HEALTH_CLOCK_DISCONTINUITY")),
         "重基必须留痕迹");
   }
+
+  /**
+   * 同一 tick 内逐车处理顺序按列车名排序，与调用方集合的顺序无关。
+   *
+   * <p>此前用 {@code Set.copyOf(activeTrains)}，顺序每个 JVM 随机一次——两车同时满足兜底条件时谁先动手随重启变。六个非字母序的车名让退回 {@code
+   * Set.copyOf} 的实现几乎必然失败。
+   */
+  @Test
+  @DisplayName("逐车处理顺序按列车名排序（check 与 forceUnlockNow）")
+  void perTrainVisitOrderIsByNameRegardlessOfCallerOrder() {
+    List<String> visited = new ArrayList<>();
+    when(dispatchService.getTrainState(anyString()))
+        .thenAnswer(
+            invocation -> {
+              visited.add(invocation.getArgument(0));
+              return Optional.empty();
+            });
+    Set<String> callerOrder =
+        new java.util.LinkedHashSet<>(List.of("t-5", "t-2", "t-9", "t-1", "t-7", "t-3"));
+    List<String> byName = List.of("t-1", "t-2", "t-3", "t-5", "t-7", "t-9");
+
+    monitor.check(callerOrder, Instant.parse("2026-01-01T00:00:00Z"));
+    assertEquals(byName, visited.stream().distinct().toList(), "check 的逐车顺序");
+
+    visited.clear();
+    monitor.forceUnlockNow(callerOrder, Instant.parse("2026-01-01T00:00:01Z"));
+    assertEquals(byName, visited.stream().distinct().toList(), "forceUnlockNow 的逐车顺序");
+  }
 }
