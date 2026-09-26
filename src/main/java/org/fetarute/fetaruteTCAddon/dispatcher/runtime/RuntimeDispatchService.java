@@ -21612,16 +21612,18 @@ public final class RuntimeDispatchService {
       ConfigManager.RuntimeSettings runtimeSettings,
       int rearGuardEdges,
       long rearGuardDistanceBlocks) {
+    // 身后保护钉在实际到达的股道上：路径点被改写成车头节点后，不能再让最短路替列车"选"股道。
     return new OccupancyRequestBuilder(
-        graph,
-        runtimeSettings.lookaheadEdges(),
-        runtimeSettings.minClearEdges(),
-        rearGuardEdges,
-        runtimeSettings.switcherZoneEdges(),
-        runtimeLookaheadMinDistanceBlocks(runtimeSettings),
-        runtimeLookaheadMaxEdges(runtimeSettings),
-        rearGuardDistanceBlocks,
-        debugLogger);
+            graph,
+            runtimeSettings.lookaheadEdges(),
+            runtimeSettings.minClearEdges(),
+            rearGuardEdges,
+            runtimeSettings.switcherZoneEdges(),
+            runtimeLookaheadMinDistanceBlocks(runtimeSettings),
+            runtimeLookaheadMaxEdges(runtimeSettings),
+            rearGuardDistanceBlocks,
+            debugLogger)
+        .withRearGuardAnchor(progressRegistry::arrivalNodeAt);
   }
 
   /**
@@ -22378,15 +22380,16 @@ public final class RuntimeDispatchService {
     }
     OccupancyRequestBuilder rearGuardBuilder =
         new OccupancyRequestBuilder(
-            graph,
-            runtimeSettings.lookaheadEdges(),
-            runtimeSettings.minClearEdges(),
-            runtimeSettings.rearGuardEdges(),
-            runtimeSettings.switcherZoneEdges(),
-            runtimeLookaheadMinDistanceBlocks(runtimeSettings),
-            runtimeLookaheadMaxEdges(runtimeSettings),
-            resolveRearGuardDistanceBlocks(train),
-            debugLogger);
+                graph,
+                runtimeSettings.lookaheadEdges(),
+                runtimeSettings.minClearEdges(),
+                runtimeSettings.rearGuardEdges(),
+                runtimeSettings.switcherZoneEdges(),
+                runtimeLookaheadMinDistanceBlocks(runtimeSettings),
+                runtimeLookaheadMaxEdges(runtimeSettings),
+                resolveRearGuardDistanceBlocks(train),
+                debugLogger)
+            .withRearGuardAnchor(progressRegistry::arrivalNodeAt);
     OccupancyRequest rearGuardRequest =
         movementPlan
             .map(

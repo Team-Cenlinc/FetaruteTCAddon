@@ -23,6 +23,56 @@ import org.junit.jupiter.api.Test;
 
 class RouteProgressRegistryTest {
 
+  /**
+   * 到达锚点：只由带现场证据的到达写入，驶过后续图节点不丢，推进到别的索引、换交路、移除时作废，改名时跟着走。
+   *
+   * <p>它与 {@code lastPassedGraphNode} 不是同一个量——后者车头每过一个图节点就被覆盖，出站之后就不再记得走的是哪条股道。
+   */
+  @Test
+  void arrivalAnchorSurvivesPassingNodesAndExpiresWithTheIndex() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"),
+            List.of(NodeId.of("OP:S:A:1"), NodeId.of("OP:S:B:1"), NodeId.of("OP:S:C:1")),
+            Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    TagStore store = new TagStore("FTA_ROUTE_INDEX=0");
+    NodeId trackTwo = NodeId.of("OP:S:B:2");
+
+    registry.initFromTags("train-1", store.properties(), route);
+    assertEquals(Optional.empty(), registry.arrivalNodeAt("train-1", 0), "初始化没有现场证据");
+
+    registry.recordArrival(
+        "train-1", null, route, 1, trackTwo, store.properties(), Instant.ofEpochMilli(1000));
+    registry.updateLastPassedGraphNode(
+        "train-1", NodeId.of("SWITCHER:B:E"), Instant.ofEpochMilli(1100));
+    assertEquals(Optional.of(trackTwo), registry.arrivalNodeAt("train-1", 1));
+    assertEquals(Optional.empty(), registry.arrivalNodeAt("train-1", 0), "只对到达的那个索引成立");
+
+    registry.advance("train-1", null, route, 1, store.properties(), Instant.ofEpochMilli(1200));
+    assertEquals(Optional.of(trackTwo), registry.arrivalNodeAt("train-1", 1), "同索引无证据的刷新沿用锚点");
+
+    assertTrue(registry.rename("train-1", "train-renamed"));
+    assertEquals(Optional.of(trackTwo), registry.arrivalNodeAt("train-renamed", 1));
+    assertEquals(Optional.empty(), registry.arrivalNodeAt("train-1", 1));
+
+    registry.advance(
+        "train-renamed", null, route, 2, store.properties(), Instant.ofEpochMilli(1300));
+    assertEquals(Optional.empty(), registry.arrivalNodeAt("train-renamed", 1));
+    assertEquals(Optional.empty(), registry.arrivalNodeAt("train-renamed", 2), "推进没有现场证据");
+
+    registry.recordArrival(
+        "train-renamed",
+        null,
+        route,
+        2,
+        NodeId.of("OP:S:C:1"),
+        store.properties(),
+        Instant.ofEpochMilli(1400));
+    registry.remove("train-renamed");
+    assertEquals(Optional.empty(), registry.arrivalNodeAt("train-renamed", 2));
+  }
+
   @Test
   void initFromTagsRestoresIndex() {
     UUID routeId = UUID.randomUUID();
