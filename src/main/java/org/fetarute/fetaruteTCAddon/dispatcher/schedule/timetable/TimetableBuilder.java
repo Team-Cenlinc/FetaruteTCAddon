@@ -119,7 +119,7 @@ public final class TimetableBuilder {
     } catch (BuildFailure failure) {
       return TimetableBuildResult.failure(failure.getMessage(), prepared.infeasible());
     }
-    // 报告与搜索都以"最小的组间隔"为标量：放宽时所有组等比。
+    // 报告与搜索都以"最小的组间隔"为标量：搜索时所有组等比放宽，找到之后再逐组收紧（tightenGroups）。
     int targetHeadway = target.headwaySeconds();
 
     Attempt chosen = target;
@@ -137,8 +137,11 @@ public final class TimetableBuilder {
         return TimetableBuildResult.failure(String.join("\n", reasons), prepared.infeasible());
       }
       List<String> searchNotes = new ArrayList<>();
+      // 已经排不开的各组间隔：搜索与收紧都往里记，收紧时用它剪掉注定失败的完整构建（一次几十秒）。
+      List<Map<String, Integer>> failed = new ArrayList<>();
+      failed.add(target.intervals());
       Optional<Attempt> fallback =
-          searchFeasibleHeadway(prepared, options, target, input, builtAt, searchNotes);
+          searchFeasibleHeadway(prepared, options, target, input, builtAt, searchNotes, failed);
       if (fallback.isEmpty()) {
         return TimetableBuildResult.failure(
             summary
@@ -151,13 +154,15 @@ public final class TimetableBuilder {
                     options.dutyLimits().turnaround()),
             prepared.infeasible());
       }
-      chosen = fallback.get();
+      chosen =
+          tightenGroups(
+              prepared, options, target, fallback.get(), input, builtAt, searchNotes, failed);
       warnings.addAll(searchNotes);
       warnings.add(
           summary
               + "，已回退到最小可行间隔 "
-              + chosen.headwaySeconds()
-              + "s（--strict 可改为构建失败）"
+              + describeRelaxed(target, chosen)
+              + "（--strict 可改为构建失败）"
               + (target.conflicts().external().isEmpty()
                   ? ""
                   : "；其中 " + target.conflicts().external().size() + " 处是与已发布邻表的冲突，只能挪自己"));
@@ -266,17 +271,34 @@ public final class TimetableBuilder {
         List.copyOf(warnings));
   }
 
+  /** 各组目标与实际间隔，按组名排序（尝试里的间隔表是 {@code Map.copyOf}，遍历顺序每个进程都不同）。 */
   private static List<TimetableBuildResult.GroupInterval> groupIntervals(
       Attempt target, Attempt chosen) {
     List<TimetableBuildResult.GroupInterval> out = new ArrayList<>();
-    target
-        .intervals()
+    new TreeMap<>(target.intervals())
         .forEach(
             (group, seconds) ->
                 out.add(
                     new TimetableBuildResult.GroupInterval(
                         group, seconds, chosen.intervals().getOrDefault(group, seconds))));
     return List.copyOf(out);
+  }
+
+  /** 回退提示里的间隔：只有一组时就是一个数；多组时只列被放宽的组，逐组收紧后回到目标的组不列。 */
+  private static String describeRelaxed(Attempt target, Attempt chosen) {
+    if (target.intervals().size() <= 1) {
+      return chosen.headwaySeconds() + "s";
+    }
+    List<String> relaxed = new ArrayList<>();
+    new TreeMap<>(target.intervals())
+        .forEach(
+            (group, seconds) -> {
+              int effective = chosen.intervals().getOrDefault(group, seconds);
+              if (effective > seconds) {
+                relaxed.add(group + " " + seconds + "→" + effective + "s");
+              }
+            });
+    return relaxed.isEmpty() ? chosen.headwaySeconds() + "s" : String.join("、", relaxed);
   }
 
   /** 交路形状：跑几班的交路各有多少条；运营者看它判断出入库班配得多不多。 */
@@ -867,7 +889,7 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 目标间隔有冲突时往上找最小可行间隔，所有组等比放宽。
+   * 目标间隔有冲突时往上找最小可行间隔，所有组等比放宽（找到之后由 {@link #tightenGroups} 逐组收紧）。
    *
    * <p>可行性不随间隔单调：实测 WS 135 可行、140 不可行、150 又可行。原来按 10 秒一档往上搜，从 120 直接跳到 150，漏掉 135。 现在分两层：
    *
@@ -882,6 +904,7 @@ public final class TimetableBuilder {
    * <p>只放宽间隔、不挪动单个班次：表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成，因此找到的间隔是一个可以直接写回配置的数， 而不是一次性的手工调整。
    *
    * @param searchNotes 搜索过程的说明（跳过了哪些结构上不可行的间隔），进报告
+   * @param failed 排不开的各组间隔，搜索往里追加
    */
   private Optional<Attempt> searchFeasibleHeadway(
       Prepared prepared,
@@ -889,7 +912,8 @@ public final class TimetableBuilder {
       Attempt target,
       BuildInput input,
       Instant builtAt,
-      List<String> searchNotes) {
+      List<String> searchNotes,
+      List<Map<String, Integer>> failed) {
     int targetHeadway = target.headwaySeconds();
     boolean structural = structuralClearance(prepared, options).isPresent();
     HeadwayCandidates candidates =
@@ -912,6 +936,9 @@ public final class TimetableBuilder {
       } catch (BuildFailure ignored) {
         continue;
       }
+      if (!candidate.clean()) {
+        failed.add(candidate.intervals());
+      }
       if (candidate.clean()) {
         if (candidates.skipped() > 0) {
           searchNotes.add(
@@ -926,6 +953,226 @@ public final class TimetableBuilder {
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * 等比放宽找到可行间隔之后，逐个单元往回收紧。
+   *
+   * <p>等比放宽把没卡住的组也一起拖慢：实服三线联编里卡住的是 WS 在 CHT 的折返与车库咽喉，DS 并不参与，却跟着从 200 秒放到 235 秒； 显式给 WS/MT 176、DS
+   * 200 照样排得开。
+   *
+   * <p>按车接续连在一起的组必须同一个间隔，并成一个单元一起收紧，单元内保持目标比例。单元按放宽的秒数从多到少、同秒按名字依次试：
+   * 先试目标间隔，再按格点与预筛岛的起点往上，直到当前间隔之前，第一个干净的就收下，其余单元不动。每一步收下的表里所有组都不比上一步慢，
+   * 所以结果不会比等比放宽差。只走一遍：后收紧的单元可能给先前没收紧成功的单元腾出空间，这里不回头再试。
+   *
+   * <p>剪枝：候选间隔若已经排不开过、而且当时单元外每一组都不比现在紧，就不再完整构建——单元外更紧只会多添约束。
+   * 可行性对间隔并不单调，这是经验规则，换来的是省掉注定失败的构建（实服三线联编里一次 71 秒）。
+   *
+   * @param relaxed 等比放宽找到的可行尝试
+   * @param notes 收紧了哪些组，进报告
+   * @param failed 排不开的各组间隔；收紧失败的也往里追加
+   * @return 收紧后的尝试；一个单元也收不紧时就是 {@code relaxed}
+   */
+  private Attempt tightenGroups(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      Attempt target,
+      Attempt relaxed,
+      BuildInput input,
+      Instant builtAt,
+      List<String> notes,
+      List<Map<String, Integer>> failed) {
+    Attempt current = relaxed;
+    for (Set<String> unit : tighteningUnits(prepared, options, target, relaxed)) {
+      int targetMin = minInterval(target.intervals(), unit);
+      int currentMin = minInterval(current.intervals(), unit);
+      if (currentMin <= targetMin) {
+        continue;
+      }
+      Attempt base = current;
+      IntPredicate structuralPass =
+          structuralClearance(prepared, options).isPresent()
+              ? headway -> {
+                OptionalInt clearance =
+                    structuralClearance(
+                        prepared, unitOptions(options, target, base, unit, headway));
+                return clearance.isEmpty() || clearance.getAsInt() >= 0;
+              }
+              : null;
+      Optional<Attempt> tightened = Optional.empty();
+      if (structuralPass == null || structuralPass.test(targetMin)) {
+        tightened =
+            tryTightening(
+                prepared,
+                unitOptions(options, target, base, unit, targetMin),
+                unit,
+                input,
+                builtAt,
+                failed);
+      }
+      HeadwayCandidates candidates =
+          new HeadwayCandidates(
+              targetMin, currentMin - 1, HEADWAY_SEARCH_STEP_SECONDS, structuralPass);
+      for (OptionalInt next = candidates.next();
+          tightened.isEmpty() && next.isPresent();
+          next = candidates.next()) {
+        tightened =
+            tryTightening(
+                prepared,
+                unitOptions(options, target, base, unit, next.getAsInt()),
+                unit,
+                input,
+                builtAt,
+                failed);
+      }
+      if (tightened.isPresent()) {
+        current = tightened.get();
+        List<String> changes = new ArrayList<>();
+        for (String group : unit) {
+          changes.add(
+              group
+                  + " "
+                  + base.intervals().get(group)
+                  + "s → "
+                  + current.intervals().get(group)
+                  + "s");
+        }
+        notes.add(
+            "逐组收紧："
+                + String.join("、", changes)
+                + (minInterval(current.intervals(), unit) == targetMin ? "（回到目标）" : ""));
+      }
+    }
+    return current;
+  }
+
+  /**
+   * 收紧一个单元的一次尝试，只在干净时返回；构建失败或留有让不掉的冲突都算不行，失败的间隔记进 {@code failed}。 已被 {@code failed}
+   * 里某次失败覆盖的候选直接跳过（见 {@link #tightenGroups} 的剪枝）。
+   */
+  private Optional<Attempt> tryTightening(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      Set<String> unit,
+      BuildInput input,
+      Instant builtAt,
+      List<Map<String, Integer>> failed) {
+    Map<String, Integer> intervals = new TreeMap<>();
+    for (ServiceGroupClassifier.Group group : prepared.classification().groups()) {
+      intervals.put(group.name(), options.intervalFor(group.name()));
+    }
+    for (Map<String, Integer> known : failed) {
+      if (dominates(known, intervals, unit)) {
+        return Optional.empty();
+      }
+    }
+    try {
+      Attempt attempt = attempt(prepared, options, input, builtAt);
+      if (attempt.clean()) {
+        return Optional.of(attempt);
+      }
+      failed.add(attempt.intervals());
+    } catch (BuildFailure ignored) {
+      failed.add(intervals);
+    }
+    return Optional.empty();
+  }
+
+  /** {@code known} 这次失败是否覆盖 {@code candidate}：单元内间隔相同，单元外每一组都不比候选紧。 */
+  static boolean dominates(
+      Map<String, Integer> known, Map<String, Integer> candidate, Set<String> unit) {
+    for (Map.Entry<String, Integer> entry : candidate.entrySet()) {
+      Integer seen = known.get(entry.getKey());
+      if (seen == null) {
+        return false;
+      }
+      boolean inUnit = unit.contains(entry.getKey());
+      if (inUnit ? !seen.equals(entry.getValue()) : seen < entry.getValue()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 收紧的单元：按车接续连在一起的组并成一个单元（接续要求两组同一个间隔），只看真正上网格的组。
+   *
+   * <p>顺序：放宽得多的先试，同秒按单元里最小的组名——确定，与遍历顺序无关。
+   */
+  private static List<Set<String>> tighteningUnits(
+      Prepared prepared, TimetableBuildOptions options, Attempt target, Attempt relaxed) {
+    Set<UUID> gridRoutes = new HashSet<>();
+    for (TimetableRoutePlan plan : prepared.operationPlans()) {
+      gridRoutes.add(plan.routeId());
+    }
+    List<ServiceGroupClassifier.Group> gridGroups =
+        gridGroupsOf(prepared.classification().groups(), gridRoutes);
+    Map<UUID, String> groupByRoute = new HashMap<>();
+    Map<String, String> parent = new TreeMap<>();
+    for (ServiceGroupClassifier.Group group : gridGroups) {
+      parent.put(group.name(), group.name());
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        for (UUID routeId : direction.routeIds()) {
+          groupByRoute.put(routeId, group.name());
+        }
+      }
+    }
+    PhasePlanner.Phases phases =
+        planPhases(
+            prepared,
+            options.withIntervals(options.headway(), relaxed.intervals()),
+            relaxed.intervals(),
+            gridGroups);
+    for (PhasePlanner.Connection connection : phases.connections()) {
+      List<UUID> linked = new ArrayList<>(connection.feederRoutes());
+      linked.addAll(connection.fedRoutes());
+      String anchor = null;
+      for (UUID routeId : linked) {
+        String group = groupByRoute.get(routeId);
+        if (group == null) {
+          continue;
+        }
+        if (anchor == null) {
+          anchor = group;
+        } else {
+          parent.put(root(parent, group), root(parent, anchor));
+        }
+      }
+    }
+    Map<String, Set<String>> byRoot = new TreeMap<>();
+    for (String group : parent.keySet()) {
+      byRoot.computeIfAbsent(root(parent, group), key -> new TreeSet<>()).add(group);
+    }
+    List<Set<String>> units = new ArrayList<>(byRoot.values());
+    units.sort(
+        Comparator.comparingInt(
+                (Set<String> unit) ->
+                    minInterval(target.intervals(), unit) - minInterval(relaxed.intervals(), unit))
+            .thenComparing(unit -> unit.iterator().next()));
+    return units;
+  }
+
+  private static String root(Map<String, String> parent, String group) {
+    String current = group;
+    while (!parent.get(current).equals(current)) {
+      current = parent.get(current);
+    }
+    return current;
+  }
+
+  private static int minInterval(Map<String, Integer> intervals, Set<String> unit) {
+    return unit.stream().mapToInt(intervals::get).min().orElse(0);
+  }
+
+  /** 单元里最小的组间隔走到 {@code headway}，单元内按目标比例；单元外的组保持 {@code base} 的间隔。 */
+  private static TimetableBuildOptions unitOptions(
+      TimetableBuildOptions options, Attempt target, Attempt base, Set<String> unit, int headway) {
+    double factor = (double) headway / minInterval(target.intervals(), unit);
+    Map<String, Integer> intervals = new TreeMap<>(base.intervals());
+    for (String group : unit) {
+      intervals.put(group, (int) Math.round(target.intervals().get(group) * factor));
+    }
+    return options.withIntervals(options.headway(), intervals);
   }
 
   /** 搜索要完整构建的间隔，升序、惰性：有结构预筛时逐秒问一遍，预筛不过的跳过（计数）；过了的只在格点上、 以及每一段"过"的区间的第一秒上交出去。没有预筛时只交格点。 */

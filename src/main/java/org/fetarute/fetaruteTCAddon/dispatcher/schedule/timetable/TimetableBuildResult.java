@@ -110,9 +110,20 @@ public record TimetableBuildResult(
     return conflictsAtTarget.stream().filter(c -> !c.external()).toList();
   }
 
-  /** 目标 headway 是否被放宽了。 */
+  /**
+   * 目标间隔是否被放宽了：有交路组时看有没有哪一组实际间隔大于目标。
+   *
+   * <p>不能只比最小的组间隔：逐组收紧之后，没卡住的组回到目标，最小间隔可能与目标相同，而卡住的组仍被放宽着。
+   */
   public boolean headwayRelaxed() {
-    return success() && effectiveHeadwaySeconds > targetHeadwaySeconds;
+    if (!success()) {
+      return false;
+    }
+    if (groupIntervals.isEmpty()) {
+      return effectiveHeadwaySeconds > targetHeadwaySeconds;
+    }
+    return groupIntervals.stream()
+        .anyMatch(interval -> interval.effectiveSeconds() > interval.targetSeconds());
   }
 
   /** 构建是否产出了时刻表。 */

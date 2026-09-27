@@ -93,12 +93,14 @@ final class TimetableBuildReportSender {
             TimetableCsvExporter.clock(options.serviceStartSecondOfDay())
                 + " → "
                 + TimetableCsvExporter.clock(options.serviceEndSecondOfDay())
-                + "，间隔 "
-                + result.effectiveHeadwaySeconds()
-                + "s"
-                + (result.headwayRelaxed()
-                    ? "（目标 " + result.targetHeadwaySeconds() + "s 有冲突，已放宽）"
-                    : "")));
+                + (result.groupIntervals().isEmpty()
+                    ? "，间隔 "
+                        + result.effectiveHeadwaySeconds()
+                        + "s"
+                        + (result.headwayRelaxed()
+                            ? "（目标 " + result.targetHeadwaySeconds() + "s 有冲突，已放宽）"
+                            : "")
+                    : "，间隔按交路组（见下）" + (result.headwayRelaxed() ? "；目标有冲突，卡住的组已放宽" : ""))));
     if (runModel != null && !runModel.isBlank()) {
       sender.sendMessage(FtaTimetableCommand.field("走行", runModel));
     }
