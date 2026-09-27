@@ -38,15 +38,19 @@ class DispatchQueueContentionTest {
   private static final int MAX_TICKS = 1000;
 
   /**
-   * 五站会让走廊，四列车逐站起步。
+   * 五站会让走廊，四列车在 0/2/3/4 站起步。
    *
    * <p>配置是量出来的：要让 I7 真正被检验，现场必须同时有并发排队、有非 STOP 信号、且有列车推进。 在 50ms/tick 的场景时钟下实测（跑 1000 tick）：
    *
    * <pre>
-   *   5 站 0/1/2/3 → 并发 2、比较 2918 次、proceed 1496 次、四车全部推进  ← 采用
+   *   5 站 0/2/3/4 → 并发 2、比较 4776 次、proceed 1179 次、三车推进  ← 采用
+   *   5 站 0/1/2/3 → 并发 1（没有竞争，见下）
    *   7 站 0/2/4/6 → 并发 1（没有竞争）
    *   9 站 0/2/4/6/8 → 并发 1（没有竞争）
    * </pre>
+   *
+   * <p>原先采用的 5 站 0/1/2/3 在 2026-09-27 之后没有并发排队了：那里唯一的一次“两车排同一资源”，是车头已越过道岔的车排在岔外车后面—— 实服 SPB
+   * 汇合岔互等的同一形态。道岔占用者出清不再排队之后，那个队列只剩一辆车，推进情况不变。
    *
    * <p>注意这些数字与墙钟骨架时代的完全不同：那时 5 站 0/1/2/3 是发车线上就锁死的现场（四车 progress 全 0），
    * 现在它是四车全部推进的正常现场。换时间源会换掉整个现场的动力学，旧的调参结论不可沿用。
@@ -58,9 +62,9 @@ class DispatchQueueContentionTest {
     return DispatchScenarioHarness.builder()
         .topology(topology)
         .train("q0", "shared-route", path, topology.stations(), 0)
-        .train("q1", "shared-route", path, topology.stations(), 1)
-        .train("q2", "shared-route", path, topology.stations(), 2)
-        .train("q3", "shared-route", path, topology.stations(), 3)
+        .train("q1", "shared-route", path, topology.stations(), 2)
+        .train("q2", "shared-route", path, topology.stations(), 3)
+        .train("q3", "shared-route", path, topology.stations(), 4)
         .build();
   }
 
@@ -86,6 +90,34 @@ class DispatchQueueContentionTest {
 
     assertFieldIsAlive(harness);
     harness.assertNoViolationsOf("I7");
+  }
+
+  /**
+   * 环形五站、两车同站起步：以前开局就锁死（四车 progress 全 0、一次非 STOP 信号都没有，道岔队列四车排满），现在岔上的车先出清， 现场跑得起来。
+   *
+   * <p>锁死的形态与实服 2026-09-27 SPB 汇合岔一样：车头已越过道岔的车以 HOLD_ONLY 挂着道岔，要升级为前进授权却排在岔外车后面， 岔外车又等它让出车体压着的节点。
+   */
+  @Test
+  void ringCorridorDoesNotLockAtTheStartWhenSwitcherOccupantsClearFirst() {
+    DispatchScenarioHarness.Topology topology =
+        DispatchScenarioHarness.ringCorridor(List.of("A1", "B1", "C1", "D1", "E1"));
+    List<NodeId> path = topology.physicalPath();
+    DispatchScenarioHarness harness =
+        DispatchScenarioHarness.builder()
+            .topology(topology)
+            .train("r0", "shared-route", path, topology.stations(), 0)
+            .train("r1", "shared-route", path, topology.stations(), 0)
+            .train("r2", "shared-route", path, topology.stations(), 1)
+            .train("r3", "shared-route", path, topology.stations(), 2)
+            .build();
+
+    harness.runTicks(MAX_TICKS);
+
+    assertTrue(harness.proceedAuthorityChecks() > 0, "整场没有一次非 STOP 信号：" + harness.describeState());
+    assertTrue(
+        harness.trainNames().stream().filter(name -> harness.progressOf(name) > 0).count() >= 2,
+        "至少两列车要推进过：" + harness.describeState());
+    harness.assertNoViolationsOf("I1", "I2", "I3", "I4", "I6", "I7");
   }
 
   /** 同一现场下结构性安全与可解释性不得退化——排队竞争不是放宽互斥的理由。 */

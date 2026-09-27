@@ -704,6 +704,10 @@ public final class SimpleOccupancyManager
         }
         continue;
       }
+      if (verifiedSwitcherOccupantBypassesQueue(request, resource)) {
+        traceSwitcherOccupantQueueBypass(request, resource, now);
+        continue;
+      }
       Optional<OccupancyDecision> directionBlocked =
           failClosedUnknownSingleConflictEntry(request, resource, now);
       if (directionBlocked.isPresent()) {
@@ -894,6 +898,9 @@ public final class SimpleOccupancyManager
         }
         continue;
       }
+      if (verifiedSwitcherOccupantBypassesQueue(request, resource)) {
+        continue;
+      }
       Optional<OccupancyDecision> directionBlocked =
           failClosedUnknownSingleConflictEntry(request, resource, now);
       if (directionBlocked.isPresent()) {
@@ -1003,7 +1010,8 @@ public final class SimpleOccupancyManager
         continue;
       }
       OccupancyClaim selfClaim = findClaim(existing, request.trainName());
-      if (selfClaimBypassesQueue(selfClaim)) {
+      if (selfClaimBypassesQueue(selfClaim)
+          || verifiedSwitcherOccupantBypassesQueue(request, resource)) {
         /*
          * 排队位次只决定尚未取得进路者的次序。当前列车已经持有同一资源的可执行
          * MOVEMENT_REQUIRED claim 时，失败方的纯队列记录不能反向成为停车点；
@@ -1073,6 +1081,7 @@ public final class SimpleOccupancyManager
             : Set.of();
     List<OccupancyResource> admittedResources = new ArrayList<>();
     List<OccupancyResource> changedResources = new ArrayList<>();
+    List<OccupancyResource> queueSatisfiedResources = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
@@ -1130,6 +1139,9 @@ public final class SimpleOccupancyManager
         traceResourceLifecycle(
             request, resource, current, updated, lifecycleEvent, refresh.reason());
         admittedResources.add(resource);
+        if (selfClaimBypassesQueue(updated)) {
+          queueSatisfiedResources.add(resource);
+        }
         if (stateChanged) {
           changedResources.add(resource);
         }
@@ -1148,12 +1160,18 @@ public final class SimpleOccupancyManager
       rememberSwitcherClaimSignature(request, resource);
       traceResourceLifecycle(request, resource, null, created, "acquire", "new-claim");
       admittedResources.add(resource);
+      if (selfClaimBypassesQueue(created)) {
+        queueSatisfiedResources.add(resource);
+      }
       changedResources.add(resource);
     }
+    // 只有拿到可执行授权的资源才算排到了：此后 selfClaimBypassesQueue 本来就不再看队列。停车保持、尾部保护以 HOLD_ONLY/
+    // PROTECTIVE_RETAIN 接纳只是原地占着，本车仍在等前进授权，排队位次必须留着；以前一并删掉，停着的车每拍被删、下一拍又以新的
+    // firstSeen 入队，排队资历永远是 0（实服 2026-09-27 MT-LP-6727 就这样一直输给后到的 MT-LP-7340）。
     int removedQueueEntries =
-        admittedResources.isEmpty()
+        queueSatisfiedResources.isEmpty()
             ? 0
-            : removeFromQueuesForResources(request.trainName(), admittedResources, false);
+            : removeFromQueuesForResources(request.trainName(), queueSatisfiedResources, false);
     if (!changedResources.isEmpty() || removedQueueEntries > 0) {
       version.incrementAndGet();
     }
@@ -4011,6 +4029,46 @@ public final class SimpleOccupancyManager
    */
   private boolean selfClaimBypassesQueue(OccupancyClaim selfClaim) {
     return selfClaim != null && selfClaim.role() == ClaimRole.MOVEMENT_REQUIRED;
+  }
+
+  /**
+   * 已验证的道岔占用者出清不排队。
+   *
+   * <p>{@link VerifiedSwitcherDrainClaims} 证明本车当前节点就是该道岔（车头已越过）、持有道岔节点、计划从道岔驶向出口，且出口路径没有外车硬占用。
+   * 占用者必须先开走，岔外的车才进得来；排队只决定尚未进岔者的先后，不能反过来挡住岔上的车。否则岔外排在前面的车等占用者让出节点、 占用者等它让出队头，互等到底——实服 2026-09-27
+   * SPB 汇合岔 {@code -566:77:1179}：MT-LP-6727 车身在岔上，被还在 WSD:2 的 MT-LP-7340 排在后面，直到关服。
+   *
+   * <p>只认 {@code CONFLICT_CLEARING} 请求上、当场按现有 claims 复核通过的 {@code VERIFIED_SWITCHER_OCCUPANT} 证据；
+   * 只放行排队，外车实际 claim 仍按原规则判。
+   */
+  private boolean verifiedSwitcherOccupantBypassesQueue(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return false;
+    }
+    ConflictReleaseHint hint = request.conflictReleaseHints().get(resource.key());
+    return hint != null
+        && hint.kind() == ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT
+        && hasVerifiedSwitcherOccupantHint(request, resource);
+  }
+
+  /** 记录道岔占用者越过队头的一次放行；只在队头确实是别的车时输出，排在最前或队列为空时不算越过。 */
+  private void traceSwitcherOccupantQueueBypass(
+      OccupancyRequest request, OccupancyResource resource, Instant now) {
+    ConflictQueue queue = queues.get(resource);
+    Optional<OccupancyQueueEntry> head = queue == null ? Optional.empty() : queue.headAny(now);
+    if (head.isEmpty()
+        || TrainNameNormalizer.sameLogicalTrain(head.get().trainName(), request.trainName())) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        "SWITCHER_OCCUPANT_QUEUE_BYPASS train="
+            + request.trainName()
+            + " resource="
+            + resource
+            + " queueHead="
+            + head.get().trainName()
+            + " reason=verified-switcher-occupant-clears-first");
   }
 
   private boolean isQueueAllowedPreview(

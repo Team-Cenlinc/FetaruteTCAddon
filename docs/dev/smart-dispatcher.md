@@ -327,6 +327,10 @@ Gate Queue 使用稳定 `entryOrder` 和首次等待时间，不依赖 `HashMap`
 
 核心 trace 为 `SMART_PRIORITY_RESOLVED` 与 `SMART_PENDING_WINNER_ARBITRATION`；队列详情可通过 `/fta occupancy queue` 查看。
 
+排队资历只在“排到了”时用掉：列车以 `MOVEMENT_REQUIRED` 取得该资源后出队，此后它的自持 claim 本来就不再看队列；停车保持、尾部保护以 `HOLD_ONLY/PROTECTIVE_RETAIN` 接纳同一资源只是原地占着，本车仍在等前进授权，排队条目与首次等待时间原样保留。以前两种接纳都删排队，停着的车每拍被删、下一拍又以新的 firstSeen 入队，上一段“持续刷新的等待者保留首次等待时间”并不成立，仲裁永远输给后到的车。
+
+道岔上的车出清不排队：请求带有当场复核通过的 `VERIFIED_SWITCHER_OCCUPANT` 证据（`VerifiedSwitcherDrainClaims`：当前节点就是该道岔、本车持有道岔节点、计划从道岔驶向出口、出口路径没有外车硬占用）时，该道岔的 Gate Queue 对它不设卡，trace `SWITCHER_OCCUPANT_QUEUE_BYPASS` 记录越过的队头。占用者必须先开走，岔外的车才进得来；排队只决定尚未进岔者的先后。外车 live claim 仍按原规则判，只以 `HOLD_ONLY` 挂着道岔、车头尚未越过它的车照旧排队。背景：2026-09-27 实服 SPB 汇合岔 `-566:77:1179`，MT-LP-6727 车身在岔上，被还在 WSD:2 的 MT-LP-7340 排在后面：7340 等 6727 让出车体压着的节点，6727 等 7340 让出队头，互等到关服，并连带堵住 8574、1317、0085 与 PPK 折返。出清证明每拍都成立，只是排队检查不看它。
+
 ## blocker graph 与 destroy 前置审查
 
 Health 只负责发现 stuck/deadlock episode；destroy 必须经过 Smart Dispatcher 审查。审查要求：
