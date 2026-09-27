@@ -134,7 +134,7 @@ runtime:
   lookahead-edges: 3
   # 同向跟驰最小空闲边数
   min-clear-edges: 2
-  # 尾部保护占用边数（当前节点向后 N 段边）
+  # 尾部保护占用边数：保留整列车身（按估算车长）+ 车尾之后 N 段边；车长未知时保留全部可证明的后向路径
   rear-guard-edges: 1
   # 道岔区联合锁闭范围（向前 N 段边）
   switcher-zone-edges: 3

@@ -856,6 +856,122 @@ class OccupancyRequestBuilderTest {
         ResourceIntent.PROTECTIVE_RETAIN, request.intentFor(OccupancyResource.forEdge(edgeBC)));
   }
 
+  /**
+   * 尾部保护 = 车身 + 车尾之后 {@code rear-guard-edges} 条边，不拿车头身后那条边的长度当余量。
+   *
+   * <p>从车头节点往回依次是 25、7、4、7、21 格的边（照实服 PPK:2 的进站路径）。车长 30：车身覆盖 25 + 7， 车尾之后再留 1 条边（4 格），止于
+   * S2。旧公式要覆盖"车头身后那条边 25 + 车长 30 = 55"再取整到整边，一路退到 64 格外的 R0。
+   */
+  @Test
+  void rearGuardCoversTheTrainBodyPlusConfiguredEdgesBehindTheTail() {
+    NodeId r0 = NodeId.of("R0");
+    NodeId s1 = NodeId.of("S1");
+    NodeId s2 = NodeId.of("S2");
+    NodeId s3 = NodeId.of("S3");
+    NodeId s4 = NodeId.of("S4");
+    NodeId platform = NodeId.of("P");
+    SimpleRailGraph graph = linearGraph(List.of(r0, s1, s2, s3, s4, platform), 21, 7, 4, 7, 25);
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(graph, 1, 0, 1, 0, 0L, 1, 30L, message -> {});
+
+    OccupancyRequest request =
+        builder.buildRearGuardRequestFromNodes(
+            "Train-1",
+            Optional.empty(),
+            List.of(r0, s1, s2, s3, s4, platform),
+            5,
+            Instant.now(),
+            0);
+
+    assertTrue(
+        request
+            .resourceList()
+            .contains(OccupancyResource.forEdge(EdgeId.undirected(s4, platform))));
+    assertTrue(
+        request.resourceList().contains(OccupancyResource.forEdge(EdgeId.undirected(s3, s4))));
+    assertTrue(
+        request.resourceList().contains(OccupancyResource.forEdge(EdgeId.undirected(s2, s3))),
+        "车尾之后再留 1 条边");
+    assertFalse(
+        request.resourceList().contains(OccupancyResource.forEdge(EdgeId.undirected(s1, s2))),
+        () -> request.resourceList().toString());
+    assertFalse(request.resourceList().contains(OccupancyResource.forNode(s1)));
+    assertFalse(request.resourceList().contains(OccupancyResource.forNode(r0)));
+  }
+
+  /**
+   * 车身从车头节点往回量：车长 34（实服 MT 三节模型车的保守估算）时，车身盖到 36 格处的 S2，再留 1 条边到 S1。
+   *
+   * <p>停站时车头越过站台节点约半个车长，实际车尾只在节点后方十几格；从节点起量的保护因此偏长——这是已知局限， 按停稳后的实测足迹收窄尚未实现。
+   */
+  @Test
+  void rearGuardIsMeasuredBackFromTheHeadNode() {
+    NodeId r0 = NodeId.of("R0");
+    NodeId s1 = NodeId.of("S1");
+    NodeId s2 = NodeId.of("S2");
+    NodeId s3 = NodeId.of("S3");
+    NodeId s4 = NodeId.of("S4");
+    NodeId platform = NodeId.of("P");
+    SimpleRailGraph graph = linearGraph(List.of(r0, s1, s2, s3, s4, platform), 21, 7, 4, 7, 25);
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(graph, 1, 0, 1, 0, 0L, 1, 34L, message -> {});
+
+    OccupancyRequest request =
+        builder.buildRearGuardRequestFromNodes(
+            "Train-1",
+            Optional.empty(),
+            List.of(r0, s1, s2, s3, s4, platform),
+            5,
+            Instant.now(),
+            0);
+
+    assertTrue(
+        request.resourceList().contains(OccupancyResource.forEdge(EdgeId.undirected(s1, s2))));
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(s1)));
+    assertFalse(
+        request.resourceList().contains(OccupancyResource.forEdge(EdgeId.undirected(r0, s1))),
+        () -> request.resourceList().toString());
+  }
+
+  /** 车长未知时覆盖全部可证明的后向路径：不能用边数代替车长提前放掉身后的资源。 */
+  @Test
+  void rearGuardKeepsTheWholeProvenPathWhenTrainLengthIsUnknown() {
+    NodeId r0 = NodeId.of("R0");
+    NodeId s1 = NodeId.of("S1");
+    NodeId s2 = NodeId.of("S2");
+    NodeId platform = NodeId.of("P");
+    SimpleRailGraph graph = linearGraph(List.of(r0, s1, s2, platform), 21, 7, 25);
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(graph, 1, 0, 1, 0, 0L, 1, Long.MAX_VALUE, message -> {});
+
+    OccupancyRequest request =
+        builder.buildRearGuardRequestFromNodes(
+            "Train-1", Optional.empty(), List.of(r0, s1, s2, platform), 3, Instant.now(), 0);
+
+    assertTrue(
+        request.resourceList().contains(OccupancyResource.forEdge(EdgeId.undirected(r0, s1))));
+    assertTrue(request.resourceList().contains(OccupancyResource.forNode(r0)));
+  }
+
+  /** 直线图：相邻节点依次相连，边长按给定顺序。 */
+  private static SimpleRailGraph linearGraph(List<NodeId> nodes, int... lengths) {
+    Map<NodeId, RailNode> railNodes = new LinkedHashMap<>();
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    double x = 0.0;
+    for (int i = 0; i < nodes.size(); i++) {
+      railNodes.put(nodes.get(i), waypoint(nodes.get(i), x));
+      if (i < lengths.length) {
+        EdgeId edgeId = EdgeId.undirected(nodes.get(i), nodes.get(i + 1));
+        edges.put(
+            edgeId,
+            new RailEdge(
+                edgeId, nodes.get(i), nodes.get(i + 1), lengths[i], 8.0, true, Optional.empty()));
+        x += lengths[i];
+      }
+    }
+    return new SimpleRailGraph(railNodes, edges, Set.of());
+  }
+
   @Test
   void rearGuardDistanceKeepsEnoughPhysicalEdgesForTrainLengthAndConfiguredMargin() {
     NodeId nodeA = NodeId.of("A");

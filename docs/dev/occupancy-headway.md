@@ -57,7 +57,13 @@
   - Route 节点 A→B 之间如果在 RailGraph 中有多个中间 Waypoint，会先展开再按边数截断。
   - 这确保了 `lookahead-edges=2` 始终代表 2 条实际轨道边（约 60-100 blocks），而非 2 个站间区间。
 - 同向跟驰最小空闲边数由 `runtime.min-clear-edges` 控制（与 lookahead 取最大值）。
-- `runtime.rear-guard-edges` 会保留当前节点向后 N 段边，确保长列车尾部在完全离开前不被后车侵入。
+- 尾部保护 = 整列车身 + 车尾之后 `runtime.rear-guard-edges` 段边：从车头最近到达的 route 节点往回逐边累计到覆盖保守车长
+  （车尾落在哪条边上，那条边算车身；车长算法见 `runtime-dispatch.md`），再多留 N 段边；车长未知时保留全部可证明的后向路径。
+  确保长列车尾部在完全离开前不被后车侵入。
+  余量按"车尾之后的边数"算，不拿车头身后那条边的长度当距离——那个量与车尾身后无关，站台边一长再取整到整边，保护会多退一两段。
+  已知局限：车身从节点起量，而停站时列车以站牌为中心、车头越过站台节点约半个车长，保护因此比实际车尾多出约半个车长
+  （实服 PPK:2 停着的 MT 仍会盖到身后通往 PPK:1 的渡线道岔）；按停稳后的实测足迹收窄尚未实现。
+  折返交接的旧 footprint 释放阈值（见 `runtime-dispatch.md`）是另一套机制，不受这条影响。
 - 默认会同时占用路径上的 NODE 资源（当前节点 + lookahead 节点），用于阻止前车未离开时后车进入同一节点。
 - `OccupancyRequestBuilder` 负责从 `TrainRuntimeState + RouteDefinition + RailGraph` 构建请求。
 - Occupancy 请求使用的是 expanded path：Route 相邻节点会先通过 `RailGraph.shortestPath` 展开成真实 graph nodes/edges，再按 lookahead edge count 截断。若现场看到“两个车很远却红灯”，优先检查远端资源是否误进入了 `MOVEMENT_REQUIRED`，而不是假设占用用了未展开的 route span。

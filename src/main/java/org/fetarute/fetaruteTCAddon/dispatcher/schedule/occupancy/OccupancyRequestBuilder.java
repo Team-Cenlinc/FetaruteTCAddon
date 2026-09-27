@@ -34,8 +34,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainRuntimeState;
  * 运行时占用请求构建器：把“列车状态 + 线路定义 + 图”转换成 OccupancyRequest。
  *
  * <p>默认会占用 lookahead 边与对应节点资源，并附加走廊/道岔冲突资源；道岔冲突可按 {@code switcherZoneEdges} 限制为“前 N 段边内的道岔”。
- * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。尾部保护同时满足 {@code rearGuardEdges}
- * 的边数下限与列车长度导出的最小方块距离，避免长编组车头过点后提前释放仍被列尾占用的平交/道岔资源。
+ * 同向跟驰最小空闲边数由 {@code minClearEdges} 与 lookahead 取最大值控制。尾部保护 = 整列车身（从车头最近到达的 route 节点往回按保守车长整边覆盖）+
+ * 车尾之后 {@code rearGuardEdges} 条边，避免长编组车头过点后提前释放仍被列尾占用的平交/道岔资源。
  *
  * <p>同时会记录冲突区 entryOrder（首次进入冲突的边序号），用于冲突区放行与死锁解除。
  *
@@ -919,9 +919,10 @@ public final class OccupancyRequestBuilder {
   }
 
   /**
-   * 构建“尾部保护”占用请求：仅保留当前节点与其后方 N 段边资源。
+   * 构建“尾部保护”占用请求：保留当前节点、整列车身与车尾之后 {@code rearGuardEdges} 段边资源。
    *
-   * <p>用于停站期间，避免后车过早释放导致互卡；不会额外占用前方 lookahead 资源。
+   * <p>车身从 {@code nodes.get(currentIndex)} 往回量保守车长——这必须是车头已经到达或越过的节点（route 进度在到达时才推进），
+   * 车头越过它多远，保护就多覆盖多远，只偏保守。用于停站期间，避免后车过早释放导致互卡；不会额外占用前方 lookahead 资源。
    */
   public OccupancyRequest buildRearGuardRequestFromNodes(
       String trainName,
@@ -950,7 +951,8 @@ public final class OccupancyRequestBuilder {
   /**
    * 从本周期规范行车计划派生尾部保护请求。
    *
-   * <p>资源窗口仍只覆盖当前节点后方的 configured rear-guard edges；single 方向与有向上下文完全继承 {@code movementPlan}。
+   * <p>资源窗口与 {@link #buildRearGuardRequestFromNodes} 相同（车身 + 车尾之后 {@code rearGuardEdges} 段边）；single
+   * 方向与有向上下文完全继承 {@code movementPlan}。
    *
    * @param trainName 列车名
    * @param routeId 线路 route id
@@ -1543,10 +1545,13 @@ public final class OccupancyRequestBuilder {
   }
 
   /**
-   * 从车头当前位置向后截断尾部保护节点列表。
+   * 从车头当前位置向后截断尾部保护节点列表：先覆盖整列车，再在车尾之后多保留 {@code rearGuardEdges} 条边。
    *
-   * <p>先计算配置 {@code rearGuardEdges}
-   * 对应的安全余量距离，再叠加列车长度下限；从末尾逐边累计，直到同时满足配置边数和总距离。若已知后向路径不足，则保留全部可证明路径而不是缩短阈值。
+   * <p>{@code nodes} 的末节点必须是车头已经到达或越过的节点。车身部分从它往回逐边累计，直到覆盖列车长度下限；车尾落在哪条边上，那条边就算车身。
+   * 车头越过末节点多远（行驶中、或停站时以站牌为中心越过站台节点约半个车长），保护就多覆盖多远，只偏保守。车长未知（{@link Long#MAX_VALUE}）
+   * 时覆盖全部可证明路径；已知后向路径不足时同样保留全部，而不是缩短阈值。
+   *
+   * <p>余量按"车尾之后的边数"算，不拿车头身后那几条边的长度当距离：那个量与车尾身后的轨道无关，站台边一长再取整到整边， 保护就会多退一两段、越过身后的渡线。
    */
   private List<NodeId> truncateRearGuardByEdgesAndDistance(List<NodeId> nodes) {
     if (nodes == null || nodes.isEmpty()) {
@@ -1555,36 +1560,22 @@ public final class OccupancyRequestBuilder {
     if (nodes.size() < 2 || (rearGuardEdges <= 0 && minRearGuardDistanceBlocks <= 0L)) {
       return List.of(nodes.get(nodes.size() - 1));
     }
-    long configuredMargin = 0L;
     int availableEdges = nodes.size() - 1;
-    int configuredEdges = Math.min(rearGuardEdges, availableEdges);
-    for (int offset = 0; offset < configuredEdges; offset++) {
-      int edgeIndex = availableEdges - 1 - offset;
-      configuredMargin =
+    long bodyDistance = 0L;
+    int bodyEdges = 0;
+    while (bodyEdges < availableEdges && bodyDistance < minRearGuardDistanceBlocks) {
+      int edgeIndex = availableEdges - 1 - bodyEdges;
+      bodyDistance =
           saturatingAdd(
-              configuredMargin,
+              bodyDistance,
               findEdge(nodes.get(edgeIndex), nodes.get(edgeIndex + 1))
                   .map(RailEdge::lengthBlocks)
                   .map(length -> Math.max(0, length))
                   .orElse(0));
+      bodyEdges++;
     }
-    long requiredDistance = saturatingAdd(configuredMargin, minRearGuardDistanceBlocks);
-    long coveredDistance = 0L;
-    int includedEdges = 0;
-    while (includedEdges < availableEdges
-        && (includedEdges < rearGuardEdges || coveredDistance < requiredDistance)) {
-      int edgeIndex = availableEdges - 1 - includedEdges;
-      coveredDistance =
-          saturatingAdd(
-              coveredDistance,
-              findEdge(nodes.get(edgeIndex), nodes.get(edgeIndex + 1))
-                  .map(RailEdge::lengthBlocks)
-                  .map(length -> Math.max(0, length))
-                  .orElse(0));
-      includedEdges++;
-    }
-    int startIndex = nodes.size() - includedEdges - 1;
-    return nodes.subList(startIndex, nodes.size());
+    int includedEdges = Math.min(availableEdges, bodyEdges + Math.max(0, rearGuardEdges));
+    return nodes.subList(nodes.size() - includedEdges - 1, nodes.size());
   }
 
   private static long saturatingAdd(long left, long right) {

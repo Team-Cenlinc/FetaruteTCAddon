@@ -33,7 +33,7 @@
 - 停站时长优先使用 `dwell=<秒>`，缺失时回退为 20 秒默认值。
 - Waypoint STOP/TERMINATE 停站仍只在 `GROUP_ENTER` 触发，避免过早点刹导致居中不稳；已声明的普通 transit/PASS Waypoint 会在车头 `MEMBER_ENTER` 立即推进，覆盖 TrainCarts 未送达 `GROUP_ENTER` 的 TCCoasters 事件边界。随后重复事件由同节点/同索引去重窗吸收。
 - 停站期间会保持 STOP 信号；STOP waypoint dwell handoff 属于明确行为例外，可提前写入下一跳 destination，确保发车时直接走寻路方向，但不会在此处放行或发车。
-- 停站期间保留“当前节点 + 尾部保护边（`runtime.rear-guard-edges`）”的占用，并同步刷新前方冲突队列位次，避免后车在等待窗口内抢占发车顺序。
+- 停站期间保留“当前节点 + 尾部保护（车身 + 车尾之后 `runtime.rear-guard-edges` 段边）”的占用，并同步刷新前方冲突队列位次，避免后车在等待窗口内抢占发车顺序。
 - 运行时只要检测到列车仍在 dwell 窗口，就会强制维持 STOP（不依赖当前 index 再次命中 RouteStop），避免”停站后被提前放行”。
 - 信号 tick 中门控等待、dwell 窗口、waypoint 停站三种”保持 STOP”场景统一由 `holdStopAtCurrentNode` 处理，保留当前占用 + 下发 STOP 控车。
 - 对 STOP/TERM waypoint 的进站控车采用 handoff：信号 tick 不强制 STOP，而是把目标速度上限压到 `runtime.approach-speed-bps`（approaching）。
@@ -313,13 +313,13 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 ## lookahead 占用
 - `runtime.lookahead-edges` 控制每次申请占用的边数量。
 - `runtime.min-clear-edges` 用于限制同向跟驰的最小空闲边数（与 lookahead 取最大值）。
-- `runtime.rear-guard-edges` 用于保留当前节点向后 N 段边，保护长编组尾部避免追尾。
+- `runtime.rear-guard-edges` 用于保留车尾之后 N 段边（车身按保守车长整段保留），保护长编组尾部避免追尾；算法见 `occupancy-headway.md`。
+- 值越大越保守，能降低咽喉/道岔前卡死风险。
 - 保守车长（尾部保护、驶出联锁区的泊位距离、折返后旧进路的释放阈值共用）由 `TrainCartsRuntimeHandle#estimatedTrainLengthBlocks` 实测：
   相邻两节车中心的 L1 距离之和，两端各加"半个车体 + 1 格"（按每节车的 TrainCarts 模型 `cartLength`），每个连接处加 0.25 格曲线余量，
   并以"车体长度之和"与"每节 2 格"中较大者托底（`PhysicalRailFootprintPolicy#conservativeTrainLengthBlocks`）。
   任一节读不到位置或模型时按车长未知处理，保留全部后向路径。以前两端合计只补 2 格，模型车会被严重低估：
   实服 MT（TrainCarts 存档 `SUR100_test`，三节 10.0/9.6/9.95 格）实际 30.55 格，被估成约 23 格。
-- 值越大越保守，能降低咽喉/道岔前卡死风险。
 - `runtime.switcher-zone-edges` 控制道岔联合锁闭范围（向前 N 段边）。
 - 单线走廊冲突采用方向锁：同向可跟驰，对向需等待走廊清空。
 - 道岔、单线与无方向物理联锁冲突都会进入 Gate Queue。priority 提供每分 0.5 秒、最多 2 分钟的有界时间优势，首次等待时间提供 starvation aging；因此短期高优先级先行，持续刷新的老等待者也不会被后来流量永久插队。
