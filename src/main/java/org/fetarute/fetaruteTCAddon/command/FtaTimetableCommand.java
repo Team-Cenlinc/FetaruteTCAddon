@@ -384,15 +384,9 @@ public final class FtaTimetableCommand {
     }
     int serviceStart = start.orElse(TimetableBuildOptions.DEFAULT_SERVICE_START);
     int serviceEnd = end.orElse(TimetableBuildOptions.DEFAULT_SERVICE_END);
-    if (serviceEnd <= serviceStart) {
-      sender.sendMessage(
-          Component.text(
-              "末班时刻不能早于首班：跨零点请写成 25:00 这样的形式（当前首班 "
-                  + TimetableCsvExporter.clock(serviceStart)
-                  + "，末班 "
-                  + TimetableCsvExporter.clock(serviceEnd)
-                  + "）。",
-              NamedTextColor.RED));
+    Optional<String> windowProblem = serviceWindowProblem(serviceStart, serviceEnd);
+    if (windowProblem.isPresent()) {
+      sender.sendMessage(Component.text(windowProblem.get(), NamedTextColor.RED));
       return;
     }
 
@@ -2297,6 +2291,31 @@ public final class FtaTimetableCommand {
       }
     }
     return 1;
+  }
+
+  /**
+   * 检查计划窗口，返回要回给发令者的问题；窗口可用时为空。
+   *
+   * <p>首班只能落在当天（00:00–23:59），跨零点只写在末班上。{@link #parseClock} 为了让末班能写成 {@code 25:00} 放宽到了 47 点，而
+   * {@link TimetableBuildOptions} 要求首班在一天之内；缺了这一道，{@code --start 24:00} 会越过命令层， 在主线程构造选项时抛出没人接的异常。
+   *
+   * @param serviceStart 首班，当日秒数
+   * @param serviceEnd 末班必须跑完的时刻，当日秒数（可以超过一天）
+   * @return 问题描述；窗口可用时为空
+   */
+  static Optional<String> serviceWindowProblem(int serviceStart, int serviceEnd) {
+    if (serviceStart >= TimetableTrip.SECONDS_PER_DAY) {
+      return Optional.of("首班时刻应在 00:00–23:59 之间：跨零点只写在末班上，例如 --start 05:00 --end 25:00。");
+    }
+    if (serviceEnd <= serviceStart) {
+      return Optional.of(
+          "末班时刻不能早于首班：跨零点请写成 25:00 这样的形式（当前首班 "
+              + TimetableCsvExporter.clock(serviceStart)
+              + "，末班 "
+              + TimetableCsvExporter.clock(serviceEnd)
+              + "）。");
+    }
+    return Optional.empty();
   }
 
   /** 解析 {@code HH:mm} 为当日秒数。 */
