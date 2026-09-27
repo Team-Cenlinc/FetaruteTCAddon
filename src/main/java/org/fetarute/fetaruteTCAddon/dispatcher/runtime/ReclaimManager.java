@@ -89,6 +89,14 @@ public class ReclaimManager {
   /** 回收扫描用的时钟；滞留阈值按它计，测试里可推进。 */
   private final java.util.function.Supplier<Instant> clock;
 
+  /**
+   * 回库闸：这辆待命车能不能被带回车库。默认恒放行。
+   *
+   * <p>按表运行时装上 {@code TimetableService#allowsReturn}，与表定回库票同一个判据：交路还有班次要跑的车不收，否则回收会把
+   * 正等着下一班的车送回车库，那一班就开了天窗。交路已经断了（剩下的班次都过了容差）的车照常回收。
+   */
+  private volatile java.util.function.Predicate<String> returnGate = trainName -> true;
+
   private BukkitTask task;
 
   public ReclaimManager(
@@ -155,6 +163,11 @@ public class ReclaimManager {
   private static boolean hasPlayerPassengersByName(String trainName) {
     TrainProperties properties = trainName == null ? null : TrainPropertiesStore.get(trainName);
     return RuntimeDispatchService.hasPlayerPassengers(properties);
+  }
+
+  /** 装上回库闸；{@code null} 恢复恒放行。 */
+  public void setReturnGate(java.util.function.Predicate<String> gate) {
+    this.returnGate = gate == null ? trainName -> true : gate;
   }
 
   public void start() {
@@ -255,6 +268,11 @@ public class ReclaimManager {
         }
       }
 
+      if (shouldReclaim && !returnGate.test(candidate.trainName())) {
+        // 交路还有班次：这不是派不出回库票，不能记成滞留。
+        debugLogger.accept("回收跳过: 交路还有班次要跑 train=" + candidate.trainName());
+        continue;
+      }
       if (shouldReclaim) {
         if (assignReturnTicket(candidate, providerOpt)) {
           strandedSince.remove(candidate.trainName());

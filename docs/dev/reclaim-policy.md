@@ -10,6 +10,11 @@
 2. **总量超限**：Minecraft 世界中已加载且有效的 TrainCarts group 数超过 `reclaim.max-active-trains`，优先回收待命最久的列车；离线持久化的 `TrainProperties` 不计入活跃车。
 3. **生命周期到期**：若列车标签 `FTA_OP_TRIPS >= FTA_OP_MAX`，即使未超时也优先回收。
 
+以上任一条件成立后，还要过**回库闸**（`ReclaimManager#setReturnGate`）：按表运行时装的是 `TimetableService#allowsReturn`，
+与表定回库票同一个判据——交路还有班次要跑的车不收（日志 `回收跳过: 交路还有班次要跑`），也不计入下面的滞留计时；
+交路已经断了（剩下的班次都过了 `timetable.assign-tolerance-seconds`，票都已作废）的车照常回收。
+没有这道闸时，闲置超时、总量超限、方向供给过剩都能把正等着下一班的车送回车库，那一班就开了天窗。
+
 ## 回收动作
 - **生成 RETURN 票据**：为待回收列车分配一张 `RETURN` 类型的 `ServiceTicket`。
 - **低优先级调度**：回收票据的优先级设为 `-10`（普通客运为 `0`，VIP/Depot发车可能更高），确保回收列车不会抢占正常客运列车的线路资源（Fairness）。

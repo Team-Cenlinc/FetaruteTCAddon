@@ -153,9 +153,12 @@ class TimetableServiceTest {
     return service(enabled, new ArrayList<>(), published);
   }
 
+  /** 服务时钟与用例里的事件同一天：交路是否还有班次要跑取决于"现在"，墙钟会让 3 月的班次全部显得早已作废。 */
+  private static final Instant FIXTURE_NOW = Instant.parse("2026-03-02T08:00:00Z");
+
   private static TimetableService service(
       boolean enabled, List<String> logs, Timetable... published) {
-    TimetableService service = new TimetableService(Instant::now, logs::add);
+    TimetableService service = new TimetableService(() -> FIXTURE_NOW, logs::add);
     service.applySettings(
         new TimetableService.Settings(
             enabled,
@@ -408,6 +411,38 @@ class TimetableServiceTest {
     service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:10:05Z")));
     assertTrue(service.allowsReturn("train-A"), "交路 2/2，可以回库");
     assertFalse(service.allowsLayoverReuse("train-A"), "同一时刻运营复用被否决：两道闸互为镜像");
+  }
+
+  /**
+   * 交路断了就放它回库：剩下的班次都过了发车容差，票都已作废，再没人会派这辆车。
+   *
+   * <p>否则它会被自己交路的回库票以"还有班次"永远拒绝，回收也绕开它，只能在终点等兜底销毁。容差之内（下一班的票还可能派它）照旧不放行。
+   */
+  @Test
+  void returnIsAllowedOnceTheRemainingTripsHaveAllExpired() {
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(Instant.parse("2026-03-02T08:00:05Z"));
+    List<String> logs = new ArrayList<>();
+    TimetableService service = new TimetableService(clock::get, logs::add);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            ZONE));
+    service.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
+    service.scheduledDepartureAt(event("train-A", 0, clock.get()));
+
+    // 第二班 08:10 发，容差 300 秒：08:15:00 之前它的票还可能派这辆车。
+    clock.set(Instant.parse("2026-03-02T08:14:59Z"));
+    assertFalse(service.allowsReturn("train-A"), "第二班的票还没作废");
+    clock.set(Instant.parse("2026-03-02T08:15:01Z"));
+    assertTrue(service.allowsReturn("train-A"), "剩下的班次都作废了");
+    assertTrue(
+        logs.stream().anyMatch(line -> line.startsWith("TIMETABLE_DUTY_CONTINUATION_LOST")),
+        logs::toString);
   }
 
   /**

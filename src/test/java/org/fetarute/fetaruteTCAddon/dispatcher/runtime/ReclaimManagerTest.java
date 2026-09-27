@@ -584,6 +584,66 @@ class ReclaimManagerTest {
     assertTrue(destroyedWithPassengers.isEmpty(), "载客的车不能被兜底销毁");
   }
 
+  /**
+   * 回库闸：交路还有班次要跑的车不回收，也不算滞留；闸放行后照常回收。
+   *
+   * <p>回收以前绕过时刻表，闲置超时、车辆超限、方向供给过剩都能把正等着下一班的车送回车库，那一班就开了天窗。
+   */
+  @Test
+  void performReclaimCheckLeavesTrainsWithRemainingTripsToTheTimetable() {
+    Instant t0 = Instant.parse("2026-03-01T08:00:00Z");
+    UUID routeId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, stationId);
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-a",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        t0.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(t0);
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
+    when(configManager.current()).thenReturn(view);
+    when(view.reclaimSettings())
+        .thenReturn(new ConfigManager.ReclaimSettings(true, 3600, 100, 60, 600));
+    List<String> destroyed = new java.util.ArrayList<>();
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin,
+            layoverRegistry,
+            ticketAssigner,
+            configManager,
+            null,
+            () -> 0,
+            trainName -> false,
+            (trainName, reason) -> destroyed.add(trainName),
+            clock::get);
+    java.util.concurrent.atomic.AtomicBoolean dutyFinished =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+    manager.setReturnGate(trainName -> dutyFinished.get());
+
+    manager.performReclaimCheck();
+    clock.set(t0.plusSeconds(5000));
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(destroyed.isEmpty(), "交路还有班次不是派不出回库票，不能按滞留销毁");
+
+    dutyFinished.set(true);
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, times(1)).forceAssign(eq(provider), eq("train-a"), any());
+  }
+
   /** 直通车滞留在别的运营商的终点：本运营商没有从那里出发的 RETURN，外方有一条首站写裸节点 id 的 RETURN——要认得出并派给它。 */
   @Test
   void performReclaimCheckFallsBackToForeignOperatorReturnRouteMatchedByNodeId() {

@@ -163,7 +163,10 @@ duty 跑完最后一班 → allowsLayoverReuse=false（不准再接运营班）
 duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在终点等下一班
 ```
 
-`allowsLayoverReuse` 只作用于 OPERATION 票，`allowsReturn` 只作用于 RETURN 票。
+唯一的例外是**交路断了**：剩下的班次全都过了 `assign-tolerance-seconds`（它们的票都已作废，再没人会派这辆车），
+`allowsReturn` 放行（`TIMETABLE_DUTY_CONTINUATION_LOST`）。否则它会被自己交路的回库票以"还有班次"永远拒绝，只能在终点等兜底销毁。
+
+`allowsLayoverReuse` 只作用于 OPERATION 票，`allowsReturn` 作用于表定 RETURN 票与 `ReclaimManager` 的回收（见 `reclaim-policy.md`）。
 没有第二道闸的话，按表发出的回库票会把正等着跑下一班的车送回车库，那一班就开了天窗。
 `ReclaimManager` 的闲置回收仍然保留，作为回库票没能带走车时的兜底。
 时刻表层不复制一套车辆所有权，只是把"不准再接班 / 不准带走"这两个事实告诉发车侧。
@@ -648,7 +651,8 @@ planned segment duration   vs   actual segment duration
 | `TIMETABLE_ASSIGN_MISS` | 绑不上车次：最近的车次与偏差、容差、原因（`out-of-tolerance` / `all-claimed` / `no-trips` / `duty-has-no-trip`：绑定的交路在这条 route 上没有车次）；同车同站同原因一分钟一条，`/fta timetable status` 有累计计数 |
 | `RECLAIM_STRANDED_DESTROY` / `RECLAIM_STRANDED_DESTROY_FAILED` / `RECLAIM_STRANDED_SKIP` | 该回收却派不出 RETURN 票的待命车滞留超过 `reclaim.stranded-destroy-seconds` 被销毁 / 销毁失败 / 跳过（`reason=has-passengers` 或 `reason=dispatch-attempt-in-progress`）。完整策略见 `reclaim-policy.md` |
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
-| `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票被否决、车留在终点 |
+| `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票（或回收）被否决、车留在终点 |
+| `TIMETABLE_DUTY_CONTINUATION_LOST` | 交路剩下的班次都已过了容差，放它回库 |
 | `TIMETABLE_DUTY_BOUND` / `TIMETABLE_DUTY_BIND_CONFLICT` | 车绑到交路上 / 已绑别的交路（错派的车暴露在这里） |
 | `TIMETABLE_CANDIDATE_REJECT` | 某张票拒绝了某辆待命车：`other-duty` 或 `unbound-only-first-trip` |
 | `TIMETABLE_SPAWN_DISPATCHED` | 表定票派给了哪辆车 |

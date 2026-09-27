@@ -1394,6 +1394,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.reclaimManager =
         new ReclaimManager(
             this, layoverRegistry, spawnTicketAssigner, configManager, loggerManager::debug);
+    // 回收与表定回库票同一个判据：交路还有班次要跑的车不收。
+    reclaimManager.setReturnGate(timetableService == null ? null : timetableService::allowsReturn);
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
     }

@@ -206,10 +206,12 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 这辆车现在能不能被回库票带走。
+   * 这辆车现在能不能被带回车库——表定回库票与 {@code ReclaimManager} 的回收共用这一个判据。
    *
-   * <p>这是 {@link #allowsLayoverReuse} 的镜像：交路还有余额的车不准被 RETURN 票抓走，否则一张按表发出的回库票会把
-   * 正等着跑下一班的车送回车库，后面的班次就开了天窗。没有交路进度的车（自由运行、或本来就不受时刻表管辖）照常可回。
+   * <p>这是 {@link #allowsLayoverReuse} 的镜像：交路还有余额的车不准被带走，否则会把正等着跑下一班的车送回车库，后面的班次就开了天窗。
+   * 没有交路进度的车（自由运行、或本来就不受时刻表管辖）照常可回。
+   *
+   * <p>例外是<b>交路已经断了</b>：剩下的班次全都过了发车容差，它们的票都已作废，再也不会有人派这辆车。不放行的话它会被自己交路的回库票 永远拒绝、又被回收绕开，只能在终点等兜底销毁。
    *
    * @param trainName 列车名
    * @return 允许回库返回 true；未启用按表运行、或该车不受时刻表管辖时同样返回 true
@@ -220,7 +222,41 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     String key = keyOf(trainName);
-    return key == null || ledger.allowsReturn(key, trainName);
+    if (key == null) {
+      return true;
+    }
+    Optional<DutyProgress> progress = ledger.progressOf(key).filter(p -> !p.exhausted());
+    if (progress.isPresent() && continuationLost(key, progress.get(), current)) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_CONTINUATION_LOST train="
+              + trainName
+              + " duty="
+              + progress.get().describe()
+              + " action=allow-return");
+      return true;
+    }
+    return ledger.allowsReturn(key, trainName);
+  }
+
+  /**
+   * 交路剩下的班次是否都已过了发车容差（表定票到期 = 计划发车 + 容差）。
+   *
+   * <p>班次按执行顺序排列，所以只需看末班：末班的票都作废了，前面的只会更早。查不到归属、表、交路或末班时返回 false， 保持"交路没跑完不准回库"的原判定。
+   */
+  private boolean continuationLost(String key, DutyProgress progress, Settings current) {
+    Optional<DutyKey> binding =
+        ledger.bindingOf(key).filter(bound -> bound.dutyId().equals(progress.dutyId()));
+    Optional<Timetable> timetable = binding.map(bound -> snapshot.byId().get(bound.timetableId()));
+    Optional<TimetableTrip> lastTrip =
+        timetable
+            .flatMap(t -> t.duty(progress.dutyId()))
+            .map(VehicleDuty::tripIds)
+            .filter(ids -> !ids.isEmpty())
+            .flatMap(ids -> timetable.get().trip(ids.get(ids.size() - 1)));
+    return lastTrip
+        .map(trip -> timetable.get().departureOnServiceDay(trip, binding.get().serviceDate()))
+        .map(departure -> departure.plus(current.assignTolerance()).isBefore(clock.get()))
+        .orElse(false);
   }
 
   /**

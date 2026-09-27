@@ -150,6 +150,19 @@ public record Timetable(
     return Optional.empty();
   }
 
+  /** 按 UUID 查车次。 */
+  public Optional<TimetableTrip> trip(UUID tripId) {
+    if (tripId == null) {
+      return Optional.empty();
+    }
+    for (TimetableTrip trip : trips) {
+      if (trip.id().equals(tripId)) {
+        return Optional.of(trip);
+      }
+    }
+    return Optional.empty();
+  }
+
   /** 按 duty UUID 查车辆交路。 */
   public Optional<VehicleDuty> duty(UUID dutyId) {
     if (dutyId == null) {
@@ -220,6 +233,23 @@ public record Timetable(
     return trip.departureSecondOfDay() < serviceStartSecondOfDay
         ? calendarDate.minusDays(1)
         : calendarDate;
+  }
+
+  /**
+   * {@link #serviceDayOf} 的逆：某趟车在某个服务日里的起点发车时刻。
+   *
+   * <p>跨零点的班次（发车时刻早于计划窗口起点）落在服务日的下一个日历日。
+   *
+   * @param trip 车次
+   * @param serviceDay 服务日
+   * @return 起点绝对发车时间
+   */
+  public Instant departureOnServiceDay(TimetableTrip trip, LocalDate serviceDay) {
+    Objects.requireNonNull(trip, "trip");
+    Objects.requireNonNull(serviceDay, "serviceDay");
+    LocalDate calendarDate =
+        trip.departureSecondOfDay() < serviceStartSecondOfDay ? serviceDay.plusDays(1) : serviceDay;
+    return trip.departureAt(calendarDate, zoneId);
   }
 
   /** 返回替换了发车表与 duty 的新实例，供加载后回填。 */
