@@ -1,11 +1,19 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import java.util.List;
 import java.util.OptionalDouble;
 
 /** 根据 TrainCarts 车体与轮轴几何计算实时轨道足迹的保守端部余量。 */
 public final class PhysicalRailFootprintPolicy {
 
   private static final double BLOCK_BOUNDARY_PADDING = 1.0;
+
+  /** 每个车钩连接处的曲线弦长余量：相邻两节车中心在曲线上的直线距离短于轨道弧长。 */
+  private static final double CURVE_PADDING_PER_GAP_BLOCKS = 0.25;
+
+  /** 每节车的最小长度托底：原版矿车模型不到一格，仍按两格算。 */
+  private static final double MIN_LENGTH_PER_MEMBER_BLOCKS = 2.0;
+
   private static final double DISTANCE_EPSILON = 1.0e-9;
 
   private PhysicalRailFootprintPolicy() {}
@@ -53,5 +61,50 @@ public final class PhysicalRailFootprintPolicy {
     }
     double distance = (cartLength / 2.0) + BLOCK_BOUNDARY_PADDING;
     return Double.isFinite(distance) ? OptionalDouble.of(distance) : OptionalDouble.empty();
+  }
+
+  /**
+   * 由各节车中心的实测跨度与每节车的车体长度，算整列车长的保守估计。
+   *
+   * <p>中心点跨度只量到首尾两节车的中心，两端各还有半个车体。TrainCarts 的模型车可以长到十格，不能用固定余量代替： 以前两端合计只补两格，三节约十格的车（车体 30.5
+   * 格）会被估成约 23 格，列尾有六七格落在保护之外。每端改按 {@link #requiredCenterWalkDistanceBlocks}（半车长 +
+   * 一格边界余量），每个连接处再加曲线弦长余量； 另以车体长度之和与每节两格两者中的较大者托底（曲线上中心跨度可能偏短）。
+   *
+   * @param centerSpanBlocks 相邻两节车中心距离之和（L1 距离，曲线/坡道上偏大）
+   * @param cartLengths 每节车的完整车体长度，按编组从头到尾
+   * @return 保守车长；跨度或任一车体长度无效、或没有车时为空（调用方按车长未知处理，不缩短防护）
+   */
+  public static OptionalDouble conservativeTrainLengthBlocks(
+      double centerSpanBlocks, List<Double> cartLengths) {
+    if (!Double.isFinite(centerSpanBlocks)
+        || centerSpanBlocks < 0.0
+        || cartLengths == null
+        || cartLengths.isEmpty()) {
+      return OptionalDouble.empty();
+    }
+    double totalCartLength = 0.0;
+    for (Double cartLength : cartLengths) {
+      if (cartLength == null || !Double.isFinite(cartLength) || cartLength < 0.0) {
+        return OptionalDouble.empty();
+      }
+      totalCartLength += cartLength;
+    }
+    OptionalDouble headEnd = requiredCenterWalkDistanceBlocks(cartLengths.get(0));
+    OptionalDouble tailEnd =
+        requiredCenterWalkDistanceBlocks(cartLengths.get(cartLengths.size() - 1));
+    if (headEnd.isEmpty() || tailEnd.isEmpty()) {
+      return OptionalDouble.empty();
+    }
+    int gaps = cartLengths.size() - 1;
+    double positionEstimate =
+        centerSpanBlocks
+            + headEnd.getAsDouble()
+            + tailEnd.getAsDouble()
+            + gaps * CURVE_PADDING_PER_GAP_BLOCKS;
+    double floor = Math.max(totalCartLength, cartLengths.size() * MIN_LENGTH_PER_MEMBER_BLOCKS);
+    double estimate = Math.max(positionEstimate, floor);
+    return Double.isFinite(estimate) && estimate > 0.0
+        ? OptionalDouble.of(estimate)
+        : OptionalDouble.empty();
   }
 }

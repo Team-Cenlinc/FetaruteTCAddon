@@ -314,6 +314,11 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 - `runtime.lookahead-edges` 控制每次申请占用的边数量。
 - `runtime.min-clear-edges` 用于限制同向跟驰的最小空闲边数（与 lookahead 取最大值）。
 - `runtime.rear-guard-edges` 用于保留当前节点向后 N 段边，保护长编组尾部避免追尾。
+- 保守车长（尾部保护、驶出联锁区的泊位距离、折返后旧进路的释放阈值共用）由 `TrainCartsRuntimeHandle#estimatedTrainLengthBlocks` 实测：
+  相邻两节车中心的 L1 距离之和，两端各加"半个车体 + 1 格"（按每节车的 TrainCarts 模型 `cartLength`），每个连接处加 0.25 格曲线余量，
+  并以"车体长度之和"与"每节 2 格"中较大者托底（`PhysicalRailFootprintPolicy#conservativeTrainLengthBlocks`）。
+  任一节读不到位置或模型时按车长未知处理，保留全部后向路径。以前两端合计只补 2 格，模型车会被严重低估：
+  实服 MT（TrainCarts 存档 `SUR100_test`，三节 10.0/9.6/9.95 格）实际 30.55 格，被估成约 23 格。
 - 值越大越保守，能降低咽喉/道岔前卡死风险。
 - `runtime.switcher-zone-edges` 控制道岔联合锁闭范围（向前 N 段边）。
 - 单线走廊冲突采用方向锁：同向可跟驰，对向需等待走廊清空。

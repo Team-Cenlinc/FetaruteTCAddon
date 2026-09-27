@@ -10,7 +10,9 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -39,9 +41,6 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
   private static final String ACTION_TAG_LAUNCH = "fta_launch";
   private static final int PATH_NODE_SEARCH_DISTANCE = 64;
-  private static final double MIN_LENGTH_PER_MEMBER_BLOCKS = 2.0;
-  private static final double END_FOOTPRINT_PADDING_BLOCKS = 2.0;
-  private static final double CURVE_PADDING_PER_GAP_BLOCKS = 0.25;
   private static final int MAX_LIVE_BODY_WALK_STEPS = 256;
   private static final double MAX_LIVE_BODY_WALK_DISTANCE_BLOCKS = 512.0;
   private static final double LIVE_BODY_WALK_EPSILON = 1.0e-6;
@@ -108,10 +107,11 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   }
 
   /**
-   * 根据当前每节车的位置与编组数量估算列车总长。
+   * 根据每节车的实时位置与车体长度估算列车总长。
    *
-   * <p>相邻 member
-   * 中心点距离之和提供实时编组跨度；额外加入两端车体余量、每个连接处的曲线弦长余量，并以每节两格的数量下界托底。任一实体位置缺失、跨世界或坐标异常时返回缺失，让列尾防护保持占用，而不是用可能偏小的值放行。
+   * <p>相邻 member 中心点距离之和提供实时编组跨度，两端的车体余量按每节车真实的 {@code cartLength} 补足（模型车可以长到十格）， 算法见 {@link
+   * PhysicalRailFootprintPolicy#conservativeTrainLengthBlocks}。任一实体位置缺失、跨世界、坐标异常或读不到车体模型时返回缺失，
+   * 让列尾防护保持占用，而不是用可能偏小的值放行。
    */
   @Override
   @SuppressFBWarnings(
@@ -126,9 +126,12 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     double previousY = 0.0;
     double previousZ = 0.0;
     double observedPathSpan = 0.0;
-    int memberCount = 0;
+    List<Double> cartLengths = new ArrayList<>();
     for (MinecartMember<?> member : group) {
-      if (member == null || member.getEntity() == null) {
+      if (member == null
+          || member.getEntity() == null
+          || member.getProperties() == null
+          || member.getProperties().getModel() == null) {
         return OptionalDouble.empty();
       }
       org.bukkit.entity.Entity entity = member.getEntity().getEntity();
@@ -148,7 +151,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
         return OptionalDouble.empty();
       }
-      if (memberCount > 0) {
+      if (!cartLengths.isEmpty()) {
         // Minecraft 轨道以方块轴线和坡道为主，L1 距离会对曲线/坡道保持偏大，适合安全释放阈值。
         double gapLength =
             Math.abs(x - previousX) + Math.abs(y - previousY) + Math.abs(z - previousZ);
@@ -163,20 +166,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       previousX = x;
       previousY = y;
       previousZ = z;
-      memberCount++;
+      cartLengths.add((double) member.getProperties().getModel().getCartLength());
     }
-    if (memberCount <= 0) {
-      return OptionalDouble.empty();
-    }
-    double positionEstimate =
-        observedPathSpan
-            + END_FOOTPRINT_PADDING_BLOCKS
-            + Math.max(0, memberCount - 1) * CURVE_PADDING_PER_GAP_BLOCKS;
-    double countFloor = memberCount * MIN_LENGTH_PER_MEMBER_BLOCKS;
-    double conservativeEstimate = Math.max(positionEstimate, countFloor);
-    return Double.isFinite(conservativeEstimate) && conservativeEstimate > 0.0
-        ? OptionalDouble.of(conservativeEstimate)
-        : OptionalDouble.empty();
+    return PhysicalRailFootprintPolicy.conservativeTrainLengthBlocks(observedPathSpan, cartLengths);
   }
 
   /**
