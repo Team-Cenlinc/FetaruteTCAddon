@@ -14,7 +14,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  * <p>全部是运营口径的输入，没有一个来自历史跑车记录：时刻表是按这些参数 + 当前路网算出来的。
  *
  * @param serviceStartSecondOfDay 首班发车时刻（当日秒数）
- * @param serviceEndSecondOfDay 末班发车时刻（相对同一服务日的秒数，可超过一天表示跨零点）
+ * @param serviceEndSecondOfDay 运营结束时刻（相对同一服务日的秒数，可超过一天表示跨零点）：每一班按名义发车时刻算须在此之前跑完；
+ *     端点串行、让车把班次往后推时，实际到达与之后的回库可能略晚于它
  * @param headway 兜底发车间隔：交路组没有自己的间隔时用它；每个方向按各自的间隔铺规整子网格，weight 只在同方向多 route 之间切份额
  * @param defaultDwell RouteStop 未配置停站时长时的缺省值
  * @param dutyLimits 车辆交路硬上限
@@ -103,7 +104,7 @@ public record TimetableBuildOptions(
   /** 默认首班 05:00。 */
   public static final int DEFAULT_SERVICE_START = 5 * 3600;
 
-  /** 默认末班 23:00。 */
+  /** 默认运营结束 23:00（末班须在此之前跑完）。 */
   public static final int DEFAULT_SERVICE_END = 23 * 3600;
 
   /** 默认基准间隔 5 分钟。 */
@@ -291,7 +292,7 @@ public record TimetableBuildOptions(
         nextRepair);
   }
 
-  /** 计划窗口长度（秒）。 */
+  /** 计划窗口长度（秒）：首班发车到运营结束。 */
   public int horizonSeconds() {
     return serviceEndSecondOfDay - serviceStartSecondOfDay;
   }

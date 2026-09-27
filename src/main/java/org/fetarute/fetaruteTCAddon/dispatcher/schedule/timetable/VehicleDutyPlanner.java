@@ -154,6 +154,9 @@ public final class VehicleDutyPlanner {
 
     // 计划窗口结束：所有还开着的 duty 一律封口回库，没有例外。停在没有回库线路的终点上的，
     // 把尾段班次退掉直到能回库为止——退掉的班次如实上报，而不是留一辆回不了库的车。
+    // 原因如实写：车就绪之后窗口里再没有任何发车才是 HORIZON_END；之后还有班次、只是没轮到它（被别的车接走、
+    // 等不起、终点对不上）的是 NO_COMPATIBLE_NEXT——否则凌晨就回库的车也会被标成"窗口结束"。
+    int lastDeparture = ordered.get(ordered.size() - 1).departureSeconds();
     for (OpenDuty duty : List.copyOf(open)) {
       boolean trimmed = false;
       while (!duty.trips.isEmpty() && !access.closable(duty.lastTrip())) {
@@ -167,7 +170,7 @@ public final class VehicleDutyPlanner {
         continue;
       }
       duty.seal(
-          trimmed
+          trimmed || duty.readyAtSeconds <= lastDeparture
               ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT
               : VehicleDuty.CloseReason.HORIZON_END);
       closed.add(duty);

@@ -476,6 +476,30 @@ class VehicleDutyPlannerTest {
     assertTrue(tight.allDutiesReturnToStorage());
   }
 
+  /**
+   * 窗口结束时仍开着的 duty，只有"就绪之后再没有任何发车"的才标 HORIZON_END。
+   *
+   * <p>每趟 300 秒、间隔 1200 秒、闲置上限 300 秒、不传时隙表：四班各一辆车，前三辆都开到窗口末尾才封口。 此前四辆一律标 HORIZON_END——实服 DS 凌晨
+   * 05:18 就回库的车也是这个标签。
+   */
+  @Test
+  void onlyDutiesReadyAfterTheLastDepartureEndAtHorizon() {
+    List<VehicleDutyPlanner.PlannedTrip> trips = loopTrips(4, 1200, 300);
+
+    VehicleDutyPlanner.Result result =
+        VehicleDutyPlanner.plan(
+            TIMETABLE, trips, hubLegs(), new VehicleDutyPlanner.Limits(4, 7200, 0, 300));
+
+    assertEquals(4, result.duties().size());
+    assertEquals(VehicleDuty.CloseReason.HORIZON_END, dutyHolding(result, "T00003").closeReason());
+    for (String code : List.of("T00000", "T00001", "T00002")) {
+      assertEquals(
+          VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT,
+          dutyHolding(result, code).closeReason(),
+          code);
+    }
+  }
+
   /** 闲置收口要写明原因：接完这一班之后下一个时隙太远，按计划回库而不是挂到窗口末尾。 */
   @Test
   void dutyClosesWithIdleLimitWhenNextSlotIsTooFar() {

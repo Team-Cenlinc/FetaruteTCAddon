@@ -2732,7 +2732,7 @@ public final class FtaTimetableCommand {
    *
    * @param headwaySeconds 全线基准发车间隔；未显式给出时为 {@code null}，由线路 baseline 决定
    * @param start 首班时刻 {@code HH:mm}
-   * @param end 末班时刻 {@code HH:mm}
+   * @param end 运营结束时刻 {@code HH:mm}：末班须在此之前跑完
    * @param dwellSeconds 缺省停站时长
    * @param maxTripsPerDuty 单个车辆交路最多班次；未显式给出时为 {@code null}，由交路组的 {@code maxOperationTrips} 决定
    * @param maxDutyMinutes 单个车辆交路最长在线分钟
