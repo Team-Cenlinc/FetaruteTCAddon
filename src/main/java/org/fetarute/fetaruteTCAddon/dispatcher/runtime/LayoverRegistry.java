@@ -127,16 +127,18 @@ public final class LayoverRegistry {
    * <p>同一票据重试会返回原 attempt，因而不会反复生成 UUID 或在失败路径持续改名；另一张票据不能抢占已经进入 handoff 事务的候选。认领本身不代表授权已提交，若
    * handoff 在修改任何占用前被拒绝，调用方可用 {@link #releaseDispatchAttempt(String, String)} 释放认领。
    *
+   * @param now 认领时刻（调度层时钟）；同一票据重试返回的原 attempt 保留首次认领时刻
    * @return 当前票据拥有的稳定 attempt；列车不存在或已被另一票据认领时返回 empty
    */
   public synchronized Optional<DispatchAttempt> claimDispatch(
-      String trainName, String ticketId, String targetTrainName) {
+      String trainName, String ticketId, String targetTrainName, Instant now) {
     if (trainName == null
         || trainName.isBlank()
         || ticketId == null
         || ticketId.isBlank()
         || targetTrainName == null
-        || targetTrainName.isBlank()) {
+        || targetTrainName.isBlank()
+        || now == null) {
       return Optional.empty();
     }
     Optional<LayoverCandidate> attemptOwner = findDispatchAttemptOwnerInternal(ticketId);
@@ -155,7 +157,7 @@ public final class LayoverRegistry {
       DispatchAttempt existing = candidate.dispatchAttempt().get();
       return existing.ticketId().equals(ticketId) ? Optional.of(existing) : Optional.empty();
     }
-    DispatchAttempt attempt = new DispatchAttempt(ticketId, targetTrainName);
+    DispatchAttempt attempt = new DispatchAttempt(ticketId, targetTrainName, now);
     candidates.put(trainName, candidate.withDispatchAttempt(Optional.of(attempt)));
     return Optional.of(attempt);
   }
@@ -302,11 +304,21 @@ public final class LayoverRegistry {
     }
   }
 
-  /** 一次折返事务的稳定身份。 */
-  public record DispatchAttempt(String ticketId, String targetTrainName) {
+  /**
+   * 一次折返事务的稳定身份。
+   *
+   * <p>认领之后交接可能已经改动了占用（改名迁移 owner 等），只能由同一张票重试完成，不能按时间自动释放；{@code claimedAt} 只用来发现挂得过久的交接（见 {@code
+   * ReclaimManager}），不参与任何判定。
+   *
+   * @param ticketId 票据 ID
+   * @param targetTrainName 折返后的列车名
+   * @param claimedAt 认领时刻
+   */
+  public record DispatchAttempt(String ticketId, String targetTrainName, Instant claimedAt) {
     public DispatchAttempt {
       Objects.requireNonNull(ticketId, "ticketId");
       Objects.requireNonNull(targetTrainName, "targetTrainName");
+      Objects.requireNonNull(claimedAt, "claimedAt");
       if (ticketId.isBlank() || targetTrainName.isBlank()) {
         throw new IllegalArgumentException("ticketId 与 targetTrainName 不能为空");
       }

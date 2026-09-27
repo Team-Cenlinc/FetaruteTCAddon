@@ -277,7 +277,9 @@ class SimpleTicketAssignerLayoverTest {
     Instant now = Instant.parse("2026-02-01T00:00:00Z");
     assigner.tick(provider, now);
     layoverRegistry.register("inbound", "A", NodeId.of("A"), now, Map.of());
-    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound").orElseThrow();
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
 
     assertEquals(0, assigner.clearPendingTickets());
 
@@ -590,7 +592,10 @@ class SimpleTicketAssignerLayoverTest {
               if (candidate.trainName().equals(first.trainName())) {
                 layoverRegistry
                     .claimDispatch(
-                        candidate.trainName(), serviceTicket.ticketId(), "train-1-outbound")
+                        candidate.trainName(),
+                        serviceTicket.ticketId(),
+                        "train-1-outbound",
+                        Instant.now())
                     .orElseThrow();
                 return LayoverDispatchResult.failed(
                     candidate.trainName(), "handoff-commit-pending");
@@ -638,7 +643,8 @@ class SimpleTicketAssignerLayoverTest {
     layoverRegistry.register("attempt-owner", "A", NodeId.of("A"), now.minusSeconds(1), Map.of());
     LayoverRegistry.LayoverCandidate fifoFirst = layoverRegistry.get("fifo-first").orElseThrow();
     layoverRegistry
-        .claimDispatch("attempt-owner", ticket.id().toString(), "attempt-owner-outbound")
+        .claimDispatch(
+            "attempt-owner", ticket.id().toString(), "attempt-owner-outbound", Instant.now())
         .orElseThrow();
     LayoverRegistry.LayoverCandidate attemptOwner =
         layoverRegistry.findDispatchAttemptOwner(ticket.id().toString()).orElseThrow();
@@ -922,7 +928,9 @@ class SimpleTicketAssignerLayoverTest {
     Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
     assigner.tick(provider, t0);
     layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
-    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound").orElseThrow();
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
 
     assigner.tick(provider, t0.plusSeconds(601));
 
@@ -960,7 +968,9 @@ class SimpleTicketAssignerLayoverTest {
     Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
     assigner.tick(provider, t0);
     layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
-    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound").orElseThrow();
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
     when(provider.routes().findById(routeId)).thenReturn(Optional.empty());
 
     assigner.tick(provider, t0.plusSeconds(1));
@@ -1901,7 +1911,9 @@ class SimpleTicketAssignerLayoverTest {
     Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
     assigner.tick(provider, t0);
     layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
-    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound").orElseThrow();
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
 
     assigner.tick(provider, t0.plusSeconds(61));
 

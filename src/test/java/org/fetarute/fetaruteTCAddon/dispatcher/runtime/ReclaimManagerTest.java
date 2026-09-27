@@ -234,7 +234,7 @@ class ReclaimManagerTest {
               ticketIds.add(ticket.ticketId());
               if (ticketIds.size() == 1) {
                 layoverRegistry
-                    .claimDispatch(trainName, ticket.ticketId(), "train-renamed")
+                    .claimDispatch(trainName, ticket.ticketId(), "train-renamed", Instant.now())
                     .orElseThrow();
                 layoverRegistry.rename(trainName, "train-renamed");
                 layoverRegistry.register(
@@ -290,7 +290,8 @@ class ReclaimManagerTest {
               String trainName = invocation.getArgument(1);
               ServiceTicket ticket = invocation.getArgument(2);
               ticketIds.add(ticket.ticketId());
-              layoverRegistry.claimDispatch(trainName, ticket.ticketId(), trainName + "-returning");
+              layoverRegistry.claimDispatch(
+                  trainName, ticket.ticketId(), trainName + "-returning", Instant.now());
               return false;
             });
     ReclaimManager manager =
@@ -324,7 +325,8 @@ class ReclaimManagerTest {
             "FTA_OP_TRIPS", "4",
             "FTA_OP_MAX", "4"));
     layoverRegistry
-        .claimDispatch("train-operation", "operation-ticket", "train-operation-returning")
+        .claimDispatch(
+            "train-operation", "operation-ticket", "train-operation-returning", Instant.now())
         .orElseThrow();
     TicketAssigner ticketAssigner = mock(TicketAssigner.class);
     when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
@@ -642,6 +644,68 @@ class ReclaimManagerTest {
     manager.performReclaimCheck();
 
     verify(ticketAssigner, times(1)).forceAssign(eq(provider), eq("train-a"), any());
+  }
+
+  /**
+   * 挂起过久的折返交接只告警、不释放：认领之后交接可能已经改动了占用，只能由同一张票重试完成。
+   *
+   * <p>同一次认领只告警一次；释放后重新认领算新的一次，挂满阈值会再告警。
+   */
+  @Test
+  void staleDispatchAttemptIsReportedOncePerClaimAndNeverReleased() {
+    Instant t0 = Instant.parse("2026-03-01T08:00:00Z");
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(t0);
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.empty());
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-a",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        t0,
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    layoverRegistry.claimDispatch("train-a", "ticket-1", "train-a-next", t0).orElseThrow();
+    List<String> logs = new ArrayList<>();
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin,
+            layoverRegistry,
+            ticketAssigner,
+            mockConfigManager(),
+            logs::add,
+            () -> 0,
+            trainName -> false,
+            (trainName, reason) -> false,
+            clock::get);
+
+    clock.set(t0.plusSeconds(ReclaimManager.STALE_DISPATCH_ATTEMPT_SECONDS - 1));
+    manager.performReclaimCheck();
+    clock.set(t0.plusSeconds(130));
+    manager.performReclaimCheck();
+    manager.performReclaimCheck();
+
+    assertEquals(1, staleReports(logs), logs::toString);
+    assertTrue(logs.stream().anyMatch(line -> line.contains("ageSeconds=130")), logs::toString);
+    assertTrue(layoverRegistry.hasDispatchAttemptForTicket("ticket-1"), "只告警，不释放做到一半的交接");
+
+    // 这次交接结束（认领释放），同一张票稍后重新认领：是新的一次，挂满阈值再告警。
+    layoverRegistry.releaseDispatchAttempt("train-a", "ticket-1");
+    manager.performReclaimCheck();
+    Instant reclaimedAt = t0.plusSeconds(200);
+    layoverRegistry.claimDispatch("train-a", "ticket-1", "train-a-next", reclaimedAt).orElseThrow();
+    clock.set(reclaimedAt.plusSeconds(ReclaimManager.STALE_DISPATCH_ATTEMPT_SECONDS));
+    manager.performReclaimCheck();
+
+    assertEquals(2, staleReports(logs), logs::toString);
+  }
+
+  private static long staleReports(List<String> logs) {
+    return logs.stream().filter(line -> line.startsWith("RECLAIM_DISPATCH_ATTEMPT_STALE")).count();
   }
 
   /** 直通车滞留在别的运营商的终点：本运营商没有从那里出发的 RETURN，外方有一条首站写裸节点 id 的 RETURN——要认得出并派给它。 */

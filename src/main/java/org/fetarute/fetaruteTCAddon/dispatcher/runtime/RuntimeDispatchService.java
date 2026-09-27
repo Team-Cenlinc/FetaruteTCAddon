@@ -16030,7 +16030,8 @@ public final class RuntimeDispatchService {
             ticket.ticketId(),
             regeneratedTrainName == null || regeneratedTrainName.isBlank()
                 ? trainName
-                : regeneratedTrainName);
+                : regeneratedTrainName,
+            now);
     if (dispatchAttempt.isEmpty()) {
       debugLogger.accept(
           "Layover 发车失败: 候选已被其他票据认领 train=" + trainName + " ticket=" + ticket.ticketId());

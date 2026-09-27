@@ -47,13 +47,14 @@ class LayoverRegistryTest {
     LayoverRegistry registry = registeredCandidate("inbound");
 
     LayoverRegistry.DispatchAttempt first =
-        registry.claimDispatch("inbound", "ticket-1", "outbound-1").orElseThrow();
+        registry.claimDispatch("inbound", "ticket-1", "outbound-1", Instant.now()).orElseThrow();
     LayoverRegistry.DispatchAttempt retry =
-        registry.claimDispatch("inbound", "ticket-1", "outbound-2").orElseThrow();
+        registry.claimDispatch("inbound", "ticket-1", "outbound-2", Instant.now()).orElseThrow();
 
     assertEquals(first, retry);
     assertEquals("outbound-1", retry.targetTrainName());
-    assertTrue(registry.claimDispatch("inbound", "ticket-2", "outbound-2").isEmpty());
+    assertTrue(
+        registry.claimDispatch("inbound", "ticket-2", "outbound-2", Instant.now()).isEmpty());
   }
 
   @Test
@@ -67,9 +68,10 @@ class LayoverRegistryTest {
         Map.of());
 
     LayoverRegistry.DispatchAttempt attempt =
-        registry.claimDispatch("train-1", "ticket-1", "outbound-1").orElseThrow();
+        registry.claimDispatch("train-1", "ticket-1", "outbound-1", Instant.now()).orElseThrow();
 
-    assertTrue(registry.claimDispatch("train-2", "ticket-1", "outbound-2").isEmpty());
+    assertTrue(
+        registry.claimDispatch("train-2", "ticket-1", "outbound-2", Instant.now()).isEmpty());
     LayoverRegistry.LayoverCandidate owner =
         registry.findDispatchAttemptOwner("ticket-1").orElseThrow();
     assertEquals("train-1", owner.trainName());
@@ -80,7 +82,7 @@ class LayoverRegistryTest {
   @Test
   void renamePreservesAttemptAndOnlyMatchingTicketCanReleaseIt() {
     LayoverRegistry registry = registeredCandidate("inbound");
-    registry.claimDispatch("inbound", "ticket-1", "outbound").orElseThrow();
+    registry.claimDispatch("inbound", "ticket-1", "outbound", Instant.now()).orElseThrow();
 
     assertTrue(registry.rename("inbound", "outbound"));
     assertEquals(
@@ -94,7 +96,7 @@ class LayoverRegistryTest {
   @Test
   void dispatchAttemptLookupFollowsCandidateRename() {
     LayoverRegistry registry = registeredCandidate("inbound");
-    registry.claimDispatch("inbound", "ticket-1", "outbound").orElseThrow();
+    registry.claimDispatch("inbound", "ticket-1", "outbound", Instant.now()).orElseThrow();
 
     assertTrue(registry.hasDispatchAttemptForTicket("ticket-1"));
     assertTrue(registry.rename("inbound", "outbound"));
@@ -107,7 +109,7 @@ class LayoverRegistryTest {
   void repeatedRegistrationCannotEraseActiveDispatchAttempt() {
     LayoverRegistry registry = registeredCandidate("inbound");
     LayoverRegistry.DispatchAttempt attempt =
-        registry.claimDispatch("inbound", "ticket-1", "outbound").orElseThrow();
+        registry.claimDispatch("inbound", "ticket-1", "outbound", Instant.now()).orElseThrow();
 
     registry.register(
         "inbound",

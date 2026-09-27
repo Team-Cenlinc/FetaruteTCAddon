@@ -2092,7 +2092,8 @@ class RuntimeDispatchServiceTest {
 
     assertFalse(result.dispatched());
     assertEquals("dynamic-target-unavailable", result.reason());
-    verify(layoverRegistry, never()).claimDispatch(anyString(), anyString(), anyString());
+    verify(layoverRegistry, never())
+        .claimDispatch(anyString(), anyString(), anyString(), any(Instant.class));
     verify(occupancyManager, never())
         .canEnter(argThat(OccupancyRequest::hasMovementRequiredResources));
     verify(occupancyManager, never())
@@ -8190,7 +8191,10 @@ class RuntimeDispatchServiceTest {
     LayoverRegistry layoverRegistry = new LayoverRegistry();
     layoverRegistry.register(
         "train-1", "SURC:S:TERM", location, Instant.now().minusSeconds(1), Map.of());
-    assertTrue(layoverRegistry.claimDispatch("train-1", "ticket-1", "train-1-next").isPresent());
+    assertTrue(
+        layoverRegistry
+            .claimDispatch("train-1", "ticket-1", "train-1-next", Instant.now())
+            .isPresent());
 
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));

@@ -9,6 +9,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -17,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import org.bukkit.Bukkit;
 import org.bukkit.scheduler.BukkitTask;
@@ -63,6 +65,17 @@ public class ReclaimManager {
   /** 方向供需回库最小闲置时间（秒），避免刚入 Layover 立即被回收。 */
   private static final long DIRECTION_MIN_IDLE_SECONDS = 120L;
 
+  /**
+   * 折返交接挂起多久记告警（秒）。
+   *
+   * <p>没有实测分布，只是一个"明显不正常"的量级：交接由票据分配器在每个发车 tick（{@code spawn.tick-interval-ticks}， 默认 100 tick = 5
+   * 秒）重试一次，成功就注销候选、授权被拒就释放认领，挂满两分钟等于连续二十多次既没成功也没被拒。 它只决定告警，不触发任何动作；回收扫描每 {@code
+   * reclaim.check-interval-seconds} 一次，所以实际在 120 秒到 120 秒 + 一个扫描间隔之间报出。
+   */
+  static final long STALE_DISPATCH_ATTEMPT_SECONDS = 120L;
+
+  private static final Logger HEALTH_LOGGER = Logger.getLogger("FetaruteTCAddon");
+
   private final FetaruteTCAddon plugin;
   private final LayoverRegistry layoverRegistry;
   private final TicketAssigner ticketAssigner;
@@ -79,6 +92,9 @@ public class ReclaimManager {
    * <p>典型是直通车滞留在别的运营商的终点，或回库票过期后再没有线路能从那里出发。健康监控明确把待命车排除在清除之外， 所以没有这条兜底的话这辆车会永远留在终点占着站台。
    */
   private final Map<String, Instant> strandedSince = new HashMap<>();
+
+  /** 已经告警过的挂起交接（按 ticketId），同一次交接只告警一次。 */
+  private final Set<LayoverRegistry.DispatchAttempt> staleAttemptsReported = new HashSet<>();
 
   /** 有乘客的车不能被兜底销毁；可注入以便测试。 */
   private final java.util.function.Predicate<String> passengerCheck;
@@ -208,6 +224,7 @@ public class ReclaimManager {
     List<LayoverRegistry.LayoverCandidate> candidates = layoverRegistry.snapshot();
     pruneStableReturnTickets(candidates);
     pruneStranded(candidates);
+    reportStaleDispatchAttempts(candidates, now);
     Map<String, Integer> pendingDemandByDirection = buildPendingDemandByDirection();
     Map<String, Integer> layoverSupplyByDirection = buildLayoverSupplyByDirection(candidates);
 
@@ -287,6 +304,40 @@ public class ReclaimManager {
     }
   }
 
+  /**
+   * 挂起过久的折返交接只告警、不释放。
+   *
+   * <p>认领之后交接可能已经改动了占用，只能由同一张票重试完成；按时间释放会把做到一半的交接丢掉。可它又会让滞留销毁永远跳过这辆车， 所以至少要让人看见：{@code
+   * RECLAIM_DISPATCH_ATTEMPT_STALE}，同一次交接只记一次。
+   */
+  private void reportStaleDispatchAttempts(
+      List<LayoverRegistry.LayoverCandidate> candidates, Instant now) {
+    Set<LayoverRegistry.DispatchAttempt> live = new HashSet<>();
+    for (LayoverRegistry.LayoverCandidate candidate : candidates) {
+      if (candidate == null || candidate.dispatchAttempt().isEmpty()) {
+        continue;
+      }
+      LayoverRegistry.DispatchAttempt attempt = candidate.dispatchAttempt().get();
+      live.add(attempt);
+      long ageSeconds = ChronoUnit.SECONDS.between(attempt.claimedAt(), now);
+      if (ageSeconds < STALE_DISPATCH_ATTEMPT_SECONDS || !staleAttemptsReported.add(attempt)) {
+        continue;
+      }
+      String detail =
+          "train="
+              + candidate.trainName()
+              + " ticket="
+              + attempt.ticketId()
+              + " target="
+              + attempt.targetTrainName()
+              + " ageSeconds="
+              + ageSeconds;
+      debugLogger.accept("RECLAIM_DISPATCH_ATTEMPT_STALE " + detail + " action=alert-only");
+      HEALTH_LOGGER.warning("[FTA] 折返交接挂起过久，只告警不释放: " + detail);
+    }
+    staleAttemptsReported.retainAll(live);
+  }
+
   /** 已经不在待命池里的车不再算滞留。 */
   private void pruneStranded(List<LayoverRegistry.LayoverCandidate> candidates) {
     if (strandedSince.isEmpty()) {
@@ -320,7 +371,10 @@ public class ReclaimManager {
     }
     if (candidate.dispatchAttempt().isPresent()) {
       debugLogger.accept(
-          "RECLAIM_STRANDED_SKIP train=" + trainName + " reason=dispatch-attempt-in-progress");
+          "RECLAIM_STRANDED_SKIP train="
+              + trainName
+              + " reason=dispatch-attempt-in-progress attemptAgeSeconds="
+              + ChronoUnit.SECONDS.between(candidate.dispatchAttempt().get().claimedAt(), now));
       return;
     }
     if (passengerCheck.test(trainName)) {

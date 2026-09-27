@@ -26,6 +26,12 @@
   （默认 1800，`0` 关闭）走 `destroyTrainByName` 销毁，日志 `RECLAIM_STRANDED_DESTROY`（失败记 `RECLAIM_STRANDED_DESTROY_FAILED`）。
   **有乘客**（`reason=has-passengers`）或**有进行中的折返事务**（`reason=dispatch-attempt-in-progress`）的车不碰，记 `RECLAIM_STRANDED_SKIP`。
   一旦这辆车成功派到 RETURN 票，计时清零。
+- **挂起交接只告警**：进行中的折返事务（`LayoverRegistry.DispatchAttempt`）认领之后可能已经改动了占用（改名迁移 owner 等），只能由同一张票重试完成，
+  不能按时间自动释放。可它又会让上面的滞留销毁永远跳过这辆车，所以认领满 120 秒（`ReclaimManager.STALE_DISPATCH_ATTEMPT_SECONDS`；
+  交接在每个发车 tick 重试一次，成功就注销候选、被拒就释放认领，挂满两分钟等于连续二十多次既没成功也没被拒）时告警：
+  debug 行 `RECLAIM_DISPATCH_ATTEMPT_STALE` 加一条不依赖 debug 开关的 WARN。同一次认领只报一次，释放后重新认领算新的一次；
+  回收扫描间隔决定实际报出时刻在 120 秒到 120 秒 + `check-interval-seconds` 之间。认领时刻由调度层时钟传入。
+  `RECLAIM_STRANDED_SKIP reason=dispatch-attempt-in-progress` 也带上 `attemptAgeSeconds`。
 
 ## 配置项
 在 `config.yml` 的 `reclaim` 段落：
