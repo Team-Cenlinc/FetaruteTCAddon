@@ -55,6 +55,44 @@ abstract class JdbcRepositorySupport {
     return new ConnectionResource(dataSource.getConnection(), true);
   }
 
+  /**
+   * 在一个事务里做完 {@code work}。
+   *
+   * <p>调用方已经开了事务（{@link JdbcConnectionContext}）时直接复用，由调用方提交；否则自己借一条连接、关掉自动提交， 做完提交、出错回滚，归还前恢复自动提交。
+   *
+   * <p>一次写多行的操作都应该走这里：自动提交下每条语句各是一个事务，SQLite 每次都要落盘——时刻表几千行车次逐行提交实测 3 秒多，一个事务 40 毫秒；中途失败也不会留下半份数据。
+   *
+   * @param work 在事务连接上执行的写入
+   * @return {@code work} 的返回值
+   */
+  protected final <T> T inTransaction(SqlWork<T> work) throws SQLException {
+    Objects.requireNonNull(work, "work");
+    try (ConnectionResource connection = openConnection()) {
+      if (!connection.owned) {
+        return work.apply(connection);
+      }
+      Connection raw = connection.connection;
+      boolean autoCommit = raw.getAutoCommit();
+      raw.setAutoCommit(false);
+      try {
+        T result = work.apply(connection);
+        raw.commit();
+        return result;
+      } catch (SQLException | RuntimeException ex) {
+        raw.rollback();
+        throw ex;
+      } finally {
+        raw.setAutoCommit(autoCommit);
+      }
+    }
+  }
+
+  /** 事务里的一段写入。 */
+  @FunctionalInterface
+  protected interface SqlWork<T> {
+    T apply(ConnectionResource connection) throws SQLException;
+  }
+
   protected void setUuid(PreparedStatement statement, int index, UUID uuid) throws SQLException {
     if (uuid == null) {
       statement.setObject(index, null);

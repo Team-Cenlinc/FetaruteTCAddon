@@ -222,28 +222,6 @@ public record Timetable(
         : calendarDate;
   }
 
-  /** 返回替换了状态与更新时间的新实例。 */
-  public Timetable withStatus(TimetableStatus nextStatus, Instant now) {
-    Objects.requireNonNull(nextStatus, "nextStatus");
-    return new Timetable(
-        id,
-        companyId,
-        operatorId,
-        lineId,
-        code,
-        name,
-        nextStatus,
-        zoneId,
-        serviceStartSecondOfDay,
-        serviceEndSecondOfDay,
-        routePlans,
-        trips,
-        duties,
-        notes,
-        createdAt,
-        now == null ? updatedAt : now);
-  }
-
   /** 返回替换了发车表与 duty 的新实例，供加载后回填。 */
   public Timetable withTripsAndDuties(List<TimetableTrip> nextTrips, List<VehicleDuty> nextDuties) {
     return new Timetable(

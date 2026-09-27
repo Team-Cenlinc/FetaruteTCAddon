@@ -6,6 +6,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.DateTimeException;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -32,8 +33,8 @@ import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 /**
  * JDBC 实现的时刻表仓库。
  *
- * <p>表头、发车表与车辆交路是同一个聚合：{@link #save(Timetable)} 在同一条连接上先覆盖表头、再整体替换 trips 与 duties。调用方若已开启事务，{@code
- * openConnection()} 会复用事务连接，因此"表头写了但车次没写" 这种半份状态不会落库。
+ * <p>表头、发车表与车辆交路是同一个聚合：{@link #save(Timetable)} 在一个事务里先覆盖表头、再整体替换 trips 与 duties （{@link
+ * #inTransaction}），"表头写了但车次没写"这种半份状态不会落库；调用方已开启事务时并入调用方的事务。 只翻发布状态用 {@link #updateStatus}，不重写车次。
  *
  * <p>读取同样共用一条连接：SQLite 走单连接池，持着一条连接再去 {@code openConnection()} 会一直等到池超时。
  */
@@ -129,16 +130,37 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
                 "route_plans",
                 "notes",
                 "updated_at"));
-    try (var connection = openConnection()) {
-      try (var statement = connection.prepareStatement(upsert)) {
-        writeHeader(statement, timetable);
-        statement.executeUpdate();
-      }
-      replaceChildren(connection, timetable);
-      connection.commitIfNecessary();
-      return timetable;
+    try {
+      return inTransaction(
+          connection -> {
+            try (var statement = connection.prepareStatement(upsert)) {
+              writeHeader(statement, timetable);
+              statement.executeUpdate();
+            }
+            replaceChildren(connection, timetable);
+            return timetable;
+          });
     } catch (SQLException ex) {
       throw new StorageException("保存时刻表失败", ex);
+    }
+  }
+
+  @Override
+  public boolean updateStatus(UUID id, TimetableStatus status, Instant updatedAt) {
+    Objects.requireNonNull(id, "id");
+    Objects.requireNonNull(status, "status");
+    Objects.requireNonNull(updatedAt, "updatedAt");
+    String sql = "UPDATE " + table("timetables") + " SET status = ?, updated_at = ? WHERE id = ?";
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      statement.setString(1, status.name());
+      setInstant(statement, 2, updatedAt);
+      setUuid(statement, 3, id);
+      int updated = statement.executeUpdate();
+      connection.commitIfNecessary();
+      return updated > 0;
+    } catch (SQLException ex) {
+      throw new StorageException("更新时刻表状态失败", ex);
     }
   }
 
@@ -149,15 +171,21 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
     }
     // 依赖外键级联在这里是不够的：SQLite 只有在 PRAGMA foreign_keys=ON 时才级联，
     // 而这条删除是运营命令直接触发的，必须无论方言与连接设置都把子表清干净。
-    try (var connection = openConnection()) {
-      deleteChildren(
-          connection, id, List.of("timetable_trips", "timetable_duties", "timetable_baselines"));
-      try (var statement =
-          connection.prepareStatement("DELETE FROM " + table("timetables") + " WHERE id = ?")) {
-        setUuid(statement, 1, id);
-        statement.executeUpdate();
-      }
-      connection.commitIfNecessary();
+    try {
+      inTransaction(
+          connection -> {
+            deleteChildren(
+                connection,
+                id,
+                List.of("timetable_trips", "timetable_duties", "timetable_baselines"));
+            try (var statement =
+                connection.prepareStatement(
+                    "DELETE FROM " + table("timetables") + " WHERE id = ?")) {
+              setUuid(statement, 1, id);
+              statement.executeUpdate();
+            }
+            return null;
+          });
     } catch (SQLException ex) {
       throw new StorageException("删除时刻表失败", ex);
     }
@@ -240,29 +268,32 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
             + " (timetable_id, neighbor_timetable_id, neighbor_code, neighbor_updated_at,"
             + " shared_resources, conflicts_at_target, stale_against_graph)"
             + " VALUES (?, ?, ?, ?, ?, ?, ?)";
-    try (var connection = openConnection()) {
-      try (var statement =
-          connection.prepareStatement(
-              "DELETE FROM " + table("timetable_baselines") + " WHERE timetable_id = ?")) {
-        setUuid(statement, 1, timetableId);
-        statement.executeUpdate();
-      }
-      if (baselines != null && !baselines.isEmpty()) {
-        try (var statement = connection.prepareStatement(insert)) {
-          for (TimetableBaseline baseline : baselines) {
-            setUuid(statement, 1, timetableId);
-            setUuid(statement, 2, baseline.neighborTimetableId());
-            statement.setString(3, baseline.neighborCode());
-            setInstant(statement, 4, baseline.neighborUpdatedAt());
-            statement.setInt(5, baseline.sharedResources());
-            statement.setInt(6, baseline.conflictsAtTarget());
-            statement.setInt(7, baseline.staleAgainstGraph() ? 1 : 0);
-            statement.addBatch();
-          }
-          statement.executeBatch();
-        }
-      }
-      connection.commitIfNecessary();
+    try {
+      inTransaction(
+          connection -> {
+            try (var statement =
+                connection.prepareStatement(
+                    "DELETE FROM " + table("timetable_baselines") + " WHERE timetable_id = ?")) {
+              setUuid(statement, 1, timetableId);
+              statement.executeUpdate();
+            }
+            if (baselines != null && !baselines.isEmpty()) {
+              try (var statement = connection.prepareStatement(insert)) {
+                for (TimetableBaseline baseline : baselines) {
+                  setUuid(statement, 1, timetableId);
+                  setUuid(statement, 2, baseline.neighborTimetableId());
+                  statement.setString(3, baseline.neighborCode());
+                  setInstant(statement, 4, baseline.neighborUpdatedAt());
+                  statement.setInt(5, baseline.sharedResources());
+                  statement.setInt(6, baseline.conflictsAtTarget());
+                  statement.setInt(7, baseline.staleAgainstGraph() ? 1 : 0);
+                  statement.addBatch();
+                }
+                statement.executeBatch();
+              }
+            }
+            return null;
+          });
     } catch (SQLException ex) {
       throw new StorageException("保存时刻表基线失败", ex);
     }

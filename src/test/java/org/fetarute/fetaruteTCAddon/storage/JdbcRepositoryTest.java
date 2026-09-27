@@ -1010,10 +1010,19 @@ final class JdbcRepositoryTest {
     assertEquals(List.of(tripId), loaded.duties().get(0).tripIds());
     assertEquals(Optional.of("备注"), loaded.notes());
 
-    // 只有 PUBLISHED 才进运行时视图。
+    // 只有 PUBLISHED 才进运行时视图；翻状态只改表头，不碰车次与交路。
     assertTrue(provider.timetables().listPublished().isEmpty());
-    provider.timetables().save(loaded.withStatus(TimetableStatus.PUBLISHED, now));
-    assertEquals(1, provider.timetables().listPublished().size());
+    Instant publishedAt = now.plusSeconds(30);
+    assertTrue(
+        provider.timetables().updateStatus(timetableId, TimetableStatus.PUBLISHED, publishedAt));
+    List<Timetable> published = provider.timetables().listPublished();
+    assertEquals(1, published.size());
+    assertEquals(publishedAt, published.get(0).updatedAt());
+    assertEquals(loaded.trips(), published.get(0).trips());
+    assertEquals(loaded.duties(), published.get(0).duties());
+    assertFalse(
+        provider.timetables().updateStatus(UUID.randomUUID(), TimetableStatus.PUBLISHED, now),
+        "没有这份表时报告未找到");
 
     // 重新保存必须整体替换子表，而不是累加。
     provider
@@ -1225,14 +1234,64 @@ final class JdbcRepositoryTest {
     assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "整体替换：空列表清空基线");
 
     provider.timetables().replaceBaselines(timetableId, List.of(baseline));
-    provider.timetables().save(timetable.withStatus(TimetableStatus.PUBLISHED, now.plusSeconds(1)));
+    provider.timetables().save(timetable);
+    provider.timetables().updateStatus(timetableId, TimetableStatus.PUBLISHED, now.plusSeconds(1));
     assertEquals(
         List.of(baseline),
         provider.timetables().listBaselines(timetableId),
-        "改状态的 save 只重写发车表与交路，基线要留着");
+        "重存表（只重写发车表与交路）与翻状态都不碰基线");
 
     provider.timetables().delete(timetableId);
     assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "删表时基线随之删除");
+  }
+
+  /**
+   * 一次保存是一个事务：半路失败时整份回滚，库里还是上一版。
+   *
+   * <p>保存先删旧的车次与交路、再逐行插入。此前每条语句自动提交，插到一半撞上唯一约束时旧车次已经删掉了， 库里留下半份表——有表头没车次的表会让一条线"按表运行"却一趟车都发不出来。
+   */
+  @Test
+  void timetableSaveRollsBackAsAWhole() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable original =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT4",
+            "回滚表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(),
+            List.of(trip(timetableId, fixture.routeId(), "TTR-001", 8 * 3600)),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(original);
+
+    // 两趟车同一个车次号：第二行撞上 (timetable_id, trip_code) 唯一约束。
+    Timetable broken =
+        original.withTripsAndDuties(
+            List.of(
+                trip(timetableId, fixture.routeId(), "TTR-002", 9 * 3600),
+                trip(timetableId, fixture.routeId(), "TTR-002", 10 * 3600)),
+            List.of());
+    assertThrows(StorageException.class, () -> provider.timetables().save(broken));
+
+    Timetable reloaded = provider.timetables().findById(timetableId).orElseThrow();
+    assertEquals(original.trips(), reloaded.trips(), "失败的保存不能把上一版的车次删掉");
+  }
+
+  private static TimetableTrip trip(UUID timetableId, UUID routeId, String code, int departure) {
+    return new TimetableTrip(
+        UUID.randomUUID(), timetableId, routeId, 0, code, departure, Optional.empty());
   }
 
   /** 建起一条 company → operator → line → route 的最小链路，满足时刻表的外键。 */

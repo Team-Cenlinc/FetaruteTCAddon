@@ -64,6 +64,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableNeighborhoodLoader;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
+import org.fetarute.fetaruteTCAddon.storage.api.TransactionCallback;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.component.CommandComponent;
@@ -511,8 +512,8 @@ public final class FtaTimetableCommand {
             repairOptions(sender, flags.maxWaitSeconds()));
     String timetableName = flags.name() == null ? code : flags.name();
 
-    // 邻表输入在主线程读库（已发布表、无表线路的 route 与停靠），足迹计算、邻表投影与 build 一起进异步线程。
-    // 一起编的几条线互相不算邻表——它们在同一次相位选择与修复里。
+    // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
+    // 几千行车次，放主线程每次 build 都要卡一两个 tick。一起编的几条线互相不算邻表——它们在同一次相位选择与修复里。
     Map<UUID, List<RouteStop>> myStops = new java.util.HashMap<>();
     Map<UUID, RouteDefinition> myDefinitions = new java.util.HashMap<>();
     List<TimetableNeighborhoodLoader.RouteCandidate> myRoutes = new ArrayList<>();
@@ -552,11 +553,9 @@ public final class FtaTimetableCommand {
     }
     UUID footprintId =
         joint ? TimetableSetBuilder.jointTimetableId(code, lineIds) : members.get(0).timetableId();
-    NeighborInputs neighborInputs =
-        collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
 
     // 构建是纯 CPU 运算：时分积分、SWRR、派车、串行、让车、冲突扫描，目标间隔有真冲突时还要向上搜索几十次。
-    // 输入全是不可变快照，放到异步线程跑，报告与落库回到主线程。
+    // 输入全是不可变快照，放到异步线程跑；报告回到主线程，落库再交给异步事务（writeAsync）。
     sender.sendMessage(
         Component.text(
             joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY));
@@ -571,6 +570,8 @@ public final class FtaTimetableCommand {
               TimetableSetBuilder.SetResult result;
               NeighborReport neighborReport;
               try {
+                NeighborInputs neighborInputs =
+                    collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
                 TimetableConflictChecker.GraphIndex index =
                     TimetableConflictChecker.GraphIndex.of(graphSnapshot);
                 TimetableFootprint footprint =
@@ -764,7 +765,7 @@ public final class FtaTimetableCommand {
     if (!set.success()) {
       return;
     }
-    List<Timetable> saved = new ArrayList<>();
+    List<Timetable> tables = new ArrayList<>();
     for (ResolvedLine line : lines) {
       Timetable timetable = set.tables().get(line.line().id());
       if (timetable == null) {
@@ -772,21 +773,91 @@ public final class FtaTimetableCommand {
             Component.text(line.line().code() + " 没有拆出表来，这是一个不应发生的状态。", NamedTextColor.RED));
         return;
       }
-      try {
-        provider.timetables().save(timetable);
-        provider
-            .timetables()
-            .replaceBaselines(
-                timetable.id(), set.baselines().getOrDefault(line.line().id(), List.of()));
-      } catch (StorageException ex) {
-        sender.sendMessage(
-            Component.text(
-                "保存 " + line.line().code() + " 的时刻表失败：" + ex.getMessage(), NamedTextColor.RED));
-        return;
-      }
-      saved.add(timetable);
+      tables.add(timetable);
     }
-    report.sendSavedActions(lines, saved, lineArgumentOf(lines), options, result);
+    // 联编的几张表一起落库：要么都存上，要么都不存。
+    writeAsync(
+        sender,
+        provider,
+        "保存时刻表失败",
+        () -> {
+          for (Timetable timetable : tables) {
+            provider.timetables().save(timetable);
+            provider
+                .timetables()
+                .replaceBaselines(
+                    timetable.id(), set.baselines().getOrDefault(timetable.lineId(), List.of()));
+          }
+          return Optional.empty();
+        },
+        false,
+        () -> report.sendSavedActions(lines, tables, lineArgumentOf(lines), options, result));
+  }
+
+  /**
+   * 时刻表写库：在异步线程里用一个事务写完，需要时刷新已发布时刻表缓存，再回主线程收尾。
+   *
+   * <p>一张表就是几千行车次与交路。原先在主线程逐行自动提交，实服库副本上三张草稿要 3.4 秒，整个服务器跟着卡； 一个事务 40 毫秒，放到异步线程后主线程完全不等。
+   *
+   * <p>{@code write} 返回拒绝理由时不刷新缓存、不执行收尾，理由原样回给发令者。拒绝必须在写任何东西之前判断： 事务照常提交，没有写入就没有副作用。
+   *
+   * @param failurePrefix 写库失败时提示的前缀
+   * @param write 在事务里执行的写入；返回拒绝理由表示什么也没写
+   * @param reloadPublished 写完是否刷新已发布时刻表缓存（改了发布状态或删了表时要）
+   * @param onWritten 写成功后回到主线程执行
+   */
+  private void writeAsync(
+      CommandSender sender,
+      StorageProvider provider,
+      String failurePrefix,
+      TransactionCallback<Optional<String>> write,
+      boolean reloadPublished,
+      Runnable onWritten) {
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              Optional<String> rejected;
+              try {
+                rejected = provider.transactionManager().execute(write);
+                if (rejected.isEmpty() && reloadPublished) {
+                  plugin.getTimetableService().ifPresent(service -> service.reload(provider));
+                }
+              } catch (StorageException ex) {
+                String reason = failurePrefix + "：" + rootMessage(ex);
+                plugin
+                    .getServer()
+                    .getScheduler()
+                    .runTask(
+                        plugin,
+                        () -> sender.sendMessage(Component.text(reason, NamedTextColor.RED)));
+                return;
+              }
+              Optional<String> outcome = rejected;
+              plugin
+                  .getServer()
+                  .getScheduler()
+                  .runTask(
+                      plugin,
+                      () -> {
+                        if (outcome.isPresent()) {
+                          sender.sendMessage(Component.text(outcome.get(), NamedTextColor.RED));
+                          return;
+                        }
+                        onWritten.run();
+                      });
+            });
+  }
+
+  /** 事务管理器会把回调里的异常包一层"事务执行失败"，提示里要的是最里面那句。 */
+  private static String rootMessage(Throwable error) {
+    Throwable current = error;
+    while (current.getCause() != null && current.getCause() != current) {
+      current = current.getCause();
+    }
+    return current.getMessage() == null ? error.getMessage() : current.getMessage();
   }
 
   /** 几条线在命令里的写法：逗号分隔，不加引号（line code 里没有空格）。 */
@@ -1599,9 +1670,7 @@ public final class FtaTimetableCommand {
       tables.add(timetable.get());
     }
     if (next != TimetableStatus.PUBLISHED) {
-      for (Timetable timetable : tables) {
-        applyStatus(sender, provider, timetable, next);
-      }
+      applyStatus(sender, provider, tables, next);
       return;
     }
     for (Timetable timetable : tables) {
@@ -1637,21 +1706,8 @@ public final class FtaTimetableCommand {
     }
     RailGraph graph = worldGraph.graph();
     RunTimeModel model = runTimeModel(worldGraph.worldId());
-    Map<UUID, NeighborInputs> inputsById = new java.util.LinkedHashMap<>();
-    for (int i = 0; i < tables.size(); i++) {
-      Timetable timetable = tables.get(i);
-      ResolvedLine line = lines.get(i);
-      inputsById.put(
-          timetable.id(),
-          collectNeighborInputs(
-              provider,
-              lines,
-              routesOf(timetable, displayCodeOf(line)),
-              Map.of(),
-              Map.of(),
-              model));
-    }
     sender.sendMessage(Component.text("正在对照已发布邻表重检…", NamedTextColor.GRAY));
+    // 邻表输入要读全部已发布表（几千行车次），与重检一起放异步线程。
     plugin
         .getServer()
         .getScheduler()
@@ -1659,14 +1715,34 @@ public final class FtaTimetableCommand {
             plugin,
             () -> {
               Map<UUID, ScopeCheck> checks = new java.util.LinkedHashMap<>();
-              for (Timetable timetable : tables) {
-                checks.put(
-                    timetable.id(),
-                    scopeCheck(
-                        inputsById.get(timetable.id()),
-                        graph,
-                        timetable,
-                        stored.getOrDefault(timetable.id(), List.of())));
+              try {
+                for (int i = 0; i < tables.size(); i++) {
+                  Timetable timetable = tables.get(i);
+                  NeighborInputs inputs =
+                      collectNeighborInputs(
+                          provider,
+                          lines,
+                          routesOf(timetable, displayCodeOf(lines.get(i))),
+                          Map.of(),
+                          Map.of(),
+                          model);
+                  checks.put(
+                      timetable.id(),
+                      scopeCheck(
+                          inputs,
+                          graph,
+                          timetable,
+                          stored.getOrDefault(timetable.id(), List.of())));
+                }
+              } catch (RuntimeException ex) {
+                String reason = "发布前重检失败：" + rootMessage(ex);
+                plugin
+                    .getServer()
+                    .getScheduler()
+                    .runTask(
+                        plugin,
+                        () -> sender.sendMessage(Component.text(reason, NamedTextColor.RED)));
+                return;
               }
               plugin
                   .getServer()
@@ -1687,29 +1763,14 @@ public final class FtaTimetableCommand {
   /**
    * 发布重检的主线程收尾：基线没变直接发；变了且有外部冲突则拒绝（整组）；变了但无冲突则更新基线再发。
    *
-   * <p>重检在异步线程跑了一会儿，期间表可能被重新 build 或删除；save 会整体重写发车表与交路，所以必须回读一次， 变了就拒绝而不是把重检前的旧表写回去。
+   * <p>重检在异步线程跑了一会儿，期间表可能被重新 build 或删除。这件事在写库的事务里回读核对（{@link #publishAll}）， 变了就拒绝，不把重检前的判断套到新表上。
    */
   private void finishPublish(
       CommandSender sender,
       StorageProvider provider,
-      List<Timetable> checked,
+      List<Timetable> tables,
       Map<UUID, ScopeCheck> checks,
       Map<UUID, List<TimetableBaseline>> stored) {
-    List<Timetable> tables = new ArrayList<>();
-    for (Timetable before : checked) {
-      Optional<Timetable> current = provider.timetables().findById(before.id());
-      if (current.isEmpty()) {
-        sender.sendMessage(Component.text(before.code() + " 在重检期间被删除，取消发布。", NamedTextColor.RED));
-        return;
-      }
-      if (!current.get().updatedAt().equals(before.updatedAt())) {
-        sender.sendMessage(
-            Component.text(
-                before.code() + " 在重检期间被修改（例如重新 build），请重新 publish。", NamedTextColor.RED));
-        return;
-      }
-      tables.add(current.get());
-    }
     boolean rejected = false;
     for (Timetable timetable : tables) {
       ScopeCheck check = checks.get(timetable.id());
@@ -1738,7 +1799,11 @@ public final class FtaTimetableCommand {
     publishAll(sender, provider, tables, checks, stored);
   }
 
-  /** 把几张表一起置为 PUBLISHED：同一个时刻，互相的基线也记这个时刻（它们从此互为已发布邻表，updatedAt 要对得上）；外部邻表的基线按重检结果更新。 */
+  /**
+   * 把几张表一起置为 PUBLISHED：同一个时刻，互相的基线也记这个时刻（它们从此互为已发布邻表，updatedAt 要对得上）；外部邻表的基线按重检结果更新。
+   *
+   * <p>写库在一个事务里：先回读核对重检期间表没被删、没被重新 build，再写基线、翻状态。只翻状态，不重写车次。
+   */
   private void publishAll(
       CommandSender sender,
       StorageProvider provider,
@@ -1750,69 +1815,101 @@ public final class FtaTimetableCommand {
     for (Timetable timetable : tables) {
       setIds.add(timetable.id());
     }
+    Map<UUID, List<TimetableBaseline>> refreshed = new java.util.LinkedHashMap<>();
+    List<String> notes = new ArrayList<>();
     for (Timetable timetable : tables) {
       ScopeCheck check = checks.get(timetable.id());
       boolean refresh = tables.size() > 1 || (check != null && !check.baselinesMatch());
-      if (refresh) {
-        List<TimetableBaseline> baselines =
-            check == null ? new ArrayList<>() : new ArrayList<>(baselinesOf(timetable, check));
-        for (TimetableBaseline old : stored.getOrDefault(timetable.id(), List.of())) {
-          if (setIds.contains(old.neighborTimetableId())) {
-            baselines.add(
-                new TimetableBaseline(
-                    timetable.id(),
-                    old.neighborTimetableId(),
-                    old.neighborCode(),
-                    now,
-                    old.sharedResources(),
-                    old.conflictsAtTarget(),
-                    old.staleAgainstGraph()));
-          }
-        }
-        try {
-          provider.timetables().replaceBaselines(timetable.id(), baselines);
-        } catch (StorageException ex) {
-          sender.sendMessage(Component.text("更新基线失败：" + ex.getMessage(), NamedTextColor.RED));
-          return;
-        }
-        if (check != null && !check.baselinesMatch()) {
-          sender.sendMessage(
-              Component.text(timetable.code() + "：邻表有变化但无冲突，已更新基线。", NamedTextColor.GRAY));
+      if (!refresh) {
+        continue;
+      }
+      List<TimetableBaseline> baselines =
+          check == null ? new ArrayList<>() : new ArrayList<>(baselinesOf(timetable, check));
+      for (TimetableBaseline old : stored.getOrDefault(timetable.id(), List.of())) {
+        if (setIds.contains(old.neighborTimetableId())) {
+          baselines.add(
+              new TimetableBaseline(
+                  timetable.id(),
+                  old.neighborTimetableId(),
+                  old.neighborCode(),
+                  now,
+                  old.sharedResources(),
+                  old.conflictsAtTarget(),
+                  old.staleAgainstGraph()));
         }
       }
-      provider.timetables().save(timetable.withStatus(TimetableStatus.PUBLISHED, now));
+      refreshed.put(timetable.id(), baselines);
+      if (check != null && !check.baselinesMatch()) {
+        notes.add(timetable.code() + "：邻表有变化但无冲突，已更新基线。");
+      }
     }
-    plugin.getTimetableService().ifPresent(service -> service.reload(provider));
-    for (Timetable timetable : tables) {
-      sender.sendMessage(Component.text(timetable.code() + " → PUBLISHED", NamedTextColor.GREEN));
-    }
-    boolean enabled =
-        plugin.getTimetableService().map(service -> service.settings().enabled()).orElse(false);
-    if (!enabled) {
-      sender.sendMessage(
-          Component.text(
-              "注意：config.yml 的 timetable.enabled 仍为 false，这份表暂时不会影响任何列车。", NamedTextColor.YELLOW));
-    }
+    writeAsync(
+        sender,
+        provider,
+        "发布失败",
+        () -> {
+          for (Timetable before : tables) {
+            Optional<Timetable> current = provider.timetables().findById(before.id());
+            if (current.isEmpty()) {
+              return Optional.of(before.code() + " 在重检期间被删除，取消发布。");
+            }
+            if (!current.get().updatedAt().equals(before.updatedAt())) {
+              return Optional.of(before.code() + " 在重检期间被修改（例如重新 build），请重新 publish。");
+            }
+          }
+          refreshed.forEach(provider.timetables()::replaceBaselines);
+          for (Timetable timetable : tables) {
+            provider.timetables().updateStatus(timetable.id(), TimetableStatus.PUBLISHED, now);
+          }
+          return Optional.empty();
+        },
+        true,
+        () -> {
+          for (String note : notes) {
+            sender.sendMessage(Component.text(note, NamedTextColor.GRAY));
+          }
+          for (Timetable timetable : tables) {
+            sender.sendMessage(
+                Component.text(timetable.code() + " → PUBLISHED", NamedTextColor.GREEN));
+          }
+          boolean enabled =
+              plugin
+                  .getTimetableService()
+                  .map(service -> service.settings().enabled())
+                  .orElse(false);
+          if (!enabled) {
+            sender.sendMessage(
+                Component.text(
+                    "注意：config.yml 的 timetable.enabled 仍为 false，这份表暂时不会影响任何列车。",
+                    NamedTextColor.YELLOW));
+          }
+        });
   }
 
+  /** 撤下或归档：只翻状态，写完刷新已发布时刻表缓存。发布走 {@link #publishAll}（要先对照邻表重检）。 */
   private void applyStatus(
-      CommandSender sender, StorageProvider provider, Timetable timetable, TimetableStatus next) {
-    provider.timetables().save(timetable.withStatus(next, Instant.now()));
-    plugin.getTimetableService().ifPresent(service -> service.reload(provider));
-    sender.sendMessage(
-        Component.text(
-            timetable.code() + " → " + next.name(),
-            next == TimetableStatus.PUBLISHED ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-    if (next == TimetableStatus.PUBLISHED) {
-      boolean enabled =
-          plugin.getTimetableService().map(service -> service.settings().enabled()).orElse(false);
-      if (!enabled) {
-        sender.sendMessage(
-            Component.text(
-                "注意：config.yml 的 timetable.enabled 仍为 false，这份表暂时不会影响任何列车。",
-                NamedTextColor.YELLOW));
-      }
-    }
+      CommandSender sender,
+      StorageProvider provider,
+      List<Timetable> tables,
+      TimetableStatus next) {
+    Instant now = Instant.now();
+    writeAsync(
+        sender,
+        provider,
+        "更新时刻表状态失败",
+        () -> {
+          for (Timetable timetable : tables) {
+            provider.timetables().updateStatus(timetable.id(), next, now);
+          }
+          return Optional.empty();
+        },
+        true,
+        () -> {
+          for (Timetable timetable : tables) {
+            sender.sendMessage(
+                Component.text(timetable.code() + " → " + next.name(), NamedTextColor.YELLOW));
+          }
+        });
   }
 
   /** 从表里任意一条 route 的定义找到它所在世界的图快照。 */
@@ -1931,18 +2028,26 @@ public final class FtaTimetableCommand {
       sender.sendMessage(locale().component("command.common.confirm-required"));
       return;
     }
-    for (Timetable timetable : tables) {
-      provider.timetables().delete(timetable.id());
-    }
-    plugin.getTimetableService().ifPresent(service -> service.reload(provider));
-    sender.sendMessage(
-        Component.text(
-            "已删除时刻表 "
-                + lineArgumentOf(lines)
-                + "/"
-                + code
-                + (tables.size() > 1 ? "（" + tables.size() + " 张）" : ""),
-            NamedTextColor.DARK_AQUA));
+    writeAsync(
+        sender,
+        provider,
+        "删除时刻表失败",
+        () -> {
+          for (Timetable timetable : tables) {
+            provider.timetables().delete(timetable.id());
+          }
+          return Optional.empty();
+        },
+        true,
+        () ->
+            sender.sendMessage(
+                Component.text(
+                    "已删除时刻表 "
+                        + lineArgumentOf(lines)
+                        + "/"
+                        + code
+                        + (tables.size() > 1 ? "（" + tables.size() + " 张）" : ""),
+                    NamedTextColor.DARK_AQUA)));
   }
 
   private void handleExport(CommandContext<CommandSender> ctx) {

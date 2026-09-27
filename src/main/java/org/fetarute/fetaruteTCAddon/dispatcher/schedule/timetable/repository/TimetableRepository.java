@@ -1,9 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 
 /**
@@ -26,8 +28,20 @@ public interface TimetableRepository {
   /** 列出全网处于 PUBLISHED 状态的时刻表（含 trips 与 duties），供运行时预热。 */
   List<Timetable> listPublished();
 
-  /** 保存时刻表及其发车表与车辆交路（存在则整体覆盖）。 */
+  /** 保存时刻表及其发车表与车辆交路（存在则整体覆盖），整份在一个事务里写完。 */
   Timetable save(Timetable timetable);
+
+  /**
+   * 只改发布状态与更新时刻，不动车次与交路。
+   *
+   * <p>发布、撤下只是翻一个状态；走 {@link #save} 会把几千行车次与交路删掉重插。
+   *
+   * @param id 时刻表
+   * @param status 新状态
+   * @param updatedAt 更新时刻（publish 重检靠它判断邻表有没有变）
+   * @return 是否找到这份表
+   */
+  boolean updateStatus(UUID id, TimetableStatus status, Instant updatedAt);
 
   /** 删除时刻表及其发车表与车辆交路。 */
   void delete(UUID id);
