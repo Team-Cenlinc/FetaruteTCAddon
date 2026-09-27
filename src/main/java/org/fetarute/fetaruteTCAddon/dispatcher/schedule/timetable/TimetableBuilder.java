@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -22,6 +23,7 @@ import java.util.UUID;
 import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionIndex;
@@ -76,6 +78,23 @@ public final class TimetableBuilder {
   /** 搜索可行 headway 时最多放宽到目标的多少倍。 */
   public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 4;
 
+  /**
+   * 按车接续的喂车方向在中途最多多停几秒。
+   *
+   * <p>多停写进表里，运行时靠"早到等点"执行（{@code timetable.hold-max-seconds}，默认 120 秒；调度层另有 150 秒硬上限）。
+   * 上限取得远低于它，保证表上的每一次多停运行时都真的会扣。
+   */
+  public static final int FEEDER_HOLD_LIMIT_SECONDS = 60;
+
+  /** 逐组收紧最多走几遍：后收紧的单元可能给先前收不紧的腾出空间，走到一遍里谁都收不动为止。 */
+  static final int TIGHTEN_PASSES = 3;
+
+  /** 结构上不必多停时，按这个步长抽样试多停（沿线错开只有完整构建看得见）。 */
+  static final int FEEDER_HOLD_GRID_SECONDS = 15;
+
+  /** 同一个间隔下最多完整构建几种多停（候选里取最短的几个）：每种都是一次完整构建，不能无限试。 */
+  static final int FEEDER_HOLD_TRIES = 3;
+
   private final TimetableTimingCalculator timingCalculator;
 
   public TimetableBuilder() {
@@ -123,6 +142,8 @@ public final class TimetableBuilder {
     int targetHeadway = target.headwaySeconds();
 
     Attempt chosen = target;
+    // 选中的那份准备：喂车方向多停时是改过那几条 route 时分的一份（时分、投影、走行都跟着变）。
+    Prepared chosenPrepared = prepared;
     List<String> warnings = new ArrayList<>();
     // 只有"运行时也让不掉"的残余才算目标间隔不可行；可吸收的那些照常发布。
     if (!target.clean()) {
@@ -137,10 +158,10 @@ public final class TimetableBuilder {
         return TimetableBuildResult.failure(String.join("\n", reasons), prepared.infeasible());
       }
       List<String> searchNotes = new ArrayList<>();
-      // 已经排不开的各组间隔：搜索与收紧都往里记，收紧时用它剪掉注定失败的完整构建（一次几十秒）。
-      List<Map<String, Integer>> failed = new ArrayList<>();
-      failed.add(target.intervals());
-      Optional<Attempt> fallback =
+      // 已经排不开的各组间隔：搜索与收紧都往里记，收紧时用它剪掉注定失败的完整构建。
+      List<Failure> failed = new ArrayList<>();
+      failed.add(new Failure(FeederHold.NONE, target.intervals()));
+      Optional<Found> fallback =
           searchFeasibleHeadway(prepared, options, target, input, builtAt, searchNotes, failed);
       if (fallback.isEmpty()) {
         return TimetableBuildResult.failure(
@@ -154,9 +175,19 @@ public final class TimetableBuilder {
                     options.dutyLimits().turnaround()),
             prepared.infeasible());
       }
+      Found found = fallback.get();
+      chosenPrepared = found.prepared();
       chosen =
           tightenGroups(
-              prepared, options, target, fallback.get(), input, builtAt, searchNotes, failed);
+              found.prepared(),
+              options,
+              target,
+              found.attempt(),
+              found.input(),
+              builtAt,
+              searchNotes,
+              failed,
+              found.hold());
       warnings.addAll(searchNotes);
       warnings.add(
           summary
@@ -219,7 +250,7 @@ public final class TimetableBuilder {
     Timetable timetable = chosen.timetable();
 
     int longestTrip =
-        prepared.operationPlans().stream()
+        chosenPrepared.operationPlans().stream()
             .mapToInt(TimetableRoutePlan::totalRunSeconds)
             .max()
             .orElse(0);
@@ -319,12 +350,23 @@ public final class TimetableBuilder {
       BuildInput input,
       TimetableBuildOptions options,
       List<TimetableBuildResult.InfeasibleRoute> infeasible) {
+    return prepare(input, options, infeasible, null);
+  }
+
+  /**
+   * @param knownIndex 已经建好的图索引（同一张图）；为空时现建
+   */
+  private Prepared prepare(
+      BuildInput input,
+      TimetableBuildOptions options,
+      List<TimetableBuildResult.InfeasibleRoute> infeasible,
+      TimetableConflictChecker.GraphIndex knownIndex) {
     UUID timetableId = input.timetableId();
     List<TimetableRoutePlan> plans = new ArrayList<>();
     List<OperationPlan> operations = new ArrayList<>();
     // 图索引只建一次：站台映射要用节点类型，冲突扫描要用容量与单线区段。
     TimetableConflictChecker.GraphIndex graphIndex =
-        TimetableConflictChecker.GraphIndex.of(input.graph());
+        knownIndex != null ? knownIndex : TimetableConflictChecker.GraphIndex.of(input.graph());
     List<VehicleDutyPlanner.Leg> createLegs = new ArrayList<>();
     List<VehicleDutyPlanner.Leg> returnLegs = new ArrayList<>();
     Map<UUID, String> legStation = new HashMap<>();
@@ -903,18 +945,36 @@ public final class TimetableBuilder {
    *
    * <p>只放宽间隔、不挪动单个班次：表的结构（SWRR 序列、duty 链）在任何间隔下都用同一套规则生成，因此找到的间隔是一个可以直接写回配置的数， 而不是一次性的手工调整。
    *
-   * @param searchNotes 搜索过程的说明（跳过了哪些结构上不可行的间隔），进报告
-   * @param failed 排不开的各组间隔，搜索往里追加
+   * <p>结构预筛之外还有一个可调量：按车接续的喂车方向在第一个中途停车点多停几秒（{@link HoldSearch}）。相位层原本只能让被接往返对的反向车在远端多等，
+   * 这一等把它回到端点与回库过咽喉两件事一起平移，而喂车方向到端点与出库过咽喉之间差的是它自己的走行——两个约束的相对位置被走行锁死， 时分一变就可能无解（实服：停站开销从 4 秒改成 2
+   * 秒，WS 最小可行间隔反而从 176 秒变成 185 秒）。喂车方向中途多停 h 秒， 它出库过咽喉就早 h
+   * 秒、到端点不变，两个约束解开；它还让喂车方向与同向别的方向在共用站台上错开，这一层只有完整构建看得见。每个间隔先试不多停，再从短到长试 {@link HoldSearch#feasible}
+   * 给出的几种多停（实服三线联编：WS 176 → 156）。
+   *
+   * @param searchNotes 搜索过程的说明（跳过了哪些结构上不可行的间隔、喂车方向多停了多少），进报告
+   * @param failed 排不开的间隔（连同当时的多停），搜索往里追加
    */
-  private Optional<Attempt> searchFeasibleHeadway(
+  private Optional<Found> searchFeasibleHeadway(
       Prepared prepared,
       TimetableBuildOptions options,
       Attempt target,
       BuildInput input,
       Instant builtAt,
       List<String> searchNotes,
-      List<Map<String, Integer>> failed) {
+      List<Failure> failed) {
     int targetHeadway = target.headwaySeconds();
+    HoldSearch holds = new HoldSearch(prepared, options, input);
+    // 目标间隔不多停已经试过；结构上排不开时先看喂车方向中途多停能不能错开，再往上放宽。
+    for (FeederHold hold : holds.feasible(options)) {
+      if (hold.isNone()) {
+        continue;
+      }
+      Optional<Found> found = tryAt(holds, hold, options, builtAt, failed);
+      if (found.isPresent()) {
+        searchNotes.add(holds.describe(hold));
+        return found;
+      }
+    }
     boolean structural = structuralClearance(prepared, options).isPresent();
     HeadwayCandidates candidates =
         new HeadwayCandidates(
@@ -922,37 +982,60 @@ public final class TimetableBuilder {
             targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
             HEADWAY_SEARCH_STEP_SECONDS,
             structural
-                ? headway -> {
-                  OptionalInt clearance =
-                      structuralClearance(prepared, relaxedOptions(options, target, headway));
-                  return clearance.isEmpty() || clearance.getAsInt() >= 0;
-                }
+                ? headway -> !holds.feasible(relaxedOptions(options, target, headway)).isEmpty()
                 : null);
     for (OptionalInt next = candidates.next(); next.isPresent(); next = candidates.next()) {
-      Attempt candidate;
-      try {
-        candidate =
-            attempt(prepared, relaxedOptions(options, target, next.getAsInt()), input, builtAt);
-      } catch (BuildFailure ignored) {
-        continue;
-      }
-      if (!candidate.clean()) {
-        failed.add(candidate.intervals());
-      }
-      if (candidate.clean()) {
+      TimetableBuildOptions relaxed = relaxedOptions(options, target, next.getAsInt());
+      List<FeederHold> tries = structural ? holds.feasible(relaxed) : List.of(FeederHold.NONE);
+      for (FeederHold hold : tries) {
+        Optional<Found> found = tryAt(holds, hold, relaxed, builtAt, failed);
+        if (found.isEmpty()) {
+          continue;
+        }
         if (candidates.skipped() > 0) {
           searchNotes.add(
               String.format(
                   Locale.ROOT,
-                  "搜索逐秒预筛：%d–%ds 之间 %d 档间隔端点或车库咽喉在结构上错不开，没有逐一构建",
+                  "搜索逐秒预筛：%d–%ds 之间 %d 档间隔端点或车库咽喉在结构上错不开（喂车多停 %d 秒内也不行），没有逐一构建",
                   candidates.skippedFrom(),
                   candidates.skippedTo(),
-                  candidates.skipped()));
+                  candidates.skipped(),
+                  FEEDER_HOLD_LIMIT_SECONDS));
         }
-        return Optional.of(candidate);
+        if (!hold.isNone()) {
+          searchNotes.add(holds.describe(hold));
+        }
+        return found;
       }
     }
     return Optional.empty();
+  }
+
+  /** 按某种多停完整构建一次；干净就交回，否则把失败的间隔记进 {@code failed}。 */
+  private Optional<Found> tryAt(
+      HoldSearch holds,
+      FeederHold hold,
+      TimetableBuildOptions options,
+      Instant builtAt,
+      List<Failure> failed) {
+    Prepared variant;
+    try {
+      variant = holds.prepared(hold);
+    } catch (BuildFailure ignored) {
+      return Optional.empty();
+    }
+    BuildInput variantInput = holds.input(hold);
+    Attempt candidate;
+    try {
+      candidate = attempt(variant, options, variantInput, builtAt);
+    } catch (BuildFailure ignored) {
+      return Optional.empty();
+    }
+    if (!candidate.clean()) {
+      failed.add(new Failure(hold, candidate.intervals()));
+      return Optional.empty();
+    }
+    return Optional.of(new Found(candidate, variant, variantInput, hold));
   }
 
   /**
@@ -962,15 +1045,16 @@ public final class TimetableBuilder {
    * 200 照样排得开。
    *
    * <p>按车接续连在一起的组必须同一个间隔，并成一个单元一起收紧，单元内保持目标比例。单元按放宽的秒数从多到少、同秒按名字依次试：
-   * 先试目标间隔，再按格点与预筛岛的起点往上，直到当前间隔之前，第一个干净的就收下，其余单元不动。每一步收下的表里所有组都不比上一步慢，
-   * 所以结果不会比等比放宽差。只走一遍：后收紧的单元可能给先前没收紧成功的单元腾出空间，这里不回头再试。
+   * 先试目标间隔，再按格点与预筛岛的起点往上，直到当前间隔之前，第一个干净的就收下，其余单元不动。每一步收下的表里所有组都不比上一步慢， 所以结果不会比等比放宽差。最多走 {@value
+   * #TIGHTEN_PASSES} 遍：后收紧的单元可能给先前没收紧成功的单元腾出空间（实服三线联编里 WS 排在最后，它不先收紧 MT 就收不下来），一遍里谁都收不动就停。
    *
    * <p>剪枝：候选间隔若已经排不开过、而且当时单元外每一组都不比现在紧，就不再完整构建——单元外更紧只会多添约束。
    * 可行性对间隔并不单调，这是经验规则，换来的是省掉注定失败的构建（实服三线联编里一次 71 秒）。
    *
    * @param relaxed 等比放宽找到的可行尝试
    * @param notes 收紧了哪些组，进报告
-   * @param failed 排不开的各组间隔；收紧失败的也往里追加
+   * @param failed 排不开的间隔；收紧失败的也往里追加
+   * @param hold 放宽时选中的喂车多停；收紧沿用它，只有同一种多停下的失败才拿来剪枝
    * @return 收紧后的尝试；一个单元也收不紧时就是 {@code relaxed}
    */
   private Attempt tightenGroups(
@@ -981,66 +1065,77 @@ public final class TimetableBuilder {
       BuildInput input,
       Instant builtAt,
       List<String> notes,
-      List<Map<String, Integer>> failed) {
+      List<Failure> failed,
+      FeederHold hold) {
     Attempt current = relaxed;
-    for (Set<String> unit : tighteningUnits(prepared, options, target, relaxed)) {
-      int targetMin = minInterval(target.intervals(), unit);
-      int currentMin = minInterval(current.intervals(), unit);
-      if (currentMin <= targetMin) {
-        continue;
-      }
-      Attempt base = current;
-      IntPredicate structuralPass =
-          structuralClearance(prepared, options).isPresent()
-              ? headway -> {
-                OptionalInt clearance =
-                    structuralClearance(
-                        prepared, unitOptions(options, target, base, unit, headway));
-                return clearance.isEmpty() || clearance.getAsInt() >= 0;
-              }
-              : null;
-      Optional<Attempt> tightened = Optional.empty();
-      if (structuralPass == null || structuralPass.test(targetMin)) {
-        tightened =
-            tryTightening(
-                prepared,
-                unitOptions(options, target, base, unit, targetMin),
-                unit,
-                input,
-                builtAt,
-                failed);
-      }
-      HeadwayCandidates candidates =
-          new HeadwayCandidates(
-              targetMin, currentMin - 1, HEADWAY_SEARCH_STEP_SECONDS, structuralPass);
-      for (OptionalInt next = candidates.next();
-          tightened.isEmpty() && next.isPresent();
-          next = candidates.next()) {
-        tightened =
-            tryTightening(
-                prepared,
-                unitOptions(options, target, base, unit, next.getAsInt()),
-                unit,
-                input,
-                builtAt,
-                failed);
-      }
-      if (tightened.isPresent()) {
-        current = tightened.get();
-        List<String> changes = new ArrayList<>();
-        for (String group : unit) {
-          changes.add(
-              group
-                  + " "
-                  + base.intervals().get(group)
-                  + "s → "
-                  + current.intervals().get(group)
-                  + "s");
+    List<Set<String>> units = tighteningUnits(prepared, options, target, relaxed);
+    for (int pass = 0; pass < TIGHTEN_PASSES; pass++) {
+      boolean changed = false;
+      for (Set<String> unit : units) {
+        int targetMin = minInterval(target.intervals(), unit);
+        int currentMin = minInterval(current.intervals(), unit);
+        if (currentMin <= targetMin) {
+          continue;
         }
-        notes.add(
-            "逐组收紧："
-                + String.join("、", changes)
-                + (minInterval(current.intervals(), unit) == targetMin ? "（回到目标）" : ""));
+        Attempt base = current;
+        IntPredicate structuralPass =
+            structuralClearance(prepared, options).isPresent()
+                ? headway -> {
+                  OptionalInt clearance =
+                      structuralClearance(
+                          prepared, unitOptions(options, target, base, unit, headway));
+                  return clearance.isEmpty() || clearance.getAsInt() >= 0;
+                }
+                : null;
+        Optional<Attempt> tightened = Optional.empty();
+        if (structuralPass == null || structuralPass.test(targetMin)) {
+          tightened =
+              tryTightening(
+                  prepared,
+                  unitOptions(options, target, base, unit, targetMin),
+                  unit,
+                  input,
+                  builtAt,
+                  failed,
+                  hold);
+        }
+        HeadwayCandidates candidates =
+            new HeadwayCandidates(
+                targetMin, currentMin - 1, HEADWAY_SEARCH_STEP_SECONDS, structuralPass);
+        for (OptionalInt next = candidates.next();
+            tightened.isEmpty() && next.isPresent();
+            next = candidates.next()) {
+          tightened =
+              tryTightening(
+                  prepared,
+                  unitOptions(options, target, base, unit, next.getAsInt()),
+                  unit,
+                  input,
+                  builtAt,
+                  failed,
+                  hold);
+        }
+        if (tightened.isPresent()) {
+          current = tightened.get();
+          changed = true;
+          List<String> changes = new ArrayList<>();
+          for (String group : unit) {
+            changes.add(
+                group
+                    + " "
+                    + base.intervals().get(group)
+                    + "s → "
+                    + current.intervals().get(group)
+                    + "s");
+          }
+          notes.add(
+              "逐组收紧："
+                  + String.join("、", changes)
+                  + (minInterval(current.intervals(), unit) == targetMin ? "（回到目标）" : ""));
+        }
+      }
+      if (!changed) {
+        break;
       }
     }
     return current;
@@ -1056,13 +1151,15 @@ public final class TimetableBuilder {
       Set<String> unit,
       BuildInput input,
       Instant builtAt,
-      List<Map<String, Integer>> failed) {
+      List<Failure> failed,
+      FeederHold hold) {
     Map<String, Integer> intervals = new TreeMap<>();
     for (ServiceGroupClassifier.Group group : prepared.classification().groups()) {
       intervals.put(group.name(), options.intervalFor(group.name()));
     }
-    for (Map<String, Integer> known : failed) {
-      if (dominates(known, intervals, unit)) {
+    for (Failure known : failed) {
+      // 多停不同，时分就不同：别的多停下的失败说明不了这里。
+      if (known.hold().equals(hold) && dominates(known.intervals(), intervals, unit)) {
         return Optional.empty();
       }
     }
@@ -1071,9 +1168,9 @@ public final class TimetableBuilder {
       if (attempt.clean()) {
         return Optional.of(attempt);
       }
-      failed.add(attempt.intervals());
+      failed.add(new Failure(hold, attempt.intervals()));
     } catch (BuildFailure ignored) {
-      failed.add(intervals);
+      failed.add(new Failure(hold, intervals));
     }
     return Optional.empty();
   }
@@ -1384,6 +1481,17 @@ public final class TimetableBuilder {
    * 负数说明远端多等在上限内怎么挑都错不开——这个间隔下端点或咽喉必有冲突，不用完整构建就知道。
    */
   private static OptionalInt structuralClearance(Prepared prepared, TimetableBuildOptions options) {
+    return clearanceOf(structuralPhases(prepared, options));
+  }
+
+  /** 按车接续留下的最小间隙；没有按车接续时为空。 */
+  private static OptionalInt clearanceOf(PhasePlanner.Phases phases) {
+    return phases.connections().stream().mapToInt(PhasePlanner.Connection::clearanceSeconds).min();
+  }
+
+  /** 结构预筛用的前两层相位（含跨组按车接续与远端多等）。 */
+  private static PhasePlanner.Phases structuralPhases(
+      Prepared prepared, TimetableBuildOptions options) {
     Map<String, Integer> intervalByGroup = new TreeMap<>();
     for (ServiceGroupClassifier.Group group : prepared.classification().groups()) {
       intervalByGroup.put(group.name(), options.intervalFor(group.name()));
@@ -1394,9 +1502,7 @@ public final class TimetableBuilder {
     }
     List<ServiceGroupClassifier.Group> gridGroups =
         gridGroupsOf(prepared.classification().groups(), gridRoutes);
-    return planPhases(prepared, options, intervalByGroup, gridGroups).connections().stream()
-        .mapToInt(PhasePlanner.Connection::clearanceSeconds)
-        .min();
+    return planPhases(prepared, options, intervalByGroup, gridGroups);
   }
 
   /** 每组只留下至少有一条 route 真正上网格的方向。 */
@@ -1564,7 +1670,261 @@ public final class TimetableBuilder {
       List<TimetableBuildResult.InfeasibleRoute> infeasible,
       ServiceGroupClassifier.Classification classification,
       Set<UUID> passengerReturns,
-      Map<UUID, Integer> runByRoute) {}
+      Map<UUID, Integer> runByRoute) {
+
+    /** 这几条 route 的全程走行各加 {@code seconds}，其余不变：结构预筛估喂车多停的效果，只有走行进相位层。 */
+    Prepared withExtraRun(Collection<UUID> routeIds, int seconds) {
+      Map<UUID, Integer> run = new HashMap<>(runByRoute);
+      for (UUID routeId : routeIds) {
+        run.computeIfPresent(routeId, (id, value) -> value + seconds);
+      }
+      return new Prepared(
+          timetableId,
+          graphIndex,
+          plans,
+          operations,
+          operationPlans,
+          candidates,
+          legs,
+          profiles,
+          infeasible,
+          classification,
+          passengerReturns,
+          Map.copyOf(run));
+    }
+  }
+
+  /**
+   * 按车接续的喂车方向中途多停：这几条 route 在各自第一个中途停车点多停 {@code seconds} 秒。
+   *
+   * @param routeIds 喂车方向的 route
+   * @param seconds 多停秒数；0 表示不多停
+   */
+  record FeederHold(List<UUID> routeIds, int seconds) {
+    static final FeederHold NONE = new FeederHold(List.of(), 0);
+
+    FeederHold {
+      routeIds = routeIds == null ? List.of() : List.copyOf(routeIds);
+    }
+
+    boolean isNone() {
+      return seconds <= 0;
+    }
+  }
+
+  /** 一次排不开的完整构建：当时的多停与各组间隔。 */
+  private record Failure(FeederHold hold, Map<String, Integer> intervals) {}
+
+  /** 搜索找到的可行尝试，连同它用的准备、输入与多停。 */
+  private record Found(Attempt attempt, Prepared prepared, BuildInput input, FeederHold hold) {}
+
+  /**
+   * 喂车方向中途多停的搜索：给定间隔下结构上排得开的多停有哪些，以及某种多停对应的输入与准备。
+   *
+   * <p>多停加在喂车方向每条 route 的第一个中途停车点——过了出库咽喉、还没到端点，于是出库过咽喉提前、到端点不变。 结构判断只把这几条 route
+   * 的全程走行加上多停秒数，让相位层重算按车接续（毫秒级）；真要完整构建时才改 route 的停站、重算时分与投影。 表上写的就是加长的停站，运行时靠"早到等点"执行。
+   */
+  private final class HoldSearch {
+    private final Prepared base;
+    private final TimetableBuildOptions options;
+    private final BuildInput input;
+    private final Map<Map<String, Integer>, List<FeederHold>> feasibleByIntervals = new HashMap<>();
+    private final Map<FeederHold, Prepared> preparedByHold = new HashMap<>();
+    private final Map<FeederHold, BuildInput> inputByHold = new HashMap<>();
+
+    HoldSearch(Prepared base, TimetableBuildOptions options, BuildInput input) {
+      this.base = base;
+      this.options = options;
+      this.input = input;
+    }
+
+    /**
+     * 这组间隔下值得完整构建的多停，不多停在前、其余按秒数从短到长，最多 {@value #FEEDER_HOLD_TRIES} 种多停。
+     *
+     * <p>多停有两种作用。一是结构上的：喂车方向到端点不变、出库过咽喉提前，把端点与咽喉两个约束解开——相位层看得见，
+     * 结构上排不开的多停一律不试。二是沿线的：喂车方向到端点前的那一段整体后移，与同向别的方向在共用站台上错开 （实服 1L 与 2N 同向共用
+     * HHU:2、KPO:2、LYM:2、PHI:2）——相位层看不见，
+     * 此时远端多等会把多停抵消掉，结构间隙对多停不敏感，只有完整构建才知道。所以候选取两类：结构上排得开的每一段区间里间隙最大的那一秒， 以及每 {@value
+     * #FEEDER_HOLD_GRID_SECONDS} 秒一档里结构上排得开的那些。实服 WS@156：不多停撞，多停 10 秒撞，20–45 秒排得开，60 秒又撞。
+     *
+     * <p>没有按车接续时只有 NONE（交给完整构建判）。
+     */
+    List<FeederHold> feasible(TimetableBuildOptions at) {
+      return feasibleByIntervals.computeIfAbsent(intervalsOf(base, at), key -> scan(at));
+    }
+
+    private List<FeederHold> scan(TimetableBuildOptions at) {
+      PhasePlanner.Phases phases = structuralPhases(base, at);
+      OptionalInt clearance = clearanceOf(phases);
+      List<FeederHold> out = new ArrayList<>();
+      if (clearance.isEmpty() || clearance.getAsInt() >= 0) {
+        out.add(FeederHold.NONE);
+      }
+      if (clearance.isEmpty()) {
+        return out;
+      }
+      List<UUID> feeders = holdableFeeders(phases.connections());
+      if (feeders.isEmpty()) {
+        return out;
+      }
+      int limit = Math.min(FEEDER_HOLD_LIMIT_SECONDS, minInterval(intervalsOf(base, at)) - 1);
+      int[] gap = new int[limit + 1];
+      gap[0] = clearance.getAsInt();
+      for (int h = 1; h <= limit; h++) {
+        OptionalInt held = clearanceOf(structuralPhases(base.withExtraRun(feeders, h), at));
+        gap[h] = held.isPresent() ? held.getAsInt() : Integer.MIN_VALUE;
+      }
+      Set<Integer> picks = new TreeSet<>();
+      // 结构上排得开的每一段区间取间隙最大的那一秒（并列取较短的）；从 0 起的那一段由 NONE 代表。
+      int h = 1;
+      while (h <= limit) {
+        if (gap[h] < 0) {
+          h++;
+          continue;
+        }
+        int start = h;
+        int best = h;
+        while (h <= limit && gap[h] >= 0) {
+          if (gap[h] > gap[best]) {
+            best = h;
+          }
+          h++;
+        }
+        if (start > 1 || gap[0] < 0) {
+          picks.add(best);
+        }
+      }
+      for (int step = FEEDER_HOLD_GRID_SECONDS; step <= limit; step += FEEDER_HOLD_GRID_SECONDS) {
+        if (gap[step] >= 0) {
+          picks.add(step);
+        }
+      }
+      for (int pick : picks) {
+        if (out.size() - (out.contains(FeederHold.NONE) ? 1 : 0) >= FEEDER_HOLD_TRIES) {
+          break;
+        }
+        out.add(new FeederHold(feeders, pick));
+      }
+      return out;
+    }
+
+    /** 喂车方向的 route；有一条找不到中途停车点就整体不多停——同一方向的车必须一起挪，否则相位对不上。 */
+    private List<UUID> holdableFeeders(List<PhasePlanner.Connection> connections) {
+      Set<UUID> feeders = new java.util.LinkedHashSet<>();
+      for (PhasePlanner.Connection connection : connections) {
+        feeders.addAll(connection.feederRoutes());
+      }
+      for (UUID routeId : feeders) {
+        Optional<RouteInput> route = routeOf(routeId);
+        if (route.isEmpty() || firstIntermediateStop(route.get().stops()).isEmpty()) {
+          return List.of();
+        }
+      }
+      return List.copyOf(feeders);
+    }
+
+    BuildInput input(FeederHold hold) {
+      if (hold.isNone()) {
+        return input;
+      }
+      return inputByHold.computeIfAbsent(
+          hold,
+          key -> {
+            List<RouteInput> routes = new ArrayList<>(input.routes().size());
+            for (RouteInput route : input.routes()) {
+              routes.add(
+                  key.routeIds().contains(route.routeId())
+                      ? held(route, key.seconds(), options.defaultDwell())
+                      : route);
+            }
+            return input.withRoutes(routes);
+          });
+    }
+
+    /** 按多停重算的准备：停站变了，时分、投影、走行都跟着变；图索引沿用。 */
+    Prepared prepared(FeederHold hold) {
+      if (hold.isNone()) {
+        return base;
+      }
+      Prepared known = preparedByHold.get(hold);
+      if (known == null) {
+        known = prepare(input(hold), options, new ArrayList<>(), base.graphIndex());
+        preparedByHold.put(hold, known);
+      }
+      return known;
+    }
+
+    /** 报告里的一行：谁在哪一站多停了多少。 */
+    String describe(FeederHold hold) {
+      List<String> parts = new ArrayList<>();
+      for (UUID routeId : hold.routeIds()) {
+        routeOf(routeId)
+            .ifPresent(
+                route ->
+                    firstIntermediateStop(route.stops())
+                        .ifPresent(
+                            index ->
+                                parts.add(
+                                    route.routeCode()
+                                        + " 在 "
+                                        + route.definition().waypoints().get(index).value())));
+      }
+      return "按车接续：喂车方向 "
+          + String.join("、", parts)
+          + " 多停 "
+          + hold.seconds()
+          + "s（写进停站，运行时按早到等点扣留）";
+    }
+
+    private Optional<RouteInput> routeOf(UUID routeId) {
+      return input.routes().stream().filter(route -> route.routeId().equals(routeId)).findFirst();
+    }
+  }
+
+  /** 第一个中途停车点（首末之间第一个 STOP）；停靠配置与 waypoints 按下标对齐。 */
+  static Optional<Integer> firstIntermediateStop(List<RouteStop> stops) {
+    for (int i = 1; i + 1 < stops.size(); i++) {
+      if (stops.get(i).passType() == RouteStopPassType.STOP) {
+        return Optional.of(i);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 在第一个中途停车点多停 {@code seconds} 秒：没配 dwell 的按缺省停站算起。找不到中途停车点时原样返回。 */
+  static RouteInput held(RouteInput route, int seconds, Duration defaultDwell) {
+    Optional<Integer> at = firstIntermediateStop(route.stops());
+    if (at.isEmpty() || seconds <= 0) {
+      return route;
+    }
+    List<RouteStop> stops = new ArrayList<>(route.stops());
+    RouteStop stop = stops.get(at.get());
+    int dwell = stop.dwellSeconds().orElse((int) defaultDwell.toSeconds());
+    stops.set(
+        at.get(),
+        new RouteStop(
+            stop.routeId(),
+            stop.sequence(),
+            stop.stationId(),
+            stop.waypointNodeId(),
+            Optional.of(dwell + seconds),
+            stop.passType(),
+            stop.notes()));
+    return route.withStops(stops);
+  }
+
+  private static Map<String, Integer> intervalsOf(
+      Prepared prepared, TimetableBuildOptions options) {
+    Map<String, Integer> intervals = new TreeMap<>();
+    for (ServiceGroupClassifier.Group group : prepared.classification().groups()) {
+      intervals.put(group.name(), options.intervalFor(group.name()));
+    }
+    return intervals;
+  }
+
+  private static int minInterval(Map<String, Integer> intervals) {
+    return intervals.values().stream().mapToInt(Integer::intValue).min().orElse(1);
+  }
 
   /** 按某个 headway 排出来的一份完整计划及其冲突报告。 */
   private record Attempt(
@@ -1675,6 +2035,23 @@ public final class TimetableBuilder {
       notes = notes == null ? Optional.empty() : notes;
       neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
       lineByRoute = lineByRoute == null ? Map.of() : Map.copyOf(lineByRoute);
+    }
+
+    /** 换一份 route 列表，其余不变。 */
+    BuildInput withRoutes(List<RouteInput> nextRoutes) {
+      return new BuildInput(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          nextRoutes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute);
     }
 
     /** 单线构建：所有 route 同一车池。 */
@@ -1795,6 +2172,21 @@ public final class TimetableBuilder {
           spawnGroup == null
               ? Optional.empty()
               : spawnGroup.map(String::trim).filter(g -> !g.isBlank());
+    }
+
+    /** 换一份停靠配置，其余不变。 */
+    RouteInput withStops(List<RouteStop> nextStops) {
+      return new RouteInput(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          nextStops,
+          depotNodeId,
+          declaredAs,
+          external,
+          spawnGroup);
     }
 
     /** 没有交路组信息的构造：进默认组。 */
