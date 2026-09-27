@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
@@ -338,6 +339,19 @@ public final class TrainHealthMonitor {
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
 
+  /**
+   * 受控停站：正在 dwell，或正被按表扣在站里等点。
+   *
+   * <p>两种情况下静止、进度不变都是计划内的。按表扣车比 dwell 长得多（最长 150 秒），不排除的话停滞检测会在扣留期间 派发恢复动作，一路升级到强制重发，把等点的车提前放走。
+   */
+  private boolean inControlledStationStop(String trainName) {
+    if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent()) {
+      return true;
+    }
+    StationStopCoordinator stationStops = dispatchService.stationStops();
+    return stationStops != null && stationStops.holdingForSchedule(trainName);
+  }
+
   /** 设置静止阈值。 */
   public void setStallThreshold(Duration threshold) {
     if (threshold != null && !threshold.isNegative()) {
@@ -487,7 +501,7 @@ public final class TrainHealthMonitor {
       if (stateOpt.isEmpty()) {
         continue;
       }
-      if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent()) {
+      if (inControlledStationStop(trainName)) {
         continue;
       }
       RuntimeDispatchService.TrainRuntimeState state = stateOpt.get();
@@ -621,10 +635,8 @@ public final class TrainHealthMonitor {
         recovery.resetDeadlock();
       }
 
-      // 排除正在停站（dwell）的列车：停站期间静止和进度不变都是正常的
-      boolean isDwelling =
-          dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent();
-      if (isDwelling) {
+      // 排除受控停站（dwell 或按表扣车）的列车：这期间静止和进度不变都是正常的
+      if (inControlledStationStop(trainName)) {
         // Dwell 是受控停车，不应计入下一段 STOP 的互卡/停滞年龄。每次采样都把两个时钟锚定到当前时刻，
         // 这样停站结束后的短暂信号重算窗口会从零开始观察。
         snapshots.put(

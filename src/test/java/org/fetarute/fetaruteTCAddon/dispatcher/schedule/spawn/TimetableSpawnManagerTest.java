@@ -16,6 +16,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
@@ -177,7 +178,88 @@ class TimetableSpawnManagerTest {
         () -> fixture.logs.toString());
   }
 
+  /**
+   * 出库票在车库口重试期间，重启后留下的车在首站接下了这个交路：出库票作废，不再出第二辆车。
+   *
+   * <p>2026-09-27 实服就是这个顺序——出库票被车库咽喉挡了一分钟，这期间留下的车绑走了那一班；出库票随后照发，
+   * 同一交路两辆车，后出的那辆从此抢下一班。续班票不受影响：它只接本交路的车，不会多出车。
+   */
+  @Test
+  void createTicketIsDroppedOnceItsDutyHasATrain() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> tickets = fixture.pollAll();
+    SpawnTicket create = tickets.get(0);
+    SpawnTicket continuation = tickets.get(2);
+    Instant now = DAY.plusSeconds(8 * 3600 + 5);
+    fixture.service.scheduledDepartureAt(
+        new StationStopEvent("train-restored", Optional.of(ROUTE), "R1", 0, 2, "OP:S:AAA:1", now));
+    fixture.logs.clear();
+
+    fixture.manager.requeue(create.delayedUntil(now, "depot-busy"));
+    fixture.manager.requeue(continuation.delayedUntil(now, "waiting-vehicle"));
+    List<SpawnTicket> released =
+        fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(5));
+
+    assertTrue(released.stream().noneMatch(t -> t.id().equals(create.id())), "交路已有车，不再出库");
+    assertTrue(released.stream().anyMatch(t -> t.id().equals(continuation.id())), "续班票照常放出");
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(
+                line ->
+                    line.contains("reason=duty-already-running")
+                        && line.contains("kind=CREATE")
+                        && line.contains("train=train-restored")),
+        () -> fixture.logs.toString());
+    assertTrue(
+        fixture.logs.stream().noneMatch(line -> line.contains("reason=abandoned")),
+        () -> "作废原因必须是交路已有车，不能混进超时：" + fixture.logs);
+    assertTrue(fixture.manager.expiryOf(create).isEmpty(), "作废后不再跟踪");
+  }
+
+  /** 首班本身从车库始发（没有出库走行）时，首班票就是出库票：交路已有车同样作废。 */
+  @Test
+  void depotFirstTripTicketIsDroppedOnceItsDutyHasATrain() {
+    Fixture fixture = fixture(depotStartTimetable());
+    List<SpawnTicket> tickets = fixture.pollAll();
+    SpawnTicket firstTrip = tickets.get(0);
+    assertEquals(ROUTE, firstTrip.service().routeId(), () -> tickets.toString());
+    Instant now = DAY.plusSeconds(8 * 3600 + 5);
+    fixture.service.scheduledDepartureAt(
+        new StationStopEvent("train-restored", Optional.of(ROUTE), "R1", 0, 2, "OP:S:AAA:1", now));
+
+    fixture.manager.requeue(firstTrip.delayedUntil(now, "depot-busy"));
+    List<SpawnTicket> released =
+        fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(5));
+
+    assertTrue(
+        released.stream().noneMatch(t -> t.id().equals(firstTrip.id())),
+        () -> fixture.logs.toString());
+  }
+
   // ------------------------------------------------------------------ 夹具
+
+  /** 同一份表，但交路没有出库走行：首班 route 本身从车库始发，首班票就是出库票。 */
+  private static Timetable depotStartTimetable() {
+    Timetable base = timetable();
+    VehicleDuty duty = base.duties().get(0);
+    return base.withTripsAndDuties(
+        base.trips(),
+        List.of(
+            new VehicleDuty(
+                duty.id(),
+                duty.timetableId(),
+                duty.sequence(),
+                duty.dutyCode(),
+                duty.startDepotNodeId(),
+                duty.endDepotNodeId(),
+                Optional.empty(),
+                duty.returnRouteId(),
+                duty.tripIds(),
+                8 * 3600,
+                duty.returnSecondOfDay(),
+                duty.plannedEndSecondOfDay(),
+                duty.closeReason())));
+  }
 
   private static Fixture fixture() {
     return fixture(timetable());

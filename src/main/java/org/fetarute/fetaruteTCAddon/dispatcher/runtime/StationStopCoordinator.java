@@ -4,9 +4,12 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -47,6 +50,9 @@ public final class StationStopCoordinator {
   private volatile StationStopObserver observer;
   private volatile ScheduledDeparturePlan plan;
   private volatile Duration maxHold = Duration.ZERO;
+
+  /** 正在按表扣留的车 → 扣到几点。只用来回答健康检查"它是不是在等点"，不参与任何放行判定。 */
+  private final ConcurrentMap<String, Instant> scheduledHolds = new ConcurrentHashMap<>();
 
   StationStopCoordinator(
       Consumer<String> debugLogger,
@@ -108,10 +114,50 @@ public final class StationStopCoordinator {
       int currentIndex,
       NodeId nodeId,
       Instant now) {
+    Optional<Instant> heldUntil =
+        scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now);
+    String key = holdKey(trainName);
+    if (key != null) {
+      heldUntil.ifPresentOrElse(
+          until -> scheduledHolds.put(key, until), () -> scheduledHolds.remove(key));
+    }
+    return heldUntil.isPresent();
+  }
+
+  /**
+   * 这辆车此刻是否正被按表扣在站里。
+   *
+   * <p>给健康检查用：扣留期间静止、进度不变都是计划内的，和 dwell 一样不能当成停滞去"恢复"—— 恢复动作一路升级到强制重发，会把等点的车提前放走。
+   * 最近一次门控放行（到点、晚点或改了计划）即失效，最迟到计划发车时刻自动失效。
+   *
+   * @param trainName 列车名（大小写不敏感）
+   * @return 正在按表扣留时返回 true
+   */
+  public boolean holdingForSchedule(String trainName) {
+    String key = holdKey(trainName);
+    Instant until = key == null ? null : scheduledHolds.get(key);
+    if (until == null) {
+      return false;
+    }
+    if (clock.get().isBefore(until)) {
+      return true;
+    }
+    scheduledHolds.remove(key, until);
+    return false;
+  }
+
+  /** 扣留判定本体：要扣就返回扣到几点。 */
+  private Optional<Instant> scheduledHoldTarget(
+      String trainName,
+      RouteDefinition route,
+      Optional<UUID> routeUuid,
+      int currentIndex,
+      NodeId nodeId,
+      Instant now) {
     ScheduledDeparturePlan current = this.plan;
     Duration cap = this.maxHold;
     if (current == null || cap.isZero() || route == null || nodeId == null || now == null) {
-      return false;
+      return Optional.empty();
     }
     Optional<Instant> scheduled;
     try {
@@ -121,15 +167,15 @@ public final class StationStopCoordinator {
     } catch (RuntimeException ex) {
       // 计划源自己出错时绝不能把车留在站里：吞掉异常、记一条审计、按现状放行。
       debugLogger.accept("SCHEDULED_DEPARTURE_PLAN_FAILED train=" + trainName + " error=" + ex);
-      return false;
+      return Optional.empty();
     }
     if (scheduled == null || scheduled.isEmpty()) {
-      return false;
+      return Optional.empty();
     }
     Instant target = scheduled.get();
     if (!now.isBefore(target)) {
       // 已到点或已晚点：立刻放行。时刻表不负责让晚点的车更晚。
-      return false;
+      return Optional.empty();
     }
     Duration early = Duration.between(now, target);
     if (early.compareTo(cap) > 0) {
@@ -143,7 +189,7 @@ public final class StationStopCoordinator {
               + early.toSeconds()
               + " maxHoldSeconds="
               + cap.toSeconds());
-      return false;
+      return Optional.empty();
     }
     debugLogger.accept(
         "SCHEDULED_DEPARTURE_HOLD train="
@@ -156,7 +202,7 @@ public final class StationStopCoordinator {
             + target
             + " remainingSeconds="
             + early.toSeconds());
-    return true;
+    return Optional.of(target);
   }
 
   /**
@@ -235,6 +281,10 @@ public final class StationStopCoordinator {
 
   /** 播报某辆车已离开运行时管辖。 */
   public void notifyReleased(String trainName, String reason) {
+    String key = holdKey(trainName);
+    if (key != null) {
+      scheduledHolds.remove(key);
+    }
     StationStopObserver current = this.observer;
     if (current == null || trainName == null || trainName.isBlank()) {
       return;
@@ -244,6 +294,13 @@ public final class StationStopCoordinator {
     } catch (RuntimeException ex) {
       debugLogger.accept("STATION_STOP_OBSERVER_FAILED train=" + trainName + " error=" + ex);
     }
+  }
+
+  private static String holdKey(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return null;
+    }
+    return trainName.trim().toLowerCase(Locale.ROOT);
   }
 
   private static StationStopEvent event(

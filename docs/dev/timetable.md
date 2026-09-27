@@ -563,6 +563,7 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 | 候选过滤 `acceptsVehicle` | 绑在某交路上的车只接同一交路的票；没绑交路的车只能接**首班**，续班与回库票都不接 |
 | 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），pending 与重试队列都适用，不走全局 max-age |
 | 派发回调 `onDispatched` | 出库票实体化的车、接了首班的车，立刻绑到交路上（`TIMETABLE_DUTY_BOUND`） |
+| 交路已有车 `runningVehicleFor` | 会新出一辆车的票（出库票；交路没有出库走行时的首班票）每次放出前都问：交路已经绑了车就作废（`TIMETABLE_SPAWN_SKIP reason=duty-already-running`）。同一交路只能有一辆车 |
 
 于是"接班没车"的语义是**等**：续班票在 pending 里等本交路那辆车到站（晚点就晚点跑），不抓别的交路的车，也不新出库；
 超过容差才作废。门控上首次绑定到带 duty 的车次时同样会建立交路绑定，所以自由运行的车一旦绑上表定车次，之后也只认自己的交路。
@@ -576,12 +577,25 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 
 ### 车次绑定
 
-列车与表定车次的绑定发生在**第一次问门控**时：取该 route 所有已发布时刻表里，在当前停靠点
-计划发车时刻与"现在"最接近、偏差在 `assign-tolerance-seconds` 内、尚未被别的车占用的那一趟。
+列车与表定车次的绑定发生在**第一次问门控**时，分两种车：
+
+- **已经绑在交路上的车**（出库票出来的、接了本交路续班的）只在**本交路**里找：同一 route、当前停靠点计划发车离"现在"最近、
+  没被别的车占用的那一班，**不看容差**。交路已经说明了它该跑哪一班，晚点就晚点跑。同一 route 在一个交路里相隔整整一圈，就近不会选错。
+- **没绑交路的车**（重启后留在线上的车、自由运行的车）按时间就近：偏差在 `assign-tolerance-seconds` 内、尚未被别的车占用，
+  并且**跳过别的车已经绑定的交路**——那一班有它自己的车。绑上之后它就接下了那个交路，那个交路的出库票随之作废（见上表）。
+
 没有合适的就不绑定，该车自由运行。
+
+为什么绑交路的车不能按时间去抢：2026-09-27 实服，重启后留下的一辆 MT-2 车按时间绑走了当前那一班，那一班的出库票照发，
+同一交路出了两辆车；后出的那辆只好抢下一班，下一班的出库车再往后抢——此后每辆车都早到整整一班、在首站扣 40–120 秒等别人的时刻，
+挡住车库出车，全网发车队列跟着堵；交路归属与进度对不上，到终点回库票被当成"别的交路"拒掉，车永久停在 PPK。
 
 回到起点（`stopIndex == 0`）会重新匹配——那是新的一趟车。不重新匹配的话，同一条 route 上
 连续接班的列车会一直用第一趟的时刻，交路进度也永远停在第一班。
+
+交路进度记的是"跑到了交路里的第几班"，按那一班在 `VehicleDuty#tripIds` 里的位置算，只进不退；带客回库班不在其中，跑到它即视为跑完。
+不按指派次数数：折返复用常常给车改名（新名字从零数起），某一站没问到门控也会漏一次，两种情况都会让跑完交路的车以为自己还有班要跑，
+回库票就带不走它。
 
 绑定只存在于内存：重启后所有车回到自由运行。**宁可少绑，不可错绑**——错误的绑定会让车等一个
 不属于它的时刻，而丢失绑定只会退回现状。
@@ -630,8 +644,8 @@ planned segment duration   vs   actual segment duration
 
 | 前缀 | 含义 |
 | --- | --- |
-| `TIMETABLE_ASSIGN` / `TIMETABLE_RELEASE` | 车次绑定与解绑 |
-| `TIMETABLE_ASSIGN_MISS` | 绑不上车次：最近的车次与偏差、容差、原因（`out-of-tolerance` / `all-claimed` / `no-trips`）；同车同站同原因一分钟一条，`/fta timetable status` 有累计计数 |
+| `TIMETABLE_ASSIGN` / `TIMETABLE_RELEASE` | 车次绑定与解绑；`scope=duty` 是按本交路绑的，`scope=nearest` 是没绑交路的车按时间就近绑的 |
+| `TIMETABLE_ASSIGN_MISS` | 绑不上车次：最近的车次与偏差、容差、原因（`out-of-tolerance` / `all-claimed` / `no-trips` / `duty-has-no-trip`：绑定的交路在这条 route 上没有车次）；同车同站同原因一分钟一条，`/fta timetable status` 有累计计数 |
 | `RECLAIM_STRANDED_DESTROY` / `RECLAIM_STRANDED_DESTROY_FAILED` / `RECLAIM_STRANDED_SKIP` | 该回收却派不出 RETURN 票的待命车滞留超过 `reclaim.stranded-destroy-seconds` 被销毁 / 销毁失败 / 跳过（`reason=has-passengers` 或 `reason=dispatch-attempt-in-progress`）。完整策略见 `reclaim-policy.md` |
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
 | `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票被否决、车留在终点 |
@@ -641,13 +655,15 @@ planned segment duration   vs   actual segment duration
 | `TIMETABLE_DUTY_RELEASED` | 交路进度随列车下线释放 |
 | `TIMETABLE_RELOAD` | 已发布时刻表缓存刷新 |
 | `TIMETABLE_PUBLISH_REJECTED` | 发布重检发现与已发布邻表冲突，拒绝发布 |
-| `TIMETABLE_SPAWN_TICKET` / `TIMETABLE_SPAWN_SKIP` | 表定出票（`kind=CREATE/OPERATION/RETURN`，带 duty）与跳过/作废原因（`no-spawn-service`、`abandoned`） |
+| `TIMETABLE_SPAWN_TICKET` / `TIMETABLE_SPAWN_SKIP` | 表定出票（`kind=CREATE/OPERATION/RETURN`，带 duty）与跳过/作废原因（`no-spawn-service`、`abandoned`、`duty-already-running`：交路已经有车，`train=` 是那辆车） |
 | `SCHEDULED_DEPARTURE_HOLD` | 某辆车正因等待表定时刻被扣留 |
 | `SCHEDULED_DEPARTURE_HOLD_SKIPPED` | 早到幅度超上限，已放行（多半绑错了车次） |
 | `SCHEDULED_DEPARTURE_PLAN_FAILED` | 计划源抛异常，已按现状放行 |
 
 现场看到"一辆车停在站里不动"时，先看有没有 `SCHEDULED_DEPARTURE_HOLD`：
-有就是正常等点，没有就与时刻表无关。
+有就是正常等点，没有就与时刻表无关。等点期间健康检查不报停滞（`StationStopCoordinator#holdingForSchedule`，与 dwell 同等对待）。
+如果每辆车都在同一站扣上一两分钟，看它们的 `TIMETABLE_ASSIGN`：`scope=nearest` 且偏差接近负一个间隔，说明没绑交路的车在抢班；
+紧跟着的 `TIMETABLE_DUTY_BIND_CONFLICT` 说明同一交路出了两辆车。
 
 看到"`TIMETABLE_ASSIGN` 变少、车都在自由跑"时，先看 `TIMETABLE_ASSIGN_MISS`：`out-of-tolerance` 且偏差为正说明车晚到超过容差
 （多半是跨线干扰或前车晚点），`no-trips` 说明这条 route 在表里没有这个停靠点的车次，`all-claimed` 说明同一趟车已被别的车绑走。

@@ -160,7 +160,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       // 回到起点就是新的一趟车。不在这里重新匹配的话，同一条 route 上连续接班的列车会一直用第一趟的时刻，
       // 交路进度也永远停在第一班——"每辆车最终都会回库"就失去了推进它的事件。
       // 但"还在起点等点"不算回到起点：门控每秒问一次，扣留期间反复解绑重绑只会刷日志、扫全表。
-      matcher.release(key, "new-circuit");
+      // 旧绑定由重新匹配换掉：匹配到的还是同一班（晚点超过容差、仍在起点）就原样保留。
       existing = null;
     }
     if (routeId == null) {
@@ -261,6 +261,37 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (key != null) {
       ledger.bind(trainName, key, duty, reason);
     }
+  }
+
+  /**
+   * 这张票要从车库新出一辆车、而它的交路已经有车在跑时，返回那辆车。
+   *
+   * <p>同一交路只能有一辆车。重启后留在线上的车没有交路归属，它在门控上按时间绑到当前那一班，也就接下了那一班的交路；
+   * 这时那一班的出库票再出库，就是同一交路两辆车——后出的那辆只能去抢下一班，从此每辆车错一班（2026-09-27 实服）。
+   *
+   * <p>只管"会新出一辆车"的票：出库走行票，以及交路没有出库走行、首班本身从车库始发时的首班票。 续班与回库票只接本交路的车，本来就不会多出车。
+   *
+   * @param intent 票据的交路意图
+   * @return 已经在跑这个交路的车（规范化后的键）；未启用按表运行、不是出库类票、或交路还没有车时为空
+   */
+  public Optional<String> runningVehicleFor(TicketIntent intent) {
+    if (!settings.enabled() || intent == null || !materializesVehicle(intent)) {
+      return Optional.empty();
+    }
+    return ledger.holderOf(intent.key());
+  }
+
+  private boolean materializesVehicle(TicketIntent intent) {
+    if (intent.kind() == RouteOperationType.CREATE) {
+      return true;
+    }
+    if (intent.kind() != RouteOperationType.OPERATION || intent.tripIndex() != 0) {
+      return false;
+    }
+    return Optional.ofNullable(snapshot.byId().get(intent.timetableId()))
+        .flatMap(timetable -> timetable.duty(intent.dutyId()))
+        .map(duty -> duty.createRouteId().isEmpty())
+        .orElse(false);
   }
 
   /** 查询某辆车绑在哪个交路上。 */
@@ -527,27 +558,21 @@ public final class TimetableService implements ScheduledDeparturePlan {
       List<Timetable> timetables,
       StationStopEvent event,
       Settings current) {
-    Optional<TripMatcher.Match> matched = matcher.match(key, routeId, timetables, event, current);
+    Optional<TripMatcher.Match> matched =
+        matcher.match(
+            key,
+            routeId,
+            timetables,
+            event,
+            current,
+            ledger.bindingOf(key),
+            duty -> ledger.heldByOther(duty, key));
     if (matched.isEmpty()) {
       return Optional.empty();
     }
     TripMatcher.Match match = matched.get();
     ledger.startOrAdvance(key, match.timetable(), match.trip());
-    match
-        .trip()
-        .dutyId()
-        .ifPresent(
-            dutyId ->
-                ledger.bind(
-                    event.trainName(),
-                    key,
-                    new DutyKey(
-                        match.timetable().id(),
-                        dutyId,
-                        match
-                            .timetable()
-                            .serviceDayOf(match.trip(), match.assignment().serviceDate())),
-                    "trip-assigned"));
+    match.duty().ifPresent(duty -> ledger.bind(event.trainName(), key, duty, "trip-assigned"));
     return Optional.of(match.assignment());
   }
 
@@ -621,7 +646,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param dutyId 交路 UUID
    * @param dutyCode 交路编号
    * @param plannedTrips 该交路计划承担的班次数（有限，构建时就夹住了）
-   * @param assignedTrips 已经被指派的班次数，含正在跑的那一班
+   * @param assignedTrips 跑到了交路里的第几班，含正在跑的那一班；按班次在交路里的位置算，不按指派次数数
    * @param lastTripId 最近一次指派的班次，用于识别"换了一班"而不是同一班的重复查询
    */
   public record DutyProgress(
@@ -635,8 +660,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
       assignedTrips = Math.max(0, assignedTrips);
     }
 
-    DutyProgress withTrip(UUID tripId) {
-      return new DutyProgress(dutyId, dutyCode, plannedTrips, assignedTrips + 1, tripId);
+    /** 跑到了交路里的第 {@code position} 班：进度只进不退，同一班的重复查询不会把它拉回去。 */
+    DutyProgress reached(UUID tripId, int position) {
+      return new DutyProgress(
+          dutyId, dutyCode, plannedTrips, Math.max(assignedTrips, position), tripId);
     }
 
     /** 交路是否已经用完额度。 */

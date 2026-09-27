@@ -472,6 +472,39 @@ class TimetableServiceTest {
   }
 
   /**
+   * 晚点超过容差、还堵在起点的车：每次问门控都重新匹配，结果仍是手上这一班，就原样保留，不解绑重绑。
+   *
+   * <p>绑在交路上的车匹配不看容差，所以"过了容差就不是在等点"的判定会让它每秒重新匹配一次；结果一样时若照样解绑再绑， 堵在起点的每辆车每秒刷两行日志。
+   */
+  @Test
+  void lateTrainStuckAtOriginKeepsItsTripWithoutRebinding() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = new TimetableService(Instant::now, logs::add);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            ZONE));
+    service.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+
+    // 08:00 那班晚了 180 秒（超过 120 秒容差），下一班 08:10 还差 420 秒：仍是 08:00 那班。
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:03:00Z")));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:03:01Z")));
+
+    assertEquals(Optional.of("R1-001"), service.assignmentOf("train-A").map(a -> a.tripCode()));
+    assertEquals(
+        1,
+        logs.stream().filter(line -> line.startsWith("TIMETABLE_ASSIGN ")).count(),
+        logs::toString);
+    assertTrue(
+        logs.stream().noneMatch(line -> line.startsWith("TIMETABLE_RELEASE")), logs::toString);
+  }
+
+  /**
    * 跨零点的班次：发车时刻取模后落到下一个日历日，但它属于前一个服务日的交路。
    *
    * <p>绑定的 DutyKey 必须用服务日，否则出库票（服务日 D）绑的车与 00:20 那班（日历日 D+1）对不上。
@@ -577,6 +610,62 @@ class TimetableServiceTest {
     service.bindDuty("train-A", second, "create-again");
 
     assertEquals(Optional.of(first), service.dutyBindingOf("train-A"));
+  }
+
+  /**
+   * 交路进度按班次在交路里的位置算，折返改名后的车不会从零数起。
+   *
+   * <p>折返复用常常给车改名，新名字没有进度。按指派次数数的话，这辆跑到第二班（也是最后一班）的车会以为自己才跑了 1/2， 回库票被 {@code allowsReturn}
+   * 拒绝，车就滞留在终点。
+   */
+  @Test
+  void dutyProgressFollowsTripPositionAcrossRenames() {
+    Timetable timetable = timetable(TimetableStatus.PUBLISHED);
+    TimetableService service = service(true, timetable);
+    service.bindDuty(
+        "train-renamed",
+        new TimetableService.DutyKey(
+            TIMETABLE, timetable.duties().get(0).id(), java.time.LocalDate.of(2026, 3, 2)),
+        "ticket-operation");
+
+    service.scheduledDepartureAt(event("train-renamed", 0, Instant.parse("2026-03-02T08:10:05Z")));
+
+    assertEquals(
+        Optional.of("R1-002"), service.assignmentOf("train-renamed").map(a -> a.tripCode()));
+    assertEquals(
+        Optional.of(2), service.dutyProgressOf("train-renamed").map(p -> p.assignedTrips()));
+    assertTrue(service.allowsReturn("train-renamed"), "跑到了交路的最后一班，回库票要能带走它");
+    assertFalse(service.allowsLayoverReuse("train-renamed"));
+  }
+
+  /**
+   * 只有"会新出一辆车"的票才会因为交路已经有车而作废。
+   *
+   * <p>这个交路有出库走行：出库票会新出一辆车；首班票接的是出库上来的那辆车，续班与回库票同理——它们都必须照常放出， 否则交路自己的车等不到票。
+   */
+  @Test
+  void onlyVehicleCreatingTicketsAreSupersededByARunningDuty() {
+    Timetable timetable = timetable(TimetableStatus.PUBLISHED);
+    TimetableService service = service(true, timetable);
+    UUID duty = timetable.duties().get(0).id();
+    java.time.LocalDate day = java.time.LocalDate.of(2026, 3, 2);
+    service.bindDuty(
+        "train-A", new TimetableService.DutyKey(TIMETABLE, duty, day), "ticket-create");
+
+    assertEquals(
+        Optional.of("train-a"),
+        service.runningVehicleFor(
+            new TimetableService.TicketIntent(TIMETABLE, duty, day, RouteOperationType.CREATE, 0)));
+    for (TimetableService.TicketIntent intent :
+        List.of(
+            new TimetableService.TicketIntent(
+                TIMETABLE, duty, day, RouteOperationType.OPERATION, 0),
+            new TimetableService.TicketIntent(
+                TIMETABLE, duty, day, RouteOperationType.OPERATION, 1),
+            new TimetableService.TicketIntent(
+                TIMETABLE, duty, day, RouteOperationType.RETURN, 0))) {
+      assertTrue(service.runningVehicleFor(intent).isEmpty(), intent::toString);
+    }
   }
 
   /** 未启用按表运行时判定完全透明。 */

@@ -46,10 +46,11 @@ final class DutyLedger {
   /**
    * 建立或推进这辆车的交路进度。
    *
-   * <p>计的是"已经被指派了几班"，而不是"已经跑完几班"：对"还能不能再接一班"这个问题来说， 正在跑的那一班同样占用额度。用"跑完"计数则需要一个可靠的完成事件，而同一条 route
-   * 连续接班时 并不会产生解绑，那个事件根本不存在——那正是上一版会漏计的地方。
+   * <p>记的是"跑到了交路里的第几班"（含正在跑的那一班），按这一班在交路里的位置算，而不是数自己被指派过几次：
+   * 对"还能不能再接一班"这个问题来说，正在跑的那一班同样占用额度；而数次数离不开一个连续的计数者——
+   * 折返复用常常给车改名（新名字从零数起），某一站没问到门控也会漏一次，两种情况都会让一辆跑完交路的车 以为自己还有班要跑，回库票就再也带不走它。位置只取决于这一班本身，不怕改名，也不怕漏。
    *
-   * <p>换了 duty 就是换了一轮周转：旧进度作废，新 duty 从第一班重新计。
+   * <p>带客回库班不在 {@link VehicleDuty#tripIds()} 里：跑到它说明交路已经跑完。换了 duty 就是换了一轮周转，旧进度作废； 同一交路里进度只进不退。
    */
   void startOrAdvance(String key, Timetable timetable, TimetableTrip trip) {
     UUID dutyId = trip.dutyId().orElse(null);
@@ -63,16 +64,18 @@ final class DutyLedger {
       return;
     }
     VehicleDuty duty = dutyOpt.get();
+    int position = duty.tripIds().indexOf(trip.id());
+    int reached = position < 0 ? duty.tripCount() : position + 1;
     TimetableService.DutyProgress previous = progress.get(key);
     if (previous == null || !previous.dutyId().equals(dutyId)) {
       progress.put(
           key,
           new TimetableService.DutyProgress(
-              dutyId, duty.dutyCode(), duty.tripCount(), 1, trip.id()));
+              dutyId, duty.dutyCode(), duty.tripCount(), reached, trip.id()));
       return;
     }
     if (!previous.lastTripId().equals(trip.id())) {
-      progress.put(key, previous.withTrip(trip.id()));
+      progress.put(key, previous.reached(trip.id(), reached));
     }
   }
 
@@ -98,6 +101,26 @@ final class DutyLedger {
               + " reason="
               + reason);
     }
+  }
+
+  /** 这个交路是否已经归别的车：没绑交路的车按时间匹配时，不能绑到一个已经有车在跑的交路上。 */
+  boolean heldByOther(TimetableService.DutyKey duty, String key) {
+    for (var entry : bindings.entrySet()) {
+      if (entry.getValue().equals(duty) && !entry.getKey().equals(key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 绑在这个交路上的车（任取一辆；折返改名后旧名字要到下一次 retain 才清掉）。 */
+  Optional<String> holderOf(TimetableService.DutyKey duty) {
+    for (var entry : bindings.entrySet()) {
+      if (entry.getValue().equals(duty)) {
+        return Optional.of(entry.getKey());
+      }
+    }
+    return Optional.empty();
   }
 
   /** duty 的班次余额用完了就不准再接运营班。 */

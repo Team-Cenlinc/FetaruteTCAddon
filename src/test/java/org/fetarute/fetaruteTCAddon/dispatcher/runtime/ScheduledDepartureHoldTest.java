@@ -150,6 +150,40 @@ class ScheduledDepartureHoldTest {
         () -> logs.toString());
   }
 
+  /**
+   * 健康检查要能看见"它在等点"：扣车期间为真，门控放行或到点即失效，列车下线立刻清掉。
+   *
+   * <p>看不见的话，停滞检测会在扣留期间派发恢复动作，一路升级到强制重发，把等点的车提前放走（2026-09-27 实服每辆 MT-2 都被报了停滞）。
+   */
+  @Test
+  void activeHoldIsVisibleUntilReleased() {
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(T0);
+    StationStopCoordinator service =
+        TestServices.minimal(new ArrayList<>(), clock::get).stationStops();
+    service.setPlan(event -> Optional.of(T0.plusSeconds(60)));
+    service.setMaxHold(Duration.ofSeconds(120));
+
+    assertFalse(service.holdingForSchedule("train-A"), "还没问过门控");
+    assertTrue(holds(service, T0));
+    assertTrue(service.holdingForSchedule("TRAIN-A"), "大小写不敏感");
+
+    clock.set(T0.plusSeconds(30));
+    assertTrue(service.holdingForSchedule("train-A"));
+    assertFalse(holds(service, T0.plusSeconds(60)), "到点放行");
+    assertFalse(service.holdingForSchedule("train-A"), "门控放行后立即失效");
+
+    clock.set(T0);
+    assertTrue(holds(service, T0));
+    clock.set(T0.plusSeconds(61));
+    assertFalse(service.holdingForSchedule("train-A"), "没人再问门控也会在计划时刻失效");
+
+    clock.set(T0);
+    assertTrue(holds(service, T0));
+    service.notifyReleased("train-A", "destroyed");
+    assertFalse(service.holdingForSchedule("train-A"), "列车下线立刻清掉");
+  }
+
   /** 计划源可以被随时摘掉，摘掉后立刻不再扣车——这是“关掉按表运行”的唯一动作。 */
   @Test
   void detachingPlanStopsHoldingImmediately() {

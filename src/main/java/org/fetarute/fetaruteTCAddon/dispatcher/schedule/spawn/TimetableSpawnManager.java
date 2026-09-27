@@ -27,7 +27,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * 一旦多发或漏发，纠正手段只有人工销毁列车。装饰器让“关掉按表运行”退化成不装配这一层， 而不是依赖一个布尔分支在几百行状态机里到处判断。
  *
  * <p>本层出的每张票都带着交路意图（哪个 duty、第几班），并通过三个钩子交给票据分配器：候选过滤（续班只能接本交路的车）、 到期作废（计划时刻 + assign-tolerance
- * 还没车就放弃）、派发回调（把实体车绑到交路上）。
+ * 还没车就放弃）、派发回调（把实体车绑到交路上）。出库类票每次放出前还要确认交路没有车在跑：同一交路只能有一辆车。
  *
  * <p><b>前提</b>：时刻表只提供“几点发车”，不提供“从哪发、算谁的”。出库点、线路/运营商 code 仍然取自 {@link StorageSpawnManager}
  * 的计划快照。因此一条 route 必须本来就是可发车服务（配了 depot 与 spawn 开关）， 时刻表才能驱动它——否则本层会跳过并留下审计记录，而不是猜一个 depot。
@@ -91,11 +91,46 @@ public final class TimetableSpawnManager
 
     Instant from = lastPoll;
     lastPoll = now;
-    out.addAll(drainRetries(now));
+    out.addAll(withoutRunningDuties(drainRetries(now)));
     if (from != null) {
-      out.addAll(buildTimetableTickets(from, now));
+      out.addAll(withoutRunningDuties(buildTimetableTickets(from, now)));
     }
     return List.copyOf(out);
+  }
+
+  /**
+   * 交路已经有车在跑时，它的出库票作废：同一交路只能有一辆车。
+   *
+   * <p>每次放票前都要问，不只在出票那一刻：出库票常常要在车库口重试一两分钟，重启后留在线上的车可能正是在这段时间里 在门控上接下了这个交路。判定本身在 {@link
+   * TimetableService#runningVehicleFor}。
+   */
+  private List<SpawnTicket> withoutRunningDuties(List<SpawnTicket> tickets) {
+    if (tickets.isEmpty()) {
+      return tickets;
+    }
+    List<SpawnTicket> kept = new ArrayList<>(tickets.size());
+    for (SpawnTicket ticket : tickets) {
+      Optional<TicketIntent> intent =
+          Optional.ofNullable(ownedTickets.get(ticket.id())).flatMap(OwnedTicket::intent);
+      Optional<String> running = intent.flatMap(timetableService::runningVehicleFor);
+      if (running.isEmpty()) {
+        kept.add(ticket);
+        continue;
+      }
+      ownedTickets.remove(ticket.id());
+      debugLogger.accept(
+          "TIMETABLE_SPAWN_SKIP reason=duty-already-running kind="
+              + intent.get().kind().name()
+              + " duty="
+              + intent.get().key().describe()
+              + " tripIndex="
+              + intent.get().tripIndex()
+              + " train="
+              + running.get()
+              + " ticket="
+              + ticket.id());
+    }
+    return kept;
   }
 
   @Override

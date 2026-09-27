@@ -12,10 +12,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 
 /**
- * 车次匹配：列车在门控上第一次问"我该几点开"时，把它绑到最近的一趟表定车次上，并占住那趟车不让别的车再绑。
+ * 车次匹配：列车在门控上第一次问"我该几点开"时，把它绑到一趟表定车次上，并占住那趟车不让别的车再绑。 已经绑在交路上的车只跑本交路的车次；没绑交路的车按时间就近匹配。
  *
  * <p>从 {@link TimetableService} 抽出来的只有"绑定"这一件事：绑定表、trip 占用、起点等点判定、绑不上的留痕。 交路进度与交路归属在 {@link
  * DutyLedger}，快照与出票查询留在服务里。
@@ -95,16 +96,29 @@ final class TripMatcher {
   }
 
   /**
-   * 为这辆车找一趟表定车次：同一 route、当前停靠点计划发车与"现在"最接近、偏差在容差内、尚未被别的车占用。
+   * 为这辆车找一趟表定车次：同一 route、当前停靠点计划发车与"现在"最接近、尚未被别的车占用。
+   *
+   * <p>已经绑在交路上的车只在<b>本交路</b>里找，且不看容差：交路已经说明了它该跑哪一班，晚点就晚点跑。 按时间去抢别的交路的车次会连锁错班——被抢那一班的车只好再往后抢，
+   * 每辆车都早到整整一班、在站台上等别人的时刻；交路归属与班次进度从此对不上，到终点连回库票都接不了 （2026-09-27 实服 PPK）。同一 route
+   * 在一个交路里相隔整整一圈，就近不会选错。
+   *
+   * <p>没绑交路的车（重启后留在线上的车、自由运行的车）按时间就近匹配，限容差内，并跳过别的车已经绑定的交路： 那一班有它自己的车，孤儿车绑上去就是同一交路两辆车。
    *
    * <p>找不到就留痕并返回空——宁可少绑，不可错绑：错误的绑定会让车等一个不属于它的时刻，丢失绑定只会退回现状。
+   *
+   * <p>车手上已有绑定时（回到起点重新匹配），结果还是那一班就原样保留；换了班才解绑旧的，找不到也解绑旧的。
+   *
+   * @param boundDuty 这辆车已经绑定的交路
+   * @param heldByOthers 某个交路是否已经归别的车
    */
   Optional<Match> match(
       String key,
       UUID routeId,
       List<Timetable> timetables,
       StationStopEvent event,
-      TimetableService.Settings current) {
+      TimetableService.Settings current,
+      Optional<TimetableService.DutyKey> boundDuty,
+      Predicate<TimetableService.DutyKey> heldByOthers) {
     if (assignments.size() >= MAX_ASSIGNMENTS) {
       debugLogger.accept(
           "TIMETABLE_ASSIGN_SKIP reason=assignment-limit train=" + event.trainName());
@@ -125,6 +139,10 @@ final class TripMatcher {
         }
         for (int offset : SERVICE_DATE_OFFSETS) {
           LocalDate date = LocalDate.ofInstant(now, timetable.zoneId()).plusDays(offset);
+          Optional<TimetableService.DutyKey> tripDuty = dutyKeyOf(timetable, trip, date);
+          if (boundDuty.isPresent() && !boundDuty.equals(tripDuty)) {
+            continue;
+          }
           Optional<Instant> scheduled = timetable.scheduledDeparture(trip, event.stopIndex(), date);
           if (scheduled.isEmpty()) {
             continue;
@@ -135,30 +153,47 @@ final class TripMatcher {
             nearestDeviation = deviation;
             nearestCode = trip.tripCode();
           }
-          if (Math.abs(deviation) > tolerance) {
+          if (boundDuty.isEmpty() && Math.abs(deviation) > tolerance) {
             continue;
           }
           TripKey tripKey = new TripKey(timetable.id(), trip.id(), date);
           String holder = claims.get(tripKey);
-          if (holder != null && !holder.equals(key)) {
+          if ((holder != null && !holder.equals(key))
+              || (boundDuty.isEmpty() && tripDuty.filter(heldByOthers).isPresent())) {
             claimedByOthers++;
             continue;
           }
           if (best == null || Math.abs(deviation) < Math.abs(best.deviationSeconds())) {
-            best = new Candidate(timetable, trip, date, tripKey, deviation);
+            best = new Candidate(timetable, trip, date, tripKey, tripDuty, deviation);
           }
         }
       }
     }
+    TimetableAssignment previous = assignments.get(key);
     if (best == null) {
+      if (previous != null) {
+        release(key, "new-circuit");
+      }
       String reason =
-          candidates == 0 ? "no-trips" : claimedByOthers > 0 ? "all-claimed" : "out-of-tolerance";
+          candidates == 0
+              ? boundDuty.isPresent() ? "duty-has-no-trip" : "no-trips"
+              : claimedByOthers > 0 ? "all-claimed" : "out-of-tolerance";
       recordMiss(key, event, routeId, reason, nearestCode, nearestDeviation, tolerance, candidates);
       return Optional.empty();
+    }
+    if (previous != null
+        && previous.timetableId().equals(best.timetable().id())
+        && previous.tripId().equals(best.trip().id())
+        && previous.serviceDate().equals(best.serviceDate())) {
+      // 回到起点重新匹配，结果还是手上这一班（晚点了仍在起点等）：原样保留。门控每秒问一次，解绑重绑只会刷日志。
+      return Optional.of(new Match(previous, best.timetable(), best.trip(), best.duty()));
     }
     String existingHolder = claims.putIfAbsent(best.tripKey(), key);
     if (existingHolder != null && !existingHolder.equals(key)) {
       return Optional.empty();
+    }
+    if (previous != null) {
+      release(key, "new-circuit");
     }
     TimetableAssignment assignment =
         new TimetableAssignment(
@@ -185,8 +220,20 @@ final class TripMatcher {
             + " stopIndex="
             + event.stopIndex()
             + " deviationSeconds="
-            + best.deviationSeconds());
-    return Optional.of(new Match(assignment, best.timetable(), best.trip()));
+            + best.deviationSeconds()
+            + " scope="
+            + (boundDuty.isPresent() ? "duty" : "nearest"));
+    return Optional.of(new Match(assignment, best.timetable(), best.trip(), best.duty()));
+  }
+
+  /** 某趟车在某个日历日发车时所属的交路身份；交路用服务日，跨零点的班次才能和前一晚出库的车对上。 */
+  private static Optional<TimetableService.DutyKey> dutyKeyOf(
+      Timetable timetable, TimetableTrip trip, LocalDate calendarDate) {
+    return trip.dutyId()
+        .map(
+            dutyId ->
+                new TimetableService.DutyKey(
+                    timetable.id(), dutyId, timetable.serviceDayOf(trip, calendarDate)));
   }
 
   /** 记一次绑定失败：计数不节流，日志按 {@code train + stopIndex + reason} 每分钟一条。 */
@@ -270,14 +317,19 @@ final class TripMatcher {
     return size;
   }
 
-  /** 一次成功的匹配：绑定本身，以及它指向的表与车次（供交路账本推进进度）。 */
-  record Match(TimetableAssignment assignment, Timetable timetable, TimetableTrip trip) {}
+  /** 一次成功的匹配：绑定本身，它指向的表与车次，以及车次所属的交路（供交路账本推进进度与绑定归属）。 */
+  record Match(
+      TimetableAssignment assignment,
+      Timetable timetable,
+      TimetableTrip trip,
+      Optional<TimetableService.DutyKey> duty) {}
 
   private record Candidate(
       Timetable timetable,
       TimetableTrip trip,
       LocalDate serviceDate,
       TripKey tripKey,
+      Optional<TimetableService.DutyKey> duty,
       long deviationSeconds) {}
 
   private record TripKey(UUID timetableId, UUID tripId, LocalDate serviceDate) {}

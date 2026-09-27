@@ -9,7 +9,7 @@
 ## 检测项
 - `STALL`：信号为 `PROCEED`，且速度持续低于阈值（默认 30 秒）。
 - `PROGRESS_STUCK`：`route index` 与“最近经过图节点（`lastPassedGraphNode`）”同时长时间不变（默认 60 秒）。
-- 停站排除：`DwellRegistry` 中存在剩余停站时间时，跳过上述检测。
+- 停站排除：`DwellRegistry` 中存在剩余停站时间，或列车正被按表扣在站里等点（`StationStopCoordinator#holdingForSchedule`）时，跳过上述检测。按表扣车最长 150 秒，不排除的话会在扣留期间派发恢复动作、一路升级到强制重发，把等点的车提前放走。
 
 > 说明：在“线路定义只写关键站点、未写全经过 waypoint”的场景下，列车经过中间 waypoint 会更新 `lastPassedGraphNode`，并重置 stuck 计时，避免误报。
 

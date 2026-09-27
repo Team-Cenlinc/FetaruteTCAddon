@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
@@ -782,6 +783,29 @@ class TrainHealthMonitorTest {
 
     assertEquals(0, result.stallCount(), "停站期间静止不应视为 stall");
     assertTrue(alerts.isEmpty());
+  }
+
+  @Test
+  @DisplayName("按表扣车：在站里等点期间静止、进度不变都不算 stall / 进度停滞")
+  void scheduledHoldIsNeitherStallNorProgressStuck() {
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(Optional.of(state("train1", 1, SignalAspect.PROCEED, 0.0)));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    StationStopCoordinator stationStops = mock(StationStopCoordinator.class);
+    when(dispatchService.stationStops()).thenReturn(stationStops);
+    when(stationStops.holdingForSchedule("train1")).thenReturn(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.now();
+    monitor.check(Set.of("train1"), t0);
+    TrainHealthMonitor.CheckResult result = monitor.check(Set.of("train1"), t0.plusSeconds(130));
+
+    assertEquals(0, result.stallCount(), "等点不是 stall");
+    assertEquals(0, result.progressStuckCount(), "等点不是进度停滞");
+    assertTrue(alerts.isEmpty(), alerts::toString);
+    verify(dispatchService, never()).refreshSignalByName(anyString());
   }
 
   @Test
