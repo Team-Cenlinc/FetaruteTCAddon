@@ -908,9 +908,20 @@ final class JdbcRepositoryTest {
                     "TTR",
                     5,
                     List.of(
-                        new TimetableStop(0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0),
                         new TimetableStop(
-                            1, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 100, 130)),
+                            0,
+                            Optional.of("AAA"),
+                            Optional.of("OP:S:AAA:1"),
+                            0,
+                            0,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            1,
+                            Optional.of("BBB"),
+                            Optional.of("OP:S:BBB:1"),
+                            100,
+                            130,
+                            RouteStopPassType.STOP)),
                     "OP:S:AAA:1",
                     "OP:S:BBB:1",
                     Optional.of("OP:D:DEP:1"),
@@ -921,8 +932,20 @@ final class JdbcRepositoryTest {
                     RouteOperationType.RETURN,
                     7,
                     List.of(
-                        new TimetableStop(0, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 0, 0),
-                        new TimetableStop(1, Optional.empty(), Optional.of("OP:D:DEP:1"), 40, 40)),
+                        new TimetableStop(
+                            0,
+                            Optional.of("BBB"),
+                            Optional.of("OP:S:BBB:1"),
+                            0,
+                            0,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            1,
+                            Optional.empty(),
+                            Optional.of("OP:D:DEP:1"),
+                            40,
+                            40,
+                            RouteStopPassType.PASS)),
                     "OP:S:BBB:1",
                     "OP:D:DEP:1",
                     Optional.empty(),
@@ -968,6 +991,11 @@ final class JdbcRepositoryTest {
     assertEquals(RouteOperationType.RETURN, loaded.routePlans().get(1).kind());
     assertEquals(0, loaded.routePlans().get(1).weight(), "非运营线路的 weight 恒为 0");
     assertEquals(130, loaded.routePlans().get(0).stops().get(1).departureOffsetSeconds());
+    assertEquals(RouteStopPassType.STOP, loaded.routePlans().get(0).stops().get(1).passType());
+    assertEquals(
+        RouteStopPassType.PASS,
+        loaded.routePlans().get(1).stops().get(1).passType(),
+        "停车方式随 route_plans 落库：回库段的车库是通过点");
     assertEquals(Optional.of("OP:D:DEP:1"), loaded.routePlans().get(0).depotNodeId());
     assertEquals(1, loaded.trips().size());
     assertEquals("TTR-001", loaded.trips().get(0).tripCode());
@@ -1058,6 +1086,102 @@ final class JdbcRepositoryTest {
     assertFalse(loaded.routePlan(fixture.routeId()).orElseThrow().external());
     assertTrue(loaded.routePlan(foreignRoute).orElseThrow().external());
     assertEquals(List.of(fixture.routeId()), loaded.managedRouteIds());
+  }
+
+  /** 1.5.0 之前落库的 route_plans 没有停车方式：按当时对外的口径回推（首末站与停站大于 0 秒的点算停车）， 停站 0 秒的中途点当作通过——重新发布后才按交路定义。 */
+  @Test
+  void legacyRoutePlanWithoutPassTypeFallsBackToDwellHeuristic() throws Exception {
+    StorageProvider provider = setupProvider(TEST_DB);
+    JdbcStorageProvider jdbcProvider = (JdbcStorageProvider) provider;
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT4",
+            "旧表",
+            TimetableStatus.PUBLISHED,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    fixture.routeId(),
+                    "RA",
+                    1,
+                    List.of(
+                        new TimetableStop(
+                            0,
+                            Optional.of("AAA"),
+                            Optional.of("OP:S:AAA:1"),
+                            0,
+                            0,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            1,
+                            Optional.of("ZZZ"),
+                            Optional.of("OP:S:ZZZ:1"),
+                            50,
+                            50,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            2,
+                            Optional.of("BBB"),
+                            Optional.of("OP:S:BBB:1"),
+                            100,
+                            130,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            3,
+                            Optional.of("CCC"),
+                            Optional.of("OP:S:CCC:1"),
+                            230,
+                            230,
+                            RouteStopPassType.TERMINATE)),
+                    "OP:S:AAA:1",
+                    "OP:S:CCC:1",
+                    Optional.empty(),
+                    Optional.empty())),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(timetable);
+
+    // 抹掉 pass 字段，模拟 1.5.0 之前写入的行。
+    try (var connection = jdbcProvider.dataSource().getConnection()) {
+      String json;
+      try (var ps =
+          connection.prepareStatement("SELECT route_plans FROM fta_timetables WHERE id = ?")) {
+        ps.setString(1, timetableId.toString());
+        try (var rs = ps.executeQuery()) {
+          assertTrue(rs.next());
+          json = rs.getString(1);
+        }
+      }
+      assertTrue(json.contains("\"pass\""), "新写入的行带停车方式");
+      try (var ps =
+          connection.prepareStatement("UPDATE fta_timetables SET route_plans = ? WHERE id = ?")) {
+        ps.setString(1, json.replaceAll(",\"pass\":\"[A-Z]+\"", ""));
+        ps.setString(2, timetableId.toString());
+        ps.executeUpdate();
+      }
+    }
+
+    List<TimetableStop> stops =
+        provider.timetables().findById(timetableId).orElseThrow().routePlans().get(0).stops();
+    assertEquals(
+        List.of(
+            RouteStopPassType.STOP,
+            RouteStopPassType.PASS,
+            RouteStopPassType.STOP,
+            RouteStopPassType.STOP),
+        stops.stream().map(TimetableStop::passType).toList());
   }
 
   /** 邻表基线随表落库、整体替换、随表删除：publish 重检靠它判断邻表变没变。 */

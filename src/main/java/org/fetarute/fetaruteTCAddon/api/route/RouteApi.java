@@ -30,7 +30,8 @@ import java.util.UUID;
  * routes.getRoute(routeId).ifPresent(route -> {
  *     System.out.println("途经站点:");
  *     for (StopInfo stop : route.stops()) {
- *         System.out.println("  " + stop.sequence() + ". " + stop.stationName());
+ *         // sequence 是 0 起下标，展示给人看时自己 +1
+ *         System.out.println("  " + (stop.sequence() + 1) + ". " + stop.stationName());
  *     }
  * });
  *
@@ -101,7 +102,7 @@ public interface RouteApi {
    *
    * @param info 基本信息
    * @param waypoints 途经节点 ID 列表（有序）
-   * @param stops 停靠站点列表（有序）
+   * @param stops 停靠站点列表（有序，与 {@code waypoints} 等长、下标一一对应）
    * @param terminal 终点信息（EOR/EOP）
    * @param totalDistanceBlocks 全程距离（blocks）
    */
@@ -153,10 +154,12 @@ public interface RouteApi {
   /**
    * 停靠站点信息。
    *
-   * @param sequence 序号（从 1 开始）
+   * @param sequence 停靠序号：交路节点的 <b>0 起下标</b>，即本条在 {@code RouteDetail.stops()} 与 {@code waypoints()}
+   *     中的下标。与 TimetableApi 的 {@code stopSequence}、车站到发事件的 {@code getStopIndex()} 同一口径（1.5.0 起； 此前为
+   *     1 起，展示序号请自行 +1）
    * @param nodeId 节点 ID（DYNAMIC stop 使用 placeholder nodeId，格式 {@code OP:S/D:NAME:fromTrack}）
    * @param stationName 站点名称
-   * @param dwellSeconds 停车时间（秒），0 表示通过不停
+   * @param dwellSeconds 路线上配置的停车时间（秒）；未配置为 0（运行时按默认停站）。是否停车看 {@code passType}，不看它
    * @param passType 通过类型（行为：停车/通过/终点）
    * @param dynamic 是否为动态站台选择（运行时根据占用情况选择轨道）
    */

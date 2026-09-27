@@ -78,7 +78,7 @@ FetaruteApi 提供九个子模块，另有一组 Bukkit 事件（见“事件”
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表 |
-| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0） |
+| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径） |
 
 ---
 
@@ -220,9 +220,9 @@ for (RouteApi.RouteInfo route : api.routes().listRoutes()) {
 api.routes().getRoute(routeUuid).ifPresent(detail -> {
     System.out.println("途经点: " + detail.waypoints());
 
-    // 停靠表
+    // 停靠表：与 waypoints 等长、下标一一对应；sequence 就是下标（0 起），展示时自行 +1
     for (RouteApi.StopInfo stop : detail.stops()) {
-        System.out.println(stop.sequence() + ". " + stop.nodeId());
+        System.out.println((stop.sequence() + 1) + ". " + stop.nodeId());
         stop.stationName().ifPresent(name ->
             System.out.println("   站名: " + name));
         System.out.println("   停车: " + stop.dwellSeconds() + "s");
@@ -242,6 +242,21 @@ api.routes().getRoute(routeUuid).ifPresent(detail -> {
     }
 });
 ```
+
+### 停靠序号口径（1.5.0 统一）
+
+公开 API 里所有“第几站”都是**交路节点序列的 0 起下标**，同一个数在各处指同一站：
+
+| 字段 | 含义 |
+|------|------|
+| `RouteApi.StopInfo#sequence` | 本条在 `RouteDetail.stops()` / `waypoints()` 中的下标（1.5.0 之前为 1 起重新编号） |
+| `TimetableApi.StopTime#stopSequence`、`Departure#stopSequence` | 同上 |
+| `TimetableApi.TrainAssignment#lastStopSequence` / `nextStopSequence` | 同上 |
+| `TrainArriveStationEvent` / `TrainDepartStationEvent#getStopIndex` | 同上 |
+| `EtaApi.RuntimeSnapshot#routeIndex` | 列车最近到达的节点下标（同一口径） |
+
+所以拿到序号 `n` 直接 `route.stops().get(n)` 即可。`stops()` 包含 PASS 节点（区间点、咽喉、通过站），序号不是“第几个停车站”；
+是否停车看 `passType`（STOP/TERMINATE 停，PASS 不停），**不要**用 `dwellSeconds == 0` 判断——停站 0 秒的 STOP 站同样停车。
 
 ### EOR 与 EOP 区别
 
@@ -474,7 +489,7 @@ api.eta().getRuntimeSnapshot("train-1").ifPresent(snap -> {
 
 ---
 
-## TimetableApi - 时刻表（1.4.0）
+## TimetableApi - 时刻表（1.4.0，1.5.0 修订）
 
 只读，数据来自内存中已发布时刻表的快照，查询不访问数据库。返回的 `Instant` 已按时刻表自身时区与服务日换算好。
 
@@ -488,26 +503,38 @@ for (TimetableApi.Departure d :
 }
 ```
 
-只列在该站停车的车次（通过站不列），多张已发布时刻表合并后按计划发车时刻排序；窗口上限 24 小时。
+只列在该站停车（`StopTime#stops()`：STOP 与 TERMINATE，停站 0 秒也算）的车次，通过站不列；多张已发布时刻表合并后按计划发车时刻排序；
+窗口上限 24 小时。`terminating` 为 true 表示本站是该车次终点（TERMINATE 站，或其后只剩回库/折返等通过点）。
 
 ### 列车当前车次与偏差
 
 ```java
 tt.getAssignment("SURC-WS-LC-1037").ifPresent(a -> {
     System.out.println("车次 " + a.tripCode() + " 交路 " + a.dutyCode().orElse("-"));
-    a.currentDelaySeconds().ifPresent(d -> System.out.println("晚点 " + d + " 秒"));
+    a.currentDelaySeconds().ifPresent(d -> System.out.println("上一站晚点 " + d + " 秒"));
+    // 预计晚点说的是哪一站：nextStop* 三个字段，站码最稳
+    a.projectedDelaySeconds().ifPresent(d -> System.out.println(
+        "预计到 " + a.nextStationCode().orElse("?") + " 晚点 " + d + " 秒"));
 });
 ```
 
-`currentDelaySeconds` 取本车次最近一次实际到站或发车（同交路上一趟车的记录不算），与该站计划到达/发车相减（正数为晚点）；
-`projectedDelaySeconds` 按 ETA 预计到达下一个停车点、与计划到达相减——列车在区间被扣停时它会随之增长，
-而 `currentDelaySeconds` 要到下一次到发才更新；`initialDeviationSeconds` 是绑定车次时的偏差。
-按表运行未启用（`enabled() == false`）时已发布时刻表仍可查询，但不会有车次绑定。
+| 字段 | 口径 |
+|------|------|
+| `currentDelaySeconds` | 本车次最近一次**实际**到站或发车（同交路上一趟车的记录不算）与该站计划到达/发车相减，正数为晚点 |
+| `lastStopSequence` / `lastStopNodeId` / `lastStationCode` | 上面那次到发的停靠序号、实际节点（DYNAMIC 为实际股道）、站码（1.5.0 增加后两项） |
+| `projectedDelaySeconds` | 按 ETA **预计**到达 `nextStop*` 那一站与计划到达相减。列车在区间被扣停时随之增长，`currentDelaySeconds` 要到下一次到发才更新 |
+| `nextStopSequence` / `nextStopNodeId` / `nextStationCode` | 下一个计划停车点（按交路 `passType`，与 RouteApi 停靠表、HUD 的“下一站”是同一站）。DYNAMIC 已选台时 `nextStopNodeId` 是实际股道，未选台时是占位股道 `OP:S:CODE:fromTrack`（与 RouteApi 一致）；站码不随选台变化 |
+| `initialDeviationSeconds` | 绑定车次时的偏差 |
+
+- DYNAMIC 停靠：已选台按实际股道估算；未选台按车站级估算（到该站在图上存在的任一候选股道，取最早），占位股道不可达也算得出来。
+- 性能：`getAssignment` / `listAssignments` 按 tick 缓存，同一 tick 内对同一列车重复查询只算一次 ETA；可放心按帧轮询。
+- 按表运行未启用（`enabled() == false`）时已发布时刻表仍可查询，但不会有车次绑定。
 
 ### 时刻表内容
 
-`listPublished()` / `listByLine(lineId)` 返回概要，`getTimetable(id)` 返回交路时分（各站相对起点发车的到发偏移）、
-按发车时刻排序的车次、车辆交路（出库→依次运行的车次→回库）。
+`listPublished()` / `listByLine(lineId)` 返回概要，`getTimetable(id)` 返回交路时分（各站相对起点发车的到发偏移与停车方式 `passType`）、
+按发车时刻排序的车次、车辆交路（出库→依次运行的车次→回库）。`StopTime#stationCode` 只有车站本体节点才有，区间点、咽喉、车库为空。
+1.5.0 之前发布的时刻表没有记录停车方式，读出时按“首末站或停站大于 0 秒”回推，重新构建并发布后即按交路定义。
 
 ---
 
@@ -689,6 +716,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.5.0 | **行为变更**：停靠序号统一为交路节点的 0 起下标——`RouteApi.StopInfo#sequence` 由 1 起改为 0 起，与 `TimetableApi` 的 `stopSequence`、车站到发事件的 `getStopIndex()` 同一口径（此前三者可能差 1）；`TimetableApi.TrainAssignment` 增加 `lastStopNodeId`/`lastStationCode`/`nextStopNodeId`/`nextStationCode`；`TimetableApi.StopTime` 增加 `passType` 与 `stops()`，停车判定改按交路 `passType`（此前按“停站 > 0 秒”猜，停站 0 秒的 STOP 站被当成通过、预计晚点落到后面的站）；`StopTime#stationCode` 只给车站本体节点；DYNAMIC 停靠的预计晚点按实际股道（未选台按车站级）估算；`getAssignment`/`listAssignments` 按 tick 缓存；ETA 中途站未配停站按运行时默认 20 秒计（此前按 0 秒）、TERMINATE 站计入停站、中途停车按起停拆段、到站后停站计时注册前的空档计入本站停站 |
 | 1.4.0 | 新增 `TimetableApi` 与 `api.event` 事件；`EtaApi.Reason` 增加 `HOLD`、`OVERDUE`，ETA 随扣停与票据超时顺延；`TerminalInfo` 的 EOP 与 HUD/站牌同一口径，没有载客车站时为空（不再回退为 EOR）；EOR 仍为交路最后一个节点，车库时名称为 `LWN Depot`、折返线时为它之前最近的车站；
 `EtaApi.BoardRow.destination`（站牌主目的地）改取运营终点，回库车越过运营终点后为“回库”；`EtaApi.Reason.WAIT` 收窄为可预知的等待（按表等点、票据未到点），占用/信号等待改报 `HOLD`；修正版本常量（此前代码停留在 1.2.0，`isCompatible(..., "1.3.0")` 会误判为不兼容） |
 | 1.3.0 | RouteApi: StopInfo 增加 `dynamic` 字段；RouteDetail 增加 `TerminalInfo`（EOR/EOP）；移除 `PassType.DYNAMIC` |

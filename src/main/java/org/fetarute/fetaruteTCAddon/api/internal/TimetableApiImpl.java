@@ -7,19 +7,25 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaTarget;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
@@ -34,6 +40,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
  *
  * <p>只调用 {@link TimetableService} 的纯查询方法；{@code scheduledDepartureAt} 等会建立绑定、写日志的方法一律不碰，
  * 外部插件怎么轮询都不会改变调度状态。
+ *
+ * <p>车次绑定按 tick 缓存：预计偏差要走一遍 ETA 路径计算，外部插件按“列车数 × 每秒数次”轮询时， 同一 tick 内的重复查询只读第一次的结果。
  */
 public final class TimetableApiImpl implements TimetableApi {
 
@@ -50,29 +58,26 @@ public final class TimetableApiImpl implements TimetableApi {
   private final Supplier<Optional<TimetableService>> service;
   private final Supplier<Optional<StationPresenceTracker>> stops;
   private final Supplier<Optional<EtaService>> eta;
+  private final LongSupplier tick;
 
-  /**
-   * @param service 时刻表服务（可能尚未初始化）
-   * @param stops 实际停靠记录（用于计算当前偏差；可能为空）
-   */
-  public TimetableApiImpl(
-      Supplier<Optional<TimetableService>> service,
-      Supplier<Optional<StationPresenceTracker>> stops) {
-    this(service, stops, Optional::empty);
-  }
+  /** 当前 tick 的车次绑定结果；换 tick 整份丢弃，所以只占当前在网列车数的内存。 */
+  private volatile TickMemo memo = new TickMemo(Long.MIN_VALUE, new ConcurrentHashMap<>());
 
   /**
    * @param service 时刻表服务（可能尚未初始化）
    * @param stops 实际停靠记录（用于计算当前偏差；可能为空）
    * @param eta ETA 服务（用于预计到下一站的偏差；可能为空）
+   * @param tick 服务器当前 tick；同一 tick 内的车次绑定查询共用一份结果
    */
   public TimetableApiImpl(
       Supplier<Optional<TimetableService>> service,
       Supplier<Optional<StationPresenceTracker>> stops,
-      Supplier<Optional<EtaService>> eta) {
+      Supplier<Optional<EtaService>> eta,
+      LongSupplier tick) {
     this.service = Objects.requireNonNull(service, "service");
     this.stops = stops == null ? Optional::empty : stops;
     this.eta = eta == null ? Optional::empty : eta;
+    this.tick = Objects.requireNonNull(tick, "tick");
   }
 
   @Override
@@ -139,7 +144,7 @@ public final class TimetableApiImpl implements TimetableApi {
     if (svc.isEmpty() || !svc.get().settings().enabled()) {
       return Optional.empty();
     }
-    return svc.get().assignmentOf(trainName).map(a -> assignment(svc.get(), a));
+    return memoized(svc.get(), trainName);
   }
 
   @Override
@@ -148,8 +153,35 @@ public final class TimetableApiImpl implements TimetableApi {
     if (svc.isEmpty() || !svc.get().settings().enabled()) {
       return List.of();
     }
-    return svc.get().assignments().stream().map(a -> assignment(svc.get(), a)).toList();
+    return svc.get().assignments().stream()
+        .map(a -> memoized(svc.get(), a.trainName()))
+        .flatMap(Optional::stream)
+        .toList();
   }
+
+  /** 本 tick 内第一次查询时计算，其后直接返回同一份结果。 */
+  private Optional<TrainAssignment> memoized(TimetableService svc, String trainName) {
+    long now = tick.getAsLong();
+    TickMemo current = memo;
+    if (current.tick() != now) {
+      current = new TickMemo(now, new ConcurrentHashMap<>());
+      memo = current;
+    }
+    return current
+        .byTrain()
+        .computeIfAbsent(
+            trainName.trim().toLowerCase(Locale.ROOT),
+            key -> svc.assignmentOf(trainName).map(a -> assignment(svc, a)));
+  }
+
+  /**
+   * 一个 tick 的查询结果。
+   *
+   * @param tick 服务器 tick
+   * @param byTrain 列车名（小写）→ 车次绑定；未绑定记为空
+   */
+  private record TickMemo(
+      long tick, ConcurrentHashMap<String, Optional<TrainAssignment>> byTrain) {}
 
   private List<Timetable> published() {
     return service.get().map(TimetableService::publishedTimetables).orElse(List.of());
@@ -166,15 +198,13 @@ public final class TimetableApiImpl implements TimetableApi {
       }
       TimetableRoutePlan plan = planOpt.get();
       List<TimetableStop> planStops = plan.stops();
+      int lastStopping = lastStoppingIndex(planStops);
       for (int i = 0; i < planStops.size(); i++) {
         TimetableStop stop = planStops.get(i);
-        if (stop.stationCode().filter(stationCode::equalsIgnoreCase).isEmpty()) {
+        if (!stop.stops() || stop.stationCode().filter(stationCode::equalsIgnoreCase).isEmpty()) {
           continue;
         }
-        boolean terminating = i == planStops.size() - 1;
-        if (!stopsHere(stop, i, planStops.size())) {
-          continue;
-        }
+        boolean terminating = i == lastStopping || stop.passType() == RouteStopPassType.TERMINATE;
         for (LocalDate date = firstDate; !date.isAfter(lastDate); date = date.plusDays(1)) {
           Instant base = trip.departureAt(date, timetable.zoneId());
           Instant departure = base.plusSeconds(stop.departureOffsetSeconds());
@@ -199,11 +229,14 @@ public final class TimetableApiImpl implements TimetableApi {
     }
   }
 
-  /** 车次在该点停车：通过站到发时刻相同；起点与终点即使停站时分为 0 也算。 */
-  private static boolean stopsHere(TimetableStop stop, int position, int count) {
-    return position == 0
-        || position == count - 1
-        || stop.departureOffsetSeconds() > stop.arrivalOffsetSeconds();
+  /** 最后一个停车点：其后只剩回库、折返等通过点。它与 TERMINATE 站都是车次终点。 */
+  private static int lastStoppingIndex(List<TimetableStop> planStops) {
+    for (int i = planStops.size() - 1; i >= 0; i--) {
+      if (planStops.get(i).stops()) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   private TrainAssignment assignment(TimetableService svc, TimetableAssignment a) {
@@ -230,7 +263,7 @@ public final class TimetableApiImpl implements TimetableApi {
         delay = OptionalLong.of(Duration.between(planned.get(), record.at()).getSeconds());
       }
     }
-    Optional<Projection> projection = timetable.flatMap(t -> project(t, a));
+    Optional<NextStop> next = timetable.flatMap(t -> nextStop(t, a));
     return new TrainAssignment(
         a.trainName(),
         a.timetableId(),
@@ -241,9 +274,13 @@ public final class TimetableApiImpl implements TimetableApi {
         a.assignedAt(),
         a.initialDeviationSeconds(),
         last.map(StationPresenceTracker.StopRecord::stopIndex),
+        last.map(StationPresenceTracker.StopRecord::nodeId).filter(id -> !id.isBlank()),
+        last.flatMap(record -> RouteTerminals.stationCodeOf(record.nodeId())),
         delay,
-        projection.map(Projection::stopSequence),
-        projection.map(p -> OptionalLong.of(p.delaySeconds())).orElse(OptionalLong.empty()));
+        next.map(NextStop::stopSequence),
+        next.flatMap(NextStop::nodeId),
+        next.flatMap(NextStop::stationCode),
+        next.map(NextStop::projectedDelaySeconds).orElse(OptionalLong.empty()));
   }
 
   /** 到发记录是否属于这个车次：同一交路，且发生在绑定之后，或正是促成绑定的那次到站。 */
@@ -259,12 +296,16 @@ public final class TimetableApiImpl implements TimetableApi {
         && !record.at().isBefore(a.assignedAt().minus(BIND_ARRIVAL_LOOKBACK));
   }
 
-  /** 按 ETA 预计到达下一个计划停靠点，与计划到达相减。 */
-  private Optional<Projection> project(Timetable timetable, TimetableAssignment a) {
+  /**
+   * 下一个计划停车点，及按 ETA 预计到达它相对计划的偏差。
+   *
+   * <p>停车点按交路停车方式定（停站 0 秒的 STOP 也算），与 RouteApi 停靠表、HUD 的“下一站”是同一站。 ETA 按序号估算（{@link
+   * EtaTarget.StopIndex}）：DYNAMIC 已选台时是实际股道，未选台时是到该站任一候选股道——拿占位股道去算， 列车被分到别的股道时会算错站台，占位股道不可达时干脆算不出。
+   */
+  private Optional<NextStop> nextStop(Timetable timetable, TimetableAssignment a) {
     Optional<EtaService> etaService = eta.get();
-    Optional<TimetableTrip> trip = timetable.tripByCode(a.tripCode());
     Optional<TimetableRoutePlan> plan = timetable.routePlan(a.routeId());
-    if (etaService.isEmpty() || trip.isEmpty() || plan.isEmpty()) {
+    if (etaService.isEmpty() || plan.isEmpty()) {
       return Optional.empty();
     }
     Optional<TrainRuntimeSnapshot> snap = etaService.get().getRuntimeSnapshot(a.trainName());
@@ -272,35 +313,60 @@ public final class TimetableApiImpl implements TimetableApi {
       return Optional.empty();
     }
     int index = snap.get().routeIndex();
-    List<TimetableStop> planStops = plan.get().stops();
-    Optional<TimetableStop> next = Optional.empty();
-    for (int i = 0; i < planStops.size(); i++) {
-      TimetableStop stop = planStops.get(i);
-      if (stop.stopSequence() > index
-          && stop.nodeId().isPresent()
-          && stopsHere(stop, i, planStops.size())) {
-        next = Optional.of(stop);
-        break;
-      }
-    }
+    Optional<TimetableStop> next =
+        plan.get().stops().stream()
+            .filter(stop -> stop.stopSequence() > index && stop.stops())
+            .findFirst();
     if (next.isEmpty()) {
       return Optional.empty();
     }
-    Optional<Instant> planned =
-        timetable.scheduledArrival(trip.get(), next.get().stopSequence(), a.serviceDate());
-    EtaResult result =
+    TimetableStop stop = next.get();
+    Optional<String> nodeId =
         etaService
             .get()
-            .getForTrain(
-                a.trainName(), new EtaTarget.PlatformNode(NodeId.of(next.get().nodeId().get())));
-    if (planned.isEmpty() || result.etaEpochMillis() <= 0L) {
-      return Optional.empty();
-    }
-    long delay = Math.floorDiv(result.etaEpochMillis() - planned.get().toEpochMilli(), 1000L);
-    return Optional.of(new Projection(next.get().stopSequence(), delay));
+            .effectiveStopNode(a.trainName(), stop.stopSequence())
+            .map(NodeId::value)
+            .or(stop::nodeId);
+    Optional<String> stationCode =
+        nodeId.flatMap(RouteTerminals::stationCodeOf).or(stop::stationCode);
+    return Optional.of(
+        new NextStop(
+            stop.stopSequence(),
+            nodeId,
+            stationCode,
+            projectedDelay(etaService.get(), timetable, a, stop.stopSequence())));
   }
 
-  private record Projection(int stopSequence, long delaySeconds) {}
+  private static OptionalLong projectedDelay(
+      EtaService etaService, Timetable timetable, TimetableAssignment a, int stopSequence) {
+    Optional<Instant> planned =
+        timetable
+            .tripByCode(a.tripCode())
+            .flatMap(trip -> timetable.scheduledArrival(trip, stopSequence, a.serviceDate()));
+    if (planned.isEmpty()) {
+      return OptionalLong.empty();
+    }
+    EtaResult result = etaService.getForTrain(a.trainName(), new EtaTarget.StopIndex(stopSequence));
+    if (result.etaEpochMillis() <= 0L) {
+      return OptionalLong.empty();
+    }
+    return OptionalLong.of(
+        Math.floorDiv(result.etaEpochMillis() - planned.get().toEpochMilli(), 1000L));
+  }
+
+  /**
+   * 下一个计划停车点。
+   *
+   * @param stopSequence 停靠序号
+   * @param nodeId 实际节点（DYNAMIC 未选台为占位股道）
+   * @param stationCode 站码
+   * @param projectedDelaySeconds 预计到达偏差；ETA 不可用时为空
+   */
+  private record NextStop(
+      int stopSequence,
+      Optional<String> nodeId,
+      Optional<String> stationCode,
+      OptionalLong projectedDelaySeconds) {}
 
   private static TimetableInfo info(Timetable t) {
     return new TimetableInfo(
@@ -342,7 +408,8 @@ public final class TimetableApiImpl implements TimetableApi {
                                         s.stationCode(),
                                         s.nodeId(),
                                         s.arrivalOffsetSeconds(),
-                                        s.departureOffsetSeconds()))
+                                        s.departureOffsetSeconds(),
+                                        RouteApi.PassType.valueOf(s.passType().name())))
                             .toList()))
             .toList();
     List<Trip> trips =

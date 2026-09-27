@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -42,9 +43,17 @@ class TimetableServiceTest {
     UUID tripTwo = UUID.randomUUID();
     List<TimetableStop> stops =
         List.of(
-            new TimetableStop(0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0),
-            new TimetableStop(1, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 100, 130),
-            new TimetableStop(2, Optional.of("CCC"), Optional.of("OP:S:CCC:1"), 230, 230));
+            new TimetableStop(
+                0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 100, 130, RouteStopPassType.STOP),
+            new TimetableStop(
+                2,
+                Optional.of("CCC"),
+                Optional.of("OP:S:CCC:1"),
+                230,
+                230,
+                RouteStopPassType.STOP));
     return new Timetable(
         TIMETABLE,
         COMPANY,
@@ -72,8 +81,20 @@ class TimetableServiceTest {
                 RouteOperationType.CREATE,
                 0,
                 List.of(
-                    new TimetableStop(0, Optional.empty(), Optional.of("OP:D:DEP:1"), 0, 0),
-                    new TimetableStop(1, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 60, 60)),
+                    new TimetableStop(
+                        0,
+                        Optional.empty(),
+                        Optional.of("OP:D:DEP:1"),
+                        0,
+                        0,
+                        RouteStopPassType.STOP),
+                    new TimetableStop(
+                        1,
+                        Optional.of("AAA"),
+                        Optional.of("OP:S:AAA:1"),
+                        60,
+                        60,
+                        RouteStopPassType.STOP)),
                 "OP:D:DEP:1",
                 "OP:S:AAA:1",
                 Optional.empty(),
@@ -84,8 +105,20 @@ class TimetableServiceTest {
                 RouteOperationType.RETURN,
                 0,
                 List.of(
-                    new TimetableStop(0, Optional.of("CCC"), Optional.of("OP:S:CCC:1"), 0, 0),
-                    new TimetableStop(1, Optional.empty(), Optional.of("OP:D:DEP:1"), 90, 90)),
+                    new TimetableStop(
+                        0,
+                        Optional.of("CCC"),
+                        Optional.of("OP:S:CCC:1"),
+                        0,
+                        0,
+                        RouteStopPassType.STOP),
+                    new TimetableStop(
+                        1,
+                        Optional.empty(),
+                        Optional.of("OP:D:DEP:1"),
+                        90,
+                        90,
+                        RouteStopPassType.STOP)),
                 "OP:S:CCC:1",
                 "OP:D:DEP:1",
                 Optional.empty(),
@@ -449,8 +482,15 @@ class TimetableServiceTest {
     UUID lateTrip = UUID.randomUUID();
     List<TimetableStop> stops =
         List.of(
-            new TimetableStop(0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0),
-            new TimetableStop(1, Optional.of("CCC"), Optional.of("OP:S:CCC:1"), 230, 230));
+            new TimetableStop(
+                0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1,
+                Optional.of("CCC"),
+                Optional.of("OP:S:CCC:1"),
+                230,
+                230,
+                RouteStopPassType.STOP));
     Timetable overnight =
         new Timetable(
             TIMETABLE,

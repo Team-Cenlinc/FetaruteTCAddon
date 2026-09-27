@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 
 /**
  * 构建时刻表的参数。
@@ -108,8 +109,8 @@ public record TimetableBuildOptions(
   /** 默认基准间隔 5 分钟。 */
   public static final int DEFAULT_HEADWAY_SECONDS = 300;
 
-  /** 默认停站 20 秒，与 AutoStation 的缺省一致。 */
-  public static final int DEFAULT_DWELL_SECONDS = 20;
+  /** 默认停站，与运行时停车没配 dwell 时的缺省是同一个值（见 {@link RouteStop#DEFAULT_DWELL_SECONDS}）。 */
+  public static final int DEFAULT_DWELL_SECONDS = RouteStop.DEFAULT_DWELL_SECONDS;
 
   /** 单次构建允许的最大班次数，防止把 headway 写成 1 秒时生成一张无法使用的表。 */
   public static final int MAX_TRIPS = 5000;

@@ -140,15 +140,26 @@ public final class StationPresenceTracker implements StationStopObserver {
    *
    * @param arrival true 为到站，false 为发车
    * @param stopIndex 交路索引
+   * @param nodeId 实际停靠的节点（DYNAMIC 为选中的股道）
    * @param routeKey 交路 key
    * @param routeUuid 交路 UUID（仅 code 定义的交路为空）
    * @param at 发生时刻（调度层时钟）
    */
   public record StopRecord(
-      boolean arrival, int stopIndex, String routeKey, Optional<UUID> routeUuid, Instant at) {
+      boolean arrival,
+      int stopIndex,
+      String nodeId,
+      String routeKey,
+      Optional<UUID> routeUuid,
+      Instant at) {
     static StopRecord of(boolean arrival, StationStopEvent event) {
       return new StopRecord(
-          arrival, event.stopIndex(), event.routeKey(), event.routeUuid(), event.at());
+          arrival,
+          event.stopIndex(),
+          event.nodeId(),
+          event.routeKey(),
+          event.routeUuid(),
+          event.at());
     }
   }
 }

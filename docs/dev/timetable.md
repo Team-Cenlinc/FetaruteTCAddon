@@ -382,7 +382,7 @@ RouteTrip C ─┘   决定"跑什么"                        决定"谁来跑"
 
 | 表 | 内容 |
 | --- | --- |
-| `fta_timetables` | 表头 + `route_plans`（JSON，整体读写；每条带 `kind`＝OPERATION/CREATE/RETURN，借用的外方走行线路带 `external`＝true，旧数据缺省 false） |
+| `fta_timetables` | 表头 + `route_plans`（JSON，整体读写；每条带 `kind`＝OPERATION/CREATE/RETURN，借用的外方走行线路带 `external`＝true，旧数据缺省 false；每个停靠点带 `pass`＝STOP/PASS/TERMINATE，1.5.0 之前的旧数据按“首末站或停站大于 0 秒算停车”回推，重新发布后按交路定义） |
 | `fta_timetable_trips` | 发车表，一趟一行，`(timetable_id, trip_code)` 唯一；只有 OPERATION |
 | `fta_timetable_duties` | 车辆交路：`end_depot_node_id` NOT NULL，`create_route_id`/`return_route_id` 可空（两端 route 自带 CRET/DSTY 时），`return_second` 是回库票发出时刻 |
 | `fta_timetable_baselines` | build 当时读到的邻表身份（`neighbor_timetable_id` + `neighbor_code` + `neighbor_updated_at`）与共用资源数、目标间隔下的冲突数。publish 重检靠它判断邻表集合有没有变；**只由 build / publish 重检 / delete 写**，改状态的 save 不碰它 |

@@ -1,7 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 
 /**
  * 时刻表中的一个停靠点，时间以“相对本趟车发车时刻的秒偏移”表达。
@@ -11,20 +13,26 @@ import java.util.Optional;
  *
  * <p>偏移允许超过一天：跨零点的班次由偏移自然表达，不需要额外的日期字段。
  *
- * @param stopSequence 停靠序号，与 {@code RouteStop.sequence} 同义
- * @param stationCode 站点主数据 code；DYNAMIC 站台等场景可能缺失
+ * <p>是否停车看 {@code passType}，不看停站时长：停站 0 秒的 STOP 站照样停车，PASS 的到发时刻本来就相同。
+ *
+ * @param stopSequence 停靠序号：交路 {@code waypoints()} 的 0 起下标，与运行时进度索引同一口径（不是 {@code
+ *     RouteStop.sequence}——那是库里的排序键，可以不连续）
+ * @param stationCode 站点 code，只有车站本体节点才有；区间点、咽喉、车库为空
  * @param nodeId 调度图节点 ID 或 DYNAMIC 占位符
  * @param arrivalOffsetSeconds 相对发车时刻的到达偏移（秒），首站为 0
  * @param departureOffsetSeconds 相对发车时刻的发车偏移（秒），不早于到达偏移
+ * @param passType 构建时交路上该点的停车方式
  */
 public record TimetableStop(
     int stopSequence,
     Optional<String> stationCode,
     Optional<String> nodeId,
     int arrivalOffsetSeconds,
-    int departureOffsetSeconds) {
+    int departureOffsetSeconds,
+    RouteStopPassType passType) {
 
   public TimetableStop {
+    Objects.requireNonNull(passType, "passType");
     if (stopSequence < 0) {
       throw new IllegalArgumentException("stopSequence 不能为负");
     }
@@ -40,6 +48,11 @@ public record TimetableStop(
     }
     stationCode = normalize(stationCode);
     nodeId = normalize(nodeId);
+  }
+
+  /** 列车是否在此停车（STOP 与 TERMINATE）。 */
+  public boolean stops() {
+    return passType != RouteStopPassType.PASS;
   }
 
   /** 停站时长，由到达/发车偏移之差派生，不单独存储以免二者不一致。 */

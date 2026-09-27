@@ -231,6 +231,22 @@ public final class RouteTerminals {
         .map(meta -> new StationRef(meta.operator(), meta.originStation(), nodeId.get()));
   }
 
+  /**
+   * 车站本体节点的站码：{@code OP:S:CODE:TRACK} → {@code CODE}（DYNAMIC 占位节点同形，同样适用）。
+   *
+   * <p>车站咽喉、区间点、车库都不是车站，返回空——区间点 {@code OP:FROM:TO:TRACK:SEQ} 的第三段是去向站，
+   * 车库与同代码车站共用第三段，按段数硬切会把它们都当成车站。
+   *
+   * @param nodeId 图节点 ID
+   * @return 站码；非车站节点为空
+   */
+  public static Optional<String> stationCodeOf(String nodeId) {
+    return parseWaypoint(nodeId)
+        .filter(meta -> meta.kind() == WaypointKind.STATION)
+        .map(WaypointMetadata::originStation)
+        .filter(code -> !code.isBlank());
+  }
+
   /** 车库的站码式显示（站牌、公开 API 用站码作名称），如「LWN Depot」。 */
   public static String depotCodeLabel(String depotCode) {
     return depotCode + " " + DEPOT_SUFFIX_LANG2;

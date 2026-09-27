@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 
 /**
  * 从路网计算一条 Route 的计划时分。
@@ -206,20 +207,24 @@ public final class TimetableTimingCalculator {
     return stop.dwellSeconds().filter(value -> value >= 0).map(Long::valueOf).orElse(fallback);
   }
 
+  /**
+   * 停靠点：停车方式照抄 route 定义，站码只取车站本体节点（见 {@link RouteTerminals#stationCodeOf}）。
+   *
+   * <p>停车方式必须在这里记下来：到发时刻相同既可能是通过，也可能是停站 0 秒的 STOP，事后无法从时刻反推。
+   */
   private static TimetableStop stopAt(
       NodeId nodeId, List<RouteStop> stops, int index, int arrivalOffset, int departureOffset) {
-    Optional<String> stationCode = Optional.of(stationCodeOf(nodeId.value()));
+    RouteStopPassType passType =
+        stops != null && index < stops.size() && stops.get(index) != null
+            ? stops.get(index).passType()
+            : RouteStopPassType.STOP;
     return new TimetableStop(
-        index, stationCode, Optional.of(nodeId.value()), arrivalOffset, departureOffset);
-  }
-
-  /** 站点 code：节点 ID 形如 {@code Operator:S:Station:Track}，取第三段；解析不出就留空。 */
-  private static String stationCodeOf(String nodeId) {
-    if (nodeId == null || nodeId.isBlank()) {
-      return "";
-    }
-    String[] parts = nodeId.trim().split(":");
-    return parts.length < 3 ? "" : parts[2].trim();
+        index,
+        RouteTerminals.stationCodeOf(nodeId.value()),
+        Optional.of(nodeId.value()),
+        arrivalOffset,
+        departureOffset,
+        passType);
   }
 
   /**

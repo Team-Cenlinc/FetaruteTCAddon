@@ -961,7 +961,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
     etaService.attachDebugLogger(loggerManager::debug);
     if (runtimeDispatchService != null) {
       etaService.attachRuntimeStopStates(runtimeDispatchService::getActiveStopState);
+      // DYNAMIC 选台后按实际股道估算：与控车读同一份有效节点。
+      etaService.attachEffectiveWaypoints(
+          runtimeDispatchService::resolveEffectiveWaypointsForEvent);
     }
+    // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
+    etaService.attachStationPresence(this::getStationPresence);
   }
 
   private void restartRuntimeMonitor() {
@@ -1471,7 +1476,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new org.fetarute.fetaruteTCAddon.api.internal.TimetableApiImpl(
             () -> Optional.ofNullable(timetableService),
             this::getStationPresence,
-            () -> Optional.ofNullable(etaService));
+            () -> Optional.ofNullable(etaService),
+            () -> getServer().getCurrentTick());
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.initialize(
         graphApi,
         trainApi,

@@ -459,6 +459,18 @@ class EtaServiceTest {
     assertTrue(result.etaMinutesRounded() >= 0 || result.arriving(), "ETA 应该可用，因为实际下一 STOP 是 D 站");
   }
 
+  private static RouteStop terminalStop(
+      UUID routeUuid, int sequence, NodeId node, RouteStopPassType passType) {
+    return new RouteStop(
+        routeUuid,
+        sequence,
+        Optional.empty(),
+        Optional.of(node.value()),
+        Optional.empty(),
+        passType,
+        Optional.empty());
+  }
+
   private RailGraph buildLinearGraph(List<NodeId> nodes, int edgeLengthBlocks) {
     java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodeMap =
         new java.util.HashMap<>();
@@ -544,11 +556,14 @@ class EtaServiceTest {
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
-    when(routeDefinitions.listStops(routeId)).thenReturn(List.of(stopB, stopC));
-    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stopB));
-    when(routeDefinitions.findStop(routeId, 2)).thenReturn(Optional.of(stopC));
-    when(routeDefinitions.findStop(routeId, 0)).thenReturn(Optional.empty());
-    when(routeDefinitions.findStop(routeId, 3)).thenReturn(Optional.empty());
+    // 停靠配置与 waypoints 下标一一对应（与 RouteDefinitionCache#listStops 的契约一致）。
+    when(routeDefinitions.listStops(routeId))
+        .thenReturn(
+            List.of(
+                terminalStop(routeUuid, 0, nodeA, RouteStopPassType.STOP),
+                stopB,
+                stopC,
+                terminalStop(routeUuid, 3, nodeD, RouteStopPassType.TERMINATE)));
 
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     when(occupancyManager.canEnter(any()))
@@ -622,11 +637,14 @@ class EtaServiceTest {
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
-    when(routeDefinitions.listStops(routeId)).thenReturn(List.of(stopB, stopC));
-    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stopB));
-    when(routeDefinitions.findStop(routeId, 2)).thenReturn(Optional.of(stopC));
-    when(routeDefinitions.findStop(routeId, 0)).thenReturn(Optional.empty());
-    when(routeDefinitions.findStop(routeId, 3)).thenReturn(Optional.empty());
+    // 停靠配置与 waypoints 下标一一对应（与 RouteDefinitionCache#listStops 的契约一致）。
+    when(routeDefinitions.listStops(routeId))
+        .thenReturn(
+            List.of(
+                terminalStop(routeUuid, 0, nodeA, RouteStopPassType.STOP),
+                stopB,
+                stopC,
+                terminalStop(routeUuid, 3, nodeD, RouteStopPassType.TERMINATE)));
 
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     when(occupancyManager.canEnter(any()))

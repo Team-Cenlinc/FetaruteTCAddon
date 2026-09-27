@@ -97,12 +97,11 @@ public final class RouteApiImpl implements RouteApi {
       waypoints.add(nodeId.value());
     }
 
-    // 获取 stops
+    // 停靠表与 waypoints 下标对齐；序号就是下标，与 TimetableApi、车站事件同一口径。
     List<StopInfo> stops = new ArrayList<>();
     List<RouteStop> routeStops = routeDefinitions.listStops(def.id());
-    int seq = 1;
-    for (RouteStop stop : routeStops) {
-      stops.add(convertStopInfo(stop, seq++));
+    for (int i = 0; i < routeStops.size(); i++) {
+      stops.add(convertStopInfo(routeStops.get(i), i));
     }
 
     // 解析终点信息

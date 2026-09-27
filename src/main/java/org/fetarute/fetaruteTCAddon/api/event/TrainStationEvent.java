@@ -49,7 +49,9 @@ public abstract class TrainStationEvent extends Event {
     return routeKey;
   }
 
-  /** 本站在交路中的索引（与 RouteApi 停靠表的序号一致）。 */
+  /**
+   * 本站停靠序号：交路节点的 0 起下标，与 RouteApi 停靠表的 {@code sequence}、TimetableApi 的 {@code stopSequence} 同一口径。
+   */
   public int getStopIndex() {
     return stopIndex;
   }

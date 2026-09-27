@@ -10,12 +10,14 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
@@ -477,7 +479,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
                 stop.stationCode().orElse(null),
                 stop.nodeId().orElse(null),
                 stop.arrivalOffsetSeconds(),
-                stop.departureOffsetSeconds()));
+                stop.departureOffsetSeconds(),
+                stop.passType().name()));
       }
       dtos.add(
           new RoutePlanDto(
@@ -509,7 +512,9 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
       }
       List<TimetableStop> stops = new ArrayList<>();
       if (dto.stops() != null) {
-        for (StopDto stop : dto.stops()) {
+        int count = dto.stops().size();
+        for (int i = 0; i < count; i++) {
+          StopDto stop = dto.stops().get(i);
           if (stop == null) {
             continue;
           }
@@ -519,7 +524,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
                   Optional.ofNullable(stop.station()),
                   Optional.ofNullable(stop.node()),
                   stop.arr(),
-                  stop.dep()));
+                  stop.dep(),
+                  decodePassType(stop, i, count)));
         }
       }
       out.add(
@@ -536,6 +542,24 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               Boolean.TRUE.equals(dto.external())));
     }
     return List.copyOf(out);
+  }
+
+  /**
+   * 停车方式；1.5.0 之前落库的时刻表没有这一项，按当时对外的口径回推：首末站与停站时长大于 0 的点算停车。
+   *
+   * <p>回推会把停站 0 秒的 STOP 站当成通过，这正是新字段要修的问题——重新构建并发布时刻表后即按交路定义。
+   */
+  private static RouteStopPassType decodePassType(StopDto stop, int position, int count) {
+    if (stop.pass() != null) {
+      try {
+        return RouteStopPassType.valueOf(stop.pass().trim().toUpperCase(Locale.ROOT));
+      } catch (IllegalArgumentException ex) {
+        throw new StorageException("无法识别的停车方式: " + stop.pass(), ex);
+      }
+    }
+    return position == 0 || position == count - 1 || stop.dep() > stop.arr()
+        ? RouteStopPassType.STOP
+        : RouteStopPassType.PASS;
   }
 
   @FunctionalInterface
@@ -555,5 +579,6 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
       List<StopDto> stops,
       Boolean external) {}
 
-  private record StopDto(int seq, String station, String node, int arr, int dep) {}
+  /** {@code pass} 为 {@link RouteStopPassType} 名；1.5.0 之前的行没有它（见 {@link #decodePassType}）。 */
+  private record StopDto(int seq, String station, String node, int arr, int dep, String pass) {}
 }

@@ -87,14 +87,34 @@ public final class PathProgressModel {
     }
 
     // 找到目标在 waypoint 中的位置（若不存在则无法定位）。
-    int targetIndex = -1;
     for (int i = currentIndex + 1; i < waypoints.size(); i++) {
       if (target.equals(waypoints.get(i))) {
-        targetIndex = i;
-        break;
+        return remainingToIndex(graph, waypoints, currentIndex, i, lastPassedGraphNode);
       }
     }
-    if (targetIndex < 0) {
+    return Optional.empty();
+  }
+
+  /**
+   * 按下标计算到目标的剩余路径。
+   *
+   * <p>调用方已经知道目标在交路里的下标时用它：同一节点在交路里出现两次、或目标节点换成了 DYNAMIC 选中的股道时， 按节点找下标都会找错。
+   *
+   * @param graph 调度图
+   * @param waypoints 节点序列（可以是运行时实际节点，目标下标处也可以换成候选股道）
+   * @param currentIndex 列车当前下标
+   * @param targetIndex 目标下标，须大于 {@code currentIndex}
+   * @param lastPassedGraphNode 列车经过的最后一个图节点（可为 null）
+   */
+  public Optional<PathProgress> remainingToIndex(
+      RailGraph graph,
+      List<NodeId> waypoints,
+      int currentIndex,
+      int targetIndex,
+      NodeId lastPassedGraphNode) {
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(waypoints, "waypoints");
+    if (currentIndex < 0 || targetIndex <= currentIndex || targetIndex >= waypoints.size()) {
       return Optional.empty();
     }
 

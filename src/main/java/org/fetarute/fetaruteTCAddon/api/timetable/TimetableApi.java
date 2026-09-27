@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 
 /**
  * 时刻表 API：已发布时刻表、车次、站点计划到发与列车当前车次（1.4.0 新增）。
@@ -19,6 +20,13 @@ import java.util.UUID;
  * <p>时刻表是按服务日重复的模板：车次只记起点发车的“当日秒数”，各站时刻是相对起点发车的偏移。 本 API 返回的 {@link Instant}
  * 已按时刻表自身时区与服务日换算好，调用方无需自己做日期换算。
  *
+ * <h2>停靠序号</h2>
+ *
+ * <p>本 API 所有 {@code stopSequence} 都是交路节点序列的 <b>0 起下标</b>，与 {@code
+ * RouteApi.RouteDetail#waypoints()} 及 {@code stops()} 的下标、{@code
+ * RouteApi.StopInfo#sequence()}、车站到发事件的 {@code getStopIndex()} 同一口径（1.5.0 起统一）：拿到序号 {@code n} 直接
+ * {@code route.stops().get(n)} 即可。另附节点 ID 与站码，调用方也可以不依赖序号确认是哪一站。
+ *
  * <h2>示例</h2>
  *
  * <pre>{@code
@@ -29,7 +37,8 @@ import java.util.UUID;
  * }
  * tt.getAssignment("SURC-WS-LC-1037").ifPresent(a -> {
  *   a.currentDelaySeconds().ifPresent(d -> System.out.println(a.tripCode() + " 上一站偏差 " + d + " 秒"));
- *   a.projectedDelaySeconds().ifPresent(d -> System.out.println("预计到下一站偏差 " + d + " 秒"));
+ *   a.projectedDelaySeconds().ifPresent(d -> System.out.println(
+ *       "预计到 " + a.nextStationCode().orElse("?") + " 偏差 " + d + " 秒"));
  * });
  * }</pre>
  */
@@ -63,7 +72,8 @@ public interface TimetableApi {
   /**
    * 某站在时间窗内的计划发车（所有已发布时刻表合并，按计划发车时刻排序）。
    *
-   * <p>只列在该站停车的车次；终到车次也会列出（其到达即终到，{@link Departure#terminating()} 为 true）。
+   * <p>只列在该站停车（{@link StopTime#stops()}）的车次；终到车次也会列出（其到达即终到，{@link Departure#terminating()} 为
+   * true）。
    *
    * @param operatorId 运营商 ID；为 null 时不限运营商
    * @param stationCode 站点代码（如 {@code HHU}，大小写不敏感）
@@ -77,12 +87,14 @@ public interface TimetableApi {
   /**
    * 列车当前绑定的车次，以及相对计划的偏差。
    *
+   * <p>结果按 tick 缓存：同一 tick 内对同一列车重复查询只算一次（预计偏差要走一遍 ETA 路径计算）， 所以按帧轮询也不会放大开销；下一 tick 起重新计算。
+   *
    * @param trainName 列车名（大小写不敏感）
    * @return 未启用按表运行或列车未绑定车次时为空
    */
   Optional<TrainAssignment> getAssignment(String trainName);
 
-  /** 当前全部车次绑定。 */
+  /** 当前全部车次绑定（与 {@link #getAssignment} 共用同一份 tick 缓存）。 */
   Collection<TrainAssignment> listAssignments();
 
   /**
@@ -153,18 +165,28 @@ public interface TimetableApi {
   /**
    * 停靠点计划时分。
    *
-   * @param stopSequence 停靠序号（与运行时进度索引同义）
-   * @param stationCode 站点代码（非车站节点为空）
-   * @param nodeId 调度图节点
+   * <p>是否停车看 {@code passType}（{@link #stops()}），不要拿到发时刻是否相同去猜：停站 0 秒的 STOP 站同样停车。
+   *
+   * @param stopSequence 停靠序号（交路节点的 0 起下标，见类注释“停靠序号”）
+   * @param stationCode 站点代码（只有车站本体节点才有；区间点、咽喉、车库为空）
+   * @param nodeId 调度图节点（DYNAMIC 停靠为占位股道 {@code OP:S:CODE:fromTrack}，与 RouteApi 停靠表一致）
    * @param arrivalOffsetSeconds 相对起点发车的到达偏移（秒）
    * @param departureOffsetSeconds 相对起点发车的发车偏移（秒）
+   * @param passType 停车方式（1.5.0 新增；1.5.0 之前发布的时刻表按“首末站或停站大于 0 秒”回推，重新发布后按交路定义）
    */
   record StopTime(
       int stopSequence,
       Optional<String> stationCode,
       Optional<String> nodeId,
       int arrivalOffsetSeconds,
-      int departureOffsetSeconds) {}
+      int departureOffsetSeconds,
+      RouteApi.PassType passType) {
+
+    /** 列车是否在此停车（STOP 与 TERMINATE）。 */
+    public boolean stops() {
+      return passType != RouteApi.PassType.PASS;
+    }
+  }
 
   /**
    * 车次。
@@ -214,8 +236,8 @@ public interface TimetableApi {
    * @param routeId 交路 ID
    * @param routeCode 交路代码
    * @param tripCode 车次号
-   * @param stopSequence 本站在交路中的停靠序号
-   * @param nodeId 本站调度图节点（可用于显示站台）
+   * @param stopSequence 本站停靠序号（交路节点的 0 起下标）
+   * @param nodeId 本站调度图节点（可用于显示站台；DYNAMIC 停靠为占位股道）
    * @param plannedArrival 计划到达
    * @param plannedDeparture 计划发车
    * @param terminating 本站是否为该车次终点
@@ -237,6 +259,8 @@ public interface TimetableApi {
   /**
    * 列车的车次绑定。
    *
+   * <p>上一站、下一站各给三样：序号、节点、站码。序号与 RouteApi 停靠表同一口径；只想确认“晚点说的是哪一站”时， 比站码最稳（DYNAMIC 停靠选台前后节点会变，站码不变）。
+   *
    * @param trainName 列车名
    * @param timetableId 时刻表 ID
    * @param tripCode 车次号
@@ -246,10 +270,15 @@ public interface TimetableApi {
    * @param assignedAt 绑定时刻
    * @param initialDeviationSeconds 绑定时相对计划的偏差（正数为晚点）
    * @param lastStopSequence 本车次最近一次实际到达或发车的停靠序号（尚无记录时为空）
+   * @param lastStopNodeId 该次到发实际停靠的节点（DYNAMIC 为实际股道）
+   * @param lastStationCode 该次到发所在车站的站码（非车站节点为空）
    * @param currentDelaySeconds 本车次最近一次实际到达或发车相对计划的偏差（正数为晚点；尚无记录时为空）
-   * @param nextStopSequence 下一个计划停靠点的序号（无法定位时为空）
-   * @param projectedDelaySeconds 按 ETA 预计到达下一个计划停靠点相对计划的偏差（正数为晚点）。 列车在区间被扣停时它会随扣停时长增长， 而 {@code
-   *     currentDelaySeconds} 要到下一次到发才更新；ETA 不可用时为空
+   * @param nextStopSequence 下一个计划停车点的序号（按交路停车方式，停站 0 秒的 STOP 也算；无法定位时为空）
+   * @param nextStopNodeId 下一个计划停车点的节点：DYNAMIC 已选台为实际股道，未选台为占位股道（与 RouteApi 停靠表一致）
+   * @param nextStationCode 下一个计划停车点的站码（非车站节点为空）
+   * @param projectedDelaySeconds 按 ETA 预计到达 {@code nextStop*} 那一站相对计划的偏差（正数为晚点）。
+   *     列车在区间被扣停时它会随扣停时长增长，而 {@code currentDelaySeconds} 要到下一次到发才更新；DYNAMIC 未选台时按到该站任一候选股道估算； ETA
+   *     不可用时为空。同一 tick 内重复查询返回同一份结果
    */
   record TrainAssignment(
       String trainName,
@@ -261,7 +290,11 @@ public interface TimetableApi {
       Instant assignedAt,
       long initialDeviationSeconds,
       Optional<Integer> lastStopSequence,
+      Optional<String> lastStopNodeId,
+      Optional<String> lastStationCode,
       OptionalLong currentDelaySeconds,
       Optional<Integer> nextStopSequence,
+      Optional<String> nextStopNodeId,
+      Optional<String> nextStationCode,
       OptionalLong projectedDelaySeconds) {}
 }

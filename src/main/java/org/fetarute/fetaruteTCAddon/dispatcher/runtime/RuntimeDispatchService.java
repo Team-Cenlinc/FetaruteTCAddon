@@ -171,9 +171,6 @@ public final class RuntimeDispatchService {
   /** 普通 lookahead 距离化后的绝对硬上限，避免极端配置放大占用资源集。 */
   private static final int DISTANCE_LOOKAHEAD_ABSOLUTE_MAX_EDGES = 24;
 
-  /** Waypoint 作为 STOP/TERM 时的默认停站时长（秒）。 */
-  private static final int DEFAULT_WAYPOINT_DWELL_SECONDS = 20;
-
   /** 居中动作执行时的临时速度限制（blocks/tick）。需大于 0 以允许 Station.centerTrain() 移动列车。 */
   private static final double WAYPOINT_CENTER_SPEED_LIMIT = 0.4;
 
@@ -19500,7 +19497,7 @@ public final class RuntimeDispatchService {
     if (stop == null) {
       return 0;
     }
-    return stop.dwellSeconds().orElse(DEFAULT_WAYPOINT_DWELL_SECONDS);
+    return stop.dwellSeconds().orElse(RouteStop.DEFAULT_DWELL_SECONDS);
   }
 
   /**

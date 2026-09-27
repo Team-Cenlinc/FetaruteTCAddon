@@ -1,12 +1,17 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.route;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
 /**
  * DYNAMIC stop 匹配工具：解析 DYNAMIC 规范并判断 NodeId 是否匹配。
@@ -70,7 +75,79 @@ public final class DynamicStopMatcher {
   private static final Pattern DYNAMIC_DIRECTIVE_PATTERN =
       Pattern.compile("(?:^|\\s)DYNAMIC(?:$|[\\s:])", Pattern.CASE_INSENSITIVE);
 
+  /** 候选股道数的安全上限，防止规范范围写得过大时逐条寻路卡服。 */
+  static final int MAX_TRACK_CANDIDATES = 20;
+
   private DynamicStopMatcher() {}
+
+  /**
+   * DYNAMIC 规范在图上实际存在的候选股道节点（按股道号升序）。
+   *
+   * <p>声明了范围就按范围；<b>未声明范围时枚举该站在图上实际存在的全部股道</b>（按前缀匹配、只取纯数字股道段）。 {@link #parseDynamicSpec}
+   * 对未声明范围的规范返回 {@code from=1, to=1, unbounded=true}，若忽略 {@code unbounded()}，{@code
+   * DYNAMIC:SURC:S:PPK} 就退化成只看 1 号股道（第十六轮实服：PPK 有 1/2 两个站台，候选里却只有一个）。
+   *
+   * <p>选台（{@code DynamicPlatformAllocator}）与尚未选台时的 ETA 估算共用这一份枚举。
+   *
+   * @param spec DYNAMIC 规范
+   * @param graph 调度图；为空时没有候选
+   * @return 图上存在的候选节点，至多 {@link #MAX_TRACK_CANDIDATES} 个
+   */
+  public static List<NodeId> candidateNodes(DynamicSpec spec, RailGraph graph) {
+    if (spec == null || graph == null) {
+      return List.of();
+    }
+    String prefix =
+        spec.operatorCode().trim()
+            + ":"
+            + spec.nodeType().trim()
+            + ":"
+            + spec.nodeName().trim()
+            + ":";
+    List<Integer> tracks = new ArrayList<>();
+    if (!spec.unbounded()) {
+      int maxTrack = Math.min(spec.toTrack(), spec.fromTrack() + MAX_TRACK_CANDIDATES - 1);
+      for (int track = spec.fromTrack(); track <= maxTrack; track++) {
+        tracks.add(track);
+      }
+    } else {
+      TreeSet<Integer> discovered = new TreeSet<>();
+      for (RailNode node : graph.nodes()) {
+        if (node == null || node.id() == null || node.id().value() == null) {
+          continue;
+        }
+        String value = node.id().value();
+        if (!value.regionMatches(true, 0, prefix, 0, prefix.length())) {
+          continue;
+        }
+        String trackPart = value.substring(prefix.length());
+        if (trackPart.isEmpty() || trackPart.indexOf(':') >= 0) {
+          continue;
+        }
+        try {
+          int track = Integer.parseInt(trackPart);
+          if (track >= 1) {
+            discovered.add(track);
+          }
+        } catch (NumberFormatException ignored) {
+          // 非数字股道段不是候选。
+        }
+        if (discovered.size() >= MAX_TRACK_CANDIDATES) {
+          break;
+        }
+      }
+      // 图上一个都发现不了时退回声明值（随后按“图上不存在”滤掉）。
+      tracks.addAll(discovered.isEmpty() ? List.of(spec.fromTrack()) : discovered);
+    }
+    List<NodeId> out = new ArrayList<>(tracks.size());
+    for (int track : tracks) {
+      NodeId candidate = NodeId.of(prefix + track);
+      if (graph.findNode(candidate).isPresent()) {
+        out.add(candidate);
+      }
+    }
+    return List.copyOf(out);
+  }
 
   /**
    * 判断 stop 是否为 DYNAMIC 类型（notes 中包含 DYNAMIC 指令）。

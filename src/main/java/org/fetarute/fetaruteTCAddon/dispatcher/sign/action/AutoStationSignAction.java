@@ -49,12 +49,11 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * <p>用于承载“停站/开关门/站台行为”等语义，因此只接受站点本体（4 段 {@code Operator:S:Station:Track}）。
  * 站咽喉属于图节点（Waypoint）职责，不应使用 AutoStation 牌子注册。
  *
- * <p>行为触发依赖列车 {@code FTA_ROUTE_ID} tag 与 RouteStop：仅在 STOP/TERMINATE 时停站， {@code dwellSeconds}
- * 缺失时默认 20 秒。开门失败将跳过关门动作，避免“未开门先关门”的误触发。
+ * <p>行为触发依赖列车 {@code FTA_ROUTE_ID} tag 与 RouteStop：仅在 STOP/TERMINATE 时停站， {@code dwellSeconds} 缺失时取
+ * {@link RouteStop#DEFAULT_DWELL_SECONDS}。开门失败将跳过关门动作，避免“未开门先关门”的误触发。
  */
 public final class AutoStationSignAction extends AbstractNodeSignAction {
 
-  private static final int DEFAULT_DWELL_SECONDS = 20;
   private static final String TAG_ROUTE_ID = "FTA_ROUTE_ID";
   private static final String TAG_DOOR_FIRST_STOP_DONE = "FTA_DOOR_FIRST_STOP_DONE";
   private static final String TAG_RUN_AT = "FTA_RUN_AT";
@@ -1130,8 +1129,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (match.passType() == RouteStopPassType.PASS) {
       return Optional.empty();
     }
-    int dwell = match.dwellSeconds().orElse(DEFAULT_DWELL_SECONDS);
-    return Optional.of(dwell);
+    return Optional.of(match.plannedDwellSeconds());
   }
 
   /** 读取 AutoStation 提示音配置，缺失则返回禁用配置。 */

@@ -52,8 +52,33 @@ ETA 的等待只看运行时**真实**停车状态（`RuntimeDispatchService#get
 采样器按相邻两次采样的平均速度积分“自上一个经过节点起已行驶的距离”（`TrainRuntimeSnapshot#traveledSinceLastPassedBlocks`），
 经过新节点即清零，单次积分间隔按最多 2 秒计。ETA 从剩余路径前端扣掉这段距离——否则列车在一条边上行驶时 ETA 基本不动，过节点时再突跳。
 
+## 停站与途中停车
+
+ETA = 行程 + 停站 + 等待。停站的口径与运行时实际怎么停一致（`RouteStopPlan`，按 `waypoints()` 下标对齐停靠配置）：
+
+| 情形 | 计入 ETA |
+|---|---|
+| 途中 STOP / TERMINATE 节点 | 该点 `dwell`；没配时取 `RouteStop.DEFAULT_DWELL_SECONDS`（20 秒，与 AutoStation、区间点停车、终到折返同一个值）。此前没配按 0 秒、TERMINATE 不计 |
+| 途中 PASS 节点 | 0 |
+| 本站停站计时进行中 | 停站计时剩余秒数 |
+| 已到站、停站计时尚未注册（停稳前约 3 秒） | 本站计划停站（靠 `StationPresenceTracker` 识别在站）。此前这几秒按 0 计，ETA 先提前一整段停站再跳回 |
+| 本站停站计时已结束（关门、等发车许可） | 0，超时部分按扣停处理（见上节） |
+
+行程按途中停车点**拆段**：每段以进站限速收尾（接入进站限速配置时），下一段从静止起步。一路不停地算会少算每站的制动与起步
+（默认参数约 5 秒一站）。是否停车只看 `passType`，不看 `dwell` 是否为 0。
+
+## DYNAMIC 站台
+
+ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffectiveWaypointsForEvent`）：
+
+- 已选台：按选中的股道估算。拿交路里声明的占位股道（`OP:S:CODE:fromTrack`）来问 `PlatformNode` 也能定位到这一站、按实际股道算。
+- 尚未选台：车站级估算——该站在图上存在的每条候选股道（与选台共用 `DynamicStopMatcher#candidateNodes`）各算一遍取最早。
+  占位股道只是范围里的第一条，未必是列车会去的那条，甚至未必存在。
+- 已经知道下标时用 `EtaTarget.StopIndex`（交路 0 起下标，与公开 API 停靠序号同一口径），不必按节点反查；
+  同一节点在交路里出现两次时，按节点反查只能找到第一次。
+
 ## 其它口径
-- 票据（未发车）ETA 同样计入中途停站时间。
+- 票据（未发车）ETA 同样计入中途停站时间，并从静止起步、途中停车点同样拆段。
 - 无限速边的默认速度取 `graph.default-speed-blocks-per-second`，与控车同一个配置值。
 - 实服第二十七轮 1067 段实测：站内“进站到发车”中位 24 秒（停站配置 20 秒），行车实测比模型快约 13%，两者大致抵消，
   因此加减速参数保持不变；偏早与卡住的主因是扣停与票据超时未计入、以及边内进度缺失。

@@ -8,6 +8,9 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.IntStream;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -56,6 +59,51 @@ class TimetableTimingCalculatorTest {
     assertEquals(25, segment.exitOffset(1));
     assertEquals(
         result.stops().get(1).arrivalOffsetSeconds(), segment.exitOffset(1), "末节点时刻等于到站时刻");
+  }
+
+  /**
+   * 停车方式照抄 route 定义：停站 0 秒的 STOP 与 PASS 到发同刻，事后无法从时刻区分，必须构建时记下来。
+   *
+   * <p>站码只取车站本体节点：区间点 {@code OP:A:B:1:01} 的第三段是去向站、车库与同代码车站共用第三段，都不是车站。
+   */
+  @Test
+  void stopsRecordPassTypeAndStationCodeOnlyForStationNodes() {
+    List<String> nodes = List.of("OP:D:AAA:1", "OP:AAA:BBB:1:01", "OP:S:BBB:1", "OP:S:CCC:1");
+    RailGraph graph =
+        TimetableTestFixtures.chain(nodes, new int[] {100, 100, 100}, new double[] {10, 10, 10});
+    RouteDefinition route = TimetableTestFixtures.route("R1", nodes);
+    List<RouteStopPassType> passTypes =
+        List.of(
+            RouteStopPassType.PASS,
+            RouteStopPassType.PASS,
+            RouteStopPassType.STOP,
+            RouteStopPassType.TERMINATE);
+    List<RouteStop> stops =
+        IntStream.range(0, nodes.size())
+            .mapToObj(
+                i ->
+                    new RouteStop(
+                        ROUTE,
+                        i,
+                        Optional.empty(),
+                        Optional.of(nodes.get(i)),
+                        Optional.of(0),
+                        passTypes.get(i),
+                        Optional.empty()))
+            .toList();
+
+    TimetableTimingCalculator.TimingResult result =
+        new TimetableTimingCalculator()
+            .compute(graph, RailTravelTimeModels.constantSpeed(10.0), route, stops, Duration.ZERO);
+
+    assertTrue(result.ok(), () -> result.failure().toString());
+    assertEquals(passTypes, result.stops().stream().map(TimetableStop::passType).toList());
+    TimetableStop bbb = result.stops().get(2);
+    assertEquals(bbb.arrivalOffsetSeconds(), bbb.departureOffsetSeconds(), "停站 0 秒");
+    assertTrue(bbb.stops(), "停站 0 秒的 STOP 仍是停车点");
+    assertEquals(
+        List.of(Optional.empty(), Optional.empty(), Optional.of("BBB"), Optional.of("CCC")),
+        result.stops().stream().map(TimetableStop::stationCode).toList());
   }
 
   /** 单一限速：时分 = 长度 / 限速，停站单独叠加。 */
@@ -174,31 +222,31 @@ class TimetableTimingCalculatorTest {
             new double[] {10.0, 10.0});
     RouteDefinition route =
         TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"));
-    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
+    List<RouteStop> stops =
         List.of(
-            new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+            new RouteStop(
                 ROUTE,
                 0,
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
-                org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP,
+                RouteStopPassType.STOP,
                 Optional.empty()),
-            new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+            new RouteStop(
                 ROUTE,
                 1,
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
-                org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.PASS,
+                RouteStopPassType.PASS,
                 Optional.empty()),
-            new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+            new RouteStop(
                 ROUTE,
                 2,
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
-                org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE,
+                RouteStopPassType.TERMINATE,
                 Optional.empty()));
 
     TimetableTimingCalculator.TimingResult result =

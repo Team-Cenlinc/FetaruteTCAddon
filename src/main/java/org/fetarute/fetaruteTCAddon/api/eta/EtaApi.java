@@ -183,7 +183,7 @@ public interface EtaApi {
    * @param trainName 列车名
    * @param worldId 世界 UUID
    * @param routeId 路线 ID
-   * @param routeIndex 当前 index
+   * @param routeIndex 列车最近到达的交路节点下标（0 起，与停靠序号同一口径）
    * @param currentNode 当前节点
    * @param lastPassedNode 上一节点
    */

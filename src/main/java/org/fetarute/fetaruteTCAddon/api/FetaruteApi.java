@@ -62,7 +62,7 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
 public final class FetaruteApi {
 
   /** 当前 API 版本（语义版本）。 */
-  public static final String API_VERSION = "1.4.0";
+  public static final String API_VERSION = "1.5.0";
 
   private static volatile FetaruteApi instance;
 
@@ -206,7 +206,7 @@ public final class FetaruteApi {
   }
 
   /**
-   * 时刻表 API：已发布时刻表、车次、站点计划到发、列车当前车次（1.4.0）。
+   * 时刻表 API：已发布时刻表、车次、站点计划到发、列车当前车次（1.4.0；1.5.0 统一停靠序号口径）。
    *
    * @return 时刻表 API
    */

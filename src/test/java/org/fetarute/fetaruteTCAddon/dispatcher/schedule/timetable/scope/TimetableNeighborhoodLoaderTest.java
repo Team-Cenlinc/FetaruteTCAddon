@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
@@ -222,9 +223,11 @@ class TimetableNeighborhoodLoaderTest {
                     "OTHER",
                     1,
                     List.of(
-                        new TimetableStop(0, Optional.empty(), Optional.of(B), 0, 0),
+                        new TimetableStop(
+                            0, Optional.empty(), Optional.of(B), 0, 0, RouteStopPassType.STOP),
                         // 当前图上 B→D 是 20 秒，落库却写着 60 秒：邻表基于旧图。
-                        new TimetableStop(1, Optional.empty(), Optional.of(D), 60, 60)),
+                        new TimetableStop(
+                            1, Optional.empty(), Optional.of(D), 60, 60, RouteStopPassType.STOP)),
                     B,
                     D,
                     Optional.empty(),
@@ -390,8 +393,10 @@ class TimetableNeighborhoodLoaderTest {
         code,
         1,
         List.of(
-            new TimetableStop(0, Optional.empty(), Optional.of(origin), 0, 0),
-            new TimetableStop(1, Optional.empty(), Optional.of(terminal), 20, 20)),
+            new TimetableStop(
+                0, Optional.empty(), Optional.of(origin), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.empty(), Optional.of(terminal), 20, 20, RouteStopPassType.STOP)),
         origin,
         terminal,
         Optional.empty(),
