@@ -207,7 +207,8 @@ spawn:
   tick-interval-ticks: 100
   # 刷新发车计划的间隔（ticks）：会从数据库重新读取 Company/Operator/Line/Route/RouteStop
   plan-refresh-ticks: 200
-  # 每次 tick 最多尝试 spawn 的数量（避免卡主线程/刷车）
+  # 每次 tick 最多实体化（新生成）的列车数（避免卡主线程/刷车）
+  # 只数真正生成的车：被闭塞挡在预检的出库票、折返复用的票都不占名额，每拍都会各试一次
   max-spawn-per-tick: 1
   # 每次 tick 最多生成的票据数量（用于追赶 dueTime；建议与 max-backlog-per-service 配合）
   max-generate-per-tick: 5

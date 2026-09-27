@@ -384,6 +384,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final int maxSpawnPerTick;
   private final int maxRetryAttempts;
 
+  /**
+   * 本 tick 已经实体化（调用 {@link DepotSpawner#spawn}）的次数。{@code max-spawn-per-tick} 限的就是它。
+   *
+   * <p>限的是"生成了几辆车"而不是"试了几张票"：被闭塞挡在预检的票、折返复用的票都不生成实体，不占名额。
+   * 以前按尝试计，每拍唯一的名额总落在同一张出不了库的票上，全网其余的票（含终点折返）一张都轮不到 （2026-09-27 实服：一张被车库咽喉挡住的出库票连试 19 次，WS 在 CHT
+   * 的折返票被延后 41 次）。
+   */
+  private int materializationsThisTick;
+
   /** 出车成功次数（含 Layover 复用）。 */
   private final java.util.concurrent.atomic.LongAdder spawnSuccess =
       new java.util.concurrent.atomic.LongAdder();
@@ -674,6 +683,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     lastStorageProvider = provider;
+    materializationsThisTick = 0;
     spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
     advancePendingMaterializedSpawns(now);
@@ -689,18 +699,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     dueTickets = orderDueTicketsWithRouteRotation(dueTickets);
     dueTickets = applyDepotDispatchCoordination(provider, dueTickets, selectedDepotsThisTick, now);
     dueTickets = orderDepotTicketsByLineDepotLoad(provider, dueTickets);
-    int remaining = maxSpawnPerTick;
+    // 每张票都试一次；实体化名额在 materializePreparedDepotSpawn 里扣，名额用完的出库票在那里延后。
     for (SpawnTicket ticket : dueTickets) {
-      if (ticket == null) {
-        continue;
+      if (ticket != null) {
+        trySpawn(provider, now, ticket, selectedDepotsThisTick);
       }
-      if (remaining <= 0) {
-        deferWithoutAttempt(ticket, now, "spawn-per-tick-limit");
-        continue;
-      }
-      remaining--;
-      trySpawn(provider, now, ticket, selectedDepotsThisTick);
     }
+  }
+
+  /** 本 tick 还能不能再实体化一辆车。 */
+  private boolean spawnBudgetLeft() {
+    return materializationsThisTick < maxSpawnPerTick;
   }
 
   /** 推进已实体化发车事务；只有真实 footprint promotion 后才提交票据。 */
@@ -1274,7 +1283,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       java.util.OptionalLong fallbackTimeoutSeconds = resolveLayoverFallbackTimeoutSeconds(service);
       if (fallbackTimeoutSeconds.isPresent() && waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
         if (canFallbackSpawnFromDepot(service)) {
-          if (preservePendingDispatchAttempt(ticket, "depot-fallback")) {
+          if (!spawnBudgetLeft() || preservePendingDispatchAttempt(ticket, "depot-fallback")) {
+            // 名额用完时原样保留等待记录：刷新窗口会让降级计时从头再来。
             continue;
           }
           removeIds.add(ticketId);
@@ -1458,7 +1468,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           long waitSeconds = Duration.between(pendingEntry.addedAt(), now).getSeconds();
           if (waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
             if (canFallbackSpawnFromDepot(service)) {
-              if (!preservePendingDispatchAttempt(ticket, "due-ticket-depot-fallback")) {
+              if (spawnBudgetLeft()
+                  && !preservePendingDispatchAttempt(ticket, "due-ticket-depot-fallback")) {
                 pendingLayoverTickets.remove(ticket.id());
                 debugLogger.accept(
                     "Layover 降级发车: route="
@@ -3069,7 +3080,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         trainName, graphOpt.get(), gateRequest.context())) {
       runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, reasonPrefix + "smart-depot-long-single-held");
+      deferBlockedAtDepot(effectiveTicket, now, reasonPrefix + "smart-depot-long-single-held");
       return Optional.empty();
     }
     LaunchAuthorizationService.AuthorizationResult authorization =
@@ -3087,7 +3098,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           reasonPrefix + "preview");
       runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
-      requeue(
+      deferBlockedAtDepot(
           effectiveTicket,
           now,
           reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
@@ -3124,6 +3135,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private Optional<DepotSpawner.MaterializedSpawn> materializePreparedDepotSpawn(
       StorageProvider provider, PreparedDepotSpawn prepared, Instant now, DepotSpawnOrigin origin) {
     DepotSpawnOrigin effectiveOrigin = origin == null ? DepotSpawnOrigin.NORMAL : origin;
+    if (!spawnBudgetLeft()) {
+      // 常规、降级、pending 降级三条出库路径都经过这里：名额只在真要生成实体时扣，也只在这里扣。
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(prepared.trainName());
+      releaseSpawnLease(prepared.spawnLease());
+      deferWithoutAttempt(prepared.ticket(), now, "spawn-per-tick-limit");
+      return Optional.empty();
+    }
+    materializationsThisTick++;
     try {
       Optional<DepotSpawner.MaterializedSpawn> materializedSpawn =
           depotSpawner.spawn(provider, prepared.ticket(), prepared.trainName(), now);
@@ -3640,6 +3659,39 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         .computeIfAbsent(key, ignored -> new java.util.concurrent.atomic.LongAdder())
         .increment();
     deferWithoutAttempt(ticket, now, key);
+  }
+
+  /**
+   * 出库被闭塞挡住（车库咽喉、长单线、预检 blocker）：记 depot backoff，延后重试，不消耗重试预算。
+   *
+   * <p>与 {@link #deferByGate} 同一个道理：挡住它的是别的车，累到 max-attempts 把票丢掉就是取消发车。 表定票被丢掉的代价尤其大——首班出库票没了，
+   * 整个交路都不会有车（2026-09-27 实服 DS-1F_Full 被咽喉挡了约 100 秒就因此作废，而它自己的容差是 300 秒）。 兜底仍在：表定票有自己的到期时刻，按间隔发车的票有
+   * {@code queued-ticket-max-age-seconds}。
+   */
+  private void deferBlockedAtDepot(SpawnTicket ticket, Instant now, String reason) {
+    if (ticket == null) {
+      return;
+    }
+    if (isDepotGateFailure(reason)) {
+      depotDispatchCoordinator.recordOccupancyFailure(ticket, now);
+    }
+    spawnRetries.increment();
+    requeueByError
+        .computeIfAbsent(reason, ignored -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+    SpawnTicket retry = ticket.blockedUntil(now.plus(retryDelay), reason);
+    spawnManager.requeue(retry);
+    debugLogger.accept(
+        "自动发车重试入队: ticket="
+            + ticket.id()
+            + " route="
+            + ticket.service().routeCode()
+            + " attempts="
+            + retry.attempts()
+            + " notBefore="
+            + retry.notBefore()
+            + " error="
+            + reason);
   }
 
   private void deferWithoutAttempt(SpawnTicket ticket, Instant now, String reason) {
@@ -4403,9 +4455,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /**
    * 按“本线路各 depot 在线负载”重排本轮 depot 发车票据。
    *
-   * <p>{@code DepotDispatchCoordinator} 只负责同一 depot 的互斥与退避；当 {@code maxSpawnPerTick} 小于本轮 ready
-   * 票据数时，仍需要在进入执行循环前把低负载 depot 的票据排到前面。否则列表稳定排序会让 route code 靠前、且经常被单线 depot gate 阻塞的票据反复占用本 tick
-   * 执行名额，导致同线路另一个 depot 的交路组长期得不到尝试。
+   * <p>{@code DepotDispatchCoordinator} 只负责同一 depot 的互斥与退避；本轮能出库的票多于 {@code maxSpawnPerTick}
+   * 时，谁先拿到实体化名额由这里的顺序决定：低负载 depot 的票据排在前面，避免同线路另一个 depot 的交路组长期拿不到名额。 被闭塞挡住的票不占名额，不会再因为排在前面而饿死别人。
    */
   private List<SpawnTicket> orderDepotTicketsByLineDepotLoad(
       StorageProvider provider, List<SpawnTicket> dueTickets) {

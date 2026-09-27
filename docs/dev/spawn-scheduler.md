@@ -64,13 +64,19 @@ Depot 选择会同时考虑：
 - 当前 active train 数量与 depot 权重。
 - 本 tick 已经选择过的 depot，避免同一轮连续压到同一个出库点。
 - `DepotDispatchCoordinator` 记录的 backoff，刚被 gate/occupancy 阻塞的 depot 会被强烈降权；同线路还有其它候选 depot 时，下一次会优先尝试其它候选。
-- 进入 `spawn.max-spawn-per-tick` 截断前，本轮 ready 的 depot 票据会再按本线路各 depot 的在线负载排序，避免单线 depot 的票据持续占用执行名额而饿死另一 depot 的交路组。
+- 本轮 ready 的 depot 票据会再按本线路各 depot 的在线负载排序：能出库的票多于 `spawn.max-spawn-per-tick` 时，低负载 depot 的票先拿到实体化名额，避免同线路另一个 depot 的交路组长期拿不到名额。
 
 Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 执行。动态 depot 会先 materialize 成具体 `selectedDepotNodeId`，再进入全局 depot key 仲裁。同一个 depot 同 tick 只放行一张票据，其余票据以 `depot-backoff:<depot_key>` 延迟重试；多线路共享同一 depot 时，仲裁器会记录该 depot 上一次放行的 line，并在无长期饥饿票据时轮转到其它 line。同一线路多个交路组共享同一 depot 时，也会记录上一次放行的 route，避免固定排序导致某个交路组长期压住其它交路组。
 
 自动与手动出车的列车名均使用 `<OP>-<LINE>-<PATTERN><DEST>-<SEQ>`。其中 `DEST` 取解析出的运营目的地 `code` 首字符，而不是 station name 或 route name；`FTA_DEST_CODE/FTA_DEST_NAME` tags 仍保留完整目的地信息。
 
-`spawn.max-spawn-per-tick` 只是执行层吞吐上限，不应丢弃已到期票据。超过本 tick 容量的票据会以 `spawn-per-tick-limit` 延迟重入队，且不增加 `attempts`，避免多 depot 或多线路共享单股道 depot 时因为瞬时到期票据过多而破坏 baseline/backlog。
+`spawn.max-spawn-per-tick` 限的是**每拍实体化（调用 `DepotSpawner#spawn`）的列车数**，不是尝试的票数。每张到期票每拍都会试一次：
+被闭塞挡在预检的出库票不生成实体、不占名额；折返复用（含 RETURN）不生成实体、不占名额。名额在唯一的实体化入口扣
+（常规、RETURN 降级、pending 降级三条出库路径都经过它），用完后本拍其余要出库的票以 `spawn-per-tick-limit` 延迟重入队，且不增加 `attempts`；
+pending 里到了降级时刻的折返票则原样留在 pending，不重置降级计时。调用了 spawn 就算用掉名额，哪怕 spawn 本身失败——区块加载与实体生成的开销已经花了。
+
+以前按尝试计名额：一张出不了库的票（例如被车库咽喉挡住）每拍都排在最前、每拍都失败，全网其余的票一张都轮不到。
+2026-09-27 实服一张 DS-1F_Full 出库票连试 19 次，同期 WS 在 CHT 的折返票被延后 41 次、一次都没试过，列车在空线路的终点干等。
 
 ## 线路最大车数（软限制）
 
@@ -159,6 +165,10 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 - 允许：生成列车后还会基于本次 `acquire` 的资源集合，主动刷新同资源上的其他列车信号（含冲突队列等待列车），缩短“新车出库后他车仍维持旧信号”的窗口。
 - 不允许/失败：若 spawn 失败会释放已占用资源，票据按 `spawn.retry-delay-ticks` 延迟后重试。
 - 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
+- 例外：被闭塞挡住（`gate-blocked:*`、`smart-depot-long-single-held`）是推迟不是失败——挡住它的是别的车。这类重试**不增加 `attempts`**，
+  但丢掉本次选定的 depot（`SpawnTicket#blockedUntil`），下次重新挑，多 depot 线路的 backoff 才能生效。否则它约 100 秒就会被 `max-attempts` 丢掉：
+  表定出库票自己的容差是 300 秒，首班出库票一丢整个交路就没有车（2026-09-27 实服 DS-1F_Full 即如此）。兜底仍在：表定票有自己的到期时刻，
+  按间隔发车的票有 `queued-ticket-max-age-seconds`。
 - 因 `spawn.max-spawn-per-tick` 超出本 tick 执行容量而延后的票据不算失败，只更新 `notBefore/lastError=spawn-per-tick-limit`，不增加 `attempts`。
 - 当 `SpawnTicket.attempts >= spawn.max-attempts` 时会放弃该票据并释放 backlog，避免无限重试。
 - 队列票据会保留 `firstDueAt`。重试会推进 `dueAt/notBefore` 以避免压住队头，但不会推进 `firstDueAt`；当票据真实年龄超过 `spawn.queued-ticket-max-age-seconds` 时会被丢弃并释放 backlog。

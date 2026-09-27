@@ -150,25 +150,26 @@ public record SpawnTicket(
    * <p>重试时会将 {@code dueAt} 推进到不早于 {@code notBefore} 的时间点，避免长期失败票据持续压住队头，造成同权重 route 饥饿。
    */
   public SpawnTicket withRetry(Instant nextNotBefore, String error) {
-    Instant nextWindow = nextNotBefore == null ? notBefore : nextNotBefore;
-    Instant nextDueAt = nextWindow.isAfter(dueAt) ? nextWindow : dueAt;
-    return new SpawnTicket(
-        id,
-        service,
-        nextDueAt,
-        nextWindow,
-        firstDueAt,
-        attempts + 1,
-        sequenceNumber,
-        Optional.empty(),
-        Optional.ofNullable(error),
-        serviceTripId,
-        source,
-        priority);
+    return rescheduled(nextNotBefore, error, attempts + 1, Optional.empty());
   }
 
   /** 创建延迟票据，不增加 attempts，用于 depot 仲裁等未真正尝试的退避。 */
   public SpawnTicket delayedUntil(Instant nextNotBefore, String reason) {
+    return rescheduled(nextNotBefore, reason, attempts, selectedDepotNodeId);
+  }
+
+  /**
+   * 出库被闭塞挡住后的重试票据：不增加 attempts，但丢掉本次选定的 depot，下次重新挑。
+   *
+   * <p>挡住它的是别的车，不是这张票的过错；累到 max-attempts 会被丢掉，那是取消发车而不是推迟发车。depot 要重新挑： 多 depot 线路的 backoff
+   * 只在重新选择时生效，留着旧选择就会一直撞同一个被挡住的出库点。
+   */
+  public SpawnTicket blockedUntil(Instant nextNotBefore, String reason) {
+    return rescheduled(nextNotBefore, reason, attempts, Optional.empty());
+  }
+
+  private SpawnTicket rescheduled(
+      Instant nextNotBefore, String reason, int nextAttempts, Optional<String> nextDepot) {
     Instant nextWindow = nextNotBefore == null ? notBefore : nextNotBefore;
     Instant nextDueAt = nextWindow.isAfter(dueAt) ? nextWindow : dueAt;
     return new SpawnTicket(
@@ -177,9 +178,9 @@ public record SpawnTicket(
         nextDueAt,
         nextWindow,
         firstDueAt,
-        attempts,
+        nextAttempts,
         sequenceNumber,
-        selectedDepotNodeId,
+        nextDepot,
         Optional.ofNullable(reason),
         serviceTripId,
         source,
