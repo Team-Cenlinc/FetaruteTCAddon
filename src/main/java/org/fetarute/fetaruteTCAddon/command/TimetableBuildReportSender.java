@@ -45,12 +45,23 @@ final class TimetableBuildReportSender {
     this.holdMaxSeconds = holdMaxSeconds;
   }
 
+  /**
+   * 发构建报告。
+   *
+   * @param result 构建结果
+   * @param options 构建参数
+   * @param headway 间隔来源（未分组时用）
+   * @param groupSources 各交路组间隔的来源说明
+   * @param maxTripsSource 交路上限的来源说明
+   * @param runModel 走行参数的一句话说明：表定时分是按什么起步、制动与进站规则算出来的
+   */
   void sendBuildReport(
       TimetableBuildResult result,
       TimetableBuildOptions options,
       TimetableHeadwayDefaults.Choice headway,
       Map<String, String> groupSources,
-      String maxTripsSource) {
+      String maxTripsSource,
+      String runModel) {
     sender.sendMessage(Component.text("===== 构建报告 =====", NamedTextColor.DARK_AQUA));
     if (!result.success()) {
       for (String warning : result.warnings()) {
@@ -88,6 +99,9 @@ final class TimetableBuildReportSender {
                 + (result.headwayRelaxed()
                     ? "（目标 " + result.targetHeadwaySeconds() + "s 有冲突，已放宽）"
                     : "")));
+    if (runModel != null && !runModel.isBlank()) {
+      sender.sendMessage(FtaTimetableCommand.field("走行", runModel));
+    }
     if (result.groupIntervals().isEmpty()) {
       sender.sendMessage(
           FtaTimetableCommand.field("间隔来源", headway.description() + "：" + headway.seconds() + "s"));

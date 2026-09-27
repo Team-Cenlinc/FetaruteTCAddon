@@ -10,13 +10,13 @@ import java.util.UUID;
  *
  * <h2>为什么不是一个常数</h2>
  *
- * <p>这里曾经是 {@code Limits.turnaroundSeconds}，一个默认 180 秒的标量。那个数在运行时侧<b>并不存在</b>： {@code
- * RuntimeDispatchService} 注册待命车时写的是 {@code readyAt = 当前时间 + 终到站 dwell}（dwell 为 0 时立即就绪）， {@code
- * LayoverRegistry} 对 readyAt 的定义是"关门完成时间"。也就是说运行时没有任何最短折返， 车终到即待命，下一班的票一到就复用。
+ * <p>这里曾经是 {@code Limits.turnaroundSeconds}，一个默认 180 秒的标量。那个数在运行时侧<b>并不存在</b>： 运行时车终到后，AutoStation
+ * 居中刹停、开门、按终到 dwell 计时，计时结束才进入待命（{@code LayoverRegistry} 对 readyAt
+ * 的定义是"关门完成时间"），之后下一班的票一到就复用，没有任何最短折返。
  *
  * <p>一个凭空造出来的 180 秒因此是编表侧独有的第三个事实源，而它正在系统性地虚增端点占用——实测中它一项就贡献了 单股道端点九成的占用。本类把这个量换回<b>route
- * 定义里本来就写着的数</b>：终到停靠点的 dwell， 解析走 {@link
- * TimetableTimingCalculator#terminalDwellSeconds}，与行程时分共用同一套规则，不另开一个读者。
+ * 定义里本来就写着的数</b>：终到停靠点的 dwell，车站终到再加停站开销（居中刹停 + 开门延迟）。秒数由 {@link
+ * TimetableTimingCalculator#terminalStopSeconds} 算出，与途中停站共用同一套规则，不另开一个读者。
  *
  * <h2>按 route 而不是按节点</h2>
  *
@@ -54,27 +54,22 @@ public record TurnaroundTable(Map<UUID, Integer> byRoute, int fallbackSeconds, b
   }
 
   /**
-   * 从 route 的停靠配置建表。
+   * 按各 route 已算好的终到停站秒数建表。
    *
-   * @param stopsByRoute 各 route 的停靠配置（按 sequence 升序）
-   * @param dwellFallbackSeconds 停靠却没配 dwell 时的兜底值（{@code --dwell}）
+   * @param secondsByRoute 各 route 的折返秒数（见 {@link TimetableTimingCalculator#terminalStopSeconds}）
+   * @param fallbackSeconds 表里没有的 route 用的值（{@code --dwell}）
    */
-  public static TurnaroundTable ofStops(
-      Map<UUID, ? extends java.util.List<org.fetarute.fetaruteTCAddon.company.model.RouteStop>>
-          stopsByRoute,
-      int dwellFallbackSeconds) {
+  public static TurnaroundTable ofSeconds(Map<UUID, Integer> secondsByRoute, int fallbackSeconds) {
     Map<UUID, Integer> byRoute = new LinkedHashMap<>();
-    if (stopsByRoute != null) {
-      stopsByRoute.forEach(
-          (routeId, stops) -> {
-            if (routeId != null) {
-              byRoute.put(
-                  routeId,
-                  TimetableTimingCalculator.terminalDwellSeconds(stops, dwellFallbackSeconds));
+    if (secondsByRoute != null) {
+      secondsByRoute.forEach(
+          (routeId, seconds) -> {
+            if (routeId != null && seconds != null) {
+              byRoute.put(routeId, Math.max(0, seconds));
             }
           });
     }
-    return new TurnaroundTable(byRoute, Math.max(0, dwellFallbackSeconds), false);
+    return new TurnaroundTable(byRoute, Math.max(0, fallbackSeconds), false);
   }
 
   /**
@@ -119,7 +114,7 @@ public record TurnaroundTable(Map<UUID, Integer> byRoute, int fallbackSeconds, b
   }
 
   /**
-   * 报告文案里的来源说明：显式覆盖，还是按各 route 终到站 dwell。
+   * 报告文案里的来源说明：显式覆盖，还是按各 route 终到站停站（dwell，车站另加停站开销）。
    *
    * <p>表还没建起来（命令层拿到的那份）时只说来源不说数字——具体秒数由调用方从它手上的数据打印， 两处不各报一个可能对不上的值。
    */
@@ -128,11 +123,11 @@ public record TurnaroundTable(Map<UUID, Integer> byRoute, int fallbackSeconds, b
       return "--turnaround " + fallbackSeconds + "s";
     }
     if (byRoute.isEmpty()) {
-      return "终到站 dwell";
+      return "终到站停站";
     }
     int min = minimumSeconds();
     int max = maximumSeconds();
-    return min == max ? "终到站 dwell " + min + "s" : "终到站 dwell " + min + "–" + max + "s";
+    return min == max ? "终到站停站 " + min + "s" : "终到站停站 " + min + "–" + max + "s";
   }
 
   @Override

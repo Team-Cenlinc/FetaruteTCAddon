@@ -2,7 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.util.HashMap;
 import java.util.Map;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 
@@ -17,7 +17,7 @@ public final class TimetableEdgeSpeeds {
   private TimetableEdgeSpeeds() {}
 
   /** 由某个世界的覆盖表得到解析器；覆盖表为空时退化成"边基础限速，没有就用默认速度"。 */
-  public static DynamicTravelTimeModel.EdgeSpeedResolver resolver(
+  public static RunCurveModel.EdgeSpeedResolver resolver(
       Map<EdgeId, RailEdgeOverrideRecord> overrides) {
     Map<EdgeId, Double> permanent = new HashMap<>();
     if (overrides != null) {

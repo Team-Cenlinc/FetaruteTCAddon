@@ -31,8 +31,9 @@ route 定义 + 调度图限速 + 运营参数  →  build  →  publish  →  �
 | --- | --- |
 | 站序 | `RouteDefinition.waypoints()` |
 | 区段路径 | `RailGraphPathFinder`（与诊断命令、ETA 同一套最短路） |
-| 区段限速与加减速 | `DynamicTravelTimeModel`（ETA 模块的权威模型） |
-| 停站时长 | `RouteStop.dwellSeconds()`，缺省值来自 `--dwell` |
+| 区段限速与永久限速覆盖 | 调度图 + `fta_rail_edge_overrides`（`TimetableEdgeSpeeds`） |
+| 起步、制动与进站 | `RunCurveModel`：默认车种的加减速（`train.types`）+ `runtime.approach-*` |
+| 停站时长 | `RouteStop.dwellSeconds()`，缺省值来自 `--dwell`；车站再加 `timetable.station-stop-overhead-seconds` |
 | 服务比例 | Route metadata 的 `spawn_weight` |
 | 首末班 / 间隔 / 交路上限 | `build` 的参数 |
 
@@ -46,6 +47,31 @@ route 定义 + 调度图限速 + 运营参数  →  build  →  publish  →  �
 后半段 5 bps 的线，平均速度会把全程时分少算三分之一以上，而表定时分一旦偏乐观，
 按表运行就会把每一趟车都变成晚点。算不出来的 route（区段不可达、缺限速）会被明确排除
 并给出原因，不用任何默认值顶上。
+
+#### 走行：从静止起步，按运行时的进站规则进站
+
+路径点按停车方式切成若干段**走行**：每段从停车点静止起步，途中的 PASS 点按线路速度通过，到下一个停车点按进站规则减速
+（`TimetableTimingCalculator` + `RunCurveModel`）。一段走行的速度曲线取三样的最小值——各边限速、进站限速区、终点速度——
+先正向按加速度推、再反向按减速度推（`RunCurve`，沿里程 0.25 格一步离散，节点落在整数格上，逐节点时刻是精确累加）。
+三组参数都与运行时控车读同一份配置：
+
+| 量 | 取值 | 说明 |
+| --- | --- | --- |
+| 加减速 | `train.default-type` 那个车种的 `accel-bps2` / `decel-bps2` | 编表**不读车库牌子**推断车种：牌子所在区块没加载时会退回默认车种，同一份输入就不再产出同一张表 |
+| 进站限速区 | `runtime.approach-window-blocks` / `approach-window-edges`、`approach-speed-bps`、`approach-depot-speed-bps` | 触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）：目标站同站同股道的本体与咽喉，或与之直接相连的道岔；区间停车点只认它自己。运行时按"最近经过的图节点"到触发点的距离判断窗口，所以限速区从窗口内的第一个图节点起算，不是连续的里程 |
+| 终点速度 | 车站：进站限速（压上站牌后由 TrainCarts 居中刹停）；车库：进库限速；区间停车点：0（调度层在节点处刹停）；交路末端 PASS（开进车库销毁）：不限 | — |
+| 停站 | 车站 = dwell + `timetable.station-stop-overhead-seconds`（默认 4）；车库与区间停车点只有 dwell | 车压牌后居中刹停约 3 秒，停稳后 AutoStation 再过 1 秒开门，dwell 从开门起算 |
+
+它是"理想司机"：在限速区起点正好刹到限速。运行时只在触发点前一小段才开始下压速度，实际常常晚刹，所以长站距、高限速的区段上
+本模型略偏慢——偏差方向是安全的：早到的车在站里被计划扣留吸收，晚到的车会把晚点传给后面每一班。
+
+**实服校核（2026-09-26，22 分钟日志、30 个站间区段、136 次停站）**：走行"发车→压牌"中位误差 0.0%、平均绝对误差 5.1%；
+停站"压牌→发车"中位 24 秒（dwell 20）。旧口径（每站按限速"飞"出去、瞬间停车，加减速 1.0/1.2、不做进站限速）同一批区段
+中位少算 42%，整趟 WS-1L 表 226 秒、实测 312 秒、新模型 305 秒。偏差最大的是进尽头站（CHT:3、WYB）的最后一段，
+新模型仍少 4–19 秒。
+
+单元测试用 `RunTimeModel.perEdge(...)`（逐边"长度 ÷ 限速"累加、停站不加开销）让排班类用例的时刻可以手算；
+走行曲线本身由 `RunCurveTest`、`RunCurveModelTest` 与计时器的曲线用例覆盖。
 
 ### 2. weight 是目标服务比例
 
@@ -237,8 +263,9 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 
 ### 折返时间来自 route 定义，不是常数
 
-**折返没有默认值。** 它按 route 逐条取**终到停靠点的 dwell**（`TurnaroundTable`），解析与行程时分共用
-`TimetableTimingCalculator#terminalDwellSeconds`：PASS 不停站算 0，停靠却没配 dwell 的用 `--dwell` 兜底。
+**折返没有默认值。** 它按 route 逐条取**终到停靠点的停站**（`TurnaroundTable`），解析与途中停站共用
+`TimetableTimingCalculator#terminalStopSeconds`：PASS 不停站算 0，停靠却没配 dwell 的用 `--dwell` 兜底，
+车站终到再加停站开销（车在开门计时结束后才进入待命）。
 同一个站台被快车停 20 秒、慢车停 30 秒终到时，两条 route 各按各的算，不会被压成一个数。
 
 这样做是为了对齐运行时的唯一真值：`RuntimeDispatchService` 注册待命车时写的是 `readyAt = 到达 + 终到站 dwell`
@@ -246,7 +273,7 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 它在运行时侧并不存在，属于编表侧独有的第三个事实源——实测中它一项就占掉了单股道端点九成的容量。
 
 `--turnaround <sec>` 保留，但语义是**显式全线覆盖**（运营方要求"每个端点至少留这么久"时用），不是默认值。
-不传它的时候系统里不存在一个全线折返数，报告里写"折返取 终到站 dwell 20–30s"；传了则写"折返取 --turnaround 90s"。
+不传它的时候系统里不存在一个全线折返数，报告里写"折返取 终到站停站 24–34s"；传了则写"折返取 --turnaround 90s"。
 
 "需要等更久"不由这个量表达：端点串行与让车修复会在资源要求时把发车往后推。折返只回答"物理上最早什么时候能走"。
 
@@ -273,6 +300,11 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 但 132 时端点与咽喉的间隙只剩 0–1 秒，135 有 6–7 秒；间隔要不要贴着下限排，是运营决策。
 要把下限往下压，得改那 419 秒：在端点与咽喉之间给某一路加停站（实测 1L 在 HHU 多停 55–60 秒时 120 在端点与咽喉上都错得开，
 但 1L 与 2N 共用 HHU:2，每个周期撞一次），或者改股道/出入段线。
+
+> ⚠️ 上面这一段的数（132、419、527、端点 55 秒）全部是**旧走行口径**（每站满速通过、瞬间停车）下量出来的，那时走行少算约四成。
+> 换成运行曲线之后（见「走行」一节），实服库副本上三线联编（组间隔 WS 150/150、MT 150/150、DS 200，其余全缺省）的结果是：
+> 150 时端点与车库咽喉有 1014 处让不掉的冲突，151–175 秒逐秒预筛全部错不开，**最小可行间隔 176 秒**（DS 同比例放宽到 235），
+> 此时端点两次折返间隙 0 秒、咽喉出入库间隙 1 秒。推导方法不变，数要按新时分重推。
 
 这一层刻意**不**建模授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；将来的回放校验（阶段 8）如果发现
 本模型漏了约束，修的是本模型，不是让 build 去依赖回放。
@@ -397,7 +429,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 /fta timetable build <company> <operator> <line>[,<line>…] <code>
         [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
-        [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站 dwell）]
+        [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站停站）]
         [--separation <sec>] [--max-wait <sec>] [--max-idle <sec>] [--strict]
         [--name "<name>"] [--prefix <p>] [--zone <zoneId>]
 /fta timetable config <company> <operator> <line>          # 参数一览：生效值、来源与改它的入口
@@ -432,7 +464,7 @@ baseline 是目标不是硬约束：排出来有冲突时所有组按同一比�
 都会被命令拒绝并提示写成 `--start 05:00 --end 25:00` 这样的形式。
 
 `build` 的输出不是一句"成功"，而是一份可解释的报告：班次数、运营/出库/回库 route 数、计划窗口（含实际使用的间隔，
-目标间隔有冲突被放宽时会标出）、冲突检查结果（无冲突，或目标间隔下的冲突数与明细）、**共用资源**（哪些已发布的表、
+目标间隔有冲突被放宽时会标出）、**走行**（表定时分按什么起步、制动与进站规则算，车站停站在 dwell 之外加几秒；与 `/fta timetable config` 同一句话）、冲突检查结果（无冲突，或目标间隔下的冲突数与明细）、**共用资源**（哪些已发布的表、
 哪些没有表的线路与本表共用区间/站台/单线/道岔，各多少个——足迹按展开后的路径算，不按申报的停靠点；目前只报告不联合排布，
 设计见 `timetable-scope-design.md`）、
 交路数、**全天出库次数与峰值同时在线车数**、**目标服务比例 vs 实际服务比例**、最长一趟车、单交路最多班次与最长在线、
@@ -532,6 +564,7 @@ baseline 是目标不是硬约束：排出来有冲突时所有组按同一比�
 | `max-catch-up-seconds` | `300` | 发车侧单次轮询的回补窗口上限 |
 | `reload-interval-seconds` | `60` | publish/unpublish 后最多多久生效（读库在异步线程，兜底 retain 回主线程） |
 | `zone` | `""` | 时刻表默认时区，留空用服务器默认 |
+| `station-stop-overhead-seconds` | `4` | 编表时车站停车在 dwell 之外多算的秒数：TrainCarts 居中刹停约 3 秒 + AutoStation 开门延迟 1 秒（dwell 从开门起算）。表定发车 = 到站 + dwell + 本值，车站终到的折返同理；车库与区间停车点不加。改了要重新 build |
 
 ## 遥测（未来的 calibration，不是构建输入）
 
@@ -614,6 +647,6 @@ planned segment duration   vs   actual segment duration
   才会以 `NO_RETURN_ACCESS` 取消班次。运行时 `ReclaimManager` 的兜底回收先在本 operator 找、再扩到全部 operator，
   首站按节点匹配；仍然派不出 RETURN 的车滞留超过 `reclaim.stranded-destroy-seconds` 后销毁（无乘客、无折返事务时）。
 - 不支持一辆车跨两份时刻表接班（duty 只属于一份表）。
-- `build` 目前用 `DynamicTravelTimeModel` 的默认加减速参数（1.0 / 1.2 bps²），
-  尚未按列车类型区分；接 `TrainConfigResolver` 是后续工作。
-- 进站 approaching 限速尚未接入 `build`（ETA 运行时已启用），因此表定时分会比实际略乐观一点点。
+- 走行按默认车种（`train.default-type`）一种加减速编表，不按 route 区分车种。进尽头站（CHT:3、WYB）的最后一段
+  仍少算 4–19 秒；dwell 为 0 的 STOP 按停车处理（AutoStation 实际上对 dwell ≤ 0 直接放行）。
+- ETA 与编表共用运行曲线，但边限速多叠加当前临时限速、未发车票据按出库车库推断车种（见 `eta.md`「走行」），所以临时限速期间两者会有差。

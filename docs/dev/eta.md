@@ -64,8 +64,27 @@ ETA = 行程 + 停站 + 等待。停站的口径与运行时实际怎么停一�
 | 已到站、停站计时尚未注册（停稳前约 3 秒） | 本站计划停站（靠 `StationPresenceTracker` 识别在站）。此前这几秒按 0 计，ETA 先提前一整段停站再跳回 |
 | 本站停站计时已结束（关门、等发车许可） | 0，超时部分按扣停处理（见上节） |
 
-行程按途中停车点**拆段**：每段以进站限速收尾（接入进站限速配置时），下一段从静止起步。一路不停地算会少算每站的制动与起步
-（默认参数约 5 秒一站）。是否停车只看 `passType`，不看 `dwell` 是否为 0。
+途中车站的停站另加 `timetable.station-stop-overhead-seconds`（默认 4 秒：压牌后居中刹停约 3 秒，停稳后 AutoStation 再过 1 秒开门，
+dwell 从开门起算）；车库与区间停车点只有 dwell。与编表同一口径（`RouteStopPlan#stopSecondsBetween`）。
+
+## 走行（与编表同一条运行曲线）
+
+行程由 `TravelTimeModel` 按途中停车点**拆段**，每段交给 `RunCurveModel`——编表用的同一个模型（见 `timetable.md`「走行」）：
+
+- 第一段从列车当前位置、当前速度出发（边内进度扣掉首边已走的部分）；之后每段从停车点静止起步。
+- 每段以进站规则收尾：`runtime.approach-window-blocks` / `approach-window-edges` 窗口内按 `approach-speed-bps`（车库
+  `approach-depot-speed-bps`）行驶，触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）。目标不停车（PASS）时不减速。
+- 是否停车只看 `passType`，不看 `dwell` 是否为 0。
+
+与编表只差两处，都是有意的：
+
+| 量 | 编表 | ETA |
+|---|---|---|
+| 边限速 | 图基础限速 + 永久覆盖（临时限速带截止时刻，进表会破坏确定性） | 运行时有效限速：再叠加当前生效的临时限速 |
+| 加减速 | `train.default-type` 车种 | 运行中列车同编表；未发车票据按 Route 的出库车库推断车种（`SpawnTrainConfigResolver`），推断不出来用默认车种 |
+
+此前 ETA 用逐边的 `DynamicTravelTimeModel`（每条边按限速"飞"过去，加减速 1.0/1.2 写死、不读配置、不做进站限速），与编表各算各的；
+该类与 `ApproachingConfig` 已删除。
 
 ## DYNAMIC 站台
 
@@ -79,9 +98,11 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
 
 ## 其它口径
 - 票据（未发车）ETA 同样计入中途停站时间，并从静止起步、途中停车点同样拆段。
-- 无限速边的默认速度取 `graph.default-speed-blocks-per-second`，与控车同一个配置值。
-- 实服第二十七轮 1067 段实测：站内“进站到发车”中位 24 秒（停站配置 20 秒），行车实测比模型快约 13%，两者大致抵消，
-  因此加减速参数保持不变；偏早与卡住的主因是扣停与票据超时未计入、以及边内进度缺失。
+- 无限速边的默认速度取 `graph.default-speed-blocks-per-second`，与控车、编表同一个配置值；没有接入配置时（单测）按 6 格/秒、不做进站限速、不加停站开销。
+- 实服第二十七轮 1067 段实测：站内“进站到发车”中位 24 秒（停站配置 20 秒），行车实测比旧逐边模型快约 13%，两者大致抵消；
+  偏早与卡住的主因是扣停与票据超时未计入、以及边内进度缺失。
+- 2026-09-26 实服校核（30 个站间区段、136 次停站）：运行曲线“发车→压牌”中位误差 0.0%、平均绝对误差 5.1%；
+  停站“压牌→发车”中位 24 秒 = dwell 20 + 开销 4。
 
 ## 集成点（运行时）
 建议在 `RuntimeSignalMonitor` 中，对每一辆列车：

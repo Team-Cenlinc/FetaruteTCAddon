@@ -28,10 +28,9 @@ import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
@@ -520,7 +519,7 @@ public final class FtaTimetableCommand {
     List<UUID> lineIds = new ArrayList<>();
     List<TimetableSetBuilder.Member> setMembers = new ArrayList<>();
     RailGraph graphSnapshot = graph.graph();
-    RailTravelTimeModel model = travelTimeModel(graph.worldId());
+    RunCurveModel model = runTimeModel(graph.worldId());
     for (LineRoutes member : members) {
       String display = displayCodeOf(member.line());
       lineIds.add(member.line().line().id());
@@ -610,6 +609,7 @@ public final class FtaTimetableCommand {
                               lines,
                               built,
                               options,
+                              model.settings(),
                               headwayChoice,
                               neighbors,
                               groupSources,
@@ -715,6 +715,7 @@ public final class FtaTimetableCommand {
       List<ResolvedLine> lines,
       TimetableSetBuilder.SetResult set,
       TimetableBuildOptions options,
+      RunCurveModel.Settings run,
       TimetableHeadwayDefaults.Choice headway,
       NeighborReport neighbors,
       Map<String, String> groupSources,
@@ -722,7 +723,8 @@ public final class FtaTimetableCommand {
       List<String> warnings) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
-    report.sendBuildReport(result, options, headway, groupSources, maxTripsSource);
+    report.sendBuildReport(
+        result, options, headway, groupSources, maxTripsSource, describeRun(run));
     for (String warning : warnings) {
       sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.YELLOW));
     }
@@ -879,7 +881,7 @@ public final class FtaTimetableCommand {
    * @param unscheduled 本世界里不属于任何已发布表、也不属于我这条 line 的 route
    * @param stopsByRoute 上述全部 route 的停靠配置
    * @param definitions 上述全部 route 的交路定义（主线程解析好，异步线程不碰缓存）
-   * @param travelTimeModel 行程时间模型
+   * @param runTimeModel 走行时分模型（与 build 同一个）
    * @param lineIds 我这几条 line（联编时不止一条）：它们名下的表互相不算邻表
    * @param myDisplayCode 我这份表的显示码
    */
@@ -890,7 +892,7 @@ public final class FtaTimetableCommand {
       List<TimetableNeighborhoodLoader.RouteCandidate> unscheduled,
       Map<UUID, List<RouteStop>> stopsByRoute,
       Map<UUID, RouteDefinition> definitions,
-      RailTravelTimeModel travelTimeModel,
+      RunTimeModel runTimeModel,
       java.util.Set<UUID> lineIds,
       String myDisplayCode,
       TimetableNeighborhoodLoader loader) {
@@ -900,10 +902,10 @@ public final class FtaTimetableCommand {
         Map<UUID, RouteDefinition> definitions,
         Map<UUID, List<RouteStop>> stopsByRoute,
         Map<UUID, String> displayCodeById,
-        RailTravelTimeModel travelTimeModel) {
+        RunTimeModel runTimeModel) {
       return new TimetableNeighborhoodLoader(
           new TimetableTimingCalculator(),
-          travelTimeModel,
+          runTimeModel,
           routeId -> Optional.ofNullable(definitions.get(routeId)),
           routeId -> stopsByRoute.getOrDefault(routeId, List.of()),
           timetable -> displayCodeById.getOrDefault(timetable.id(), timetable.code()));
@@ -988,7 +990,7 @@ public final class FtaTimetableCommand {
       List<TimetableNeighborhoodLoader.RouteCandidate> mine,
       Map<UUID, List<RouteStop>> knownStops,
       Map<UUID, RouteDefinition> knownDefinitions,
-      RailTravelTimeModel model) {
+      RunTimeModel model) {
     Map<UUID, List<RouteStop>> stopsByRoute = new java.util.HashMap<>(knownStops);
     Map<UUID, RouteDefinition> definitions = new java.util.HashMap<>(knownDefinitions);
     for (TimetableNeighborhoodLoader.RouteCandidate route : mine) {
@@ -1276,6 +1278,21 @@ public final class FtaTimetableCommand {
             TimetableBuildOptions.DEFAULT_DWELL_SECONDS + "s",
             "默认（无持久化位置）",
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --dwell ", "只对这一次构建生效")));
+    RunCurveModel.Settings run =
+        runCurveSettings(
+            plugin.getConfigManager() == null ? null : plugin.getConfigManager().current());
+    sender.sendMessage(
+        configRow(
+            "走行",
+            describeRun(run),
+            "config.yml 的 train（默认车种）与 runtime.approach-*，与运行时控车同一组",
+            Component.empty()));
+    sender.sendMessage(
+        configRow(
+            "停站开销",
+            run.stationStopOverheadSeconds() + "s",
+            "config.yml 的 timetable.station-stop-overhead-seconds：车站停车在 dwell 之外多算的秒数",
+            Component.empty()));
     sender.sendMessage(
         configRow(
             "交路最长在线",
@@ -1285,7 +1302,7 @@ public final class FtaTimetableCommand {
     sender.sendMessage(
         configRow(
             "折返时间",
-            "按各 route 终到站 dwell",
+            "按各 route 终到站停站（车站另加停站开销）",
             "默认（无持久化位置）",
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --turnaround ", "给全线钉一个固定值")));
 
@@ -1598,7 +1615,7 @@ public final class FtaTimetableCommand {
       return;
     }
     RailGraph graph = worldGraph.graph();
-    RailTravelTimeModel model = travelTimeModel(worldGraph.worldId());
+    RunTimeModel model = runTimeModel(worldGraph.worldId());
     Map<UUID, NeighborInputs> inputsById = new java.util.LinkedHashMap<>();
     for (int i = 0; i < tables.size(); i++) {
       Timetable timetable = tables.get(i);
@@ -1819,7 +1836,7 @@ public final class FtaTimetableCommand {
             routesOf(timetable, displayCodeOf(line)),
             Map.of(),
             Map.of(),
-            travelTimeModel(worldGraph.worldId()));
+            runTimeModel(worldGraph.worldId()));
     List<TimetableBaseline> stored = provider.timetables().listBaselines(timetable.id());
     plugin
         .getServer()
@@ -1971,30 +1988,48 @@ public final class FtaTimetableCommand {
   // ---------------------------------------------------------------- 构建辅助
 
   /**
-   * 构建行程时间模型。
-   *
-   * <p>复用 ETA 模块的 {@code DynamicTravelTimeModel}：它按<b>每条边的实际限速</b>加减速积分， 因此一条穿越多个限速区间的 route
-   * 不会被一个全线平均速度抹平。不另起一套平行模型，是为了让 "表定时分"和"运行时 ETA"永远出自同一套算法。
+   * 编表用的走行时分模型：边限速取该世界的永久限速覆盖（{@link TimetableEdgeSpeeds}），其余参数见 {@link
+   * #runCurveSettings}。图里的边基础限速多半是 0，不接覆盖表全线就按默认速度算，时分会慢两到三倍。
    */
-  /**
-   * 编表用的行程时间模型：默认加减速参数 + 该世界的永久限速覆盖（{@link TimetableEdgeSpeeds}）。 图里的边基础限速多半是
-   * 0，不接覆盖表全线就按默认速度算，时分会慢两到三倍。
-   */
-  private RailTravelTimeModel travelTimeModel(UUID worldId) {
-    double fallback = FALLBACK_SPEED_BPS;
-    if (plugin.getConfigManager() != null && plugin.getConfigManager().current() != null) {
-      double configured =
-          plugin.getConfigManager().current().graphSettings().defaultSpeedBlocksPerSecond();
-      if (Double.isFinite(configured) && configured > 0.0D) {
-        fallback = configured;
-      }
-    }
-    return new DynamicTravelTimeModel(
-        DynamicTravelTimeModel.TrainMotionParams.defaults(),
-        fallback,
-        ApproachingConfig.disabled(),
+  private RunCurveModel runTimeModel(UUID worldId) {
+    return new RunCurveModel(
+        runCurveSettings(
+            plugin.getConfigManager() == null ? null : plugin.getConfigManager().current()),
         TimetableEdgeSpeeds.resolver(
             worldId == null ? Map.of() : plugin.getRailGraphService().edgeOverrides(worldId)));
+  }
+
+  /**
+   * 走行参数的一句话说明：参数面板与构建报告共用，两处说的永远是同一组数。
+   *
+   * @param run 走行参数
+   */
+  static String describeRun(RunCurveModel.Settings run) {
+    return String.format(
+        java.util.Locale.ROOT,
+        "起步 %.2f / 制动 %.2f 格/秒²，进站 %.0f 格内限 %.1f 格/秒，车站停站 = dwell + %ds",
+        run.motion().accelBps2(),
+        run.motion().decelBps2(),
+        run.approach().windowBlocks(),
+        run.approach().stationSpeedBps(),
+        run.stationStopOverheadSeconds());
+  }
+
+  /**
+   * 编表的走行参数：与运行时控车、ETA 读同一组配置（{@link RunCurveModel.Settings#fromConfig}）。参数面板、构建报告与 build
+   * 共用这一个方法，面板上显示的就是 build 用的。
+   *
+   * @param config 当前配置；为空时（插件未加载配置）退回默认加减速、不做进站限速
+   */
+  static RunCurveModel.Settings runCurveSettings(ConfigManager.ConfigView config) {
+    if (config == null) {
+      return new RunCurveModel.Settings(
+          RunCurveModel.MotionParams.defaults(),
+          FALLBACK_SPEED_BPS,
+          RunCurveModel.ApproachRule.disabled(),
+          ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS);
+    }
+    return RunCurveModel.Settings.fromConfig(config, FALLBACK_SPEED_BPS);
   }
 
   /** 找到覆盖这条交路全部节点的调度图快照。 */

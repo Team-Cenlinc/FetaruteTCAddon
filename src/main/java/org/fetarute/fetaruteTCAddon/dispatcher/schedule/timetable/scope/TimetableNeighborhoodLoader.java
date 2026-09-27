@@ -16,8 +16,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
@@ -39,7 +39,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 public final class TimetableNeighborhoodLoader {
 
   private final TimetableTimingCalculator timingCalculator;
-  private final RailTravelTimeModel travelTimeModel;
+  private final RunTimeModel runTimeModel;
   private final Function<UUID, Optional<RouteDefinition>> routeDefinitions;
   private final Function<UUID, List<RouteStop>> routeStops;
   private final Function<Timetable, String> displayCodes;
@@ -52,19 +52,19 @@ public final class TimetableNeighborhoodLoader {
 
   /**
    * @param timingCalculator 与 build 同一个计时器：足迹用的路径就是它算出的逐边路径
-   * @param travelTimeModel 行程时间模型；足迹只关心路径，时分本身不重要
+   * @param runTimeModel 与 build 同一个走行时分模型；足迹只关心路径，区段内逐节点时刻的比例按它分摊
    * @param routeDefinitions 按 route UUID 取交路定义
    * @param routeStops 按 route UUID 取停靠配置（DYNAMIC 判定要用）
    * @param displayCodes 时刻表的显示码，形如 {@code company/operator/line/code}
    */
   public TimetableNeighborhoodLoader(
       TimetableTimingCalculator timingCalculator,
-      RailTravelTimeModel travelTimeModel,
+      RunTimeModel runTimeModel,
       Function<UUID, Optional<RouteDefinition>> routeDefinitions,
       Function<UUID, List<RouteStop>> routeStops,
       Function<Timetable, String> displayCodes) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
-    this.travelTimeModel = Objects.requireNonNull(travelTimeModel, "travelTimeModel");
+    this.runTimeModel = Objects.requireNonNull(runTimeModel, "runTimeModel");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.routeStops = Objects.requireNonNull(routeStops, "routeStops");
     this.displayCodes = Objects.requireNonNull(displayCodes, "displayCodes");
@@ -353,7 +353,7 @@ public final class TimetableNeighborhoodLoader {
     }
     List<RouteStop> stops = routeStops.apply(plan.routeId());
     TimetableTimingCalculator.TimingResult timing =
-        timingCalculator.compute(graph, travelTimeModel, definition.get(), stops, Duration.ZERO);
+        timingCalculator.compute(graph, runTimeModel, definition.get(), stops, Duration.ZERO);
     if (!timing.ok() || timing.segments().size() != plan.stops().size() - 1) {
       return Optional.empty();
     }
@@ -436,7 +436,7 @@ public final class TimetableNeighborhoodLoader {
     }
     List<RouteStop> stops = routeStops.apply(routeId);
     TimetableTimingCalculator.TimingResult timing =
-        timingCalculator.compute(graph, travelTimeModel, definition.get(), stops, Duration.ZERO);
+        timingCalculator.compute(graph, runTimeModel, definition.get(), stops, Duration.ZERO);
     if (!timing.ok()) {
       return Optional.empty();
     }

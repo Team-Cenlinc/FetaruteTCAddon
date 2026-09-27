@@ -11,8 +11,11 @@ import java.util.UUID;
 import java.util.stream.IntStream;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.junit.jupiter.api.Test;
 
@@ -94,7 +97,12 @@ class TimetableTimingCalculatorTest {
 
     TimetableTimingCalculator.TimingResult result =
         new TimetableTimingCalculator()
-            .compute(graph, RailTravelTimeModels.constantSpeed(10.0), route, stops, Duration.ZERO);
+            .compute(
+                graph,
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
+                route,
+                stops,
+                Duration.ZERO);
 
     assertTrue(result.ok(), () -> result.failure().toString());
     assertEquals(passTypes, result.stops().stream().map(TimetableStop::passType).toList());
@@ -118,7 +126,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                RailTravelTimeModels.constantSpeed(10.0),
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 2, 30),
                 Duration.ofSeconds(20));
@@ -150,7 +158,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                new PerEdgeSpeedModel(),
+                RunTimeModel.perEdge(new PerEdgeSpeedModel()),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 3, 0),
                 Duration.ZERO);
@@ -176,7 +184,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                RailTravelTimeModels.constantSpeed(10.0),
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 3, 40),
                 Duration.ofSeconds(20));
@@ -204,7 +212,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                RailTravelTimeModels.constantSpeed(10.0),
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 3, null),
                 Duration.ofSeconds(25));
@@ -253,7 +261,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                RailTravelTimeModels.constantSpeed(10.0),
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
                 route,
                 stops,
                 Duration.ofSeconds(25));
@@ -276,14 +284,14 @@ class TimetableTimingCalculatorTest {
     TimetableTimingCalculator.TimingResult first =
         calculator.compute(
             graph,
-            RailTravelTimeModels.constantSpeed(3.0),
+            RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(3.0)),
             route,
             TimetableTestFixtures.stops(ROUTE, 2, 0),
             Duration.ZERO);
     TimetableTimingCalculator.TimingResult second =
         calculator.compute(
             graph,
-            RailTravelTimeModels.constantSpeed(3.0),
+            RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(3.0)),
             route,
             TimetableTestFixtures.stops(ROUTE, 2, 0),
             Duration.ZERO);
@@ -305,7 +313,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                RailTravelTimeModels.constantSpeed(10.0),
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 3, 0),
                 Duration.ZERO);
@@ -323,12 +331,244 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 null,
-                RailTravelTimeModels.constantSpeed(10.0),
+                RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 2, 0),
                 Duration.ZERO);
 
     assertFalse(result.ok());
+  }
+
+  /**
+   * 走行从静止起步：100 格、限速 10、加速度 1，前 10 秒加到限速（走过 50 格），剩下 50 格匀速 5 秒，共 15 秒。
+   *
+   * <p>旧口径每站都按限速"飞"出去，同一段只算 10 秒——实服 32 个站间区段合计少算了 42%，少的就是这一段起步。
+   */
+  @Test
+  void runCurveStartsFromRest() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of("OP:S:A:1", "OP:S:B:1"), new int[] {100}, new double[] {10.0});
+    RouteDefinition route = TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:S:B:1"));
+
+    TimetableTimingCalculator.TimingResult result =
+        new TimetableTimingCalculator()
+            .compute(
+                graph,
+                curve(RunCurveModel.ApproachRule.disabled(), 0),
+                route,
+                TimetableTestFixtures.stops(ROUTE, 2, 20),
+                Duration.ZERO);
+
+    assertTrue(result.ok(), () -> result.failure().toString());
+    assertEquals(15, result.stops().get(1).arrivalOffsetSeconds());
+  }
+
+  /**
+   * 进站限速区从"离触发节点不超过窗口的第一个图节点"起算，与运行时逐节点判断同一口径。
+   *
+   * <p>A→M 150 格、M→B 50 格，限速 20，B 前 50 格内限 10，加减速都是 1：先加速到 √200 ≈ 14.14（走过 100 格， 14.14 秒）， 再制动到 10
+   * 正好到 M（50 格，4.14 秒），M→B 按 10 走 5 秒。M 约 18.3 秒，B 约 23.3 秒。
+   */
+  @Test
+  void approachWindowStartsAtTheFirstGraphNodeWithinReach() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"),
+            List.of(NodeType.STATION, NodeType.WAYPOINT, NodeType.STATION),
+            new int[] {150, 50},
+            new double[] {20.0, 20.0});
+    RouteDefinition route = TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:S:B:1"));
+
+    TimetableTimingCalculator.TimingResult result =
+        new TimetableTimingCalculator()
+            .compute(
+                graph,
+                curve(new RunCurveModel.ApproachRule(50.0, 0, 10.0, 5.0), 0),
+                route,
+                TimetableTestFixtures.stops(ROUTE, 2, 20),
+                Duration.ZERO);
+
+    assertTrue(result.ok(), () -> result.failure().toString());
+    assertEquals(List.of(0, 18, 23), result.segments().get(0).nodeOffsets());
+    assertEquals(23, result.stops().get(1).arrivalOffsetSeconds());
+  }
+
+  /**
+   * 途中的 PASS 点不打断走行：车按线路速度开过去，不在那里起步第二次。
+   *
+   * <p>A→W→B 各 100 格、限速 10、加减速 1：W 是 PASS 时一次起步，B 在 25 秒到（10 秒加速 + 150 格匀速）。 W 若是区间停车点（停 0 秒），车要在 W
+   * 前刹停再重新起步：A→W 加速 50 格、制动 50 格共 20 秒，W→B 再 15 秒，B 在 35 秒到。
+   */
+  @Test
+  void passWaypointsDoNotSplitTheRun() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"),
+            List.of(NodeType.STATION, NodeType.WAYPOINT, NodeType.STATION),
+            new int[] {100, 100},
+            new double[] {10.0, 10.0});
+    RouteDefinition route =
+        TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"));
+    RunTimeModel model = curve(RunCurveModel.ApproachRule.disabled(), 0);
+    TimetableTimingCalculator calculator = new TimetableTimingCalculator();
+
+    TimetableTimingCalculator.TimingResult passing =
+        calculator.compute(
+            graph,
+            model,
+            route,
+            stopsWithPassTypes(
+                RouteStopPassType.STOP, RouteStopPassType.PASS, RouteStopPassType.TERMINATE),
+            Duration.ZERO);
+    TimetableTimingCalculator.TimingResult stopping =
+        calculator.compute(
+            graph,
+            model,
+            route,
+            List.of(
+                stop(0, RouteStopPassType.STOP, 20),
+                stop(1, RouteStopPassType.STOP, 0),
+                stop(2, RouteStopPassType.TERMINATE, 20)),
+            Duration.ZERO);
+
+    assertEquals(15, passing.stops().get(1).arrivalOffsetSeconds(), "W 按线路速度通过");
+    assertEquals(15, passing.stops().get(1).departureOffsetSeconds());
+    assertEquals(25, passing.stops().get(2).arrivalOffsetSeconds());
+    assertEquals(20, stopping.stops().get(1).arrivalOffsetSeconds(), "W 前刹停到 0");
+    assertEquals(35, stopping.stops().get(2).arrivalOffsetSeconds(), "W 之后重新起步");
+  }
+
+  /** 区间停车点由调度层在节点处刹停，终点速度为 0：100 格、限速 10、加减速 1，加速 50 格、制动 50 格，共 20 秒。 */
+  @Test
+  void waypointStopBrakesToStandstill() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of("OP:S:A:1", "OP:A:B:1:001"),
+            List.of(NodeType.STATION, NodeType.WAYPOINT),
+            new int[] {100},
+            new double[] {10.0});
+    RouteDefinition route = TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:A:B:1:001"));
+
+    TimetableTimingCalculator.TimingResult result =
+        new TimetableTimingCalculator()
+            .compute(
+                graph,
+                curve(RunCurveModel.ApproachRule.disabled(), 0),
+                route,
+                TimetableTestFixtures.stops(ROUTE, 2, 20),
+                Duration.ZERO);
+
+    assertEquals(20, result.stops().get(1).arrivalOffsetSeconds());
+  }
+
+  /**
+   * 停站开销只加在车站：AutoStation 居中刹停与开门延迟只在车站发生，区间停车点与车库没有这一段。
+   *
+   * <p>折返（终到停站）同一套规则：车站终到 = dwell + 开销，车库终到只有 dwell。
+   */
+  @Test
+  void stationStopOverheadAppliesToStationsOnly() {
+    List<String> nodes = List.of("OP:S:A:1", "OP:S:B:1", "OP:A:C:1:001", "OP:D:DEP:1");
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            nodes,
+            List.of(NodeType.STATION, NodeType.STATION, NodeType.WAYPOINT, NodeType.DEPOT),
+            new int[] {100, 100, 100},
+            new double[] {10.0, 10.0, 10.0});
+    RouteDefinition route = TimetableTestFixtures.route("R1", nodes);
+    List<RouteStop> stops =
+        List.of(
+            stop(0, RouteStopPassType.STOP, 20),
+            stop(1, RouteStopPassType.STOP, 20),
+            stop(2, RouteStopPassType.STOP, 10),
+            stop(3, RouteStopPassType.TERMINATE, 5));
+    RunTimeModel model =
+        withOverhead(RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0)), 4);
+
+    TimetableTimingCalculator.TimingResult result =
+        new TimetableTimingCalculator().compute(graph, model, route, stops, Duration.ZERO);
+
+    assertEquals(34, result.stops().get(1).departureOffsetSeconds(), "车站：到达 10 + dwell 20 + 开销 4");
+    assertEquals(44, result.stops().get(2).arrivalOffsetSeconds());
+    assertEquals(54, result.stops().get(2).departureOffsetSeconds(), "区间停车点：只有 dwell 10");
+    assertEquals(
+        5,
+        TimetableTimingCalculator.terminalStopSeconds(graph, model, route, stops, 0),
+        "车库终到不加开销");
+    RouteDefinition toStation = TimetableTestFixtures.route("R2", List.of("OP:S:A:1", "OP:S:B:1"));
+    assertEquals(
+        24,
+        TimetableTimingCalculator.terminalStopSeconds(
+            graph, model, toStation, TimetableTestFixtures.stops(ROUTE, 2, 20), 0),
+        "车站终到：dwell 20 + 开销 4");
+  }
+
+  /** 终到停站按 route 自己的 dwell；没配 dwell 用兜底值；末站 PASS 不停站，折返为 0。 */
+  @Test
+  void terminalStopSecondsFollowTheRouteDefinition() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of("OP:S:A:1", "OP:S:B:1"), new int[] {100}, new double[] {10.0});
+    RouteDefinition route = TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:S:B:1"));
+    RunTimeModel model = RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0));
+
+    assertEquals(
+        30,
+        TimetableTimingCalculator.terminalStopSeconds(
+            graph, model, route, TimetableTestFixtures.stops(ROUTE, 2, 30), 99));
+    assertEquals(
+        25,
+        TimetableTimingCalculator.terminalStopSeconds(
+            graph, model, route, TimetableTestFixtures.stops(ROUTE, 2, null), 25),
+        "没配 dwell 走 --dwell 兜底");
+    assertEquals(
+        0,
+        TimetableTimingCalculator.terminalStopSeconds(
+            graph,
+            model,
+            route,
+            List.of(stop(0, RouteStopPassType.STOP, null), stop(1, RouteStopPassType.PASS, null)),
+            40),
+        "末站 PASS 不停站");
+  }
+
+  /** 生产用的走行模型：给定进站规则与停站开销，加减速都取 1，便于手算。 */
+  private static RunTimeModel curve(RunCurveModel.ApproachRule approach, int overhead) {
+    return new RunCurveModel(
+        new RunCurveModel.Settings(
+            new RunCurveModel.MotionParams(1.0, 1.0), 8.0, approach, overhead),
+        null);
+  }
+
+  /** 在任意走行模型上叠加车站停站开销。 */
+  private static RunTimeModel withOverhead(RunTimeModel base, int overhead) {
+    return new RunTimeModel() {
+      @Override
+      public Optional<double[]> nodeTimes(RailGraph graph, Run run) {
+        return base.nodeTimes(graph, run);
+      }
+
+      @Override
+      public int stationStopOverheadSeconds() {
+        return overhead;
+      }
+    };
+  }
+
+  private static List<RouteStop> stopsWithPassTypes(RouteStopPassType... passTypes) {
+    return IntStream.range(0, passTypes.length).mapToObj(i -> stop(i, passTypes[i], 20)).toList();
+  }
+
+  private static RouteStop stop(int sequence, RouteStopPassType passType, Integer dwellSeconds) {
+    return new RouteStop(
+        ROUTE,
+        sequence,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.ofNullable(dwellSeconds),
+        passType,
+        Optional.empty());
   }
 
   /** 按每条边自己的 {@code baseSpeedLimit} 估时的最小模型，用来验证"逐段限速"这件事本身。 */

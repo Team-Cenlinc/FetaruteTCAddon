@@ -7,6 +7,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 
@@ -104,11 +105,24 @@ public final class RouteStopPlan {
     return out;
   }
 
-  /** {@code from}、{@code to} 之间（均不含）各停车点的计划停站之和。 */
-  public int dwellBetween(int from, int to) {
+  /**
+   * {@code from}、{@code to} 之间（均不含）各停车点的计划停站之和：dwell，车站再加停站开销——与编表的途中停站同一口径。
+   *
+   * <p>车站停车在 dwell 之外还有居中刹停与开门延迟（dwell 从开门起算），只看 dwell 的话每站早报几秒，站越多越早。
+   *
+   * @param graph 调度图，用来判断停车点是不是车站；为空时不加开销
+   * @param stationOverheadSeconds 车站停车在 dwell 之外多耗的秒数
+   */
+  public int stopSecondsBetween(int from, int to, RailGraph graph, int stationOverheadSeconds) {
     int total = 0;
     for (int index : stoppingIndicesBetween(from, to)) {
       total += plannedDwellSec(index);
+      if (stationOverheadSeconds > 0
+          && graph != null
+          && StopApproach.targetOf(graph, effective.get(index)).kind()
+              == StopApproach.Kind.STATION) {
+        total += stationOverheadSeconds;
+      }
     }
     return total;
   }

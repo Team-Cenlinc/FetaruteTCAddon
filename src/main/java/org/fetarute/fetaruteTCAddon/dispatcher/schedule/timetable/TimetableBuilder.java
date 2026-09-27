@@ -22,9 +22,9 @@ import java.util.UUID;
 import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionIndex;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
@@ -313,7 +313,7 @@ public final class TimetableBuilder {
       TimetableTimingCalculator.TimingResult timing =
           timingCalculator.compute(
               input.graph(),
-              input.travelTimeModel(),
+              input.runTimeModel(),
               route.definition(),
               route.stops(),
               options.defaultDwell());
@@ -1035,10 +1035,10 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 折返时间表：{@code --turnaround} 显式覆盖时原样保留，否则按各 route 终到停靠点的 dwell 建表。
+   * 折返时间表：{@code --turnaround} 显式覆盖时原样保留，否则按各 route 终到停站建表。
    *
-   * <p>dwell 的解析走 {@link TimetableTimingCalculator#terminalDwellSeconds}，与行程时分同一套规则—— 折返不是新造的事实，就是
-   * route 定义里那个一直没有消费者的数。
+   * <p>秒数由 {@link TimetableTimingCalculator#terminalStopSeconds} 算出，与行程时分同一套规则—— 折返不是新造的事实，就是 route
+   * 定义里那个终到 dwell，车站终到再加停站开销（运行时车在开门计时结束后才进入待命）。
    */
   private static TurnaroundTable resolveTurnarounds(
       BuildInput input, TimetableBuildOptions options) {
@@ -1046,11 +1046,15 @@ public final class TimetableBuilder {
     if (requested.fixed()) {
       return requested;
     }
-    Map<UUID, List<RouteStop>> stopsByRoute = new LinkedHashMap<>();
+    int fallback = (int) options.defaultDwell().toSeconds();
+    Map<UUID, Integer> secondsByRoute = new LinkedHashMap<>();
     for (RouteInput route : input.sortedRoutes()) {
-      stopsByRoute.put(route.routeId(), route.stops());
+      secondsByRoute.put(
+          route.routeId(),
+          TimetableTimingCalculator.terminalStopSeconds(
+              input.graph(), input.runTimeModel(), route.definition(), route.stops(), fallback));
     }
-    return TurnaroundTable.ofStops(stopsByRoute, (int) options.defaultDwell().toSeconds());
+    return TurnaroundTable.ofSeconds(secondsByRoute, fallback);
   }
 
   /**
@@ -1396,7 +1400,7 @@ public final class TimetableBuilder {
    * @param name 展示名
    * @param routes 参与的 route（OPERATION 进发车表，CREATE/RETURN 提供出库/回库走行）
    * @param graph 调度图快照
-   * @param travelTimeModel 行程时间模型
+   * @param runTimeModel 走行时分模型（生产上按运行曲线，单元测试可用逐边累计）
    * @param notes 备注
    * @param neighbors 已投影到我零点的邻表：它们的运行是不可移动的路权事实，只有我的运行会为了避让它们放宽 headway
    * @param lineByRoute 多线联编时每条 route 属于哪条线（车池）；没列出的按 {@code lineId}。单线为空
@@ -1410,7 +1414,7 @@ public final class TimetableBuilder {
       String name,
       List<RouteInput> routes,
       RailGraph graph,
-      RailTravelTimeModel travelTimeModel,
+      RunTimeModel runTimeModel,
       Optional<String> notes,
       List<NeighborTimetable> neighbors,
       Map<UUID, UUID> lineByRoute) {
@@ -1436,7 +1440,7 @@ public final class TimetableBuilder {
         String name,
         List<RouteInput> routes,
         RailGraph graph,
-        RailTravelTimeModel travelTimeModel,
+        RunTimeModel runTimeModel,
         Optional<String> notes,
         List<NeighborTimetable> neighbors) {
       this(
@@ -1448,7 +1452,7 @@ public final class TimetableBuilder {
           name,
           routes,
           graph,
-          travelTimeModel,
+          runTimeModel,
           notes,
           neighbors,
           Map.of());
@@ -1479,7 +1483,7 @@ public final class TimetableBuilder {
         String name,
         List<RouteInput> routes,
         RailGraph graph,
-        RailTravelTimeModel travelTimeModel,
+        RunTimeModel runTimeModel,
         Optional<String> notes) {
       this(
           timetableId,
@@ -1490,7 +1494,7 @@ public final class TimetableBuilder {
           name,
           routes,
           graph,
-          travelTimeModel,
+          runTimeModel,
           notes,
           List.of());
     }

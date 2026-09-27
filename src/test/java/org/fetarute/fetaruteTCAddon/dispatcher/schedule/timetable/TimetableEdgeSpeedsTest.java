@@ -7,7 +7,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.UUID;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
@@ -34,8 +34,7 @@ class TimetableEdgeSpeedsTest {
             false,
             Optional.empty(),
             Instant.EPOCH);
-    DynamicTravelTimeModel.EdgeSpeedResolver resolver =
-        TimetableEdgeSpeeds.resolver(Map.of(id, permanent));
+    RunCurveModel.EdgeSpeedResolver resolver = TimetableEdgeSpeeds.resolver(Map.of(id, permanent));
 
     assertEquals(16.5, resolver.resolve(null, edge, 8.0), 1e-9);
   }
@@ -55,8 +54,7 @@ class TimetableEdgeSpeedsTest {
             false,
             Optional.empty(),
             Instant.EPOCH);
-    DynamicTravelTimeModel.EdgeSpeedResolver resolver =
-        TimetableEdgeSpeeds.resolver(Map.of(id, temporary));
+    RunCurveModel.EdgeSpeedResolver resolver = TimetableEdgeSpeeds.resolver(Map.of(id, temporary));
 
     assertEquals(8.0, resolver.resolve(null, noBase, 8.0), 1e-9, "临时限速不进表，没基础限速用默认");
     assertEquals(12.0, resolver.resolve(null, withBase, 8.0), 1e-9, "有基础限速用基础限速");

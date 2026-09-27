@@ -21,12 +21,11 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.cache.EtaCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ApproachingConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ArrivingClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DwellModel;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DynamicTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.PathProgressModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RouteStopPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpawnTrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.TravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
@@ -75,17 +74,18 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *
  * <p>Layover：若起点存在待命列车，未发车 ETA 会使用候选的 readyAt 修正最早发车时间。
  *
- * <h2>动态速度模型</h2>
+ * <h2>走行模型</h2>
  *
- * <p>ETA 计算使用动态速度模型，综合考虑：
+ * <p>与编表同一条运行曲线（{@link RunCurveModel}）：按停车点拆段，第一段从列车当前位置与速度出发、之后每段从停车点静止起步， 受车种加减速约束，按边的有效限速行驶，进站前按
+ * {@code runtime.approach-*} 减速；途中车站停站 = dwell + 停站开销。 所以 ETA 与表定时刻的差就是晚点，不含两套模型的口径差。
  *
  * <ul>
- *   <li>边限速（{@code RailEdge.baseSpeedLimit}）
- *   <li>列车加减速参数（运行中列车从快照获取，未发车从 depot 配置推断）
- *   <li>当前速度（若快照有采样）
+ *   <li>边限速：运行时的有效限速（图基础限速 + 永久覆盖 + 临时限速）
+ *   <li>加减速：默认车种；未发车票据按 CRET 车库推断车种
+ *   <li>当前速度：快照有采样时用，没有时按首边限速
  * </ul>
  *
- * @see DynamicTravelTimeModel
+ * @see RunCurveModel
  * @see SpawnTrainConfigResolver
  */
 public final class EtaService {
@@ -137,12 +137,6 @@ public final class EtaService {
 
   private volatile java.util.function.Consumer<String> debugLogger = message -> {};
 
-  /** 动态旅行时间模型（考虑边限速、加减速与 approaching 限速）。 */
-  private volatile DynamicTravelTimeModel dynamicTravelTimeModel;
-
-  /** 适配层，将 DynamicTravelTimeModel 包装为 TravelTimeModel 供现有逻辑使用。 */
-  private volatile TravelTimeModel travelTimeModel;
-
   private final EtaCache<String, EtaResult> trainCache = new EtaCache<>(Duration.ofMillis(800));
   private final EtaCache<String, EtaResult> ticketCache = new EtaCache<>(Duration.ofMillis(1200));
   private final EtaCache<String, BoardResult> boardCache = new EtaCache<>(Duration.ofMillis(1500));
@@ -152,7 +146,9 @@ public final class EtaService {
   private volatile LayoverRegistry layoverRegistry;
   private volatile StorageProvider storageProvider;
   private volatile SignNodeRegistry signNodeRegistry;
-  private volatile ConfigManager.ConfigView configView;
+
+  /** 当前配置；每次估算现读，{@code /fta reload} 之后立即生效。未接入时按默认加减速、不做进站限速、不加停站开销。 */
+  private volatile java.util.function.Supplier<ConfigManager.ConfigView> configSource;
 
   public EtaService(
       TrainSnapshotStore snapshotStore,
@@ -162,12 +158,6 @@ public final class EtaService {
     this.snapshotStore = Objects.requireNonNull(snapshotStore, "snapshotStore");
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
-
-    // 初始化动态旅行时间模型（使用默认加减速参数）
-    this.dynamicTravelTimeModel =
-        new DynamicTravelTimeModel(
-            DynamicTravelTimeModel.TrainMotionParams.defaults(), DEFAULT_FALLBACK_SPEED_BPS);
-    this.travelTimeModel = new TravelTimeModel(dynamicTravelTimeModel);
   }
 
   /** 接入调试日志（读取外部状态失败时留痕）。 */
@@ -237,91 +227,45 @@ public final class EtaService {
   }
 
   /**
-   * 绑定 SignNodeRegistry 与配置，用于未发车列车的配置推断与 approaching 限速。
+   * 接入配置与牌子注册表。
    *
-   * <p>调用此方法后会重建动态旅行时间模型，加入 approaching 限速支持。
+   * <p>走行参数（车种加减速、进站规则、默认速度、车站停站开销）与编表读同一组配置（{@link RunCurveModel.Settings#fromConfig}），表定时分与 ETA
+   * 出自同一条运行曲线；牌子注册表用于未发车票据按车库推断车种。
    *
    * @param signNodeRegistry 牌子注册表
-   * @param configView 配置视图
+   * @param configSource 当前配置；每次估算现读
    */
   public void attachConfigSources(
-      SignNodeRegistry signNodeRegistry, ConfigManager.ConfigView configView) {
+      SignNodeRegistry signNodeRegistry,
+      java.util.function.Supplier<ConfigManager.ConfigView> configSource) {
     this.signNodeRegistry = signNodeRegistry;
-    this.configView = configView;
-
-    // 重建动态模型，加入 approaching 限速
-    rebuildTravelTimeModel();
+    this.configSource = configSource;
   }
 
-  /** 重建动态旅行时间模型（使用最新的 configView 和 signNodeRegistry）。 */
-  private void rebuildTravelTimeModel() {
-    ApproachingConfig approachingConfig = buildApproachingConfig();
-    this.dynamicTravelTimeModel =
-        new DynamicTravelTimeModel(
-            DynamicTravelTimeModel.TrainMotionParams.defaults(),
-            DEFAULT_FALLBACK_SPEED_BPS,
-            approachingConfig);
-    this.travelTimeModel = new TravelTimeModel(dynamicTravelTimeModel);
-  }
-
-  /** 根据当前配置构建 ApproachingConfig。 */
-  private ApproachingConfig buildApproachingConfig() {
-    ConfigManager.ConfigView config = this.configView;
-    SignNodeRegistry registry = this.signNodeRegistry;
-
-    if (config == null || registry == null) {
-      return ApproachingConfig.disabled();
+  private ConfigManager.ConfigView currentConfig() {
+    java.util.function.Supplier<ConfigManager.ConfigView> source = this.configSource;
+    if (source == null) {
+      return null;
     }
-
-    double stationSpeed = config.runtimeSettings().approachSpeedBps();
-    double depotSpeed = config.runtimeSettings().approachDepotSpeedBps();
-
-    return ApproachingConfig.of(
-        stationSpeed,
-        depotSpeed,
-        nodeId -> isStationNode(registry, nodeId),
-        nodeId -> isDepotNode(registry, nodeId));
+    try {
+      return source.get();
+    } catch (RuntimeException ex) {
+      debugLogger.accept("ETA_CONFIG_READ_FAILED error=" + ex);
+      return null;
+    }
   }
 
-  /** 判断节点是否为站点。 */
-  private static boolean isStationNode(SignNodeRegistry registry, NodeId nodeId) {
-    if (registry == null || nodeId == null) {
-      return false;
+  /** 当前走行参数：没有配置时按默认加减速、不做进站限速、不加停站开销。 */
+  private RunCurveModel.Settings runSettings() {
+    ConfigManager.ConfigView config = currentConfig();
+    if (config == null) {
+      return new RunCurveModel.Settings(
+          RunCurveModel.MotionParams.defaults(),
+          DEFAULT_FALLBACK_SPEED_BPS,
+          RunCurveModel.ApproachRule.disabled(),
+          0);
     }
-    return registry
-        .findByNodeId(nodeId, null)
-        .map(SignNodeRegistry.SignNodeInfo::definition)
-        .map(def -> def.nodeType() == NodeType.STATION)
-        .orElseGet(
-            () ->
-                parseWaypointKind(nodeId).map(kind -> kind == WaypointKind.STATION).orElse(false));
-  }
-
-  /** 判断节点是否为车库。 */
-  private static boolean isDepotNode(SignNodeRegistry registry, NodeId nodeId) {
-    if (registry == null || nodeId == null) {
-      return false;
-    }
-    return registry
-        .findByNodeId(nodeId, null)
-        .map(SignNodeRegistry.SignNodeInfo::definition)
-        .map(def -> def.nodeType() == NodeType.DEPOT)
-        .orElseGet(
-            () -> parseWaypointKind(nodeId).map(kind -> kind == WaypointKind.DEPOT).orElse(false));
-  }
-
-  private static Optional<WaypointKind> parseWaypointKind(NodeId nodeId) {
-    if (nodeId == null || nodeId.value() == null) {
-      return Optional.empty();
-    }
-    return org.fetarute
-        .fetaruteTCAddon
-        .dispatcher
-        .sign
-        .SignTextParser
-        .parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
-        .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition::waypointMetadata)
-        .map(meta -> meta.kind());
+    return RunCurveModel.Settings.fromConfig(config, DEFAULT_FALLBACK_SPEED_BPS);
   }
 
   /**
@@ -562,7 +506,13 @@ public final class EtaService {
     int travelSec = routed.travelSec();
     // 本站停站（含到站后、停站计时尚未开始的空档）+ 途中各停车点的计划停站
     int currentDwellSec = currentDwellSec(trainName, snap, plan);
-    int dwellSec = currentDwellSec + plan.dwellBetween(snap.routeIndex(), targetSel.index());
+    int dwellSec =
+        currentDwellSec
+            + plan.stopSecondsBetween(
+                snap.routeIndex(),
+                targetSel.index(),
+                graph,
+                effectiveTravelTimeModel.stationStopOverheadSeconds());
 
     // 等待只看运行时真实的停车状态：旧的占用预判（lookahead preview）与现行准入口径不一致，
     // 既会在车被扣住时报“无需等待”，也会在畅通时误报阻塞，让 HUD 在进站时丢掉“即将到站”。
@@ -666,7 +616,8 @@ public final class EtaService {
               progress.remainingEdges(),
               initialSpeed,
               progress.firstEdgeRemainingBlocks(),
-              plan.stopPositions(progress.remainingNodes(), fromIndex, targetIndex));
+              plan.stopPositions(progress.remainingNodes(), fromIndex, targetIndex),
+              plan.stopsAt(targetIndex));
       if (travelSec.isPresent() && (best == null || travelSec.get() < best.travelSec())) {
         best = new RoutedTarget(candidate, progress, travelSec.get());
       }
@@ -1229,15 +1180,18 @@ public final class EtaService {
     int travelSec = 0;
     int dwellSec = 0;
 
-    // 使用 Route 对应的动态模型（考虑 CRET depot 的列车配置）
-    TravelTimeModel routeTravelTimeModel =
-        resolveTravelTimeModelForRoute(ticket.service().routeId());
-
     if (targetSel.index() > 0) {
-      Optional<RailGraph> graphOpt = resolveGraphForRouteSegment(route, 0, targetSel.index());
+      Optional<UUID> worldOpt = worldIdForRouteSegment(route, 0, targetSel.index());
+      Optional<RailGraph> graphOpt =
+          worldOpt.flatMap(
+              id ->
+                  railGraphService.getSnapshot(id).map(RailGraphService.RailGraphSnapshot::graph));
       if (graphOpt.isEmpty()) {
         return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
       }
+      // 按车库推断的车种估算，边限速与运行中列车读同一个有效限速入口。
+      TravelTimeModel routeTravelTimeModel =
+          resolveTravelTimeModelForRoute(ticket.service().routeId(), worldOpt.get(), now);
       // 从起点静止出发；途中停车点与运行中列车同样拆段、同样累加停站——票据漏了停站，站牌上离起点越远的班次越早。
       Optional<RoutedTarget> routedOpt =
           routeToTarget(
@@ -1255,7 +1209,12 @@ public final class EtaService {
       travelSec = routedOpt.get().travelSec();
       remainingEdgeCount = routedOpt.get().progress().remainingEdgeCount();
       targetNode = routedOpt.get().node();
-      dwellSec = plan.dwellBetween(0, targetSel.index());
+      dwellSec =
+          plan.stopSecondsBetween(
+              0,
+              targetSel.index(),
+              graphOpt.get(),
+              routeTravelTimeModel.stationStopOverheadSeconds());
     }
 
     Instant departAt = resolveTicketDepartTime(ticket, route);
@@ -1316,6 +1275,14 @@ public final class EtaService {
 
   private Optional<RailGraph> resolveGraphForRouteSegment(
       RouteDefinition route, int startIndex, int targetIndex) {
+    return worldIdForRouteSegment(route, startIndex, targetIndex)
+        .flatMap(
+            id -> railGraphService.getSnapshot(id).map(RailGraphService.RailGraphSnapshot::graph));
+  }
+
+  /** 覆盖交路这一段全部路径点的世界。 */
+  private Optional<UUID> worldIdForRouteSegment(
+      RouteDefinition route, int startIndex, int targetIndex) {
     if (route == null) {
       return Optional.empty();
     }
@@ -1323,16 +1290,7 @@ public final class EtaService {
     if (startIndex < 0 || targetIndex >= waypoints.size() || startIndex >= targetIndex) {
       return Optional.empty();
     }
-    List<NodeId> segment = waypoints.subList(startIndex, targetIndex + 1);
-    Optional<UUID> worldIdOpt = railGraphService.findWorldIdForPath(segment);
-    if (worldIdOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    return railGraphService
-        .getSnapshot(worldIdOpt.get())
-        .map(
-            org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService.RailGraphSnapshot
-                ::graph);
+    return railGraphService.findWorldIdForPath(waypoints.subList(startIndex, targetIndex + 1));
   }
 
   private Instant resolveTicketDepartTime(SpawnTicket ticket) {
@@ -1962,78 +1920,48 @@ public final class EtaService {
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * 根据 Route 的 CRET depot 配置创建动态旅行时间模型（用于未发车 ETA）。
-   *
-   * <p>解析优先级：
-   *
-   * <ol>
-   *   <li>从 CRET depot spawn pattern 推断列车类型
-   *   <li>根据列车类型获取加减速配置
-   *   <li>fallback 到默认配置
-   * </ol>
+   * 未发车票据的走行模型：车种按 Route 的 CRET 车库推断（{@link SpawnTrainConfigResolver}），推断不出来用默认车种； 其余参数与运行中列车相同。
    *
    * @param routeUuid Route UUID
-   * @return 适用于该 Route 的 TravelTimeModel
+   * @param worldId 这段交路所在的世界
+   * @param now 当前时刻（临时限速按它判断是否生效）
    */
-  TravelTimeModel resolveTravelTimeModelForRoute(UUID routeUuid) {
-    if (routeUuid == null || signNodeRegistry == null || configView == null) {
-      return travelTimeModel;
-    }
+  TravelTimeModel resolveTravelTimeModelForRoute(UUID routeUuid, UUID worldId, Instant now) {
+    RunCurveModel.Settings settings = runSettings();
+    ConfigManager.ConfigView config = currentConfig();
     StorageProvider provider = this.storageProvider;
-    if (provider == null) {
-      return travelTimeModel;
+    SignNodeRegistry registry = this.signNodeRegistry;
+    if (routeUuid != null && config != null && provider != null && registry != null) {
+      Optional<Route> routeOpt = provider.routes().findById(routeUuid);
+      if (routeOpt.isPresent()) {
+        TrainConfig trainConfig =
+            new SpawnTrainConfigResolver(registry, config)
+                .resolveForRoute(routeOpt.get(), provider.routeStops().listByRoute(routeUuid));
+        settings =
+            settings.withMotion(
+                new RunCurveModel.MotionParams(trainConfig.accelBps2(), trainConfig.decelBps2()));
+      }
     }
+    return new TravelTimeModel(new RunCurveModel(settings, effectiveSpeeds(worldId, now)));
+  }
 
-    Optional<Route> routeOpt = provider.routes().findById(routeUuid);
-    if (routeOpt.isEmpty()) {
-      return travelTimeModel;
-    }
-    Route route = routeOpt.get();
-    List<RouteStop> stops = provider.routeStops().listByRoute(routeUuid);
-
-    SpawnTrainConfigResolver configResolver =
-        new SpawnTrainConfigResolver(signNodeRegistry, configView);
-    TrainConfig trainConfig = configResolver.resolveForRoute(route, stops);
-
-    DynamicTravelTimeModel.TrainMotionParams params =
-        new DynamicTravelTimeModel.TrainMotionParams(
-            trainConfig.accelBps2(), trainConfig.decelBps2());
-    DynamicTravelTimeModel dynamicModel =
-        new DynamicTravelTimeModel(params, DEFAULT_FALLBACK_SPEED_BPS);
-    return new TravelTimeModel(dynamicModel);
+  /** 运行中列车的走行模型：与编表同一条运行曲线，边限速读运行时的有效限速（含永久覆盖与临时限速）。 */
+  private TravelTimeModel travelTimeModelForWorld(UUID worldId, Instant now) {
+    return new TravelTimeModel(new RunCurveModel(runSettings(), effectiveSpeeds(worldId, now)));
   }
 
   /**
-   * 构建与运行时一致的边限速 ETA 模型。
+   * 运行时控车用的有效限速：合并图基础限速、永久 override 与临时限速。
    *
-   * <p>运行时控车会合并图基础限速、永久 override 与临时限速；ETA 在有 worldId 时复用同一解析入口，避免 section speed 生效后仍按 base speed
-   * 估算。
+   * <p>编表只接永久覆盖（临时限速带截止时刻，进表会破坏确定性）；ETA 要回答"现在开过去多久"，所以连临时限速一起算。
    */
-  private TravelTimeModel travelTimeModelForWorld(UUID worldId, Instant now) {
+  private RunCurveModel.EdgeSpeedResolver effectiveSpeeds(UUID worldId, Instant now) {
     if (worldId == null) {
-      return travelTimeModel;
+      return null;
     }
-    ApproachingConfig approachingConfig = buildApproachingConfig();
-    // 无限速边的默认速度必须与控车同一个配置值，否则同一条边 ETA 与实际按两个速度走。
-    ConfigManager.ConfigView config = this.configView;
-    double defaultSpeed =
-        config != null && config.graphSettings().defaultSpeedBlocksPerSecond() > 0.0
-            ? config.graphSettings().defaultSpeedBlocksPerSecond()
-            : DEFAULT_FALLBACK_SPEED_BPS;
-    DynamicTravelTimeModel model =
-        new DynamicTravelTimeModel(
-            DynamicTravelTimeModel.TrainMotionParams.defaults(),
-            defaultSpeed,
-            approachingConfig,
-            (graph, edge, fallbackSpeed) ->
-                railGraphService.effectiveSpeedLimitBlocksPerSecond(
-                    worldId, edge, now != null ? now : Instant.now(), fallbackSpeed));
-    return new TravelTimeModel(model);
-  }
-
-  /** 获取动态旅行时间模型（用于诊断/测试）。 */
-  public DynamicTravelTimeModel getDynamicTravelTimeModel() {
-    return dynamicTravelTimeModel;
+    Instant at = now != null ? now : Instant.now();
+    return (graph, edge, fallbackSpeed) ->
+        railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, at, fallbackSpeed);
   }
 
   /**

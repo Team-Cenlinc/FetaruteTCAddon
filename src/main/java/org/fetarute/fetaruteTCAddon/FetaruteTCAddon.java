@@ -967,6 +967,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
     etaService.attachStationPresence(this::getStationPresence);
+    // 走行参数（车种加减速、进站规则、默认速度、停站开销）与编表读同一组配置；每次估算现读，重载即生效。
+    etaService.attachConfigSources(
+        signNodeRegistry, () -> configManager == null ? null : configManager.current());
   }
 
   private void restartRuntimeMonitor() {

@@ -20,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 34;
+  private static final int EXPECTED_CONFIG_VERSION = 35;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -250,6 +250,13 @@ public final class ConfigManager {
         zone = "";
       }
     }
+    int stationStopOverheadSeconds =
+        readNonNegativeInt(
+            section,
+            "station-stop-overhead-seconds",
+            defaults.stationStopOverheadSeconds(),
+            "timetable",
+            logger);
     return new TimetableSettings(
         enabled,
         spawnEnabled,
@@ -258,7 +265,8 @@ public final class ConfigManager {
         maxCatchUpSeconds,
         reloadIntervalSeconds,
         recorderFlushIntervalSeconds,
-        zone == null ? "" : zone.trim());
+        zone == null ? "" : zone.trim(),
+        stationStopOverheadSeconds);
   }
 
   private static int readNonNegativeInt(
@@ -1525,6 +1533,7 @@ public final class ConfigManager {
    * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
    * @param recorderFlushIntervalSeconds 录制结果落库的间隔
    * @param zone 时刻表默认时区；留空表示服务器默认时区
+   * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
    */
   public record TimetableSettings(
       boolean enabled,
@@ -1534,7 +1543,11 @@ public final class ConfigManager {
       int maxCatchUpSeconds,
       int reloadIntervalSeconds,
       int recorderFlushIntervalSeconds,
-      String zone) {
+      String zone,
+      int stationStopOverheadSeconds) {
+
+    /** 车站停车开销的缺省值：2026-09-26 实服 136 次停站实测"压牌→发车"中位 24 秒，dwell 20。 */
+    public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
 
     public TimetableSettings {
       holdMaxSeconds = Math.max(0, holdMaxSeconds);
@@ -1543,11 +1556,13 @@ public final class ConfigManager {
       reloadIntervalSeconds = Math.max(1, reloadIntervalSeconds);
       recorderFlushIntervalSeconds = Math.max(1, recorderFlushIntervalSeconds);
       zone = zone == null ? "" : zone.trim();
+      stationStopOverheadSeconds = Math.max(0, stationStopOverheadSeconds);
     }
 
     /** 全部关闭的默认值。 */
     public static TimetableSettings defaults() {
-      return new TimetableSettings(false, false, 120, 300, 300, 60, 5, "");
+      return new TimetableSettings(
+          false, false, 120, 300, 300, 60, 5, "", DEFAULT_STATION_STOP_OVERHEAD_SECONDS);
     }
 
     /** 解析时区，留空时回退服务器默认。 */

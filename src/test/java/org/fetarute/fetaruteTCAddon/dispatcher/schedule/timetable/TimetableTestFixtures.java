@@ -14,6 +14,7 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -104,19 +105,20 @@ public final class TimetableTestFixtures {
   }
 
   /**
-   * 按每条边自己的 {@code baseSpeedLimit} 估时的最小模型。
+   * 按每条边自己的 {@code baseSpeedLimit} 估时的最小模型：逐边"长度 ÷ 限速"累加，不建模起步与制动，停站也不加开销。
    *
    * <p>用它而不是常速模型，是为了让"改路网限速就改表定时分"这件事在用例里真的被驱动—— 常速模型会让任何路网都得到同样的时分，那样就测不到"时分来自路网"这条不变量。
+   * 排班类用例用它让时刻可以手算；走行曲线本身由 {@code RunCurveModelTest} 与计时器的曲线用例覆盖。
    */
-  public static org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel
-      perEdgeSpeedModel() {
-    return (graph, edge, from, to) -> {
-      if (edge == null || edge.lengthBlocks() <= 0 || edge.baseSpeedLimit() <= 0.0) {
-        return Optional.empty();
-      }
-      double seconds = edge.lengthBlocks() / edge.baseSpeedLimit();
-      return Optional.of(java.time.Duration.ofMillis(Math.round(seconds * 1000.0)));
-    };
+  public static RunTimeModel perEdgeSpeedModel() {
+    return RunTimeModel.perEdge(
+        (graph, edge, from, to) -> {
+          if (edge == null || edge.lengthBlocks() <= 0 || edge.baseSpeedLimit() <= 0.0) {
+            return Optional.empty();
+          }
+          double seconds = edge.lengthBlocks() / edge.baseSpeedLimit();
+          return Optional.of(java.time.Duration.ofMillis(Math.round(seconds * 1000.0)));
+        });
   }
 
   /**

@@ -180,7 +180,7 @@ public final class TimetableSetBuilder {
             first.input().name(),
             new ArrayList<>(routes.values()),
             first.input().graph(),
-            first.input().travelTimeModel(),
+            first.input().runTimeModel(),
             first.input().notes(),
             input.neighbors(),
             lineByRoute);
@@ -351,7 +351,7 @@ public final class TimetableSetBuilder {
         input.name(),
         input.routes(),
         input.graph(),
-        input.travelTimeModel(),
+        input.runTimeModel(),
         input.notes(),
         neighbors.isEmpty() ? input.neighbors() : neighbors,
         lineByRoute);

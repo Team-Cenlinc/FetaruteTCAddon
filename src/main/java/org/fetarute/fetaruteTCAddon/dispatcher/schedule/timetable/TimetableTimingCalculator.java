@@ -7,11 +7,12 @@ import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
@@ -26,12 +27,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  *
  * <ul>
  *   <li>路径：{@link RailGraphPathFinder}，与诊断命令、ETA 用的是同一套最短路。
- *   <li>时分：{@link RailTravelTimeModel}（生产上是 {@code DynamicTravelTimeModel}），
- *       它按<b>每条边的实际限速</b>加减速积分，因此一条穿越多个限速区间的 route 不会被一个全线平均速度抹平。
- *   <li>停站：{@link RouteStop#dwellSeconds()}，缺省值由调用方从配置传入，绝不在这里塞魔法数。
+ *   <li>走行：{@link RunTimeModel}（生产上是 {@code RunCurveModel}）。路径点按停车方式切成若干段<b>走行</b>： 每段从停车点静止起步，途中的
+ *       PASS 点按线路速度通过，到下一个停车点按进站规则减速——站间的起步与制动正是旧口径（每站满速通过）少算的那部分。
+ *   <li>停站：{@link RouteStop#dwellSeconds()}，缺省值由调用方从配置传入；车站停车另加 {@link
+ *       RunTimeModel#stationStopOverheadSeconds()}（居中刹停 + 开门延迟，dwell 从开门起算）。
  * </ul>
  *
  * <p>终端折返时间<b>不</b>计入 stop profile：它发生在两趟车之间，属于车辆周转（duty）的范畴， 记在这里会让"这趟车跑多久"和"这辆车多久能再发一趟"混成同一个数。
+ * 折返读 {@link #terminalStopSeconds}，与途中停站同一套规则。
  */
 public final class TimetableTimingCalculator {
 
@@ -49,7 +52,7 @@ public final class TimetableTimingCalculator {
    * 计算一条 route 的站间时分档案。
    *
    * @param graph 调度图快照
-   * @param travelTimeModel 行程时间模型（按边限速 + 加减速）
+   * @param runTimeModel 走行时分模型
    * @param route 已解析的交路定义
    * @param stops route 的停靠配置，按 sequence 升序；索引与 {@code route.waypoints()} 对齐
    * @param defaultDwell 未配置 dwell 时使用的停站时长
@@ -57,11 +60,11 @@ public final class TimetableTimingCalculator {
    */
   public TimingResult compute(
       RailGraph graph,
-      RailTravelTimeModel travelTimeModel,
+      RunTimeModel runTimeModel,
       RouteDefinition route,
       List<RouteStop> stops,
       Duration defaultDwell) {
-    Objects.requireNonNull(travelTimeModel, "travelTimeModel");
+    Objects.requireNonNull(runTimeModel, "runTimeModel");
     Objects.requireNonNull(route, "route");
     if (graph == null) {
       return TimingResult.failure("缺少调度图快照");
@@ -70,104 +73,134 @@ public final class TimetableTimingCalculator {
     if (waypoints.size() < 2) {
       return TimingResult.failure("交路至少需要两个节点");
     }
-    long dwellFallback = defaultDwell == null ? 0L : Math.max(0L, defaultDwell.toSeconds());
+    int dwellFallback = defaultDwell == null ? 0 : (int) Math.max(0L, defaultDwell.toSeconds());
 
-    List<TimetableStop> profile = new ArrayList<>(waypoints.size());
-    List<SegmentTiming> segments = new ArrayList<>(waypoints.size() - 1);
-    int arrivalOffset = 0;
-    int departureOffset = 0;
-    profile.add(stopAt(waypoints.get(0), stops, 0, 0, 0));
-
+    List<RailGraphPath> legs = new ArrayList<>(waypoints.size() - 1);
     for (int i = 1; i < waypoints.size(); i++) {
       NodeId from = waypoints.get(i - 1);
       NodeId to = waypoints.get(i);
-      Optional<RailGraphPath> pathOpt =
+      Optional<RailGraphPath> path =
           pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
-      if (pathOpt.isEmpty()) {
+      if (path.isEmpty()) {
         return TimingResult.failure(
             "区段不可达: #" + (i - 1) + "→#" + i + " " + from.value() + " → " + to.value());
       }
-      RailGraphPath path = pathOpt.get();
-      Optional<Duration> travel = travelTimeModel.pathTravelTime(graph, path.nodes(), path.edges());
-      if (travel.isEmpty()) {
-        return TimingResult.failure(
-            "区段时分无法估算（缺限速或长度）: #" + (i - 1) + "→#" + i + " " + from.value() + " → " + to.value());
+      legs.add(path.get());
+    }
+
+    List<TimetableStop> profile = new ArrayList<>(waypoints.size());
+    List<SegmentTiming> segments = new ArrayList<>(legs.size());
+    profile.add(stopAt(waypoints.get(0), stops, 0, 0, 0));
+    int departure = 0;
+    int runStart = 0;
+    for (int end = 1; end < waypoints.size(); end++) {
+      boolean last = end == waypoints.size() - 1;
+      if (!last && !stopsAt(stops, end)) {
+        continue;
       }
-      int legSeconds = roundSeconds(travel.get());
-      segments.add(
-          new SegmentTiming(
-              i - 1,
-              i,
-              path.nodes(),
-              path.edges(),
-              nodeOffsets(graph, travelTimeModel, path, departureOffset, legSeconds)));
-      arrivalOffset = departureOffset + legSeconds;
-      boolean last = i == waypoints.size() - 1;
-      long dwell = last ? 0L : resolveDwellSeconds(stops, i, dwellFallback);
-      departureOffset = arrivalOffset + (int) dwell;
-      profile.add(stopAt(to, stops, i, arrivalOffset, last ? arrivalOffset : departureOffset));
+      RunSpan run = RunSpan.of(legs, runStart, end);
+      Optional<double[]> times =
+          runTimeModel.nodeTimes(
+              graph, new RunTimeModel.Run(run.nodes(), run.edges(), 0.0, stopsAt(stops, end)));
+      if (times.isEmpty()) {
+        return TimingResult.failure(
+            "区段时分无法估算（缺限速或长度）: #"
+                + runStart
+                + "→#"
+                + end
+                + " "
+                + waypoints.get(runStart).value()
+                + " → "
+                + waypoints.get(end).value());
+      }
+      int[] offsets = new int[times.get().length];
+      for (int j = 0; j < offsets.length; j++) {
+        offsets[j] = departure + (int) Math.round(times.get()[j]);
+      }
+      for (int leg = runStart; leg < end; leg++) {
+        int from = run.boundary(leg);
+        int to = run.boundary(leg + 1);
+        List<Integer> legOffsets = new ArrayList<>(to - from + 1);
+        for (int j = from; j <= to; j++) {
+          legOffsets.add(offsets[j]);
+        }
+        segments.add(
+            new SegmentTiming(
+                leg, leg + 1, legs.get(leg).nodes(), legs.get(leg).edges(), legOffsets));
+        if (leg + 1 < end) {
+          int passing = offsets[to];
+          profile.add(stopAt(waypoints.get(leg + 1), stops, leg + 1, passing, passing));
+        }
+      }
+      int arrival = offsets[offsets.length - 1];
+      int stopSeconds =
+          last
+              ? 0
+              : stopSeconds(graph, runTimeModel, waypoints.get(end), stops, end, dwellFallback);
+      profile.add(stopAt(waypoints.get(end), stops, end, arrival, arrival + stopSeconds));
+      departure = arrival + stopSeconds;
+      runStart = end;
     }
     return TimingResult.success(List.copyOf(profile), List.copyOf(segments));
   }
 
   /**
-   * 把一段区间的总时分摊到路径上的每一条边，得到列车到达每个节点的时刻。
+   * 终到停靠点的停站时长：车按这条 route 到达终点后，多久能再发车。
    *
-   * <p>总时分以 {@code pathTravelTime} 为准（生产模型会按整条路径做加减速积分）；逐边的分摊比例优先用模型的逐边估算， 模型给不出时按边长分摊。
-   * 分摊后的末节点时刻精确等于总时分，四舍五入的余数全部记在最后一条边上，保证站间时分与逐边时分不会出现两套数。
+   * <p>行程时分把末站的停站记作 0（班次到这儿就结束了，它不属于走行时间），{@link TurnaroundTable} 是这个量的读者—— 折返时间不是另立的常数，就是 route
+   * 定义里写着的终到 dwell，车站终到再加停站开销：运行时车在开门计时结束后才进入待命。 解析规则与途中停站共用同一个方法，不另开一套。
    *
-   * @return 长度为 {@code nodes.size()} 的到达时刻（相对 route 首站发车的秒偏移）
+   * @param graph 调度图，用来判断终点是不是车站；为空时不加停站开销
+   * @param runTimeModel 走行时分模型（提供停站开销）
+   * @param route 交路定义
+   * @param stops route 的停靠配置（按 sequence 升序）
+   * @param fallbackSeconds 停靠却没配 dwell 时的兜底值（{@code --dwell}）
+   * @return 终到点停站秒数
    */
-  private static List<Integer> nodeOffsets(
+  public static int terminalStopSeconds(
       RailGraph graph,
-      RailTravelTimeModel model,
-      RailGraphPath path,
-      int departureOffset,
-      int legSeconds) {
-    List<RailEdge> edges = path.edges();
-    int count = edges.size();
-    List<Integer> offsets = new ArrayList<>(count + 1);
-    offsets.add(departureOffset);
-    if (count == 0) {
-      return offsets;
+      RunTimeModel runTimeModel,
+      RouteDefinition route,
+      List<RouteStop> stops,
+      int fallbackSeconds) {
+    Objects.requireNonNull(runTimeModel, "runTimeModel");
+    Objects.requireNonNull(route, "route");
+    List<NodeId> waypoints = route.waypoints();
+    if (waypoints.isEmpty()) {
+      return Math.max(0, fallbackSeconds);
     }
-    double[] weights = new double[count];
-    boolean allEstimated = true;
-    for (int k = 0; k < count; k++) {
-      Optional<Duration> dt =
-          model.edgeTravelTime(graph, edges.get(k), path.nodes().get(k), path.nodes().get(k + 1));
-      if (dt.isEmpty() || dt.get().isNegative()) {
-        allEstimated = false;
-        break;
-      }
-      weights[k] = dt.get().toMillis();
-    }
-    if (!allEstimated) {
-      for (int k = 0; k < count; k++) {
-        weights[k] = Math.max(0, edges.get(k).lengthBlocks());
-      }
-    }
-    double total = 0.0D;
-    for (double weight : weights) {
-      total += weight;
-    }
-    double cumulative = 0.0D;
-    for (int k = 0; k < count - 1; k++) {
-      cumulative += total <= 0.0D ? 1.0D / count : weights[k] / total;
-      offsets.add(departureOffset + (int) Math.round(cumulative * legSeconds));
-    }
-    offsets.add(departureOffset + legSeconds);
-    return offsets;
+    int last = waypoints.size() - 1;
+    return stopSeconds(
+        graph, runTimeModel, waypoints.get(last), stops, last, Math.max(0, fallbackSeconds));
   }
 
   /**
-   * 秒级四舍五入。
+   * 停车点的停站时长：dwell，车站再加停站开销。PASS 不停站算 0。
    *
-   * <p>用四舍五入而不是截断：截断在每个区段都少算最多一秒，一条二十站的线累计下来能少算十几秒， 而那正好是"表定时分总是偏乐观"的一个隐蔽来源。四舍五入的误差在长路径上互相抵消。
+   * <p>停站开销只加在车站上：它由 AutoStation 的居中刹停与开门延迟构成，车库与区间停车点没有这一段。
    */
-  private static int roundSeconds(Duration duration) {
-    long millis = Math.max(0L, duration.toMillis());
-    return (int) Math.min(Integer.MAX_VALUE, (millis + 500L) / 1000L);
+  private static int stopSeconds(
+      RailGraph graph,
+      RunTimeModel runTimeModel,
+      NodeId node,
+      List<RouteStop> stops,
+      int index,
+      int fallback) {
+    if (!stopsAt(stops, index)) {
+      return 0;
+    }
+    int dwell = resolveDwellSeconds(stops, index, fallback);
+    boolean station =
+        graph != null && StopApproach.targetOf(graph, node).kind() == StopApproach.Kind.STATION;
+    return station ? dwell + runTimeModel.stationStopOverheadSeconds() : dwell;
+  }
+
+  /** 列车是否在这个路径点停车：只有 PASS 不停；缺停靠配置时按停车处理（与 {@link #resolveDwellSeconds} 的兜底一致）。 */
+  private static boolean stopsAt(List<RouteStop> stops, int index) {
+    if (stops == null || index < 0 || index >= stops.size() || stops.get(index) == null) {
+      return true;
+    }
+    return stops.get(index).passType() != RouteStopPassType.PASS;
   }
 
   /**
@@ -175,25 +208,7 @@ public final class TimetableTimingCalculator {
    *
    * <p>否则一条 route 上每个路径点都会被算成一次 {@code --dwell} 长的停站：全程时分被虚增一到三成， 冲突检查里每个路径点还会多出一段假的站台占用。
    */
-  /**
-   * 终到停靠点的停站时长：车按这条 route 到达终点后，多久能再发车。
-   *
-   * <p>行程时分把末站的 dwell 记作 0（班次到这儿就结束了，它不属于走行时间），于是这个字段一直没有消费者。 {@link TurnaroundTable}
-   * 是它的第一个读者——折返时间不是另立的常数，就是 route 定义里写着的这个数。 解析规则与行程时分共用同一个方法，不另开一套：PASS 不停站算 0，停靠却没配 dwell 的用兜底值。
-   *
-   * @param stops route 的停靠配置，按 sequence 升序
-   * @param fallbackSeconds 停靠却没配 dwell 时的兜底值（{@code --dwell}）
-   * @return 终到点停站秒数；没有停靠配置时返回兜底值
-   */
-  public static int terminalDwellSeconds(List<RouteStop> stops, int fallbackSeconds) {
-    long fallback = Math.max(0, fallbackSeconds);
-    if (stops == null || stops.isEmpty()) {
-      return (int) fallback;
-    }
-    return (int) Math.max(0L, resolveDwellSeconds(stops, stops.size() - 1, fallback));
-  }
-
-  private static long resolveDwellSeconds(List<RouteStop> stops, int index, long fallback) {
+  private static int resolveDwellSeconds(List<RouteStop> stops, int index, int fallback) {
     if (stops == null || index < 0 || index >= stops.size()) {
       return fallback;
     }
@@ -202,9 +217,9 @@ public final class TimetableTimingCalculator {
       return fallback;
     }
     if (stop.passType() == RouteStopPassType.PASS) {
-      return 0L;
+      return 0;
     }
-    return stop.dwellSeconds().filter(value -> value >= 0).map(Long::valueOf).orElse(fallback);
+    return stop.dwellSeconds().filter(value -> value >= 0).orElse(fallback);
   }
 
   /**
@@ -225,6 +240,38 @@ public final class TimetableTimingCalculator {
         arrivalOffset,
         departureOffset,
         passType);
+  }
+
+  /**
+   * 一段走行：相邻两个停车点之间的若干路径点区段首尾相接。
+   *
+   * @param nodes 走行的全部节点
+   * @param edges 走行的全部边
+   * @param firstLeg 走行里第一个路径点区段的序号
+   * @param legStarts 每个路径点区段的起点在 {@code nodes} 里的下标，末项是终点下标
+   */
+  private record RunSpan(
+      List<NodeId> nodes, List<RailEdge> edges, int firstLeg, List<Integer> legStarts) {
+
+    static RunSpan of(List<RailGraphPath> legs, int fromWaypoint, int toWaypoint) {
+      List<NodeId> nodes = new ArrayList<>();
+      List<RailEdge> edges = new ArrayList<>();
+      List<Integer> starts = new ArrayList<>(toWaypoint - fromWaypoint + 1);
+      nodes.add(legs.get(fromWaypoint).nodes().get(0));
+      for (int leg = fromWaypoint; leg < toWaypoint; leg++) {
+        RailGraphPath path = legs.get(leg);
+        starts.add(nodes.size() - 1);
+        nodes.addAll(path.nodes().subList(1, path.nodes().size()));
+        edges.addAll(path.edges());
+      }
+      starts.add(nodes.size() - 1);
+      return new RunSpan(List.copyOf(nodes), List.copyOf(edges), fromWaypoint, List.copyOf(starts));
+    }
+
+    /** 第 {@code waypoint} 个路径点在本段走行节点里的下标。 */
+    int boundary(int waypoint) {
+      return legStarts.get(waypoint - firstLeg);
+    }
   }
 
   /**

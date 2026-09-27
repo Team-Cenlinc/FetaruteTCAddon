@@ -386,6 +386,40 @@ class ConfigManagerTest {
   }
 
   /**
+   * 编表的车站停站开销：缺省 4 秒（实服 136 次停站"压牌→发车"中位 24 秒、dwell 20），可配，负数回退缺省。
+   *
+   * <p>它进表：改它就改表定发车与折返，所以缺省值必须写死在一处（{@link
+   * ConfigManager.TimetableSettings#DEFAULT_STATION_STOP_OVERHEAD_SECONDS}），不能让模板与代码各有一个数。
+   */
+  @Test
+  void timetableStationStopOverheadHasADefaultAndIsConfigurable() {
+    YamlConfiguration missing = new YamlConfiguration();
+    missing.set("timetable.enabled", true);
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
+        ConfigManager.parse(missing, Logger.getLogger("config-test"))
+            .timetableSettings()
+            .stationStopOverheadSeconds());
+
+    YamlConfiguration explicit = new YamlConfiguration();
+    explicit.set("timetable.station-stop-overhead-seconds", 6);
+    assertEquals(
+        6,
+        ConfigManager.parse(explicit, Logger.getLogger("config-test"))
+            .timetableSettings()
+            .stationStopOverheadSeconds());
+
+    YamlConfiguration negative = new YamlConfiguration();
+    negative.set("timetable.station-stop-overhead-seconds", -3);
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
+        ConfigManager.parse(negative, Logger.getLogger("config-test"))
+            .timetableSettings()
+            .stationStopOverheadSeconds(),
+        "负数回退缺省值");
+  }
+
+  /**
    * 内置模板的 {@code config-version} 必须就是解析器期望的版本。
    *
    * <p>{@code ConfigUpdater} 合并时总把版本号写成模板值，所以两者一旦错开，每次起服与重载都会报一条"不匹配"。 {@code b41c1ac} 把模板升到 34
