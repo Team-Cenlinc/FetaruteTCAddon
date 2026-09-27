@@ -696,12 +696,17 @@ public final class OccupancyRequestBuilder {
   /**
    * 识别从当前图节点进入、并必须一次持有到首个清出点的站场联锁窗口。
    *
-   * <p>这不是新的图资源，也不依赖环秩或距离阈值：当前 waypoint/station/depot 是可保持 STOP 的入口边界；从入口到首个 SWITCHER/显式 throat
+   * <p>这不是新的图资源，也不依赖环秩：当前 waypoint/station/depot 是可保持 STOP 的入口边界；从入口到首个 SWITCHER/显式 throat
    * 之间的节点是联锁接近段；进入联锁节点后，首个普通 waypoint、destination 或下一安全停车点是清出点。请求必须把所选有向路径上的全部 NODE/EDGE/CONFLICT
    * 作为同一次 hard authority 提交，消除“双方各占一半再互等”的竞态。
    *
    * <p>只有首个联锁节点已经落入普通 hard lookahead 时才提升窗口；更远的道岔只保留在完整 Movement Plan 中，不能提前扩大本 tick
    * 的硬授权。开始提升后仍扫描到下一处 STATION/DEPOT：若已经进入联锁却没有可见清出点，则 fail-closed。
+   *
+   * <p>两组道岔之间的直线段容不下整列车时，停在段内的车必然压着其中一组，这两组对这列车就是同一组联锁：清出点之后、累计不到 {@link
+   * #minConflictExitDistanceBlocks} 就又碰上联锁节点，这个清出点作废，窗口继续穿过下一组道岔。实服 2026-09-27 OFL 车库口：回库车穿过剪刀渡线后，
+   * 首个清出点 MLU:1:003 离渡线 17 格、离车库岔口 28 格，停在那里车尾还压着渡线、车头对着逆向来车，两车顶牛到关服。道岔后面接长直线时仍取首个清出点；
+   * 未配置泊位距离（0）时与只看首个清出点等价。
    */
   private AtomicAuthorityWindow resolveAtomicInterlockingWindow(
       List<NodeId> fullPath, List<NodeId> hardWindow, AuthorizationPurpose purpose) {
@@ -712,27 +717,57 @@ public final class OccupancyRequestBuilder {
         || hardWindow.stream().noneMatch(this::isInterlockingNode)) {
       return AtomicAuthorityWindow.notApplicable();
     }
-    boolean enteredInterlocking = isInterlockingNode(fullPath.get(0));
+    NodeId entry = fullPath.get(0);
+    boolean enteredInterlocking = isInterlockingNode(entry);
+    int clearanceIndex = -1;
+    long clearanceDistanceBlocks = 0L;
     for (int index = 1; index < fullPath.size(); index++) {
       NodeId node = fullPath.get(index);
       if (isInterlockingSafeStopNode(node)) {
-        return enteredInterlocking
-            ? AtomicAuthorityWindow.resolved(fullPath.get(0), node, index)
-            : AtomicAuthorityWindow.notApplicable();
+        if (!enteredInterlocking) {
+          return AtomicAuthorityWindow.notApplicable();
+        }
+        return clearanceIndex >= 0
+            ? clearanceWindow(fullPath, clearanceIndex)
+            : AtomicAuthorityWindow.resolved(entry, node, index);
       }
       if (isInterlockingNode(node)) {
         enteredInterlocking = true;
+        clearanceIndex = -1;
+        clearanceDistanceBlocks = 0L;
         continue;
       }
-      if (enteredInterlocking) {
-        return isInterlockingClearanceNode(node)
-            ? AtomicAuthorityWindow.resolved(fullPath.get(0), node, index)
-            : AtomicAuthorityWindow.unresolved(fullPath.get(0));
+      if (!enteredInterlocking) {
+        continue;
+      }
+      if (!isInterlockingClearanceNode(node)) {
+        return clearanceWindow(fullPath, clearanceIndex);
+      }
+      if (clearanceIndex < 0) {
+        clearanceIndex = index;
+      }
+      clearanceDistanceBlocks =
+          saturatingAdd(clearanceDistanceBlocks, stepLengthBlocks(fullPath.get(index - 1), node));
+      if (clearanceDistanceBlocks >= minConflictExitDistanceBlocks) {
+        return clearanceWindow(fullPath, clearanceIndex);
       }
     }
     return enteredInterlocking
-        ? AtomicAuthorityWindow.unresolved(fullPath.get(0))
+        ? clearanceWindow(fullPath, clearanceIndex)
         : AtomicAuthorityWindow.notApplicable();
+  }
+
+  /** 以 {@code clearanceIndex} 处的清出点结束原子窗口；没有清出点时 fail-closed。 */
+  private static AtomicAuthorityWindow clearanceWindow(List<NodeId> fullPath, int clearanceIndex) {
+    return clearanceIndex >= 0
+        ? AtomicAuthorityWindow.resolved(
+            fullPath.get(0), fullPath.get(clearanceIndex), clearanceIndex)
+        : AtomicAuthorityWindow.unresolved(fullPath.get(0));
+  }
+
+  /** 相邻两节点间的图边长度；找不到边时按 0 计，只会让窗口更长（保守）。 */
+  private long stepLengthBlocks(NodeId from, NodeId to) {
+    return findEdge(from, to).map(edge -> Math.max(0L, edge.lengthBlocks())).orElse(0L);
   }
 
   /**
