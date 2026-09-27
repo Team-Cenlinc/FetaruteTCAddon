@@ -5,6 +5,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -19,8 +20,10 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
@@ -82,6 +85,45 @@ final class RuntimeDispatchTestFixtures {
         return false;
       }
     };
+  }
+
+  /**
+   * 去掉单线区段与冲突组语义、只保留节点、区间与联锁区的图视图。
+   *
+   * <p>链状夹具会被 {@link SimpleRailGraph} 识别成单线区段，信号 tick 在单线准入处提前停车；实服的双线区间不构成单线区段。 需要让信号 tick
+   * 走到常规授权与位置保持时用这个视图。
+   */
+  static RailGraph sectionlessGraph(SimpleRailGraph delegate) {
+    return new SectionlessGraph(delegate, delegate.interlockingState());
+  }
+
+  private record SectionlessGraph(RailGraph delegate, RailInterlockingState interlockingState)
+      implements RailGraph, RailGraphInterlockingSupport {
+
+    @Override
+    public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
+      return delegate.nodes();
+    }
+
+    @Override
+    public java.util.Collection<RailEdge> edges() {
+      return delegate.edges();
+    }
+
+    @Override
+    public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+      return delegate.findNode(id);
+    }
+
+    @Override
+    public Set<RailEdge> edgesFrom(NodeId id) {
+      return delegate.edgesFrom(id);
+    }
+
+    @Override
+    public boolean isBlocked(EdgeId id) {
+      return delegate.isBlocked(id);
+    }
   }
 
   static ConfigManager.ConfigView testConfigView(int intervalTicks, double defaultSpeedBps) {
@@ -266,6 +308,7 @@ final class RuntimeDispatchTestFixtures {
     int hardStopCalls = 0;
     Optional<Set<RailFootprintCell>> liveRailFootprintCells =
         Optional.of(Set.of(new RailFootprintCell(0, 64, 0)));
+    Optional<RailState> railState = Optional.empty();
     OptionalDouble estimatedTrainLengthBlocks = OptionalDouble.of(1.0);
     LinkageError liveRailFootprintFailure;
     LinkageError physicalIdentityFailure;
@@ -375,6 +418,11 @@ final class RuntimeDispatchTestFixtures {
     @Override
     public java.util.Optional<org.bukkit.block.BlockFace> forwardDirection() {
       return java.util.Optional.empty();
+    }
+
+    @Override
+    public Optional<RailState> railState() {
+      return railState;
     }
 
     @Override

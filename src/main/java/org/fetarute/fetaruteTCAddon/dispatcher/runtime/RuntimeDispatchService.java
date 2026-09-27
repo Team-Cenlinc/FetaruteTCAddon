@@ -6307,7 +6307,7 @@ public final class RuntimeDispatchService {
                 now,
                 priority,
                 AuthorizationPurpose.RUNTIME_MOVE,
-                train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+                train,
                 trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
                 resolveConflictExitBerthDistanceBlocks(train, runtimeSettings))
             .orElse(context);
@@ -12611,7 +12611,7 @@ public final class RuntimeDispatchService {
             clockNow(),
             resolvePriority(properties, route),
             AuthorizationPurpose.RUNTIME_MOVE,
-            trainHandle.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+            trainHandle,
             trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
             resolveConflictExitBerthDistanceBlocks(trainHandle, runtimeSettings));
     if (contextOpt.isEmpty()) {
@@ -12830,7 +12830,7 @@ public final class RuntimeDispatchService {
                 clockNow(),
                 resolvePriority(properties, route),
                 AuthorizationPurpose.RUNTIME_MOVE,
-                trainHandle.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+                trainHandle,
                 trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
                 resolveConflictExitBerthDistanceBlocks(trainHandle, runtimeSettings))
             .orElse(context);
@@ -14337,7 +14337,7 @@ public final class RuntimeDispatchService {
                 now,
                 priorityResolution.priority(),
                 AuthorizationPurpose.RUNTIME_MOVE,
-                train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+                train,
                 trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
                 resolveConflictExitBerthDistanceBlocks(train, runtimeSettings))
             .orElse(context);
@@ -18881,6 +18881,21 @@ public final class RuntimeDispatchService {
     return OptionalLong.of(Math.max(0L, remaining));
   }
 
+  /**
+   * 车头已驶过当前图节点的距离（沿去往 {@code nextNode} 的首条边）。
+   *
+   * <p>取不到车头位置时 {@link TrainPositionResolver} 按整条边剩余计，这里得 0，回到从节点起算的旧口径。
+   */
+  private long resolveHeadProgressBlocks(
+      RuntimeTrainHandle train, RailGraph graph, NodeId currentNode, NodeId nextNode) {
+    OptionalLong total = resolveShortestDistance(graph, currentNode, nextNode);
+    OptionalLong remaining = resolveRemainingDistanceToNode(train, graph, currentNode, nextNode);
+    if (total.isEmpty() || remaining.isEmpty()) {
+      return 0L;
+    }
+    return Math.max(0L, total.getAsLong() - remaining.getAsLong());
+  }
+
   // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
 
   /**
@@ -21686,7 +21701,7 @@ public final class RuntimeDispatchService {
       Instant now,
       int priority,
       AuthorizationPurpose purpose,
-      double currentSpeedBps,
+      RuntimeTrainHandle train,
       double decelBps2,
       long minConflictExitDistanceBlocks) {
     return buildHardAuthorityContextWithDirectionContext(
@@ -21700,7 +21715,7 @@ public final class RuntimeDispatchService {
         now,
         priority,
         purpose,
-        currentSpeedBps,
+        train,
         decelBps2,
         minConflictExitDistanceBlocks);
   }
@@ -21709,6 +21724,14 @@ public final class RuntimeDispatchService {
    * 构建物理窗口从实时节点起算、但单线方向继承 canonical route leg 的硬授权。
    *
    * <p>{@code directionContextNodes} 只参与方向解析，不会扩大本 tick 的 NODE/EDGE/CONFLICT 资源。
+   *
+   * <p>窗口要覆盖“预计停车点 + 安全余量”：预计停车点 = 车头 + 当前制动距离，停着时就是车头。窗口从当前图节点起算，所以要补上车头已驶过当前节点的那一段，
+   * 否则车头在同一条边上越走越远，窗口却一直按“节点起算已够长”不往前伸，直到压过下一节点才发现前方拿不到——此时已在制动距离内。实服 2026-09-27：回库 MT 从 MLU:2:001
+   * 起的窗口 47 格一路“够长”，车头越过 MLU:2:002 才被拒，冲出 17 格停在渡线道岔尖轨上。
+   *
+   * <p>停着时同样保留余量，要求才前后一致：刹车途中车头前进、制动距离缩短，两者之和不变；停稳后仍是“车头 + 余量”。若停着只要一条边，被挡停下的车下一拍就会按一条边放行、
+   * 起步后按“制动距离 + 余量”又被挡——实服 4 小时里 3 秒内解除的停车 458 次，431 次解除时挡车资源仍在。健康恢复的预览与重发也走同一口径， 否则按单边窗口放行后下一拍又被信号
+   * tick 挡回。例外（停着时保持单边窗口）：停在道岔上的车（道岔出清要能先动），以及余量会盖满整份行车计划时 （离 route 终点或未选站台的 DYNAMIC 不到一个余量）。
    */
   private Optional<OccupancyRequestContext> buildHardAuthorityContextWithDirectionContext(
       RailGraph graph,
@@ -21721,12 +21744,81 @@ public final class RuntimeDispatchService {
       Instant now,
       int priority,
       AuthorizationPurpose purpose,
-      double currentSpeedBps,
+      RuntimeTrainHandle train,
       double decelBps2,
       long minConflictExitDistanceBlocks) {
     if (graph == null || runtimeSettings == null || route == null) {
       return Optional.empty();
     }
+    boolean standingOnSwitcher =
+        currentIndex >= 0
+            && currentIndex < effectiveNodes.size()
+            && graph
+                .findNode(effectiveNodes.get(currentIndex))
+                .map(RailNode::type)
+                .filter(NodeType.SWITCHER::equals)
+                .isPresent();
+    double speedBps =
+        train == null ? 0.0 : train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND;
+    long minDistanceBlocks =
+        hardAuthorityMinDistanceBlocks(runtimeSettings, speedBps, decelBps2, !standingOnSwitcher);
+    if (minDistanceBlocks > 0L && currentIndex >= 0 && currentIndex + 1 < effectiveNodes.size()) {
+      minDistanceBlocks +=
+          resolveHeadProgressBlocks(
+              train, graph, effectiveNodes.get(currentIndex), effectiveNodes.get(currentIndex + 1));
+    }
+    Optional<OccupancyRequestContext> context =
+        buildHardAuthorityWindow(
+            graph,
+            runtimeSettings,
+            trainName,
+            route,
+            effectiveNodes,
+            directionContextNodes,
+            currentIndex,
+            now,
+            priority,
+            purpose,
+            minDistanceBlocks,
+            minConflictExitDistanceBlocks);
+    if (speedBps > 1.0e-6 || minDistanceBlocks <= 0L || context.isEmpty()) {
+      return context;
+    }
+    // 停着时补余量会把窗口推到行车计划末端（route 终点或未选站台的 DYNAMIC 之前）：那里本来就是真实停车点，
+    // 余量防的是“停下又放行”，用不着；而盖满计划会把授权终点变成物理终点，可恢复的保持随之变成作废授权的硬停车。退回单边窗口。
+    Optional<MovementPlanSnapshot> plan = context.get().request().movementPlanSnapshot();
+    if (plan.isEmpty() || plan.get().directedEdges().size() > context.get().edges().size()) {
+      return context;
+    }
+    return buildHardAuthorityWindow(
+        graph,
+        runtimeSettings,
+        trainName,
+        route,
+        effectiveNodes,
+        directionContextNodes,
+        currentIndex,
+        now,
+        priority,
+        purpose,
+        0L,
+        minConflictExitDistanceBlocks);
+  }
+
+  /** 按给定的最小距离构建硬授权窗口；最短一条边，并受物理联锁出口泊位约束。 */
+  private Optional<OccupancyRequestContext> buildHardAuthorityWindow(
+      RailGraph graph,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      String trainName,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      List<NodeId> directionContextNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose,
+      long minDistanceBlocks,
+      long minConflictExitDistanceBlocks) {
     OccupancyRequestBuilder authorizationBuilder =
         new OccupancyRequestBuilder(
                 graph,
@@ -21734,7 +21826,7 @@ public final class RuntimeDispatchService {
                 0,
                 0,
                 runtimeSettings.switcherZoneEdges(),
-                hardAuthorityMinDistanceBlocks(runtimeSettings, currentSpeedBps, decelBps2),
+                minDistanceBlocks,
                 HARD_AUTHORITY_DISTANCE_MAX_EDGES,
                 debugLogger)
             .withMinimumConflictExitDistanceBlocks(minConflictExitDistanceBlocks);
@@ -21750,14 +21842,23 @@ public final class RuntimeDispatchService {
         purpose);
   }
 
+  /**
+   * 硬授权窗口相对车头的最小长度：制动距离 + 安全余量。
+   *
+   * @param marginAtRest 停着时是否仍要求安全余量；为 {@code false} 时停着返回 0（单边窗口）
+   */
   private static long hardAuthorityMinDistanceBlocks(
-      ConfigManager.RuntimeSettings runtimeSettings, double currentSpeedBps, double decelBps2) {
+      ConfigManager.RuntimeSettings runtimeSettings,
+      double currentSpeedBps,
+      double decelBps2,
+      boolean marginAtRest) {
     double speed = Double.isFinite(currentSpeedBps) ? Math.max(0.0, currentSpeedBps) : 0.0;
-    if (speed <= 1.0e-6) {
+    boolean atRest = speed <= 1.0e-6;
+    if (atRest && !marginAtRest) {
       return 0L;
     }
     double decel = Double.isFinite(decelBps2) && decelBps2 > 0.0 ? decelBps2 : 0.001;
-    double brakingDistance = (speed * speed) / (2.0 * decel);
+    double brakingDistance = atRest ? 0.0 : (speed * speed) / (2.0 * decel);
     double cautionMargin =
         runtimeSettings == null
             ? 0.0

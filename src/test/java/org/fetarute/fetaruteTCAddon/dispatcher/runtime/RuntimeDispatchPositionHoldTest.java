@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.sectionlessGraph;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.testConfigView;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -14,7 +15,6 @@ import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,14 +24,12 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
@@ -220,7 +218,7 @@ class RuntimeDispatchPositionHoldTest {
                 1, true, Set.of(crossing, new RailFootprintCell(-515, 77, 2274))));
     RailInterlockingState interlocking =
         RailInterlockingState.from(worldId, edges.keySet(), footprints);
-    RailGraph graph =
+    SimpleRailGraph graph =
         new SimpleRailGraph(
             Map.of(
                 behind, new RailNodeTest(behind),
@@ -246,7 +244,7 @@ class RuntimeDispatchPositionHoldTest {
             Map.of());
     return new OflJunctionFixture(
         graph,
-        new DoubleTrackGraph(graph, interlocking),
+        sectionlessGraph(graph),
         behind,
         current,
         junction,
@@ -362,40 +360,6 @@ class RuntimeDispatchPositionHoldTest {
       FakeTrain train = new FakeTrain(worldId, dsTags().properties(), moving);
       train.liveRailFootprintCells = Optional.of(Set.of(body));
       return train;
-    }
-  }
-
-  /**
-   * 只保留节点、区间与联锁区的图视图。
-   *
-   * <p>夹具是一条没有分叉的链，会被识别成单线区段而在单线准入处提前停车；实服 OFL–MLU 是带渡线的双线，不构成单线区段。去掉区段语义后信号 tick 才会走到位置保持。
-   */
-  private record DoubleTrackGraph(RailGraph delegate, RailInterlockingState interlockingState)
-      implements RailGraph, RailGraphInterlockingSupport {
-
-    @Override
-    public Collection<RailNode> nodes() {
-      return delegate.nodes();
-    }
-
-    @Override
-    public Collection<RailEdge> edges() {
-      return delegate.edges();
-    }
-
-    @Override
-    public Optional<RailNode> findNode(NodeId id) {
-      return delegate.findNode(id);
-    }
-
-    @Override
-    public Set<RailEdge> edgesFrom(NodeId id) {
-      return delegate.edgesFrom(id);
-    }
-
-    @Override
-    public boolean isBlocked(EdgeId id) {
-      return delegate.isBlocked(id);
     }
   }
 }

@@ -77,7 +77,14 @@
 - `BLOCKED_BY_OCCUPANCY`、`WAITING_FOR_SINGLE_ZONE` 与 protective retain 等可恢复 STOP 会保存当时的外部 blocker 快照。最终 Signal 发布除了核验本次 `hardAuthorityWindow` 外，还必须复核这些 blocker 是否仍以 `MOVEMENT_REQUIRED`、`PHYSICAL_FOOTPRINT`、`PROTECTIVE_RETAIN` 或 `HOLD_ONLY` 存在；只要其中任一项仍归外车，短窗口的新 token 不得清除 STOP 或发布行驶信号。只有 claim 已释放、原子转移给本车，或降级为纯 `QUEUE_POSITION` / preview 诊断后，才允许完整授权链恢复信号；快照不可读时按 fail-closed 保持 STOP。
 - 排查“绿灯后速度突然归零”时，按同一列车时间线关联 `SMART_STOP_LIFECYCLE`、`SMART_SIGNAL_FINAL` 与 `DIRECT_SIGNAL_UPDATE_SUPPRESSED`。若仍见 `reason=active-occupancy-stop-blocker-still-held`，`hardBarrierReason` 会给出 `资源@claim:owner:role`；应等待真实资源释放事件触发完整重评估，禁止手工释放 claim、清库或用队列位次替代物理清空证明。
 - `SMART_ROUTE_ARRIVAL`、`SMART_STOP_LIFECYCLE` 和 `SMART_RESOURCE_LIFECYCLE` 由生产端按实际变化去重后逐次保留，不消耗每分钟普通观察预算。稳定 STOP 与无语义变化的 claim refresh 不重复输出；blocker 按资源、owner 与角色去重排序，枚举顺序变化不算新停因。资源事件记录创建、释放与 owner/角色/方向变化；周期 signal/resource snapshot 仍受预算限制。账本事件不能单独证明现场车尾已清空。
-- 周期信号 tick 与推进点的 `hardAuthorityWindow` 会在列车移动时按“当前制动距离 + 跟驰/authority 安全余量”扩展，最多保留 8 条展开图边。这样短咽喉、站前折返与 PWC 前的小段不会因为固定 1-edge 授权而漏看可制动距离内的真实冲突；静止和健康恢复重发路径仍保持单边硬窗口，避免把远端 advisory blocker 提前升级为物理 STOP。
+- 周期信号 tick 与推进点的 `hardAuthorityWindow` 会在列车移动时按“当前制动距离 + 跟驰/authority 安全余量”扩展，最多保留 8 条展开图边。这样短咽喉、站前折返与 PWC 前的小段不会因为固定 1-edge 授权而漏看可制动距离内的真实冲突。停着的车同样要求“车头 + 安全余量”（制动距离为 0），见下一条。
+- 这段距离从**车头**量起：窗口从当前图节点起算，行进中的列车要补上车头已驶过当前节点的那一段（`TrainPositionResolver` 按车头坐标插值；取不到车头位置时按 0 计，回到从节点起算）。否则车头在一条长边上越走越远，窗口却一直按“节点起算已够长”不往前伸，直到压过下一节点才发现前方拿不到——那时已在制动距离内。实服 2026-09-27：回库 MT 从 `MLU:2:001` 起的 47 格窗口一路“够长”，车头越过 `MLU:2:002` 后穿渡线的原子窗口才被拒，冲出 17 格停在渡线道岔尖轨上。代价：被拒时列车会在离被拒资源约“跟驰停车余量 + authority 注意余量”（实服 16 + 24 = 40 格）处开始停车，长边上比以前停得靠后；短边上本来就是这样。
+- **停着时也保留余量**，要求才前后一致：刹车途中车头前进、制动距离缩短，两者之和不变，停稳后仍是“车头 + 余量”。以前停着只要一条边，被挡停下的车下一拍就按一条边放行，起步后按“制动距离 + 余量”又被挡——这就是“突然停下、下一拍又放行”和起步闪烁。实服 2026-09-27 四小时日志：3 秒内解除的停车 458 次，431 次解除时挡车资源仍在。例外（停着时仍用单边窗口）：
+  - 停在 `SWITCHER` 节点上的车：道岔出清要能先动，不能因余量里更远的占用原地不动；
+  - 余量会盖满整份行车计划时（离 route 终点、或未选站台的 `DYNAMIC` 不到一个余量）：那里本来就是真实停车点，盖满计划会把授权终点变成物理终点，可恢复的保持随之升级为作废授权的硬停车。
+
+  健康恢复的“清理自持单线方向”预览与“重发 destination”也走同一口径：前者预览的就是信号 tick 会发的请求，后者若按单边窗口放行，下一拍信号 tick 按余量又会挡回。
+- 停站（dwell）期间信号 tick 直接保持 STOP、不申请前向授权，所以停着的余量不会让停站的车提前多占前方资源。代价只落在“停着准备走”的车上：要等车头前方约 40 格都拿得到才起步，而不是先走一条边再被挡。
 - 若首个 `SWITCHER` 或显式咽喉已经进入普通 hard lookahead，`OccupancyRequestBuilder` 会把当前安全边界至冲突点、再到首个正常图边界/出清站点的 NODE、EDGE、CONFLICT 原子提升为硬进路窗口。更远的平交道口只保留在 advisory/完整 Movement Plan 中，不能从数百方块外提前锁闭；一旦联锁已进入硬窗口却找不到可证明出口，请求构造会失败，PERIODIC 与推进点入口都会立即撤销旧 Movement Authority、写入 movement inhibitor 并落地硬 STOP，禁止“入口已放行、列车却沿用上周期 PROCEED 停在道口中间”。
 - 前向授权请求中只有下一跳 NODE/EDGE/必要冲突资源标记为 `MOVEMENT_REQUIRED`，当前位置、尾部保护与 hold-only single claim 只作为 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 保留。前向授权不得把 rear guard 或 advisory blocker 混入 fail-closed 请求。
 - 发车门控是 admission gate：它保留完整的选定前向路径与必要的原子联锁窗口来判断是否允许出发，但正式 acquire 只写 `MOVEMENT_REQUIRED` 资源，不覆盖 rear guard 或 hold retain claim。
