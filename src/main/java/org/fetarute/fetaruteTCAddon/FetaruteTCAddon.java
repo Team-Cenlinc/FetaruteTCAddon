@@ -9,10 +9,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
@@ -27,10 +29,13 @@ import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpeedCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaStationGroupCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTimetableCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
+import org.fetarute.fetaruteTCAddon.company.api.StationGroupChange;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
@@ -121,6 +126,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SignalEvaluator signalEvaluator;
   private RuntimeSignalReevaluationScheduler signalReevaluationScheduler;
   private RouteDefinitionCache routeDefinitionCache;
+  private StationDirectory stationDirectory;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
   private DwellRegistry dwellRegistry;
@@ -452,6 +458,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaLineCommand(this).register(commandManager);
     new FtaRouteCommand(this).register(commandManager);
     new FtaStationCommand(this).register(commandManager);
+    new FtaStationGroupCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaEtaCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
@@ -568,9 +575,64 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (this.routeDefinitionCache == null) {
       this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
     }
-    if (storageManager != null && storageManager.isReady()) {
-      storageManager.provider().ifPresent(provider -> routeDefinitionCache.reload(provider));
+    if (this.stationDirectory == null) {
+      // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
+      this.stationDirectory = new StationDirectory(routeDefinitionCache, loggerManager::debug);
     }
+    if (storageManager != null && storageManager.isReady()) {
+      storageManager
+          .provider()
+          .ifPresent(
+              provider -> {
+                routeDefinitionCache.reload(provider);
+                stationDirectory.reload(provider);
+              });
+    }
+  }
+
+  /** 车站目录（车站、车站组、停靠线路的内存索引）；插件未完成初始化时为空。 */
+  public Optional<StationDirectory> getStationDirectory() {
+    return Optional.ofNullable(stationDirectory);
+  }
+
+  /**
+   * 车站、线路、运营商或车站组改库之后调用：重读车站目录的主数据并重建索引，公开 API 数据版本随之递增。
+   *
+   * <p>交路变化不需要调用它——交路缓存刷新时车站目录会自动重算。
+   */
+  public void refreshStationDirectory() {
+    if (stationDirectory == null || storageManager == null || !storageManager.isReady()) {
+      return;
+    }
+    storageManager.provider().ifPresent(stationDirectory::reload);
+  }
+
+  /**
+   * 车站组改库之后调用：刷新车站目录，并在下一 tick 发出公开事件 {@code StationGroupChangedEvent}。
+   *
+   * @param change 车站组变化
+   */
+  public void notifyStationGroupChanged(StationGroupChange change) {
+    Objects.requireNonNull(change, "change");
+    refreshStationDirectory();
+    if (apiEventBridge == null) {
+      return;
+    }
+    StationGroupChangedEvent.ChangeType type =
+        switch (change.kind()) {
+          case CREATED -> StationGroupChangedEvent.ChangeType.CREATED;
+          case MEMBER_ADDED -> StationGroupChangedEvent.ChangeType.MEMBER_ADDED;
+          case MEMBER_UPDATED -> StationGroupChangedEvent.ChangeType.MEMBER_UPDATED;
+          case MEMBER_REMOVED -> StationGroupChangedEvent.ChangeType.MEMBER_REMOVED;
+          case DELETED -> StationGroupChangedEvent.ChangeType.DELETED;
+        };
+    apiEventBridge.onStationGroupChanged(
+        type,
+        change.groupId(),
+        change.companyId(),
+        change.groupCode(),
+        change.stationId(),
+        stationDirectory == null ? 0L : stationDirectory.revision());
   }
 
   /**
@@ -1468,8 +1530,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             trainSnapshotStore, routeProgressRegistry, routeDefinitionCache, etaService);
     org.fetarute.fetaruteTCAddon.api.route.RouteApi routeApi =
         new org.fetarute.fetaruteTCAddon.api.internal.RouteApiImpl(
-            routeDefinitionCache,
-            storageManager != null ? storageManager.provider().orElse(null) : null);
+            routeDefinitionCache, stationDirectory);
     org.fetarute.fetaruteTCAddon.api.occupancy.OccupancyApi occupancyApi =
         new org.fetarute.fetaruteTCAddon.api.internal.OccupancyApiImpl(occupancyManager);
     // 站点 API
@@ -1482,7 +1543,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       var provider = storageManager.provider().get();
       stationApi =
           new org.fetarute.fetaruteTCAddon.api.internal.StationApiImpl(
-              provider.stations(), provider.companies(), provider.operators());
+              provider.stations(), provider.companies(), provider.operators(), stationDirectory);
       operatorApi =
           new org.fetarute.fetaruteTCAddon.api.internal.OperatorApiImpl(
               provider.operators(), provider.companies());
@@ -1509,7 +1570,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         operatorApi,
         lineApi,
         etaApi,
-        timetableApi);
+        timetableApi,
+        () -> stationDirectory == null ? 0L : stationDirectory.revision());
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");

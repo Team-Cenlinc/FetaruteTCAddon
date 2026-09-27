@@ -1262,9 +1262,22 @@ public final class TrainHudContextResolver {
     return display;
   }
 
+  /**
+   * 按运营商代码 + 站码找车站。
+   *
+   * <p>车站目录可用时走目录（与公开 API 同一个索引、同一套运营商代码口径，两边不会给出不同的车站）； 目录尚未就绪时退回本地缓存（同样先到先得）。
+   */
   private StationDisplay resolveStationDisplay(StationKey key) {
     if (key == null) {
       return StationDisplay.empty();
+    }
+    Optional<StationDisplay> fromDirectory =
+        plugin
+            .getStationDirectory()
+            .flatMap(directory -> directory.snapshot().findStation(key.operator(), key.station()))
+            .map(entry -> StationDisplay.fromStation(entry.station()));
+    if (fromDirectory.isPresent()) {
+      return fromDirectory.get();
     }
     ensureStationCache();
     StationDisplay cached = stationByKey.get(stationKey(key.operator(), key.station()));
@@ -1383,7 +1396,8 @@ public final class TrainHudContextResolver {
             stationNodeById.put(station.id(), nodeId);
             String key = stationKey(operator.code(), station.code());
             if (!key.isBlank()) {
-              stationByKey.put(key, display);
+              // 跨公司同名运营商时先到先得，与车站目录、公司显示同一规则。
+              stationByKey.putIfAbsent(key, display);
             }
           }
         }

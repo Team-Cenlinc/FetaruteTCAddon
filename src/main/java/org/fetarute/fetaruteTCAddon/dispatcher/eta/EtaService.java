@@ -1711,24 +1711,16 @@ public final class EtaService {
     return Optional.empty();
   }
 
+  /** 站牌目的地只认车站本体节点（咽喉不是终点），口径见 {@link RouteTerminals#stationRefOfNode}。 */
   private Optional<DestinationInfo> resolveStationDestination(NodeId nodeId) {
     if (nodeId == null) {
       return Optional.empty();
     }
-    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeId);
-    if (metaOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    WaypointMetadata meta = metaOpt.get();
-    if (meta.kind() != WaypointKind.STATION) {
-      return Optional.empty();
-    }
-    String operator = meta.operator();
-    String station = meta.originStation();
-    if (operator == null || operator.isBlank() || station == null || station.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(new DestinationInfo(station, Optional.of(operator + ":" + station)));
+    return RouteTerminals.stationRefOfNode(nodeId.value())
+        .map(
+            ref ->
+                new DestinationInfo(
+                    ref.stationCode(), Optional.of(ref.operatorCode() + ":" + ref.stationCode())));
   }
 
   private Optional<DestinationInfo> resolveStationDestination(

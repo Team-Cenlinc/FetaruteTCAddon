@@ -56,6 +56,11 @@
 | `/fta station bind <station> --sign` | 读取玩家看向的轨道牌子位置，写入 location/world/graphNodeId | DISPATCHER/MANAGER | `StationRepository.save` |
 | `/fta station set <station> [--name --secondary --primary-line --graph-node <id>]` | 更新站点属性 | DISPATCHER/MANAGER | `StationRepository.save` |
 | `/fta station list <operator>` | 列出运营商车站 | 成员 | `StationRepository.listByOperator` |
+| `/fta station group create <company> <code> <name> [secondaryName]` | 创建车站组（换乘站） | OWNER/MANAGER | `StationGroupRepository.save` |
+| `/fta station group add <group> <operator> <station> [transferType] [walkSecs]` | 加入/更新车站组成员；跨公司须同时管理两家公司 | OWNER/MANAGER | `StationGroupRepository.saveMember` |
+| `/fta station group remove <group> <operator> <station>` | 移除成员 | OWNER/MANAGER | `StationGroupRepository.removeMember` |
+| `/fta station group info <group>` / `list [company]` | 查看车站组成员、停靠线路与换乘方式 | 成员 | `StationDirectory` |
+| `/fta station group delete <group> --confirm` | 删除车站组 | OWNER/MANAGER | `StationGroupRepository.delete` |
 
 ## Route 命令
 | 命令 | 说明 | 角色 | DAO |

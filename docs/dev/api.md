@@ -66,7 +66,7 @@ if (!FetaruteApi.isCompatible(this, "1.0.0")) {
 
 ## API 模块
 
-FetaruteApi 提供九个子模块，另有一组 Bukkit 事件（见“事件”一节）：
+FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
 
 | 模块 | 方法 | 功能 |
 |------|------|------|
@@ -74,7 +74,7 @@ FetaruteApi 提供九个子模块，另有一组 Bukkit 事件（见“事件”
 | `trains()` | `TrainApi` | 列车状态：位置、速度、ETA |
 | `routes()` | `RouteApi` | 路线定义：站点、停靠表 |
 | `occupancy()` | `OccupancyApi` | 占用状态：信号、队列 |
-| `stations()` | `StationApi` | 站点信息：位置、名称、关联节点 |
+| `stations()` | `StationApi` | 站点信息：位置、名称、关联节点；车站组与停靠线路（1.6.0） |
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表 |
@@ -208,11 +208,22 @@ int inWorld = api.trains().activeTrainCount(worldId);
 
 ```java
 for (RouteApi.RouteInfo route : api.routes().listRoutes()) {
-    System.out.println("路线: " + route.code());
+    System.out.println("路线: " + route.code() + " (" + route.id() + ")");
     System.out.println("  显示名: " + route.displayName());
-    System.out.println("  类型: " + route.operationType()); // NORMAL, EXPRESS, etc.
+    System.out.println("  运营类型: " + route.operationType()); // LOCAL, RAPID, EXPRESS
+    System.out.println("  交路阶段: " + route.stage());         // CREATE, OPERATION, RETURN
 }
 ```
+
+### 路线 ID、运营类型与交路阶段（1.6.0）
+
+| 字段 | 口径 |
+|------|------|
+| `RouteInfo#id` | 路线 UUID。`listRoutes()`、`getRoute()`、`findByCode()` 对同一条路线返回同一个值（1.6.0 之前恒为 `null`） |
+| `RouteInfo#operationType` | 运营类型，来自路线的停站模式 `pattern_type`：`LOCAL → LOCAL`、`RAPID`/`NEO_RAPID → RAPID`、`EXPRESS`/`LIMITED_EXPRESS → EXPRESS`（1.6.0 之前恒为 `NORMAL`）。`NORMAL` 仅在路线实体不可用时出现 |
+| `RouteInfo#stage` | 交路阶段，来自路线的 `operation_type`：`CREATE` 出库、`OPERATION` 运营、`RETURN` 回库，未知为 `UNKNOWN` |
+
+运营类型与交路阶段相互独立：一条各停路线可以是出库、运营或回库交路。需要只看载客运营时按 `stage() == RouteStage.OPERATION` 过滤。
 
 ### 获取路线详情
 
@@ -225,6 +236,8 @@ api.routes().getRoute(routeUuid).ifPresent(detail -> {
         System.out.println((stop.sequence() + 1) + ". " + stop.nodeId());
         stop.stationName().ifPresent(name ->
             System.out.println("   站名: " + name));
+        stop.stationId().ifPresent(id ->
+            System.out.println("   车站: " + stop.stationCode().orElse("?") + " (" + id + ")"));
         System.out.println("   停车: " + stop.dwellSeconds() + "s");
         System.out.println("   类型: " + stop.passType()); // STOP, PASS, TERMINATE
         System.out.println("   动态站台: " + stop.dynamic()); // true = 运行时选择站台
@@ -257,6 +270,27 @@ api.routes().getRoute(routeUuid).ifPresent(detail -> {
 
 所以拿到序号 `n` 直接 `route.stops().get(n)` 即可。`stops()` 包含 PASS 节点（区间点、咽喉、通过站），序号不是“第几个停车站”；
 是否停车看 `passType`（STOP/TERMINATE 停，PASS 不停），**不要**用 `dwellSeconds == 0` 判断——停站 0 秒的 STOP 站同样停车。
+
+### 停靠点站名与车站身份（1.6.0）
+
+停靠点通常只写节点（实服数据里 `route_stops.station_id` 全部为空），DYNAMIC 停靠只写在 `notes` 里。1.6.0 起按节点解析车站：
+
+| 节点 | 例 | `stationId` / `stationCode` | `stationName` |
+|------|----|------|------|
+| 站台 `OP:S:CODE:TRACK` | `SURC:S:PPK:1` | 站码 `CODE` 对应的车站 | 车站记录的站名 |
+| 咽喉 `OP:S:CODE:TRACK:SEQ` | `SURC:S:PPK:1:001` | 同上 | 同上 |
+| DYNAMIC 占位 `OP:S:CODE:fromTrack` | `SURC:S:WYB:1` | 同上 | 同上 |
+| 车库 `OP:D:CODE:TRACK`、DYNAMIC 车库 | `SURC:D:LWN:1` | 空 | 空 |
+| 区间点、道岔等 | `SURC:PPK:HHU:1:001` | 空 | 空 |
+
+- 停靠点绑定了车站记录（`station_id`）时以绑定为准。
+- 站码查不到车站记录时，`stationCode` 与 `stationName` 都是站码，`stationId` 为空。
+- 节点无法按上表解析、但被某个车站绑定为图节点（`graph_node_id`）时，归到该车站。
+- 运营商代码不区分大小写，跨公司重名时先到先得；解析交路停靠点时优先取交路自身的运营商。HUD 按站码查车站使用同一个索引，二者不会给出不同的车站；同一站码在不同运营商下不会串站。
+- `TerminalInfo#endOfOperationName`、`endOfRouteName` 使用同一套规则；线路终点为车库时 `endOfRouteName` 仍为 `LWN Depot`（停靠表里车库停靠点的 `stationName` 为空）。
+- 解析结果在路线缓存或车站数据变化时预先算好，`getRoute()` 不访问存储。
+
+1.6.0 之前只有绑定了车站记录的停靠点给出站名，DYNAMIC 停靠给出的是站码（如 `WYB`），普通停靠点为空。
 
 ### EOR 与 EOP 区别
 
@@ -379,6 +413,71 @@ api.stations().findByCode(operatorId, "AAA").ifPresent(station -> {
 ```java
 int total = api.stations().stationCount();
 System.out.println("共 " + total + " 个站点");
+```
+
+### 车站组与停靠线路（1.6.0）
+
+**车站组**是乘客视角的一座换乘站，成员是车站记录，可以跨运营商、跨公司（例如 FTA 的 SL 线车站与 SURC 的车站位于同一处）。
+同一运营商、同一站码的不同股道本来就是同一站，不需要建组。一个车站最多属于一个组。每个成员标注换乘方式
+`TransferType`（`SAME_PLATFORM` 同台换乘、`IN_STATION` 站内换乘、`OUT_OF_STATION` 出站换乘）与可选的步行秒数。车站组由
+`/fta station group` 命令维护（见 [站点主数据管理](station-management.md)）。
+
+**停靠线路**由 FTCA 计算，调用方不必再遍历路线推导换乘：
+
+```java
+StationApi stations = api.stations();
+
+// 列车浮层：下一站可换乘的线路（节点 ID 可以是站台、咽喉或 DYNAMIC 占位）
+for (StationApi.ServingLine line : stations.linesServingNode("SURC:S:PPK:1")) {
+    if (line.lineId().equals(currentLineId)) {
+        continue; // 本线
+    }
+    String color = line.color().orElse("#888888");
+    String how = line.transferType()
+        .map(type -> type + line.walkSeconds().stream().mapToObj(s -> " " + s + "s").findFirst().orElse(""))
+        .orElse("本站");
+    System.out.println(line.operatorCode() + " " + line.lineCode() + " " + line.lineName()
+        + " @" + line.stationCode() + " [" + how + "] " + color);
+}
+
+// 车站所属的车站组
+stations.findGroupOfNode("FTA:S:PPK:1").ifPresent(group -> {
+    System.out.println(group.code() + " " + group.name());
+    for (StationApi.StationGroupMember m : group.members()) {
+        System.out.println("  " + m.operatorCode() + "/" + m.stationCode() + " " + m.stationName()
+            + " " + m.transferType());
+    }
+});
+```
+
+`linesServing(stationId)` / `linesServingNode(nodeId)` 的口径：
+
+- 返回停靠查询站**及同组各站**的全部线路。查询站自身的线路 `transferType`、`walkSeconds` 为空；同组其他车站的线路带上该成员的换乘方式与步行秒数，`stationId`/`stationCode` 是实际停靠的那座车站。
+- 只统计 `STOP` 与 `TERMINATE`，`PASS` 不算；DYNAMIC 停靠归到它所在的车站。
+- 出库、回库、运营各阶段的路线都统计；需要区分时按 `RouteApi.RouteInfo#stage` 自行过滤。
+- 同一条线路既停靠查询站又停靠同组其他车站时只列一次，保留查询站那一条。
+- 排序：成员 `sortOrder` → 运营商代码 → 线路代码。
+- `color` 为线路色，缺失时回退运营商主题色。
+- 节点不是车站节点（区间点、车库）或没有对应的车站记录时返回空列表。
+
+**性能与刷新**：车站组与停靠线路读内存快照。路线、车站、线路、运营商、车站组变化时重建，返回不可变列表；
+每次查询只做查表、不访问存储，可在任意线程调用（按列车每 0.5 秒刷新一次没有问题）。
+
+**变更通知**：
+
+- `FetaruteApi#dataRevision()`：路线、车站、线路、车站组任一变化时递增，插件重载后不回退。外部插件可以缓存查询结果，发现版本变化后立即刷新。
+- `StationGroupChangedEvent`：车站组变化（建组、成员增删改、删组）后的下一 tick 发出，`getDataRevision()` 为变化生效后的版本。
+
+```java
+long seen = -1;
+
+void refreshIfChanged(FetaruteApi api) {
+    long revision = api.dataRevision();
+    if (revision != seen) {
+        seen = revision;
+        rebuildOverlayCache(api); // 重新拉取路线与停靠线路
+    }
+}
 ```
 
 ---
@@ -553,6 +652,7 @@ tt.getAssignment("SURC-WS-LC-1037").ifPresent(a -> {
 | `TrainReleasedEvent` | 离开运行时管辖（销毁、回库、改派、异常清理） |
 | `TrainHealthAlertEvent` | 健康监控告警（沿用告警总线的一分钟限流） |
 | `TimetableTripAssignedEvent` | 绑定到时刻表车次 |
+| `StationGroupChangedEvent` | 车站组变化（1.6.0）：建组、成员增删改、删组；含变化后的数据版本 |
 
 扣停、信号、车次绑定三类没有现成的变化回调，每 tick 对比一次采样快照，同一 tick 内的来回变化会被合并。
 同一次扣停期间换原因会再发一次 `TrainHoldEvent`（`getSince()` 不变），解除事件的时长覆盖整次扣停。每 tick 最多发出 256 个事件，
@@ -578,7 +678,7 @@ public class BoardListener implements Listener {
 
 ## 线程安全
 
-**所有 API 返回的数据都是不可变快照**，可安全在任意线程使用：
+**所有 API 返回的数据都是不可变快照**，可安全在任意线程使用。车站组与停靠线路查询（1.6.0）本身即读内存快照，可直接在任意线程高频调用：
 
 ```java
 // 可在异步线程中处理
@@ -615,8 +715,14 @@ GraphApi.NodeType: STATION, DEPOT, WAYPOINT, SWITCHER, UNKNOWN
 // 信号
 TrainApi.Signal / OccupancyApi.Signal: PROCEED, PROCEED_WITH_CAUTION, CAUTION, STOP, UNKNOWN
 
-// 运营类型
+// 运营类型（1.6.0 起来自 pattern_type）
 RouteApi.OperationType: NORMAL, RAPID, EXPRESS, LOCAL, OTHER
+
+// 交路阶段（1.6.0，来自 operation_type）
+RouteApi.RouteStage: CREATE, RETURN, OPERATION, UNKNOWN
+
+// 换乘方式（1.6.0）
+StationApi.TransferType: SAME_PLATFORM, IN_STATION, OUT_OF_STATION
 
 // 停靠类型（行为）
 RouteApi.PassType: STOP, PASS, TERMINATE
@@ -716,6 +822,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.6.0 | 新增车站组与停靠线路：`StationApi#listStationGroups`/`findGroupOfStation`/`findGroupOfNode`/`linesServing`/`linesServingNode`，记录 `StationGroupInfo`、`StationGroupMember`、`ServingLine` 与枚举 `TransferType`；新增 `FetaruteApi#dataRevision()` 与 `StationGroupChangedEvent`。**记录新增字段**：`RouteApi.RouteInfo` 增加 `stage`（新枚举 `RouteStage`），`RouteApi.StopInfo` 增加 `stationId`、`stationCode`；两者均保留旧的全参构造器作为次级构造器（`stage` 取 `UNKNOWN`，`stationId`/`stationCode` 为空），按旧签名 `new` 的代码源码与二进制均兼容；对这两个记录使用记录模式（record pattern）解构的代码需补上新增分量。**行为变更**：`RouteInfo#id` 不再为 `null`；`RouteInfo#operationType` 按 `pattern_type` 映射（此前恒为 `NORMAL`）；`StopInfo#stationName` 与 `TerminalInfo` 的站名改为车站记录的真实站名（此前普通停靠点为空、DYNAMIC 停靠为站码），查不到记录时退回站码；DYNAMIC 车库停靠点的 `stationName` 改为空（此前为车库代码），与普通车库节点一致 |
 | 1.5.0 | **行为变更**：停靠序号统一为交路节点的 0 起下标——`RouteApi.StopInfo#sequence` 由 1 起改为 0 起，与 `TimetableApi` 的 `stopSequence`、车站到发事件的 `getStopIndex()` 同一口径（此前三者可能差 1）；`TimetableApi.TrainAssignment` 增加 `lastStopNodeId`/`lastStationCode`/`nextStopNodeId`/`nextStationCode`；`TimetableApi.StopTime` 增加 `passType` 与 `stops()`，停车判定改按交路 `passType`（此前按“停站 > 0 秒”猜，停站 0 秒的 STOP 站被当成通过、预计晚点落到后面的站）；`StopTime#stationCode` 只给车站本体节点；DYNAMIC 停靠的预计晚点按实际股道（未选台按车站级）估算；`getAssignment`/`listAssignments` 按 tick 缓存；ETA 中途站未配停站按运行时默认 20 秒计（此前按 0 秒）、TERMINATE 站计入停站、中途停车按起停拆段、到站后停站计时注册前的空档计入本站停站 |
 | 1.4.0 | 新增 `TimetableApi` 与 `api.event` 事件；`EtaApi.Reason` 增加 `HOLD`、`OVERDUE`，ETA 随扣停与票据超时顺延；`TerminalInfo` 的 EOP 与 HUD/站牌同一口径，没有载客车站时为空（不再回退为 EOR）；EOR 仍为交路最后一个节点，车库时名称为 `LWN Depot`、折返线时为它之前最近的车站；
 `EtaApi.BoardRow.destination`（站牌主目的地）改取运营终点，回库车越过运营终点后为“回库”；`EtaApi.Reason.WAIT` 收窄为可预知的等待（按表等点、票据未到点），占用/信号等待改报 `HOLD`；修正版本常量（此前代码停留在 1.2.0，`isCompatible(..., "1.3.0")` 会误判为不兼容） |

@@ -80,13 +80,15 @@ public interface RouteApi {
   /**
    * 路线基本信息（用于列表展示）。
    *
-   * @param id 路线 UUID
+   * @param id 路线 UUID；{@link #listRoutes()}、{@link #getRoute}、{@link #findByCode}
+   *     对同一条路线给出同一个值（1.6.0 起非空，此前恒为 null）
    * @param code 完整代码（如 "SURN:L1:R1"）
    * @param operatorCode 运营商代码
    * @param lineCode 线路代码
    * @param routeCode 路线代码
    * @param displayName 显示名称
-   * @param operationType 运营类型（普通/快速/特急等）
+   * @param operationType 运营类型（各停/快速/特急），来自路线的停站模式 {@code pattern_type}（1.6.0 起；此前恒为 {@code NORMAL}）
+   * @param stage 交路阶段（出库/运营/回库），来自路线的 {@code operation_type}（1.6.0）
    */
   record RouteInfo(
       UUID id,
@@ -95,7 +97,29 @@ public interface RouteApi {
       String lineCode,
       String routeCode,
       Optional<String> displayName,
-      OperationType operationType) {}
+      OperationType operationType,
+      RouteStage stage) {
+
+    /** 1.5.0 及以前的构造器（源码兼容）；{@code stage} 取 {@link RouteStage#UNKNOWN}。 */
+    public RouteInfo(
+        UUID id,
+        String code,
+        String operatorCode,
+        String lineCode,
+        String routeCode,
+        Optional<String> displayName,
+        OperationType operationType) {
+      this(
+          id,
+          code,
+          operatorCode,
+          lineCode,
+          routeCode,
+          displayName,
+          operationType,
+          RouteStage.UNKNOWN);
+    }
+  }
 
   /**
    * 路线详情（包含完整信息）。
@@ -154,14 +178,21 @@ public interface RouteApi {
   /**
    * 停靠站点信息。
    *
+   * <p>车站身份按节点解析：站台 {@code OP:S:CODE:TRACK}、咽喉 {@code OP:S:CODE:TRACK:SEQ}、DYNAMIC 占位 {@code
+   * OP:S:CODE:fromTrack} 都归到站码 {@code CODE} 对应的车站；停靠点绑定了车站记录时以绑定为准。
+   * 运营商代码按交路自己的运营商优先解析，同一站码在不同运营商下不会串站。
+   *
    * @param sequence 停靠序号：交路节点的 <b>0 起下标</b>，即本条在 {@code RouteDetail.stops()} 与 {@code waypoints()}
    *     中的下标。与 TimetableApi 的 {@code stopSequence}、车站到发事件的 {@code getStopIndex()} 同一口径（1.5.0 起； 此前为
    *     1 起，展示序号请自行 +1）
    * @param nodeId 节点 ID（DYNAMIC stop 使用 placeholder nodeId，格式 {@code OP:S/D:NAME:fromTrack}）
-   * @param stationName 站点名称
+   * @param stationName 站名：车站记录的真实站名，查不到记录时退回站码；车库、区间点等非车站节点为空（1.6.0 起；此前只有绑定车站记录的停靠点给站名， DYNAMIC
+   *     停靠给的是站码）。线路终点落在车库时的 {@code LWN Depot} 标签见 {@link TerminalInfo}
    * @param dwellSeconds 路线上配置的停车时间（秒）；未配置为 0（运行时按默认停站）。是否停车看 {@code passType}，不看它
    * @param passType 通过类型（行为：停车/通过/终点）
    * @param dynamic 是否为动态站台选择（运行时根据占用情况选择轨道）
+   * @param stationId 车站记录 ID；非车站节点、或站码查不到车站记录时为空（1.6.0）
+   * @param stationCode 站码；非车站节点为空（1.6.0）
    */
   record StopInfo(
       int sequence,
@@ -169,7 +200,29 @@ public interface RouteApi {
       Optional<String> stationName,
       int dwellSeconds,
       PassType passType,
-      boolean dynamic) {}
+      boolean dynamic,
+      Optional<UUID> stationId,
+      Optional<String> stationCode) {
+
+    /** 1.5.0 及以前的构造器（源码兼容）；{@code stationId}、{@code stationCode} 为空。 */
+    public StopInfo(
+        int sequence,
+        String nodeId,
+        Optional<String> stationName,
+        int dwellSeconds,
+        PassType passType,
+        boolean dynamic) {
+      this(
+          sequence,
+          nodeId,
+          stationName,
+          dwellSeconds,
+          passType,
+          dynamic,
+          Optional.empty(),
+          Optional.empty());
+    }
+  }
 
   /** 通过类型（描述停靠行为）。 */
   enum PassType {
@@ -181,17 +234,38 @@ public interface RouteApi {
     TERMINATE
   }
 
-  /** 运营类型。 */
+  /**
+   * 运营类型（停站模式）。
+   *
+   * <p>1.6.0 起按路线的 {@code pattern_type} 映射：{@code LOCAL → LOCAL}、{@code RAPID/NEO_RAPID → RAPID}、
+   * {@code EXPRESS/LIMITED_EXPRESS → EXPRESS}。{@code NORMAL} 只在路线实体不可用时出现。
+   */
   enum OperationType {
-    /** 普通 */
+    /** 普通（未知停站模式时的默认值） */
     NORMAL,
-    /** 快速 */
+    /** 快速（含新快速） */
     RAPID,
-    /** 特急 */
+    /** 特急（含限定特急） */
     EXPRESS,
     /** 各停 */
     LOCAL,
     /** 其他 */
     OTHER
+  }
+
+  /**
+   * 交路阶段（1.6.0），来自路线的 {@code operation_type}。与运营类型无关：一条各停路线可以是出库、运营或回库。
+   *
+   * <p>停靠线路查询（{@code StationApi#linesServing}）统计所有阶段，需要只看运营交路时按本字段过滤。
+   */
+  enum RouteStage {
+    /** 出库（从车库注入运力） */
+    CREATE,
+    /** 回库 */
+    RETURN,
+    /** 运营 */
+    OPERATION,
+    /** 未知 */
+    UNKNOWN
   }
 }

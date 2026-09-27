@@ -960,6 +960,7 @@ public final class FtaRouteCommand {
                               groups, new SpawnGroup(groupArg, baselineSeconds, maxTrips)));
                   Line updatedLine = withSpawnGroups(resolved.line(), groups);
                   provider.lines().save(updatedLine);
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           existed
@@ -1046,6 +1047,7 @@ public final class FtaRouteCommand {
                               groups, new SpawnGroup(target.get().name(), baseline, maxTrips)));
                   Line updatedLine = withSpawnGroups(resolved.line(), groups);
                   provider.lines().save(updatedLine);
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.route.group.set.success",

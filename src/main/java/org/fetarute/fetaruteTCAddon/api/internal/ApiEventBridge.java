@@ -20,6 +20,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.bukkit.event.Event;
 import org.bukkit.event.HandlerList;
+import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainArriveStationEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainDepartStationEvent;
@@ -42,7 +43,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssig
  * <p>两条来源：
  *
  * <ul>
- *   <li><b>推送</b>：车站到发、离开管辖（{@link StationStopObserver}）与健康告警（告警总线）。 回调发生在调度路径里，这里只入队，不调用外部代码。
+ *   <li><b>推送</b>：车站到发、离开管辖（{@link StationStopObserver}）、健康告警（告警总线）与车站组变化（命令改库后）。
+ *       回调发生在调度路径或命令里，这里只入队，不调用外部代码。
  *   <li><b>对比</b>：扣停、信号、车次绑定没有现成的变化回调，每 tick 对比一次快照（只读几张表，开销可忽略）。
  *       不往调度服务里加钩子——它贴着静态分析的方法数上限，而且事件不该有机会影响控车。
  * </ul>
@@ -154,6 +156,33 @@ public final class ApiEventBridge implements StationStopObserver, Consumer<Healt
     }
     if (hasListeners.test(TrainReleasedEvent.getHandlerList())) {
       enqueue(new TrainReleasedEvent(trainName, reason));
+    }
+  }
+
+  /**
+   * 车站组数据变化（命令改库并刷新车站目录之后调用）。
+   *
+   * @param changeType 变化类型
+   * @param groupId 车站组
+   * @param companyId 组所属公司
+   * @param groupCode 组代码
+   * @param stationId 涉及的成员车站
+   * @param dataRevision 刷新后的数据版本
+   */
+  public void onStationGroupChanged(
+      StationGroupChangedEvent.ChangeType changeType,
+      UUID groupId,
+      UUID companyId,
+      String groupCode,
+      Optional<UUID> stationId,
+      long dataRevision) {
+    if (changeType == null || groupId == null || companyId == null || groupCode == null) {
+      return;
+    }
+    if (hasListeners.test(StationGroupChangedEvent.getHandlerList())) {
+      enqueue(
+          new StationGroupChangedEvent(
+              changeType, groupId, companyId, groupCode, stationId, dataRevision));
     }
   }
 

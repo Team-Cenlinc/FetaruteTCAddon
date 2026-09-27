@@ -203,6 +203,58 @@ public final class RouteTerminals {
   }
 
   /**
+   * 停靠点所属车站的身份（运营商代码 + 站码），用于站名、车站 ID 与停靠线路。
+   *
+   * <p>与 {@link #stationRef} 的区别只在车站咽喉：终点与命名只认车站本体，而“这个停靠点属于哪座车站”要把咽喉 （{@code
+   * OP:S:CODE:TRACK:SEQ}）也归到车站。DYNAMIC 车站规范、站台节点与 {@link #stationRef} 相同；车库、区间点为空。 只绑定 stationId 的
+   * stop 需要查库，本方法返回空。
+   *
+   * @param stop 路线停靠
+   * @return 车站身份；非车站节点为空
+   */
+  public static Optional<StationRef> stationIdentityOf(RouteStop stop) {
+    if (stop == null) {
+      return Optional.empty();
+    }
+    Optional<DynamicStopMatcher.DynamicSpec> dynamic = DynamicStopMatcher.parseDynamicSpec(stop);
+    if (dynamic.isPresent()) {
+      return stationRef(stop);
+    }
+    return stop.waypointNodeId().flatMap(RouteTerminals::stationIdentityOfNode);
+  }
+
+  /**
+   * 节点所属车站的身份：站台 {@code OP:S:CODE:TRACK}、咽喉 {@code OP:S:CODE:TRACK:SEQ}、DYNAMIC 占位 {@code
+   * OP:S:CODE:fromTrack}（与站台同形）。车库、区间点为空。
+   *
+   * @param nodeId 图节点 ID
+   * @return 车站身份（{@code nodeId} 为入参本身）；非车站节点为空
+   */
+  public static Optional<StationRef> stationIdentityOfNode(String nodeId) {
+    return parseWaypoint(nodeId)
+        .filter(
+            meta ->
+                meta.kind() == WaypointKind.STATION || meta.kind() == WaypointKind.STATION_THROAT)
+        .filter(meta -> !meta.operator().isBlank() && !meta.originStation().isBlank())
+        .map(meta -> new StationRef(meta.operator().trim(), meta.originStation().trim(), nodeId));
+  }
+
+  /**
+   * 车站本体节点的站点引用：{@code OP:S:CODE:TRACK}（DYNAMIC 占位节点同形）；咽喉、区间点、车库为空。
+   *
+   * <p>终点、站牌目的地只认车站本体，见 {@link #stationCodeOf}。
+   *
+   * @param nodeId 图节点 ID
+   * @return 站点引用；非车站本体节点为空
+   */
+  public static Optional<StationRef> stationRefOfNode(String nodeId) {
+    return parseWaypoint(nodeId)
+        .filter(meta -> meta.kind() == WaypointKind.STATION)
+        .filter(meta -> !meta.operator().isBlank() && !meta.originStation().isBlank())
+        .map(meta -> new StationRef(meta.operator(), meta.originStation(), nodeId));
+  }
+
+  /**
    * 解析车库类 stop 的车库引用（普通车库节点 {@code OP:D:CODE:TRACK} 或 DYNAMIC 车库规范）。
    *
    * <p>线路终点（EOR）常落在车库上；显示时接在同代码车站的名称后面，如「林湾车库」，与车次终点（EOP）区分开。
@@ -241,10 +293,7 @@ public final class RouteTerminals {
    * @return 站码；非车站节点为空
    */
   public static Optional<String> stationCodeOf(String nodeId) {
-    return parseWaypoint(nodeId)
-        .filter(meta -> meta.kind() == WaypointKind.STATION)
-        .map(WaypointMetadata::originStation)
-        .filter(code -> !code.isBlank());
+    return stationRefOfNode(nodeId).map(StationRef::stationCode);
   }
 
   /** 车库的站码式显示（站牌、公开 API 用站码作名称），如「LWN Depot」。 */

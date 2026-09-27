@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.api;
 
 import java.util.Optional;
+import java.util.function.LongSupplier;
 import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
@@ -62,7 +63,7 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
 public final class FetaruteApi {
 
   /** 当前 API 版本（语义版本）。 */
-  public static final String API_VERSION = "1.5.0";
+  public static final String API_VERSION = "1.6.0";
 
   private static volatile FetaruteApi instance;
 
@@ -75,6 +76,7 @@ public final class FetaruteApi {
   private final LineApi lineApi;
   private final EtaApi etaApi;
   private final TimetableApi timetableApi;
+  private final LongSupplier dataRevision;
 
   private FetaruteApi(
       GraphApi graphApi,
@@ -85,7 +87,8 @@ public final class FetaruteApi {
       OperatorApi operatorApi,
       LineApi lineApi,
       EtaApi etaApi,
-      TimetableApi timetableApi) {
+      TimetableApi timetableApi,
+      LongSupplier dataRevision) {
     this.graphApi = graphApi;
     this.trainApi = trainApi;
     this.routeApi = routeApi;
@@ -95,6 +98,7 @@ public final class FetaruteApi {
     this.lineApi = lineApi;
     this.etaApi = etaApi;
     this.timetableApi = timetableApi;
+    this.dataRevision = dataRevision == null ? () -> 0L : dataRevision;
   }
 
   /**
@@ -170,7 +174,10 @@ public final class FetaruteApi {
   }
 
   /**
-   * 站点 API：站点信息查询。
+   * 站点 API：站点信息查询；1.6.0 起含车站组（乘客视角的换乘站，成员可跨运营商、跨公司）与停靠线路查询。
+   *
+   * <p>车站组与停靠线路（{@link StationApi#linesServing}、{@link StationApi#linesServingNode} 等）读内存快照，
+   * 每次查询只做查表、不访问存储，可在任意线程高频调用；数据变化时 {@link #dataRevision()} 递增。
    *
    * @return 站点 API
    */
@@ -223,6 +230,17 @@ public final class FetaruteApi {
     return API_VERSION;
   }
 
+  /**
+   * 数据版本（1.6.0）：路线、车站、线路、车站组任何一项变化时递增。
+   *
+   * <p>外部插件可以缓存路线、停靠线路等查询结果，发现本值变化后立即刷新，不必定时全量重拉。 插件重载（{@code /fta reload}）不会让本值回退。
+   *
+   * @return 单调递增的版本号
+   */
+  public long dataRevision() {
+    return dataRevision.getAsLong();
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // 内部方法（仅供 FetaruteTCAddon 调用）
   // ─────────────────────────────────────────────────────────────────────────────
@@ -239,6 +257,7 @@ public final class FetaruteApi {
    * @param lineApi 线路 API 实现
    * @param etaApi ETA API 实现
    * @param timetableApi 时刻表 API 实现
+   * @param dataRevision 数据版本来源
    */
   public static void initialize(
       GraphApi graphApi,
@@ -249,7 +268,8 @@ public final class FetaruteApi {
       OperatorApi operatorApi,
       LineApi lineApi,
       EtaApi etaApi,
-      TimetableApi timetableApi) {
+      TimetableApi timetableApi,
+      LongSupplier dataRevision) {
     instance =
         new FetaruteApi(
             graphApi,
@@ -260,7 +280,32 @@ public final class FetaruteApi {
             operatorApi,
             lineApi,
             etaApi,
-            timetableApi);
+            timetableApi,
+            dataRevision);
+  }
+
+  /** 兼容 1.5 及以前的初始化入口（无数据版本，恒为 0）。 */
+  public static void initialize(
+      GraphApi graphApi,
+      TrainApi trainApi,
+      RouteApi routeApi,
+      OccupancyApi occupancyApi,
+      StationApi stationApi,
+      OperatorApi operatorApi,
+      LineApi lineApi,
+      EtaApi etaApi,
+      TimetableApi timetableApi) {
+    initialize(
+        graphApi,
+        trainApi,
+        routeApi,
+        occupancyApi,
+        stationApi,
+        operatorApi,
+        lineApi,
+        etaApi,
+        timetableApi,
+        null);
   }
 
   /** 兼容 1.3 及以前的初始化入口（无时刻表 API）。 */
@@ -274,7 +319,16 @@ public final class FetaruteApi {
       LineApi lineApi,
       EtaApi etaApi) {
     initialize(
-        graphApi, trainApi, routeApi, occupancyApi, stationApi, operatorApi, lineApi, etaApi, null);
+        graphApi,
+        trainApi,
+        routeApi,
+        occupancyApi,
+        stationApi,
+        operatorApi,
+        lineApi,
+        etaApi,
+        null,
+        null);
   }
 
   /** 销毁 API 实例（仅供 {@link FetaruteTCAddon} 调用）。 */

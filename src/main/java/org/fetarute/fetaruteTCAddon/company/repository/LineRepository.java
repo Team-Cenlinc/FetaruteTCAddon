@@ -14,6 +14,9 @@ public interface LineRepository {
 
   List<Line> listByOperator(UUID operatorId);
 
+  /** 全部线路（内存索引一次性加载用）。 */
+  List<Line> listAll();
+
   Line save(Line line);
 
   void delete(UUID id);
