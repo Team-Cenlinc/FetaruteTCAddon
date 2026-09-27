@@ -377,6 +377,7 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 - 被引用的线路与本 operator 搜到的取并集进 build；同一站有多条时**显式指定的优先**，再按走行最短。
 - 被引用的线路必须本身是对应类型（CREATE/RETURN），否则 build 报"指定的出库/回库线路类型不符"。
 - 被引用的线路必须是可发车服务（所在 line 配了车库、开了发车），否则 build 只警告，运行时该票 `TIMETABLE_SPAWN_SKIP reason=no-spawn-service`。
+  显式 `spawn_enabled=false` 的被引用线路直接不进 build（与本线路同样处理，见「已知边界」末条）。
 - 引用不存在只警告不中断；写入时只校验格式（引用方未必有读外方 company 的权限）；四段 code 大小写按存储原样匹配。
 - **外方线路不受本表管辖**：它在 `route_plans` 里标 `external`，进足迹、进交路，但不进 `managedRouteIds()`——
   它所在线路自己的 headway 票照常发，我的表只是借它出库/回库。
@@ -480,6 +481,11 @@ baseline 是目标不是硬约束：排出来有冲突时所有组按同一比�
 
 `RouteOperationType.OPERATION` 进发车表；中途有 STOP 的 CREATE/RETURN 也进（带客的出库班、回库班）；中途没有 STOP 的 CREATE/RETURN
 只提供车辆交路两端的走行，不进发车表，但同样落在 `route_plans` 里。
+
+route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（本线的、借用的出入库线路、直通指定的外方线路都一样），
+命令会逐线列出被跳过的 route。原因是运行时只能给发车计划里的 route 出票，而发车计划不含停用的 route：
+2026-09-26 那次联编把停用的 `MT-1N_ShortR`/`MT-1O_ShortR` 排进了 210 个交路，发布后这些车会停在 PPK 等一张永远不来的票，
+回库票又因为交路没跑完被拒。要让它们进表，先 `/fta route set … --spawn-enabled true`。
 `duties` 子命令会显示每个交路经哪条线路出库、哪条线路几点回库。
 
 权限：`fetarute.timetable`（只读）、`fetarute.timetable.manage`（编表/发布/删除）。
@@ -650,3 +656,4 @@ planned segment duration   vs   actual segment duration
 - 走行按默认车种（`train.default-type`）一种加减速编表，不按 route 区分车种。进尽头站（CHT:3、WYB）的最后一段
   仍少算 4–19 秒；dwell 为 0 的 STOP 按停车处理（AutoStation 实际上对 dwell ≤ 0 直接放行）。
 - ETA 与编表共用运行曲线，但边限速多叠加当前临时限速、未发车票据按出库车库推断车种（见 `eta.md`「走行」），所以临时限速期间两者会有差。
+- 显式 `spawn_enabled=false` 的 route 不进表（build 会逐线列出）：发车计划不含它们，按表运行给它们出不了票。

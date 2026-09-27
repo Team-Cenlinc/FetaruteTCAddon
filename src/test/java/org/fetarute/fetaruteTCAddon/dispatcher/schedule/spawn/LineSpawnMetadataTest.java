@@ -85,4 +85,20 @@ class LineSpawnMetadataTest {
     assertEquals(180, entry.get("baselineSec"));
     assertEquals(6, entry.get("maxOperationTrips"));
   }
+
+  /**
+   * 布尔读取与发车计划同一口径：boolean 与 true/false 字符串（忽略大小写与空白）都认，认不出来与缺省都是 empty。
+   *
+   * <p>编表靠它判断 route 是否显式停用发车（{@code spawn_enabled=false}）：只有显式 false 才不进表。
+   */
+  @Test
+  void readBooleanAcceptsBooleansAndTrueFalseStrings() {
+    assertEquals(Optional.of(false), LineSpawnMetadata.readBoolean(Map.of("k", false), "k"));
+    assertEquals(Optional.of(true), LineSpawnMetadata.readBoolean(Map.of("k", " TRUE "), "k"));
+    assertEquals(Optional.of(false), LineSpawnMetadata.readBoolean(Map.of("k", "false"), "k"));
+    assertEquals(Optional.empty(), LineSpawnMetadata.readBoolean(Map.of("k", "no"), "k"));
+    assertEquals(Optional.empty(), LineSpawnMetadata.readBoolean(Map.of("k", 0), "k"));
+    assertEquals(Optional.empty(), LineSpawnMetadata.readBoolean(Map.of(), "k"));
+    assertEquals(Optional.empty(), LineSpawnMetadata.readBoolean(null, "k"));
+  }
 }

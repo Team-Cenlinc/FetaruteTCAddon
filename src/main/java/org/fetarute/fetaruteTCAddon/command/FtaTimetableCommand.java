@@ -645,20 +645,43 @@ public final class FtaTimetableCommand {
     boolean anyOperation = false;
     java.util.Set<UUID> own = new java.util.HashSet<>();
     for (Route route : provider.routes().listByLine(resolved.line().id())) {
-      if (route != null) {
+      if (route != null && !spawnDisabled(route)) {
         own.add(route.id());
       }
     }
-    List<Route> routes = new ArrayList<>(collectRoutes(provider, resolved));
+    // 停用发车的 route 不进表：按表运行只能给发车计划里的 route 出票，排进表里的班次到点发不出车，
+    // 接这些班次的车会停在终点等一张永远不来的票，回库票又因为交路没跑完被拒。
+    java.util.Set<String> disabled = new java.util.TreeSet<>();
+    List<Route> routes = new ArrayList<>();
+    for (Route route : collectRoutes(provider, resolved)) {
+      if (spawnDisabled(route)) {
+        disabled.add(route.code());
+      } else {
+        routes.add(route);
+      }
+    }
     // 直通运转：运营 route 显式指定的外方出库/回库线路也进 build，并优先于本 operator 搜到的同站线路。
     DeclaredRoutes declared = resolveDeclaredRoutes(sender, provider, routes);
     // 本 operator 范围之外的走行线路：借用它出库/回库，但它不受本表管辖（它所在线路自己的 headway 票照常发）。
     java.util.Set<UUID> externalRoutes = new java.util.HashSet<>();
     for (Route extra : declared.routes()) {
+      if (spawnDisabled(extra)) {
+        disabled.add(extra.code());
+        continue;
+      }
       if (routes.stream().noneMatch(route -> route.id().equals(extra.id()))) {
         routes.add(extra);
         externalRoutes.add(extra.id());
       }
+    }
+    if (!disabled.isEmpty()) {
+      sender.sendMessage(
+          Component.text(
+              resolved.line().code()
+                  + "：跳过停用发车（spawn_enabled=false）的 route "
+                  + String.join("、", disabled)
+                  + "。按表运行只能给发车计划里的 route 出票，排进表里也发不出车；要让它们进表，先 /fta route set … --spawn-enabled true。",
+              NamedTextColor.YELLOW));
     }
     for (Route route : routes) {
       Optional<RouteDefinition> definitionOpt = plugin.findRouteDefinitionById(route.id());
@@ -671,11 +694,7 @@ public final class FtaTimetableCommand {
       if (graph == null) {
         graph = resolveGraph(definition).orElse(null);
       }
-      List<RouteStop> stops =
-          provider.routeStops().listByRoute(route.id()).stream()
-              .filter(Objects::nonNull)
-              .sorted(Comparator.comparingInt(RouteStop::sequence))
-              .toList();
+      List<RouteStop> stops = plugin.listRouteStopsById(route.id());
       TimetableBuilder.RouteInput routeInput =
           new TimetableBuilder.RouteInput(
               route.id(),
@@ -706,6 +725,15 @@ public final class FtaTimetableCommand {
     }
     return new LineRoutes(
         resolved, routeInputs, own, graph, existingId.orElseGet(UUID::randomUUID));
+  }
+
+  /**
+   * route 显式停用了发车（{@code spawn_enabled=false}）。
+   *
+   * <p>发车计划不含这样的 route（{@code StorageSpawnManager} 同一口径），时刻表的票也就无处可出。缺省或写得认不出来都不算停用。
+   */
+  private static boolean spawnDisabled(Route route) {
+    return !LineSpawnMetadata.readBoolean(route.metadata(), "spawn_enabled").orElse(true);
   }
 
   /** 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。 */
@@ -994,7 +1022,7 @@ public final class FtaTimetableCommand {
     Map<UUID, List<RouteStop>> stopsByRoute = new java.util.HashMap<>(knownStops);
     Map<UUID, RouteDefinition> definitions = new java.util.HashMap<>(knownDefinitions);
     for (TimetableNeighborhoodLoader.RouteCandidate route : mine) {
-      stopsByRoute.computeIfAbsent(route.routeId(), id -> sortedStops(provider, id));
+      stopsByRoute.computeIfAbsent(route.routeId(), id -> plugin.listRouteStopsById(id));
       if (!definitions.containsKey(route.routeId())) {
         plugin
             .findRouteDefinitionById(route.routeId())
@@ -1015,7 +1043,7 @@ public final class FtaTimetableCommand {
       displayCodeById.put(
           timetable.id(), displayCodeOf(provider, timetable) + "/" + timetable.code());
       for (UUID routeId : timetable.routeIds()) {
-        stopsByRoute.computeIfAbsent(routeId, id -> sortedStops(provider, id));
+        stopsByRoute.computeIfAbsent(routeId, id -> plugin.listRouteStopsById(id));
         plugin.findRouteDefinitionById(routeId).ifPresent(def -> definitions.put(routeId, def));
       }
     }
@@ -1028,7 +1056,7 @@ public final class FtaTimetableCommand {
           }
           String lineCode = company.code() + "/" + operator.code() + "/" + line.code();
           for (Route route : provider.routes().listByLine(line.id())) {
-            stopsByRoute.computeIfAbsent(route.id(), id -> sortedStops(provider, id));
+            stopsByRoute.computeIfAbsent(route.id(), id -> plugin.listRouteStopsById(id));
             plugin
                 .findRouteDefinitionById(route.id())
                 .ifPresent(def -> definitions.put(route.id(), def));
@@ -1119,13 +1147,6 @@ public final class FtaTimetableCommand {
               timetable.id(), neighbor, byOwner.getOrDefault(neighbor.displayCode(), 0)));
     }
     return out;
-  }
-
-  private static List<RouteStop> sortedStops(StorageProvider provider, UUID routeId) {
-    return provider.routeStops().listByRoute(routeId).stream()
-        .filter(Objects::nonNull)
-        .sorted(Comparator.comparingInt(RouteStop::sequence))
-        .toList();
   }
 
   private static String displayCodeOf(StorageProvider provider, Timetable timetable) {

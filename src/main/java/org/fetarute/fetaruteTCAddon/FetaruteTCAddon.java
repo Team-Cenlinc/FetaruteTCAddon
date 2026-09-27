@@ -34,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
@@ -376,6 +377,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
       return Optional.empty();
     }
     return routeDefinitionCache.findById(routeId);
+  }
+
+  /**
+   * 与 {@link #findRouteDefinitionById} 的 {@code waypoints()} 下标一一对应的停靠配置。
+   *
+   * <p>解析不到图节点的停靠已剔除，与运行时、ETA 读同一份；直接读库的原始列表在某站缺图节点时会与 waypoints 错位。
+   *
+   * @param routeId route UUID
+   * @return 对齐后的停靠配置；交路定义未加载时为空列表
+   */
+  public List<RouteStop> listRouteStopsById(java.util.UUID routeId) {
+    if (routeDefinitionCache == null || routeId == null) {
+      return List.of();
+    }
+    return routeDefinitionCache
+        .findById(routeId)
+        .map(definition -> routeDefinitionCache.listStops(definition.id()))
+        .orElse(List.of());
   }
 
   /** 返回当前占用管理器（调度闭塞骨架）。 */
