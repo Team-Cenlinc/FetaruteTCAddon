@@ -141,6 +141,18 @@ public interface RuntimeTrainHandle {
   }
 
   /**
+   * 列车身上是否挂着本插件发车动作以外的 TrainCarts 动作（停站等待、停稳居中、其它牌子下发的动作等）。
+   *
+   * <p>运行中补牵引只在没有这类动作时下发：launch 动作排在队尾，要等前面的动作结束才执行，接在停站等待后面就等于绕过发车门控。
+   * 默认视为有——实现报告不了时不补牵引，保持原来"只在信号变化时补牵引"的行为。
+   *
+   * @return 有别的动作，或无法判断时为 {@code true}
+   */
+  default boolean hasForeignAction() {
+    return true;
+  }
+
+  /**
    * 强制重发列车（用于回退检测后纠正方向）。
    *
    * <p>与 {@link #launchWithFallback} 不同，此方法会：

@@ -25,6 +25,7 @@ public final class TrainLaunchManager {
   private static final double TICKS_PER_SECOND = 20.0;
   private static final long TICK_MILLIS = 50L;
   private static final double MOVING_CONTROL_EPSILON_BPT = 0.005;
+  private static final double RESUME_TRACTION_TOLERANCE_RATIO = 0.05;
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
   private static final String TAG_PENDING_LAUNCH_COMMAND = "FTA_PENDING_LAUNCH_COMMAND";
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
@@ -161,6 +162,8 @@ public final class TrainLaunchManager {
         curveAdjustedBps < Math.max(0.0, targetBps) - 1.0e-6
             ? OptionalDouble.of(curveAdjustedBps)
             : OptionalDouble.empty();
+    boolean resumeTraction =
+        !allowLaunch && shouldResumeTraction(train, toBlocksPerTick(curveAdjustedBps));
     double adjustedBps = curveAdjustedBps;
     adjustedBps =
         applySpeedCommandRateLimit(
@@ -170,8 +173,8 @@ public final class TrainLaunchManager {
             config,
             runtimeSettings,
             false,
-            // 发车/信号放行瞬间不应再被“上行限幅”二次压速，避免列车起步过慢。
-            allowLaunch);
+            // 发车/信号放行/运行中补牵引都由 launch 动作按加速度爬升，速度上限不再“上行限幅”二次压速，避免起步或提速过慢。
+            allowLaunch || resumeTraction);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     boolean launchCommandAccepted = false;
@@ -184,10 +187,11 @@ public final class TrainLaunchManager {
           launchCommandAccepted = true;
         }
         boolean needsMovingControl = shouldIssueMovingControl(train, targetBpt);
-        if (allowLaunch || needsMovingControl) {
+        if (allowLaunch || needsMovingControl || resumeTraction) {
           double controlAcceleration = needsMovingControl ? decelBpt2 : accelBpt2;
           // 运动中：放行/信号变化时补充牵引；目标速度下降时也下发一次 launch，让 TrainCarts
-          // 按加减速度平滑收敛到 approach/限速目标，而不是只硬切 speedLimit。
+          // 按加减速度平滑收敛到 approach/限速目标，而不是只硬切 speedLimit；目标回升（驶过慢速边、
+          // 授权延伸）时同样补牵引——TrainCarts 列车不会因为 speedLimit 调高就自己加速。
           train.accelerateTo(targetBpt, controlAcceleration);
         }
       } else {
@@ -218,6 +222,24 @@ public final class TrainLaunchManager {
     }
     return new ControlApplicationResult(
         targetBps, speedCurveLimit, adjustedBps, limiterSource, launchCommandAccepted);
+  }
+
+  /**
+   * 运行中列车的目标速度明显高于当前车速时补牵引。
+   *
+   * <p>"明显"与 {@link TrainCartsRuntimeHandle#accelerateTo} 的已接近目标判定一致（目标的 5%，至少 {@value
+   * #MOVING_CONTROL_EPSILON_BPT} 格/tick）。身上挂着别的 TrainCarts 动作（停站等待、居中）时不补：launch 会排在它后面执行。
+   */
+  private boolean shouldResumeTraction(RuntimeTrainHandle train, double targetBlocksPerTick) {
+    if (train == null || !train.isMoving() || !Double.isFinite(targetBlocksPerTick)) {
+      return false;
+    }
+    double current = train.currentSpeedBlocksPerTick();
+    double tolerance =
+        Math.max(MOVING_CONTROL_EPSILON_BPT, targetBlocksPerTick * RESUME_TRACTION_TOLERANCE_RATIO);
+    return Double.isFinite(current)
+        && targetBlocksPerTick > current + tolerance
+        && !train.hasForeignAction();
   }
 
   /** 判断运动中列车是否需要补发控速动作。 */

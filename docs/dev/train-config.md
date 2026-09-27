@@ -30,7 +30,8 @@ tags:
 - 或使用 `@train[...]` 选择器一次匹配多列车
 
 ## 运行时行为
-- PROCEED 信号：使用调度图默认速度作为基准，再叠加边限速。
+- PROCEED 信号：使用调度图默认速度作为基准，再叠加边限速。当前节点与下一路径点相邻时就是那条边的限速；不相邻（线路只写车站，站间还有若干图节点）时取本段最短路的**限速包络**——列车所在区间的限速，以及刹得住前方每条更低限速边的最高速度 `√(v²+2·a·d)`（`a` 为列车减速度，`d` 从车头量起）。关闭 `runtime.speed-curve-enabled` 时退回整段最小限速。
+  - 不能取整段最小值：2026-09-27 实服 WS LWN:2→SWN:2 共 865 格，只有道岔后一条 48 格边是默认 8 格/秒，列车全段 8 格/秒、每趟比表慢 51 秒；编表与 ETA 都按逐边限速算。
 - CAUTION/PROCEED_WITH_CAUTION 信号：使用连通分量的 caution 速度上限（无覆盖时回退为 `runtime.caution-speed-bps`）。
 - STOP 信号：限速 0 并停车。只有当前 route index 后已记录非 `PASS` RouteStop 的计划停靠接近，才仅通过 approach 或 CAUTION 限速而不因制动距离单独变成 STOP；裸终点、真实物理 blocker、授权失败和证据缺失仍会 fail-closed 到 STOP。
 - 普通 PROCEED 不再把“到下一图节点的距离”当作停车曲线约束。速度曲线只会在真实 blocker/caution、移动授权约束、STOP/TERM waypoint 或前方低限速边存在时下压目标速度。
@@ -41,7 +42,7 @@ tags:
 
 | 字段 | 说明 |
 |------|------|
-| `edge_limit_bps` | 当前边 effective speed；PROCEED 的主要巡航基准 |
+| `edge_limit_bps` | PROCEED 的主要巡航基准：相邻时是当前边 effective speed，不相邻时是本段路径的限速包络（见上） |
 | `aspect_base_speed_bps` | 信号等级映射后的基础速度；CAUTION 会先落到 caution 速度 |
 | `caution_source` | `none`、`config` 或 `component`，说明 CAUTION 速度来源 |
 | `approach_limit_bps` | 进站、进库或 STOP/TERM waypoint approach 限速 |
@@ -55,7 +56,7 @@ tags:
 
 排查时先看 `final_limiter_source`：
 
-- `edge_limit`：edge effective speed 生效，未被其它运行时约束压低。
+- `edge_limit`：edge effective speed（或本段限速包络）生效，未被其它运行时约束压低。
 - `config_caution` / `component_caution`：当前处于 CAUTION/PROCEED_WITH_CAUTION，目标速度来自配置或连通分量 caution，并非 edge speed 失效。
 - `movement_authority`：前方 blocker/caution 距离不足，移动授权主动压速。
 - `edge_speed_lookahead`：前方存在更低 effective speed 的边，系统提前减速。
@@ -82,11 +83,11 @@ tags:
 
 ## 控车节流与补能
 - 每次调度 tick 都会刷新 `speedLimit`，加减速曲线由 TrainCarts 的 WaitAcceleration 接管。
-- “运动中补能”的 launch/accelerate 只在信号变化、强制刷新或低速 failover 时下发，避免周期性加速打断停靠或在道岔处反向弹回。
+- “运动中补能”的 launch/accelerate 在信号变化、强制刷新或低速 failover 时下发；此外目标速度比当前车速高出 5% 以上（驶过慢速边、授权延伸）且列车身上没有别的 TrainCarts 动作时也补一次牵引——TrainCarts 列车不会因为 speedLimit 调高就自己加速。停站等待、停稳居中等动作还在队列里时不补（launch 会排在它们后面执行），报告不了动作队列的实现也不补。已在执行的本插件 launch 不会被重复下发。
 - 速度命令新增“限幅 + 迟滞”保护：
   - `runtime.speed-command-hysteresis-bps`
   - `runtime.speed-command-accel-factor`
   - `runtime.speed-command-decel-factor`
-- 发车/放行时会跳过“上行限幅”，由 TrainCarts launch + WaitAcceleration 接管起步斜率，避免发车目标速度被压到极低。
+- 发车/放行/运行中补牵引时会跳过“上行限幅”，由 TrainCarts launch + WaitAcceleration 接管起步与提速斜率，避免目标速度被压到极低。
 - 降低 `speedLimit` 不做降速限幅，也不受迟滞保护。边限速、前方低限速、移动授权、approach 与 STOP 这类安全上限必须立即写入；实际车辆不会瞬间减速，平滑制动由 WaitAcceleration 负责。
 - 授权距离不足时会触发移动授权降级（Movement Authority），与速度限幅协同防止冒进与急剧速度跳变；`ARTIFICIAL_WINDOW_LIMIT` 属于人工窗口截断，只能触发内部扩展和诊断，不能单独发布黄灯/红灯。

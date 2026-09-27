@@ -60,10 +60,10 @@
 - `RuntimeSignalMonitor` 只负责巡检、异常清理与 ETA 采样，实际信号控制仍由 `RuntimeDispatchService.handleSignalTick(...)` 完成。
 - 完整 `handleSignalTick(...)` 只在首次观测、列车正运动或物理运动状态发生变化时由周期巡检调用。稳定静止列车已经完成本轮 STOP/queue 决定，周期巡检不得把它重新送入方向解析、进路构建或占用触碰。资源释放会唤醒直接队首以及在该资源上显式登记的动态容量等待者；Gate Queue 资格变化仍只唤醒该队首。没有新资源事实的持续静止异常由 `TrainHealthMonitor` 的冷却恢复路径处理。
 - 对运行中列车重新评估 canEnter，信号变化时会触发发车/限速。
-- 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）。
+- 即便信号未变化，也会刷新限速（用于边限速变化或阻塞解除后的速度恢复）；目标速度升高且列车身上没有别的 TrainCarts 动作时会补一次牵引，否则只调高 speedLimit 列车不会加速（规则见 `train-config.md`）。
 - 同一 active Movement Authority 下，即使列车仍物理静止，信号重评估也不会重写 TrainCarts action queue、destination、token 或 occupancy。执行层只接受一次具有相同参数的 launch；物理推进、STOP/撤销或新授权才会消费该 pending command。静止故障恢复由独立的 `TrainHealthMonitor` 以阈值、阶段和冷却执行，周期信号检查绝不能充当重试计时器。
 - 发车/加速动作会做节流（`runtime.launch-cooldown-ticks`），避免动作队列膨胀。
-- 降低 `speedLimit` 属于安全上限，执行层不会再用速度命令限幅延迟它；列车仍在运动且目标速度下降时，会补发一次 TrainCarts launch 控速动作，让 approach/限速按加减速度平滑收敛。若 `/fta train debug` 显示 `edge_limit`、`edge_speed_lookahead`、`movement_authority` 或 approach limiter，写入的 cap 应立即反映该限制。
+- 降低 `speedLimit` 属于安全上限，执行层不会再用速度命令限幅延迟它；列车仍在运动且目标速度下降时，会补发一次 TrainCarts launch 控速动作，让 approach/限速按加减速度平滑收敛。站间只写车站时，边限速基准是本段路径的限速包络（所在区间限速 + 刹得住前方更低限速的速度），不是整段最小限速。若 `/fta train debug` 显示 `edge_limit`、`edge_speed_lookahead`、`movement_authority` 或 approach limiter，写入的 cap 应立即反映该限制。
 - 硬 STOP 下发 speedLimit=0、清动作队列、调用 TrainCarts hard stop，并撤销旧 destination 的运动授权；destination 的清除由具体停因和配置决定。普通占用等待与硬停车分别保留其恢复契约。非物理 CONFLICT 上的 protective-only retain 可在同一 single-corridor 方向已证明一致时降级为跟驰/过期诊断；外车持有同一 EDGE/NODE 时不适用该放宽。
 - 到达入口与周期信号、出站门控共用安全状态停车规则：交路定义缺失时不猜测新索引，立即硬停车；普通 PASS 已确认到达但图快照缺失时，先提交到达事实再硬停车。原有 claim 与 destination 保留，恢复后必须重新通过 acquire、token 与最终信号发布门。
 - STOP waypoint dwell handoff 与计划进站 approach 不走 hard STOP；它们可以继续使用 planned-stop 减速曲线，但 movement token 与 hard STOP 抑制状态会隔离闭塞红灯和计划停站语义。仅当当前 route index 后已证明存在非 `PASS` RouteStop 时，`ROUTE_STOP_OR_TERMINAL` 才会记录 `MOVEMENT_AUTHORITY_PLANNED_STOP_ADVISORY` 并交给 Smart Dispatcher→Signal 产生 approach/CAUTION；不得因制动距离在到站前变成 `STOP` 或写入 0 速度。裸 route 终点、真实 blocker、对向、UNKNOWN、路径/物理证据缺失仍保持 fail-closed STOP。

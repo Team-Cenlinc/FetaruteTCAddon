@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -420,6 +421,118 @@ class TrainLaunchManagerTest {
             Optional.empty(),
             runtimeSettings(0.0, 1.0, 1.0));
     return tags;
+  }
+
+  /**
+   * 驶过慢速边后目标回升：列车身上没有别的动作时补一次牵引，速度上限直接给到目标、由 launch 按加速度爬升。
+   *
+   * <p>TrainCarts 列车不会因为 speedLimit 调高就自己加速（2026-09-27 实服 WS LWN→SWN 全段 8 格/秒）。
+   */
+  @Test
+  void movingTrainBelowItsTargetResumesTractionWhenNothingElseIsQueued() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = slowTrainTags("train-resume");
+    RuntimeTrainHandle train = movingAt(8.0, false);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train).accelerateTo(22.2 / 20.0, 1.0 / 400.0);
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertEquals(22.2 / 20.0, speedCaptor.getValue(), 1.0e-9);
+  }
+
+  /** 停站等待、居中等动作还在队列里时不补牵引：launch 会排在它后面，等于绕过发车门控。 */
+  @Test
+  void movingTrainWithAnotherActionQueuedIsNotGivenTraction() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = slowTrainTags("train-foreign");
+    RuntimeTrainHandle train = movingAt(8.0, true);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train, never()).accelerateTo(anyDouble(), anyDouble());
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertTrue(speedCaptor.getValue() < 22.2 / 20.0, "不补牵引时速度上限仍按命令限幅逐步抬升");
+  }
+
+  @Test
+  void movingTrainAlreadyNearItsTargetGetsNoNewAction() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-near",
+            "FTA_LAST_SPEED_CMD_BPS=22.2",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = movingAt(21.5, false);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train, never()).accelerateTo(anyDouble(), anyDouble());
+  }
+
+  /** 报告不了动作队列的实现按"有别的动作"处理，保持只在信号变化时补牵引的旧行为。 */
+  @Test
+  void handlesThatCannotReportTheirActionsKeepTheOldBehaviour() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = slowTrainTags("train-legacy");
+    FakeTrain train = new FakeTrain(tags.properties(), true, 8.0 / 20.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    assertEquals(0, train.accelerateCalls);
+  }
+
+  private static TagStore slowTrainTags(String trainName) {
+    return new TagStore(
+        trainName,
+        "FTA_LAST_SPEED_CMD_BPS=8.0",
+        "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+  }
+
+  private static RuntimeTrainHandle movingAt(double speedBps, boolean foreignAction) {
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isMoving()).thenReturn(true);
+    when(train.currentSpeedBlocksPerTick()).thenReturn(speedBps / 20.0);
+    when(train.hasForeignAction()).thenReturn(foreignAction);
+    return train;
   }
 
   private static ConfigManager.RuntimeSettings runtimeSettings(

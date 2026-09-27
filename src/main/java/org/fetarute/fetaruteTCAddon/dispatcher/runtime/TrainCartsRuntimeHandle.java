@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.controller.components.ActionTracker;
 import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
 import com.bergerkiller.bukkit.tc.controller.components.RailPath;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
@@ -703,6 +704,28 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (action != null) {
       action.addTag(ACTION_TAG_LAUNCH);
     }
+  }
+
+  /**
+   * 编组或任一车厢的动作队列里，当前动作不是本插件的 launch 即算外来动作。
+   *
+   * <p>停站等待（AutoStation、waypoint 居中）挂在编组队列，launch 挂在车头队列，两边都要看。
+   */
+  @Override
+  public boolean hasForeignAction() {
+    if (isForeignActionQueue(group.getActions())) {
+      return true;
+    }
+    for (MinecartMember<?> member : group) {
+      if (member != null && isForeignActionQueue(member.getActions())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isForeignActionQueue(ActionTracker actions) {
+    return actions != null && actions.hasAction() && !actions.isCurrentActionTag(ACTION_TAG_LAUNCH);
   }
 
   @Override

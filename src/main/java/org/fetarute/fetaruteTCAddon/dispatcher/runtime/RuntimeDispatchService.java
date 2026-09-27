@@ -18686,7 +18686,8 @@ public final class RuntimeDispatchService {
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
     // 先获取边限速作为 PROCEED 基准（而非固定 defaultSpeed）
     double edgeLimit =
-        resolveEdgeSpeedLimit(train, graph, currentNode, nextNode, configManager.current());
+        resolveEdgeSpeedLimit(
+            train, graph, currentNode, nextNode, configManager.current(), config.decelBps2());
     TargetSpeedDecision speedDecision =
         resolveTargetSpeedDecision(
             train != null ? train.worldId() : null,
@@ -30080,45 +30081,53 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 解析从 from 到 to 的边限速。
+   * 解析从 from 到 to 的边限速（PROCEED 的速度基准）。
    *
-   * <p>优先查找直接相邻边；若不存在则尝试最短路径，取路径上所有边限速的最小值。
+   * <p>相邻时就是那条边的限速。不相邻（线路只写了车站、中间还有若干图节点）时沿最短路取限速包络：所在区间的限速，以及刹得住前方每条更低限速边的最高速度 （{@link
+   * SignalLookahead#pathSpeedEnvelope}，距离从车头量起）。关闭速度曲线时退回整段最小限速。
+   *
+   * <p>不能取整段最小值：一条 48 格的默认限速道岔边会把 865 格的站间全压到 8 格/秒， 而编表与 ETA 都按逐边限速算（2026-09-27 实服 WS LWN→SWN
+   * 每趟因此晚 51 秒）。
+   *
+   * @param decelBps2 列车制动减速度，用于前方更低限速的制动曲线
    */
   private double resolveEdgeSpeedLimit(
       RuntimeTrainHandle train,
       RailGraph graph,
       NodeId from,
       NodeId to,
-      ConfigManager.ConfigView config) {
+      ConfigManager.ConfigView config,
+      double decelBps2) {
     if (train == null || graph == null || from == null || to == null || config == null) {
       return -1.0;
     }
     double defaultSpeed = config.graphSettings().defaultSpeedBlocksPerSecond();
     UUID worldId = train.worldId();
-    Instant now = clockNow();
 
     // 1. 尝试直接相邻边
     Optional<RailEdge> directEdgeOpt = findEdge(graph, from, to);
     if (directEdgeOpt.isPresent()) {
       return railGraphService.effectiveSpeedLimitBlocksPerSecond(
-          worldId, directEdgeOpt.get(), now, defaultSpeed);
+          worldId, directEdgeOpt.get(), clockNow(), defaultSpeed);
     }
 
-    // 2. 回退：通过最短路径查找，取路径上所有边的最小限速
+    // 2. 不相邻：沿最短路取本段限速包络
     Optional<RailGraphPath> pathOpt =
         pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
     if (pathOpt.isEmpty() || pathOpt.get().edges().isEmpty()) {
       return -1.0;
     }
-    double minSpeed = Double.MAX_VALUE;
-    for (RailEdge edge : pathOpt.get().edges()) {
-      double edgeSpeed =
-          railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
-      if (edgeSpeed > 0.0 && edgeSpeed < minSpeed) {
-        minSpeed = edgeSpeed;
-      }
+    List<RailEdge> edges = pathOpt.get().edges();
+    SignalLookahead.EdgeSpeedResolver resolver = createEdgeSpeedResolver(worldId);
+    double brakingDecel = config.runtimeSettings().speedCurveEnabled() ? decelBps2 : 0.0;
+    OptionalDouble envelope = SignalLookahead.pathSpeedEnvelope(edges, resolver, brakingDecel, 0L);
+    if (envelope.isPresent() && envelope.getAsDouble() < resolver.resolve(edges.get(0))) {
+      // 前方有更低限速在约束：按车头实际位置重算，车头越过首节点越远，离慢速边越近。
+      envelope =
+          SignalLookahead.pathSpeedEnvelope(
+              edges, resolver, brakingDecel, resolveHeadProgressBlocks(train, graph, from, to));
     }
-    return minSpeed == Double.MAX_VALUE ? defaultSpeed : minSpeed;
+    return envelope.orElse(defaultSpeed);
   }
 
   /**
