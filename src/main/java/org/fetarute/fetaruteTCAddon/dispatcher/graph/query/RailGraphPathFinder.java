@@ -23,14 +23,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  *
  * <h2>等长平局规则（跨进程确定）</h2>
  *
- * <p>多条最短路代价相等（差值不超过 {@code 1e-9}）时，<b>从终点倒推，每一步在全部最短前驱中取 {@link NodeId} 自然序最小者</b>；同一前驱经多条区间到达时取
- * {@link org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId}
- * 自然序最小者。等价表述：在全部最短路中，取"从终点倒读的节点序列"字典序最小的那一条。
+ * <p>多条最短路代价相等（差值不超过 {@code 1e-9}）时，<b>先取区间数最少的</b>；区间数也相同，<b>从终点倒推，每一步在其中取 {@link NodeId}
+ * 自然序最小的前驱</b>；同一前驱经多条区间到达时取 {@link org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId} 自然序最小者。
+ *
+ * <p>区间数优先是为了剪刀渡线：直股是一条区间，穿菱形是"斜线—菱形中心—斜线"三条，图上按轨道步数计长度时两者可以恰好等长。 只比节点序时规划会穿菱形，
+ * 而实车沿直股开出，规划路径上的菱形资源永远等不到"经过即释放"，占用一直挂到列车销毁（2026-09-26 实服 PPK:2 折返）。 少一条区间就少过一组道岔，更接近列车实际走的那条。
  *
  * <p>结果只取决于图的内容，与 {@link RailGraph#edgesFrom} 的遍历顺序无关——此前用严格 {@code <} 松弛、优先队列只比距离，等长时"先遍历到的邻居赢"，而
  * {@code Set.copyOf} 的遍历顺序每个 JVM 随机一次，于是会让环两股道之类的等长备选每次重启换一条。
  *
- * <p>这条规则只为可复现，不表达运营偏好（例如"优先 1 道"）：它在简单会让环上恰好选中较小的股道号，但一旦股道两侧还有别的节点，选中的是"靠终点一侧节点 id
+ * <p>节点序这一层只为可复现，不表达运营偏好（例如"优先 1 道"）：它在简单会让环上恰好选中较小的股道号，但一旦股道两侧还有别的节点，选中的是"靠终点一侧节点 id
  * 较小"的那一条。需要按语义选股道的地方必须显式钉住途经节点（如 DYNAMIC 选台结果），不能依赖平局。
  */
 public final class RailGraphPathFinder {
@@ -73,6 +75,7 @@ public final class RailGraphPathFinder {
     }
 
     Map<NodeId, Double> dist = new HashMap<>();
+    Map<NodeId, Integer> hops = new HashMap<>();
     Map<NodeId, NodeId> prev = new HashMap<>();
     Map<NodeId, RailEdge> prevEdge = new HashMap<>();
     // 距离相同再比节点：出队顺序只取决于图内容，不取决于入队先后。
@@ -81,6 +84,7 @@ public final class RailGraphPathFinder {
             Comparator.comparingDouble(Entry::distance).thenComparing(Entry::nodeId));
 
     dist.put(from, 0.0);
+    hops.put(from, 0);
     queue.add(new Entry(from, 0.0));
 
     while (!queue.isEmpty()) {
@@ -122,15 +126,24 @@ public final class RailGraphPathFinder {
         }
 
         Double bestKnown = dist.get(neighbor);
+        int nextHops = hops.get(current) + 1;
         if (bestKnown == null || nextDistance + COST_EPSILON < bestKnown) {
           dist.put(neighbor, nextDistance);
+          hops.put(neighbor, nextHops);
           prev.put(neighbor, current);
           prevEdge.put(neighbor, edge);
           queue.add(new Entry(neighbor, nextDistance));
         } else if (nextDistance <= bestKnown + COST_EPSILON
-            && prefersPredecessor(current, edge, prev.get(neighbor), prevEdge.get(neighbor))) {
-          // 等长平局：只换前驱，不改距离、不重复入队。代价恒为正，所以 neighbor 的全部最短前驱
-          // 都严格比它先出队，它出队（或作为终点结束搜索）时前驱已是最终的最小者。
+            && prefersPredecessor(
+                nextHops,
+                current,
+                edge,
+                hops.get(neighbor),
+                prev.get(neighbor),
+                prevEdge.get(neighbor))) {
+          // 等长平局：只换前驱与区间数，不改距离、不重复入队。代价恒为正，所以 neighbor 的全部最短前驱
+          // 都严格比它先出队（区间数随之确定），它出队（或作为终点结束搜索）时前驱已是最终的最优者。
+          hops.put(neighbor, nextHops);
           prev.put(neighbor, current);
           prevEdge.put(neighbor, edge);
         }
@@ -179,11 +192,19 @@ public final class RailGraphPathFinder {
     return Optional.of(new RailGraphPath(from, to, nodes, edges, totalLengthBlocks));
   }
 
-  /** 等长平局时，候选前驱是否优于已记录的前驱：先比节点，同节点再比区间。 */
+  /** 等长平局时，候选前驱是否优于已记录的前驱：先比区间数，再比节点，同节点再比区间。 */
   private static boolean prefersPredecessor(
-      NodeId candidate, RailEdge candidateEdge, NodeId recorded, RailEdge recordedEdge) {
-    if (recorded == null || recordedEdge == null) {
+      int candidateHops,
+      NodeId candidate,
+      RailEdge candidateEdge,
+      Integer recordedHops,
+      NodeId recorded,
+      RailEdge recordedEdge) {
+    if (recordedHops == null || recorded == null || recordedEdge == null) {
       return false;
+    }
+    if (candidateHops != recordedHops) {
+      return candidateHops < recordedHops;
     }
     int byNode = candidate.compareTo(recorded);
     if (byNode != 0) {
