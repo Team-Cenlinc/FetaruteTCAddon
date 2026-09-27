@@ -902,7 +902,8 @@ class OccupancyRequestBuilderTest {
   /**
    * 车身从车头节点往回量：车长 34（实服 MT 三节模型车的保守估算）时，车身盖到 36 格处的 S2，再留 1 条边到 S1。
    *
-   * <p>停站时车头越过站台节点约半个车长，实际车尾只在节点后方十几格；从节点起量的保护因此偏长——这是已知局限， 按停稳后的实测足迹收窄尚未实现。
+   * <p>停站时车头越过站台节点约半个车长，实际车尾只在节点后方十几格；从节点起量的保护因此偏长。终点折返待命车另由 {@code LayoverBodyRetain}
+   * 按停稳后的实测车身收窄，这里只钉尾部保护本身的量法。
    */
   @Test
   void rearGuardIsMeasuredBackFromTheHeadNode() {

@@ -205,6 +205,11 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 - 列车抵达 `TERM` 站点且线路生命周期为 `REUSE_AT_TERM` 时，只有“当前索引已到线路尾节点”才会进入待命（Layover）状态并注册到 `LayoverRegistry`。
 - 若 `TERM` 后仍有定义节点（回库/折返段），运行时会继续推进，不会在 TERM 站台永久拦停。
 - Layover 注册时会触发一次即时复用尝试（不必等待下一轮 spawn tick）。
+- 待命期间每拍的停车保持：列车停稳、整列车身区间覆盖完整（`livePhysicalEdgeCoverage`）时，只保持车身实际压着的区间、它们的两端节点与由此带出的
+  冲突资源（`LayoverBodyRetain`），不再按尾部保护从站台节点往回盖一个车长再加 N 条边——列车以站牌为中心停车，车头越过站台节点约半个车长，
+  从节点量会多盖半个车长，双站台终点的共用入口道岔正好落在里面，另一个站台就进不去（2026-09-27 实服 PPK：停 PPK:1 按表等约 5 分钟折返，
+  分到 PPK:2 的后车在 RVS:1 一直等到它开走）。待命车只会原地等票或折返，身后的轨道对它没有用；车身区间的端点仍在保持范围内，同线开往同一站台的
+  后车照样进不来。没停稳、覆盖不完整时保持原有的尾部保护；已有折返交接（dispatch attempt）时整条进路原样保持，不走这条收窄。
 - 即时复用只有在 `readyAt` 已到、TrainCarts 句柄确认列车停稳、Waypoint 居中状态已结束且 `DwellRegistry` 不再有真实停站窗口时才进入折返授权；否则保留 Layover 候选，等待后续 spawn tick 重试。Waypoint TERM 的候选会在触牌时登记，实际 dwell 在居中完成后才启动，因此不能只相信预估的 `readyAt`。
 - 下一条交路的 DYNAMIC 站台没有空闲容量时，Layover 不领取 ticket、不执行 authority handoff，也不申请前向进路；候选保持可重试，待站台容量释放后再派发。
 - 同一 `ticketId` 在 `LayoverRegistry` 内最多只有一个 dispatch attempt owner。handoff 前被拒绝会释放 attempt，分配器仍可尝试下一辆 READY 候选；一旦 handoff 留下 attempt，当前 tick 与后续 tick 都只重试该 owner，不能把同一票据同时交给第二辆折返车。pending 的超时、fallback 与人工清理也不能删除 active attempt 对应票据。

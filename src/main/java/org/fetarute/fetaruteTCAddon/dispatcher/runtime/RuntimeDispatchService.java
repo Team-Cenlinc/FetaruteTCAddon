@@ -28616,9 +28616,13 @@ public final class RuntimeDispatchService {
           route.get(),
           route.get().waypoints().size() - 1,
           locationNode,
+          Optional.empty(),
           graph.get(),
           now,
-          train);
+          resolveRearGuardDistanceBlocks(train),
+          resolveLivePhysicalReleaseEvidence(trainName, train, graph.get())
+              .withLayoverBody(livePhysicalEdgeCoverage(train, graph.get())),
+          Set.of());
       return;
     }
     OccupancyResource locationResource = OccupancyResource.forNode(locationNode);
@@ -28843,8 +28847,16 @@ public final class RuntimeDispatchService {
     DispatchPriorityResolution priorityResolution = plan.priorityResolution();
     int priority = plan.schedulingPriority();
     Optional<OccupancyRequest> canonicalRequest = plan.canonicalRequest();
+    // 终点待命车停稳、车身覆盖完整时只保持车身；实时联锁区在收窄之后并入。
     OccupancyRequest request =
-        mergeStopPhysicalEvidence(plan.request(), livePhysicalEvidence.resources());
+        mergeStopPhysicalEvidence(
+            LayoverBodyRetain.narrow(
+                plan.request(),
+                livePhysicalEvidence.layoverBody(),
+                livePhysicalEvidence.stationary(),
+                graph,
+                plan.currentNode()),
+            livePhysicalEvidence.resources());
     List<OccupancyClaim> oldSelfClaims = snapshotSelfClaims(trainName);
     traceSignalAuthorityLifecycle(
         "stop-retain",
@@ -29177,21 +29189,33 @@ public final class RuntimeDispatchService {
    * 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。
    *
    * @param stationary 读取足迹时列车已停稳；制动中车头仍可能压进前方联锁区
+   * @param layoverBody 终点待命车的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
    */
   private record LivePhysicalReleaseEvidence(
-      boolean required, boolean complete, boolean stationary, Set<OccupancyResource> resources) {
+      boolean required,
+      boolean complete,
+      boolean stationary,
+      Set<OccupancyResource> resources,
+      Optional<LivePhysicalEdgeCoverage> layoverBody) {
 
     private LivePhysicalReleaseEvidence {
       resources = resources == null ? Set.of() : Set.copyOf(resources);
+      layoverBody = layoverBody == null ? Optional.empty() : layoverBody;
     }
 
     private static LivePhysicalReleaseEvidence incomplete() {
-      return new LivePhysicalReleaseEvidence(true, false, false, Set.of());
+      return new LivePhysicalReleaseEvidence(true, false, false, Set.of(), Optional.empty());
     }
 
     private static LivePhysicalReleaseEvidence complete(
         Set<OccupancyResource> resources, boolean stationary) {
-      return new LivePhysicalReleaseEvidence(true, true, stationary, resources);
+      return new LivePhysicalReleaseEvidence(true, true, stationary, resources, Optional.empty());
+    }
+
+    /** 标记为终点待命车，附上整列车身覆盖。 */
+    private LivePhysicalReleaseEvidence withLayoverBody(LivePhysicalEdgeCoverage body) {
+      return new LivePhysicalReleaseEvidence(
+          required, complete, stationary, resources, Optional.ofNullable(body));
     }
 
     /** 位置保持对当前边联锁区的依据：停稳且足迹完整才跟随现场，否则按当前边整体保持。 */
