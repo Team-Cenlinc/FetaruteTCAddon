@@ -120,6 +120,8 @@ NODE/EDGE blocker 没有 `A_TO_B/B_TO_A` 这种二值走廊方向。Planner 会�
 
 跨不同图边或不同 switcher ID 的物理平交使用无方向的共享 `CONFLICT:interlocking:<hash>`。走廊 `A_TO_B/B_TO_A` 只用于单线方向锁，不能用于侧面平交兼容性。sparse catalog 不完整时整张世界图退化为同一个 fail-closed 联锁资源，避免因漏采样形成敌对双授权。普通轨道方块不会被持久化；它们的进路与列尾保护继续来自 Node/Edge、规范 Movement Plan 和真实车长。
 
+位置保持（信号 tick 的当前位置保护、停车保持）按“当前节点 + 当前边”取资源，当前边上的 `interlocking:*` 由 `PositionZoneEvidence` 决定：列车行进中（含制动越过授权终点的那几格）或本轮整列足迹不完整时，按当前边整体保持；列车已停稳且足迹完整时，只保持车体实际压到的联锁区。停着的车要再往前走，必须重新以 `MOVEMENT_REQUIRED` 申请这些联锁区，所以放掉没压到的交叠格不会扩大任何授权。尾部保护与当前边的 NODE/EDGE/switcher/single 资源不受影响。背景：2026-09-27 实服 OFL 车库口，DS 车头刚越过 `MLU:1:004` 牌子，节点模型认为它进了通往岔口的那条边，边末端与 1 号库线的交叠格被整条扣住；车体离交叠格还有二十几格，回库的 MT 却进不了库，两车顶牛到关服。
+
 共享物理联锁与 switcher/single 一起进入 Gate Queue，但联锁始终按无方向全局 winner 仲裁。priority 只提供每分 0.5 秒、最多 2 分钟的有界时间优势；首次等待时间形成固定 aging 排序键，使 `OPERATION > depot exit/CREATE > RETURN` 的短期优先关系成立，同时保证持续刷新的老等待者最终压过后来流量。`SMART_PENDING_WINNER_ARBITRATION` 会记录 winner 基础 priority、已等待秒数与优势上限；队列 winner 仍必须 fresh acquire 完整 admission/physical window，不能凭队头身份越过 live claim。
 
 ## 启动现场恢复事务

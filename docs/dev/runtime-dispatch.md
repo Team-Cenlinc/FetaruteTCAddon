@@ -112,6 +112,7 @@
 - 单线走廊冲突会进入 Gate Queue，信号 tick 会尊重排队顺序与方向锁。
 - 中间图节点（未写入 route 的 waypoint/switcher）触发会更新 `lastPassedGraphNode`，信号/占用评估会尽量贴合列车真实位置。
 - 运行中当前位置保护只截取当前图节点与下一段实际图边作为资源窗口，但方向、完整 expanded path 与 switcher path signature 继承同一周期的 canonical `MovementPlanSnapshot`。缺少规范计划的兼容路径仍可沿最短路定位物理资源，但 single 方向保持未知，避免短路径反向解释出库授权。
+- 当前位置保护与停车保持对当前边上的物理联锁区（`interlocking:*`）按 `PositionZoneEvidence` 取舍：列车停稳且整列足迹完整时只保持车体实际压到的联锁区，行进中或足迹读不到时按当前边整体保持。依据与背景见 `smart-dispatcher.md`「安全状态分层」。
 - 成功授权后的 rear guard 与 STOP hold 使用相同的 canonical 计划派生保护资源；计划中的 single 方向缺失或为 `UNKNOWN` 时不按局部路径猜测。若该保护资源已经滑出当前前向计划，占用层只允许非硬请求继承同车既有 claim 中由上一份硬授权提交的已知方向，避免同向列车在平交道口边界被误判为 `UNKNOWN` 对向屏障。没有这两类证据时继续保持 fail-closed。
 - Occupancy acquire/release 事件只表达“现场事实已变化”，不能携带或创造 signal / Movement Authority。事件桥只把受影响逻辑列车交给 `RuntimeSignalReevaluationScheduler`；同一 tick 内的大小写变体与 TrainCarts split 临时别名会合并，并在下一 Bukkit tick 进入完整 `handleSignalTick`，不等待默认 50 ticks 的周期巡检。
 - 容量等待撤队前，`DynamicCapacityWaitRegistry` 登记实际受阻 DYNAMIC 目标的候选 NODE；已 materialize 时只登记该目标。提前选台的受阻目标索引由分配器通过 `DynamicResolution` 返回，与当前进度索引分开保存，覆盖中间还有 PASS 的场景。同步事件查询仅合并直接队首与该索引中的等待者，不扫描 RouteProgressRegistry 或轨道图、不寻路、不授予 winner。选台成功、推进、交路切换与列车移除会清理通知，改名在 owner 移交提交后迁移接收者。
@@ -314,17 +315,27 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 
 ## 类体积约束：不要再往 RuntimeDispatchService 里加方法
 
-`RuntimeDispatchService` 约三万行、994 个方法，已经贴着 SpotBugs 的单类分析上限。
+`RuntimeDispatchService` 约三万行、995 个方法，已经贴着 SpotBugs 的单类分析上限。
 越线之后整个类被标记 `SKIPPED_CLASS_TOO_BIG` 并**完全跳过静态分析**——而它恰恰是全项目最需要被覆盖的类。
 
-实测边界（SpotBugs 4.8.6，effort=MAX）：**993 个方法通过，1000 个方法触发**。
-不是行数，是方法数；`javap -p <class> | grep -c '(.*);'` 可以直接数。
+判据（SpotBugs 4.8.6 `AnalysisContext#isTooBig`）：类文件超过 1,000,000 字节，或方法数超过 1000，任一成立即跳过。
+不是行数，是方法数（lambda 编译出的合成方法也算）。数法要把带 `throws` 的方法算进去：
+
+```bash
+javap -p <class> | grep -cE '\(.*\)( throws [^;]*)?;$'
+```
+
+只数 `'(.*);'` 会漏掉 `throws` 子句结尾的方法——主类恰好没有这种方法，测试类里却很多。
 
 因此往这个类里加能力时，做法是把逻辑放进独立协作者，只在它上面留一个访问器。
 `StationStopCoordinator` 与 `RuntimeDispatchService#stationStops()` 是现成范例：
 时刻表录制播报 + 计划扣留一共只在这个类上花掉一个方法的余量。
 
-加方法前先跑一次 `./gradlew spotbugsMain`，确认没有把余量花光。
+**`RuntimeDispatchServiceTest` 同样受这个上限约束**（现 996 个方法，`spotbugsTest` 会分析它）。
+越线的现象不是它自己报错，而是它被整类跳过后，只在它里面赋值的 `FakeTrain` 字段被误报 `UWF_UNWRITTEN_FIELD`。
+新用例放进独立测试类（例如 `RuntimeDispatchPositionHoldTest`），不要再往里加。
+
+加方法前先跑一次 `./gradlew spotbugsMain spotbugsTest`，确认没有把余量花光。
 
 ## 车站停靠事件与计划扣留
 

@@ -1033,7 +1033,8 @@ public final class OccupancyRequestBuilder {
         now,
         priority,
         purpose,
-        Optional.empty());
+        Optional.empty(),
+        PositionZoneEvidence.EDGE_WIDE);
   }
 
   /**
@@ -1074,10 +1075,30 @@ public final class OccupancyRequestBuilder {
         now,
         priority,
         purpose,
-        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")));
+        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")),
+        PositionZoneEvidence.EDGE_WIDE);
   }
 
-  private OccupancyRequest buildHoldPositionRequest(
+  /**
+   * 构建当前位置等待请求，并按现场证据决定当前边上的物理联锁区。
+   *
+   * <p>当前边的节点、区间、道岔与单线资源照旧整条保持；只有 {@code interlocking:*} 交叠格交给 {@code zoneEvidence} 判定。
+   * 尾部保护另行加入，同一联锁区若也挂在尾部保护的边上照旧保持。
+   *
+   * @param trainName 列车名
+   * @param routeId 线路 route id
+   * @param currentNode 当前图节点
+   * @param targetNode 下一目标节点
+   * @param routeNodes 当前有效 route 节点
+   * @param currentIndex 当前 route index
+   * @param now 请求时间
+   * @param priority 队列优先级
+   * @param purpose 授权来源
+   * @param movementPlan 本周期规范行车计划；缺失时 single 方向保持未知
+   * @param zoneEvidence 当前边上联锁区的现场证据
+   * @return 当前位置等待请求
+   */
+  public OccupancyRequest buildHoldPositionRequest(
       String trainName,
       Optional<RouteId> routeId,
       NodeId currentNode,
@@ -1087,10 +1108,13 @@ public final class OccupancyRequestBuilder {
       Instant now,
       int priority,
       AuthorizationPurpose purpose,
-      Optional<MovementPlanSnapshot> movementPlan) {
+      Optional<MovementPlanSnapshot> movementPlan,
+      PositionZoneEvidence zoneEvidence) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(currentNode, "currentNode");
+    Objects.requireNonNull(movementPlan, "movementPlan");
+    Objects.requireNonNull(zoneEvidence, "zoneEvidence");
     Instant requestTime = now != null ? now : Instant.now();
     Set<OccupancyResource> resources = new LinkedHashSet<>();
     Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
@@ -1108,7 +1132,7 @@ public final class OccupancyRequestBuilder {
         addResources(
             resources,
             intents,
-            OccupancyResourceResolver.resourcesForEdge(graph, step.edge()),
+            positionResourcesForEdge(step.edge(), zoneEvidence),
             ResourceIntent.HOLD_ONLY);
       }
     }
@@ -1191,7 +1215,15 @@ public final class OccupancyRequestBuilder {
       int priority,
       AuthorizationPurpose purpose) {
     return buildCurrentPositionRequest(
-        trainName, routeId, currentNode, targetNode, now, priority, purpose, Optional.empty());
+        trainName,
+        routeId,
+        currentNode,
+        targetNode,
+        now,
+        priority,
+        purpose,
+        Optional.empty(),
+        PositionZoneEvidence.EDGE_WIDE);
   }
 
   /**
@@ -1226,10 +1258,27 @@ public final class OccupancyRequestBuilder {
         now,
         priority,
         purpose,
-        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")));
+        Optional.of(Objects.requireNonNull(movementPlan, "movementPlan")),
+        PositionZoneEvidence.EDGE_WIDE);
   }
 
-  private OccupancyRequest buildCurrentPositionRequest(
+  /**
+   * 构建当前位置保护请求，并按现场证据决定当前边上的物理联锁区。
+   *
+   * <p>当前节点与当前边的其余资源照旧保持；只有 {@code interlocking:*} 交叠格交给 {@code zoneEvidence} 判定。
+   *
+   * @param trainName 列车名
+   * @param routeId 线路 route id
+   * @param currentNode 当前图节点
+   * @param targetNode 下一目标节点
+   * @param now 请求时间
+   * @param priority 队列优先级
+   * @param purpose 授权来源
+   * @param movementPlan 本周期规范行车计划；缺失时 single 方向保持未知
+   * @param zoneEvidence 当前边上联锁区的现场证据
+   * @return 当前位置保护请求
+   */
+  public OccupancyRequest buildCurrentPositionRequest(
       String trainName,
       Optional<RouteId> routeId,
       NodeId currentNode,
@@ -1237,10 +1286,13 @@ public final class OccupancyRequestBuilder {
       Instant now,
       int priority,
       AuthorizationPurpose purpose,
-      Optional<MovementPlanSnapshot> movementPlan) {
+      Optional<MovementPlanSnapshot> movementPlan,
+      PositionZoneEvidence zoneEvidence) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(currentNode, "currentNode");
+    Objects.requireNonNull(movementPlan, "movementPlan");
+    Objects.requireNonNull(zoneEvidence, "zoneEvidence");
     Instant requestTime = now != null ? now : Instant.now();
     Set<OccupancyResource> resources = new LinkedHashSet<>();
     Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
@@ -1260,7 +1312,7 @@ public final class OccupancyRequestBuilder {
         addResources(
             resources,
             intents,
-            OccupancyResourceResolver.resourcesForEdge(graph, step.edge()),
+            positionResourcesForEdge(step.edge(), zoneEvidence),
             ResourceIntent.PROTECTIVE_RETAIN);
         pathNodes = step.nodes();
         edges = List.of(step.edge());
@@ -1294,6 +1346,14 @@ public final class OccupancyRequestBuilder {
         Map.of(),
         intents,
         Optional.of(directedContext));
+  }
+
+  /** 位置保持取当前边资源：联锁区按现场证据取舍，其余资源整条保持。 */
+  private List<OccupancyResource> positionResourcesForEdge(
+      RailEdge edge, PositionZoneEvidence zoneEvidence) {
+    return OccupancyResourceResolver.resourcesForEdge(graph, edge).stream()
+        .filter(zoneEvidence::retains)
+        .toList();
   }
 
   private DirectedTraversalContext buildProtectiveDirectedContext(

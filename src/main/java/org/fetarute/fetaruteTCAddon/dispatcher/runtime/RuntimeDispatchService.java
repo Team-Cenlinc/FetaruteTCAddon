@@ -110,6 +110,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalFootprintHydrationSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalInterlockingBerthPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PositionZoneEvidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -7975,7 +7976,8 @@ public final class RuntimeDispatchService {
             Optional.empty(),
             graph,
             now,
-            resolveRearGuardDistanceBlocks(train));
+            resolveRearGuardDistanceBlocks(train),
+            PositionZoneEvidence.EDGE_WIDE);
     if (plan.isEmpty()) {
       stopForStartupOccupancyReconstruction(train, "startup-field-request-unresolvable");
       return StartupOccupancyEvidence.incomplete();
@@ -14409,7 +14411,10 @@ public final class RuntimeDispatchService {
         nextNode,
         authorizationRequest.movementPlanSnapshot(),
         graph,
-        now);
+        now,
+        train.isMoving()
+            ? PositionZoneEvidence.EDGE_WIDE
+            : resolveLivePhysicalReleaseEvidence(trainName, train, graph).positionZones());
     dirtyEventSignals.remove(normalizeTrainKey(trainName));
     OccupancyDecision decision = occupancyManager.canEnter(authorizationRequest);
     decision =
@@ -21260,6 +21265,8 @@ public final class RuntimeDispatchService {
    * 主动维持当前位置占用。
    *
    * <p>当列车处于运行中时，当前节点/当前边必须始终保持 claim，以防调度窗口切换导致尾部资源提前释放。
+   *
+   * @param zoneEvidence 当前边上联锁区的现场证据；列车停稳且足迹完整时只保持车体压到的联锁区
    */
   private void retainCurrentPositionOccupancy(
       String trainName,
@@ -21268,7 +21275,8 @@ public final class RuntimeDispatchService {
       Optional<NodeId> nextNodeOpt,
       Optional<MovementPlanSnapshot> movementPlan,
       RailGraph graph,
-      Instant now) {
+      Instant now,
+      PositionZoneEvidence zoneEvidence) {
     if (occupancyManager == null
         || trainName == null
         || trainName.isBlank()
@@ -21288,32 +21296,18 @@ public final class RuntimeDispatchService {
               0,
               AuthorizationPurpose.RUNTIME_MOVE);
     } else {
-      OccupancyRequestBuilder builder = new OccupancyRequestBuilder(graph, 1, 0, 0, 0, debugLogger);
-      Optional<MovementPlanSnapshot> canonicalPlan =
-          movementPlan == null ? Optional.empty() : movementPlan;
       request =
-          canonicalPlan
-              .map(
-                  plan ->
-                      builder.buildCurrentPositionRequestFromPlan(
-                          trainName,
-                          Optional.ofNullable(routeId),
-                          currentNode,
-                          nextNodeOpt != null ? nextNodeOpt : Optional.empty(),
-                          now,
-                          0,
-                          AuthorizationPurpose.RUNTIME_MOVE,
-                          plan))
-              .orElseGet(
-                  () ->
-                      builder.buildCurrentPositionRequest(
-                          trainName,
-                          Optional.ofNullable(routeId),
-                          currentNode,
-                          nextNodeOpt != null ? nextNodeOpt : Optional.empty(),
-                          now,
-                          0,
-                          AuthorizationPurpose.RUNTIME_MOVE));
+          new OccupancyRequestBuilder(graph, 1, 0, 0, 0, debugLogger)
+              .buildCurrentPositionRequest(
+                  trainName,
+                  Optional.ofNullable(routeId),
+                  currentNode,
+                  nextNodeOpt != null ? nextNodeOpt : Optional.empty(),
+                  now,
+                  0,
+                  AuthorizationPurpose.RUNTIME_MOVE,
+                  movementPlan == null ? Optional.empty() : movementPlan,
+                  zoneEvidence);
     }
     occupancyManager.acquire(request);
   }
@@ -28474,6 +28468,8 @@ public final class RuntimeDispatchService {
    * 只计算停止态现场保护窗口，不读写 occupancy。
    *
    * <p>运行中 retain 与启动原子恢复共用同一份路径、方向、车长和动态节点解析，避免启动阶段以另一套简化规则重建现场。
+   *
+   * @param zoneEvidence 当前边上联锁区的现场证据；启动重建没有停稳证据，按当前边整体保持
    */
   private Optional<StopOccupancyPlan> buildStopOccupancyPlan(
       String trainName,
@@ -28483,7 +28479,8 @@ public final class RuntimeDispatchService {
       Optional<OccupancyRequest> movementRequest,
       RailGraph graph,
       Instant now,
-      long rearGuardDistanceBlocks) {
+      long rearGuardDistanceBlocks,
+      PositionZoneEvidence zoneEvidence) {
     if (trainName == null
         || trainName.isBlank()
         || route == null
@@ -28533,35 +28530,19 @@ public final class RuntimeDispatchService {
                 .map(OccupancyRequestContext::request);
     int schedulingPriority =
         canonicalRequest.map(OccupancyRequest::priority).orElse(priorityResolution.priority());
-    Optional<MovementPlanSnapshot> canonicalPlan =
-        canonicalRequest.flatMap(OccupancyRequest::movementPlanSnapshot);
-    OccupancyRequest request;
-    if (canonicalPlan.isPresent()) {
-      request =
-          builder.buildHoldPositionRequestFromPlan(
-              trainName,
-              Optional.ofNullable(route.id()),
-              resolvedCurrentNode,
-              targetNode,
-              effectiveNodes,
-              currentIndex,
-              now,
-              schedulingPriority,
-              AuthorizationPurpose.RUNTIME_MOVE,
-              canonicalPlan.get());
-    } else {
-      request =
-          builder.buildHoldPositionRequest(
-              trainName,
-              Optional.ofNullable(route.id()),
-              resolvedCurrentNode,
-              targetNode,
-              effectiveNodes,
-              currentIndex,
-              now,
-              schedulingPriority,
-              AuthorizationPurpose.RUNTIME_MOVE);
-    }
+    OccupancyRequest request =
+        builder.buildHoldPositionRequest(
+            trainName,
+            Optional.ofNullable(route.id()),
+            resolvedCurrentNode,
+            targetNode,
+            effectiveNodes,
+            currentIndex,
+            now,
+            schedulingPriority,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            canonicalRequest.flatMap(OccupancyRequest::movementPlanSnapshot),
+            zoneEvidence);
     return Optional.of(
         new StopOccupancyPlan(
             resolvedCurrentNode,
@@ -28648,7 +28629,8 @@ public final class RuntimeDispatchService {
             movementRequest,
             graph,
             now,
-            rearGuardDistanceBlocks);
+            rearGuardDistanceBlocks,
+            livePhysicalEvidence.positionZones());
     if (planOpt.isEmpty()) {
       return false;
     }
@@ -28810,7 +28792,7 @@ public final class RuntimeDispatchService {
                 + resolution.reason());
         return LivePhysicalReleaseEvidence.incomplete();
       }
-      return LivePhysicalReleaseEvidence.complete(resolution.resources());
+      return LivePhysicalReleaseEvidence.complete(resolution.resources(), !train.isMoving());
     } catch (RuntimeException | LinkageError ex) {
       debugLogger.accept(
           "SMART_LIVE_FOOTPRINT_READ_FAILED train="
@@ -28988,20 +28970,32 @@ public final class RuntimeDispatchService {
     return Set.copyOf(retained);
   }
 
-  /** 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。 */
+  /**
+   * 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。
+   *
+   * @param stationary 读取足迹时列车已停稳；制动中车头仍可能压进前方联锁区
+   */
   private record LivePhysicalReleaseEvidence(
-      boolean required, boolean complete, Set<OccupancyResource> resources) {
+      boolean required, boolean complete, boolean stationary, Set<OccupancyResource> resources) {
 
     private LivePhysicalReleaseEvidence {
       resources = resources == null ? Set.of() : Set.copyOf(resources);
     }
 
     private static LivePhysicalReleaseEvidence incomplete() {
-      return new LivePhysicalReleaseEvidence(true, false, Set.of());
+      return new LivePhysicalReleaseEvidence(true, false, false, Set.of());
     }
 
-    private static LivePhysicalReleaseEvidence complete(Set<OccupancyResource> resources) {
-      return new LivePhysicalReleaseEvidence(true, true, resources);
+    private static LivePhysicalReleaseEvidence complete(
+        Set<OccupancyResource> resources, boolean stationary) {
+      return new LivePhysicalReleaseEvidence(true, true, stationary, resources);
+    }
+
+    /** 位置保持对当前边联锁区的依据：停稳且足迹完整才跟随现场，否则按当前边整体保持。 */
+    private PositionZoneEvidence positionZones() {
+      return complete && stationary
+          ? PositionZoneEvidence.stationaryFootprint(resources)
+          : PositionZoneEvidence.EDGE_WIDE;
     }
   }
 
