@@ -21817,6 +21817,9 @@ public final class RuntimeDispatchService {
           resolveHeadProgressBlocks(
               train, graph, effectiveNodes.get(currentIndex), effectiveNodes.get(currentIndex + 1));
     }
+    minDistanceBlocks =
+        capHardAuthorityAtPlannedStop(
+            graph, route, effectiveNodes, currentIndex, minDistanceBlocks);
     Optional<OccupancyRequestContext> context =
         buildHardAuthorityWindow(
             graph,
@@ -21853,6 +21856,47 @@ public final class RuntimeDispatchService {
         purpose,
         0L,
         minConflictExitDistanceBlocks);
+  }
+
+  /**
+   * 硬授权窗口不越过前方第一个计划停车点。
+   *
+   * <p>列车反正要在那里停（车站由 AutoStation 停车，STOP 路径点按 dwell 停车），站台之后的资源发车前用不到；窗口越过站台时，
+   * 前车留在站台之后的尾部保护会把本车挡在站外，站台明明空着。实服 2026-09-27：MT 进 SPB:1 前被前车留在 PTK:SPB:1:002 的尾部保护挡住，
+   * 0245/8312/2989/4909 各等 29/26/22/143 秒，4909 那 143 秒把后车 6727 堵在汇合岔上，引出了 SPB 汇合岔互等。停着也要余量之前，
+   * 停着的车只要一条边，能先挪进站台；行进中的车则先被挡停、再挪进去。
+   *
+   * <p>距离沿有效 route 节点逐段取最短路，从当前图节点起算，与 {@code minDistanceBlocks} 同一个起点。停车点落在最小距离之外、
+   * 或中途任一段距离读不到时原样返回。列车停稳时车头越过站台节点半个车长，与挪进站台时相同；停车保持随后接管当前边。
+   *
+   * @return 封顶后的最小距离；前方没有更近的计划停车点时为原值
+   */
+  private long capHardAuthorityAtPlannedStop(
+      RailGraph graph,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      int currentIndex,
+      long minDistanceBlocks) {
+    if (minDistanceBlocks <= 0L || route == null || currentIndex < 0) {
+      return minDistanceBlocks;
+    }
+    long distance = 0L;
+    for (int index = currentIndex + 1; index < effectiveNodes.size(); index++) {
+      OptionalLong step =
+          resolveShortestDistance(graph, effectiveNodes.get(index - 1), effectiveNodes.get(index));
+      if (step.isEmpty()) {
+        return minDistanceBlocks;
+      }
+      distance += step.getAsLong();
+      if (distance >= minDistanceBlocks) {
+        return minDistanceBlocks;
+      }
+      Optional<RouteStop> stop = routeDefinitions.findStop(route.id(), index);
+      if (stop.isPresent() && stop.get().passType() != RouteStopPassType.PASS && distance > 0L) {
+        return distance;
+      }
+    }
+    return minDistanceBlocks;
   }
 
   /** 按给定的最小距离构建硬授权窗口；最短一条边，并受物理联锁出口泊位约束。 */
