@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bukkit.event.Event;
+import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainArriveStationEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHealthAlertEvent;
@@ -205,6 +206,47 @@ class ApiEventBridgeTest {
       bridge.onTrainReleased("T" + i, "x");
     }
     assertEquals(5L, bridge.droppedEvents());
+  }
+
+  @Test
+  void stationGroupChangesAreDeferredToNextTick() {
+    ApiEventBridge bridge = bridge(true);
+    UUID group = UUID.randomUUID();
+    UUID company = UUID.randomUUID();
+    UUID station = UUID.randomUUID();
+
+    bridge.onStationGroupChanged(
+        StationGroupChangedEvent.ChangeType.MEMBER_ADDED,
+        group,
+        company,
+        "PPK",
+        Optional.of(station),
+        42L);
+    assertTrue(fired.isEmpty(), "命令里只入队，不直接调用外部监听器");
+
+    bridge.tick();
+    StationGroupChangedEvent event = assertInstanceOf(StationGroupChangedEvent.class, fired.get(0));
+    assertEquals(StationGroupChangedEvent.ChangeType.MEMBER_ADDED, event.getChangeType());
+    assertEquals(group, event.getGroupId());
+    assertEquals(company, event.getCompanyId());
+    assertEquals("PPK", event.getGroupCode());
+    assertEquals(Optional.of(station), event.getStationId());
+    assertEquals(42L, event.getDataRevision());
+    assertTrue(!event.isAsynchronous(), "同步事件");
+  }
+
+  @Test
+  void stationGroupChangesAreSkippedWithoutListeners() {
+    ApiEventBridge bridge = bridge(false);
+    bridge.onStationGroupChanged(
+        StationGroupChangedEvent.ChangeType.DELETED,
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        "PPK",
+        Optional.empty(),
+        1L);
+    bridge.tick();
+    assertTrue(fired.isEmpty());
   }
 
   private static TimetableAssignment assignment(UUID trip, String code) {

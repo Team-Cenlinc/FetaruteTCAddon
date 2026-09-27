@@ -125,6 +125,25 @@ public final class JdbcStationRepository extends JdbcRepositorySupport
   }
 
   @Override
+  public List<Station> listAll() {
+    String sql =
+        "SELECT id, code, operator_id, primary_line_id, name, secondary_name, world, x, y, z, yaw, pitch, graph_node_id, amenities, metadata, created_at, updated_at FROM "
+            + table("stations")
+            + " ORDER BY code ASC";
+    List<Station> results = new ArrayList<>();
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql);
+        var rs = statement.executeQuery()) {
+      while (rs.next()) {
+        results.add(mapRow(rs));
+      }
+      return results;
+    } catch (SQLException ex) {
+      throw new StorageException("列出全部站点失败", ex);
+    }
+  }
+
+  @Override
   public Station save(Station station) {
     Objects.requireNonNull(station, "station");
     String insert =
@@ -165,12 +184,23 @@ public final class JdbcStationRepository extends JdbcRepositorySupport
 
   @Override
   public void delete(UUID id) {
-    String sql = "DELETE FROM " + table("stations") + " WHERE id = ?";
-    try (var connection = openConnection();
-        var statement = connection.prepareStatement(sql)) {
-      setUuid(statement, 1, id);
-      statement.executeUpdate();
-      connection.commitIfNecessary();
+    // 车站组成员随车站删除：外键级联只在 SQLite 开了 foreign_keys 时生效，这里显式删一遍。
+    try {
+      inTransaction(
+          connection -> {
+            try (var statement =
+                connection.prepareStatement(
+                    "DELETE FROM " + table("station_group_members") + " WHERE station_id = ?")) {
+              setUuid(statement, 1, id);
+              statement.executeUpdate();
+            }
+            try (var statement =
+                connection.prepareStatement("DELETE FROM " + table("stations") + " WHERE id = ?")) {
+              setUuid(statement, 1, id);
+              statement.executeUpdate();
+            }
+            return null;
+          });
     } catch (SQLException ex) {
       throw new StorageException("删除站点失败", ex);
     }
@@ -223,11 +253,13 @@ public final class JdbcStationRepository extends JdbcRepositorySupport
     String name = rs.getString("name");
     String secondaryName = rs.getString("secondary_name");
     String world = rs.getString("world");
-    Double x = rs.getObject("x", Double.class);
-    Double y = rs.getObject("y", Double.class);
-    Double z = rs.getObject("z", Double.class);
-    Double yaw = rs.getObject("yaw", Double.class);
-    Double pitch = rs.getObject("pitch", Double.class);
+    // 坐标可为空（未设置位置或 --location-clear）：SQLite 驱动对 NULL 调 getObject(col, Double.class) 会抛异常，
+    // 一个没有坐标的车站就会让整个运营商的车站列表读不出来。
+    Double x = readNullableDouble(rs, "x");
+    Double y = readNullableDouble(rs, "y");
+    Double z = readNullableDouble(rs, "z");
+    Double yaw = readNullableDouble(rs, "yaw");
+    Double pitch = readNullableDouble(rs, "pitch");
     String graphNodeId = rs.getString("graph_node_id");
     String amenitiesJson = rs.getString("amenities");
     Map<String, Object> metadata = fromJson(rs.getString("metadata"));

@@ -6043,7 +6043,15 @@ public final class FtaGraphCommand {
                 java.util.function.Consumer<String> debug =
                     plugin.getLoggerManager() != null ? plugin.getLoggerManager()::debug : m -> {};
                 StationAutoSyncService sync = new StationAutoSyncService(debug);
-                sync.syncFromRailNodes(provider, worldName, nodes);
+                StationAutoSyncService.StationAutoSyncResult result =
+                    sync.syncFromRailNodes(provider, worldName, nodes);
+                if (result.created() > 0 || result.updated() > 0) {
+                  // 新建/补全了车站：回主线程刷新车站目录（停靠点站名、停靠线路随之更新）。
+                  plugin
+                      .getServer()
+                      .getScheduler()
+                      .runTask(plugin, plugin::refreshStationDirectory);
+                }
               } catch (Exception ex) {
                 plugin.getLogger().warning("站点自愈失败: " + ex.getMessage());
               }

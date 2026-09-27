@@ -9,6 +9,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
@@ -81,6 +82,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public StationRepository stations() {
     return unsupported(StationRepository.class);
+  }
+
+  @Override
+  public StationGroupRepository stationGroups() {
+    return unsupported(StationGroupRepository.class);
   }
 
   @Override

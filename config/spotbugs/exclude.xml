@@ -162,6 +162,12 @@
         <Class name="org.fetarute.fetaruteTCAddon.utils.ConfigUpdater"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <!-- 车站目录持有共享的交路缓存（注册变更监听），不是防御性拷贝的对象 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.company.api.StationDirectory"/>
+        <Method name="&lt;init&gt;"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
 
     <!-- 使用表前缀动态组装 SQL，表名来自白名单，安全性由代码保证 -->
     <Match>
@@ -233,8 +239,25 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationGroupRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManager"/>
         <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
+
+    <!-- 测试存储按生产建表语句（带表前缀）建表 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.TransitTestStorage"/>
+        <Method name="init"/>
+        <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
+    <!-- 用 Mockito Connection/PreparedStatement 截取 MySQL 方言下生成的 SQL，不会打开真实数据库资源。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.StationGroupRepositoryTest"/>
+        <Method name="mySqlWritesNeverUseDuplicateKeyUpsert"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION,SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
 
     <!-- 测试夹具在 setUp 中清理测试文件，空值路径已由 JUnit 环境保障 -->

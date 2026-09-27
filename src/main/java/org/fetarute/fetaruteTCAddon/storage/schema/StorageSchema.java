@@ -48,6 +48,8 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("lines_code", "lines", "operator_id, code"));
     ddl.add(stations(dialect));
     ddl.add(uniqueIndex("stations_code", "stations", "operator_id, code"));
+    ddl.add(stationGroups(dialect));
+    ddl.add(stationGroupMembers(dialect));
     ddl.add(routes(dialect));
     ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
     ddl.add(routeStops(dialect));
@@ -297,6 +299,64 @@ public final class StorageSchema {
         dialect.timestampType(),
         table("operators"),
         table("lines"));
+  }
+
+  /**
+   * 车站组（乘客视角的换乘站）。
+   *
+   * <p>唯一约束写在表内而不是单独的 {@code CREATE INDEX IF NOT EXISTS}：后者 MySQL 不支持，表内 {@code UNIQUE} 两种后端都能建。
+   */
+  private String stationGroups(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    code %s NOT NULL,
+                    name %s NOT NULL,
+                    secondary_name %s,
+                    metadata %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (company_id, code),
+                    FOREIGN KEY (company_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("station_groups"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("companies"));
+  }
+
+  /** 车站组成员；{@code station_id} 全局唯一，即一个车站最多属于一个组。 */
+  private String stationGroupMembers(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    group_id %s NOT NULL,
+                    station_id %s NOT NULL UNIQUE,
+                    transfer_type %s NOT NULL DEFAULT 'IN_STATION',
+                    walk_secs %s,
+                    sort_order %s NOT NULL DEFAULT 0,
+                    PRIMARY KEY (group_id, station_id),
+                    FOREIGN KEY (group_id) REFERENCES %s(id) ON DELETE CASCADE,
+                    FOREIGN KEY (station_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("station_group_members"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        table("station_groups"),
+        table("stations"));
   }
 
   private String routes(SqlDialect dialect) {

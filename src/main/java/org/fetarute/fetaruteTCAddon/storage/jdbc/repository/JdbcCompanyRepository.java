@@ -130,12 +130,35 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
 
   @Override
   public void delete(UUID id) {
-    String sql = "DELETE FROM " + table("companies") + " WHERE id = ?";
-    try (var connection = openConnection();
-        var statement = connection.prepareStatement(sql)) {
-      setUuid(statement, 1, id);
-      statement.executeUpdate();
-      connection.commitIfNecessary();
+    // 车站组与成员显式删除，不依赖 PRAGMA foreign_keys 的级联（同 JdbcTimetableRepository#delete）：
+    // 组内可能有别家公司的车站，成员也要随组一起删；本公司车站在别家组里的成员随车站一起删。
+    List<String> statements =
+        List.of(
+            "DELETE FROM "
+                + table("station_group_members")
+                + " WHERE group_id IN (SELECT id FROM "
+                + table("station_groups")
+                + " WHERE company_id = ?)",
+            "DELETE FROM "
+                + table("station_group_members")
+                + " WHERE station_id IN (SELECT s.id FROM "
+                + table("stations")
+                + " s JOIN "
+                + table("operators")
+                + " o ON s.operator_id = o.id WHERE o.company_id = ?)",
+            "DELETE FROM " + table("station_groups") + " WHERE company_id = ?",
+            "DELETE FROM " + table("companies") + " WHERE id = ?");
+    try {
+      inTransaction(
+          connection -> {
+            for (String sql : statements) {
+              try (var statement = connection.prepareStatement(sql)) {
+                setUuid(statement, 1, id);
+                statement.executeUpdate();
+              }
+            }
+            return null;
+          });
     } catch (SQLException ex) {
       throw new StorageException("删除公司失败", ex);
     }

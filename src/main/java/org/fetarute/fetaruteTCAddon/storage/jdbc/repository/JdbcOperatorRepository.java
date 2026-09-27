@@ -125,12 +125,25 @@ public final class JdbcOperatorRepository extends JdbcRepositorySupport
 
   @Override
   public void delete(UUID id) {
-    String sql = "DELETE FROM " + table("operators") + " WHERE id = ?";
-    try (var connection = openConnection();
-        var statement = connection.prepareStatement(sql)) {
-      setUuid(statement, 1, id);
-      statement.executeUpdate();
-      connection.commitIfNecessary();
+    // 本运营商车站的车站组成员显式删除，不依赖 PRAGMA foreign_keys 的级联（同 JdbcTimetableRepository#delete）。
+    String members =
+        "DELETE FROM "
+            + table("station_group_members")
+            + " WHERE station_id IN (SELECT id FROM "
+            + table("stations")
+            + " WHERE operator_id = ?)";
+    String operator = "DELETE FROM " + table("operators") + " WHERE id = ?";
+    try {
+      inTransaction(
+          connection -> {
+            for (String sql : List.of(members, operator)) {
+              try (var statement = connection.prepareStatement(sql)) {
+                setUuid(statement, 1, id);
+                statement.executeUpdate();
+              }
+            }
+            return null;
+          });
     } catch (SQLException ex) {
       throw new StorageException("删除运营商失败", ex);
     }

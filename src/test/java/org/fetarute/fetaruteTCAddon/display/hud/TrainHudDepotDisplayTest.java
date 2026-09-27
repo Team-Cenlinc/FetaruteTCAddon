@@ -6,12 +6,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -26,9 +28,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.TransitTestStorage;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** 线路终点落在车库时：同代码车站名 + 车库（用户定：“有点像 LWN concatenate depot”）。 */
 class TrainHudDepotDisplayTest {
@@ -122,6 +126,32 @@ class TrainHudDepotDisplayTest {
     assertEquals("林湾车库", display.label());
     assertEquals("Lym Won Depot", display.lang2());
     assertEquals("LWN", display.code());
+  }
+
+  @Test
+  void stationLookupGoesThroughTheSharedStationDirectory(@TempDir Path dir) throws Exception {
+    // HUD 按运营商代码 + 站码找车站走车站目录：与公开 API 同一个索引，两边不会给出不同的车站。
+    try (TransitTestStorage storage = TransitTestStorage.open(dir)) {
+      var operator = storage.operator(storage.company("SURC"), "SURC", null);
+      storage.station(operator, "LWN", "林湾");
+      StationDirectory directory = new StationDirectory(null, message -> {});
+      directory.reload(storage.provider());
+      TrainHudContextResolver resolver = resolverWithStation(null, "SURC");
+      FetaruteTCAddon plugin = pluginOf(resolver);
+      when(plugin.getStationDirectory()).thenReturn(Optional.of(directory));
+
+      TrainHudContext.StationDisplay display =
+          depotDisplay(resolver, new RouteTerminals.StationRef("SURC", "LWN", "SURC:D:LWN:1"));
+
+      // HUD 自己的缓存里没有这个站（mock 仓库为空），能拿到站名说明走的是目录。
+      assertEquals("林湾车库", display.label());
+    }
+  }
+
+  private static FetaruteTCAddon pluginOf(TrainHudContextResolver resolver) throws Exception {
+    java.lang.reflect.Field field = TrainHudContextResolver.class.getDeclaredField("plugin");
+    field.setAccessible(true);
+    return (FetaruteTCAddon) field.get(resolver);
   }
 
   @Test

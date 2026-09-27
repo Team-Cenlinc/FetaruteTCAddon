@@ -259,6 +259,7 @@ public final class FtaLineCommand {
                           now,
                           now);
                   provider.lines().save(line);
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.line.create.success",
@@ -608,6 +609,7 @@ public final class FtaLineCommand {
                           line.createdAt(),
                           Instant.now());
                   provider.lines().save(updated);
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component("command.line.set.success", Map.of("code", line.code())));
                 }));
@@ -785,6 +787,7 @@ public final class FtaLineCommand {
                           line.createdAt(),
                           Instant.now());
                   provider.lines().save(updatedLine);
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.line.depot.add.success",
@@ -880,6 +883,7 @@ public final class FtaLineCommand {
                           line.createdAt(),
                           Instant.now());
                   provider.lines().save(updatedLine);
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.line.depot.remove.success",
@@ -948,6 +952,7 @@ public final class FtaLineCommand {
 
                   // 线路删除属于危险操作，命令层已要求 --confirm；数据库侧会 cascade 清理下游（如 routes）。
                   provider.lines().delete(line.id());
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component("command.line.delete.success", Map.of("code", line.code())));
                 }));
