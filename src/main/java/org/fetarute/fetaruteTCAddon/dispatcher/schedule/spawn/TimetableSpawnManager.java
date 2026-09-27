@@ -377,7 +377,12 @@ public final class TimetableSpawnManager
       return Optional.empty();
     }
     String tripId =
-        "TIMETABLE-" + due.timetable().code() + "-" + due.code() + "-" + due.serviceDate();
+        SpawnTicket.TIMETABLE_TRIP_PREFIX
+            + due.timetable().code()
+            + "-"
+            + due.code()
+            + "-"
+            + due.serviceDate();
     return Optional.of(
         new SpawnTicket(
             UUID.randomUUID(),
@@ -414,7 +419,7 @@ public final class TimetableSpawnManager
     Optional<String> depotOverride =
         due.timetable().routePlan(routeId).flatMap(plan -> plan.depotNodeId());
     String tripId =
-        "TIMETABLE-"
+        SpawnTicket.TIMETABLE_TRIP_PREFIX
             + due.timetable().code()
             + "-"
             + due.trip().tripCode()

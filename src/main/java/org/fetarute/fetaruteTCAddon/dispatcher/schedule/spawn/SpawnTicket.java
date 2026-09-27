@@ -128,8 +128,20 @@ public record SpawnTicket(
     source = source == null ? TripSource.SCHEDULED : source;
   }
 
+  /** 表定车次票据的 {@code serviceTripId} 前缀（{@link TimetableSpawnManager} 出的票）。 */
+  public static final String TIMETABLE_TRIP_PREFIX = "TIMETABLE-";
+
   public Instant scheduledTime() {
     return dueAt;
+  }
+
+  /**
+   * 这张票是不是按表出的：何时发车由时刻表决定，编表时已经过冲突检查。
+   *
+   * <p>按表运行与按间隔发车的票都标 {@link TripSource#SCHEDULED}，只能靠车次号区分。
+   */
+  public boolean timetableDriven() {
+    return serviceTripId.map(id -> id.startsWith(TIMETABLE_TRIP_PREFIX)).orElse(false);
   }
 
   /**

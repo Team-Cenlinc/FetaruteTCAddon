@@ -590,6 +590,14 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 
 见 `config.yml` 的 `timetable:` 段，所有开关默认关闭。直通车滞留兜底用的 `reclaim.stranded-destroy-seconds` 不在本段，它属于 `reclaim:` 段（整段默认 `enabled: false`），见 `reclaim-policy.md`。
 
+按表运行与发车准入（2026-09-27）：
+- **表定车次不受拥堵闸门约束**（`SpawnTicket#timetableDriven`，车次号带 `TIMETABLE-` 前缀）：何时发车由时刻表决定，编表时已经过冲突检查；
+  拥堵闸门排在复用在网车之前，扣下表定班次会把折返的车留在终点。按间隔发车的线路照旧受它约束。
+- **`spawn.max-active-trains` 仍然管住表定出库**：必须高于表的峰值同时在网车数（build 报告"峰值同时在线"），否则顶到时新造车被推迟，
+  推迟超过 `assign-tolerance-seconds` 的班次作废。它是保护性天花板，不是调度手段。
+- **`reclaim.enabled` 建议打开**：没绑上车次的自由运行车只能靠闲置回收回库，关着时它们跑完就停在终点，单股道尽头会被堵死。
+- **`timetable.hold-max-seconds` 不能低于喂车多停上限（60 秒）**：多停靠运行时早到等点执行，上限更低时车不等就走，早到端点撞前车。
+
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 按表运行总开关 |

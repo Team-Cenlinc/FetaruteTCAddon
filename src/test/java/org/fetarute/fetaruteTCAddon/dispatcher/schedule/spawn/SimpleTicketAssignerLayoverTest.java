@@ -65,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -3196,6 +3197,69 @@ class SimpleTicketAssignerLayoverTest {
     // 但"拦了多少次"必须仍然可数。
     assertEquals(
         1L, assigner.snapshotDiagnostics().requeueByError().getOrDefault("congestion-hold", 0L));
+  }
+
+  /**
+   * 表定车次不受拥堵闸门约束：与上一条同样的拥堵现场，票换成按表出的（车次号带 {@code TIMETABLE-} 前缀），就不该因拥堵被扣。
+   *
+   * <p>何时发车由时刻表决定，编表时已经过冲突检查；拥堵闸门排在复用在网车之前，扣下表定班次会把折返的车留在终点。
+   */
+  @Test
+  void timetableTicketIsNotHeldByTheCongestionGate() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket headway = buildTicket(routeId, lineId, "R1", 0L);
+    SpawnTicket ticket =
+        new SpawnTicket(
+            headway.id(),
+            headway.service(),
+            headway.dueAt(),
+            headway.notBefore(),
+            headway.firstDueAt(),
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(SpawnTicket.TIMETABLE_TRIP_PREFIX + "SURC-Composed-R1-001-2026-09-27"),
+            TripSource.SCHEDULED,
+            0);
+    assertTrue(ticket.timetableDriven());
+    assertFalse(headway.timetableDriven(), "按间隔出的票没有车次号");
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "R1", RouteOperationType.OPERATION, "SURN:D:DEPOT:1", "B");
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of(congestedEdgeClaim()));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(congestedProgressEntries(routeId, "OP:L1:R1"));
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    assertEquals(
+        0L,
+        assigner.snapshotDiagnostics().requeueByError().getOrDefault("congestion-hold", 0L),
+        "表定车次不该被拥堵闸门扣下");
   }
 
   @Test

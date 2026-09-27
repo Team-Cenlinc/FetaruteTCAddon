@@ -1485,7 +1485,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
 
-    if (shouldHoldByCongestion(provider, service, line, routeEntity, route, now)) {
+    if (shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
       // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
       // 这个隐患此前一直存在，只是拥堵闸门从未触发过一次，所以没人撞上。
       deferByGate(ticket, now, "congestion-hold");
@@ -1673,6 +1673,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private boolean shouldHoldByCongestion(
       StorageProvider provider,
+      SpawnTicket ticket,
       SpawnService service,
       Line line,
       Route routeEntity,
@@ -1700,6 +1701,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                 + " key="
                 + returnKey
                 + " reason=operation-type-return");
+      }
+      return false;
+    }
+    if (ticket != null && ticket.timetableDriven()) {
+      // 表定车次不受拥堵闸门约束：何时发车由时刻表决定，编表时已经过冲突检查；拥堵评分是按间隔发车时代的吞吐启发式，
+      // 不管行车安全（安全由占用与联锁负责）。它排在复用在网车之前，拦下表定班次会把折返的车扣在终点——
+      // 单股道尽头（CHT:3）一扣就堵死整条线。实服间隔发车十来辆车时评分已到 0.564（阈值 0.58），
+      // 按表 35 辆车时全网压力一项就会顶满。全网硬上限（max-active-trains）照旧生效。
+      String timetableKey = buildCongestionGateKey(service) + "|timetable";
+      if (congestionScoreReported.put(timetableKey, "timetable-exempt") == null) {
+        debugLogger.accept(
+            "SMART_SPAWN_CONGESTION_EXEMPT line="
+                + line.code()
+                + " route="
+                + routeEntity.code()
+                + " key="
+                + timetableKey
+                + " reason=timetable-trip");
       }
       return false;
     }
