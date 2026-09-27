@@ -4,6 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
@@ -372,5 +383,51 @@ class ConfigManagerTest {
         ConfigManager.parse(both, Logger.getLogger("config-test")).spawnSettings();
     assertEquals(24, explicit.maxActiveTrains());
     assertEquals(20, explicit.congestionNetworkReferenceTrains(), "显式写了就用写的值");
+  }
+
+  /**
+   * 内置模板的 {@code config-version} 必须就是解析器期望的版本。
+   *
+   * <p>{@code ConfigUpdater} 合并时总把版本号写成模板值，所以两者一旦错开，每次起服与重载都会报一条"不匹配"。 {@code b41c1ac} 把模板升到 34
+   * 时就漏改了期望值，直到对照实服才发现。这条让下一次升模板时当场变红。
+   */
+  @Test
+  void bundledTemplateMatchesTheExpectedVersion() throws IOException {
+    YamlConfiguration template;
+    try (InputStream in =
+            Objects.requireNonNull(
+                ConfigManagerTest.class.getClassLoader().getResourceAsStream("config.yml"));
+        Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
+      template = YamlConfiguration.loadConfiguration(reader);
+    }
+    List<String> warnings = new ArrayList<>();
+    Handler capture =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            if (record.getLevel() == Level.WARNING) {
+              warnings.add(record.getMessage());
+            }
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    Logger logger = Logger.getAnonymousLogger();
+    logger.setUseParentHandlers(false);
+    logger.addHandler(capture);
+    try {
+      ConfigManager.parse(template, logger);
+    } finally {
+      logger.removeHandler(capture);
+    }
+
+    assertTrue(template.getInt("config-version") > 0, "前置：模板里应当写着 config-version");
+    assertTrue(
+        warnings.stream().noneMatch(message -> message.contains("config-version")),
+        () -> "内置模板的版本与解析器期望的不一致：" + warnings);
   }
 }
