@@ -472,6 +472,13 @@ baseline 是目标不是硬约束：排出来有冲突时先等比放宽到可�
 `--end` 是**运营结束**而不是末班发车：每一班按名义发车时刻算须在它之前跑完（全程长的 route 在窗口末尾自然被挤出）。
 端点串行与让车只往后推，所以末班的实际到达、以及之后的回库可能略晚于 `--end`（2026-09-26 草稿：WS 末班 23:00:54 到、回库 23:04:57）。
 
+**构建耗时。** 几乎全部花在让车修复（`ResourceRepair`）：目标间隔排不开时要修上千处冲突，每修一处就要重投影那条交路、重扫它碰过的资源。
+2026-09-27 做了三件事，实服三线联编（含逐组收紧）从 226 秒降到 28 秒，产物逐字不变：
+重扫只扫被改动的时段（`TimetableConflictChecker.Window`：改动只影响"后到占用在改动时段 + 裕量内进入"的冲突，繁忙区间的桶是全天几千条占用）；
+每条 route 的占用足迹只算一次，投影一趟车就是平移（`TimetableConflictChecker.Footprint`，不再逐条现拼资源键）；
+修复循环里 code → 班次/交路的映射记下来。增量与全量重扫的等价由 `ResourceRepairDifferentialTest`（随机种子）与
+`ResourceRepairChainTest.incrementalRepairEqualsFullRescan` 钉住。剩下的大头是每一轮挑下一处让车时要遍历全表冲突。
+
 **写库不上主线程。** build 落库、publish、unpublish、delete 都在异步线程里用一个事务写完，写完刷新已发布时刻表缓存，再回主线程发提示。
 一张表就是几千行车次与交路：原先在主线程逐行自动提交，实服库副本上三张草稿（4058 趟、1395 个交路）要 3.0–3.4 秒，整服 TPS 跟着掉；
 一个事务 40 毫秒。publish/unpublish 只翻状态（`TimetableRepository#updateStatus`），不再把车次删掉重插。

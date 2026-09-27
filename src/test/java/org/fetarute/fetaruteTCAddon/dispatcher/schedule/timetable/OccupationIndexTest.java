@@ -94,7 +94,7 @@ class OccupationIndexTest {
     assertEquals(expected, actual);
   }
 
-  /** 换掉一辆车只动它自己的资源：没被返回的资源键上，冲突一条不变。 */
+  /** 换掉一辆车只动它自己的资源、自己的时段：没被返回的资源键上，冲突一条不变；返回的资源上，时段之外的冲突也一条不变。 按时段重扫得到的，正好是全扫里落在时段内的那些。 */
   @Test
   void replaceVehicleTouchesOnlyItsResources() {
     List<TimetableConflictChecker.Movement> movements = movements();
@@ -104,7 +104,7 @@ class OccupationIndexTest {
         byResource(occupations.scanAll(SEPARATION));
 
     // D002 那辆车整体后移 200 s：班次 T2 与它在 B:1 的待命一起挪。
-    Set<String> touched =
+    Map<String, TimetableConflictChecker.Window> touched =
         occupations.replaceVehicle(
             "|D002",
             List.of(new TimetableConflictChecker.Movement("T2", rb, 205)),
@@ -113,13 +113,11 @@ class OccupationIndexTest {
     Map<String, List<TimetableConflictChecker.Conflict>> after =
         byResource(occupations.scanAll(SEPARATION));
     for (String key : union(before.keySet(), after.keySet())) {
-      if (touched.contains(key)) {
-        continue;
-      }
+      TimetableConflictChecker.Window window = touched.get(key);
       assertEquals(
-          before.getOrDefault(key, List.of()),
-          after.getOrDefault(key, List.of()),
-          () -> "没被返回的资源 " + key + " 上的冲突不该变");
+          outside(before.getOrDefault(key, List.of()), window),
+          outside(after.getOrDefault(key, List.of()), window),
+          () -> "资源 " + key + " 上时段之外的冲突不该变");
     }
     // 换完之后索引与从头投影一遍等价。
     List<TimetableConflictChecker.Movement> replaced = new ArrayList<>();
@@ -140,15 +138,25 @@ class OccupationIndexTest {
         TimetableConflictChecker.check(
             index, profiles, replaced, replacedStays, SEPARATION, vehicleOf),
         occupations.scanAll(SEPARATION));
-    // 只扫被碰过的资源，得到的就是那些资源上的全部冲突。
+    // 只扫被碰过的资源上被改动的时段，得到的就是全扫里落在这些时段内的冲突。
     TimetableConflictChecker.Report partial = occupations.scan(touched, SEPARATION);
     List<TimetableConflictChecker.Conflict> expected = new ArrayList<>();
     for (TimetableConflictChecker.Conflict conflict : occupations.scanAll(SEPARATION).conflicts()) {
-      if (touched.contains(conflict.resource())) {
+      TimetableConflictChecker.Window window = touched.get(conflict.resource());
+      if (window != null && window.covers(conflict, SEPARATION)) {
         expected.add(conflict);
       }
     }
+    assertFalse(expected.isEmpty(), "前置：挪完之后时段内要有冲突，否则这条断言什么也没证明");
     assertEquals(expected, partial.conflicts());
+  }
+
+  /** 时段之外的冲突；没有时段（资源没被碰到）就是全部。 */
+  private static List<TimetableConflictChecker.Conflict> outside(
+      List<TimetableConflictChecker.Conflict> conflicts, TimetableConflictChecker.Window window) {
+    return window == null
+        ? conflicts
+        : conflicts.stream().filter(conflict -> !window.covers(conflict, SEPARATION)).toList();
   }
 
   // ------------------------------------------------------------------ 夹具

@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -32,8 +33,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Neighbor
  * 单步判据会把"一串小让车各挪二十秒"的每一步都拒掉——每一步单独看都不减少冲突，合起来才减少；实测 WS@300 的一千九百处残余没有一处是预算问题，全是这个。
  * 段末仍要求冲突总数严格减少，所以修复只朝一个方向走，循环必然终止。 回滚时判死的是<b>挪不动的那一步</b>（没有就是开段的那一处），而不是无差别地怪开段。
  *
- * <p>重扫是增量的（{@link OccupationIndex}）：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源。 返回的 {@code remaining}
- * 另外做一次全量重扫，与 builder 最后那一遍同一口径。
+ * <p>重扫是增量的（{@link OccupationIndex}）：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源上被改动的时段。 返回的 {@code
+ * remaining} 另外做一次全量重扫，与 builder 最后那一遍同一口径。
  *
  * <p>确定性：冲突按检查器的稳定序取第一处可修的；延后量由时刻算出；不引入随机源、不依赖哈希遍历序。
  */
@@ -145,7 +146,7 @@ public final class ResourceRepair {
 
   /** 重扫方式。增量是生产路径；全量是它的参照物，只在等价性用例里走到。 */
   enum Rescan {
-    /** 只重投影被改的那条交路、只重扫它碰过的资源。 */
+    /** 只重投影被改的那条交路、只重扫它碰过的资源上被改动的时段。 */
     INCREMENTAL,
     /** 每次都把整张表重新投影再全扫。 */
     FULL
@@ -539,9 +540,9 @@ public final class ResourceRepair {
   /**
    * 修复循环的重扫。
    *
-   * <p>增量：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源，别的资源沿用上一次的结果。冲突按资源存着 （{@code
+   * <p>增量：一处让车只改一条交路，于是只重投影那条交路、只重扫它前后碰过的资源上被改动的时段，别的资源与时段外的冲突沿用上一次的结果。冲突按资源存着 （{@code
    * byResource}）而不是存成一张排好序的报告：全表上千条冲突，每一步合并加排序的开销比重扫本身还大，
-   * 而循环真正要的只有三样——总数、全体（数真冲突用）、<b>这一步新冒出来的那几条</b>。 只有被碰过的资源上的冲突会变，差集也就只能出在那里。
+   * 而循环真正要的只有三样——总数、全体（数真冲突用）、<b>这一步新冒出来的那几条</b>。 只有被碰过的资源上、改动时段内的冲突会变，差集也就只能出在那里。
    *
    * <p>全量：每一步把整张表重新投影再全扫。它是增量的参照物，生产路径不走。
    *
@@ -611,22 +612,34 @@ public final class ResourceRepair {
         movements = occupancy.movements();
         stays = occupancy.stays();
       }
-      Set<String> keys =
+      Map<String, TimetableConflictChecker.Window> windows =
           occupations.replaceVehicle(
               TimetableConflictChecker.vehicleKey(state.dutyCodeOf(d), Optional.empty(), vehicleOf),
               movements,
               stays);
+      // 只换掉受影响时段内的冲突：时段外的后到占用，在场集合里没有被改动的占用，冲突一条都不会变。
       Set<TimetableConflictChecker.Conflict> old = new HashSet<>();
       int removed = 0;
-      for (String key : keys) {
-        List<TimetableConflictChecker.Conflict> group = byResource.remove(key);
-        if (group != null) {
-          old.addAll(group);
-          removed += group.size();
+      for (Map.Entry<String, TimetableConflictChecker.Window> entry : windows.entrySet()) {
+        List<TimetableConflictChecker.Conflict> group = byResource.get(entry.getKey());
+        if (group == null) {
+          continue;
+        }
+        Iterator<TimetableConflictChecker.Conflict> it = group.iterator();
+        while (it.hasNext()) {
+          TimetableConflictChecker.Conflict conflict = it.next();
+          if (entry.getValue().covers(conflict, input.separationSeconds())) {
+            old.add(conflict);
+            removed++;
+            it.remove();
+          }
+        }
+        if (group.isEmpty()) {
+          byResource.remove(entry.getKey());
         }
       }
       List<TimetableConflictChecker.Conflict> rescanned =
-          occupations.scan(keys, input.separationSeconds()).conflicts();
+          occupations.scan(windows, input.separationSeconds()).conflicts();
       group(rescanned);
       total += rescanned.size() - removed;
       return freshOf(rescanned, old);
@@ -693,6 +706,10 @@ public final class ResourceRepair {
     private final Map<UUID, TerminalSerializer.Shift.Reason> reasons;
     private final Map<String, UUID> tripByCode;
     private final Map<String, Integer> dutyByCode;
+    private final Map<String, Target> targets = new HashMap<>();
+
+    /** code 指向的班次或交路；两者都不是时 {@code tripId} 为空、{@code duty} 为 −1。 */
+    private record Target(UUID tripId, int duty) {}
 
     State(
         Input input,
@@ -771,12 +788,12 @@ public final class ResourceRepair {
 
     /** 这个 code 归哪条交路：让车只改一条交路的时刻，增量重扫要按它换占用。挪不动的东西返回 −1。 */
     int dutyOf(String code) {
-      UUID tripId = tripByCode.get(code);
-      if (tripId != null) {
-        int[] pos = position.get(tripId);
+      Target target = targetOf(code);
+      if (target.tripId() != null) {
+        int[] pos = position.get(target.tripId());
         return pos == null ? -1 : pos[0];
       }
-      return dutyIndexOf(code);
+      return target.duty();
     }
 
     /** 这条交路还有班次留在表上。 */
@@ -807,19 +824,31 @@ public final class ResourceRepair {
 
     /** 这个 code 是不是我能挪的东西：班次、出库走行、回库走行、待命。 */
     boolean canMove(String code) {
-      if (tripByCode.containsKey(code)) {
-        return !truncated.contains(tripByCode.get(code));
-      }
-      return dutyIndexOf(code) >= 0;
+      Target target = targetOf(code);
+      return target.tripId() != null ? !truncated.contains(target.tripId()) : target.duty() >= 0;
     }
 
-    private int dutyIndexOf(String code) {
-      String dutyCode = code;
-      if (code.endsWith("-CREATE") || code.endsWith("-RETURN")) {
-        dutyCode = code.substring(0, code.length() - 7);
-      }
-      Integer d = dutyByCode.get(dutyCode);
-      return d == null ? -1 : d;
+    /**
+     * code 指向的东西：班次（{@code tripId}）或交路（走行 {@code Dxxx-CREATE/RETURN} 与待命，{@code duty}）。
+     *
+     * <p>挑下一处让车时每一轮都要对全表上千条冲突各问一两次；映射在修复过程中不变（截断另有 {@code truncated}）， 记下来就不必每次查两张表、再为走行 code
+     * 切一次后缀。
+     */
+    private Target targetOf(String code) {
+      return targets.computeIfAbsent(
+          code,
+          key -> {
+            UUID tripId = tripByCode.get(key);
+            if (tripId != null) {
+              return new Target(tripId, -1);
+            }
+            String dutyCode =
+                key.endsWith("-CREATE") || key.endsWith("-RETURN")
+                    ? key.substring(0, key.length() - 7)
+                    : key;
+            Integer d = dutyByCode.get(dutyCode);
+            return new Target(null, d == null ? -1 : d);
+          });
     }
 
     /**
@@ -830,11 +859,12 @@ public final class ResourceRepair {
     boolean apply(Move move) {
       String code = move.mover();
       int wait = move.waitSeconds();
-      if (tripByCode.containsKey(code)) {
-        int[] pos = position.get(tripByCode.get(code));
+      Target target = targetOf(code);
+      if (target.tripId() != null) {
+        int[] pos = position.get(target.tripId());
         return pos != null && delayTrip(pos[0], pos[1], wait, true);
       }
-      int d = dutyIndexOf(code);
+      int d = target.duty();
       if (d < 0 || kept[d] <= 0) {
         return false;
       }

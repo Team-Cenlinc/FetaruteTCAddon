@@ -20,8 +20,14 @@ import java.util.function.Function;
  * <p>{@link ResourceRepair} 每施加一处让车就要知道"现在还剩哪些冲突"，此前的做法是把整张表重新投影一遍再全扫。 实测 WS@300 有 902 班，一次 attempt
  * 要重来几千次，光这一项就是四十多秒。可是一处让车只改一条交路的时刻， 别的车在别的资源上的占用一个字都没变——重算它们纯属浪费。
  *
- * <p>于是把投影的产物留下来：{@link #replaceVehicle} 只换掉一辆车的占用并交回这次改动碰到的资源键， {@link #scan} 只扫这些资源。复杂度从 O(全表) 降到
- * O(改动的那几条运行 × 它们的资源)。
+ * <p>于是把投影的产物留下来：{@link #replaceVehicle} 只换掉一辆车的占用并交回这次改动碰到的资源键与各自的时段， {@link #scan}
+ * 只扫这些资源上的这些时段。复杂度从 O(全表) 降到 O(改动的那几条运行 × 它们的资源 × 时段内的占用)。
+ *
+ * <h2>只扫受影响的时段</h2>
+ *
+ * <p>一个繁忙区间的桶里是全天几千条占用，一处让车只挪动其中几条。改动只会影响"后到占用在改动时段 + 裕量内进入"的那些冲突 （{@link
+ * TimetableConflictChecker.Window}），所以重扫从窗前"一定已腾空"的位置起、到窗尾止，窗外的冲突原样保留。 实服三线联编里，目标间隔下一次 attempt
+ * 的让车修复占总耗时 99%，其中九成在重扫整桶。
  *
  * <h2>只换真正变了的那几条</h2>
  *
@@ -37,9 +43,11 @@ import java.util.function.Function;
  */
 public final class OccupationIndex {
 
-  private final TimetableConflictChecker.GraphIndex index;
   private final Map<UUID, TimetableConflictChecker.RouteProfile> profiles;
   private final Function<String, String> vehicleOf;
+
+  /** 各 route 的占用足迹：修复循环换一次车就要撤掉、新加各投影一遍，足迹只算一次。 */
+  private final TimetableConflictChecker.Footprints footprints;
 
   /**
    * 资源键 → 占用桶。
@@ -64,9 +72,12 @@ public final class OccupationIndex {
       TimetableConflictChecker.GraphIndex index,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       Function<String, String> vehicleOf) {
-    this.index = index == null ? TimetableConflictChecker.GraphIndex.of(null) : index;
+
     this.profiles = profiles == null ? Map.of() : Map.copyOf(profiles);
     this.vehicleOf = vehicleOf == null ? Function.identity() : vehicleOf;
+    this.footprints =
+        new TimetableConflictChecker.Footprints(
+            index == null ? TimetableConflictChecker.GraphIndex.of(null) : index);
   }
 
   /**
@@ -86,7 +97,7 @@ public final class OccupationIndex {
       Function<String, String> vehicleOf) {
     OccupationIndex out = new OccupationIndex(index, profiles, vehicleOf);
     TimetableConflictChecker.projectInto(
-        out.resources, out.index, out.profiles, movements, stays, out.vehicleOf);
+        out.resources, out.footprints, out.profiles, movements, stays, out.vehicleOf);
     out.remember(movements, stays);
     return out;
   }
@@ -97,9 +108,9 @@ public final class OccupationIndex {
    * @param vehicle 车辆身份（{@code |duty 号}）；用 {@link TimetableConflictChecker#vehicleKey} 拼
    * @param movements 这辆车新的运行
    * @param stays 这辆车新的待命
-   * @return 这次改动碰到的资源键——撤掉的与新加的两边都算进去，只看新的会漏掉"车挪走之后原来那处不再冲突"； 没被碰到的资源上的占用一条没动，它们的冲突也就不会变
+   * @return 这次改动碰到的资源键与各自被改动的时段——撤掉的与新加的两边都算进去，只看新的会漏掉"车挪走之后原来那处不再冲突"； 没被碰到的资源、以及碰到的资源上时段之外的冲突都不会变
    */
-  public Set<String> replaceVehicle(
+  public Map<String, TimetableConflictChecker.Window> replaceVehicle(
       String vehicle,
       List<TimetableConflictChecker.Movement> movements,
       List<TimetableConflictChecker.Stay> stays) {
@@ -117,39 +128,34 @@ public final class OccupationIndex {
       requireOwnedBy(vehicle, stay.code(), stay.owner());
     }
     Projection last = projected.getOrDefault(vehicle, Projection.EMPTY);
-    Set<String> touched =
-        new LinkedHashSet<>(
+    Map<String, TimetableConflictChecker.Window> touched =
+        new LinkedHashMap<>(
             remove(subtract(last.movements(), next), subtract(last.stays(), nextStays)));
-    touched.addAll(
-        TimetableConflictChecker.projectInto(
+    TimetableConflictChecker.projectInto(
             resources,
-            index,
+            footprints,
             profiles,
             subtract(next, last.movements()),
             subtract(nextStays, last.stays()),
-            vehicleOf));
+            vehicleOf)
+        .forEach(
+            (key, window) -> touched.merge(key, window, TimetableConflictChecker.Window::merge));
     projected.put(vehicle, new Projection(next, nextStays));
     return touched;
   }
 
   /**
-   * 只扫这些资源。
+   * 只扫这些资源上的这些时段：报出后到占用在时段内进入的冲突（见 {@link TimetableConflictChecker.Window}）。
    *
-   * @param resourceKeys 资源键；表里没有的忽略
+   * @param windows 资源键 → 改动覆盖的时段；表里没有的键忽略
    * @param separationSeconds 相邻占用之间的最小间隔
    */
-  public TimetableConflictChecker.Report scan(Set<String> resourceKeys, int separationSeconds) {
-    if (resourceKeys == null || resourceKeys.isEmpty()) {
+  public TimetableConflictChecker.Report scan(
+      Map<String, TimetableConflictChecker.Window> windows, int separationSeconds) {
+    if (windows == null || windows.isEmpty()) {
       return TimetableConflictChecker.Report.none();
     }
-    List<TimetableConflictChecker.Resource> picked = new ArrayList<>(resourceKeys.size());
-    for (String key : resourceKeys) {
-      TimetableConflictChecker.Resource resource = resources.get(key);
-      if (resource != null) {
-        picked.add(resource);
-      }
-    }
-    return TimetableConflictChecker.scanResources(picked, separationSeconds);
+    return TimetableConflictChecker.scanWindows(resources, windows, separationSeconds);
   }
 
   /** 全扫：与 {@link TimetableConflictChecker#check} 等价。 */
@@ -157,17 +163,18 @@ public final class OccupationIndex {
     return TimetableConflictChecker.scanResources(resources.values(), separationSeconds);
   }
 
-  /** 撤掉这些运行与待命的占用：它们原样再投影一遍就是当初加进去的那些，按值撤掉即可。 */
-  private Set<String> remove(
+  /** 撤掉这些运行与待命的占用：它们原样再投影一遍就是当初加进去的那些，按值撤掉即可。返回碰到的资源与时段。 */
+  private Map<String, TimetableConflictChecker.Window> remove(
       List<TimetableConflictChecker.Movement> movements,
       List<TimetableConflictChecker.Stay> stays) {
     if (movements.isEmpty() && stays.isEmpty()) {
-      return Set.of();
+      return Map.of();
     }
     Map<String, TimetableConflictChecker.Resource> scratch = new LinkedHashMap<>();
-    Set<String> keys =
-        TimetableConflictChecker.projectInto(scratch, index, profiles, movements, stays, vehicleOf);
-    for (String key : keys) {
+    Map<String, TimetableConflictChecker.Window> keys =
+        TimetableConflictChecker.projectInto(
+            scratch, footprints, profiles, movements, stays, vehicleOf);
+    for (String key : keys.keySet()) {
       TimetableConflictChecker.Resource target = resources.get(key);
       TimetableConflictChecker.Resource produced = scratch.get(key);
       if (target != null && produced != null) {
