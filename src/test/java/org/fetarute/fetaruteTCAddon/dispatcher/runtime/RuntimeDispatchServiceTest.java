@@ -10669,7 +10669,8 @@ class RuntimeDispatchServiceTest {
             RouteDefinition.class,
             NodeId.class,
             NodeId.class,
-            OccupancyDecision.class);
+            OccupancyDecision.class,
+            HeldAuthorityBraking.Decision.class);
     issue.setAccessible(true);
     activate.setAccessible(true);
     valid.setAccessible(true);
@@ -10694,7 +10695,16 @@ class RuntimeDispatchServiceTest {
                     Optional.empty(),
                     ClaimRole.PROTECTIVE_RETAIN)));
 
-    protectiveStop.invoke(service, train, tags.properties(), "train-1", route, a, b, decision);
+    protectiveStop.invoke(
+        service,
+        train,
+        tags.properties(),
+        "train-1",
+        route,
+        a,
+        b,
+        decision,
+        HeldAuthorityBraking.Decision.notApplicable());
 
     assertFalse(service.isMovementInhibited("train-1"));
     assertTrue((boolean) valid.invoke(service, "train-1", a, b, List.of(resource)));
@@ -20514,10 +20524,20 @@ class RuntimeDispatchServiceTest {
             Optional.class,
             RailGraph.class,
             Instant.class,
-            RuntimeTrainHandle.class);
+            RuntimeTrainHandle.class,
+            Set.class);
     method.setAccessible(true);
     method.invoke(
-        service, trainName, route, currentIndex, currentNode, movementRequest, graph, now, train);
+        service,
+        trainName,
+        route,
+        currentIndex,
+        currentNode,
+        movementRequest,
+        graph,
+        now,
+        train,
+        Set.of());
   }
 
   private void invokeRetainStopOccupancy(

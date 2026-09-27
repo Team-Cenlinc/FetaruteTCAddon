@@ -5308,7 +5308,8 @@ public final class RuntimeDispatchService {
           Optional.of(authorizationRequest),
           graph,
           now,
-          train);
+          train,
+          Set.of());
       debugLogger.accept(
           "SMART_STATION_DEPARTURE_HELD train="
               + trainName
@@ -5357,7 +5358,8 @@ public final class RuntimeDispatchService {
                         Optional.of(authorizationRequest),
                         graph,
                         now,
-                        train);
+                        train,
+                        Set.of());
                   }
                 }));
     if (!authorization.allowed()) {
@@ -6400,7 +6402,15 @@ public final class RuntimeDispatchService {
       // 避免后车在当前车等待放行时先抢到更靠前的队头。
       if (occupancyManager != null) {
         retainStopOccupancy(
-            trainName, route, currentIndex, currentNode, Optional.of(request), graph, now, train);
+            trainName,
+            route,
+            currentIndex,
+            currentNode,
+            Optional.of(request),
+            graph,
+            now,
+            train,
+            Set.of());
       }
       applyHardStop(
           train,
@@ -14374,6 +14384,14 @@ public final class RuntimeDispatchService {
     if (smartAdmissionShouldBlock(trainName, singleSafety)) {
       OccupancyDecision blocked =
           singleZoneBlockedDecision(authorizationRequest, singleSafety.reason(), now);
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.orElse(null));
       retainStopOccupancy(
           trainName,
           route,
@@ -14382,19 +14400,22 @@ public final class RuntimeDispatchService {
           Optional.of(authorizationRequest),
           graph,
           now,
-          train);
+          train,
+          braking.retainedResources());
       applyNonInvalidatingBlockedStop(
           train,
           properties,
           trainName,
           "WAITING_FOR_SINGLE_ZONE",
+          null,
           route,
           currentNodeOpt.orElse(null),
           nextNode.orElse(null),
           graph,
           blocked,
           authorizationRequest,
-          authorityEnd);
+          authorityEnd,
+          braking);
       return;
     }
     releaseResourcesNotInRequest(
@@ -14449,6 +14470,14 @@ public final class RuntimeDispatchService {
                   authorityEnd.distanceBlocks(),
                   authorityEnd.resource(),
                   authorizationContext.edges().size()));
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.orElse(null));
       retainStopOccupancy(
           trainName,
           route,
@@ -14457,7 +14486,8 @@ public final class RuntimeDispatchService {
           Optional.of(authorizationRequest),
           graph,
           now,
-          train);
+          train,
+          braking.retainedResources());
       if (isProtectiveOnlyStop(decision)) {
         applyProtectiveOnlyStop(
             train,
@@ -14466,7 +14496,8 @@ public final class RuntimeDispatchService {
             route,
             currentNodeOpt.orElse(null),
             nextNode.orElse(null),
-            decision);
+            decision,
+            braking);
         return;
       }
       applyNonInvalidatingBlockedStop(
@@ -14484,7 +14515,8 @@ public final class RuntimeDispatchService {
           graph,
           decision,
           authorizationRequest,
-          authorityEnd);
+          authorityEnd,
+          braking);
       return;
     }
     boolean deadlockRelease = decision.conflictRelease();
@@ -14497,7 +14529,8 @@ public final class RuntimeDispatchService {
           Optional.of(authorizationRequest),
           graph,
           now,
-          train);
+          train,
+          Set.of());
       applyHardStop(
           train,
           properties,
@@ -14550,6 +14583,14 @@ public final class RuntimeDispatchService {
                   authorityEnd.distanceBlocks(),
                   authorityEnd.resource(),
                   authorizationContext.edges().size()));
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.orElse(null));
       retainStopOccupancy(
           trainName,
           route,
@@ -14558,7 +14599,8 @@ public final class RuntimeDispatchService {
           Optional.of(authorizationRequest),
           graph,
           now,
-          train);
+          train,
+          braking.retainedResources());
       if (isProtectiveOnlyStop(acquired)) {
         applyProtectiveOnlyStop(
             train,
@@ -14567,7 +14609,8 @@ public final class RuntimeDispatchService {
             route,
             currentNodeOpt.orElse(null),
             nextNode.orElse(null),
-            acquired);
+            acquired,
+            braking);
         return;
       }
       debugLogger.accept(
@@ -14591,7 +14634,8 @@ public final class RuntimeDispatchService {
           graph,
           acquired,
           authorizationRequest,
-          authorityEnd);
+          authorityEnd,
+          braking);
       return;
     }
     decision = acquired;
@@ -14680,7 +14724,8 @@ public final class RuntimeDispatchService {
             Optional.of(authorizationRequest),
             graph,
             now,
-            train);
+            train,
+            Set.of());
         rollbackMovementAuthorization(
             trainName, token, authorizationRequest, HardStopReason.UNREACHABLE_FAILOVER);
         applyHardStop(
@@ -15158,7 +15203,8 @@ public final class RuntimeDispatchService {
           graph,
           advisoryDecision != null ? advisoryDecision : decision,
           authorizationRequest,
-          authorityEnd);
+          authorityEnd,
+          HeldAuthorityBraking.Decision.notApplicable());
       return;
     }
 
@@ -17705,35 +17751,10 @@ public final class RuntimeDispatchService {
    *
    * <p>这类 STOP 代表“当前不能继续取得 hard authority”，不是 destination/token 自身损坏；因此只更新 STOP 信号与控车诊断，不清
    * TrainCarts destination，也不写入 movement inhibitor。
+   *
+   * <p>{@code waitDetail} 由调用方显式给出停因明细，用于 decision 自己不带原因的路径；为 {@code null} 时取 decision 的原因。运行中被拒且
+   * {@code braking} 给出计划时，沿已持有授权刹到终点前，否则当拍停车。
    */
-  private void applyNonInvalidatingBlockedStop(
-      RuntimeTrainHandle train,
-      TrainProperties properties,
-      String trainName,
-      String waitReason,
-      RouteDefinition route,
-      NodeId currentNode,
-      NodeId nextNode,
-      RailGraph graph,
-      OccupancyDecision decision,
-      OccupancyRequest request,
-      AuthorityEnd authorityEnd) {
-    applyNonInvalidatingBlockedStop(
-        train,
-        properties,
-        trainName,
-        waitReason,
-        null,
-        route,
-        currentNode,
-        nextNode,
-        graph,
-        decision,
-        request,
-        authorityEnd);
-  }
-
-  /** 同上，但由调用方显式给出停因明细；用于 decision 自己不带原因的路径。 */
   private void applyNonInvalidatingBlockedStop(
       RuntimeTrainHandle train,
       TrainProperties properties,
@@ -17746,12 +17767,14 @@ public final class RuntimeDispatchService {
       RailGraph graph,
       OccupancyDecision decision,
       OccupancyRequest request,
-      AuthorityEnd authorityEnd) {
+      AuthorityEnd authorityEnd,
+      HeldAuthorityBraking.Decision braking) {
     Instant stoppedAt = clockNow();
     String reason =
         waitReason == null || waitReason.isBlank() ? "BLOCKED_BY_OCCUPANCY" : waitReason;
-    recordStopState(
-        RuntimeStopState.occupancyHold(trainName, reason, decision, waitDetail, stoppedAt));
+    RuntimeStopState stopState =
+        RuntimeStopState.occupancyHold(trainName, reason, decision, waitDetail, stoppedAt);
+    recordStopState(stopState.withDetailSuffix(braking.detailSuffix()));
     updateBlockerSnapshot(trainName, decision, stoppedAt);
     boolean physicalPublished = updateSignalOrWarn(trainName, SignalAspect.STOP, stoppedAt);
     SmartUnlockReservation activeUnlock =
@@ -17842,7 +17865,7 @@ public final class RuntimeDispatchService {
         nextNode,
         graph,
         false,
-        OptionalLong.empty(),
+        braking.stopDistanceBlocks(),
         null,
         new ControlSpeedOverrides(
             OptionalDouble.empty(),
@@ -17851,6 +17874,31 @@ public final class RuntimeDispatchService {
             authorityEnd,
             blockedDestination,
             debugResources));
+  }
+
+  /**
+   * 运行中被拒时能否沿已持有授权刹停（判据见 {@link HeldAuthorityBraking}）。
+   *
+   * <p>必须在停车保持收缩占用之前调用：判定要读此刻账本里前方那段授权。列车带 movement inhibitor 时授权已被撤销，按没有 token 处理。
+   */
+  private HeldAuthorityBraking.Decision resolveHeldAuthorityBraking(
+      String trainName,
+      RuntimeTrainHandle train,
+      RailGraph graph,
+      OccupancyRequest refusedRequest,
+      NodeId currentNode,
+      NodeId nextRouteNode) {
+    return HeldAuthorityBraking.resolve(
+        isMovementInhibited(trainName)
+            ? null
+            : movementAuthorizationTokens.get(normalizeTrainKey(trainName)),
+        refusedRequest,
+        currentNode,
+        nextRouteNode,
+        snapshotSelfClaims(trainName),
+        graph,
+        train,
+        configManager.current().runtimeSettings().movementAuthorityStopMarginBlocks());
   }
 
   /** 对在线列车重新下发硬 STOP，供健康监控在 STOP 互卡等待期间使用。 */
@@ -19064,7 +19112,8 @@ public final class RuntimeDispatchService {
       RouteDefinition route,
       NodeId currentNode,
       NodeId nextNode,
-      OccupancyDecision decision) {
+      OccupancyDecision decision,
+      HeldAuthorityBraking.Decision braking) {
     Instant now = clockNow();
     updateBlockerSnapshot(trainName, decision, now);
     boolean releaseCandidate =
@@ -19098,7 +19147,8 @@ public final class RuntimeDispatchService {
                 + OccupancyClaimEvidence.describeBlockerShapes(
                     decision == null ? List.of() : decision.blockers())
                 + ":"
-                + (releaseCandidate ? "release-candidate" : "no-self-retain-candidate"),
+                + (releaseCandidate ? "release-candidate" : "no-self-retain-candidate")
+                + braking.detailSuffix(),
             now));
     updateSignalOrWarn(trainName, SignalAspect.STOP, now);
     if (train != null
@@ -19115,7 +19165,7 @@ public final class RuntimeDispatchService {
           nextNode,
           null,
           false,
-          OptionalLong.empty());
+          braking.stopDistanceBlocks());
     }
   }
 
@@ -28562,7 +28612,8 @@ public final class RuntimeDispatchService {
         graph,
         now,
         resolveRearGuardDistanceBlocks(train),
-        resolveLivePhysicalReleaseEvidence(trainName, train, graph));
+        resolveLivePhysicalReleaseEvidence(trainName, train, graph),
+        Set.of());
   }
 
   /**
@@ -28669,6 +28720,8 @@ public final class RuntimeDispatchService {
    * 使用实时列车长度和本轮 movement plan 刷新停止态尾部保护。
    *
    * <p>movement plan 只证明路径，车长仍来自 live handle；两类证据在此合流后才允许缩减旧 claim。
+   *
+   * @param brakingRetained 沿已持有授权刹车期间不得释放的前方资源（见 {@link HeldAuthorityBraking}）；不刹车时为空
    */
   private boolean retainStopOccupancy(
       String trainName,
@@ -28678,7 +28731,8 @@ public final class RuntimeDispatchService {
       Optional<OccupancyRequest> movementRequest,
       RailGraph graph,
       Instant now,
-      RuntimeTrainHandle train) {
+      RuntimeTrainHandle train,
+      Set<OccupancyResource> brakingRetained) {
     return retainStopOccupancy(
         trainName,
         route,
@@ -28688,7 +28742,8 @@ public final class RuntimeDispatchService {
         graph,
         now,
         resolveRearGuardDistanceBlocks(train),
-        resolveLivePhysicalReleaseEvidence(trainName, train, graph));
+        resolveLivePhysicalReleaseEvidence(trainName, train, graph),
+        brakingRetained);
   }
 
   private boolean retainStopOccupancy(
@@ -28700,7 +28755,8 @@ public final class RuntimeDispatchService {
       RailGraph graph,
       Instant now,
       long rearGuardDistanceBlocks,
-      LivePhysicalReleaseEvidence livePhysicalEvidence) {
+      LivePhysicalReleaseEvidence livePhysicalEvidence,
+      Set<OccupancyResource> brakingRetained) {
     if (occupancyManager == null || trainName == null || trainName.isBlank()) {
       return false;
     }
@@ -28790,6 +28846,7 @@ public final class RuntimeDispatchService {
       protectedResources =
           mergeProtectedResources(protectedResources, livePhysicalEvidence.resources());
     }
+    protectedResources = mergeProtectedResources(protectedResources, brakingRetained);
     List<OccupancyResource> releaseEligibleResources =
         resourcesEligibleForRelease(trainName, request.resourceList(), protectedResources);
     if (!releaseEligibleResources.isEmpty()) {

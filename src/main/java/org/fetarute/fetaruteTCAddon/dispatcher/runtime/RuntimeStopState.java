@@ -157,6 +157,30 @@ public record RuntimeStopState(
         now);
   }
 
+  /**
+   * 在明细末尾追加后缀，其余字段不变；后缀为空时原样返回。
+   *
+   * <p>用于运行中被拒时标注控车方式（沿已持有授权刹车，或当拍停车及其原因）。后缀进明细即进 {@link #sameLifecycle}： 列车从刹车转为停稳时算作新的停车生命周期，必留的
+   * {@code SMART_STOP_LIFECYCLE} 行因此能看到这一步。
+   *
+   * @param suffix 不含空白的后缀
+   * @return 追加后缀后的停车状态
+   */
+  public RuntimeStopState withDetailSuffix(String suffix) {
+    if (suffix == null || suffix.isBlank()) {
+      return this;
+    }
+    return new RuntimeStopState(
+        trainName,
+        reasonCode,
+        detail + suffix.strip(),
+        releaseCondition,
+        retryTrigger,
+        blockers,
+        invalidatesAuthority,
+        enteredAt);
+  }
+
   /** 构造撤销既有 Movement Authority 的硬停车。 */
   public static RuntimeStopState hardStop(
       String trainName, HardStopReason reason, OccupancyDecision decision, Instant now) {

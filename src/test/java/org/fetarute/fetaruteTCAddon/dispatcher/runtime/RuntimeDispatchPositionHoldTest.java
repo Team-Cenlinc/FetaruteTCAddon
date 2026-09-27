@@ -328,7 +328,8 @@ class RuntimeDispatchPositionHoldTest {
             Optional.class,
             RailGraph.class,
             Instant.class,
-            RuntimeTrainHandle.class);
+            RuntimeTrainHandle.class,
+            Set.class);
     method.setAccessible(true);
     method.invoke(
         service,
@@ -339,7 +340,8 @@ class RuntimeDispatchPositionHoldTest {
         Optional.empty(),
         fixture.graph(),
         Instant.now(),
-        train);
+        train,
+        Set.of());
   }
 
   /** OFL 车库口夹具：DS 停在 {@code approach} 起点，MT 以 {@code depotRunIn} 进库。 */

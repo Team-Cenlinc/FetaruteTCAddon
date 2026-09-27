@@ -85,6 +85,12 @@
 
   健康恢复的“清理自持单线方向”预览与“重发 destination”也走同一口径：前者预览的就是信号 tick 会发的请求，后者若按单边窗口放行，下一拍信号 tick 按余量又会挡回。
 - 停站（dwell）期间信号 tick 直接保持 STOP、不申请前向授权，所以停着的余量不会让停站的车提前多占前方资源。代价只落在“停着准备走”的车上：要等车头前方约 40 格都拿得到才起步，而不是先走一条边再被挡。
+- **被拒时沿已持有授权刹车**（`HeldAuthorityBraking`）：运行中的车在信号 tick 延伸被拒（`BLOCKED_BY_OCCUPANCY`、`PROTECTIVE_RETAIN_HOLD`、`WAITING_FOR_SINGLE_ZONE`）时，不再当拍清零速度——`group.stop()` 是 `vel.setZero()`，就是瞬停——而是沿上一拍已授予、仍由本车以 `MOVEMENT_REQUIRED` 独占的那段授权，刹到“授权终点 − `movement-authority-stop-margin-blocks`”前。停车保持期间这段资源不释放；STOP 带上到停车点的距离落地，走与计划停车同一条制动曲线（`TrainLaunchManager#resolveStopSpeed`，限速不高于当前车速，离终点还远时只保持车速、不借 STOP 加速）。停稳后照旧收缩到当前位置。
+  - 终点取有效 token 的 `authorityEndNode`；下一个 route 节点更近时停在它前面——越过 route 节点要由推进点改写 TrainCarts destination，道岔寻路只认 destination，刹车途中不做这件事。
+  - fail-closed，任一成立就当拍停车（与旧版相同）：列车静止；没有有效 token 或带 movement inhibitor；token 终点不在本拍行车计划前方；token 里前方任一资源不再以 `MOVEMENT_REQUIRED` 持有；车头到终点的路径不全在 token 内；边长或车头位置读不到（坐标插值被钳到边末端也算读不到）；车头已进停车余量。
+  - 为什么安全：路径上的 NODE/EDGE 与冲突资源都由本车 `MOVEMENT_REQUIRED` 独占，别的车拿不到。TrainCarts 的限速是硬切（每个物理步把 maxSpeed 设为限速），每拍（实服 `dispatch-tick-interval-ticks: 20`，即 1 秒）把限速压在 √(2a·(d − `speed-curve-early-brake-blocks`)) 以下，两拍之间最多走一拍的距离，停车点前的剩余距离 d 不会穿过 0：early-brake 12、a ≤ 1 时至少还剩约 11.5 格；early-brake 为 0 时最多越过 a/2 格，由停车余量吸收。拍间隔拉长到 T 秒时下界变成 early-brake − aT²/2。
+  - 停因明细：运行中被拒时追加 `:braking=held-authority` 或 `:braking=instant:<原因>`，写在必留的 `SMART_STOP_LIFECYCLE` 行里；停稳后明细不带后缀，算新的停车生命周期，所以一次运行中被拒会有两行 `event=enter`。
+  - 不在范围内：推进点在 route 节点处被拒仍是作废授权的硬停车。刹车不越过下一个 route 节点，正常刹车不会走到那里。
 - 若首个 `SWITCHER` 或显式咽喉已经进入普通 hard lookahead，`OccupancyRequestBuilder` 会把当前安全边界至冲突点、再到首个正常图边界/出清站点的 NODE、EDGE、CONFLICT 原子提升为硬进路窗口。更远的平交道口只保留在 advisory/完整 Movement Plan 中，不能从数百方块外提前锁闭；一旦联锁已进入硬窗口却找不到可证明出口，请求构造会失败，PERIODIC 与推进点入口都会立即撤销旧 Movement Authority、写入 movement inhibitor 并落地硬 STOP，禁止“入口已放行、列车却沿用上周期 PROCEED 停在道口中间”。
 - 前向授权请求中只有下一跳 NODE/EDGE/必要冲突资源标记为 `MOVEMENT_REQUIRED`，当前位置、尾部保护与 hold-only single claim 只作为 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 保留。前向授权不得把 rear guard 或 advisory blocker 混入 fail-closed 请求。
 - 发车门控是 admission gate：它保留完整的选定前向路径与必要的原子联锁窗口来判断是否允许出发，但正式 acquire 只写 `MOVEMENT_REQUIRED` 资源，不覆盖 rear guard 或 hold retain claim。

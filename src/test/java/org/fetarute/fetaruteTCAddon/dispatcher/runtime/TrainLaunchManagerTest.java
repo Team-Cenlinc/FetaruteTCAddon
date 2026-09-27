@@ -382,6 +382,46 @@ class TrainLaunchManagerTest {
     assertEquals("hard_stop", result.finalLimiterSource());
   }
 
+  /**
+   * STOP 制动曲线不高于当前车速：离停车点还远时只保持车速，不借 STOP 加速；进入曲线后照曲线限速。
+   *
+   * <p>沿已持有授权刹车（{@link HeldAuthorityBraking}）一被拒就交出很远的停车距离，靠的就是这一条。车速 15 bps、减速度 1：500 格处曲线
+   * √1000≈31.6，限速取 15；20 格处曲线 √40≈6.3。
+   */
+  @Test
+  void stopCurveHoldsSpeedUntilItBitesAndNeverAccelerates() {
+    ArgumentCaptor<Double> far = ArgumentCaptor.forClass(Double.class);
+    TagStore farTags = stopCurve(500L);
+    verify(farTags.properties()).setSpeedLimit(far.capture());
+    assertEquals(15.0 / 20.0, far.getValue(), 1.0e-9);
+
+    ArgumentCaptor<Double> near = ArgumentCaptor.forClass(Double.class);
+    TagStore nearTags = stopCurve(20L);
+    verify(nearTags.properties()).setSpeedLimit(near.capture());
+    assertEquals(Math.sqrt(40.0) / 20.0, near.getValue(), 1.0e-9);
+  }
+
+  private static TagStore stopCurve(long distanceBlocks) {
+    TagStore tags =
+        new TagStore(
+            "train-braking-" + distanceBlocks,
+            "FTA_LAST_SPEED_CMD_BPS=15.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    FakeTrain train = new FakeTrain(tags.properties(), true, 15.0 / 20.0);
+    new TrainLaunchManager()
+        .applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.STOP,
+            0.0,
+            new TrainConfig(TrainType.EMU, 1.0, 1.0),
+            false,
+            OptionalLong.of(distanceBlocks),
+            Optional.empty(),
+            runtimeSettings(0.0, 1.0, 1.0));
+    return tags;
+  }
+
   private static ConfigManager.RuntimeSettings runtimeSettings(
       double hysteresisBps, double accelFactor, double decelFactor) {
     return runtimeSettings(hysteresisBps, accelFactor, decelFactor, 10);
