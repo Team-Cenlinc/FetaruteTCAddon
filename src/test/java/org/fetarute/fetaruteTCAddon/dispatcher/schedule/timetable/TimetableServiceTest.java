@@ -38,9 +38,25 @@ class TimetableServiceTest {
 
   /** 两班车、一个只能跑两班的交路。 */
   private static Timetable timetable(TimetableStatus status) {
+    return timetable(status, 2);
+  }
+
+  /** {@code tripCount} 班车（08:00 起每 10 分钟一班）、一个跑完全部班次的交路。 */
+  private static Timetable timetable(TimetableStatus status, int tripCount) {
     UUID dutyId = UUID.randomUUID();
-    UUID tripOne = UUID.randomUUID();
-    UUID tripTwo = UUID.randomUUID();
+    List<TimetableTrip> trips = new ArrayList<>();
+    for (int index = 0; index < tripCount; index++) {
+      trips.add(
+          new TimetableTrip(
+              UUID.randomUUID(),
+              TIMETABLE,
+              ROUTE,
+              index,
+              String.format("R1-%03d", index + 1),
+              8 * 3600 + 600 * index,
+              Optional.of(dutyId)));
+    }
+    int lastDeparture = 8 * 3600 + 600 * (tripCount - 1);
     List<TimetableStop> stops =
         List.of(
             new TimetableStop(
@@ -123,13 +139,9 @@ class TimetableServiceTest {
                 "OP:D:DEP:1",
                 Optional.empty(),
                 Optional.empty())),
+        trips,
         List.of(
-            new TimetableTrip(
-                tripOne, TIMETABLE, ROUTE, 0, "R1-001", 8 * 3600, Optional.of(dutyId)),
-            new TimetableTrip(
-                tripTwo, TIMETABLE, ROUTE, 1, "R1-002", 8 * 3600 + 600, Optional.of(dutyId))),
-        List.of(
-            // 出库票 07:57（走行 60 秒 + 就绪 120 秒），回库票 08:14（末班 08:10 发、230 秒到、折返 120 秒后）。
+            // 出库票 07:57（走行 60 秒 + 就绪 120 秒），回库票在末班发车 + 230 秒到 + 折返 120 秒后（两班时为 08:14）。
             new VehicleDuty(
                 dutyId,
                 TIMETABLE,
@@ -139,10 +151,10 @@ class TimetableServiceTest {
                 "OP:D:DEP:1",
                 Optional.of(CREATE_ROUTE),
                 Optional.of(RETURN_ROUTE),
-                List.of(tripOne, tripTwo),
+                trips.stream().map(TimetableTrip::id).toList(),
                 8 * 3600 - 180,
-                8 * 3600 + 600 + 230 + 120,
-                8 * 3600 + 600 + 230 + 120 + 90,
+                lastDeparture + 230 + 120,
+                lastDeparture + 230 + 120 + 90,
                 VehicleDuty.CloseReason.MAX_TRIPS)),
         Optional.empty(),
         Instant.parse("2026-03-01T00:00:00Z"),
@@ -443,6 +455,79 @@ class TimetableServiceTest {
     assertTrue(
         logs.stream().anyMatch(line -> line.startsWith("TIMETABLE_DUTY_CONTINUATION_LOST")),
         logs::toString);
+  }
+
+  /**
+   * 停在正线折返点的车，下一班作废就放它回送，不等交路末班也作废。
+   *
+   * <p>三班的交路跑完第一班：第二班 08:10 发、容差 300 秒。08:15 之后第二班的票已作废，第三班从别的端点发车，这辆车停在正线上再也接不上； 在站台上的车照旧按 {@link
+   * TimetableService#allowsReturn} 等到末班也作废。
+   */
+  @Test
+  void mainlineTurnbackReturnsOnceTheNextTripIsMissed() {
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(Instant.parse("2026-03-02T08:00:05Z"));
+    List<String> logs = new ArrayList<>();
+    TimetableService service = new TimetableService(clock::get, logs::add);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            ZONE));
+    service.reload(providerWith(timetable(TimetableStatus.PUBLISHED, 3)));
+    service.scheduledDepartureAt(event("train-A", 0, clock.get()));
+
+    clock.set(Instant.parse("2026-03-02T08:14:59Z"));
+    assertFalse(
+        service.allowsReturnFromMainlineTurnback("train-A", Optional.of(ROUTE)), "第二班的票还没作废");
+
+    clock.set(Instant.parse("2026-03-02T08:15:01Z"));
+    logs.clear();
+    assertTrue(
+        service.allowsReturnFromMainlineTurnback("train-A", Optional.of(ROUTE)), "第二班已作废，接不上了");
+    assertEquals(1, logs.size(), logs::toString);
+    assertTrue(logs.get(0).startsWith("TIMETABLE_DUTY_NEXT_TRIP_MISSED"), "放行时不能先记一条'回库被否决'");
+    assertFalse(service.allowsReturn("train-A"), "第三班还没作废：站台上的车照旧留着");
+  }
+
+  /**
+   * 正线立即回收只管由时刻表出票的交路：自由运行的线路、只扣车不出票的模式下，接哪一班由间隔出票决定，没有交路上的对应关系可判， 照旧交给闲置回收。
+   *
+   * <p>由时刻表出票的交路上没绑交路的车（例如重启后账本丢了）就是没有对应关系，放行。
+   */
+  @Test
+  void mainlineTurnbackOnlyAppliesToTimetableIssuedRoutes() {
+    TimetableService service = service(true, timetable(TimetableStatus.PUBLISHED));
+
+    assertTrue(
+        service.allowsReturnFromMainlineTurnback("train-unbound", Optional.of(ROUTE)),
+        "按表交路上没绑交路的车");
+    assertFalse(
+        service.allowsReturnFromMainlineTurnback("train-unbound", Optional.of(UUID.randomUUID())),
+        "自由运行的交路");
+    assertFalse(
+        service.allowsReturnFromMainlineTurnback("train-unbound", Optional.empty()), "不知道跑的是哪条交路");
+    assertFalse(
+        service(false, timetable(TimetableStatus.PUBLISHED))
+            .allowsReturnFromMainlineTurnback("train-unbound", Optional.of(ROUTE)),
+        "未启用按表运行");
+
+    TimetableService holdOnly = new TimetableService(() -> FIXTURE_NOW, line -> {});
+    holdOnly.applySettings(
+        new TimetableService.Settings(
+            true,
+            false,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            ZONE));
+    holdOnly.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
+    assertFalse(
+        holdOnly.allowsReturnFromMainlineTurnback("train-unbound", Optional.of(ROUTE)),
+        "只扣车不出票：车由间隔出票复用");
   }
 
   /**

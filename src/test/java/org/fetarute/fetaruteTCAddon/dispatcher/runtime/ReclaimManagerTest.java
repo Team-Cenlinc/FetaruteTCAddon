@@ -842,6 +842,290 @@ class ReclaimManagerTest {
   }
 
   /**
+   * 正线折返点上没有后续班次可接的车：闲置过一个短门槛就原地销毁，不等闲置上限，也不看站台上那道回库闸。
+   *
+   * <p>实服 MT-1O_ShortR 终到 {@code OFL:MLU:2:004}（正线 2 股上的路径点），车停在那里挡着同股道的后车；不倒车能到的车库在 2000 格外，
+   * 开过去等于往已经晚点的干线里塞一趟表外车。
+   */
+  @Test
+  void mainlineTurnbackWithoutAContinuationIsDestroyedInPlace() {
+    MainlineFixture fixture = new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK);
+    List<Optional<UUID>> gatedRoutes = new ArrayList<>();
+    fixture.manager.setMainlineReturnGate(
+        (train, route) -> gatedRoutes.add(route) && "train-a".equals(train));
+    fixture.manager.setReturnGate(train -> false);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS - 1);
+    assertTrue(fixture.destroyed.isEmpty(), "刚到时自己的下一班票可能还在路上");
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    assertEquals(List.of("train-a:reclaim-mainline-turnback"), fixture.destroyed);
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(line -> line.startsWith("RECLAIM_MAINLINE_DESTROY train=train-a")),
+        fixture.logs::toString);
+    assertEquals(List.of(Optional.of(fixture.shortRoute)), gatedRoutes, "闸拿到的是车刚跑完的交路");
+  }
+
+  /** 有从折返点出发的 RETURN 交路（人工定义）时照它开走，不销毁。 */
+  @Test
+  void aReturnRouteFromTheTurnbackIsPreferredToDestroying() {
+    MainlineFixture fixture =
+        new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK, true, false, 600);
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    org.mockito.ArgumentCaptor<ServiceTicket> captor =
+        org.mockito.ArgumentCaptor.forClass(ServiceTicket.class);
+    verify(fixture.ticketAssigner)
+        .forceAssign(eq(fixture.provider), eq("train-a"), captor.capture());
+    assertEquals(fixture.mainlineReturnRoute, captor.getValue().routeId());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
+  /**
+   * 首站写站 code 的 RETURN 只认停在那个站的车：区间路径点 {@code PPK:RVS:1:001} 名字里带 PPK，车并不在 PPK。
+   *
+   * <p>修复前按冒号拆段逐段比，会把车派上一条从它不在的车站出发的回库线。
+   */
+  @Test
+  void aStationReturnDoesNotMatchAnIntervalPointNamedAfterIt() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:PPK:RVS:1:001"));
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertEquals(List.of("train-a:reclaim-mainline-turnback"), fixture.destroyed);
+  }
+
+  /** 车上有乘客不销毁；{@code stranded-destroy-seconds} 为 0（回收不销毁车）时也不销毁。 */
+  @Test
+  void passengersAndTheDestroySwitchKeepTheTurnbackTrain() {
+    MainlineFixture withPassengers =
+        new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK, false, true, 600);
+    withPassengers.manager.setMainlineReturnGate((train, route) -> true);
+    withPassengers.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    assertTrue(withPassengers.destroyed.isEmpty());
+    assertTrue(
+        withPassengers.logs.contains("RECLAIM_MAINLINE_SKIP train=train-a reason=has-passengers"),
+        withPassengers.logs::toString);
+
+    MainlineFixture destroyDisabled =
+        new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK, false, false, 0);
+    destroyDisabled.manager.setMainlineReturnGate((train, route) -> true);
+    destroyDisabled.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    assertTrue(destroyDisabled.destroyed.isEmpty());
+  }
+
+  /** 正线闸不放行（下一班还接得上）时，闲置超时仍要过站台那道回库闸，不能因为停在正线上就绕过去。 */
+  @Test
+  void aDeniedMainlineGateStillHonoursTheReturnGate() {
+    MainlineFixture fixture =
+        new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK, true, false, 600);
+    fixture.manager.setMainlineReturnGate((train, route) -> false);
+    java.util.concurrent.atomic.AtomicBoolean dutyFinished =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+    fixture.manager.setReturnGate(train -> dutyFinished.get());
+
+    fixture.checkAfterIdle(4000);
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+
+    dutyFinished.set(true);
+    fixture.checkAfterIdle(4001);
+    verify(fixture.ticketAssigner, times(1))
+        .forceAssign(eq(fixture.provider), eq("train-a"), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
+  /** 没装正线闸（不按表运行）时不提前回收：没有"接哪一班"的对应关系，照旧等闲置上限。 */
+  @Test
+  void withoutAMainlineGateTheTurnbackWaitsForTheIdleLimit() {
+    MainlineFixture fixture = new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS + 60);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
+  /** 站台上的车不走正线规则：正线闸放行也不提前回收、不销毁。 */
+  @Test
+  void aPlatformTerminalIsNotAMainlineTurnback() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"));
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS + 60);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
+  /** 有从折返点出发的 RETURN 交路、只是这一拍没派出去（闭塞、被拒）：不能断定没有回库路，不销毁，照常进滞留计时。 */
+  @Test
+  void aReturnRouteThatIsOnlyBlockedDoesNotDestroyTheTrain() {
+    MainlineFixture fixture =
+        new MainlineFixture(MainlineFixture.MAINLINE_TURNBACK, true, false, 600);
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    when(fixture.ticketAssigner.forceAssign(eq(fixture.provider), eq("train-a"), any()))
+        .thenReturn(false);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    verify(fixture.ticketAssigner).forceAssign(eq(fixture.provider), eq("train-a"), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
+  /**
+   * 销毁前按待命池的当前记录判交接：这一拍的派票刚认领了交接、授权后又失败（认领保留等重试）时，扫描开头的快照里还没有它。
+   *
+   * <p>滞留满阈值的那一拍正好发生这件事：照快照判会把一辆挂着交接的车删掉，留下悬空 attempt。
+   */
+  @Test
+  void aHandoffClaimedEarlierInTheSameScanBlocksTheDestroy() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"), false, false, 60);
+    java.util.concurrent.atomic.AtomicInteger calls =
+        new java.util.concurrent.atomic.AtomicInteger();
+    when(fixture.ticketAssigner.forceAssign(eq(fixture.provider), eq("train-a"), any()))
+        .thenAnswer(
+            invocation -> {
+              if (calls.incrementAndGet() == 2) {
+                ServiceTicket ticket = invocation.getArgument(2);
+                fixture.layoverRegistry.claimDispatch(
+                    "train-a", ticket.ticketId(), "train-a", Instant.EPOCH);
+              }
+              return false;
+            });
+
+    fixture.checkAfterIdle(4000);
+    fixture.checkAfterIdle(4061);
+
+    assertEquals(2, calls.get());
+    assertTrue(fixture.destroyed.isEmpty());
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(
+                line ->
+                    line.startsWith(
+                        "RECLAIM_STRANDED_SKIP train=train-a reason=dispatch-attempt-in-progress")),
+        fixture.logs::toString);
+  }
+
+  /**
+   * 正线折返用例的夹具：本运营商 MT 线上一条刚跑完的交路 {@link #shortRoute} 与一条站台 PPK 出发的 RETURN；可选再加一条从正线折返点出发的 RETURN
+   * {@link #mainlineReturnRoute}。闲置上限 3600 秒，时钟由用例推进，销毁记为 {@code 列车:原因}。
+   */
+  private static final class MainlineFixture {
+    static final NodeId MAINLINE_TURNBACK = NodeId.of("SURC:OFL:MLU:2:004");
+    private static final Instant ARRIVED = Instant.parse("2026-09-27T23:20:00Z");
+
+    final StorageProvider provider;
+    final TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    final UUID shortRoute = UUID.randomUUID();
+    final UUID mainlineReturnRoute = UUID.randomUUID();
+    final ReclaimManager manager;
+    final List<String> destroyed = new ArrayList<>();
+    final List<String> logs = new ArrayList<>();
+    final LayoverRegistry layoverRegistry = new LayoverRegistry();
+    private final java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(ARRIVED);
+
+    MainlineFixture(NodeId layoverNode) {
+      this(layoverNode, false, false, 600);
+    }
+
+    MainlineFixture(
+        NodeId layoverNode,
+        boolean withMainlineReturn,
+        boolean passengers,
+        long strandedDestroySeconds) {
+      provider = mockProvider(UUID.randomUUID(), UUID.randomUUID());
+      UUID companyId = provider.companies().listAll().get(0).id();
+      Operator operator =
+          provider.operators().findByCompanyAndCode(companyId, "SURC").orElseThrow();
+      Line line = provider.lines().listByOperator(operator.id()).get(0);
+      Route platformReturn = provider.routes().listByLine(line.id()).get(0);
+      Route shortR = route(shortRoute, "MT-1O_ShortR", line.id(), RouteOperationType.OPERATION);
+      Route mainlineReturn =
+          route(mainlineReturnRoute, "MT-1O_ShortR-RET", line.id(), RouteOperationType.RETURN);
+      when(provider.routes().findById(shortRoute)).thenReturn(Optional.of(shortR));
+      when(provider.routes().listByLine(line.id()))
+          .thenReturn(
+              withMainlineReturn
+                  ? List.of(platformReturn, shortR, mainlineReturn)
+                  : List.of(platformReturn, shortR));
+      when(provider.routeStops().listByRoute(mainlineReturnRoute))
+          .thenReturn(
+              List.of(
+                  new RouteStop(
+                      mainlineReturnRoute,
+                      0,
+                      Optional.empty(),
+                      Optional.of(MAINLINE_TURNBACK.value()),
+                      Optional.empty(),
+                      RouteStopPassType.STOP,
+                      Optional.empty())));
+
+      FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+      StorageManager storageManager = mock(StorageManager.class);
+      when(plugin.getStorageManager()).thenReturn(storageManager);
+      when(storageManager.provider()).thenReturn(Optional.of(provider));
+      when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+      when(ticketAssigner.forceAssign(eq(provider), eq("train-a"), any())).thenReturn(true);
+      layoverRegistry.register(
+          "train-a",
+          layoverNode.value().toLowerCase(java.util.Locale.ROOT),
+          layoverNode,
+          ARRIVED,
+          Map.of(
+              "FTA_OPERATOR_CODE",
+              "SURC",
+              RouteProgressRegistry.TAG_ROUTE_ID,
+              shortRoute.toString()));
+      ConfigManager configManager = mock(ConfigManager.class);
+      ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
+      when(configManager.current()).thenReturn(view);
+      when(view.reclaimSettings())
+          .thenReturn(
+              new ConfigManager.ReclaimSettings(true, 3600, 100, 60, strandedDestroySeconds));
+      manager =
+          new ReclaimManager(
+              plugin,
+              layoverRegistry,
+              ticketAssigner,
+              configManager,
+              logs::add,
+              () -> 0,
+              trainName -> passengers,
+              (trainName, reason) -> destroyed.add(trainName + ":" + reason),
+              clock::get);
+    }
+
+    void checkAfterIdle(long seconds) {
+      clock.set(ARRIVED.plusSeconds(seconds));
+      manager.performReclaimCheck();
+    }
+
+    private static Route route(UUID id, String code, UUID lineId, RouteOperationType type) {
+      Instant ts = Instant.parse("2026-02-01T00:00:00Z");
+      return new Route(
+          id,
+          code,
+          lineId,
+          code,
+          Optional.empty(),
+          RoutePatternType.LOCAL,
+          type,
+          Optional.empty(),
+          Optional.empty(),
+          Map.of(),
+          ts,
+          ts);
+    }
+  }
+
+  /**
    * 在样例库里加一个外方运营商 SURN 及其 RETURN 交路：首站是裸节点 {@code SURN:S:XXX:1}，不引用站点主数据。
    *
    * @return 外方 RETURN 交路 ID

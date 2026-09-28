@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -64,6 +65,13 @@ public class ReclaimManager {
 
   /** 方向供需回库最小闲置时间（秒），避免刚入 Layover 立即被回收。 */
   private static final long DIRECTION_MIN_IDLE_SECONDS = 120L;
+
+  /**
+   * 正线折返点上的待命车至少闲置这么久才立即回收：刚到时自己的下一班票可能还在路上（到达与派票不在同一拍）。
+   *
+   * <p>取一个扫描周期以内的短值，实际等待约为"下一次扫描"。
+   */
+  static final long MAINLINE_TURNBACK_MIN_IDLE_SECONDS = 15L;
 
   /**
    * 折返交接挂起多久记告警（秒）。
@@ -112,6 +120,14 @@ public class ReclaimManager {
    * 正等着下一班的车送回车库，那一班就开了天窗。交路已经断了（剩下的班次都过了容差）的车照常回收。
    */
   private volatile java.util.function.Predicate<String> returnGate = trainName -> true;
+
+  /**
+   * 正线折返点的立即回收闸：参数是列车名与它刚跑完的交路（{@code FTA_ROUTE_ID}）。默认恒拒绝—— 不按表运行时没有"这辆车接哪一班"的对应关系， 照旧等闲置上限或方向供需。
+   *
+   * <p>按表运行时装上 {@code TimetableService#allowsReturnFromMainlineTurnback}。
+   */
+  private volatile java.util.function.BiPredicate<String, Optional<UUID>> mainlineReturnGate =
+      (trainName, routeId) -> false;
 
   private BukkitTask task;
 
@@ -186,6 +202,11 @@ public class ReclaimManager {
     this.returnGate = gate == null ? trainName -> true : gate;
   }
 
+  /** 装上正线折返点的立即回收闸；{@code null} 恢复恒拒绝。 */
+  public void setMainlineReturnGate(java.util.function.BiPredicate<String, Optional<UUID>> gate) {
+    this.mainlineReturnGate = gate == null ? (trainName, routeId) -> false : gate;
+  }
+
   public void start() {
     stop();
     long interval = configManager.current().reclaimSettings().checkIntervalSeconds() * 20L;
@@ -241,7 +262,24 @@ public class ReclaimManager {
       int operationTrips = readPositiveIntTag(candidate.tags(), TAG_OPERATION_TRIPS);
       int maxOperationTrips = readPositiveIntTag(candidate.tags(), TAG_MAX_OPERATION_TRIPS);
 
-      if (maxOperationTrips > 0 && operationTrips >= maxOperationTrips) {
+      boolean mainlineReturn =
+          idleSec >= MAINLINE_TURNBACK_MIN_IDLE_SECONDS
+              && candidate.locationNodeId() != null
+              && RouteTerminals.isMainlineTurnback(candidate.locationNodeId().value())
+              && mainlineReturnGate.test(
+                  candidate.trainName(),
+                  parseUuidTag(candidate.tags(), RouteProgressRegistry.TAG_ROUTE_ID));
+      if (mainlineReturn) {
+        shouldReclaim = true;
+        debugLogger.accept(
+            "回收触发: 正线折返点无后续班次 train="
+                + candidate.trainName()
+                + " node="
+                + candidate.locationNodeId().value()
+                + " idle="
+                + idleSec
+                + "s");
+      } else if (maxOperationTrips > 0 && operationTrips >= maxOperationTrips) {
         shouldReclaim = true;
         debugLogger.accept(
             "回收触发: 生命周期到达上限 train="
@@ -285,18 +323,21 @@ public class ReclaimManager {
         }
       }
 
-      if (shouldReclaim && !returnGate.test(candidate.trainName())) {
+      if (shouldReclaim && !mainlineReturn && !returnGate.test(candidate.trainName())) {
         // 交路还有班次：这不是派不出回库票，不能记成滞留。
         debugLogger.accept("回收跳过: 交路还有班次要跑 train=" + candidate.trainName());
         continue;
       }
       if (shouldReclaim) {
-        if (assignReturnTicket(candidate, providerOpt)) {
+        ReturnOutcome outcome = assignReturnTicket(candidate, providerOpt);
+        if (outcome == ReturnOutcome.ASSIGNED) {
           strandedSince.remove(candidate.trainName());
           decrementDirectionSupply(layoverSupplyByDirection, directionKey);
           if (pressure) {
             pressure = false; // 本轮执行一次回收后，立即解除压力模式
           }
+        } else if (mainlineReturn && outcome == ReturnOutcome.NO_ROUTE) {
+          destroyAtMainlineTurnback(candidate, now, idleSec, settings.strandedDestroySeconds());
         } else {
           destroyIfStranded(candidate, now, settings.strandedDestroySeconds());
         }
@@ -355,8 +396,7 @@ public class ReclaimManager {
   /**
    * 该回收却派不出 RETURN 票的车，滞留超过阈值就销毁。
    *
-   * <p>三道闸：阈值为 0 关闭；有进行中的折返事务不碰（那是票据分配器的事务，删车会留下悬空 attempt）；有乘客不碰。 销毁走 {@code
-   * RuntimeDispatchService#destroyTrainByName}，与健康监控的清除是同一条路径，占用释放仍等物理实体消失。
+   * <p>阈值为 0 关闭；折返事务与乘客两道闸见 {@link #destroyUnlessBusy}。
    */
   private void destroyIfStranded(
       LayoverRegistry.LayoverCandidate candidate, Instant now, long strandedDestroySeconds) {
@@ -369,29 +409,83 @@ public class ReclaimManager {
     if (strandedSeconds < strandedDestroySeconds) {
       return;
     }
-    if (candidate.dispatchAttempt().isPresent()) {
+    destroyUnlessBusy(
+        candidate,
+        now,
+        "RECLAIM_STRANDED",
+        "reclaim-stranded",
+        " strandedSeconds=" + strandedSeconds + " threshold=" + strandedDestroySeconds);
+  }
+
+  /**
+   * 正线折返点上接不上下一班、又确实没有从这里出发的 RETURN 交路的车：原地销毁，不等滞留阈值。
+   *
+   * <p>车停在正线上挡着同一股道的后车。正线折返点往往没有顺向的近车库，自动找回库路线要沿干线跑一整趟表外车， 而这条规则只在网络已经晚点时触发，再塞一趟表外车只会更堵；
+   * 车库发车按需生成，销毁与回库在车辆资源上等价。有 RETURN 交路只是这一拍没派出去（闭塞、交接进行中）时不走这里，照常进滞留计时。 {@code
+   * reclaim.stranded-destroy-seconds} 为 0（回收不销毁车）时同样不销毁，只记滞留。
+   */
+  private void destroyAtMainlineTurnback(
+      LayoverRegistry.LayoverCandidate candidate,
+      Instant now,
+      long idleSeconds,
+      long strandedDestroySeconds) {
+    if (strandedDestroySeconds <= 0) {
+      strandedSince.computeIfAbsent(candidate.trainName(), ignored -> now);
+      return;
+    }
+    destroyUnlessBusy(
+        candidate,
+        now,
+        "RECLAIM_MAINLINE",
+        "reclaim-mainline-turnback",
+        " node=" + candidate.locationNodeId().value() + " idleSeconds=" + idleSeconds);
+  }
+
+  /**
+   * 回收销毁的共同闸：已不在待命池里的不碰（这一拍里被派走了）；有进行中的折返事务不碰（那是票据分配器的事务，删车会留下悬空 attempt）；有乘客不碰。
+   * 两项都按待命池的当前记录判，不用扫描开头的快照——同一拍里的派票可能刚认领了交接。 销毁走 {@code
+   * RuntimeDispatchService#destroyTrainByName}，与健康监控的清除是同一条路径，占用释放仍等物理实体消失。
+   *
+   * @param event 日志前缀：{@code <event>_SKIP} / {@code <event>_DESTROY} / {@code
+   *     <event>_DESTROY_FAILED}
+   * @param reason 交给销毁回调的原因
+   * @param detail 追加在销毁日志末尾的字段
+   */
+  private void destroyUnlessBusy(
+      LayoverRegistry.LayoverCandidate candidate,
+      Instant now,
+      String event,
+      String reason,
+      String detail) {
+    String trainName = candidate.trainName();
+    Optional<LayoverRegistry.LayoverCandidate> current = layoverRegistry.get(trainName);
+    if (current.isEmpty()) {
+      debugLogger.accept(event + "_SKIP train=" + trainName + " reason=no-longer-waiting");
+      return;
+    }
+    Optional<LayoverRegistry.DispatchAttempt> attempt = current.get().dispatchAttempt();
+    if (attempt.isPresent()) {
       debugLogger.accept(
-          "RECLAIM_STRANDED_SKIP train="
+          event
+              + "_SKIP train="
               + trainName
               + " reason=dispatch-attempt-in-progress attemptAgeSeconds="
-              + ChronoUnit.SECONDS.between(candidate.dispatchAttempt().get().claimedAt(), now));
+              + ChronoUnit.SECONDS.between(attempt.get().claimedAt(), now));
       return;
     }
     if (passengerCheck.test(trainName)) {
-      debugLogger.accept("RECLAIM_STRANDED_SKIP train=" + trainName + " reason=has-passengers");
+      debugLogger.accept(event + "_SKIP train=" + trainName + " reason=has-passengers");
       return;
     }
-    boolean destroyed = destroyer.test(trainName, "reclaim-stranded");
+    boolean destroyed = destroyer.test(trainName, reason);
     debugLogger.accept(
-        (destroyed ? "RECLAIM_STRANDED_DESTROY" : "RECLAIM_STRANDED_DESTROY_FAILED")
+        event
+            + (destroyed ? "_DESTROY" : "_DESTROY_FAILED")
             + " train="
             + trainName
             + " terminal="
             + candidate.terminalKey()
-            + " strandedSeconds="
-            + strandedSeconds
-            + " threshold="
-            + strandedDestroySeconds);
+            + detail);
     if (destroyed) {
       strandedSince.remove(trainName);
     }
@@ -465,23 +559,35 @@ public class ReclaimManager {
     return TerminalKeyResolver.extractStationKey(normalized).orElse(normalized);
   }
 
+  /** 一次派 RETURN 票的结果。 */
+  private enum ReturnOutcome {
+    /** 已派出。 */
+    ASSIGNED,
+    /** 查过了：没有一条 RETURN 交路从这个终点出发。 */
+    NO_ROUTE,
+    /** 没派出去，但不能断定没有交路：存储不可用、运营商回溯不到、匹配的交路被拒或交接进行中。 */
+    BLOCKED
+  }
+
   /**
    * 为待回收列车分配 RETURN 票据。
    *
    * <p>该方法只负责票据分配，不直接销毁列车。纯预检拒绝且没有建立 dispatch attempt 时会继续尝试下一条匹配 RETURN route；一旦进入 handoff
    * 事务，则固定保留同一 route/ticket 供下一轮重试，避免同时产生两个折返事务。
+   *
+   * <p>只有查过全部 RETURN 交路、确实没有一条从这个终点出发时才返回 {@link ReturnOutcome#NO_ROUTE}；正线折返点的原地销毁只认这一种。
    */
-  private boolean assignReturnTicket(
+  private ReturnOutcome assignReturnTicket(
       LayoverRegistry.LayoverCandidate candidate, Optional<StorageProvider> providerOpt) {
     if (providerOpt.isEmpty()) {
       debugLogger.accept("回收失败: StorageProvider 不可用 train=" + candidate.trainName());
-      return false;
+      return ReturnOutcome.BLOCKED;
     }
     StorageProvider provider = providerOpt.get();
 
     Optional<Operator> operatorOpt = resolveCandidateOperator(provider, candidate);
     if (operatorOpt.isEmpty()) {
-      return false;
+      return ReturnOutcome.BLOCKED;
     }
     UUID operatorId = operatorOpt.get().id();
     String opCode = operatorOpt.get().code();
@@ -509,9 +615,10 @@ public class ReclaimManager {
     if (allReturnRoutes.isEmpty()) {
       debugLogger.accept(
           "回收失败: Operator " + opCode + " 无 RETURN 线路 train=" + candidate.trainName());
-      return false;
+      return ReturnOutcome.NO_ROUTE;
     }
 
+    boolean matched = false;
     for (Route route : allReturnRoutes) {
       List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
       if (stops.isEmpty()) {
@@ -521,6 +628,7 @@ public class ReclaimManager {
       boolean match = returnRouteStartsAt(provider, first, candidate.terminalKey());
 
       if (match) {
+        matched = true;
         Optional<ServiceTicket> ticketOpt = stableReturnTicket(candidate, route.id());
         if (ticketOpt.isEmpty()) {
           debugLogger.accept("回收跳过: 候选已由其他 dispatch 事务认领 train=" + candidate.trainName());
@@ -535,21 +643,24 @@ public class ReclaimManager {
         if (success) {
           stableReturnTickets.remove(ticket.ticketId());
           debugLogger.accept("回收成功: 已分配 RETURN ticket train=" + candidate.trainName());
-          return true;
+          return ReturnOutcome.ASSIGNED;
         }
         debugLogger.accept("回收失败: TicketAssigner 拒绝分配 train=" + candidate.trainName());
         if (layoverRegistry.findDispatchAttemptOwner(ticket.ticketId()).isPresent()) {
-          return false;
+          return ReturnOutcome.BLOCKED;
         }
         stableReturnTickets.remove(ticket.ticketId());
       }
+    }
+    if (matched) {
+      return ReturnOutcome.BLOCKED;
     }
     debugLogger.accept(
         "回收失败: 未找到匹配 terminal="
             + candidate.terminalKey()
             + " 的 RETURN 线路 train="
             + candidate.trainName());
-    return false;
+    return ReturnOutcome.NO_ROUTE;
   }
 
   private static List<Route> listReturnRoutes(StorageProvider provider, UUID operatorId) {
@@ -564,6 +675,8 @@ public class ReclaimManager {
    *
    * <p>三种写法都要认：按站点主数据引用（比站 code）、直接写图节点 id（直通到外方终点时只能这么写）、DYNAMIC 规范（按站台组比）。 只认第一种的话，凡是首站在别的运营商地盘上的
    * RETURN 永远匹配不上。
+   *
+   * <p>站 code 只和终点所在车站/车库的名字段比：区间路径点（例如 {@code OFL:MLU:2:004}）里的起讫站段不表示车停在那个站。
    */
   private static boolean returnRouteStartsAt(
       StorageProvider provider, RouteStop first, String terminalKey) {
@@ -571,16 +684,15 @@ public class ReclaimManager {
       return false;
     }
     if (first.stationId().isPresent()) {
-      var stationOpt = provider.stations().findById(first.stationId().get());
-      if (stationOpt.isPresent()) {
-        String code = stationOpt.get().code();
-        for (String part : terminalKey.split(":")) {
-          if (part.equalsIgnoreCase(code)) {
-            return true;
-          }
-        }
-      }
-      return false;
+      Optional<String> stationName =
+          TerminalKeyResolver.extractStationKey(terminalKey)
+              .map(key -> key.substring(key.lastIndexOf(':') + 1));
+      return stationName.isPresent()
+          && provider
+              .stations()
+              .findById(first.stationId().get())
+              .filter(station -> station.code().equalsIgnoreCase(stationName.get()))
+              .isPresent();
     }
     if (first.waypointNodeId().isPresent()) {
       return TerminalKeyResolver.matches(terminalKey, first.waypointNodeId().get());

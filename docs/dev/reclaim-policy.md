@@ -15,6 +15,29 @@
 交路已经断了（剩下的班次都过了 `timetable.assign-tolerance-seconds`，票都已作废）的车照常回收。
 没有这道闸时，闲置超时、总量超限、方向供给过剩都能把正等着下一班的车送回车库，那一班就开了天窗。
 
+**正线折返点立即回收**：待命位置是正线区间路径点（`RouteTerminals#isMainlineTurnback`：`WaypointKind.INTERVAL`，例如 MT-1O_ShortR 终到的 `OFL:MLU:2:004`；
+车站、咽喉、车库、道岔都不算；编表的往返对锚定用的是同一个判定）的车停在正线上，会挡同一股道的后车，不能等闲置上限。闲置满
+`ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS`（15 秒，实际约为下一次扫描）且过了**正线回送闸**
+（`ReclaimManager#setMainlineReturnGate`，参数是列车名与它刚跑完的 `FTA_ROUTE_ID`）就立即回收，日志 `回收触发: 正线折返点无后续班次`：
+有从这个路径点出发的 RETURN 交路（人工定义，首站写这个节点 id）就照它开走；只有查过全部 RETURN 交路、**确实没有**一条从这里出发时才**原地销毁**
+（`RECLAIM_MAINLINE_DESTROY`，失败记 `RECLAIM_MAINLINE_DESTROY_FAILED`）。有这样的交路只是这一拍没派出去（闭塞、被拒、交接进行中）、
+存储不可用、或运营商回溯不到时都不销毁，照常进下面的滞留计时。已不在待命池、有乘客、或有进行中的折返事务时不销毁
+（`RECLAIM_MAINLINE_SKIP`，与滞留销毁同一组闸，按待命池的当前记录判，不用扫描开头的快照）；
+`reclaim.stranded-destroy-seconds: 0`（回收不销毁车）时也不销毁、只记滞留。
+这道闸代替上面的回库闸，按表运行时装的是 `TimetableService#allowsReturnFromMainlineTurnback`，只管**由时刻表出票**的交路：
+
+- 自由运行的交路、只扣车不出票（`timetable.spawn-enabled: false`）、不知道刚跑完哪条交路（缺 `FTA_ROUTE_ID`）、未启用按表运行：
+  不放行，照旧走上面三条规则——接哪一班由间隔出票决定，没有交路上的对应关系可判；
+- 本交路的**下一班**已过了 `timetable.assign-tolerance-seconds`（它的票已作废）放行（`TIMETABLE_DUTY_NEXT_TRIP_MISSED`）：
+  再下一次回到这个折返点发车要等一整个往返，停在正线上等那么久会一直挡着后车；站台上的车则照旧等到末班也作废；
+- 下一班还接得上时落到 `allowsReturn`：没绑交路（例如重启后账本丢了）、交路已跑完、剩下的班次全都作废时放行，否则不放行（`TIMETABLE_RETURN_DENIED`）。
+
+正线回送闸不放行（下一班还接得上）时，闲置超时等规则触发的回收仍要过回库闸，不会因为停在正线上就绕过去。
+
+为什么是销毁而不是自动找车库开回去：这条规则只在网络已经晚点时触发（正常情况下编表把往返对锚在正线端，车到了约 20 秒就接下一班），
+而正线折返点往往没有顺向的近车库——实服 `OFL:MLU:2:004` 除折返本身外不再倒车能到的车库是 D:HHU（约 2129 格）与 D:LWN（约 2408 格），
+都要沿干线跑一整趟表外车；D:OFL 就在旁边，却要再倒一次车。车库发车按需生成，销毁与回库在车辆资源上等价。
+
 ## 回收动作
 - **生成 RETURN 票据**：为待回收列车分配一张 `RETURN` 类型的 `ServiceTicket`。
 - **低优先级调度**：回收票据的优先级设为 `-10`（普通客运为 `0`，VIP/Depot发车可能更高），确保回收列车不会抢占正常客运列车的线路资源（Fairness）。
@@ -22,6 +45,7 @@
 - **标签复位**：RETURN 或 CREATE 再次发车后，`FTA_OP_TRIPS` 会重置为 `0`，`FTA_OP_MAX` 继续沿用 route/group 的配置结果，供下一轮运营判断。
 - **RETURN 搜索范围**：先在本运营商的线路里找，找不到再扩到全部运营商；候选 RETURN 的首站按站点 code、裸节点 id
   与 DYNAMIC 规范三种写法匹配。直通车停在外方终点时，靠这一步才找得到能带它回去的线路。
+  站点 code 只和终点所在车站/车库的名字段比（`SURC:S:PPK:1` 的 `PPK`）：区间路径点 `PPK:RVS:1:001` 里的起讫站段不表示车停在 PPK。
 - **滞留销毁兜底**：仍然派不出 RETURN 票的待命车，从第一次判定该回收起计时，超过 `reclaim.stranded-destroy-seconds`
   （默认 1800，`0` 关闭）走 `destroyTrainByName` 销毁，日志 `RECLAIM_STRANDED_DESTROY`（失败记 `RECLAIM_STRANDED_DESTROY_FAILED`）。
   **有乘客**（`reason=has-passengers`）或**有进行中的折返事务**（`reason=dispatch-attempt-in-progress`）的车不碰，记 `RECLAIM_STRANDED_SKIP`。
@@ -41,7 +65,7 @@ reclaim:
   max-idle-seconds: 300          # 待命超过多少秒触发回收
   max-active-trains: 50          # 压力模式阈值：全服活跃列车数超过它就每轮回收一辆闲置车
   check-interval-seconds: 60     # 检查周期
-  stranded-destroy-seconds: 1800 # 兜底：该回收却一直派不出 RETURN 票的待命车，滞留超过它就销毁；0 关闭
+  stranded-destroy-seconds: 1800 # 兜底：该回收却一直派不出 RETURN 票的待命车，滞留超过它就销毁；0 关闭（连同正线折返点原地销毁）
 ```
 
 `reclaim.max-active-trains` 是**出口侧**的压力阈值，与 `spawn.max-active-trains` 的入口侧准入不是一回事，两者互不替代。

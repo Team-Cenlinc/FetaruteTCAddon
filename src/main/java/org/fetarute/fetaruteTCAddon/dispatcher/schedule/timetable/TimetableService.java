@@ -18,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ScheduledDeparturePlan;
@@ -239,21 +240,78 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
+   * 停在正线折返点（区间路径点，不是车站也不是车库）的车能不能立即回收。
+   *
+   * <p>车停在正线上会挡同一股道的后车，不能像在站台上那样等闲置上限或交路末班过期。只管由时刻表出票的交路（{@code routeId}
+   * 是它刚跑完的那一趟）：自由运行的线路、只扣车不出票的模式下，接哪一班由间隔出票决定，没有交路上的对应关系可判，照旧交给闲置回收。 由时刻表出票时以下情形都没有对应关系，放行：
+   *
+   * <ul>
+   *   <li>本交路的<b>下一班</b>已过了发车容差（它的票已作废）：再下一次回到这个折返点发车要等一整个往返，停在正线上等那么久会一直挡着后车；
+   *   <li>{@link #allowsReturn} 放行的情形：没绑交路（例如重启后账本丢了）、交路已跑完、剩下的班次全都作废。
+   * </ul>
+   *
+   * <p>先判下一班：下一班还接得上时才落到 {@link #allowsReturn}，它记的 {@code TIMETABLE_RETURN_DENIED} 才名副其实。
+   *
+   * @param trainName 列车名
+   * @param routeId 列车刚跑完的交路；缺失视为不由时刻表出票
+   * @return 允许立即回收返回 true
+   */
+  public boolean allowsReturnFromMainlineTurnback(String trainName, Optional<UUID> routeId) {
+    Settings current = settings;
+    if (!current.spawnEnabled() || routeId.filter(this::managed).isEmpty()) {
+      return false;
+    }
+    String key = keyOf(trainName);
+    Optional<DutyProgress> progress = ledger.progressOf(key).filter(p -> !p.exhausted());
+    if (progress.isPresent() && nextTripMissed(key, progress.get(), current)) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_NEXT_TRIP_MISSED train="
+              + trainName
+              + " duty="
+              + progress.get().describe()
+              + " action=allow-mainline-return");
+      return true;
+    }
+    return allowsReturn(trainName);
+  }
+
+  /** 交路的下一班（进度之后的第一班）是否已过了发车容差；查不到归属、表、交路或下一班时返回 false。 */
+  private boolean nextTripMissed(String key, DutyProgress progress, Settings current) {
+    int next = progress.assignedTrips();
+    return dutyTripExpired(
+        key,
+        progress,
+        current,
+        ids -> next < ids.size() ? Optional.of(ids.get(next)) : Optional.empty());
+  }
+
+  /**
    * 交路剩下的班次是否都已过了发车容差（表定票到期 = 计划发车 + 容差）。
    *
    * <p>班次按执行顺序排列，所以只需看末班：末班的票都作废了，前面的只会更早。查不到归属、表、交路或末班时返回 false， 保持"交路没跑完不准回库"的原判定。
    */
   private boolean continuationLost(String key, DutyProgress progress, Settings current) {
+    return dutyTripExpired(
+        key,
+        progress,
+        current,
+        ids -> ids.isEmpty() ? Optional.empty() : Optional.of(ids.get(ids.size() - 1)));
+  }
+
+  /** 交路里 {@code pick} 选出的那一班是否已过了发车容差（它的票已作废）；查不到归属、表、交路或那一班时返回 false。 */
+  private boolean dutyTripExpired(
+      String key,
+      DutyProgress progress,
+      Settings current,
+      Function<List<UUID>, Optional<UUID>> pick) {
     Optional<DutyKey> binding =
         ledger.bindingOf(key).filter(bound -> bound.dutyId().equals(progress.dutyId()));
     Optional<Timetable> timetable = binding.map(bound -> snapshot.byId().get(bound.timetableId()));
-    Optional<TimetableTrip> lastTrip =
-        timetable
-            .flatMap(t -> t.duty(progress.dutyId()))
-            .map(VehicleDuty::tripIds)
-            .filter(ids -> !ids.isEmpty())
-            .flatMap(ids -> timetable.get().trip(ids.get(ids.size() - 1)));
-    return lastTrip
+    return timetable
+        .flatMap(t -> t.duty(progress.dutyId()))
+        .map(VehicleDuty::tripIds)
+        .flatMap(pick)
+        .flatMap(tripId -> timetable.get().trip(tripId))
         .map(trip -> timetable.get().departureOnServiceDay(trip, binding.get().serviceDate()))
         .map(departure -> departure.plus(current.assignTolerance()).isBefore(clock.get()))
         .orElse(false);
