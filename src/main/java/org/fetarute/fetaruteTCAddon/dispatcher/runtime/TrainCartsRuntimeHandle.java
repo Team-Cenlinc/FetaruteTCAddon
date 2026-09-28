@@ -8,6 +8,7 @@ import com.bergerkiller.bukkit.tc.controller.components.RailPath;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.controller.components.RailTracker;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.utils.LaunchFunction;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -609,10 +610,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return true;
     }
     group.getActions().launchReset();
-    LauncherConfig launchConfig = LauncherConfig.createDefault();
-    if (accelBlocksPerTickSquared > 0.0) {
-      launchConfig.setAcceleration(accelBlocksPerTickSquared);
-    }
+    LauncherConfig launchConfig = accelerationLaunchConfig(accelBlocksPerTickSquared);
     TrainProperties properties = group.getProperties();
     LoggerManager logger = resolveLoggerManager();
     LaunchDirectionResult directionResult =
@@ -680,10 +678,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     head.getActions().clear();
 
     // 立即发车
-    LauncherConfig launchConfig = LauncherConfig.createDefault();
-    if (accelBlocksPerTickSquared > 0.0) {
-      launchConfig.setAcceleration(accelBlocksPerTickSquared);
-    }
+    LauncherConfig launchConfig = accelerationLaunchConfig(accelBlocksPerTickSquared);
     LoggerManager logger = resolveLoggerManager();
     if (logger != null) {
       TrainProperties properties = group.getProperties();
@@ -748,14 +743,30 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       head.getActions().clear();
     }
     // 无论目标是加速还是减速，都交给 TrainCarts launch action 按加速度平滑收敛。
-    LauncherConfig launchConfig = LauncherConfig.createDefault();
-    if (accelBlocksPerTickSquared > 0.0) {
-      launchConfig.setAcceleration(accelBlocksPerTickSquared);
-    }
+    LauncherConfig launchConfig = accelerationLaunchConfig(accelBlocksPerTickSquared);
     var action = head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
     if (action != null) {
       action.addTag(ACTION_TAG_LAUNCH);
     }
+  }
+
+  /**
+   * 按加速度发车或调速的 launch 配置，固定使用线性曲线。
+   *
+   * <p>{@link LauncherConfig#createDefault()} 跟随 TrainCarts 的 {@code launchFunction}（实服为
+   * bezier）。bezier 每段开头的加速度为 0， 而进行中的 launch 只要 speedLimit 变化就会从当前速度重新规划一段：调度层按车头距离连续更新限速、逐 tick
+   * 斜坡也在写限速， bezier 于是反复从零加速度起步，发车加速被拖到原来的几分之一（实服 2026-09-27 OFL→HAS 头 50 格 26 秒，正常约 11 秒）。
+   * 线性曲线每次重算都按同一加速度接着走，不受干扰时的总用时与 bezier 相同；TrainCarts 解析带加速度的发车牌子时也默认改用线性。
+   *
+   * @param accelBlocksPerTickSquared 加速度（blocks/tick²）；不大于 0 时保持默认配置
+   */
+  static LauncherConfig accelerationLaunchConfig(double accelBlocksPerTickSquared) {
+    LauncherConfig config = LauncherConfig.createDefault();
+    if (accelBlocksPerTickSquared > 0.0) {
+      config.setFunction(LaunchFunction.Linear.class);
+      config.setAcceleration(accelBlocksPerTickSquared);
+    }
+    return config;
   }
 
   @Override

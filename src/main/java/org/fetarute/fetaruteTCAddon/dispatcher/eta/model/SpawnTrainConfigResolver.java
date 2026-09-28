@@ -161,11 +161,12 @@ public final class SpawnTrainConfigResolver {
    * <p>解析规则：
    *
    * <ul>
-   *   <li>若 pattern 匹配已知 savedTrain 命名约定（如包含 emu/dmu/diesel/electric），则推断类型
+   *   <li>若 pattern 匹配已知 savedTrain 命名约定（如包含 metro/tram/emu/dmu/diesel/electric），则推断类型；
+   *       metro/tram/light_rail 先于 emu 判定，{@code metro_emu} 这类名字归地铁型
    *   <li>否则返回 empty，由调用方使用默认类型
    * </ul>
    */
-  private Optional<TrainType> inferTrainTypeFromPattern(String pattern) {
+  static Optional<TrainType> inferTrainTypeFromPattern(String pattern) {
     if (pattern == null || pattern.isBlank()) {
       return Optional.empty();
     }
@@ -173,6 +174,9 @@ public final class SpawnTrainConfigResolver {
     String lower = pattern.toLowerCase(Locale.ROOT);
 
     // 按常见命名约定推断
+    if (lower.contains("metro") || lower.contains("tram") || lower.contains("light_rail")) {
+      return Optional.of(TrainType.METRO);
+    }
     if (lower.contains("emu") || lower.contains("electric_multiple")) {
       return Optional.of(TrainType.EMU);
     }

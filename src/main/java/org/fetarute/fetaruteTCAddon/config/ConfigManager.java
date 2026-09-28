@@ -2,7 +2,9 @@ package org.fetarute.fetaruteTCAddon.config;
 
 import java.io.File;
 import java.io.InputStream;
+import java.util.EnumMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import org.bukkit.configuration.ConfigurationSection;
@@ -20,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 35;
+  private static final int EXPECTED_CONFIG_VERSION = 36;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -37,7 +39,6 @@ public final class ConfigManager {
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
   private static final double DEFAULT_APPROACH_WINDOW_BLOCKS = 96.0;
   private static final int DEFAULT_APPROACH_WINDOW_EDGES = 0;
-  private static final int DEFAULT_APPROACH_TARGET_EDGES = 1;
   private static final boolean DEFAULT_HUD_BOSSBAR_ENABLED = true;
   private static final int DEFAULT_HUD_BOSSBAR_TICK_INTERVAL = 10;
   private static final Optional<String> DEFAULT_HUD_BOSSBAR_TEMPLATE = Optional.empty();
@@ -98,14 +99,10 @@ public final class ConfigManager {
       false;
   private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ONE_ACTIVE_RESERVATION_PER_CYCLE =
       true;
-  private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
-  private static final double DEFAULT_EMU_DECEL_BPS2 = 1.0;
-  private static final double DEFAULT_DMU_ACCEL_BPS2 = 0.7;
-  private static final double DEFAULT_DMU_DECEL_BPS2 = 0.9;
-  private static final double DEFAULT_DIESEL_PP_ACCEL_BPS2 = 0.6;
-  private static final double DEFAULT_DIESEL_PP_DECEL_BPS2 = 0.8;
-  private static final double DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2 = 0.9;
-  private static final double DEFAULT_ELECTRIC_LOCO_DECEL_BPS2 = 1.1;
+
+  /** 配置缺失或写错 {@code train.default-type} 时的默认车种。 */
+  private static final TrainType DEFAULT_TRAIN_TYPE = TrainType.METRO;
+
   private static final int DEFAULT_SPAWN_MAX_ATTEMPTS = 10;
   private static final long DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS = 86400L;
   private static final long DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS = 86400L;
@@ -1025,7 +1022,6 @@ public final class ConfigManager {
     double approachDepotSpeed = DEFAULT_APPROACH_DEPOT_SPEED_BPS;
     double approachWindowBlocks = DEFAULT_APPROACH_WINDOW_BLOCKS;
     int approachWindowEdges = DEFAULT_APPROACH_WINDOW_EDGES;
-    int approachTargetEdges = DEFAULT_APPROACH_TARGET_EDGES;
     boolean speedCurveEnabled = DEFAULT_SPEED_CURVE_ENABLED;
     SpeedCurveType speedCurveType = DEFAULT_SPEED_CURVE_TYPE;
     double speedCurveFactor = DEFAULT_SPEED_CURVE_FACTOR;
@@ -1170,13 +1166,6 @@ public final class ConfigManager {
         approachWindowEdges = configuredApproachWindowEdges;
       } else {
         logger.warning("runtime.approach-window-edges 配置无效: " + configuredApproachWindowEdges);
-      }
-      int configuredApproachTargetEdges =
-          section.getInt("approach-target-edges", approachTargetEdges);
-      if (configuredApproachTargetEdges >= 0) {
-        approachTargetEdges = configuredApproachTargetEdges;
-      } else {
-        logger.warning("runtime.approach-target-edges 配置无效: " + configuredApproachTargetEdges);
       }
       boolean configuredSpeedCurve = section.getBoolean("speed-curve-enabled", speedCurveEnabled);
       speedCurveEnabled = configuredSpeedCurve;
@@ -1324,7 +1313,6 @@ public final class ConfigManager {
         approachDepotSpeed,
         approachWindowBlocks,
         approachWindowEdges,
-        approachTargetEdges,
         speedCurveEnabled,
         speedCurveType,
         speedCurveFactor,
@@ -1362,14 +1350,15 @@ public final class ConfigManager {
   private static TrainConfigSettings parseTrain(
       ConfigurationSection section, java.util.logging.Logger logger) {
     ConfigurationSection types = section != null ? section.getConfigurationSection("types") : null;
-    TrainTypeSettings emu = parseTrainType(types, "emu", defaultsEmu(), logger);
-    TrainTypeSettings dmu = parseTrainType(types, "dmu", defaultsDmu(), logger);
-    TrainTypeSettings diesel =
-        parseTrainType(types, "diesel_push_pull", defaultsDieselPushPull(), logger);
-    TrainTypeSettings electric =
-        parseTrainType(types, "electric_loco", defaultsElectricLoco(), logger);
-    String defaultType = section != null ? section.getString("default-type", "emu") : "emu";
-    return new TrainConfigSettings(defaultType, emu, dmu, diesel, electric);
+    Map<TrainType, TrainTypeSettings> parsed = new EnumMap<>(TrainType.class);
+    for (TrainType type : TrainType.values()) {
+      parsed.put(type, parseTrainType(types, type.key(), TrainTypeSettings.preset(type), logger));
+    }
+    String defaultType =
+        section != null
+            ? section.getString("default-type", DEFAULT_TRAIN_TYPE.key())
+            : DEFAULT_TRAIN_TYPE.key();
+    return new TrainConfigSettings(defaultType, parsed);
   }
 
   private static TrainTypeSettings parseTrainType(
@@ -1961,7 +1950,6 @@ public final class ConfigManager {
       double approachDepotSpeedBps,
       double approachWindowBlocks,
       int approachWindowEdges,
-      int approachTargetEdges,
       boolean speedCurveEnabled,
       SpeedCurveType speedCurveType,
       double speedCurveFactor,
@@ -2027,9 +2015,6 @@ public final class ConfigManager {
       }
       if (approachWindowEdges < 0) {
         throw new IllegalArgumentException("approachWindowEdges 必须为非负数");
-      }
-      if (approachTargetEdges < 0) {
-        throw new IllegalArgumentException("approachTargetEdges 必须为非负数");
       }
       if (speedCurveType == null) {
         throw new IllegalArgumentException("speedCurveType 不能为空");
@@ -2150,7 +2135,6 @@ public final class ConfigManager {
           approachDepotSpeedBps,
           DEFAULT_APPROACH_WINDOW_BLOCKS,
           DEFAULT_APPROACH_WINDOW_EDGES,
-          DEFAULT_APPROACH_TARGET_EDGES,
           speedCurveEnabled,
           speedCurveType,
           speedCurveFactor,
@@ -2186,34 +2170,33 @@ public final class ConfigManager {
     }
   }
 
-  /** 列车类型默认配置（车种映射 + 默认类型）。 */
-  public record TrainConfigSettings(
-      String defaultType,
-      TrainTypeSettings emu,
-      TrainTypeSettings dmu,
-      TrainTypeSettings dieselPushPull,
-      TrainTypeSettings electricLoco) {
+  /**
+   * 列车类型配置：默认车种与各车种加减速。
+   *
+   * @param defaultType 默认车种（{@code train.default-type}）；为空时取 {@link #DEFAULT_TRAIN_TYPE}
+   * @param types 各车种加减速；未列出的车种取 {@link TrainType} 自带的预设
+   */
+  public record TrainConfigSettings(String defaultType, Map<TrainType, TrainTypeSettings> types) {
 
     public TrainConfigSettings {
       if (defaultType == null || defaultType.isBlank()) {
-        defaultType = "emu";
+        defaultType = DEFAULT_TRAIN_TYPE.key();
       }
+      Map<TrainType, TrainTypeSettings> complete = new EnumMap<>(TrainType.class);
+      for (TrainType type : TrainType.values()) {
+        TrainTypeSettings configured = types == null ? null : types.get(type);
+        complete.put(type, configured != null ? configured : TrainTypeSettings.preset(type));
+      }
+      types = Map.copyOf(complete);
     }
 
     public TrainType defaultTrainType() {
-      return TrainType.parse(defaultType).orElse(TrainType.EMU);
+      return TrainType.parse(defaultType).orElse(DEFAULT_TRAIN_TYPE);
     }
 
+    /** 车种的加减速；{@code null} 按默认车种。 */
     public TrainTypeSettings forType(TrainType type) {
-      if (type == null) {
-        return emu;
-      }
-      return switch (type) {
-        case EMU -> emu;
-        case DMU -> dmu;
-        case DIESEL_PUSH_PULL -> dieselPushPull;
-        case ELECTRIC_LOCO -> electricLoco;
-      };
+      return types.get(type == null ? defaultTrainType() : type);
     }
   }
 
@@ -2227,23 +2210,11 @@ public final class ConfigManager {
         throw new IllegalArgumentException("decelBps2 必须为正数");
       }
     }
-  }
 
-  private static TrainTypeSettings defaultsEmu() {
-    return new TrainTypeSettings(DEFAULT_EMU_ACCEL_BPS2, DEFAULT_EMU_DECEL_BPS2);
-  }
-
-  private static TrainTypeSettings defaultsDmu() {
-    return new TrainTypeSettings(DEFAULT_DMU_ACCEL_BPS2, DEFAULT_DMU_DECEL_BPS2);
-  }
-
-  private static TrainTypeSettings defaultsDieselPushPull() {
-    return new TrainTypeSettings(DEFAULT_DIESEL_PP_ACCEL_BPS2, DEFAULT_DIESEL_PP_DECEL_BPS2);
-  }
-
-  private static TrainTypeSettings defaultsElectricLoco() {
-    return new TrainTypeSettings(
-        DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2, DEFAULT_ELECTRIC_LOCO_DECEL_BPS2);
+    /** 车种自带的预设。 */
+    public static TrainTypeSettings preset(TrainType type) {
+      return new TrainTypeSettings(type.presetAccelBps2(), type.presetDecelBps2());
+    }
   }
 
   /** 存储后端定义。 */

@@ -10,6 +10,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
@@ -26,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintC
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 
 /**
@@ -201,8 +203,7 @@ final class RuntimeDispatchTestFixtures {
             Optional.empty());
     ConfigManager.TrainTypeSettings typeDefaults = new ConfigManager.TrainTypeSettings(1.0, 1.0);
     ConfigManager.TrainConfigSettings train =
-        new ConfigManager.TrainConfigSettings(
-            "emu", typeDefaults, typeDefaults, typeDefaults, typeDefaults);
+        new ConfigManager.TrainConfigSettings("emu", Map.of(TrainType.EMU, typeDefaults));
     return new ConfigManager.ConfigView(
         10,
         false,

@@ -17,6 +17,8 @@ import org.junit.jupiter.api.Test;
  * 进站触发规则与运行时同一口径：同站同股道的本体与咽喉、与它们直接相连的道岔都算"已经在进站"；别的股道、区间点与不相连的道岔不算。
  *
  * <p>夹具节点不带元数据，全部靠节点 ID 解析——编表拿到的图在生产上带元数据，这里顺带覆盖了退回解析的那条路径。
+ *
+ * <p>限速区划分（{@link StopApproach#zones}）由编表运行曲线与运行时控车共用，也在这里验证。
  */
 class StopApproachTest {
 
@@ -49,6 +51,43 @@ class StopApproachTest {
             new TimetableTestFixtures.Edge(THROAT, STATION, 10, 10.0),
             new TimetableTestFixtures.Edge(FAR_SWITCH, DEPOT_THROAT, 30, 10.0),
             new TimetableTestFixtures.Edge(DEPOT_THROAT, DEPOT, 10, 10.0)));
+  }
+
+  private static final StopApproach.Rule WINDOW_96 = new StopApproach.Rule(96.0, 0, 10.0, 5.0);
+
+  @Test
+  void zoneStartsAtTheFirstNodeWithinTheWindow() {
+    // A —150— B —60— C —90— 站：B 离站 150 > 96，C 离站 90 ≤ 96，限速区从 C 起。
+    List<StopApproach.Zone> zones =
+        StopApproach.zones(
+            new double[] {0.0, 150.0, 210.0, 300.0},
+            new boolean[] {false, false, false, true},
+            WINDOW_96);
+
+    assertEquals(List.of(new StopApproach.Zone(210.0, 300.0)), zones);
+  }
+
+  @Test
+  void eachNodeLooksAtItsNextTriggerAndAdjacentZonesMerge() {
+    // 咽喉（触发点）在 250，站在 300：B 离咽喉 50、咽喉离站 50，两段相接合并。起点即使离咽喉很近也不算触发点。
+    List<StopApproach.Zone> zones =
+        StopApproach.zones(
+            new double[] {0.0, 200.0, 250.0, 300.0},
+            new boolean[] {true, false, true, true},
+            WINDOW_96);
+
+    assertEquals(List.of(new StopApproach.Zone(200.0, 300.0)), zones);
+  }
+
+  @Test
+  void edgeRuleCoversTheLastEdgesRegardlessOfLength() {
+    StopApproach.Rule lastEdge = new StopApproach.Rule(0.0, 1, 10.0, 5.0);
+
+    List<StopApproach.Zone> zones =
+        StopApproach.zones(
+            new double[] {0.0, 100.0, 400.0}, new boolean[] {false, false, true}, lastEdge);
+
+    assertEquals(List.of(new StopApproach.Zone(100.0, 400.0)), zones);
   }
 
   /** 车站本体与站咽喉都是车站，车库与车库咽喉是车库，其余（区间点、图里没有的节点）是区间停车点。 */

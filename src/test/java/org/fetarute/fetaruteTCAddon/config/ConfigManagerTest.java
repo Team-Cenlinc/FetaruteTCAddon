@@ -17,6 +17,7 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherPlannerMode;
 import org.junit.jupiter.api.Test;
@@ -79,13 +80,42 @@ class ConfigManagerTest {
     YamlConfiguration config = new YamlConfiguration();
     config.set("runtime.approach-window-blocks", 72.5);
     config.set("runtime.approach-window-edges", 2);
-    config.set("runtime.approach-target-edges", 1);
 
     ConfigManager.ConfigView view = ConfigManager.parse(config, Logger.getLogger("config-test"));
 
     assertEquals(72.5, view.runtimeSettings().approachWindowBlocks());
     assertEquals(2, view.runtimeSettings().approachWindowEdges());
-    assertEquals(1, view.runtimeSettings().approachTargetEdges());
+  }
+
+  @Test
+  // 没有 train 段时默认车种为 metro，各车种按 TrainType 预设补齐
+  void trainTypesDefaultToMetroAndPresets() {
+    ConfigManager.ConfigView view =
+        ConfigManager.parse(new YamlConfiguration(), Logger.getLogger("config-test"));
+
+    ConfigManager.TrainConfigSettings train = view.trainConfigSettings();
+    assertEquals(TrainType.METRO, train.defaultTrainType());
+    for (TrainType type : TrainType.values()) {
+      assertEquals(type.presetAccelBps2(), train.forType(type).accelBps2(), type.key());
+      assertEquals(type.presetDecelBps2(), train.forType(type).decelBps2(), type.key());
+    }
+    assertEquals(train.forType(TrainType.METRO), train.forType(null), "未指定车种按默认车种");
+  }
+
+  @Test
+  // 配置逐项覆盖预设：写了的字段按配置，漏写的字段与车种按预设；默认车种写错时退回 metro
+  void configuredTrainTypesOverridePresetsFieldByField() {
+    YamlConfiguration config = new YamlConfiguration();
+    config.set("train.default-type", "tram-train");
+    config.set("train.types.emu.accel-bps2", 0.75);
+
+    ConfigManager.TrainConfigSettings train =
+        ConfigManager.parse(config, Logger.getLogger("config-test")).trainConfigSettings();
+
+    assertEquals(TrainType.METRO, train.defaultTrainType());
+    assertEquals(0.75, train.forType(TrainType.EMU).accelBps2());
+    assertEquals(TrainType.EMU.presetDecelBps2(), train.forType(TrainType.EMU).decelBps2());
+    assertEquals(TrainType.DMU.presetAccelBps2(), train.forType(TrainType.DMU).accelBps2());
   }
 
   @Test

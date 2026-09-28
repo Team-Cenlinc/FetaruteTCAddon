@@ -7,15 +7,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
-import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,96 +49,108 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
 /**
- * 进站限速按编表运行曲线的口径执行，距离从车头量起。
+ * 控车沿到下一停车点的整段路径与编表运行曲线对齐。
  *
- * <p>夹具：A —210— W —90— 车站，进站限速 6 bps，线路限速 20 bps，减速度 1.0，进站窗口 96 格。W 离站 90 格、在窗口内，按编表运行曲线的判据
- * （{@code StopApproach#zones}），进站限速区从 W 起；区外按减速度制动至区起点，从 √(36 + 2·(210 − x)) = 20 即 x ≈ 28 处开始减速。
- * 旧口径从 A 量起、车头在 A 与 W 之间距离恒为 300，要等过 W 才一次性降下来；实服 2026-09-27 进站时“一下就降下去”即此。
+ * <ul>
+ *   <li>计划停车点已由进站控制接管时，授权终点不再按“刹到 0”压速：那条曲线从上一图节点量距，末段边短时整段被压到进站限速以下 （实服末段 45 格时进站只有 8.1
+ *       格/秒），编表却按进站限速到站；
+ *   <li>前瞻窗口只有几条边，编表运行曲线沿整段路径反推制动：窗口外的慢速边也要按同一条制动曲线提前减速。
+ * </ul>
+ *
+ * <p>夹具减速度 1.0，线路限速 20 bps，前瞻窗口 1 条边，Smart Dispatcher 关闭以隔离运行时控车本身。
  */
-class ApproachHeadDistanceTest {
+class ApproachPathAlignmentTest {
 
-  private static final String TRAIN = "SURC-MT-LP-5410";
-  private static final NodeId A = NodeId.of("SURC:PPK:RVS:1:002");
-  private static final NodeId W = NodeId.of("SURC:PPK:RVS:1:001");
-  private static final NodeId STATION = NodeId.of("SURC:S:PPK:1");
-  private static final double APPROACH_BPS = 6.0;
+  private static final String TRAIN = "SURC-WS-LC-5666";
   private static final double LINE_BPS = 20.0;
-  private static final double ZONE_START = 210.0;
 
-  /** 车头在 x=10：制动至限速区的上界 √(36 + 400) ≈ 20.9 仍高于线路速度，按线路速度跑，诊断不显示进站。 */
+  private static final NodeId W = NodeId.of("SURC:HHU:LWN:1:001");
+  private static final NodeId STATION = NodeId.of("SURC:S:HHU:1");
+
+  private static final NodeId A = NodeId.of("SURC:LWN:SWN:1:001");
+  private static final NodeId B = NodeId.of("SURC:LWN:SWN:1:002");
+  private static final NodeId C = NodeId.of("SURC:LWN:SWN:1:003");
+  private static final NodeId FAR_STATION = NodeId.of("SURC:S:SWN:1");
+
+  /** 末段 30 格进站：进站控制接管后按进站限速 10 bps 进站，不再被授权终点的“刹到 0”曲线压到约 7 bps。 */
   @Test
-  void farFromTheStationKeepsLineSpeed() {
-    ControlDiagnostics diagnostics = signalTick(10.0);
+  void plannedStopGovernedByApproachArrivesAtApproachSpeed() {
+    ControlDiagnostics diagnostics = shortLastEdgeTick(10.0);
 
-    assertEquals("none", diagnostics.approachKind());
-    assertEquals(LINE_BPS, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
+    assertEquals(SignalAspect.PROCEED, diagnostics.currentSignal(), diagnostics.toString());
+    assertEquals(10.0, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
+    assertEquals("approach", diagnostics.finalLimiterSource(), diagnostics.toString());
   }
 
-  /** 车头在 x=100（从 A 量起仍是 300 格）：按车头到限速区起点 110 格刹车，与编表运行曲线一致。 */
+  /** 进站限速关闭（0）时没有进站控制可接管，授权终点照旧按移动授权收紧：不能因此放开对停车点的制动。 */
   @Test
-  void brakesIntoTheZoneThatStartsAtTheFirstNodeWithinTheWindow() {
-    ControlDiagnostics diagnostics = signalTick(100.0);
+  void plannedStopWithoutApproachControlKeepsMovementAuthority() {
+    ControlDiagnostics diagnostics = shortLastEdgeTick(0.0);
 
-    double expected = Math.sqrt(APPROACH_BPS * APPROACH_BPS + 2.0 * 1.0 * (ZONE_START - 100.0));
-    assertEquals("station", diagnostics.approachKind(), "进站限速在收紧时应显示进站诊断");
-    assertEquals("approach_curve", diagnostics.finalLimiterSource(), diagnostics.toString());
-    assertEquals(expected, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
-    assertTrue(diagnostics.approachReason().contains("distance=200"), diagnostics.approachReason());
-    assertTrue(
-        diagnostics.approachReason().contains("node_distance=300"), diagnostics.approachReason());
-    assertTrue(
-        diagnostics.approachReason().contains("engaged=false"), diagnostics.approachReason());
+    assertTrue(diagnostics.finalTargetBps() < 10.0, diagnostics.toString());
   }
 
-  /** 车头从远处一路开到限速区前，目标速度只随车头前进连续下降，不在节点处跳变。 */
+  /**
+   * A —100— B —100（8 bps）— C —50— 车站，B、C 为通过点。前瞻窗口只到 B，编表运行曲线却从 A 起就按慢速边反推：车头在 x=10 时应限 √(64 +
+   * 2·1·90) ≈ 15.6。
+   */
   @Test
-  void targetFallsContinuouslyWithHeadPosition() {
-    double previous = Double.POSITIVE_INFINITY;
-    for (int step = 0; step < 40; step++) {
-      double target = signalTick(10.0 + step * 5.0).finalTargetBps();
-      assertTrue(target <= previous + 1.0e-9, "目标速度不得随车头前进而升高");
-      if (Double.isFinite(previous)) {
-        assertTrue(previous - target < 1.0, "车头前进 5 格，目标速度不应跳变超过 1 bps");
-      }
-      previous = target;
-    }
+  void slowEdgeBeyondTheLookaheadWindowBrakesLikeTheRunCurve() {
+    Map<NodeId, Double> xs = new LinkedHashMap<>();
+    xs.put(A, 0.0);
+    xs.put(B, 100.0);
+    xs.put(C, 200.0);
+    xs.put(FAR_STATION, 250.0);
+    Map<EdgeId, Double> slowEdges = Map.of(EdgeId.undirected(B, C), 8.0);
+    Map<Integer, RouteStopPassType> stops =
+        Map.of(1, RouteStopPassType.PASS, 2, RouteStopPassType.PASS, 3, RouteStopPassType.STOP);
+
+    ControlDiagnostics diagnostics =
+        signalTick(List.of(A, B, C, FAR_STATION), xs, slowEdges, stops, 6.0, 10.0, LINE_BPS);
+
+    assertEquals(
+        Math.sqrt(64.0 + 2.0 * 1.0 * 90.0),
+        diagnostics.finalTargetBps(),
+        1.0e-6,
+        diagnostics.toString());
+    assertEquals("edge_speed_lookahead", diagnostics.finalLimiterSource(), diagnostics.toString());
   }
 
-  /** 信号 tick 把进站曲线交给逐 tick 斜坡：保持上限就是制动至限速区的曲线；远处它高于线路速度，不会挡推进放行。 */
-  @Test
-  void signalTickHandsTheApproachCurveToTheRamp() throws ReflectiveOperationException {
-    SpeedLimitRamp approaching = new SpeedLimitRamp(tick -> () -> {});
-    FakeTrain braking = signalTick(160.0, approaching).train();
-    double expected = Math.sqrt(APPROACH_BPS * APPROACH_BPS + 2.0 * 1.0 * (ZONE_START - 160.0));
-    assertEquals(1, approaching.size(), "进站减速中的运行列车应登记到斜坡");
-    assertEquals(expected, approaching.holdLimitBps(braking).orElseThrow(), 1.0e-6);
-
-    SpeedLimitRamp far = new SpeedLimitRamp(tick -> () -> {});
-    FakeTrain farTrain = signalTick(10.0, far).train();
-    assertTrue(far.holdLimitBps(farTrain).orElseThrow() > LINE_BPS, "远处的保持上限应高于线路速度，不挡推进放行");
+  /** W —30— 车站，车头在 W 之后 5 格、以进站限速行驶。 */
+  private static ControlDiagnostics shortLastEdgeTick(double approachSpeedBps) {
+    Map<NodeId, Double> xs = new LinkedHashMap<>();
+    xs.put(W, 0.0);
+    xs.put(STATION, 30.0);
+    return signalTick(
+        List.of(W, STATION),
+        xs,
+        Map.of(),
+        Map.of(1, RouteStopPassType.STOP),
+        approachSpeedBps,
+        5.0,
+        10.0);
   }
-
-  private static ControlDiagnostics signalTick(double headX) {
-    try {
-      return signalTick(headX, null).diagnostics();
-    } catch (ReflectiveOperationException ex) {
-      throw new IllegalStateException(ex);
-    }
-  }
-
-  /** 一拍信号 tick 的诊断与列车。 */
-  private record TickRun(ControlDiagnostics diagnostics, FakeTrain train) {}
 
   /**
    * 跑一拍信号 tick。
    *
-   * @param ramp 非空时换上由它驱动的控车门面，并让属性替身记住 speedLimit，以便观察斜坡登记
+   * @param waypoints 线路节点（相邻节点在图上直接相连，边长取坐标差）
+   * @param xs 节点 x 坐标，供车头位置插值
+   * @param slowEdges 与线路限速不同的边限速
+   * @param stops 各 route index 的停车方式
+   * @param headX 车头 x 坐标
+   * @param speedBps 当前车速
    */
-  private static TickRun signalTick(double headX, SpeedLimitRamp ramp)
-      throws ReflectiveOperationException {
+  private static ControlDiagnostics signalTick(
+      List<NodeId> waypoints,
+      Map<NodeId, Double> xs,
+      Map<EdgeId, Double> slowEdges,
+      Map<Integer, RouteStopPassType> stops,
+      double approachSpeedBps,
+      double headX,
+      double speedBps) {
     UUID worldId = UUID.randomUUID();
-    RouteDefinition route =
-        new RouteDefinition(RouteId.of("MT-2F_Short"), List.of(A, STATION), Optional.empty());
+    RouteDefinition route = new RouteDefinition(RouteId.of("WS-1L"), waypoints, Optional.empty());
     TagStore tags =
         new TagStore(
             TRAIN,
@@ -150,19 +160,30 @@ class ApproachHeadDistanceTest {
             "FTA_ROUTE_INDEX=0");
     ConfigManager configManager = mock(ConfigManager.class);
     ConfigManager.ConfigView base = testConfigView(20, LINE_BPS, 1, 1, SmartDispatcherMode.OFF);
-    when(configManager.current()).thenReturn(withApproachSpeed(base, APPROACH_BPS));
+    when(configManager.current()).thenReturn(withApproachSpeed(base, approachSpeedBps));
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    sectionlessGraph(stationApproachGraph()), Instant.now())));
+                    sectionlessGraph(graph(waypoints, xs)), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
-        .thenReturn(LINE_BPS);
+        .thenAnswer(
+            invocation -> {
+              RailEdge edge = invocation.getArgument(1);
+              return slowEdges.getOrDefault(edge.id(), LINE_BPS);
+            });
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
-    when(routeDefinitions.findStop(any(), eq(1)))
-        .thenReturn(Optional.of(routeStop(1, STATION, RouteStopPassType.STOP)));
+    when(routeDefinitions.findStop(any(), anyInt()))
+        .thenAnswer(
+            invocation -> {
+              int index = invocation.getArgument(1);
+              RouteStopPassType pass = stops.get(index);
+              return pass == null
+                  ? Optional.empty()
+                  : Optional.of(routeStop(index, waypoints.get(index), pass));
+            });
 
     OccupancyManager occupancyManager =
         mock(OccupancyManager.class, withSettings().extraInterfaces(AuthorityHandoffSupport.class));
@@ -198,50 +219,35 @@ class ApproachHeadDistanceTest {
             null,
             new TrainConfigResolver(),
             message -> {});
-    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, LINE_BPS / 20.0);
+    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, speedBps / 20.0);
     RailState head = mock(RailState.class);
     when(head.positionLocation()).thenReturn(new Location(null, headX, 64.0, 0.0));
     train.railState = Optional.of(head);
 
-    if (ramp != null) {
-      double[] speedLimit = {0.0};
-      doAnswer(
-              invocation -> {
-                speedLimit[0] = invocation.getArgument(0, Double.class);
-                return null;
-              })
-          .when(tags.properties())
-          .setSpeedLimit(anyDouble());
-      when(tags.properties().getSpeedLimit()).thenAnswer(invocation -> speedLimit[0]);
-      Field controller = RuntimeDispatchService.class.getDeclaredField("runtimeTrainController");
-      controller.setAccessible(true);
-      controller.set(service, new RuntimeTrainController(new TrainLaunchManager(ramp)));
-    }
-
     service.handleSignalTick(train, false);
 
-    return new TickRun(service.getDiagnostics(TRAIN).orElseThrow(), train);
+    return service.getDiagnostics(TRAIN).orElseThrow();
   }
 
-  /** A —210— W —90— 车站，节点坐标沿 x 轴与边长一致，供车头位置插值。 */
-  private static SimpleRailGraph stationApproachGraph() {
+  /** 相邻线路节点直接相连，边长取 x 坐标差。 */
+  private static SimpleRailGraph graph(List<NodeId> waypoints, Map<NodeId, Double> xs) {
     Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
-    nodes.put(A, node(A, NodeType.WAYPOINT, 0.0));
-    nodes.put(W, node(W, NodeType.WAYPOINT, ZONE_START));
-    nodes.put(STATION, node(STATION, NodeType.STATION, 300.0));
+    for (NodeId id : waypoints) {
+      NodeType type = id.value().contains(":S:") ? NodeType.STATION : NodeType.WAYPOINT;
+      nodes.put(
+          id,
+          new SignRailNode(
+              id, type, new Vector(xs.get(id), 64.0, 0.0), Optional.empty(), Optional.empty()));
+    }
     Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
-    edge(edges, A, W, 210);
-    edge(edges, W, STATION, 90);
+    for (int i = 0; i + 1 < waypoints.size(); i++) {
+      NodeId from = waypoints.get(i);
+      NodeId to = waypoints.get(i + 1);
+      EdgeId id = EdgeId.undirected(from, to);
+      int length = (int) Math.round(xs.get(to) - xs.get(from));
+      edges.put(id, new RailEdge(id, from, to, length, -1.0, true, Optional.empty()));
+    }
     return new SimpleRailGraph(nodes, edges, java.util.Set.of());
-  }
-
-  private static RailNode node(NodeId id, NodeType type, double x) {
-    return new SignRailNode(id, type, new Vector(x, 64.0, 0.0), Optional.empty(), Optional.empty());
-  }
-
-  private static void edge(Map<EdgeId, RailEdge> edges, NodeId from, NodeId to, int lengthBlocks) {
-    EdgeId id = EdgeId.undirected(from, to);
-    edges.put(id, new RailEdge(id, from, to, lengthBlocks, -1.0, true, Optional.empty()));
   }
 
   private static ConfigManager.ConfigView withApproachSpeed(
