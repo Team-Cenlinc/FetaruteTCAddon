@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.company.model.StationTransferType;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -50,6 +51,8 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *       占位），这里不另写解析。节点解析不出车站时，再看有没有车站把它绑定为图节点。
  *   <li>运营商代码不区分大小写；跨公司重名时按公司列表顺序先到先得（与 HUD 公司显示同一规则）。 解析交路停靠点时优先取交路自己的运营商（代码相同的话），跨公司同名运营商也不会串站。
  * </ul>
+ *
+ * <p>停靠线路按列车在该站所属的线路统计（直通运转，见 {@link RouteLineChanges}）：换线之后的各站算新线路， 换线站本身两条线都算（列车以原线路到达、以新线路发车）。
  */
 public final class StationDirectory {
 
@@ -219,7 +222,7 @@ public final class StationDirectory {
   }
 
   /**
-   * 停靠某车站的一条线路。
+   * 线路及其所属运营商（停靠某车站的一条线路，或按代码查到的线路）。
    *
    * @param line 线路
    * @param operator 线路所属运营商
@@ -258,7 +261,7 @@ public final class StationDirectory {
 
     static final Catalog EMPTY =
         new Catalog(
-            false, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), List.of(),
+            false, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), List.of(),
             List.of());
 
     /** 是否从存储加载过；没加载过时线路、运营商以交路缓存里的实体为准。 */
@@ -267,6 +270,7 @@ public final class StationDirectory {
     private final Map<UUID, Operator> operatorsById;
     private final Map<String, Operator> operatorsByCode;
     private final Map<UUID, Line> linesById;
+    private final Map<String, Line> linesByOperatorAndCode;
     private final Map<UUID, StationEntry> stationsById;
     private final Map<String, StationEntry> stationsByOperatorAndCode;
     private final Map<String, StationEntry> stationsByGraphNode;
@@ -278,6 +282,7 @@ public final class StationDirectory {
         Map<UUID, Operator> operatorsById,
         Map<String, Operator> operatorsByCode,
         Map<UUID, Line> linesById,
+        Map<String, Line> linesByOperatorAndCode,
         Map<UUID, StationEntry> stationsById,
         Map<String, StationEntry> stationsByOperatorAndCode,
         Map<String, StationEntry> stationsByGraphNode,
@@ -287,6 +292,7 @@ public final class StationDirectory {
       this.operatorsById = Map.copyOf(operatorsById);
       this.operatorsByCode = Map.copyOf(operatorsByCode);
       this.linesById = Map.copyOf(linesById);
+      this.linesByOperatorAndCode = Map.copyOf(linesByOperatorAndCode);
       this.stationsById = Map.copyOf(stationsById);
       this.stationsByOperatorAndCode = Map.copyOf(stationsByOperatorAndCode);
       this.stationsByGraphNode = Map.copyOf(stationsByGraphNode);
@@ -315,9 +321,14 @@ public final class StationDirectory {
         }
       }
       Map<UUID, Line> linesById = new HashMap<>();
+      Map<String, Line> linesByKey = new HashMap<>();
       for (Line line : nonNull(provider.lines().listAll())) {
         if (line != null && operatorsById.containsKey(line.operatorId())) {
           linesById.put(line.id(), line);
+          String key = stationKey(line.operatorId(), line.code());
+          if (!key.isEmpty()) {
+            linesByKey.putIfAbsent(key, line);
+          }
         }
       }
       Map<UUID, StationEntry> stationsById = new HashMap<>();
@@ -358,6 +369,7 @@ public final class StationDirectory {
           operatorsById,
           operatorsByCode,
           linesById,
+          linesByKey,
           stationsById,
           stationsByKey,
           stationsByGraphNode,
@@ -412,6 +424,31 @@ public final class StationDirectory {
 
     Operator operator(UUID operatorId, Operator fallback) {
       return operatorsById.getOrDefault(operatorId, fallback);
+    }
+
+    /**
+     * 按运营商代码 + 线路代码找线路（均不区分大小写）；运营商代码与 {@code preferred} 相同时优先在它名下找。
+     *
+     * @param operatorCode 运营商代码
+     * @param lineCode 线路代码
+     * @param preferred 优先运营商（通常是交路所属运营商），可为 null
+     */
+    Optional<LineAtStation> findLine(String operatorCode, String lineCode, Operator preferred) {
+      if (operatorCode == null || lineCode == null) {
+        return Optional.empty();
+      }
+      if (preferred != null && preferred.code().trim().equalsIgnoreCase(operatorCode.trim())) {
+        Line line = linesByOperatorAndCode.get(stationKey(preferred.id(), lineCode));
+        if (line != null) {
+          return Optional.of(new LineAtStation(line, operator(line.operatorId(), preferred)));
+        }
+      }
+      Operator operator = operatorsByCode.get(lower(operatorCode));
+      if (operator == null) {
+        return Optional.empty();
+      }
+      Line line = linesByOperatorAndCode.get(stationKey(operator.id(), lineCode));
+      return line == null ? Optional.empty() : Optional.of(new LineAtStation(line, operator));
     }
 
     /**
@@ -555,26 +592,41 @@ public final class StationDirectory {
           }
           routeStations.put(entry.routeId(), new RouteStations(stops, resolved));
 
-          Optional<Line> currentLine = catalog.line(record.line());
-          if (currentLine.isEmpty()) {
-            continue;
-          }
-          Line line = currentLine.get();
-          LineAtStation serving =
-              new LineAtStation(line, catalog.operator(line.operatorId(), record.operator()));
+          Optional<LineAtStation> routeServing =
+              catalog
+                  .line(record.line())
+                  .map(
+                      line ->
+                          new LineAtStation(
+                              line, catalog.operator(line.operatorId(), record.operator())));
+          RouteLineChanges.LineRef routeLine =
+              new RouteLineChanges.LineRef(record.operator().code(), record.line().code());
+          List<RouteLineChanges.LineRef> lines = RouteLineChanges.linesByIndex(stops, routeLine);
           for (int i = 0; i < stops.size(); i++) {
             RouteStop stop = stops.get(i);
             // 只统计停车（STOP/TERMINATE）；出库、回库、运营各阶段都算，调用方可按交路阶段自行过滤。
             if (stop == null || !stop.stops()) {
               continue;
             }
-            resolved
-                .get(i)
-                .stationId()
-                .ifPresent(
-                    stationId ->
-                        own.computeIfAbsent(stationId, ignored -> new LinkedHashMap<>())
-                            .putIfAbsent(line.id(), serving));
+            Optional<UUID> stationId = resolved.get(i).stationId();
+            if (stationId.isEmpty()) {
+              continue;
+            }
+            LinkedHashMap<UUID, LineAtStation> atStation =
+                own.computeIfAbsent(stationId.get(), ignored -> new LinkedHashMap<>());
+            // 直通运转：本站按列车在此所属的线路算；换线站以原线路到达，原线路也算。
+            List<RouteLineChanges.LineRef> serving = new ArrayList<>(2);
+            if (i > 0 && !lines.get(i - 1).sameLine(lines.get(i))) {
+              serving.add(lines.get(i - 1));
+            }
+            serving.add(lines.get(i));
+            for (RouteLineChanges.LineRef ref : serving) {
+              Optional<LineAtStation> line =
+                  ref.sameLine(routeLine)
+                      ? routeServing
+                      : catalog.findLine(ref.operatorCode(), ref.lineCode(), record.operator());
+              line.ifPresent(value -> atStation.putIfAbsent(value.line().id(), value));
+            }
           }
         }
       }
@@ -719,6 +771,33 @@ public final class StationDirectory {
      */
     public Optional<StationEntry> findStation(String operatorCode, String stationCode) {
       return catalog.findStation(operatorCode, stationCode, null);
+    }
+
+    /**
+     * 按运营商代码 + 线路代码找线路（均不区分大小写）；跨公司同名运营商先到先得，与 {@link #findStation} 同一规则。
+     *
+     * <p>直通运转指令里写的代码大小写可能与主数据不同，显示前用它换成主数据的写法、取线路名与颜色。
+     *
+     * @param operatorCode 运营商代码
+     * @param lineCode 线路代码
+     * @return 线路与所属运营商；运营商或线路不存在时为空
+     */
+    public Optional<LineAtStation> findLine(String operatorCode, String lineCode) {
+      return catalog.findLine(operatorCode, lineCode, null);
+    }
+
+    /**
+     * 线路代码的规范写法：线路存在时换成主数据的运营商、线路代码，否则原样返回。
+     *
+     * <p>直通运转指令与列车标签里的代码是作者手写的（常见小写），公开 API、HUD、站牌都经这里统一，不各自再换一遍。
+     *
+     * @param line 线路
+     * @return 规范写法的线路
+     */
+    public RouteLineChanges.LineRef canonicalLine(RouteLineChanges.LineRef line) {
+      return findLine(line.operatorCode(), line.lineCode())
+          .map(found -> new RouteLineChanges.LineRef(found.operator().code(), found.line().code()))
+          .orElse(line);
     }
 
     /**

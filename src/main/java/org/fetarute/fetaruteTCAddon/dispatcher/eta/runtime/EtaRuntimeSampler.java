@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
@@ -166,7 +167,17 @@ public final class EtaRuntimeSampler {
             distanceToNext,
             edgeLength,
             traveled,
-            timeline));
+            timeline,
+            sampleLineTag(group)));
+  }
+
+  /** 列车的线路标签（直通运转换线后即新线路）；两个标签不全时为空。 */
+  private static Optional<RouteLineChanges.LineRef> sampleLineTag(MinecartGroup group) {
+    return RouteLineChanges.LineRef.of(
+        TrainTagHelper.readTagValue(group.getProperties(), RouteProgressRegistry.TAG_OPERATOR_CODE)
+            .orElse(null),
+        TrainTagHelper.readTagValue(group.getProperties(), RouteProgressRegistry.TAG_LINE_CODE)
+            .orElse(null));
   }
 
   /**

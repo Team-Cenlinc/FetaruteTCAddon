@@ -71,8 +71,8 @@ FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6
 | 模块 | 方法 | 功能 |
 |------|------|------|
 | `graph()` | `GraphApi` | 调度图：节点、边、路径查询 |
-| `trains()` | `TrainApi` | 列车状态：位置、速度、ETA |
-| `routes()` | `RouteApi` | 路线定义：站点、停靠表 |
+| `trains()` | `TrainApi` | 列车状态：位置、速度、ETA；当前所属线路与回库判定（1.7.0） |
+| `routes()` | `RouteApi` | 路线定义：站点、停靠表；直通运转换线站（1.7.0） |
 | `occupancy()` | `OccupancyApi` | 占用状态：信号、队列 |
 | `stations()` | `StationApi` | 站点信息：位置、名称、关联节点；车站组与停靠线路（1.6.0） |
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
@@ -193,6 +193,29 @@ api.trains().getTrainSnapshot("train-1").ifPresent(train -> {
 });
 ```
 
+### 当前线路与回库（1.7.0）
+
+```java
+api.trains().getTrainSnapshot("SURC-WS-LC-1037").ifPresent(train -> {
+    // 直通运转换线后是新线路；routeId 里的线路仍是交路本身的（管理归属）
+    train.lineCode().ifPresent(line ->
+        System.out.println("当前线路: " + train.operatorCode().orElse("?") + ":" + line));
+    if (train.outOfService()) {
+        System.out.println("回库 / Not in Service"); // 不显示「开往」、下一站与到站时间
+    }
+});
+```
+
+| 字段 | 口径 |
+|------|------|
+| `routeId` / `routeCode` | 交路代码 `运营商:线路:交路`（两者同值，`routeCode` 在交路找得到时有值）。其中的运营商、线路是交路本身的归属（管理归属），出车后不变 |
+| `operatorCode` / `lineCode` | 列车**当前**对乘客显示的线路：取自列车的线路标签（出车与直通运转 CHANGE 写入），没有标签时为交路本身的线路；线路存在时代码按主数据的写法给出。两者同时有值，标签与交路都不明时为空 |
+| `outOfService` | 回库交路越过运营终点（EOP）之后，或整趟没有载客车站的回库交路为 true；与 HUD、站牌的「回库 / Not in Service」同一判定（`RouteTerminals.outOfService`）。停在运营终点时仍为 false；出库、运营交路恒为 false |
+| `nextNode` | 下一个**途经节点**（可能是区间点或咽喉），不一定是下一个停车站 |
+
+用 1.6.0 签名构造 `TrainSnapshot` 的代码仍可编译运行：当前线路为空、`outOfService` 为 false。
+列车进度下标与交路 UUID 仍按原方式取：`EtaApi#getRuntimeSnapshot` 的 `routeIndex`，`RouteApi#findByCode` 拆 `routeId`。
+
 ### 统计数量
 
 ```java
@@ -291,6 +314,30 @@ api.routes().getRoute(routeUuid).ifPresent(detail -> {
 - 解析结果在路线缓存或车站数据变化时预先算好，`getRoute()` 不访问存储。
 
 1.6.0 之前只有绑定了车站记录的停靠点给出站名，DYNAMIC 停靠给出的是站码（如 `WYB`），普通停靠点为空。
+
+### 直通运转（1.7.0）
+
+停靠点备注里的 `CHANGE:<运营商>:<线路>` 是一条**通知**：列车到达该站起改按另一条线运营（对乘客显示新线路），**不换交路、不改进度下标，也不改变管理归属**——
+交路、交路组、时刻表、调度仍归交路自身的线路（`RouteInfo#operatorCode`/`lineCode`）。一趟直通车对乘客而言横跨两条线，`StopInfo#lineChange` 标出换线站：
+
+```java
+RouteApi.LineRef line = new RouteApi.LineRef(detail.info().operatorCode(), detail.info().lineCode());
+for (RouteApi.StopInfo stop : detail.stops()) {
+    if (stop.lineChange().isPresent()) {
+        line = stop.lineChange().get();
+        System.out.println(stop.stationName().orElse(stop.nodeId()) + " 起直通 " + line.lineCode());
+    }
+    // 本站及之后属于 line；换乘时排除的也是它（换线站本身两条都排除）
+}
+```
+
+- 每站所属线路 = 该站及之前最后一次换线的目标，没有时为交路自身线路。**换线站本身算新线路**：列车以原线路到达、以新线路发车。
+- 只有真正换线才有值：目标与此前所属线路相同的 CHANGE、缺线路段或有空段的 CHANGE（运行时也不执行）都不算。
+- `LineRef` 的代码在线路存在时按主数据的写法给出（指令可能写成小写），不存在时原样给出；比较请不区分大小写。
+- 列车当前属于哪条线看 `TrainSnapshot#operatorCode`/`lineCode`。
+- 面向乘客的查询同一口径：停靠线路（`StationApi#linesServing`，“这里能坐哪条线”）换线之后的车站算新线路、换线站两条都算；
+  站牌行 `EtaApi.BoardRow#lineName` 与线路过滤按列车到该站时所属的线路。
+- 管理归属不随换线变化：`RouteInfo`、`TrainSnapshot#routeId`、时刻表（`TimetableApi`，含 `Departure#lineId`）、调度与回收都是交路自身的线路。
 
 ### EOR 与 EOP 区别
 
@@ -455,6 +502,7 @@ stations.findGroupOfNode("FTA:S:PPK:1").ifPresent(group -> {
 - 返回停靠查询站**及同组各站**的全部线路。查询站自身的线路 `transferType`、`walkSeconds` 为空；同组其他车站的线路带上该成员的换乘方式与步行秒数，`stationId`/`stationCode` 是实际停靠的那座车站。
 - 只统计 `STOP` 与 `TERMINATE`，`PASS` 不算；DYNAMIC 停靠归到它所在的车站。
 - 出库、回库、运营各阶段的路线都统计；需要区分时按 `RouteApi.RouteInfo#stage` 自行过滤。
+- 直通运转（1.7.0）：按列车在该站所属的线路统计——换线之后的车站算新线路，换线站本身两条都算（以原线路到达、以新线路发车）；换线目标线路不存在时其后的车站不计。1.7.0 之前一律算交路本身的线路，直通车换线后的车站会被当成原线路停靠。
 - 同一条线路既停靠查询站又停靠同组其他车站时只列一次，保留查询站那一条。
 - 排序：成员 `sortOrder` → 运营商代码 → 线路代码。
 - `color` 为线路色，缺失时回退运营商主题色。
@@ -578,6 +626,8 @@ for (EtaApi.BoardRow row : board.rows()) {
 }
 ```
 
+站牌行的 `lineName`（线路代码）与 `getBoard` 的线路过滤按列车到达本站时所属的线路（1.7.0，直通运转换线后为新线路，换线站本身即新线路）。
+
 ### 运行时快照（调试）
 
 ```java
@@ -604,6 +654,9 @@ for (TimetableApi.Departure d :
 
 只列在该站停车（`StopTime#stops()`：STOP 与 TERMINATE，停站 0 秒也算）的车次，通过站不列；多张已发布时刻表合并后按计划发车时刻排序；
 窗口上限 24 小时。`terminating` 为 true 表示本站是该车次终点（TERMINATE 站，或其后只剩回库/折返等通过点）。
+
+`Departure#lineId` 与 `operatorId` 过滤都是时刻表所属的线路与运营商，即交路组的管理归属。直通运转换线不改变它（换线只是通知列车改按另一条线运营）；
+乘客在本站看到的线路用 `routeId` + `stopSequence` 对照 `RouteApi.StopInfo#lineChange`。
 
 ### 列车当前车次与偏差
 
@@ -822,6 +875,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.7.0 | 直通运转与回库。**记录新增字段**：`RouteApi.StopInfo` 增加 `lineChange`（新记录 `RouteApi.LineRef`：运营商代码 + 线路代码），`TrainApi.TrainSnapshot` 增加 `operatorCode`、`lineCode`（`Optional<String>`，对乘客显示的当前线路）与 `outOfService`；两者均保留 1.6.0 的全参构造器作为次级构造器（`lineChange` 与当前线路为空、`outOfService` 为 false），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量。两个记录的 `Optional` 分量传 `null` 时规整为空。**行为变更**（均为直通运转换线后面向乘客的口径修正，没有 CHANGE 的交路结果不变；交路、时刻表等管理归属不变）：`StationApi#linesServing`/`linesServingNode` 换线之后的车站算新线路、换线站两条都算（此前一律算交路本身的线路）；`EtaApi.BoardRow#lineName` 与 `getBoard` 的线路过滤按列车到该站时所属的线路。文档修正：`TrainSnapshot#routeCode` 实际与 `routeId` 同为 `运营商:线路:交路`（此前文档写成 `L1-R1`，实现未变） |
 | 1.6.0 | 新增车站组与停靠线路：`StationApi#listStationGroups`/`findGroupOfStation`/`findGroupOfNode`/`linesServing`/`linesServingNode`，记录 `StationGroupInfo`、`StationGroupMember`、`ServingLine` 与枚举 `TransferType`；新增 `FetaruteApi#dataRevision()` 与 `StationGroupChangedEvent`。**记录新增字段**：`RouteApi.RouteInfo` 增加 `stage`（新枚举 `RouteStage`），`RouteApi.StopInfo` 增加 `stationId`、`stationCode`；两者均保留旧的全参构造器作为次级构造器（`stage` 取 `UNKNOWN`，`stationId`/`stationCode` 为空），按旧签名 `new` 的代码源码与二进制均兼容；对这两个记录使用记录模式（record pattern）解构的代码需补上新增分量。**行为变更**：`RouteInfo#id` 不再为 `null`；`RouteInfo#operationType` 按 `pattern_type` 映射（此前恒为 `NORMAL`）；`StopInfo#stationName` 与 `TerminalInfo` 的站名改为车站记录的真实站名（此前普通停靠点为空、DYNAMIC 停靠为站码），查不到记录时退回站码；DYNAMIC 车库停靠点的 `stationName` 改为空（此前为车库代码），与普通车库节点一致 |
 | 1.5.0 | **行为变更**：停靠序号统一为交路节点的 0 起下标——`RouteApi.StopInfo#sequence` 由 1 起改为 0 起，与 `TimetableApi` 的 `stopSequence`、车站到发事件的 `getStopIndex()` 同一口径（此前三者可能差 1）；`TimetableApi.TrainAssignment` 增加 `lastStopNodeId`/`lastStationCode`/`nextStopNodeId`/`nextStationCode`；`TimetableApi.StopTime` 增加 `passType` 与 `stops()`，停车判定改按交路 `passType`（此前按“停站 > 0 秒”猜，停站 0 秒的 STOP 站被当成通过、预计晚点落到后面的站）；`StopTime#stationCode` 只给车站本体节点；DYNAMIC 停靠的预计晚点按实际股道（未选台按车站级）估算；`getAssignment`/`listAssignments` 按 tick 缓存；ETA 中途站未配停站按运行时默认 20 秒计（此前按 0 秒）、TERMINATE 站计入停站、中途停车按起停拆段、到站后停站计时注册前的空档计入本站停站 |
 | 1.4.0 | 新增 `TimetableApi` 与 `api.event` 事件；`EtaApi.Reason` 增加 `HOLD`、`OVERDUE`，ETA 随扣停与票据超时顺延；`TerminalInfo` 的 EOP 与 HUD/站牌同一口径，没有载客车站时为空（不再回退为 EOR）；EOR 仍为交路最后一个节点，车库时名称为 `LWN Depot`、折返线时为它之前最近的车站；

@@ -1048,6 +1048,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
     etaService.attachStationPresence(this::getStationPresence);
+    // 站牌行显示直通换线后的线路时，代码按主数据的写法（与公开 API、HUD 同一口径）。
+    etaService.attachLineCanonicalizer(
+        line -> stationDirectory == null ? line : stationDirectory.snapshot().canonicalLine(line));
     // 走行参数（车种加减速、进站规则、默认速度、停站开销）与编表读同一组配置；每次估算现读，重载即生效。
     etaService.attachConfigSources(
         signNodeRegistry, () -> configManager == null ? null : configManager.current());
@@ -1529,7 +1532,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new org.fetarute.fetaruteTCAddon.api.internal.GraphApiImpl(railGraphService);
     org.fetarute.fetaruteTCAddon.api.train.TrainApi trainApi =
         new org.fetarute.fetaruteTCAddon.api.internal.TrainApiImpl(
-            trainSnapshotStore, routeProgressRegistry, routeDefinitionCache, etaService);
+            trainSnapshotStore,
+            routeProgressRegistry,
+            routeDefinitionCache,
+            etaService,
+            stationDirectory);
     org.fetarute.fetaruteTCAddon.api.route.RouteApi routeApi =
         new org.fetarute.fetaruteTCAddon.api.internal.RouteApiImpl(
             routeDefinitionCache, stationDirectory);

@@ -38,6 +38,7 @@ display:
         ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将换向，等待调度</white>
         IDLE_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>临时停车</white>
         IDLE_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>等待信号中</white>
+        OUT_OF_SERVICE: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>回库，不再载客</white>
       label:
         line: "线路"
         next: "下一站"
@@ -66,6 +67,7 @@ display:
         TERM_ARRIVING: <yellow>终点 {next_station} 到达</yellow>
         ON_LAYOVER: <white>折返待命中</white>
         IDLE: <white>临时停车</white>
+        OUT_OF_SERVICE: <white>本列车回库，不再载客</white>
         <white>欢迎乘坐 {company}/{operator} 列车</white>
         <white>本次列车为 {line} 列车，前往 {dest_eop}</white>
         <white>下一站 {next_station}</white>

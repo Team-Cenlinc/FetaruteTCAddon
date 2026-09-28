@@ -232,7 +232,8 @@ public interface TimetableApi {
    * 站点的一条计划发车。
    *
    * @param timetableId 时刻表 ID
-   * @param lineId 线路 ID
+   * @param lineId 时刻表所属线路 ID（交路组的管理归属）。直通运转（CHANGE）换线只是通知列车改按另一条线运营， 不改变归属；乘客在本站看到的线路见 {@code
+   *     RouteApi.StopInfo#lineChange}
    * @param routeId 交路 ID
    * @param routeCode 交路代码
    * @param tripCode 车次号

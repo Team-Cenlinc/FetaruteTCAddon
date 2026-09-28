@@ -6,6 +6,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
@@ -14,6 +15,14 @@ import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
  * HUD 上下文：汇总线路/站点/ETA/运行时状态，用于占位符与状态渲染。
  *
  * <p>所有可能缺失的数据已在 resolver 内标准化为 {@code "-"}，避免模板层处理 null。
+ *
+ * <p>线路：{@code routeDefinition} 是交路本身；{@code currentLine}/{@code lineInfo} 是列车当前所属的线路——
+ * 直通运转（CHANGE）换线后两者不同，线路名、颜色、运营商、绑定模板都跟当前线路走。
+ *
+ * @param currentLine 列车当前所属线路（线路标签优先，见 {@link RouteLineChanges#current}）；交路线路不明时为空
+ * @param throughService 前方的直通换线（下一次换线）；没有时为空
+ * @param outOfService 回库车已越过运营终点（{@link
+ *     org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals#outOfService}）
  */
 public record TrainHudContext(
     String trainName,
@@ -32,7 +41,10 @@ public record TrainHudContext(
     boolean moving,
     boolean atLastStation,
     boolean terminalNextStop,
-    double speedBps) {
+    double speedBps,
+    Optional<RouteLineChanges.LineRef> currentLine,
+    Optional<ThroughService> throughService,
+    boolean outOfService) {
   public TrainHudContext {
     Objects.requireNonNull(trainName, "trainName");
     routeDefinition = routeDefinition == null ? Optional.empty() : routeDefinition;
@@ -45,6 +57,26 @@ public record TrainHudContext(
     Objects.requireNonNull(destinations, "destinations");
     Objects.requireNonNull(eta, "eta");
     layover = layover == null ? Optional.empty() : layover;
+    currentLine = currentLine == null ? Optional.empty() : currentLine;
+    throughService = throughService == null ? Optional.empty() : throughService;
+  }
+
+  /**
+   * 前方的直通换线：列车将从 {@code station} 起改属 {@code line}（在该站以原线路到达、以新线路发车）。
+   *
+   * @param station 换线站
+   * @param line 换线后的线路
+   * @param lineInfo 换线后线路的名称与颜色；线路不存在时为空
+   */
+  public record ThroughService(
+      StationDisplay station,
+      RouteLineChanges.LineRef line,
+      Optional<HudTemplateService.LineInfo> lineInfo) {
+    public ThroughService {
+      Objects.requireNonNull(station, "station");
+      Objects.requireNonNull(line, "line");
+      lineInfo = lineInfo == null ? Optional.empty() : lineInfo;
+    }
   }
 
   /** 终点信息：EOR/ EOP。 */

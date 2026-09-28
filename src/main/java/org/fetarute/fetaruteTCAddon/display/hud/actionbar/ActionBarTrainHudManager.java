@@ -21,7 +21,6 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
@@ -172,9 +171,8 @@ public final class ActionBarTrainHudManager implements Listener {
 
     Optional<String> templateOpt =
         templateService != null
-            ? templateService.resolveTemplate(
-                HudTemplateType.ACTIONBAR,
-                context.routeDefinition().flatMap(RouteDefinition::metadata))
+            ? templateService.resolveTemplateForLine(
+                HudTemplateType.ACTIONBAR, context.currentLine())
             : Optional.empty();
     BossBarHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
     long nowMillis = System.currentTimeMillis();
@@ -199,6 +197,9 @@ public final class ActionBarTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
+    state =
+        HudStateTracker.applyOutOfService(
+            state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
     String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
     player.sendActionBar(title);

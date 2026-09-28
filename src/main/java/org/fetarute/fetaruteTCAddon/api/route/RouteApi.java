@@ -14,6 +14,8 @@ import java.util.UUID;
  *   <li><b>路线定义</b>：途经节点序列、运营商、线路代码
  *   <li><b>停靠站点</b>：每个站点的停车时间、通过类型
  *   <li><b>元数据</b>：终点站、运行方向等
+ *   <li><b>直通运转</b>（1.7.0）：停靠点上的 {@code CHANGE:<运营商>:<线路>} 通知列车从该站起改按另一条线对乘客运营， 见 {@link
+ *       StopInfo#lineChange()}。交路的管理归属（{@link RouteInfo} 的运营商、线路，以及交路组、时刻表、调度）不随换线变化
  * </ul>
  *
  * <h2>使用示例</h2>
@@ -193,6 +195,8 @@ public interface RouteApi {
    * @param dynamic 是否为动态站台选择（运行时根据占用情况选择轨道）
    * @param stationId 车站记录 ID；非车站节点、或站码查不到车站记录时为空（1.6.0）
    * @param stationCode 站码；非车站节点为空（1.6.0）
+   * @param lineChange 直通运转（1.7.0）：从本站起列车对乘客显示的线路（管理归属不变，仍是交路自身的线路）。只在本站有 {@code CHANGE:<运营商>:<线路>}
+   *     指令、且目标与此前所属线路不同时有值； 本站之前的各站属于交路自身线路（或更早一次换线的目标），本站及之后属于这里给出的线路，直到下一次换线。 列车以原线路到达本站、以新线路发车
    */
   record StopInfo(
       int sequence,
@@ -202,9 +206,39 @@ public interface RouteApi {
       PassType passType,
       boolean dynamic,
       Optional<UUID> stationId,
-      Optional<String> stationCode) {
+      Optional<String> stationCode,
+      Optional<LineRef> lineChange) {
 
-    /** 1.5.0 及以前的构造器（源码兼容）；{@code stationId}、{@code stationCode} 为空。 */
+    public StopInfo {
+      stationName = stationName == null ? Optional.empty() : stationName;
+      stationId = stationId == null ? Optional.empty() : stationId;
+      stationCode = stationCode == null ? Optional.empty() : stationCode;
+      lineChange = lineChange == null ? Optional.empty() : lineChange;
+    }
+
+    /** 1.6.0 的构造器（源码与二进制兼容）；{@code lineChange} 为空。 */
+    public StopInfo(
+        int sequence,
+        String nodeId,
+        Optional<String> stationName,
+        int dwellSeconds,
+        PassType passType,
+        boolean dynamic,
+        Optional<UUID> stationId,
+        Optional<String> stationCode) {
+      this(
+          sequence,
+          nodeId,
+          stationName,
+          dwellSeconds,
+          passType,
+          dynamic,
+          stationId,
+          stationCode,
+          Optional.empty());
+    }
+
+    /** 1.5.0 及以前的构造器（源码兼容）；{@code stationId}、{@code stationCode}、{@code lineChange} 为空。 */
     public StopInfo(
         int sequence,
         String nodeId,
@@ -220,9 +254,21 @@ public interface RouteApi {
           passType,
           dynamic,
           Optional.empty(),
+          Optional.empty(),
           Optional.empty());
     }
   }
+
+  /**
+   * 线路标识（1.7.0）：运营商代码 + 线路代码。
+   *
+   * <p>线路存在时代码按主数据的写法给出（与 {@code LineApi}、{@code StationApi.ServingLine} 一致）；指令里写的线路不存在时原样给出。
+   * 比较请不区分大小写。
+   *
+   * @param operatorCode 运营商代码
+   * @param lineCode 线路代码
+   */
+  record LineRef(String operatorCode, String lineCode) {}
 
   /** 通过类型（描述停靠行为）。 */
   enum PassType {

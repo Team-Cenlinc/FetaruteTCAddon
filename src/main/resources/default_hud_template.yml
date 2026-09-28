@@ -13,6 +13,8 @@ bossbar:
     ON_LAYOVER_2: <aqua>◈━━</aqua> <gray>Preparing for new trip</gray> <aqua>━━◈</aqua>
     IDLE_1: <{signal_color_tag}>⬤</{signal_color_tag}> <white>临时停车</white> <dark_gray>━</dark_gray> <gray>等待信号中...</gray>
     IDLE_2: <{signal_color_tag}>⬤</{signal_color_tag}> <white>Holding</white> <dark_gray>━</dark_gray> <gray>Waiting for signal...</gray>
+    OUT_OF_SERVICE_1: <{line_color_tag}>█<white> {line}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>回库</white>
+    OUT_OF_SERVICE_2: <{line_color_tag}>█<white> {line_lang2}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>Not in Service</white>
 actionbar:
   template: |-
     rotate_ticks: 60
@@ -33,6 +35,8 @@ actionbar:
     ON_LAYOVER_2: <aqua>◈</aqua> <gray>Preparing for new trip</gray> <aqua>◈</aqua>
     IDLE_1: <{signal_color_tag}>⬤</{signal_color_tag}> <white>临时停车</white> <dark_gray>━</dark_gray> <gray>等待信号中...</gray>
     IDLE_2: <{signal_color_tag}>⬤</{signal_color_tag}> <white>Holding</white> <dark_gray>━</dark_gray> <gray>Waiting for signal...</gray>
+    OUT_OF_SERVICE_1: <gray>◈━━</gray> <white>本列车回库，不再载客</white> <gray>━━◈</gray>
+    OUT_OF_SERVICE_2: <gray>◈━━</gray> <white>Not in Service</white> <gray>━━◈</gray>
 player_display:
   template: |-
     lines: 15
@@ -78,4 +82,20 @@ player_display:
           periodTicks: 40
           resetOnStop: true
         footer:
+          - "<gray>█</gray> <white>Time: {time_hhmmss}</white>"
+
+      OUT_OF_SERVICE_1:
+        title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <{line_color_tag}>█</{line_color_tag}>"
+        kind: static
+        lines:
+          - "<gray>█</gray> <white>回库</white>"
+          - "<gray>█</gray> <gray>本列车不再载客</gray>"
+          - "<gray>█</gray> <white>时间：{time_hhmmss}</white>"
+
+      OUT_OF_SERVICE_2:
+        title: "<{line_color_tag}>█</{line_color_tag}> <white>{line_lang2}</white> <{line_color_tag}>█</{line_color_tag}>"
+        kind: static
+        lines:
+          - "<gray>█</gray> <white>Not in Service</white>"
+          - "<gray>█</gray> <gray>This train does not carry passengers</gray>"
           - "<gray>█</gray> <white>Time: {time_hhmmss}</white>"

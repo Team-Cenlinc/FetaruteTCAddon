@@ -60,6 +60,12 @@ public final class ScoreboardHudTemplate {
     return title;
   }
 
+  /** 模板是否写了该状态的页面（不算 DEFAULT 与回退页）。 */
+  public boolean defines(HudState state) {
+    List<Page> pages = pagesByState.get(state);
+    return pages != null && !pages.isEmpty();
+  }
+
   /** 解析当前 HUD 状态的页面（支持分页轮播）。 */
   public Optional<Page> resolvePage(HudState state, long tick) {
     List<Page> pages = pagesByState.get(state);
