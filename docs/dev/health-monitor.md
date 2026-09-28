@@ -120,3 +120,6 @@ LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 cor
 - 这条兜底链路用于覆盖 `/train destroyall` 或其他未触发 `GroupRemoveEvent` 的全服列车消失场景：即使事件侧没有逐车回调，`/fta health heal` 与周期 health tick 也能按“当前存活列车集合”释放孤儿 claim 和脱管 progress。
 - `OccupancyHealer` 仍负责传统的占用超时/孤儿 claim 诊断；运行时 cleanup 负责与 progress、layover、departure gate 同步，避免只释放 occupancy 但保留调度状态。
 - `RuntimeSignalMonitor` 对普通非 FTA TrainCarts 列车只做脱轨安全兜底：明确 `TrainStatus.Derailed` 时销毁实体，但不会把普通列车加入 dispatch、ETA 或 orphan active 集合；事件侧 `MemberRemoveEvent` 也只有在源/目标编组已带 derailed 状态时才清理普通列车。
+- FTA 列车的 `MemberRemoveEvent` 当下只隔离、硬停相关物理编组；下一 tick 由 `RuntimeDispatchListener` 分类：源编组与被移除成员此刻所在的编组里仍存活的，逐个进入异常清理（隔离 + 全局现场重建 + 销毁实体），实体移除后隔离解除、重建完成。
+  查被移除成员的编组只用 `hasInitializedGroup()`：成员没有编组时 `getGroup()` 会让 TrainCarts 给它新建一个，实体已死时直接抛异常。查不到编组的成员只计入诊断明细 `unresolvedMembers`，源编组照常清理——
+  2026-09-28 实服一节车厢实体死亡，分类抛异常，异常编组没进清理，隔离永不解除，全局重建每秒以 `result=abnormal-physical-quarantine` 失败，全网冻结。分类正常时全局冻结约 1 秒。

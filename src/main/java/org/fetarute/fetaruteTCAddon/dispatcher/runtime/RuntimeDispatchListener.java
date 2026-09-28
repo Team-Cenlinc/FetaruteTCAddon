@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.bukkit.Bukkit;
@@ -256,9 +257,11 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   private void classifyUnexpectedSplit(PendingUnexpectedSplit pending) {
-    for (MinecartGroup survivingGroup : pending.survivingGroups()) {
-      String reason = pending.reasonFor(survivingGroup);
-      dispatchService.handleAbnormalGroup(survivingGroup, reason, pending.detail());
+    SplitSurvivors<MinecartGroup> survivors = pending.survivingGroups();
+    String detail = pending.detail(survivors.unresolvedMembers());
+    for (MinecartGroup survivingGroup : survivors.groups()) {
+      dispatchService.handleAbnormalGroup(
+          survivingGroup, pending.reasonFor(survivingGroup), detail);
     }
   }
 
@@ -457,6 +460,48 @@ public final class RuntimeDispatchListener implements Listener {
     return List.copyOf(matches);
   }
 
+  /**
+   * 拆分候选里仍存活的编组：源编组，加上各被移除成员此刻所在的编组，按对象身份去重。
+   *
+   * <p>查不到编组的成员（实体已死、已卸载，或查询抛异常）不贡献残编、只计数，源编组照常交付。分类一旦整体失败，异常编组就进不了清理，
+   * 成员移除时装上的隔离再也不会收尾，全局现场重建每秒因隔离失败重试——2026-09-28 实服 DS-LH-7549 一节车厢实体死亡， {@code getGroup()}
+   * 想给它新建编组时抛异常，此后全网冻结。
+   *
+   * @param source 源编组
+   * @param removedMembers 同一 tick 内被移除的成员
+   * @param currentGroup 成员此刻所在的编组；没有时为空
+   * @param alive 编组是否仍存活
+   * @return 存活编组与查不到编组的成员数
+   */
+  static <G, M> SplitSurvivors<G> survivingGroups(
+      G source, List<M> removedMembers, Function<M, Optional<G>> currentGroup, Predicate<G> alive) {
+    List<G> candidates = new ArrayList<>();
+    candidates.add(source);
+    int unresolved = 0;
+    for (M member : removedMembers) {
+      Optional<G> group;
+      try {
+        group = currentGroup.apply(member);
+      } catch (RuntimeException ex) {
+        group = Optional.empty();
+      }
+      if (group.isPresent()) {
+        candidates.add(group.get());
+      } else {
+        unresolved++;
+      }
+    }
+    return new SplitSurvivors<>(identityDistinctMatching(candidates, alive), unresolved);
+  }
+
+  /**
+   * 拆分分类的结果。
+   *
+   * @param groups 仍存活的编组（源编组在前）
+   * @param unresolvedMembers 查不到当前编组的被移除成员数
+   */
+  record SplitSurvivors<G>(List<G> groups, int unresolvedMembers) {}
+
   /** 同一源编组在一个 tick 内产生的成员移除候选；以对象身份聚合，避免可变编组的 {@code hashCode} 失稳。 */
   private static final class PendingUnexpectedSplit {
 
@@ -491,19 +536,31 @@ public final class RuntimeDispatchListener implements Listener {
       }
     }
 
-    private List<MinecartGroup> survivingGroups() {
-      List<MinecartGroup> candidates = new ArrayList<>();
-      candidates.add(sourceGroup);
-      for (MinecartMember<?> member : removedMembers) {
-        candidates.add(member.getGroup());
-      }
-      return identityDistinctMatching(candidates, PendingUnexpectedSplit::isAlive);
+    private SplitSurvivors<MinecartGroup> survivingGroups() {
+      return RuntimeDispatchListener.survivingGroups(
+          sourceGroup,
+          removedMembers,
+          PendingUnexpectedSplit::currentGroup,
+          PendingUnexpectedSplit::isAlive);
     }
 
-    private String detail() {
+    /**
+     * 成员此刻所在的编组。
+     *
+     * <p>不能直接调 {@code getGroup()}：成员没有编组时 TrainCarts 会给它新建一个，实体已死时直接抛异常。
+     */
+    private static Optional<MinecartGroup> currentGroup(MinecartMember<?> member) {
+      return member.hasInitializedGroup() ? Optional.of(member.getGroup()) : Optional.empty();
+    }
+
+    private String detail(int unresolvedMembers) {
       StringBuilder builder = new StringBuilder();
       RuntimeDiagnosticFormatter.appendKeyValue(
           builder, "memberRemovalCount", Integer.toString(removedMembers.size()));
+      if (unresolvedMembers > 0) {
+        RuntimeDiagnosticFormatter.appendKeyValue(
+            builder, "unresolvedMembers", Integer.toString(unresolvedMembers));
+      }
       RuntimeDiagnosticFormatter.appendKeyValue(builder, "firstRemoval", firstDetail);
       return builder.length() == 0 ? null : builder.toString();
     }

@@ -217,6 +217,46 @@ class RuntimeDispatchListenerTest {
     assertEquals(List.of(source, detached), survivors);
   }
 
+  /**
+   * 被移除成员查不到编组（实体已死）或查询抛异常时只跳过它：源编组照常交付清理，异常编组的隔离才会收尾。
+   *
+   * <p>2026-09-28 实服：一节车厢实体死亡，{@code getGroup()} 抛异常，整批分类失败，隔离永不解除，全网冻结。
+   */
+  @Test
+  void survivingGroupsSkipMembersWithoutAGroupAndStillDeliverTheSource() {
+    Object source = new Object();
+    Object detached = new Object();
+    java.util.Map<String, Object> groups = java.util.Map.of("detached", detached);
+
+    RuntimeDispatchListener.SplitSurvivors<Object> survivors =
+        RuntimeDispatchListener.survivingGroups(
+            source,
+            List.of("dead", "detached", "throws", "detached"),
+            member -> {
+              if (member.equals("throws")) {
+                throw new IllegalArgumentException("Member at index 0 of members array is dead");
+              }
+              return java.util.Optional.ofNullable(groups.get(member));
+            },
+            ignored -> true);
+
+    assertEquals(List.of(source, detached), survivors.groups());
+    assertEquals(2, survivors.unresolvedMembers());
+  }
+
+  /** 已失效的编组不交付：源编组也已失效时没有残编要清理。 */
+  @Test
+  void survivingGroupsDropDeadGroups() {
+    Object source = new Object();
+
+    RuntimeDispatchListener.SplitSurvivors<Object> survivors =
+        RuntimeDispatchListener.survivingGroups(
+            source, List.of("dead"), member -> java.util.Optional.empty(), group -> false);
+
+    assertTrue(survivors.groups().isEmpty());
+    assertEquals(1, survivors.unresolvedMembers());
+  }
+
   @Test
   void shouldAdvancePassStationOnTrainGroupEnter() {
     assertTrue(
