@@ -9991,6 +9991,12 @@ class RuntimeDispatchServiceTest {
     assertEquals("approach", diagnostics.finalLimiterSource());
   }
 
+  /**
+   * 远处的停靠站不压速。
+   *
+   * <p>区外有导入制动（到进站区界时降到区内曲线），所以“远”要远过导入制动的起点：单边到站、末边须以进站限速运行时， 导入制动在区界降到 6 bps，从 √(36 + 2·(d −
+   * 159)) ≥ 线路速度 28.8 即约 556 格处开始收紧。这里放在 600 格。
+   */
   @Test
   void farStopStationDoesNotTriggerApproachBeforeWindow() {
     NodeId a = NodeId.of("A");
@@ -10016,7 +10022,7 @@ class RuntimeDispatchServiceTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
-                    graphWithSingleEdge(a, station, 160), Instant.now())));
+                    graphWithSingleEdge(a, station, 600), Instant.now())));
     when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
         .thenReturn(28.8);
 
@@ -10048,7 +10054,8 @@ class RuntimeDispatchServiceTest {
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
     assertEquals("none", diagnostics.approachKind());
-    assertEquals("movement_authority", diagnostics.finalLimiterSource());
+    // 600 格处授权反推速度 √(2·598) ≈ 34.6 已高于边限速 28.8，最终由边限速决定（原 160 格夹具下是授权速度 ≈ 17.8）。
+    assertEquals("edge_limit", diagnostics.finalLimiterSource());
   }
 
   @Test

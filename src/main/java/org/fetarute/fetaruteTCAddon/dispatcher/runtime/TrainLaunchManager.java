@@ -6,6 +6,7 @@ import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -29,6 +30,23 @@ public final class TrainLaunchManager {
   private static final String TAG_PENDING_LAUNCH_COMMAND = "FTA_PENDING_LAUNCH_COMMAND";
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
   private static final String TAG_LAST_SPEED_CMD_AT = "FTA_LAST_SPEED_CMD_AT";
+
+  /** 逐 tick 斜坡在未被刷新时至少保留的 tick 数；实际取三个调度周期与它的较大者。 */
+  private static final int MIN_SPEED_RAMP_TTL_TICKS = 40;
+
+  private final SpeedLimitRamp speedLimitRamp;
+
+  /** 使用 Bukkit 调度器驱动的逐 tick 限速斜坡。 */
+  public TrainLaunchManager() {
+    this(new SpeedLimitRamp());
+  }
+
+  /**
+   * @param speedLimitRamp 逐 tick 限速斜坡
+   */
+  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp) {
+    this.speedLimitRamp = java.util.Objects.requireNonNull(speedLimitRamp, "speedLimitRamp");
+  }
 
   /**
    * 一次控车命令的速度落地结果。
@@ -71,8 +89,8 @@ public final class TrainLaunchManager {
    *
    * @param targetBps 目标速度（blocks/s，已考虑信号与边限速）
    * @param distanceOpt 可选“到下一节点的剩余距离”（用于提前减速）
-   * @implNote 运动中列车在信号变化/强制刷新时补充控车动作；若目标速度低于当前速度，也会下发一次平滑减速动作， 避免 approach/限速只硬切 {@link
-   *     TrainProperties#setSpeedLimit(double)}。
+   * @implNote 运动中列车在信号变化/强制刷新时补充控车动作。{@link TrainProperties#setSpeedLimit(double)}
+   *     降低后下一物理步即截速，TrainCarts 不会平滑它；周期之间的平滑下调见 {@link SpeedLimitRamp}。
    */
   public ControlApplicationResult applyControl(
       RuntimeTrainHandle train,
@@ -100,6 +118,8 @@ public final class TrainLaunchManager {
   /**
    * 应用控车动作：限速、加减速曲线、发车/停车。
    *
+   * <p>调用方没有速度上下文（不带包络），等同于 {@code speedEnvelope == null}。
+   *
    * @param stopMode STOP 信号的落地模式；硬 STOP 不允许速度曲线和 launch action
    */
   public ControlApplicationResult applyControl(
@@ -113,6 +133,47 @@ public final class TrainLaunchManager {
       java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
       ConfigManager.RuntimeSettings runtimeSettings,
       StopControlMode stopMode) {
+    return applyControl(
+        train,
+        properties,
+        aspect,
+        targetBps,
+        config,
+        allowLaunch,
+        distanceOpt,
+        launchFallbackDirection,
+        runtimeSettings,
+        stopMode,
+        null);
+  }
+
+  /**
+   * 应用控车动作：限速、加减速曲线、发车/停车。
+   *
+   * <p>非 STOP 命令分两类：
+   *
+   * <ul>
+   *   <li>带包络（{@code speedEnvelope != null}，信号 tick 的完整判定）：命令即权威，运行中列车交给 {@link SpeedLimitRamp}
+   *       在周期之间沿包络继续下调；
+   *   <li>不带包络（过节点时的推进放行等）：调用方只知道“可以走”，不知道前方要进站，所以不得越过斜坡登记的保持约束（进站限速），
+   *       避免把正在进站减速的车先抬回线路速度、下一拍再砍回去。其余情况照旧放行并补牵引——周期命令值里有上调限幅的滞后， 拿它封顶会扣住减速解除后唯一的补牵引。
+   * </ul>
+   *
+   * @param stopMode STOP 信号的落地模式；硬 STOP 不允许速度曲线和 launch action
+   * @param speedEnvelope 调度层给出的、从车头量起的随距离约束；{@code null} 表示调用方没有速度上下文
+   */
+  public ControlApplicationResult applyControl(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode,
+      SpeedEnvelope speedEnvelope) {
     if (properties == null || aspect == null || config == null || runtimeSettings == null) {
       return new ControlApplicationResult(
           targetBps, OptionalDouble.empty(), Math.max(0.0, targetBps), "none");
@@ -124,6 +185,7 @@ public final class TrainLaunchManager {
     }
 
     if (aspect == SignalAspect.STOP) {
+      speedLimitRamp.release(train);
       clearPendingLaunchCommand(properties);
       StopControlMode resolvedStopMode =
           stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
@@ -161,12 +223,18 @@ public final class TrainLaunchManager {
         curveAdjustedBps < Math.max(0.0, targetBps) - 1.0e-6
             ? OptionalDouble.of(curveAdjustedBps)
             : OptionalDouble.empty();
-    double adjustedBps = curveAdjustedBps;
-    adjustedBps =
+    double heldBps = curveAdjustedBps;
+    if (speedEnvelope == null) {
+      OptionalDouble hold = speedLimitRamp.holdLimitBps(train);
+      if (hold.isPresent() && hold.getAsDouble() < heldBps) {
+        heldBps = hold.getAsDouble();
+      }
+    }
+    double adjustedBps =
         applySpeedCommandRateLimit(
             train,
             properties,
-            adjustedBps,
+            heldBps,
             config,
             runtimeSettings,
             false,
@@ -174,6 +242,14 @@ public final class TrainLaunchManager {
             allowLaunch);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
+    if (speedEnvelope == null) {
+      speedLimitRamp.acknowledgeWrite(train, properties);
+    } else if (train != null && train.isMoving() && !speedEnvelope.isEmpty()) {
+      speedLimitRamp.arm(
+          train, properties, adjustedBps, speedEnvelope, speedRampTtlTicks(runtimeSettings));
+    } else {
+      speedLimitRamp.release(train);
+    }
     boolean launchCommandAccepted = false;
     // 非 STOP 信号：允许发车或对运动中列车补充能量
     if (train != null) {
@@ -186,8 +262,9 @@ public final class TrainLaunchManager {
         boolean needsMovingControl = shouldIssueMovingControl(train, targetBpt);
         if (allowLaunch || needsMovingControl) {
           double controlAcceleration = needsMovingControl ? decelBpt2 : accelBpt2;
-          // 运动中：放行/信号变化时补充牵引；目标速度下降时也下发一次 launch，让 TrainCarts
-          // 按加减速度平滑收敛到 approach/限速目标，而不是只硬切 speedLimit。
+          // 运动中：放行/信号变化时补充牵引。目标速度下降时这次 launch 并不起平滑作用——speedLimit 已在下一
+          // 物理步截速，launch 起点被夹到新上限后立即完成——它的作用是把 TrainCarts 速度向量重置为目标值，
+          // 清掉被截住但仍留在向量里的旧速度，免得之后限速一抬就瞬间弹回。减速的平滑由 SpeedLimitRamp 负责。
           train.accelerateTo(targetBpt, controlAcceleration);
         }
       } else {
@@ -211,13 +288,24 @@ public final class TrainLaunchManager {
       }
     }
     String limiterSource = "none";
-    if (adjustedBps < curveAdjustedBps - 1.0e-6) {
+    if (adjustedBps < heldBps - 1.0e-6) {
       limiterSource = "speed_command_rate_limit";
+    } else if (heldBps < curveAdjustedBps - 1.0e-6) {
+      limiterSource = "approach_hold";
     } else if (speedCurveLimit.isPresent()) {
       limiterSource = "speed_curve";
     }
     return new ControlApplicationResult(
         targetBps, speedCurveLimit, adjustedBps, limiterSource, launchCommandAccepted);
+  }
+
+  /** 撤销该车的逐 tick 限速斜坡（硬停、重发等绕过 {@link #applyControl} 的控车路径调用）。 */
+  public void releaseSpeedRamp(RuntimeTrainHandle train) {
+    speedLimitRamp.release(train);
+  }
+
+  private static int speedRampTtlTicks(ConfigManager.RuntimeSettings runtimeSettings) {
+    return Math.max(MIN_SPEED_RAMP_TTL_TICKS, runtimeSettings.dispatchTickIntervalTicks() * 3);
   }
 
   /** 判断运动中列车是否需要补发控速动作。 */
@@ -475,7 +563,8 @@ public final class TrainLaunchManager {
         limited = Math.min(requested, referenceSpeed + maxIncrease);
       }
     } else if (lowering) {
-      // 降低 speedLimit 是安全约束，不能被命令限幅延迟；实际平滑制动由 TrainCarts WaitAcceleration 接管。
+      // 降低 speedLimit 是安全约束，不能被命令限幅延迟。注意 TrainCarts 不会平滑 speedLimit 的下调
+      // （WaitAcceleration 只管跟车/互斥区），周期之间的平滑下调由 SpeedLimitRamp 沿速度包络完成。
       limited = requested;
     }
 

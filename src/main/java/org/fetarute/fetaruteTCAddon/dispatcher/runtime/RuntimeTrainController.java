@@ -7,6 +7,7 @@ import java.util.OptionalLong;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -99,6 +100,40 @@ public final class RuntimeTrainController {
   }
 
   /**
+   * 带速度包络应用一次控车命令（信号 tick 的完整判定）。
+   *
+   * @param speedEnvelope 从车头量起的随距离约束；{@code null} 表示没有速度上下文
+   * @see TrainLaunchManager#applyControl(RuntimeTrainHandle, TrainProperties, SignalAspect, double,
+   *     TrainConfig, boolean, OptionalLong, Optional, ConfigManager.RuntimeSettings,
+   *     StopControlMode, SpeedEnvelope)
+   */
+  public TrainLaunchManager.ControlApplicationResult applyControl(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      Optional<BlockFace> launchFallbackDirection,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode,
+      SpeedEnvelope speedEnvelope) {
+    return launchManager.applyControl(
+        train,
+        properties,
+        aspect,
+        targetBps,
+        config,
+        allowLaunch,
+        distanceOpt,
+        launchFallbackDirection,
+        runtimeSettings,
+        stopMode,
+        speedEnvelope);
+  }
+
+  /**
    * 立即保持停车。
    *
    * <p>用于没有下一节点或异常状态下的兜底停车。常规 STOP 制动仍应优先通过 {@link #applyControl(RuntimeTrainHandle,
@@ -108,6 +143,7 @@ public final class RuntimeTrainController {
    * @param train 运行时列车句柄
    */
   public void stopNow(RuntimeTrainHandle train) {
+    launchManager.releaseSpeedRamp(train);
     if (train != null) {
       train.stop();
     }
@@ -115,6 +151,7 @@ public final class RuntimeTrainController {
 
   /** 立即执行闭塞硬 STOP：不使用制动曲线，不保留 launch action。 */
   public void stopHard(RuntimeTrainHandle train, TrainProperties properties) {
+    launchManager.releaseSpeedRamp(train);
     if (properties != null) {
       properties.setSpeedLimit(0.0);
     }
@@ -159,6 +196,7 @@ public final class RuntimeTrainController {
     }
     double targetBpt = toBlocksPerTick(targetBps);
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
+    launchManager.releaseSpeedRamp(train);
     properties.setSpeedLimit(targetBpt);
     train.forceRelaunch(direction, targetBpt, accelBpt2);
   }
@@ -217,6 +255,157 @@ public final class RuntimeTrainController {
       return previewEnvelope;
     }
     return Math.min(previewEnvelope, Math.max(approachLimitBps, brakingEnvelope));
+  }
+
+  /**
+   * 进站限速：区内按 {@link #resolveApproachSpeedEnvelope}，区外按导入制动。
+   *
+   * <p>“区”指进站窗口及其前的预减速区（{@link #approachEngaged}）。线路速度较高时，区界处的区内包络已低于线路速度——例如 22.2 bps、 进站 10
+   * bps、末边 40 格时区界即 18.4——只在区内限速，进区那一拍就是一刀。区外因此加一段导入制动：以区界处的区内包络 {@code E_b} 为终点速度，按列车制动能力反推 √(E_b²
+   * + 2·a·(d − 区界))，保证到区界时恰好降到 {@code E_b}。
+   *
+   * <p>当区内的物理制动曲线在区界起作用时，导入制动就是它向区外的延伸；目标点（触发点前最后若干条边的起点）远在区外时，
+   * 导入制动在区界降到进站限速。低速爬行的范围仍只到区界为止，不随末边变长而扩大。
+   *
+   * @param currentTargetBps 当前基础目标速度
+   * @param approachLimitBps 进站限速
+   * @param decelBps2 列车制动能力
+   * @param distanceBlocks 从车头到进站触发点的距离
+   * @param targetEdgeDistanceBlocks 触发点前最后若干条边的总长
+   * @param edgeCount 到触发点的边数
+   * @param runtime 运行时控车配置
+   * @param previewDistanceBlocks 预减速区长度
+   * @return 进站限速；不收紧时返回 {@code currentTargetBps}
+   */
+  static double resolveApproachSpeedLimit(
+      double currentTargetBps,
+      double approachLimitBps,
+      double decelBps2,
+      long distanceBlocks,
+      OptionalLong targetEdgeDistanceBlocks,
+      int edgeCount,
+      ConfigManager.RuntimeSettings runtime,
+      double previewDistanceBlocks) {
+    if (approachEngaged(runtime, distanceBlocks, edgeCount, previewDistanceBlocks)) {
+      return resolveApproachSpeedEnvelope(
+          currentTargetBps,
+          approachLimitBps,
+          decelBps2,
+          OptionalLong.of(distanceBlocks),
+          targetEdgeDistanceBlocks,
+          edgeCount,
+          runtime,
+          previewDistanceBlocks);
+    }
+    if (runtime == null
+        || !runtime.speedCurveEnabled()
+        || !Double.isFinite(currentTargetBps)
+        || currentTargetBps <= 0.0
+        || !Double.isFinite(decelBps2)
+        || decelBps2 <= 0.0
+        || targetEdgeDistanceBlocks == null
+        || targetEdgeDistanceBlocks.isEmpty()) {
+      return currentTargetBps;
+    }
+    long boundary = lastEngagedDistance(runtime, previewDistanceBlocks);
+    if (boundary < 0L || distanceBlocks <= boundary) {
+      return currentTargetBps;
+    }
+    double boundaryLimit =
+        resolveApproachSpeedEnvelope(
+            currentTargetBps,
+            approachLimitBps,
+            decelBps2,
+            OptionalLong.of(boundary),
+            targetEdgeDistanceBlocks,
+            edgeCount,
+            runtime,
+            previewDistanceBlocks);
+    if (!Double.isFinite(boundaryLimit) || boundaryLimit >= currentTargetBps) {
+      return currentTargetBps;
+    }
+    double leadIn =
+        Math.sqrt(
+            boundaryLimit * boundaryLimit
+                + 2.0 * decelBps2 * (distanceBlocks - boundary) * runtime.speedCurveFactor());
+    if (!Double.isFinite(leadIn)) {
+      return currentTargetBps;
+    }
+    return Math.min(currentTargetBps, leadIn);
+  }
+
+  /**
+   * 按距离判定仍处于区内的最远整数距离；距离条件不会成立（窗口与预减速区都关闭）时返回 -1。
+   *
+   * <p>与 {@link #approachEngaged} 的距离部分同一判据：预减速区有效时区内即 {@code d < 窗口 + 预减速}，否则 {@code d ≤ 窗口}。
+   */
+  private static long lastEngagedDistance(
+      ConfigManager.RuntimeSettings runtime, double previewDistanceBlocks) {
+    double windowBlocks = runtime.approachWindowBlocks();
+    if (!Double.isFinite(windowBlocks) || windowBlocks < 0.0) {
+      return -1L;
+    }
+    long boundary = windowBlocks > 0.0 ? (long) Math.floor(windowBlocks) : -1L;
+    if (Double.isFinite(previewDistanceBlocks) && previewDistanceBlocks > 0.0) {
+      boundary = Math.max(boundary, (long) Math.ceil(windowBlocks + previewDistanceBlocks) - 1L);
+    }
+    return boundary;
+  }
+
+  /**
+   * 进站限速的逐 tick 形式，供 {@link SpeedLimitRamp} 在调度周期之间求值。
+   *
+   * <p>与调度周期同一公式 {@link #resolveApproachSpeedLimit}，只把“到进站触发点的距离”换成“周期取样时的车头距离 − 此后又走过的距离”，
+   * 向下取整以免高估。这样列车在两个周期之间越过区界时斜坡与下一周期算出的目标衔接，不会先压下去再被抬回。
+   *
+   * <p>{@code targetEdgeDistanceBlocks} 是触发点前最后若干条边的<b>长度</b>，不随列车前进而变，不能跟着平移。
+   *
+   * <p>不收紧时返回 {@link Double#POSITIVE_INFINITY} 而不是基础目标速度：该约束也用作推进放行的保持约束，基础目标速度是周期取样时的边限速或 caution
+   * 速度，列车驶过节点后已不成立，拿它封顶会把车扣在旧值上。
+   *
+   * @param distanceBlocks 周期取样时从车头到进站触发点的距离
+   */
+  static SpeedEnvelope.Constraint approachConstraint(
+      double currentTargetBps,
+      double approachLimitBps,
+      double decelBps2,
+      long distanceBlocks,
+      OptionalLong targetEdgeDistanceBlocks,
+      int edgeCount,
+      ConfigManager.RuntimeSettings runtime,
+      double previewDistanceBlocks) {
+    return traveled -> {
+      double limit =
+          resolveApproachSpeedLimit(
+              currentTargetBps,
+              approachLimitBps,
+              decelBps2,
+              Math.max(0L, (long) Math.floor(distanceBlocks - traveled)),
+              targetEdgeDistanceBlocks,
+              edgeCount,
+              runtime,
+              previewDistanceBlocks);
+      return limit < currentTargetBps ? limit : Double.POSITIVE_INFINITY;
+    };
+  }
+
+  /**
+   * 是否已进入进站窗口或其前的预减速区。与调度层 {@code resolveApproachWindowState(...).active()} 同一判据。
+   *
+   * @param distanceBlocks 从车头到进站触发点的距离
+   */
+  static boolean approachEngaged(
+      ConfigManager.RuntimeSettings runtime,
+      long distanceBlocks,
+      int edgeCount,
+      double previewDistanceBlocks) {
+    if (runtime == null) {
+      return false;
+    }
+    return withinApproachWindow(runtime, distanceBlocks, edgeCount)
+        || approachPreviewRatio(
+                runtime.approachWindowBlocks(), previewDistanceBlocks, distanceBlocks)
+            > 0.0;
   }
 
   static double approachPreviewRatio(
