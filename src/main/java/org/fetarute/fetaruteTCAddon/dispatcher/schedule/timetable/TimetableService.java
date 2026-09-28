@@ -15,8 +15,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -73,6 +76,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 交路进度、交路归属与三道闸。 */
   private final DutyLedger ledger;
 
+  /** 车次取消登记：站牌与公开事件读这里。 */
+  private final TripCancellations cancellations = new TripCancellations();
+
+  /** 各车在当前车次上已停完的最后一站；车半途离开时据此判断哪些站不再停。 */
+  private final ConcurrentMap<String, ServedStops> servedStops = new ConcurrentHashMap<>();
+
+  private volatile Consumer<TripCancellations.Cancellation> cancellationListener =
+      cancellation -> {};
+
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
@@ -86,7 +98,30 @@ public final class TimetableService implements ScheduledDeparturePlan {
     this.settings = resolved;
     if (!resolved.enabled()) {
       clearAssignments("settings-disabled");
+      cancellations.clear();
     }
+  }
+
+  /**
+   * 设置车次取消的监听者（公开事件桥）；传 {@code null} 取消监听。
+   *
+   * <p>回调发生在调度路径里（销毁列车、票据作废、出票轮询），监听者只能入队，不能做耗时操作。
+   */
+  public void setCancellationListener(Consumer<TripCancellations.Cancellation> listener) {
+    this.cancellationListener = listener == null ? cancellation -> {} : listener;
+  }
+
+  /**
+   * 查询某趟车的取消。
+   *
+   * @param timetableId 时刻表
+   * @param tripId 车次
+   * @param serviceDate 起点发车所在日期
+   * @return 没有取消时为空
+   */
+  public Optional<TripCancellations.Cancellation> cancellationOf(
+      UUID timetableId, UUID tripId, LocalDate serviceDate) {
+    return cancellations.find(timetableId, tripId, serviceDate);
   }
 
   /** 当前配置。 */
@@ -476,16 +511,152 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     matcher.retain(keep);
     ledger.retain(keep);
+    servedStops.keySet().retainAll(keep);
   }
 
-  /** 列车离开运行时管辖时释放绑定与交路进度。 */
+  /**
+   * 列车离开运行时管辖时释放绑定与交路进度。
+   *
+   * <p>车次还没跑完就离开的（销毁、异常清理），剩下的停车站登记为取消：已经发车的站不算，到了终点站就是跑完了。
+   */
   public void release(String trainName, String reason) {
     String key = keyOf(trainName);
     if (key == null) {
       return;
     }
-    matcher.release(key, reason);
+    Optional<TimetableAssignment> released = matcher.release(key, reason);
+    ServedStops served = servedStops.remove(key);
+    released.ifPresent(assignment -> cancelRemainingStops(assignment, served, reason));
     ledger.release(key, trainName, reason);
+  }
+
+  /**
+   * 记下列车在当前车次上停完了哪一站：发车才算这一站停完，到达车次终点站算整趟跑完。
+   *
+   * <p>由车站停靠观察者调用。只认当前绑定车次所在交路的事件：改派到别的交路之后、重新绑定之前的停靠不算旧车次的。
+   *
+   * @param event 停靠事件
+   * @param departure true 为发车，false 为到达
+   */
+  public void observeStop(StationStopEvent event, boolean departure) {
+    String key = event == null ? null : keyOf(event.trainName());
+    TimetableAssignment assignment = key == null ? null : matcher.get(key).orElse(null);
+    if (assignment == null || !event.routeUuid().equals(Optional.of(assignment.routeId()))) {
+      return;
+    }
+    int through = event.stopIndex();
+    if (!departure) {
+      OptionalInt terminating =
+          resolveTimetable(assignment)
+              .flatMap(timetable -> timetable.routePlan(assignment.routeId()))
+              .map(TimetableRoutePlan::terminatingSequence)
+              .orElse(OptionalInt.empty());
+      if (terminating.isEmpty() || through < terminating.getAsInt()) {
+        return;
+      }
+    }
+    servedStops.merge(key, ServedStops.of(assignment, through), ServedStops::advance);
+  }
+
+  /**
+   * 一趟到点没有派出车的车次登记为整趟取消：票过了容差作废，或服务器卡顿超过追补上限被跳过。
+   *
+   * <p>这趟车已经有车绑着（重启后留在线上的车在门控上接了它）时不算取消。
+   *
+   * @param due 车次
+   * @param detail 诊断明细
+   */
+  public void cancelUndispatched(DueTrip due, String detail) {
+    if (due == null
+        || !settings.enabled()
+        || !snapshot.byId().containsKey(due.timetable().id())
+        || matcher.claimed(due.timetable().id(), due.trip().id(), due.serviceDate())) {
+      return;
+    }
+    OptionalInt origin =
+        due.timetable()
+            .routePlan(due.trip().routeId())
+            .map(plan -> plan.firstStopAfter(-1))
+            .orElse(OptionalInt.empty());
+    if (origin.isEmpty()) {
+      return;
+    }
+    recordCancellation(
+        new TripCancellations.Cancellation(
+            due.timetable().id(),
+            due.trip().id(),
+            due.trip().tripCode(),
+            due.trip().routeId(),
+            due.serviceDate(),
+            due.departure(),
+            TripCancellations.Scope.FULL,
+            origin.getAsInt(),
+            TripCancellations.Reason.NOT_DISPATCHED,
+            Optional.empty(),
+            detail));
+  }
+
+  /** 车次没跑完车就离开了：从第一个还没发车的停车站起登记取消；一站都没开出就是整趟取消。 */
+  private void cancelRemainingStops(
+      TimetableAssignment assignment, ServedStops served, String reason) {
+    Timetable timetable = resolveTimetable(assignment).orElse(null);
+    TimetableTrip trip =
+        timetable == null ? null : timetable.trip(assignment.tripId()).orElse(null);
+    TimetableRoutePlan plan =
+        trip == null ? null : timetable.routePlan(trip.routeId()).orElse(null);
+    if (plan == null) {
+      return;
+    }
+    // 没有停靠记录时从绑定的那一站算起：绑定发生在该站的门控上，那时还没发车；更早的站不是这辆车跑的，不算。
+    int through =
+        served != null && served.sameTrip(assignment)
+            ? served.through()
+            : assignment.assignedAtStopIndex() - 1;
+    OptionalInt first = plan.firstStopAfter(through);
+    if (first.isEmpty()) {
+      return;
+    }
+    boolean untouched = plan.firstStopAfter(-1).equals(first);
+    recordCancellation(
+        new TripCancellations.Cancellation(
+            timetable.id(),
+            trip.id(),
+            trip.tripCode(),
+            trip.routeId(),
+            assignment.serviceDate(),
+            trip.departureAt(assignment.serviceDate(), timetable.zoneId()),
+            untouched ? TripCancellations.Scope.FULL : TripCancellations.Scope.PARTIAL,
+            first.getAsInt(),
+            TripCancellations.Reason.VEHICLE_REMOVED,
+            Optional.of(assignment.trainName()),
+            reason));
+  }
+
+  private void recordCancellation(TripCancellations.Cancellation cancellation) {
+    Optional<TripCancellations.Cancellation> recorded = cancellations.record(cancellation);
+    if (recorded.isEmpty()) {
+      return;
+    }
+    debugLogger.accept(
+        "TIMETABLE_TRIP_CANCELLED trip="
+            + cancellation.tripCode()
+            + " date="
+            + cancellation.serviceDate()
+            + " scope="
+            + cancellation.scope()
+            + " fromStop="
+            + cancellation.firstCancelledStopSequence()
+            + " reason="
+            + cancellation.reason()
+            + " train="
+            + cancellation.trainName().orElse("-")
+            + " detail="
+            + cancellation.detail());
+    try {
+      cancellationListener.accept(cancellation);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("TIMETABLE_TRIP_CANCELLED_LISTENER_FAILED error=" + ex);
+    }
   }
 
   /**
@@ -504,9 +675,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return List.of();
     }
     // 限制单次窗口长度：服务器停了一整天再启动，不应该把这一天的车全部补发出来。
-    Instant windowStart =
-        to.minus(current.maxCatchUp()).isAfter(from) ? to.minus(current.maxCatchUp()) : from;
-    return tripsBetween(windowStart, to);
+    Instant catchUpFrom = to.minus(current.maxCatchUp());
+    if (!catchUpFrom.isAfter(from)) {
+      return tripsBetween(from, to);
+    }
+    // 追补上限之外的车次不会再出票，就此取消。
+    for (DueTrip skipped : tripsBetween(from, catchUpFrom)) {
+      cancelUndispatched(skipped, "catch-up-limit");
+    }
+    return tripsBetween(catchUpFrom, to);
   }
 
   /**
@@ -665,6 +842,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return Optional.empty();
     }
     TripMatcher.Match match = matched.get();
+    // 取消之后又有车接上了这趟车（重启后留在线上的车、晚到的车）：站牌恢复正常。
+    cancellations.revoke(
+        match.timetable().id(), match.trip().id(), match.assignment().serviceDate());
     ledger.startOrAdvance(key, match.timetable(), match.trip());
     match.duty().ifPresent(duty -> ledger.bind(event.trainName(), key, duty, "trip-assigned"));
     return Optional.of(match.assignment());
@@ -683,6 +863,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   private void clearAssignments(String reason) {
+    servedStops.clear();
     if (matcher.isEmpty() && ledger.isEmpty()) {
       matcher.clear();
       return;
@@ -697,6 +878,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     Set<String> released = new HashSet<>();
     matcher.dropOutside(next.byId().keySet(), released::add);
     ledger.dropOutside(next.byId().keySet(), released);
+    cancellations.retainTimetables(next.byId().keySet());
   }
 
   private static String keyOf(String trainName) {
@@ -705,6 +887,39 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     String trimmed = trainName.trim();
     return trimmed.isEmpty() ? null : trimmed.toLowerCase(Locale.ROOT);
+  }
+
+  /**
+   * 某辆车在某趟车上已停完的最后一站。
+   *
+   * @param timetableId 时刻表
+   * @param tripId 车次
+   * @param serviceDate 起点发车所在日期
+   * @param through 已停完的最后一个停靠序号（到达终点站时即终点序号）
+   */
+  private record ServedStops(UUID timetableId, UUID tripId, LocalDate serviceDate, int through) {
+
+    static ServedStops of(TimetableAssignment assignment, int through) {
+      return new ServedStops(
+          assignment.timetableId(), assignment.tripId(), assignment.serviceDate(), through);
+    }
+
+    boolean sameTrip(TimetableAssignment assignment) {
+      return sameTrip(assignment.timetableId(), assignment.tripId(), assignment.serviceDate());
+    }
+
+    /** 同一趟车只往前推；换了车次就从新记录重来。 */
+    ServedStops advance(ServedStops next) {
+      return sameTrip(next.timetableId, next.tripId, next.serviceDate) && through >= next.through
+          ? this
+          : next;
+    }
+
+    private boolean sameTrip(UUID otherTimetable, UUID otherTrip, LocalDate otherDate) {
+      return timetableId.equals(otherTimetable)
+          && tripId.equals(otherTrip)
+          && serviceDate.equals(otherDate);
+    }
   }
 
   /** 已发布时刻表的只读索引。 */

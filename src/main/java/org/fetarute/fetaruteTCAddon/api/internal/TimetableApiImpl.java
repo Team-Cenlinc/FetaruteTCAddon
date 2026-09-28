@@ -125,11 +125,12 @@ public final class TimetableApiImpl implements TimetableApi {
     Instant to = from.plus(span);
     int max = limit <= 0 ? DEFAULT_LIMIT : limit;
     List<Departure> out = new ArrayList<>();
+    Optional<TimetableService> svc = service.get();
     for (Timetable timetable : published()) {
       if (operatorId != null && !operatorId.equals(timetable.operatorId())) {
         continue;
       }
-      collectDepartures(timetable, stationCode.trim(), from, to, out);
+      collectDepartures(svc, timetable, stationCode.trim(), from, to, out);
     }
     out.sort(Comparator.comparing(Departure::plannedDeparture).thenComparing(Departure::tripCode));
     return out.size() > max ? List.copyOf(out.subList(0, max)) : List.copyOf(out);
@@ -188,7 +189,12 @@ public final class TimetableApiImpl implements TimetableApi {
   }
 
   private void collectDepartures(
-      Timetable timetable, String stationCode, Instant from, Instant to, List<Departure> out) {
+      Optional<TimetableService> svc,
+      Timetable timetable,
+      String stationCode,
+      Instant from,
+      Instant to,
+      List<Departure> out) {
     LocalDate firstDate = from.atZone(timetable.zoneId()).toLocalDate().minusDays(1);
     LocalDate lastDate = to.atZone(timetable.zoneId()).toLocalDate();
     for (TimetableTrip trip : timetable.trips()) {
@@ -211,6 +217,11 @@ public final class TimetableApiImpl implements TimetableApi {
           if (departure.isBefore(from) || !departure.isBefore(to)) {
             continue;
           }
+          LocalDate serviceDate = date;
+          boolean cancelled =
+              svc.flatMap(s -> s.cancellationOf(timetable.id(), trip.id(), serviceDate))
+                  .map(cancellation -> cancellation.covers(stop.stopSequence()))
+                  .orElse(false);
           out.add(
               new Departure(
                   timetable.id(),
@@ -223,7 +234,8 @@ public final class TimetableApiImpl implements TimetableApi {
                   base.plusSeconds(stop.arrivalOffsetSeconds()),
                   departure,
                   terminating,
-                  date));
+                  date,
+                  cancelled));
         }
       }
     }

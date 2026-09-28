@@ -22,6 +22,7 @@ import org.bukkit.event.Event;
 import org.bukkit.event.HandlerList;
 import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainArriveStationEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainDepartStationEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHealthAlertEvent;
@@ -36,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TripCancellations;
 
 /**
  * 内部事实 → 公开 Bukkit 事件的桥。
@@ -157,6 +159,25 @@ public final class ApiEventBridge implements StationStopObserver, Consumer<Healt
     if (hasListeners.test(TrainReleasedEvent.getHandlerList())) {
       enqueue(new TrainReleasedEvent(trainName, reason));
     }
+  }
+
+  /** 时刻表车次取消（时刻表服务登记之后调用，发生在调度路径或出票轮询里：只入队）。 */
+  public void onTripCancelled(TripCancellations.Cancellation cancellation) {
+    if (cancellation == null || !hasListeners.test(TimetableTripCancelledEvent.getHandlerList())) {
+      return;
+    }
+    enqueue(
+        new TimetableTripCancelledEvent(
+            cancellation.timetableId(),
+            cancellation.tripId(),
+            cancellation.tripCode(),
+            cancellation.routeId(),
+            cancellation.serviceDate(),
+            cancellation.plannedDeparture(),
+            TimetableTripCancelledEvent.Scope.valueOf(cancellation.scope().name()),
+            cancellation.firstCancelledStopSequence(),
+            TimetableTripCancelledEvent.Reason.valueOf(cancellation.reason().name()),
+            cancellation.trainName()));
   }
 
   /**

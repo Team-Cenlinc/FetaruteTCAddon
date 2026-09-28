@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.api.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -17,6 +18,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.bukkit.event.Event;
 import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainArriveStationEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHealthAlertEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHoldEvent;
@@ -30,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TripCancellations;
 import org.junit.jupiter.api.Test;
 
 class ApiEventBridgeTest {
@@ -92,6 +95,42 @@ class ApiEventBridgeTest {
     holds.put(TRAIN, hold("HARD_BLOCKER_STOP", now.get()));
     ticks(bridge, 3);
     assertTrue(fired.isEmpty());
+  }
+
+  /** 车次取消：下一 tick 发出，内部枚举按名映射到公开枚举；没有监听器时不入队。 */
+  @Test
+  void tripCancellationIsDeferredAndMapped() {
+    UUID trip = UUID.randomUUID();
+    TripCancellations.Cancellation cancellation =
+        new TripCancellations.Cancellation(
+            UUID.randomUUID(),
+            trip,
+            "R1-007",
+            UUID.randomUUID(),
+            LocalDate.of(2026, 9, 24),
+            now.get(),
+            TripCancellations.Scope.PARTIAL,
+            5,
+            TripCancellations.Reason.VEHICLE_REMOVED,
+            Optional.of(TRAIN),
+            "stuck-cleanup");
+
+    bridge(false).onTripCancelled(cancellation);
+    ApiEventBridge bridge = bridge(true);
+    bridge.onTripCancelled(cancellation);
+    assertTrue(fired.isEmpty());
+    bridge.tick();
+
+    TimetableTripCancelledEvent event =
+        assertInstanceOf(TimetableTripCancelledEvent.class, fired.get(0));
+    assertEquals(1, fired.size());
+    assertEquals(trip, event.getTripId());
+    assertEquals(TimetableTripCancelledEvent.Scope.PARTIAL, event.getScope());
+    assertEquals(TimetableTripCancelledEvent.Reason.VEHICLE_REMOVED, event.getReason());
+    assertEquals(5, event.getFirstCancelledStopSequence());
+    assertEquals(Optional.of(TRAIN), event.getTrainName());
+    assertTrue(event.covers(5));
+    assertFalse(event.covers(4));
   }
 
   @Test

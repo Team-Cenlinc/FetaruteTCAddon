@@ -290,6 +290,11 @@ final class TripMatcher {
     return Optional.of(removed);
   }
 
+  /** 某个日期的某趟车是否已有车绑着。 */
+  boolean claimed(UUID timetableId, UUID tripId, LocalDate serviceDate) {
+    return claims.containsKey(new TripKey(timetableId, tripId, serviceDate));
+  }
+
   /** 只保留这些车的绑定。 */
   void retain(Set<String> keep) {
     for (String key : List.copyOf(assignments.keySet())) {

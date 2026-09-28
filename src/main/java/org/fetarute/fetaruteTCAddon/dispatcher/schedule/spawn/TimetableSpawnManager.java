@@ -152,8 +152,16 @@ public final class TimetableSpawnManager
     }
     OwnedTicket owned = ownedTickets.remove(ticket.id());
     if (owned != null) {
-      // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的。
-      owned.intent().ifPresent(intent -> logAbandoned(ticket, intent));
+      // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的：运营票这一趟就此取消。
+      owned
+          .intent()
+          .ifPresent(
+              intent -> {
+                logAbandoned(ticket, intent);
+                owned
+                    .trip()
+                    .ifPresent(due -> timetableService.cancelUndispatched(due, "ticket-abandoned"));
+              });
       return;
     }
     delegate.complete(ticket);
@@ -349,7 +357,8 @@ public final class TimetableSpawnManager
                             leg.duty().id(),
                             leg.serviceDate(),
                             leg.kind(),
-                            0)));
+                            0)),
+                    Optional.empty());
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind="
@@ -368,7 +377,7 @@ public final class TimetableSpawnManager
       buildTicket(trip)
           .ifPresent(
               built -> {
-                track(built, intentOf(trip));
+                track(built, intentOf(trip), Optional.of(trip));
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind=OPERATION trip="
@@ -526,8 +535,9 @@ public final class TimetableSpawnManager
                                 Math.max(0, duty.tripIds().indexOf(due.trip().id())))));
   }
 
-  /** 登记一张本层的票：有交路意图的票同时带上到期时刻（计划时刻 + assign-tolerance）。 */
-  private void track(SpawnTicket ticket, Optional<TicketIntent> intent) {
+  /** 登记一张本层的票：有交路意图的票同时带上到期时刻（计划时刻 + assign-tolerance）；运营票带上车次，作废时登记取消。 */
+  private void track(
+      SpawnTicket ticket, Optional<TicketIntent> intent, Optional<TimetableService.DueTrip> trip) {
     if (ownedTickets.size() >= MAX_TRACKED_TICKETS) {
       // 上限被打到说明 assigner 长期既不 complete 也不 requeue；此时清空只会丢掉“这张是我的”这条信息，
       // 代价是后续 requeue 会误派给 delegate。相比无界增长，这是更可控的退化。
@@ -536,7 +546,7 @@ public final class TimetableSpawnManager
     }
     Optional<Instant> expiry =
         intent.map(ignored -> ticket.dueAt().plus(timetableService.settings().assignTolerance()));
-    ownedTickets.put(ticket.id(), new OwnedTicket(intent, expiry));
+    ownedTickets.put(ticket.id(), new OwnedTicket(intent, expiry, trip));
   }
 
   /**
@@ -544,15 +554,20 @@ public final class TimetableSpawnManager
    *
    * @param intent 交路意图；派发后或没有 duty 的票为空
    * @param expiry 到期时刻；派发后为空
+   * @param trip 运营票对应的车次；走行票与派发后为空
    */
-  private record OwnedTicket(Optional<TicketIntent> intent, Optional<Instant> expiry) {
+  private record OwnedTicket(
+      Optional<TicketIntent> intent,
+      Optional<Instant> expiry,
+      Optional<TimetableService.DueTrip> trip) {
     private OwnedTicket {
       intent = intent == null ? Optional.empty() : intent;
       expiry = expiry == null ? Optional.empty() : expiry;
+      trip = trip == null ? Optional.empty() : trip;
     }
 
     private static OwnedTicket dispatched() {
-      return new OwnedTicket(Optional.empty(), Optional.empty());
+      return new OwnedTicket(Optional.empty(), Optional.empty(), Optional.empty());
     }
   }
 }

@@ -249,6 +249,36 @@ class TimetableApiImplTest {
         "按运营商过滤");
   }
 
+  /** 车在 BBB 发车后被销毁：BBB 及之前照常，QQQ 起（含终点）标为取消；下一趟不受影响。 */
+  @Test
+  void departuresMarkTheStopsACancelledTripNoLongerServes() {
+    TimetableService service = service(true);
+    TimetableApiImpl api = api(service, null, null);
+    bindTripOne(service, 5);
+    service.observeStop(
+        new StationStopEvent("train-A", Optional.of(ROUTE), "R1", 0, 5, "OP:S:AAA:1", BOUND_AT),
+        true);
+    service.observeStop(
+        new StationStopEvent("train-A", Optional.of(ROUTE), "R1", 2, 5, "OP:S:BBB:1", BOUND_AT),
+        true);
+    service.release("train-A", "destroyed");
+
+    Instant from = Instant.parse("2026-03-02T07:59:00Z");
+    assertEquals(
+        List.of(false, false),
+        cancelledFlags(api.departuresAt(OPERATOR, "BBB", from, Duration.ofMinutes(20), 10)));
+    assertEquals(
+        List.of(true, false),
+        cancelledFlags(api.departuresAt(OPERATOR, "QQQ", from, Duration.ofMinutes(20), 10)));
+    assertEquals(
+        List.of(true, false),
+        cancelledFlags(api.departuresAt(OPERATOR, "CCC", from, Duration.ofMinutes(20), 10)));
+  }
+
+  private static List<Boolean> cancelledFlags(List<TimetableApi.Departure> departures) {
+    return departures.stream().map(TimetableApi.Departure::cancelled).toList();
+  }
+
   @Test
   void zeroDwellStopStillCountsAsStop() {
     TimetableService service = service(true);

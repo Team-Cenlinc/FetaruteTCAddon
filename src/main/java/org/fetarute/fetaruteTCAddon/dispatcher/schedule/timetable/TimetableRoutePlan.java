@@ -4,8 +4,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 
 /**
  * 一条 route 在时刻表里的计划：站间时分档案 + 目标服务比例。
@@ -136,5 +138,45 @@ public record TimetableRoutePlan(
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * 车次终点的停靠序号：第一个 TERMINATE 站；没有时为最后一个停车点（其后只剩回库、折返等通过点）。
+   *
+   * @return 整条都不停车时为空
+   */
+  public OptionalInt terminatingSequence() {
+    int lastStopping = -1;
+    for (TimetableStop stop : stops) {
+      if (stop.passType() == RouteStopPassType.TERMINATE) {
+        return OptionalInt.of(stop.stopSequence());
+      }
+      if (stop.stops()) {
+        lastStopping = stop.stopSequence();
+      }
+    }
+    return lastStopping < 0 ? OptionalInt.empty() : OptionalInt.of(lastStopping);
+  }
+
+  /**
+   * 某一站之后（不含）、车次终点为止的第一个停车点。
+   *
+   * @param stopSequence 停靠序号；传 -1 取首个停车点
+   * @return 其后到终点都没有停车点时为空
+   */
+  public OptionalInt firstStopAfter(int stopSequence) {
+    OptionalInt terminating = terminatingSequence();
+    if (terminating.isEmpty()) {
+      return OptionalInt.empty();
+    }
+    for (TimetableStop stop : stops) {
+      if (stop.stopSequence() > terminating.getAsInt()) {
+        break;
+      }
+      if (stop.stops() && stop.stopSequence() > stopSequence) {
+        return OptionalInt.of(stop.stopSequence());
+      }
+    }
+    return OptionalInt.empty();
   }
 }

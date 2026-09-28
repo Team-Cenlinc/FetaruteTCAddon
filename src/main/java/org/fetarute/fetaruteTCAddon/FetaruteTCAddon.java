@@ -1202,15 +1202,27 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver() {
           @Override
           public void onStationArrival(
-              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {
+            timetableService.observeStop(event, false);
+          }
 
           @Override
           public void onStationDeparture(
-              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {
+            timetableService.observeStop(event, true);
+          }
 
           @Override
           public void onTrainReleased(String trainName, String reason) {
             timetableService.release(trainName, reason);
+          }
+        });
+    // 车次取消转成公开事件；事件桥可能晚于本方法建立或被重建，每次取当前的那个。
+    timetableService.setCancellationListener(
+        cancellation -> {
+          org.fetarute.fetaruteTCAddon.api.internal.ApiEventBridge bridge = apiEventBridge;
+          if (bridge != null) {
+            bridge.onTripCancelled(cancellation);
           }
         });
     runtimeDispatchService

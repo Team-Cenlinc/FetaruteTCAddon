@@ -616,6 +616,25 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 绑定只存在于内存：重启后所有车回到自由运行。**宁可少绑，不可错绑**——错误的绑定会让车等一个
 不属于它的时刻，而丢失绑定只会退回现状。
 
+### 车次取消
+
+站牌（`TimetableApi#departuresAt` 的 `Departure#cancelled`）与公开事件 `TimetableTripCancelledEvent`（API 1.8.0）读同一份登记
+（`TripCancellations`，由 `TimetableService` 维护），以后做 PIDS 用。两种来源：
+
+| 范围 | 原因 | 何时登记 |
+| --- | --- | --- |
+| 整趟 `FULL` | `NOT_DISPATCHED` | 运营票过了容差被放弃（`TIMETABLE_SPAWN_SKIP reason=abandoned`）；或服务器卡顿（睡眠、冻结）超过 `max-catch-up-seconds`，追补窗口之外的车次不再出票。这趟车已经有车绑着时不算 |
+| 半途 `PARTIAL`（一站没开出即 `FULL`） | `VEHICLE_REMOVED` | 执行中的车半途离开运行时（卡死清理、互卡销毁、异常清理等），从第一个还没**发车**的停车站起到车次终点都不再停 |
+
+- **停完一站以发车为准**：`AutoStation` 放行离站（`onStationDeparture`）才算这一站停完；停着还没发车时被销毁，这一站也算取消。
+  **到达车次终点**（第一个 TERMINATE 站，没有时为最后一个停车点）就是跑完了，之后在终点被销毁、回收都不算取消。
+  没有停靠记录时从绑定的那一站算起（绑定发生在该站门控上，那时还没发车），更早的站不是这辆车跑的，不算。
+- 只认当前车次所在交路的停靠：改派到别的交路、还没重新绑定之前的停靠不算旧车次的。
+- 不算取消：定时 `retain` 清掉的车（`train-gone`，多为折返复用改名）、时刻表下架、交路已有车时作废的出库类票（`duty-already-running`）、
+  没配发车服务的 route（`no-spawn-service`，配置问题）。改派交路（`route-changed`）也不算，那是运维手动改的。
+- 每趟车（按起点发车日期区分）只登记、只发一次事件；取消之后又有车绑上这趟车时撤销，站牌恢复正常，不另发事件。
+- 只存内存：新登记时清掉前一天之前发车的记录；时刻表下架连同其取消一起清掉；关掉按表运行清空；重启后清空。
+
 ## 配置
 
 见 `config.yml` 的 `timetable:` 段，所有开关默认关闭。直通车滞留兜底用的 `reclaim.stranded-destroy-seconds` 不在本段，它属于 `reclaim:` 段（整段默认 `enabled: false`），见 `reclaim-policy.md`。
@@ -674,6 +693,7 @@ planned segment duration   vs   actual segment duration
 | `TIMETABLE_DUTY_RELEASED` | 交路进度随列车下线释放 |
 | `TIMETABLE_RELOAD` | 已发布时刻表缓存刷新 |
 | `TIMETABLE_PUBLISH_REJECTED` | 发布重检发现与已发布邻表冲突，拒绝发布 |
+| `TIMETABLE_TRIP_CANCELLED` | 车次取消登记：`scope=FULL/PARTIAL`、`fromStop=` 第一个不再停的停靠序号、`reason=NOT_DISPATCHED/VEHICLE_REMOVED`、`detail=`（`ticket-abandoned`、`catch-up-limit` 或列车离开原因） |
 | `TIMETABLE_SPAWN_TICKET` / `TIMETABLE_SPAWN_SKIP` | 表定出票（`kind=CREATE/OPERATION/RETURN`，带 duty）与跳过/作废原因（`no-spawn-service`、`abandoned`、`duty-already-running`：交路已经有车，`train=` 是那辆车） |
 | `SCHEDULED_DEPARTURE_HOLD` | 某辆车正因等待表定时刻被扣留 |
 | `SCHEDULED_DEPARTURE_HOLD_SKIPPED` | 早到幅度超上限，已放行（多半绑错了车次） |

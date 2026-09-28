@@ -78,7 +78,7 @@ FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表 |
-| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径） |
+| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消） |
 
 ---
 
@@ -638,7 +638,7 @@ api.eta().getRuntimeSnapshot("train-1").ifPresent(snap -> {
 
 ---
 
-## TimetableApi - 时刻表（1.4.0，1.5.0 修订）
+## TimetableApi - 时刻表（1.4.0，1.5.0 修订，1.8.0 车次取消）
 
 只读，数据来自内存中已发布时刻表的快照，查询不访问数据库。返回的 `Instant` 已按时刻表自身时区与服务日换算好。
 
@@ -657,6 +657,37 @@ for (TimetableApi.Departure d :
 
 `Departure#lineId` 与 `operatorId` 过滤都是时刻表所属的线路与运营商，即交路组的管理归属。直通运转换线不改变它（换线只是通知列车改按另一条线运营）；
 乘客在本站看到的线路用 `routeId` + `stopSequence` 对照 `RouteApi.StopInfo#lineChange`。
+
+### 车次取消（1.8.0）
+
+`Departure#cancelled` 为 true 表示这趟车在本站不再停，站牌照常列出、由调用方决定怎么显示（如「取消 / Cancelled」）。两种情况：
+
+- **整趟没开出**：到点没有派出车（票过了发车容差作废，或服务器卡顿超过追补上限被跳过），各站都标为取消。
+- **开出后车没了**：执行这趟车的列车半途离开运行时（卡死清理、互卡销毁等），从第一个还没发车的停车站起到车次终点都标为取消；
+  已经发车的站不变。车到达终点站就是跑完了，之后被销毁、回收都不算。
+
+取消同时发出 `TimetableTripCancelledEvent`（见“事件”一节），每趟车（按服务日区分）只发一次：
+
+```java
+@EventHandler
+public void onCancelled(TimetableTripCancelledEvent event) {
+    // 站牌行用 时刻表 ID + 车次号 + 服务日 对上；covers(n) 判断某一站是否不再停
+    board.markCancelled(event.getTimetableId(), event.getTripCode(), event.getServiceDate(),
+        event.getFirstCancelledStopSequence());
+}
+```
+
+| 字段 | 口径 |
+|------|------|
+| `getScope()` | `FULL`：起点就没有发车；`PARTIAL`：开出过，从 `getFirstCancelledStopSequence()` 那一站起不再停 |
+| `getReason()` | `NOT_DISPATCHED`：没派出车；`VEHICLE_REMOVED`：执行的列车离开了运行时 |
+| `getFirstCancelledStopSequence()` | 与 `Departure#stopSequence` 同一口径；整趟取消时为首个停车站 |
+| `getServiceDate()` | 与 `Departure#serviceDate` 同一口径（起点发车所在日期） |
+| `getTrainName()` | 执行的列车；没派出车时为空 |
+
+取消之后又有车接上这趟车（例如重启后留在线上的车在门控上绑了它）时，`departuresAt` 恢复正常显示，但**不另发事件**；
+以 `departuresAt` 为准的站牌不受影响，只靠事件缓存状态的调用方需要定期用 `departuresAt` 校正。取消只存内存，重启后清空。
+用 1.7.0 签名构造 `Departure` 的代码仍可编译运行：`cancelled` 为 false。
 
 ### 列车当前车次与偏差
 
@@ -705,6 +736,7 @@ tt.getAssignment("SURC-WS-LC-1037").ifPresent(a -> {
 | `TrainReleasedEvent` | 离开运行时管辖（销毁、回库、改派、异常清理） |
 | `TrainHealthAlertEvent` | 健康监控告警（沿用告警总线的一分钟限流） |
 | `TimetableTripAssignedEvent` | 绑定到时刻表车次 |
+| `TimetableTripCancelledEvent` | 时刻表车次取消（1.8.0）：整趟没派出车，或执行的列车半途离开、剩下的站不再停；含范围、起始停靠序号与原因 |
 | `StationGroupChangedEvent` | 车站组变化（1.6.0）：建组、成员增删改、删组；含变化后的数据版本 |
 
 扣停、信号、车次绑定三类没有现成的变化回调，每 tick 对比一次采样快照，同一 tick 内的来回变化会被合并。

@@ -243,6 +243,8 @@ public interface TimetableApi {
    * @param plannedDeparture 计划发车
    * @param terminating 本站是否为该车次终点
    * @param serviceDate 服务日（起点发车所在日期）
+   * @param cancelled 这趟车在本站不再停（1.8.0）：整趟没开出，或开出后车离开运行时、本站在剩下的站里。 详情见 {@code
+   *     TimetableTripCancelledEvent}
    */
   record Departure(
       UUID timetableId,
@@ -255,7 +257,37 @@ public interface TimetableApi {
       Instant plannedArrival,
       Instant plannedDeparture,
       boolean terminating,
-      LocalDate serviceDate) {}
+      LocalDate serviceDate,
+      boolean cancelled) {
+
+    /** 1.7.0 及以前的构造器（源码与二进制兼容）：未取消。 */
+    public Departure(
+        UUID timetableId,
+        UUID lineId,
+        UUID routeId,
+        String routeCode,
+        String tripCode,
+        int stopSequence,
+        Optional<String> nodeId,
+        Instant plannedArrival,
+        Instant plannedDeparture,
+        boolean terminating,
+        LocalDate serviceDate) {
+      this(
+          timetableId,
+          lineId,
+          routeId,
+          routeCode,
+          tripCode,
+          stopSequence,
+          nodeId,
+          plannedArrival,
+          plannedDeparture,
+          terminating,
+          serviceDate,
+          false);
+    }
+  }
 
   /**
    * 列车的车次绑定。

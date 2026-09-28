@@ -178,6 +178,38 @@ class TimetableSpawnManagerTest {
         () -> fixture.logs.toString());
   }
 
+  /** 放弃的运营票登记为整趟取消；派出去的运营票、放弃的走行票都不算。 */
+  @Test
+  void abandonedOperationTicketCancelsItsTrip() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> tickets = fixture.pollAll();
+    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TripCancellations.Cancellation>
+        cancelled = new ArrayList<>();
+    fixture.service.setCancellationListener(cancelled::add);
+    java.time.LocalDate date = java.time.LocalDate.of(2026, 3, 2);
+
+    fixture.manager.complete(tickets.get(0));
+    fixture.manager.onDispatched(tickets.get(1), "train-1");
+    fixture.manager.complete(tickets.get(1));
+    fixture.manager.complete(tickets.get(2));
+
+    assertEquals(1, cancelled.size(), () -> cancelled.toString());
+    assertEquals(TRIP_TWO, cancelled.get(0).tripId());
+    assertEquals(
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .schedule
+            .timetable
+            .TripCancellations
+            .Reason
+            .NOT_DISPATCHED,
+        cancelled.get(0).reason());
+    assertEquals("ticket-abandoned", cancelled.get(0).detail());
+    assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_ONE, date).isEmpty());
+    assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_TWO, date).isPresent());
+  }
+
   /**
    * 出库票在车库口重试期间，重启后留下的车在首站接下了这个交路：出库票作废，不再出第二辆车。
    *
