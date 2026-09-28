@@ -403,6 +403,9 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 一夜 5 次断车，前车那条释放记录都被预算吞了（1269 条生命周期只记下 28 条），只能靠推断。
           // 生产端按列车去重，只有保下的资源或回滚原因变化才输出。
           "SMART_AUTHORITY_ROLLBACK_KEPT_HELD",
+          // 全网重建先停期间补记到达事实的唯一证据。2026-09-28 3291 到站被丢、重建按旧进度摆回上一站，
+          // 与后车永久互卡 5 小时以上；只在重建期间命中，体量受限于重建窗口里的到站次数。
+          "SMART_STARTUP_FREEZE_ARRIVAL_COMMITTED",
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。

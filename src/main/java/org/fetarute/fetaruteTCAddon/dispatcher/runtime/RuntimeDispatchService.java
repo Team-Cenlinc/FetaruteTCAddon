@@ -470,6 +470,13 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, Object> hydratedPhysicalOwnerIdentities =
       new java.util.concurrent.ConcurrentHashMap<>();
 
+  /**
+   * 关授权门那一刻已确认的物理主人：关门会清空 {@link #hydratedPhysicalOwnerIdentities}，先停期间补记到达要靠它认车（见 {@link
+   * #commitArrivalDuringStartupFreeze}）。一次重建里关门可能调用多次，所以只合并不清空；重建提交、重新登记主人后清掉。
+   */
+  private final java.util.concurrent.ConcurrentMap<String, Object> freezeOwnerIdentities =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   /** 已取得 Depot 硬授权、等待下一次完整现场足迹后才能 promotion/launch 的新编组。 */
   private final java.util.concurrent.ConcurrentMap<String, ExpectedMaterializedSpawn>
       expectedMaterializedSpawns = new java.util.concurrent.ConcurrentHashMap<>();
@@ -5541,6 +5548,7 @@ public final class RuntimeDispatchService {
     }
     TrainProperties properties = train.properties();
     if (startupOccupancyRecoveryBlocks(train, "station-arrival")) {
+      commitArrivalDuringStartupFreeze(train, definition, "station-arrival");
       return;
     }
 
@@ -5898,6 +5906,88 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 全网重建先停期间的到站/推进点：只提交到达事实，不改占用、不发授权、不销毁、不进待命。
+   *
+   * <p>到达是物理事实，先停只该拦住授权。以前整条事件直接丢掉，重建再按旧进度摆放逻辑占用：2026-09-28 实服 3291 在 3423 断车触发重建的同一刻 到达
+   * PTK:1，到站被丢、进度仍记在 SPB:1，重建把它的占用摆回 SPB 一带；空着的 SPB:1 被后车 0366 合法拿走，两车从此永久互卡（5 小时以上）。
+   *
+   * <p>只给已确认的物理主人补记（重建前登记在 {@link #freezeOwnerIdentities}、或本轮重建已重新登记的就是这个实体）：
+   * 异常隔离车、重复逻辑身份、已销毁车的滞后事件都不碰。 索引解析与正常路径相同（含 DYNAMIC 实际股道）；不在交路内的图节点只更新最近经过节点；比当前进度靠后的到达不回写。
+   */
+  private void commitArrivalDuringStartupFreeze(
+      RuntimeTrainHandle train, SignNodeDefinition definition, String source) {
+    if (startupOccupancyReconstructionState == StartupOccupancyReconstructionState.READY
+        || train == null
+        || !train.isValid()
+        || definition == null
+        || definition.nodeId() == null) {
+      return;
+    }
+    TrainProperties properties = train.properties();
+    Object identity = train.physicalRuntimeIdentity();
+    if (properties == null
+        || identity == null
+        || !isFtaManagedTrain(properties)
+        || abnormalPhysicalQuarantines.contains(identity)
+        || dispatchDestroyedPhysicalIdentities.containsKey(identity)) {
+      return;
+    }
+    String trainName = resolveTrackedTrainName(properties).orElse(null);
+    if (trainName == null) {
+      return;
+    }
+    String trainKey = normalizeTrainKey(trainName);
+    Object owner = hydratedPhysicalOwnerIdentities.get(trainKey);
+    if ((owner == null ? freezeOwnerIdentities.get(trainKey) : owner) != identity) {
+      return;
+    }
+    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties);
+    if (routeOpt.isEmpty()) {
+      return;
+    }
+    RouteDefinition route = routeOpt.get();
+    OptionalInt tagIndex =
+        TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
+            .map(OptionalInt::of)
+            .orElse(OptionalInt.empty());
+    int index =
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route, routeDefinitions, tagIndex, definition.nodeId());
+    if (index < 0) {
+      if (shouldTrackIntermediateGraphNode(definition)) {
+        updateLastPassedGraphNode(properties, definition);
+      }
+      return;
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> previous = progressRegistry.get(trainName);
+    if (previous.isPresent()
+        && previous.get().routeId().equals(route.id())
+        && index < previous.get().currentIndex()) {
+      return;
+    }
+    recordEffectiveNode(trainName, route, index, definition.nodeId());
+    recordArrivalProgress(
+        trainName,
+        readRouteUuid(properties).orElse(null),
+        route,
+        index,
+        definition.nodeId(),
+        properties,
+        clockNow());
+    debugLogger.accept(
+        "SMART_STARTUP_FREEZE_ARRIVAL_COMMITTED train="
+            + trainName
+            + " source="
+            + source
+            + " index="
+            + index
+            + " node="
+            + definition.nodeId().value()
+            + " state="
+            + startupOccupancyReconstructionState.name());
+  }
+
+  /**
    * 提交实际到达并留下不受普通观察预算抑制的进度证据。
    *
    * <p>普通经过、停站与终到共用此入口。相同交路、索引和实际节点的重复事件不再发出审计记录；日志只证明到达事实已提交，不代表下一跳获得授权。
@@ -5963,6 +6053,7 @@ public final class RuntimeDispatchService {
     }
     TrainProperties properties = train.properties();
     if (startupOccupancyRecoveryBlocks(train, "progress-trigger")) {
+      commitArrivalDuringStartupFreeze(train, definition, "progress-trigger");
       return;
     }
 
@@ -7014,6 +7105,7 @@ public final class RuntimeDispatchService {
     startupRecoveryEnforced = true;
     startupOccupancyReconstructionState = StartupOccupancyReconstructionState.STOP_FIRST;
     long recoveryEpoch = startupOccupancyRecoveryEpoch.incrementAndGet();
+    freezeOwnerIdentities.putAll(hydratedPhysicalOwnerIdentities);
     hydratedPhysicalOwnerIdentities.clear();
     expectedMaterializedSpawns.clear();
     canonicalForwardMovementPlans.clear();
@@ -7836,6 +7928,7 @@ public final class RuntimeDispatchService {
       }
       startupPhysicalFootprintGuards.clear();
       hydratedPhysicalOwnerIdentities.clear();
+      freezeOwnerIdentities.clear();
       expectedMaterializedSpawns.clear();
       stagedPhysicalIdentities.forEach(
           (trainKey, identity) -> {
