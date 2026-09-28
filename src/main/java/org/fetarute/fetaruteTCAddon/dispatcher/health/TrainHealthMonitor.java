@@ -3089,6 +3089,33 @@ public final class TrainHealthMonitor {
     return base.multipliedBy(DIRECTION_AUDIT_LAST_RESORT_THRESHOLD_MULTIPLIER);
   }
 
+  /**
+   * 互卡恢复链要不要停在这个动作上。
+   *
+   * <p>"链要不要继续往下走"按恢复语境判（{@code destroyContext=false}）：未经测量的有效要计数、连着两次没解开就放行。以前互卡链按销毁语境判，
+   * 假定有效一律当真——链永远停在第一步，每次还报"已修复"。2026-09-27 实服 OFL：DS 每 11 秒释放一次车后的保护占用、下一拍又占回，17 分钟 320
+   * 次；真正能解开的排队位让位一次也没轮到。销毁的去留另由 {@link #appliedEffective} 在调用方挡住，不随这里放宽。
+   */
+  private boolean holdsMutualChain(
+      String trainName,
+      String conflictKey,
+      RuntimeDispatchService.SmartRecoveryActionResult result) {
+    return shouldHoldForSafeCandidate(trainName, conflictKey, result, false);
+  }
+
+  /** 动作落地且有效（含未经测量的假定有效）：本轮不销毁，与互卡链原先的销毁口径一致。 */
+  private static boolean appliedEffective(RuntimeDispatchService.SmartRecoveryActionResult result) {
+    return result != null && result.applied() && result.effectiveness().effective();
+  }
+
+  /** 动作落地且有效是测量出来的：只有这时才报"已修复"，假定有效不算。 */
+  private static boolean measuredEffective(
+      RuntimeDispatchService.SmartRecoveryActionResult result) {
+    return appliedEffective(result)
+        && !RuntimeDispatchService.SmartRecoveryEffectiveness.ASSUMED_EFFECTIVE_REASON.equals(
+            result.effectiveness().reason());
+  }
+
   private boolean shouldHoldForSafeCandidate(
       String trainName,
       String conflictKey,
@@ -3443,6 +3470,9 @@ public final class TrainHealthMonitor {
     RuntimeDispatchService.SmartRecoveryInput smartInput =
         dispatchService.smartRecoveryInput(
             episode.stableLeader, Duration.between(episode.firstSeenAt, now), SignalAspect.STOP);
+    // 链的去留与销毁的去留分开判（见 holdsMutualChain）：动作落地且有效（含未经测量的假定有效）本轮就不销毁，
+    // 但假定有效连着两次没解开，链照样往下走，轮到后面的疏通、前推与排队位让位。
+    boolean safeUnlockAppliedEffective = false;
     RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
         safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(smartInput));
     if (selfRetainRelease.candidate()) {
@@ -3455,13 +3485,13 @@ public final class TrainHealthMonitor {
               + selfRetainRelease.decision()
               + " conflict="
               + episode.conflictKey);
-      if (shouldHoldForSafeCandidate(
-          episode.stableLeader, episode.conflictKey, selfRetainRelease, true)) {
+      safeUnlockAppliedEffective |= appliedEffective(selfRetainRelease);
+      if (holdsMutualChain(episode.stableLeader, episode.conflictKey, selfRetainRelease)) {
         traceDeadlockDestroySkipped(
             episode, observation, progressDuration, now, "self-owned-stale-retain-release");
         recovery.lastDeadlockAttemptAt = now;
         deadlockPairLastAttemptAt.put(pairKey, now);
-        return selfRetainRelease.applied() && selfRetainRelease.effectiveness().effective();
+        return measuredEffective(selfRetainRelease);
       }
     }
     RuntimeDispatchService.SmartRecoveryActionResult smartDrainUnlock =
@@ -3476,12 +3506,12 @@ public final class TrainHealthMonitor {
               + smartDrainUnlock.decision()
               + " conflict="
               + episode.conflictKey);
-      if (shouldHoldForSafeCandidate(
-          episode.stableLeader, episode.conflictKey, smartDrainUnlock, true)) {
+      safeUnlockAppliedEffective |= appliedEffective(smartDrainUnlock);
+      if (holdsMutualChain(episode.stableLeader, episode.conflictKey, smartDrainUnlock)) {
         traceDeadlockDestroySkipped(episode, observation, progressDuration, now, "drain-unlock");
         recovery.lastDeadlockAttemptAt = now;
         deadlockPairLastAttemptAt.put(pairKey, now);
-        return smartDrainUnlock.applied() && smartDrainUnlock.effectiveness().effective();
+        return measuredEffective(smartDrainUnlock);
       }
     }
     RuntimeDispatchService.SmartRecoveryActionResult forwardUnlock =
@@ -3496,15 +3526,45 @@ public final class TrainHealthMonitor {
               + " reason=forward-unlock-candidate"
               + " conflict="
               + episode.conflictKey);
-      if (shouldHoldForSafeCandidate(
-          episode.stableLeader, episode.conflictKey, forwardUnlock, true)) {
+      safeUnlockAppliedEffective |= appliedEffective(forwardUnlock);
+      if (holdsMutualChain(episode.stableLeader, episode.conflictKey, forwardUnlock)) {
         forwardUnlockBlocksDestroy = true;
         traceDeadlockDestroySkipped(
             episode, observation, progressDuration, now, "forward-unlock-candidate");
         recovery.lastDeadlockAttemptAt = now;
         deadlockPairLastAttemptAt.put(pairKey, now);
-        return forwardUnlock.applied() && forwardUnlock.effectiveness().effective();
+        return measuredEffective(forwardUnlock);
       }
+    }
+    // 排队位让位：互卡里常见的一种是"一辆只被对方的排队位挡住、另一辆被这一辆的硬占挡住"，前三个动作都只处理自持资源，割不开它。
+    // 以前让位只在单车进度停滞链里，而互卡配对只处理 A 车、B 车整个跳过——2026-09-27 OFL 的 MT 正是只差一个排队位的 B 车。
+    // 两辆都试；让位本身要求证实经过排队位的等待环，不会凭空改队列。
+    for (String yieldTrain : List.of(episode.trainA, episode.trainB)) {
+      RuntimeDispatchService.SmartRecoveryActionResult queueYield =
+          safeSmartRecoveryResult(
+              dispatchService.applySmartQueuePositionYield(
+                  dispatchService.smartRecoveryInput(
+                      yieldTrain, Duration.between(episode.firstSeenAt, now), SignalAspect.STOP)));
+      if (!queueYield.candidate()) {
+        continue;
+      }
+      traceRecoveryCandidateSelected(yieldTrain, queueYield.decision(), episode.conflictKey);
+      safeUnlockAppliedEffective |= appliedEffective(queueYield);
+      if (holdsMutualChain(yieldTrain, episode.conflictKey, queueYield)) {
+        traceDeadlockDestroySkipped(
+            episode, observation, progressDuration, now, "queue-position-yield");
+        recovery.lastDeadlockAttemptAt = now;
+        deadlockPairLastAttemptAt.put(pairKey, now);
+        return measuredEffective(queueYield);
+      }
+    }
+    if (safeUnlockAppliedEffective) {
+      // 有动作落地且（至少被假定）有效：销毁仍按旧口径挡住，只是链不再停在第一步。
+      traceDeadlockDestroySkipped(
+          episode, observation, progressDuration, now, "safe-unlock-applied");
+      recovery.lastDeadlockAttemptAt = now;
+      deadlockPairLastAttemptAt.put(pairKey, now);
+      return false;
     }
     debugLogger.accept(
         "SMART_RECOVERY_NO_SAFE_CANDIDATE train="

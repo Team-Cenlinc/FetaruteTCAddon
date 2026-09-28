@@ -35,6 +35,10 @@
 6. destroy 后会执行 post cleanup 与延迟 verification；同一 episode 不会连续销毁第二辆，survivor 会在清理后刷新信号。
 7. 若 confirmed 条件缺少方向或 single conflict 证据，但 blocker 快照持续互相指向，系统会进入 weaker episode；weaker episode 仅诊断和重新取证，不再因为等待时间增长进入销毁。
 8. 一台列车停在道岔区并作为 blocker 阻塞多车时，健康监控只输出 `SWITCHER_OCCUPANT_BLOCKING_MANY` 诊断，不把该模式升级成 confirmed single，也不直接销毁 occupant。
+9. 互卡恢复链（refresh/hard-stop 之后）依次尝试：自持 stale retain 释放 → drain unlock → forward unlock → 排队位让位（A、B 两车都试）。
+   - "链要不要停在这个动作上"与"要不要因此跳过销毁"分开判：链的去留按恢复语境——未经测量的"假定有效"要计数，连着两次没解开就往下走；销毁仍按原口径——本轮有动作落地且有效（含假定有效）就不销毁，记 `DEADLOCK_DESTROY_SKIPPED … safe-unlock-applied`。
+   - 只有测量出来的有效才报"已修复"，假定有效只算派发了动作。
+   - 背景：2026-09-27 实服 OFL，DS 与 MT 互卡，恢复层每 11 秒对 DS 释放一次车后保护占用（假定有效）、下一拍又被占回，17 分钟 320 次都停在第一步、每次报"已修复"；MT 只差 DS 在车库岔口的一个排队位，而排队位让位以前只在单车进度停滞链里，互卡配对只处理 A 车、B 车整个跳过，一次也没轮到。
 
 ### 普通长时间停滞 cleanup
 

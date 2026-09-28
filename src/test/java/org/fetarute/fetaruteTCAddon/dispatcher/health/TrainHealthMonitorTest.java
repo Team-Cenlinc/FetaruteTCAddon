@@ -1922,6 +1922,126 @@ class TrainHealthMonitorTest {
     }
   }
 
+  /**
+   * 2026-09-27 实服 OFL：DS 与 MT 互卡，恢复层每 11 秒对 DS 做一次"释放车后保护占用"（假定有效），下一拍又被占回， 17 分钟 320
+   * 次都停在这一步、每次报"已修复"； MT 只差 DS 的一个排队位，排队位让位一次也没轮到。
+   */
+  @Test
+  @DisplayName("互卡链：假定有效的动作连着两次没解开，链继续走到 B 车的排队位让位")
+  void mutualChainMovesPastAssumedEffectiveActionsToQueuePositionYield() {
+    MutualChainFixture fixture = new MutualChainFixture();
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
+        .thenReturn(assumedEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+    when(dispatchService.applySmartQueuePositionYield(fixture.inputB))
+        .thenReturn(measuredEffective("SMART_QUEUE_POSITION_YIELD"));
+
+    fixture.runUntil(125);
+
+    verify(dispatchService, atLeastOnce()).applySmartQueuePositionYield(fixture.inputB);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("互卡链：假定有效不报已修复，测量有效才报")
+  void mutualChainReportsFixedOnlyForMeasuredEffectiveness() {
+    MutualChainFixture fixture = new MutualChainFixture();
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
+        .thenReturn(assumedEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+
+    assertEquals(0, fixture.runUntil(125), "假定有效只是派发了动作，车没动就不算修好");
+
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
+        .thenReturn(measuredEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+    assertTrue(fixture.checkAt(140).fixedCount() > 0);
+  }
+
+  /** 链往下走不等于放宽销毁：有动作落地且（被假定）有效，本轮照旧不销毁。 */
+  @Test
+  @DisplayName("互卡链：假定有效的动作仍挡住销毁")
+  void mutualChainStillBlocksDestroyWhileAnUnlockIsAssumedEffective() {
+    MutualChainFixture fixture = new MutualChainFixture();
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
+        .thenReturn(assumedEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+
+    fixture.runUntil(305);
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("DEADLOCK_DESTROY_SKIPPED")
+                        && message.contains("safe-unlock-applied")));
+  }
+
+  /** 两车互卡、各自的恢复输入；每 15 秒检查一次。 */
+  private final class MutualChainFixture {
+    private final RuntimeDispatchService.SmartRecoveryInput inputA =
+        smartRecoveryInput("trainA", SignalComputationTrace.TokenState.ACTIVE, true, "mutual");
+    private final RuntimeDispatchService.SmartRecoveryInput inputB =
+        smartRecoveryInput("trainB", SignalComputationTrace.TokenState.ACTIVE, true, "mutual");
+    private final Instant t0 = Instant.now();
+
+    private MutualChainFixture() {
+      when(dwellRegistry.remainingSeconds(anyString())).thenReturn(Optional.empty());
+      when(dispatchService.getTrainState("trainA"))
+          .thenReturn(Optional.of(state("trainA", 5, SignalAspect.STOP, 0.0)));
+      when(dispatchService.getTrainState("trainB"))
+          .thenReturn(Optional.of(state("trainB", 7, SignalAspect.STOP, 0.0)));
+      stubConfirmedDeadlock("trainA", "trainB");
+      when(dispatchService.reapplyHardStopByName(anyString(), anyString())).thenReturn(true);
+      when(dispatchService.smartRecoveryInput(eq("trainA"), any(), any())).thenReturn(inputA);
+      when(dispatchService.smartRecoveryInput(eq("trainB"), any(), any())).thenReturn(inputB);
+      monitor.setProgressStuckThreshold(Duration.ofSeconds(300));
+      monitor.setProgressStopGraceThreshold(Duration.ofSeconds(180));
+      monitor.check(Set.of("trainA", "trainB"), t0);
+    }
+
+    /** 从 50 秒起每 15 秒检查一次直到 {@code lastSecond}，返回累计 fixedCount。 */
+    private int runUntil(int lastSecond) {
+      int fixed = 0;
+      for (int second = 50; second <= lastSecond; second += 15) {
+        fixed += checkAt(second).fixedCount();
+      }
+      return fixed;
+    }
+
+    private TrainHealthMonitor.CheckResult checkAt(int second) {
+      return monitor.check(Set.of("trainA", "trainB"), t0.plusSeconds(second));
+    }
+  }
+
+  private static RuntimeDispatchService.SmartRecoveryActionResult assumedEffective(
+      String decision) {
+    return new RuntimeDispatchService.SmartRecoveryActionResult(
+        true, true, decision, "test", DispatchEffectClass.SIGNAL_CONSTRAINT);
+  }
+
+  private static RuntimeDispatchService.SmartRecoveryActionResult measuredEffective(
+      String decision) {
+    return new RuntimeDispatchService.SmartRecoveryActionResult(
+        true,
+        true,
+        decision,
+        "test",
+        DispatchEffectClass.SIGNAL_CONSTRAINT,
+        new RuntimeDispatchService.SmartRecoveryEffectiveness(
+            decision,
+            "-",
+            true,
+            SignalAspect.PROCEED,
+            true,
+            true,
+            SignalComputationTrace.TokenState.ACTIVE,
+            SignalComputationTrace.TokenState.ACTIVE,
+            false,
+            false,
+            false,
+            false,
+            "measured"));
+  }
+
   @Test
   @DisplayName("互相阻塞自动恢复失败后仍不强制动车")
   void mutualDeadlockKeepsRetryingNonMovingRecoveryWhenActionsFail() {
