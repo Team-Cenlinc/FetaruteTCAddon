@@ -395,6 +395,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 现在没被硬停"的次数。第十五轮 3 辆车被硬停在离段场一个节点处，最长 172 秒，
           // 而它们 holds=[] blockedBy=[]。生产端按 (train, routeIndex) 去重。
           "SMART_DEPOT_RUN_IN_PROVEN",
+          // 已授予的前方授权差点被本拍释放拆开、被保下来的唯一证据（HeldForwardAuthority）。
+          // 2026-09-27 OFL 回库原子进路被截断那一分钟诊断丢了 1.18 万行，截断原因无从查起。
+          // 生产端按列车去重，只有被保下的资源或硬授权成败变化才输出。
+          "SMART_FORWARD_AUTHORITY_RETAINED",
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。

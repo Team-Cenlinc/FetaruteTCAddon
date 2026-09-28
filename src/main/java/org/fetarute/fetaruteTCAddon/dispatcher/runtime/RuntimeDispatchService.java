@@ -232,6 +232,11 @@ public final class RuntimeDispatchService {
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
   private final RouteProgressRegistry progressRegistry;
+
+  /** 已授予前方授权被保下的诊断按车去重（必留诊断不经观察预算去重）。 */
+  private final HeldForwardAuthority.TraceDedup forwardAuthorityTraces =
+      new HeldForwardAuthority.TraceDedup();
+
   private final SignNodeRegistry signNodeRegistry;
   private final LayoverRegistry layoverRegistry;
 
@@ -6298,21 +6303,21 @@ public final class RuntimeDispatchService {
       releaseSpeculativeQueueEntriesFromBehindOnSharedPath(
           trainName, route, currentIndex, currentNode, graph, request);
     }
-    OccupancyRequestContext authorizationContext =
+    Optional<OccupancyRequestContext> hardAuthorityContext =
         buildHardAuthorityContext(
-                graph,
-                runtimeSettings,
-                trainName,
-                route,
-                effectiveNodes,
-                currentIndex,
-                now,
-                priority,
-                AuthorizationPurpose.RUNTIME_MOVE,
-                train,
-                trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
-                resolveConflictExitBerthDistanceBlocks(train, runtimeSettings))
-            .orElse(context);
+            graph,
+            runtimeSettings,
+            trainName,
+            route,
+            effectiveNodes,
+            currentIndex,
+            now,
+            priority,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            train,
+            trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
+            resolveConflictExitBerthDistanceBlocks(train, runtimeSettings));
+    OccupancyRequestContext authorizationContext = hardAuthorityContext.orElse(context);
     OccupancyRequest request =
         prepareRuntimeAuthorizationRequest(
             authorizationContext, graph, SignalComputationTrace.Source.PROGRESS_TRIGGER);
@@ -6322,13 +6327,30 @@ public final class RuntimeDispatchService {
             Optional.ofNullable(currentNode),
             Optional.of(nextNode),
             graph);
+    Set<OccupancyResource> heldForwardAuthority =
+        HeldForwardAuthority.resolve(
+            isMovementInhibited(trainName)
+                ? null
+                : movementAuthorizationTokens.get(normalizeTrainKey(trainName)),
+            request.movementPlanSnapshot(),
+            snapshotSelfClaims(trainName),
+            graph);
+    forwardAuthorityTraces
+        .line(
+            trainName,
+            "PROGRESS_TRIGGER",
+            hardAuthorityContext.isPresent(),
+            HeldForwardAuthority.savedFromRelease(heldForwardAuthority, keepResources))
+        .ifPresent(debugLogger);
     releaseResourcesNotInRequest(
         trainName,
         keepResources,
         mergeProtectedResources(
-            protectedSwitcherZoneClaims(
-                trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
-            livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)));
+            mergeProtectedResources(
+                protectedSwitcherZoneClaims(
+                    trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
+                livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)),
+            heldForwardAuthority));
     MovementAuthorizationCoordinator.AuthorizationResult authorization =
         movementAuthorizationCoordinator.authorize(
             new MovementAuthorizationCoordinator.AuthorizationRequest(
@@ -14335,22 +14357,22 @@ public final class RuntimeDispatchService {
     OccupancyRequestContext context = contextOpt.get();
     OccupancyRequestContext advisoryContext = toAdvisoryLookaheadContext(context);
     OccupancyRequest request = advisoryContext.request();
-    OccupancyRequestContext authorizationContext =
+    Optional<OccupancyRequestContext> hardAuthorityContext =
         buildHardAuthorityContextWithDirectionContext(
-                graph,
-                runtimeSettings,
-                trainName,
-                route,
-                effectiveNodes,
-                directionContextNodes,
-                currentIndex,
-                now,
-                priorityResolution.priority(),
-                AuthorizationPurpose.RUNTIME_MOVE,
-                train,
-                trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
-                resolveConflictExitBerthDistanceBlocks(train, runtimeSettings))
-            .orElse(context);
+            graph,
+            runtimeSettings,
+            trainName,
+            route,
+            effectiveNodes,
+            directionContextNodes,
+            currentIndex,
+            now,
+            priorityResolution.priority(),
+            AuthorizationPurpose.RUNTIME_MOVE,
+            train,
+            trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
+            resolveConflictExitBerthDistanceBlocks(train, runtimeSettings));
+    OccupancyRequestContext authorizationContext = hardAuthorityContext.orElse(context);
     OccupancyRequest authorizationRequest =
         prepareRuntimeAuthorizationRequest(
             authorizationContext, graph, SignalComputationTrace.Source.PERIODIC_TICK);
@@ -14418,13 +14440,30 @@ public final class RuntimeDispatchService {
           braking);
       return;
     }
+    Set<OccupancyResource> heldForwardAuthority =
+        HeldForwardAuthority.resolve(
+            isMovementInhibited(trainName)
+                ? null
+                : movementAuthorizationTokens.get(normalizeTrainKey(trainName)),
+            authorizationRequest.movementPlanSnapshot(),
+            snapshotSelfClaims(trainName),
+            graph);
+    forwardAuthorityTraces
+        .line(
+            trainName,
+            "SIGNAL_TICK",
+            hardAuthorityContext.isPresent(),
+            HeldForwardAuthority.savedFromRelease(heldForwardAuthority, keepResources))
+        .ifPresent(debugLogger);
     releaseResourcesNotInRequest(
         trainName,
         keepResources,
         mergeProtectedResources(
-            protectedSwitcherZoneClaims(
-                trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"),
-            livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)));
+            mergeProtectedResources(
+                protectedSwitcherZoneClaims(
+                    trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"),
+                livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)),
+            heldForwardAuthority));
     retainCurrentPositionOccupancy(
         trainName,
         route.id(),
