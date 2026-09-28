@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
@@ -99,10 +100,11 @@ final class HeldForwardAuthority {
   }
 
   /**
-   * 诊断行按车去重：同一辆车只在"来源、硬授权是否构建成功、被保下的资源"变化时输出一行。
+   * 诊断行按车去重：同一辆车只在诊断内容变化时输出一行。
    *
-   * <p>这行是必留诊断，不受观察预算与重复窗口约束，所以由生产端去重；硬授权持续退回时它每拍都会命中。按列车名记最近一行，
-   * 记满时整表清空重来（改名后的旧名不会再来，清空最多让每辆车多输出一行）。
+   * <p>去重的都是必留诊断，不受观察预算与重复窗口约束，所以由生产端去重；它们在授权持续退回或持续被拒时每拍都会命中。按列车名记最近一行，
+   * 记满时整表清空重来（改名后的旧名不会再来，清空最多让每辆车多输出一行）。 {@link HeldForwardAuthority} 与 {@link
+   * AuthorityRollbackBaseline} 各用一个实例。
    */
   static final class TraceDedup {
     private static final int MAX_TRAINS = 256;
@@ -110,7 +112,7 @@ final class HeldForwardAuthority {
     private final Map<String, String> lastByTrain = new HashMap<>();
 
     /**
-     * 生成诊断行；与这辆车上一行相同时返回空。
+     * 生成被保下的前方授权的诊断行；与这辆车上一行相同时返回空。
      *
      * @param trainName 列车名
      * @param source 调用来源（SIGNAL_TICK / PROGRESS_TRIGGER）
@@ -118,36 +120,58 @@ final class HeldForwardAuthority {
      * @param saved {@link #savedFromRelease} 的结果；为空时不输出并清掉记录
      * @return 需要输出的诊断行
      */
-    synchronized Optional<String> line(
+    Optional<String> line(
         String trainName,
         String source,
         boolean hardAuthorityBuilt,
         List<OccupancyResource> saved) {
+      if (saved == null || saved.isEmpty()) {
+        return changed(trainName, Optional.empty());
+      }
+      return changed(
+          trainName,
+          Optional.of(
+              "SMART_FORWARD_AUTHORITY_RETAINED train="
+                  + trainName
+                  + " source="
+                  + source
+                  + " hardAuthority="
+                  + (hardAuthorityBuilt ? "built" : "fallback")
+                  + " retained="
+                  + saved.size()
+                  + " resources="
+                  + saved));
+    }
+
+    /**
+     * 与这辆车上一行不同时交给 {@code sink} 输出。
+     *
+     * @param trainName 列车名
+     * @param line 诊断行；为空时不输出并清掉记录（同样的内容下次还会输出）
+     * @param sink 输出目标
+     */
+    void emit(String trainName, Optional<String> line, Consumer<String> sink) {
+      Optional<String> changed = changed(trainName, line);
+      if (changed.isPresent() && sink != null) {
+        sink.accept(changed.get());
+      }
+    }
+
+    private synchronized Optional<String> changed(String trainName, Optional<String> line) {
       if (trainName == null || trainName.isBlank()) {
         return Optional.empty();
       }
-      if (saved == null || saved.isEmpty()) {
+      if (line == null || line.isEmpty()) {
         lastByTrain.remove(trainName);
         return Optional.empty();
       }
-      String line =
-          "SMART_FORWARD_AUTHORITY_RETAINED train="
-              + trainName
-              + " source="
-              + source
-              + " hardAuthority="
-              + (hardAuthorityBuilt ? "built" : "fallback")
-              + " retained="
-              + saved.size()
-              + " resources="
-              + saved;
       if (lastByTrain.size() >= MAX_TRAINS && !lastByTrain.containsKey(trainName)) {
         lastByTrain.clear();
       }
-      if (line.equals(lastByTrain.put(trainName, line))) {
+      if (line.get().equals(lastByTrain.put(trainName, line.get()))) {
         return Optional.empty();
       }
-      return Optional.of(line);
+      return line;
     }
   }
 

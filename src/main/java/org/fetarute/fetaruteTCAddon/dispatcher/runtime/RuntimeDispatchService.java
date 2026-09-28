@@ -236,6 +236,10 @@ public final class RuntimeDispatchService {
   private final HeldForwardAuthority.TraceDedup forwardAuthorityTraces =
       new HeldForwardAuthority.TraceDedup();
 
+  /** 授权回滚保下之前已持有资源的诊断去重（见 {@link AuthorityRollbackBaseline}）。 */
+  private final HeldForwardAuthority.TraceDedup rollbackKeptTraces =
+      new HeldForwardAuthority.TraceDedup();
+
   private final SignNodeRegistry signNodeRegistry;
   private final LayoverRegistry layoverRegistry;
 
@@ -6337,6 +6341,8 @@ public final class RuntimeDispatchService {
                     trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
                 livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)),
             heldForwardAuthority));
+    AuthorityRollbackBaseline rollbackBaseline =
+        AuthorityRollbackBaseline.capture(snapshotSelfClaims(trainName));
     MovementAuthorizationCoordinator.AuthorizationResult authorization =
         movementAuthorizationCoordinator.authorize(
             new MovementAuthorizationCoordinator.AuthorizationRequest(
@@ -6461,7 +6467,17 @@ public final class RuntimeDispatchService {
         || !activateMovementAuthorizationTokenRetainingInhibitor(
             trainName, token, destinationName.get())) {
       rollbackMovementAuthorization(
-          trainName, token, request, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          request,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNode,
+          graph,
+          now);
       OccupancyDecision blocked =
           new OccupancyDecision(
               false, now, SignalAspect.STOP, List.of(), false, "destination-commit-failed");
@@ -6503,7 +6519,17 @@ public final class RuntimeDispatchService {
         validateFinalSignalAuthorization(trainName, SignalAspect.PROCEED, finalAuthorization, true);
     if (!validation.allowed()) {
       rollbackMovementAuthorization(
-          trainName, token, request, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          request,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNode,
+          graph,
+          now);
       OccupancyDecision blocked =
           new OccupancyDecision(
               false,
@@ -6537,7 +6563,17 @@ public final class RuntimeDispatchService {
     if (!clearMovementInhibitorAfterFinalAuthorization(
         trainName, finalAuthorization, SignalAspect.PROCEED)) {
       rollbackMovementAuthorization(
-          trainName, token, request, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          request,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNode,
+          graph,
+          now);
       applyHardStop(
           train,
           properties,
@@ -12890,6 +12926,8 @@ public final class RuntimeDispatchService {
               + " wouldMutate=false didMutate=false");
       return false;
     }
+    AuthorityRollbackBaseline rollbackBaseline =
+        AuthorityRollbackBaseline.capture(snapshotSelfClaims(trainName));
     OccupancyDecision acquired = occupancyManager.acquire(authorizationRequest);
     ProceedDecision acquiredProceed =
         evaluateProceedDecision(trainName, acquired, clockNow(), "health-reissue-acquire");
@@ -12934,7 +12972,17 @@ public final class RuntimeDispatchService {
         || !activateMovementAuthorizationTokenRetainingInhibitor(
             trainName, token, destinationName.get())) {
       rollbackMovementAuthorization(
-          trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          authorizationRequest,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          trainHandle,
+          route,
+          currentIndex,
+          resolveEffectiveNode(trainName, route, currentIndex),
+          graph,
+          clockNow());
       applyHardStop(
           new TrainCartsRuntimeHandle(group),
           properties,
@@ -14571,6 +14619,8 @@ public final class RuntimeDispatchService {
           authorityEnd);
       return;
     }
+    AuthorityRollbackBaseline rollbackBaseline =
+        AuthorityRollbackBaseline.capture(snapshotSelfClaims(trainName));
     OccupancyDecision acquired = occupancyManager.acquire(authorizationRequest);
     SelfOwnedRetainDecisionRecovery acquiredRecovery =
         maybeRecoverSelfOwnedStaleRetain(authorizationRequest, acquired, "signal-acquire");
@@ -14722,7 +14772,17 @@ public final class RuntimeDispatchService {
         handleLayoverRegistrationIfNeeded(trainName, route, currentNodeOpt.get(), properties);
       }
       rollbackMovementAuthorization(
-          trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          authorizationRequest,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          graph,
+          now);
       return;
     }
     // 进站包络与前方限速边改从车头量起：从当前图节点量起的距离在两节点之间不缩短，过节点时目标速度整段跳变。
@@ -14772,7 +14832,17 @@ public final class RuntimeDispatchService {
             train,
             Set.of());
         rollbackMovementAuthorization(
-            trainName, token, authorizationRequest, HardStopReason.UNREACHABLE_FAILOVER);
+            trainName,
+            token,
+            authorizationRequest,
+            HardStopReason.UNREACHABLE_FAILOVER,
+            rollbackBaseline,
+            train,
+            route,
+            currentIndex,
+            currentNodeForSignal,
+            graph,
+            now);
         applyHardStop(
             train,
             properties,
@@ -15098,7 +15168,17 @@ public final class RuntimeDispatchService {
                     authorityEnd.resource(),
                     authorityEnd.authorizedEdgeCount()));
         rollbackMovementAuthorization(
-            trainName, token, authorizationRequest, HardStopReason.AUTHORITY_WINDOW_EXCEEDED);
+            trainName,
+            token,
+            authorizationRequest,
+            HardStopReason.AUTHORITY_WINDOW_EXCEEDED,
+            rollbackBaseline,
+            train,
+            route,
+            currentIndex,
+            currentNodeForSignal,
+            graph,
+            now);
         applyHardStop(
             train,
             properties,
@@ -15221,7 +15301,8 @@ public final class RuntimeDispatchService {
           authorizationRequest,
           smartDecision,
           priorityResolution,
-          retainedDestination);
+          retainedDestination,
+          rollbackBaseline);
       traceSmartSignalFinalDecision(
           trainName,
           "PERIODIC_TICK",
@@ -15316,7 +15397,17 @@ public final class RuntimeDispatchService {
           || !activateMovementAuthorizationTokenRetainingInhibitor(
               trainName, token, committedDestination.get())) {
         rollbackMovementAuthorization(
-            trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+            trainName,
+            token,
+            authorizationRequest,
+            HardStopReason.AUTHORIZATION_FAILURE,
+            rollbackBaseline,
+            train,
+            route,
+            currentIndex,
+            currentNodeForSignal,
+            graph,
+            now);
         OccupancyDecision blocked =
             new OccupancyDecision(
                 false, now, SignalAspect.STOP, List.of(), false, "destination-commit-failed");
@@ -15464,7 +15555,17 @@ public final class RuntimeDispatchService {
         return;
       }
       rollbackMovementAuthorization(
-          trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          authorizationRequest,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          graph,
+          now);
       OccupancyDecision blocked =
           new OccupancyDecision(
               false,
@@ -15533,7 +15634,17 @@ public final class RuntimeDispatchService {
         validateFinalSignalAuthorization(trainName, nextAspect, finalAuthorization, true);
     if (!finalValidation.allowed()) {
       rollbackMovementAuthorization(
-          trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          authorizationRequest,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          graph,
+          now);
       OccupancyDecision blocked =
           new OccupancyDecision(
               false,
@@ -15568,7 +15679,17 @@ public final class RuntimeDispatchService {
         && !clearMovementInhibitorAfterFinalAuthorization(
             trainName, finalAuthorization, nextAspect)) {
       rollbackMovementAuthorization(
-          trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
+          trainName,
+          token,
+          authorizationRequest,
+          HardStopReason.AUTHORIZATION_FAILURE,
+          rollbackBaseline,
+          train,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          graph,
+          now);
       OccupancyDecision blocked =
           new OccupancyDecision(
               false, now, SignalAspect.STOP, List.of(), false, "movement-inhibitor-clear-failed");
@@ -18228,11 +18349,28 @@ public final class RuntimeDispatchService {
     return true;
   }
 
+  /**
+   * 撤销本拍授权并就地保持：作废 token、释放本拍新拿到的硬授权、按停车保持收缩，再写入 movement inhibitor。
+   *
+   * <p>调用方随后都会硬停车（当拍停住，不走制动曲线）。之前已持有的资源由回滚原样留下（{@link AuthorityRollbackBaseline}）， 再照 {@link
+   * #applyUnresolvableMovementPlanStop} 的先例收缩到当前位置与列尾防护——列车压着的道岔不会有空档被别的车拿走，
+   * 停着的车前方多余的授权也照旧放掉。以前回滚把整段请求连车身一起放掉，停车保持要到后面几拍才重新占回。
+   *
+   * @param baseline 本拍 acquire 之前本车已持有的资源；这些不在回滚里释放
+   * @param currentNode 就地保持的起点；为空时不收缩
+   */
   private void rollbackMovementAuthorization(
       String trainName,
       MovementAuthorizationToken token,
       OccupancyRequest request,
-      HardStopReason reason) {
+      HardStopReason reason,
+      AuthorityRollbackBaseline baseline,
+      RuntimeTrainHandle train,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId currentNode,
+      RailGraph graph,
+      Instant now) {
     String key = normalizeTrainKey(trainName);
     if (!key.isEmpty() && token != null) {
       MovementAuthorizationToken current = movementAuthorizationTokens.get(key);
@@ -18240,7 +18378,18 @@ public final class RuntimeDispatchService {
         movementAuthorizationTokens.remove(key);
       }
     }
-    releaseMovementAuthorityResources(trainName, request);
+    releaseMovementAuthorityResources(
+        trainName, request, baseline, reason == null ? "UNKNOWN" : reason.name());
+    if (occupancyManager != null && currentNode != null) {
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNode,
+          graph,
+          now == null ? clockNow() : now,
+          train);
+    }
     invalidateMovementAuthorization(trainName, reason);
   }
 
@@ -18256,9 +18405,16 @@ public final class RuntimeDispatchService {
       OccupancyRequest request,
       SmartSignalDecisionResult smartDecision,
       DispatchPriorityResolution priorityResolution,
-      String retainedDestination) {
+      String retainedDestination,
+      AuthorityRollbackBaseline baseline) {
     releaseRecoverableMovementAuthorityResources(
-        trainName, token, request, smartDecision, priorityResolution, retainedDestination);
+        trainName,
+        token,
+        request,
+        smartDecision,
+        priorityResolution,
+        retainedDestination,
+        baseline);
   }
 
   private void retainRecoverableMovementDestination(
@@ -18278,19 +18434,31 @@ public final class RuntimeDispatchService {
                 : current);
   }
 
-  private void releaseMovementAuthorityResources(String trainName, OccupancyRequest request) {
+  private void releaseMovementAuthorityResources(
+      String trainName,
+      OccupancyRequest request,
+      AuthorityRollbackBaseline baseline,
+      String reason) {
     if (occupancyManager == null || request == null) {
       return;
     }
     Set<OccupancyResource> protectedFootprint =
         turnbackFootprintGuards.protectedResources(trainName);
+    List<OccupancyResource> kept = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
-      if (resource != null
-          && request.intentFor(resource).hardAuthority()
-          && !protectedFootprint.contains(resource)) {
-        occupancyManager.releaseResource(resource, Optional.of(trainName));
+      if (resource == null
+          || !request.intentFor(resource).hardAuthority()
+          || protectedFootprint.contains(resource)) {
+        continue;
       }
+      if (!baseline.releasable(resource)) {
+        kept.add(resource);
+        continue;
+      }
+      occupancyManager.releaseResource(resource, Optional.of(trainName));
     }
+    rollbackKeptTraces.emit(
+        trainName, AuthorityRollbackBaseline.traceLine(trainName, reason, kept), debugLogger);
   }
 
   private void releaseRecoverableMovementAuthorityResources(
@@ -18299,7 +18467,8 @@ public final class RuntimeDispatchService {
       OccupancyRequest request,
       SmartSignalDecisionResult smartDecision,
       DispatchPriorityResolution priorityResolution,
-      String retainedDestination) {
+      String retainedDestination,
+      AuthorityRollbackBaseline baseline) {
     if (occupancyManager == null || request == null) {
       return;
     }
@@ -18311,11 +18480,16 @@ public final class RuntimeDispatchService {
                 || tokenState == SignalComputationTrace.TokenState.ACTIVE);
     Set<OccupancyResource> protectedFootprint =
         turnbackFootprintGuards.protectedResources(trainName);
+    List<OccupancyResource> kept = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null || !request.intentFor(resource).hardAuthority()) {
         continue;
       }
       if (protectedFootprint.contains(resource)) {
+        continue;
+      }
+      if (!baseline.releasable(resource)) {
+        kept.add(resource);
         continue;
       }
       ClaimRole claimRoleBeforeRelease = claimRoleForTrain(resource, trainName).orElse(null);
@@ -18341,6 +18515,10 @@ public final class RuntimeDispatchService {
           queueHeadBeforeRelease,
           queueRetained);
     }
+    rollbackKeptTraces.emit(
+        trainName,
+        AuthorityRollbackBaseline.traceLine(trainName, "RECOVERABLE_HOLD", kept),
+        debugLogger);
   }
 
   private Optional<ClaimRole> claimRoleForTrain(OccupancyResource resource, String trainName) {

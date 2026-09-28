@@ -399,6 +399,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 2026-09-27 OFL 回库原子进路被截断那一分钟诊断丢了 1.18 万行，截断原因无从查起。
           // 生产端按列车去重，只有被保下的资源或硬授权成败变化才输出。
           "SMART_FORWARD_AUTHORITY_RETAINED",
+          // 授权回滚没有放掉之前已持有资源的唯一证据（AuthorityRollbackBaseline）。2026-09-28 SPB 合流岔
+          // 一夜 5 次断车，前车那条释放记录都被预算吞了（1269 条生命周期只记下 28 条），只能靠推断。
+          // 生产端按列车去重，只有保下的资源或回滚原因变化才输出。
+          "SMART_AUTHORITY_ROLLBACK_KEPT_HELD",
           // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
           // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。

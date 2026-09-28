@@ -8113,9 +8113,18 @@ class RuntimeDispatchServiceTest {
 
     java.lang.reflect.Method rollback =
         RuntimeDispatchService.class.getDeclaredMethod(
-            "releaseMovementAuthorityResources", String.class, OccupancyRequest.class);
+            "releaseMovementAuthorityResources",
+            String.class,
+            OccupancyRequest.class,
+            AuthorityRollbackBaseline.class,
+            String.class);
     rollback.setAccessible(true);
-    rollback.invoke(service, "turning-train", outbound);
+    rollback.invoke(
+        service,
+        "turning-train",
+        outbound,
+        AuthorityRollbackBaseline.capture(List.of()),
+        "AUTHORIZATION_FAILURE");
     assertTrue(
         manager.snapshotClaims().stream()
             .anyMatch(claim -> sharedCrossing.equals(claim.resource())));
