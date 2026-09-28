@@ -715,7 +715,138 @@ class ReclaimManagerTest {
     UUID ownRouteId = UUID.randomUUID();
     UUID stationId = UUID.randomUUID();
     StorageProvider provider = mockProvider(ownRouteId, stationId);
-    // 外方运营商 SURN 及其 RETURN：首站是裸节点 SURN:S:XXX:1，不引用站点主数据。
+    UUID foreignRouteId = addForeignOperatorReturn(provider);
+
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-thru"), any())).thenReturn(true);
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-thru",
+        "surn:s:xxx:2",
+        NodeId.of("SURN:S:XXX:2"),
+        now.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+
+    manager.performReclaimCheck();
+
+    org.mockito.ArgumentCaptor<ServiceTicket> captor =
+        org.mockito.ArgumentCaptor.forClass(ServiceTicket.class);
+    verify(ticketAssigner).forceAssign(eq(provider), eq("train-thru"), captor.capture());
+    assertEquals(foreignRouteId, captor.getValue().routeId(), "应当派给外方的 RETURN（同站不同股道也算匹配）");
+  }
+
+  @Test
+  void performReclaimCheckUsesRouteOperatorAfterCrossOperatorChange() {
+    // 直通车在 SURC 交路上经 CHANGE:SURN:NL 换线：运营商标签被改写成 SURN，交路仍归 SURC 管理。
+    // 修复前两者不一致即放弃回收，滞留在外方终点的直通车永远回不了库。
+    Instant now = Instant.now();
+    UUID ownRouteId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(ownRouteId, UUID.randomUUID());
+    UUID foreignRouteId = addForeignOperatorReturn(provider);
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-thru"), any())).thenReturn(true);
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-thru",
+        "surn:s:xxx:2",
+        NodeId.of("SURN:S:XXX:2"),
+        now.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURN", "FTA_ROUTE_ID", ownRouteId.toString()));
+    List<String> logs = new ArrayList<>();
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), logs::add, () -> 0);
+
+    manager.performReclaimCheck();
+
+    org.mockito.ArgumentCaptor<ServiceTicket> captor =
+        org.mockito.ArgumentCaptor.forClass(ServiceTicket.class);
+    verify(ticketAssigner).forceAssign(eq(provider), eq("train-thru"), captor.capture());
+    assertEquals(foreignRouteId, captor.getValue().routeId(), "先搜交路所属的 SURC，再搜外方 SURN 的 RETURN");
+    assertTrue(logs.stream().noneMatch(line -> line.contains("不一致")), "换线后的运营商标签不再让回收失败");
+    assertTrue(logs.stream().anyMatch(line -> line.contains("按交路归属运营商 SURC")));
+  }
+
+  @Test
+  void performReclaimCheckUsesRouteOperatorWhenOperatorTagIsMissing() {
+    Instant now = Instant.now();
+    UUID routeId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, UUID.randomUUID());
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq(provider), eq("route-only"), any())).thenReturn(true);
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "route-only",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        now.minusSeconds(30),
+        Map.of("FTA_ROUTE_ID", routeId.toString(), "FTA_OP_TRIPS", "4", "FTA_OP_MAX", "4"));
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner).forceAssign(eq(provider), eq("route-only"), any(ServiceTicket.class));
+  }
+
+  @Test
+  void performReclaimCheckRefusesWhenRouteIdNoLongerResolves() {
+    // 有交路 ID 却回溯不到（交路已删除）：运营商标签可能是换线后的外方运营商，不能拿它顶替管理归属。
+    Instant now = Instant.now();
+    StorageProvider provider = mockProvider(UUID.randomUUID(), UUID.randomUUID());
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "orphan",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        now.minusSeconds(30),
+        Map.of(
+            "FTA_OPERATOR_CODE", "SURC",
+            "FTA_ROUTE_ID", UUID.randomUUID().toString(),
+            "FTA_OP_TRIPS", "4",
+            "FTA_OP_MAX", "4"));
+    List<String> logs = new ArrayList<>();
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), logs::add, () -> 0);
+
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(logs.stream().anyMatch(line -> line.contains("FTA_ROUTE_ID 回溯不到运营商")));
+  }
+
+  /**
+   * 在样例库里加一个外方运营商 SURN 及其 RETURN 交路：首站是裸节点 {@code SURN:S:XXX:1}，不引用站点主数据。
+   *
+   * @return 外方 RETURN 交路 ID
+   */
+  private static UUID addForeignOperatorReturn(StorageProvider provider) {
     Instant ts = Instant.parse("2026-02-01T00:00:00Z");
     UUID companyId = provider.companies().listAll().get(0).id();
     UUID foreignOperatorId = UUID.randomUUID();
@@ -778,30 +909,7 @@ class ReclaimManagerTest {
     when(provider.routes().listByLine(foreignLineId)).thenReturn(List.of(foreignReturn));
     when(provider.routeStops().listByRoute(foreignRouteId)).thenReturn(List.of(foreignFirst));
 
-    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
-    StorageManager storageManager = mock(StorageManager.class);
-    when(plugin.getStorageManager()).thenReturn(storageManager);
-    when(storageManager.provider()).thenReturn(Optional.of(provider));
-    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
-    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
-    when(ticketAssigner.forceAssign(eq(provider), eq("train-thru"), any())).thenReturn(true);
-    LayoverRegistry layoverRegistry = new LayoverRegistry();
-    layoverRegistry.register(
-        "train-thru",
-        "surn:s:xxx:2",
-        NodeId.of("SURN:S:XXX:2"),
-        now.minusSeconds(4000),
-        Map.of("FTA_OPERATOR_CODE", "SURC"));
-    ReclaimManager manager =
-        new ReclaimManager(
-            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
-
-    manager.performReclaimCheck();
-
-    org.mockito.ArgumentCaptor<ServiceTicket> captor =
-        org.mockito.ArgumentCaptor.forClass(ServiceTicket.class);
-    verify(ticketAssigner).forceAssign(eq(provider), eq("train-thru"), captor.capture());
-    assertEquals(foreignRouteId, captor.getValue().routeId(), "应当派给外方的 RETURN（同站不同股道也算匹配）");
+    return foreignRouteId;
   }
 
   private static ConfigManager mockConfigManager() {

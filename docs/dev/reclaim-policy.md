@@ -59,7 +59,7 @@ reclaim:
   **但它会销毁待命列车**：上面的滞留兜底是回收侧唯一一处销毁动作，触发条件是"该回收 + 长期派不出 RETURN 票 + 无乘客 + 无进行中折返事务"。
 - Reclaim 只按不可变 ticketId 重试自己创建且 routeId 一致的 RETURN attempt；Layover 的位置、readyAt 或 TrainCarts 名称刷新不会改变事务身份。若候选已被普通运营折返等其他 dispatch attempt 认领，本轮跳过，不能复用其 ticketId 改派 RETURN；同站同 tick 的两列车也各自持有独立票据。
 - 若某条匹配 RETURN route 在建立 attempt 前即被预检拒绝，会清理该临时 ticket 并继续尝试下一条匹配 route；一旦 handoff attempt 已建立，则固定在原 route 上稳定重试，避免双事务。
-- 运营商优先通过候选的 `FTA_ROUTE_ID -> Line -> Operator` 精确回溯；旧数据缺少 route UUID 时，只有全库恰好一个同 code Operator 才允许回退。不同公司使用相同 Operator code 时不会再按遍历顺序误选 RETURN route。
+- 管理运营商取候选的 `FTA_ROUTE_ID -> Line -> Operator`（交路本身的运营商），不看 `FTA_OPERATOR_CODE`：直通运转 `CHANGE` 会把它改写成对乘客显示的运营商，跨运营商换线后必然与交路不一致。有交路 ID 却回溯不到（交路已删除）时拒绝回收，由滞留销毁兜底；只有没有交路 ID 的旧数据才按运营商标签找，且全库恰好一个同 code Operator 才允许回退。不同公司使用相同 Operator code 时不会再按遍历顺序误选 RETURN route。
 - 如果某列车在 rename / split 过渡态中尚未稳定为单一逻辑列车，通常会先被运行时巡检或 layover 清理链路处理；回收侧只在候选稳定可见时才会分配 RETURN 票据。
 - 当一次回收成功后，本轮会立即扣减同方向供给计数，避免同方向候选被连续过回收。
 

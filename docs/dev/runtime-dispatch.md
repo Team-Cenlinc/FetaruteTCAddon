@@ -166,8 +166,11 @@
 ## tags 与恢复
 推进点依赖 TrainProperties tags：
 - `FTA_ROUTE_ID`：线路 UUID（由 `/fta depot spawn` 写入）
-- `FTA_OPERATOR_CODE`：运营商 code（由 `/fta depot spawn` 写入）
-- `FTA_LINE_CODE`：线路 code（由 `/fta depot spawn` 写入）
+- `FTA_OPERATOR_CODE`：运营商 code（出车时写入交路本身的运营商；直通运转 `CHANGE` 到站时改写为对乘客显示的运营商）
+- `FTA_LINE_CODE`：线路 code（同上；`CHANGE` 后为对乘客显示的线路）
+
+`CHANGE` 只是通知，管理归属不变：换线后 `FTA_OPERATOR_CODE`/`FTA_LINE_CODE` 表示的是对乘客显示的线路，
+交路识别、回收、优先级等管理逻辑必须以 `FTA_ROUTE_ID` 的交路为准，不能拿这两个标签判断归属（HUD 与公开 API 的显示口径见 `RouteLineChanges`）。
 - `FTA_ROUTE_CODE`：班次 code（由 `/fta depot spawn` 写入）
 - `FTA_ROUTE_INDEX`：已抵达节点索引（运行时写回）
 - `FTA_ROUTE_UPDATED_AT`：可选，调度更新时间（毫秒）
@@ -183,8 +186,9 @@
 DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId、该索引的声明节点与 RouteStop 定义证据。`/fta reload` 只保留定义未变化的合法 materialization；即使 routeId 相同，只要 waypoint 或 DYNAMIC/CRET 规则已经更新，旧覆盖也会立即丢弃。route handoff 会清空上一交路覆盖；真实节点观测回到 route 声明节点时会写入 declared marker，已结束的旧 `FTA_DEPOT_ID` 不会在下一 tick 重新复活。
 
 线路定义查找顺序：
-1) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`
-2) `FTA_ROUTE_ID`（兼容旧标签）
+1) `FTA_ROUTE_ID`
+2) `FTA_OPERATOR_CODE/FTA_LINE_CODE/FTA_ROUTE_CODE`：只在没有 UUID、或 UUID 不在缓存中（交路删后重建）时使用。
+   不能先按它找：直通运转换线后三元组是（新运营商, 新线路, 原交路代码），新线路恰有同码交路时会解析成别的交路。
 
 ## 手动调试（debug set route）
 在不重生列车的情况下，可用命令手动写入 route tags 并同步下一跳 destination：

@@ -479,19 +479,12 @@ public class ReclaimManager {
     }
     StorageProvider provider = providerOpt.get();
 
-    String opCode = candidate.tags().get("FTA_OPERATOR_CODE");
-    if (opCode == null) {
-      debugLogger.accept("回收失败: 缺失 FTA_OPERATOR_CODE train=" + candidate.trainName());
-      return false;
-    }
-
-    Optional<Operator> operatorOpt = resolveCandidateOperator(provider, candidate, opCode);
-
+    Optional<Operator> operatorOpt = resolveCandidateOperator(provider, candidate);
     if (operatorOpt.isEmpty()) {
-      debugLogger.accept("回收失败: 找不到 Operator " + opCode + " train=" + candidate.trainName());
       return false;
     }
     UUID operatorId = operatorOpt.get().id();
+    String opCode = operatorOpt.get().code();
 
     // 先本运营商，再其它运营商：直通车滞留在别人的终点时，能带它回家的只有别人的 RETURN。
     List<Route> allReturnRoutes = new ArrayList<>(listReturnRoutes(provider, operatorId));
@@ -604,13 +597,19 @@ public class ReclaimManager {
   }
 
   /**
-   * 解析候选列车所属运营商。
+   * 解析候选列车的管理运营商（决定先搜哪家的 RETURN 交路）。
    *
-   * <p>Operator code 只在公司内唯一，不能遍历公司后取第一个同名对象。优先沿本次列车的 {@code FTA_ROUTE_ID -> Line -> Operator}
-   * 精确回溯；旧数据缺少 route UUID 时，仅在全库恰好一个同 code 运营商时允许回退。
+   * <p>管理归属是交路自身的运营商：沿本次列车的 {@code FTA_ROUTE_ID -> Line -> Operator} 精确回溯，不看 {@code
+   * FTA_OPERATOR_CODE}——直通运转（CHANGE）会把它改写成对乘客显示的线路，跨运营商换线后必然与交路不一致， 但交路、交路组仍归原运营商管理。
+   *
+   * <ul>
+   *   <li>有交路 ID 却回溯不到（交路已删除、数据不一致）：拒绝回收。此时运营商标签可能是换线后的外方运营商， 按它找会把搜索顺序颠倒；回收失败后由滞留销毁兜底。
+   *   <li>没有（或无法解析的）交路 ID 的旧数据才按运营商标签找，且 Operator code 只在公司内唯一，仅在全库恰好一个同 code 运营商时允许回退。
+   * </ul>
    */
   private Optional<Operator> resolveCandidateOperator(
-      StorageProvider provider, LayoverRegistry.LayoverCandidate candidate, String operatorCode) {
+      StorageProvider provider, LayoverRegistry.LayoverCandidate candidate) {
+    String operatorCode = candidate.tags().get(RouteProgressRegistry.TAG_OPERATOR_CODE);
     Optional<UUID> routeId = parseUuidTag(candidate.tags(), RouteProgressRegistry.TAG_ROUTE_ID);
     if (routeId.isPresent()) {
       Optional<Operator> byRoute =
@@ -620,20 +619,32 @@ public class ReclaimManager {
               .flatMap(route -> provider.lines().findById(route.lineId()))
               .flatMap(line -> provider.operators().findById(line.operatorId()));
       if (byRoute.isPresent()) {
-        if (byRoute.get().code().equalsIgnoreCase(operatorCode)) {
-          return byRoute;
+        if (operatorCode != null && !byRoute.get().code().equalsIgnoreCase(operatorCode)) {
+          debugLogger.accept(
+              "回收: 按交路归属运营商 "
+                  + byRoute.get().code()
+                  + "（FTA_OPERATOR_CODE="
+                  + operatorCode
+                  + " 为直通换线后的显示线路）train="
+                  + candidate.trainName()
+                  + " routeId="
+                  + routeId.get());
         }
-        debugLogger.accept(
-            "回收失败: FTA_ROUTE_ID 与 FTA_OPERATOR_CODE 不一致 train="
-                + candidate.trainName()
-                + " routeId="
-                + routeId.get()
-                + " operator="
-                + operatorCode);
-        return Optional.empty();
+        return byRoute;
       }
+      debugLogger.accept(
+          "回收失败: FTA_ROUTE_ID 回溯不到运营商 train="
+              + candidate.trainName()
+              + " routeId="
+              + routeId.get());
+      return Optional.empty();
     }
 
+    if (operatorCode == null) {
+      debugLogger.accept(
+          "回收失败: 缺失 FTA_ROUTE_ID 与 FTA_OPERATOR_CODE train=" + candidate.trainName());
+      return Optional.empty();
+    }
     List<Operator> matches =
         provider.companies().listAll().stream()
             .filter(Objects::nonNull)
@@ -651,6 +662,8 @@ public class ReclaimManager {
               + operatorCode
               + " matches="
               + matches.size());
+    } else {
+      debugLogger.accept("回收失败: 找不到 Operator " + operatorCode + " train=" + candidate.trainName());
     }
     return Optional.empty();
   }
