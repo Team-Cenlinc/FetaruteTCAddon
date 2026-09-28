@@ -137,6 +137,9 @@ public interface StationApi {
    * <p>只统计 STOP 与 TERMINATE（PASS 不算）；DYNAMIC 停靠归到它所在的车站；出库、回库、运营各阶段的路线都统计。
    * 同一条线路既停本站又停同组其他站时只列一次（本站那条）。排序：成员 sortOrder → 运营商代码 → 线路代码。
    *
+   * <p>直通运转（1.7.0）：按列车在本站所属的线路统计——换线之后的车站算新线路，换线站本身两条都算（以原线路到达、 以新线路发车），见 {@code
+   * RouteApi.StopInfo#lineChange}。
+   *
    * @param stationId 车站 UUID
    * @return 线路列表（不可变）；没有线路时为空列表
    */

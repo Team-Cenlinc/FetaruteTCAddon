@@ -23,7 +23,6 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
@@ -35,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
+import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -167,8 +167,7 @@ public final class BossBarTrainHudManager implements Listener {
 
     Optional<String> templateOpt =
         templateService != null
-            ? templateService.resolveBossBarTemplate(
-                context.routeDefinition().flatMap(RouteDefinition::metadata))
+            ? templateService.resolveTemplateForLine(HudTemplateType.BOSSBAR, context.currentLine())
             : Optional.empty();
     BossBarHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
     long nowMillis = System.currentTimeMillis();
@@ -193,6 +192,9 @@ public final class BossBarTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
+    state =
+        HudStateTracker.applyOutOfService(
+            state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
     String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
 

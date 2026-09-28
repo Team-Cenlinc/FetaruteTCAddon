@@ -41,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
@@ -135,6 +136,10 @@ public final class EtaService {
   /** 列车在站记录，用来识别“已到站、停站计时尚未开始”的空档；未接入时该空档按 0 计。 */
   private volatile java.util.function.Supplier<Optional<StationPresenceTracker>> stationPresence;
 
+  /** 线路代码的规范写法（直通指令里的代码可能写成小写）；未接入时原样显示。 */
+  private volatile java.util.function.UnaryOperator<RouteLineChanges.LineRef> lineCanonicalizer =
+      java.util.function.UnaryOperator.identity();
+
   private volatile java.util.function.Consumer<String> debugLogger = message -> {};
 
   private final EtaCache<String, EtaResult> trainCache = new EtaCache<>(Duration.ofMillis(800));
@@ -207,6 +212,17 @@ public final class EtaService {
   public void attachStationPresence(
       java.util.function.Supplier<Optional<StationPresenceTracker>> stationPresence) {
     this.stationPresence = stationPresence;
+  }
+
+  /**
+   * 接入线路代码的规范写法：站牌行显示直通运转换线后的线路时，与公开 API、HUD 用同一种写法。
+   *
+   * @param canonicalizer 线路 → 主数据写法的线路；传 null 表示断开（原样显示）
+   */
+  public void attachLineCanonicalizer(
+      java.util.function.UnaryOperator<RouteLineChanges.LineRef> canonicalizer) {
+    this.lineCanonicalizer =
+        canonicalizer == null ? java.util.function.UnaryOperator.identity() : canonicalizer;
   }
 
   /** 绑定票据来源（SpawnManager/TicketAssigner），用于未发车 ETA。 */
@@ -926,9 +942,6 @@ public final class EtaService {
         continue;
       }
       RouteDefinition route = routeOpt.get();
-      if (!lineMatches(route, lineId)) {
-        continue;
-      }
       EtaTarget stationTarget = new EtaTarget.Station(stationId);
       Optional<TargetSelection> targetOpt =
           resolveTargetSelection(
@@ -936,12 +949,18 @@ public final class EtaService {
       if (targetOpt.isEmpty()) {
         continue;
       }
+      TargetSelection target = targetOpt.get();
+      // 直通运转：列车到本站时属于哪条线，就按哪条线显示与过滤。
+      String lineName =
+          lineAtStop(route, route.metadata().flatMap(RouteLineChanges.LineRef::of), target.index())
+              .orElseGet(() -> resolveLineName(route));
+      if (!lineMatches(route, lineName, lineId)) {
+        continue;
+      }
       EtaResult result = computeForTrain(trainName, stationTarget, now);
       if (result.etaEpochMillis() <= 0L || result.etaEpochMillis() > cutoff.toEpochMilli()) {
         continue;
       }
-      TargetSelection target = targetOpt.get();
-      String lineName = resolveLineName(route);
       String routeId = route.id().value();
       TerminalInfo terminal =
           resolveTerminalInfo(route, snap.routeUuid(), terminalCache, terminalContext);
@@ -1029,11 +1048,6 @@ public final class EtaService {
     if (ticket == null || ticket.service() == null) {
       return Optional.empty();
     }
-    if (lineId != null
-        && !lineId.isBlank()
-        && !ticket.service().lineCode().equalsIgnoreCase(lineId)) {
-      return Optional.empty();
-    }
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(ticket);
     if (routeOpt.isEmpty()) {
       return Optional.empty();
@@ -1045,12 +1059,22 @@ public final class EtaService {
     if (targetOpt.isEmpty()) {
       return Optional.empty();
     }
+    TargetSelection target = targetOpt.get();
+    // 直通运转：列车到本站时属于哪条线，就按哪条线显示与过滤。
+    String lineName =
+        lineAtStop(
+                route,
+                RouteLineChanges.LineRef.of(
+                    ticket.service().operatorCode(), ticket.service().lineCode()),
+                target.index())
+            .orElse(ticket.service().lineCode());
+    if (lineId != null && !lineId.isBlank() && !lineName.equalsIgnoreCase(lineId.trim())) {
+      return Optional.empty();
+    }
     EtaResult result = computeForSpawnTicket(ticket, stationTarget, now);
     if (result.etaEpochMillis() <= 0L || result.etaEpochMillis() > cutoff.toEpochMilli()) {
       return Optional.empty();
     }
-    TargetSelection target = targetOpt.get();
-    String lineName = ticket.service().lineCode();
     String routeId = route.id().value();
     TerminalInfo terminal =
         resolveTerminalInfo(route, ticket.service().routeId(), terminalCache, terminalContext);
@@ -1506,7 +1530,14 @@ public final class EtaService {
     }
   }
 
-  private boolean lineMatches(RouteDefinition route, String lineId) {
+  /**
+   * 站牌行是否属于要查的线路。
+   *
+   * @param route 交路
+   * @param lineName 列车到本站时所属的线路代码（{@link #lineAtStop}）
+   * @param lineId 要查的线路代码；为空时不过滤
+   */
+  private boolean lineMatches(RouteDefinition route, String lineName, String lineId) {
     if (lineId == null || lineId.isBlank()) {
       return true;
     }
@@ -1514,13 +1545,30 @@ public final class EtaService {
     if (route == null) {
       return false;
     }
-    Optional<RouteMetadata> metaOpt = route.metadata();
-    if (metaOpt.isPresent() && metaOpt.get().lineId() != null) {
-      return metaOpt.get().lineId().equalsIgnoreCase(expected);
+    if (route.metadata().isPresent() && route.metadata().get().lineId() != null) {
+      return lineName.equalsIgnoreCase(expected);
     }
     return parseRouteId(route.id())
         .map(parts -> parts.line().equalsIgnoreCase(expected))
         .orElse(false);
+  }
+
+  /**
+   * 列车到达停靠表第 {@code index} 项时对乘客显示的线路代码（直通运转换线后为新线路，见 {@link RouteLineChanges}），按规范写法给出。
+   *
+   * @param routeLine 交路自身的线路；未知时为空
+   */
+  private Optional<String> lineAtStop(
+      RouteDefinition route, Optional<RouteLineChanges.LineRef> routeLine, int index) {
+    if (route == null || routeLine.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        lineCanonicalizer
+            .apply(
+                RouteLineChanges.lineAt(
+                    routeDefinitions.listStops(route.id()), index, routeLine.get()))
+            .lineCode());
   }
 
   private String resolveLineName(RouteDefinition route) {

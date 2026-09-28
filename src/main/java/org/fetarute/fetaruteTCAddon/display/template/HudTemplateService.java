@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.display.template;
 
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -9,7 +10,7 @@ import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -53,27 +54,17 @@ public final class HudTemplateService {
   }
 
   /**
-   * 解析 BossBar 模板文本：根据线路绑定查询对应模板内容。
+   * 按运营商代码 + 线路代码解析绑定的模板（代码不区分大小写）。
    *
-   * <p>当线路未绑定模板时返回 empty，由调用方决定回退到配置/语言默认模板。
-   */
-  public Optional<String> resolveBossBarTemplate(Optional<RouteMetadata> metaOpt) {
-    return resolveTemplate(HudTemplateType.BOSSBAR, metaOpt);
-  }
-
-  /**
-   * 解析指定类型的 HUD 模板文本：根据线路绑定查询对应模板内容。
+   * <p>直通运转换线后，HUD 按列车当前所属的线路取模板，而不是交路本身的线路。
    *
-   * <p>当线路未绑定模板时返回 empty，由调用方决定回退到配置/语言默认模板。
+   * @param type 模板类型
+   * @param operator 运营商代码
+   * @param line 线路代码
+   * @return 模板文本；线路未绑定该类型模板时为空
    */
-  public Optional<String> resolveTemplate(HudTemplateType type, Optional<RouteMetadata> metaOpt) {
-    if (type == null || metaOpt == null || metaOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteMetadata meta = metaOpt.get();
-    String operator = meta.operator();
-    String line = meta.lineId();
-    if (operator == null || operator.isBlank() || line == null || line.isBlank()) {
+  public Optional<String> resolveTemplate(HudTemplateType type, String operator, String line) {
+    if (type == null || operator == null || operator.isBlank() || line == null || line.isBlank()) {
       return Optional.empty();
     }
     UUID lineId = lineByCode.get(new LineKey(operator, line));
@@ -89,6 +80,21 @@ public final class HudTemplateService {
       return Optional.empty();
     }
     return Optional.of(template.content());
+  }
+
+  /**
+   * 按列车当前所属线路解析绑定的模板（直通运转换线后为新线路）。
+   *
+   * @param type 模板类型
+   * @param line 当前线路；为空时返回空
+   * @return 模板文本；线路未绑定该类型模板时为空
+   */
+  public Optional<String> resolveTemplateForLine(
+      HudTemplateType type, Optional<RouteLineChanges.LineRef> line) {
+    if (line == null || line.isEmpty()) {
+      return Optional.empty();
+    }
+    return resolveTemplate(type, line.get().operatorCode(), line.get().lineCode());
   }
 
   /** 按公司 + 类型 + 名称检索模板。 */
@@ -184,17 +190,13 @@ public final class HudTemplateService {
   }
 
   /**
-   * 解析线路元信息（用于占位符）。
+   * 按运营商代码 + 线路代码解析线路元信息（代码不区分大小写）。
    *
-   * <p>仅基于 operator+line code 查找，避免依赖 route name/route code。
+   * @param operator 运营商代码
+   * @param line 线路代码
+   * @return 线路元信息；线路不存在时为空
    */
-  public Optional<LineInfo> resolveLineInfo(Optional<RouteMetadata> metaOpt) {
-    if (metaOpt == null || metaOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteMetadata meta = metaOpt.get();
-    String operator = meta.operator();
-    String line = meta.lineId();
+  public Optional<LineInfo> resolveLineInfo(String operator, String line) {
     if (operator == null || operator.isBlank() || line == null || line.isBlank()) {
       return Optional.empty();
     }
@@ -209,10 +211,11 @@ public final class HudTemplateService {
     }
   }
 
+  /** 运营商 + 线路代码（统一小写：直通指令里写的代码大小写可能与主数据不同）。 */
   private record LineKey(String operator, String line) {
     private LineKey {
-      Objects.requireNonNull(operator, "operator");
-      Objects.requireNonNull(line, "line");
+      operator = Objects.requireNonNull(operator, "operator").trim().toLowerCase(Locale.ROOT);
+      line = Objects.requireNonNull(line, "line").trim().toLowerCase(Locale.ROOT);
     }
   }
 

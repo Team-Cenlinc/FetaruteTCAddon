@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 
@@ -137,9 +138,10 @@ public final class RouteApiImpl implements RouteApi {
     // 停靠表与 waypoints 下标对齐；序号就是下标，与 TimetableApi、车站事件同一口径。
     List<RouteStop> routeStops = routeDefinitions.listStops(def.id());
     List<StopStation> resolved = resolveStops(routeUuid, routeStops);
+    List<Optional<LineRef>> lineChanges = resolveLineChanges(info, routeStops);
     List<StopInfo> stops = new ArrayList<>();
     for (int i = 0; i < routeStops.size(); i++) {
-      stops.add(convertStopInfo(routeStops.get(i), resolved.get(i), i));
+      stops.add(convertStopInfo(routeStops.get(i), resolved.get(i), i, lineChanges.get(i)));
     }
 
     // 解析终点信息
@@ -157,6 +159,29 @@ public final class RouteApiImpl implements RouteApi {
     Optional<Operator> routeOperator =
         routeDefinitions.findRecord(routeUuid).map(RouteDefinitionCache.RouteRecord::operator);
     return snapshot().stopStations(routeUuid, stops, routeOperator);
+  }
+
+  /**
+   * 各停靠点的直通换线（与 {@code stops} 下标对齐），口径见 {@link RouteLineChanges#changesByIndex}；代码按主数据的写法给出。
+   *
+   * <p>交路自身线路未知时（没有运营商或线路代码）无从比较，全部为空。
+   */
+  private List<Optional<LineRef>> resolveLineChanges(RouteInfo info, List<RouteStop> stops) {
+    Optional<RouteLineChanges.LineRef> routeLine =
+        RouteLineChanges.LineRef.of(info.operatorCode(), info.lineCode());
+    if (routeLine.isEmpty()) {
+      return java.util.Collections.nCopies(stops.size(), Optional.empty());
+    }
+    StationDirectory.Snapshot snapshot = snapshot();
+    List<Optional<LineRef>> changes = new ArrayList<>(stops.size());
+    for (Optional<RouteLineChanges.LineRef> change :
+        RouteLineChanges.changesByIndex(stops, routeLine.get())) {
+      changes.add(
+          change
+              .map(snapshot::canonicalLine)
+              .map(line -> new LineRef(line.operatorCode(), line.lineCode())));
+    }
+    return changes;
   }
 
   /** 车站目录的当前快照；没有目录时用空快照（站名退回站码、没有车站 ID）。 */
@@ -238,7 +263,8 @@ public final class RouteApiImpl implements RouteApi {
     return RouteTerminals.stationIdentityOfNode(nodeId).map(RouteTerminals.StationRef::stationCode);
   }
 
-  private StopInfo convertStopInfo(RouteStop stop, StopStation station, int sequence) {
+  private StopInfo convertStopInfo(
+      RouteStop stop, StopStation station, int sequence, Optional<LineRef> lineChange) {
     // 检查是否为 DYNAMIC stop
     Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
         DynamicStopMatcher.parseDynamicSpec(stop);
@@ -258,7 +284,8 @@ public final class RouteApiImpl implements RouteApi {
         convertPassType(stop.passType()),
         isDynamic,
         station.stationId(),
-        station.stationCode());
+        station.stationCode(),
+        lineChange);
   }
 
   private PassType convertPassType(RouteStopPassType type) {

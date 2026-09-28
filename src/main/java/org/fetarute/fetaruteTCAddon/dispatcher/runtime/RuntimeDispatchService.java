@@ -30279,9 +30279,23 @@ public final class RuntimeDispatchService {
             });
   }
 
+  /**
+   * 列车所跑的交路：以 {@code FTA_ROUTE_ID} 为准，代码三元组只做旧数据回退。
+   *
+   * <p>直通运转（CHANGE）只是通知：它把 {@code FTA_OPERATOR_CODE}/{@code FTA_LINE_CODE} 改写成对乘客显示的线路， 交路与管理归属不变。
+   * 此后三元组是（新运营商, 新线路, 原交路代码），新线路恰有同码交路时会解析成别的交路，所以不能先按它找。 改派交路的各处（出车、{@code /fta depot}、{@code /fta
+   * train}、折返改派）都同时写 UUID 与三元组，两者只在换线后才会不一致。 没有 UUID、或 UUID 不在缓存中（交路删后重建）时才退回三元组。
+   */
   private Optional<RouteDefinition> resolveRouteDefinition(TrainProperties properties) {
     if (properties == null) {
       return Optional.empty();
+    }
+    Optional<UUID> routeUuidOpt = readRouteUuid(properties);
+    if (routeUuidOpt.isPresent()) {
+      Optional<RouteDefinition> byId = routeDefinitions.findById(routeUuidOpt.get());
+      if (byId.isPresent()) {
+        return byId;
+      }
     }
     Optional<String> operatorCode =
         readFirstTag(properties, RouteProgressRegistry.TAG_OPERATOR_CODE, "FTA_OPERATOR");
@@ -30290,17 +30304,9 @@ public final class RuntimeDispatchService {
     Optional<String> routeCode =
         readFirstTag(properties, RouteProgressRegistry.TAG_ROUTE_CODE, "FTA_ROUTE");
     if (operatorCode.isPresent() && lineCode.isPresent() && routeCode.isPresent()) {
-      Optional<RouteDefinition> def =
-          routeDefinitions.findByCodes(operatorCode.get(), lineCode.get(), routeCode.get());
-      if (def.isPresent()) {
-        return def;
-      }
+      return routeDefinitions.findByCodes(operatorCode.get(), lineCode.get(), routeCode.get());
     }
-    Optional<UUID> routeUuidOpt = readRouteUuid(properties);
-    if (routeUuidOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    return routeDefinitions.findById(routeUuidOpt.get());
+    return Optional.empty();
   }
 
   private Optional<UUID> readRouteUuid(TrainProperties properties) {

@@ -11,12 +11,19 @@ ACTION:PAYLOAD[:MORE]
 
 ### 1.1 换线标记（CHANGE）
 - 语法：`CHANGE:<OperatorCode>:<LineCode>`（例如 `CHANGE:SURN:LT`）。
-- 含义：列车抵达当前 stop 后，调度层更新列车的所属 operator/line 标识（`FTA_OPERATOR_CODE`/`FTA_LINE_CODE` tags），但**不改变当前 Route 或 routeIndex**。列车继续沿当前 route 运行，仅逻辑归属变更。
-- 典型场景：直通车在枢纽站由 FTL 线移交给 SURN-LT 线运营（列车继续按原 route 行驶，但 HUD/PIDS 显示的线路信息变为新线路）。
+- 含义：列车抵达当前 stop 后，调度层把对乘客显示的 operator/line（`FTA_OPERATOR_CODE`/`FTA_LINE_CODE` tags）改为新线路，但**不改变当前 Route 或 routeIndex**，也不改变管理归属。列车继续沿当前 route 运行。
+- 典型场景：直通车在枢纽站起按 SURN-LT 线对乘客运营（列车继续按原 FTL 交路行驶、仍归 FTL 管理，HUD/PIDS 显示的线路信息变为 SURN-LT）。
 - 行为：
   - 仅写入 `FTA_OPERATOR_CODE` 和 `FTA_LINE_CODE` tags
   - 不修改 `FTA_ROUTE_ID`/`FTA_ROUTE_CODE`/routeIndex
-  - HUD placeholder（如 `{line}`/`{line_color}`/`{operator}`）会在下次 tick 时感知变化
+  - 与此前所属线路相同的 CHANGE 不算换线；缺少线路段或有空段的 CHANGE 不执行（运行时记 `CHANGE 解析失败`）
+- CHANGE 是**通知**，不是移交管理：交路、交路组、时刻表、调度（优先级、回收、折返）仍归交路自身的线路；换线只影响对乘客显示的线路。
+- 显示口径（`RouteLineChanges` 是唯一定义，执行与显示共用同一套解析）：
+  - 每站所属线路 = 该站及之前最后一个有效 CHANGE 的目标，没有时为交路自身线路；**换线站本身算新线路**（以原线路到达、以新线路发车，到站即改写标签）。
+  - 列车当前线路以标签为准，标签不全时为交路本身的线路（运行时执行 CHANGE 必然写标签，标签就是“通知是否发生”的事实）。
+  - HUD：`{line}`/`{line_color}`/`{operator}`/`{company}` 与线路绑定的模板跟当前线路走；`{through_*}` 给出前方下一次换线的车站与线路；LCD 前方停靠列表里换线之后的各站按新线路着色。
+  - 公开 API（1.7.0）：`RouteApi.StopInfo#lineChange` 标出换线站，`TrainApi.TrainSnapshot#operatorCode`/`lineCode` 为当前线路；
+    停靠线路（`StationApi#linesServing`）换线之后的车站算新线路、换线站两条都算；站牌行的线路按列车到该站时所属的线路。时刻表仍是交路自身线路的。
 
 ### 1.2 动态站台标记（DYNAMIC）
 - 语法：`DYNAMIC:<OperatorCode>:<S|D>:<NodeCode>[:Range]`，例如 `DYNAMIC:SURN:S:PTK:[1:3]` 表示 PTK 站 1-3 号站台任选其一。

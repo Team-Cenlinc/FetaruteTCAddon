@@ -54,6 +54,12 @@ public final class BossBarHudTemplate {
     return selected == null ? Optional.empty() : Optional.ofNullable(selected.content());
   }
 
+  /** 模板是否写了该状态的行（不算 DEFAULT 与无前缀行的回退）。 */
+  public boolean defines(HudState state) {
+    List<TemplateLine> lines = linesByState.get(state);
+    return lines != null && !lines.isEmpty();
+  }
+
   /** 进度表达式（BossBar 专用）。 */
   public Optional<String> progressExpression() {
     return progressExpression;

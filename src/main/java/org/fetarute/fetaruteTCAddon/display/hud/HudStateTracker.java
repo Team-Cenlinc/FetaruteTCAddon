@@ -71,6 +71,25 @@ public final class HudStateTracker {
     return HudState.IN_TRIP;
   }
 
+  /**
+   * 回库车越过运营终点后改用 {@link HudState#OUT_OF_SERVICE}。
+   *
+   * <p>折返待命（{@link HudState#ON_LAYOVER}）仍优先。模板没写 {@code OUT_OF_SERVICE} 时保持原状态——旧模板里没有这一状态， 不能让它回退到
+   * {@code DEFAULT} 而丢掉原本的运行、临时停车显示。
+   *
+   * @param resolved {@link #resolve} 的结果
+   * @param outOfService 是否已越过运营终点
+   * @param templateDefinesOutOfService 模板是否写了 {@code OUT_OF_SERVICE}
+   * @return 实际使用的状态
+   */
+  public static HudState applyOutOfService(
+      HudState resolved, boolean outOfService, boolean templateDefinesOutOfService) {
+    if (!outOfService || !templateDefinesOutOfService || resolved == HudState.ON_LAYOVER) {
+      return resolved;
+    }
+    return HudState.OUT_OF_SERVICE;
+  }
+
   public void retain(Set<String> activeTrainNames) {
     if (activeTrainNames == null || activeTrainNames.isEmpty()) {
       states.clear();

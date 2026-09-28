@@ -8,6 +8,7 @@ import java.util.OptionalInt;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -24,6 +25,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * </ul>
  *
  * <p>这些字段为 Optional，若采样时无法获取则返回 empty，ETA 计算会使用默认估算。
+ *
+ * <p>{@code lineTag} 是采样时列车的线路标签（{@code FTA_OPERATOR_CODE}/{@code FTA_LINE_CODE}，出车与直通运转 CHANGE
+ * 写入）。标签只能在主线程读，采样时顺手记下，公开 API 在任意线程读快照即可； 两个标签不全时为空，读取方按交路本身的线路处理（见 {@link
+ * RouteLineChanges#current}）。
  */
 public record TrainRuntimeSnapshot(
     long updatedTick,
@@ -41,7 +46,8 @@ public record TrainRuntimeSnapshot(
     OptionalInt distanceToNextBlocks,
     OptionalInt edgeLengthBlocks,
     OptionalDouble traveledSinceLastPassedBlocks,
-    HoldTimeline holdTimeline) {
+    HoldTimeline holdTimeline,
+    Optional<RouteLineChanges.LineRef> lineTag) {
 
   public TrainRuntimeSnapshot {
     Objects.requireNonNull(updatedAt, "updatedAt");
@@ -62,6 +68,45 @@ public record TrainRuntimeSnapshot(
             ? OptionalDouble.empty()
             : traveledSinceLastPassedBlocks;
     holdTimeline = holdTimeline == null ? HoldTimeline.EMPTY : holdTimeline;
+    lineTag = lineTag == null ? Optional.empty() : lineTag;
+  }
+
+  /** 兼容调用：不带线路标签。 */
+  public TrainRuntimeSnapshot(
+      long updatedTick,
+      Instant updatedAt,
+      UUID worldId,
+      UUID routeUuid,
+      RouteId routeId,
+      int routeIndex,
+      Optional<NodeId> currentNodeId,
+      Optional<NodeId> lastPassedNodeId,
+      Optional<Integer> dwellRemainingSec,
+      Optional<SignalAspect> signalAspect,
+      Optional<String> ticketId,
+      OptionalDouble currentSpeedBps,
+      OptionalInt distanceToNextBlocks,
+      OptionalInt edgeLengthBlocks,
+      OptionalDouble traveledSinceLastPassedBlocks,
+      HoldTimeline holdTimeline) {
+    this(
+        updatedTick,
+        updatedAt,
+        worldId,
+        routeUuid,
+        routeId,
+        routeIndex,
+        currentNodeId,
+        lastPassedNodeId,
+        dwellRemainingSec,
+        signalAspect,
+        ticketId,
+        currentSpeedBps,
+        distanceToNextBlocks,
+        edgeLengthBlocks,
+        traveledSinceLastPassedBlocks,
+        holdTimeline,
+        Optional.empty());
   }
 
   /** 兼容调用：不带扣停时间线。 */
