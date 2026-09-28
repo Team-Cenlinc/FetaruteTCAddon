@@ -148,6 +148,7 @@
 - Smart single/throat admission 必须复用完成版本标记与清空证据计算后的同一份授权请求。咽喉原子检查只忽略 `VerifiedSwitcherDrainClaims` 返回的精确抽象 switcher claim；出口 NODE/EDGE、其他 switcher、single conflict、未知或陈旧证据仍按原规则 fail-closed。这样既避免“占用层允许实体出清，但外层 single admission 又把同一抽象 claim 压回 STOP”的组合门控死锁，也防止一条合法 hint 携带放宽未进入本次计划的其他 switcher。
 - 咽喉原子准入不能用 advisory expanded path 替代 hard window。入口至首个 Station/Depot/Interval 清出点的全部 EDGE/NODE/CONFLICT 必须在同一个请求中标记为 `MOVEMENT_REQUIRED`，否则即使快照当前空闲也输出 `throat-hard-authority-incomplete` 并保持入口 STOP。
 - 清出点要给整列车留出泊位：清出点之后、累计不到出口泊位距离（车长 + 停车净空，信号 tick 的硬授权按实时车长配置）就又碰上道岔/咽喉，这个清出点作废，原子窗口继续穿过下一组道岔——两组道岔之间的直线段容不下整列车时，停在段内的车必然压着其中一组，它们对这列车就是同一组联锁。道岔后面接长直线时仍取首个清出点；疏通（drain）走同一条路径，因此也不会把车推进这种夹缝。背景：2026-09-27 实服 OFL 车库口，回库 MT 穿过剪刀渡线后停在 `MLU:1:003`（离渡线 17 格、离车库岔口 11 格），车尾压着渡线、车头对着 1 道下行 DS，两车顶牛到关服。实服图上受影响的夹缝只有 `OFL:MLU:1:003`、`HHU:LWN:1:001`（从 `502:74:996` 一侧来时）与 `ZKW:HHU:2:002`（车长加净空超过 32–37 格时）。
+- 路线以车库终止时，联锁区之后的库线只要容得下整列车（保守车长）就算清出，不再要求"车长 + 停车净空"。列车在车库停下或到达即销毁，停车净空防的"越过泊位撞上下一处冲突"并不存在。只认完整路径终点、且终点是车库节点；中途车站仍按完整泊位（停站车尾可能压着进站咽喉）；车长未知不启用。背景：2026-09-27 18:43 实服 OFL，车库岔口联锁区之后到 `D:OFL:1` 只有 45 格，按 74 格判"物理联锁缺少可见清出边"，回库 MT 过了 `MLU:2:002` 硬授权就构建失败——而早一个节点时联锁区还不在窗口里，原子进路已经一直授予到车库。
 - Smart recovery 的 drain/forward unlock 仍默认尊重对向或未知方向 single barrier；只有当当前占用快照证明本车已持有 contested
   section、方向已知、下一跳朝出口前进、出口 edge/node 没有外部 claim，且 hard blocker 只对应同一 section 时，才允许进入最终 signal
   refresh 复判。该分支只输出 `SMART_*_UNLOCK_DRAIN_OUT_ALLOWED` 并触发既有复判，不创建 DRAIN_THROUGH authority、不 force-green、不改

@@ -21835,7 +21835,8 @@ public final class RuntimeDispatchService {
             priority,
             purpose,
             minDistanceBlocks,
-            minConflictExitDistanceBlocks);
+            minConflictExitDistanceBlocks,
+            resolveRearGuardDistanceBlocks(train));
     if (speedBps > 1.0e-6 || minDistanceBlocks <= 0L || context.isEmpty()) {
       return context;
     }
@@ -21857,7 +21858,8 @@ public final class RuntimeDispatchService {
         priority,
         purpose,
         0L,
-        minConflictExitDistanceBlocks);
+        minConflictExitDistanceBlocks,
+        resolveRearGuardDistanceBlocks(train));
   }
 
   /**
@@ -21901,7 +21903,11 @@ public final class RuntimeDispatchService {
     return minDistanceBlocks;
   }
 
-  /** 按给定的最小距离构建硬授权窗口；最短一条边，并受物理联锁出口泊位约束。 */
+  /**
+   * 按给定的最小距离构建硬授权窗口；最短一条边，并受物理联锁出口泊位约束。
+   *
+   * @param terminalDepotBerthBlocks 路线以车库终止时库线需容下的长度（保守车长）；车长未知为 {@link Long#MAX_VALUE}，不启用
+   */
   private Optional<OccupancyRequestContext> buildHardAuthorityWindow(
       RailGraph graph,
       ConfigManager.RuntimeSettings runtimeSettings,
@@ -21914,7 +21920,8 @@ public final class RuntimeDispatchService {
       int priority,
       AuthorizationPurpose purpose,
       long minDistanceBlocks,
-      long minConflictExitDistanceBlocks) {
+      long minConflictExitDistanceBlocks,
+      long terminalDepotBerthBlocks) {
     OccupancyRequestBuilder authorizationBuilder =
         new OccupancyRequestBuilder(
                 graph,
@@ -21925,7 +21932,8 @@ public final class RuntimeDispatchService {
                 minDistanceBlocks,
                 HARD_AUTHORITY_DISTANCE_MAX_EDGES,
                 debugLogger)
-            .withMinimumConflictExitDistanceBlocks(minConflictExitDistanceBlocks);
+            .withMinimumConflictExitDistanceBlocks(minConflictExitDistanceBlocks)
+            .withTerminalDepotBerthBlocks(terminalDepotBerthBlocks);
     return buildContextWithinDynamicBoundary(
         authorizationBuilder,
         trainName,

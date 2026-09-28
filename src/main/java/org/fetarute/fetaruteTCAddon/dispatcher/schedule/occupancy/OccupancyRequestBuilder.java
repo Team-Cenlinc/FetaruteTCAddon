@@ -52,6 +52,7 @@ public final class OccupancyRequestBuilder {
   private final int maxLookaheadEdges;
   private final long minRearGuardDistanceBlocks;
   private final long minConflictExitDistanceBlocks;
+  private final long terminalDepotBerthBlocks;
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
   private final SemanticCorridorDirectionResolver semanticDirectionResolver;
   private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
@@ -144,6 +145,7 @@ public final class OccupancyRequestBuilder {
         maxLookaheadEdges,
         minRearGuardDistanceBlocks,
         0L,
+        Long.MAX_VALUE,
         debugLogger,
         null);
   }
@@ -158,6 +160,7 @@ public final class OccupancyRequestBuilder {
       int maxLookaheadEdges,
       long minRearGuardDistanceBlocks,
       long minConflictExitDistanceBlocks,
+      long terminalDepotBerthBlocks,
       java.util.function.Consumer<String> debugLogger,
       RearGuardAnchor rearGuardAnchor) {
     this.graph = Objects.requireNonNull(graph, "graph");
@@ -185,12 +188,16 @@ public final class OccupancyRequestBuilder {
     if (minConflictExitDistanceBlocks < 0L) {
       throw new IllegalArgumentException("minConflictExitDistanceBlocks 必须为非负数");
     }
+    if (terminalDepotBerthBlocks < 0L) {
+      throw new IllegalArgumentException("terminalDepotBerthBlocks 必须为非负数");
+    }
     this.switcherZoneEdges = switcherZoneEdges;
     this.rearGuardEdges = rearGuardEdges;
     this.effectiveLookaheadEdges = Math.max(lookaheadEdges, minClearEdges);
     this.minLookaheadDistanceBlocks = minLookaheadDistanceBlocks;
     this.minRearGuardDistanceBlocks = minRearGuardDistanceBlocks;
     this.minConflictExitDistanceBlocks = minConflictExitDistanceBlocks;
+    this.terminalDepotBerthBlocks = terminalDepotBerthBlocks;
     this.maxLookaheadEdges =
         maxLookaheadEdges <= 0
             ? this.effectiveLookaheadEdges
@@ -223,6 +230,43 @@ public final class OccupancyRequestBuilder {
         maxLookaheadEdges,
         minRearGuardDistanceBlocks,
         distanceBlocks,
+        terminalDepotBerthBlocks,
+        debugLogger,
+        rearGuardAnchor);
+  }
+
+  /**
+   * 返回允许"终点车库"充当物理联锁出口的新构建器。
+   *
+   * <p>{@link #withMinimumConflictExitDistanceBlocks} 要求联锁区之后累计出"车长 +
+   * 停车余量"的泊位；可路线在车库终止时，联锁区之后到车库只有一段库线，
+   * 再往后什么都没有。列车在车库停下（或到达即销毁），停车余量防的"越过泊位撞上下一处冲突"并不存在，只要这段库线容得下整列车，车体就已清出联锁区。 实服 2026-09-27
+   * OFL：车库岔口联锁区之后到 D:OFL:1 只有 45 格，按 74 格要求判"缺少可见清出边"，回库车一进窗口就构建失败， 信号周期退回宽松前瞻请求，把已授予的回库原子进路截在
+   * MLU:1:003，与对向车互等 18 分钟。
+   *
+   * <p>只认路径终点、且终点是车库节点；中途车站仍按完整泊位要求（停站车尾可能压着进站咽喉）。
+   *
+   * @param berthBlocks 车库库线需容下的长度（整列车长）；{@link Long#MAX_VALUE} 表示不启用
+   * @return 保留当前全部设置、仅替换终点车库泊位的新构建器
+   */
+  public OccupancyRequestBuilder withTerminalDepotBerthBlocks(long berthBlocks) {
+    if (berthBlocks < 0L) {
+      throw new IllegalArgumentException("berthBlocks 必须为非负数");
+    }
+    if (berthBlocks == terminalDepotBerthBlocks) {
+      return this;
+    }
+    return new OccupancyRequestBuilder(
+        graph,
+        effectiveLookaheadEdges,
+        0,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        minConflictExitDistanceBlocks,
+        berthBlocks,
         debugLogger,
         rearGuardAnchor);
   }
@@ -251,6 +295,7 @@ public final class OccupancyRequestBuilder {
         maxLookaheadEdges,
         minRearGuardDistanceBlocks,
         minConflictExitDistanceBlocks,
+        terminalDepotBerthBlocks,
         debugLogger,
         anchor);
   }
@@ -425,7 +470,8 @@ public final class OccupancyRequestBuilder {
     // 按实际图边截断：至少覆盖 edge 下限和距离下限，同时受 maxLookaheadEdges 硬上限约束。
     List<NodeId> expandedNodes = truncateLookahead(fullExpanded, fullEdges);
     ConflictExitAuthorityWindow conflictExitWindow =
-        resolveConflictExitAuthorityWindow(fullEdges, expandedNodes);
+        resolveConflictExitAuthorityWindow(
+            fullEdges, expandedNodes, fullExpanded.get(fullExpanded.size() - 1));
     if (conflictExitWindow.applicable() && !conflictExitWindow.resolved()) {
       debugLogger.accept(
           "构建请求失败: 物理联锁缺少可见清出边 train="
@@ -783,10 +829,13 @@ public final class OccupancyRequestBuilder {
    * throat/switcher 原子窗口负责，避免在这里把相邻边重复解释为第二套出口规则。
    *
    * <p>完整路径没有可见清出边时 builder 直接返回空请求并 fail-closed；不能把原始短窗口继续交给不理解物理联锁的调用方。若 route
-   * 终止在联锁区内，应补充可证明车体完全清出的图边界，而不是把 destination 当作出清证据。
+   * 终止在联锁区内，应补充可证明车体完全清出的图边界，而不是把 destination 当作出清证据。唯一例外是路径终点为车库：联锁区之后的库线容得下整列车即算清出（见 {@link
+   * #withTerminalDepotBerthBlocks}）。
+   *
+   * @param pathEnd 完整路径的最后一个节点
    */
   private ConflictExitAuthorityWindow resolveConflictExitAuthorityWindow(
-      List<RailEdge> fullEdges, List<NodeId> hardWindow) {
+      List<RailEdge> fullEdges, List<NodeId> hardWindow, NodeId pathEnd) {
     if (fullEdges == null || fullEdges.isEmpty() || hardWindow == null || hardWindow.size() < 2) {
       return ConflictExitAuthorityWindow.notApplicable();
     }
@@ -804,7 +853,7 @@ public final class OccupancyRequestBuilder {
       List<String> candidates =
           conflictKeys.stream().filter(key -> !resolvedKeys.contains(key)).toList();
       for (String conflictKey : candidates) {
-        int exitEdgeCount = conflictExitEdgeCount(fullEdges, conflictKey);
+        int exitEdgeCount = conflictExitEdgeCount(fullEdges, conflictKey, pathEnd);
         if (exitEdgeCount < 0) {
           return ConflictExitAuthorityWindow.unresolved(conflictKeys);
         }
@@ -849,7 +898,7 @@ public final class OccupancyRequestBuilder {
         && !key.startsWith("interlocking:incomplete:");
   }
 
-  private int conflictExitEdgeCount(List<RailEdge> edges, String conflictKey) {
+  private int conflictExitEdgeCount(List<RailEdge> edges, String conflictKey, NodeId pathEnd) {
     boolean entered = false;
     long clearanceDistanceBlocks = 0L;
     for (int index = 0; index < edges.size(); index++) {
@@ -872,7 +921,15 @@ public final class OccupancyRequestBuilder {
         }
       }
     }
+    if (entered && clearanceDistanceBlocks >= terminalDepotBerthBlocks && isDepotNode(pathEnd)) {
+      return edges.size();
+    }
     return -1;
+  }
+
+  private boolean isDepotNode(NodeId nodeId) {
+    return nodeId != null
+        && graph.findNode(nodeId).map(RailNode::type).filter(NodeType.DEPOT::equals).isPresent();
   }
 
   private boolean isInterlockingNode(NodeId nodeId) {
