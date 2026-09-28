@@ -48,6 +48,49 @@ class PhasePlannerTest {
     assertTrue(phases.notes().stream().anyMatch(note -> note.contains("锚定")));
   }
 
+  /** 正线折返端锚定：C→A 方向（键较大）里的 RS 终到正线折返点，它当正向、锚点放在正线那端；锚定走行与折返取 RS 自己的， 不取同方向更快、但不在正线折返的 RT。 */
+  @Test
+  void returnPairIsAnchoredAtTheMainlineTurnbackEnd() {
+    ServiceGroupClassifier.Group group =
+        new ServiceGroupClassifier.Group(
+            "default",
+            List.of(
+                direction("OP:S:A", "OP:S:C", "RA", RA),
+                new ServiceGroupClassifier.Direction(
+                    "OP:S:C",
+                    "OP:S:A",
+                    List.of(
+                        new WeightedTripAllocator.Candidate("RS", 1),
+                        new WeightedTripAllocator.Candidate("RT", 1)),
+                    List.of(RS, RT))),
+            List.of());
+
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            List.of(group),
+            Map.of("default", 600),
+            Map.of(RA, 500, RS, 400, RT, 300),
+            TurnaroundTable.fixed(30),
+            3600,
+            Map.of(),
+            new PhasePlanner.Topology(Set.of(), null, null, Set.of(RS)));
+
+    assertEquals(0, phases.phaseByDirection().get("OP:S:C→OP:S:A"));
+    assertEquals(400 + 30, phases.phaseByDirection().get("OP:S:A→OP:S:C"));
+    assertEquals(
+        List.of("OP:S:C→OP:S:A"),
+        PhasePlanner.residues(
+                List.of(group),
+                Map.of("default", 600),
+                Map.of(RA, 500, RS, 400, RT, 300),
+                TurnaroundTable.fixed(30),
+                Set.of(RS))
+            .stream()
+            .map(PhasePlanner.Residue::forwardKey)
+            .toList(),
+        "报告里的正向与相位锚定同一个");
+  }
+
   /** 没有配对的方向相位 0；走行取方向内最短的候选。 */
   @Test
   void unpairedDirectionStaysAtZero() {
@@ -288,6 +331,27 @@ class PhasePlannerTest {
     PhasePlanner.Connection connection = phases.connections().get(0);
     assertEquals(30, connection.farEndWaitSeconds(), "上限 150 − 120 = 30，取上限内错开最远的");
     assertEquals((145 + 30) % 150, phases.phaseByDirection().get("OP:S:Z→OP:S:A"));
+  }
+
+  /** 被接方向终到正线折返点时，周期余数不放到远端：远端就是正线，多等就是车停在正线上挡着后车。 */
+  @Test
+  void farEndWaitIsNotPlacedAtAMainlineTurnback() {
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            wsLikeGroups(),
+            Map.of("full", 150, "short", 150),
+            Map.of(RA, 575, RB, 582, RS, 226),
+            TurnaroundTable.fixed(20),
+            3600,
+            Map.of(),
+            new PhasePlanner.Topology(Set.of("OP:S:A"), (g, a, d) -> 55, null, Set.of(RA)));
+
+    PhasePlanner.Connection connection = phases.connections().get(0);
+    assertEquals(0, connection.farEndWaitSeconds());
+    assertEquals((575 + 20) % 150, phases.phaseByDirection().get("OP:S:Z→OP:S:A"), "反向相位就是锚定");
+    assertTrue(
+        phases.notes().stream().anyMatch(note -> note.contains("终到正线折返点")),
+        phases.notes().toString());
   }
 
   /** 被接方向的起点若是它自己往返对的锚定端（本对的车已经喂它），就不做跨组接续，小交路照旧按合流点交错。 */

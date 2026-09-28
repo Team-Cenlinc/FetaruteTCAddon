@@ -19,6 +19,24 @@ import org.junit.jupiter.api.Test;
 /** 终点口径：停靠表形态取自实服路线（2026-09-24 库）。 */
 class RouteTerminalsTest {
 
+  /** 只有区间路径点算正线折返点：车站、咽喉、车库、道岔（自动 ID 形同区间点）和解析不了的节点都不算。 */
+  @Test
+  void onlyIntervalWaypointsAreMainlineTurnbacks() {
+    assertTrue(RouteTerminals.isMainlineTurnback("SURC:OFL:MLU:2:004"));
+    for (String node :
+        java.util.Arrays.asList(
+            "SURC:S:PPK:1",
+            "SURC:S:OFL:1:002",
+            "SURC:D:OFL:1",
+            "SURC:D:OFL:1:001",
+            "SWITCHER:Towny:-515:77:2272",
+            "garbage",
+            "",
+            null)) {
+      assertFalse(RouteTerminals.isMainlineTurnback(node), String.valueOf(node));
+    }
+  }
+
   private static final UUID ROUTE = UUID.randomUUID();
 
   /** MT-1O_ShortR 尾部：TERMINATE 落在 OFL 与 MLU 之间的折返线上。 */

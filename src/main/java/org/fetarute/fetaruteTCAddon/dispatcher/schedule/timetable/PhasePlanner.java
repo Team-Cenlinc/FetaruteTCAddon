@@ -143,11 +143,22 @@ public final class PhasePlanner {
    * @param throatGeometry 车库咽喉的几何；远端多等要同时让端点与咽喉都错得开
    */
   public record Topology(
-      Set<String> stubTerminals, FarEndCost farEndCost, ThroatGeometry throatGeometry) {
+      Set<String> stubTerminals,
+      FarEndCost farEndCost,
+      ThroatGeometry throatGeometry,
+      Set<UUID> mainlineTurnbackRoutes) {
     public Topology {
       stubTerminals = stubTerminals == null ? Set.of() : Set.copyOf(stubTerminals);
       farEndCost = farEndCost == null ? (group, arriving, departing) -> 0 : farEndCost;
       throatGeometry = throatGeometry == null ? (feeder, back) -> Optional.empty() : throatGeometry;
+      mainlineTurnbackRoutes =
+          mainlineTurnbackRoutes == null ? Set.of() : Set.copyOf(mainlineTurnbackRoutes);
+    }
+
+    /** 没有正线折返点。 */
+    public Topology(
+        Set<String> stubTerminals, FarEndCost farEndCost, ThroatGeometry throatGeometry) {
+      this(stubTerminals, farEndCost, throatGeometry, Set.of());
     }
 
     /** 不看车库咽喉。 */
@@ -182,12 +193,17 @@ public final class PhasePlanner {
       int intervalSeconds,
       int residue) {}
 
-  /** 各往返对的余数，按正向键排序。 */
+  /**
+   * 各往返对的余数，按正向键排序；正向的取法与相位锚定相同（见 {@link #isForward}）。
+   *
+   * @param mainlineTurnbackRoutes 终到正线折返点的 route
+   */
   public static List<Residue> residues(
       List<ServiceGroupClassifier.Group> groups,
       Map<String, Integer> intervalByGroup,
       Map<UUID, Integer> runSecondsByRoute,
-      TurnaroundTable turnarounds) {
+      TurnaroundTable turnarounds,
+      Set<UUID> mainlineTurnbackRoutes) {
     List<Residue> out = new ArrayList<>();
     if (groups == null) {
       return out;
@@ -203,11 +219,11 @@ public final class PhasePlanner {
       }
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         ServiceGroupClassifier.Direction reverse = byKey.get(direction.reverseKey());
-        if (reverse == null || direction.key().compareTo(reverse.key()) > 0) {
+        if (reverse == null || !isForward(direction, reverse, mainlineTurnbackRoutes)) {
           continue;
         }
-        UUID anchor = minRunRoute(direction, runSecondsByRoute);
-        int run = minRun(direction, runSecondsByRoute);
+        UUID anchor = anchorRoute(direction, reverse, runSecondsByRoute, mainlineTurnbackRoutes);
+        int run = runOf(anchor, direction, runSecondsByRoute);
         int turnaround = turnarounds == null ? 0 : turnarounds.secondsFor(anchor);
         out.add(
             new Residue(
@@ -318,8 +334,14 @@ public final class PhasePlanner {
       int interval = Math.max(1, intervalByGroup.getOrDefault(group.name(), 1));
       // 第一层：组内相对相位（偏移 0 时的相位），往返对锚定。
       Map<String, Integer> relative =
-          anchorReturnPairs(group, interval, runSecondsByRoute, turnarounds, notes);
-      reverseAnchored.addAll(reverseKeysOf(group));
+          anchorReturnPairs(
+              group,
+              interval,
+              runSecondsByRoute,
+              turnarounds,
+              shape.mainlineTurnbackRoutes(),
+              notes);
+      reverseAnchored.addAll(reverseKeysOf(group, shape.mainlineTurnbackRoutes()));
       // 第二层的例外：本组有方向能按车接到先放好的别组方向上，整组偏移由车决定，不再按合流点扫描。
       Anchor anchor =
           vehicleAnchorOf(
@@ -508,15 +530,16 @@ public final class PhasePlanner {
   private record Anchor(Connection connection, int offset, int feederTurnaround) {}
 
   /** 组内往返对里被锚定的反向方向：它的起点就是锚定端，那一端已经有本对的车喂。 */
-  private static Set<String> reverseKeysOf(ServiceGroupClassifier.Group group) {
-    Set<String> present = new HashSet<>();
+  private static Set<String> reverseKeysOf(
+      ServiceGroupClassifier.Group group, Set<UUID> mainlineTurnbackRoutes) {
+    Map<String, ServiceGroupClassifier.Direction> byKey = new LinkedHashMap<>();
     for (ServiceGroupClassifier.Direction direction : group.directions()) {
-      present.add(direction.key());
+      byKey.put(direction.key(), direction);
     }
     Set<String> keys = new HashSet<>();
     for (ServiceGroupClassifier.Direction direction : group.directions()) {
-      if (present.contains(direction.reverseKey())
-          && direction.key().compareTo(direction.reverseKey()) > 0) {
+      ServiceGroupClassifier.Direction reverse = byKey.get(direction.reverseKey());
+      if (reverse != null && !isForward(direction, reverse, mainlineTurnbackRoutes)) {
         keys.add(direction.key());
       }
     }
@@ -591,6 +614,8 @@ public final class PhasePlanner {
    * 只看端点会把咽喉挤到正好贴着：实测 WS@150 端点 75/75 而咽喉间隙 0，咽喉一串行，库里多等几秒的出库车晚到端点，全天积成滞后。
    *
    * <p>{@code w} 的上限 = 间隔 − 远端一次折返的占用：多等得再久，下一班到远端时上一辆车还占着那股道。 没有反向（被接方向不回这个端点）时什么都不做。
+   *
+   * <p>被接方向终到正线折返点时也不做：远端就是正线，多等 {@code w} 就是车停在正线上挡着后车；余量留在接续端点的站台上。
    */
   private static Connection placeRemainderAtFarEnd(
       Connection connection,
@@ -605,6 +630,10 @@ public final class PhasePlanner {
     ServiceGroupClassifier.Direction feeder = placed.get(connection.feederKey());
     ServiceGroupClassifier.Direction back = fed == null ? null : placed.get(fed.reverseKey());
     if (feeder == null || back == null || !back.terminalGroup().equals(connection.terminal())) {
+      return connection;
+    }
+    if (turnsBackOnMainline(fed, topology.mainlineTurnbackRoutes())) {
+      notes.add(fed.key() + " 终到正线折返点：周期余数不放到远端，留在 " + connection.terminal());
       return connection;
     }
     UUID feederRoute = minRunRoute(feeder, runSecondsByRoute);
@@ -709,12 +738,18 @@ public final class PhasePlanner {
     return Math.min(diff, interval - diff);
   }
 
-  /** 往返对锚定：起终点互换的两个方向里，键较小的为正向、相位 0；反向相位 = 正向走行（方向内最短的候选）+ 折返，对间隔取模。 没有配对的方向相位 0。 */
+  /**
+   * 往返对锚定：起终点互换的两个方向里，正向相位 0；反向相位 = 正向锚定 route 的走行 + 它的折返，对间隔取模。 没有配对的方向相位 0。
+   *
+   * <p>锚点就是正向的终点：反向在那里按"到达 + 折返"发车，停留最短；另一端拿周期余数。正向与锚定 route 的取法见 {@link #isForward} 与 {@link
+   * #anchorRoute}。
+   */
   private static Map<String, Integer> anchorReturnPairs(
       ServiceGroupClassifier.Group group,
       int interval,
       Map<UUID, Integer> runSecondsByRoute,
       TurnaroundTable turnarounds,
+      Set<UUID> mainlineTurnbackRoutes,
       List<String> notes) {
     Map<String, Integer> relative = new LinkedHashMap<>();
     Map<String, ServiceGroupClassifier.Direction> byKey = new LinkedHashMap<>();
@@ -726,16 +761,16 @@ public final class PhasePlanner {
         continue;
       }
       ServiceGroupClassifier.Direction reverse = byKey.get(direction.reverseKey());
-      if (reverse == null || direction.key().compareTo(reverse.key()) > 0) {
+      if (reverse == null || !isForward(direction, reverse, mainlineTurnbackRoutes)) {
         if (reverse == null) {
           relative.put(direction.key(), 0);
         }
         continue;
       }
       relative.put(direction.key(), 0);
-      // 折返取正向里<b>走行最短那条 route</b> 自己的：锚定用的是同一趟车，走行与折返必须来自同一条线路。
-      UUID anchorRoute = minRunRoute(direction, runSecondsByRoute);
-      int run = minRun(direction, runSecondsByRoute);
+      // 走行与折返取锚定 route 自己的：锚定用的是同一趟车，两者必须来自同一条线路。
+      UUID anchorRoute = anchorRoute(direction, reverse, runSecondsByRoute, mainlineTurnbackRoutes);
+      int run = runOf(anchorRoute, direction, runSecondsByRoute);
       int turnaroundSeconds = turnarounds.secondsFor(anchorRoute);
       int anchored = Math.floorMod(run + turnaroundSeconds, interval);
       relative.put(reverse.key(), anchored);
@@ -755,6 +790,71 @@ public final class PhasePlanner {
               + "s");
     }
     return relative;
+  }
+
+  /**
+   * 往返对里这个方向是不是正向（锚点放在正向终点）。
+   *
+   * <p>恰有一个方向含终到正线折返点的 route 时它是正向：车在正线路径点上折返会挡住同一股道的后车，折返要最短，余量放到另一端的站台上。 例如 MT-1 的 1O_ShortR 过
+   * OFL 站后在正线 OFL:MLU:2:004 终到折返、1N_ShortR 从那里发车，站台组却都记作 OFL；只按键的字典序时锚点落在 PPK，
+   * 正线折返点拿的是周期余数。两个方向都有或都没有正线折返时，键较小的是正向（原规则）。
+   *
+   * <p>锚在正线端之后，后续各层也不能再往正线折返点上加等待：第三层只让这样的往返对整对平移（{@link ResourcePhasePlanner}），
+   * 按车接续的周期余数不放到正线折返那一端（{@link #placeRemainderAtFarEnd}）。
+   *
+   * @param direction 待判定的方向
+   * @param reverse 它的反向
+   * @param mainlineTurnbackRoutes 终到正线折返点的 route
+   */
+  static boolean isForward(
+      ServiceGroupClassifier.Direction direction,
+      ServiceGroupClassifier.Direction reverse,
+      Set<UUID> mainlineTurnbackRoutes) {
+    boolean turnsBack = turnsBackOnMainline(direction, mainlineTurnbackRoutes);
+    if (turnsBack != turnsBackOnMainline(reverse, mainlineTurnbackRoutes)) {
+      return turnsBack;
+    }
+    return direction.key().compareTo(reverse.key()) <= 0;
+  }
+
+  /** 方向里有没有终到正线折返点的 route。 */
+  static boolean turnsBackOnMainline(
+      ServiceGroupClassifier.Direction direction, Set<UUID> mainlineTurnbackRoutes) {
+    return mainlineTurnbackRoutes != null
+        && direction.routeIds().stream().anyMatch(mainlineTurnbackRoutes::contains);
+  }
+
+  /** 正向里用来锚定的 route：按正线折返点锚定时取终到那里、走行最短的 route（同方向还有回库车时，不能拿回库车的走行与折返去锚正线折返）；否则取方向内走行最短的。 */
+  private static UUID anchorRoute(
+      ServiceGroupClassifier.Direction forward,
+      ServiceGroupClassifier.Direction reverse,
+      Map<UUID, Integer> runSecondsByRoute,
+      Set<UUID> mainlineTurnbackRoutes) {
+    boolean mainlineRule =
+        turnsBackOnMainline(forward, mainlineTurnbackRoutes)
+            && !turnsBackOnMainline(reverse, mainlineTurnbackRoutes);
+    if (!mainlineRule) {
+      return minRunRoute(forward, runSecondsByRoute);
+    }
+    UUID best = null;
+    int min = Integer.MAX_VALUE;
+    for (UUID routeId : forward.routeIds()) {
+      Integer run = runSecondsByRoute.get(routeId);
+      if (mainlineTurnbackRoutes.contains(routeId) && run != null && run < min) {
+        min = run;
+        best = routeId;
+      }
+    }
+    return best == null ? minRunRoute(forward, runSecondsByRoute) : best;
+  }
+
+  /** 锚定 route 的走行；取不到时退回方向内最短走行（与旧规则相同）。 */
+  private static int runOf(
+      UUID anchorRoute,
+      ServiceGroupClassifier.Direction direction,
+      Map<UUID, Integer> runSecondsByRoute) {
+    Integer run = anchorRoute == null ? null : runSecondsByRoute.get(anchorRoute);
+    return run == null ? minRun(direction, runSecondsByRoute) : run;
   }
 
   /** 方向内走行最短的那条 route；相位与折返都以它为锚。 */

@@ -35,7 +35,16 @@ class ResourcePhasePlannerTest {
 
     PhasePlanner.Phases after =
         ResourcePhasePlanner.refine(
-            before, List.of(), Map.of(), Map.of(), Map.of(), index(), SEPARATION, MAX_WAIT, 300);
+            before,
+            List.of(),
+            Map.of(),
+            Map.of(),
+            Map.of(),
+            index(),
+            SEPARATION,
+            MAX_WAIT,
+            300,
+            java.util.Set.of());
 
     assertEquals(before, after);
   }
@@ -55,7 +64,8 @@ class ResourcePhasePlannerTest {
             index(),
             SEPARATION,
             MAX_WAIT,
-            120);
+            120,
+            java.util.Set.of());
 
     for (Integer delta : after.deltaByDirection().values()) {
       assertTrue(delta <= 600, "正向 δ 不超过间隔");
@@ -80,7 +90,8 @@ class ResourcePhasePlannerTest {
             index(),
             SEPARATION,
             MAX_WAIT,
-            300);
+            300,
+            java.util.Set.of());
     PhasePlanner.Phases second =
         ResourcePhasePlanner.refine(
             fixture.phases(),
@@ -91,7 +102,8 @@ class ResourcePhasePlannerTest {
             index(),
             SEPARATION,
             MAX_WAIT,
-            300);
+            300,
+            java.util.Set.of());
 
     assertEquals(first.deltaByDirection(), second.deltaByDirection());
     assertEquals(first.resourceNotes(), second.resourceNotes());
@@ -113,7 +125,8 @@ class ResourcePhasePlannerTest {
             index(),
             SEPARATION,
             MAX_WAIT,
-            300);
+            300,
+            java.util.Set.of());
 
     assertTrue(
         after.deltaByDirection().values().stream().allMatch(delta -> delta == 0), "不撞就不该付出任何端点等待");
@@ -148,13 +161,51 @@ class ResourcePhasePlannerTest {
             index(),
             SEPARATION,
             MAX_WAIT,
-            300);
+            300,
+            java.util.Set.of());
 
     assertEquals(
         after.deltaByDirection().get(keys.get(0)),
         after.deltaByDirection().get(keys.get(1)),
         "接续链上的方向 δ 必须相同");
     assertEquals(List.of(connection), after.connections(), "接续关系原样交给派车器");
+  }
+
+  /**
+   * 锚在正线折返点的往返对只能整对平移：正线上的停留 = 折返 + 反向 δ − 正向 δ，单独动任何一边都会把等待加回正线上。
+   *
+   * <p>间隔 80 秒的单线对开：不标正线折返时正向取 10、反向取 160——反向车在折返点多等 150 秒（前提成立，这个用例才有意义）。
+   */
+  @Test
+  void aMainlineTurnbackPairMovesOnlyAsAPair() {
+    Fixture fixture = opposingPair(80);
+    List<String> keys = List.copyOf(fixture.phases().phaseByDirection().keySet());
+
+    PhasePlanner.Phases free = refine(fixture, java.util.Set.of());
+    PhasePlanner.Phases pinned =
+        refine(fixture, java.util.Set.of(TimetableTestFixtures.routeId("FWD")));
+
+    assertTrue(
+        !free.deltaByDirection().get(keys.get(0)).equals(free.deltaByDirection().get(keys.get(1))),
+        free.deltaByDirection().toString());
+    assertEquals(
+        pinned.deltaByDirection().get(keys.get(0)),
+        pinned.deltaByDirection().get(keys.get(1)),
+        pinned.deltaByDirection().toString());
+  }
+
+  private static PhasePlanner.Phases refine(Fixture fixture, java.util.Set<UUID> mainline) {
+    return ResourcePhasePlanner.refine(
+        fixture.phases(),
+        fixture.groups(),
+        fixture.intervals(),
+        fixture.templates(),
+        fixture.profiles(),
+        index(),
+        SEPARATION,
+        MAX_WAIT,
+        300,
+        mainline);
   }
 
   /** 往返对余数只进报告：算得出来，但不参与任何决策。 */
@@ -168,7 +219,8 @@ class ResourcePhasePlannerTest {
             fixture.groups(),
             fixture.intervals(),
             Map.of(forward, 20, TimetableTestFixtures.routeId("REV"), 20),
-            TurnaroundTable.fixed(40));
+            TurnaroundTable.fixed(40),
+            java.util.Set.of());
 
     assertEquals(1, residues.size());
     PhasePlanner.Residue residue = residues.get(0);

@@ -29,6 +29,7 @@ import java.util.UUID;
  *   <li><b>正向</b>方向的 δ 是整组平移，不改变组内往返对的相对关系。
  *   <li><b>反向</b>方向的 δ 是<b>端点多等</b>：车到终点之后多停一会儿再发，所以上限是 {@code --max-idle} （再久运行时就把它收回库了）。相位 = 锚定 +
  *       δ，子网格与派车器都不用改，{@code readyAt} 天然吃下这段等待。
+ *   <li>按车接续链、以及锚在正线折返点的往返对，整体一起平移（见 {@link #unitsOf}）：前者拆开会换接车，后者单独动一边会把等待加回正线上。
  * </ul>
  *
  * <p>评估不另写几何模型，直接把模板铺 {@link #CYCLES} 个周期交给 {@link TimetableConflictChecker}， 再用 {@link
@@ -80,6 +81,7 @@ public final class ResourcePhasePlanner {
    * @param separationSeconds 裕量
    * @param maxWaitSeconds 可吸收判据用的单步上限
    * @param maxIdleSeconds 反向 δ 的上限（端点多等不能超过运行时的闲置回收）
+   * @param mainlineTurnbackRoutes 终到正线折返点的 route：含它们的往返对锚在正线端，只能整对平移
    * @return 带 {@code deltaByDirection} 与 {@code resourceNotes} 的新 {@code Phases}
    */
   public static PhasePlanner.Phases refine(
@@ -91,7 +93,8 @@ public final class ResourcePhasePlanner {
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
       int maxWaitSeconds,
-      int maxIdleSeconds) {
+      int maxIdleSeconds,
+      Set<UUID> mainlineTurnbackRoutes) {
     if (phases == null || groups == null || templates == null || templates.isEmpty()) {
       return phases;
     }
@@ -103,7 +106,7 @@ public final class ResourcePhasePlanner {
     }
     Map<String, Integer> delta = new LinkedHashMap<>();
     List<String> notes = new ArrayList<>();
-    for (Unit unit : unitsOf(order, groups, phases.connections())) {
+    for (Unit unit : unitsOf(order, groups, phases.connections(), mainlineTurnbackRoutes)) {
       int limit = unit.reverse() ? Math.max(0, maxIdleSeconds) : unit.interval();
       Score best = null;
       int bestDelta = 0;
@@ -136,7 +139,7 @@ public final class ResourcePhasePlanner {
                 Locale.ROOT,
                 "%s %s %ds（周期评估：让不掉的 %d 处、共 %d 处）",
                 String.join(" + ", unit.keys()),
-                unit.reverse() ? "端点多等" : (unit.keys().size() > 1 ? "按车接续链整体平移" : "整组平移"),
+                unit.reverse() ? "端点多等" : (unit.keys().size() > 1 ? "整体平移" : "整组平移"),
                 bestDelta,
                 best == null ? 0 : best.unabsorbable(),
                 best == null ? 0 : best.total()));
@@ -203,11 +206,14 @@ public final class ResourcePhasePlanner {
   /**
    * 按车接续把几个方向的相位钉在一起（喂车方向到站 + 折返 = 被接方向发车；被接方向的往返对反向在远端多等）， 单独给其中任何一个 δ
    * 都会把接续拆开——实测拆开之后派车器改接另一辆车，交路形态整个翻掉。所以接续链上的方向 （含它们各自的往返对）并成一个单元，只能一起平移；其余方向照旧一个一个定。
+   *
+   * <p>锚在正线折返点的往返对同样整对平移：正线上的停留 = 折返 + 反向 δ − 正向 δ，单独给任何一边 δ 都会把等待加回正线上。
    */
   private static List<Unit> unitsOf(
       List<Direction> order,
       List<ServiceGroupClassifier.Group> groups,
-      List<PhasePlanner.Connection> connections) {
+      List<PhasePlanner.Connection> connections,
+      Set<UUID> mainlineTurnbackRoutes) {
     Map<String, String> parent = new LinkedHashMap<>();
     for (Direction direction : order) {
       parent.put(direction.key(), direction.key());
@@ -216,6 +222,13 @@ public final class ResourcePhasePlanner {
     for (PhasePlanner.Connection connection : connections) {
       union(parent, connection.feederKey(), connection.fedKey());
       linked.add(connection.feederKey());
+    }
+    for (ServiceGroupClassifier.Group group : groups) {
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        if (PhasePlanner.turnsBackOnMainline(direction, mainlineTurnbackRoutes)) {
+          linked.add(direction.key());
+        }
+      }
     }
     if (!linked.isEmpty()) {
       for (ServiceGroupClassifier.Group group : groups) {

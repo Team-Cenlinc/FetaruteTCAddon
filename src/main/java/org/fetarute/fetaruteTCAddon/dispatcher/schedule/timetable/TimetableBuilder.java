@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
@@ -562,7 +563,8 @@ public final class TimetableBuilder {
             prepared.graphIndex(),
             separation,
             options.repair().maxWaitSeconds(),
-            options.dutyLimits().maxIdleSeconds());
+            options.dutyLimits().maxIdleSeconds(),
+            mainlineTurnbackRoutes(prepared.operationPlans()));
     List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
     List<Placed> placed = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : gridGroups) {
@@ -894,7 +896,11 @@ public final class TimetableBuilder {
         phases.notes(),
         phases.resourceNotes(),
         PhasePlanner.residues(
-            gridGroups, intervalByGroup, prepared.runByRoute(), options.dutyLimits().turnaround()));
+            gridGroups,
+            intervalByGroup,
+            prepared.runByRoute(),
+            options.dutyLimits().turnaround(),
+            mainlineTurnbackRoutes(prepared.operationPlans())));
   }
 
   /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
@@ -1586,7 +1592,25 @@ public final class TimetableBuilder {
                   turnaround + in.get().enterOffset(),
                   turnaround + in.get().exitOffset() + sep));
         };
-    return new PhasePlanner.Topology(stubs, cost, geometry);
+    return new PhasePlanner.Topology(stubs, cost, geometry, mainlineTurnbackRoutes(operationPlans));
+  }
+
+  /**
+   * 终到正线折返点的运营 route：末站 TERMINATE，终点节点是正线折返点（{@link RouteTerminals#isMainlineTurnback}）。
+   *
+   * <p>车在那里停着会挡住同一股道的后车，往返对要把锚点放在这一端（见 {@link PhasePlanner#isForward}）。
+   */
+  static Set<UUID> mainlineTurnbackRoutes(List<TimetableRoutePlan> operationPlans) {
+    Set<UUID> routes = new HashSet<>();
+    for (TimetableRoutePlan plan : operationPlans) {
+      List<TimetableStop> stops = plan.stops();
+      if (RouteTerminals.isMainlineTurnback(plan.terminalNodeId())
+          && !stops.isEmpty()
+          && stops.get(stops.size() - 1).passType() == RouteStopPassType.TERMINATE) {
+        routes.add(plan.routeId());
+      }
+    }
+    return Set.copyOf(routes);
   }
 
   /** 这条 route 跑完之后回库走的线路：与派车器同一条选法（优先回出库的那座车库）。 */

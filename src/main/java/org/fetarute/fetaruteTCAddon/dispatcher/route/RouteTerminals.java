@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 
 /**
  * 路线终点口径的唯一定义。
@@ -299,6 +300,21 @@ public final class RouteTerminals {
   /** 车库的站码式显示（站牌、公开 API 用站码作名称），如「LWN Depot」。 */
   public static String depotCodeLabel(String depotCode) {
     return depotCode + " " + DEPOT_SUFFIX_LANG2;
+  }
+
+  /**
+   * 节点是不是正线折返点：区间路径点（{@link WaypointKind#INTERVAL}，如 {@code SURC:OFL:MLU:2:004}）。车在那里折返时停在正线上，
+   * 挡着同一股道的后车。
+   *
+   * <p>车站、车库、咽喉、道岔以及解析不了的节点都不算。道岔的自动 ID（{@code SWITCHER:<world>:x:y:z}）形同区间点，要单独排除。
+   * 编表的往返对锚定与运行时的正线立即回收共用这一把尺子。
+   *
+   * @param nodeId 图节点 ID
+   * @return 是正线折返点返回 true
+   */
+  public static boolean isMainlineTurnback(String nodeId) {
+    return parseWaypoint(nodeId).map(WaypointMetadata::kind).orElse(null) == WaypointKind.INTERVAL
+        && SwitcherSignDefinitionParser.tryParseRailPos(NodeId.of(nodeId)).isEmpty();
   }
 
   /**
