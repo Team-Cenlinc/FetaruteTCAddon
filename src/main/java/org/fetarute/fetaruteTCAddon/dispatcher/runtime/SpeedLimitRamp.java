@@ -21,19 +21,20 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
  * WaitAcceleration} 只作用于跟车、互斥区与阻挡牌，与 speedLimit 无关。调度周期（实服每秒一次）只在周期点算目标速度， 减速于是成了
  * “每秒切一刀、中间匀速”。本类在周期之间按列车实际走过的距离重算包络，每 tick 只下调一小步。
  *
- * <p>四条规则保证它只让减速更平顺，不放宽任何限制：
+ * <p>三条规则保证它只让减速更平顺，不放宽任何限制：
  *
  * <ul>
  *   <li>只降不升：写入值永不高于上一次写入值，因而也不高于本周期命令值；
- *   <li>车速追近才写：包络比车速高出 {@value #DEFER_MARGIN_BPT} 格/tick 以上时暂不下调。TrainCarts 进行中的 launch
- *       每遇限速变化就从当前速度重新规划，重算那一 tick 不加速；起步途中若每一两 tick 写一次，实际加速度只剩设计值的一半左右。
- *       限速高于车速时本来就不起作用，推迟写入不改变列车运动，追近时再写足以在越过包络前生效；
  *   <li>让位：发现限速被别处改写（STOP、居中、重发等）立即退出，不与其它控车路径争写；
  *   <li>有寿命：连续若干调度周期没被刷新就退出，退回逐周期保持。
  * </ul>
  *
- * <p>包络中的保持约束（{@link SpeedEnvelope#withHold}，目前只有进站限速）另供没有速度上下文的控车调用（过节点时的推进放行）封顶。
- * 只认保持约束、不认周期命令值：周期命令值里有上调限幅的滞后与已驶过区段的限速，拿它封顶会扣住推进放行的补牵引。 保持约束是制动至进站限速区的物理上界，按它封顶不会压低出站加速。
+ * <p>加速中写限速不会打断提速：本插件的发车动作（{@link CurveLaunchAction}）每 tick 直接读当前限速，不像 TrainCarts 的 launch
+ * 那样遇限速变化就重新规划。
+ *
+ * <p>包络中的保持约束（{@link
+ * SpeedEnvelope#withHold}，即到下一停车点的速度天花板：进站限速区、沿途慢速边与到站速度）另供没有速度上下文的控车调用（过节点时的推进放行）封顶。
+ * 只认保持约束、不认周期命令值：周期命令值里有上调限幅的滞后与已驶过区段的限速，拿它封顶会扣住推进放行的补牵引。 保持约束是按制动曲线推出的物理上界，远处就是线路速度，按它封顶不会压低出站加速。
  *
  * <p>仅在服务器主线程使用。
  */
@@ -54,12 +55,6 @@ public final class SpeedLimitRamp {
 
   /** 单次下调的最小步长（blocks/tick）。0.005 bpt = 0.1 bps：截速察觉不到，也不必每 tick 改写一次属性。 */
   static final double WRITE_STEP_BPT = 0.005;
-
-  /**
-   * 包络比实际车速高出这么多（blocks/tick）时暂不下调。0.1 bpt = 2 bps：按车种预设，车速与包络每 tick 相向收敛不超过约 0.12 bps，留有十余 tick
-   * 的余量。
-   */
-  static final double DEFER_MARGIN_BPT = 0.1;
 
   /** 判定“限速被别处改写”的容差（blocks/tick）。 */
   private static final double FOREIGN_WRITE_TOLERANCE_BPT = 1.0e-9;
@@ -308,7 +303,7 @@ public final class SpeedLimitRamp {
         return true;
       }
       double limitBpt = Math.max(0.0, limitBps / TICKS_PER_SECOND);
-      if (limitBpt <= lastWrittenBpt - WRITE_STEP_BPT && limitBpt <= movedBpt + DEFER_MARGIN_BPT) {
+      if (limitBpt <= lastWrittenBpt - WRITE_STEP_BPT) {
         properties.setSpeedLimit(limitBpt);
         lastWrittenBpt = properties.getSpeedLimit();
       }

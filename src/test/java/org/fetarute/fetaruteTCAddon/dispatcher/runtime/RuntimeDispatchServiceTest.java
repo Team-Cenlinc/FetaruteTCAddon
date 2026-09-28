@@ -46,6 +46,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -10190,8 +10192,18 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
-    // W 离站旁道岔 10 格、在进站窗口内，限速区从 W（前方 110 格）起；按列车自己的减速度 0.25 制动至区起点。
-    double expectedApproachEnvelope = Math.sqrt(6.0 * 6.0 + 2.0 * 0.25 * 110.0);
+    // W 离站旁道岔 10 格、在进站窗口内，限速区从 W（前方 110 格）起；按列车自己的减速度 0.25 沿 S 形制动曲线降到区起点，
+    // 与编表运行曲线同一个天花板（SpeedCeiling），输入是沿途各边限速、限速区与到站速度。
+    double expectedApproachEnvelope =
+        SpeedCeiling.of(
+                new double[] {110, 10, 20},
+                new double[] {28.8, 28.8, 28.8},
+                List.of(
+                    new SpeedCeiling.Cap(110.0, 140.0, 6.0),
+                    new SpeedCeiling.Cap(140.0, 140.0, 6.0)),
+                6.0,
+                new SpeedCurve(1.0, 0.25))
+            .limitBps(0.0);
     assertEquals("station", diagnostics.approachKind());
     assertEquals("approach_curve", diagnostics.finalLimiterSource(), diagnostics.toString());
     assertTrue(

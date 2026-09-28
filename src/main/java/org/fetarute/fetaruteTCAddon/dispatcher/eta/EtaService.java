@@ -27,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.PathProgressModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RouteStopPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpawnTrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.TravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
@@ -277,10 +278,7 @@ public final class EtaService {
     ConfigManager.ConfigView config = currentConfig();
     if (config == null) {
       return new RunCurveModel.Settings(
-          RunCurveModel.MotionParams.defaults(),
-          DEFAULT_FALLBACK_SPEED_BPS,
-          StopApproach.Rule.disabled(),
-          0);
+          SpeedCurve.defaults(), DEFAULT_FALLBACK_SPEED_BPS, StopApproach.Rule.disabled(), 0);
     }
     return RunCurveModel.Settings.fromConfig(config, DEFAULT_FALLBACK_SPEED_BPS);
   }
@@ -1979,8 +1977,7 @@ public final class EtaService {
             new SpawnTrainConfigResolver(registry, config)
                 .resolveForRoute(routeOpt.get(), provider.routeStops().listByRoute(routeUuid));
         settings =
-            settings.withMotion(
-                new RunCurveModel.MotionParams(trainConfig.accelBps2(), trainConfig.decelBps2()));
+            settings.withMotion(new SpeedCurve(trainConfig.accelBps2(), trainConfig.decelBps2()));
       }
     }
     return new TravelTimeModel(new RunCurveModel(settings, effectiveSpeeds(worldId, now)));

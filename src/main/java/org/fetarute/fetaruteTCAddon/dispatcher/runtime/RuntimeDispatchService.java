@@ -36,6 +36,10 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -1382,7 +1386,8 @@ public final class RuntimeDispatchService {
    * @param stopNode 停车点节点
    * @param distanceBlocks 从车头到第一个进站触发节点的距离
    * @param zones 进站限速区（含停车点本身），里程从车头量起；已驶过的区不列入
-   * @param pathEdgeSpeeds 到停车点整段路径上各边的限速，距离从车头量起（车头已在其上的边记 0）；编表运行曲线沿同一段路径反推制动
+   * @param ceiling 到停车点整段路径的速度天花板（沿途各边限速、进站限速区、到站速度），里程从当前图节点量起；与编表运行曲线同一个构造
+   * @param ceilingOffsetBlocks 车头在天花板里程上的位置（车头已驶过当前图节点的距离）
    * @param engaged 车头是否已在进站限速区内；诊断在它或进站限速实际收紧时才显示
    */
   private record ApproachControl(
@@ -1393,7 +1398,8 @@ public final class RuntimeDispatchService {
       OptionalDouble limitBps,
       OptionalLong distanceBlocks,
       List<StopApproach.Zone> zones,
-      List<SignalLookahead.EdgeSpeedConstraint> pathEdgeSpeeds,
+      Optional<SpeedCeiling> ceiling,
+      double ceilingOffsetBlocks,
       boolean engaged) {
     private ApproachControl {
       node = node == null ? Optional.empty() : node;
@@ -1403,7 +1409,7 @@ public final class RuntimeDispatchService {
       limitBps = limitBps == null ? OptionalDouble.empty() : limitBps;
       distanceBlocks = distanceBlocks == null ? OptionalLong.empty() : distanceBlocks;
       zones = zones == null ? List.of() : List.copyOf(zones);
-      pathEdgeSpeeds = pathEdgeSpeeds == null ? List.of() : List.copyOf(pathEdgeSpeeds);
+      ceiling = ceiling == null ? Optional.empty() : ceiling;
     }
 
     private static ApproachControl none() {
@@ -1415,8 +1421,21 @@ public final class RuntimeDispatchService {
           OptionalDouble.empty(),
           OptionalLong.empty(),
           List.of(),
-          List.of(),
+          Optional.empty(),
+          0.0,
           false);
+    }
+
+    /** 车头之后又走过 {@code traveledBlocks} 处的天花板速度；没有天花板时不设限。 */
+    private double ceilingLimitBps(double traveledBlocks) {
+      return ceiling.isPresent()
+          ? ceiling.get().limitBps(ceilingOffsetBlocks + traveledBlocks)
+          : Double.POSITIVE_INFINITY;
+    }
+
+    /** 车头处的天花板是否由进站限速区或到站速度决定（而不是沿途边限速）。 */
+    private boolean ceilingCapBoundAtHead() {
+      return ceiling.isPresent() && ceiling.get().capBoundAt(ceilingOffsetBlocks);
     }
 
     private boolean activeFor(NodeId candidate) {
@@ -14888,9 +14907,13 @@ public final class RuntimeDispatchService {
                 effectiveNodes.get(currentIndex),
                 effectiveNodes.get(currentIndex + 1))
             : 0L;
-    // 沿途限速边只在速度曲线启用时参与制动（与前瞻同一开关）。
-    SignalLookahead.EdgeSpeedResolver edgeSpeedResolver =
-        runtimeSettings.speedCurveEnabled() ? createEdgeSpeedResolver(train.worldId()) : null;
+    SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(train.worldId());
+    // 制动曲线只在速度曲线启用时参与（与前瞻同一开关）；加减速取本车车种，与编表按默认车种一致（未打车种标签时）。
+    TrainConfig motionConfig = trainConfigResolver.resolve(properties, configManager.current());
+    SpeedCurve speedCurve =
+        runtimeSettings.speedCurveEnabled()
+            ? new SpeedCurve(motionConfig.accelBps2(), motionConfig.decelBps2())
+            : null;
     ApproachControl approachControl =
         resolveApproachControl(
             graph,
@@ -14899,7 +14922,8 @@ public final class RuntimeDispatchService {
             currentIndex,
             currentNodeOpt.get(),
             headProgressBlocks,
-            edgeSpeedResolver);
+            edgeSpeedResolver,
+            speedCurve);
     OptionalLong distanceOpt = OptionalLong.empty();
     OptionalLong constraintDistanceOpt = OptionalLong.empty();
     OptionalLong blockerDistanceOpt = OptionalLong.empty();
@@ -14964,7 +14988,7 @@ public final class RuntimeDispatchService {
     boolean needsLookahead =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.movementAuthorityEnabled();
     if (needsLookahead) {
-      if (edgeSpeedResolver != null) {
+      if (runtimeSettings.speedCurveEnabled()) {
         lookahead =
             SignalLookahead.computeWithEdgeSpeed(
                 advisoryDecision,
@@ -15017,7 +15041,7 @@ public final class RuntimeDispatchService {
     boolean plannedStopByApproach =
         plannedStopAuthorityEnd && approachControl.governsAuthorityEnd(authorityEnd);
     if (runtimeSettings.movementAuthorityEnabled() && !stopAtNextWaypoint) {
-      TrainConfig trainConfig = trainConfigResolver.resolve(properties, configManager.current());
+      TrainConfig trainConfig = motionConfig;
       boolean authorityFromHardConstraint =
           constraintDistanceOpt != null && constraintDistanceOpt.isPresent();
       AuthorityEndReason authorityEndReason =
@@ -15978,11 +16002,7 @@ public final class RuntimeDispatchService {
         graph,
         allowLaunch,
         effectiveDistanceOpt,
-        lookahead == null
-            ? null
-            : lookahead
-                .withEdgeSpeedConstraintsShiftedBy(headProgressBlocks)
-                .withAdditionalEdgeSpeedConstraints(approachControl.pathEdgeSpeeds()),
+        lookahead == null ? null : lookahead.withEdgeSpeedConstraintsShiftedBy(headProgressBlocks),
         new ControlSpeedOverrides(
             approachOverrideBps,
             movementAuthorityLimitBps,
@@ -27676,37 +27696,22 @@ public final class RuntimeDispatchService {
     SpeedEnvelope envelope = SpeedEnvelope.empty();
     ControlSpeedOverrides overrides =
         speedOverrides != null ? speedOverrides : ControlSpeedOverrides.empty();
-    if (overrides.approachLimitBps().isPresent()) {
-      double override = overrides.approachLimitBps().getAsDouble();
-      if (Double.isFinite(override) && override > 0.0) {
-        ApproachControl approach = overrides.approachControl();
-        // 区内限进站速度、区外按车型减速度制动至区起点，与编表运行曲线同一口径；关闭速度曲线时只在区内限速。
-        double approachDecel =
-            configManager.current().runtimeSettings().speedCurveEnabled() ? decelBps2 : 0.0;
-        double approachEnvelope =
-            Math.min(
-                target,
-                RuntimeTrainController.approachSpeedLimit(
-                    override, approachDecel, approach.zones(), 0.0));
-        if (!approach.zones().isEmpty()) {
-          // 列车会在该站停下，进站限速随列车前进一直有效，登记为保持约束：过节点的推进放行也不得越过它。
-          envelope =
-              envelope.withHold(
-                  RuntimeTrainController.approachConstraint(
-                      override, approachDecel, approach.zones()));
-        }
-        if (approach.engaged() || approachEnvelope < target) {
-          approachLimitBps =
-              OptionalDouble.of(
-                  approachLimitBps.isPresent()
-                      ? Math.min(approachLimitBps.getAsDouble(), override)
-                      : override);
-        }
-        if (approachEnvelope < target) {
-          target = approachEnvelope;
-          limiterSource =
-              resolveApproachLimiterSource(overrides.approachControl(), override, target);
-        }
+    ApproachControl approach = overrides.approachControl();
+    if (aspect != SignalAspect.STOP && approach.ceiling().isPresent()) {
+      // 速度天花板与编表运行曲线同一个：进站限速区、沿途慢速边与到站速度都在内，随列车前进一直有效，登记为保持约束，
+      // 过节点的推进放行也不得越过它。
+      envelope = envelope.withHold(approach::ceilingLimitBps);
+      double atHead = approach.ceilingLimitBps(0.0);
+      OptionalDouble override = overrides.approachLimitBps();
+      if (override.isPresent() && (approach.engaged() || atHead < target)) {
+        approachLimitBps = override;
+      }
+      if (atHead < target) {
+        target = atHead;
+        limiterSource =
+            override.isPresent() && approach.ceilingCapBoundAtHead()
+                ? resolveApproachLimiterSource(approach, override.getAsDouble(), target)
+                : "edge_speed_lookahead";
       }
     }
     if (overrides.movementAuthorityLimitBps().isPresent()) {
@@ -27767,10 +27772,12 @@ public final class RuntimeDispatchService {
    * 区间位置换算成从<b>车头</b>量起：从当前图节点量起的距离在两节点之间不缩短，要等过了节点才会降，那一拍就是一刀。 {@link ApproachControl#engaged()}
    * 只表示车头已在区内，供诊断使用；区外的制动由调用方按限速区自行推算。
    *
-   * <p>同一段展开路径上各边的限速也一并给出：前瞻窗口只有几条边，而编表运行曲线沿整段路径反推制动，远处的慢速边要同样提前刹。
+   * <p>同一段展开路径还给出速度天花板（{@link SpeedCeiling}）：沿途各边限速、进站限速区与到站速度按 S 形制动曲线往回推，
+   * 与编表运行曲线同一个函数、同一组输入。前瞻窗口只有几条边，远处的慢速边也要与编表一样提前制动。
    *
    * @param headProgressBlocks 车头已驶过 {@code effectiveNodes[currentIndex]} 的距离
-   * @param edgeSpeeds 边有效限速；为 {@code null} 时不给出沿途限速
+   * @param edgeSpeeds 边有效限速
+   * @param curve 加减速曲线；为 {@code null} 时（关闭速度曲线）天花板只取逐点限速，不提前制动
    */
   private ApproachControl resolveApproachControl(
       RailGraph graph,
@@ -27779,7 +27786,8 @@ public final class RuntimeDispatchService {
       int currentIndex,
       NodeId currentNode,
       long headProgressBlocks,
-      SignalLookahead.EdgeSpeedResolver edgeSpeeds) {
+      SignalLookahead.EdgeSpeedResolver edgeSpeeds,
+      SpeedCurve curve) {
     if (graph == null
         || route == null
         || effectiveNodes == null
@@ -27826,16 +27834,6 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
     // 车头只可能在首条边上：进度超出首条边说明插值失真，按首条边末端算，不越过下一节点。
     double head = Math.min(Math.max(0L, headProgressBlocks), positions[1]);
-    List<SignalLookahead.EdgeSpeedConstraint> pathEdgeSpeeds = new ArrayList<>();
-    for (int i = 0; edgeSpeeds != null && i < last && i < path.edges().size(); i++) {
-      RailEdge edge = path.edges().get(i);
-      double edgeLimit = edge == null ? Double.NaN : edgeSpeeds.resolve(edge);
-      if (Double.isFinite(edgeLimit) && edgeLimit > 0.0) {
-        pathEdgeSpeeds.add(
-            new SignalLookahead.EdgeSpeedConstraint(
-                Math.round(Math.max(0.0, positions[i] - head)), edgeLimit));
-      }
-    }
     List<StopApproach.Zone> zones = new ArrayList<>();
     for (StopApproach.Zone zone :
         StopApproach.zones(positions, triggers, StopApproach.Rule.fromRuntime(runtime))) {
@@ -27875,6 +27873,25 @@ public final class RuntimeDispatchService {
             + engaged;
     OptionalDouble limitOpt =
         Double.isFinite(limit) && limit > 0.0 ? OptionalDouble.of(limit) : OptionalDouble.empty();
+    // 速度天花板与编表运行曲线同一个构造（RunCurveModel#ceiling）：从当前图节点出发的整段展开路径，车头处按偏移取值。
+    // 区间停车点保持进站限速到点（调度层在节点处停车），不像编表那样刹到 0，否则车会停在牌子前触发不到停车。
+    int edgeCount = Math.min(last, path.edges().size());
+    RunCurveModel runModel =
+        new RunCurveModel(
+            RunCurveModel.Settings.fromConfig(
+                configManager.current(),
+                configManager.current().graphSettings().defaultSpeedBlocksPerSecond()),
+            (runGraph, edge, fallback) -> edgeSpeeds.resolve(edge));
+    Optional<SpeedCeiling> ceiling =
+        runModel.ceiling(
+            graph,
+            new RunTimeModel.Run(
+                path.nodes().subList(0, edgeCount + 1),
+                path.edges().subList(0, edgeCount),
+                0.0,
+                true),
+            curve,
+            true);
     return new ApproachControl(
         Optional.of(path.nodes().get(firstTrigger)),
         Optional.of(target.stopNode()),
@@ -27883,7 +27900,8 @@ public final class RuntimeDispatchService {
         limitOpt,
         OptionalLong.of(headDistance),
         zones,
-        pathEdgeSpeeds,
+        ceiling,
+        head,
         engaged);
   }
 

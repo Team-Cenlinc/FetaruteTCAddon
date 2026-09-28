@@ -39,7 +39,7 @@ class TrainLaunchManagerSpeedRampTest {
 
     assertEquals(10.0 / TICKS, limit.properties().getSpeedLimit(), 1.0e-9);
     assertEquals(10.0, result.finalTargetBps(), 1.0e-9);
-    assertEquals("approach_hold", result.finalLimiterSource());
+    assertEquals("speed_ceiling_hold", result.finalLimiterSource());
     assertTrue(
         train.accelerateCalls == 0 || train.lastAccelerateTargetBpt <= 10.0 / TICKS + 1.0e-9,
         "推进放行不得把列车牵引到高于进站限速的速度");

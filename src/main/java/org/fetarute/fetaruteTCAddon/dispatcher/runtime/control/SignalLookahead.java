@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
@@ -107,25 +106,6 @@ public final class SignalLookahead {
       }
       return new LookaheadResult(
           distanceToBlocker, distanceToCaution, distanceToApproach, effectiveSignal, shifted);
-    }
-
-    /**
-     * 并入另一组限速边约束（与本结果的限速边同一原点），按距离排序。
-     *
-     * <p>前瞻只覆盖授权窗口内的几条边；调用方可并入到下一停车点整段路径上的限速边，让远处的慢速边与编表运行曲线一样提前制动。 重复的边取两次不影响结果：每条约束各自给出上限，最终取最小值。
-     *
-     * @param additional 追加的约束；为空时原样返回
-     */
-    public LookaheadResult withAdditionalEdgeSpeedConstraints(
-        List<EdgeSpeedConstraint> additional) {
-      if (additional == null || additional.isEmpty()) {
-        return this;
-      }
-      List<EdgeSpeedConstraint> merged = new ArrayList<>(edgeSpeedConstraints);
-      merged.addAll(additional);
-      merged.sort(Comparator.comparingLong(EdgeSpeedConstraint::distanceBlocks));
-      return new LookaheadResult(
-          distanceToBlocker, distanceToCaution, distanceToApproach, effectiveSignal, merged);
     }
 
     /** 获取到最近限制点的距离（用于速度曲线计算）。 */

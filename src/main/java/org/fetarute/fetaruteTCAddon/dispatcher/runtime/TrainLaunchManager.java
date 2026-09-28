@@ -26,7 +26,7 @@ public final class TrainLaunchManager {
   private static final double TICKS_PER_SECOND = 20.0;
   private static final long TICK_MILLIS = 50L;
   private static final double MOVING_CONTROL_EPSILON_BPT = 0.005;
-  private static final double RESUME_TRACTION_TOLERANCE_RATIO = 0.05;
+  private static final double RESUME_TRACTION_TOLERANCE_RATIO = 0.01;
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
   private static final String TAG_PENDING_LAUNCH_COMMAND = "FTA_PENDING_LAUNCH_COMMAND";
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
@@ -156,8 +156,8 @@ public final class TrainLaunchManager {
    * <ul>
    *   <li>带包络（{@code speedEnvelope != null}，信号 tick 的完整判定）：命令即权威，运行中列车交给 {@link SpeedLimitRamp}
    *       在周期之间沿包络继续下调；
-   *   <li>不带包络（过节点时的推进放行等）：调用方只知道“可以走”，不知道前方要进站，所以不得越过斜坡登记的保持约束（进站限速），
-   *       避免把正在进站减速的车先抬回线路速度、下一拍再砍回去。其余情况照旧放行并补牵引——周期命令值里有上调限幅的滞后， 拿它封顶会扣住减速解除后唯一的补牵引。
+   *   <li>不带包络（过节点时的推进放行等）：调用方只知道“可以走”，不知道前方要进站或有慢速边，所以不得越过斜坡登记的保持约束
+   *       （到下一停车点的速度天花板），避免把正在减速的车先抬回线路速度、下一拍再砍回去。其余情况照旧放行并补牵引——周期命令值里有上调限幅的滞后， 拿它封顶会扣住减速解除后唯一的补牵引。
    * </ul>
    *
    * @param stopMode STOP 信号的落地模式；硬 STOP 不允许速度曲线和 launch action
@@ -294,7 +294,7 @@ public final class TrainLaunchManager {
     if (adjustedBps < heldBps - 1.0e-6) {
       limiterSource = "speed_command_rate_limit";
     } else if (heldBps < curveAdjustedBps - 1.0e-6) {
-      limiterSource = "approach_hold";
+      limiterSource = "speed_ceiling_hold";
     } else if (speedCurveLimit.isPresent()) {
       limiterSource = "speed_curve";
     }
@@ -305,7 +305,7 @@ public final class TrainLaunchManager {
   /**
    * 运行中列车的目标速度明显高于当前车速时补牵引。
    *
-   * <p>"明显"与 {@link TrainCartsRuntimeHandle#accelerateTo} 的已接近目标判定一致（目标的 5%，至少 {@value
+   * <p>"明显"与 {@link TrainCartsRuntimeHandle#accelerateTo} 的已接近目标判定一致（目标的 1%，至少 {@value
    * #MOVING_CONTROL_EPSILON_BPT} 格/tick）。身上挂着别的 TrainCarts 动作（停站等待、居中）时不补：launch 会排在它后面执行。
    */
   private boolean shouldResumeTraction(RuntimeTrainHandle train, double targetBlocksPerTick) {

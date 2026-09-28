@@ -277,10 +277,11 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 - `runtime.speed-curve-factor` 用于调节阻塞/授权终点停车曲线的激进程度（>1 更激进，<1 更保守）；进站区外制动与前方限速边按车型减速度原值计算，不受它影响（与编表运行曲线同口径）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
 - `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
-- 进站限速区由 `StopApproach.zones` 划定，与编表/ETA 运行曲线（`RunCurveModel`）共用同一判据：区内限 approaching 速度，区外若速度曲线启用则按车型减速度制动至区起点（`sqrt(v_app^2 + 2·decel·d)`），与运行曲线的反向推算一致。
-- 限速计算入口为 `RuntimeTrainController.approachSpeedLimit` / `approachConstraint`（后者登记给逐 tick 斜坡）；SignalSystem 只提供信号、约束类型和距离。
+- 进站限速区由 `StopApproach.zones` 划定，与编表/ETA 运行曲线（`RunCurveModel`）共用同一判据。
+- 目标速度取速度天花板（`SpeedCeiling`，在 `resolveApproachControl` 里按到下一停车点的展开路径计算）：沿途各边限速、进站限速区与到站速度按 S 形制动曲线（`SpeedCurve`）往回推，与编表运行曲线同一个函数；天花板同时登记为逐 tick 斜坡的保持约束。SignalSystem 只提供信号、约束类型和距离。
 - 移动授权终点正是下一处计划停车点、且进站限速已就绪时，该终点不再按“刹到 0”参与移动授权、速度曲线与 Smart 前瞻，由进站控制按运行曲线接管（STOP 信号不变）。
-- 到下一停车点整段展开路径上的各边限速并入前瞻的限速边约束，远处慢速边与编表一样提前制动，不受 `lookahead-edges` 窗口限制。
+- 到下一停车点整段展开路径上的各边限速都在天花板内，远处慢速边与编表一样提前制动，不受 `lookahead-edges` 窗口限制。
+- 发车与调速用本插件的 `CurveLaunchAction`（S 形加速，每 tick 读当前限速），不用 TrainCarts 自带的 launch 曲线；详见 `docs/dev/train-config.md`。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
@@ -326,7 +327,7 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 ## 进站限速
 - `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
 - `runtime.approach-window-blocks` / `runtime.approach-window-edges` 划定进站限速区：节点到其后第一个进站触发点的距离或边数不超过该值时，从该节点起按进站限速运行；停车点本身也算一个区。
-- 区外按车型减速度提前制动至区起点，不再有单独的预减速区或末边参数（`approach-target-edges` 已于 config-version 36 移除）。编表与 ETA 用同一判据，改动后需重新 build 时刻表；规则详见 `docs/dev/train-config.md`。
+- 区外按车型的 S 形制动曲线提前降到区起点，不再有单独的预减速区或末边参数（`approach-target-edges` 已于 config-version 36 移除）。编表与 ETA 用同一判据，改动后需重新 build 时刻表；规则详见 `docs/dev/train-config.md`。
 
 ## CAUTION 速度来源
 - 优先使用“连通分量 caution 覆盖”（`rail_component_cautions`）。

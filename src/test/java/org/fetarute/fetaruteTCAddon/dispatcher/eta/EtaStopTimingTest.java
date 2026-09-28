@@ -147,9 +147,9 @@ class EtaStopTimingTest {
                 stop(2, c, RouteStopPassType.STOP, 0),
                 stop(3, d, RouteStopPassType.STOP, 0)),
             graph);
-    // A→B 10 秒；B→C、C→D 各从静止起步：加速 6 秒走 18 格，余 42 格 7 秒。修复前当成不停车通过，同样是 30 秒。
-    assertEquals(
-        10 + 13 + 13, stopping.getForTrain(TRAIN, new EtaTarget.PlatformNode(d)).travelSec());
+    // A→B 10 秒；B→C、C→D 各从静止按 S 形曲线起步，各约 13.7 秒（恒加速度时 13 秒），合计约 37.3 秒。
+    // 修复前当成不停车通过，同样是 30 秒。
+    assertEquals(37, stopping.getForTrain(TRAIN, new EtaTarget.PlatformNode(d)).travelSec());
   }
 
   @Test

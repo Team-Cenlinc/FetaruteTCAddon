@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon;
 
 import com.bergerkiller.bukkit.common.cloud.CloudSimpleHandler;
+import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
@@ -53,6 +54,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSyn
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
@@ -517,6 +519,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     SignAction.register(waypointSignAction);
     SignAction.register(autoStationSignAction);
     SignAction.register(depotSignAction);
+    // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。
+    CurveLaunchAction.registerSerializer(TrainCarts.plugin);
     preloadSignNodeRegistryFromStorage();
     getServer()
         .getPluginManager()
@@ -1518,6 +1522,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (depotSignAction != null) {
       SignAction.unregister(depotSignAction);
     }
+    CurveLaunchAction.unregisterSerializer(TrainCarts.plugin);
     if (signNodeRegistry != null) {
       signNodeRegistry.clear();
     }
