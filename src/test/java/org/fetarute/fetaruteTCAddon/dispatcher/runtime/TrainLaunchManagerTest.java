@@ -475,6 +475,7 @@ class TrainLaunchManagerTest {
     assertTrue(speedCaptor.getValue() < 22.2 / 20.0, "不补牵引时速度上限仍按命令限幅逐步抬升");
   }
 
+  /** 车速已在目标的 1% 以内（22.05 对 22.2）：不再下发动作。 */
   @Test
   void movingTrainAlreadyNearItsTargetGetsNoNewAction() {
     TrainLaunchManager manager = new TrainLaunchManager();
@@ -483,7 +484,7 @@ class TrainLaunchManagerTest {
             "train-near",
             "FTA_LAST_SPEED_CMD_BPS=22.2",
             "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
-    RuntimeTrainHandle train = movingAt(21.5, false);
+    RuntimeTrainHandle train = movingAt(22.05, false);
 
     manager.applyControl(
         train,

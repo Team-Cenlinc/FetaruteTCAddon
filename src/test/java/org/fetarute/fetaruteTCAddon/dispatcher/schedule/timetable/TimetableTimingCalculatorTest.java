@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
@@ -341,7 +342,8 @@ class TimetableTimingCalculatorTest {
   }
 
   /**
-   * 走行从静止起步：100 格、限速 10、加速度 1，前 10 秒加到限速（走过 50 格），剩下 50 格匀速 5 秒，共 15 秒。
+   * 走行从静止起步：100 格、限速 10、加速度 1。恒加速度时 10 秒加到限速、共 15 秒；S 形起步（{@code SpeedCurve}） 起步与到速两端渐变，约 15.6 秒，取整
+   * 16。
    *
    * <p>旧口径每站都按限速"飞"出去，同一段只算 10 秒——实服 32 个站间区段合计少算了 42%，少的就是这一段起步。
    */
@@ -362,14 +364,14 @@ class TimetableTimingCalculatorTest {
                 Duration.ZERO);
 
     assertTrue(result.ok(), () -> result.failure().toString());
-    assertEquals(15, result.stops().get(1).arrivalOffsetSeconds());
+    assertEquals(16, result.stops().get(1).arrivalOffsetSeconds());
   }
 
   /**
    * 进站限速区从"离触发节点不超过窗口的第一个图节点"起算，与运行时逐节点判断同一口径。
    *
-   * <p>A→M 150 格、M→B 50 格，限速 20，B 前 50 格内限 10，加减速都是 1：先加速到 √200 ≈ 14.14（走过 100 格， 14.14 秒）， 再制动到 10
-   * 正好到 M（50 格，4.14 秒），M→B 按 10 走 5 秒。M 约 18.3 秒，B 约 23.3 秒。
+   * <p>A→M 150 格、M→B 50 格，限速 20，B 前 50 格内限 10，加减速都是 1：起步加速、在 M 前按 S 形制动降到 10，M→B 按 10 走 5 秒。M 约
+   * 19.3 秒，B 约 24.3 秒（恒加减速度时为 18.3 / 23.3）。
    */
   @Test
   void approachWindowStartsAtTheFirstGraphNodeWithinReach() {
@@ -391,15 +393,15 @@ class TimetableTimingCalculatorTest {
                 Duration.ZERO);
 
     assertTrue(result.ok(), () -> result.failure().toString());
-    assertEquals(List.of(0, 18, 23), result.segments().get(0).nodeOffsets());
-    assertEquals(23, result.stops().get(1).arrivalOffsetSeconds());
+    assertEquals(List.of(0, 19, 24), result.segments().get(0).nodeOffsets());
+    assertEquals(24, result.stops().get(1).arrivalOffsetSeconds());
   }
 
   /**
    * 途中的 PASS 点不打断走行：车按线路速度开过去，不在那里起步第二次。
    *
-   * <p>A→W→B 各 100 格、限速 10、加减速 1：W 是 PASS 时一次起步，B 在 25 秒到（10 秒加速 + 150 格匀速）。 W 若是区间停车点（停 0 秒），车要在 W
-   * 前刹停再重新起步：A→W 加速 50 格、制动 50 格共 20 秒，W→B 再 15 秒，B 在 35 秒到。
+   * <p>A→W→B 各 100 格、限速 10、加减速 1：W 是 PASS 时一次起步，W 约 15.6 秒、B 约 25.6 秒到。W 若是区间停车点（停 0 秒）， 车要在 W
+   * 前刹停再重新起步：A→W 约 22.1 秒（刹到 0 两端柔和），W→B 再约 15.6 秒，B 在 22 + 16 = 38 秒到。
    */
   @Test
   void passWaypointsDoNotSplitTheRun() {
@@ -433,14 +435,14 @@ class TimetableTimingCalculatorTest {
                 stop(2, RouteStopPassType.TERMINATE, 20)),
             Duration.ZERO);
 
-    assertEquals(15, passing.stops().get(1).arrivalOffsetSeconds(), "W 按线路速度通过");
-    assertEquals(15, passing.stops().get(1).departureOffsetSeconds());
-    assertEquals(25, passing.stops().get(2).arrivalOffsetSeconds());
-    assertEquals(20, stopping.stops().get(1).arrivalOffsetSeconds(), "W 前刹停到 0");
-    assertEquals(35, stopping.stops().get(2).arrivalOffsetSeconds(), "W 之后重新起步");
+    assertEquals(16, passing.stops().get(1).arrivalOffsetSeconds(), "W 按线路速度通过");
+    assertEquals(16, passing.stops().get(1).departureOffsetSeconds());
+    assertEquals(26, passing.stops().get(2).arrivalOffsetSeconds());
+    assertEquals(22, stopping.stops().get(1).arrivalOffsetSeconds(), "W 前刹停到 0");
+    assertEquals(38, stopping.stops().get(2).arrivalOffsetSeconds(), "W 之后重新起步");
   }
 
-  /** 区间停车点由调度层在节点处刹停，终点速度为 0：100 格、限速 10、加减速 1，加速 50 格、制动 50 格，共 20 秒。 */
+  /** 区间停车点由调度层在节点处刹停，终点速度为 0：100 格、限速 10、加减速 1，S 形起步与刹停约 22.1 秒（恒加减速度时 20 秒）。 */
   @Test
   void waypointStopBrakesToStandstill() {
     RailGraph graph =
@@ -460,7 +462,7 @@ class TimetableTimingCalculatorTest {
                 TimetableTestFixtures.stops(ROUTE, 2, 20),
                 Duration.ZERO);
 
-    assertEquals(20, result.stops().get(1).arrivalOffsetSeconds());
+    assertEquals(22, result.stops().get(1).arrivalOffsetSeconds());
   }
 
   /**
@@ -534,12 +536,10 @@ class TimetableTimingCalculatorTest {
         "末站 PASS 不停站");
   }
 
-  /** 生产用的走行模型：给定进站规则与停站开销，加减速都取 1，便于手算。 */
+  /** 生产用的走行模型：给定进站规则与停站开销，加减速都取 1。 */
   private static RunTimeModel curve(StopApproach.Rule approach, int overhead) {
     return new RunCurveModel(
-        new RunCurveModel.Settings(
-            new RunCurveModel.MotionParams(1.0, 1.0), 8.0, approach, overhead),
-        null);
+        new RunCurveModel.Settings(new SpeedCurve(1.0, 1.0), 8.0, approach, overhead), null);
   }
 
   /** 在任意走行模型上叠加车站停站开销。 */

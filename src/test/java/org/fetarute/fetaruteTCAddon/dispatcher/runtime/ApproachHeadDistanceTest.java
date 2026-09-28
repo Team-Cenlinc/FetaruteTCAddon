@@ -26,6 +26,8 @@ import org.bukkit.Location;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -53,9 +55,10 @@ import org.junit.jupiter.api.Test;
 /**
  * 进站限速按编表运行曲线的口径执行，距离从车头量起。
  *
- * <p>夹具：A —210— W —90— 车站，进站限速 6 bps，线路限速 20 bps，减速度 1.0，进站窗口 96 格。W 离站 90 格、在窗口内，按编表运行曲线的判据
- * （{@code StopApproach#zones}），进站限速区从 W 起；区外按减速度制动至区起点，从 √(36 + 2·(210 − x)) = 20 即 x ≈ 28 处开始减速。
- * 旧口径从 A 量起、车头在 A 与 W 之间距离恒为 300，要等过 W 才一次性降下来；实服 2026-09-27 进站时“一下就降下去”即此。
+ * <p>夹具：A —400— W —90— 车站，进站限速 6 bps，线路限速 20 bps，加减速 1.0，进站窗口 96 格。W 离站 90 格、在窗口内，
+ * 按编表运行曲线的判据（{@code StopApproach#zones}）进站限速区从 W 起。目标速度就是编表与控车共用的速度天花板（{@link
+ * SpeedCeiling}）在车头处的值：区外沿 S 形制动曲线降到区起点。旧口径从 A 量起、车头在 A 与 W 之间距离不变， 要等过 W 才一次性降下来；实服 2026-09-27
+ * 进站时“一下就降下去”即此。
  */
 class ApproachHeadDistanceTest {
 
@@ -65,9 +68,10 @@ class ApproachHeadDistanceTest {
   private static final NodeId STATION = NodeId.of("SURC:S:PPK:1");
   private static final double APPROACH_BPS = 6.0;
   private static final double LINE_BPS = 20.0;
-  private static final double ZONE_START = 210.0;
+  private static final double ZONE_START = 400.0;
+  private static final double STATION_X = 490.0;
 
-  /** 车头在 x=10：制动至限速区的上界 √(36 + 400) ≈ 20.9 仍高于线路速度，按线路速度跑，诊断不显示进站。 */
+  /** 车头在 x=10：离限速区还有 390 格，远在制动段之外，按线路速度跑，诊断不显示进站。 */
   @Test
   void farFromTheStationKeepsLineSpeed() {
     ControlDiagnostics diagnostics = signalTick(10.0);
@@ -76,18 +80,19 @@ class ApproachHeadDistanceTest {
     assertEquals(LINE_BPS, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
   }
 
-  /** 车头在 x=100（从 A 量起仍是 300 格）：按车头到限速区起点 110 格刹车，与编表运行曲线一致。 */
+  /** 车头在 x=300（从 A 量起仍是 490 格）：按车头到限速区起点 100 格制动，与编表运行曲线同一个天花板。 */
   @Test
   void brakesIntoTheZoneThatStartsAtTheFirstNodeWithinTheWindow() {
-    ControlDiagnostics diagnostics = signalTick(100.0);
+    ControlDiagnostics diagnostics = signalTick(300.0);
 
-    double expected = Math.sqrt(APPROACH_BPS * APPROACH_BPS + 2.0 * 1.0 * (ZONE_START - 100.0));
     assertEquals("station", diagnostics.approachKind(), "进站限速在收紧时应显示进站诊断");
     assertEquals("approach_curve", diagnostics.finalLimiterSource(), diagnostics.toString());
-    assertEquals(expected, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
-    assertTrue(diagnostics.approachReason().contains("distance=200"), diagnostics.approachReason());
+    assertTrue(expectedCeiling(300.0) < LINE_BPS, "x=300 应已在制动段内");
+    assertEquals(
+        expectedCeiling(300.0), diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
+    assertTrue(diagnostics.approachReason().contains("distance=190"), diagnostics.approachReason());
     assertTrue(
-        diagnostics.approachReason().contains("node_distance=300"), diagnostics.approachReason());
+        diagnostics.approachReason().contains("node_distance=490"), diagnostics.approachReason());
     assertTrue(
         diagnostics.approachReason().contains("engaged=false"), diagnostics.approachReason());
   }
@@ -96,8 +101,8 @@ class ApproachHeadDistanceTest {
   @Test
   void targetFallsContinuouslyWithHeadPosition() {
     double previous = Double.POSITIVE_INFINITY;
-    for (int step = 0; step < 40; step++) {
-      double target = signalTick(10.0 + step * 5.0).finalTargetBps();
+    for (int step = 0; step < 50; step++) {
+      double target = signalTick(150.0 + step * 5.0).finalTargetBps();
       assertTrue(target <= previous + 1.0e-9, "目标速度不得随车头前进而升高");
       if (Double.isFinite(previous)) {
         assertTrue(previous - target < 1.0, "车头前进 5 格，目标速度不应跳变超过 1 bps");
@@ -106,18 +111,30 @@ class ApproachHeadDistanceTest {
     }
   }
 
-  /** 信号 tick 把进站曲线交给逐 tick 斜坡：保持上限就是制动至限速区的曲线；远处它高于线路速度，不会挡推进放行。 */
+  /** 信号 tick 把速度天花板交给逐 tick 斜坡：保持上限就是天花板；远处它等于线路速度，不会把推进放行压到线路速度以下。 */
   @Test
   void signalTickHandsTheApproachCurveToTheRamp() throws ReflectiveOperationException {
     SpeedLimitRamp approaching = new SpeedLimitRamp(tick -> () -> {});
-    FakeTrain braking = signalTick(160.0, approaching).train();
-    double expected = Math.sqrt(APPROACH_BPS * APPROACH_BPS + 2.0 * 1.0 * (ZONE_START - 160.0));
+    FakeTrain braking = signalTick(350.0, approaching).train();
     assertEquals(1, approaching.size(), "进站减速中的运行列车应登记到斜坡");
-    assertEquals(expected, approaching.holdLimitBps(braking).orElseThrow(), 1.0e-6);
+    assertEquals(expectedCeiling(350.0), approaching.holdLimitBps(braking).orElseThrow(), 1.0e-6);
 
     SpeedLimitRamp far = new SpeedLimitRamp(tick -> () -> {});
     FakeTrain farTrain = signalTick(10.0, far).train();
-    assertTrue(far.holdLimitBps(farTrain).orElseThrow() > LINE_BPS, "远处的保持上限应高于线路速度，不挡推进放行");
+    assertEquals(LINE_BPS, far.holdLimitBps(farTrain).orElseThrow(), 1.0e-9, "远处的保持上限就是线路速度");
+  }
+
+  /** 编表与控车共用的天花板在车头 x 处的值：沿途两条边、进站限速区 [W, 车站] 与到站速度。 */
+  private static double expectedCeiling(double headX) {
+    return SpeedCeiling.of(
+            new double[] {ZONE_START - headX, STATION_X - ZONE_START},
+            new double[] {LINE_BPS, LINE_BPS},
+            List.of(
+                new SpeedCeiling.Cap(ZONE_START - headX, STATION_X - headX, APPROACH_BPS),
+                new SpeedCeiling.Cap(STATION_X - headX, STATION_X - headX, APPROACH_BPS)),
+            APPROACH_BPS,
+            new SpeedCurve(1.0, 1.0))
+        .limitBps(0.0);
   }
 
   private static ControlDiagnostics signalTick(double headX) {
@@ -223,14 +240,14 @@ class ApproachHeadDistanceTest {
     return new TickRun(service.getDiagnostics(TRAIN).orElseThrow(), train);
   }
 
-  /** A —210— W —90— 车站，节点坐标沿 x 轴与边长一致，供车头位置插值。 */
+  /** A —400— W —90— 车站，节点坐标沿 x 轴与边长一致，供车头位置插值。 */
   private static SimpleRailGraph stationApproachGraph() {
     Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
     nodes.put(A, node(A, NodeType.WAYPOINT, 0.0));
     nodes.put(W, node(W, NodeType.WAYPOINT, ZONE_START));
-    nodes.put(STATION, node(STATION, NodeType.STATION, 300.0));
+    nodes.put(STATION, node(STATION, NodeType.STATION, STATION_X));
     Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
-    edge(edges, A, W, 210);
+    edge(edges, A, W, 400);
     edge(edges, W, STATION, 90);
     return new SimpleRailGraph(nodes, edges, java.util.Set.of());
   }

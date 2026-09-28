@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -2151,7 +2152,7 @@ public final class FtaTimetableCommand {
   static RunCurveModel.Settings runCurveSettings(ConfigManager.ConfigView config) {
     if (config == null) {
       return new RunCurveModel.Settings(
-          RunCurveModel.MotionParams.defaults(),
+          SpeedCurve.defaults(),
           FALLBACK_SPEED_BPS,
           StopApproach.Rule.disabled(),
           ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS);

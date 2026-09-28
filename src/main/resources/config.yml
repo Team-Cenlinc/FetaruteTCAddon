@@ -330,7 +330,8 @@ timetable:
 train:
   # 默认车种（metro/emu/dmu/diesel_push_pull/electric_loco）：未打车种标签的车与编表、ETA 的运行曲线都按它算，改动后需重新 build 时刻表
   default-type: metro
-  # 各车种加减速（blocks/s²，1 block 按 1 米计）：低速段平均起动加速度与常用制动减速度，不是紧急制动
+  # 各车种加减速（blocks/s²，1 block 按 1 米计）：低速段平均起动加速度与常用制动减速度，不是紧急制动。
+  # 实际按首尾柔和的 S 形曲线变化（起步、到速、开始制动、减到末速度各有 1.5~2.5 秒渐变），控车与编表同一条曲线
   types:
     # 地铁/轻轨型电动车组（含 tram-train）：站距短、起停频繁
     metro:

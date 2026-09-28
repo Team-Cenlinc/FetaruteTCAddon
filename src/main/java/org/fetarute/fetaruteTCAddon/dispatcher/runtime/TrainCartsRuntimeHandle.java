@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import com.bergerkiller.bukkit.tc.actions.Action;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.components.ActionTracker;
@@ -8,7 +9,6 @@ import com.bergerkiller.bukkit.tc.controller.components.RailPath;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.controller.components.RailTracker;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
-import com.bergerkiller.bukkit.tc.utils.LaunchFunction;
 import com.bergerkiller.bukkit.tc.utils.LauncherConfig;
 import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
   private static final String ACTION_TAG_LAUNCH = "fta_launch";
+  private static final double TICKS_PER_SECOND = 20.0;
   private static final int PATH_NODE_SEARCH_DISTANCE = 64;
   private static final int MAX_LIVE_BODY_WALK_STEPS = 256;
   private static final double MAX_LIVE_BODY_WALK_DISTANCE_BLOCKS = 512.0;
@@ -610,7 +611,6 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return true;
     }
     group.getActions().launchReset();
-    LauncherConfig launchConfig = accelerationLaunchConfig(accelBlocksPerTickSquared);
     TrainProperties properties = group.getProperties();
     LoggerManager logger = resolveLoggerManager();
     LaunchDirectionResult directionResult =
@@ -639,20 +639,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
               + " detail="
               + detail);
     }
-    if (directionOpt.isPresent()) {
-      // 使用“带方向”的 launch，确保在折返/道岔附近发车时与 TrainCarts 寻路方向一致。
-      var action =
-          head.getActions().addActionLaunch(directionOpt.get(), launchConfig, targetBlocksPerTick);
-      if (action != null) {
-        action.addTag(ACTION_TAG_LAUNCH);
-      }
-      return action != null;
-    }
-    var action = head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
-    if (action != null) {
-      action.addTag(ACTION_TAG_LAUNCH);
-    }
-    return action != null;
+    // 使用“带方向”的发车，确保在折返/道岔附近发车时与 TrainCarts 寻路方向一致；方向未知时沿当前方向。
+    return addLaunchAction(
+        head, directionOpt.orElse(null), targetBlocksPerTick, accelBlocksPerTickSquared);
   }
 
   /**
@@ -678,7 +667,6 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     head.getActions().clear();
 
     // 立即发车
-    LauncherConfig launchConfig = accelerationLaunchConfig(accelBlocksPerTickSquared);
     LoggerManager logger = resolveLoggerManager();
     if (logger != null) {
       TrainProperties properties = group.getProperties();
@@ -695,10 +683,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
               + " targetBpt="
               + targetBlocksPerTick);
     }
-    var action = head.getActions().addActionLaunch(direction, launchConfig, targetBlocksPerTick);
-    if (action != null) {
-      action.addTag(ACTION_TAG_LAUNCH);
-    }
+    addLaunchAction(head, direction, targetBlocksPerTick, accelBlocksPerTickSquared);
   }
 
   /**
@@ -730,7 +715,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return;
     }
     double currentSpeed = currentSpeedBlocksPerTick();
-    double tolerance = Math.max(0.005, Math.abs(targetBlocksPerTick) * 0.05);
+    // 与 TrainLaunchManager 的补牵引判定同一容差（目标的 1%）：更大的容差会让小幅回升的限速（如 8.0→8.33）永远不补牵引，
+    // 而编表运行曲线在任何回升处都会重新加速。
+    double tolerance = Math.max(0.005, Math.abs(targetBlocksPerTick) * 0.01);
     // 如果当前速度已经接近目标，不需要重新下发动作
     if (Math.abs(currentSpeed - targetBlocksPerTick) <= tolerance) {
       return;
@@ -742,31 +729,43 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       }
       head.getActions().clear();
     }
-    // 无论目标是加速还是减速，都交给 TrainCarts launch action 按加速度平滑收敛。
-    LauncherConfig launchConfig = accelerationLaunchConfig(accelBlocksPerTickSquared);
-    var action = head.getActions().addActionLaunch(launchConfig, targetBlocksPerTick);
-    if (action != null) {
-      action.addTag(ACTION_TAG_LAUNCH);
-    }
+    // 加速按 S 形曲线提速；减速时第一 tick 就落到目标，把 TrainCarts 速度向量重置为目标值（截速不缩短向量）。
+    addLaunchAction(head, null, targetBlocksPerTick, accelBlocksPerTickSquared);
   }
 
   /**
-   * 按加速度发车或调速的 launch 配置，固定使用线性曲线。
+   * 挂上本插件的发车/调速动作。
    *
-   * <p>{@link LauncherConfig#createDefault()} 跟随 TrainCarts 的 {@code launchFunction}（实服为
-   * bezier）。bezier 每段开头的加速度为 0， 而进行中的 launch 只要 speedLimit 变化就会从当前速度重新规划一段：调度层按车头距离连续更新限速、逐 tick
-   * 斜坡也在写限速， bezier 于是反复从零加速度起步，发车加速被拖到原来的几分之一（实服 2026-09-27 OFL→HAS 头 50 格 26 秒，正常约 11 秒）。
-   * 线性曲线每次重算都按同一加速度接着走，不受干扰时的总用时与 bezier 相同；TrainCarts 解析带加速度的发车牌子时也默认改用线性。
+   * <p>加速度有效时用 {@link CurveLaunchAction}，与编表运行曲线同一条 S 形加速曲线；加速度无效（车种配置缺失）时退回 TrainCarts 默认的
+   * launch。两者都打上 {@link #ACTION_TAG_LAUNCH}，供重复下发与外来动作判断识别。
    *
-   * @param accelBlocksPerTickSquared 加速度（blocks/tick²）；不大于 0 时保持默认配置
+   * @param direction 起动方向；为 {@code null} 时沿当前方向
+   * @return TrainCarts 是否接受了动作
    */
-  static LauncherConfig accelerationLaunchConfig(double accelBlocksPerTickSquared) {
-    LauncherConfig config = LauncherConfig.createDefault();
-    if (accelBlocksPerTickSquared > 0.0) {
-      config.setFunction(LaunchFunction.Linear.class);
-      config.setAcceleration(accelBlocksPerTickSquared);
+  private static boolean addLaunchAction(
+      MinecartMember<?> head,
+      BlockFace direction,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
+    Action action;
+    if (accelBlocksPerTickSquared > 0.0 && Double.isFinite(accelBlocksPerTickSquared)) {
+      double accelBps2 = accelBlocksPerTickSquared * TICKS_PER_SECOND * TICKS_PER_SECOND;
+      action =
+          head.getActions()
+              .addGroupAction(new CurveLaunchAction(accelBps2, targetBlocksPerTick, direction));
+    } else if (direction != null) {
+      action =
+          head.getActions()
+              .addActionLaunch(direction, LauncherConfig.createDefault(), targetBlocksPerTick);
+    } else {
+      action =
+          head.getActions().addActionLaunch(LauncherConfig.createDefault(), targetBlocksPerTick);
     }
-    return config;
+    if (action == null) {
+      return false;
+    }
+    action.addTag(ACTION_TAG_LAUNCH);
+    return true;
   }
 
   @Override

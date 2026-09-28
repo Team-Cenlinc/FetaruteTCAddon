@@ -24,6 +24,8 @@ import org.bukkit.Location;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -108,11 +110,19 @@ class ApproachPathAlignmentTest {
     ControlDiagnostics diagnostics =
         signalTick(List.of(A, B, C, FAR_STATION), xs, slowEdges, stops, 6.0, 10.0, LINE_BPS);
 
-    assertEquals(
-        Math.sqrt(64.0 + 2.0 * 1.0 * 90.0),
-        diagnostics.finalTargetBps(),
-        1.0e-6,
-        diagnostics.toString());
+    // 编表与控车共用的天花板：车头之后 90 格 @20、100 格 @8、50 格 @20，进站限速区 [C, 车站] 限 6。
+    double expected =
+        SpeedCeiling.of(
+                new double[] {90, 100, 50},
+                new double[] {LINE_BPS, 8.0, LINE_BPS},
+                List.of(
+                    new SpeedCeiling.Cap(190.0, 240.0, 6.0),
+                    new SpeedCeiling.Cap(240.0, 240.0, 6.0)),
+                6.0,
+                new SpeedCurve(1.0, 1.0))
+            .limitBps(0.0);
+    assertTrue(expected < LINE_BPS, "x=10 应已在慢速边的制动段内");
+    assertEquals(expected, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
     assertEquals("edge_speed_lookahead", diagnostics.finalLimiterSource(), diagnostics.toString());
   }
 

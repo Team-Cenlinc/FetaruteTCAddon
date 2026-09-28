@@ -1,13 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -201,56 +199,6 @@ public final class RuntimeTrainController {
     launchManager.releaseSpeedRamp(train);
     properties.setSpeedLimit(targetBpt);
     train.forceRelaunch(direction, targetBpt, accelBpt2);
-  }
-
-  /**
-   * 进站限速，与编表运行曲线（{@code RunCurveModel}）同一口径。
-   *
-   * <p>进站限速区由 {@link StopApproach#zones} 划定（编表与控车共用）。区内不超过进站限速；区外按列车减速度制动至前方每个限速区的起点并取最低，即 √(v² +
-   * 2·a·到区起点的距离)——运行曲线反向推算的“理想司机”就是这样开的，控车照此执行，表定时分才对得上实际。
-   *
-   * @param approachLimitBps 进站限速，必须为正
-   * @param decelBps2 列车减速度；非正或非有限时只在区内限速，区外不设限
-   * @param zones 限速区，里程从本周期取样时的车头量起
-   * @param traveledBlocks 取样后又走过的距离
-   * @return 限速上限；此处不设限时返回 {@link Double#POSITIVE_INFINITY}
-   */
-  static double approachSpeedLimit(
-      double approachLimitBps,
-      double decelBps2,
-      List<StopApproach.Zone> zones,
-      double traveledBlocks) {
-    if (!Double.isFinite(approachLimitBps) || approachLimitBps <= 0.0 || zones == null) {
-      return Double.POSITIVE_INFINITY;
-    }
-    boolean brakeInto = Double.isFinite(decelBps2) && decelBps2 > 0.0;
-    double limit = Double.POSITIVE_INFINITY;
-    for (StopApproach.Zone zone : zones) {
-      if (zone.toBlocks() < traveledBlocks) {
-        continue;
-      }
-      double ahead = zone.fromBlocks() - traveledBlocks;
-      if (ahead <= 0.0) {
-        return approachLimitBps;
-      }
-      if (brakeInto) {
-        limit =
-            Math.min(
-                limit, Math.sqrt(approachLimitBps * approachLimitBps + 2.0 * decelBps2 * ahead));
-      }
-    }
-    return limit;
-  }
-
-  /**
-   * 进站限速的逐 tick 形式，供 {@link SpeedLimitRamp} 在调度周期之间按实际走过的距离求值；公式即 {@link #approachSpeedLimit}。
-   *
-   * <p>它给出的是制动至限速区的物理上界，不含周期取样时的边限速或 caution 速度，驶过节点后依然成立，因此可以作推进放行的保持约束。
-   */
-  static SpeedEnvelope.Constraint approachConstraint(
-      double approachLimitBps, double decelBps2, List<StopApproach.Zone> zones) {
-    List<StopApproach.Zone> fixed = zones == null ? List.of() : List.copyOf(zones);
-    return traveled -> approachSpeedLimit(approachLimitBps, decelBps2, fixed, traveled);
   }
 
   private static double toBlocksPerTick(double blocksPerSecond) {
