@@ -15,10 +15,14 @@ import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.block.BlockFace;
@@ -2575,8 +2579,26 @@ public final class AutoStationDoorController {
 
   private record ChimeLocation(Location location, ChimeSound override) {}
 
+  /**
+   * 原版声音注册表 key 对应的常量式名字：{@code minecraft:block.note_block.bell} → {@code BLOCK_NOTE_BLOCK_BELL}。
+   *
+   * <p>与 Bukkit 旧 {@code Sound} 枚举常量的命名规则一致，用来兼容配置里的常量式写法；非原版命名空间返回 null。
+   *
+   * @param key 声音注册表 key
+   * @return 常量式名字；非原版命名空间为 null
+   */
+  static String soundConstantName(NamespacedKey key) {
+    if (key == null || !NamespacedKey.MINECRAFT.equals(key.getNamespace())) {
+      return null;
+    }
+    return key.getKey().replace('.', '_').toUpperCase(Locale.ROOT);
+  }
+
   /** 支持 Bukkit Sound 或自定义 sound key 的提示音封装。 */
   private record ChimeSound(Sound enumSound, String soundKey, float volume, float pitch) {
+    private static final Map<String, Optional<Sound>> SOUNDS_BY_CONSTANT_NAME =
+        new ConcurrentHashMap<>();
+
     static ChimeSound from(String raw, float volume, float pitch) {
       if (raw == null || raw.isBlank() || "none".equalsIgnoreCase(raw)) {
         return disabled();
@@ -2619,15 +2641,29 @@ public final class AutoStationDoorController {
       return 1.0f;
     }
 
+    /**
+     * 按配置里的常量式名字（如 {@code BLOCK_NOTE_BLOCK_BELL}）在声音注册表里找原版声音；找不到时返回 null，调用方把原字符串当自定义声音 key 播放。
+     *
+     * <p>1.21.3 起 {@link Sound} 不再是枚举，{@code Sound.valueOf} 已弃用并将删除。常量名由原版注册表 key 大写、点换下划线得来（{@code
+     * block.note_block.bell} → {@code BLOCK_NOTE_BLOCK_BELL}），这里按同一规则反查。每停一次站都会解析一次，结果按名字缓存。
+     */
     private static Sound parseEnumSound(String raw) {
       if (raw == null || raw.isBlank()) {
         return null;
       }
-      try {
-        return Sound.valueOf(raw.trim().toUpperCase(Locale.ROOT));
-      } catch (IllegalArgumentException ex) {
-        return null;
-      }
+      return SOUNDS_BY_CONSTANT_NAME
+          .computeIfAbsent(raw.trim().toUpperCase(Locale.ROOT), ChimeSound::lookupVanillaSound)
+          .orElse(null);
+    }
+
+    private static Optional<Sound> lookupVanillaSound(String constantName) {
+      return Registry.SOUNDS.stream()
+          .filter(
+              sound -> {
+                NamespacedKey key = Registry.SOUNDS.getKey(sound);
+                return key != null && constantName.equals(soundConstantName(key));
+              })
+          .findFirst();
     }
   }
 }

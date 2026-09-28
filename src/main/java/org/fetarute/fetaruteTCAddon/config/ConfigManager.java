@@ -424,7 +424,7 @@ public final class ConfigManager {
     }
     logger.info(
         smartDispatcherBuildFingerprintTrace(
-            plugin.getDescription().getVersion(),
+            plugin.getPluginMeta().getVersion(),
             buildInfoProperty("gitCommit"),
             buildInfoProperty("buildTime").or(() -> buildInfoProperty("buildId")),
             pluginJarPath(),
@@ -435,7 +435,7 @@ public final class ConfigManager {
             smartDispatcherDefaultUsedFlags(config)));
     logger.info(
         smartRuntimeBuildFingerprintTrace(
-            plugin.getDescription().getVersion(),
+            plugin.getPluginMeta().getVersion(),
             buildInfoProperty("gitCommit"),
             buildInfoProperty("buildTime").or(() -> buildInfoProperty("buildId"))));
     logger.info(smartDispatcherPlannerConfigTrace(plannerSettings));
