@@ -85,6 +85,29 @@ public final class SignalLookahead {
           Collections.emptyList());
     }
 
+    /**
+     * 返回限速边距离改为从车头量起的副本。
+     *
+     * <p>前瞻沿路径从当前图节点起算，而车头已驶过该节点 {@code headProgressBlocks}。起点已被车头越过的限速边记 0（车头已在该边上，
+     * 限速即刻生效）。只平移限速边：阻塞/caution/approach 距离仍按节点起算，信号判定与诊断沿用原口径。
+     *
+     * @param headProgressBlocks 车头已驶过当前图节点的距离；不大于 0 时原样返回
+     */
+    public LookaheadResult withEdgeSpeedConstraintsShiftedBy(long headProgressBlocks) {
+      if (headProgressBlocks <= 0L || edgeSpeedConstraints.isEmpty()) {
+        return this;
+      }
+      List<EdgeSpeedConstraint> shifted = new ArrayList<>(edgeSpeedConstraints.size());
+      for (EdgeSpeedConstraint constraint : edgeSpeedConstraints) {
+        shifted.add(
+            new EdgeSpeedConstraint(
+                Math.max(0L, constraint.distanceBlocks() - headProgressBlocks),
+                constraint.speedLimitBps()));
+      }
+      return new LookaheadResult(
+          distanceToBlocker, distanceToCaution, distanceToApproach, effectiveSignal, shifted);
+    }
+
     /** 获取到最近限制点的距离（用于速度曲线计算）。 */
     public OptionalLong minConstraintDistance() {
       return minStopConstraintDistance();

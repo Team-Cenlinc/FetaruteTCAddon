@@ -75,19 +75,30 @@ tags:
 - 普通 `Waypoint` stop：只在该 STOP/TERMINATE waypoint 自身进入窗口时使用 `runtime.approach-speed-bps`。
 - `PASS` 站、普通区间点、未 materialize 的动态占位符不会触发 approach 限速。
 
-进入 approach 窗口后不会直接硬切低速。运行时会基于 expanded route 计算到 station/depot/throat/switcher 的总距离，并扣除最后 `approach-target-edges` 条 edge 的长度，按 `sqrt(v_limit^2 + 2 * decel * distance)` 生成速度包络。包络阶段的 `final_limiter_source=approach_curve`；真正进入目标 edge 区间后 limiter 会显示为 `approach`、`depot_approach` 或 `stop_waypoint_approach`。
+进入 approach 窗口后不会直接硬切低速。运行时会基于 expanded route 计算到 station/depot/throat/switcher 的总距离（从车头量起），并扣除最后 `approach-target-edges` 条 edge 的长度，按 `sqrt(v_limit^2 + 2 * decel * distance)` 生成速度包络。包络阶段的 `final_limiter_source=approach_curve`；真正进入目标 edge 区间后 limiter 会显示为 `approach`、`depot_approach` 或 `stop_waypoint_approach`。
+
+进站区（窗口 + 其前 64 格预减速区）之外还有一段**导入制动**：线路速度较高时，区界处的区内包络已经低于线路速度（例如 22.2 bps、进站 10 bps、末边 40 格时区界即约 18.4），只在区内限速会在进区那一拍一刀切下。区外因此按列车减速度反推 `sqrt(E_b^2 + 2 * decel * (d - 区界))`，`E_b` 为区界处的区内包络，保证到区界时恰好降到它。区内规则不变，低速运行的范围仍只到区界为止。导入制动限速时诊断会显示进站信息，`approach_reason` 中 `engaged=false`。
 
 `/fta train debug` 会额外输出 `approach_node`、`approach_kind`、`approach_reason`、`distance_to_approach` 与 `approach_limit_bps`，用于判断 32 bps 之类的低速到底来自真实停靠、Depot approach、STOP waypoint，还是其它 limiter。
 
 占用相关诊断会显示 `signal_blocker_resources`、`request_resources` 与 `current_claims_for_train` 的摘要。若正常出站被红灯卡住，先确认 blocker owner 是否为自身、后车前瞻、尾部保护、Depot spawn 预占或真正前车。
 
 ## 控车节流与补能
-- 每次调度 tick 都会刷新 `speedLimit`，加减速曲线由 TrainCarts 的 WaitAcceleration 接管。
+- 每次调度 tick 都会刷新 `speedLimit`。注意 TrainCarts 的 `speedLimit` 是硬上限：每个物理步都把实体最大速度设成它，改低后下一 tick 就截速，
+  不经过任何减速过程；`WaitAcceleration` 只作用于跟车（waitDistance）、互斥区与阻挡牌，**不平滑 speedLimit**。
+- 两次调度之间由逐 tick 限速斜坡（`SpeedLimitRamp`）沿本周期的速度包络继续下调：包络只收“距离从车头量起”的曲线——进站包络与前方限速边；
+  每 tick 按实际走过的距离重算，一次最多下调约 0.1 bps。斜坡只降不升，发现限速被别处改写（STOP、居中、重发等）即退出，连续三个调度周期未刷新也退出。
+- 进站包络与前方限速边的距离从车头量起（`TrainPositionResolver` 插值车头在当前边上的位置）；阻塞/授权终点的停车曲线仍从当前图节点量起——
+  车站的授权终点也会进入那条“刹到 0”的曲线，改成车头起算会让车停在站牌前。
+- 过节点时的推进放行（没有前瞻与进站上下文的 PROCEED）不得越过斜坡登记的进站限速，否则进站途中每过一个节点就会先把限速抬回线路速度、
+  下一拍再砍回去。只挡进站限速：前方限速边越过即失效，周期命令值里又有上调限幅的滞后，拿它们封顶会扣住减速解除后推进放行的补牵引。
+- TrainCarts 截速只截本步位移，实体速度向量本身不缩短：限速被压低后向量里仍留着旧速度，限速一抬就会瞬间弹回。
+  运动中目标下降时下发的那次 launch 起的正是“把向量重置为目标值”的作用，不是平滑。
 - “运动中补能”的 launch/accelerate 在信号变化、强制刷新或低速 failover 时下发；此外目标速度比当前车速高出 5% 以上（驶过慢速边、授权延伸）且列车身上没有别的 TrainCarts 动作时也补一次牵引——TrainCarts 列车不会因为 speedLimit 调高就自己加速。停站等待、停稳居中等动作还在队列里时不补（launch 会排在它们后面执行），报告不了动作队列的实现也不补。已在执行的本插件 launch 不会被重复下发。
 - 速度命令新增“限幅 + 迟滞”保护：
   - `runtime.speed-command-hysteresis-bps`
   - `runtime.speed-command-accel-factor`
-  - `runtime.speed-command-decel-factor`
-- 发车/放行/运行中补牵引时会跳过“上行限幅”，由 TrainCarts launch + WaitAcceleration 接管起步与提速斜率，避免目标速度被压到极低。
-- 降低 `speedLimit` 不做降速限幅，也不受迟滞保护。边限速、前方低限速、移动授权、approach 与 STOP 这类安全上限必须立即写入；实际车辆不会瞬间减速，平滑制动由 WaitAcceleration 负责。
+  - `runtime.speed-command-decel-factor`（兼容旧配置，已不生效）
+- 发车/放行/运行中补牵引时会跳过“上行限幅”，由 TrainCarts launch 按车型加速度接管起步与提速斜率，避免目标速度被压到极低。
+- 降低 `speedLimit` 不做降速限幅，也不受迟滞保护。边限速、前方低限速、移动授权、approach 与 STOP 这类安全上限必须立即写入。
 - 授权距离不足时会触发移动授权降级（Movement Authority），与速度限幅协同防止冒进与急剧速度跳变；`ARTIFICIAL_WINDOW_LIMIT` 属于人工窗口截断，只能触发内部扩展和诊断，不能单独发布黄灯/红灯。

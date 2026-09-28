@@ -63,6 +63,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostic
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthorityService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDistanceCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
@@ -1369,6 +1370,13 @@ public final class RuntimeDispatchService {
    * <p>approach 描述“列车已经进入下一处停靠 stop 的进路窗口或预制动 preview 区”。窗口按当前节点到停靠 stop 的展开路径距离计算，普通 PASS
    * 站、普通区间点与动态占位符不应仅凭节点编码触发 approach。
    */
+  /**
+   * 下一处停靠点的进站控制。
+   *
+   * @param distanceBlocks 从车头到进站触发点的距离
+   * @param targetEdgeDistanceBlocks 触发点前最后若干条边的总长（不随列车前进而变）
+   * @param engaged 车头是否已进入进站窗口或其前的预减速区。只有它影响目标速度、诊断与前瞻；未进入时限速与距离照样给出， 仅供逐 tick 斜坡按同一判据在周期之间接上
+   */
   private record ApproachControl(
       Optional<NodeId> node,
       String kind,
@@ -1376,7 +1384,8 @@ public final class RuntimeDispatchService {
       OptionalDouble limitBps,
       OptionalLong distanceBlocks,
       OptionalLong targetEdgeDistanceBlocks,
-      int edgeCount) {
+      int edgeCount,
+      boolean engaged) {
     private ApproachControl {
       node = node == null ? Optional.empty() : node;
       kind = kind == null || kind.isBlank() ? "none" : kind.trim();
@@ -1395,11 +1404,12 @@ public final class RuntimeDispatchService {
           OptionalDouble.empty(),
           OptionalLong.empty(),
           OptionalLong.empty(),
-          -1);
+          -1,
+          false);
     }
 
     private boolean activeFor(NodeId candidate) {
-      return candidate != null && node.isPresent() && node.get().equals(candidate);
+      return engaged && candidate != null && node.isPresent() && node.get().equals(candidate);
     }
   }
 
@@ -1491,8 +1501,10 @@ public final class RuntimeDispatchService {
       OptionalDouble movementAuthorityLimitBps,
       OptionalDouble edgeSpeedLookaheadMinBps,
       double targetBps,
-      String limiterSource) {
+      String limiterSource,
+      SpeedEnvelope envelope) {
     private TargetSpeedDecision {
+      envelope = envelope == null ? SpeedEnvelope.empty() : envelope;
       cautionSource =
           cautionSource == null || cautionSource.isBlank() ? "none" : cautionSource.trim();
       approachLimitBps = approachLimitBps == null ? OptionalDouble.empty() : approachLimitBps;
@@ -14739,8 +14751,19 @@ public final class RuntimeDispatchService {
           trainName, token, authorizationRequest, HardStopReason.AUTHORIZATION_FAILURE);
       return;
     }
+    // 进站包络与前方限速边改从车头量起：从当前图节点量起的距离在两节点之间不缩短，过节点时目标速度整段跳变。
+    // 停车曲线（阻塞/授权终点）仍按节点起算——车站的授权终点也会进入那条“刹到 0”的曲线，改成车头起算会让车停在站牌前。
+    long headProgressBlocks =
+        currentIndex + 1 < effectiveNodes.size()
+            ? resolveHeadProgressBlocks(
+                train,
+                graph,
+                effectiveNodes.get(currentIndex),
+                effectiveNodes.get(currentIndex + 1))
+            : 0L;
     ApproachControl approachControl =
-        resolveApproachControl(graph, route, effectiveNodes, currentIndex, currentNodeOpt.get());
+        resolveApproachControl(
+            graph, route, effectiveNodes, currentIndex, currentNodeOpt.get(), headProgressBlocks);
     OptionalLong distanceOpt = OptionalLong.empty();
     OptionalLong constraintDistanceOpt = OptionalLong.empty();
     OptionalLong blockerDistanceOpt = OptionalLong.empty();
@@ -15754,7 +15777,7 @@ public final class RuntimeDispatchService {
         graph,
         allowLaunch,
         effectiveDistanceOpt,
-        lookahead,
+        lookahead == null ? null : lookahead.withEdgeSpeedConstraintsShiftedBy(headProgressBlocks),
         new ControlSpeedOverrides(
             approachOverrideBps,
             movementAuthorityLimitBps,
@@ -18600,6 +18623,8 @@ public final class RuntimeDispatchService {
    * 将信号许可映射为速度/制动控制。
    *
    * <p>PROCEED 发车并恢复巡航速度；CAUTION 限速；STOP 按剩余距离制动并在停车点保持。
+   *
+   * <p>这一入口没有前瞻与进站上下文（过节点推进、兜底停车），以 {@code null} 覆盖项标明“无速度上下文”： 执行层据此不让本次命令高于该车最近一次带上下文的命令。
    */
   private void applyControl(
       RuntimeTrainHandle train,
@@ -18622,7 +18647,7 @@ public final class RuntimeDispatchService {
         allowLaunch,
         distanceOpt,
         null,
-        ControlSpeedOverrides.empty());
+        null);
   }
 
   private void applyControl(
@@ -18750,7 +18775,8 @@ public final class RuntimeDispatchService {
             distanceOpt,
             launchFallbackDirection,
             configManager.current().runtimeSettings(),
-            stopMode);
+            stopMode,
+            speedOverrides == null ? null : speedDecision.envelope());
 
     // 记录诊断数据
     recordDiagnostics(
@@ -18807,7 +18833,8 @@ public final class RuntimeDispatchService {
                 OptionalDouble.empty(),
                 OptionalDouble.empty(),
                 0.0,
-                "none");
+                "none",
+                SpeedEnvelope.empty());
     TrainLaunchManager.ControlApplicationResult result =
         applicationResult != null
             ? applicationResult
@@ -18819,7 +18846,11 @@ public final class RuntimeDispatchService {
             : result.finalLimiterSource();
     ControlSpeedOverrides overrides =
         speedOverrides != null ? speedOverrides : ControlSpeedOverrides.empty();
-    ApproachControl approach = overrides.approachControl();
+    // 进站控制只在已进入进站区、或区外导入制动已在限速时显示；否则触发点只是给逐 tick 斜坡备用，按“无进站”显示。
+    ApproachControl approach =
+        overrides.approachControl().engaged() || decision.approachLimitBps().isPresent()
+            ? overrides.approachControl()
+            : ApproachControl.none();
     AuthorityEnd authorityEnd = overrides.authorityEnd();
     BlockedDestinationDiagnostic blockedDestination = overrides.blockedDestination();
 
@@ -27379,27 +27410,48 @@ public final class RuntimeDispatchService {
     }
     double target = base;
     OptionalDouble approachLimitBps = OptionalDouble.empty();
+    // 随距离收紧、且距离已从车头量起的约束，交给逐 tick 限速斜坡在周期之间继续求值。
+    SpeedEnvelope envelope = SpeedEnvelope.empty();
     ControlSpeedOverrides overrides =
         speedOverrides != null ? speedOverrides : ControlSpeedOverrides.empty();
     if (overrides.approachLimitBps().isPresent()) {
       double override = overrides.approachLimitBps().getAsDouble();
       if (Double.isFinite(override) && override > 0.0) {
         ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
-        double approachEnvelope =
-            RuntimeTrainController.resolveApproachSpeedEnvelope(
-                target,
-                override,
-                decelBps2,
-                overrides.approachControl().distanceBlocks(),
-                overrides.approachControl().targetEdgeDistanceBlocks(),
-                overrides.approachControl().edgeCount(),
-                runtime,
-                APPROACH_PREVIEW_DISTANCE_BLOCKS);
-        approachLimitBps =
-            OptionalDouble.of(
-                approachLimitBps.isPresent()
-                    ? Math.min(approachLimitBps.getAsDouble(), override)
-                    : override);
+        ApproachControl approach = overrides.approachControl();
+        double approachEnvelope = target;
+        if (approach.distanceBlocks().isPresent()) {
+          // 区内按进站包络、区外按导入制动（到区界恰好降到区内包络）；逐 tick 斜坡用同一公式在周期之间接上。
+          approachEnvelope =
+              RuntimeTrainController.resolveApproachSpeedLimit(
+                  target,
+                  override,
+                  decelBps2,
+                  approach.distanceBlocks().getAsLong(),
+                  approach.targetEdgeDistanceBlocks(),
+                  approach.edgeCount(),
+                  runtime,
+                  APPROACH_PREVIEW_DISTANCE_BLOCKS);
+          // 列车会在该站停下，进站限速随列车前进一直有效，登记为保持约束：过节点的推进放行也不得越过它。
+          envelope =
+              envelope.withHold(
+                  RuntimeTrainController.approachConstraint(
+                      target,
+                      override,
+                      decelBps2,
+                      approach.distanceBlocks().getAsLong(),
+                      approach.targetEdgeDistanceBlocks(),
+                      approach.edgeCount(),
+                      runtime,
+                      APPROACH_PREVIEW_DISTANCE_BLOCKS));
+        }
+        if (approach.engaged() || approachEnvelope < target) {
+          approachLimitBps =
+              OptionalDouble.of(
+                  approachLimitBps.isPresent()
+                      ? Math.min(approachLimitBps.getAsDouble(), override)
+                      : override);
+        }
         if (approachEnvelope < target) {
           target = approachEnvelope;
           limiterSource =
@@ -27425,6 +27477,9 @@ public final class RuntimeDispatchService {
         target = lookedAhead;
         limiterSource = "edge_speed_lookahead";
       }
+      envelope =
+          envelope.withAll(
+              SpeedEnvelope.edgeSpeedConstraints(lookahead.edgeSpeedConstraints(), decelBps2));
     }
     return new TargetSpeedDecision(
         edgeLimit,
@@ -27434,7 +27489,8 @@ public final class RuntimeDispatchService {
         overrides.movementAuthorityLimitBps(),
         edgeLookaheadLimit,
         target,
-        limiterSource);
+        limiterSource,
+        envelope);
   }
 
   private static String resolveApproachLimiterSource(
@@ -27452,17 +27508,23 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 按展开后的 route 路径解析当前是否进入 approach 窗口。
+   * 按展开后的 route 路径解析下一处停靠点的进站控制。
    *
    * <p>Route 往往只写停靠点，不写沿途 throat/switcher。本方法从当前 route index 向前找到下一处非 PASS stop，再按调度图最短路展开 route
-   * 片段，计算到 station/depot/STOP waypoint 的真实距离。只有距离或边数进入配置窗口后，才返回有效 approach 限速。
+   * 片段，计算到 station/depot/STOP waypoint 的真实距离。
+   *
+   * <p>距离从<b>车头</b>量起：从当前图节点量起的距离在两节点之间不缩短，旧做法要等过了节点才进入窗口，此时预减速已应走完一段， 那一拍就是一刀。是否进入“窗口 + 预减速区”记在
+   * {@link ApproachControl#engaged()}，只有它影响目标速度、诊断与前瞻； 尚未进入时照样返回触发点，供逐 tick 斜坡在周期之间按同一判据接上。
+   *
+   * @param headProgressBlocks 车头已驶过 {@code effectiveNodes[currentIndex]} 的距离
    */
   private ApproachControl resolveApproachControl(
       RailGraph graph,
       RouteDefinition route,
       List<NodeId> effectiveNodes,
       int currentIndex,
-      NodeId currentNode) {
+      NodeId currentNode,
+      long headProgressBlocks) {
     if (graph == null
         || route == null
         || effectiveNodes == null
@@ -27494,15 +27556,14 @@ public final class RuntimeDispatchService {
     }
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
     ApproachTrigger trigger = triggerOpt.get();
+    long headDistance = Math.max(0L, trigger.distanceBlocks() - Math.max(0L, headProgressBlocks));
     ApproachWindowState windowState =
-        resolveApproachWindowState(runtime, trigger.distanceBlocks(), trigger.edgeCount());
-    if (!windowState.active()) {
-      return ApproachControl.none();
-    }
+        resolveApproachWindowState(runtime, headDistance, trigger.edgeCount());
     double limit =
         "depot".equals(target.kind())
             ? runtime.approachDepotSpeedBps()
             : runtime.approachSpeedBps();
+    // targetEdgeDistance 是触发点前最后若干条边的长度，不是到某点的距离，不随车头平移。
     long targetEdgeDistance = trigger.targetEdgeDistanceBlocks(runtime.approachTargetEdges());
     String reason =
         "route_stop:"
@@ -27510,6 +27571,8 @@ public final class RuntimeDispatchService {
             + ";"
             + trigger.reason()
             + ";distance="
+            + headDistance
+            + ";node_distance="
             + trigger.distanceBlocks()
             + ";edges="
             + trigger.edgeCount()
@@ -27526,15 +27589,18 @@ public final class RuntimeDispatchService {
             + ";approach_ratio="
             + formatApproachDouble(windowState.ratio())
             + ";approach_limit="
-            + formatApproachDouble(limit);
+            + formatApproachDouble(limit)
+            + ";engaged="
+            + windowState.active();
     return approachWithLimit(
         trigger.node(),
         target.kind(),
         reason,
         limit,
-        OptionalLong.of(trigger.distanceBlocks()),
+        OptionalLong.of(headDistance),
         OptionalLong.of(targetEdgeDistance),
-        trigger.edgeCount());
+        trigger.edgeCount(),
+        windowState.active());
   }
 
   private Optional<IndexedRouteStop> findNextStoppingRouteStop(
@@ -27729,7 +27795,8 @@ public final class RuntimeDispatchService {
       double limitBps,
       OptionalLong distanceBlocks,
       OptionalLong targetEdgeDistanceBlocks,
-      int edgeCount) {
+      int edgeCount,
+      boolean engaged) {
     OptionalDouble limit =
         Double.isFinite(limitBps) && limitBps > 0.0
             ? OptionalDouble.of(limitBps)
@@ -27741,7 +27808,8 @@ public final class RuntimeDispatchService {
         limit,
         distanceBlocks,
         targetEdgeDistanceBlocks,
-        edgeCount);
+        edgeCount,
+        engaged);
   }
 
   private CautionSpeedDecision resolveCautionSpeedDecision(UUID worldId, NodeId nodeId) {
