@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailTravelTimeModels;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -355,7 +356,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                curve(RunCurveModel.ApproachRule.disabled(), 0),
+                curve(StopApproach.Rule.disabled(), 0),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 2, 20),
                 Duration.ZERO);
@@ -384,7 +385,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                curve(new RunCurveModel.ApproachRule(50.0, 0, 10.0, 5.0), 0),
+                curve(new StopApproach.Rule(50.0, 0, 10.0, 5.0), 0),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 2, 20),
                 Duration.ZERO);
@@ -410,7 +411,7 @@ class TimetableTimingCalculatorTest {
             new double[] {10.0, 10.0});
     RouteDefinition route =
         TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"));
-    RunTimeModel model = curve(RunCurveModel.ApproachRule.disabled(), 0);
+    RunTimeModel model = curve(StopApproach.Rule.disabled(), 0);
     TimetableTimingCalculator calculator = new TimetableTimingCalculator();
 
     TimetableTimingCalculator.TimingResult passing =
@@ -454,7 +455,7 @@ class TimetableTimingCalculatorTest {
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                curve(RunCurveModel.ApproachRule.disabled(), 0),
+                curve(StopApproach.Rule.disabled(), 0),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 2, 20),
                 Duration.ZERO);
@@ -534,7 +535,7 @@ class TimetableTimingCalculatorTest {
   }
 
   /** 生产用的走行模型：给定进站规则与停站开销，加减速都取 1，便于手算。 */
-  private static RunTimeModel curve(RunCurveModel.ApproachRule approach, int overhead) {
+  private static RunTimeModel curve(StopApproach.Rule approach, int overhead) {
     return new RunCurveModel(
         new RunCurveModel.Settings(
             new RunCurveModel.MotionParams(1.0, 1.0), 8.0, approach, overhead),

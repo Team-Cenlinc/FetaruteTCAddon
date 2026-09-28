@@ -1,11 +1,13 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -202,271 +204,53 @@ public final class RuntimeTrainController {
   }
 
   /**
-   * 计算 approach 速度包络。
+   * 进站限速，与编表运行曲线（{@code RunCurveModel}）同一口径。
    *
-   * <p>信号/调度层只提供“需要降速的目标、距离与配置”；这里统一把 preview 区线性下压、正式 approach 限速和物理制动包络合成最终速度上限。
+   * <p>进站限速区由 {@link StopApproach#zones} 划定（编表与控车共用）。区内不超过进站限速；区外按列车减速度制动至前方每个限速区的起点并取最低，即 √(v² +
+   * 2·a·到区起点的距离)——运行曲线反向推算的“理想司机”就是这样开的，控车照此执行，表定时分才对得上实际。
    *
-   * @param currentTargetBps 当前基础目标速度
-   * @param approachLimitBps approach 目标速度
-   * @param decelBps2 列车制动能力
-   * @param distanceBlocks 到 approach 目标的距离
-   * @param targetEdgeDistanceBlocks approach 目标边界距离
-   * @param edgeCount 到目标的边数量
-   * @param runtime 运行时控车配置
-   * @param previewDistanceBlocks 正式 approach 窗口外的预制动距离
-   * @return 合成后的 approach 速度上限
+   * @param approachLimitBps 进站限速，必须为正
+   * @param decelBps2 列车减速度；非正或非有限时只在区内限速，区外不设限
+   * @param zones 限速区，里程从本周期取样时的车头量起
+   * @param traveledBlocks 取样后又走过的距离
+   * @return 限速上限；此处不设限时返回 {@link Double#POSITIVE_INFINITY}
    */
-  static double resolveApproachSpeedEnvelope(
-      double currentTargetBps,
+  static double approachSpeedLimit(
       double approachLimitBps,
       double decelBps2,
-      OptionalLong distanceBlocks,
-      OptionalLong targetEdgeDistanceBlocks,
-      int edgeCount,
-      ConfigManager.RuntimeSettings runtime,
-      double previewDistanceBlocks) {
-    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
-      return 0.0;
+      List<StopApproach.Zone> zones,
+      double traveledBlocks) {
+    if (!Double.isFinite(approachLimitBps) || approachLimitBps <= 0.0 || zones == null) {
+      return Double.POSITIVE_INFINITY;
     }
-    if (!Double.isFinite(approachLimitBps) || approachLimitBps <= 0.0) {
-      return currentTargetBps;
+    boolean brakeInto = Double.isFinite(decelBps2) && decelBps2 > 0.0;
+    double limit = Double.POSITIVE_INFINITY;
+    for (StopApproach.Zone zone : zones) {
+      if (zone.toBlocks() < traveledBlocks) {
+        continue;
+      }
+      double ahead = zone.fromBlocks() - traveledBlocks;
+      if (ahead <= 0.0) {
+        return approachLimitBps;
+      }
+      if (brakeInto) {
+        limit =
+            Math.min(
+                limit, Math.sqrt(approachLimitBps * approachLimitBps + 2.0 * decelBps2 * ahead));
+      }
     }
-    if (runtime == null || distanceBlocks == null || distanceBlocks.isEmpty()) {
-      return Math.min(currentTargetBps, approachLimitBps);
-    }
-    long distance = distanceBlocks.getAsLong();
-    double previewRatio =
-        resolveApproachPreviewRatio(runtime, previewDistanceBlocks, distance, edgeCount);
-    double previewEnvelope =
-        approachPreviewSpeedLimit(currentTargetBps, approachLimitBps, previewRatio);
-    if (!runtime.speedCurveEnabled()
-        || targetEdgeDistanceBlocks == null
-        || targetEdgeDistanceBlocks.isEmpty()
-        || !Double.isFinite(decelBps2)
-        || decelBps2 <= 0.0) {
-      return previewEnvelope;
-    }
-    double brakingDistance = Math.max(0.0, distance - targetEdgeDistanceBlocks.getAsLong());
-    double brakingEnvelope =
-        Math.sqrt(
-            approachLimitBps * approachLimitBps
-                + 2.0 * decelBps2 * brakingDistance * runtime.speedCurveFactor());
-    if (!Double.isFinite(brakingEnvelope) || brakingEnvelope <= 0.0) {
-      return previewEnvelope;
-    }
-    return Math.min(previewEnvelope, Math.max(approachLimitBps, brakingEnvelope));
+    return limit;
   }
 
   /**
-   * 进站限速：区内按 {@link #resolveApproachSpeedEnvelope}，区外按导入制动。
+   * 进站限速的逐 tick 形式，供 {@link SpeedLimitRamp} 在调度周期之间按实际走过的距离求值；公式即 {@link #approachSpeedLimit}。
    *
-   * <p>“区”指进站窗口及其前的预减速区（{@link #approachEngaged}）。线路速度较高时，区界处的区内包络已低于线路速度——例如 22.2 bps、 进站 10
-   * bps、末边 40 格时区界即 18.4——只在区内限速，进区那一拍就是一刀。区外因此加一段导入制动：以区界处的区内包络 {@code E_b} 为终点速度，按列车制动能力反推 √(E_b²
-   * + 2·a·(d − 区界))，保证到区界时恰好降到 {@code E_b}。
-   *
-   * <p>当区内的物理制动曲线在区界起作用时，导入制动就是它向区外的延伸；目标点（触发点前最后若干条边的起点）远在区外时，
-   * 导入制动在区界降到进站限速。低速爬行的范围仍只到区界为止，不随末边变长而扩大。
-   *
-   * @param currentTargetBps 当前基础目标速度
-   * @param approachLimitBps 进站限速
-   * @param decelBps2 列车制动能力
-   * @param distanceBlocks 从车头到进站触发点的距离
-   * @param targetEdgeDistanceBlocks 触发点前最后若干条边的总长
-   * @param edgeCount 到触发点的边数
-   * @param runtime 运行时控车配置
-   * @param previewDistanceBlocks 预减速区长度
-   * @return 进站限速；不收紧时返回 {@code currentTargetBps}
-   */
-  static double resolveApproachSpeedLimit(
-      double currentTargetBps,
-      double approachLimitBps,
-      double decelBps2,
-      long distanceBlocks,
-      OptionalLong targetEdgeDistanceBlocks,
-      int edgeCount,
-      ConfigManager.RuntimeSettings runtime,
-      double previewDistanceBlocks) {
-    if (approachEngaged(runtime, distanceBlocks, edgeCount, previewDistanceBlocks)) {
-      return resolveApproachSpeedEnvelope(
-          currentTargetBps,
-          approachLimitBps,
-          decelBps2,
-          OptionalLong.of(distanceBlocks),
-          targetEdgeDistanceBlocks,
-          edgeCount,
-          runtime,
-          previewDistanceBlocks);
-    }
-    if (runtime == null
-        || !runtime.speedCurveEnabled()
-        || !Double.isFinite(currentTargetBps)
-        || currentTargetBps <= 0.0
-        || !Double.isFinite(decelBps2)
-        || decelBps2 <= 0.0
-        || targetEdgeDistanceBlocks == null
-        || targetEdgeDistanceBlocks.isEmpty()) {
-      return currentTargetBps;
-    }
-    long boundary = lastEngagedDistance(runtime, previewDistanceBlocks);
-    if (boundary < 0L || distanceBlocks <= boundary) {
-      return currentTargetBps;
-    }
-    double boundaryLimit =
-        resolveApproachSpeedEnvelope(
-            currentTargetBps,
-            approachLimitBps,
-            decelBps2,
-            OptionalLong.of(boundary),
-            targetEdgeDistanceBlocks,
-            edgeCount,
-            runtime,
-            previewDistanceBlocks);
-    if (!Double.isFinite(boundaryLimit) || boundaryLimit >= currentTargetBps) {
-      return currentTargetBps;
-    }
-    double leadIn =
-        Math.sqrt(
-            boundaryLimit * boundaryLimit
-                + 2.0 * decelBps2 * (distanceBlocks - boundary) * runtime.speedCurveFactor());
-    if (!Double.isFinite(leadIn)) {
-      return currentTargetBps;
-    }
-    return Math.min(currentTargetBps, leadIn);
-  }
-
-  /**
-   * 按距离判定仍处于区内的最远整数距离；距离条件不会成立（窗口与预减速区都关闭）时返回 -1。
-   *
-   * <p>与 {@link #approachEngaged} 的距离部分同一判据：预减速区有效时区内即 {@code d < 窗口 + 预减速}，否则 {@code d ≤ 窗口}。
-   */
-  private static long lastEngagedDistance(
-      ConfigManager.RuntimeSettings runtime, double previewDistanceBlocks) {
-    double windowBlocks = runtime.approachWindowBlocks();
-    if (!Double.isFinite(windowBlocks) || windowBlocks < 0.0) {
-      return -1L;
-    }
-    long boundary = windowBlocks > 0.0 ? (long) Math.floor(windowBlocks) : -1L;
-    if (Double.isFinite(previewDistanceBlocks) && previewDistanceBlocks > 0.0) {
-      boundary = Math.max(boundary, (long) Math.ceil(windowBlocks + previewDistanceBlocks) - 1L);
-    }
-    return boundary;
-  }
-
-  /**
-   * 进站限速的逐 tick 形式，供 {@link SpeedLimitRamp} 在调度周期之间求值。
-   *
-   * <p>与调度周期同一公式 {@link #resolveApproachSpeedLimit}，只把“到进站触发点的距离”换成“周期取样时的车头距离 − 此后又走过的距离”，
-   * 向下取整以免高估。这样列车在两个周期之间越过区界时斜坡与下一周期算出的目标衔接，不会先压下去再被抬回。
-   *
-   * <p>{@code targetEdgeDistanceBlocks} 是触发点前最后若干条边的<b>长度</b>，不随列车前进而变，不能跟着平移。
-   *
-   * <p>不收紧时返回 {@link Double#POSITIVE_INFINITY} 而不是基础目标速度：该约束也用作推进放行的保持约束，基础目标速度是周期取样时的边限速或 caution
-   * 速度，列车驶过节点后已不成立，拿它封顶会把车扣在旧值上。
-   *
-   * @param distanceBlocks 周期取样时从车头到进站触发点的距离
+   * <p>它给出的是制动至限速区的物理上界，不含周期取样时的边限速或 caution 速度，驶过节点后依然成立，因此可以作推进放行的保持约束。
    */
   static SpeedEnvelope.Constraint approachConstraint(
-      double currentTargetBps,
-      double approachLimitBps,
-      double decelBps2,
-      long distanceBlocks,
-      OptionalLong targetEdgeDistanceBlocks,
-      int edgeCount,
-      ConfigManager.RuntimeSettings runtime,
-      double previewDistanceBlocks) {
-    return traveled -> {
-      double limit =
-          resolveApproachSpeedLimit(
-              currentTargetBps,
-              approachLimitBps,
-              decelBps2,
-              Math.max(0L, (long) Math.floor(distanceBlocks - traveled)),
-              targetEdgeDistanceBlocks,
-              edgeCount,
-              runtime,
-              previewDistanceBlocks);
-      return limit < currentTargetBps ? limit : Double.POSITIVE_INFINITY;
-    };
-  }
-
-  /**
-   * 是否已进入进站窗口或其前的预减速区。与调度层 {@code resolveApproachWindowState(...).active()} 同一判据。
-   *
-   * @param distanceBlocks 从车头到进站触发点的距离
-   */
-  static boolean approachEngaged(
-      ConfigManager.RuntimeSettings runtime,
-      long distanceBlocks,
-      int edgeCount,
-      double previewDistanceBlocks) {
-    if (runtime == null) {
-      return false;
-    }
-    return withinApproachWindow(runtime, distanceBlocks, edgeCount)
-        || approachPreviewRatio(
-                runtime.approachWindowBlocks(), previewDistanceBlocks, distanceBlocks)
-            > 0.0;
-  }
-
-  static double approachPreviewRatio(
-      double approachWindowBlocks, double previewDistanceBlocks, long distanceBlocks) {
-    if (!Double.isFinite(approachWindowBlocks)
-        || approachWindowBlocks < 0.0
-        || !Double.isFinite(previewDistanceBlocks)
-        || previewDistanceBlocks <= 0.0
-        || distanceBlocks < 0L) {
-      return 0.0;
-    }
-    if (distanceBlocks <= approachWindowBlocks) {
-      return 1.0;
-    }
-    double distanceToBoundary = distanceBlocks - approachWindowBlocks;
-    if (distanceToBoundary >= previewDistanceBlocks) {
-      return 0.0;
-    }
-    return Math.max(0.0, Math.min(1.0, 1.0 - distanceToBoundary / previewDistanceBlocks));
-  }
-
-  static double approachPreviewSpeedLimit(
-      double currentTargetBps, double approachLimitBps, double ratio) {
-    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
-      return 0.0;
-    }
-    if (!Double.isFinite(approachLimitBps)
-        || approachLimitBps <= 0.0
-        || approachLimitBps >= currentTargetBps) {
-      return currentTargetBps;
-    }
-    double clampedRatio = Double.isFinite(ratio) ? Math.max(0.0, Math.min(1.0, ratio)) : 0.0;
-    return approachLimitBps + (currentTargetBps - approachLimitBps) * (1.0 - clampedRatio);
-  }
-
-  private static double resolveApproachPreviewRatio(
-      ConfigManager.RuntimeSettings runtime,
-      double previewDistanceBlocks,
-      long distanceBlocks,
-      int edgeCount) {
-    if (runtime == null) {
-      return 0.0;
-    }
-    if (withinApproachWindow(runtime, distanceBlocks, edgeCount)) {
-      return 1.0;
-    }
-    return approachPreviewRatio(
-        runtime.approachWindowBlocks(), previewDistanceBlocks, distanceBlocks);
-  }
-
-  private static boolean withinApproachWindow(
-      ConfigManager.RuntimeSettings runtime, long distanceBlocks, int edgeCount) {
-    if (runtime == null) {
-      return false;
-    }
-    double windowBlocks = runtime.approachWindowBlocks();
-    if (Double.isFinite(windowBlocks) && windowBlocks > 0.0 && distanceBlocks <= windowBlocks) {
-      return true;
-    }
-    int windowEdges = runtime.approachWindowEdges();
-    return windowEdges > 0 && edgeCount >= 0 && edgeCount <= windowEdges;
+      double approachLimitBps, double decelBps2, List<StopApproach.Zone> zones) {
+    List<StopApproach.Zone> fixed = zones == null ? List.of() : List.copyOf(zones);
+    return traveled -> approachSpeedLimit(approachLimitBps, decelBps2, fixed, traveled);
   }
 
   private static double toBlocksPerTick(double blocksPerSecond) {

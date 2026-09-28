@@ -1,5 +1,5 @@
 # config 版本，请勿修改
-config-version: 35
+config-version: 36
 
 # 语言标签，对应 lang/ 下的文件名
 locale: zh_CN
@@ -142,20 +142,19 @@ runtime:
   approach-speed-bps: 10.0
   # 进库前的限速（blocks per second）
   approach-depot-speed-bps: 5.0
-  # 到下一处停靠 station/depot/STOP waypoint 的距离小于等于该值时才进入 approaching（blocks）
-  # station/depot 包含本体、对应咽喉，以及与本体/咽喉立即相邻的 switcher；0 表示不按距离触发
+  # 进站限速区（blocks）：沿路径逐节点看，节点离它之后的第一个进站触发点不超过该距离时，从这个节点起按进站限速运行；
+  # 区外按车型减速度提前制动至区起点。触发点为车站/车库本体、对应咽喉，以及与本体/咽喉立即相邻的 switcher。
+  # 编表与 ETA 的运行曲线用同一判据，改动后需重新 build 时刻表。0 表示不按距离划区
   approach-window-blocks: 96.0
-  # 到下一处停靠节点的展开路径边数小于等于该值时也可进入 approaching；0 表示禁用边数触发
+  # 节点到下一个触发点的边数小于等于该值时也划入进站限速区；0 表示禁用边数判据
   approach-window-edges: 0
-  # 到 approach 触发点剩余边数小于等于该值时必须已经降到 approaching 限速；0 表示只在触发点收敛
-  approach-target-edges: 1
   # CAUTION 信号速度上限（blocks per second），可被连通分量覆盖
   caution-speed-bps: 10.0
   # 是否启用“提前减速”速度曲线（根据剩余距离与制动能力动态限速）
   speed-curve-enabled: true
   # 速度曲线类型：physics/linear/quadratic/cubic
   speed-curve-type: "physics"
-  # 速度曲线放大系数（>1 更激进，<1 更保守）
+  # 速度曲线放大系数（>1 更激进，<1 更保守）：只作用于阻塞/授权终点的停车曲线；进站区外制动与前方限速边按车型减速度原值计算（与编表同口径）
   speed-curve-factor: 1.0
   # 提前减速缓冲距离（blocks），用于更早开始降速
   speed-curve-early-brake-blocks: 0.0
@@ -329,21 +328,30 @@ timetable:
   zone: ""
 
 train:
-  # 默认车种（emu/dmu/diesel_push_pull/electric_loco）
-  default-type: emu
+  # 默认车种（metro/emu/dmu/diesel_push_pull/electric_loco）：未打车种标签的车与编表、ETA 的运行曲线都按它算，改动后需重新 build 时刻表
+  default-type: metro
+  # 各车种加减速（blocks/s²，1 block 按 1 米计）：低速段平均起动加速度与常用制动减速度，不是紧急制动
   types:
+    # 地铁/轻轨型电动车组（含 tram-train）：站距短、起停频繁
+    metro:
+      accel-bps2: 1.1
+      decel-bps2: 1.2
+    # 通勤/市域电动车组
     emu:
-      accel-bps2: 0.8
-      decel-bps2: 1.0
-    dmu:
-      accel-bps2: 0.7
-      decel-bps2: 0.9
-    diesel_push_pull:
-      accel-bps2: 0.6
-      decel-bps2: 0.8
-    electric_loco:
       accel-bps2: 0.9
-      decel-bps2: 1.1
+      decel-bps2: 1.0
+    # 内燃动车组
+    dmu:
+      accel-bps2: 0.6
+      decel-bps2: 0.9
+    # 内燃机车推拉
+    diesel_push_pull:
+      accel-bps2: 0.35
+      decel-bps2: 0.7
+    # 电力机车牵引
+    electric_loco:
+      accel-bps2: 0.5
+      decel-bps2: 0.8
 
 storage:
   # 可选值：sqlite / mysql

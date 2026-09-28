@@ -9994,8 +9994,8 @@ class RuntimeDispatchServiceTest {
   /**
    * 远处的停靠站不压速。
    *
-   * <p>区外有导入制动（到进站区界时降到区内曲线），所以“远”要远过导入制动的起点：单边到站、末边须以进站限速运行时， 导入制动在区界降到 6 bps，从 √(36 + 2·(d −
-   * 159)) ≥ 线路速度 28.8 即约 556 格处开始收紧。这里放在 600 格。
+   * <p>区外按减速度制动至限速区，所以“远”要远过制动起点：单边 600 格到站，起点离站超出 96 格窗口不划区，只剩停车点本身； 从 √(36 + 2·d) ≥ 线路速度 28.8
+   * 即离站约 397 格处开始收紧，起点尚在制动段之外。
    */
   @Test
   void farStopStationDoesNotTriggerApproachBeforeWindow() {
@@ -10181,11 +10181,12 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
-    double expectedApproachEnvelope = Math.sqrt(6.0 * 6.0 + 2.0 * 0.25 * (120.0 - 10.0));
+    // W 离站旁道岔 10 格、在进站窗口内，限速区从 W（前方 110 格）起；按列车自己的减速度 0.25 制动至区起点。
+    double expectedApproachEnvelope = Math.sqrt(6.0 * 6.0 + 2.0 * 0.25 * 110.0);
     assertEquals("station", diagnostics.approachKind());
     assertEquals("approach_curve", diagnostics.finalLimiterSource(), diagnostics.toString());
-    assertTrue(diagnostics.approachReason().contains("target_edge_distance=10"));
-    assertTrue(diagnostics.approachReason().contains("preview=true"));
+    assertTrue(
+        diagnostics.approachReason().contains("zone_start=110.000"), diagnostics.approachReason());
     assertTrue(diagnostics.movementAuthorityLimitBps().isEmpty(), diagnostics.toString());
     assertEquals(expectedApproachEnvelope, diagnostics.finalTargetBps(), 1.0e-6);
   }

@@ -176,15 +176,43 @@ class SpeedLimitRampTest {
   }
 
   @Test
-  void holdLimitNeverExceedsWhatTheRampAlreadyWrote() {
+  void holdLimitIsTheHoldItselfNotTheWrittenLimit() {
+    // 已写入 8 bps（可能来自边限速或上调限幅的滞后）：推进放行只被保持约束 12 bps 封顶，既不放开也不压回 8。
     ManualDriver driver = new ManualDriver();
     SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
     RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(0.4);
     RampTestSupport.MovingTrain train = new RampTestSupport.MovingTrain(limit.properties(), 0.4);
 
     ramp.arm(train, limit.properties(), 8.0, hold(12.0), 100);
+    assertEquals(12.0, ramp.holdLimitBps(train).orElseThrow(), 1.0e-9);
 
-    assertEquals(8.0, ramp.holdLimitBps(train).orElseThrow(), 1.0e-9);
+    ramp.arm(train, limit.properties(), 8.0, hold(6.0), 100);
+    assertEquals(6.0, ramp.holdLimitBps(train).orElseThrow(), 1.0e-9);
+  }
+
+  @Test
+  void defersLoweringUntilTheTrainClosesInOnTheEnvelope() {
+    // 起步加速途中车速远低于包络：限速不起作用，写入只会让 TrainCarts 的 launch 重新规划、白丢一 tick 加速。
+    ManualDriver driver = new ManualDriver();
+    SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
+    SpeedEnvelope envelope = SpeedEnvelope.empty().with(SpeedEnvelope.braking(60.0, 10.0, 1.0));
+    double commandedBps = envelope.limitBps(0.0);
+    RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(commandedBps / TICKS);
+    RampTestSupport.MovingTrain train =
+        new RampTestSupport.MovingTrain(limit.properties(), 5.0 / TICKS);
+
+    ramp.arm(train, limit.properties(), commandedBps, envelope, 400);
+    for (int tick = 0; tick < 20; tick++) {
+      driver.tick();
+    }
+    assertEquals(0, limit.writes(), "车速 5 bps、包络约 14.5 bps 时不应改写限速");
+
+    train.speedBpt = 13.0 / TICKS;
+    driver.tick();
+    assertEquals(1, limit.writes(), "车速追近到包络 2 bps 以内时应立即下调");
+    // 已走 5 + 0.65 格：包络 √(100 + 2·(60 − 5.65)) ≈ 14.46。
+    assertEquals(
+        Math.sqrt(100.0 + 2.0 * (60.0 - 5.65)) / TICKS, limit.properties().getSpeedLimit(), 1.0e-9);
   }
 
   @Test
@@ -241,7 +269,7 @@ class SpeedLimitRampTest {
     SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
     RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(0.5);
     RampTestSupport.MovingTrain train = new RampTestSupport.MovingTrain(limit.properties(), 0.5);
-    ramp.arm(train, limit.properties(), 10.0, hold(50.0), 100);
+    ramp.arm(train, limit.properties(), 10.0, hold(8.0), 100);
 
     limit.properties().setSpeedLimit(0.4);
     ramp.acknowledgeWrite(train, limit.properties());

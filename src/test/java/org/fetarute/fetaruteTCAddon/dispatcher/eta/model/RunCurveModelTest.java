@@ -27,7 +27,7 @@ class RunCurveModelTest {
             new double[] {20.0});
 
     double[] times =
-        model(new RunCurveModel.ApproachRule(1000.0, 0, 10.0, 5.0), null)
+        model(new StopApproach.Rule(1000.0, 0, 10.0, 5.0), null)
             .nodeTimes(graph, run(graph, "OP:S:A:1", "OP:D:DEP:1", true))
             .orElseThrow();
 
@@ -48,7 +48,7 @@ class RunCurveModelTest {
             new double[] {20.0, 20.0});
 
     double[] times =
-        model(new RunCurveModel.ApproachRule(0.0, 1, 10.0, 5.0), null)
+        model(new StopApproach.Rule(0.0, 1, 10.0, 5.0), null)
             .nodeTimes(graph, run(graph, "OP:S:A:1", "OP:S:B:1", true))
             .orElseThrow();
 
@@ -65,7 +65,7 @@ class RunCurveModelTest {
             List.of("OP:S:A:1", "OP:S:B:1"), new int[] {100}, new double[] {10.0});
 
     double[] times =
-        model(new RunCurveModel.ApproachRule(1000.0, 0, 2.0, 2.0), null)
+        model(new StopApproach.Rule(1000.0, 0, 2.0, 2.0), null)
             .nodeTimes(graph, run(graph, "OP:S:A:1", "OP:S:B:1", false))
             .orElseThrow();
 
@@ -80,7 +80,7 @@ class RunCurveModelTest {
             List.of("OP:S:A:1", "OP:S:B:1"), new int[] {100}, new double[] {0.0});
 
     double[] times =
-        model(RunCurveModel.ApproachRule.disabled(), null)
+        model(StopApproach.Rule.disabled(), null)
             .nodeTimes(graph, run(graph, "OP:S:A:1", "OP:S:B:1", true))
             .orElseThrow();
 
@@ -95,7 +95,7 @@ class RunCurveModelTest {
             List.of("OP:S:A:1", "OP:S:B:1"), new int[] {100}, new double[] {10.0});
 
     double[] times =
-        model(RunCurveModel.ApproachRule.disabled(), (g, edge, fallback) -> 5.0)
+        model(StopApproach.Rule.disabled(), (g, edge, fallback) -> 5.0)
             .nodeTimes(graph, run(graph, "OP:S:A:1", "OP:S:B:1", true))
             .orElseThrow();
 
@@ -108,10 +108,7 @@ class RunCurveModelTest {
     RunCurveModel model =
         new RunCurveModel(
             new RunCurveModel.Settings(
-                new RunCurveModel.MotionParams(0.8, 1.0),
-                8.0,
-                RunCurveModel.ApproachRule.disabled(),
-                4),
+                new RunCurveModel.MotionParams(0.8, 1.0), 8.0, StopApproach.Rule.disabled(), 4),
             null);
 
     assertEquals(4, model.stationStopOverheadSeconds());
@@ -119,7 +116,7 @@ class RunCurveModelTest {
   }
 
   private static RunCurveModel model(
-      RunCurveModel.ApproachRule approach, RunCurveModel.EdgeSpeedResolver speeds) {
+      StopApproach.Rule approach, RunCurveModel.EdgeSpeedResolver speeds) {
     return new RunCurveModel(
         new RunCurveModel.Settings(new RunCurveModel.MotionParams(1.0, 1.0), 8.0, approach, 0),
         speeds);

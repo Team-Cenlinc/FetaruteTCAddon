@@ -1,8 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -25,11 +28,115 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
  *   <li>触发节点：与目标同运营商、同站、同股道的本体或咽喉，或与这样的节点直接相连的道岔；区间停车点与解析不出站点的目标只认它自己。
  * </ul>
  *
- * <p>运行时按"最近经过的图节点到下一个触发节点"的距离判断是否进入进站窗口，所以窗口的起点落在图节点上，不是连续的里程。
+ * <p>进站限速区由 {@link #zones} 划定，编表运行曲线与运行时控车调同一个函数：区的起点落在图节点上，列车在区内不超过进站限速， 区外按车型减速度制动至区起点。
  */
 public final class StopApproach {
 
   private StopApproach() {}
+
+  /**
+   * 进站限速区：里程 {@code [fromBlocks, toBlocks]} 内不超过进站限速。
+   *
+   * @param fromBlocks 起点里程（格）
+   * @param toBlocks 终点里程（格），不小于起点
+   */
+  public record Zone(double fromBlocks, double toBlocks) {}
+
+  /**
+   * 沿路径划出进站限速区。编表运行曲线（{@link RunCurveModel}）与运行时控车共用这一个判据，两边的进站速度曲线因此一致。
+   *
+   * <p>逐节点看它之后的第一个触发节点：两者相距不超过进站窗口的格数，或相隔不超过窗口的边数时，从这个节点到下一个节点按进站限速运行。
+   * 起点节点不算触发节点（列车已在它上面或已驶过），终点一定算。相邻的区合并为一个。
+   *
+   * @param positions 各节点里程（格），单调不减
+   * @param triggers 各节点是否触发节点，与 {@code positions} 等长
+   * @param rule 进站规则
+   * @return 按里程排列的限速区；节点少于两个时为空
+   */
+  public static List<Zone> zones(double[] positions, boolean[] triggers, Rule rule) {
+    Objects.requireNonNull(positions, "positions");
+    Objects.requireNonNull(triggers, "triggers");
+    Objects.requireNonNull(rule, "rule");
+    if (positions.length != triggers.length) {
+      throw new IllegalArgumentException("positions 与 triggers 数量不匹配");
+    }
+    int last = positions.length - 1;
+    if (last < 1) {
+      return List.of();
+    }
+    int[] nextTrigger = new int[positions.length];
+    int upcoming = last;
+    for (int i = last; i >= 0; i--) {
+      nextTrigger[i] = upcoming;
+      if (i > 0 && triggers[i]) {
+        upcoming = i;
+      }
+    }
+    List<Zone> zones = new ArrayList<>();
+    for (int i = 0; i < last; i++) {
+      int trigger = nextTrigger[i];
+      if (!rule.covers(positions[trigger] - positions[i], trigger - i)) {
+        continue;
+      }
+      int previous = zones.size() - 1;
+      if (previous >= 0 && zones.get(previous).toBlocks() >= positions[i]) {
+        zones.set(previous, new Zone(zones.get(previous).fromBlocks(), positions[i + 1]));
+      } else {
+        zones.add(new Zone(positions[i], positions[i + 1]));
+      }
+    }
+    return List.copyOf(zones);
+  }
+
+  /**
+   * 进站规则，对应配置 {@code runtime.approach-*}；编表运行曲线与运行时控车读同一组值。
+   *
+   * @param windowBlocks 到触发节点的距离不超过它时进入进站窗口；0 表示不按距离触发
+   * @param windowEdges 到触发节点的边数不超过它时也进入窗口；0 表示不按边数触发
+   * @param stationSpeedBps 车站与区间停车点的进站限速；0 表示不限速
+   * @param depotSpeedBps 进库限速；0 表示不限速
+   */
+  public record Rule(
+      double windowBlocks, int windowEdges, double stationSpeedBps, double depotSpeedBps) {
+
+    public Rule {
+      windowBlocks = Double.isFinite(windowBlocks) ? Math.max(0.0, windowBlocks) : 0.0;
+      windowEdges = Math.max(0, windowEdges);
+      stationSpeedBps = Double.isFinite(stationSpeedBps) ? Math.max(0.0, stationSpeedBps) : 0.0;
+      depotSpeedBps = Double.isFinite(depotSpeedBps) ? Math.max(0.0, depotSpeedBps) : 0.0;
+    }
+
+    /** 不做进站限速。 */
+    public static Rule disabled() {
+      return new Rule(0.0, 0, 0.0, 0.0);
+    }
+
+    /** 读运行时配置 {@code runtime.approach-*}；编表与控车用同一组值。 */
+    public static Rule fromRuntime(ConfigManager.RuntimeSettings runtime) {
+      Objects.requireNonNull(runtime, "runtime");
+      return new Rule(
+          runtime.approachWindowBlocks(),
+          runtime.approachWindowEdges(),
+          runtime.approachSpeedBps(),
+          runtime.approachDepotSpeedBps());
+    }
+
+    /**
+     * 节点离它之后的第一个触发节点这么远时，是否已在进站窗口内。
+     *
+     * @param distanceBlocks 到触发节点的距离（格）
+     * @param edges 到触发节点的边数
+     */
+    public boolean covers(double distanceBlocks, int edges) {
+      return (windowBlocks > 0.0 && distanceBlocks <= windowBlocks)
+          || (windowEdges > 0 && edges <= windowEdges);
+    }
+
+    /** 停车点类别对应的进站限速。 */
+    public double speedFor(Kind kind) {
+      return kind == Kind.DEPOT ? depotSpeedBps : stationSpeedBps;
+    }
+  }
 
   /** 停车点的类别：决定进站限速取哪个值、以及终点是否要停稳。 */
   public enum Kind {

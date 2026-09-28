@@ -27,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.PathProgressModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RouteStopPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpawnTrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.TravelTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
@@ -278,7 +279,7 @@ public final class EtaService {
       return new RunCurveModel.Settings(
           RunCurveModel.MotionParams.defaults(),
           DEFAULT_FALLBACK_SPEED_BPS,
-          RunCurveModel.ApproachRule.disabled(),
+          StopApproach.Rule.disabled(),
           0);
     }
     return RunCurveModel.Settings.fromConfig(config, DEFAULT_FALLBACK_SPEED_BPS);

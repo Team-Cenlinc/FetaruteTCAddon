@@ -96,41 +96,24 @@ public final class RunCurveModel implements RunTimeModel {
     return settings;
   }
 
-  /**
-   * 进站限速区：列车每经过一个图节点，若到下一个触发节点的距离（或边数）已在窗口内，从这个节点起按进站限速行驶。
-   *
-   * <p>与运行时逐节点判断同一口径：运行时拿"最近经过的图节点"算到触发点的距离，所以限速区起点落在节点上。
-   */
+  /** 进站限速区（{@link StopApproach#zones}，与运行时控车同一个判据）按进站限速落成运行曲线的限速区。 */
   private List<RunCurve.Cap> approachCaps(
       RailGraph graph,
       List<NodeId> nodes,
       double[] lengths,
       StopApproach.Target target,
       double capSpeed) {
-    int last = nodes.size() - 1;
     double[] position = new double[nodes.size()];
     for (int k = 0; k < lengths.length; k++) {
       position[k + 1] = position[k] + lengths[k];
     }
-    // 从后往前记下每个位置之后的第一个触发节点；终点本身一定是触发节点。
-    int[] nextTrigger = new int[nodes.size()];
-    int upcoming = last;
-    for (int i = last; i >= 0; i--) {
-      nextTrigger[i] = upcoming;
-      if (i > 0 && target.triggeredBy(graph, nodes.get(i))) {
-        upcoming = i;
-      }
+    boolean[] triggers = new boolean[nodes.size()];
+    for (int i = 0; i < nodes.size(); i++) {
+      triggers[i] = target.triggeredBy(graph, nodes.get(i));
     }
-    ApproachRule rule = settings.approach();
     List<RunCurve.Cap> caps = new ArrayList<>();
-    for (int i = 0; i < last; i++) {
-      int trigger = nextTrigger[i];
-      boolean withinBlocks =
-          rule.windowBlocks() > 0.0 && position[trigger] - position[i] <= rule.windowBlocks();
-      boolean withinEdges = rule.windowEdges() > 0 && trigger - i <= rule.windowEdges();
-      if (withinBlocks || withinEdges) {
-        caps.add(new RunCurve.Cap(position[i], position[i + 1], capSpeed));
-      }
+    for (StopApproach.Zone zone : StopApproach.zones(position, triggers, settings.approach())) {
+      caps.add(new RunCurve.Cap(zone.fromBlocks(), zone.toBlocks(), capSpeed));
     }
     return caps;
   }
@@ -175,35 +158,6 @@ public final class RunCurveModel implements RunTimeModel {
   }
 
   /**
-   * 进站规则，对应配置 {@code runtime.approach-*}。
-   *
-   * @param windowBlocks 到触发节点的距离不超过它时进入进站窗口；0 表示不按距离触发
-   * @param windowEdges 到触发节点的边数不超过它时也进入窗口；0 表示不按边数触发
-   * @param stationSpeedBps 车站与区间停车点的进站限速；0 表示不限速
-   * @param depotSpeedBps 进库限速；0 表示不限速
-   */
-  public record ApproachRule(
-      double windowBlocks, int windowEdges, double stationSpeedBps, double depotSpeedBps) {
-
-    public ApproachRule {
-      windowBlocks = Double.isFinite(windowBlocks) ? Math.max(0.0, windowBlocks) : 0.0;
-      windowEdges = Math.max(0, windowEdges);
-      stationSpeedBps = Double.isFinite(stationSpeedBps) ? Math.max(0.0, stationSpeedBps) : 0.0;
-      depotSpeedBps = Double.isFinite(depotSpeedBps) ? Math.max(0.0, depotSpeedBps) : 0.0;
-    }
-
-    /** 不做进站限速。 */
-    public static ApproachRule disabled() {
-      return new ApproachRule(0.0, 0, 0.0, 0.0);
-    }
-
-    /** 停车点类别对应的进站限速。 */
-    public double speedFor(StopApproach.Kind kind) {
-      return kind == StopApproach.Kind.DEPOT ? depotSpeedBps : stationSpeedBps;
-    }
-  }
-
-  /**
    * 模型参数。
    *
    * @param motion 加减速
@@ -214,7 +168,7 @@ public final class RunCurveModel implements RunTimeModel {
   public record Settings(
       MotionParams motion,
       double fallbackSpeedBps,
-      ApproachRule approach,
+      StopApproach.Rule approach,
       int stationStopOverheadSeconds) {
 
     public Settings {
@@ -222,7 +176,7 @@ public final class RunCurveModel implements RunTimeModel {
       if (!Double.isFinite(fallbackSpeedBps) || fallbackSpeedBps <= 0.0) {
         throw new IllegalArgumentException("fallbackSpeedBps 必须为正数");
       }
-      approach = approach == null ? ApproachRule.disabled() : approach;
+      approach = approach == null ? StopApproach.Rule.disabled() : approach;
       stationStopOverheadSeconds = Math.max(0, stationStopOverheadSeconds);
     }
 
@@ -249,11 +203,7 @@ public final class RunCurveModel implements RunTimeModel {
       return new Settings(
           new MotionParams(train.accelBps2(), train.decelBps2()),
           Double.isFinite(configured) && configured > 0.0 ? configured : fallbackSpeedBps,
-          new ApproachRule(
-              runtime.approachWindowBlocks(),
-              runtime.approachWindowEdges(),
-              runtime.approachSpeedBps(),
-              runtime.approachDepotSpeedBps()),
+          StopApproach.Rule.fromRuntime(runtime),
           config.timetableSettings().stationStopOverheadSeconds());
     }
 

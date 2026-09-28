@@ -3,10 +3,12 @@ package org.fetarute.fetaruteTCAddon.command;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Locale;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -51,8 +53,13 @@ class FtaTimetableCommandRunModelTest {
 
     String text = FtaTimetableCommand.describeRun(FtaTimetableCommand.runCurveSettings(view));
 
-    assertTrue(text.contains("起步 0.80"), text);
-    assertTrue(text.contains("制动 1.00"), text);
+    // 空配置按默认车种 metro 的预设。
+    assertTrue(
+        text.contains(String.format(Locale.ROOT, "起步 %.2f", TrainType.METRO.presetAccelBps2())),
+        text);
+    assertTrue(
+        text.contains(String.format(Locale.ROOT, "制动 %.2f", TrainType.METRO.presetDecelBps2())),
+        text);
     assertTrue(text.contains("进站 96 格内"), text);
     assertTrue(text.contains("dwell + 4s"), text);
   }

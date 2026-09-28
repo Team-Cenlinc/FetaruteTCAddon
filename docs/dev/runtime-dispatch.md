@@ -264,11 +264,13 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 - 当信号处于 PROCEED_WITH_CAUTION/CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度；STOP 会额外用 TrainCarts railState 和图节点坐标估算剩余距离，避免固定节点距离导致红灯曲线长期保持非零。
 - 当“下一站”为 STOP/TERM waypoint 时，信号 tick 的距离只看前方 blocker（不看下一节点距离/CAUTION 距离），避免提前刹停在牌子前。
 - `runtime.speed-curve-type` 控制曲线形态（`physics/linear/quadratic/cubic`）。
-- `runtime.speed-curve-factor` 用于调节曲线激进程度（>1 更激进，<1 更保守）。
+- `runtime.speed-curve-factor` 用于调节阻塞/授权终点停车曲线的激进程度（>1 更激进，<1 更保守）；进站区外制动与前方限速边按车型减速度原值计算，不受它影响（与编表运行曲线同口径）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
 - `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
-- approach 正式窗口外 64 blocks 内会先进入 preview 制动区，速度上限从当前目标速度线性收敛到 approaching 限速；进入正式窗口后保持 approaching 限速。若速度曲线启用，还会叠加到停靠目标的物理制动包络并取更低上限。
-- approach preview 与最终 speed envelope 的主入口为 `RuntimeTrainController.resolveApproachSpeedEnvelope`；SignalSystem 只提供信号、约束类型和距离。
+- 进站限速区由 `StopApproach.zones` 划定，与编表/ETA 运行曲线（`RunCurveModel`）共用同一判据：区内限 approaching 速度，区外若速度曲线启用则按车型减速度制动至区起点（`sqrt(v_app^2 + 2·decel·d)`），与运行曲线的反向推算一致。
+- 限速计算入口为 `RuntimeTrainController.approachSpeedLimit` / `approachConstraint`（后者登记给逐 tick 斜坡）；SignalSystem 只提供信号、约束类型和距离。
+- 移动授权终点正是下一处计划停车点、且进站限速已就绪时，该终点不再按“刹到 0”参与移动授权、速度曲线与 Smart 前瞻，由进站控制按运行曲线接管（STOP 信号不变）。
+- 到下一停车点整段展开路径上的各边限速并入前瞻的限速边约束，远处慢速边与编表一样提前制动，不受 `lookahead-edges` 窗口限制。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
 
 重启后从数据库加载 RouteDefinition，再从 tags 恢复当前 index。
@@ -301,7 +303,7 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 
 ## 列车速度配置
 通过 `/fta train config set|list` 写入列车配置：
-- `FTA_TRAIN_TYPE`：车种（EMU/DMU/DIESEL_PUSH_PULL/ELECTRIC_LOCO）
+- `FTA_TRAIN_TYPE`：车种（METRO/EMU/DMU/DIESEL_PUSH_PULL/ELECTRIC_LOCO，未打标签按 `train.default-type`，默认 metro）
 - `FTA_TRAIN_ACCEL_BPS2`：加速度（blocks/second^2）
 - `FTA_TRAIN_DECEL_BPS2`：减速度（blocks/second^2）
 
@@ -313,8 +315,8 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 
 ## 进站限速
 - `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
-- `runtime.approach-window-blocks` / `runtime.approach-window-edges` 控制正式 approach 边界；正式边界外 64 blocks 内会提前进入 preview，避免到边界才突然套低速上限。
-- `runtime.approach-target-edges` 控制物理制动包络参考的末尾 edge 范围；最终上限取 preview 线性包络与物理制动包络中的较低值。
+- `runtime.approach-window-blocks` / `runtime.approach-window-edges` 划定进站限速区：节点到其后第一个进站触发点的距离或边数不超过该值时，从该节点起按进站限速运行；停车点本身也算一个区。
+- 区外按车型减速度提前制动至区起点，不再有单独的预减速区或末边参数（`approach-target-edges` 已于 config-version 36 移除）。编表与 ETA 用同一判据，改动后需重新 build 时刻表；规则详见 `docs/dev/train-config.md`。
 
 ## CAUTION 速度来源
 - 优先使用“连通分量 caution 覆盖”（`rail_component_cautions`）。

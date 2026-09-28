@@ -323,7 +323,8 @@ TrainCarts 会根据 `setWaitAcceleration()` 与 `setSpeedLimit()` 自行完成�
 | `runtime.speed-curve-early-brake-blocks` | 提前制动距离 | `0.0` |
 | `runtime.approach-speed-bps` | approaching 速度上限（进站 + STOP/TERM waypoint handoff） | `4.0` |
 | `runtime.approach-depot-speed-bps` | 进库限速 | `3.5` |
-| `runtime.approach-target-edges` | 剩余多少条调度图 edge 时必须达到 approaching 限速 | `1` |
+| `runtime.approach-window-blocks` | 进站限速区：节点离其后第一个进站触发点不超过该距离时从该节点起限速（与编表共用） | `96.0` |
+| `runtime.approach-window-edges` | 同上，按边数判定；`0` 禁用 | `0` |
 
 ## 诊断命令
 
